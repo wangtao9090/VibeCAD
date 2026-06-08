@@ -1,0 +1,55 @@
+[project]
+name = "vibecad"
+version = "0.0.1"
+description = "AI 对话式 CAD —— FreeCAD MCP 连接器（Chat-native 零安装）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "wangtao", email = "wangtao9090@gmail.com" }]
+keywords = ["cad", "freecad", "mcp", "3d-printing", "parametric", "ai"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+]
+
+# 注意：FreeCAD 不在此列 —— 它是 conda 包，由 micromamba 运行时安装器（D4）拉取，
+# 与本 server 的 pip 依赖隔离。此处仅声明纯 pip 可装依赖。
+dependencies = [
+    "mcp>=1.2.0",          # 官方 MCP SDK（FastMCP），D3
+    "pygltflib>=1.16.0",   # glTF 导出器，D6
+    "trimesh>=4.0.0",      # 软渲染回退，D5
+    "numpy>=1.26",
+    "pyyaml>=6.0",         # 规则引擎 YAML，D2
+]
+
+[project.urls]
+Homepage = "https://github.com/wangtao/vibecad"
+
+[project.scripts]
+vibecad = "vibecad.server:main"   # uvx 一键入口
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vibecad"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

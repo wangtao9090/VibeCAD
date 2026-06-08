@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# uv / venv
+.venv/
+uv.lock.bak
+
+# 测试 / 工具缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# VibeCAD 运行时与产物（D4 micromamba 运行时、checkpoint、导出件不入库）
+.vibecad/
+runtime/micromamba/
+runtime/envs/
+*.FCStd
+*.FCStd1
+checkpoints/
+exports/
+*.step
+*.stp
+*.stl
+*.3mf
+*.dxf
+*.glb
+*.gltf
+
+# OS / 编辑器
+.DS_Store
+*.swp
+.idea/
+.vscode/
