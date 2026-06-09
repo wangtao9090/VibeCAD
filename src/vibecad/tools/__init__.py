@@ -7,4 +7,7 @@ export(STEP/STL)。每工具一个事务 + 几何断言 + 规则检查。
     modeling  —— 参数化 Part 图元 + 布尔（D2 本次实现）
     export    —— STEP/STL 导出（Task 5 添加）
 """
-from vibecad.tools import modeling  # noqa: F401  re-export, importable without FreeCAD/mcp
+from vibecad.tools import (
+    export,  # noqa: F401
+    modeling,  # noqa: F401  re-export, importable without FreeCAD/mcp
+)
