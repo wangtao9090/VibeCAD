@@ -1,6 +1,13 @@
+import os
+import subprocess
+
 import pytest
 
 from vibecad.engine.session import Session
+from vibecad.runtime import status
+
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SRC = os.path.join(_REPO, "src")
 
 
 class FakeDoc:
@@ -100,3 +107,24 @@ def test_get_object_missing_raises(monkeypatch):
     monkeypatch.setattr(s, "_doc", FakeDoc([]))
     with pytest.raises(KeyError):
         s.get_object("Nope")
+
+
+@pytest.mark.slow
+def test_session_open_close_checkpoint(runtime_env, tmp_path):
+    code = (
+        status._PREP
+        + f"import sys; sys.path.insert(0, {_SRC!r})\n"
+        + "from pathlib import Path\n"
+        + "from vibecad.engine.session import Session\n"
+        + f"s = Session(checkpoint_dir=Path({str(tmp_path)!r}))\n"
+        + "s.open_document('t')\n"
+        + "assert s.doc is not None\n"
+        + "p = s._checkpoint()\n"
+        + "assert Path(p).exists()\n"
+        + "s.close_document()\n"
+        + "assert s.doc is None\n"
+        + "print('LIFECYCLE_OK')\n"
+    )
+    r = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, r.stderr
+    assert "LIFECYCLE_OK" in r.stdout
