@@ -12,6 +12,7 @@ from vibecad.runtime.installer import RuntimeInstaller
 pytestmark = pytest.mark.slow
 _RUN = os.environ.get("VIBECAD_RUN_INTEGRATION") == "1"
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SRC = os.path.join(_REPO, "src")
 
 
 @pytest.mark.skipif(not _RUN, reason="set VIBECAD_RUN_INTEGRATION=1")
@@ -34,3 +35,32 @@ def test_install_and_smoke(tmp_path, monkeypatch):
     assert r.returncode == 0, r.stderr
     assert os.path.exists(step)
     assert phases[-1] == "ready"
+
+
+def test_walking_skeleton(runtime_env, tmp_path):
+    """端到端 Walking Skeleton：建模→布尔→导出→诊断（真实 FreeCAD）。"""
+    out = str(tmp_path)
+    code = (
+        status._PREP
+        + f"import sys; sys.path.insert(0, {_SRC!r})\n"
+        + "import os\n"
+        + "from vibecad.engine.session import Session\n"
+        + "from vibecad.tools import modeling, export\n"
+        + "from vibecad.feedback.text import describe_shape\n"
+        + "s = Session(); modeling.new_document(s, 'WalkingSkeleton')\n"
+        + "box = modeling.add_box(s, 30, 30, 30)\n"
+        + "assert box['ok'] and abs(box['volume'] - 27000) < 1e-2, box\n"
+        + "cyl = modeling.add_cylinder(s, 8, 40)\n"
+        + "assert cyl['ok'] and cyl['volume'] > 0\n"
+        + "cut = modeling.boolean_cut(s, box['name'], cyl['name'])\n"
+        + "assert cut['ok'] and 0 < cut['volume'] < 27000, cut\n"
+        + f"r = export.export_part(s, {out!r})\n"
+        + "assert os.path.getsize(r['step']) > 0 and os.path.getsize(r['stl']) > 0\n"
+        + "d = describe_shape(s.get_object(cut['name']).Shape)\n"
+        + "assert d['valid'] and d['solid_count'] == 1\n"
+        + "assert abs(d['volume'] - cut['volume']) < 1e-4\n"
+        + "print('SKELETON_OK')\n"
+    )
+    p = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0, p.stderr
+    assert "SKELETON_OK" in p.stdout
