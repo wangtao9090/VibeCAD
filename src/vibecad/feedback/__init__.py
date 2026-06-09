@@ -5,5 +5,6 @@
 - glTF 导出器（D6）：逐面 Shape.tessellate() → pygltflib，primitive extras
   写入 {part, face, geom_type, params}
 
-脚手架占位 —— 实现见 M1 周3-4。
+子模块可独立导入，无需 FreeCAD/MCP 运行时。
 """
+from vibecad.feedback import text  # noqa: F401
