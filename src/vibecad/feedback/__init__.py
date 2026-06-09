@@ -9,3 +9,4 @@
 """
 from vibecad.feedback import text  # noqa: F401
 from vibecad.feedback import render  # noqa: F401
+from vibecad.feedback import gltf  # noqa: F401
