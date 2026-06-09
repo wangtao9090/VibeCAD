@@ -20,3 +20,8 @@ def test_mesh_to_png_each_view():
 def test_mesh_to_png_rejects_bad_view():
     with pytest.raises(ValueError, match="view"):
         render.mesh_to_png(_TETRA_VERTS, _TETRA_FACETS, view="nope")
+
+
+def test_mesh_to_png_rejects_empty():
+    with pytest.raises(ValueError, match="空网格"):
+        render.mesh_to_png([], [])

@@ -95,7 +95,10 @@ def test_render_part_returns_image(monkeypatch):
     monkeypatch.setattr(srv._installer, "is_ready", lambda: True)
     monkeypatch.setattr(srv, "_in_conda_runtime", lambda: True)
     monkeypatch.setattr(srv._session, "get_result_shape", lambda: "SHAPE")
-    monkeypatch.setattr(srv._render, "render_png", lambda shape, view="iso": b"\x89PNG-bytes")
+    seen = {}
+    monkeypatch.setattr(srv._render, "render_png",
+                        lambda shape, view="iso": seen.setdefault("view", view) or b"\x89PNG")
     from mcp.server.fastmcp import Image
     out = srv.render_part(view="front")
     assert isinstance(out, Image)
+    assert seen["view"] == "front"

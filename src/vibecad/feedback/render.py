@@ -13,6 +13,8 @@ def mesh_to_png(verts: list[tuple[float, float, float]], facets: list[tuple[int,
     """三角网 → PNG bytes。纯函数（只用 matplotlib），不碰 FreeCAD。"""
     if view not in _VIEWS:
         raise ValueError(f"view 必须是 {sorted(_VIEWS)} 之一（得到 {view!r}）")
+    if not verts or not facets:
+        raise ValueError("空网格：无顶点或三角面，无法渲染（可能是 tessellate 失败或形状退化）")
     import io  # noqa: PLC0415
 
     import matplotlib  # noqa: PLC0415
@@ -62,5 +64,7 @@ def render_png(shape: Any, *, view: str = "iso", size: tuple[int, int] = (440, 4
 
     with silence_fd1():
         verts, facets = shape.tessellate(0.1)
+        if not verts or not facets:
+            raise RuntimeError("几何断言失败：形状无法镶嵌为网格（空 tessellation）")
         pts = [(p.x, p.y, p.z) for p in verts]
     return mesh_to_png(pts, facets, view=view, size=size)

@@ -171,9 +171,12 @@ def render_part(view: str = "iso") -> Any:
     guard = _runtime_guard()
     if guard:
         return guard
-    with _silence_fd1():
-        shape = _session.get_result_shape()
-    png = _render.render_png(shape, view=view)
+    try:
+        with _silence_fd1():
+            shape = _session.get_result_shape()
+        png = _render.render_png(shape, view=view)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"渲染失败：{exc}"}
     return Image(data=png, format="png")
 
 
