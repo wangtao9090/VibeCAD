@@ -53,3 +53,9 @@ def test_pid_alive_self_and_dead():
     assert status._pid_alive(os.getpid()) is True
     assert status._pid_alive(2_000_000_000) is False
     assert status._pid_alive(None) is False
+
+
+def test_prep_injects_freecad_module_path():
+    # A1：conda-forge 把 FreeCAD.so 放 <prefix>/lib（Windows: Library/bin），须注入 sys.path
+    assert "sys.path" in status._PREP
+    assert "lib" in status._PREP
