@@ -84,3 +84,18 @@ def test_describe_part_delegates(monkeypatch):
 def test_describe_part_guard_not_ready(monkeypatch):
     monkeypatch.setattr(srv._installer, "is_ready", lambda: False)
     assert srv.describe_part()["ok"] is False
+
+
+def test_render_part_guard_not_ready(monkeypatch):
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: False)
+    assert srv.render_part()["ok"] is False
+
+
+def test_render_part_returns_image(monkeypatch):
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: True)
+    monkeypatch.setattr(srv._session, "get_result_shape", lambda: "SHAPE")
+    monkeypatch.setattr(srv._render, "render_png", lambda shape, view="iso": b"\x89PNG-bytes")
+    from mcp.server.fastmcp import Image
+    out = srv.render_part(view="front")
+    assert isinstance(out, Image)

@@ -53,6 +53,53 @@ def test_export_step_only(tmp_path):
     s = _MockSession()
     r = export.export_part(s, str(tmp_path), fmt="step")
     assert r["step"] is not None and r["stl"] is None
+    assert r["gltf"] is None
+
+
+def test_export_gltf_only(tmp_path, monkeypatch):
+    s = _MockSession()
+    gltf_calls = []
+
+    def _fake_export_gltf(shape, path, *, doc_name="part"):
+        gltf_calls.append((shape, path, doc_name))
+        # 写一个标记文件，模拟真实写入
+        import pathlib
+        pathlib.Path(path).write_bytes(b"glTF-marker")
+        return path
+
+    monkeypatch.setattr("vibecad.feedback.gltf.export_gltf", _fake_export_gltf)
+    r = export.export_part(s, str(tmp_path), fmt="gltf")
+    assert r["ok"] is True
+    assert r["gltf"] is not None and r["gltf"].endswith("Mock.glb")
+    assert r["step"] is None
+    assert r["stl"] is None
+    assert len(gltf_calls) == 1
+    assert gltf_calls[0][2] == "Mock"
+
+
+def test_export_all(tmp_path, monkeypatch):
+    s = _MockSession()
+    gltf_calls = []
+
+    def _fake_export_gltf(shape, path, *, doc_name="part"):
+        gltf_calls.append((shape, path, doc_name))
+        import pathlib
+        pathlib.Path(path).write_bytes(b"glTF-marker")
+        return path
+
+    monkeypatch.setattr("vibecad.feedback.gltf.export_gltf", _fake_export_gltf)
+    r = export.export_part(s, str(tmp_path), fmt="all")
+    assert r["ok"] is True
+    assert r["step"] is not None and r["step"].endswith("Mock.step")
+    assert r["stl"] is not None and r["stl"].endswith("Mock.stl")
+    assert r["gltf"] is not None and r["gltf"].endswith("Mock.glb")
+    assert ("step", r["step"]) in s.calls and ("stl", r["stl"]) in s.calls
+    assert len(gltf_calls) == 1
+
+
+def test_export_rejects_invalid_fmt_dxf(tmp_path):
+    with pytest.raises(ValueError, match="fmt"):
+        export.export_part(_MockSession(), str(tmp_path), fmt="dxf")
 
 
 @pytest.mark.slow
