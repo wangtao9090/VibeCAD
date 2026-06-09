@@ -3,7 +3,7 @@ name = "vibecad"
 version = "0.0.1"
 description = "AI 对话式 CAD —— FreeCAD MCP 连接器（Chat-native 零安装）"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "wangtao", email = "wangtao9090@gmail.com" }]
 keywords = ["cad", "freecad", "mcp", "3d-printing", "parametric", "ai"]
@@ -16,7 +16,7 @@ classifiers = [
 # 注意：FreeCAD 不在此列 —— 它是 conda 包，由 micromamba 运行时安装器（D4）拉取，
 # 与本 server 的 pip 依赖隔离。此处仅声明纯 pip 可装依赖。
 dependencies = [
-    "mcp>=1.2.0",          # 官方 MCP SDK（FastMCP），D3
+    "mcp>=1.12",          # 结构化 dict 输出需 ≥1.10，取 1.12 稳
     "pygltflib>=1.16.0",   # glTF 导出器，D6
     "trimesh>=4.0.0",      # 软渲染回退，D5
     "numpy>=1.26",
@@ -27,7 +27,7 @@ dependencies = [
 Homepage = "https://github.com/wangtao/vibecad"
 
 [project.scripts]
-vibecad = "vibecad.server:main"   # uvx 一键入口
+vibecad = "vibecad.launcher:main"   # uvx 一键入口（先跑纯 stdlib launcher）
 
 [build-system]
 requires = ["hatchling"]
@@ -44,7 +44,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -52,4 +52,5 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -m 'not slow'"
+markers = ["slow: 真实下载 2-3GB 装 FreeCAD 的集成测试（需 VIBECAD_RUN_INTEGRATION=1）"]
