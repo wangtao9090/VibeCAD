@@ -6,6 +6,7 @@ import 延迟到 open_document（Task 3），在 silence_fd1() 内进行。
 from __future__ import annotations
 
 import contextlib
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -51,3 +52,47 @@ class Session:
         if obj is None:
             raise KeyError(name)
         return obj
+
+    def open_document(self, name: str) -> Any:
+        self._ensure_freecad()
+        from vibecad.freecad_env import silence_fd1
+        with silence_fd1():
+            import FreeCAD  # noqa: PLC0415
+            self._doc = FreeCAD.newDocument(name)
+        return self._doc
+
+    def close_document(self) -> None:
+        if self._doc is None:
+            return
+        from vibecad.freecad_env import silence_fd1
+        with silence_fd1():
+            import FreeCAD  # noqa: PLC0415
+            FreeCAD.closeDocument(self._doc.Name)
+        self._doc = None
+
+    def _checkpoint(self) -> Path:
+        if self._doc is None:
+            raise RuntimeError("无活动文档，无法 checkpoint")
+        cp_dir = self._checkpoint_dir or (Path(tempfile.gettempdir()) / "vibecad_checkpoints")
+        cp_dir.mkdir(parents=True, exist_ok=True)
+        path = cp_dir / f"{self._doc.Name}.FCStd"
+        from vibecad.freecad_env import silence_fd1
+        with silence_fd1():
+            self._doc.saveAs(str(path))
+        return path
+
+    def get_result_shape(self) -> Any:
+        if self._doc is None:
+            raise RuntimeError("无活动文档")
+        boolean_types = ("Part::Cut", "Part::Fuse", "Part::Common")
+        result = None
+        for obj in self._doc.Objects:
+            if getattr(obj, "TypeId", "") in boolean_types and hasattr(obj, "Shape"):
+                result = obj
+        if result is None:
+            for obj in self._doc.Objects:
+                if hasattr(obj, "Shape") and getattr(obj.Shape, "Volume", 0) > 0:
+                    result = obj
+        if result is None:
+            raise RuntimeError("文档中无有效 solid")
+        return result.Shape

@@ -34,6 +34,9 @@ exports/
 *.glb
 *.gltf
 
+# 测试运行时缓存（conda env + FreeCAD，约 2-3 GB，不入库）
+.vibecad-test-runtime/
+
 # OS / 编辑器
 .DS_Store
 *.swp
