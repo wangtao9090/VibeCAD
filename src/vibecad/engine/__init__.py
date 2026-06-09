@@ -5,6 +5,8 @@
 - solve() 返回值不可信 ⇒ 强制几何断言
 - 关节引用须双子元素（传错静默失败）
 - 面索引按几何类型检索（缓解 TNP）
-
-脚手架占位 —— 实现见 M1 周1。
 """
+
+from vibecad.engine.session import Session
+
+__all__ = ["Session"]
