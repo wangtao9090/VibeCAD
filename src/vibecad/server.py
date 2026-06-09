@@ -79,9 +79,8 @@ def ensure_runtime() -> dict[str, Any]:
 
 
 def _prepare_freecad_import() -> None:
-    """M4：Windows 把 conda Library/bin 注入 PATH。
-    （add_dll_directory 作双保险，可能被 conda 补丁拦截）。
-    """
+    """A1/M4：conda-forge 把 FreeCAD 模块装在 <prefix>/lib（Windows 为 Library/bin），
+    须注入 sys.path 才能进程内 import；Windows 另把 Library/bin 注入 PATH/DLL 搜索路径。"""
     if sys.platform == "win32":
         libbin = os.path.join(sys.prefix, "Library", "bin")
         os.environ["PATH"] = libbin + os.pathsep + os.environ.get("PATH", "")
@@ -89,6 +88,12 @@ def _prepare_freecad_import() -> None:
             os.add_dll_directory(libbin)
         except (OSError, AttributeError):
             pass
+        mod_dirs = [libbin, os.path.join(sys.prefix, "Library", "lib")]
+    else:
+        mod_dirs = [os.path.join(sys.prefix, "lib")]
+    for d in mod_dirs:
+        if d not in sys.path:
+            sys.path.insert(0, d)
 
 
 @contextlib.contextmanager

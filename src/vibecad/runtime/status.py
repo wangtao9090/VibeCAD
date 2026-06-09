@@ -23,6 +23,12 @@ _PREP = (
     "        os.add_dll_directory(_b)\n"
     "    except Exception:\n"
     "        pass\n"
+    "    _mods=[_b, os.path.join(sys.prefix,'Library','lib')]\n"
+    "else:\n"
+    "    _mods=[os.path.join(sys.prefix,'lib')]\n"
+    "for _m in _mods:\n"
+    "    if _m not in sys.path:\n"
+    "        sys.path.insert(0, _m)\n"
 )
 _HEALTH_SNIPPET = _PREP + "import FreeCAD, Part\n"
 # 更严就绪校验：连 vibecad.server（连带 mcp）一起 import，确保 re-exec 进去后 server 真能起（m-4）
