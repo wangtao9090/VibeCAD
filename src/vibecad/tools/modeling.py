@@ -6,6 +6,14 @@ from typing import Any
 
 from vibecad.engine.session import Session
 
+_AXIS = {"z": ((0.0, 0.0, 1.0), 0.0), "x": ((0.0, 1.0, 0.0), 90.0), "y": ((1.0, 0.0, 0.0), -90.0)}
+
+
+def _validate_position(position) -> None:
+    if (not isinstance(position, (list, tuple)) or len(position) != 3
+            or not all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in position)):
+        raise ValueError(f"position 必须是 3 个数字 (x, y, z)（得到 {position!r}）")
+
 
 def new_document(session: Session, name: str) -> dict[str, Any]:
     if not name or not isinstance(name, str):
@@ -14,33 +22,53 @@ def new_document(session: Session, name: str) -> dict[str, Any]:
     return {"ok": True, "name": name}
 
 
-def add_box(session: Session, length: float, width: float, height: float) -> dict[str, Any]:
+def add_box(
+    session: Session, length: float, width: float, height: float,
+    position=(0.0, 0.0, 0.0),
+) -> dict[str, Any]:
     for field, value in (("length", length), ("width", width), ("height", height)):
         if value <= 0:
             raise ValueError(f"{field} 必须 > 0（得到 {value}）")
+    _validate_position(position)
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
     with session._transaction("add_box"):
         with silence_fd1():
+            import FreeCAD  # noqa: PLC0415
             obj = session.doc.addObject("Part::Box", "Box")
             obj.Length, obj.Width, obj.Height = length, width, height
+            obj.Placement = FreeCAD.Placement(FreeCAD.Vector(*position), FreeCAD.Rotation())
             session.doc.recompute()
             session.assert_valid_solid(obj.Shape)
-            result = {"ok": True, "name": obj.Name, "volume": obj.Shape.Volume}
+            result = {
+                "ok": True, "name": obj.Name,
+                "volume": obj.Shape.Volume, "position": list(position),
+            }
     return result
 
 
-def add_cylinder(session: Session, radius: float, height: float) -> dict[str, Any]:
+def add_cylinder(
+    session: Session, radius: float, height: float,
+    position=(0.0, 0.0, 0.0), axis="z",
+) -> dict[str, Any]:
     for field, value in (("radius", radius), ("height", height)):
         if value <= 0:
             raise ValueError(f"{field} 必须 > 0（得到 {value}）")
+    _validate_position(position)
+    if axis not in _AXIS:
+        raise ValueError(f"axis 必须是 x/y/z（得到 {axis!r}）")
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
     with session._transaction("add_cylinder"):
         with silence_fd1():
+            import FreeCAD  # noqa: PLC0415
             obj = session.doc.addObject("Part::Cylinder", "Cylinder")
             obj.Radius, obj.Height = radius, height
+            rot_axis, angle = _AXIS[axis]
+            obj.Placement = FreeCAD.Placement(
+                FreeCAD.Vector(*position), FreeCAD.Rotation(FreeCAD.Vector(*rot_axis), angle))
             session.doc.recompute()
             session.assert_valid_solid(obj.Shape)
-            result = {"ok": True, "name": obj.Name, "volume": obj.Shape.Volume}
+            result = {"ok": True, "name": obj.Name, "volume": obj.Shape.Volume,
+                      "position": list(position), "axis": axis}
     return result
 
 
