@@ -36,7 +36,7 @@ def test_add_box_delegates(monkeypatch):
     _ready(monkeypatch)
     seen = {}
 
-    def _fake_add_box(s, length, w, h):
+    def _fake_add_box(s, length, w, h, position):
         seen["a"] = (length, w, h)
         return {"ok": True}
 
@@ -48,10 +48,52 @@ def test_add_box_delegates(monkeypatch):
 def test_add_cylinder_delegates(monkeypatch):
     _ready(monkeypatch)
     seen = {}
-    monkeypatch.setattr(srv._modeling, "add_cylinder",
-                        lambda s, r, h: seen.setdefault("a", (r, h)) or {"ok": True})
+    def _fake_add_cylinder(s, r, h, position, axis):
+        seen.setdefault("a", (r, h))
+        return {"ok": True}
+
+    monkeypatch.setattr(srv._modeling, "add_cylinder", _fake_add_cylinder)
     srv.add_cylinder(5, 12)
     assert seen["a"] == (5, 12)
+
+
+def test_add_box_forwards_position(monkeypatch):
+    _ready(monkeypatch)
+    seen = {}
+
+    def _fake_add_box_pos(s, ln, w, h, position):
+        seen.setdefault("a", (ln, w, h, position))
+        return {"ok": True}
+
+    monkeypatch.setattr(srv._modeling, "add_box", _fake_add_box_pos)
+    srv.add_box(10, 20, 30, position=[1, 2, 3])
+    assert seen["a"] == (10, 20, 30, (1, 2, 3))
+
+
+def test_add_cylinder_forwards_position_axis(monkeypatch):
+    _ready(monkeypatch)
+    seen = {}
+
+    def _fake_add_cyl_pos(s, r, h, position, axis):
+        seen.setdefault("a", (r, h, position, axis))
+        return {"ok": True}
+
+    monkeypatch.setattr(srv._modeling, "add_cylinder", _fake_add_cyl_pos)
+    srv.add_cylinder(5, 12, position=[1, 1, 0], axis="x")
+    assert seen["a"] == (5, 12, (1, 1, 0), "x")
+
+
+def test_add_cylinder_default_axis_z(monkeypatch):
+    _ready(monkeypatch)
+    seen = {}
+
+    def _fake_add_cyl_axis(s, r, h, position, axis):
+        seen.setdefault("a", axis)
+        return {"ok": True}
+
+    monkeypatch.setattr(srv._modeling, "add_cylinder", _fake_add_cyl_axis)
+    srv.add_cylinder(5, 12)
+    assert seen["a"] == "z"
 
 
 def test_boolean_cut_delegates(monkeypatch):
