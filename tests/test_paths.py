@@ -30,3 +30,20 @@ def test_active_runtime_prefers_override(monkeypatch, tmp_path):
     assert paths.active_runtime_prefix() == tmp_path / "myenv"
     assert paths.active_runtime_python() == tmp_path / "myenv" / "bin" / "python"
     assert paths.ready_sentinel() == tmp_path / "myenv" / ".vibecad_ready"
+
+
+def test_freecadcmd_honors_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
+    monkeypatch.setattr(paths.platform, "is_windows", lambda: False)
+    monkeypatch.setenv("VIBECAD_FREECAD_ENV", str(tmp_path / "myenv"))
+    assert paths.freecadcmd_path() == tmp_path / "myenv" / "bin" / "freecadcmd"
+
+
+def test_freecadcmd_honors_override_windows(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
+    monkeypatch.setattr(paths.platform, "is_windows", lambda: True)
+    monkeypatch.setenv("VIBECAD_FREECAD_ENV", str(tmp_path / "myenv"))
+    assert (
+        paths.freecadcmd_path()
+        == tmp_path / "myenv" / "Library" / "bin" / "FreeCADCmd.exe"
+    )
