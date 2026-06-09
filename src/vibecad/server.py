@@ -9,6 +9,8 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from vibecad import __version__
+from vibecad.engine.session import Session
+from vibecad.feedback import text as _feedback_text
 from vibecad.freecad_env import (
     prepare_freecad_import as _prepare_freecad_import,
 )
@@ -17,11 +19,14 @@ from vibecad.freecad_env import (
 )
 from vibecad.runtime import paths, status
 from vibecad.runtime.installer import RuntimeInstaller
+from vibecad.tools import export as _export
+from vibecad.tools import modeling as _modeling
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # m10：杜绝隐式拉起 GUI
 
 mcp = FastMCP("vibecad")
 _installer = RuntimeInstaller()  # 进度由 installer 落 status.json，server 读盘
+_session = Session()  # 跨 MCP 调用维持同一活动文档（单零件先行）；构造不 import FreeCAD
 _install_thread: threading.Thread | None = None
 
 
@@ -108,6 +113,55 @@ def smoke_cad() -> dict[str, Any]:
         _msg = "运行时已就绪，但当前会话运行在引导解释器中，请重连本 MCP server 后再调用 smoke_cad"
         return {"ok": False, "message": _msg}
     return _build_box_and_export()
+
+
+def _runtime_guard() -> dict[str, Any] | None:
+    if not _installer.is_ready():
+        return {"ok": False, "message": "FreeCAD 运行时未就绪，请先调用 ensure_runtime"}
+    if not _in_conda_runtime():
+        _msg = "运行时已就绪，但当前会话运行在引导解释器中，请重连本 MCP server 后再试"
+        return {"ok": False, "message": _msg}
+    return None
+
+
+@mcp.tool()
+def new_document(name: str) -> dict[str, Any]:
+    """新建一个 CAD 文档（单零件工作区）。"""
+    return _runtime_guard() or _modeling.new_document(_session, name)
+
+
+@mcp.tool()
+def add_box(length: float, width: float, height: float) -> dict[str, Any]:
+    """添加参数化长方体（mm）。返回对象名与体积。"""
+    return _runtime_guard() or _modeling.add_box(_session, length, width, height)
+
+
+@mcp.tool()
+def add_cylinder(radius: float, height: float) -> dict[str, Any]:
+    """添加参数化圆柱（mm）。返回对象名与体积。"""
+    return _runtime_guard() or _modeling.add_cylinder(_session, radius, height)
+
+
+@mcp.tool()
+def boolean_cut(base_name: str, tool_name: str) -> dict[str, Any]:
+    """布尔差集：从 base 减去 tool，返回结果对象名与体积。"""
+    return _runtime_guard() or _modeling.boolean_cut(_session, base_name, tool_name)
+
+
+@mcp.tool()
+def export_part(output_dir: str, fmt: str = "both") -> dict[str, Any]:
+    """导出当前结果为 STEP/STL（fmt: step|stl|both）到 output_dir。"""
+    return _runtime_guard() or _export.export_part(_session, output_dir, fmt=fmt)
+
+
+@mcp.tool()
+def describe_part() -> dict[str, Any]:
+    """返回当前结果零件的文本诊断（体积/包围盒/质心/实体数/有效性）。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    with _silence_fd1():
+        return _feedback_text.describe_shape(_session.get_result_shape())
 
 
 def main() -> None:
