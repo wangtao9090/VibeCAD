@@ -64,3 +64,32 @@ def test_walking_skeleton(runtime_env, tmp_path):
     p = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
     assert p.returncode == 0, p.stderr
     assert "SKELETON_OK" in p.stdout
+
+
+def test_render_and_gltf(runtime_env, tmp_path):
+    """端到端视觉：建模→布尔→render_png(PNG)→export_gltf(glb)（真实 FreeCAD）。"""
+    glb = str(tmp_path / "p.glb")
+    code = (
+        status._PREP
+        + f"import sys; sys.path.insert(0, {_SRC!r})\n"
+        + "from pathlib import Path\n"
+        + "from pygltflib import GLTF2\n"
+        + "from vibecad.engine.session import Session\n"
+        + "from vibecad.tools import modeling\n"
+        + "from vibecad.feedback.render import render_png\n"
+        + "from vibecad.feedback.gltf import export_gltf\n"
+        + "s = Session(); modeling.new_document(s, 'Visual')\n"
+        + "b = modeling.add_box(s, 30, 20, 10)\n"
+        + "c = modeling.add_cylinder(s, 5, 30)\n"
+        + "cut = modeling.boolean_cut(s, b['name'], c['name'])\n"
+        + "shape = s.get_object(cut['name']).Shape\n"
+        + "png = render_png(shape, view='iso')\n"
+        + "assert png[:4] == b'\\x89PNG' and len(png) > 2000, len(png)\n"
+        + f"gp = export_gltf(shape, {glb!r})\n"
+        + "g = GLTF2().load(gp)\n"
+        + "assert Path(gp).stat().st_size > 0 and len(g.meshes[0].primitives) > 0\n"
+        + "print('VISUAL_OK')\n"
+    )
+    pr = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
+    assert pr.returncode == 0, pr.stderr
+    assert "VISUAL_OK" in pr.stdout
