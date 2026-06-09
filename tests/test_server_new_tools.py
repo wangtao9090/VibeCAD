@@ -102,3 +102,16 @@ def test_render_part_returns_image(monkeypatch):
     out = srv.render_part(view="front")
     assert isinstance(out, Image)
     assert seen["view"] == "front"
+
+
+def test_export_part_failure_is_structured(monkeypatch):
+    """export_part 内部抛出 RuntimeError 时，server 应返回结构化 ok:False dict，而非抛出异常。"""
+    _ready(monkeypatch)
+
+    def _boom(s, out, *, fmt):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(srv._export, "export_part", _boom)
+    r = srv.export_part("/tmp/x")
+    assert r["ok"] is False
+    assert "boom" in r["message"]
