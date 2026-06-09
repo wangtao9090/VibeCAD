@@ -6,10 +6,11 @@ import sys
 import threading
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 from vibecad import __version__
 from vibecad.engine.session import Session
+from vibecad.feedback import render as _render
 from vibecad.feedback import text as _feedback_text
 from vibecad.freecad_env import (
     prepare_freecad_import as _prepare_freecad_import,
@@ -150,7 +151,7 @@ def boolean_cut(base_name: str, tool_name: str) -> dict[str, Any]:
 
 @mcp.tool()
 def export_part(output_dir: str, fmt: str = "both") -> dict[str, Any]:
-    """导出当前结果为 STEP/STL（fmt: step|stl|both）到 output_dir。"""
+    """导出当前结果为 STEP/STL/glTF（fmt: step|stl|gltf|both|all）到 output_dir。"""
     return _runtime_guard() or _export.export_part(_session, output_dir, fmt=fmt)
 
 
@@ -162,6 +163,18 @@ def describe_part() -> dict[str, Any]:
         return guard
     with _silence_fd1():
         return _feedback_text.describe_shape(_session.get_result_shape())
+
+
+@mcp.tool()
+def render_part(view: str = "iso") -> Any:
+    """渲染当前零件为 PNG 预览图（view: iso|front|top|right|back），MCP 客户端内联显示。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    with _silence_fd1():
+        shape = _session.get_result_shape()
+    png = _render.render_png(shape, view=view)
+    return Image(data=png, format="png")
 
 
 def main() -> None:
