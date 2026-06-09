@@ -93,3 +93,27 @@ def test_render_and_gltf(runtime_env, tmp_path):
     pr = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
     assert pr.returncode == 0, pr.stderr
     assert "VISUAL_OK" in pr.stdout
+
+
+def test_positioned_part(runtime_env, tmp_path):
+    """端到端：position 参数造居中贯穿孔 + 渲染（真实 FreeCAD）。"""
+    code = (
+        status._PREP
+        + f"import sys; sys.path.insert(0, {_SRC!r})\n"
+        + "import math\n"
+        + "from vibecad.engine.session import Session\n"
+        + "from vibecad.tools import modeling\n"
+        + "from vibecad.feedback.render import render_png\n"
+        + "s = Session(); modeling.new_document(s, 'Plate')\n"
+        + "b = modeling.add_box(s, 40, 30, 20)\n"
+        + "c = modeling.add_cylinder(s, 6, 40, position=(20, 15, -10), axis='z')\n"
+        + "cut = modeling.boolean_cut(s, b['name'], c['name'])\n"
+        + "expected = 24000 - math.pi * 36 * 20\n"  # 居中贯穿 → 挖掉 box 内整段圆柱
+        + "assert abs(cut['volume'] - expected) < 40, (cut['volume'], expected)\n"
+        + "png = render_png(s.get_object(cut['name']).Shape)\n"
+        + "assert png[:4] == b'\\x89PNG' and len(png) > 2000\n"
+        + "print('POSITIONED_OK')\n"
+    )
+    pr = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
+    assert pr.returncode == 0, pr.stderr
+    assert "POSITIONED_OK" in pr.stdout
