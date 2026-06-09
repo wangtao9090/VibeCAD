@@ -4,5 +4,5 @@
 （装至用户数据目录，~1.5-2GB）。全平台矩阵：win-64 / osx-64 / osx-arm64 /
 linux-64 / linux-aarch64。
 
-脚手架占位 —— 实现见 M1 周1。
+M1 周1 已实现：platform / paths / micromamba / status / installer（均纯 stdlib）。
 """
