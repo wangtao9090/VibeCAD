@@ -67,7 +67,7 @@ def install_log() -> Path:
 
 
 def freecadcmd_path() -> Path:
-    env = env_prefix()
+    env = active_runtime_prefix()
     return (
         env / "Library" / "bin" / "FreeCADCmd.exe"
         if platform.is_windows()
