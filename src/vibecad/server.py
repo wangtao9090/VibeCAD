@@ -132,15 +132,21 @@ def new_document(name: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def add_box(length: float, width: float, height: float) -> dict[str, Any]:
-    """添加参数化长方体（mm）。返回对象名与体积。"""
-    return _runtime_guard() or _modeling.add_box(_session, length, width, height)
+def add_box(length: float, width: float, height: float,
+            position: list[float] | None = None) -> dict[str, Any]:
+    """添加参数化长方体（mm）；position=[x,y,z] 放置位置（默认原点）。"""
+    return _runtime_guard() or _modeling.add_box(
+        _session, length, width, height,
+        position=tuple(position) if position else (0.0, 0.0, 0.0))
 
 
 @mcp.tool()
-def add_cylinder(radius: float, height: float) -> dict[str, Any]:
-    """添加参数化圆柱（mm）。返回对象名与体积。"""
-    return _runtime_guard() or _modeling.add_cylinder(_session, radius, height)
+def add_cylinder(radius: float, height: float,
+                 position: list[float] | None = None, axis: str = "z") -> dict[str, Any]:
+    """添加参数化圆柱（mm）；position=[x,y,z] 放置位置，axis=x|y|z 圆柱轴向（默认 z）。"""
+    return _runtime_guard() or _modeling.add_cylinder(
+        _session, radius, height,
+        position=tuple(position) if position else (0.0, 0.0, 0.0), axis=axis)
 
 
 @mcp.tool()
