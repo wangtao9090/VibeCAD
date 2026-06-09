@@ -49,6 +49,25 @@ def test_describe_shape_center_of_mass_is_json_list():
     assert isinstance(d["center_of_mass"], list)
 
 
+def test_describe_shape_compound_falls_back_to_first_solid():
+    # Part.Compound（布尔结果）无 CenterOfMass 属性：退到首个 Solid
+    class _Solid:
+        CenterOfMass = _Vec(1.0, 2.0, 3.0)
+
+    class _Compound:
+        Volume = 100.0
+        BoundBox = _BB()
+        Solids = [_Solid()]
+        Shells = []
+
+        def isValid(self):
+            return True
+
+    d = text.describe_shape(_Compound())
+    assert d["center_of_mass"] == [1.0, 2.0, 3.0]
+    assert d["solid_count"] == 1 and d["shell_count"] == 0
+
+
 @pytest.mark.slow
 def test_describe_shape_real_box(runtime_env):
     code = (
