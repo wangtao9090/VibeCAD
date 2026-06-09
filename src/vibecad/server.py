@@ -152,7 +152,13 @@ def boolean_cut(base_name: str, tool_name: str) -> dict[str, Any]:
 @mcp.tool()
 def export_part(output_dir: str, fmt: str = "both") -> dict[str, Any]:
     """导出当前结果为 STEP/STL/glTF（fmt: step|stl|gltf|both|all）到 output_dir。"""
-    return _runtime_guard() or _export.export_part(_session, output_dir, fmt=fmt)
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        return _export.export_part(_session, output_dir, fmt=fmt)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"导出失败：{exc}"}
 
 
 @mcp.tool()

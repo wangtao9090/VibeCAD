@@ -36,8 +36,8 @@ def build_glb(parts: list[dict]) -> bytes:
     accessors: list = []
     primitives: list = []
     for part in parts:
-        if not part["verts"]:
-            continue  # 跳过空 verts 的 part，防止 verts.min(axis=0) 在零尺寸数组上崩溃
+        if not part["verts"] or not part.get("facets"):
+            continue  # 跳过空 verts 或空 facets 的 part，防止生成无效 glb
         verts = np.asarray(part["verts"], dtype=np.float32)
         idx = np.asarray(part["facets"], dtype=np.uint32).reshape(-1)
         pos_bytes = verts.tobytes()

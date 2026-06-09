@@ -16,9 +16,13 @@ class _FakeShape:
 
     def exportStep(self, p):
         self.calls.append(("step", p))
+        from pathlib import Path
+        Path(p).write_text("FAKE")
 
     def exportStl(self, p):
         self.calls.append(("stl", p))
+        from pathlib import Path
+        Path(p).write_text("FAKE")
 
 
 class _MockSession:
@@ -100,6 +104,26 @@ def test_export_all(tmp_path, monkeypatch):
 def test_export_rejects_invalid_fmt_dxf(tmp_path):
     with pytest.raises(ValueError, match="fmt"):
         export.export_part(_MockSession(), str(tmp_path), fmt="dxf")
+
+
+def test_export_raises_on_empty_output(tmp_path):
+    """exportStep 写零字节文件（或不写）时，export_part 应抛出 RuntimeError。"""
+    calls = []
+
+    class _EmptyShape(_FakeShape):
+        def exportStep(self, p):
+            calls.append(("step", p))
+            # 故意写零字节文件，触发 _assert_written
+            from pathlib import Path
+            Path(p).write_bytes(b"")
+
+    class _MockSessionEmpty(_MockSession):
+        def __init__(self):
+            super().__init__()
+            self._shape = _EmptyShape(self.calls)
+
+    with pytest.raises(RuntimeError, match="导出文件未生成或为空"):
+        export.export_part(_MockSessionEmpty(), str(tmp_path), fmt="step")
 
 
 @pytest.mark.slow
