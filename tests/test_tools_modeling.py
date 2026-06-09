@@ -54,6 +54,21 @@ def test_boolean_cut_rejects_empty_tool():
         modeling.boolean_cut(MockSession(), "Box", "")
 
 
+def test_add_box_rejects_bad_position():
+    with pytest.raises(ValueError, match="position"):
+        modeling.add_box(MockSession(), 10, 10, 10, position=(1, 2))
+
+
+def test_add_cylinder_rejects_bad_axis():
+    with pytest.raises(ValueError, match="axis"):
+        modeling.add_cylinder(MockSession(), 5, 10, axis="w")
+
+
+def test_add_cylinder_rejects_bad_position():
+    with pytest.raises(ValueError, match="position"):
+        modeling.add_cylinder(MockSession(), 5, 10, position="nope")
+
+
 @pytest.mark.slow
 def test_add_box_real(runtime_env):
     code = (
@@ -89,3 +104,24 @@ def test_boolean_cut_real(runtime_env):
     p = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
     assert p.returncode == 0, p.stderr
     assert "CUT_OK" in p.stdout
+
+
+@pytest.mark.slow
+def test_positioned_centered_through_hole(runtime_env):
+    code = (
+        status._PREP
+        + f"import sys; sys.path.insert(0, {_SRC!r})\n"
+        + "import math\n"
+        + "from vibecad.engine.session import Session\n"
+        + "from vibecad.tools import modeling\n"
+        + "s = Session(); modeling.new_document(s, 'Pos')\n"
+        + "b = modeling.add_box(s, 20, 20, 20)\n"            # 原点 0..20
+        + "c = modeling.add_cylinder(s, 4, 30, position=(10, 10, -5), axis='z')\n"  # 居中、贯穿
+        + "cut = modeling.boolean_cut(s, b['name'], c['name'])\n"
+        + "expected = 8000 - math.pi * 16 * 20\n"            # 整根圆柱被挖掉 ≈ 6994.7
+        + "assert abs(cut['volume'] - expected) < 30, (cut['volume'], expected)\n"
+        + "print('POS_OK')\n"
+    )
+    p = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0, p.stderr
+    assert "POS_OK" in p.stdout
