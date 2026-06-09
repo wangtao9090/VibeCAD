@@ -36,6 +36,8 @@ def build_glb(parts: list[dict]) -> bytes:
     accessors: list = []
     primitives: list = []
     for part in parts:
+        if not part["verts"]:
+            continue  # 跳过空 verts 的 part，防止 verts.min(axis=0) 在零尺寸数组上崩溃
         verts = np.asarray(part["verts"], dtype=np.float32)
         idx = np.asarray(part["facets"], dtype=np.uint32).reshape(-1)
         pos_bytes = verts.tobytes()
@@ -117,15 +119,22 @@ def export_gltf(shape: Any, path: str, *, doc_name: str = "part") -> str:
     with silence_fd1():
         for i, face in enumerate(shape.Faces):
             fv, ff = face.tessellate(0.1)
+            verts_list = [(p.x, p.y, p.z) for p in fv]
+            facets_list = [tuple(t) for t in ff]
+            if not verts_list or not facets_list:
+                continue  # 跳过退化面（无顶点/无三角形）
             parts.append(
                 {
-                    "verts": [(p.x, p.y, p.z) for p in fv],
-                    "facets": [tuple(t) for t in ff],
+                    "verts": verts_list,
+                    "facets": facets_list,
                     "extras": {
+                        "part": doc_name,
                         "face_index": i,
                         "geom_type": type(face.Surface).__name__,
                     },
                 }
             )
+    if not parts:
+        raise RuntimeError("几何断言失败：形状无可镶嵌面，glTF 导出中止")
     Path(path).write_bytes(build_glb(parts))
     return path
