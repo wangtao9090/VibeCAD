@@ -628,6 +628,143 @@ print("FULL_CIRCLE_ONLY_OK", radii)
 
 
 @pytest.mark.slow
+def test_modify_box_length_recomputes_chain(runtime_env):
+    """改 Box.length → Cut 链自动重算，体积精确；旧标签过期。"""
+    out = _run_in_env(runtime_env, """
+import math
+from vibecad.engine.naming import LabelExpiredError
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import modeling, features, modify
+s = Session()
+modeling.new_document(s, "mod")
+modeling.add_box(s, 40, 30, 20)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+features.add_hole(s, top, diameter=8)
+r = modify.modify_part(s, "Box", "length", 45)
+expect = 45 * 30 * 20 - math.pi * 16 * 20
+assert abs(r["volume"] - expect) < 1.0, (r["volume"], expect)
+assert r["modified"]["from"] == 40.0 and r["modified"]["to"] == 45.0
+try:
+    s.resolve_face(top)
+    raise SystemExit("EXPECTED stale label")
+except LabelExpiredError:
+    print("MODIFY_CHAIN_OK", round(r["volume"], 1))
+""")
+    assert "MODIFY_CHAIN_OK" in out
+
+
+@pytest.mark.slow
+def test_modify_hole_radius(runtime_env):
+    """改 HoleTool.radius 4→5 → Cut 链重算，通孔体积 = 24000 − π·25·20。"""
+    out = _run_in_env(runtime_env, """
+import math
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import modeling, features, modify
+s = Session()
+modeling.new_document(s, "rad")
+modeling.add_box(s, 40, 30, 20)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+features.add_hole(s, top, diameter=8)
+r = modify.modify_part(s, "HoleTool", "radius", 5)
+expect = 24000 - math.pi * 25 * 20
+assert abs(r["volume"] - expect) < 1.0
+print("MODIFY_RADIUS_OK")
+""")
+    assert "MODIFY_RADIUS_OK" in out
+
+
+@pytest.mark.slow
+def test_modify_fillet_radius(runtime_env):
+    """改 Fillet.radius 2→3（Edges 元组重写路径）→ 体积 = 27000 − 9·30·(1−π/4)。"""
+    out = _run_in_env(runtime_env, """
+import math
+from vibecad.engine.session import Session
+from vibecad.feedback import annotate
+from vibecad.tools import modeling, features, modify
+s = Session()
+modeling.new_document(s, "fil")
+modeling.add_box(s, 30, 30, 30)
+png, table, fr, er = annotate.render_annotated(
+    s.get_result_shape(), mode="edges", view="iso")
+s.set_labels(fr, er, shown=set(table.keys()))
+lab = next(lab for lab, d in table.items() if "15.0" in d and "直线边" in d)
+features.fillet_edges(s, [lab], radius=2)
+r = modify.modify_part(s, "Fillet", "radius", 3)
+expect = 27000 - 9 * 30 * (1 - math.pi / 4)
+assert abs(r["volume"] - expect) < 0.1, (r["volume"], expect)
+print("MODIFY_FILLET_OK")
+""")
+    assert "MODIFY_FILLET_OK" in out
+
+
+@pytest.mark.slow
+def test_modify_downstream_failure_rolls_back(runtime_env):
+    """孔径改到超界（r=50 吞掉 40×30 零件）→ 下游断言失败 → 回滚：
+    参数复原为 4，会话可恢复（改合法值 5 成功）。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import modeling, features, modify
+s = Session()
+modeling.new_document(s, "rb")
+modeling.add_box(s, 40, 30, 20)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+features.add_hole(s, top, diameter=8)
+try:
+    modify.modify_part(s, "HoleTool", "radius", 50)  # 超出 40x30 零件
+    raise SystemExit("EXPECTED failure")
+except (RuntimeError, ValueError) as exc:
+    print("RB_RAISED", type(exc).__name__)
+obj = s.get_object("HoleTool")
+assert abs(float(obj.Radius) - 4.0) < 1e-9, "回滚后参数应复原为 4"
+r = modify.modify_part(s, "HoleTool", "radius", 5)  # 会话可恢复
+assert r["ok"]
+print("MODIFY_ROLLBACK_OK")
+""")
+    assert "MODIFY_ROLLBACK_OK" in out
+
+
+@pytest.mark.slow
+def test_same_radius_holes_both_have_position_dims(runtime_env):
+    """同径双孔：project_view circles 两个圆 → multiview 不抛错；
+    定位解耦后两孔均有定位尺寸（数据层断言：vis_full 两项均进定位循环——
+    以渲染成功 + circles 数==2 钉住；像素级留人眼黑盒）。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.feedback.multiview import project_view, _VIEW_TFS
+from vibecad.tools import modeling, features
+s = Session()
+modeling.new_document(s, "twin")
+modeling.add_box(s, 60, 40, 10)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+features.add_hole(s, top, diameter=10, offset=[-15, 0])
+png2, t2, fr2, er2 = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr2, er2, shown=set(t2.keys()))
+top2 = next(lab for lab, d in t2.items() if "顶面" in d)
+features.add_hole(s, top2, diameter=10, offset=[15, 0])
+d, tf = _VIEW_TFS["top"]
+pv = project_view(s.get_result_shape(), d, tf)
+full_vis = [c for c in pv["circles"] if c[3]]
+assert len(full_vis) == 2, full_vis
+png3, *_ = multiview.render_multiview(s.get_result_shape())
+assert png3.startswith(b"\\x89PNG")
+print("TWIN_HOLES_OK")
+""")
+    assert "TWIN_HOLES_OK" in out
+
+
+@pytest.mark.slow
 def test_modify_guards_feature_semantics(runtime_env):
     """modify_part 特征语义护栏（审查 E1-E6 真机取证修复）：①改长把孔变开槽 →
     孔完整性断言；②改孔径把件切两半 → 单实体/完整性断言；③刀具吞件 → 结果对象
