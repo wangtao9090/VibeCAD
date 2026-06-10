@@ -147,7 +147,7 @@ def _attach_view(result: dict[str, Any]) -> Any:
         result.pop("hint", None)
         try:
             with _silence_fd1():
-                result["parts"] = _modify.list_parameters(_session.doc)
+                result["parts"] = _modify.list_parameters(_session.doc, session=_session)
         except Exception:  # noqa: BLE001 - 参数清单失败不应丢弃已成功的渲染：
             # labels/Image 已就绪，parts 只是辅助清单，兜底空 dict 而非把整个
             # 附图降级到 render_error 路径（消除"渲染成功却报渲染失败"的语义矛盾）

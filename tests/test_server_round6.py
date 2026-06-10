@@ -53,7 +53,7 @@ def test_add_box_attaches_view(server, monkeypatch):
                         lambda session, length, width, height, position:
                         {"ok": True, "name": "Box", "volume": 24000.0})
     monkeypatch.setattr(server._modify, "list_parameters",
-                        lambda doc: {"Box": {"length": 40.0}})
+                        lambda doc, session=None: {"Part1": {"Box": {"length": 40.0}}})
     monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
@@ -65,7 +65,7 @@ def test_add_box_attaches_view(server, monkeypatch):
     body = out[0]
     assert body["ok"] is True and body["labels"] == {"A": "顶面"}
     assert "labels_stale" not in body and "hint" not in body
-    assert "parts" in body  # 断言升格：每步结果附 parts 字段
+    assert "parts" in body  # 断言升格：每步结果附 parts 字段（新形态 {零件: {对象: {参数}}}）
 
 
 def test_attach_view_render_failure_not_fatal(server, monkeypatch):
@@ -161,7 +161,7 @@ def test_modify_part_delegates_and_attaches(server, monkeypatch):
                         {"ok": True, "modified": {"name": name, "parameter": parameter,
                                                   "from": 40.0, "to": value}})
     monkeypatch.setattr(server._modify, "list_parameters",
-                        lambda doc: {"Box": {"length": 45.0}})
+                        lambda doc, session=None: {"Part1": {"Box": {"length": 45.0}}})
     monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
@@ -170,7 +170,9 @@ def test_modify_part_delegates_and_attaches(server, monkeypatch):
                         raising=False)
     out = server.modify_part(name="Box", parameter="length", value=45)
     assert isinstance(out, list) and isinstance(out[1], Image)
-    assert out[0]["modified"]["to"] == 45 and out[0]["parts"] == {"Box": {"length": 45.0}}
+    # 断言升格：新形态 {零件: {对象: {参数}}}
+    assert out[0]["modified"]["to"] == 45
+    assert out[0]["parts"] == {"Part1": {"Box": {"length": 45.0}}}
 
 
 def test_attach_view_includes_parts(server, monkeypatch):
@@ -183,7 +185,7 @@ def test_attach_view_includes_parts(server, monkeypatch):
                         lambda session, length, width, height, position:
                         {"ok": True, "name": "Box", "volume": 24000.0})
     monkeypatch.setattr(server._modify, "list_parameters",
-                        lambda doc: {"Box": {"length": 40.0}})
+                        lambda doc, session=None: {"Part1": {"Box": {"length": 40.0}}})
     monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
@@ -191,7 +193,8 @@ def test_attach_view_includes_parts(server, monkeypatch):
     monkeypatch.setattr(type(server._session), "doc", property(lambda self: object()),
                         raising=False)
     out = server.add_box(length=40, width=30, height=20)
-    assert out[0]["parts"] == {"Box": {"length": 40.0}}
+    # 断言升格：新形态 {零件: {对象: {参数}}}
+    assert out[0]["parts"] == {"Part1": {"Box": {"length": 40.0}}}
 
 
 def test_modify_part_failure_structured(server, monkeypatch):
@@ -215,7 +218,7 @@ def test_attach_view_parts_failure_not_fatal(server, monkeypatch):
                         lambda session, length, width, height, position:
                         {"ok": True, "name": "Box", "volume": 24000.0})
 
-    def _boom(doc):
+    def _boom(doc, session=None):
         raise RuntimeError("参数清单炸了")
 
     monkeypatch.setattr(server._modify, "list_parameters", _boom)

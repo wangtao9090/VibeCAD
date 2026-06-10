@@ -27,9 +27,18 @@ _WHITELIST: dict[str, dict[str, str | None]] = {
 }
 
 
-def list_parameters(doc: Any) -> dict[str, dict[str, float]]:
-    """文档对象 → 白名单参数当前值（附进每步 result 的 parts 字段，给 AI 读）。"""
-    out: dict[str, dict[str, float]] = {}
+def list_parameters(doc: Any,
+                    session: Any = None) -> dict[str, dict[str, dict[str, float]]]:
+    """文档对象 → 白名单参数当前值（附进每步 result 的 parts 字段，给 AI 读）。
+
+    Round 8：统一新形态 {零件名: {对象名: {参数名: 值}}}。
+    - 装配模式（session._parts 非空）：按零件分组，零件名来自注册表。
+    - 单零件模式（session._parts 空或 session=None）：零件键固定为 "Part1"。
+
+    注：session 参数可选，None 时退回单零件模式（向后兼容旧调用方）。
+    """
+    # 先收集全局对象 → 参数映射（不变）
+    flat: dict[str, dict[str, float]] = {}
     for obj in getattr(doc, "Objects", []):
         wl = _WHITELIST.get(getattr(obj, "TypeId", ""))
         if not wl:
@@ -43,8 +52,25 @@ def list_parameters(doc: Any) -> dict[str, dict[str, float]]:
             else:
                 params[key] = float(getattr(obj, attr))
         if params:
-            out[obj.Name] = params
-    return out
+            flat[obj.Name] = params
+
+    # 装配模式：按零件分组
+    if session is not None and getattr(session, "_parts", None):
+        out: dict[str, dict[str, dict[str, float]]] = {}
+        for pname, info in session._parts.items():
+            part_objs = info.get("objects", set())
+            part_params = {n: p for n, p in flat.items() if n in part_objs}
+            if part_params:
+                out[pname] = part_params
+        # 不属于任何零件的可改对象放到兜底键（正常不可达，容错）
+        assigned = {n for p in out.values() for n in p}
+        orphans = {n: p for n, p in flat.items() if n not in assigned}
+        if orphans:
+            out.setdefault("__unassigned__", {}).update(orphans)
+        return out
+
+    # 单零件模式：固定 "Part1" 键
+    return {"Part1": flat}
 
 
 def _assert_shape_reflects(obj: Any, key: str, value: float) -> None:
