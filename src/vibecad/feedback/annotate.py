@@ -286,14 +286,20 @@ def collect_annotation_data(shape: Any, *, view: str = "iso",
 
 
 def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = None,
-                     view: str = "iso") -> tuple[bytes, dict, dict, dict]:
+                     view: str = "iso",
+                     part_map: dict[str, Any] | None = None) -> tuple[bytes, dict, dict, dict]:
     """FreeCAD Shape → (png, labels_table, faces_registry, edges_registry)。
 
     注册表（faces_reg/edges_reg）无论 mode 都全量注册（面+边指纹），保证
     "看面→看边→打孔"工作流中 Session.set_labels 整体覆盖不丢另一类标签，
     且标签序号不随 mode/edges_of 漂移。mode 与 edges_of 只决定图上画什么：
     faces 模式画面标签+尺寸线；edges 模式画边标签（edges_of 给定时只画该面
-    的边，但标签号仍是全局边序号）。labels_table 只含当前画出来的标签项。"""
+    的边，但标签号仍是全局边序号）。labels_table 只含当前画出来的标签项。
+
+    part_map={零件名: 全局 shape}（可选，装配模式）：faces 模式透传给
+    collect_annotation_data（分色 + 表条目"（零件：X）"后缀）；edges 模式按
+    compound 边序拼接规则（各零件 shape.Edges 按 part_map 迭代顺序拼接，与面序
+    同款 spike 结论）给边表条目加零件归属后缀。None = 单零件模式，行为不变。"""
     from vibecad.engine import naming  # noqa: PLC0415
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
 
@@ -305,7 +311,7 @@ def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = 
             # 静默忽略会让调用方误以为过滤生效，违反"绝不静默"纪律
             raise ValueError("edges_of 仅在 mode='edges' 时有效")
         # faces 模式：委托给共享数据源
-        data = collect_annotation_data(shape, view=view)
+        data = collect_annotation_data(shape, view=view, part_map=part_map)
         dims = data["dims"]
         png = annotated_png(face_meshes=data["face_meshes"],
                             face_labels=data["face_labels"],
@@ -313,6 +319,11 @@ def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = 
         return png, data["table"], data["faces_reg"], data["edges_reg"]
     # edges 模式：需要 polyline/edge_adj/draw_set，继续完整采集
     with silence_fd1():
+        # 装配模式：边的零件归属（compound 边序 = 各零件 Edges 按 part_map 迭代序拼接）
+        edge_part_names: list[str] = []
+        if part_map is not None:
+            for pname, p_shape in part_map.items():
+                edge_part_names.extend([pname] * len(p_shape.Edges))
         n_faces = len(shape.Faces)
         if edges_of is not None and not 0 <= edges_of < n_faces:
             # Python 负索引会静默取最后一个面，违反"绝不静默"纪律
@@ -378,7 +389,8 @@ def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = 
         edge_labels_out.append({"label": lab, "pos": info["pos"],
                                 "polyline": info["polyline"], "visible": e_vis})
         note = "" if e_vis else "（背面边，谨慎指认）"
-        table[lab] = naming.edge_summary(info["fp"]) + note
+        suffix = f"（零件：{edge_part_names[ei]}）" if ei < len(edge_part_names) else ""
+        table[lab] = naming.edge_summary(info["fp"]) + note + suffix
     png = annotated_png(face_meshes=face_meshes, face_labels=[],
                         edge_labels=edge_labels_out, view=view, dims=None)
     return png, table, faces_reg, edges_reg

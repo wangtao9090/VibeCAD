@@ -43,16 +43,30 @@ class _FakeDoc:
         self.log.append(("abort",))
 
 
+class _FakePlacement:
+    """fake 容器位姿：identity=False 时 toMatrix() 返回哨兵矩阵供 transformed 消费。"""
+
+    def __init__(self, identity=True):
+        self._identity = identity
+
+    def isIdentity(self):
+        return self._identity
+
+    def toMatrix(self):
+        return "FAKE_MATRIX"
+
+
 class _FakeContainer:
-    def __init__(self):
+    def __init__(self, placement=None):
         self.grouped = []
+        self.Placement = placement or _FakePlacement()
 
     def addObject(self, obj):
         self.grouped.append(obj)
 
 
-def _fake_part(objects=()):
-    return {"container": _FakeContainer(), "objects": set(objects)}
+def _fake_part(objects=(), placement=None):
+    return {"container": _FakeContainer(placement), "objects": set(objects)}
 
 
 # ---- 注册表基本面（计划 Task 1 Step 1 基准）----
@@ -318,3 +332,48 @@ def test_resolve_unknown_label_in_part_namespace():
         s.resolve_edge("E1")  # 该命名空间没有边标签
     with pytest.raises(naming.LabelExpiredError, match="未知面标签"):
         s.resolve_face("Z")   # 该命名空间没有 Z 标签
+
+
+# ---- BUG-1 回归：装配模式 resolve 必须在全局坐标系匹配（标注指纹同款坐标系）----
+
+
+def test_resolve_matches_in_global_frame_when_placement_nonidentity(monkeypatch):
+    """黑盒复现根因：align 后容器 Placement 非单位，重新标注的指纹是全局坐标
+    （get_assembly_shape 的 compound 面），在局部 Faces 上永远命中 0——
+    修复后 resolve 匹配 transformed 后的全局 shape，立即可用新标签二次 align。"""
+    s = Session()
+    local_face = _Face(100.0, center=(0, 0, 0))     # 局部面（面心在原点）
+    global_face = _Face(100.0, center=(0, 0, 10))   # 容器位姿应用后的全局面（z+10）
+
+    class _TransformableShape:
+        Faces = [local_face]
+
+        def transformed(self, matrix):
+            assert matrix == "FAKE_MATRIX"  # 必须消费容器 Placement.toMatrix()
+            return _FacesShape([global_face])
+
+    s._parts = {"盖板": _fake_part(placement=_FakePlacement(identity=False))}
+    s._active_part = "盖板"
+    s.set_labels({"A": naming.face_fingerprint(global_face)}, {})  # 标注=全局指纹
+    monkeypatch.setattr(s, "get_result_shape",
+                        lambda part=None: _TransformableShape())
+    assert s.resolve_face("A") == 0  # 修复前：局部面集命中 0 → LabelExpiredError
+
+
+def test_resolve_skips_transform_when_placement_identity(monkeypatch):
+    """容器 Placement 为单位时不做 transformed（局部即全局，与修复前行为等价）。"""
+    s = Session()
+    face = _Face(100.0)
+
+    class _NoTransformShape:
+        Faces = [face]
+
+        def transformed(self, matrix):
+            raise AssertionError("identity Placement 不应触发 transformed")
+
+    s._parts = {"盖板": _fake_part()}  # 默认单位 Placement
+    s._active_part = "盖板"
+    s.set_labels({"A": naming.face_fingerprint(face)}, {})
+    monkeypatch.setattr(s, "get_result_shape",
+                        lambda part=None: _NoTransformShape())
+    assert s.resolve_face("A") == 0

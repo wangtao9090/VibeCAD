@@ -231,6 +231,75 @@ def test_export_part_split_passthrough(server, monkeypatch):
     assert isinstance(out["step"], list)
 
 
+# ─── annotate 路径 part_map 接入（BUG-2 回归）────────────────────────────────
+
+
+def test_render_part_annotate_passes_part_map_in_assembly(server, monkeypatch):
+    """装配模式：annotate 路径必须把 part_map 传给 render_annotated——
+    否则标签表无"（零件：X）"归属后缀，AI 无法判断面属哪个零件（BUG-2）。"""
+    sentinel_map = {"底板": object(), "盖板": object()}
+    monkeypatch.setattr(server, "_build_part_map", lambda: sentinel_map)
+    _mock_assembly_shape(server, monkeypatch)
+    seen = {}
+
+    def _fake_annotated(shape, *, mode, edges_of, view, part_map=None):
+        seen["part_map"] = part_map
+        return (b"\x89PNG", {"A": "顶面（零件：底板）"}, {"A": {}}, {})
+
+    monkeypatch.setattr(server._annotate, "render_annotated", _fake_annotated)
+    monkeypatch.setattr(server._session, "set_labels",
+                        lambda faces, edges, shown=None: None)
+    out = server.render_part(view="iso", annotate="faces")
+    assert isinstance(out, list)
+    assert seen["part_map"] is sentinel_map
+
+
+def test_render_part_annotate_part_map_none_in_single_mode(server, monkeypatch):
+    """单零件模式：annotate 路径 part_map=None（行为与 R7 完全一致）。"""
+    monkeypatch.setattr(type(server._session), "_parts",
+                        property(lambda self: {}), raising=False)
+    _mock_assembly_shape(server, monkeypatch)
+    seen = {}
+
+    def _fake_annotated(shape, *, mode, edges_of, view, part_map=None):
+        seen["part_map"] = part_map
+        return (b"\x89PNG", {"A": "顶面"}, {"A": {}}, {})
+
+    monkeypatch.setattr(server._annotate, "render_annotated", _fake_annotated)
+    monkeypatch.setattr(server._session, "set_labels",
+                        lambda faces, edges, shown=None: None)
+    out = server.render_part(view="iso", annotate="faces")
+    assert isinstance(out, list)
+    assert seen["part_map"] is None
+
+
+def test_build_part_map_single_and_assembly(server, monkeypatch):
+    """_build_part_map：单零件模式返回 None；装配模式返回
+    {零件名: get_result_shape(name).transformed(容器 Placement.toMatrix())}。"""
+    # 单零件模式
+    monkeypatch.setattr(type(server._session), "_parts",
+                        property(lambda self: {}), raising=False)
+    assert server._build_part_map() is None
+
+    # 装配模式：fake 容器 + 可变换 shape
+    class _Pl:
+        def toMatrix(self):
+            return "M"
+
+    class _Shape:
+        def transformed(self, m):
+            assert m == "M"
+            return ("global", self)
+
+    parts = {"底板": {"container": type("C", (), {"Placement": _Pl()})()}}
+    monkeypatch.setattr(type(server._session), "_parts",
+                        property(lambda self: parts), raising=False)
+    monkeypatch.setattr(server._session, "get_result_shape", lambda name=None: _Shape())
+    pm = server._build_part_map()
+    assert list(pm) == ["底板"]
+    assert pm["底板"][0] == "global"
+
+
 # ─── 握手纯净回归（放文件末尾）────────────────────────────────────────────────
 
 

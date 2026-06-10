@@ -133,6 +133,19 @@ def _runtime_guard() -> dict[str, Any] | None:
     return None
 
 
+def _build_part_map() -> dict[str, Any] | None:
+    """装配模式构造 {零件名: 全局 shape}（容器位姿已应用，与 get_assembly_shape
+    的 compound 同坐标系），用于渲染分色与标签表"（零件：X）"归属后缀；
+    单零件模式返回 None。调用方需置于 _silence_fd1() 内（transformed 走 OCCT）。"""
+    if not _session._parts:
+        return None
+    return {
+        name: _session.get_result_shape(name).transformed(
+            info["container"].Placement.toMatrix())
+        for name, info in _session._parts.items()
+    }
+
+
 def _attach_view(result: dict[str, Any]) -> Any:
     """成功结果附三视图拼图 + 当场刷新标签表；附图失败不连坐（保留操作成功 +
     render_error + 退回 labels_stale 提示）——绝不因附图失败把成功操作报成失败，
@@ -146,16 +159,8 @@ def _attach_view(result: dict[str, Any]) -> Any:
     try:
         with _silence_fd1():
             shape = _session.get_assembly_shape()
-            # 装配模式构造 part_map（{零件名: 全局 shape}）用于分色和归属标注
-            part_map = None
-            if _session._parts:
-                part_map = {
-                    name: _session.get_result_shape(name).transformed(
-                        info["container"].Placement.toMatrix())
-                    for name, info in _session._parts.items()
-                }
             png, table, faces_reg, edges_reg = _multiview.render_multiview(
-                shape, part_map=part_map)
+                shape, part_map=_build_part_map())
         _session.set_labels(faces_reg, edges_reg, shown=set(table.keys()))
         result.pop("labels_stale", None)
         result.pop("hint", None)
@@ -285,15 +290,8 @@ def render_part(view: str = "iso", annotate: str | None = None,
             with _silence_fd1():
                 # Round 8：改用装配 shape；装配模式传入 part_map 用于分色和归属标注
                 shape = _session.get_assembly_shape()
-                part_map = None
-                if _session._parts:
-                    part_map = {
-                        name: _session.get_result_shape(name).transformed(
-                            info["container"].Placement.toMatrix())
-                        for name, info in _session._parts.items()
-                    }
                 png, table, faces_reg, edges_reg = _multiview.render_multiview(
-                    shape, part_map=part_map)
+                    shape, part_map=_build_part_map())
             _session.set_labels(faces_reg, edges_reg, shown=set(table.keys()))
             return [Image(data=png, format="png"),
                     json.dumps({"ok": True, "labels": table}, ensure_ascii=False)]
@@ -304,15 +302,17 @@ def render_part(view: str = "iso", annotate: str | None = None,
             return {"ok": False, "message": f"渲染失败（{type(exc).__name__}）：{exc}"}
     try:
         with _silence_fd1():
-            # Round 8：改用装配 shape（单零件模式等价）
+            # Round 8：改用装配 shape（单零件模式等价）；装配模式 part_map
+            # 同样接入 annotate 路径（分色 + 标签表零件归属后缀）
             shape = _session.get_assembly_shape()
+            part_map = _build_part_map()
             # is not None（非 falsy）：空串必须进 resolve_face 撞出"未知面标签 ''"响亮失败
             ef_idx = _session.resolve_face(edges_of) if edges_of is not None else None
         if annotate is None:
             png = _render.render_png(shape, view=view)
             return Image(data=png, format="png")
         png, table, faces_reg, edges_reg = _annotate.render_annotated(
-            shape, mode=annotate, edges_of=ef_idx, view=view)
+            shape, mode=annotate, edges_of=ef_idx, view=view, part_map=part_map)
         # shown=本次表里实际展示的键：未展示过的标签不可被指认（防 AI 编造盲选）
         _session.set_labels(faces_reg, edges_reg, shown=set(table.keys()))
         return [Image(data=png, format="png"),
