@@ -1,6 +1,8 @@
 # src/vibecad/feedback/annotate.py
 """标注渲染：逐面网格 + 面/边标签 + 包围盒尺寸线（matplotlib Agg，函数内 import）。
-annotated_png 为纯函数（吃普通 list 数据）；render_annotated 才碰 FreeCAD Shape。"""
+annotated_png 为纯函数（吃普通 list 数据）；render_annotated 才碰 FreeCAD Shape。
+已知限界：标签锚点只做朝相机三角形过滤，不做完整遮挡检测——凹腔/被其他几何
+挡住的面，其标签仍可能穿透叠画在前景上（可见性表注是权威，图为辅助）。"""
 from __future__ import annotations
 
 import math
@@ -40,11 +42,16 @@ def mesh_normal(verts: list, facets: list) -> tuple[float, float, float]:
     return (sx / ln, sy / ln, sz / ln)
 
 
-def largest_triangle_centroid(verts: list, facets: list) -> tuple[float, float, float]:
+def largest_triangle_centroid(verts: list, facets: list,
+                              cam: tuple | None = None) -> tuple[float, float, float]:
     """面最大三角形的质心——面标签锚点（spike 定稿：CenterOfMass 在带孔面会落孔上）。
+    cam 给定时优先取"朝相机"（三角形法向·cam > 0）的最大三角形质心——曲面（如圆柱面）
+    的全局最大三角形可能在背面，锚点落背面会被前景遮挡；无朝相机三角形退回全局最大。
     退化/空网格返回首顶点或 (0,0,0)。"""
     best = None
     best_area = -1.0
+    best_facing = None
+    best_facing_area = -1.0
     for f in facets:
         a, b, c = verts[f[0]], verts[f[1]], verts[f[2]]
         ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
@@ -54,6 +61,12 @@ def largest_triangle_centroid(verts: list, facets: list) -> tuple[float, float, 
         if area > best_area:
             best_area = area
             best = tuple((a[i] + b[i] + c[i]) / 3 for i in range(3))
+        if (cam is not None and area > best_facing_area
+                and nx * cam[0] + ny * cam[1] + nz * cam[2] > 0):
+            best_facing_area = area
+            best_facing = tuple((a[i] + b[i] + c[i]) / 3 for i in range(3))
+    if best_facing is not None:
+        return best_facing
     if best is None:
         return tuple(verts[0]) if verts else (0.0, 0.0, 0.0)
     return best
