@@ -59,6 +59,20 @@ def largest_triangle_centroid(verts: list, facets: list) -> tuple[float, float, 
     return best
 
 
+def visibility_note(normal: tuple, current_view: str) -> str:
+    """面法向 → 表注文本。当前视角可见返回 ""；不可见则计算哪些预设视角可见
+    （而非静态死路文案——底面/孔壁在全部预设视角都不可见时直说）。"""
+    def _dot(view: str) -> float:
+        return sum(a * b for a, b in zip(normal, camera_direction(view), strict=True))
+
+    if _dot(current_view) > _VIS_DOT:
+        return ""
+    seen = [v for v in sorted(_VIEWS) if _dot(v) > _VIS_DOT]
+    if seen:
+        return f"（当前视角不可见，在 {'/'.join(seen)} 视角可见）"
+    return "（预设视角均不可见，请直接用本描述指代）"
+
+
 def annotated_png(*, face_meshes: list[dict], face_labels: list[dict],
                   edge_labels: list[dict], view: str = "iso",
                   size: tuple[int, int] = (560, 560), dims: dict | None = None) -> bytes:
@@ -106,16 +120,20 @@ def annotated_png(*, face_meshes: list[dict], face_labels: list[dict],
         ax.set_xlim(mins[0] - pad, maxs[0] + pad)
         ax.set_ylim(mins[1] - pad, maxs[1] + pad)
         ax.set_zlim(mins[2] - pad, maxs[2] + pad)
-        ax.set_box_aspect(tuple((maxs[i] - mins[i]) or 1 for i in range(3)))
+        # aspect 与 limits 同口径（都含 pad），否则非立方体各向异性拉伸（孔变椭圆）
+        ax.set_box_aspect(tuple(((maxs[i] - mins[i]) + 2 * pad) or 1 for i in range(3)))
         ax.view_init(*_VIEWS[view])
         ax.set_axis_off()
         for el in edge_labels:
             poly = el.get("polyline") or []
+            e_vis = el.get("visible", True)  # 缺省可见（向后兼容）
             if len(poly) >= 2:
-                ax.plot(*zip(*poly, strict=False), color="#e07020", lw=2.0, zorder=50)
+                style = {} if e_vis else {"linestyle": ":", "alpha": 0.35}  # 背面边虚线弱化
+                ax.plot(*zip(*poly, strict=False), color="#e07020", lw=2.0, zorder=50, **style)
             ax.text(*el["pos"], el["label"], fontsize=9, color="#7a3500", fontweight="bold",
                     ha="center", va="center", zorder=99,
-                    bbox=dict(boxstyle="round,pad=0.2", fc="#fff3e6", ec="#e07020", alpha=0.95))
+                    bbox=dict(boxstyle="round,pad=0.2", fc="#fff3e6", ec="#e07020",
+                              alpha=0.95 if e_vis else 0.45))
         for fl in face_labels:
             if not fl.get("visible"):
                 continue
@@ -143,7 +161,12 @@ def annotated_png(*, face_meshes: list[dict], face_labels: list[dict],
 def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = None,
                      view: str = "iso") -> tuple[bytes, dict, dict, dict]:
     """FreeCAD Shape → (png, labels_table, faces_registry, edges_registry)。
-    mode='faces'：全部面标注 + 尺寸线；mode='edges'：边标注（edges_of=面索引则只标该面的边）。"""
+
+    注册表（faces_reg/edges_reg）无论 mode 都全量注册（面+边指纹），保证
+    "看面→看边→打孔"工作流中 Session.set_labels 整体覆盖不丢另一类标签，
+    且标签序号不随 mode/edges_of 漂移。mode 与 edges_of 只决定图上画什么：
+    faces 模式画面标签+尺寸线；edges 模式画边标签（edges_of 给定时只画该面
+    的边，但标签号仍是全局边序号）。labels_table 只含当前画出来的标签项。"""
     from vibecad.engine import naming  # noqa: PLC0415
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
 
@@ -151,6 +174,10 @@ def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = 
         raise ValueError(f"annotate 必须是 'faces' 或 'edges'（得到 {mode!r}）")
     cam = camera_direction(view)
     with silence_fd1():
+        n_faces = len(shape.Faces)
+        if edges_of is not None and not 0 <= edges_of < n_faces:
+            # Python 负索引会静默取最后一个面，违反"绝不静默"纪律
+            raise ValueError(f"edges_of 面索引越界（0..{n_faces - 1}，得到 {edges_of}）")
         bb = shape.BoundBox
         bbox = (bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax)
         face_meshes, face_info = [], []
@@ -163,37 +190,53 @@ def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = 
                               "normal": mesh_normal(pts, facets)})
         if not any(fm["verts"] for fm in face_meshes):
             raise RuntimeError("几何断言失败：形状无法镶嵌为网格（空 tessellation）")
-        if mode == "edges" and edges_of is not None:
-            edge_objs = list(shape.Faces[edges_of].Edges)
-        elif mode == "edges":
-            edge_objs = list(shape.Edges)
-        else:
-            edge_objs = []
+        # 边信息无条件全量（全局序）——注册表全量 + 标签号稳定的前提
+        all_edges = list(shape.Edges)
         edge_info = []
-        for e in edge_objs:
+        for e in all_edges:
             mid = e.CenterOfMass
             edge_info.append({"fp": naming.edge_fingerprint(e),
                               "pos": (mid.x, mid.y, mid.z),
                               "polyline": [(p.x, p.y, p.z) for p in e.discretize(24)]})
+        # edge → 相邻面索引（isSame 反向匹配）：边可见 = 任一相邻面可见
+        edge_adj: list[list[int]] = [[] for _ in all_edges]
+        for fi, f in enumerate(shape.Faces):
+            for fe in f.Edges:
+                for ei, e in enumerate(all_edges):
+                    if fe.isSame(e):
+                        edge_adj[ei].append(fi)
+        # edges_of 过滤只影响绘制集合，标签号保持全局边序
+        if mode == "edges" and edges_of is not None:
+            draw_set = {ei for fe in shape.Faces[edges_of].Edges
+                        for ei, e in enumerate(all_edges) if fe.isSame(e)}
+        else:
+            draw_set = set(range(len(all_edges)))
+    face_visible = [
+        sum(a * b for a, b in zip(info["normal"], cam, strict=True)) > _VIS_DOT
+        for info in face_info]
+    # 注册表始终全量（与 mode 无关）
+    face_names = naming.face_labels(len(face_info))
+    faces_reg = {lab: info["fp"]
+                 for lab, info in zip(face_names, face_info, strict=True)}
+    edge_names = naming.edge_labels(len(edge_info))
+    edges_reg = {lab: info["fp"]
+                 for lab, info in zip(edge_names, edge_info, strict=True)}
     table: dict[str, str] = {}
-    faces_reg: dict[str, dict] = {}
     face_labels_out = []
     if mode == "faces":
-        names = naming.face_labels(len(face_info))
-        for lab, info in zip(names, face_info, strict=True):
-            visible = (sum(a * b for a, b in zip(info["normal"], cam, strict=True)) > _VIS_DOT)
-            faces_reg[lab] = info["fp"]
-            face_labels_out.append({"label": lab, "pos": info["anchor"], "visible": visible})
-            note = "" if visible else "（当前视角不可见，换 top/front/right 试）"
-            table[lab] = naming.face_summary(info["fp"], bbox) + note
-    edges_reg: dict[str, dict] = {}
+        for lab, info, vis in zip(face_names, face_info, face_visible, strict=True):
+            face_labels_out.append({"label": lab, "pos": info["anchor"], "visible": vis})
+            table[lab] = (naming.face_summary(info["fp"], bbox)
+                          + visibility_note(info["normal"], view))
     edge_labels_out = []
     if mode == "edges":
-        names = naming.edge_labels(len(edge_info))
-        for lab, info in zip(names, edge_info, strict=True):
-            edges_reg[lab] = info["fp"]
-            edge_labels_out.append({"label": lab, "pos": info["pos"], "polyline": info["polyline"]})
-            table[lab] = naming.edge_summary(info["fp"])
+        for ei in sorted(draw_set):
+            lab, info = edge_names[ei], edge_info[ei]
+            e_vis = any(face_visible[fi] for fi in edge_adj[ei])
+            edge_labels_out.append({"label": lab, "pos": info["pos"],
+                                    "polyline": info["polyline"], "visible": e_vis})
+            note = "" if e_vis else "（背面边，谨慎指认）"
+            table[lab] = naming.edge_summary(info["fp"]) + note
     dims = {"L": bbox[3] - bbox[0], "W": bbox[4] - bbox[1], "H": bbox[5] - bbox[2],
             "bbox": bbox} if mode == "faces" else None
     png = annotated_png(face_meshes=face_meshes, face_labels=face_labels_out,
