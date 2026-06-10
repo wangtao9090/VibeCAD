@@ -190,27 +190,40 @@ def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = 
                               "normal": mesh_normal(pts, facets)})
         if not any(fm["verts"] for fm in face_meshes):
             raise RuntimeError("几何断言失败：形状无法镶嵌为网格（空 tessellation）")
-        # 边信息无条件全量（全局序）——注册表全量 + 标签号稳定的前提
+        # 边指纹+中点无条件全量（全局序）——注册表全量 + 标签号稳定的前提（T3 契约）
         all_edges = list(shape.Edges)
         edge_info = []
         for e in all_edges:
             mid = e.CenterOfMass
             edge_info.append({"fp": naming.edge_fingerprint(e),
-                              "pos": (mid.x, mid.y, mid.z),
-                              "polyline": [(p.x, p.y, p.z) for p in e.discretize(24)]})
-        # edge → 相邻面索引（isSame 反向匹配）：边可见 = 任一相邻面可见
+                              "pos": (mid.x, mid.y, mid.z)})
+        # 以下重活只有 edges 模式的绘制会消费：polyline 离散 + O(E²) isSame 邻接
         edge_adj: list[list[int]] = [[] for _ in all_edges]
-        for fi, f in enumerate(shape.Faces):
-            for fe in f.Edges:
-                for ei, e in enumerate(all_edges):
-                    if fe.isSame(e):
-                        edge_adj[ei].append(fi)
-        # edges_of 过滤只影响绘制集合，标签号保持全局边序
-        if mode == "edges" and edges_of is not None:
-            draw_set = {ei for fe in shape.Faces[edges_of].Edges
-                        for ei, e in enumerate(all_edges) if fe.isSame(e)}
-        else:
-            draw_set = set(range(len(all_edges)))
+        draw_set: set[int] = set()
+        if mode == "edges":
+            for info, e in zip(edge_info, all_edges, strict=True):
+                info["polyline"] = [(p.x, p.y, p.z) for p in e.discretize(24)]
+            # edge → 相邻面索引（isSame 反向匹配）：边可见 = 任一相邻面可见
+            for fi, f in enumerate(shape.Faces):
+                for fe in f.Edges:
+                    for ei, e in enumerate(all_edges):
+                        if fe.isSame(e):
+                            edge_adj[ei].append(fi)
+            for ei, adj in enumerate(edge_adj):
+                if not adj:  # 流形 solid 不可能；静默会把该边误标"背面边"
+                    raise RuntimeError(
+                        f"几何断言失败：边 {ei} 不属于任何面（非流形几何？）")
+            # edges_of 过滤只影响绘制集合，标签号保持全局边序
+            if edges_of is not None:
+                target_edges = shape.Faces[edges_of].Edges
+                draw_set = {ei for fe in target_edges
+                            for ei, e in enumerate(all_edges) if fe.isSame(e)}
+                if not draw_set and target_edges:
+                    raise RuntimeError(
+                        f"几何断言失败：面 {edges_of} 的 {len(target_edges)} 条边"
+                        "在全局边集中无一匹配（isSame 失效？）")
+            else:
+                draw_set = set(range(len(all_edges)))
     face_visible = [
         sum(a * b for a, b in zip(info["normal"], cam, strict=True)) > _VIS_DOT
         for info in face_info]
