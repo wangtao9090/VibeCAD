@@ -39,7 +39,12 @@ tests/test_server_round7.py      新建  三工具委托/附图/pattern 透传
   1. **slot wire**：两直线+两半圆弧（`Part.Arc`/`Part.makeCircle` 片段）拼 `Part.Wire` 是否闭合（`wire.isClosed()`）→ `Part.Face(wire)` 面积 == L·W+π(W/2)²。备选：`Part.makePolygon` 矩形 + 两端 `Part.Edge(Part.Arc(p1, pm, p2))` 三点弧。
   2. **rotate 绕中心**：`FreeCAD.Placement(FreeCAD.Vector(), rot, center)`（三参带旋转中心）`.multiply(obj.Placement)` 后 box(40,30,20) 绕 BoundBox 中心转 z 90°——断言 BoundBox 变 30×40×20 且中心不动。
   3. **无基体 pad**：空文档 `Part::Feature` + Shape 赋值 → recompute → get_result_object 能否选中（fallback 路径）。
-- [ ] **Step 2**: 跑通并把三个结论（slot 用哪种弧构造、rotate 用哪个 Placement 写法、Feature 赋值语法）回填本计划此处。
+- [x] **Step 2**: 跑通并把三个结论回填本计划此处。
+
+> **✅ Spike 结论（2026-06-10 真机一次通过）**：
+> 1. **slot wire**：`Part.LineSegment(p1,p2).toShape()` ×2 + `Part.Arc(p_start, p_mid, p_end).toShape()` 三点弧 ×2（弧中点在 ±(L/2+r, 0)）→ `Part.Wire(edges)` 闭合，`Part.Face(wire).Area` 与 L·W+πr² 精确匹配（210.2655）。
+> 2. **rotate 绕中心**：`obj.Placement = FreeCAD.Placement(FreeCAD.Vector(), rot, center).multiply(obj.Placement)`——box 40×30×20 绕 z 转 90° 后 bbox 30×40×20、中心 (20,15,10) 不动。计划 Task 1 代码的写法即正确。
+> 3. **无基体 pad**：`feat = doc.addObject("Part::Feature", "Profile"); feat.Shape = solid; doc.recompute()` 体积/有效性精确（1051.3274, valid=True）。
 - [ ] **Step 3**: commit（仅本计划文档的结论回填；spike 脚本在 gitignore 内）
 
 ---
