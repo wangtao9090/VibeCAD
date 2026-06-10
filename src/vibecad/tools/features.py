@@ -1,0 +1,133 @@
+"""面/边级特征工具（Round 5）：消费标签注册表的指代（"A 面打孔"、"E3 倒角"）。
+纪律：参数校验 → 标签指纹解析（过期即 LabelExpiredError）→ 事务 → 几何断言 → 结构化 dict。"""
+from __future__ import annotations
+
+import math
+from typing import Any
+
+from vibecad.engine.session import Session
+
+
+def _inplane_axes(n) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """法向 n → 面内正交单位基 (e1, e2)：取与 n 最不平行的全局轴投影（offset 方向直观）。"""
+    nx, ny, nz = float(n[0]), float(n[1]), float(n[2])
+    axes = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    g = min(axes, key=lambda a: abs(a[0] * nx + a[1] * ny + a[2] * nz))
+    d = g[0] * nx + g[1] * ny + g[2] * nz
+    e1 = (g[0] - d * nx, g[1] - d * ny, g[2] - d * nz)
+    ln = math.sqrt(sum(c * c for c in e1))
+    e1 = (e1[0] / ln, e1[1] / ln, e1[2] / ln)
+    e2 = (ny * e1[2] - nz * e1[1], nz * e1[0] - nx * e1[2], nx * e1[1] - ny * e1[0])
+    return e1, e2
+
+
+def _outward_normal(shape: Any, face: Any):
+    """面的单位外法向（normalAt 不保证定向——用实体内点探针校正）。返回 FreeCAD.Vector。"""
+    u0, u1, v0, v1 = face.ParameterRange
+    n = face.normalAt((u0 + u1) / 2, (v0 + v1) / 2)
+    n.normalize()
+    solid = shape.Solids[0] if getattr(shape, "Solids", None) else shape
+    probe = face.CenterOfMass + n * 0.01
+    if solid.isInside(probe, 1e-6, False):
+        n = -n
+    return n
+
+
+def add_hole(session: Session, face: str, diameter: float,
+             depth: float | None = None, offset=(0.0, 0.0)) -> dict[str, Any]:
+    """在指定面（标签）打圆孔：depth=None 通孔；offset 为面内毫米坐标（原点=面心）。"""
+    if not face or not isinstance(face, str):
+        raise ValueError("face 必须是非空字符串（面标签，如 'A'）")
+    if diameter <= 0:
+        raise ValueError(f"diameter 必须 > 0（得到 {diameter}）")
+    if depth is not None and depth <= 0:
+        raise ValueError(f"depth 必须 > 0 或省略表示通孔（得到 {depth}）")
+    if (not isinstance(offset, (list, tuple)) or len(offset) != 2
+            or not all(isinstance(c, (int, float)) and not isinstance(c, bool)
+                       and math.isfinite(c) for c in offset)):
+        raise ValueError(f"offset 必须是 2 个有限数字 (u, v)（得到 {offset!r}）")
+    from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+    with session._transaction("add_hole"):
+        with silence_fd1():
+            import FreeCAD  # noqa: PLC0415
+            idx = session.resolve_face(face)
+            base_obj = session.get_result_object()
+            shape = base_obj.Shape
+            face_obj = shape.Faces[idx]
+            surface = type(face_obj.Surface).__name__
+            if surface != "Plane":
+                raise ValueError(f"标签 {face} 是 {surface}，只能在平面上打孔")
+            n = _outward_normal(shape, face_obj)
+            e1, e2 = _inplane_axes((n.x, n.y, n.z))
+            c = face_obj.CenterOfMass
+            lift = 0.5  # 从面外 0.5mm 起钻，避免共面布尔
+            bx = c.x + e1[0] * offset[0] + e2[0] * offset[1] + n.x * lift
+            by = c.y + e1[1] * offset[0] + e2[1] * offset[1] + n.y * lift
+            bz = c.z + e1[2] * offset[0] + e2[2] * offset[1] + n.z * lift
+            length = (depth + lift) if depth is not None \
+                else shape.BoundBox.DiagonalLength + 2 * lift
+            base_vol = shape.Volume
+            cyl = session.doc.addObject("Part::Cylinder", "HoleTool")
+            cyl.Radius, cyl.Height = diameter / 2.0, length
+            cyl.Placement = FreeCAD.Placement(
+                FreeCAD.Vector(bx, by, bz),
+                FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), FreeCAD.Vector(-n.x, -n.y, -n.z)))
+            cut = session.doc.addObject("Part::Cut", "Hole")
+            cut.Base, cut.Tool = base_obj, cyl
+            session.doc.recompute()
+            session.assert_valid_solid(cut.Shape)
+            if cut.Shape.Volume >= base_vol - 1e-6:
+                raise RuntimeError(
+                    f"几何断言失败：打孔未移除任何材料（base={base_vol:.3f}, "
+                    f"cut={cut.Shape.Volume:.3f}）——offset/depth 可能让孔落在零件之外")
+            result = {"ok": True, "name": cut.Name, "volume": cut.Shape.Volume,
+                      "hole": {"face": face, "diameter": diameter,
+                               "depth": depth if depth is not None else "through",
+                               "offset": list(offset)},
+                      "labels_stale": True,
+                      "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"}
+    return result
+
+
+def _edge_feature(session: Session, edges, value: float, *, kind: str,
+                  type_name: str, obj_label: str, value_field: str) -> dict[str, Any]:
+    if not isinstance(edges, (list, tuple)) or not edges \
+            or not all(isinstance(e, str) and e for e in edges):
+        raise ValueError(f"edges 必须是非空字符串列表（边标签，如 ['E1','E2']）（得到 {edges!r}）")
+    if value <= 0:
+        raise ValueError(f"{value_field} 必须 > 0（得到 {value}）")
+    from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+    with session._transaction(kind):
+        with silence_fd1():
+            idxs = [session.resolve_edge(e) for e in edges]
+            base_obj = session.get_result_object()
+            faces_before = len(base_obj.Shape.Faces)
+            vol_before = base_obj.Shape.Volume
+            feat = session.doc.addObject(type_name, obj_label)
+            feat.Base = base_obj
+            feat.Edges = [(i + 1, value, value) for i in idxs]  # 1-based (idx, r1, r2)
+            session.doc.recompute()
+            session.assert_valid_solid(feat.Shape)
+            if len(feat.Shape.Faces) <= faces_before:
+                raise RuntimeError(
+                    f"几何断言失败：{kind} 未产生新面（{faces_before} → "
+                    f"{len(feat.Shape.Faces)}）——OCCT 可能对所选边失败：{edges}")
+            if abs(feat.Shape.Volume - vol_before) < 1e-9:
+                raise RuntimeError(f"几何断言失败：{kind} 后体积无变化——所选边可能无效：{edges}")
+            result = {"ok": True, "name": feat.Name, "volume": feat.Shape.Volume,
+                      kind: {value_field: value, "edges": list(edges)},
+                      "labels_stale": True,
+                      "hint": "几何已变更，调用 render_part(annotate='edges') 查看最新标注"}
+    return result
+
+
+def fillet_edges(session: Session, edges, radius: float) -> dict[str, Any]:
+    """对指定边（标签列表）做圆角。"""
+    return _edge_feature(session, edges, radius, kind="fillet",
+                         type_name="Part::Fillet", obj_label="Fillet", value_field="radius")
+
+
+def chamfer_edges(session: Session, edges, size: float) -> dict[str, Any]:
+    """对指定边（标签列表）做倒角。"""
+    return _edge_feature(session, edges, size, kind="chamfer",
+                         type_name="Part::Chamfer", obj_label="Chamfer", value_field="size")
