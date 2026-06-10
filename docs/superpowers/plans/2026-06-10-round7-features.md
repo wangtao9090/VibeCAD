@@ -603,3 +603,24 @@ def test_floating_pad_rejected(runtime_env):
 2. 慢：`VIBECAD_RUN_INTEGRATION=1 uv run pytest -m slow` 全绿（39 + 8 = 47 条）。
 3. 黑盒人眼：阵列/槽/移动的工程图。
 4. 两路终审通过 + PR。
+
+---
+
+## 实施记录与验收（2026-06-10，macOS arm64 实机）
+
+**执行方式**：闭关 subagent-driven。Spike 三疑点一次通过（slot 三点弧 wire/rotate 旋转中心 Placement/bare Part::Feature）。
+
+### 验收结果
+- 快测 **227 passed** + ruff 清零；真机慢测 **51 passed**（含 R7 12 条新增：reposition/阵列/拉伸/四条审查取证固化）。
+- **黑盒人眼**：4 孔线性阵列（每孔定位链式 15/25/35/45）→ slot pocket（跑道轮廓+隐藏线）→ move 孔重定位（定位链同步更新、孔出现在槽中央）→ pocket 打穿响亮被拒。
+- 黑盒还实证了一个**断言正确拦截**：rotate 带特征链的基体 → 刀具不随动 → 孔完整性拒绝（rotate 单图元语义符合 spec；"带特征整体旋转"记 R8 装配轮候选）。
+
+### 第七轮审查战果（2 Critical + 3 Important 全真机实锤，修复 `1cbab96`）
+1. **C1**：有基体文档上 `extrude_profile(face=None)` 创建孤儿实体并劫持结果对象 → 孤儿守卫。
+2. **C2**：add_hole 不保护其它半径既有孔（⌀20 同心孔吞 ⌀8 报 ok）→ 全径快照 + assert_holes_intact。
+3. **I1**：pocket 打穿/pattern 盲孔超深静默放行（R6b 盲孔教训在新路径复发）→ 双边体积核算。
+4. **I2**：reposition 轴向退化——孔被封死成**密封内腔**仍 ok → `assert_no_sealed_holes` 端面探针（transform+sketch pad 双接入）。
+5. **I3**：非对称轮廓在侧面的取向不可预测（Rotation 最短弧）→ Matrix(e1,e2,n) 显式取向，profile 局部 X/Y 严格映射面内 u/v。
+
+### 方法论沉淀
+"体积/计数断言只看自己的语义桶"是惯犯模式的新变体（C2/I1 都是新特征路径绕开既有守卫）——**新工具接入时必须显式核对：既有几何语义守卫（全径快照/深度核算/密封探针）是否全部接线**，已沉淀为 _integrity 共享模块的接入清单注释。
