@@ -300,7 +300,12 @@ def extrude_profile(session: Session, profile, height: float,
                             f"area×height={expected_delta:.3f}（容差 1%）"
                             "——轮廓可能部分嵌入基体、悬空或越出面边缘")
                     # I2：pad 盖住既有孔口 → 孔变密封内腔（不可加工）→ 拒
-                    assert_no_sealed_holes(session.doc, result_shape)
+                    # 装配模式只探活动零件（=sketch 操作的 owner）自己的孔
+                    # （跨零件局部坐标系混用会误报，终审 C-E 同源）
+                    _owner_names = (session._parts[session._active_part]["objects"]
+                                    if session._parts else None)
+                    assert_no_sealed_holes(session.doc, result_shape,
+                                           owner_names=_owner_names)
                 else:
                     # pocket：移除量双边核算（I1——超深打穿板厚时实际移除量
                     # 低于名义值；意外多切则高于名义值）

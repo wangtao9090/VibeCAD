@@ -6,12 +6,16 @@ features.add_hole（快照/比对——跨径既有孔保护）、sketch（单so
 + pad 密封探针）。
 判据沿革见 R6b 计划实施记录（虚构不变量教训：基线必须取改前实际状态）。
 
-Round 8 装配语义：
-- assert_solid_integrity：统一入口，_parts 空走原 assert_single_solid；
-  _parts 非空调 assert_parts_single_solid（每零件独立断言，compound 天然多 solid 不违例）。
-- cut_tool_radii / hole_count_snapshot / assert_no_sealed_holes：遍历 doc.Objects
-  天然覆盖全部零件（App::Part 容器 TypeId="App::Part" 会被 "!= Part::Cut" 条件跳过，
-  不干扰遍历——真机已验证），装配模式无需额外改动。
+Round 8 装配语义（终审修订：守卫锚定"被操作零件"而非"活动零件"）：
+- assert_solid_integrity：统一入口，_parts 空走原 assert_single_solid；装配模式
+  直接断言传入 shape（新几何承载者，差集归属尚未发生）+ 逐一回取其余零件
+  （owner 跳过、空零件跳过）。
+- assert_no_sealed_holes：装配模式必须传 owner_names（owner 零件的对象名集合）
+  ——刀具 Placement 与零件 shape 同在零件局部坐标系，跨零件混用探针会把 B 的
+  盲孔打在 A 的材料上误报（终审 C-E）。
+- assert_result_not_drifted：part 透传到 get_result_object（终审 C-D 同源）。
+- cut_tool_radii / hole_count_snapshot：基线 = owner shape 的实际计数，跨零件
+  半径的基线天然为 0（无误报、不漏检自己的孔），radii 全文档扫描可接受。
 - 单零件模式（_parts 空）行为零变化。"""
 from __future__ import annotations
 
@@ -87,33 +91,37 @@ def assert_single_solid(shape: Any, context: str) -> None:
             "——新操作可能让孔/特征越过零件边缘")
 
 
-def assert_parts_single_solid(session: Session, context: str) -> None:
-    """装配模式：对 session 中每个零件的结果 shape 独立断言单 solid。
+def assert_solid_integrity(session: Session, shape: Any, context: str,
+                           part: str | None = None) -> None:
+    """统一入口：_parts 空（单零件模式）调 assert_single_solid(shape, context)。
 
-    装配 compound 天然多 solid，不能对 compound 整体调 assert_single_solid——
-    本函数在零件粒度逐一断言，语义与单零件模式保持一致。
-    """
-    for part_name in session._parts:
-        shape = session.get_result_shape(part_name)
-        n_solids = len(shape.Solids)
-        if n_solids != 1:
-            raise RuntimeError(
-                f"几何断言失败：{context} 把零件 {part_name!r} 切成 {n_solids} 块"
-                "——新操作可能让孔/特征越过零件边缘")
-
-
-def assert_solid_integrity(session: Session, shape: Any, context: str) -> None:
-    """统一入口：_parts 空（单零件模式）调 assert_single_solid(shape, context)；
-    _parts 非空（装配模式）调 assert_parts_single_solid(session, context)。
-
-    各消费方（modify/transform/sketch）调用此函数即可自动分流，无需感知模式。
-    shape 参数在装配模式下忽略（各零件 shape 由 session 内部取，
-    传入 shape 仅供单零件模式用，保持原 assert_single_solid 签名兼容）。
+    装配模式（_parts 非空，终审 C-A 修复语义）：
+    - **传入的 shape 必须直接断言**——它承载操作的新几何结果，而差集归属发生在
+      事务收尾（_claim_new_objects），断言时新对象尚未进 owner 的 objects 集合，
+      经 get_result_shape(owner) 回取拿到的是旧结果（飞地 pad 切成 2 块漏检）、
+      对空零件甚至直接崩（"零件 X 中无有效 solid"——装配模式无基体 pad 不可用）。
+    - part = 承载 shape 的零件名（owner）；None 默认活动零件（sketch 等
+      活动零件操作）。其余零件逐一回取断言；objects 为空的零件（new_part 后
+      尚未建几何）跳过——空零件没有完整性可言，不应让别的零件操作误拒。
     """
     if not session._parts:
         assert_single_solid(shape, context)
-    else:
-        assert_parts_single_solid(session, context)
+        return
+    owner = part if part is not None else session._active_part
+    n_solids = len(shape.Solids)
+    if n_solids != 1:
+        raise RuntimeError(
+            f"几何断言失败：{context} 把零件 {owner!r} 切成 {n_solids} 块"
+            "——新操作可能让孔/特征越过零件边缘")
+    for part_name, info in session._parts.items():
+        if part_name == owner or not info["objects"]:
+            continue
+        p_shape = session.get_result_shape(part_name)
+        n = len(p_shape.Solids)
+        if n != 1:
+            raise RuntimeError(
+                f"几何断言失败：{context} 把零件 {part_name!r} 切成 {n} 块"
+                "——新操作可能让孔/特征越过零件边缘")
 
 
 def assert_not_touched(obj: Any, parameter_desc: str) -> None:
@@ -134,16 +142,22 @@ def assert_not_touched(obj: Any, parameter_desc: str) -> None:
             "Touched 状态——依赖链可能未重算（recompute 未执行或失败）")
 
 
-def assert_no_sealed_holes(doc: Any, shape: Any) -> None:
+def assert_no_sealed_holes(doc: Any, shape: Any,
+                           owner_names: set[str] | None = None) -> None:
     """孔端面探针：检测孔是否被操作完全封闭成内腔（不可加工）→ 响亮拒绝。
 
-    对文档每个 Part::Cut 的圆柱 Tool：取其轴线两端点各向外延 0.6mm（> 钻入
+    对每个 Part::Cut 的圆柱 Tool：取其轴线两端点各向外延 0.6mm（> 钻入
     lift 0.5，确保正常通孔的探针落在零件外）的探针点，solid.isInside 检测：
     - 两端探针都在材料内 = 孔口被完全封死、孔变成密封内腔 → RuntimeError；
     - 一端在材料内（通孔变盲孔）→ 放行（探针无法低成本区分"本来就是盲孔"
       与"通孔被封一端"，且盲孔本身合法——该盲区由调用方 docstring 注明）。
-    消费方：transform._reposition（移动基体/刀具封死孔口）、
-    sketch.extrude_profile pad 路径（pad 盖住孔口同属密封腔家族）。
+
+    owner_names（装配模式必传，终审 C-E）：只遍历 Name 在该集合内的 Part::Cut
+    ——刀具 Placement 与零件 shape 同在零件局部坐标系，跨零件混用会把 B 零件
+    盲孔的探针点打在 A 零件的材料上（B 容器摆远后局部坐标恰落 A 体内）误报。
+    None = 单零件模式，全文档遍历（R7 行为不变）。
+    消费方：transform._reposition（移动基体/刀具封死孔口）、modify_part（改基体
+    尺寸埋孔）、sketch.extrude_profile pad 路径（pad 盖住孔口同属密封腔家族）。
     """
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
     with silence_fd1():
@@ -152,6 +166,8 @@ def assert_no_sealed_holes(doc: Any, shape: Any) -> None:
     for o in getattr(doc, "Objects", []):
         if getattr(o, "TypeId", "") != "Part::Cut":
             continue
+        if owner_names is not None and o.Name not in owner_names:
+            continue  # 其它零件的孔与本 shape 不同坐标系，探针无意义（见 docstring）
         tool = getattr(o, "Tool", None)
         if tool is None or getattr(tool, "TypeId", "") != "Part::Cylinder":
             continue
@@ -167,13 +183,16 @@ def assert_no_sealed_holes(doc: Any, shape: Any) -> None:
                 "——请调整位置")
 
 
-def assert_result_not_drifted(session: Session, before_name: str) -> None:
+def assert_result_not_drifted(session: Session, before_name: str,
+                              part: str | None = None) -> None:
     """断言结果对象名未改变，否则响亮拒绝（RuntimeError）。
 
     结果对象漂移断言（审查 E5 CRITICAL：刀具吞件 → Cut 体积归 0 →
-    get_result_object fallback 漂移到刀具圆柱 → 谎报刀具体积污染会话）
+    get_result_object fallback 漂移到刀具圆柱 → 谎报刀具体积污染会话）。
+    part = 被操作对象所属零件（owner，终审 C-D）：装配模式必须在 owner 的
+    对象集内查结果对象——按活动零件查会拿错零件的结果名导致假漂移/漏漂移。
     """
-    result_obj = session.get_result_object()
+    result_obj = session.get_result_object(part)
     if result_obj.Name != before_name:
         raise RuntimeError(
             f"几何断言失败：操作导致结果对象从 {before_name} 漂移为 "

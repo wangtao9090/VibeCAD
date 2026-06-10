@@ -149,7 +149,16 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
                 old = float(getattr(obj, attr))
             if abs(old - value) < 1e-9:
                 raise ValueError(f"参数 {key} 已是 {value:g}，无需修改")
-            result_obj_before = session.get_result_object()
+            # 锚定纪律（终审 C-D）：装配模式全部快照/断言锚定被改对象所属零件
+            # （owner）而非活动零件——active=B 时改 A 的对象，用 B 的 shape 做
+            # 快照会让 A 的孔被静默吞掉还报 ok。owner 反查不到 = 状态异常拒绝。
+            owner = session.owner_of(obj.Name)
+            if session._parts and owner is None:
+                raise ValueError(
+                    f"对象 {obj.Name!r} 不属于任何已注册零件"
+                    f"（已有零件：{list(session._parts)}）——装配状态异常，拒绝操作")
+            owner_names = session._parts[owner]["objects"] if owner is not None else None
+            result_obj_before = session.get_result_object(owner)
             before_name = result_obj_before.Name
             shape_before = result_obj_before.Shape
             result_before = shape_before.Volume
@@ -211,18 +220,19 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
             assert_not_touched(obj, f"参数 {key}")
             # 结果对象漂移断言（审查 E5 CRITICAL：刀具吞件 → Cut 体积归 0 →
             # get_result_object fallback 漂移到刀具圆柱 → 谎报刀具体积污染会话）
-            assert_result_not_drifted(session, before_name)
-            result_obj = session.get_result_object()
+            assert_result_not_drifted(session, before_name, part=owner)
+            result_obj = session.get_result_object(owner)
             shape = result_obj.Shape
             session.assert_valid_solid(shape)
             # 单实体断言（审查 E4：⌀32 刀具横穿 30 宽零件把件切成两半仍 ok:True）
-            # 装配模式分流：assert_solid_integrity 内部按 _parts 是否空自动选路
-            assert_solid_integrity(session, shape, "参数修改")
+            # 装配模式：直接断言 owner 的新结果 shape + 其余零件回取（C-A 语义）
+            assert_solid_integrity(session, shape, "参数修改", part=owner)
             # 孔完整性断言（快照推演见上）
             assert_holes_intact(shape, expected_counts)
             # R7 终验移交项热修：改基体尺寸（如 height 加大）可把既有盲孔埋成
             # 密封内腔（孔完整面仍在、计数不变）——与 reposition 封孔同族，接同一探针
-            assert_no_sealed_holes(session.doc, shape)
+            # 装配模式只探 owner 自己的孔（跨零件坐标系混用误报，终审 C-E）
+            assert_no_sealed_holes(session.doc, shape, owner_names=owner_names)
             result = {"ok": True,
                       "modified": {"name": obj.Name, "parameter": key,
                                    "from": old, "to": float(value)},
