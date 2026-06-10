@@ -1658,3 +1658,94 @@ def test_assembly_pad_no_base_and_enclave_pad(runtime_env):
 "print('ASSEMBLY_PAD_CA_OK')\n"
 )
     assert "ASSEMBLY_PAD_CA_OK" in out
+
+
+@pytest.mark.slow
+def test_interference_empty_part_noted_not_silent(runtime_env):
+    """终审 C-B：空零件（含 objects 被清空的异常态）必须显式注明"干涉未检查"，
+    绝不静默 []——修复前 except Exception → vol=0.0 把 9000mm³ 真实重叠静默放行。"""
+    out = _run_in_env(runtime_env,
+"from vibecad.engine.session import Session\n"
+"from vibecad.tools import assembly, modeling\n"
+"s = Session(); modeling.new_document(s, 'cb')\n"
+"s.new_part('A'); modeling.add_box(s, 30, 30, 10)\n"
+"s.new_part('B')  # 空零件\n"
+"inter = assembly.assert_no_interference(s, allow=True)\n"
+"assert any(it.get('volume') is None and 'B 无几何' in it.get('note', '')\n"
+"           for it in inter), inter\n"
+"# 取证 2 异常态：B 有几何后 objects 被清空（内部状态不一致）→ 注明而非静默\n"
+"modeling.add_box(s, 30, 30, 10)  # B 与 A 完全重叠\n"
+"inter2 = assembly.assert_no_interference(s, allow=True)\n"
+"assert any(it.get('volume') == 9000.0 for it in inter2), inter2  # 正常态报干涉\n"
+"s._parts['B']['objects'] = set()\n"
+"inter3 = assembly.assert_no_interference(s, allow=False)\n"
+"assert inter3 and inter3[0]['volume'] is None and '未检查' in inter3[0]['note'], inter3\n"
+"print('INTERFERENCE_NOT_SILENT_OK')\n"
+)
+    assert "INTERFERENCE_NOT_SILENT_OK" in out
+
+
+@pytest.mark.slow
+def test_server_edges_of_maps_to_global_index(runtime_env):
+    """终审 C-C（server 级端到端）：active=第二零件时 render_part(annotate='edges',
+    edges_of=该零件面标签) 必须画该零件自己的边（表注归属正确、边数=该零件边数）
+    ——修复前局部索引被当 compound 全局索引消费，画的是第一零件的边。"""
+    out = _run_in_env(runtime_env,
+"import json\n"
+"from vibecad.engine import naming\n"
+"import vibecad.server as srv\n"
+"srv._runtime_guard = lambda: None\n"
+"srv.new_document('cc')\n"
+"srv.new_part('底板'); srv.add_box(60, 40, 10)\n"
+"srv.new_part('盖板'); srv.add_box(20, 20, 5, position=[100.0, 0.0, 0.0])\n"
+"out_f = srv.render_part(view='iso', annotate='faces')\n"
+"assert isinstance(out_f, list), out_f\n"
+"s = srv._session\n"
+"shape = s.get_assembly_shape()\n"
+"labels = naming.face_labels(len(shape.Faces))\n"
+"n_base = len(s.get_result_shape('底板').Faces)\n"
+"lid_top_idx = max(range(n_base, len(shape.Faces)),\n"
+"                  key=lambda i: shape.Faces[i].CenterOfMass.z)\n"
+"lid_label = labels[lid_top_idx]\n"
+"out_e = srv.render_part(view='iso', annotate='edges', edges_of=lid_label)\n"
+"assert isinstance(out_e, list), out_e\n"
+"t_e = json.loads(out_e[1])['labels']\n"
+"owners = sorted({v.split('零件：')[-1].rstrip('）')\n"
+"                 for v in t_e.values() if '零件：' in v})\n"
+"assert owners == ['盖板'], f'edges_of 画了错误零件的边：{owners}'\n"
+"assert len(t_e) == 4, f'盖板顶面应有 4 条边（得到 {len(t_e)}）'\n"
+"print('EDGES_OF_GLOBAL_OK')\n"
+)
+    assert "EDGES_OF_GLOBAL_OK" in out
+
+
+@pytest.mark.slow
+def test_server_relabel_refreshes_all_part_namespaces(runtime_env):
+    """终审 I-1（server 级端到端，取证 7 场景）：非活动零件（target）被移动后，
+    AI 重标注一次 → align 必须走到干涉判定/成功——修复前标签只写活动零件命名
+    空间，target 快照永久过期且无恢复路径（server 无 set_active_part 工具）。"""
+    out = _run_in_env(runtime_env,
+"import json\n"
+"from vibecad.engine import naming\n"
+"import vibecad.server as srv\n"
+"srv._runtime_guard = lambda: None\n"
+"srv.new_document('i1')\n"
+"srv.new_part('底板'); srv.add_box(60, 40, 10)\n"
+"srv.new_part('盖板'); srv.add_box(60, 40, 5, position=[0.0, 0.0, 50.0])\n"
+"srv.place_part(part='底板', position=[10.0, 0.0, 0.0])  # 移动非活动零件\n"
+"out_f = srv.render_part(view='iso', annotate='faces')  # 重标注一次\n"
+"assert isinstance(out_f, list), out_f\n"
+"s = srv._session\n"
+"shape = s.get_assembly_shape()\n"
+"labels = naming.face_labels(len(shape.Faces))\n"
+"n_base = len(s.get_result_shape('底板').Faces)\n"
+"base_top = labels[max(range(0, n_base), key=lambda i: shape.Faces[i].CenterOfMass.z)]\n"
+"lid_bot = labels[min(range(n_base, len(shape.Faces)),\n"
+"                     key=lambda i: shape.Faces[i].CenterOfMass.z)]\n"
+"out_a = srv.align_parts(moving_part='盖板', moving_face=lid_bot,\n"
+"                        target_part='底板', target_face=base_top)\n"
+"assert isinstance(out_a, list) and out_a[0]['ok'], out_a\n"
+"assert out_a[0]['interference'] == [], out_a[0]\n"
+"print('RELABEL_ALL_NAMESPACES_OK')\n"
+)
+    assert "RELABEL_ALL_NAMESPACES_OK" in out

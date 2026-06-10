@@ -166,29 +166,45 @@ def assert_no_interference(session: Session, *, allow: bool = False, context: st
     allow=False 时抛 RuntimeError（报零件对+干涉量）；
     allow=True 时放行并返回干涉清单 [{"parts": [a, b], "volume": v}]。
     单零件模式（_parts 空）直接返回空列表。
+
+    "绝不静默"纪律（终审 C-B：此前 except Exception → vol=0.0 让 9000mm³ 真实
+    重叠在内部状态异常时被静默放行——最关键守卫上的唯一破口）：
+    - 空零件（objects 空，new_part 后未建几何）：无 shape 可相交，跳过该零件的
+      全部配对，但在返回清单尾部追加 {"parts": [X], "volume": None, "note":
+      "零件 X 无几何，干涉未检查"} 显式注明——消费方（align/place 的 result、
+      describe_assembly）原样送达，绝不静默 []。note 条目不参与 allow=False
+      的拒绝判定（无确证干涉不能拒）。
+    - get_result_shape 的 RuntimeError（有对象却无 solid = 状态异常）直接上抛；
+    - OCC 布尔崩溃窄抓 Part.OCCError 转 RuntimeError 报"干涉检查无法完成"。
     """
     if not session._parts:
         return []
 
-    names = list(session._parts)
+    from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+    with silence_fd1():
+        import Part  # noqa: PLC0415
+
+    names = [n for n in session._parts if session._parts[n]["objects"]]
+    skipped = [n for n in session._parts if not session._parts[n]["objects"]]
     interferences: list[dict] = []
 
-    for i in range(len(names)):
-        for j in range(i + 1, len(names)):
-            a, b = names[i], names[j]
-            try:
+    with silence_fd1():
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                a, b = names[i], names[j]
                 sa = session.get_result_shape(a).transformed(
                     session._parts[a]["container"].Placement.toMatrix())
                 sb = session.get_result_shape(b).transformed(
                     session._parts[b]["container"].Placement.toMatrix())
-                vol = sa.common(sb).Volume
-            except Exception as exc:  # noqa: BLE001
-                # OCC 可能对无效 shape 抛出；当作无干涉放行，容错
-                _ = exc
-                vol = 0.0
+                try:
+                    vol = sa.common(sb).Volume
+                except Part.OCCError as exc:
+                    raise RuntimeError(
+                        f"干涉检查无法完成（{a}↔{b}）：{exc}"
+                        "——几何状态异常，请检查零件") from exc
 
-            if vol > 1e-6:
-                interferences.append({"parts": [a, b], "volume": round(vol, 6)})
+                if vol > 1e-6:
+                    interferences.append({"parts": [a, b], "volume": round(vol, 6)})
 
     if interferences and not allow:
         pairs = ", ".join(f"{it['parts'][0]}↔{it['parts'][1]}({it['volume']:.3f}mm³)"
@@ -196,6 +212,9 @@ def assert_no_interference(session: Session, *, allow: bool = False, context: st
         ctx = f"（{context}）" if context else ""
         raise RuntimeError(
             f"装配干涉{ctx}：{pairs}——零件重叠，请调整位置或使用 allow_interference=True 放行")
+    for n in skipped:
+        interferences.append({"parts": [n], "volume": None,
+                              "note": f"零件 {n} 无几何，干涉未检查"})
     return interferences
 
 

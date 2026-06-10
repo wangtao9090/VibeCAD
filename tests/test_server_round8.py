@@ -275,13 +275,14 @@ def test_render_part_annotate_part_map_none_in_single_mode(server, monkeypatch):
 
 def test_build_part_map_single_and_assembly(server, monkeypatch):
     """_build_part_map：单零件模式返回 None；装配模式返回
-    {零件名: get_result_shape(name).transformed(容器 Placement.toMatrix())}。"""
+    {零件名: get_result_shape(name).transformed(容器 Placement.toMatrix())}；
+    空零件（objects 空）跳过——与 get_assembly_shape 的 compound 拼接序一致。"""
     # 单零件模式
     monkeypatch.setattr(type(server._session), "_parts",
                         property(lambda self: {}), raising=False)
     assert server._build_part_map() is None
 
-    # 装配模式：fake 容器 + 可变换 shape
+    # 装配模式：fake 容器 + 可变换 shape；空件 objects 空必须被跳过
     class _Pl:
         def toMatrix(self):
             return "M"
@@ -291,13 +292,74 @@ def test_build_part_map_single_and_assembly(server, monkeypatch):
             assert m == "M"
             return ("global", self)
 
-    parts = {"底板": {"container": type("C", (), {"Placement": _Pl()})()}}
+    parts = {"底板": {"container": type("C", (), {"Placement": _Pl()})(),
+                    "objects": {"Box"}},
+             "空件": {"container": object(), "objects": set()}}
     monkeypatch.setattr(type(server._session), "_parts",
                         property(lambda self: parts), raising=False)
     monkeypatch.setattr(server._session, "get_result_shape", lambda name=None: _Shape())
     pm = server._build_part_map()
-    assert list(pm) == ["底板"]
+    assert list(pm) == ["底板"]  # 空件被跳过
     assert pm["底板"][0] == "global"
+
+
+# ─── _store_labels：装配模式写每个零件命名空间（终审 I-1 死锁修复）───────────
+
+
+def test_store_labels_writes_all_part_namespaces(server, monkeypatch):
+    """装配模式：全 compound 注册表写入每个零件命名空间——非活动零件被移动后
+    重标注一次即可刷新其快照（修复前只写活动零件 → 死锁）。"""
+    calls = []
+    monkeypatch.setattr(type(server._session), "_parts",
+                        property(lambda self: {"底板": {}, "盖板": {}}), raising=False)
+    monkeypatch.setattr(server._session, "set_labels",
+                        lambda faces, edges, shown=None, part=None: calls.append(part))
+    server._store_labels({"A": {}}, {}, shown={"A"})
+    assert calls == ["底板", "盖板"]
+
+
+def test_store_labels_single_mode_unchanged(server, monkeypatch):
+    """单零件模式：单命名空间（set_labels 默认 part 语义，R7 行为不变）。"""
+    calls = []
+    monkeypatch.setattr(type(server._session), "_parts",
+                        property(lambda self: {}), raising=False)
+    monkeypatch.setattr(server._session, "set_labels",
+                        lambda faces, edges, shown=None, part=None: calls.append(part))
+    server._store_labels({"A": {}}, {}, shown={"A"})
+    assert calls == [None]
+
+
+# ─── _edges_of_global_index：局部 → compound 全局面索引（终审 C-C）────────────
+
+
+def test_edges_of_global_index_mapping(server, monkeypatch):
+    """resolve 返回零件局部面索引；annotate 消费 compound 全局索引——装配模式
+    必须按 part_map 拼接序平移（活动零件之前各零件面数之和）。"""
+
+    class _S:
+        def __init__(self, n):
+            self.Faces = [object()] * n
+
+    pm = {"底板": _S(6), "盖板": _S(6)}
+    monkeypatch.setattr(type(server._session), "_active_part",
+                        property(lambda self: "盖板"), raising=False)
+    assert server._edges_of_global_index(2, pm) == 8  # 6（底板）+ 2
+    monkeypatch.setattr(type(server._session), "_active_part",
+                        property(lambda self: "底板"), raising=False)
+    assert server._edges_of_global_index(2, pm) == 2  # 第一零件无平移
+    assert server._edges_of_global_index(2, None) == 2  # 单零件模式原样
+
+
+def test_edges_of_global_index_active_not_in_map_raises(server, monkeypatch):
+    """活动零件不在渲染序列（空零件等异常态）→ 响亮拒绝而非画错图。"""
+
+    class _S:
+        Faces = [object()] * 6
+
+    monkeypatch.setattr(type(server._session), "_active_part",
+                        property(lambda self: "幽灵"), raising=False)
+    with pytest.raises(RuntimeError, match="幽灵"):
+        server._edges_of_global_index(0, {"底板": _S()})
 
 
 # ─── 握手纯净回归（放文件末尾）────────────────────────────────────────────────

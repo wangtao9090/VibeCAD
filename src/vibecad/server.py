@@ -136,14 +136,48 @@ def _runtime_guard() -> dict[str, Any] | None:
 def _build_part_map() -> dict[str, Any] | None:
     """装配模式构造 {零件名: 全局 shape}（容器位姿已应用，与 get_assembly_shape
     的 compound 同坐标系），用于渲染分色与标签表"（零件：X）"归属后缀；
-    单零件模式返回 None。调用方需置于 _silence_fd1() 内（transformed 走 OCCT）。"""
+    单零件模式返回 None。调用方需置于 _silence_fd1() 内（transformed 走 OCCT）。
+    空零件跳过——必须与 get_assembly_shape 的跳过规则一致（compound 拼接序）。"""
     if not _session._parts:
         return None
     return {
         name: _session.get_result_shape(name).transformed(
             info["container"].Placement.toMatrix())
-        for name, info in _session._parts.items()
+        for name, info in _session._parts.items() if info["objects"]
     }
+
+
+def _store_labels(faces_reg: dict, edges_reg: dict, shown: set) -> None:
+    """标签快照入库：单零件模式写单命名空间（R7 原行为）。
+
+    装配模式（终审 I-1 死锁修复）：把全 compound 注册表写入**每个零件**的命名
+    空间——指纹是全局坐标，resolve 时 _match_shape(part) 用各零件自己的全局
+    shape 匹配，天然只命中本零件的面（跨零件标签的指纹在该零件面集中命中 0
+    → 照旧响亮失败），不会串扰。此前只写活动零件命名空间：非活动零件被移动后
+    其快照永久过期，而重标注永远只刷活动零件——"请重新标注"提示成了死循环
+    （server 无 set_active_part 工具）。"""
+    if _session._parts:
+        for pname in _session._parts:
+            _session.set_labels(faces_reg, edges_reg, shown=shown, part=pname)
+    else:
+        _session.set_labels(faces_reg, edges_reg, shown=shown)
+
+
+def _edges_of_global_index(ef_idx: int, part_map: dict[str, Any] | None) -> int:
+    """resolve_face 返回的是零件**局部**面索引；annotate 消费的是装配 compound
+    的**全局**面索引（终审 C-C：错位导致画错零件的边+表注堂而皇之错）。
+    装配模式把局部索引平移：全局 = 活动零件之前各零件（part_map 迭代序 =
+    compound 拼接序）的面数之和 + 局部索引。单零件模式（part_map None）原样。"""
+    if part_map is None:
+        return ef_idx
+    offset = 0
+    for name, p_shape in part_map.items():
+        if name == _session.active_part:
+            return offset + ef_idx
+        offset += len(p_shape.Faces)
+    # 活动零件不在 part_map（空零件等异常态）——静默用错索引画错图违反纪律
+    raise RuntimeError(
+        f"活动零件 {_session.active_part!r} 不在装配渲染序列中——无法定位 edges_of 面")
 
 
 def _attach_view(result: dict[str, Any]) -> Any:
@@ -161,7 +195,7 @@ def _attach_view(result: dict[str, Any]) -> Any:
             shape = _session.get_assembly_shape()
             png, table, faces_reg, edges_reg = _multiview.render_multiview(
                 shape, part_map=_build_part_map())
-        _session.set_labels(faces_reg, edges_reg, shown=set(table.keys()))
+        _store_labels(faces_reg, edges_reg, shown=set(table.keys()))
         result.pop("labels_stale", None)
         result.pop("hint", None)
         try:
@@ -260,11 +294,15 @@ def describe_part() -> dict[str, Any]:
     guard = _runtime_guard()
     if guard:
         return guard
-    with _silence_fd1():
-        # Round 8：装配模式分流（_parts 非空用 describe_assembly，否则原格式）
-        if _session._parts:
-            return _feedback_text.describe_assembly(_session)
-        return _feedback_text.describe_shape(_session.get_result_shape())
+    try:
+        with _silence_fd1():
+            # Round 8：装配模式分流（_parts 非空用 describe_assembly，否则原格式）
+            if _session._parts:
+                return _feedback_text.describe_assembly(_session)
+            return _feedback_text.describe_shape(_session.get_result_shape())
+    except (RuntimeError, ValueError) as exc:
+        # 终审 M-2：无文档/全空装配等态此前异常穿透成 isError——结构化失败
+        return {"ok": False, "message": f"描述失败：{exc}"}
 
 
 @mcp.tool()
@@ -292,7 +330,7 @@ def render_part(view: str = "iso", annotate: str | None = None,
                 shape = _session.get_assembly_shape()
                 png, table, faces_reg, edges_reg = _multiview.render_multiview(
                     shape, part_map=_build_part_map())
-            _session.set_labels(faces_reg, edges_reg, shown=set(table.keys()))
+            _store_labels(faces_reg, edges_reg, shown=set(table.keys()))
             return [Image(data=png, format="png"),
                     json.dumps({"ok": True, "labels": table}, ensure_ascii=False)]
         except Exception as exc:  # noqa: BLE001 - 与 _attach_view 同理：同一条
@@ -308,13 +346,16 @@ def render_part(view: str = "iso", annotate: str | None = None,
             part_map = _build_part_map()
             # is not None（非 falsy）：空串必须进 resolve_face 撞出"未知面标签 ''"响亮失败
             ef_idx = _session.resolve_face(edges_of) if edges_of is not None else None
+            if ef_idx is not None:
+                # 终审 C-C：局部面索引 → compound 全局面索引（装配模式平移）
+                ef_idx = _edges_of_global_index(ef_idx, part_map)
         if annotate is None:
             png = _render.render_png(shape, view=view)
             return Image(data=png, format="png")
         png, table, faces_reg, edges_reg = _annotate.render_annotated(
             shape, mode=annotate, edges_of=ef_idx, view=view, part_map=part_map)
         # shown=本次表里实际展示的键：未展示过的标签不可被指认（防 AI 编造盲选）
-        _session.set_labels(faces_reg, edges_reg, shown=set(table.keys()))
+        _store_labels(faces_reg, edges_reg, shown=set(table.keys()))
         return [Image(data=png, format="png"),
                 json.dumps({"ok": True, "labels": table}, ensure_ascii=False)]
     except (RuntimeError, ValueError) as exc:
