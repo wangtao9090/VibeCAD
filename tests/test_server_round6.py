@@ -201,3 +201,31 @@ def test_modify_part_failure_structured(server, monkeypatch):
     monkeypatch.setattr(server._modify, "modify_part", _boom)
     out = server.modify_part(name="Box", parameter="length", value=45)
     assert out["ok"] is False and "已是" in out["message"]
+
+
+def test_attach_view_parts_failure_not_fatal(server, monkeypatch):
+    """parts 清单失败不连坐：渲染成功路径保留（labels+Image 照常），parts 兜底空 dict
+    ——不得把已成功的渲染降级到 render_error 路径（语义矛盾）。"""
+    from mcp.server.fastmcp import Image
+
+    class _Shape:
+        pass
+
+    monkeypatch.setattr(server._modeling, "add_box",
+                        lambda session, length, width, height, position:
+                        {"ok": True, "name": "Box", "volume": 24000.0})
+
+    def _boom(doc):
+        raise RuntimeError("参数清单炸了")
+
+    monkeypatch.setattr(server._modify, "list_parameters", _boom)
+    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    _mock_multiview(server, monkeypatch)
+    monkeypatch.setattr(server._session, "set_labels",
+                        lambda faces, edges, shown=None: None)
+    monkeypatch.setattr(type(server._session), "doc", property(lambda self: object()),
+                        raising=False)
+    out = server.add_box(length=40, width=30, height=20)
+    assert isinstance(out, list) and isinstance(out[1], Image)
+    assert out[0]["parts"] == {} and out[0]["labels"] == {"A": "顶面"}
+    assert "render_error" not in out[0]

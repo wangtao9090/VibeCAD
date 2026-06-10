@@ -143,9 +143,14 @@ def _attach_view(result: dict[str, Any]) -> Any:
         _session.set_labels(faces_reg, edges_reg, shown=set(table.keys()))
         result.pop("labels_stale", None)
         result.pop("hint", None)
+        try:
+            with _silence_fd1():
+                result["parts"] = _modify.list_parameters(_session.doc)
+        except Exception:  # noqa: BLE001 - 参数清单失败不应丢弃已成功的渲染：
+            # labels/Image 已就绪，parts 只是辅助清单，兜底空 dict 而非把整个
+            # 附图降级到 render_error 路径（消除"渲染成功却报渲染失败"的语义矛盾）
+            result["parts"] = {}
         result["labels"] = table
-        with _silence_fd1():
-            result["parts"] = _modify.list_parameters(_session.doc)
         return [result, Image(data=png, format="png")]
     except Exception as exc:  # noqa: BLE001 - 事务已提交，纯展示阶段刻意宽抓：
         # 此处任何异常（实测 TechDraw 的 TypeError、潜在 ImportError/IndexError）
