@@ -8,6 +8,7 @@ from typing import Any
 
 from vibecad.engine.session import Session
 from vibecad.tools import _integrity
+from vibecad.tools._integrity import assert_solid_integrity
 
 _MOVABLE = ("Part::Box", "Part::Cylinder")  # Cut/Fillet/Chamfer 跟随 Base，不可直接 repos
 _AXES = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}
@@ -61,7 +62,7 @@ def _reposition(session: Session, name: str, apply, op: str) -> dict[str, Any]:
             _integrity.assert_result_not_drifted(session, before_name)
             shape = session.get_result_shape()
             session.assert_valid_solid(shape)
-            _integrity.assert_single_solid(shape, op)
+            assert_solid_integrity(session, shape, op)
             _integrity.assert_holes_intact(shape, counts)
             _integrity.assert_no_sealed_holes(session.doc, shape)
             pl = obj.Placement

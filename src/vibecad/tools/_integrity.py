@@ -4,7 +4,15 @@ Touched 账本、单 solid、孔密封内腔探针。
 消费方：modify（快照/比对/漂移/Touched/单solid）、transform（全套+密封探针）、
 features.add_hole（快照/比对——跨径既有孔保护）、sketch（单solid/Touched/孔完整性
 + pad 密封探针）。
-判据沿革见 R6b 计划实施记录（虚构不变量教训：基线必须取改前实际状态）。"""
+判据沿革见 R6b 计划实施记录（虚构不变量教训：基线必须取改前实际状态）。
+
+Round 8 装配语义：
+- assert_solid_integrity：统一入口，_parts 空走原 assert_single_solid；
+  _parts 非空调 assert_parts_single_solid（每零件独立断言，compound 天然多 solid 不违例）。
+- cut_tool_radii / hole_count_snapshot / assert_no_sealed_holes：遍历 doc.Objects
+  天然覆盖全部零件（App::Part 容器 TypeId="App::Part" 会被 "!= Part::Cut" 条件跳过，
+  不干扰遍历——真机已验证），装配模式无需额外改动。
+- 单零件模式（_parts 空）行为零变化。"""
 from __future__ import annotations
 
 import math
@@ -70,12 +78,42 @@ def assert_single_solid(shape: Any, context: str) -> None:
     """断言形状只有 1 个 solid，否则响亮拒绝（RuntimeError）。
 
     单实体断言（审查 E4：⌀32 刀具横穿 30 宽零件把件切成两半仍 ok:True）。
+    单零件模式直接调此函数；装配模式请用 assert_solid_integrity。
     """
     n_solids = len(shape.Solids)
     if n_solids != 1:
         raise RuntimeError(
             f"几何断言失败：{context} 把零件切成 {n_solids} 块"
             "——新操作可能让孔/特征越过零件边缘")
+
+
+def assert_parts_single_solid(session: Session, context: str) -> None:
+    """装配模式：对 session 中每个零件的结果 shape 独立断言单 solid。
+
+    装配 compound 天然多 solid，不能对 compound 整体调 assert_single_solid——
+    本函数在零件粒度逐一断言，语义与单零件模式保持一致。
+    """
+    for part_name in session._parts:
+        shape = session.get_result_shape(part_name)
+        n_solids = len(shape.Solids)
+        if n_solids != 1:
+            raise RuntimeError(
+                f"几何断言失败：{context} 把零件 {part_name!r} 切成 {n_solids} 块"
+                "——新操作可能让孔/特征越过零件边缘")
+
+
+def assert_solid_integrity(session: Session, shape: Any, context: str) -> None:
+    """统一入口：_parts 空（单零件模式）调 assert_single_solid(shape, context)；
+    _parts 非空（装配模式）调 assert_parts_single_solid(session, context)。
+
+    各消费方（modify/transform/sketch）调用此函数即可自动分流，无需感知模式。
+    shape 参数在装配模式下忽略（各零件 shape 由 session 内部取，
+    传入 shape 仅供单零件模式用，保持原 assert_single_solid 签名兼容）。
+    """
+    if not session._parts:
+        assert_single_solid(shape, context)
+    else:
+        assert_parts_single_solid(session, context)
 
 
 def assert_not_touched(obj: Any, parameter_desc: str) -> None:

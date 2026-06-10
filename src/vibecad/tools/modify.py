@@ -13,7 +13,7 @@ from vibecad.tools._integrity import (
     assert_no_sealed_holes,
     assert_not_touched,
     assert_result_not_drifted,
-    assert_single_solid,
+    assert_solid_integrity,
     cut_tool_radii,
     hole_count_snapshot,
 )
@@ -190,7 +190,8 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
             shape = result_obj.Shape
             session.assert_valid_solid(shape)
             # 单实体断言（审查 E4：⌀32 刀具横穿 30 宽零件把件切成两半仍 ok:True）
-            assert_single_solid(shape, "参数修改")
+            # 装配模式分流：assert_solid_integrity 内部按 _parts 是否空自动选路
+            assert_solid_integrity(session, shape, "参数修改")
             # 孔完整性断言（快照推演见上）
             assert_holes_intact(shape, expected_counts)
             # R7 终验移交项热修：改基体尺寸（如 height 加大）可把既有盲孔埋成
