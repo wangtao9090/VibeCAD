@@ -55,6 +55,7 @@ class Session:
         return obj
 
     def open_document(self, name: str) -> Any:
+        self._labels = None  # 标签快照作用域 = 某文档的某次标注，换文档即失效
         self._ensure_freecad()
         from vibecad.freecad_env import silence_fd1
         with silence_fd1():
@@ -63,6 +64,7 @@ class Session:
         return self._doc
 
     def close_document(self) -> None:
+        self._labels = None  # 关文档必清标签；置于早退前，无文档时也不留残余快照
         if self._doc is None:
             return
         from vibecad.freecad_env import silence_fd1
