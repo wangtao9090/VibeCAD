@@ -7,6 +7,7 @@ import math
 from typing import Any
 
 from vibecad.engine.session import Session
+from vibecad.tools._integrity import _count_full_cylinder_faces  # 从 _integrity 共享（R7 抽取）
 
 
 def _inplane_axes(n) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
@@ -31,21 +32,6 @@ def _outward_normal(shape: Any, face: Any):
     probe = face.CenterOfMass + n * 0.01
     if solid.isInside(probe, 1e-6, False):
         n = -n
-    return n
-
-
-def _count_full_cylinder_faces(shape: Any, radius: float) -> int:
-    """数半径匹配（1e-6）且 u 参数跨满 2π（容差 1e-3）的圆柱面——完整圆孔的成形判据。
-    增量判据（cut 前后各数一次，after >= before+1）：存在性判据会被同径旧孔放行
-    新孔的越界缺口（安装孔阵列是常见操作，终审 CRITICAL-3）。"""
-    n = 0
-    for f in shape.Faces:
-        s = f.Surface
-        if type(s).__name__ != "Cylinder" or abs(s.Radius - radius) > 1e-6:
-            continue
-        u0, u1 = f.ParameterRange[0], f.ParameterRange[1]
-        if abs((u1 - u0) - 2 * math.pi) < 1e-3:
-            n += 1
     return n
 
 
