@@ -125,6 +125,17 @@ def test_render_annotated_edges_of_negative_rejected():
         annotate.render_annotated(_FakeShape(), mode="edges", edges_of=-1)
 
 
+def test_render_annotated_faces_rejects_edges_of():
+    """faces 模式下 edges_of 必须显式拒绝（静默忽略会让调用方误以为过滤生效）。
+    校验在 faces 分支首行、碰 shape 之前触发——fake shape 不会被访问。"""
+
+    class _FakeShape:
+        pass
+
+    with pytest.raises(ValueError, match="edges_of"):
+        annotate.render_annotated(_FakeShape(), mode="faces", edges_of=0)
+
+
 def test_module_import_purity():
     # 真正的纯净断言：annotate 模块对象自身的全局命名空间不含 matplotlib/FreeCAD
     assert not any(m in getattr(annotate, "__dict__", {}) for m in ("matplotlib", "FreeCAD"))

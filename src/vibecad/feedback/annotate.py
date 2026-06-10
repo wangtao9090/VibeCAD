@@ -236,6 +236,9 @@ def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = 
         raise ValueError(f"annotate 必须是 'faces' 或 'edges'（得到 {mode!r}）")
     cam = camera_direction(view)
     if mode == "faces":
+        if edges_of is not None:
+            # 静默忽略会让调用方误以为过滤生效，违反"绝不静默"纪律
+            raise ValueError("edges_of 仅在 mode='edges' 时有效")
         # faces 模式：委托给共享数据源
         data = collect_annotation_data(shape, view=view)
         dims = data["dims"]
