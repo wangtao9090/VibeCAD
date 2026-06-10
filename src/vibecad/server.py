@@ -137,7 +137,7 @@ def add_box(length: float, width: float, height: float,
     """添加参数化长方体（mm）；position=[x,y,z] 放置位置（默认原点）。"""
     return _runtime_guard() or _modeling.add_box(
         _session, length, width, height,
-        position=tuple(position) if position else (0.0, 0.0, 0.0))
+        position=tuple(position) if position is not None else (0.0, 0.0, 0.0))
 
 
 @mcp.tool()
@@ -146,7 +146,7 @@ def add_cylinder(radius: float, height: float,
     """添加参数化圆柱（mm）；position=[x,y,z] 放置位置，axis=x|y|z 圆柱轴向（默认 z）。"""
     return _runtime_guard() or _modeling.add_cylinder(
         _session, radius, height,
-        position=tuple(position) if position else (0.0, 0.0, 0.0), axis=axis)
+        position=tuple(position) if position is not None else (0.0, 0.0, 0.0), axis=axis)
 
 
 @mcp.tool()

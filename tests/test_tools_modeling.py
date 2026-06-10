@@ -69,6 +69,16 @@ def test_add_cylinder_rejects_bad_position():
         modeling.add_cylinder(MockSession(), 5, 10, position="nope")
 
 
+def test_add_box_rejects_nan_position():
+    with pytest.raises(ValueError, match="position"):
+        modeling.add_box(MockSession(), 10, 10, 10, position=(float("nan"), 0, 0))
+
+
+def test_add_box_rejects_empty_position():
+    with pytest.raises(ValueError, match="position"):
+        modeling.add_box(MockSession(), 10, 10, 10, position=[])
+
+
 @pytest.mark.slow
 def test_add_box_real(runtime_env):
     code = (
@@ -104,6 +114,49 @@ def test_boolean_cut_real(runtime_env):
     p = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
     assert p.returncode == 0, p.stderr
     assert "CUT_OK" in p.stdout
+
+
+@pytest.mark.slow
+def test_boolean_cut_noop_raises(runtime_env):
+    code = (
+        status._PREP
+        + f"import sys; sys.path.insert(0, {_SRC!r})\n"
+        + "from vibecad.engine.session import Session\n"
+        + "from vibecad.tools import modeling\n"
+        + "s = Session(); modeling.new_document(s, 'Noop')\n"
+        + "b = modeling.add_box(s, 10, 10, 10)\n"           # 原点 0..10
+        + "c = modeling.add_cylinder(s, 2, 5, position=(1000, 1000, 1000))\n"  # 远离 base
+        + "raised = False\n"
+        + "try:\n"
+        + "    modeling.boolean_cut(s, b['name'], c['name'])\n"
+        + "except RuntimeError:\n"
+        + "    raised = True\n"
+        + "assert raised, 'boolean_cut should raise when tool does not intersect base'\n"
+        + "print('NOOP_RAISES_OK')\n"
+    )
+    p = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0, p.stderr
+    assert "NOOP_RAISES_OK" in p.stdout
+
+
+@pytest.mark.slow
+def test_cylinder_axis_x_orientation(runtime_env):
+    code = (
+        status._PREP
+        + f"import sys; sys.path.insert(0, {_SRC!r})\n"
+        + "from vibecad.engine.session import Session\n"
+        + "from vibecad.tools import modeling\n"
+        + "s = Session(); modeling.new_document(s, 'AxisX')\n"
+        + "r = modeling.add_cylinder(s, 2, 30, axis='x')\n"
+        + "bb = s.get_object(r['name']).Shape.BoundBox\n"
+        + "assert abs(bb.XLength - 30) < 1e-3, f'XLength={bb.XLength}'\n"
+        + "assert abs(bb.YLength - 4) < 1e-3, f'YLength={bb.YLength}'\n"
+        + "assert abs(bb.ZLength - 4) < 1e-3, f'ZLength={bb.ZLength}'\n"
+        + "print('AXIS_X_OK')\n"
+    )
+    p = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0, p.stderr
+    assert "AXIS_X_OK" in p.stdout
 
 
 @pytest.mark.slow

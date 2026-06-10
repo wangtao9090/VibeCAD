@@ -2,6 +2,7 @@
 每工具 = 参数校验 → 事务 → 参数化对象 → recompute → 几何断言 → 结构化 dict。"""
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from vibecad.engine.session import Session
@@ -11,8 +12,9 @@ _AXIS = {"z": ((0.0, 0.0, 1.0), 0.0), "x": ((0.0, 1.0, 0.0), 90.0), "y": ((1.0, 
 
 def _validate_position(position) -> None:
     if (not isinstance(position, (list, tuple)) or len(position) != 3
-            or not all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in position)):
-        raise ValueError(f"position 必须是 3 个数字 (x, y, z)（得到 {position!r}）")
+            or not all(isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c)
+                       for c in position)):
+        raise ValueError(f"position 必须是 3 个有限数字 (x, y, z)（得到 {position!r}）")
 
 
 def new_document(session: Session, name: str) -> dict[str, Any]:
@@ -83,10 +85,17 @@ def boolean_cut(session: Session, base_name: str, tool_name: str) -> dict[str, A
             base = session.get_object(base_name)
             tool = session.get_object(tool_name)
             session.doc.recompute()  # 防守：确保 Base/Tool 已算
+            base_vol = base.Shape.Volume
             cut = session.doc.addObject("Part::Cut", "Cut")
             cut.Base = base
             cut.Tool = tool
             session.doc.recompute()
             session.assert_valid_solid(cut.Shape)
+            if cut.Shape.Volume >= base_vol - 1e-6:
+                raise RuntimeError(
+                    f"几何断言失败：布尔差集未移除任何材料（base={base_vol:.3f}, "
+                    f"cut={cut.Shape.Volume:.3f}）——tool '{tool_name}' 可能因 position/axis "
+                    f"未与 base '{base_name}' 相交"
+                )
             result = {"ok": True, "name": cut.Name, "volume": cut.Shape.Volume}
     return result

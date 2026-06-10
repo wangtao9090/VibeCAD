@@ -70,6 +70,20 @@ def test_add_box_forwards_position(monkeypatch):
     assert seen["a"] == (10, 20, 30, (1, 2, 3))
 
 
+def test_add_box_empty_list_forwards_as_empty_tuple(monkeypatch):
+    """空列表不应静默转为原点 (0,0,0)，而应原样转为 () 交给 _validate_position 拒绝。"""
+    _ready(monkeypatch)
+    seen = {}
+
+    def _fake_add_box_empty(s, ln, w, h, position):
+        seen["position"] = position
+        return {"ok": True}
+
+    monkeypatch.setattr(srv._modeling, "add_box", _fake_add_box_empty)
+    srv.add_box(10, 20, 30, position=[])
+    assert seen["position"] == (), f"expected empty tuple, got {seen['position']!r}"
+
+
 def test_add_cylinder_forwards_position_axis(monkeypatch):
     _ready(monkeypatch)
     seen = {}
