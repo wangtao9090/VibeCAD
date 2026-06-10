@@ -572,3 +572,18 @@ def test_auto_view_labels_fresh_after_feature(runtime_env):
 2. 慢：`VIBECAD_RUN_INTEGRATION=1 uv run pytest -m slow` 全绿（multiview 真机、标签新鲜性、既有 28 条零回归）。
 3. 黑盒：每步指令直接收到 `[json, image]`，**人眼确认拼图四格**。
 4. 两路终审通过 + PR 就绪。
+
+---
+
+## Task 2-R（设计变更改造）：multiview 正交格从半透明改为 HLR 工程图
+
+> 用户在 T2 交付后否决半透明方案，定稿 spike v5 工程图样式（spec §2/§3.1 已修订）。本任务改造 a64f1c0/d8fe797 已交付的 multiview.py。代码基准 = `.vibecad/spike_engineering5.py`（真实管线人眼定稿，本地未入库——其 project/draw_view/dim_h/dim_v/统一比例逻辑即实现蓝本）。
+
+**Files:** Modify `src/vibecad/feedback/multiview.py`, `tests/test_multiview.py`
+
+- [ ] **Step 1**: multiview.py 重构为四件套（spec §3.1 签名）：`_VIEW_TFS` 表（top 恒等 / front,right `(x,y)→(y,-x)`，附实测注释）；`project_view`（TechDraw.projectEx 函数内 import + noqa，组 0-4 可见/5-9 隐藏合并，Line discretize(2) 其余 48，圆收集 `(*tf(c.x,c.y), r, gi<5)`）；`draw_engineering_view`（实线 #222/1.4、虚线 #888/0.9 (0,(5,3))、圆心红点划十字、equal aspect、axis off、CJK 标题、返回 bbox 或 None）；尺寸函数 `_dim_h/_dim_v`（尺寸界线+双箭头+数字，来自 spike）；`multiview_png(*, eng_views, face_meshes, face_labels, dims, size=(920,760))`（三格工程图：bbox 总尺寸 + 每格 ⌀ 按半径去重 + 首可见圆定位尺寸 + 三格统一比例 span*1.45；iso 格 `_draw_face_meshes` + 标签 + 尺寸线同现状）；`render_multiview` 在 silence_fd1 内做三方向 project_view + collect_annotation_data(view="iso")。
+- [ ] **Step 2**: 测试更新：`test_multiview_png_smoke` 改喂 fake eng_views（手工折线矩形+一条隐藏线+一个圆）+ 既有 iso 数据，断言 PNG>8000B；新增 `test_multiview_png_dims_from_bbox`（fake 矩形 40×20 → 不抛错即可，数字断言靠真机）；空 eng_views+空 face_meshes 抛 ValueError；模块纯净不变（TechDraw 不得模块级 import）。
+- [ ] **Step 3**: `uv run pytest -q && uv run ruff check .` 全绿。
+- [ ] **Step 4**: commit `feat(multiview): engineering-drawing orthographic views (HLR wireframe, dims, hidden lines)`
+
+后续 Task 3/4/5/6 不变（render_multiview 对外签名未变）；Task 5 慢测增加：HLR 耗时打印 + top 视图投影含圆断言。
