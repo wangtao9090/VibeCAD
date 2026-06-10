@@ -41,7 +41,12 @@ def test_add_box_delegates(monkeypatch):
         return {"ok": True}
 
     monkeypatch.setattr(srv._modeling, "add_box", _fake_add_box)
-    assert srv.add_box(10, 20, 30)["ok"] is True
+    monkeypatch.setattr(srv._session, "get_result_shape", lambda: object())
+    monkeypatch.setattr(srv._multiview, "render_multiview",
+                        lambda shape: (b"\x89PNG", {}, {}, {}))
+    monkeypatch.setattr(srv._session, "set_labels", lambda f, e, shown=None: None)
+    out = srv.add_box(10, 20, 30)
+    assert isinstance(out, list) and out[0]["ok"] is True  # 成功路径返回 [dict, Image]
     assert seen["a"] == (10, 20, 30)
 
 
