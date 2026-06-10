@@ -1,5 +1,6 @@
 """面/边级特征工具（Round 5）：消费标签注册表的指代（"A 面打孔"、"E3 倒角"）。
-纪律：参数校验 → 标签指纹解析（过期即 LabelExpiredError）→ 事务 → 几何断言 → 结构化 dict。"""
+纪律：参数校验 → 事务（内含标签指纹解析，过期即 LabelExpiredError；recompute → 几何断言）
+→ 结构化 dict。校验必须先于一切 session 访问；解析在事务内，失败随事务一并回滚。"""
 from __future__ import annotations
 
 import math
@@ -33,15 +34,28 @@ def _outward_normal(shape: Any, face: Any):
     return n
 
 
+def _has_full_cylinder_face(shape: Any, radius: float) -> bool:
+    """shape 是否含半径匹配且 u 参数跨满 2π 的圆柱面——完整圆孔的成形判据。
+    已知限界：若零件已存在同径旧完整孔，部分越界的新孔可能被旧孔误放行（边角 case，接受）。"""
+    for f in shape.Faces:
+        s = f.Surface
+        if type(s).__name__ != "Cylinder" or abs(s.Radius - radius) > 1e-6:
+            continue
+        u0, u1 = f.ParameterRange[0], f.ParameterRange[1]
+        if abs((u1 - u0) - 2 * math.pi) < 1e-3:
+            return True
+    return False
+
+
 def add_hole(session: Session, face: str, diameter: float,
              depth: float | None = None, offset=(0.0, 0.0)) -> dict[str, Any]:
     """在指定面（标签）打圆孔：depth=None 通孔；offset 为面内毫米坐标（原点=面心）。"""
     if not face or not isinstance(face, str):
         raise ValueError("face 必须是非空字符串（面标签，如 'A'）")
-    if diameter <= 0:
-        raise ValueError(f"diameter 必须 > 0（得到 {diameter}）")
-    if depth is not None and depth <= 0:
-        raise ValueError(f"depth 必须 > 0 或省略表示通孔（得到 {depth}）")
+    if not math.isfinite(diameter) or diameter <= 0:  # NaN 与 <=0 比较恒 False，须显式拒绝
+        raise ValueError(f"diameter 必须是 > 0 的有限数字（得到 {diameter}）")
+    if depth is not None and (not math.isfinite(depth) or depth <= 0):
+        raise ValueError(f"depth 必须是 > 0 的有限数字或省略表示通孔（得到 {depth}）")
     if (not isinstance(offset, (list, tuple)) or len(offset) != 2
             or not all(isinstance(c, (int, float)) and not isinstance(c, bool)
                        and math.isfinite(c) for c in offset)):
@@ -80,6 +94,14 @@ def add_hole(session: Session, face: str, diameter: float,
                 raise RuntimeError(
                     f"几何断言失败：打孔未移除任何材料（base={base_vol:.3f}, "
                     f"cut={cut.Shape.Volume:.3f}）——offset/depth 可能让孔落在零件之外")
+            if len(cut.Shape.Solids) != 1:
+                raise RuntimeError(
+                    f"几何断言失败：打孔把零件切成 {len(cut.Shape.Solids)} 块"
+                    "——offset 可能越过零件边缘")
+            if not _has_full_cylinder_face(cut.Shape, diameter / 2.0):
+                raise RuntimeError(
+                    "几何断言失败：未形成完整圆孔（孔可能与零件边缘相交成开口缺口）"
+                    "——请调整 offset")
             result = {"ok": True, "name": cut.Name, "volume": cut.Shape.Volume,
                       "hole": {"face": face, "diameter": diameter,
                                "depth": depth if depth is not None else "through",
@@ -94,12 +116,13 @@ def _edge_feature(session: Session, edges, value: float, *, kind: str,
     if not isinstance(edges, (list, tuple)) or not edges \
             or not all(isinstance(e, str) and e for e in edges):
         raise ValueError(f"edges 必须是非空字符串列表（边标签，如 ['E1','E2']）（得到 {edges!r}）")
-    if value <= 0:
-        raise ValueError(f"{value_field} 必须 > 0（得到 {value}）")
+    if not math.isfinite(value) or value <= 0:  # NaN 与 <=0 比较恒 False，须显式拒绝
+        raise ValueError(f"{value_field} 必须是 > 0 的有限数字（得到 {value}）")
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
     with session._transaction(kind):
         with silence_fd1():
-            idxs = [session.resolve_edge(e) for e in edges]
+            # 去重：OCCT 对重复边静默去重，面数断言须按唯一边数计
+            idxs = list(dict.fromkeys(session.resolve_edge(e) for e in edges))
             base_obj = session.get_result_object()
             faces_before = len(base_obj.Shape.Faces)
             vol_before = base_obj.Shape.Volume
@@ -108,10 +131,11 @@ def _edge_feature(session: Session, edges, value: float, *, kind: str,
             feat.Edges = [(i + 1, value, value) for i in idxs]  # 1-based (idx, r1, r2)
             session.doc.recompute()
             session.assert_valid_solid(feat.Shape)
-            if len(feat.Shape.Faces) <= faces_before:
+            # 每条唯一边应恰好产生 1 个新面（实测 4 边 fillet 恰 +4）
+            if len(feat.Shape.Faces) < faces_before + len(idxs):
                 raise RuntimeError(
-                    f"几何断言失败：{kind} 未产生新面（{faces_before} → "
-                    f"{len(feat.Shape.Faces)}）——OCCT 可能对所选边失败：{edges}")
+                    f"几何断言失败：{kind} 新面数不足（期望 ≥ {faces_before + len(idxs)}，"
+                    f"实际 {len(feat.Shape.Faces)}）——OCCT 可能对部分所选边失败：{edges}")
             if abs(feat.Shape.Volume - vol_before) < 1e-9:
                 raise RuntimeError(f"几何断言失败：{kind} 后体积无变化——所选边可能无效：{edges}")
             result = {"ok": True, "name": feat.Name, "volume": feat.Shape.Volume,

@@ -12,7 +12,9 @@ class _NoopSession:
     ({"face": "", "diameter": 6}, "face"),
     ({"face": "A", "diameter": 0}, "diameter"),
     ({"face": "A", "diameter": -2}, "diameter"),
+    ({"face": "A", "diameter": float("nan")}, "diameter"),
     ({"face": "A", "diameter": 6, "depth": 0}, "depth"),
+    ({"face": "A", "diameter": 6, "depth": float("nan")}, "depth"),
     ({"face": "A", "diameter": 6, "offset": [1]}, "offset"),
     ({"face": "A", "diameter": 6, "offset": ["a", "b"]}, "offset"),
 ])
@@ -24,9 +26,11 @@ def test_add_hole_validation(kwargs, msg):
 @pytest.mark.parametrize("fn,kwargs,msg", [
     (features.fillet_edges, {"edges": [], "radius": 2}, "edges"),
     (features.fillet_edges, {"edges": ["E1"], "radius": 0}, "radius"),
+    (features.fillet_edges, {"edges": ["E1"], "radius": float("nan")}, "radius"),
     (features.fillet_edges, {"edges": "E1", "radius": 2}, "edges"),
     (features.chamfer_edges, {"edges": [], "size": 1}, "edges"),
     (features.chamfer_edges, {"edges": ["E1"], "size": -1}, "size"),
+    (features.chamfer_edges, {"edges": ["E1"], "size": float("nan")}, "size"),
 ])
 def test_edge_features_validation(fn, kwargs, msg):
     with pytest.raises(ValueError, match=msg):
