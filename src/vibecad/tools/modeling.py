@@ -17,6 +17,14 @@ def _validate_position(position) -> None:
         raise ValueError(f"position 必须是 3 个有限数字 (x, y, z)（得到 {position!r}）")
 
 
+def _stale_hint(session: Session) -> dict[str, Any]:
+    """几何变更使既有标注标签过期——成功 result 必须提示重标注（终审 Important-3）。"""
+    if getattr(session, "_labels", None):
+        return {"labels_stale": True,
+                "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"}
+    return {}
+
+
 def new_document(session: Session, name: str) -> dict[str, Any]:
     if not name or not isinstance(name, str):
         raise ValueError("name 必须是非空字符串")
@@ -44,6 +52,7 @@ def add_box(
             result = {
                 "ok": True, "name": obj.Name,
                 "volume": obj.Shape.Volume, "position": list(position),
+                **_stale_hint(session),
             }
     return result
 
@@ -70,7 +79,7 @@ def add_cylinder(
             session.doc.recompute()
             session.assert_valid_solid(obj.Shape)
             result = {"ok": True, "name": obj.Name, "volume": obj.Shape.Volume,
-                      "position": list(position), "axis": axis}
+                      "position": list(position), "axis": axis, **_stale_hint(session)}
     return result
 
 
@@ -97,5 +106,6 @@ def boolean_cut(session: Session, base_name: str, tool_name: str) -> dict[str, A
                     f"cut={cut.Shape.Volume:.3f}）——tool '{tool_name}' 可能因 position/axis "
                     f"未与 base '{base_name}' 相交"
                 )
-            result = {"ok": True, "name": cut.Name, "volume": cut.Shape.Volume}
+            result = {"ok": True, "name": cut.Name, "volume": cut.Shape.Volume,
+                      **_stale_hint(session)}
     return result

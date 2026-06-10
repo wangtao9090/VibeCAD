@@ -197,7 +197,8 @@ def render_part(view: str = "iso", annotate: str | None = None,
     try:
         with _silence_fd1():
             shape = _session.get_result_shape()
-            ef_idx = _session.resolve_face(edges_of) if edges_of else None
+            # is not None（非 falsy）：空串必须进 resolve_face 撞出"未知面标签 ''"响亮失败
+            ef_idx = _session.resolve_face(edges_of) if edges_of is not None else None
         if annotate is None:
             png = _render.render_png(shape, view=view)
             return Image(data=png, format="png")
