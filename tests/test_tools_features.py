@@ -472,6 +472,76 @@ def test_add_hole_offset_direction(runtime_env):
 
 
 @pytest.mark.slow
+def test_outward_normal_probe_lands_on_material(runtime_env):
+    """探针盲态修复（环形面）：顶面中心盲孔后顶面成环形面，CenterOfMass 落在孔开口上
+    ——旧探针两侧都是空气，isInside 恒 False，无法纠正定向破坏的面。
+    用 face.reversed() 模拟 OCCT cut 偶发的 Orientation 反转（normalAt 随之朝内，
+    真机实测确认）：完整面探针可纠正（既有行为），环形面也必须纠正
+    ——探针锚点必须落在材料上（最大三角形质心，同 annotate 标签锚点方案）。"""
+    out = _run_in_env(runtime_env, (
+        "from vibecad.freecad_env import silence_fd1\n"
+        "with silence_fd1():\n"
+        "    import FreeCAD\n"
+        "    import Part\n"
+        "    from vibecad.tools.features import _outward_normal\n"
+        "    box = Part.makeBox(40, 30, 20)\n"
+        "    cyl = Part.makeCylinder(5, 8.5, FreeCAD.Vector(20, 15, 20.5),"
+        " FreeCAD.Vector(0, 0, -1))\n"
+        "    shape = box.cut(cyl)\n"  # 顶面中心盲孔 → 顶面成环形面
+        "    annular = next(f for f in shape.Faces\n"
+        "                   if type(f.Surface).__name__ == 'Plane'\n"
+        "                   and abs(f.CenterOfMass.z - 20) < 1e-6 and len(f.Wires) > 1)\n"
+        "    n = _outward_normal(shape, annular)\n"
+        "    assert n.z > 0.99, f'环形面外法向应为 +z，得到 {n.z}'\n"
+        "    n_rev = _outward_normal(shape, annular.reversed())\n"
+        "    assert n_rev.z > 0.99, f'定向破坏的环形面未被纠正（探针盲态），得到 {n_rev.z}'\n"
+        "    full = next(f for f in box.Faces if type(f.Surface).__name__ == 'Plane'\n"
+        "                and abs(f.CenterOfMass.z - 20) < 1e-6)\n"
+        "    n_full = _outward_normal(box, full.reversed())\n"
+        "    assert n_full.z > 0.99, f'完整面纠正回归，得到 {n_full.z}'\n"
+        "print('PROBE_ON_MATERIAL_OK')\n"
+    ))
+    assert "PROBE_ON_MATERIAL_OK" in out
+
+
+@pytest.mark.slow
+def test_add_hole_on_annular_face(runtime_env):
+    """环形面打孔全路径回归（探针盲态场景）：顶面中心盲孔成环形面后，在该面 offset
+    打第二盲孔——起钻方向必须朝外（孔壁 z∈[15,20]，不是从材料内 0.5mm 起钻），
+    体积核算精确（±0.1）。"""
+    out = _run_in_env(runtime_env, (
+        "import math\n"
+        "from vibecad.engine.session import Session\n"
+        "from vibecad.feedback.annotate import render_annotated\n"
+        "from vibecad.tools import features, modeling\n"
+        "s = Session(); modeling.new_document(s, 'Ann')\n"
+        "modeling.add_box(s, 40, 30, 20)\n"
+        "png, t, freg, ereg = render_annotated(s.get_result_shape(), mode='faces')\n"
+        "s.set_labels(freg, ereg)\n"
+        "top = next(lab for lab, d in t.items() if '顶面' in d)\n"
+        "r1 = features.add_hole(s, top, 10, depth=8)\n"  # 中心盲孔 → 顶面成环形面
+        "assert r1['ok'], r1\n"
+        "p2, t2, freg2, ereg2 = render_annotated(s.get_result_shape(), mode='faces')\n"
+        "s.set_labels(freg2, ereg2)\n"  # 顶面被孔开口，标签过期 → 重新标注
+        "top2 = next(lab for lab, d in t2.items() if '顶面' in d)\n"
+        "r2 = features.add_hole(s, top2, 6, depth=5, offset=[12, 0])\n"
+        "expected = 24000 - math.pi * 25 * 8 - math.pi * 9 * 5\n"
+        "assert r2['ok'] and abs(r2['volume'] - expected) < 0.1, (r2['volume'], expected)\n"
+        # 起钻方向朝外：第二孔孔壁（r=3 圆柱面）必须从顶面 z=20 向下到 z=15
+        "walls = [f for f in s.get_result_shape().Faces\n"
+        "         if type(f.Surface).__name__ == 'Cylinder'\n"
+        "         and abs(f.Surface.Radius - 3.0) < 1e-6]\n"
+        "assert len(walls) == 1, [f.Surface.Radius for f in walls]\n"
+        "bb = walls[0].BoundBox\n"
+        "assert abs(bb.ZMax - 20) < 1e-6 and abs(bb.ZMin - 15) < 1e-6, (bb.ZMin, bb.ZMax)\n"
+        "ctr = walls[0].Surface.Center\n"
+        "assert abs(ctr.x - 32) < 1e-6 and abs(ctr.y - 15) < 1e-6, (ctr.x, ctr.y)\n"
+        "print('ANNULAR_HOLE_OK')\n"
+    ))
+    assert "ANNULAR_HOLE_OK" in out
+
+
+@pytest.mark.slow
 def test_render_multiview_real(runtime_env):
     """multiview HLR 真机：PNG 有效 + 标签语义与 render_annotated(faces) 等价
     + HLR 耗时计时打印 + top 视图投影含圆（box+hole 场景验证圆检测链路通）。"""

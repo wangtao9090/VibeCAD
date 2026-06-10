@@ -23,12 +23,24 @@ def _inplane_axes(n) -> tuple[tuple[float, float, float], tuple[float, float, fl
 
 
 def _outward_normal(shape: Any, face: Any):
-    """面的单位外法向（normalAt 不保证定向——用实体内点探针校正）。返回 FreeCAD.Vector。"""
-    u0, u1, v0, v1 = face.ParameterRange
-    n = face.normalAt((u0 + u1) / 2, (v0 + v1) / 2)
+    """面的单位外法向（normalAt 不保证定向——用实体内点探针校正）。返回 FreeCAD.Vector。
+    探针锚点取面三角剖分的最大三角形质心（必落材料上）：CenterOfMass/参数中点在带孔面
+    （如打孔后的环形面）会落在孔开口上，探针两侧都是空气、isInside 恒 False、校正失效
+    ——与 annotate.largest_triangle_centroid 标签锚点同方案。法向同在锚点处取，
+    保证探针沿的正是锚点处的法向（曲面上两点法向不同）。"""
+    import FreeCAD  # noqa: PLC0415
+
+    from vibecad.feedback.annotate import largest_triangle_centroid  # noqa: PLC0415
+    verts, facets = face.tessellate(0.1)
+    if facets:
+        anchor = FreeCAD.Vector(*largest_triangle_centroid(verts, facets))
+    else:  # 退化面剖分为空：退回 CenterOfMass（无孔可落，旧行为即正确）
+        anchor = face.CenterOfMass
+    u, v = face.Surface.parameter(anchor)
+    n = face.normalAt(u, v)
     n.normalize()
     solid = shape.Solids[0] if getattr(shape, "Solids", None) else shape
-    probe = face.CenterOfMass + n * 0.01
+    probe = anchor + n * 0.01
     if solid.isInside(probe, 1e-6, False):
         n = -n
     return n
