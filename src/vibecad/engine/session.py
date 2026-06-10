@@ -61,6 +61,9 @@ class Session:
         with silence_fd1():
             import FreeCAD  # noqa: PLC0415
             self._doc = FreeCAD.newDocument(name)
+            # headless 默认 UndoMode=0，openTransaction/abort 是 no-op
+            # ——必须显式开启否则失败残留垃圾对象（HoleTool、null-shape Fillet 等）
+            self._doc.UndoMode = 1
         return self._doc
 
     def close_document(self) -> None:
@@ -91,7 +94,9 @@ class Session:
         result_types = ("Part::Cut", "Part::Fuse", "Part::Common", "Part::Fillet", "Part::Chamfer")
         result = None
         for obj in self._doc.Objects:
-            if getattr(obj, "TypeId", "") in result_types and hasattr(obj, "Shape"):
+            # 纵深防御：null/invalid shape 不当选（与 fallback 循环的纪律拉齐）
+            if (getattr(obj, "TypeId", "") in result_types and hasattr(obj, "Shape")
+                    and not obj.Shape.isNull() and getattr(obj.Shape, "Volume", 0) > 0):
                 result = obj
         if result is None:
             for obj in self._doc.Objects:
