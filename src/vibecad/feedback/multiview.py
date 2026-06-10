@@ -31,7 +31,9 @@ def multiview_png(*, face_meshes: list[dict], face_labels: list[dict],
             ax = fig.add_subplot(2, 2, k + 1, projection="3d")
             drew = _draw_face_meshes(ax, face_meshes, view=view, alpha=alpha)
             drew_any = drew_any or drew
-            ax.set_title(title, fontsize=10, pad=2)
+            ax.set_title(title, fontsize=10, pad=2,
+                         fontfamily=["Heiti TC", "PingFang SC", "Arial Unicode MS",
+                                     "Noto Sans CJK SC", "WenQuanYi Zen Hei", "sans-serif"])
             if view != "iso" or not drew:
                 continue
             for fl in face_labels:  # iso 格：标签（仅可见面）
