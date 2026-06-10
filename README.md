@@ -6,7 +6,7 @@
 在任意 MCP 客户端（Claude Desktop / Cowork / OpenClaw / Cursor…）中，用自然语言完成
 中等复杂度的参数化设计与多零件装配，交付可制造文件（3D 打印 3MF/STL、CNC STEP、激光 DXF）。
 
-> **状态**：Round 1 运行时 → Round 2 语义建模 → Round 3 视觉反馈（PNG+glTF）→ Round 4 位置控制 → Round 5 可指代性（标注图+标签注册表+打孔/圆角/倒角）已全部本机实跑验证。设计文档见
+> **状态**：R1 运行时 → R2 语义建模 → R3 视觉反馈 → R4 位置控制 → R5 可指代性（标注+指纹）→ R6a 工程图三视图+每步回图 → R6b 参数修改 → R7 reposition/孔阵列/草图拉伸——已全部本机实跑验证。设计文档见
 > [`docs/superpowers/specs/2026-06-08-vibecad-design.md`](docs/superpowers/specs/2026-06-08-vibecad-design.md)。
 
 ## 首发形态：Chat-native 零安装
