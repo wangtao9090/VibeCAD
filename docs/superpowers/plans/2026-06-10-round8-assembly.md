@@ -42,7 +42,14 @@ tests/test_tools_features.py    改   @slow 6 条装配场景
   2. **TechDraw 投影吃 compound**：两个错位 box 的 `Part.makeCompound([s1, s2])` → `TechDraw.projectEx(compound, ...)` 出边正常（数量/坐标）。
   3. **干涉计算**：重叠 box 对 `s1.common(s2).Volume` 精确（重叠区体积）；不接触对 == 0。
   4. **align 数学**：手算场景——盖板（独立 box 60×40×5，任意初始位姿）底面贴底板顶面：`R = FreeCAD.Rotation(nm_vec, neg_nt_vec)`（最短弧把 moving 法向转到 -target 法向）；`T = anchor - R.multVec(moving_center)`；`Placement(T, R)` 应用后验证 moving 底面与 target 顶面共面（z 相等）且面心 XY 对齐。
-- [ ] **Step 2**: 结论回填本计划此处（承载形态选型：App::Part 可行则用之并记录全局 shape 取法；否则回退平铺分组——Session 记 obj→part 映射 + 零件位姿存 Session 由 get_assembly_shape 变换合成）。
+- [x] **Step 2**: 结论回填本计划此处。
+
+> **✅ Spike 结论（2026-06-10 真机一次通过）——选定 App::Part 容器方案**：
+> 1. 容器内特征链（Box+Cyl+Cut）recompute 正常（valid, vol=11497.35）；`p.addObject(obj)` 入组。
+> 2. 容器 `Placement` 移动后 `cut.Shape` **保持局部坐标**（XMin=0）；全局 shape 两种取法均可：`cut.Shape.transformed(p.Placement.toMatrix())`（XMin=100 ✓）与 `obj.getGlobalPlacement()`（Base.x=100 ✓）。get_assembly_shape 用 transformed 法合成 compound。
+> 3. `TechDraw.projectEx` 吃 `Part.makeCompound` 正常（双 box 8 可见边，x 0..70）。
+> 4. 干涉 `a.common(b).Volume` 精确（重叠 200/分离 0）。
+> 5. align 数学：`FreeCAD.Rotation(nm, nt.negative())` 最短弧（倒扣 180° ✓）+ `T = anchor - R.multVec(moving_center)` 落点精确 (30,20,10)。
 - [ ] **Step 3**: commit（计划结论回填）
 
 ---
