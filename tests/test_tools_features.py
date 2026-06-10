@@ -469,3 +469,86 @@ def test_add_hole_offset_direction(runtime_env):
         "print('OFFSET_DIR_OK')\n"
     ))
     assert "OFFSET_DIR_OK" in out
+
+
+@pytest.mark.slow
+def test_render_multiview_real(runtime_env):
+    """multiview HLR 真机：PNG 有效 + 标签语义与 render_annotated(faces) 等价
+    + HLR 耗时计时打印 + top 视图投影含圆（box+hole 场景验证圆检测链路通）。"""
+    out = _run_in_env(runtime_env, """
+import time
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview, annotate
+from vibecad.feedback.multiview import project_view, _VIEW_TFS
+from vibecad.freecad_env import silence_fd1
+from vibecad.tools import modeling, features
+
+s = Session()
+modeling.new_document(s, "mv")
+modeling.add_box(s, 40, 30, 20)
+
+# 计时 render_multiview（含 HLR 投影）
+t0 = time.time()
+png, table, faces_reg, edges_reg = multiview.render_multiview(s.get_result_shape())
+t1 = time.time()
+print("MULTIVIEW_MS", int((t1 - t0) * 1000))
+
+assert png.startswith(b"\\x89PNG") and len(png) > 5000, len(png)
+
+# 标签语义与 render_annotated(faces, view=iso) 完全等价
+_, t2, fr2, er2 = annotate.render_annotated(s.get_result_shape(), mode="faces", view="iso")
+assert table == t2, f"table 不等价: {set(table.keys())} vs {set(t2.keys())}"
+assert faces_reg == fr2, "faces_reg 不等价"
+assert edges_reg == er2, "edges_reg 不等价"
+
+# top 视图投影含圆：先在顶面打孔，孔壁投影到 top 方向应有圆
+s2 = Session()
+modeling.new_document(s2, "mv_hole")
+modeling.add_box(s2, 40, 30, 20)
+_, tbl2, freg2, _ = annotate.render_annotated(s2.get_result_shape(), mode="faces")
+s2.set_labels(freg2, {})
+top_lab = next(lab for lab, d in tbl2.items() if "顶面" in d)
+features.add_hole(s2, top_lab, diameter=8)
+shape2 = s2.get_result_shape()
+direction, tf = _VIEW_TFS["top"]
+with silence_fd1():
+    pv = project_view(shape2, direction, tf)
+assert any(c for c in pv["circles"]), "top 投影应含孔的圆（HLR 圆检测链路未通）"
+
+print("MULTIVIEW_REAL_OK", len(png))
+""")
+    assert "MULTIVIEW_REAL_OK" in out
+    # 从 stdout 提取并报告 HLR 耗时
+    for line in out.splitlines():
+        if line.startswith("MULTIVIEW_MS"):
+            print(line)
+            break
+
+
+@pytest.mark.slow
+def test_auto_view_labels_fresh_after_feature(runtime_env):
+    """每步自动刷新后标签立即可指（本轮核心行为）+ shown 门控语义不破。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.engine.naming import LabelExpiredError
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import modeling, features
+s = Session()
+modeling.new_document(s, "fresh")
+modeling.add_box(s, 40, 30, 20)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+features.add_hole(s, top, diameter=8)
+# 模拟 server._attach_view 的刷新
+png2, t2, fr2, er2 = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr2, er2, shown=set(t2.keys()))
+top2 = next(lab for lab, d in t2.items() if "顶面" in d)
+assert s.resolve_face(top2) >= 0          # 新标签立即可指
+try:
+    s.resolve_edge("E1")                   # 边标签未展示仍被拒（门控不破）
+    raise SystemExit("EXPECTED LabelExpiredError")
+except LabelExpiredError:
+    print("FRESH_LABELS_OK", top2)
+""")
+    assert "FRESH_LABELS_OK" in out
