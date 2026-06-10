@@ -12,7 +12,7 @@ from vibecad.tools._integrity import (
     assert_holes_intact,
     assert_no_sealed_holes,
     assert_not_touched,
-    assert_single_solid,
+    assert_solid_integrity,
     cut_tool_radii,
     hole_count_snapshot,
 )
@@ -263,7 +263,7 @@ def extrude_profile(session: Session, profile, height: float,
                 result_shape = feat.Shape
                 result_name = feat.Name
                 session.assert_valid_solid(result_shape)
-                assert_single_solid(result_shape, "extrude_profile(pad, no base)")
+                assert_solid_integrity(session, result_shape, "extrude_profile(pad, no base)")
                 vol_after = result_shape.Volume
                 if abs(vol_after - expected_delta) > tol:
                     raise RuntimeError(
@@ -289,7 +289,7 @@ def extrude_profile(session: Session, profile, height: float,
                 # 不调 assert_result_not_drifted：pad/pocket 创建新结果对象
                 # （Fuse/Cut 成为 get_result_object 最新节点）是预期行为，
                 # "漂移"语义不适用——该断言针对刀具吞件后 fallback 漂移到刀具。
-                assert_single_solid(result_shape, "extrude_profile")
+                assert_solid_integrity(session, result_shape, "extrude_profile")
                 vol_after = result_shape.Volume
 
                 if operation == "pad":

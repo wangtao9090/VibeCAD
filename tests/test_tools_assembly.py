@@ -1,5 +1,5 @@
 # tests/test_tools_assembly.py
-"""assembly：校验矩阵 + align 位姿数学纯函数。快测。"""
+"""assembly 工具 + integrity 装配语义：校验矩阵 + align 位姿数学纯函数 + 分流断言。快测。"""
 import pytest
 
 from vibecad.tools import assembly
@@ -95,3 +95,62 @@ def test_align_placement_arbitrary_normal():
         target_e1=(0, 1, 0), target_e2=(0, 0, 1), offset=(0, 0), gap=0.0)
     assert pos == pytest.approx((-40, 0, 0))
     assert angle == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Task 3：assert_solid_integrity 分流逻辑快测（纯 fake，不碰 FreeCAD）
+# ---------------------------------------------------------------------------
+
+from vibecad.tools._integrity import assert_solid_integrity  # noqa: E402
+
+
+class _FakeSolid:
+    """模拟有 N 个 solid 的 shape。"""
+    def __init__(self, n_solids: int):
+        self.Solids = [object() for _ in range(n_solids)]
+
+
+class _FakeSession:
+    """最小 fake session：控制 _parts 和 get_result_shape。"""
+    def __init__(self, parts: dict):
+        # parts: {name: shape}
+        self._parts = {k: {} for k in parts}  # 模拟 _parts 注册表（存在即可）
+        self._shapes = parts
+
+    def get_result_shape(self, part_name=None):
+        return self._shapes[part_name]
+
+
+def test_assert_solid_integrity_single_mode_pass():
+    """单零件模式（_parts 空）：shape 1 solid → 通过。"""
+    session = _FakeSession({})
+    assert_solid_integrity(session, _FakeSolid(1), "test_op")
+
+
+def test_assert_solid_integrity_single_mode_fail():
+    """单零件模式（_parts 空）：shape 2 solids → RuntimeError。"""
+    session = _FakeSession({})
+    with pytest.raises(RuntimeError, match="切成 2 块"):
+        assert_solid_integrity(session, _FakeSolid(2), "test_op")
+
+
+def test_assert_solid_integrity_assembly_mode_all_pass():
+    """装配模式（_parts 非空）：每零件 1 solid → 通过。"""
+    session = _FakeSession({"底板": _FakeSolid(1), "盖板": _FakeSolid(1)})
+    # shape 参数被忽略（装配模式取 session.get_result_shape）
+    assert_solid_integrity(session, _FakeSolid(2), "test_op")  # 传入的 compound 被忽略
+
+
+def test_assert_solid_integrity_assembly_mode_one_broken():
+    """装配模式（_parts 非空）：某零件 2 solids → RuntimeError 含零件名。"""
+    session = _FakeSession({"底板": _FakeSolid(1), "盖板": _FakeSolid(2)})
+    with pytest.raises(RuntimeError, match="盖板"):
+        assert_solid_integrity(session, _FakeSolid(1), "test_op")
+
+
+def test_assert_no_interference_single_part_mode():
+    """单零件模式（_parts 空）：assert_no_interference 直接返回空列表。"""
+    from vibecad.tools.assembly import assert_no_interference
+    session = _FakeSession({})  # _parts 空
+    result = assert_no_interference(session)
+    assert result == []
