@@ -1,4 +1,4 @@
-"""A3 引导壳：决定在哪个 python 跑 server。纯 stdlib，禁 import mcp/trimesh/FreeCAD。"""
+"""A3 引导壳：决定在哪个 python 跑 server。纯 stdlib，禁 import mcp/FreeCAD 等重依赖。"""
 from __future__ import annotations
 
 import os

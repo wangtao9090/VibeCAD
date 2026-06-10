@@ -18,7 +18,6 @@ classifiers = [
 dependencies = [
     "mcp>=1.12",          # 结构化 dict 输出需 ≥1.10，取 1.12 稳
     "pygltflib>=1.16.0",   # glTF 导出器，D6
-    "trimesh>=4.0.0",      # 软渲染回退，D5
     "numpy>=1.26",
     "pyyaml>=6.0",         # 规则引擎 YAML，D2
     "matplotlib>=3.5",     # 软渲染（matplotlib Agg，无 GPU）；松约束让 conda 满足
