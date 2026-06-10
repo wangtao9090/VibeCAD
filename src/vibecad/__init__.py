@@ -8,4 +8,4 @@
 - rules/    规则引擎（YAML 规则 + OCCT 谓词）
 """
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"  # 与 pyproject.toml 同步（发布版本）
