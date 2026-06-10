@@ -510,3 +510,22 @@ def test_same_radius_holes_both_have_position_dims(runtime_env):
 2. 慢：`VIBECAD_RUN_INTEGRATION=1 uv run pytest -m slow` 全绿（37 条）。
 3. 黑盒人眼：工程图尺寸数字当场变化。
 4. 两路终审通过 + PR。
+
+---
+
+## 实施记录与验收（2026-06-10，macOS arm64 实机）
+
+**执行方式**：闭关 subagent-driven（中途配额中断一次，断点恢复无损）。
+
+### 验收结果
+- 快测 **190 passed** + ruff 清零；真机慢测 features 套件 **25 passed**（含 modify 全套：链重算/孔径/圆角/回滚/同径双孔定位/特征语义守卫四场景/半圆槽放行）。
+- **黑盒（真实 MCP 协议）人眼确认**：`modify_part("Box","length",45)` → 工程图 front/top/iso 三处尺寸当场 40→45；`modify_part("HoleTool","radius",5)` → top 格 ⌀8→⌀10；体积精确（25429.2 差 0.000）；危险修改（radius 16 切两半）响亮被拒。parts 参数清单随每步返回。
+
+### 审查战果（第六轮，初审+两轮复审，三套取证脚本 19 场景）
+1. **CRITICAL（初审真机坐实）**：孔径改 100 吞掉整个零件 → 结果对象静默漂移成刀具圆柱报 ok:True（会话污染）→ 漂移断言修复。
+2. **IMPORTANT**：改参数可把孔改成缺口/切两半/抹掉全 ok:True——"体积变化只证明链重算了，不证明重算结果仍满足特征语义" → 孔完整性快照 + 单 solid 断言。
+3. **复审 NEW-IMPORTANT×2（修复的修复）**：①期望计数虚构不变量 → 半圆槽文档全量误拒（生产可达）→ 改"改前实际计数基线+刀具桶迁移"；②体积不变放行漏"链未重算" → **FreeCAD Touched 状态账本判据**（实现者真机推翻 Shape 回读方案——primitive Shape 在 setattr 后即时重建无判别力）。
+4. 终验 APPROVE；留档：F1 内核级部分重算盲区（Medium）、F3 同径混合迁错刀（Minor 响亮）、Fuse 顶包轴线匹配升级。
+
+### 方法论沉淀
+①**断言别虚构不变量——用改前实际状态做基线**（半圆槽误拒的根因是凭空假设"每径完整面≥刀具数"）；②修复 agent 真机探针推翻控制者方案（Shape 回读→Touched 账本）是健康信号——方案以真机为准。
