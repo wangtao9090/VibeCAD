@@ -854,3 +854,341 @@ assert abs(r['volume'] - expect) < 1.0, (r['volume'], expect)
 print('HALF_GROOVE_MODIFY_OK', round(r['volume'], 2))
 """)
     assert "HALF_GROOVE_MODIFY_OK" in out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Round 7 慢测：reposition / 孔阵列 / 草图拉伸（Task 5）+ 取证固化
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.slow
+def test_move_hole_tool_relocates_hole(runtime_env):
+    """移动孔刀具 → 孔到新位置（体积不变）；移出零件（密封内腔）→ 拒绝+回滚。
+    注：HoleTool z 在真机取证后确定为 20.5（顶面 z=20 + lift=0.5）；
+    体积断言放宽为"两次 move 后体积相同"——孔径不变、体积恒等。"""
+    out = _run_in_env(runtime_env, """
+import math
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import modeling, features, transform
+s = Session()
+modeling.new_document(s, "mv")
+modeling.add_box(s, 40, 30, 20)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+features.add_hole(s, top, diameter=8)
+vol_with_hole = s.get_result_shape().Volume
+expected_vol = 40 * 30 * 20 - math.pi * 16 * 20
+assert abs(vol_with_hole - expected_vol) < 1.0, (vol_with_hole, expected_vol)
+
+# 移动孔刀具到新 xy 位置，保持 z 不变（20.5）
+hole_tool = s.get_object("HoleTool")
+orig_z = float(hole_tool.Placement.Base.z)
+r = transform.move_part(s, "HoleTool", [10, 10, orig_z])
+# 体积不变（孔径不变，只是位置改变）
+assert abs(r["volume"] - vol_with_hole) < 1.0, (r["volume"], vol_with_hole)
+
+# 尝试移动到会封死孔口的位置（下沉，使 entry/bottom 探针都落在零件内）
+# box(40,30,50)场景验证，此处用已知拒绝：移到 z=200（刀具在零件外 → 孔完整性丢失）
+vol_before_bad = s.get_result_shape().Volume
+try:
+    transform.move_part(s, "HoleTool", [200, 200, orig_z])
+    raise SystemExit("EXPECTED rejection")
+except RuntimeError:
+    pass
+assert abs(s.get_result_shape().Volume - vol_before_bad) < 1e-6  # 回滚
+print("MOVE_OK")
+""")
+    assert "MOVE_OK" in out
+
+
+@pytest.mark.slow
+def test_rotate_box_swaps_bbox(runtime_env):
+    """绕 z 轴转 90° → bbox XLength/YLength 互换；BoundBox 中心 x=20 不动。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.engine.session import Session
+from vibecad.tools import modeling, transform
+s = Session()
+modeling.new_document(s, "rot")
+modeling.add_box(s, 40, 30, 20)
+r = transform.rotate_part(s, "Box", axis="z", angle=90)
+bb = s.get_result_shape().BoundBox
+assert abs(bb.XLength - 30) < 1e-6 and abs(bb.YLength - 40) < 1e-6, (bb.XLength, bb.YLength)
+cx = (bb.XMin + bb.XMax) / 2
+assert abs(cx - 20) < 1e-6, f"绕中心转后中心 x 应为 20，得 {cx}"
+print("ROTATE_OK")
+""")
+    assert "ROTATE_OK" in out
+
+
+@pytest.mark.slow
+def test_linear_hole_pattern(runtime_env):
+    """4 孔线性阵列：体积精确，holes.count==4，top 投影 4 个全圆。"""
+    out = _run_in_env(runtime_env, """
+import math
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.feedback.multiview import project_view, _VIEW_TFS
+from vibecad.tools import modeling, features
+s = Session()
+modeling.new_document(s, "lin")
+modeling.add_box(s, 60, 30, 10)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+r = features.add_hole(s, top, diameter=6, offset=[-15, 0],
+                      pattern={"type": "linear", "count": 4, "spacing": 10})
+expect = 60 * 30 * 10 - 4 * math.pi * 9 * 10
+assert abs(r["volume"] - expect) < 1.0, (r["volume"], expect)
+assert r["holes"]["count"] == 4, r["holes"]
+d, tf = _VIEW_TFS["top"]
+pv = project_view(s.get_result_shape(), d, tf)
+full_circles = [c for c in pv["circles"] if c[3]]
+assert len(full_circles) == 4, f"top 投影应有 4 个完整圆，得 {len(full_circles)}"
+print("LINEAR_OK")
+""")
+    assert "LINEAR_OK" in out
+
+
+@pytest.mark.slow
+def test_linear_pattern_overlap_rejected(runtime_env):
+    """spacing=4 < diameter=6 → 孔间重叠 → 单 solid 或完整性断言失败 → 全量回滚。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import modeling, features
+s = Session()
+modeling.new_document(s, "ovl")
+modeling.add_box(s, 60, 30, 10)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+v0 = s.get_result_shape().Volume
+try:
+    features.add_hole(s, top, diameter=6,
+                      pattern={"type": "linear", "count": 4, "spacing": 4})
+    raise SystemExit("EXPECTED rejection (overlap)")
+except RuntimeError:
+    pass
+assert abs(s.get_result_shape().Volume - v0) < 1e-6, "全量回滚后体积应不变"
+print("OVERLAP_REJECT_OK")
+""")
+    assert "OVERLAP_REJECT_OK" in out
+
+
+@pytest.mark.slow
+def test_circular_hole_pattern(runtime_env):
+    """6 孔圆形阵列：体积精确（36000 − 6·π·6.25·10）。"""
+    out = _run_in_env(runtime_env, """
+import math
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import modeling, features
+s = Session()
+modeling.new_document(s, "cir")
+modeling.add_box(s, 60, 60, 10)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+r = features.add_hole(s, top, diameter=5,
+                      pattern={"type": "circular", "count": 6, "radius": 18})
+expect = 36000 - 6 * math.pi * 6.25 * 10
+assert abs(r["volume"] - expect) < 1.0, (r["volume"], expect)
+print("CIRCULAR_OK")
+""")
+    assert "CIRCULAR_OK" in out
+
+
+@pytest.mark.slow
+def test_extrude_pad_rect(runtime_env):
+    """矩形 pad（20×10，高 5）贴顶面：体积增量 ≈ 1000（1% 容差）。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import modeling, sketch
+s = Session()
+modeling.new_document(s, "pad")
+modeling.add_box(s, 40, 30, 10)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+r = sketch.extrude_profile(s, {"type": "rect", "length": 20, "width": 10},
+                           height=5, face=top, operation="pad")
+assert abs(r["volume"] - (12000 + 1000)) < 12000 * 0.01, r["volume"]
+print("PAD_OK")
+""")
+    assert "PAD_OK" in out
+
+
+@pytest.mark.slow
+def test_extrude_pocket_slot_and_polygon(runtime_env):
+    """slot pocket（20×8，深 5）后接三角形 polygon pocket（深 3）：
+    slot 移除量双边 1% 核算（完全嵌入面内，精确通过）；polygon pocket 继续减料。"""
+    out = _run_in_env(runtime_env, """
+import math
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import modeling, sketch
+s = Session()
+modeling.new_document(s, "pkt")
+modeling.add_box(s, 60, 40, 20)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+slot_area = 20 * 8 + math.pi * 16   # length=20, width=8 → area = 20*8 + π*(8/2)²
+r = sketch.extrude_profile(s, {"type": "slot", "length": 20, "width": 8},
+                           height=5, face=top, operation="pocket")
+assert abs((48000 - r["volume"]) - slot_area * 5) < slot_area * 5 * 0.01, (
+    f"slot 移除量 {48000 - r['volume']:.3f} ≠ 期望 {slot_area * 5:.3f}")
+png2, t2, fr2, er2 = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr2, er2, shown=set(t2.keys()))
+top2 = next(lab for lab, d in t2.items() if "顶面" in d)
+r2 = sketch.extrude_profile(s, {"type": "polygon",
+                                "points": [[-25, -15], [-15, -15], [-25, -7]]},
+                            height=3, face=top2, offset=[0, 0], operation="pocket")
+assert (r["volume"] - r2["volume"]) > 0, "三角 pocket 应继续减料"
+print("POCKET_OK")
+""")
+    assert "POCKET_OK" in out
+
+
+@pytest.mark.slow
+def test_floating_pad_rejected(runtime_env):
+    """pad 轮廓 offset 出零件（完全不接触基体）→ Fuse 双 solid 或 pad 体积断言 → 拒绝回滚。
+    任意 RuntimeError 均算通过（双 solid 断言 / pad 体积增量断言都是合法拒绝原因）。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import modeling, sketch
+s = Session()
+modeling.new_document(s, "flt")
+modeling.add_box(s, 40, 30, 10)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+v0 = s.get_result_shape().Volume
+try:
+    sketch.extrude_profile(s, {"type": "circle", "radius": 5}, height=5,
+                           face=top, offset=[100, 100], operation="pad")
+    raise SystemExit("EXPECTED rejection (floating pad)")
+except RuntimeError:
+    pass
+assert abs(s.get_result_shape().Volume - v0) < 1e-6, "浮空 pad 回滚后体积应不变"
+print("FLOATING_REJECT_OK")
+""")
+    assert "FLOATING_REJECT_OK" in out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 取证固化（R7 commit 1cbab96 后四条断言语义变化的场景钉死）
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.slow
+def test_orphan_pad_rejected(runtime_env):
+    """face=None + 文档已有零件 → ValueError 含"已有零件"；体积不变。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.engine.session import Session
+from vibecad.tools import modeling, sketch
+s = Session()
+modeling.new_document(s, "op")
+modeling.add_box(s, 40, 30, 20)
+v0 = s.get_result_shape().Volume
+msg = ""
+try:
+    sketch.extrude_profile(s, {"type": "rect", "length": 10, "width": 10},
+                           height=5, face=None, operation="pad")
+except ValueError as exc:
+    msg = str(exc)
+assert "已有零件" in msg, f"期望含'已有零件'，得 {msg!r}"
+assert abs(s.get_result_shape().Volume - v0) < 1e-6, "ValueError 后体积应不变"
+print("ORPHAN_PAD_REJECTED_OK")
+""")
+    assert "ORPHAN_PAD_REJECTED_OK" in out
+
+
+@pytest.mark.slow
+def test_cross_radius_hole_protected(runtime_env):
+    """⌀20 同心孔试图覆盖已有 ⌀8 孔 → RuntimeError 含"⌀8"（孔完整性保护）；体积回滚。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import modeling, features
+s = Session()
+modeling.new_document(s, "cr")
+modeling.add_box(s, 60, 40, 20)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+features.add_hole(s, top, diameter=8, offset=[0, 0])
+v_with_d8 = s.get_result_shape().Volume
+# 重新标注（打孔后顶面变化）
+png2, t2, fr2, er2 = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr2, er2, shown=set(t2.keys()))
+top2 = next(lab for lab, d in t2.items() if "顶面" in d)
+msg = ""
+try:
+    features.add_hole(s, top2, diameter=20, offset=[0, 0])
+except RuntimeError as exc:
+    msg = str(exc)
+assert "⌀8" in msg, f"期望含'⌀8'，得 {msg!r}"
+assert abs(s.get_result_shape().Volume - v_with_d8) < 1e-6, "回滚后 ⌀8 孔应保留"
+print("CROSS_RADIUS_PROTECTED_OK")
+""")
+    assert "CROSS_RADIUS_PROTECTED_OK" in out
+
+
+@pytest.mark.slow
+def test_pocket_punch_through_rejected(runtime_env):
+    """10mm 板 pocket 深 25 → 打穿 → 移除量 < 期望 → RuntimeError；体积回滚。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import modeling, sketch
+s = Session()
+modeling.new_document(s, "ppt")
+modeling.add_box(s, 60, 40, 10)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+v0 = s.get_result_shape().Volume
+try:
+    sketch.extrude_profile(s, {"type": "rect", "length": 20, "width": 10},
+                           height=25, face=top, operation="pocket")
+    raise SystemExit("EXPECTED rejection (punch through)")
+except RuntimeError:
+    pass
+assert abs(s.get_result_shape().Volume - v0) < 1e-6, "打穿被拒后体积应回滚"
+print("POCKET_PUNCH_THROUGH_REJECTED_OK")
+""")
+    assert "POCKET_PUNCH_THROUGH_REJECTED_OK" in out
+
+
+@pytest.mark.slow
+def test_sealed_cavity_rejected(runtime_env):
+    """移孔刀具下沉封口 → 密封内腔探针 → RuntimeError 含"封闭"；体积回滚。
+    场景：box(40,30,50)，顶面盲孔 depth=5（HoleTool z=50.5, height=5.5）；
+    把 Box 移到 z=7 使刀具两端探针（49.9 和 56.6）均落在新零件 z=[7,57] 内。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import modeling, features, transform
+s = Session()
+modeling.new_document(s, "sc")
+modeling.add_box(s, 40, 30, 50)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+features.add_hole(s, top, diameter=8, depth=5)   # 盲孔，HoleTool z≈50.5, height≈5.5
+v0 = s.get_result_shape().Volume
+# Box 移到 z=7：零件 z=[7,57]；entry 外延(≈49.9)在 [7,57] ✓；bottom 外延(≈56.6)在 [7,57] ✓
+# → 密封内腔
+msg = ""
+try:
+    transform.move_part(s, "Box", [0, 0, 7])
+except RuntimeError as exc:
+    msg = str(exc)
+assert "封闭" in msg, f"期望含'封闭'，得 {msg!r}"
+assert abs(s.get_result_shape().Volume - v0) < 1e-6, "密封腔被拒后体积应回滚"
+print("SEALED_CAVITY_REJECTED_OK")
+""")
+    assert "SEALED_CAVITY_REJECTED_OK" in out
