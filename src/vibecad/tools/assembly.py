@@ -294,8 +294,11 @@ def place_part(
             container.Placement = pl
             session.doc.recompute()
 
-            # 完整性守卫：每零件 single_solid + valid
+            # 完整性守卫：每零件 single_solid + valid（空零件跳过——与干涉守卫/渲染一致，
+            # 否则 new_part 后未建几何的零件会让无关操作误炸且错误归因）
             for pname in session._parts:
+                if not session._parts[pname]["objects"]:
+                    continue
                 shape = session.get_result_shape(pname)
                 session.assert_valid_solid(shape)
                 _assert_single_solid_for_part(shape, pname, f"place_part:{part}")
@@ -425,8 +428,10 @@ def align_parts(
             m_container.Placement = delta_pl.multiply(m_pl)
             session.doc.recompute()
 
-            # ---- 完整性守卫 ----
+            # ---- 完整性守卫 ----（空零件跳过，理由同 place_part）
             for pname in session._parts:
+                if not session._parts[pname]["objects"]:
+                    continue
                 shape = session.get_result_shape(pname)
                 session.assert_valid_solid(shape)
                 _assert_single_solid_for_part(

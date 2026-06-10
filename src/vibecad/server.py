@@ -497,6 +497,20 @@ def new_part(name: str) -> Any:
 
 
 @mcp.tool()
+def set_active_part(name: str) -> Any:
+    """切换活动零件——后续建模/特征/标注工具默认作用于该零件
+    （在非活动零件上继续加工的恢复路径）。成功后自动附三视图拼图。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        _session.set_active_part(name)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"切换零件失败：{exc}"}
+    return _attach_view({"ok": True, "active_part": name})
+
+
+@mcp.tool()
 def place_part(part: str, position: list[float] | None = None,
                rotation_axis: str | None = None, angle: float | None = None) -> Any:
     """设置零件绝对位置 and/or 叠加旋转（装配位姿）。
