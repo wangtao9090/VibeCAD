@@ -143,15 +143,22 @@ class Session:
         return _IMPLICIT_PART
 
     def _claim_new_objects(self, before: set[str]) -> None:
-        """差集法：把本事务新增的文档对象（容器除外）归入当前活动零件。"""
+        """差集法：把本事务新增的文档对象（容器除外）归入当前活动零件。
+
+        两阶段纪律（终审 M-1）：先全部 addObject（任一失败 → 异常上抛、事务
+        abort，容器 Group 变化随之回滚），全部成功后一次性 update 注册集合——
+        绝不让集合处于半更新状态：abort 后 FreeCAD 会重用对象 Name（真机取证
+        Probe→Probe），半更新残名会让下个事务的新对象被误判为已归属。"""
         if self._active_part is None:  # 纵深防御：_parts 非空时 active 必有值
             raise RuntimeError("多零件模式下无活动零件——内部状态异常")
         info = self._parts[self._active_part]
-        for obj in self._doc.Objects:
-            if obj.Name in before or getattr(obj, "TypeId", "") == "App::Part":
-                continue
+        new_objs = [obj for obj in self._doc.Objects
+                    if obj.Name not in before
+                    and getattr(obj, "TypeId", "") != "App::Part"]
+        for obj in new_objs:  # 阶段一：容器隶属（失败上抛 → 事务 abort 整体回滚）
             info["container"].addObject(obj)
-            info["objects"].add(obj.Name)
+        # 阶段二：全部成功后一次性入册（集合无半更新状态可言）
+        info["objects"].update(obj.Name for obj in new_objs)
 
     def assert_valid_solid(self, shape: Any) -> None:
         """spec §2.4 规范②：recompute/solve 返回值不可信，几何断言是唯一可信成功判据。"""
