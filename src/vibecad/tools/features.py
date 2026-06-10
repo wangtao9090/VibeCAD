@@ -7,14 +7,21 @@ import math
 from typing import Any
 
 from vibecad.engine.session import Session
-from vibecad.tools._integrity import _count_full_cylinder_faces  # 从 _integrity 共享（R7 抽取）
+from vibecad.tools._integrity import (  # 从 _integrity 共享（R7 抽取）
+    _count_full_cylinder_faces,
+    assert_holes_intact,
+    cut_tool_radii,
+    hole_count_snapshot,
+)
 
 
 def _validate_pattern(pattern) -> list[tuple[float, float]]:
-    """纯函数：校验 pattern 字典并返回相对 offset 的孔心增量列表（含首孔 (0,0)）。
+    """纯函数：校验 pattern 字典并返回相对 offset 的孔心增量列表。
 
     linear: 第 i 孔 = i * spacing * normalize(direction)，i=0..count-1
+    （首孔增量 (0,0)，即 offset 处）
     circular: 第 i 孔 = (R*cos(2πi/N), R*sin(2πi/N))，i=0..N-1（0° 起）
+    （首孔增量 (R, 0)——offset 是圆心而非首孔位置，孔心均匀分布在半径 R 的圆上）
     """
     if not isinstance(pattern, dict):
         raise ValueError(f"pattern 必须是字典（得到 {pattern!r}）")
@@ -119,7 +126,8 @@ def add_hole(session: Session, face: str, diameter: float,
             or not all(isinstance(c, (int, float)) and not isinstance(c, bool)
                        and math.isfinite(c) for c in offset)):
         raise ValueError(f"offset 必须是 2 个有限数字 (u, v)（得到 {offset!r}）")
-    # pattern 校验在任何 session 访问前（纯函数，含 (0,0) 首孔）
+    # pattern 校验在任何 session 访问前（纯函数；linear 首孔在 offset 处，
+    # circular 首孔在圆周 (R,0) 处——offset 是圆心）
     if pattern is not None:
         deltas = _validate_pattern(pattern)  # 抛 ValueError 若非法
     else:
@@ -145,6 +153,10 @@ def add_hole(session: Session, face: str, diameter: float,
                 else shape.BoundBox.DiagonalLength + 2 * lift
             base_vol = shape.Volume
             cyl_before = _count_full_cylinder_faces(shape, diameter / 2.0)
+            # C2：跨径既有孔保护——快照改前全部刀具径桶的完整圆柱面计数，
+            # Cut 后 assert_holes_intact 防新孔咬毁其它半径的既有孔（同径由
+            # 下方"== before+count"精确断言覆盖）
+            existing_counts = hole_count_snapshot(shape, cut_tool_radii(session.doc))
 
             # 计算所有孔的绝对面内坐标（offset + delta）
             abs_offsets = [(float(offset[0]) + float(du),
@@ -178,10 +190,15 @@ def add_hole(session: Session, face: str, diameter: float,
                     f"（{cyl_before}→{cyl_before + count}），实际 {cyl_after}"
                     "——孔可能与零件边缘相交成开口缺口、孔间重叠（spacing<diameter），"
                     "或与已有孔/特征重叠，请调整 offset/spacing/radius")
-            if depth is not None and count == 1:
-                # 单盲孔体积核算：仅单孔时精确（多孔阵列场景留 > 0 + 严格减少守护）
+            # C2：其它半径既有孔不得被新孔咬毁（⌀6 阵列咬掉 ⌀8 孔壁仍单 solid，
+            # 须由跨径完整性快照逮住）
+            assert_holes_intact(cut_shape, existing_counts)
+            if depth is not None:
+                # 盲孔体积核算（单孔与阵列统一）：期望移除 = count·πr²·depth。
+                # 孔间不重叠由上方精确计数断言兜底，故 count 个孔的移除量可直接相加；
+                # 超深打穿/侧向越界少切都会让移除量低于名义值。
                 removed = base_vol - cut_shape.Volume
-                expected = math.pi * (diameter / 2.0) ** 2 * depth
+                expected = count * math.pi * (diameter / 2.0) ** 2 * depth
                 if removed < expected * 0.99 - 1e-6:
                     raise RuntimeError(
                         f"几何断言失败：盲孔实际移除体积 {removed:.3f} < 期望 {expected:.3f}"

@@ -301,7 +301,9 @@ def test_second_same_diameter_hole_cannot_hide_notch(runtime_env):
         "    features.add_hole(s, top2, 10, offset=[28, 0])\n"  # 孔心 x=58，越过 x=60 边缘
         "except RuntimeError as exc:\n"
         "    msg = str(exc)\n"
-        "assert '未形成完整圆孔' in msg, msg\n"  # 旧存在性判据会被第一孔放行——必须逮住
+        # T2 消息统一为精确计数文案（'期望完整圆孔增加 N 个'）——断言放宽到共有词干，
+        # 拒绝行为与回滚语义不变（旧存在性判据会被第一孔放行——增量判据必须逮住）
+        "assert '完整圆孔' in msg, msg\n"
         "r3 = features.add_hole(s, top2, 10, offset=[15, 0])\n"  # 第二个合法同径孔
         "assert r3['ok'], r3\n"
         "assert _count_full_cylinder_faces(s.get_result_shape(), 5.0) == 2\n"

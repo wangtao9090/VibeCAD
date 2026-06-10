@@ -10,6 +10,7 @@ from typing import Any
 from vibecad.engine.session import Session
 from vibecad.tools._integrity import (
     assert_holes_intact,
+    assert_no_sealed_holes,
     assert_not_touched,
     assert_single_solid,
     cut_tool_radii,
@@ -132,12 +133,17 @@ def extrude_profile(session: Session, profile, height: float,
                     face: str | None = None, offset=(0.0, 0.0),
                     operation: str = "pad") -> dict[str, Any]:
     """拉伸 profile 轮廓（pad 加料 / pocket 减料）。
-    face=None → 全局 XY 平面 z=0（无基体 pad 成为首个零件）。
+    face=None → 全局 XY 平面 z=0（仅空文档建底板；文档已有零件时响亮拒绝防孤儿实体）。
     face=标签 → R5 面标签解析 + 平面校验 + e1/e2 坐标系放置。
-    pad：沿面外法向拉 height，与基体 Part::Fuse（无基体直接成首个零件）。
+    取向约定：profile 局部 X=面内 u（e1）、局部 Y=面内 v（e2）——rect 的 length 沿 e1、
+    width 沿 e2，与 offset 的 (u, v) 同一坐标系（旋转用 e1/e2/n 显式矩阵，取向确定）。
+    pad：沿面外法向拉 height，与基体 Part::Fuse（空文档直接成首个零件）。
     pocket：沿面内法向挖深 height，Part::Cut（无基体 ValueError）。
-    断言：pad 体积严格增加；pocket 严格减少 + 单 solid + 孔完整性快照不退化；
-    Touched/漂移/有效性全套。
+    断言：pad 体积增量 ≈ area×height（双边 1%+1e-6）+ 孔密封内腔探针（pad 盖住
+    孔口即拒）；pocket 移除量 ≈ area×height（双边——打穿板厚/越出面即拒）+ 单 solid
+    + 孔完整性快照不退化；Touched/有效性全套。
+    注：不调 assert_result_not_drifted——pad/pocket 创建新结果对象（Fuse/Cut）
+    是预期行为，"漂移"语义不适用（该断言针对刀具吞件后 fallback 漂移到刀具的场景）。
     """
     # ─── 参数校验（先于任何 session 访问）───
     _validate_profile(profile)
@@ -162,6 +168,20 @@ def extrude_profile(session: Session, profile, height: float,
 
             # ─── 确定放置平面 ───
             if face is None:
+                if operation == "pocket":
+                    raise ValueError(
+                        "pocket 需要有基体对象（face=标签），无基体时无法减料")
+                # C1：face=None 仅用于空文档建底板——文档已有零件时创建的是
+                # 不相连孤儿实体且会劫持 get_result_object，必须响亮拒绝
+                try:
+                    session.get_result_object()
+                    has_existing = True
+                except RuntimeError:
+                    has_existing = False
+                if has_existing:
+                    raise ValueError(
+                        "文档已有零件，请用 face 指定放置面（如 face='A'）"
+                        "——face=None 仅用于空文档建底板")
                 # 全局 XY 平面，法向 +Z，基：原点 + offset
                 nx, ny, nz = 0.0, 0.0, 1.0
                 e1_tup = (1.0, 0.0, 0.0)
@@ -173,9 +193,6 @@ def extrude_profile(session: Session, profile, height: float,
                 has_base = False
                 base_obj = None
                 hole_counts: dict[float, int] = {}
-                if operation == "pocket":
-                    raise ValueError(
-                        "pocket 需要有基体对象（face=标签），无基体时无法减料")
             else:
                 if not isinstance(face, str) or not face:
                     raise ValueError("face 必须是非空字符串（面标签）")
@@ -220,16 +237,25 @@ def extrude_profile(session: Session, profile, height: float,
                 )
                 extrude_height = height_orig + lift
 
-            # 旋转 Z → extrude_dir 的 Placement（使 local face XY 对齐目标平面）
-            rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1),
-                                   extrude_dir)
-            placement = FreeCAD.Placement(origin, rot)
-            local_face.Placement = placement
+            # I3：取向必须确定——Rotation(Z→dir) 最短弧使非对称轮廓在侧面的取向
+            # 不可控（n=-Z 时甚至数学不定）。用 e1/e2/n 显式构造旋转矩阵：
+            # 旋转列 = (e1, e2, n)，即 profile 局部 X→面内 u（e1）、局部 Y→面内 v
+            # （e2）、局部 Z→外法向 n（e2=n×e1 → e1×e2=n，右手系成立）。
+            # rect 的 length 方向永远沿 e1（offset 的 u 方向），与 docstring 契约一致。
+            m = FreeCAD.Matrix(
+                e1_tup[0], e2_tup[0], nx, origin.x,
+                e1_tup[1], e2_tup[1], ny, origin.y,
+                e1_tup[2], e2_tup[2], nz, origin.z,
+                0, 0, 0, 1)
+            local_face.Placement = FreeCAD.Placement(m)
             solid = local_face.extrude(extrude_dir * extrude_height)
 
             # ─── 创建 Part::Feature 包装静态 solid ───
             feat = session.doc.addObject("Part::Feature", "Profile")
             feat.Shape = solid
+
+            expected_delta = area * height_orig  # pad 增量 / pocket 移除量的名义值
+            tol = expected_delta * 0.01 + 1e-6   # 双边容差 1%+1e-6（计划要求）
 
             if not has_base:
                 # 无基体 pad：Feature 即结果（Task 0 spike 验证写法）
@@ -239,6 +265,11 @@ def extrude_profile(session: Session, profile, height: float,
                 session.assert_valid_solid(result_shape)
                 assert_single_solid(result_shape, "extrude_profile(pad, no base)")
                 vol_after = result_shape.Volume
+                if abs(vol_after - expected_delta) > tol:
+                    raise RuntimeError(
+                        f"几何断言失败：底板体积 {vol_after:.3f} ≠ 期望 "
+                        f"area×height={expected_delta:.3f}（容差 1%）"
+                        "——轮廓构造可能异常（如自交多边形）")
             else:
                 # 有基体：Fuse（pad）或 Cut（pocket）
                 if operation == "pad":
@@ -255,23 +286,35 @@ def extrude_profile(session: Session, profile, height: float,
                 result_name = op_obj.Name
                 session.assert_valid_solid(result_shape)
                 assert_not_touched(op_obj, "extrude_profile")
+                # 不调 assert_result_not_drifted：pad/pocket 创建新结果对象
+                # （Fuse/Cut 成为 get_result_object 最新节点）是预期行为，
+                # "漂移"语义不适用——该断言针对刀具吞件后 fallback 漂移到刀具。
                 assert_single_solid(result_shape, "extrude_profile")
                 vol_after = result_shape.Volume
 
                 if operation == "pad":
                     vol_increase = vol_after - base_vol
-                    if vol_increase <= 1e-6:
+                    if abs(vol_increase - expected_delta) > tol:
                         raise RuntimeError(
-                            f"几何断言失败：pad 后体积未增加"
-                            f"（base={base_vol:.3f}, after={vol_after:.3f}）"
-                            "——轮廓可能完全落在基体内部或完全悬空")
+                            f"几何断言失败：pad 体积增量 {vol_increase:.3f} ≠ 期望 "
+                            f"area×height={expected_delta:.3f}（容差 1%）"
+                            "——轮廓可能部分嵌入基体、悬空或越出面边缘")
+                    # I2：pad 盖住既有孔口 → 孔变密封内腔（不可加工）→ 拒
+                    assert_no_sealed_holes(session.doc, result_shape)
                 else:
-                    # pocket
-                    if vol_after >= base_vol - 1e-6:
+                    # pocket：移除量双边核算（I1——超深打穿板厚时实际移除量
+                    # 低于名义值；意外多切则高于名义值）
+                    removed = base_vol - vol_after
+                    if removed < expected_delta * 0.99 - 1e-6:
                         raise RuntimeError(
-                            f"几何断言失败：pocket 后体积未减少"
-                            f"（base={base_vol:.3f}, after={vol_after:.3f}）"
-                            "——轮廓可能落在基体外部")
+                            f"几何断言失败：pocket 实际移除 {removed:.3f} < 期望 "
+                            f"{expected_delta:.3f}——深度可能打穿板厚、轮廓越出面"
+                            "或与既有孔重叠，请减小深度/调整轮廓")
+                    if removed > expected_delta * 1.01 + 1e-6:
+                        raise RuntimeError(
+                            f"几何断言失败：pocket 实际移除 {removed:.3f} > 期望 "
+                            f"{expected_delta:.3f}——切除量异常（轮廓或深度参数"
+                            "与几何不符），请检查参数")
                     assert_holes_intact(result_shape, hole_counts)
 
     # ─── result dict ───

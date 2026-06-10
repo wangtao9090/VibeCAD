@@ -1,6 +1,9 @@
 # src/vibecad/tools/_integrity.py
 """特征完整性共享守卫（R7 抽取自 modify.py）：孔完整性快照/比对、结果对象漂移、
-Touched 账本、单 solid。消费方：modify/transform/features(pattern)/sketch。
+Touched 账本、单 solid、孔密封内腔探针。
+消费方：modify（快照/比对/漂移/Touched/单solid）、transform（全套+密封探针）、
+features.add_hole（快照/比对——跨径既有孔保护）、sketch（单solid/Touched/孔完整性
++ pad 密封探针）。
 判据沿革见 R6b 计划实施记录（虚构不变量教训：基线必须取改前实际状态）。"""
 from __future__ import annotations
 
@@ -91,6 +94,39 @@ def assert_not_touched(obj: Any, parameter_desc: str) -> None:
         raise RuntimeError(
             f"几何断言失败：{parameter_desc} 后对象 {obj.Name} 仍处 "
             "Touched 状态——依赖链可能未重算（recompute 未执行或失败）")
+
+
+def assert_no_sealed_holes(doc: Any, shape: Any) -> None:
+    """孔端面探针：检测孔是否被操作完全封闭成内腔（不可加工）→ 响亮拒绝。
+
+    对文档每个 Part::Cut 的圆柱 Tool：取其轴线两端点各向外延 0.6mm（> 钻入
+    lift 0.5，确保正常通孔的探针落在零件外）的探针点，solid.isInside 检测：
+    - 两端探针都在材料内 = 孔口被完全封死、孔变成密封内腔 → RuntimeError；
+    - 一端在材料内（通孔变盲孔）→ 放行（探针无法低成本区分"本来就是盲孔"
+      与"通孔被封一端"，且盲孔本身合法——该盲区由调用方 docstring 注明）。
+    消费方：transform._reposition（移动基体/刀具封死孔口）、
+    sketch.extrude_profile pad 路径（pad 盖住孔口同属密封腔家族）。
+    """
+    from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+    with silence_fd1():
+        import FreeCAD  # noqa: PLC0415
+    solid = shape.Solids[0] if getattr(shape, "Solids", None) else shape
+    for o in getattr(doc, "Objects", []):
+        if getattr(o, "TypeId", "") != "Part::Cut":
+            continue
+        tool = getattr(o, "Tool", None)
+        if tool is None or getattr(tool, "TypeId", "") != "Part::Cylinder":
+            continue
+        pl = tool.Placement
+        axis = pl.Rotation.multVec(FreeCAD.Vector(0, 0, 1))  # 圆柱局部 +Z = 钻入方向
+        h = float(tool.Height)
+        p_entry = pl.Base - axis * 0.6              # 钻入端外延（正常时在零件外）
+        p_bottom = pl.Base + axis * (h + 0.6)       # 钻底端外延（通孔时在零件外）
+        if solid.isInside(p_entry, 1e-6, False) and solid.isInside(p_bottom, 1e-6, False):
+            r = float(tool.Radius)
+            raise RuntimeError(
+                f"几何断言失败：操作使 ⌀{2 * r:g} 孔被完全封闭成内腔（不可加工）"
+                "——请调整位置")
 
 
 def assert_result_not_drifted(session: Session, before_name: str) -> None:
