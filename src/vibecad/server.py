@@ -190,13 +190,17 @@ def render_part(view: str = "iso", annotate: str | None = None,
     guard = _runtime_guard()
     if guard:
         return guard
+    if edges_of is not None and annotate != "edges":
+        _msg = ("edges_of 仅在 annotate='edges' 时有效"
+                "——要看某面的边，请 render_part(annotate='edges', edges_of='A')")
+        return {"ok": False, "message": _msg}
     try:
         with _silence_fd1():
             shape = _session.get_result_shape()
+            ef_idx = _session.resolve_face(edges_of) if edges_of else None
         if annotate is None:
             png = _render.render_png(shape, view=view)
             return Image(data=png, format="png")
-        ef_idx = _session.resolve_face(edges_of) if edges_of else None
         png, table, faces_reg, edges_reg = _annotate.render_annotated(
             shape, mode=annotate, edges_of=ef_idx, view=view)
         _session.set_labels(faces_reg, edges_reg)

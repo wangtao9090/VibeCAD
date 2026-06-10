@@ -98,6 +98,50 @@ def test_fillet_and_chamfer_delegate(server, monkeypatch):
     assert server.chamfer_edges(edges=["E2"], size=1)["ok"] is True
 
 
+def test_render_part_edges_of_without_annotate_rejected(server, monkeypatch):
+    """edges_of 不带 annotate='edges' 必须显式拒绝，不得静默忽略呈成功形态。"""
+    monkeypatch.setattr(server._session, "get_result_shape", lambda: object())
+    out = server.render_part(view="iso", edges_of="A")
+    assert out["ok"] is False and "edges_of" in out["message"]
+    out2 = server.render_part(view="iso", annotate="faces", edges_of="A")
+    assert out2["ok"] is False and "edges_of" in out2["message"]
+
+
+def test_mcp_call_tool_render_annotate_contract(server, monkeypatch):
+    """锁死协议契约：list 返回 → [ImageContent, TextContent(json)]。mcp 升级的回归保险。"""
+    import anyio
+    from mcp.types import ImageContent, TextContent
+
+    class _Shape:
+        pass
+
+    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    monkeypatch.setattr(
+        server._annotate, "render_annotated",
+        lambda shape, mode, edges_of, view: (b"\x89PNGx", {"A": "顶面"}, {"A": {}}, {}))
+    monkeypatch.setattr(server._session, "set_labels", lambda faces, edges: None)
+    blocks = anyio.run(lambda: server.mcp.call_tool("render_part", {"annotate": "faces"}))
+    # mcp 1.27 实测：call_tool 直接返回 content blocks 列表（tuple 兜底兼容未来变化）
+    content = blocks[0] if isinstance(blocks, tuple) else blocks
+    assert isinstance(content[0], ImageContent)
+    assert isinstance(content[1], TextContent)
+    assert json.loads(content[1].text)["ok"] is True
+
+
+def test_mcp_call_tool_render_failure_contract(server, monkeypatch):
+    import anyio
+    from mcp.types import TextContent
+
+    def _boom():
+        raise RuntimeError("无活动文档")
+
+    monkeypatch.setattr(server._session, "get_result_shape", _boom)
+    blocks = anyio.run(lambda: server.mcp.call_tool("render_part", {"annotate": "faces"}))
+    content = blocks[0] if isinstance(blocks, tuple) else blocks
+    payload = json.loads([b for b in content if isinstance(b, TextContent)][0].text)
+    assert payload["ok"] is False
+
+
 def test_feature_tools_guarded(monkeypatch):
     import vibecad.server as srv
     monkeypatch.setattr(srv, "_runtime_guard", lambda: {"ok": False, "message": "not ready"})
