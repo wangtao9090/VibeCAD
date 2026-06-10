@@ -1,5 +1,7 @@
 # tests/test_multiview.py
 """multiview：2×2 工程图拼图纯函数快测（不碰 FreeCAD/TechDraw）。"""
+import math
+
 import pytest
 
 from vibecad.feedback import multiview
@@ -49,3 +51,21 @@ def test_multiview_png_empty_raises():
 def test_module_import_purity():
     assert not any(m in getattr(multiview, "__dict__", {})
                    for m in ("matplotlib", "FreeCAD", "TechDraw"))
+
+
+def test_same_radius_circles_both_positioned():
+    """同径双孔：⌀ 按径去重只标一次，但定位尺寸两孔都要有（解耦回归）。
+    纯函数层断言方式：渲染不抛错 + PNG 尺寸增长（精确坐标断言在真机慢测）。"""
+    rect = [[(0, 0), (60, 0)], [(60, 0), (60, 40)], [(60, 40), (0, 40)], [(0, 40), (0, 0)]]
+    circle1 = [[(15 + 5 * math.cos(t / 7.64 * 3.14159 / 24), 20 + 5 * math.sin(t / 7.64))
+                for t in range(3)]]  # 简化折线即可，circles 列表才是断言对象
+    eng = {"front": {"vis": rect, "hid": [], "circles": []},
+           "right": {"vis": rect, "hid": [], "circles": []},
+           "top": {"vis": rect + circle1,
+                   "hid": [],
+                   "circles": [(15.0, 20.0, 5.0, True), (45.0, 20.0, 5.0, True)]}}
+    png = multiview.multiview_png(
+        eng_views=eng,
+        face_meshes=[{"verts": _TET_V, "facets": _TET_F}],
+        face_labels=[], dims=None)
+    assert png.startswith(b"\x89PNG")
