@@ -11,6 +11,7 @@
 from vibecad.feedback import (
     annotate,  # noqa: F401
     gltf,  # noqa: F401
+    multiview,  # noqa: F401
     render,  # noqa: F401
     text,  # noqa: F401
 )
