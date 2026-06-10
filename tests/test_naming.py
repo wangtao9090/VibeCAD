@@ -195,6 +195,38 @@ def test_set_labels_shown_none_shows_all(monkeypatch):
     assert s.resolve_face("A") == 0 and s.resolve_edge("E1") == 0
 
 
+def test_match_face_tolerance_boundaries():
+    """指纹容差边界：容差公式 max(1e-3, 1e-3*|area|)，center 绝对容差 1e-3。
+
+    对 fp_area=1200，area 容差 = max(1e-3, 1.2) = 1.2：
+      - 差 1.0 < 1.2 → 命中；差 2.0 > 1.2 → 过期
+    center 绝对容差 = 1e-3：
+      - 差 0.0009 < 0.001 → 命中；差 0.002 > 0.001 → 过期
+    双候选 center 相同 → 双命中 → 过期（歧义）
+    """
+    fp = naming.face_fingerprint(_top(area=1200.0, center=(20.0, 15.0, 20.0)))
+
+    # area 差 1.0 < 容差 1.2：匹配
+    assert naming.match_face(fp, [_top(area=1201.0, center=(20.0, 15.0, 20.0))]) == 0
+
+    # area 差 2.0 > 容差 1.2：过期
+    with pytest.raises(LabelExpiredError):
+        naming.match_face(fp, [_top(area=1202.0, center=(20.0, 15.0, 20.0))])
+
+    # center 差 0.0009 < 绝对容差 0.001：匹配
+    assert naming.match_face(fp, [_top(area=1200.0, center=(20.0009, 15.0, 20.0))]) == 0
+
+    # center 差 0.002 > 绝对容差 0.001：过期
+    with pytest.raises(LabelExpiredError):
+        naming.match_face(fp, [_top(area=1200.0, center=(20.002, 15.0, 20.0))])
+
+    # 两个候选 center 均在容差内 → 双命中 → 过期（歧义）
+    cand_a = _top(area=1200.0, center=(20.0009, 15.0, 20.0))
+    cand_b = _top(area=1200.0, center=(20.0, 15.0009, 20.0))
+    with pytest.raises(LabelExpiredError):
+        naming.match_face(fp, [cand_a, cand_b])
+
+
 def test_labels_cleared_on_close_document(monkeypatch):
     """关文档必须清空标签快照（真实路径：close_document 先清 _labels，
     _doc is None 时早退不碰 FreeCAD，故可在 dev venv 直接调用）。"""

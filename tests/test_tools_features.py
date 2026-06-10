@@ -59,7 +59,7 @@ def test_inplane_axes_orthonormal():
 
 
 def test_inplane_axes_arbitrary_normal():
-    import math
+    import math  # noqa: PLC0415
     n = (1 / math.sqrt(3),) * 3
     e1, e2 = features._inplane_axes(n)
     for e in (e1, e2):
@@ -90,7 +90,10 @@ def test_failed_feature_rolls_back(runtime_env):
         "assert len(s.doc.Objects) == n0, [o.Name for o in s.doc.Objects]\n"  # 无残留
         "assert s.get_result_object().Name == name0\n"                        # 不被劫持
         "r = features.add_hole(s, 'A', 4)\n"                                  # 会话可恢复
-        "assert r['ok'] and r['volume'] < 1000.0, r\n"
+        # 通孔体积 = 1000 - π·r²·h = 1000 - π·4·10（diameter=4 → r=2，box 高 10）
+        "import math\n"
+        "expected_vol = 1000 - math.pi * 4 * 10\n"
+        "assert r['ok'] and abs(r['volume'] - expected_vol) < 0.5, (r['volume'], expected_vol)\n"
         "print('ROLLBACK_OK')\n"
     ))
     assert "ROLLBACK_OK" in out
@@ -187,6 +190,17 @@ def test_fillet_and_chamfer_by_edge_labels(runtime_env):
         "r2 = features.chamfer_edges(s, [vert2], size=2)\n"  # 顺带验证失败事务已回滚
         "nf2 = len(s.get_result_shape().Faces)\n"
         "assert r2['ok'] and nf2 > nf, (r2, nf, nf2)\n"
+        # fillet 精确体积：单边 r=3，长 30，圆角去掉材料 = 30·(3²−π·3²/4) = 270·(1−π/4)
+        "import math\n"
+        "fillet_vol = r['volume']\n"
+        "expected_fillet = 27000 - 270 * (1 - math.pi / 4)\n"
+        "assert abs(fillet_vol - expected_fillet) < 0.1, (fillet_vol, expected_fillet)\n"
+        "assert nf == 7, f'fillet 后面数应为 7（6原始+1圆角），得到 {nf}'\n"
+        # chamfer 精确体积：对角边 s=2，长 30，截面等腰直角三角形面积 = s²/2 = 2，去掉 60
+        "chamfer_vol = r2['volume']\n"
+        "expected_chamfer = expected_fillet - 2 * 2 / 2 * 30\n"
+        "assert abs(chamfer_vol - expected_chamfer) < 0.1, (chamfer_vol, expected_chamfer)\n"
+        "assert nf2 == 8, f'chamfer 后面数应为 8（7+1倒角面），得到 {nf2}'\n"
         "print('EDGE_FEATURES_OK')\n"
     ))
     assert "EDGE_FEATURES_OK" in out
@@ -356,3 +370,102 @@ def test_edges_mode_keeps_face_labels(runtime_env):
         "print('KEEP_LABELS_OK')\n"
     ))
     assert "KEEP_LABELS_OK" in out
+
+
+@pytest.mark.slow
+def test_visibility_front_view_signs(runtime_env):
+    """front 视角可见性符号：_VIEWS['front']=(0,-90) → 相机方向 (0,-1,0)（指向 -Y）。
+    '前面'(-Y 法向)在 front 视角可见 → 无'不可见'；'后面'(+Y 法向)不可见 → 含 'back'。
+    钉死 camera_direction 的 azim 符号链，防止日后 _VIEWS 被意外调整。"""
+    out = _run_in_env(runtime_env, (
+        "from vibecad.engine.session import Session\n"
+        "from vibecad.feedback.annotate import render_annotated\n"
+        "from vibecad.tools import modeling\n"
+        "s = Session(); modeling.new_document(s, 'Front')\n"
+        "modeling.add_box(s, 40, 30, 20)\n"
+        "png, table, freg, ereg = render_annotated(s.get_result_shape(), mode='faces',"
+        " view='front')\n"
+        "front_entry = next((d for d in table.values() if '前面' in d), None)\n"
+        "back_entry = next((d for d in table.values() if '后面' in d), None)\n"
+        "assert front_entry is not None, f'未找到前面标签，table={table}'\n"
+        "assert back_entry is not None, f'未找到后面标签，table={table}'\n"
+        "assert '不可见' not in front_entry, f'前面在 front 视角应可见，got={front_entry}'\n"
+        "assert 'back' in back_entry, f'后面应含 back 提示，got={back_entry}'\n"
+        "print('FRONT_SIGNS_OK')\n"
+    ))
+    assert "FRONT_SIGNS_OK" in out
+
+
+@pytest.mark.slow
+def test_edges_of_filters_to_face_edges(runtime_env):
+    """edges_of 过滤：box(40,30,20) 顶面 → render_annotated(edges_of=顶面索引)
+    → labels_table 恰 4 条边、每条中点 z==20（顶面高度）、标签键是全量边序号子集
+    且同键同描述（全局序号不因 edges_of 漂移）。"""
+    out = _run_in_env(runtime_env, (
+        "from vibecad.engine.session import Session\n"
+        "from vibecad.feedback.annotate import render_annotated\n"
+        "from vibecad.tools import modeling\n"
+        "s = Session(); modeling.new_document(s, 'EOf')\n"
+        "modeling.add_box(s, 40, 30, 20)\n"
+        "shape = s.get_result_shape()\n"
+        # 先全量 edges 标注（获取全量 table 和顶面索引）
+        "png_all, t_all, freg, ereg = render_annotated(shape, mode='edges')\n"
+        "png_f, t_f, freg2, ereg2 = render_annotated(shape, mode='faces')\n"
+        "top_idx = max(range(len(shape.Faces)), key=lambda i: shape.Faces[i].CenterOfMass.z)\n"
+        # edges_of 过滤
+        "png2, t2, _, _ = render_annotated(shape, mode='edges', edges_of=top_idx)\n"
+        # 顶面有 4 条边
+        "assert len(t2) == 4, f'顶面应有 4 条边，得到 {len(t2)}: {list(t2.keys())}'\n"
+        # 每条边中点 z == 20
+        "for lab, desc in t2.items():\n"
+        "    fp = ereg[lab]\n"
+        "    assert abs(fp['midpoint'][2] - 20.0) < 1e-3, f'{lab} 中点 z={fp[\"midpoint\"][2]}'\n"
+        # 标签键是全量表的子集
+        "assert set(t2.keys()) <= set(t_all.keys()), '标签键不是全量边序号子集'\n"
+        # 同键同描述（全局序号不漂移）
+        "for lab in t2:\n"
+        "    assert t2[lab] == t_all[lab], f'{lab}: {t2[lab]!r} != {t_all[lab]!r}'\n"
+        "print('EDGES_OF_OK')\n"
+    ))
+    assert "EDGES_OF_OK" in out
+
+
+@pytest.mark.slow
+def test_add_hole_offset_direction(runtime_env):
+    """offset 方向：box(40,30,20) 顶面（法向 +Z → _inplane_axes 给出 e1/e2）。
+    对 +Z 法向：最不平行的全局轴是 X 或 Y → e1 对应 X 轴（abs(e1·X)≈1），
+    e2 = n×e1 对应 Y 轴（cross(Z,X)=−Y，取反 → e2 对应 +Y）。
+    实测验证：offset=[10,5] → 孔心 x≈20+10=30，y≈15+5=20（面心 (20,15,20)）。
+    注：_inplane_axes 对 n=(0,0,1)：g=min by |dot| → g=X，
+    e1 = X - 0*Z = X = (1,0,0)；e2 = Z×e1 = (0,0,1)×(1,0,0) = (0,-(-1),0)...
+    需真机实测确认（e2 由叉积 n×e1 = (0,0,1)×(1,0,0) = (0·0-1·0, 1·1-0·0, 0·0-0·1) = (0,1,0)）
+    即 e1→+X, e2→+Y。offset=[10,5]: x=20+10=30, y=15+5=20。"""
+    out = _run_in_env(runtime_env, (
+        "import math\n"
+        "from vibecad.engine.session import Session\n"
+        "from vibecad.feedback.annotate import render_annotated\n"
+        "from vibecad.tools import features, modeling\n"
+        "s = Session(); modeling.new_document(s, 'OffDir')\n"
+        "modeling.add_box(s, 40, 30, 20)\n"
+        "png, table, freg, ereg = render_annotated(s.get_result_shape(), mode='faces')\n"
+        "s.set_labels(freg, ereg)\n"
+        "top = next(lab for lab, d in table.items() if '顶面' in d)\n"
+        "r = features.add_hole(s, top, diameter=8, depth=10, offset=[10, 5])\n"
+        "assert r['ok'], r\n"
+        # 找孔壁圆柱面（r=4），验证轴上点坐标
+        "cyl_faces = [f for f in s.get_result_shape().Faces\n"
+        "             if type(f.Surface).__name__ == 'Cylinder'\n"
+        "             and abs(f.Surface.Radius - 4.0) < 1e-3]\n"
+        "assert len(cyl_faces) >= 1, '未找到 r=4 圆柱面'\n"
+        "ctr = cyl_faces[0].Surface.Center\n"
+        # e1→+X, e2→+Y（已由 _inplane_axes 对 +Z 法向的叉积公式推导：
+        # e1=X, e2=Z×X=(0,0,1)×(1,0,0)=(0·0-1·0,1·1-0·0,0·0-0·1)=(0,1,0)=+Y）
+        # 面心 (20,15,*), offset=[10,5]: x≈20+10=30, y≈15+5=20
+        "assert abs(ctr.x - 30.0) < 1e-3, f'孔心 x 期望 30，得到 {ctr.x}'\n"
+        "assert abs(ctr.y - 20.0) < 1e-3, f'孔心 y 期望 20，得到 {ctr.y}'\n"
+        # 体积精确断言：24000 - π·r²·depth = 24000 - π·16·10
+        "expected_vol = 24000 - math.pi * 16 * 10\n"
+        "assert abs(r['volume'] - expected_vol) < 0.1, (r['volume'], expected_vol)\n"
+        "print('OFFSET_DIR_OK')\n"
+    ))
+    assert "OFFSET_DIR_OK" in out

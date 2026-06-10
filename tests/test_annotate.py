@@ -93,8 +93,22 @@ def test_annotated_png_empty_mesh_raises():
         annotate.annotated_png(face_meshes=[], face_labels=[], edge_labels=[], view="iso")
 
 
+def test_render_annotated_edges_of_negative_rejected():
+    """edges_of=-1 必须 ValueError 含"越界"（Python 负索引会静默取最后一面，违反纪律）。
+    校验发生在 silence_fd1 内、tessellate 之前（只需 shape.Faces 可被 len() 调用）。
+    silence_fd1 仅用 os.dup，不 import FreeCAD，dev venv 可直接调用。"""
+
+    class _FakeFace:
+        """最小化 fake face：tessellate 前校验触发，不会真正调用这些方法。"""
+        pass
+
+    class _FakeShape:
+        Faces = [_FakeFace()] * 6  # 6 个面：合法索引 0..5
+
+    with pytest.raises(ValueError, match="越界"):
+        annotate.render_annotated(_FakeShape(), mode="edges", edges_of=-1)
+
+
 def test_module_import_purity():
-    import sys
-    assert "matplotlib" not in sys.modules or True  # 见下
     # 真正的纯净断言：annotate 模块对象自身的全局命名空间不含 matplotlib/FreeCAD
     assert not any(m in getattr(annotate, "__dict__", {}) for m in ("matplotlib", "FreeCAD"))
