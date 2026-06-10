@@ -74,7 +74,7 @@ def test_render_part_edges_of_resolves_face_label(server, monkeypatch):
 
 def test_add_hole_delegates(server, monkeypatch):
     monkeypatch.setattr(server._features, "add_hole",
-                        lambda session, face, diameter, depth, offset:
+                        lambda session, face, diameter, depth, offset, pattern=None:
                         {"ok": True, "face": face, "diameter": diameter})
     monkeypatch.setattr(server._session, "get_result_shape", lambda: object())
     monkeypatch.setattr(server._multiview, "render_multiview",
@@ -88,7 +88,7 @@ def test_add_hole_delegates(server, monkeypatch):
 def test_add_hole_label_expired_structured(server, monkeypatch):
     from vibecad.engine.naming import LabelExpiredError
 
-    def _boom(session, face, diameter, depth, offset):
+    def _boom(session, face, diameter, depth, offset, pattern=None):
         raise LabelExpiredError("标签 A 已过期")
 
     monkeypatch.setattr(server._features, "add_hole", _boom)
