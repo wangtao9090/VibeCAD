@@ -257,8 +257,11 @@ def render_part(view: str = "iso", annotate: str | None = None,
             _session.set_labels(faces_reg, edges_reg, shown=set(table.keys()))
             return [Image(data=png, format="png"),
                     json.dumps({"ok": True, "labels": table}, ensure_ascii=False)]
-        except (RuntimeError, ValueError) as exc:
-            return {"ok": False, "message": f"渲染失败：{exc}"}
+        except Exception as exc:  # noqa: BLE001 - 与 _attach_view 同理：同一条
+            # render_multiview 渲染链含 TechDraw/matplotlib 深栈（实测有 TypeError），
+            # 窄抓会让同一失败在 attach 路径被结构化、在 multi 路径穿透成 isError。
+            # 宽抓后一律转结构化 {ok:False}——失败本身响亮（带类型名+文本），不静默。
+            return {"ok": False, "message": f"渲染失败（{type(exc).__name__}）：{exc}"}
     try:
         with _silence_fd1():
             shape = _session.get_result_shape()

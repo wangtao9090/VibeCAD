@@ -35,8 +35,9 @@
 - `draw_engineering_view(ax, view_data, title) -> bbox|None`：2D 工程图格绘制（纯 matplotlib）。
 - `multiview_png(*, eng_views, face_meshes, face_labels, dims, size) -> bytes`：纯函数（吃投影折线/圆数据 + iso 网格数据），dev venv 可快测。
 - `render_multiview(shape) -> (png, table, faces_reg, edges_reg)`：真实入口；iso 格数据走 `collect_annotation_data(view="iso")`（标签表/注册表语义与 render_annotated(mode="faces") 完全一致：注册表全量契约、shown=表键）；三正交格走 `project_view`。
-- 多孔标注策略：每格 ⌀ 标注按半径去重（同径只标一次）；定位尺寸只标首个可见圆（防拥挤）。
+- 多孔标注策略：⌀ 标注/中心十字/定位尺寸只对可见整圆（隐藏整圆只画虚线本体；圆角弧非整圆不算）；⌀ 按半径去重（同径只标一次）；每个去重后可见整圆都给定位尺寸（多孔拥挤布置留 backlog）。
 - iso 格绘制复用 `annotate._draw_face_meshes`（已抽取）。
+- 视图朝向采用第三角直觉约定（top 格 Y 朝上、right 格 Z 朝上），版面布局以阅读习惯排列、非严格投影角国标。
 
 ### 3.2 server 集成
 
