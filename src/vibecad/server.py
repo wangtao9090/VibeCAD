@@ -26,6 +26,7 @@ from vibecad.runtime.installer import RuntimeInstaller
 from vibecad.tools import export as _export
 from vibecad.tools import features as _features
 from vibecad.tools import modeling as _modeling
+from vibecad.tools import modify as _modify
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # m10：杜绝隐式拉起 GUI
 
@@ -143,6 +144,8 @@ def _attach_view(result: dict[str, Any]) -> Any:
         result.pop("labels_stale", None)
         result.pop("hint", None)
         result["labels"] = table
+        with _silence_fd1():
+            result["parts"] = _modify.list_parameters(_session.doc)
         return [result, Image(data=png, format="png")]
     except Exception as exc:  # noqa: BLE001 - 事务已提交，纯展示阶段刻意宽抓：
         # 此处任何异常（实测 TechDraw 的 TypeError、潜在 ImportError/IndexError）
@@ -319,6 +322,21 @@ def chamfer_edges(edges: list[str], size: float) -> Any:
         result = _features.chamfer_edges(_session, edges, size)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"倒角失败：{exc}"}
+    return _attach_view(result)
+
+
+@mcp.tool()
+def modify_part(name: str, parameter: str, value: float) -> Any:
+    """修改参数化对象的参数（如 name='Box', parameter='length', value=45）——
+    依赖链（布尔/孔/圆角）自动重算。可改对象与参数见每步返回的 parts 字段。
+    成功后自动附三视图拼图（工程图尺寸当场更新）。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        result = _modify.modify_part(_session, name, parameter, value)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"参数修改失败：{exc}"}
     return _attach_view(result)
 
 
