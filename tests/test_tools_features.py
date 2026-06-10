@@ -1220,3 +1220,267 @@ assert r["ok"]
 print("BURY_REJECT_OK")
 """)
     assert "BURY_REJECT_OK" in out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Round 8 慢测：多零件装配（Task 6）
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.slow
+def test_two_parts_independent_modeling(runtime_env):
+    """两零件互相独立建模：各自 add_box，体积互不干扰；set_active_part 切换后
+    modify 只影响活动零件（底板长度变，盖板体积不变）。"""
+    out = _run_in_env(runtime_env,
+"import math\n"
+"from vibecad.engine.session import Session\n"
+"from vibecad.tools import modeling, modify\n"
+"s = Session()\n"
+"modeling.new_document(s, 'twoparts')\n"
+"# 创建底板\n"
+"s.new_part('底板')\n"
+"modeling.add_box(s, 60, 40, 10)\n"
+"vol_base = s.get_result_shape().Volume\n"
+"assert abs(vol_base - 60 * 40 * 10) < 1.0, vol_base\n"
+"# 创建盖板\n"
+"s.new_part('盖板')\n"
+"modeling.add_box(s, 60, 40, 5)\n"
+"vol_lid = s.get_result_shape().Volume\n"
+"assert abs(vol_lid - 60 * 40 * 5) < 1.0, vol_lid\n"
+"# 检查零件注册表\n"
+"names = s.part_names()\n"
+"assert len(names) == 2, names\n"
+"assert '底板' in names and '盖板' in names\n"
+"# 切回底板，modify length 只影响底板\n"
+"s.set_active_part('底板')\n"
+"r = modify.modify_part(s, 'Box', 'length', 80)\n"
+"assert r['ok'], r\n"
+"new_base_vol = s.get_result_shape('底板').Volume\n"
+"assert abs(new_base_vol - 80 * 40 * 10) < 1.0, new_base_vol\n"
+"# 盖板体积不变\n"
+"lid_vol_after = s.get_result_shape('盖板').Volume\n"
+"assert abs(lid_vol_after - vol_lid) < 1e-6, (lid_vol_after, vol_lid)\n"
+"print('TWO_PARTS_OK')\n"
+)
+    assert "TWO_PARTS_OK" in out
+
+
+@pytest.mark.slow
+def test_place_part_moves_whole_chain(runtime_env):
+    """带孔零件整体 place_part 旋转 z 90°——R7 单图元 rotate_part 被拒场景的解药：
+    装配级旋转成功，体积不变，全局 BBox 轴互换（XLength↔YLength）。"""
+    out = _run_in_env(runtime_env,
+"import math\n"
+"from vibecad.engine.session import Session\n"
+"from vibecad.feedback import multiview\n"
+"from vibecad.tools import modeling, features, assembly\n"
+"s = Session()\n"
+"modeling.new_document(s, 'placerot')\n"
+"s.new_part('底板')\n"
+"modeling.add_box(s, 60, 40, 10)\n"
+"# 标注并打孔\n"
+"png, table, fr, er = multiview.render_multiview(s.get_result_shape())\n"
+"s.set_labels(fr, er, shown=set(table.keys()))\n"
+"top = next(lab for lab, d in table.items() if '顶面' in d)\n"
+"features.add_hole(s, top, diameter=8)\n"
+"vol_before = s.get_result_shape('底板').Volume\n"
+"# place_part 旋转 z 90°（R7 单图元 rotate 被拒，装配级可行）\n"
+"r = assembly.place_part(s, '底板', rotation_axis='z', angle=90)\n"
+"assert r['ok'], r\n"
+"# 体积不变\n"
+"vol_after = s.get_result_shape('底板').Volume\n"
+"assert abs(vol_after - vol_before) < 1.0, (vol_after, vol_before)\n"
+"# 全局装配 shape（含容器位姿）XLength/YLength 互换\n"
+"asm_shape = s.get_assembly_shape()\n"
+"bb = asm_shape.BoundBox\n"
+"# 原始 box 60×40，旋转 90° 后全局 X≈40, Y≈60（允许 1e-3 容差）\n"
+"assert abs(bb.XLength - 40) < 1.0 and abs(bb.YLength - 60) < 1.0, (\n"
+"    bb.XLength, bb.YLength)\n"
+"print('PLACE_ROTATE_OK')\n"
+)
+    assert "PLACE_ROTATE_OK" in out
+
+
+@pytest.mark.slow
+def test_align_parts_face_to_face(runtime_env):
+    """盖板底面贴底板顶面：对齐后盖板底面全局 z == 底板顶面全局 z（1e-6）、
+    面心 XY 对齐；再测 gap=2 时间隙精确（盖板底面全局 z == 12）。"""
+    out = _run_in_env(runtime_env,
+"import math\n"
+"from vibecad.engine.session import Session\n"
+"from vibecad.feedback import multiview\n"
+"from vibecad.tools import modeling, assembly\n"
+"s = Session()\n"
+"modeling.new_document(s, 'alignface')\n"
+"# 底板\n"
+"s.new_part('底板')\n"
+"modeling.add_box(s, 60, 40, 10)\n"
+"png_b, t_b, fr_b, er_b = multiview.render_multiview(s.get_result_shape())\n"
+"s.set_labels(fr_b, er_b, shown=set(t_b.keys()), part='底板')\n"
+"top_base = next(lab for lab, d in t_b.items() if '顶面' in d)\n"
+"# 盖板（初始位于原点，与底板重叠）\n"
+"s.new_part('盖板')\n"
+"modeling.add_box(s, 60, 40, 5)\n"
+"png_l, t_l, fr_l, er_l = multiview.render_multiview(s.get_result_shape())\n"
+"s.set_labels(fr_l, er_l, shown=set(t_l.keys()), part='盖板')\n"
+"bot_lid = next(lab for lab, d in t_l.items() if '底面' in d)\n"
+"# align：盖板底面贴底板顶面，gap=0\n"
+"r = assembly.align_parts(s, '盖板', bot_lid, '底板', top_base,\n"
+"                         allow_interference=True)\n"
+"assert r['ok'], r\n"
+"# 验证：盖板底面全局 z ≈ 10（底板顶面 z）\n"
+"lid_shape_global = s.get_result_shape('盖板').transformed(\n"
+"    s._parts['盖板']['container'].Placement.toMatrix())\n"
+"lid_bottom_z = min(f.CenterOfMass.z for f in lid_shape_global.Faces\n"
+"                   if f.Area > 1)\n"
+"assert abs(lid_bottom_z - 10.0) < 1e-3, f'盖板底面全局 z={lid_bottom_z}，期望 10'\n"
+"# 面心 XY 对齐：盖板底面 XY ≈ 底板顶面 XY（都是 (30,20)）\n"
+"base_shape_global = s.get_result_shape('底板').transformed(\n"
+"    s._parts['底板']['container'].Placement.toMatrix())\n"
+"base_top_face = max(base_shape_global.Faces, key=lambda f: f.CenterOfMass.z)\n"
+"lid_bot_face = min(\n"
+"    (f for f in lid_shape_global.Faces if f.Area > 1),\n"
+"    key=lambda f: f.CenterOfMass.z)\n"
+"assert abs(lid_bot_face.CenterOfMass.x - base_top_face.CenterOfMass.x) < 1e-3\n"
+"assert abs(lid_bot_face.CenterOfMass.y - base_top_face.CenterOfMass.y) < 1e-3\n"
+"# gap=2 测试：重新对齐带间隙\n"
+"r2 = assembly.align_parts(s, '盖板', bot_lid, '底板', top_base,\n"
+"                          gap=2, allow_interference=False)\n"
+"assert r2['ok'], r2\n"
+"lid_shape_g2 = s.get_result_shape('盖板').transformed(\n"
+"    s._parts['盖板']['container'].Placement.toMatrix())\n"
+"lid_bottom_z2 = min(f.CenterOfMass.z for f in lid_shape_g2.Faces if f.Area > 1)\n"
+"assert abs(lid_bottom_z2 - 12.0) < 1e-3, f'gap=2 盖板底面全局 z={lid_bottom_z2}，期望 12'\n"
+"print('ALIGN_FACE_OK')\n"
+)
+    assert "ALIGN_FACE_OK" in out
+
+
+@pytest.mark.slow
+def test_interference_rejected_and_allowed(runtime_env):
+    """干涉守卫：gap=-2 叠入 2mm → RuntimeError 报干涉+回滚（盖板位姿不变）；
+    allow_interference=True → ok 且 result['interference'] 含干涉量（≈ 60*40*2）。"""
+    out = _run_in_env(runtime_env,
+"import math\n"
+"from vibecad.engine.session import Session\n"
+"from vibecad.feedback import multiview\n"
+"from vibecad.tools import modeling, assembly\n"
+"s = Session()\n"
+"modeling.new_document(s, 'interference')\n"
+"# 底板\n"
+"s.new_part('底板')\n"
+"modeling.add_box(s, 60, 40, 10)\n"
+"png_b, t_b, fr_b, er_b = multiview.render_multiview(s.get_result_shape())\n"
+"s.set_labels(fr_b, er_b, shown=set(t_b.keys()), part='底板')\n"
+"top_base = next(lab for lab, d in t_b.items() if '顶面' in d)\n"
+"# 盖板\n"
+"s.new_part('盖板')\n"
+"modeling.add_box(s, 60, 40, 5)\n"
+"png_l, t_l, fr_l, er_l = multiview.render_multiview(s.get_result_shape())\n"
+"s.set_labels(fr_l, er_l, shown=set(t_l.keys()), part='盖板')\n"
+"bot_lid = next(lab for lab, d in t_l.items() if '底面' in d)\n"
+"# 先正确对齐 gap=0（以 allow_interference=True 跳过干涉检查）\n"
+"r0 = assembly.align_parts(s, '盖板', bot_lid, '底板', top_base,\n"
+"                          allow_interference=True)\n"
+"assert r0['ok'], r0\n"
+"# 记录盖板对齐后的位姿\n"
+"pl_before = s._parts['盖板']['container'].Placement.Base\n"
+"pos_before = (pl_before.x, pl_before.y, pl_before.z)\n"
+"# gap=-2 叠入 → 干涉 → 应被拒绝\n"
+"raised = False\n"
+"err_msg = ''\n"
+"try:\n"
+"    assembly.align_parts(s, '盖板', bot_lid, '底板', top_base, gap=-2)\n"
+"except RuntimeError as exc:\n"
+"    raised = True\n"
+"    err_msg = str(exc)\n"
+"assert raised, '叠入 2mm 应被干涉守卫拒绝'\n"
+"assert '干涉' in err_msg, err_msg\n"
+"# 回滚验证：盖板位姿不变\n"
+"pl_after = s._parts['盖板']['container'].Placement.Base\n"
+"pos_after = (pl_after.x, pl_after.y, pl_after.z)\n"
+"assert abs(pos_after[2] - pos_before[2]) < 1e-3, (\n"
+"    f'回滚失败：z {pos_before[2]} → {pos_after[2]}')\n"
+"# allow_interference=True → 放行，result 含干涉量\n"
+"r2 = assembly.align_parts(s, '盖板', bot_lid, '底板', top_base,\n"
+"                          gap=-2, allow_interference=True)\n"
+"assert r2['ok'], r2\n"
+"interferences = r2.get('interference', [])\n"
+"assert len(interferences) > 0, '应有干涉记录'\n"
+"vol = interferences[0]['volume']\n"
+"# 干涉量 ≈ 60*40*2 = 4800（允许 50% 误差，因接触面几何细节）\n"
+"expected_inf = 60 * 40 * 2\n"
+"assert vol > expected_inf * 0.3, f'干涉量 {vol} 远小于期望 {expected_inf}'\n"
+"print('INTERFERENCE_OK')\n"
+)
+    assert "INTERFERENCE_OK" in out
+
+
+@pytest.mark.slow
+def test_assembly_export_step(runtime_env):
+    """装配 STEP 导出：单文件非空；split=True 出两 per-part 文件均非空。"""
+    out = _run_in_env(runtime_env,
+"import os, tempfile\n"
+"from vibecad.engine.session import Session\n"
+"from vibecad.tools import modeling, export\n"
+"s = Session()\n"
+"modeling.new_document(s, 'exportasm')\n"
+"s.new_part('底板')\n"
+"modeling.add_box(s, 60, 40, 10)\n"
+"s.new_part('盖板')\n"
+"modeling.add_box(s, 60, 40, 5)\n"
+"tmp_dir = tempfile.mkdtemp()\n"
+"# 单文件 STEP\n"
+"r1 = export.export_part(s, tmp_dir, fmt='step')\n"
+"assert r1['ok'], r1\n"
+"step_single = r1['step']\n"
+"assert isinstance(step_single, str), step_single\n"
+"assert os.path.exists(step_single) and os.path.getsize(step_single) > 0, step_single\n"
+"# split=True：两个 per-part 文件\n"
+"r2 = export.export_part(s, tmp_dir, fmt='step', split=True)\n"
+"assert r2['ok'], r2\n"
+"step_list = r2['step']\n"
+"assert isinstance(step_list, list) and len(step_list) == 2, step_list\n"
+"for p in step_list:\n"
+"    assert os.path.exists(p) and os.path.getsize(p) > 0, p\n"
+"print('EXPORT_STEP_OK')\n"
+)
+    assert "EXPORT_STEP_OK" in out
+
+
+@pytest.mark.slow
+def test_single_part_flow_regression(runtime_env):
+    """不调 new_part 全流程回归（R7 语义一致）：box→标注→孔→modify→render_multiview，
+    体积精确断言，part_names 为空（单零件模式，用户零感知）。"""
+    out = _run_in_env(runtime_env,
+"import math\n"
+"from vibecad.engine.session import Session\n"
+"from vibecad.feedback import multiview\n"
+"from vibecad.tools import modeling, features, modify\n"
+"s = Session()\n"
+"modeling.new_document(s, 'r7compat')\n"
+"# 不调 new_part → 单零件模式\n"
+"assert s.part_names() == [], s.part_names()\n"
+"assert s.active_part is None\n"
+"modeling.add_box(s, 60, 40, 20)\n"
+"# 标注\n"
+"png, table, fr, er = multiview.render_multiview(s.get_result_shape())\n"
+"s.set_labels(fr, er, shown=set(table.keys()))\n"
+"top = next(lab for lab, d in table.items() if '顶面' in d)\n"
+"# 打孔\n"
+"r_hole = features.add_hole(s, top, diameter=8)\n"
+"expected_with_hole = 60 * 40 * 20 - math.pi * 16 * 20\n"
+"assert r_hole['ok'] and abs(r_hole['volume'] - expected_with_hole) < 1.0, (\n"
+"    r_hole['volume'], expected_with_hole)\n"
+"# modify\n"
+"r_mod = modify.modify_part(s, 'Box', 'length', 80)\n"
+"expected_modified = 80 * 40 * 20 - math.pi * 16 * 20\n"
+"assert r_mod['ok'] and abs(r_mod['volume'] - expected_modified) < 1.0, (\n"
+"    r_mod['volume'], expected_modified)\n"
+"# render_multiview 仍正常\n"
+"png2, t2, fr2, er2 = multiview.render_multiview(s.get_result_shape())\n"
+"assert png2.startswith(b'\\x89PNG') and len(png2) > 5000\n"
+"# 全程不进入多零件模式\n"
+"assert s.part_names() == [], s.part_names()\n"
+"print('R7_COMPAT_OK')\n"
+)
+    assert "R7_COMPAT_OK" in out
