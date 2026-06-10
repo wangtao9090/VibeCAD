@@ -1,5 +1,9 @@
 # Vibe CAD
 
+[![CI](https://github.com/wangtao9090/VibeCAD/actions/workflows/ci.yml/badge.svg)](https://github.com/wangtao9090/VibeCAD/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org)
+
+**AI-native conversational CAD — an open-source MCP connector for FreeCAD (chat-native, zero-install).**
+
 **AI 对话式 CAD —— FreeCAD MCP 连接器（Chat-native 零安装）**
 
 给一年只设计几次东西的人：免费的 FreeCAD + 一个让你永远不用学 FreeCAD 的 AI。
