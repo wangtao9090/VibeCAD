@@ -71,6 +71,24 @@ def test_assert_valid_solid_raises_on_invalid():
         s.assert_valid_solid(FakeShape())
 
 
+def test_assert_valid_solid_null_shape_raises_runtime_error():
+    """NULL shape 必须走 isNull 分支抛 RuntimeError——BRepCheck_Analyzer 对 NULL shape
+    的 isValid() 会抛 Part.OCCError，若先调 isValid 就把原始 OCC 错误泄漏给 server 层。"""
+    s = Session()
+
+    class FakeNullShape:
+        def isNull(self):
+            return True
+
+        def isValid(self):  # 模拟 OCCT：NULL shape 上 isValid 直接炸
+            raise Exception("BRepCheck_Analyzer::Init() - NULL shape")
+
+        Volume = 0.0
+
+    with pytest.raises(RuntimeError, match="NULL"):
+        s.assert_valid_solid(FakeNullShape())
+
+
 def test_assert_valid_solid_raises_on_zero_volume():
     s = Session()
 
