@@ -206,16 +206,22 @@ def multiview_png(*, eng_views: dict, face_meshes: list[dict], face_labels: list
     return buf.getvalue()
 
 
-def render_multiview(shape: Any) -> tuple[bytes, dict, dict, dict]:
+def render_multiview(shape: Any,
+                     part_map: dict | None = None) -> tuple[bytes, dict, dict, dict]:
     """FreeCAD Shape → (png, labels_table, faces_reg, edges_reg)。
     三正交格 HLR 投影 + iso 格标注数据；标签语义与 render_annotated(mode='faces',
-    view='iso') 完全一致（注册表全量）。"""
+    view='iso') 完全一致（注册表全量）。
+
+    Round 8：part_map={零件名: 全局 shape}（可选）；给定时 iso 格分色按零件轮换、
+    标签表条目加零件归属后缀；三正交格直接吃 compound（spike 已证 projectEx 支持）。
+    未给定（None）：单零件模式，行为与旧版完全一致。
+    """
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
 
     with silence_fd1():
         eng_views = {key: project_view(shape, direction, tf)
                      for key, (direction, tf) in _VIEW_TFS.items()}
-    data = collect_annotation_data(shape, view="iso")
+    data = collect_annotation_data(shape, view="iso", part_map=part_map)
     png = multiview_png(eng_views=eng_views, face_meshes=data["face_meshes"],
                         face_labels=data["face_labels"], dims=data["dims"])
     return png, data["table"], data["faces_reg"], data["edges_reg"]

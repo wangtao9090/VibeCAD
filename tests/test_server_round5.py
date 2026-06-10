@@ -76,9 +76,11 @@ def test_add_hole_delegates(server, monkeypatch):
     monkeypatch.setattr(server._features, "add_hole",
                         lambda session, face, diameter, depth, offset, pattern=None:
                         {"ok": True, "face": face, "diameter": diameter})
+    # Round 8 升格：_attach_view 用 get_assembly_shape；render_multiview 接受 part_map
+    monkeypatch.setattr(server._session, "get_assembly_shape", lambda: object())
     monkeypatch.setattr(server._session, "get_result_shape", lambda: object())
     monkeypatch.setattr(server._multiview, "render_multiview",
-                        lambda shape: (b"\x89PNG", {}, {}, {}))
+                        lambda shape, part_map=None: (b"\x89PNG", {}, {}, {}))
     monkeypatch.setattr(server._session, "set_labels", lambda f, e, shown=None: None)
     out = server.add_hole(face="A", diameter=8)
     assert isinstance(out, list)  # 成功路径返回 [dict, Image]
@@ -101,9 +103,11 @@ def test_fillet_and_chamfer_delegate(server, monkeypatch):
                         lambda session, edges, radius: {"ok": True, "edges": edges})
     monkeypatch.setattr(server._features, "chamfer_edges",
                         lambda session, edges, size: {"ok": True, "edges": edges})
+    # Round 8 升格：_attach_view 用 get_assembly_shape；render_multiview 接受 part_map
+    monkeypatch.setattr(server._session, "get_assembly_shape", lambda: object())
     monkeypatch.setattr(server._session, "get_result_shape", lambda: object())
     monkeypatch.setattr(server._multiview, "render_multiview",
-                        lambda shape: (b"\x89PNG", {}, {}, {}))
+                        lambda shape, part_map=None: (b"\x89PNG", {}, {}, {}))
     monkeypatch.setattr(server._session, "set_labels", lambda f, e, shown=None: None)
     fillet_out = server.fillet_edges(edges=["E1"], radius=2)
     chamfer_out = server.chamfer_edges(edges=["E2"], size=1)

@@ -41,9 +41,12 @@ def test_add_box_delegates(monkeypatch):
         return {"ok": True}
 
     monkeypatch.setattr(srv._modeling, "add_box", _fake_add_box)
+    # Round 8 升格：_attach_view 调用 get_assembly_shape()
+    monkeypatch.setattr(srv._session, "get_assembly_shape", lambda: object())
     monkeypatch.setattr(srv._session, "get_result_shape", lambda: object())
+    # Round 8 升格：render_multiview 接受 part_map 关键字参数
     monkeypatch.setattr(srv._multiview, "render_multiview",
-                        lambda shape: (b"\x89PNG", {}, {}, {}))
+                        lambda shape, part_map=None: (b"\x89PNG", {}, {}, {}))
     monkeypatch.setattr(srv._session, "set_labels", lambda f, e, shown=None: None)
     out = srv.add_box(10, 20, 30)
     assert isinstance(out, list) and out[0]["ok"] is True  # 成功路径返回 [dict, Image]
@@ -127,8 +130,10 @@ def test_boolean_cut_delegates(monkeypatch):
 def test_export_part_delegates(monkeypatch):
     _ready(monkeypatch)
     seen = {}
+    # Round 8 升格：export_part 新增 split 参数
     monkeypatch.setattr(srv._export, "export_part",
-                        lambda s, out, *, fmt: seen.setdefault("a", (out, fmt)) or {"ok": True})
+                        lambda s, out, *, fmt, split=False:
+                        seen.setdefault("a", (out, fmt)) or {"ok": True})
     srv.export_part("/tmp/x", fmt="step")
     assert seen["a"] == ("/tmp/x", "step")
 
@@ -169,7 +174,8 @@ def test_export_part_failure_is_structured(monkeypatch):
     """export_part 内部抛出 RuntimeError 时，server 应返回结构化 ok:False dict，而非抛出异常。"""
     _ready(monkeypatch)
 
-    def _boom(s, out, *, fmt):
+    # Round 8 升格：export_part 新增 split 参数
+    def _boom(s, out, *, fmt, split=False):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(srv._export, "export_part", _boom)
