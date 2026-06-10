@@ -40,7 +40,7 @@ fillet_edges(edges, radius)    # 圆角，edges=["E1","E2"]
 chamfer_edges(edges, size)     # 倒角
 ```
 
-特征操作成功后**自动返回新标注图**（几何变了标签即刷新，用户永远看到最新指代）。
+特征操作成功后返回 `labels_stale: true` + 提示（"几何已变更，调用 render_part(annotate=…) 查看最新标注"），引导 AI 客户端自动刷新标注图——用户最终总是看到最新指代；server 工具本身保持单一返回职责（MVP 取此方案而非强塞图，FastMCP 多内容能力用于 render_part 的"图+标签表"）。
 
 ### 3.2 标签注册表 + 指纹校验（`engine/naming.py`）——解持久命名问题（MVP 级）
 
