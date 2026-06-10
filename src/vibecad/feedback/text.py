@@ -44,6 +44,12 @@ def describe_assembly(session: Session) -> dict[str, Any]:
     parts_info: dict[str, Any] = {}
     with silence_fd1():
         for name, info in session._parts.items():
+            # 空零件显式注明（终审 M-2：此前 get_assembly_shape 对空零件先抛，
+            # error 字段是永远送不到用户手里的死代码；现 get_assembly_shape
+            # 跳过空零件，本 error 字段真送达）
+            if not info["objects"]:
+                parts_info[name] = {"error": f"零件 {name} 无几何"}
+                continue
             try:
                 shape = session.get_result_shape(name)
                 bb = shape.BoundBox
@@ -53,9 +59,10 @@ def describe_assembly(session: Session) -> dict[str, Any]:
                     "bbox": {"x": bb.XLength, "y": bb.YLength, "z": bb.ZLength},
                     "placement": [pl.Base.x, pl.Base.y, pl.Base.z],
                 }
-            except Exception as exc:  # noqa: BLE001
+            except (RuntimeError, ValueError) as exc:
                 parts_info[name] = {"error": str(exc)}
 
+        # 全空装配时 get_assembly_shape 响亮抛错（server describe_part 结构化）
         assembly_shape = session.get_assembly_shape()
         abb = assembly_shape.BoundBox
         assembly_bbox = {"x": abb.XLength, "y": abb.YLength, "z": abb.ZLength}

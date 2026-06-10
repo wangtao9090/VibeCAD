@@ -1,5 +1,7 @@
 # tests/test_tools_assembly.py
 """assembly 工具 + integrity 装配语义：校验矩阵 + align 位姿数学纯函数 + 分流断言。快测。"""
+import sys
+
 import pytest
 
 from vibecad.tools import assembly
@@ -181,3 +183,46 @@ def test_assert_no_interference_single_part_mode():
     session = _FakeSession({})  # _parts 空
     result = assert_no_interference(session)
     assert result == []
+
+
+def _fake_part_module(monkeypatch):
+    """注入 stub Part 模块（assert_no_interference 顶部 import Part）。"""
+    import types
+    fake = types.ModuleType("Part")
+    fake.OCCError = type("OCCError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "Part", fake)
+    return fake
+
+
+def test_assert_no_interference_empty_part_noted(monkeypatch):
+    """终审 C-B："绝不静默"——空零件（objects 空）跳过配对但必须显式注明
+    （{"parts": [X], "volume": None, "note": ...}），绝不返回静默 []。"""
+    from vibecad.tools.assembly import assert_no_interference
+    _fake_part_module(monkeypatch)
+    session = _FakeSession({"A": _FakeSolid(1), "B": None}, objects={"B": set()})
+    result = assert_no_interference(session, allow=False)
+    assert result == [{"parts": ["B"], "volume": None,
+                       "note": "零件 B 无几何，干涉未检查"}]
+
+
+def test_assert_no_interference_occ_error_raises(monkeypatch):
+    """终审 C-B：OCC 布尔崩溃必须转 RuntimeError"干涉检查无法完成"——
+    修复前 except Exception → vol=0.0 把真实重叠静默放行。"""
+    from vibecad.tools.assembly import assert_no_interference
+    fake = _fake_part_module(monkeypatch)
+
+    class _BoomShape:
+        def transformed(self, m):
+            return self
+
+        def common(self, other):
+            raise fake.OCCError("boolean failed")
+
+    session = _FakeSession({"A": _BoomShape(), "B": _BoomShape()})
+    # fake 容器（transformed 消费 Placement.toMatrix）
+    import types as _t
+    for info in session._parts.values():
+        info["container"] = _t.SimpleNamespace(
+            Placement=_t.SimpleNamespace(toMatrix=lambda: "M"))
+    with pytest.raises(RuntimeError, match="干涉检查无法完成"):
+        assert_no_interference(session)

@@ -253,7 +253,13 @@ class Session:
     def get_assembly_shape(self) -> Any:
         """全装配 shape：_parts 空 → 单零件结果 shape（与 R7 等价）；非空 → 各零件
         结果 shape 应用容器位姿（spike 选型：transformed(Placement.toMatrix())，
-        组内 shape 保持局部坐标）后合成 compound。"""
+        组内 shape 保持局部坐标）后合成 compound。
+
+        空零件（objects 空，new_part 后未建几何）跳过——无 shape 可合成，不该让
+        渲染/describe/export 整体崩掉（终审 M-2：describe_assembly 的 error 字段
+        因此处先抛而成死代码）。全部零件皆空时响亮抛错。
+        注意：跳过规则必须与 server._build_part_map 一致（compound 面/边序 =
+        各零件按迭代序拼接，二者错位会让标注归属切片计数错乱）。"""
         if not self._parts:
             return self.get_result_shape()
         from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
@@ -261,8 +267,11 @@ class Session:
             import Part  # noqa: PLC0415
             shapes = [
                 self.get_result_shape(name).transformed(info["container"].Placement.toMatrix())
-                for name, info in self._parts.items()
+                for name, info in self._parts.items() if info["objects"]
             ]
+            if not shapes:
+                raise RuntimeError(
+                    "装配中无任何零件有几何——请先用 add_box/extrude_profile 等创建几何")
             return Part.makeCompound(shapes)
 
     # ---- Round 5：标签注册表（标注快照 → 指纹解析）；Round 8：按零件分命名空间 ----
