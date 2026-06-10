@@ -7,11 +7,15 @@
 1. **单 iso 渲染图的信息缺口**：深度歧义（孔有多深/是否贯穿看不出）、底面/背面不可见。用户每次指令后要"更直观的感受"。
 2. **核心循环依赖 AI 自觉**：当前"说一句→看一眼"要靠 AI 客户端记得调 render_part；labels_stale 也只是提示。应该**每步建模/特征指令成功后自动回图**。
 
-## 2. Spike 实证结论（两版真实管线原型，已人眼检验）
+## 2. Spike 实证结论（v1-v5 五版真实管线原型，已人眼检验；用户定稿 v5 工程图样式）
 
-- 传统三视图对面片软渲染有坑：front/right 正交视图只见外轮廓，孔在内部不可见（工程图靠虚线隐藏线，面片渲染做不到）。
-- **解法：正交视图半透明渲染（alpha≈0.35）**——孔壁透出为深色竖带：位置=孔位、宽度=孔径、贯通=通孔、半截=盲孔深度。"X 光视图"对普通用户比工程图虚线更直观。
-- 2×2 拼图（880×880，~94KB）可读性良好；top 俯视对孔位布局表达力最强。
+- v1/v2（半透明"X 光"方案）被用户否决：**要求真工程图样式**——线框、虚线隐藏线、带尺寸，让用户能读懂尺寸与形状。
+- **v3-v5 工程图路径实证**：FreeCAD `TechDraw.projectEx`（OCCT HLR 隐藏线消除）**headless 完全可用**，返回 10 组边（0-4 可见类 hard/smooth/sewn/outline/iso，5-9 对应隐藏类；孔壁轮廓母线在 outline 组）。关键工程结论：
+  1. **投影局部坐标系 per-view 变换**（实测定稿）：top `(x,y)→(x,y)`；front/right `(x,y)→(y,-x)`——否则视图旋转 90°。
+  2. **尺寸从投影 2D 包围盒推导**（不用模型参数常量）——任意形状通用，且天然正确。
+  3. **圆检测**：投影边 Curve 为 Circle → 红色点划中心线十字 + `⌀{2r}` 引线标注 + 首圆定位尺寸（圆心到包围盒两方向）。
+  4. **三正交格统一比例**（共用最大跨度），"长对正高平齐"的简化实现。
+- v5 成品：front/right 孔壁两条竖直虚线（标准工程图孔表达）、top 含 ⌀12+定位 20/15+总尺寸、~41KB。
 
 ## 3. 设计
 
@@ -19,17 +23,20 @@
 
 ```
 ┌─────────────┬─────────────┐
-│ front 正视   │ top 俯视    │   front/right：半透明（X 光）
-│ (半透明)     │ (不透明)    │   top：不透明（俯视下孔本就可见）
-├─────────────┼─────────────┤   iso：标注版（面标签 A/B/C + 尺寸线）
-│ right 侧视   │ iso 立体    │   各格中英文小标题
-│ (半透明)     │ (标注)      │
+│ front 正视   │ right 侧视  │   三格工程图线框：可见边实线 #222/1.4、
+│ (工程图)     │ (工程图)    │   隐藏边虚线 #888/0.9、圆中心线红点划、
+├─────────────┼─────────────┤   尺寸界线+双箭头+数字（bbox 推导）、⌀ 引线
+│ top 俯视     │ iso 立体    │   iso：面片渲染+标注（面标签 A/B/C + 尺寸线）
+│ (工程图)     │ (标注)      │   各格中英文小标题（CJK 字体 fallback）
 └─────────────┴─────────────┘
 ```
 
-- `multiview_png(face_meshes, *, face_labels, dims, size=(880, 880)) -> bytes`：纯函数（吃逐面网格数据，不碰 FreeCAD），dev venv 可快测。
-- 绘制逻辑与 annotate.py 现已两份重复（render.py/annotate.py），本轮第三处出现——**rule of three 触发**：把单格绘制抽为 `annotate._draw_face_meshes(ax, face_meshes, *, alpha=1.0, light=...)` 共享 helper，annotate.annotated_png 与 multiview 复用；render.py 已交付不动。
-- `render_multiview(shape) -> (png, table, faces_reg, edges_reg)`：真实入口（视角集固定 2×2，无 view 参数），逐面 tessellate 一次、四格复用；iso 格调用现有标注逻辑（标签锚点/可见性按 iso 视角算），标签表/注册表语义与 render_annotated(mode="faces") 完全一致（注册表全量契约、shown=表键）。
+- `project_view(shape, direction, tf) -> {"vis": [...], "hid": [...], "circles": [(cx,cy,r,visible)]}`：HLR 投影 + 2D 变换（FreeCAD 路径，调用方保证 silence_fd1）。
+- `draw_engineering_view(ax, view_data, title) -> bbox|None`：2D 工程图格绘制（纯 matplotlib）。
+- `multiview_png(*, eng_views, face_meshes, face_labels, dims, size) -> bytes`：纯函数（吃投影折线/圆数据 + iso 网格数据），dev venv 可快测。
+- `render_multiview(shape) -> (png, table, faces_reg, edges_reg)`：真实入口；iso 格数据走 `collect_annotation_data(view="iso")`（标签表/注册表语义与 render_annotated(mode="faces") 完全一致：注册表全量契约、shown=表键）；三正交格走 `project_view`。
+- 多孔标注策略：每格 ⌀ 标注按半径去重（同径只标一次）；定位尺寸只标首个可见圆（防拥挤）。
+- iso 格绘制复用 `annotate._draw_face_meshes`（已抽取）。
 
 ### 3.2 server 集成
 
@@ -54,7 +61,7 @@
 
 ## 5. 风险
 
-1. 半透明 painter's algorithm 伪影——spike 已人眼可接受；复杂件恶化时表注/iso 格兜底。
+1. HLR 投影耗时与稳健性（复杂件可能秒级；圆柱轮廓的离散噪声——v5 实测 right 视图有一条多余虚线，语义无害可接受）——慢测记录耗时。
 2. 工具返回形态变化（dict → [dict, Image]）对客户端兼容性——FastMCP 混合 list 已验证+黑盒跑通；structuredContent 因 `-> Any` 不生成（与 render_part annotate 同型，已知契约）。注意 server 工具签名注解需改 `-> Any`。
 3. 渲染时间累计——每工具 +1~2s，可接受；若实测超 3s 记录并在计划阶段决定是否降图幅。
 
