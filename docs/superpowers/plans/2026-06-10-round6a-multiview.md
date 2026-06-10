@@ -587,3 +587,26 @@ def test_auto_view_labels_fresh_after_feature(runtime_env):
 - [ ] **Step 4**: commit `feat(multiview): engineering-drawing orthographic views (HLR wireframe, dims, hidden lines)`
 
 后续 Task 3/4/5/6 不变（render_multiview 对外签名未变）；Task 5 慢测增加：HLR 耗时打印 + top 视图投影含圆断言。
+
+---
+
+## 实施记录与验收（2026-06-10，macOS arm64 实机）
+
+**执行方式**：闭关 subagent-driven。中途经历一次**用户方向修正**：T2 交付半透明"X 光"方案后用户否决，要求真工程图样式 → spike v3-v5 三版迭代（TechDraw.projectEx HLR headless 实证）→ Task 2-R 改造定稿。
+
+### 验收结果
+- 快测 **177 passed** + ruff 清零 + 模块纯净（multiview 模块级零 TechDraw/matplotlib/FreeCAD）。
+- 真机慢测 **32 passed**：multiview 与 render_annotated 标签三向等价、标签新鲜性+shown 门控、**非对称凸台精确 2D 坐标断言**（钉死三视图变换符号）、fillet 弧不入 circles、HLR 全流程 302ms。
+- **黑盒（真实 MCP 协议）**：`add_box` → 直接收到 `[json+工程图拼图]`（标签当场刷新无 stale）→ 按表选顶面 `add_hole(⌀8)` → 再收拼图 → 体积差 0.000。**两张图人眼确认**：三视图带尺寸/⌀8/中心线/定位 20·15/孔壁虚线，iso 格标签同步。
+
+### 审查逮到的问题（已修复）
+1. **2×CRITICAL（终审 silent-failure-hunter 真机实锤）**：①right 侧视图整体 180° 旋转（front/right 共用变换但两方向投影局部系手性不同；spike 用上下对称零件检验导致旋转不可分辨——"几何不撒谎、语义撒谎"）→ right tf 改 `(-y,x)`+坐标取证注释；②fillet 圆角弧被当整圆标 ⌀ 并劫持定位尺寸 → 2π 整圆判定（`bca59b6`）。
+2. T3/T4 审查：_attach_view 不连坐承诺漏网（TypeError 穿透谎报失败诱发重试叠对象）→ 事务后纯展示阶段宽抓 Exception；labels_stale 双源矛盾 → setdefault 保留 tools 层语义（`f579ab2`）。
+3. T1/T2 审查：CJK 标题字体计划转录丢失（方块字）→ 跨平台 fallback；faces 模式 edges_of 静默回归 → 显式拒绝（`d8fe797`）。
+4. 其余：⌀ 只标可见整圆、每孔定位尺寸、multi 分支结构化宽抓、空格"（无投影）"占位、投影朝向约定声明（`bca59b6`）。
+
+### 方法论沉淀（第五轮 CRITICAL 的新教训）
+**对称零件人眼检验 + 弱断言（"含圆"）对朝向/语义类错误全盲**——线条都是真的，但标注/朝向把真线条解读错了。解法已固化为测试纪律：非对称取证体 + 精确 2D 坐标断言。
+
+### 结论
+「说一句，看一张读得懂的工程图」闭环成立：每步建模指令自动回 2×2 拼图（三视图带尺寸/孔径/隐藏线 + 标注 iso），标签当场刷新。HLR 302ms/件，拼图 ~45KB。
