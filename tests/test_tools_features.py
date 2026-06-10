@@ -244,6 +244,34 @@ def test_visibility_signs_on_real_box(runtime_env):
 
 
 @pytest.mark.slow
+def test_unshown_edge_label_rejected_until_edges_annotated(runtime_env):
+    """shown gate 真机闭环（终审 CRITICAL-1）：只看过 faces 标注图就编造 'E1' 做
+    fillet → 响亮拒绝；annotate edges（同几何，shown 累积）后 → fillet 成功。"""
+    out = _run_in_env(runtime_env, (
+        "from vibecad.engine import naming\n"
+        "from vibecad.engine.session import Session\n"
+        "from vibecad.feedback.annotate import render_annotated\n"
+        "from vibecad.tools import features, modeling\n"
+        "s = Session(); modeling.new_document(s, 'Shown')\n"
+        "modeling.add_box(s, 30, 30, 30)\n"
+        "png, table, freg, ereg = render_annotated(s.get_result_shape(), mode='faces')\n"
+        "s.set_labels(freg, ereg, shown=set(table.keys()))\n"  # 模拟 server：只展示面条目
+        "msg = ''\n"
+        "try:\n"
+        "    features.fillet_edges(s, ['E1'], radius=2)\n"  # 没看过边标注图——编造
+        "except naming.LabelExpiredError as exc:\n"
+        "    msg = str(exc)\n"
+        "assert '尚未' in msg, msg\n"
+        "png2, t2, freg2, ereg2 = render_annotated(s.get_result_shape(), mode='edges')\n"
+        "s.set_labels(freg2, ereg2, shown=set(t2.keys()))\n"  # 同几何 → shown 累积
+        "r = features.fillet_edges(s, ['E1'], radius=2)\n"
+        "assert r['ok'], r\n"
+        "print('SHOWN_GATE_OK')\n"
+    ))
+    assert "SHOWN_GATE_OK" in out
+
+
+@pytest.mark.slow
 def test_edges_mode_keeps_face_labels(runtime_env):
     """T3 修复回归：看面→看边（每次 render 都整体 set_labels，模拟 server 行为）后，
     面标签仍可解析——注册表无论 mode 都全量注册，不因 edges 渲染丢面标签。"""

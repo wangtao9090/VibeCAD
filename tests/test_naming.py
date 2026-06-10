@@ -156,6 +156,45 @@ def test_resolve_edge_roundtrip(monkeypatch):
     assert s.resolve_edge("E1") == 0
 
 
+def test_unshown_label_rejected_until_shown(monkeypatch):
+    """shown gate：注册表全量注册，但只有标签表实际展示过的键可被指认——
+    AI 没看过任何边标注图就编造 'E1' 必须响亮拒绝（终审 CRITICAL-1）。"""
+    top = _top()
+    e = FakeEdge(Line(), 40.0, (20, 0, 0))
+    s = _session_with_shape(monkeypatch, _FakeShape(faces=[top], edges=[e]))
+    freg = {"A": naming.face_fingerprint(top)}
+    ereg = {"E1": naming.edge_fingerprint(e)}
+    s.set_labels(freg, ereg, shown={"A"})  # faces 标注：表里只有面条目
+    assert s.resolve_face("A") == 0
+    with pytest.raises(LabelExpiredError, match="尚未"):
+        s.resolve_edge("E1")  # 边标注图从没展示过——编造
+    s.set_labels(freg, ereg, shown={"E1"})  # 同注册表（几何没变）→ shown 累积
+    assert s.resolve_face("A") == 0 and s.resolve_edge("E1") == 0
+
+
+def test_shown_resets_when_registry_changes(monkeypatch):
+    """注册表变化（几何变了）→ 旧 shown 重置，只认本次展示的键。"""
+    top = _top()
+    e = FakeEdge(Line(), 40.0, (20, 0, 0))
+    s = _session_with_shape(monkeypatch, _FakeShape(faces=[top], edges=[e]))
+    s.set_labels({"A": naming.face_fingerprint(top)}, {}, shown={"A"})
+    assert s.resolve_face("A") == 0
+    s.set_labels({"A": naming.face_fingerprint(_top(area=999.0))},
+                 {"E1": naming.edge_fingerprint(e)}, shown={"E1"})  # faces 注册表变了
+    with pytest.raises(LabelExpiredError, match="尚未"):
+        s.resolve_face("A")  # 旧 shown 不得跨几何残留
+    assert s.resolve_edge("E1") == 0
+
+
+def test_set_labels_shown_none_shows_all(monkeypatch):
+    """shown=None 向后兼容：视为全部展示（内部/测试用法）。"""
+    top = _top()
+    e = FakeEdge(Line(), 40.0, (20, 0, 0))
+    s = _session_with_shape(monkeypatch, _FakeShape(faces=[top], edges=[e]))
+    s.set_labels({"A": naming.face_fingerprint(top)}, {"E1": naming.edge_fingerprint(e)})
+    assert s.resolve_face("A") == 0 and s.resolve_edge("E1") == 0
+
+
 def test_labels_cleared_on_close_document(monkeypatch):
     """关文档必须清空标签快照（真实路径：close_document 先清 _labels，
     _doc is None 时早退不碰 FreeCAD，故可在 dev venv 直接调用）。"""

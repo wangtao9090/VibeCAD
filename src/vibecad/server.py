@@ -203,7 +203,8 @@ def render_part(view: str = "iso", annotate: str | None = None,
             return Image(data=png, format="png")
         png, table, faces_reg, edges_reg = _annotate.render_annotated(
             shape, mode=annotate, edges_of=ef_idx, view=view)
-        _session.set_labels(faces_reg, edges_reg)
+        # shown=本次表里实际展示的键：未展示过的标签不可被指认（防 AI 编造盲选）
+        _session.set_labels(faces_reg, edges_reg, shown=set(table.keys()))
         return [Image(data=png, format="png"),
                 json.dumps({"ok": True, "labels": table}, ensure_ascii=False)]
     except (RuntimeError, ValueError) as exc:
