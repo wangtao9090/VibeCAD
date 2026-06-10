@@ -812,3 +812,28 @@ assert abs(r['volume'] - vol0) < 1e-6, (r['volume'], vol0)
 print('MODIFY_GUARDS_OK')
 """)
     assert "MODIFY_GUARDS_OK" in out
+
+
+@pytest.mark.slow
+def test_modify_allowed_after_half_groove(runtime_env):
+    """复审 B 回归：boolean_cut 半嵌边缘的圆柱刀具开半圆槽——完整圆柱面从创建起
+    就是 0（合法几何，无完整孔）。孔完整性基线必须取改前 shape 实际计数而非
+    "每径完整面数 >= 刀具数"的虚构不变量，否则含半圆槽的文档上任何 modify_part
+    都被指向不存在的"⌀10 孔"误拒。"""
+    out = _run_in_env(runtime_env, """
+import math
+from vibecad.engine.session import Session
+from vibecad.tools import modeling, modify
+s = Session()
+modeling.new_document(s, 'GROOVE')
+modeling.add_box(s, 40, 30, 20)
+modeling.add_cylinder(s, 5, 20, position=(40, 15, 0))  # 轴在 x=40 边缘，半嵌入
+r = modeling.boolean_cut(s, 'Box', 'Cylinder')
+assert r['ok'], r
+r = modify.modify_part(s, 'Box', 'width', 35)  # 合法修改，与槽无关——不得误拒
+assert r['ok'], r
+expect = 40 * 35 * 20 - math.pi * 25 * 20 / 2  # 槽仍是完整半圆柱
+assert abs(r['volume'] - expect) < 1.0, (r['volume'], expect)
+print('HALF_GROOVE_MODIFY_OK', round(r['volume'], 2))
+""")
+    assert "HALF_GROOVE_MODIFY_OK" in out
