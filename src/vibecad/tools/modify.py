@@ -8,6 +8,7 @@ import math
 from typing import Any
 
 from vibecad.engine.session import Session
+from vibecad.tools.features import _count_full_cylinder_faces
 
 # TypeId → {对外参数名(小写): FreeCAD 属性名}；None 表示值藏在 Edges 元组（Fillet/Chamfer）
 _WHITELIST: dict[str, dict[str, str | None]] = {
@@ -73,9 +74,32 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
                 old = float(obj.Edges[0][1])
             else:
                 old = float(getattr(obj, attr))
-            if abs(old - value) < 1e-12:
+            if abs(old - value) < 1e-9:
                 raise ValueError(f"参数 {key} 已是 {value:g}，无需修改")
-            result_before = session.get_result_shape().Volume
+            result_obj_before = session.get_result_object()
+            before_name = result_obj_before.Name
+            result_before = result_obj_before.Shape.Volume
+            # 孔完整性快照（审查 E1-E4：改参把孔变开槽/移出零件/把件切两半全被
+            # ok:True 误报）。文档不变量：每把作为 Part::Cut.Tool 的圆柱刀具，结果
+            # 形状中其半径的完整圆柱面数 >= 该半径刀具数（add_hole 的增量断言
+            # _count_full_cylinder_faces >= before+1 在每次打孔时已建立此不变量）。
+            # 修改参数后此不变量必须保持。
+            # 推演（改的就是孔自身半径，如 HoleTool radius 4→5）：旧半径 4 的完整
+            # 面计数会 -1 而新半径 5 的 +1 是【预期】行为——所以期望计数按
+            # 【改后预期半径】构建：被改刀具按新值 value 计入、其余刀具按当前半径
+            # 计入。同径双刀具改一把（4→5，另一把仍 4）自然得到 {5:1, 4:1}，逐
+            # 半径断言互不干扰；按改前 shape 实际计数搬运反而会在该场景重复计数。
+            expected_counts: dict[float, int] = {}
+            for o in session.doc.Objects:
+                if getattr(o, "TypeId", "") != "Part::Cut":
+                    continue
+                tool = getattr(o, "Tool", None)
+                if tool is None or getattr(tool, "TypeId", "") != "Part::Cylinder":
+                    continue
+                r_exp = float(value) if (tool.Name == obj.Name and key == "radius") \
+                    else float(tool.Radius)
+                rk = round(r_exp, 6)
+                expected_counts[rk] = expected_counts.get(rk, 0) + 1
             if attr is None:
                 obj.Edges = [(idx, float(value), float(value))
                              for (idx, _r1, _r2) in obj.Edges]
@@ -87,16 +111,36 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
             if abs(now - value) > 1e-9:
                 raise RuntimeError(
                     f"几何断言失败：参数 {key} 设为 {value:g} 后回读为 {now:g}")
-            shape = session.get_result_shape()
-            session.assert_valid_solid(shape)
-            if abs(shape.Volume - result_before) < 1e-9:
+            # 结果对象漂移断言（审查 E5 CRITICAL：刀具吞件 → Cut 体积归 0 →
+            # get_result_object fallback 漂移到刀具圆柱 → 谎报刀具体积污染会话）
+            result_obj = session.get_result_object()
+            if result_obj.Name != before_name:
                 raise RuntimeError(
-                    f"几何断言失败：参数 {key} {old:g}→{value:g} 后结果体积无变化"
-                    "——下游依赖链可能未重算")
+                    f"几何断言失败：参数修改导致结果对象从 {before_name} 漂移为 "
+                    f"{result_obj.Name}——修改可能吞掉了整个零件，请检查 value 是否过大")
+            shape = result_obj.Shape
+            session.assert_valid_solid(shape)
+            # 单实体断言（审查 E4：⌀32 刀具横穿 30 宽零件把件切成两半仍 ok:True）
+            n_solids = len(shape.Solids)
+            if n_solids != 1:
+                raise RuntimeError(
+                    f"几何断言失败：参数修改把零件切成 {n_solids} 块"
+                    "——新尺寸可能让孔/特征越过零件边缘")
+            # 孔完整性断言（快照推演见上）
+            for rk, n_expect in expected_counts.items():
+                if _count_full_cylinder_faces(shape, rk) < n_expect:
+                    raise RuntimeError(
+                        f"几何断言失败：参数修改破坏了 ⌀{2 * rk:g} 孔的完整性"
+                        "（孔可能变成开口缺口或被移出零件）"
+                        "——请检查新尺寸与孔位的关系")
             result = {"ok": True,
                       "modified": {"name": obj.Name, "parameter": key,
                                    "from": old, "to": float(value)},
                       "volume": shape.Volume,
                       "labels_stale": True,
                       "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"}
+            # 体积不变是合法情形（审查 E6：通孔在零件外的部分加长）——参数回读
+            # 断言+对象漂移断言+孔完整性断言已接管"链未重算"的兜底，不再误拒
+            if abs(shape.Volume - result_before) < 1e-9:
+                result["note"] = "该修改未改变最终几何（参数已生效，例如通孔在零件外的部分加长）"
     return result
