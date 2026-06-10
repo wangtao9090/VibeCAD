@@ -4,6 +4,7 @@ import pytest
 
 from vibecad.engine import naming
 from vibecad.engine.naming import LabelExpiredError
+from vibecad.engine.session import Session
 
 
 class _Vec:
@@ -110,3 +111,47 @@ def test_face_summary_readable():
 def test_face_labels_sequence():
     assert naming.face_labels(3) == ["A", "B", "C"]
     assert naming.face_labels(28)[26] == "AA"
+
+
+# --- Session 注册表（fake shape，不碰 FreeCAD）---
+
+
+class _FakeShape:
+    def __init__(self, faces=(), edges=()):
+        self.Faces = list(faces)
+        self.Edges = list(edges)
+
+
+def _session_with_shape(monkeypatch, shape):
+    s = Session.__new__(Session)  # 绕开 FreeCAD 初始化
+    s._labels = None
+    monkeypatch.setattr(Session, "get_result_shape", lambda self: shape, raising=False)
+    return s
+
+
+def test_resolve_face_roundtrip(monkeypatch):
+    top = _top()
+    other = _top(area=600.0, center=(1, 1, 1))
+    s = _session_with_shape(monkeypatch, _FakeShape(faces=[other, top]))
+    s.set_labels({"A": naming.face_fingerprint(top)}, {})
+    assert s.resolve_face("A") == 1
+
+
+def test_resolve_face_unknown_label(monkeypatch):
+    s = _session_with_shape(monkeypatch, _FakeShape())
+    s.set_labels({}, {})
+    with pytest.raises(LabelExpiredError):
+        s.resolve_face("Z")
+
+
+def test_resolve_without_labels_raises(monkeypatch):
+    s = _session_with_shape(monkeypatch, _FakeShape())
+    with pytest.raises(LabelExpiredError):
+        s.resolve_face("A")
+
+
+def test_resolve_edge_roundtrip(monkeypatch):
+    e = FakeEdge(Line(), 40.0, (20, 0, 0))
+    s = _session_with_shape(monkeypatch, _FakeShape(edges=[e]))
+    s.set_labels({}, {"E1": naming.edge_fingerprint(e)})
+    assert s.resolve_edge("E1") == 0

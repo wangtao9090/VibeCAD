@@ -16,6 +16,7 @@ class Session:
         self._doc: Any = None
         self._loaded: bool = False
         self._checkpoint_dir = checkpoint_dir
+        self._labels: dict | None = None
 
     @property
     def doc(self) -> Any:
@@ -81,13 +82,14 @@ class Session:
             self._doc.saveAs(str(path))
         return path
 
-    def get_result_shape(self) -> Any:
+    def get_result_object(self) -> Any:
+        """返回当前结果文档对象（含 Fillet/Chamfer）；无则抛 RuntimeError。"""
         if self._doc is None:
             raise RuntimeError("无活动文档")
-        boolean_types = ("Part::Cut", "Part::Fuse", "Part::Common")
+        result_types = ("Part::Cut", "Part::Fuse", "Part::Common", "Part::Fillet", "Part::Chamfer")
         result = None
         for obj in self._doc.Objects:
-            if getattr(obj, "TypeId", "") in boolean_types and hasattr(obj, "Shape"):
+            if getattr(obj, "TypeId", "") in result_types and hasattr(obj, "Shape"):
                 result = obj
         if result is None:
             for obj in self._doc.Objects:
@@ -95,4 +97,27 @@ class Session:
                     result = obj
         if result is None:
             raise RuntimeError("文档中无有效 solid")
-        return result.Shape
+        return result
+
+    def get_result_shape(self) -> Any:
+        return self.get_result_object().Shape
+
+    # ---- Round 5：标签注册表（标注快照 → 指纹解析）----
+    def set_labels(self, faces: dict, edges: dict) -> None:
+        """存最近一次标注快照：{label: fingerprint}。"""
+        self._labels = {"faces": dict(faces), "edges": dict(edges)}
+
+    def resolve_face(self, label: str) -> int:
+        """面标签 → 当前结果形状的面索引；快照缺失/标签未知/匹配失败均抛 LabelExpiredError。"""
+        from vibecad.engine import naming  # noqa: PLC0415
+        if not self._labels or label not in self._labels["faces"]:
+            raise naming.LabelExpiredError(
+                f"未知面标签 {label!r}——请先调用 render_part(annotate='faces') 获取标注")
+        return naming.match_face(self._labels["faces"][label], self.get_result_shape().Faces)
+
+    def resolve_edge(self, label: str) -> int:
+        from vibecad.engine import naming  # noqa: PLC0415
+        if not self._labels or label not in self._labels["edges"]:
+            raise naming.LabelExpiredError(
+                f"未知边标签 {label!r}——请先调用 render_part(annotate='edges') 获取标注")
+        return naming.match_edge(self._labels["edges"][label], self.get_result_shape().Edges)
