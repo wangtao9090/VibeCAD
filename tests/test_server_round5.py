@@ -76,8 +76,13 @@ def test_add_hole_delegates(server, monkeypatch):
     monkeypatch.setattr(server._features, "add_hole",
                         lambda session, face, diameter, depth, offset:
                         {"ok": True, "face": face, "diameter": diameter})
+    monkeypatch.setattr(server._session, "get_result_shape", lambda: object())
+    monkeypatch.setattr(server._multiview, "render_multiview",
+                        lambda shape: (b"\x89PNG", {}, {}, {}))
+    monkeypatch.setattr(server._session, "set_labels", lambda f, e, shown=None: None)
     out = server.add_hole(face="A", diameter=8)
-    assert out["ok"] is True and out["face"] == "A"
+    assert isinstance(out, list)  # 成功路径返回 [dict, Image]
+    assert out[0]["ok"] is True and out[0]["face"] == "A"
 
 
 def test_add_hole_label_expired_structured(server, monkeypatch):
@@ -96,8 +101,15 @@ def test_fillet_and_chamfer_delegate(server, monkeypatch):
                         lambda session, edges, radius: {"ok": True, "edges": edges})
     monkeypatch.setattr(server._features, "chamfer_edges",
                         lambda session, edges, size: {"ok": True, "edges": edges})
-    assert server.fillet_edges(edges=["E1"], radius=2)["ok"] is True
-    assert server.chamfer_edges(edges=["E2"], size=1)["ok"] is True
+    monkeypatch.setattr(server._session, "get_result_shape", lambda: object())
+    monkeypatch.setattr(server._multiview, "render_multiview",
+                        lambda shape: (b"\x89PNG", {}, {}, {}))
+    monkeypatch.setattr(server._session, "set_labels", lambda f, e, shown=None: None)
+    fillet_out = server.fillet_edges(edges=["E1"], radius=2)
+    chamfer_out = server.chamfer_edges(edges=["E2"], size=1)
+    # 成功路径返回 [dict, Image]
+    assert isinstance(fillet_out, list) and fillet_out[0]["ok"] is True
+    assert isinstance(chamfer_out, list) and chamfer_out[0]["ok"] is True
 
 
 def test_render_part_edges_of_without_annotate_rejected(server, monkeypatch):

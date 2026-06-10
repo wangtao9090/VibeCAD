@@ -129,6 +129,28 @@ def _runtime_guard() -> dict[str, Any] | None:
     return None
 
 
+def _attach_view(result: dict[str, Any]) -> Any:
+    """成功结果附三视图拼图 + 当场刷新标签表；附图失败不连坐（保留操作成功 +
+    render_error + 退回 labels_stale 提示）——绝不因附图失败把成功操作报成失败，
+    也绝不静默吞掉渲染错误。"""
+    if not isinstance(result, dict) or not result.get("ok"):
+        return result
+    try:
+        with _silence_fd1():
+            shape = _session.get_result_shape()
+            png, table, faces_reg, edges_reg = _multiview.render_multiview(shape)
+        _session.set_labels(faces_reg, edges_reg, shown=set(table.keys()))
+        result.pop("labels_stale", None)
+        result.pop("hint", None)
+        result["labels"] = table
+        return [result, Image(data=png, format="png")]
+    except (RuntimeError, ValueError) as exc:
+        result["labels_stale"] = True
+        result["hint"] = "几何已变更，调用 render_part(annotate='faces') 查看最新标注"
+        result["render_error"] = f"自动渲染失败：{exc}"
+        return result
+
+
 @mcp.tool()
 def new_document(name: str) -> dict[str, Any]:
     """新建一个 CAD 文档（单零件工作区）。"""
@@ -137,26 +159,48 @@ def new_document(name: str) -> dict[str, Any]:
 
 @mcp.tool()
 def add_box(length: float, width: float, height: float,
-            position: list[float] | None = None) -> dict[str, Any]:
-    """添加参数化长方体（mm）；position=[x,y,z] 放置位置（默认原点）。"""
-    return _runtime_guard() or _modeling.add_box(
-        _session, length, width, height,
-        position=tuple(position) if position is not None else (0.0, 0.0, 0.0))
+            position: list[float] | None = None) -> Any:
+    """添加参数化长方体（mm）；position=[x,y,z] 放置位置（默认原点）。成功后自动附三视图拼图。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        result = _modeling.add_box(
+            _session, length, width, height,
+            position=tuple(position) if position is not None else (0.0, 0.0, 0.0))
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"创建失败：{exc}"}
+    return _attach_view(result)
 
 
 @mcp.tool()
 def add_cylinder(radius: float, height: float,
-                 position: list[float] | None = None, axis: str = "z") -> dict[str, Any]:
-    """添加参数化圆柱（mm）；position=[x,y,z] 放置位置，axis=x|y|z 圆柱轴向（默认 z）。"""
-    return _runtime_guard() or _modeling.add_cylinder(
-        _session, radius, height,
-        position=tuple(position) if position is not None else (0.0, 0.0, 0.0), axis=axis)
+                 position: list[float] | None = None, axis: str = "z") -> Any:
+    """添加参数化圆柱（mm）；position=[x,y,z] 放置位置，axis=x|y|z 圆柱轴向（默认 z）。
+    成功后自动附三视图拼图。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        result = _modeling.add_cylinder(
+            _session, radius, height,
+            position=tuple(position) if position is not None else (0.0, 0.0, 0.0), axis=axis)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"创建失败：{exc}"}
+    return _attach_view(result)
 
 
 @mcp.tool()
-def boolean_cut(base_name: str, tool_name: str) -> dict[str, Any]:
-    """布尔差集：从 base 减去 tool，返回结果对象名与体积。"""
-    return _runtime_guard() or _modeling.boolean_cut(_session, base_name, tool_name)
+def boolean_cut(base_name: str, tool_name: str) -> Any:
+    """布尔差集：从 base 减去 tool，返回结果对象名与体积。成功后自动附三视图拼图。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        result = _modeling.boolean_cut(_session, base_name, tool_name)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"布尔运算失败：{exc}"}
+    return _attach_view(result)
 
 
 @mcp.tool()
@@ -229,41 +273,44 @@ def render_part(view: str = "iso", annotate: str | None = None,
 
 @mcp.tool()
 def add_hole(face: str, diameter: float, depth: float | None = None,
-             offset: list[float] | None = None) -> dict[str, Any]:
+             offset: list[float] | None = None) -> Any:
     """在指定面打圆孔（face=面标签，来自 render_part(annotate='faces')）。
-    depth 省略=通孔；offset=[u,v] 面内毫米偏移（省略=面正中）。"""
+    depth 省略=通孔；offset=[u,v] 面内毫米偏移（省略=面正中）。成功后自动附三视图拼图。"""
     guard = _runtime_guard()
     if guard:
         return guard
     try:
-        return _features.add_hole(_session, face, diameter, depth,
-                                  tuple(offset) if offset is not None else (0.0, 0.0))
+        result = _features.add_hole(_session, face, diameter, depth,
+                                    tuple(offset) if offset is not None else (0.0, 0.0))
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"打孔失败：{exc}"}
+    return _attach_view(result)
 
 
 @mcp.tool()
-def fillet_edges(edges: list[str], radius: float) -> dict[str, Any]:
-    """对边标签列表做圆角（标签来自 render_part(annotate='edges')）。"""
+def fillet_edges(edges: list[str], radius: float) -> Any:
+    """对边标签列表做圆角（标签来自 render_part(annotate='edges')）。成功后自动附三视图拼图。"""
     guard = _runtime_guard()
     if guard:
         return guard
     try:
-        return _features.fillet_edges(_session, edges, radius)
+        result = _features.fillet_edges(_session, edges, radius)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"圆角失败：{exc}"}
+    return _attach_view(result)
 
 
 @mcp.tool()
-def chamfer_edges(edges: list[str], size: float) -> dict[str, Any]:
-    """对边标签列表做倒角（标签来自 render_part(annotate='edges')）。"""
+def chamfer_edges(edges: list[str], size: float) -> Any:
+    """对边标签列表做倒角（标签来自 render_part(annotate='edges')）。成功后自动附三视图拼图。"""
     guard = _runtime_guard()
     if guard:
         return guard
     try:
-        return _features.chamfer_edges(_session, edges, size)
+        result = _features.chamfer_edges(_session, edges, size)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"倒角失败：{exc}"}
+    return _attach_view(result)
 
 
 def main() -> None:
