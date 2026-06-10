@@ -8,7 +8,14 @@ import math
 from typing import Any
 
 from vibecad.engine.session import Session
-from vibecad.tools.features import _count_full_cylinder_faces
+from vibecad.tools._integrity import (
+    assert_holes_intact,
+    assert_not_touched,
+    assert_result_not_drifted,
+    assert_single_solid,
+    cut_tool_radii,
+    hole_count_snapshot,
+)
 
 # TypeId → {对外参数名(小写): FreeCAD 属性名}；None 表示值藏在 Edges 元组（Fillet/Chamfer）
 _WHITELIST: dict[str, dict[str, str | None]] = {
@@ -135,7 +142,10 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
             # 缺口降到 1 被抓——简单顶包已不可行），但"计数补偿"型顶包理论上仍
             # 可漏（一次修改同时让孔面消失、又让某残缺凸台面恢复完整，总数不变）。
             # Fuse 落地时本判据需升级为按刀具轴线匹配完整面，而非按半径全局计数。
-            tool_radii: set[float] = set()
+            #
+            # 用 cut_tool_radii / hole_count_snapshot 取快照（_integrity 共享逻辑），
+            # 桶迁移（modify 特有：改孔刀具自身半径时迁移 expected_counts）仍在此处。
+            all_radii = cut_tool_radii(session.doc)
             modified_tool_rk: float | None = None
             for o in session.doc.Objects:
                 if getattr(o, "TypeId", "") != "Part::Cut":
@@ -143,12 +153,10 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
                 tool = getattr(o, "Tool", None)
                 if tool is None or getattr(tool, "TypeId", "") != "Part::Cylinder":
                     continue
-                rk = round(float(tool.Radius), 6)
-                tool_radii.add(rk)
                 if tool.Name == obj.Name and key == "radius":
-                    modified_tool_rk = rk
-            expected_counts: dict[float, int] = {
-                rk: _count_full_cylinder_faces(shape_before, rk) for rk in tool_radii}
+                    modified_tool_rk = round(float(tool.Radius), 6)
+                    break
+            expected_counts: dict[float, int] = hole_count_snapshot(shape_before, all_radii)
             if modified_tool_rk is not None \
                     and expected_counts.get(modified_tool_rk, 0) > 0:
                 expected_counts[modified_tool_rk] -= 1
@@ -173,32 +181,17 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
             # "链已执行"的可信信号：setattr/Edges 重写后对象置 Touched（Box/
             # Cylinder/Fillet 真机均已验证），正常 recompute 后必为 Up-to-date，
             # 保持 Touched 即 recompute 未执行或未覆盖该对象。
-            if "Touched" in getattr(obj, "State", []):
-                raise RuntimeError(
-                    f"几何断言失败：参数 {key} 已写入但对象 {obj.Name} 仍处 "
-                    "Touched 状态——依赖链可能未重算（recompute 未执行或失败）")
+            assert_not_touched(obj, f"参数 {key}")
             # 结果对象漂移断言（审查 E5 CRITICAL：刀具吞件 → Cut 体积归 0 →
             # get_result_object fallback 漂移到刀具圆柱 → 谎报刀具体积污染会话）
+            assert_result_not_drifted(session, before_name)
             result_obj = session.get_result_object()
-            if result_obj.Name != before_name:
-                raise RuntimeError(
-                    f"几何断言失败：参数修改导致结果对象从 {before_name} 漂移为 "
-                    f"{result_obj.Name}——修改可能吞掉了整个零件，请检查 value 是否过大")
             shape = result_obj.Shape
             session.assert_valid_solid(shape)
             # 单实体断言（审查 E4：⌀32 刀具横穿 30 宽零件把件切成两半仍 ok:True）
-            n_solids = len(shape.Solids)
-            if n_solids != 1:
-                raise RuntimeError(
-                    f"几何断言失败：参数修改把零件切成 {n_solids} 块"
-                    "——新尺寸可能让孔/特征越过零件边缘")
+            assert_single_solid(shape, "参数修改")
             # 孔完整性断言（快照推演见上）
-            for rk, n_expect in expected_counts.items():
-                if _count_full_cylinder_faces(shape, rk) < n_expect:
-                    raise RuntimeError(
-                        f"几何断言失败：参数修改破坏了 ⌀{2 * rk:g} 孔的完整性"
-                        "（孔可能变成开口缺口或被移出零件）"
-                        "——请检查新尺寸与孔位的关系")
+            assert_holes_intact(shape, expected_counts)
             result = {"ok": True,
                       "modified": {"name": obj.Name, "parameter": key,
                                    "from": old, "to": float(value)},

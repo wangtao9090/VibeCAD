@@ -1,0 +1,106 @@
+# src/vibecad/tools/_integrity.py
+"""特征完整性共享守卫（R7 抽取自 modify.py）：孔完整性快照/比对、结果对象漂移、
+Touched 账本、单 solid。消费方：modify/transform/features(pattern)/sketch。
+判据沿革见 R6b 计划实施记录（虚构不变量教训：基线必须取改前实际状态）。"""
+from __future__ import annotations
+
+import math
+from typing import Any
+
+from vibecad.engine.session import Session
+
+
+def cut_tool_radii(doc: Any) -> list[float]:
+    """文档中 Part::Cut.Tool 圆柱半径列表（去重用 set，保留浮点精度 round 6 位）。"""
+    radii: list[float] = []
+    for o in getattr(doc, "Objects", []):
+        if getattr(o, "TypeId", "") != "Part::Cut":
+            continue
+        tool = getattr(o, "Tool", None)
+        if tool is None or getattr(tool, "TypeId", "") != "Part::Cylinder":
+            continue
+        radii.append(round(float(tool.Radius), 6))
+    return radii
+
+
+def hole_count_snapshot(shape: Any, radii: list[float]) -> dict[float, int]:
+    """改前实际完整圆柱面计数基线（逐半径计数，不能用虚构不变量——见 R6b 留档）。
+
+    基线 = 改前 shape 中每个刀具半径的【实际】完整圆柱面数——不能用
+    "每径完整面数 >= 刀具数"的虚构不变量：boolean_cut（合法注册工具）的
+    圆柱刀具半嵌边缘开半圆槽时，完整面从创建起就是 0，虚构不变量会让含
+    半圆槽的文档上任何操作全量误拒（且错误消息指向不存在的孔）。
+    """
+    return {rk: _count_full_cylinder_faces(shape, rk) for rk in set(radii)}
+
+
+def _count_full_cylinder_faces(shape: Any, radius: float) -> int:
+    """数半径匹配（1e-6）且 u 参数跨满 2π（容差 1e-3）的圆柱面——完整圆孔的成形判据。
+    增量判据（cut 前后各数一次，after >= before+1）：存在性判据会被同径旧孔放行
+    新孔的越界缺口（安装孔阵列是常见操作，终审 CRITICAL-3）。"""
+    n = 0
+    for f in shape.Faces:
+        s = f.Surface
+        if type(s).__name__ != "Cylinder" or abs(s.Radius - radius) > 1e-6:
+            continue
+        u0, u1 = f.ParameterRange[0], f.ParameterRange[1]
+        if abs((u1 - u0) - 2 * math.pi) < 1e-3:
+            n += 1
+    return n
+
+
+def assert_holes_intact(shape: Any, expected: dict[float, int]) -> None:
+    """逐半径断言完整圆柱面数 >= 期望基线，否则响亮拒绝（RuntimeError）。
+
+    使用 >= 而非 == 是因为 modify_part 可能调整桶（桶迁移逻辑在调用处维护）；
+    transform/pattern 时调用处不做桶迁移，直接用原始基线。
+    """
+    for rk, n_expect in expected.items():
+        if _count_full_cylinder_faces(shape, rk) < n_expect:
+            raise RuntimeError(
+                f"几何断言失败：操作破坏了 ⌀{2 * rk:g} 孔的完整性"
+                "（孔可能变成开口缺口或被移出零件）"
+                "——请检查新参数与孔位的关系")
+
+
+def assert_single_solid(shape: Any, context: str) -> None:
+    """断言形状只有 1 个 solid，否则响亮拒绝（RuntimeError）。
+
+    单实体断言（审查 E4：⌀32 刀具横穿 30 宽零件把件切成两半仍 ok:True）。
+    """
+    n_solids = len(shape.Solids)
+    if n_solids != 1:
+        raise RuntimeError(
+            f"几何断言失败：{context} 把零件切成 {n_solids} 块"
+            "——新操作可能让孔/特征越过零件边缘")
+
+
+def assert_not_touched(obj: Any, parameter_desc: str) -> None:
+    """断言对象不处于 Touched 状态，否则响亮拒绝（RuntimeError）。
+
+    依赖链执行账本断言（复审 D：recompute 失灵时全部几何断言凭旧几何
+    通过 + 体积不变放行 = 静默失败粉饰成 ok+note）。真机取证：primitive
+    的 Shape 在 setattr 后【即时重建】（box.Length=45 后未 recompute
+    box.Shape.BoundBox.XLength 已是 45），被改对象的 Shape 级几何回读
+    对 primitive 恒过、无判别力——FreeCAD 自己的 touched 账本才是
+    "链已执行"的可信信号：setattr/Edges 重写后对象置 Touched（Box/
+    Cylinder/Fillet 真机均已验证），正常 recompute 后必为 Up-to-date，
+    保持 Touched 即 recompute 未执行或未覆盖该对象。
+    """
+    if "Touched" in getattr(obj, "State", []):
+        raise RuntimeError(
+            f"几何断言失败：{parameter_desc} 后对象 {obj.Name} 仍处 "
+            "Touched 状态——依赖链可能未重算（recompute 未执行或失败）")
+
+
+def assert_result_not_drifted(session: Session, before_name: str) -> None:
+    """断言结果对象名未改变，否则响亮拒绝（RuntimeError）。
+
+    结果对象漂移断言（审查 E5 CRITICAL：刀具吞件 → Cut 体积归 0 →
+    get_result_object fallback 漂移到刀具圆柱 → 谎报刀具体积污染会话）
+    """
+    result_obj = session.get_result_object()
+    if result_obj.Name != before_name:
+        raise RuntimeError(
+            f"几何断言失败：操作导致结果对象从 {before_name} 漂移为 "
+            f"{result_obj.Name}——操作可能吞掉了整个零件，请检查参数是否合理")
