@@ -24,11 +24,13 @@ def test_render_part_annotate_returns_image_and_table(server, monkeypatch):
         lambda shape, mode, edges_of, view: (b"\x89PNG fake", {"A": "顶面"}, {"A": {}}, {}))
     recorded = {}
     monkeypatch.setattr(server._session, "set_labels",
-                        lambda faces, edges: recorded.update(f=faces, e=edges))
+                        lambda faces, edges, shown=None: recorded.update(
+                            f=faces, e=edges, s=shown))
     out = server.render_part(view="iso", annotate="faces")
     assert isinstance(out, list) and isinstance(out[0], Image)
     table = json.loads(out[1])
     assert table["labels"]["A"] == "顶面" and recorded["f"] == {"A": {}}
+    assert recorded["s"] == {"A"}  # shown=本次标签表实际展示的键集合
 
 
 def test_render_part_no_annotate_unchanged(server, monkeypatch):
@@ -65,7 +67,7 @@ def test_render_part_edges_of_resolves_face_label(server, monkeypatch):
         return (b"\x89PNG fake", {}, {}, {})
 
     monkeypatch.setattr(server._annotate, "render_annotated", _fake_annotated)
-    monkeypatch.setattr(server._session, "set_labels", lambda faces, edges: None)
+    monkeypatch.setattr(server._session, "set_labels", lambda faces, edges, shown=None: None)
     out = server.render_part(view="iso", annotate="edges", edges_of="A")
     assert isinstance(out, list) and seen["edges_of"] == 3
 
@@ -119,7 +121,7 @@ def test_mcp_call_tool_render_annotate_contract(server, monkeypatch):
     monkeypatch.setattr(
         server._annotate, "render_annotated",
         lambda shape, mode, edges_of, view: (b"\x89PNGx", {"A": "顶面"}, {"A": {}}, {}))
-    monkeypatch.setattr(server._session, "set_labels", lambda faces, edges: None)
+    monkeypatch.setattr(server._session, "set_labels", lambda faces, edges, shown=None: None)
     blocks = anyio.run(lambda: server.mcp.call_tool("render_part", {"annotate": "faces"}))
     # mcp 1.27 实测：call_tool 直接返回 content blocks 列表（tuple 兜底兼容未来变化）
     content = blocks[0] if isinstance(blocks, tuple) else blocks

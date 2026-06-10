@@ -30,6 +30,8 @@ class Session:
 
     @contextlib.contextmanager
     def _transaction(self, label: str):
+        if self._doc is None:  # 否则 AttributeError 穿透，绕过 RuntimeError/ValueError 契约
+            raise RuntimeError("无活动文档——请先调用 new_document 创建文档")
         self._doc.openTransaction(label)
         try:
             yield
@@ -114,16 +116,32 @@ class Session:
         return self.get_result_object().Shape
 
     # ---- Round 5：标签注册表（标注快照 → 指纹解析）----
-    def set_labels(self, faces: dict, edges: dict) -> None:
-        """存最近一次标注快照：{label: fingerprint}。"""
-        self._labels = {"faces": dict(faces), "edges": dict(edges)}
+    def set_labels(self, faces: dict, edges: dict, shown: set | None = None) -> None:
+        """存最近一次标注快照：{label: fingerprint}。
+
+        shown = 本次标签表实际向 AI 展示过的键集合（None 视为全部——内部/测试用法）。
+        注册表与现存快照完全相等（几何没变）时 shown 跨调用累积——"看面再看边"
+        两次后两类标签都算展示过；注册表变化（几何变了/首次）则重置为本次 shown。
+        """
+        faces, edges = dict(faces), dict(edges)
+        shown = set(faces) | set(edges) if shown is None else set(shown)
+        if (self._labels is not None
+                and self._labels["faces"] == faces and self._labels["edges"] == edges):
+            shown |= self._labels["shown"]
+        self._labels = {"faces": faces, "edges": edges, "shown": shown}
 
     def resolve_face(self, label: str) -> int:
-        """面标签 → 当前结果形状的面索引；快照缺失/标签未知/匹配失败均抛 LabelExpiredError。"""
+        """面标签 → 当前结果形状的面索引；快照缺失/标签未知/未展示/匹配失败均抛
+        LabelExpiredError。未展示 gate：注册表无论 mode 都全量注册，但 AI 只见过
+        标签表里画出来的条目——未展示的标签指认是编造，必须响亮拒绝。"""
         from vibecad.engine import naming  # noqa: PLC0415
         if not self._labels or label not in self._labels["faces"]:
             raise naming.LabelExpiredError(
                 f"未知面标签 {label!r}——请先调用 render_part(annotate='faces') 获取标注")
+        if label not in self._labels["shown"]:
+            raise naming.LabelExpiredError(
+                f"面标签 {label!r} 尚未在标注图中向你展示过"
+                "——请先调用 render_part(annotate='faces') 查看标注图再指认")
         return naming.match_face(self._labels["faces"][label], self.get_result_shape().Faces)
 
     def resolve_edge(self, label: str) -> int:
@@ -131,4 +149,8 @@ class Session:
         if not self._labels or label not in self._labels["edges"]:
             raise naming.LabelExpiredError(
                 f"未知边标签 {label!r}——请先调用 render_part(annotate='edges') 获取标注")
+        if label not in self._labels["shown"]:
+            raise naming.LabelExpiredError(
+                f"边标签 {label!r} 尚未在标注图中向你展示过"
+                "——请先调用 render_part(annotate='edges') 查看标注图再指认")
         return naming.match_edge(self._labels["edges"][label], self.get_result_shape().Edges)

@@ -55,6 +55,15 @@ def test_transaction_aborts_on_exception(monkeypatch):
     assert "commitTransaction" not in fake.calls
 
 
+def test_transaction_without_document_raises_runtime_error():
+    """无活动文档时 _transaction 必须抛 RuntimeError（中文指导），
+    不得让 NoneType.openTransaction 的 AttributeError 穿透到 server 层。"""
+    s = Session()
+    with pytest.raises(RuntimeError, match="无活动文档"):
+        with s._transaction("x"):
+            pass  # pragma: no cover - 不应进入事务体
+
+
 def test_assert_valid_solid_raises_on_invalid():
     s = Session()
 
