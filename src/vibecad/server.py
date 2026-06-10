@@ -23,6 +23,7 @@ from vibecad.freecad_env import (
 )
 from vibecad.runtime import paths, status
 from vibecad.runtime.installer import RuntimeInstaller
+from vibecad.tools import assembly as _assembly
 from vibecad.tools import export as _export
 from vibecad.tools import features as _features
 from vibecad.tools import modeling as _modeling
@@ -135,13 +136,26 @@ def _runtime_guard() -> dict[str, Any] | None:
 def _attach_view(result: dict[str, Any]) -> Any:
     """成功结果附三视图拼图 + 当场刷新标签表；附图失败不连坐（保留操作成功 +
     render_error + 退回 labels_stale 提示）——绝不因附图失败把成功操作报成失败，
-    也绝不静默吞掉渲染错误。"""
+    也绝不静默吞掉渲染错误。
+
+    Round 8：改用 get_assembly_shape()（单零件模式等价）；装配模式传入 part_map 给
+    render_multiview 用于 iso 格分色和标签表零件归属后缀。
+    """
     if not isinstance(result, dict) or not result.get("ok"):
         return result
     try:
         with _silence_fd1():
-            shape = _session.get_result_shape()
-            png, table, faces_reg, edges_reg = _multiview.render_multiview(shape)
+            shape = _session.get_assembly_shape()
+            # 装配模式构造 part_map（{零件名: 全局 shape}）用于分色和归属标注
+            part_map = None
+            if _session._parts:
+                part_map = {
+                    name: _session.get_result_shape(name).transformed(
+                        info["container"].Placement.toMatrix())
+                    for name, info in _session._parts.items()
+                }
+            png, table, faces_reg, edges_reg = _multiview.render_multiview(
+                shape, part_map=part_map)
         _session.set_labels(faces_reg, edges_reg, shown=set(table.keys()))
         result.pop("labels_stale", None)
         result.pop("hint", None)
@@ -220,24 +234,31 @@ def boolean_cut(base_name: str, tool_name: str) -> Any:
 
 
 @mcp.tool()
-def export_part(output_dir: str, fmt: str = "both") -> dict[str, Any]:
-    """导出当前结果为 STEP/STL/glTF（fmt: step|stl|gltf|both|all）到 output_dir。"""
+def export_part(output_dir: str, fmt: str = "both", split: bool = False) -> dict[str, Any]:
+    """导出当前结果为 STEP/STL/glTF（fmt: step|stl|gltf|both|all）到 output_dir。
+    split=True：装配模式时 per-part 导出 STEP（<doc>_<零件名>.step），每文件独立验证。
+    单零件模式下 split 被忽略（行为与旧版完全一致）。"""
     guard = _runtime_guard()
     if guard:
         return guard
     try:
-        return _export.export_part(_session, output_dir, fmt=fmt)
+        return _export.export_part(_session, output_dir, fmt=fmt, split=split)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"导出失败：{exc}"}
 
 
 @mcp.tool()
 def describe_part() -> dict[str, Any]:
-    """返回当前结果零件的文本诊断（体积/包围盒/质心/实体数/有效性）。"""
+    """返回当前结果零件的文本诊断（体积/包围盒/质心/实体数/有效性）。
+    装配模式：返回 per-part 摘要 + assembly_bbox + interference 清单。
+    单零件模式：原格式不变（体积/包围盒/质心/实体数/有效性）。"""
     guard = _runtime_guard()
     if guard:
         return guard
     with _silence_fd1():
+        # Round 8：装配模式分流（_parts 非空用 describe_assembly，否则原格式）
+        if _session._parts:
+            return _feedback_text.describe_assembly(_session)
         return _feedback_text.describe_shape(_session.get_result_shape())
 
 
@@ -262,8 +283,17 @@ def render_part(view: str = "iso", annotate: str | None = None,
                     "message": "view='multi' 已含标注 iso 格，不能与 annotate/edges_of 组合"}
         try:
             with _silence_fd1():
-                shape = _session.get_result_shape()
-                png, table, faces_reg, edges_reg = _multiview.render_multiview(shape)
+                # Round 8：改用装配 shape；装配模式传入 part_map 用于分色和归属标注
+                shape = _session.get_assembly_shape()
+                part_map = None
+                if _session._parts:
+                    part_map = {
+                        name: _session.get_result_shape(name).transformed(
+                            info["container"].Placement.toMatrix())
+                        for name, info in _session._parts.items()
+                    }
+                png, table, faces_reg, edges_reg = _multiview.render_multiview(
+                    shape, part_map=part_map)
             _session.set_labels(faces_reg, edges_reg, shown=set(table.keys()))
             return [Image(data=png, format="png"),
                     json.dumps({"ok": True, "labels": table}, ensure_ascii=False)]
@@ -274,7 +304,8 @@ def render_part(view: str = "iso", annotate: str | None = None,
             return {"ok": False, "message": f"渲染失败（{type(exc).__name__}）：{exc}"}
     try:
         with _silence_fd1():
-            shape = _session.get_result_shape()
+            # Round 8：改用装配 shape（单零件模式等价）
+            shape = _session.get_assembly_shape()
             # is not None（非 falsy）：空串必须进 resolve_face 撞出"未知面标签 ''"响亮失败
             ef_idx = _session.resolve_face(edges_of) if edges_of is not None else None
         if annotate is None:
@@ -401,6 +432,70 @@ def extrude_profile(profile: dict, height: float, face: str | None = None,
             operation=operation)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"拉伸失败：{exc}"}
+    return _attach_view(result)
+
+
+# ---------------------------------------------------------------------------
+# Round 8：装配工具（18→21）
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def new_part(name: str) -> Any:
+    """创建命名零件并将其设为活动零件（开始多零件装配模式）。
+    首次调用时，文档中已有几何对象会自动归入隐式零件 "Part1"。
+    成功后自动附三视图拼图（含多零件分色）。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        result = _session.new_part(name)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"新建零件失败：{exc}"}
+    result["ok"] = True
+    return _attach_view(result)
+
+
+@mcp.tool()
+def place_part(part: str, position: list[float] | None = None,
+               rotation_axis: str | None = None, angle: float | None = None) -> Any:
+    """设置零件绝对位置 and/or 叠加旋转（装配位姿）。
+    position=[x,y,z]：零件原点移到绝对坐标（mm）。
+    rotation_axis=x|y|z + angle：绕零件包围盒中心旋转（角度制，(-360,360) 内非零）。
+    至少提供 position 或 rotation_axis+angle 之一。成功后自动附三视图拼图。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        result = _assembly.place_part(
+            _session, part, position=position,
+            rotation_axis=rotation_axis, angle=angle)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"零件位置设置失败：{exc}"}
+    return _attach_view(result)
+
+
+@mcp.tool()
+def align_parts(moving_part: str, moving_face: str,
+                target_part: str, target_face: str,
+                offset: list[float] | None = None,
+                gap: float = 0.0,
+                allow_interference: bool = False) -> Any:
+    """面贴面对齐：moving_part 的 moving_face 贴向 target_part 的 target_face。
+    面标签来自 render_part(annotate='faces') 的标签表（每零件需分别标注）。
+    offset=[u,v]：面内毫米偏移（默认 [0,0] 面心对齐）。
+    gap：贴合间隙（mm，0=接触，正值=间隙，负值=叠入）。
+    allow_interference=True：允许干涉放行（默认 False=检测到干涉则拒绝）。
+    成功后自动附三视图拼图。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        result = _assembly.align_parts(
+            _session, moving_part, moving_face, target_part, target_face,
+            offset=tuple(offset) if offset is not None else (0.0, 0.0),
+            gap=gap, allow_interference=allow_interference)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"装配对齐失败：{exc}"}
     return _attach_view(result)
 
 

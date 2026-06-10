@@ -1,6 +1,7 @@
 # tests/test_server_round7.py
 """server Round7：move_part/rotate_part/extrude_profile 三工具 +
-add_hole pattern 透传 + 握手纯净回归。"""
+add_hole pattern 透传 + 握手纯净回归。
+Round 8 升格：render_multiview 接受 part_map；_attach_view 用 get_assembly_shape。"""
 import importlib
 import sys
 
@@ -15,8 +16,19 @@ def server(monkeypatch):
 
 
 def _mock_multiview(server, monkeypatch, png=b"\x89PNG mv"):
+    # Round 8 升格：render_multiview 接受 part_map 关键字参数
     monkeypatch.setattr(server._multiview, "render_multiview",
-                        lambda shape: (png, {"A": "顶面"}, {"A": {}}, {"E1": {}}))
+                        lambda shape, part_map=None: (png, {"A": "顶面"}, {"A": {}}, {"E1": {}}))
+
+
+def _mock_assembly_shape(server, monkeypatch, shape=None):
+    """同时 mock get_assembly_shape（_attach_view 入口）和 get_result_shape。"""
+    if shape is None:
+        class _Shape:
+            pass
+        shape = _Shape()
+    monkeypatch.setattr(server._session, "get_assembly_shape", lambda: shape)
+    monkeypatch.setattr(server._session, "get_result_shape", lambda: shape)
 
 
 # ─── move_part：委托 + 附图形态 ───────────────────────────────────────────────
@@ -26,9 +38,6 @@ def test_move_part_delegates_and_attaches(server, monkeypatch):
     """move_part 把调用委托给 _transform.move_part，成功后返回 [dict, Image]。"""
     from mcp.server.fastmcp import Image
 
-    class _Shape:
-        pass
-
     monkeypatch.setattr(server._transform, "move_part",
                         lambda session, name, position:
                         {"ok": True, "name": name, "volume": 24000.0,
@@ -37,7 +46,7 @@ def test_move_part_delegates_and_attaches(server, monkeypatch):
                          "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"})
     monkeypatch.setattr(server._modify, "list_parameters",
                         lambda doc, session=None: {"Part1": {"Box": {"length": 40.0}}})
-    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    _mock_assembly_shape(server, monkeypatch)
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
                         lambda faces, edges, shown=None: None)
@@ -70,9 +79,6 @@ def test_rotate_part_delegates_and_attaches(server, monkeypatch):
     """rotate_part 把调用委托给 _transform.rotate_part，成功后返回 [dict, Image]。"""
     from mcp.server.fastmcp import Image
 
-    class _Shape:
-        pass
-
     monkeypatch.setattr(server._transform, "rotate_part",
                         lambda session, name, axis, angle:
                         {"ok": True, "name": name, "volume": 24000.0,
@@ -81,7 +87,7 @@ def test_rotate_part_delegates_and_attaches(server, monkeypatch):
                          "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"})
     monkeypatch.setattr(server._modify, "list_parameters",
                         lambda doc, session=None: {"Part1": {"Box": {"length": 40.0}}})
-    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    _mock_assembly_shape(server, monkeypatch)
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
                         lambda faces, edges, shown=None: None)
@@ -114,9 +120,6 @@ def test_extrude_profile_delegates_and_attaches(server, monkeypatch):
     """extrude_profile 把调用委托给 _sketch.extrude_profile，成功后返回 [dict, Image]。"""
     from mcp.server.fastmcp import Image
 
-    class _Shape:
-        pass
-
     monkeypatch.setattr(server._sketch, "extrude_profile",
                         lambda session, profile, height, face, offset, operation:
                         {"ok": True, "name": "Profile", "volume": 13000.0,
@@ -127,7 +130,7 @@ def test_extrude_profile_delegates_and_attaches(server, monkeypatch):
                          "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"})
     monkeypatch.setattr(server._modify, "list_parameters",
                         lambda doc, session=None: {"Part1": {"Box": {"length": 40.0}}})
-    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    _mock_assembly_shape(server, monkeypatch)
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
                         lambda faces, edges, shown=None: None)
@@ -186,9 +189,6 @@ def test_runtime_guard_blocks_new_tools(monkeypatch):
 
 def test_add_hole_pattern_passthrough(server, monkeypatch):
     """add_hole pattern 参数透传到 _features.add_hole，并且 mock 收到的 pattern 实参正确。"""
-    class _Shape:
-        pass
-
     recorded = {}
 
     def _mock_add_hole(session, face, diameter, depth, offset, pattern=None):
@@ -201,7 +201,7 @@ def test_add_hole_pattern_passthrough(server, monkeypatch):
     monkeypatch.setattr(server._features, "add_hole", _mock_add_hole)
     monkeypatch.setattr(server._modify, "list_parameters",
                         lambda doc, session=None: {})
-    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    _mock_assembly_shape(server, monkeypatch)
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
                         lambda faces, edges, shown=None: None)

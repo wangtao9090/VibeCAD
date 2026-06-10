@@ -1,5 +1,6 @@
 # tests/test_server_round6.py
-"""server Round6a：multi 视图、六工具自动附图、附图失败不连坐、协议契约。"""
+"""server Round6a：multi 视图、六工具自动附图、附图失败不连坐、协议契约。
+Round 8 升格：_attach_view 改用 get_assembly_shape()；render_multiview 接受 part_map。"""
 import json
 
 import pytest
@@ -13,17 +14,25 @@ def server(monkeypatch):
 
 
 def _mock_multiview(server, monkeypatch, png=b"\x89PNG mv"):
+    # Round 8 升格：render_multiview 接受 part_map 关键字参数
     monkeypatch.setattr(server._multiview, "render_multiview",
-                        lambda shape: (png, {"A": "顶面"}, {"A": {}}, {"E1": {}}))
+                        lambda shape, part_map=None: (png, {"A": "顶面"}, {"A": {}}, {"E1": {}}))
+
+
+def _mock_assembly_shape(server, monkeypatch, shape=None):
+    """同时 mock get_assembly_shape（_attach_view 入口）和 get_result_shape。"""
+    if shape is None:
+        class _Shape:
+            pass
+        shape = _Shape()
+    monkeypatch.setattr(server._session, "get_assembly_shape", lambda: shape)
+    monkeypatch.setattr(server._session, "get_result_shape", lambda: shape)
 
 
 def test_render_part_view_multi(server, monkeypatch):
     from mcp.server.fastmcp import Image
 
-    class _Shape:
-        pass
-
-    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    _mock_assembly_shape(server, monkeypatch)
     _mock_multiview(server, monkeypatch)
     recorded = {}
     monkeypatch.setattr(server._session, "set_labels",
@@ -35,10 +44,7 @@ def test_render_part_view_multi(server, monkeypatch):
 
 
 def test_render_part_view_multi_with_annotate_rejected(server, monkeypatch):
-    class _Shape:
-        pass
-
-    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    _mock_assembly_shape(server, monkeypatch)
     out = server.render_part(view="multi", annotate="faces")
     assert out["ok"] is False  # multi 已含标注 iso 格，组合无意义须显式拒绝
 
@@ -46,15 +52,12 @@ def test_render_part_view_multi_with_annotate_rejected(server, monkeypatch):
 def test_add_box_attaches_view(server, monkeypatch):
     from mcp.server.fastmcp import Image
 
-    class _Shape:
-        pass
-
     monkeypatch.setattr(server._modeling, "add_box",
                         lambda session, length, width, height, position:
                         {"ok": True, "name": "Box", "volume": 24000.0})
     monkeypatch.setattr(server._modify, "list_parameters",
                         lambda doc, session=None: {"Part1": {"Box": {"length": 40.0}}})
-    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    _mock_assembly_shape(server, monkeypatch)
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
                         lambda faces, edges, shown=None: None)
@@ -76,13 +79,10 @@ def test_attach_view_render_failure_not_fatal(server, monkeypatch):
                         lambda session, length, width, height, position:
                         {"ok": True, "name": "Box", "volume": 24000.0})
 
-    def _boom(shape):
+    def _boom(shape, part_map=None):
         raise TypeError("渲染炸了")
 
-    class _Shape:
-        pass
-
-    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    _mock_assembly_shape(server, monkeypatch)
     monkeypatch.setattr(server._multiview, "render_multiview", _boom)
     out = server.add_box(length=40, width=30, height=20)
     assert isinstance(out, dict) and out["ok"] is True
@@ -98,10 +98,10 @@ def test_attach_view_failure_preserves_tool_hint(server, monkeypatch):
                         {"ok": True, "volume": 100.0, "labels_stale": True,
                          "hint": "几何已变更，调用 render_part(annotate='edges') 查看最新边标注"})
 
-    def _boom(shape):
+    def _boom(shape, part_map=None):
         raise RuntimeError("渲染炸了")
 
-    monkeypatch.setattr(server._session, "get_result_shape", lambda: object())
+    _mock_assembly_shape(server, monkeypatch)
     monkeypatch.setattr(server._multiview, "render_multiview", _boom)
     out = server.fillet_edges(edges=["E1"], radius=2)
     assert isinstance(out, dict) and out["ok"] is True
@@ -124,13 +124,10 @@ def test_mcp_contract_tool_with_image(server, monkeypatch):
     import anyio
     from mcp.types import TextContent
 
-    class _Shape:
-        pass
-
     monkeypatch.setattr(server._modeling, "add_box",
                         lambda session, length, width, height, position:
                         {"ok": True, "name": "Box", "volume": 24000.0})
-    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    _mock_assembly_shape(server, monkeypatch)
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
                         lambda faces, edges, shown=None: None)
@@ -153,16 +150,13 @@ def test_mcp_contract_tool_with_image(server, monkeypatch):
 def test_modify_part_delegates_and_attaches(server, monkeypatch):
     from mcp.server.fastmcp import Image
 
-    class _Shape:
-        pass
-
     monkeypatch.setattr(server._modify, "modify_part",
                         lambda session, name, parameter, value:
                         {"ok": True, "modified": {"name": name, "parameter": parameter,
                                                   "from": 40.0, "to": value}})
     monkeypatch.setattr(server._modify, "list_parameters",
                         lambda doc, session=None: {"Part1": {"Box": {"length": 45.0}}})
-    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    _mock_assembly_shape(server, monkeypatch)
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
                         lambda faces, edges, shown=None: None)
@@ -178,15 +172,12 @@ def test_modify_part_delegates_and_attaches(server, monkeypatch):
 def test_attach_view_includes_parts(server, monkeypatch):
     from mcp.server.fastmcp import Image  # noqa: F401
 
-    class _Shape:
-        pass
-
     monkeypatch.setattr(server._modeling, "add_box",
                         lambda session, length, width, height, position:
                         {"ok": True, "name": "Box", "volume": 24000.0})
     monkeypatch.setattr(server._modify, "list_parameters",
                         lambda doc, session=None: {"Part1": {"Box": {"length": 40.0}}})
-    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    _mock_assembly_shape(server, monkeypatch)
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
                         lambda faces, edges, shown=None: None)
@@ -211,9 +202,6 @@ def test_attach_view_parts_failure_not_fatal(server, monkeypatch):
     ——不得把已成功的渲染降级到 render_error 路径（语义矛盾）。"""
     from mcp.server.fastmcp import Image
 
-    class _Shape:
-        pass
-
     monkeypatch.setattr(server._modeling, "add_box",
                         lambda session, length, width, height, position:
                         {"ok": True, "name": "Box", "volume": 24000.0})
@@ -222,7 +210,7 @@ def test_attach_view_parts_failure_not_fatal(server, monkeypatch):
         raise RuntimeError("参数清单炸了")
 
     monkeypatch.setattr(server._modify, "list_parameters", _boom)
-    monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
+    _mock_assembly_shape(server, monkeypatch)
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
                         lambda faces, edges, shown=None: None)
