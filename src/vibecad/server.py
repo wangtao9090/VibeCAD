@@ -12,6 +12,7 @@ from mcp.server.fastmcp import FastMCP, Image
 from vibecad import __version__
 from vibecad.engine.session import Session
 from vibecad.feedback import annotate as _annotate
+from vibecad.feedback import multiview as _multiview
 from vibecad.feedback import render as _render
 from vibecad.feedback import text as _feedback_text
 from vibecad.freecad_env import (
@@ -183,10 +184,11 @@ def describe_part() -> dict[str, Any]:
 @mcp.tool()
 def render_part(view: str = "iso", annotate: str | None = None,
                 edges_of: str | None = None) -> Any:
-    """渲染当前零件 PNG（view: iso|front|top|right|back）。
+    """渲染当前零件 PNG（view: iso|front|top|right|back|multi）。
     annotate='faces'：面标注图+标签表+尺寸线（之后可用面标签如 'A' 调 add_hole）；
     annotate='edges'：边标注图（edges_of='A' 只画 A 面的边；
-    之后可调 fillet_edges/chamfer_edges）。"""
+    之后可调 fillet_edges/chamfer_edges）。
+    view='multi'：2×2 三视图+标注 iso 拼图（已含标注，不可与 annotate/edges_of 组合）。"""
     guard = _runtime_guard()
     if guard:
         return guard
@@ -194,6 +196,19 @@ def render_part(view: str = "iso", annotate: str | None = None,
         _msg = ("edges_of 仅在 annotate='edges' 时有效"
                 "——要看某面的边，请 render_part(annotate='edges', edges_of='A')")
         return {"ok": False, "message": _msg}
+    if view == "multi":
+        if annotate is not None or edges_of is not None:
+            return {"ok": False,
+                    "message": "view='multi' 已含标注 iso 格，不能与 annotate/edges_of 组合"}
+        try:
+            with _silence_fd1():
+                shape = _session.get_result_shape()
+                png, table, faces_reg, edges_reg = _multiview.render_multiview(shape)
+            _session.set_labels(faces_reg, edges_reg, shown=set(table.keys()))
+            return [Image(data=png, format="png"),
+                    json.dumps({"ok": True, "labels": table}, ensure_ascii=False)]
+        except (RuntimeError, ValueError) as exc:
+            return {"ok": False, "message": f"渲染失败：{exc}"}
     try:
         with _silence_fd1():
             shape = _session.get_result_shape()
