@@ -334,6 +334,44 @@ def test_resolve_unknown_label_in_part_namespace():
         s.resolve_face("Z")   # 该命名空间没有 Z 标签
 
 
+# ---- _claim_new_objects 两阶段（终审 M-1）----
+
+
+def test_claim_new_objects_two_phase_all_or_nothing():
+    """addObject 中途失败 → objects 集合不得半更新：abort 后 FreeCAD 重用对象
+    Name（真机取证），残名会让下个事务的新对象被误判为已归属。"""
+    s = Session()
+    s._doc = _FakeDoc()
+    s._doc.Objects = [_FakeObj("Old"), _FakeObj("New1"), _FakeObj("New2")]
+
+    class _BoomContainer(_FakeContainer):
+        def addObject(self, obj):
+            if obj.Name == "New2":
+                raise RuntimeError("container boom")
+            super().addObject(obj)
+
+    part = {"container": _BoomContainer(), "objects": {"Old"}}
+    s._parts = {"A": part}
+    s._active_part = "A"
+    with pytest.raises(RuntimeError, match="boom"):
+        s._claim_new_objects(before={"Old"})
+    # 集合零污染（New1 虽已入容器，但容器 Group 随事务 abort 回滚）
+    assert part["objects"] == {"Old"}
+
+
+def test_claim_new_objects_success_registers_all():
+    """全部成功 → 一次性入册（容器对象 App::Part 排除在外）。"""
+    s = Session()
+    s._doc = _FakeDoc()
+    s._doc.Objects = [_FakeObj("Old"), _FakeObj("New1"),
+                      _FakeObj("C0", type_id="App::Part"), _FakeObj("New2")]
+    part = _fake_part({"Old"})
+    s._parts = {"A": part}
+    s._active_part = "A"
+    s._claim_new_objects(before={"Old"})
+    assert part["objects"] == {"Old", "New1", "New2"}
+
+
 # ---- owner_of：对象 → 零件反查（终审 C-D 守卫锚定的基石）----
 
 
