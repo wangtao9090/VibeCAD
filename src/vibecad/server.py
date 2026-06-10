@@ -144,10 +144,16 @@ def _attach_view(result: dict[str, Any]) -> Any:
         result.pop("hint", None)
         result["labels"] = table
         return [result, Image(data=png, format="png")]
-    except (RuntimeError, ValueError) as exc:
-        result["labels_stale"] = True
-        result["hint"] = "几何已变更，调用 render_part(annotate='faces') 查看最新标注"
-        result["render_error"] = f"自动渲染失败：{exc}"
+    except Exception as exc:  # noqa: BLE001 - 事务已提交，纯展示阶段刻意宽抓：
+        # 此处任何异常（实测 TechDraw 的 TypeError、潜在 ImportError/IndexError）
+        # 穿透都会把已成功的操作谎报成 isError，诱发 AI 客户端重试叠出重复对象。
+        # 宽抓不违反"绝不静默"——失败本身响亮（render_error 带类型名+文本）。
+        # 项目其他处（操作路径/只读 render_part 路径）维持窄抓纪律，此处是唯一例外。
+        # setdefault：tools 层带了 labels_stale/hint 就尊重其语义，只兜底补缺
+        # （modeling 的"_labels 非空才带 stale"、fillet/chamfer 的 edges hint 不被架空）。
+        result.setdefault("labels_stale", True)
+        result.setdefault("hint", "几何已变更，调用 render_part(annotate='faces') 查看最新标注")
+        result["render_error"] = f"自动渲染失败（{type(exc).__name__}）：{exc}"
         return result
 
 
