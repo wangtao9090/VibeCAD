@@ -119,7 +119,7 @@ for lab, pos, vis, surf in labels:
 
 - [ ] **Step 3: 真机跑 + 人眼看图**
 
-Run: `ENV_PY=$(ls .vibecad-test-runtime/envs/*/bin/python | head -1); "$ENV_PY" .vibecad/spike_annotate.py`，然后 **Read /tmp/spike_annotate_iso.png 亲眼检验**：标签是否清晰、互不重叠、只出现在可见面、尺寸线可读、孔壁面（Cylinder）在 hidden 列表。
+Run: `ENV_PY=.vibecad-test-runtime/mamba/envs/vibecad/bin/python; "$ENV_PY" .vibecad/spike_annotate.py`（实际 env 布局为 `mamba/envs/vibecad`，黑盒脚本同此路径），然后 **Read /tmp/spike_annotate_iso.png 亲眼检验**：标签是否清晰、互不重叠、只出现在可见面、尺寸线可读、孔壁面（Cylinder）在 hidden 列表。
 Expected: 顶面（带孔平面）标签可见；样式不行就地调（字号/图幅/标签框），把定稿参数（字号 11、size 560×560、palette、可见性阈值 0.05）回填 Task 3。
 
 - [ ] **Step 4: commit** `chore(spike): annotated-render prototype + FastMCP multi-content conclusion`
@@ -1330,3 +1330,24 @@ Expected: 既有 8 条 + 新 5 条全 PASS
 2. **慢（真机）**：`VIBECAD_RUN_INTEGRATION=1 uv run pytest -m slow` 全绿——含"顶面标签打孔体积精确断言"、"打孔后旧标签过期+未变面仍可指"、"边标签圆角面数增加"、"孔落空响亮失败"。
 3. **黑盒**：真实 MCP 协议跑标注→指代打孔→新标注，**人眼看图**确认标签清晰、孔在指定面正中。
 4. **CI**：五平台 unit + 三平台 runtime-integration 绿。
+
+---
+
+## 实施记录与验收（2026-06-09，macOS arm64 实机）
+
+**执行方式**：闭关 subagent-driven（逐任务 实现→spec 审查→质量审查→修复→复审），8 任务全部完成。
+
+### 验收结果
+- 快测 **157 passed** + ruff 清零 + 握手纯净（server 模块级不拉 FreeCAD/matplotlib）+ MCP 协议契约测试（[Image, json] → [ImageContent, TextContent] 锁死）。
+- 真机慢测 **22 passed**（15 既有 + 7 新增：标签打孔体积精确断言、盲孔后旧标签过期+未动面仍可指（持久命名灵魂测试）、边标签圆角、孔落空响亮失败、可见性符号、edges 模式不丢面标签、失败回滚契约、e2e 标注→打孔→导出）。
+- **黑盒（真实 MCP 协议）**：`render_part(annotate="faces")` 回标注图+标签表（含语义名"顶面·平面"与计算化可见性提示）→ 从表选顶面 F → `add_hole(face="F", diameter=8)` → 体积 22994.7 与理论差 0.000 → 新标注图标签随几何刷新。**两张图人眼确认**：标签清晰不重叠、尺寸线完整、孔在顶面正中。
+
+### 审查逮到的问题（实现过程中修复）
+1. **CRITICAL（T4 质量审查，真机取证）**：headless FreeCAD `doc.UndoMode=0`，**事务回滚自 Round 2 起一直是 no-op**——失败残留垃圾对象并劫持结果链（null-shape Fillet 可致会话死锁）。修复：open_document 设 UndoMode=1 + 回滚契约慢测（`2a32032`）。
+2. T3 质量审查 6 项：box_aspect 失真、edges 模式清空面标签（→注册表全量契约）、背面边标签混叠、可见性提示静态死路（实测底面/左面在全部预设视角不可见）、edges_of 负索引静默、可见性符号无真机断言（`9112dc7`）。
+3. T5 审查：resolve_face 在 silence_fd1 外裸奔（stdio 帧污染）、edges_of 无效组合被静默吞（`6c72a06`）。
+4. T6 真机发现：`assert_valid_solid` 对 NULL shape 先调 isValid 会抛 OCCError 漏出异常契约（`77ed38e`）；fillet 切线缝合边与真棱同指纹（AI 不可区分，对切边 chamfer 必败但现在响亮失败——edge_summary 标注切线边留 Round 6）。
+5. 其余：naming 轴容差联动/radius 参与匹配（`ec58ecb`）、Session._labels 随文档生命周期清理（`bf856a2`）、annotate 流形断言+O(E²) 守卫（`3f4f5a4`）、features 孔完整性断言（单 solid+完整圆柱面）+isfinite（`1fefd50`）。
+
+### 结论
+「看得见（R3）+ 改对地方（R4）+ **指得准（R5）**」三块拼齐：用户对着标注图说"在 F 面正中打 8mm 孔 / E3 倒角"，系统精确执行且指代过期时响亮拒绝。CI 慢测已放宽为全量 `-m slow`（回滚契约等修复上 CI 防线）。

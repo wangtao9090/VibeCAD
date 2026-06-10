@@ -27,6 +27,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync
-      - name: install runtime + smoke (A1/A2/A3)
+      - name: install runtime + full real-machine suite
         env: { VIBECAD_RUN_INTEGRATION: "1" }
-        run: uv run pytest -m slow tests/test_runtime_integration.py -v -s
+        # 全量 slow：A1/A2/A3 + 建模/视觉/特征/回滚契约（UndoMode 等修复的唯一 CI 防线）
+        run: uv run pytest -m slow -v -s
