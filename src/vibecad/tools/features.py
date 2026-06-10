@@ -22,13 +22,21 @@ def _inplane_axes(n) -> tuple[tuple[float, float, float], tuple[float, float, fl
     return e1, e2
 
 
+def _param_mid(face: Any) -> tuple[float, float]:
+    """面参数范围（UVBounds）中点——offset 原点与法向探针的稳定基准。
+    内孔的 uv 范围是外环子集，不影响 UVBounds；CenterOfMass 是减除孔面积后的质心，
+    带孔面上会漂移（真机实测 d8 孔致 0.44mm 偏差，对称孔阵列静默不对称）甚至落孔上。"""
+    u0, u1, v0, v1 = face.ParameterRange
+    return (u0 + u1) / 2, (v0 + v1) / 2
+
+
 def _outward_normal(shape: Any, face: Any):
     """面的单位外法向（normalAt 不保证定向——用实体内点探针校正）。返回 FreeCAD.Vector。"""
-    u0, u1, v0, v1 = face.ParameterRange
-    n = face.normalAt((u0 + u1) / 2, (v0 + v1) / 2)
+    mu, mv = _param_mid(face)
+    n = face.normalAt(mu, mv)
     n.normalize()
     solid = shape.Solids[0] if getattr(shape, "Solids", None) else shape
-    probe = face.CenterOfMass + n * 0.01
+    probe = face.valueAt(mu, mv) + n * 0.01
     if solid.isInside(probe, 1e-6, False):
         n = -n
     return n
@@ -51,7 +59,8 @@ def _count_full_cylinder_faces(shape: Any, radius: float) -> int:
 
 def add_hole(session: Session, face: str, diameter: float,
              depth: float | None = None, offset=(0.0, 0.0)) -> dict[str, Any]:
-    """在指定面（标签）打圆孔：depth=None 通孔；offset 为面内毫米坐标（原点=面心）。"""
+    """在指定面（标签）打圆孔：depth=None 通孔；offset 为面内毫米坐标
+    （原点=面外边界包络中点，矩形面即几何中心——不随既有孔漂移）。"""
     if not face or not isinstance(face, str):
         raise ValueError("face 必须是非空字符串（面标签，如 'A'）")
     if not math.isfinite(diameter) or diameter <= 0:  # NaN 与 <=0 比较恒 False，须显式拒绝
@@ -75,7 +84,7 @@ def add_hole(session: Session, face: str, diameter: float,
                 raise ValueError(f"标签 {face} 是 {surface}，只能在平面上打孔")
             n = _outward_normal(shape, face_obj)
             e1, e2 = _inplane_axes((n.x, n.y, n.z))
-            c = face_obj.CenterOfMass
+            c = face_obj.valueAt(*_param_mid(face_obj))
             lift = 0.5  # 从面外 0.5mm 起钻，避免共面布尔
             bx = c.x + e1[0] * offset[0] + e2[0] * offset[1] + n.x * lift
             by = c.y + e1[1] * offset[0] + e2[1] * offset[1] + n.y * lift

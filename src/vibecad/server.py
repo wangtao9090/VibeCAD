@@ -281,7 +281,8 @@ def render_part(view: str = "iso", annotate: str | None = None,
 def add_hole(face: str, diameter: float, depth: float | None = None,
              offset: list[float] | None = None) -> Any:
     """在指定面打圆孔（face=面标签，来自 render_part(annotate='faces')）。
-    depth 省略=通孔；offset=[u,v] 面内毫米偏移（省略=面正中）。成功后自动附三视图拼图。"""
+    depth 省略=通孔；offset=[u,v] 面内毫米偏移（原点=面外边界包络中点，矩形面即
+    几何中心，不随已打的孔漂移；省略=原点处）。成功后自动附三视图拼图。"""
     guard = _runtime_guard()
     if guard:
         return guard

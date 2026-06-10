@@ -472,6 +472,46 @@ def test_add_hole_offset_direction(runtime_env):
 
 
 @pytest.mark.slow
+def test_add_hole_offset_origin_stable_after_existing_hole(runtime_env):
+    """offset 原点必须不受既有孔影响：box(40,30,20) 顶面先打 d8 盲孔 offset=[-10,0]
+    （圆心 (10,15) 精确），重新标注后再打 d6 通孔 offset=[10,5]——第二孔圆心必须
+    精确落在 (30,20)。若原点取 face.CenterOfMass（旧实现），第一孔减除的面积使顶面
+    质心 +X 漂移 ≈0.44mm，第二孔静默落在 (30.44,20)——对称孔阵列会得到不对称结果
+    且无任何报错。稳定基准 = 面参数范围（UVBounds）中点，内孔 uv 范围是外环子集，
+    不影响该中点。"""
+    out = _run_in_env(runtime_env, (
+        "from vibecad.engine.session import Session\n"
+        "from vibecad.feedback.annotate import render_annotated\n"
+        "from vibecad.tools import features, modeling\n"
+        "s = Session(); modeling.new_document(s, 'Stable')\n"
+        "modeling.add_box(s, 40, 30, 20)\n"
+        "png, table, freg, ereg = render_annotated(s.get_result_shape(), mode='faces')\n"
+        "s.set_labels(freg, ereg)\n"
+        "top = next(lab for lab, d in table.items() if '顶面' in d)\n"
+        "def hole_centers(radius):\n"
+        "    return [(f.Surface.Center.x, f.Surface.Center.y)\n"
+        "            for f in s.get_result_shape().Faces\n"
+        "            if type(f.Surface).__name__ == 'Cylinder'\n"
+        "            and abs(f.Surface.Radius - radius) < 1e-3]\n"
+        "r1 = features.add_hole(s, top, diameter=8, depth=10, offset=[-10, 0])\n"
+        "assert r1['ok'], r1\n"
+        "c1 = hole_centers(4.0)\n"  # 无孔面上首孔：新旧实现都精确，作基线
+        "assert len(c1) == 1 and abs(c1[0][0] - 10) < 1e-3 and abs(c1[0][1] - 15) < 1e-3, c1\n"
+        "p2, t2, freg2, ereg2 = render_annotated(s.get_result_shape(), mode='faces')\n"
+        "s.set_labels(freg2, ereg2)\n"  # 首孔使顶面标签过期 → 重新标注
+        "top2 = next(lab for lab, d in t2.items() if '顶面' in d)\n"
+        "r2 = features.add_hole(s, top2, diameter=6, offset=[10, 5])\n"
+        "assert r2['ok'], r2\n"
+        "c2 = hole_centers(3.0)\n"
+        "assert len(c2) == 1, c2\n"
+        "assert abs(c2[0][0] - 30.0) < 1e-3, f'第二孔圆心 x 期望 30.0，得到 {c2[0][0]:.4f}'\n"
+        "assert abs(c2[0][1] - 20.0) < 1e-3, f'第二孔圆心 y 期望 20.0，得到 {c2[0][1]:.4f}'\n"
+        "print('OFFSET_ORIGIN_STABLE_OK')\n"
+    ))
+    assert "OFFSET_ORIGIN_STABLE_OK" in out
+
+
+@pytest.mark.slow
 def test_render_multiview_real(runtime_env):
     """multiview HLR 真机：PNG 有效 + 标签语义与 render_annotated(faces) 等价
     + HLR 耗时计时打印 + top 视图投影含圆（box+hole 场景验证圆检测链路通）。"""
