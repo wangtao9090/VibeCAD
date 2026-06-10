@@ -27,6 +27,8 @@ from vibecad.tools import export as _export
 from vibecad.tools import features as _features
 from vibecad.tools import modeling as _modeling
 from vibecad.tools import modify as _modify
+from vibecad.tools import sketch as _sketch
+from vibecad.tools import transform as _transform
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # m10：杜绝隐式拉起 GUI
 
@@ -290,15 +292,19 @@ def render_part(view: str = "iso", annotate: str | None = None,
 
 @mcp.tool()
 def add_hole(face: str, diameter: float, depth: float | None = None,
-             offset: list[float] | None = None) -> Any:
+             offset: list[float] | None = None,
+             pattern: dict | None = None) -> Any:
     """在指定面打圆孔（face=面标签，来自 render_part(annotate='faces')）。
-    depth 省略=通孔；offset=[u,v] 面内毫米偏移（省略=面正中）。成功后自动附三视图拼图。"""
+    depth 省略=通孔；offset=[u,v] 面内毫米偏移（省略=面正中）。
+    pattern={"type":"linear","count":4,"spacing":10} 或 {"type":"circular","count":6,"radius":18}
+    实现线性/圆形阵列；省略=单孔（向后兼容）。成功后自动附三视图拼图。"""
     guard = _runtime_guard()
     if guard:
         return guard
     try:
         result = _features.add_hole(_session, face, diameter, depth,
-                                    tuple(offset) if offset is not None else (0.0, 0.0))
+                                    tuple(offset) if offset is not None else (0.0, 0.0),
+                                    pattern=pattern)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"打孔失败：{exc}"}
     return _attach_view(result)
@@ -342,6 +348,59 @@ def modify_part(name: str, parameter: str, value: float) -> Any:
         result = _modify.modify_part(_session, name, parameter, value)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"参数修改失败：{exc}"}
+    return _attach_view(result)
+
+
+@mcp.tool()
+def move_part(name: str, position: list[float]) -> Any:
+    """把图元移动到绝对位置 [x, y, z]（mm）——依赖链自动重算，成功后自动附三视图。
+    可移动对象见 parts 字段（布尔/圆角结果跟随其图元，不可直接移动）。
+    对象名来自 parts 字段（如 'Box'、'Cylinder'、'HoleTool'）。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        result = _transform.move_part(_session, name, tuple(position) if position else position)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"移动失败：{exc}"}
+    return _attach_view(result)
+
+
+@mcp.tool()
+def rotate_part(name: str, axis: str = "z", angle: float = 90.0) -> Any:
+    """绕全局轴旋转图元（以对象包围盒中心为旋转中心，角度制）——依赖链自动重算，成功后自动附三视图。
+    可旋转对象见 parts 字段（布尔/圆角结果跟随其图元，不可直接旋转）。
+    axis=x|y|z（全局轴方向）；angle 范围 (-360, 360) 非零，正值逆时针（右手定则）。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        result = _transform.rotate_part(_session, name, axis=axis, angle=angle)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"旋转失败：{exc}"}
+    return _attach_view(result)
+
+
+@mcp.tool()
+def extrude_profile(profile: dict, height: float, face: str | None = None,
+                    offset: list[float] | None = None,
+                    operation: str = "pad") -> Any:
+    """拉伸 profile 轮廓（pad 加料 / pocket 减料），成功后自动附三视图。
+    profile 示例：{"type":"rect","length":20,"width":10}、{"type":"circle","radius":5}、
+    {"type":"slot","length":20,"width":8}、{"type":"polygon","points":[[0,0],[10,0],[0,8]]}。
+    face=面标签（来自标注图，见 render_part(annotate='faces') 返回的标签表）；省略=全局 XY 平面。
+    offset=[u,v] 面内毫米偏移轮廓中心；height=拉伸高度（mm）；operation=pad|pocket。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        result = _sketch.extrude_profile(
+            _session, profile, height,
+            face=face,
+            offset=tuple(offset) if offset is not None else (0.0, 0.0),
+            operation=operation)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"拉伸失败：{exc}"}
     return _attach_view(result)
 
 
