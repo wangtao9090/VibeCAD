@@ -1558,3 +1558,103 @@ def test_relabel_after_align_resolves_in_global_frame(runtime_env):
 "print('RELABEL_GLOBAL_FRAME_OK')\n"
 )
     assert "RELABEL_GLOBAL_FRAME_OK" in out
+
+
+@pytest.mark.slow
+def test_move_foreign_part_object_guards_anchor_owner(runtime_env):
+    """终审 C-D：active=B 时移动 A 的 HoleTool（孔移出零件）必须被孔完整性
+    守卫响亮拒绝——修复前守卫锚活动零件 B 的 shape 做快照，A 的 ⌀8 孔被
+    静默吞掉还报 ok:True。回滚后 A 的孔必须完好。"""
+    out = _run_in_env(runtime_env,
+"from vibecad.engine.session import Session\n"
+"from vibecad.feedback import multiview\n"
+"from vibecad.tools import assembly, features, modeling, transform\n"
+"s = Session(); modeling.new_document(s, 'cd')\n"
+"s.new_part('A'); modeling.add_box(s, 40, 40, 20)\n"
+"png, t, fr, er = multiview.render_multiview(s.get_result_shape('A'))\n"
+"s.set_labels(fr, er, shown=set(t.keys()), part='A')\n"
+"top = next(lab for lab, d in t.items() if '顶面' in d)\n"
+"features.add_hole(s, top, diameter=8)\n"
+"s.new_part('B'); modeling.add_box(s, 10, 10, 10)\n"
+"assembly.place_part(s, 'B', position=[100.0, 0.0, 0.0])\n"
+"assert s.active_part == 'B'\n"
+"raised = ''\n"
+"try:\n"
+"    transform.move_part(s, 'HoleTool', [200.0, 200.0, 0.0])\n"
+"except RuntimeError as exc:\n"
+"    raised = str(exc)\n"
+"assert raised and '孔' in raised, raised or '应被孔完整性守卫拒绝'\n"
+"n_cyl = sum(1 for f in s.get_result_shape('A').Faces\n"
+"            if type(f.Surface).__name__ == 'Cylinder')\n"
+"assert n_cyl == 1, f'回滚后 A 的孔应完好（圆柱面数={n_cyl}）'\n"
+"print('OWNER_ANCHOR_CD_OK')\n"
+)
+    assert "OWNER_ANCHOR_CD_OK" in out
+
+
+@pytest.mark.slow
+def test_sealed_probe_does_not_cross_parts(runtime_env):
+    """终审 C-E：B（带盲孔）容器摆远后，对 A 的无害 1mm 平移必须 ok——修复前
+    B 盲孔刀具的探针点（B 局部坐标）打在 A 的 shape（A 局部坐标）上误拒。
+    对照：A 自己的孔刀具被移到完全埋入材料（密封内腔）仍必须被探针拒绝。"""
+    out = _run_in_env(runtime_env,
+"from vibecad.engine.session import Session\n"
+"from vibecad.feedback import multiview\n"
+"from vibecad.tools import assembly, features, modeling, transform\n"
+"def label_top(s, part):\n"
+"    sh = s.get_result_shape(part)\n"
+"    png, t, fr, er = multiview.render_multiview(sh)\n"
+"    s.set_labels(fr, er, shown=set(t.keys()), part=part)\n"
+"    return next(lab for lab, d in t.items() if '顶面' in d)\n"
+"s = Session(); modeling.new_document(s, 'ce')\n"
+"s.new_part('A'); modeling.add_box(s, 40, 40, 40)\n"
+"features.add_hole(s, label_top(s, 'A'), diameter=6, depth=5)\n"
+"s.new_part('B'); modeling.add_box(s, 10, 10, 10, position=(15.0, 15.0, 15.0))\n"
+"features.add_hole(s, label_top(s, 'B'), diameter=4, depth=5)\n"
+"assembly.place_part(s, 'B', position=[100.0, 0.0, 0.0])\n"
+"s.set_active_part('A')\n"
+"r = transform.move_part(s, 'Box', [1.0, 0.0, 0.0])\n"
+"assert r['ok'], r  # 修复前：被 B 的孔误拒（探针跨零件坐标混用）\n"
+"raised = ''\n"
+"try:\n"
+"    transform.move_part(s, 'HoleTool', [20.0, 20.0, 20.0])\n"
+"except RuntimeError as exc:\n"
+"    raised = str(exc)\n"
+"assert '封闭' in raised, raised or 'A 自己的孔被埋成密封内腔应被拒'\n"
+"print('SEALED_PROBE_OWNER_OK')\n"
+)
+    assert "SEALED_PROBE_OWNER_OK" in out
+
+
+@pytest.mark.slow
+def test_assembly_pad_no_base_and_enclave_pad(runtime_env):
+    """终审 C-A：差集归属发生在事务收尾，断言必须直接检查承载新几何的 shape——
+    ① 飞地 pad（offset=100 悬空）装配模式必须与单零件一样被"切成 2 块"拒绝
+      （修复前回取 owner 旧 shape 漏检，solids=2 仍 ok）；
+    ② new_part 后无基体 pad 建新零件必须可用（修复前断言遍历回取直接崩
+      "零件 X 中无有效 solid"）。"""
+    out = _run_in_env(runtime_env,
+"from vibecad.engine.session import Session\n"
+"from vibecad.feedback import multiview\n"
+"from vibecad.tools import modeling, sketch\n"
+"s = Session(); modeling.new_document(s, 'ca')\n"
+"s.new_part('底板'); modeling.add_box(s, 60, 40, 10)\n"
+"png, t, fr, er = multiview.render_multiview(s.get_result_shape('底板'))\n"
+"s.set_labels(fr, er, shown=set(t.keys()), part='底板')\n"
+"top = next(lab for lab, d in t.items() if '顶面' in d)\n"
+"raised = ''\n"
+"try:\n"
+"    sketch.extrude_profile(s, {'type': 'rect', 'length': 10, 'width': 10},\n"
+"                           height=8, face=top, operation='pad', offset=(100.0, 0.0))\n"
+"except RuntimeError as exc:\n"
+"    raised = str(exc)\n"
+"assert '切成 2 块' in raised, raised or '飞地 pad 应被单 solid 守卫拒绝'\n"
+"assert len(s.get_result_shape('底板').Solids) == 1  # 回滚完好\n"
+"s.new_part('臂')\n"
+"r = sketch.extrude_profile(s, {'type': 'rect', 'length': 20, 'width': 10},\n"
+"                           height=5, operation='pad')\n"
+"assert r['ok'] and abs(r['volume'] - 1000) < 1, r\n"
+"assert abs(s.get_result_shape('臂').Volume - 1000) < 1\n"
+"print('ASSEMBLY_PAD_CA_OK')\n"
+)
+    assert "ASSEMBLY_PAD_CA_OK" in out

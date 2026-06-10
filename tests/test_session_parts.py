@@ -334,6 +334,22 @@ def test_resolve_unknown_label_in_part_namespace():
         s.resolve_face("Z")   # 该命名空间没有 Z 标签
 
 
+# ---- owner_of：对象 → 零件反查（终审 C-D 守卫锚定的基石）----
+
+
+def test_owner_of_reverse_lookup():
+    s = Session()
+    s._parts = {"底板": _fake_part({"Box", "HoleTool"}), "盖板": _fake_part({"Box001"})}
+    assert s.owner_of("HoleTool") == "底板"
+    assert s.owner_of("Box001") == "盖板"
+    assert s.owner_of("Ghost") is None  # 未归属对象（装配状态异常，调用方拒绝）
+
+
+def test_owner_of_single_part_mode_returns_none():
+    s = Session()  # _parts 空
+    assert s.owner_of("Box") is None
+
+
 # ---- BUG-1 回归：装配模式 resolve 必须在全局坐标系匹配（标注指纹同款坐标系）----
 
 

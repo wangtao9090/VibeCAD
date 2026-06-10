@@ -111,14 +111,15 @@ class _FakeSolid:
 
 
 class _FakeSession:
-    """最小 fake session：控制 _parts 和 get_result_shape。"""
-    def __init__(self, parts: dict):
-        # parts: {name: shape}
-        self._parts = {k: {} for k in parts}  # 模拟 _parts 注册表（存在即可）
+    """最小 fake session：控制 _parts（含 objects 集合）、活动零件和 get_result_shape。"""
+    def __init__(self, parts: dict, active=None, objects=None):
+        # parts: {name: shape}；objects: {name: set}（缺省非空哨兵——有几何）
+        self._parts = {k: {"objects": (objects or {}).get(k, {"_x"})} for k in parts}
         self._shapes = parts
+        self._active_part = active if active is not None else next(iter(parts), None)
 
     def get_result_shape(self, part_name=None):
-        return self._shapes[part_name]
+        return self._shapes[part_name or self._active_part]
 
 
 def test_assert_solid_integrity_single_mode_pass():
@@ -134,18 +135,44 @@ def test_assert_solid_integrity_single_mode_fail():
         assert_solid_integrity(session, _FakeSolid(2), "test_op")
 
 
+def test_assert_solid_integrity_assembly_checks_passed_shape():
+    """装配模式（终审 C-A）：传入 shape 承载新几何，**必须直接断言**——差集归属
+    尚未发生，回取 owner 旧 shape 会漏检飞地 pad（切成 2 块仍 ok）。"""
+    session = _FakeSession({"底板": _FakeSolid(1), "盖板": _FakeSolid(1)}, active="底板")
+    with pytest.raises(RuntimeError, match="底板.*切成 2 块"):
+        assert_solid_integrity(session, _FakeSolid(2), "test_op")
+
+
 def test_assert_solid_integrity_assembly_mode_all_pass():
-    """装配模式（_parts 非空）：每零件 1 solid → 通过。"""
-    session = _FakeSession({"底板": _FakeSolid(1), "盖板": _FakeSolid(1)})
-    # shape 参数被忽略（装配模式取 session.get_result_shape）
-    assert_solid_integrity(session, _FakeSolid(2), "test_op")  # 传入的 compound 被忽略
+    """装配模式：传入 shape 1 solid + 其余零件各 1 solid → 通过。"""
+    session = _FakeSession({"底板": _FakeSolid(1), "盖板": _FakeSolid(1)}, active="底板")
+    assert_solid_integrity(session, _FakeSolid(1), "test_op")
 
 
-def test_assert_solid_integrity_assembly_mode_one_broken():
-    """装配模式（_parts 非空）：某零件 2 solids → RuntimeError 含零件名。"""
-    session = _FakeSession({"底板": _FakeSolid(1), "盖板": _FakeSolid(2)})
+def test_assert_solid_integrity_assembly_mode_other_broken():
+    """装配模式：其余零件 2 solids → RuntimeError 含该零件名。"""
+    session = _FakeSession({"底板": _FakeSolid(1), "盖板": _FakeSolid(2)}, active="底板")
     with pytest.raises(RuntimeError, match="盖板"):
         assert_solid_integrity(session, _FakeSolid(1), "test_op")
+
+
+def test_assert_solid_integrity_assembly_part_anchors_owner():
+    """part= 显式锚定 owner（非活动零件）：owner 回取被跳过（新 shape 已传入），
+    活动零件照常回取断言。"""
+    session = _FakeSession({"底板": _FakeSolid(2), "盖板": _FakeSolid(1)}, active="盖板")
+    # owner=底板：传入的新 shape 1 solid 通过；底板旧 shape（2 块）不回取——不误拒
+    assert_solid_integrity(session, _FakeSolid(1), "test_op", part="底板")
+    # 对照：不传 part（锚活动零件盖板）时底板会被回取 → 拒
+    with pytest.raises(RuntimeError, match="底板"):
+        assert_solid_integrity(session, _FakeSolid(1), "test_op")
+
+
+def test_assert_solid_integrity_assembly_skips_empty_parts():
+    """装配模式：objects 为空的零件（new_part 后未建几何）跳过回取——
+    空零件不应让其它零件的操作误拒/崩溃（终审 C-A：无基体 pad 不可用）。"""
+    session = _FakeSession({"臂": _FakeSolid(1), "空件": None},
+                           active="臂", objects={"空件": set()})
+    assert_solid_integrity(session, _FakeSolid(1), "test_op")  # 不碰 None shape
 
 
 def test_assert_no_interference_single_part_mode():

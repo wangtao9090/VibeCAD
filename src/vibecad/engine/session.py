@@ -100,6 +100,19 @@ class Session:
             raise ValueError(f"零件 {name!r} 不存在（已有零件：{list(self._parts)}）")
         self._active_part = name
 
+    def owner_of(self, obj_name: str) -> str | None:
+        """反查对象归属的零件名（_parts objects 集合）；单零件模式（_parts 空）
+        或对象未归属任何零件返回 None。
+
+        守卫锚定纪律（终审系统性根因）：modify/transform 等按对象名操作的工具，
+        全部完整性快照与断言必须锚定**被操作对象所属零件**（owner），而非活动
+        零件——active=B 时改 A 的对象，用 B 的 shape 做快照会让 A 的孔被吞而
+        守卫只盯着 B 报 ok。"""
+        for pname, info in self._parts.items():
+            if obj_name in info["objects"]:
+                return pname
+        return None
+
     def _register_part_container(self, name: str) -> Any:
         """新建 App::Part 容器：内部 Name 用 ASCII 前缀（FreeCAD 自动唯一化），
         用户零件名（可中文）存 Label。"""

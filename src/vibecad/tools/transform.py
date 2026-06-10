@@ -46,25 +46,34 @@ def _reposition(session: Session, name: str, apply, op: str) -> dict[str, Any]:
     密封内腔（孔口被完全封死、不可加工）由孔端面探针断言兜住。
     已知盲区（I2 审查后确认放行）：通孔被移动封住一端变盲孔时放行不警示——
     孔端面探针只拒"两端都封死"的密封内腔；区分"本来就是盲孔"与"通孔被封一端"
-    需追踪每孔的创建意图（成本高），且盲孔本身是合法几何，故放行。"""
+    需追踪每孔的创建意图（成本高），且盲孔本身是合法几何，故放行。
+    锚定纪律（终审 C-D）：装配模式全部快照/断言锚定**被操作对象所属零件**
+    （owner）——active=B 时移 A 的 HoleTool，用 B 的 shape 做快照会让 A 的孔
+    被静默吞掉还报 ok；owner 反查不到（_parts 非空但对象无归属）= 状态异常拒绝。"""
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
     with session._transaction(op):
         with silence_fd1():
             import FreeCAD  # noqa: PLC0415
             obj = _movable_obj(session, name)
-            before_name = session.get_result_object().Name
-            shape_before = session.get_result_shape()
+            owner = session.owner_of(obj.Name)
+            if session._parts and owner is None:
+                raise ValueError(
+                    f"对象 {obj.Name!r} 不属于任何已注册零件"
+                    f"（已有零件：{list(session._parts)}）——装配状态异常，拒绝操作")
+            owner_names = session._parts[owner]["objects"] if owner is not None else None
+            before_name = session.get_result_object(owner).Name
+            shape_before = session.get_result_shape(owner)
             radii = _integrity.cut_tool_radii(session.doc)
             counts = _integrity.hole_count_snapshot(shape_before, radii)
             apply(obj, FreeCAD)
             session.doc.recompute()
             _integrity.assert_not_touched(obj, op)
-            _integrity.assert_result_not_drifted(session, before_name)
-            shape = session.get_result_shape()
+            _integrity.assert_result_not_drifted(session, before_name, part=owner)
+            shape = session.get_result_shape(owner)
             session.assert_valid_solid(shape)
-            assert_solid_integrity(session, shape, op)
+            assert_solid_integrity(session, shape, op, part=owner)
             _integrity.assert_holes_intact(shape, counts)
-            _integrity.assert_no_sealed_holes(session.doc, shape)
+            _integrity.assert_no_sealed_holes(session.doc, shape, owner_names=owner_names)
             pl = obj.Placement
             result = {"ok": True, "name": obj.Name, "volume": shape.Volume,
                       op: {"position": [pl.Base.x, pl.Base.y, pl.Base.z]},
