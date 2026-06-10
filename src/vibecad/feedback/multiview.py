@@ -147,12 +147,11 @@ def multiview_png(*, eng_views: dict, face_meshes: list[dict], face_labels: list
             _dim_v(ax, y0, y1, x0, f"{y1 - y0:g}", -6)
             circles = eng_views[key]["circles"]
             # ⌀/定位标注显式只扫 visible=True 的整圆（不依赖可见圆排序在前的隐式
-            # 顺序）；⌀ 按半径去重（同径只标一次）。隐藏整圆只画虚线本体不标注
-            # （MVP 取舍，隐藏样式标注留 backlog）。
+            # 顺序）。隐藏整圆只画虚线本体不标注（MVP 取舍，隐藏样式标注留 backlog）。
+            vis_full = [(cx, cy, r) for cx, cy, r, vis_c in circles if vis_c]
+            # ⌀ 标注：按半径去重（同径只标一次，直径按径标）
             seen_radii: set[float] = set()
-            for cx, cy, r, vis_c in circles:
-                if not vis_c:
-                    continue
+            for cx, cy, r in vis_full:
                 rk = round(r, 6)
                 if rk in seen_radii:
                     continue
@@ -160,8 +159,9 @@ def multiview_png(*, eng_views: dict, face_meshes: list[dict], face_labels: list
                 ax.annotate(f"⌀{2 * r:g}", (cx + r * 0.707, cy + r * 0.707),
                             xytext=(cx + r + 9, cy + r + 7), fontsize=9, color="#111",
                             arrowprops=dict(arrowstyle="-", lw=0.7, color="#333"))
-                # 每个去重后可见整圆都给定位尺寸（圆心到包围盒两方向）——
-                # 典型场景 1-3 孔不会挤；多孔拥挤的标注布置留 backlog
+            # 定位尺寸：每个可见整圆都标（位置按孔标，与 ⌀ 去重解耦——
+            # 同径孔阵列每孔位置都可读；多孔拥挤布置留 backlog）
+            for cx, cy, _r in vis_full:
                 _dim_h(ax, x0, cx, y1, f"{cx - x0:g}", 6)
                 _dim_v(ax, y0, cy, x1, f"{cy - y0:g}", 6)
         # 三格统一比例（长对正/高平齐的简化版）：共用最大跨度
