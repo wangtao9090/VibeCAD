@@ -123,8 +123,7 @@ class _FakeShape:
 
 
 def _session_with_shape(monkeypatch, shape):
-    s = Session.__new__(Session)  # 绕开 FreeCAD 初始化
-    s._labels = None
+    s = Session()
     monkeypatch.setattr(Session, "get_result_shape", lambda self: shape, raising=False)
     return s
 
@@ -155,3 +154,16 @@ def test_resolve_edge_roundtrip(monkeypatch):
     s = _session_with_shape(monkeypatch, _FakeShape(edges=[e]))
     s.set_labels({}, {"E1": naming.edge_fingerprint(e)})
     assert s.resolve_edge("E1") == 0
+
+
+def test_labels_cleared_on_close_document(monkeypatch):
+    """关文档必须清空标签快照（真实路径：close_document 先清 _labels，
+    _doc is None 时早退不碰 FreeCAD，故可在 dev venv 直接调用）。"""
+    top = _top()
+    s = _session_with_shape(monkeypatch, _FakeShape(faces=[top]))
+    s.set_labels({"A": naming.face_fingerprint(top)}, {})
+    assert s.resolve_face("A") == 0  # 清理前可解析
+    s.close_document()
+    assert s._labels is None
+    with pytest.raises(LabelExpiredError):
+        s.resolve_face("A")
