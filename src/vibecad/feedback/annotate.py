@@ -182,6 +182,44 @@ def annotated_png(*, face_meshes: list[dict], face_labels: list[dict],
     return buf.getvalue()
 
 
+def collect_annotation_data(shape: Any, *, view: str = "iso") -> dict:
+    """逐面 tessellate + 指纹/锚点/可见性 + 全量注册表 + faces 标签表 + 尺寸。
+    render_annotated(mode='faces') 与 multiview.render_multiview 的共享数据源。
+    返回 {face_meshes, face_labels, table, faces_reg, edges_reg, dims}。"""
+    from vibecad.engine import naming  # noqa: PLC0415
+    from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+
+    cam = camera_direction(view)
+    with silence_fd1():
+        bb = shape.BoundBox
+        bbox = (bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax)
+        face_meshes, face_info = [], []
+        for f in shape.Faces:
+            verts, facets = f.tessellate(0.1)
+            pts = [(p.x, p.y, p.z) for p in verts]
+            face_meshes.append({"verts": pts, "facets": facets})
+            face_info.append({"fp": naming.face_fingerprint(f),
+                              "anchor": largest_triangle_centroid(pts, facets, cam),
+                              "normal": mesh_normal(pts, facets)})
+        if not any(fm["verts"] for fm in face_meshes):
+            raise RuntimeError("几何断言失败：形状无法镶嵌为网格（空 tessellation）")
+        edges_reg_list = [naming.edge_fingerprint(e) for e in shape.Edges]
+    face_names = naming.face_labels(len(face_info))
+    table: dict[str, str] = {}
+    faces_reg: dict[str, dict] = {}
+    face_labels = []
+    for lab, info in zip(face_names, face_info, strict=True):
+        visible = (sum(a * b for a, b in zip(info["normal"], cam, strict=True)) > _VIS_DOT)
+        faces_reg[lab] = info["fp"]
+        face_labels.append({"label": lab, "pos": info["anchor"], "visible": visible})
+        table[lab] = naming.face_summary(info["fp"], bbox) + visibility_note(info["normal"], view)
+    edges_reg = dict(zip(naming.edge_labels(len(edges_reg_list)), edges_reg_list, strict=True))
+    dims = {"L": bbox[3] - bbox[0], "W": bbox[4] - bbox[1], "H": bbox[5] - bbox[2],
+            "bbox": bbox}
+    return {"face_meshes": face_meshes, "face_labels": face_labels, "table": table,
+            "faces_reg": faces_reg, "edges_reg": edges_reg, "dims": dims}
+
+
 def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = None,
                      view: str = "iso") -> tuple[bytes, dict, dict, dict]:
     """FreeCAD Shape → (png, labels_table, faces_registry, edges_registry)。
@@ -197,13 +235,20 @@ def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = 
     if mode not in ("faces", "edges"):
         raise ValueError(f"annotate 必须是 'faces' 或 'edges'（得到 {mode!r}）")
     cam = camera_direction(view)
+    if mode == "faces":
+        # faces 模式：委托给共享数据源
+        data = collect_annotation_data(shape, view=view)
+        dims = data["dims"]
+        png = annotated_png(face_meshes=data["face_meshes"],
+                            face_labels=data["face_labels"],
+                            edge_labels=[], view=view, dims=dims)
+        return png, data["table"], data["faces_reg"], data["edges_reg"]
+    # edges 模式：需要 polyline/edge_adj/draw_set，继续完整采集
     with silence_fd1():
         n_faces = len(shape.Faces)
         if edges_of is not None and not 0 <= edges_of < n_faces:
             # Python 负索引会静默取最后一个面，违反"绝不静默"纪律
             raise ValueError(f"edges_of 面索引越界（0..{n_faces - 1}，得到 {edges_of}）")
-        bb = shape.BoundBox
-        bbox = (bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax)
         face_meshes, face_info = [], []
         for f in shape.Faces:
             verts, facets = f.tessellate(0.1)
@@ -224,30 +269,29 @@ def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = 
         # 以下重活只有 edges 模式的绘制会消费：polyline 离散 + O(E²) isSame 邻接
         edge_adj: list[list[int]] = [[] for _ in all_edges]
         draw_set: set[int] = set()
-        if mode == "edges":
-            for info, e in zip(edge_info, all_edges, strict=True):
-                info["polyline"] = [(p.x, p.y, p.z) for p in e.discretize(24)]
-            # edge → 相邻面索引（isSame 反向匹配）：边可见 = 任一相邻面可见
-            for fi, f in enumerate(shape.Faces):
-                for fe in f.Edges:
-                    for ei, e in enumerate(all_edges):
-                        if fe.isSame(e):
-                            edge_adj[ei].append(fi)
-            for ei, adj in enumerate(edge_adj):
-                if not adj:  # 流形 solid 不可能；静默会把该边误标"背面边"
-                    raise RuntimeError(
-                        f"几何断言失败：边 {ei} 不属于任何面（非流形几何？）")
-            # edges_of 过滤只影响绘制集合，标签号保持全局边序
-            if edges_of is not None:
-                target_edges = shape.Faces[edges_of].Edges
-                draw_set = {ei for fe in target_edges
-                            for ei, e in enumerate(all_edges) if fe.isSame(e)}
-                if not draw_set and target_edges:
-                    raise RuntimeError(
-                        f"几何断言失败：面 {edges_of} 的 {len(target_edges)} 条边"
-                        "在全局边集中无一匹配（isSame 失效？）")
-            else:
-                draw_set = set(range(len(all_edges)))
+        for info, e in zip(edge_info, all_edges, strict=True):
+            info["polyline"] = [(p.x, p.y, p.z) for p in e.discretize(24)]
+        # edge → 相邻面索引（isSame 反向匹配）：边可见 = 任一相邻面可见
+        for fi, f in enumerate(shape.Faces):
+            for fe in f.Edges:
+                for ei, e in enumerate(all_edges):
+                    if fe.isSame(e):
+                        edge_adj[ei].append(fi)
+        for ei, adj in enumerate(edge_adj):
+            if not adj:  # 流形 solid 不可能；静默会把该边误标"背面边"
+                raise RuntimeError(
+                    f"几何断言失败：边 {ei} 不属于任何面（非流形几何？）")
+        # edges_of 过滤只影响绘制集合，标签号保持全局边序
+        if edges_of is not None:
+            target_edges = shape.Faces[edges_of].Edges
+            draw_set = {ei for fe in target_edges
+                        for ei, e in enumerate(all_edges) if fe.isSame(e)}
+            if not draw_set and target_edges:
+                raise RuntimeError(
+                    f"几何断言失败：面 {edges_of} 的 {len(target_edges)} 条边"
+                    "在全局边集中无一匹配（isSame 失效？）")
+        else:
+            draw_set = set(range(len(all_edges)))
     face_visible = [
         sum(a * b for a, b in zip(info["normal"], cam, strict=True)) > _VIS_DOT
         for info in face_info]
@@ -259,23 +303,14 @@ def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = 
     edges_reg = {lab: info["fp"]
                  for lab, info in zip(edge_names, edge_info, strict=True)}
     table: dict[str, str] = {}
-    face_labels_out = []
-    if mode == "faces":
-        for lab, info, vis in zip(face_names, face_info, face_visible, strict=True):
-            face_labels_out.append({"label": lab, "pos": info["anchor"], "visible": vis})
-            table[lab] = (naming.face_summary(info["fp"], bbox)
-                          + visibility_note(info["normal"], view))
     edge_labels_out = []
-    if mode == "edges":
-        for ei in sorted(draw_set):
-            lab, info = edge_names[ei], edge_info[ei]
-            e_vis = any(face_visible[fi] for fi in edge_adj[ei])
-            edge_labels_out.append({"label": lab, "pos": info["pos"],
-                                    "polyline": info["polyline"], "visible": e_vis})
-            note = "" if e_vis else "（背面边，谨慎指认）"
-            table[lab] = naming.edge_summary(info["fp"]) + note
-    dims = {"L": bbox[3] - bbox[0], "W": bbox[4] - bbox[1], "H": bbox[5] - bbox[2],
-            "bbox": bbox} if mode == "faces" else None
-    png = annotated_png(face_meshes=face_meshes, face_labels=face_labels_out,
-                        edge_labels=edge_labels_out, view=view, dims=dims)
+    for ei in sorted(draw_set):
+        lab, info = edge_names[ei], edge_info[ei]
+        e_vis = any(face_visible[fi] for fi in edge_adj[ei])
+        edge_labels_out.append({"label": lab, "pos": info["pos"],
+                                "polyline": info["polyline"], "visible": e_vis})
+        note = "" if e_vis else "（背面边，谨慎指认）"
+        table[lab] = naming.edge_summary(info["fp"]) + note
+    png = annotated_png(face_meshes=face_meshes, face_labels=[],
+                        edge_labels=edge_labels_out, view=view, dims=None)
     return png, table, faces_reg, edges_reg
