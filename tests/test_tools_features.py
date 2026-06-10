@@ -552,3 +552,76 @@ except LabelExpiredError:
     print("FRESH_LABELS_OK", top2)
 """)
     assert "FRESH_LABELS_OK" in out
+
+
+@pytest.mark.slow
+def test_multiview_projection_orientation(runtime_env):
+    """投影朝向钉死（CRITICAL 回归：right 视图曾 180° 颠倒，对称零件+弱断言漏过）。
+    非对称凸台体 box(40,30,20) + 凸台 X[34,40]Y[0,6]Z[20,26]，三视图精确 2D 坐标断言：
+    front 凸台在右上 (34..40, 20..26)、right 在上方 (0..6, 20..26)（Y 横轴、Z 朝上）、
+    top 在下侧 (34..40, 0..6)——把 _VIEW_TFS 变换符号永久钉死。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.feedback.multiview import project_view, _VIEW_TFS
+from vibecad.freecad_env import silence_fd1
+with silence_fd1():
+    import FreeCAD
+    import Part
+    box = Part.makeBox(40, 30, 20)
+    boss = Part.makeBox(6, 6, 6, FreeCAD.Vector(34, 0, 20))
+    shape = box.fuse(boss)
+    views = {k: project_view(shape, d, tf) for k, (d, tf) in _VIEW_TFS.items()}
+
+EPS = 1e-6
+
+def pts_of(view):
+    return [p for poly in view["vis"] for p in poly]
+
+def has(view, x, y):
+    return any(abs(px - x) < EPS and abs(py - y) < EPS for px, py in pts_of(view))
+
+# front：凸台 4 角精确存在，且高于主体(>20)的点全部落在凸台 X∈[34,40]
+for cx, cy in ((34, 20), (40, 20), (34, 26), (40, 26)):
+    assert has(views["front"], cx, cy), f"front 缺凸台角点 ({cx},{cy})"
+for px, py in pts_of(views["front"]):
+    if py > 20 + EPS:
+        assert 34 - EPS <= px <= 40 + EPS, f"front 凸台越界点 ({px},{py})"
+# right：凸台 4 角 (0,20)(6,20)(0,26)(6,26)（横=+Y、竖=+Z），高于主体的点 Y∈[0,6]
+for cx, cy in ((0, 20), (6, 20), (0, 26), (6, 26)):
+    assert has(views["right"], cx, cy), f"right 缺凸台角点 ({cx},{cy})——朝向回归！"
+for px, py in pts_of(views["right"]):
+    if py > 20 + EPS:
+        assert -EPS <= px <= 6 + EPS, f"right 凸台越界点 ({px},{py})"
+# top：凸台边界点 (34,0)(34,6)(40,6)(40,0)（横=X、竖=Y，凸台在下侧）
+for cx, cy in ((34, 0), (34, 6), (40, 6), (40, 0)):
+    assert has(views["top"], cx, cy), f"top 缺凸台点 ({cx},{cy})"
+print("ORIENTATION_OK")
+""")
+    assert "ORIENTATION_OK" in out
+
+
+@pytest.mark.slow
+def test_fillet_arc_not_labeled_as_hole(runtime_env):
+    """fillet 圆角弧的 Curve 也是 Circle（CRITICAL 回归：曾被当整圆标 ⌀+中心十字
+    并劫持定位尺寸）。box + 贯穿孔 ⌀8 + 竖边 fillet r5 → top 投影 circles 只含
+    r=4 整圆，r=5 的 90° 圆角弧必须被整圆判定排除。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.feedback.multiview import project_view, _VIEW_TFS
+from vibecad.freecad_env import silence_fd1
+with silence_fd1():
+    import FreeCAD
+    import Part
+    box = Part.makeBox(40, 30, 20)
+    hole = Part.makeCylinder(4, 20, FreeCAD.Vector(20, 15, 0))
+    shape = box.cut(hole)
+    # 取 (0,0) 处竖边 fillet r5——top 投影出 r5 四分之一圆弧
+    edge = next(e for e in shape.Edges
+                if all(abs(v.Point.x) < 1e-9 and abs(v.Point.y) < 1e-9
+                       for v in e.Vertexes))
+    shape = shape.makeFillet(5, [edge])
+    d, tf = _VIEW_TFS["top"]
+    pv = project_view(shape, d, tf)
+radii = sorted({round(r, 6) for _x, _y, r, _v in pv["circles"]})
+assert radii == [4.0], f"top circles 应只含整圆 r=4（圆角弧 r=5 不算孔），得到 {radii}"
+print("FULL_CIRCLE_ONLY_OK", radii)
+""")
+    assert "FULL_CIRCLE_ONLY_OK" in out

@@ -31,6 +31,16 @@ def test_multiview_png_dims_from_bbox():
     assert png.startswith(b"\x89PNG")
 
 
+def test_multiview_png_multi_circle_positions():
+    # 两个不同径可见整圆 + 一个隐藏同径整圆：每个去重后可见圆都有 ⌀+定位尺寸，
+    # 隐藏圆不标注——不抛错即可（标注内容正确性靠真机/黑盒人眼验证）
+    view = {"vis": [_RECT], "hid": [],
+            "circles": [(12, 10, 4, True), (30, 10, 3, True), (12, 10, 4, False)]}
+    png = multiview.multiview_png(eng_views={"top": view}, face_meshes=[],
+                                  face_labels=[], dims=None)
+    assert png.startswith(b"\x89PNG")
+
+
 def test_multiview_png_empty_raises():
     with pytest.raises(ValueError):
         multiview.multiview_png(eng_views={}, face_meshes=[], face_labels=[], dims=None)

@@ -5,6 +5,7 @@ multiview_png / draw_engineering_view 纯 matplotlib；project_view / render_mul
 才碰 FreeCAD（TechDraw HLR），函数内 import。"""
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from vibecad.feedback.annotate import _draw_face_meshes, collect_annotation_data
@@ -12,14 +13,17 @@ from vibecad.feedback.annotate import _draw_face_meshes, collect_annotation_data
 _CJK_FONTS = ["Heiti TC", "PingFang SC", "Arial Unicode MS",
               "Noto Sans CJK SC", "WenQuanYi Zen Hei", "sans-serif"]
 
-# per-view (投影方向, 2D 变换)——spike v3-v5 实测定稿：tf 把 projectEx 投影局部坐标
-# 变换为直觉绘图坐标（横=宽、竖=高）。top 局部 x=X、y=Y，恒等即可；
-# front(0,-1,0)/right(1,0,0) 局部坐标系旋了 90°，需 (x,y)→(y,-x) 旋正，
-# 否则视图横竖颠倒。
+# per-view (投影方向, 2D 变换)——tf 把 projectEx 投影局部坐标变换为直觉绘图坐标
+# （横=宽、竖=高，Y/Z 朝上）。真机取证定稿（box(40,30,20) + 凸台 X[34,40]Y[0,6]Z[20,26]）：
+#   top   raw 凸台 (34..40, 0..6)：局部 (x,y)=(X,Y)，恒等即可，凸台在下侧 ✓
+#   front raw 凸台 (-26..-20, 34..40)：局部 (x,y)=(-Z,X) → (y,-x) 得 (X,Z)=(34..40, 20..26) 右上 ✓
+#   right raw 凸台 (20..26, -6..0)：局部 (x,y)=(Z,-Y) → (-y,x) 得 (Y,Z)=(0..6, 20..26) 上方 ✓
+# 注意 HLR 对 front/right 两方向给出的投影局部系手性不同：right 若沿用 front 的
+# (y,-x) 会得 (-Y,-Z)——零件顶部画到视图底部（180° 颠倒），故两方向 tf 必须不同。
 _VIEW_TFS = {
     "top": ((0.0, 0.0, 1.0), lambda x, y: (x, y)),
     "front": ((0.0, -1.0, 0.0), lambda x, y: (y, -x)),
-    "right": ((1.0, 0.0, 0.0), lambda x, y: (y, -x)),
+    "right": ((1.0, 0.0, 0.0), lambda x, y: (-y, x)),
 }
 
 # (subplot 序号, 视图名, 标题)——2×2 布局：front | right / top | iso
@@ -45,8 +49,12 @@ def project_view(shape: Any, direction: tuple[float, float, float], tf) -> dict:
             pts = e.discretize(n_pts)
             polys.append([tf(p.x, p.y) for p in pts])
             if type(e.Curve).__name__ == "Circle":
-                c = e.Curve.Center
-                circles.append((*tf(c.x, c.y), e.Curve.Radius, gi < 5))
+                # fillet 圆角弧的 Curve 也是 Circle——仅完整圆（孔/凸台轮廓）才进
+                # circles，否则圆角弧会被误标 ⌀/中心十字并劫持定位尺寸
+                arc_span = abs(e.LastParameter - e.FirstParameter)
+                if abs(arc_span - 2 * math.pi) < 1e-3:
+                    c = e.Curve.Center
+                    circles.append((*tf(c.x, c.y), e.Curve.Radius, gi < 5))
     return {"vis": vis_polys, "hid": hid_polys, "circles": circles}
 
 
@@ -60,7 +68,11 @@ def draw_engineering_view(ax, view_data: dict, title: str) -> tuple | None:
     for poly in vis:
         xs, ys = zip(*poly, strict=False)
         ax.plot(xs, ys, color="#222", lw=1.4)
-    for cx, cy, r, _v in circles:
+    for cx, cy, r, vis_c in circles:
+        # MVP 取舍：中心十字（与 ⌀/定位标注一致）只画 visible=True 的整圆；
+        # 隐藏整圆（如盲孔底圆）只画虚线本体不加标注，隐藏样式标注留 backlog
+        if not vis_c:
+            continue
         m = r * 1.4  # 中心线十字
         ax.plot([cx - m, cx + m], [cy, cy], color="#b33", lw=0.6, linestyle=(0, (8, 3, 2, 3)))
         ax.plot([cx, cx], [cy - m, cy + m], color="#b33", lw=0.6, linestyle=(0, (8, 3, 2, 3)))
@@ -121,14 +133,26 @@ def multiview_png(*, eng_views: dict, face_meshes: list[dict], face_labels: list
                 bbs[key] = bb
                 axes2d[key] = ax
                 drew_any = True
+            else:
+                # 空格不静默：画灰色占位文字（vd 缺失时 draw_engineering_view 未
+                # 被调用，补 title/axis off）
+                ax.axis("off")
+                ax.set_title(title, fontsize=11, fontfamily=_CJK_FONTS)
+                ax.text(0.5, 0.5, "（无投影）", transform=ax.transAxes, fontsize=9,
+                        color="#999", ha="center", va="center", fontfamily=_CJK_FONTS)
         # 尺寸线全部从各视图投影 2D 包围盒推导（与模型坐标解耦，任意形状通用）
         for key, (x0, y0, x1, y1) in bbs.items():
             ax = axes2d[key]
             _dim_h(ax, x0, x1, y0, f"{x1 - x0:g}", -6)
             _dim_v(ax, y0, y1, x0, f"{y1 - y0:g}", -6)
             circles = eng_views[key]["circles"]
-            seen_radii: set[float] = set()  # ⌀ 按半径去重（同径只标一次，防多孔拥挤）
-            for cx, cy, r, _vis in circles:
+            # ⌀/定位标注显式只扫 visible=True 的整圆（不依赖可见圆排序在前的隐式
+            # 顺序）；⌀ 按半径去重（同径只标一次）。隐藏整圆只画虚线本体不标注
+            # （MVP 取舍，隐藏样式标注留 backlog）。
+            seen_radii: set[float] = set()
+            for cx, cy, r, vis_c in circles:
+                if not vis_c:
+                    continue
                 rk = round(r, 6)
                 if rk in seen_radii:
                     continue
@@ -136,12 +160,10 @@ def multiview_png(*, eng_views: dict, face_meshes: list[dict], face_labels: list
                 ax.annotate(f"⌀{2 * r:g}", (cx + r * 0.707, cy + r * 0.707),
                             xytext=(cx + r + 9, cy + r + 7), fontsize=9, color="#111",
                             arrowprops=dict(arrowstyle="-", lw=0.7, color="#333"))
-            # 定位尺寸只标首个可见圆（圆心到包围盒两方向）
-            first = next(((cx, cy) for cx, cy, _r, v in circles if v), None)
-            if first is not None:
-                fx, fy = first
-                _dim_h(ax, x0, fx, y1, f"{fx - x0:g}", 6)
-                _dim_v(ax, y0, fy, x1, f"{fy - y0:g}", 6)
+                # 每个去重后可见整圆都给定位尺寸（圆心到包围盒两方向）——
+                # 典型场景 1-3 孔不会挤；多孔拥挤的标注布置留 backlog
+                _dim_h(ax, x0, cx, y1, f"{cx - x0:g}", 6)
+                _dim_v(ax, y0, cy, x1, f"{cy - y0:g}", 6)
         # 三格统一比例（长对正/高平齐的简化版）：共用最大跨度
         if bbs:
             span = max(max(b[2] - b[0], b[3] - b[1]) for b in bbs.values()) * 1.45
