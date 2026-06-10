@@ -39,6 +39,45 @@ def list_parameters(doc: Any) -> dict[str, dict[str, float]]:
     return out
 
 
+def _assert_shape_reflects(obj: Any, key: str, value: float) -> None:
+    """体积不变放行前的 Shape 级几何回读（复审 D 的纵深防御层）。
+
+    真机取证注意：primitive 的 Shape 在 setattr 后【即时重建】（recompute 失灵时
+    box.Shape.BoundBox.XLength 也已是新值），所以本回读对 primitive 抓不住
+    "链未重算"——那由 modify_part 中的 State 账本断言负责（主判据）。本函数保留
+    用于抓"参数写入但 Shape 重建出旧几何/空几何"的对象级异常（纵深防御）。
+
+    判据选择（以稳为准）：
+    - Part::Box：BoundBox 三边。本项目 add_box 只平移不旋转，BoundBox 轴对齐可靠；
+      若未来引入旋转放置，此判据需换成局部坐标。
+    - Part::Cylinder：遍历 Shape 找圆柱面。radius 比 Surface.Radius（旋转不变）；
+      height 用圆柱面 ParameterRange 的 v 跨度（参数域是局部的，v 轴向跨度=高度，
+      真机已验证旋转 137° 后 v-span 仍精确等于 Height）——BoundBox 对 add_hole
+      沿面法向旋转放置的刀具轴向不可靠，不采用。
+    """
+    type_id = getattr(obj, "TypeId", "")
+    actual: float | None = None
+    if type_id == "Part::Box":
+        bb = obj.Shape.BoundBox
+        actual = {"length": bb.XLength, "width": bb.YLength, "height": bb.ZLength}[key]
+    elif type_id == "Part::Cylinder":
+        cyl_faces = [f for f in obj.Shape.Faces
+                     if type(f.Surface).__name__ == "Cylinder"]
+        if not cyl_faces:
+            raise RuntimeError(
+                "几何断言失败：参数已写入但圆柱对象的 Shape 中找不到圆柱面"
+                "——依赖链可能未重算")
+        if key == "radius":
+            actual = float(cyl_faces[0].Surface.Radius)
+        else:  # height
+            pr = cyl_faces[0].ParameterRange
+            actual = abs(float(pr[3]) - float(pr[2]))
+    if actual is not None and abs(actual - value) > 1e-6:
+        raise RuntimeError(
+            f"几何断言失败：参数已写入但形状几何未更新（{key}={value:g} vs "
+            f"实测 {actual:g}）——依赖链可能未重算")
+
+
 def modify_part(session: Session, name: str, parameter: str, value: float) -> dict[str, Any]:
     """修改对象的白名单参数并重算依赖链。"""
     if not name or not isinstance(name, str):
@@ -78,28 +117,43 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
                 raise ValueError(f"参数 {key} 已是 {value:g}，无需修改")
             result_obj_before = session.get_result_object()
             before_name = result_obj_before.Name
-            result_before = result_obj_before.Shape.Volume
+            shape_before = result_obj_before.Shape
+            result_before = shape_before.Volume
             # 孔完整性快照（审查 E1-E4：改参把孔变开槽/移出零件/把件切两半全被
-            # ok:True 误报）。文档不变量：每把作为 Part::Cut.Tool 的圆柱刀具，结果
-            # 形状中其半径的完整圆柱面数 >= 该半径刀具数（add_hole 的增量断言
-            # _count_full_cylinder_faces >= before+1 在每次打孔时已建立此不变量）。
-            # 修改参数后此不变量必须保持。
-            # 推演（改的就是孔自身半径，如 HoleTool radius 4→5）：旧半径 4 的完整
-            # 面计数会 -1 而新半径 5 的 +1 是【预期】行为——所以期望计数按
-            # 【改后预期半径】构建：被改刀具按新值 value 计入、其余刀具按当前半径
-            # 计入。同径双刀具改一把（4→5，另一把仍 4）自然得到 {5:1, 4:1}，逐
-            # 半径断言互不干扰；按改前 shape 实际计数搬运反而会在该场景重复计数。
-            expected_counts: dict[float, int] = {}
+            # ok:True 误报；复审 B：半圆槽误拒）。
+            # 基线 = 改前 shape 中每个刀具半径的【实际】完整圆柱面数——不能用
+            # "每径完整面数 >= 刀具数"的虚构不变量：boolean_cut（合法注册工具）的
+            # 圆柱刀具半嵌边缘开半圆槽时，完整面从创建起就是 0，虚构不变量会让含
+            # 半圆槽的文档上任何 modify_part 全量误拒（且错误消息指向不存在的孔）。
+            # 桶迁移（改的就是孔自身半径，如 HoleTool radius 4→5）：旧半径桶 -1
+            # （下限 0）、新半径桶 +1——但仅当旧桶 >0（该刀具旧半径实际贡献过完整
+            # 面）才迁移：半嵌槽刀具改径不应凭空期望新半径出现完整面。
+            # 推演：同径双刀改一把 {4:2} → {4:1, 5:1}；半圆槽基线 {5:0} 改 width
+            # 不误拒；E1 缺口基线 {4:1} 改后实际 0 < 1 照拒。
+            # 留档（复审 E 场景，Part::Fuse 同径凸台；当前无 fuse 工具不可达）：
+            # 实际计数基线已把同径凸台侧面计入基线（真机取证：基线 {4:2}，孔变
+            # 缺口降到 1 被抓——简单顶包已不可行），但"计数补偿"型顶包理论上仍
+            # 可漏（一次修改同时让孔面消失、又让某残缺凸台面恢复完整，总数不变）。
+            # Fuse 落地时本判据需升级为按刀具轴线匹配完整面，而非按半径全局计数。
+            tool_radii: set[float] = set()
+            modified_tool_rk: float | None = None
             for o in session.doc.Objects:
                 if getattr(o, "TypeId", "") != "Part::Cut":
                     continue
                 tool = getattr(o, "Tool", None)
                 if tool is None or getattr(tool, "TypeId", "") != "Part::Cylinder":
                     continue
-                r_exp = float(value) if (tool.Name == obj.Name and key == "radius") \
-                    else float(tool.Radius)
-                rk = round(r_exp, 6)
-                expected_counts[rk] = expected_counts.get(rk, 0) + 1
+                rk = round(float(tool.Radius), 6)
+                tool_radii.add(rk)
+                if tool.Name == obj.Name and key == "radius":
+                    modified_tool_rk = rk
+            expected_counts: dict[float, int] = {
+                rk: _count_full_cylinder_faces(shape_before, rk) for rk in tool_radii}
+            if modified_tool_rk is not None \
+                    and expected_counts.get(modified_tool_rk, 0) > 0:
+                expected_counts[modified_tool_rk] -= 1
+                new_rk = round(float(value), 6)
+                expected_counts[new_rk] = expected_counts.get(new_rk, 0) + 1
             if attr is None:
                 obj.Edges = [(idx, float(value), float(value))
                              for (idx, _r1, _r2) in obj.Edges]
@@ -111,6 +165,18 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
             if abs(now - value) > 1e-9:
                 raise RuntimeError(
                     f"几何断言失败：参数 {key} 设为 {value:g} 后回读为 {now:g}")
+            # 依赖链执行账本断言（复审 D：recompute 失灵时全部几何断言凭旧几何
+            # 通过 + 体积不变放行 = 静默失败粉饰成 ok+note）。真机取证：primitive
+            # 的 Shape 在 setattr 后【即时重建】（box.Length=45 后未 recompute
+            # box.Shape.BoundBox.XLength 已是 45），被改对象的 Shape 级几何回读
+            # 对 primitive 恒过、无判别力——FreeCAD 自己的 touched 账本才是
+            # "链已执行"的可信信号：setattr/Edges 重写后对象置 Touched（Box/
+            # Cylinder/Fillet 真机均已验证），正常 recompute 后必为 Up-to-date，
+            # 保持 Touched 即 recompute 未执行或未覆盖该对象。
+            if "Touched" in getattr(obj, "State", []):
+                raise RuntimeError(
+                    f"几何断言失败：参数 {key} 已写入但对象 {obj.Name} 仍处 "
+                    "Touched 状态——依赖链可能未重算（recompute 未执行或失败）")
             # 结果对象漂移断言（审查 E5 CRITICAL：刀具吞件 → Cut 体积归 0 →
             # get_result_object fallback 漂移到刀具圆柱 → 谎报刀具体积污染会话）
             result_obj = session.get_result_object()
@@ -139,8 +205,19 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
                       "volume": shape.Volume,
                       "labels_stale": True,
                       "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"}
-            # 体积不变是合法情形（审查 E6：通孔在零件外的部分加长）——参数回读
-            # 断言+对象漂移断言+孔完整性断言已接管"链未重算"的兜底，不再误拒
+            # 体积不变是合法情形（审查 E6：通孔在零件外的部分加长）——但放行前
+            # 必须做被改对象的 Shape 级几何回读（复审 D：recompute 失灵时属性回读
+            # /漂移/孔完整性断言全部凭旧几何通过，放行+note 会粉饰静默失败）
             if abs(shape.Volume - result_before) < 1e-9:
+                if attr is None:
+                    # Fillet/Chamfer：值藏在 Edges 元组，Shape 级回读需逐边匹配
+                    # 圆角面半径（复杂）。但圆角/倒角半径改变必然改变体积（移除/
+                    # 添加量随半径单调），recompute 正常时它们到不了本分支——
+                    # 能走到这里 = 链未重算，直接响亮拒绝（跳过回读会让假设性
+                    # recompute 失灵场景被 note 粉饰）。
+                    raise RuntimeError(
+                        f"几何断言失败：{key} 修改后体积无变化——圆角/倒角半径"
+                        "改变必然改变体积，依赖链可能未重算")
+                _assert_shape_reflects(obj, key, float(value))
                 result["note"] = "该修改未改变最终几何（参数已生效，例如通孔在零件外的部分加长）"
     return result
