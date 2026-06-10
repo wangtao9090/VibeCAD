@@ -86,6 +86,49 @@ def visibility_note(normal: tuple, current_view: str) -> str:
     return "（预设视角均不可见，请直接用本描述指代）"
 
 
+def _draw_face_meshes(ax, face_meshes: list[dict], *, view: str, alpha: float = 1.0) -> bool:
+    """在单个 3D axes 上画逐面网格（palette 着色+朗伯明暗）并设轴范围/视角。
+    alpha<1 为半透明（X 光正交视图用，边线同步弱化）。
+    返回是否画出了任何几何（False=全部空网格，由调用方决定如何报错）。"""
+    import numpy as np  # noqa: PLC0415
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: PLC0415
+
+    light = np.array([0.35, 0.30, 0.88])
+    light = light / np.linalg.norm(light)
+    edge_rgba = (0, 0, 0, 0.05 if alpha < 1.0 else 0.12)
+    all_pts: list = []
+    for k, fm in enumerate(face_meshes):
+        verts, facets = fm["verts"], fm["facets"]
+        if not verts or not facets:
+            continue
+        all_pts.extend(verts)
+        varr = np.asarray(verts, dtype=float)
+        base = np.array(_PALETTE[k % len(_PALETTE)])
+        tris, cols = [], []
+        for f in facets:
+            a, b, c = varr[f[0]], varr[f[1]], varr[f[2]]
+            n = np.cross(b - a, c - a)
+            ln = float(np.linalg.norm(n))
+            shade = 0.45 + 0.55 * abs(float(n @ light) / ln) if ln > 1e-12 else 1.0
+            tris.append([verts[i] for i in f])
+            cols.append((*(base * shade), alpha))
+        ax.add_collection3d(Poly3DCollection(
+            tris, facecolors=cols, edgecolor=edge_rgba, linewidths=0.2))
+    if not all_pts:
+        return False
+    pts = np.asarray(all_pts)
+    mins, maxs = pts.min(0), pts.max(0)
+    pad = _PAD_RATIO * float((maxs - mins).max() or 1.0)
+    ax.set_xlim(mins[0] - pad, maxs[0] + pad)
+    ax.set_ylim(mins[1] - pad, maxs[1] + pad)
+    ax.set_zlim(mins[2] - pad, maxs[2] + pad)
+    # aspect 与 limits 同口径（都含 pad），否则非立方体各向异性拉伸（孔变椭圆）
+    ax.set_box_aspect(tuple(((maxs[i] - mins[i]) + 2 * pad) or 1 for i in range(3)))
+    ax.view_init(*_VIEWS[view])
+    ax.set_axis_off()
+    return True
+
+
 def annotated_png(*, face_meshes: list[dict], face_labels: list[dict],
                   edge_labels: list[dict], view: str = "iso",
                   size: tuple[int, int] = (560, 560), dims: dict | None = None) -> bytes:
@@ -96,47 +139,15 @@ def annotated_png(*, face_meshes: list[dict], face_labels: list[dict],
     import io  # noqa: PLC0415
 
     import matplotlib  # noqa: PLC0415
-    import numpy as np  # noqa: PLC0415
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt  # noqa: PLC0415
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: PLC0415
 
-    light = np.array([0.35, 0.30, 0.88])
-    light = light / np.linalg.norm(light)
     fig = plt.figure(figsize=(size[0] / 100, size[1] / 100), dpi=100)
     try:
         ax = fig.add_subplot(111, projection="3d")
-        all_pts: list = []
-        for k, fm in enumerate(face_meshes):
-            verts, facets = fm["verts"], fm["facets"]
-            if not verts or not facets:
-                continue
-            all_pts.extend(verts)
-            varr = np.asarray(verts, dtype=float)
-            base = np.array(_PALETTE[k % len(_PALETTE)])
-            tris, cols = [], []
-            for f in facets:
-                a, b, c = varr[f[0]], varr[f[1]], varr[f[2]]
-                n = np.cross(b - a, c - a)
-                ln = float(np.linalg.norm(n))
-                shade = 0.45 + 0.55 * abs(float(n @ light) / ln) if ln > 1e-12 else 1.0
-                tris.append([verts[i] for i in f])
-                cols.append((*(base * shade), 1.0))
-            ax.add_collection3d(Poly3DCollection(
-                tris, facecolors=cols, edgecolor=(0, 0, 0, 0.12), linewidths=0.2))
-        if not all_pts:
+        if not _draw_face_meshes(ax, face_meshes, view=view):
             raise ValueError("空网格：所有面 tessellation 均为空")
-        pts = np.asarray(all_pts)
-        mins, maxs = pts.min(0), pts.max(0)
-        pad = _PAD_RATIO * float((maxs - mins).max() or 1.0)
-        ax.set_xlim(mins[0] - pad, maxs[0] + pad)
-        ax.set_ylim(mins[1] - pad, maxs[1] + pad)
-        ax.set_zlim(mins[2] - pad, maxs[2] + pad)
-        # aspect 与 limits 同口径（都含 pad），否则非立方体各向异性拉伸（孔变椭圆）
-        ax.set_box_aspect(tuple(((maxs[i] - mins[i]) + 2 * pad) or 1 for i in range(3)))
-        ax.view_init(*_VIEWS[view])
-        ax.set_axis_off()
         for el in edge_labels:
             poly = el.get("polyline") or []
             e_vis = el.get("visible", True)  # 缺省可见（向后兼容）
