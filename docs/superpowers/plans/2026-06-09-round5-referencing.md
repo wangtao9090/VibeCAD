@@ -40,6 +40,8 @@ tests/test_runtime_integration.py 改   追加 test_annotated_feature_flow（端
 Run: `uv run python -c "import mcp.server.fastmcp.server as s, inspect; print(inspect.getsource(s._convert_to_content))"`
 目标：确认 FastMCP 对工具返回 `list` 的转换行为（预期：list/tuple 逐元素递归转换——`Image`→ImageContent、`str`→TextContent，即支持混合多 content）。若不支持混合列表 → 回退方案：`render_part` 只回 Image，标签表经新只读工具 `get_labels()` 返回（dict）。**把结论写进本文件此处再继续。**
 
+> **✅ 已验证（2026-06-09，mcp SDK in .venv）**：`mcp/server/fastmcp/utilities/func_metadata.py::_convert_to_content` 对 `list | tuple` 做 `chain.from_iterable` 递归逐元素转换——`Image`→ImageContent、`str`→TextContent。**混合列表 `[Image, json_str]` 原生支持，主方案成立，无需回退。**
+
 - [ ] **Step 2: 写原型脚本**（真机管线，box(40,30,20)+顶面正中 ⌀12 孔 → 逐面 tessellate → matplotlib 面标签+尺寸线 → /tmp/spike_annotate_iso.png）
 
 ```python
@@ -557,6 +559,8 @@ Run: `uv run pytest tests/test_annotate.py -q`
 Expected: FAIL（模块不存在）
 
 - [ ] **Step 3: 实现**（样式参数以 Task 0 spike 定稿为准；以下为基准实现）
+
+> **Task 0 spike 样式定稿（2026-06-09，已人眼检验两版）**：①面标签锚点用**该面最大三角形的质心**（不是 `CenterOfMass`——带孔面质心落在孔上会压住孔），`render_annotated` 内从 face mesh 算；②轴 limits 三向各留 **14% pad**（防尺寸线文字被视锥裁剪）；③**尺寸文本也要 `zorder=99`**（否则被零件棱线穿过）；④字号 11/白底圆角框/可见性阈值 0.05/palette 6 色循环维持基准实现不变。spike 实测可见性判定全对（左/后/底/孔壁 hidden，前/顶/右 visible）。
 
 ```python
 # src/vibecad/feedback/annotate.py
