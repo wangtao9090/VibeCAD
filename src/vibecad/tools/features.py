@@ -34,17 +34,19 @@ def _outward_normal(shape: Any, face: Any):
     return n
 
 
-def _has_full_cylinder_face(shape: Any, radius: float) -> bool:
-    """shape 是否含半径匹配且 u 参数跨满 2π 的圆柱面——完整圆孔的成形判据。
-    已知限界：若零件已存在同径旧完整孔，部分越界的新孔可能被旧孔误放行（边角 case，接受）。"""
+def _count_full_cylinder_faces(shape: Any, radius: float) -> int:
+    """数半径匹配（1e-6）且 u 参数跨满 2π（容差 1e-3）的圆柱面——完整圆孔的成形判据。
+    增量判据（cut 前后各数一次，after >= before+1）：存在性判据会被同径旧孔放行
+    新孔的越界缺口（安装孔阵列是常见操作，终审 CRITICAL-3）。"""
+    n = 0
     for f in shape.Faces:
         s = f.Surface
         if type(s).__name__ != "Cylinder" or abs(s.Radius - radius) > 1e-6:
             continue
         u0, u1 = f.ParameterRange[0], f.ParameterRange[1]
         if abs((u1 - u0) - 2 * math.pi) < 1e-3:
-            return True
-    return False
+            n += 1
+    return n
 
 
 def add_hole(session: Session, face: str, diameter: float,
@@ -81,6 +83,7 @@ def add_hole(session: Session, face: str, diameter: float,
             length = (depth + lift) if depth is not None \
                 else shape.BoundBox.DiagonalLength + 2 * lift
             base_vol = shape.Volume
+            cyl_before = _count_full_cylinder_faces(shape, diameter / 2.0)
             cyl = session.doc.addObject("Part::Cylinder", "HoleTool")
             cyl.Radius, cyl.Height = diameter / 2.0, length
             cyl.Placement = FreeCAD.Placement(
@@ -98,10 +101,19 @@ def add_hole(session: Session, face: str, diameter: float,
                 raise RuntimeError(
                     f"几何断言失败：打孔把零件切成 {len(cut.Shape.Solids)} 块"
                     "——offset 可能越过零件边缘")
-            if not _has_full_cylinder_face(cut.Shape, diameter / 2.0):
+            if _count_full_cylinder_faces(cut.Shape, diameter / 2.0) < cyl_before + 1:
                 raise RuntimeError(
                     "几何断言失败：未形成完整圆孔（孔可能与零件边缘相交成开口缺口）"
                     "——请调整 offset")
+            if depth is not None:
+                # 盲孔体积核算：超深打穿/侧向越界少切都会让移除量低于名义圆柱体积
+                removed = base_vol - cut.Shape.Volume
+                expected = math.pi * (diameter / 2.0) ** 2 * depth
+                if removed < expected * 0.99 - 1e-6:
+                    raise RuntimeError(
+                        f"几何断言失败：盲孔实际移除体积 {removed:.3f} < 期望 {expected:.3f}"
+                        "——depth 可能超出材料厚度（已打穿）或孔越界，"
+                        "请减小 depth 或检查 offset")
             result = {"ok": True, "name": cut.Name, "volume": cut.Shape.Volume,
                       "hole": {"face": face, "diameter": diameter,
                                "depth": depth if depth is not None else "through",

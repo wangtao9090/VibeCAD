@@ -216,6 +216,72 @@ def test_add_hole_offset_outside_raises(runtime_env):
 
 
 @pytest.mark.slow
+def test_blind_hole_depth_exceeding_material_raises(runtime_env):
+    """盲孔超深静默打穿（终审 CRITICAL-2）：5mm 板打 depth=20 必须响亮失败（体积核算），
+    不得报 ok:True depth=20 实际打穿；合法盲孔移除体积 ≈ π·r²·depth（±0.1）。"""
+    out = _run_in_env(runtime_env, (
+        "import math\n"
+        "from vibecad.engine.session import Session\n"
+        "from vibecad.feedback.annotate import render_annotated\n"
+        "from vibecad.tools import features, modeling\n"
+        "s = Session(); modeling.new_document(s, 'Blind')\n"
+        "modeling.add_box(s, 60, 40, 5)\n"  # 5mm 薄板
+        "png, table, freg, ereg = render_annotated(s.get_result_shape(), mode='faces')\n"
+        "s.set_labels(freg, ereg)\n"
+        "top = next(lab for lab, d in table.items() if '顶面' in d)\n"
+        "msg = ''\n"
+        "try:\n"
+        "    features.add_hole(s, top, 10, depth=20)\n"  # 超深：必打穿
+        "except RuntimeError as exc:\n"
+        "    msg = str(exc)\n"
+        "assert ('打穿' in msg or '超出' in msg), msg\n"
+        "s.close_document(); modeling.new_document(s, 'Blind2')\n"
+        "modeling.add_box(s, 40, 30, 20)\n"
+        "p2, t2, freg2, ereg2 = render_annotated(s.get_result_shape(), mode='faces')\n"
+        "s.set_labels(freg2, ereg2)\n"
+        "top2 = next(lab for lab, d in t2.items() if '顶面' in d)\n"
+        "r = features.add_hole(s, top2, 8, depth=10)\n"  # 合法盲孔
+        "removed = 24000 - r['volume']\n"
+        "assert abs(removed - math.pi * 16 * 10) < 0.1, removed\n"
+        "print('BLIND_DEPTH_OK')\n"
+    ))
+    assert "BLIND_DEPTH_OK" in out
+
+
+@pytest.mark.slow
+def test_second_same_diameter_hole_cannot_hide_notch(runtime_env):
+    """同径旧孔放行新孔缺口（终审 CRITICAL-3）：先打 d=10 完整孔，再打同径越界
+    缺口孔必须被增量判据逮住（after >= before+1）；第二个合法同径孔正常放行。"""
+    out = _run_in_env(runtime_env, (
+        "from vibecad.engine.session import Session\n"
+        "from vibecad.feedback.annotate import render_annotated\n"
+        "from vibecad.tools import features, modeling\n"
+        "from vibecad.tools.features import _count_full_cylinder_faces\n"
+        "s = Session(); modeling.new_document(s, 'Pair')\n"
+        "modeling.add_box(s, 60, 40, 8)\n"
+        "png, table, freg, ereg = render_annotated(s.get_result_shape(), mode='faces')\n"
+        "s.set_labels(freg, ereg)\n"
+        "top = next(lab for lab, d in table.items() if '顶面' in d)\n"
+        "r1 = features.add_hole(s, top, 10)\n"  # 第一个完整孔（居中）
+        "assert r1['ok'], r1\n"
+        "p2, t2, freg2, ereg2 = render_annotated(s.get_result_shape(), mode='faces')\n"
+        "s.set_labels(freg2, ereg2)\n"  # 顶面被孔开口，标签过期 → 重新标注
+        "top2 = next(lab for lab, d in t2.items() if '顶面' in d)\n"
+        "msg = ''\n"
+        "try:\n"
+        "    features.add_hole(s, top2, 10, offset=[28, 0])\n"  # 孔心 x=58，越过 x=60 边缘
+        "except RuntimeError as exc:\n"
+        "    msg = str(exc)\n"
+        "assert '未形成完整圆孔' in msg, msg\n"  # 旧存在性判据会被第一孔放行——必须逮住
+        "r3 = features.add_hole(s, top2, 10, offset=[15, 0])\n"  # 第二个合法同径孔
+        "assert r3['ok'], r3\n"
+        "assert _count_full_cylinder_faces(s.get_result_shape(), 5.0) == 2\n"
+        "print('NOTCH_CAUGHT_OK')\n"
+    ))
+    assert "NOTCH_CAUGHT_OK" in out
+
+
+@pytest.mark.slow
 def test_visibility_signs_on_real_box(runtime_env):
     """可见性符号（表是对外契约）：top 视角下顶面无'不可见'注；底面注明预设视角均不可见；
     打孔后孔壁（圆柱面，法向均值≈0）注明预设视角均不可见。"""
