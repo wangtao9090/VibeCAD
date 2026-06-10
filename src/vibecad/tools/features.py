@@ -103,7 +103,8 @@ def add_hole(session: Session, face: str, diameter: float,
                     "——offset 可能越过零件边缘")
             if _count_full_cylinder_faces(cut.Shape, diameter / 2.0) < cyl_before + 1:
                 raise RuntimeError(
-                    "几何断言失败：未形成完整圆孔（孔可能与零件边缘相交成开口缺口）"
+                    "几何断言失败：未形成完整圆孔（孔可能与零件边缘相交成开口缺口，"
+                    "或与已有孔/特征重叠）"
                     "——请调整 offset")
             if depth is not None:
                 # 盲孔体积核算：超深打穿/侧向越界少切都会让移除量低于名义圆柱体积
@@ -112,8 +113,8 @@ def add_hole(session: Session, face: str, diameter: float,
                 if removed < expected * 0.99 - 1e-6:
                     raise RuntimeError(
                         f"几何断言失败：盲孔实际移除体积 {removed:.3f} < 期望 {expected:.3f}"
-                        "——depth 可能超出材料厚度（已打穿）或孔越界，"
-                        "请减小 depth 或检查 offset")
+                        "——depth 可能超出材料厚度（已打穿）、孔越界，"
+                        "或与已有孔/特征重叠，请减小 depth 或检查 offset")
             result = {"ok": True, "name": cut.Name, "volume": cut.Shape.Volume,
                       "hole": {"face": face, "diameter": diameter,
                                "depth": depth if depth is not None else "through",

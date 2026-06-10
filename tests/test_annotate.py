@@ -44,6 +44,22 @@ def test_largest_triangle_centroid():
     assert c == pytest.approx((20 / 3, 20 / 3, 0.0))
 
 
+def test_largest_triangle_centroid_prefers_camera_facing():
+    # 背向大三角（绕向反转 → 法向 -Z，面积 200）+ 朝向小三角（法向 +Z，面积 50）
+    verts = [(0, 0, 0), (20, 0, 0), (0, 20, 0), (30, 0, 0), (40, 0, 0), (30, 10, 0)]
+    facets = [(0, 2, 1), (3, 4, 5)]
+    cam = (0.0, 0.0, 1.0)
+    # 传 cam：跳过背向大三角，锚点取朝相机的小三角质心
+    c = annotate.largest_triangle_centroid(verts, facets, cam)
+    assert c == pytest.approx((100 / 3, 10 / 3, 0.0))
+    # 不传 cam：仍取全局最大（背向大三角）
+    c0 = annotate.largest_triangle_centroid(verts, facets)
+    assert c0 == pytest.approx((20 / 3, 20 / 3, 0.0))
+    # 全部背向时退回全局最大（不返回空）
+    c_back = annotate.largest_triangle_centroid(verts, [(0, 2, 1)], cam)
+    assert c_back == pytest.approx((20 / 3, 20 / 3, 0.0))
+
+
 def test_visibility_note_top_normal_from_front():
     # 顶面法向 (0,0,1)：front 视角不可见，但 iso/top 可见 → 注里要给出 top
     note = annotate.visibility_note((0, 0, 1), "front")
