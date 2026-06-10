@@ -1,6 +1,7 @@
 """VibeCAD MCP server（FastMCP, stdio）。握手必须秒回：模块级不 import FreeCAD、不下载。"""
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -10,6 +11,7 @@ from mcp.server.fastmcp import FastMCP, Image
 
 from vibecad import __version__
 from vibecad.engine.session import Session
+from vibecad.feedback import annotate as _annotate
 from vibecad.feedback import render as _render
 from vibecad.feedback import text as _feedback_text
 from vibecad.freecad_env import (
@@ -21,6 +23,7 @@ from vibecad.freecad_env import (
 from vibecad.runtime import paths, status
 from vibecad.runtime.installer import RuntimeInstaller
 from vibecad.tools import export as _export
+from vibecad.tools import features as _features
 from vibecad.tools import modeling as _modeling
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # m10：杜绝隐式拉起 GUI
@@ -178,18 +181,68 @@ def describe_part() -> dict[str, Any]:
 
 
 @mcp.tool()
-def render_part(view: str = "iso") -> Any:
-    """渲染当前零件为 PNG 预览图（view: iso|front|top|right|back），MCP 客户端内联显示。"""
+def render_part(view: str = "iso", annotate: str | None = None,
+                edges_of: str | None = None) -> Any:
+    """渲染当前零件 PNG（view: iso|front|top|right|back）。
+    annotate='faces'：面标注图+标签表+尺寸线（之后可用面标签如 'A' 调 add_hole）；
+    annotate='edges'：边标注图（edges_of='A' 只画 A 面的边；
+    之后可调 fillet_edges/chamfer_edges）。"""
     guard = _runtime_guard()
     if guard:
         return guard
     try:
         with _silence_fd1():
             shape = _session.get_result_shape()
-        png = _render.render_png(shape, view=view)
+        if annotate is None:
+            png = _render.render_png(shape, view=view)
+            return Image(data=png, format="png")
+        ef_idx = _session.resolve_face(edges_of) if edges_of else None
+        png, table, faces_reg, edges_reg = _annotate.render_annotated(
+            shape, mode=annotate, edges_of=ef_idx, view=view)
+        _session.set_labels(faces_reg, edges_reg)
+        return [Image(data=png, format="png"),
+                json.dumps({"ok": True, "labels": table}, ensure_ascii=False)]
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"渲染失败：{exc}"}
-    return Image(data=png, format="png")
+
+
+@mcp.tool()
+def add_hole(face: str, diameter: float, depth: float | None = None,
+             offset: list[float] | None = None) -> dict[str, Any]:
+    """在指定面打圆孔（face=面标签，来自 render_part(annotate='faces')）。
+    depth 省略=通孔；offset=[u,v] 面内毫米偏移（省略=面正中）。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        return _features.add_hole(_session, face, diameter, depth,
+                                  tuple(offset) if offset is not None else (0.0, 0.0))
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"打孔失败：{exc}"}
+
+
+@mcp.tool()
+def fillet_edges(edges: list[str], radius: float) -> dict[str, Any]:
+    """对边标签列表做圆角（标签来自 render_part(annotate='edges')）。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        return _features.fillet_edges(_session, edges, radius)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"圆角失败：{exc}"}
+
+
+@mcp.tool()
+def chamfer_edges(edges: list[str], size: float) -> dict[str, Any]:
+    """对边标签列表做倒角（标签来自 render_part(annotate='edges')）。"""
+    guard = _runtime_guard()
+    if guard:
+        return guard
+    try:
+        return _features.chamfer_edges(_session, edges, size)
+    except (RuntimeError, ValueError) as exc:
+        return {"ok": False, "message": f"倒角失败：{exc}"}
 
 
 def main() -> None:
