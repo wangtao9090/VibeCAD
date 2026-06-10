@@ -41,7 +41,11 @@ def _movable_obj(session: Session, name: str):
 def _reposition(session: Session, name: str, apply, op: str) -> dict[str, Any]:
     """共享骨架：守卫快照 → apply(obj, FreeCAD) 改 Placement → recompute → 全套断言。
     注：reposition 后结果体积允许变化（移动孔刀具改变相交区是合法目的），
-    不做体积断言；越界/切空/缺口由孔完整性快照与单 solid 断言兜住。"""
+    不做体积断言；越界/切空/缺口由孔完整性快照与单 solid 断言兜住；
+    密封内腔（孔口被完全封死、不可加工）由孔端面探针断言兜住。
+    已知盲区（I2 审查后确认放行）：通孔被移动封住一端变盲孔时放行不警示——
+    孔端面探针只拒"两端都封死"的密封内腔；区分"本来就是盲孔"与"通孔被封一端"
+    需追踪每孔的创建意图（成本高），且盲孔本身是合法几何，故放行。"""
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
     with session._transaction(op):
         with silence_fd1():
@@ -59,6 +63,7 @@ def _reposition(session: Session, name: str, apply, op: str) -> dict[str, Any]:
             session.assert_valid_solid(shape)
             _integrity.assert_single_solid(shape, op)
             _integrity.assert_holes_intact(shape, counts)
+            _integrity.assert_no_sealed_holes(session.doc, shape)
             pl = obj.Placement
             result = {"ok": True, "name": obj.Name, "volume": shape.Volume,
                       op: {"position": [pl.Base.x, pl.Base.y, pl.Base.z]},
@@ -68,14 +73,17 @@ def _reposition(session: Session, name: str, apply, op: str) -> dict[str, Any]:
 
 
 def move_part(session: Session, name: str, position) -> dict[str, Any]:
-    """把图元移动到绝对位置（依赖链自动重算）。"""
+    """把图元移动到绝对位置（依赖链自动重算）。同值 no-op 拒绝（与 modify 拉齐）。"""
     if not name or not isinstance(name, str):
         raise ValueError("name 必须是非空字符串（对象名，见 parts 字段）")
     _validate_position(position)
 
     def _apply(obj, FreeCAD):
         pl = obj.Placement
-        pl.Base = FreeCAD.Vector(*[float(c) for c in position])
+        new_base = FreeCAD.Vector(*[float(c) for c in position])
+        if (pl.Base - new_base).Length < 1e-9:  # 同值 no-op 与 modify 拉齐
+            raise ValueError(f"对象已在该位置 {list(position)!r}")
+        pl.Base = new_base
         obj.Placement = pl
 
     return _reposition(session, name, _apply, "move")
