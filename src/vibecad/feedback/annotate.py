@@ -103,7 +103,9 @@ def _draw_face_meshes(ax, face_meshes: list[dict], *, view: str, alpha: float = 
             continue
         all_pts.extend(verts)
         varr = np.asarray(verts, dtype=float)
-        base = np.array(_PALETTE[k % len(_PALETTE)])
+        # 优先使用 collect_annotation_data 预分配的颜色（装配模式按零件轮换）；
+        # 否则退回全局 palette（兼容外部直接构造 face_meshes 的调用方）
+        base = np.array(fm.get("_color", _PALETTE[k % len(_PALETTE)]))
         tris, cols = [], []
         for f in facets:
             a, b, c = varr[f[0]], varr[f[1]], varr[f[2]]
@@ -182,28 +184,86 @@ def annotated_png(*, face_meshes: list[dict], face_labels: list[dict],
     return buf.getvalue()
 
 
-def collect_annotation_data(shape: Any, *, view: str = "iso") -> dict:
+def collect_annotation_data(shape: Any, *, view: str = "iso",
+                            part_map: dict[str, Any] | None = None) -> dict:
     """逐面 tessellate + 指纹/锚点/可见性 + 全量注册表 + faces 标签表 + 尺寸。
     render_annotated(mode='faces') 与 multiview.render_multiview 的共享数据源。
-    返回 {face_meshes, face_labels, table, faces_reg, edges_reg, dims}。"""
+    返回 {face_meshes, face_labels, table, faces_reg, edges_reg, dims}。
+
+    part_map={零件名: 全局 shape}（可选）：给定时对 compound shape 的每个面做零件归属
+    判定——compound 面序 = 各零件 shape.Faces 按 part_map 迭代顺序拼接，palette 按零件
+    基色轮换（零件内仍循环色差），标签表条目加"（零件：X）"后缀。
+    未给定（None）：单零件模式，行为与旧版完全一致——面色取全局 palette，无零件后缀。
+    """
     from vibecad.engine import naming  # noqa: PLC0415
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+
+    # 零件调色板：每个零件用一个不同的基色组，零件内色差沿 _PALETTE 循环
+    # 基色组：hue 按零件数均匀分布（3 个暖→冷色调），零件内循环 _PALETTE 做亮度差
+    _PART_BASE_COLORS = [
+        # 蓝调（默认单零件），红调，绿调，紫调，橙调
+        [(0.32, 0.55, 0.90), (0.36, 0.62, 0.83), (0.30, 0.50, 0.95),
+         (0.40, 0.58, 0.86), (0.34, 0.52, 0.92), (0.38, 0.60, 0.88)],
+        [(0.90, 0.40, 0.38), (0.85, 0.45, 0.42), (0.88, 0.35, 0.35),
+         (0.82, 0.50, 0.45), (0.86, 0.38, 0.40), (0.84, 0.43, 0.37)],
+        [(0.35, 0.80, 0.45), (0.40, 0.75, 0.50), (0.32, 0.78, 0.42),
+         (0.38, 0.82, 0.48), (0.36, 0.77, 0.44), (0.42, 0.79, 0.46)],
+        [(0.70, 0.45, 0.88), (0.65, 0.50, 0.85), (0.72, 0.42, 0.90),
+         (0.68, 0.48, 0.83), (0.66, 0.46, 0.87), (0.74, 0.44, 0.86)],
+        [(0.90, 0.65, 0.25), (0.85, 0.70, 0.30), (0.88, 0.60, 0.22),
+         (0.82, 0.68, 0.28), (0.86, 0.63, 0.24), (0.84, 0.67, 0.26)],
+    ]
 
     cam = camera_direction(view)
     with silence_fd1():
         bb = shape.BoundBox
         bbox = (bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax)
+
+        # 构建面的零件归属：face_idx → (零件名, 零件序号) 或 None（单零件模式）
+        face_part_assignment: list[tuple[str, int] | None] = []
+        if part_map is not None:
+            part_names = list(part_map)
+            for pi, pname in enumerate(part_names):
+                p_shape = part_map[pname]
+                for _ in p_shape.Faces:
+                    face_part_assignment.append((pname, pi))
+        else:
+            # 单零件模式：face_part_assignment 保持空，后续按 None 处理
+            face_part_assignment = []
+
         face_meshes, face_info = [], []
-        for f in shape.Faces:
+        for i, f in enumerate(shape.Faces):
             verts, facets = f.tessellate(0.1)
             pts = [(p.x, p.y, p.z) for p in verts]
-            face_meshes.append({"verts": pts, "facets": facets})
+            assignment = face_part_assignment[i] if i < len(face_part_assignment) else None
+            face_meshes.append({"verts": pts, "facets": facets,
+                                "_part_assignment": assignment})
             face_info.append({"fp": naming.face_fingerprint(f),
                               "anchor": largest_triangle_centroid(pts, facets, cam),
-                              "normal": mesh_normal(pts, facets)})
+                              "normal": mesh_normal(pts, facets),
+                              "_part_assignment": assignment})
         if not any(fm["verts"] for fm in face_meshes):
             raise RuntimeError("几何断言失败：形状无法镶嵌为网格（空 tessellation）")
         edges_reg_list = [naming.edge_fingerprint(e) for e in shape.Edges]
+
+    # 为各面分配颜色（装配模式按零件轮换基色组，单零件模式用全局 _PALETTE）
+    if part_map is not None:
+        # 每零件维护自己的 palette 内计数器
+        part_local_counter: dict[str, int] = {}
+        for fm, _info in zip(face_meshes, face_info, strict=True):
+            assignment = fm["_part_assignment"]
+            if assignment is not None:
+                pname, pi = assignment
+                local_idx = part_local_counter.get(pname, 0)
+                part_local_counter[pname] = local_idx + 1
+                palette = _PART_BASE_COLORS[pi % len(_PART_BASE_COLORS)]
+                fm["_color"] = palette[local_idx % len(palette)]
+            else:
+                fm["_color"] = _PALETTE[0]
+    else:
+        for k, fm in enumerate(face_meshes):
+            fm["_color"] = _PALETTE[k % len(_PALETTE)]
+
     face_names = naming.face_labels(len(face_info))
     table: dict[str, str] = {}
     faces_reg: dict[str, dict] = {}
@@ -212,7 +272,12 @@ def collect_annotation_data(shape: Any, *, view: str = "iso") -> dict:
         visible = (sum(a * b for a, b in zip(info["normal"], cam, strict=True)) > _VIS_DOT)
         faces_reg[lab] = info["fp"]
         face_labels.append({"label": lab, "pos": info["anchor"], "visible": visible})
-        table[lab] = naming.face_summary(info["fp"], bbox) + visibility_note(info["normal"], view)
+        summary = naming.face_summary(info["fp"], bbox) + visibility_note(info["normal"], view)
+        # 装配模式：标签表条目加零件归属后缀
+        if info["_part_assignment"] is not None:
+            pname, _pi = info["_part_assignment"]
+            summary += f"（零件：{pname}）"
+        table[lab] = summary
     edges_reg = dict(zip(naming.edge_labels(len(edges_reg_list)), edges_reg_list, strict=True))
     dims = {"L": bbox[3] - bbox[0], "W": bbox[4] - bbox[1], "H": bbox[5] - bbox[2],
             "bbox": bbox}

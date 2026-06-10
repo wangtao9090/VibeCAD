@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from vibecad.engine.session import Session
+
 
 def describe_shape(shape: Any) -> dict[str, Any]:
     bb = shape.BoundBox
@@ -13,6 +15,58 @@ def describe_shape(shape: Any) -> dict[str, Any]:
         "center_of_mass": _center_of_mass(shape),
         "solid_count": len(shape.Solids),
         "shell_count": len(shape.Shells),
+    }
+
+
+def describe_assembly(session: Session) -> dict[str, Any]:
+    """装配摘要：per-part volume/bbox/placement + assembly_bbox + interference 清单。
+
+    返回格式：
+    {
+      "parts": {
+        "零件名": {"volume": float, "bbox": {x,y,z}, "placement": [x,y,z]},
+        ...
+      },
+      "assembly_bbox": {"x": float, "y": float, "z": float},
+      "interference": [{"parts": [a, b], "volume": float}, ...]
+    }
+
+    单零件模式（_parts 空）：返回 describe_shape(get_result_shape()) 原格式。
+    """
+    if not session._parts:
+        from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+        with silence_fd1():
+            return describe_shape(session.get_result_shape())
+
+    from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+    from vibecad.tools.assembly import assert_no_interference  # noqa: PLC0415
+
+    parts_info: dict[str, Any] = {}
+    with silence_fd1():
+        for name, info in session._parts.items():
+            try:
+                shape = session.get_result_shape(name)
+                bb = shape.BoundBox
+                pl = info["container"].Placement
+                parts_info[name] = {
+                    "volume": shape.Volume,
+                    "bbox": {"x": bb.XLength, "y": bb.YLength, "z": bb.ZLength},
+                    "placement": [pl.Base.x, pl.Base.y, pl.Base.z],
+                }
+            except Exception as exc:  # noqa: BLE001
+                parts_info[name] = {"error": str(exc)}
+
+        assembly_shape = session.get_assembly_shape()
+        abb = assembly_shape.BoundBox
+        assembly_bbox = {"x": abb.XLength, "y": abb.YLength, "z": abb.ZLength}
+
+    # 干涉清单（allow=True 放行，返回清单而非抛异常）
+    interference = assert_no_interference(session, allow=True)
+
+    return {
+        "parts": parts_info,
+        "assembly_bbox": assembly_bbox,
+        "interference": interference,
     }
 
 

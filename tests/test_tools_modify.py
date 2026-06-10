@@ -36,6 +36,8 @@ class _FakeDoc:
 
 
 def test_list_parameters_whitelist_only():
+    """list_parameters 统一新形态：{零件名: {对象名: {参数名: 值}}}。
+    单零件模式（session=None）：零件键固定为 "Part1"。"""
     doc = _FakeDoc([
         _FakeObj("Box", "Part::Box", Length=40.0, Width=30.0, Height=20.0),
         _FakeObj("HoleTool", "Part::Cylinder", Radius=4.0, Height=42.0),
@@ -43,12 +45,37 @@ def test_list_parameters_whitelist_only():
         _FakeObj("Fillet", "Part::Fillet", Edges=[(3, 2.0, 2.0), (7, 2.0, 2.0)]),
     ])
     out = modify.list_parameters(doc)
+    # 新形态：{零件键: {对象: {参数}}}
     assert out == {
-        "Box": {"length": 40.0, "width": 30.0, "height": 20.0},
-        "HoleTool": {"radius": 4.0, "height": 42.0},
-        "Fillet": {"radius": 2.0},
+        "Part1": {
+            "Box": {"length": 40.0, "width": 30.0, "height": 20.0},
+            "HoleTool": {"radius": 4.0, "height": 42.0},
+            "Fillet": {"radius": 2.0},
+        }
     }
 
 
 def test_list_parameters_empty_doc():
-    assert modify.list_parameters(_FakeDoc([])) == {}
+    """空文档：返回 {"Part1": {}}（统一新形态，空则空 dict 对象层）。"""
+    out = modify.list_parameters(_FakeDoc([]))
+    assert out == {"Part1": {}}
+
+
+def test_list_parameters_assembly_mode():
+    """装配模式：session._parts 非空时，按零件分组。"""
+    class _FakeSession:
+        _parts = {
+            "底板": {"objects": {"Box"}, "container": None},
+            "盖板": {"objects": {"Cyl"}, "container": None},
+        }
+
+    doc = _FakeDoc([
+        _FakeObj("Box", "Part::Box", Length=60.0, Width=40.0, Height=10.0),
+        _FakeObj("Cyl", "Part::Cylinder", Radius=5.0, Height=20.0),
+    ])
+    out = modify.list_parameters(doc, session=_FakeSession())
+    assert "底板" in out and "盖板" in out
+    assert "Box" in out["底板"]
+    assert out["底板"]["Box"]["length"] == 60.0
+    assert "Cyl" in out["盖板"]
+    assert out["盖板"]["Cyl"]["radius"] == 5.0

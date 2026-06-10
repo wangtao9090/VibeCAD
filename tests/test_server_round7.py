@@ -36,7 +36,7 @@ def test_move_part_delegates_and_attaches(server, monkeypatch):
                          "labels_stale": True,
                          "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"})
     monkeypatch.setattr(server._modify, "list_parameters",
-                        lambda doc: {"Box": {"length": 40.0}})
+                        lambda doc, session=None: {"Part1": {"Box": {"length": 40.0}}})
     monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
@@ -80,7 +80,7 @@ def test_rotate_part_delegates_and_attaches(server, monkeypatch):
                          "labels_stale": True,
                          "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"})
     monkeypatch.setattr(server._modify, "list_parameters",
-                        lambda doc: {"Box": {"length": 40.0}})
+                        lambda doc, session=None: {"Part1": {"Box": {"length": 40.0}}})
     monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
@@ -126,7 +126,7 @@ def test_extrude_profile_delegates_and_attaches(server, monkeypatch):
                          "labels_stale": True,
                          "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"})
     monkeypatch.setattr(server._modify, "list_parameters",
-                        lambda doc: {"Box": {"length": 40.0}})
+                        lambda doc, session=None: {"Part1": {"Box": {"length": 40.0}}})
     monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",
@@ -200,7 +200,7 @@ def test_add_hole_pattern_passthrough(server, monkeypatch):
 
     monkeypatch.setattr(server._features, "add_hole", _mock_add_hole)
     monkeypatch.setattr(server._modify, "list_parameters",
-                        lambda doc: {})
+                        lambda doc, session=None: {})
     monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
     _mock_multiview(server, monkeypatch)
     monkeypatch.setattr(server._session, "set_labels",

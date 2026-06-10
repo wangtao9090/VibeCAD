@@ -29,6 +29,7 @@ class _MockSession:
     def __init__(self):
         self.calls = []
         self._shape = _FakeShape(self.calls)
+        self._parts: dict = {}  # 单零件模式
 
         class _Doc:
             Name = "Mock"
@@ -36,6 +37,10 @@ class _MockSession:
         self.doc = _Doc()
 
     def get_result_shape(self):
+        return self._shape
+
+    def get_assembly_shape(self):
+        """单零件模式：与 get_result_shape 等价。"""
         return self._shape
 
 
