@@ -64,13 +64,15 @@ def test_add_box_attaches_view(server, monkeypatch):
 
 
 def test_attach_view_render_failure_not_fatal(server, monkeypatch):
-    """附图失败不连坐：操作 ok:True 保留 + render_error + 退回 stale 提示。"""
+    """附图失败不连坐：操作 ok:True 保留 + render_error + 退回 stale 提示。
+    异常用 TypeError 验证宽抓（事务后纯展示阶段任何异常都不得连坐——
+    实测 TechDraw 会抛 TypeError，窄抓 RuntimeError/ValueError 会漏）。"""
     monkeypatch.setattr(server._modeling, "add_box",
                         lambda session, length, width, height, position:
                         {"ok": True, "name": "Box", "volume": 24000.0})
 
     def _boom(shape):
-        raise RuntimeError("渲染炸了")
+        raise TypeError("渲染炸了")
 
     class _Shape:
         pass
@@ -80,6 +82,26 @@ def test_attach_view_render_failure_not_fatal(server, monkeypatch):
     out = server.add_box(length=40, width=30, height=20)
     assert isinstance(out, dict) and out["ok"] is True
     assert "渲染炸了" in out["render_error"] and out["labels_stale"] is True
+    assert "TypeError" in out["render_error"]  # 异常类型名进 render_error 便于排障
+
+
+def test_attach_view_failure_preserves_tool_hint(server, monkeypatch):
+    """setdefault 语义：tools 层自带的 hint（如 fillet 的 annotate='edges'）
+    不被附图失败的兜底 faces 提示覆盖降级。"""
+    monkeypatch.setattr(server._features, "fillet_edges",
+                        lambda session, edges, radius:
+                        {"ok": True, "volume": 100.0, "labels_stale": True,
+                         "hint": "几何已变更，调用 render_part(annotate='edges') 查看最新边标注"})
+
+    def _boom(shape):
+        raise RuntimeError("渲染炸了")
+
+    monkeypatch.setattr(server._session, "get_result_shape", lambda: object())
+    monkeypatch.setattr(server._multiview, "render_multiview", _boom)
+    out = server.fillet_edges(edges=["E1"], radius=2)
+    assert isinstance(out, dict) and out["ok"] is True
+    assert "annotate='edges'" in out["hint"]  # tools 层 edges hint 保留，不被降级成 faces
+    assert out["labels_stale"] is True and "渲染炸了" in out["render_error"]
 
 
 def test_failed_tool_attaches_nothing(server, monkeypatch):
@@ -92,7 +114,8 @@ def test_failed_tool_attaches_nothing(server, monkeypatch):
 
 
 def test_mcp_contract_tool_with_image(server, monkeypatch):
-    """协议契约：[dict, Image] → [TextContent(json), ImageContent]。"""
+    """协议契约：[dict, Image] → [TextContent(json), ImageContent]；
+    并锁死六工具 -> Any 签名后 structuredContent 为 None 的现状。"""
     import anyio
     from mcp.types import TextContent
 
@@ -108,8 +131,14 @@ def test_mcp_contract_tool_with_image(server, monkeypatch):
                         lambda faces, edges, shown=None: None)
     content = anyio.run(lambda: server.mcp.call_tool("add_box",
                                                      {"length": 40, "width": 30, "height": 20}))
+    # structuredContent 契约固化：-> Any 签名无 output_schema，mcp 1.x 实跑
+    # call_tool 直接返回 content list（不带 structured 元组）；若 mcp 升级改为
+    # 恒返回 (content, structured) 元组，structured 也必须为 None/空 dict——
+    # 否则客户端对六工具返回的展示行为会悄悄变化。
+    structured = None
     if isinstance(content, tuple):
-        content = content[0]
+        content, structured = content
+    assert structured in (None, {})
     kinds = [type(c).__name__ for c in content]
     assert "ImageContent" in kinds and "TextContent" in kinds
     payload = json.loads([c for c in content if isinstance(c, TextContent)][0].text)
