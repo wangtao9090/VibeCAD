@@ -44,6 +44,27 @@ def test_largest_triangle_centroid():
     assert c == pytest.approx((20 / 3, 20 / 3, 0.0))
 
 
+def test_visibility_note_top_normal_from_front():
+    # 顶面法向 (0,0,1)：front 视角不可见，但 iso/top 可见 → 注里要给出 top
+    note = annotate.visibility_note((0, 0, 1), "front")
+    assert "当前视角不可见" in note
+    assert "top" in note
+
+
+def test_visibility_note_bottom_never_visible():
+    # 底面 (0,0,-1)：全部 5 个预设视角点积 ≤ 0 → 直说预设视角都看不见
+    assert "预设视角均不可见" in annotate.visibility_note((0, 0, -1), "front")
+
+
+def test_visibility_note_zero_normal():
+    # 退化网格零法向 → 同样不能给死路提示
+    assert "预设视角均不可见" in annotate.visibility_note((0.0, 0.0, 0.0), "iso")
+
+
+def test_visibility_note_visible_returns_empty():
+    assert annotate.visibility_note((0, 0, 1), "top") == ""
+
+
 def test_annotated_png_smoke():
     png = annotate.annotated_png(
         face_meshes=[{"verts": _TET_V, "facets": _TET_F}],
@@ -52,6 +73,17 @@ def test_annotated_png_smoke():
         edge_labels=[{"label": "E1", "pos": (5, 0, 0),
                       "polyline": [(0, 0, 0), (10, 0, 0)]}],
         dims={"L": 10, "W": 10, "H": 10, "bbox": (0, 0, 0, 10, 10, 10)},
+        view="iso")
+    assert png.startswith(b"\x89PNG") and len(png) > 1000
+
+
+def test_annotated_png_hidden_edge_smoke():
+    # visible=False 的边走虚线弱化分支，同样要产出合法 PNG
+    png = annotate.annotated_png(
+        face_meshes=[{"verts": _TET_V, "facets": _TET_F}],
+        face_labels=[],
+        edge_labels=[{"label": "E2", "pos": (0, 5, 0), "visible": False,
+                      "polyline": [(0, 0, 0), (0, 10, 0)]}],
         view="iso")
     assert png.startswith(b"\x89PNG") and len(png) > 1000
 
