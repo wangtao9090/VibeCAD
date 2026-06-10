@@ -10,6 +10,51 @@ from vibecad.engine.session import Session
 from vibecad.tools._integrity import _count_full_cylinder_faces  # 从 _integrity 共享（R7 抽取）
 
 
+def _validate_pattern(pattern) -> list[tuple[float, float]]:
+    """纯函数：校验 pattern 字典并返回相对 offset 的孔心增量列表（含首孔 (0,0)）。
+
+    linear: 第 i 孔 = i * spacing * normalize(direction)，i=0..count-1
+    circular: 第 i 孔 = (R*cos(2πi/N), R*sin(2πi/N))，i=0..N-1（0° 起）
+    """
+    if not isinstance(pattern, dict):
+        raise ValueError(f"pattern 必须是字典（得到 {pattern!r}）")
+    t = pattern.get("type")
+    if t not in ("linear", "circular"):
+        raise ValueError(f"pattern.type 必须是 linear 或 circular（得到 {t!r}）")
+
+    count = pattern.get("count")
+    if not isinstance(count, int) or isinstance(count, bool) or count < 2 or count > 50:
+        raise ValueError(f"pattern.count 必须是整数 2..50（得到 {count!r}）")
+
+    if t == "linear":
+        spacing = pattern.get("spacing")
+        if spacing is None or not isinstance(spacing, (int, float)) or isinstance(spacing, bool) \
+                or not math.isfinite(spacing) or spacing <= 0:
+            raise ValueError(f"pattern.spacing 必须是 > 0 的有限数字（得到 {spacing!r}）")
+        direction = pattern.get("direction", [1, 0])
+        if (not isinstance(direction, (list, tuple)) or len(direction) != 2
+                or not all(isinstance(c, (int, float)) and not isinstance(c, bool)
+                           and math.isfinite(c) for c in direction)):
+            raise ValueError(f"pattern.direction 必须是 2 个有限数字（得到 {direction!r}）")
+        du, dv = float(direction[0]), float(direction[1])
+        norm = math.sqrt(du * du + dv * dv)
+        if norm < 1e-9:
+            raise ValueError(f"pattern.direction 不能是零向量（得到 {direction!r}）")
+        ndu, ndv = du / norm, dv / norm
+        return [(i * spacing * ndu, i * spacing * ndv) for i in range(count)]
+
+    # circular
+    radius = pattern.get("radius")
+    if radius is None or not isinstance(radius, (int, float)) or isinstance(radius, bool) \
+            or not math.isfinite(radius) or radius <= 0:
+        raise ValueError(f"pattern.radius 必须是 > 0 的有限数字（得到 {radius!r}）")
+    return [
+        (float(radius) * math.cos(2 * math.pi * i / count),
+         float(radius) * math.sin(2 * math.pi * i / count))
+        for i in range(count)
+    ]
+
+
 def _inplane_axes(n) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
     """法向 n → 面内正交单位基 (e1, e2)：取与 n 最不平行的全局轴投影（offset 方向直观）。"""
     nx, ny, nz = float(n[0]), float(n[1]), float(n[2])
@@ -35,9 +80,35 @@ def _outward_normal(shape: Any, face: Any):
     return n
 
 
+def _drill(session, base_obj, n, e1, e2, c, length, diameter, du, dv, FreeCAD):
+    """在基体上打单孔（孔心面内增量 du/dv 相对面心 c），返回新 Cut 对象。
+    不做 recompute，由调用方在循环后统一执行一次。
+    n/e1/e2 为 FreeCAD.Vector 或 (x,y,z) 元组，c 为 FreeCAD.Vector（面心）。
+    du/dv：面内 e1/e2 方向的偏移（相对 c，mm）。"""
+    lift = 0.5  # 从面外 0.5mm 起钻，避免共面布尔
+    nx, ny, nz = (n.x, n.y, n.z) if hasattr(n, "x") else (float(n[0]), float(n[1]), float(n[2]))
+    e1x, e1y, e1z = (e1.x, e1.y, e1.z) if hasattr(e1, "x") else tuple(float(x) for x in e1)
+    e2x, e2y, e2z = (e2.x, e2.y, e2.z) if hasattr(e2, "x") else tuple(float(x) for x in e2)
+    bx = c.x + e1x * du + e2x * dv + nx * lift
+    by = c.y + e1y * du + e2y * dv + ny * lift
+    bz = c.z + e1z * du + e2z * dv + nz * lift
+    cyl = session.doc.addObject("Part::Cylinder", "HoleTool")
+    cyl.Radius, cyl.Height = diameter / 2.0, length
+    cyl.Placement = FreeCAD.Placement(
+        FreeCAD.Vector(bx, by, bz),
+        FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), FreeCAD.Vector(-nx, -ny, -nz)))
+    cut = session.doc.addObject("Part::Cut", "Hole")
+    cut.Base, cut.Tool = base_obj, cyl
+    return cut
+
+
 def add_hole(session: Session, face: str, diameter: float,
-             depth: float | None = None, offset=(0.0, 0.0)) -> dict[str, Any]:
-    """在指定面（标签）打圆孔：depth=None 通孔；offset 为面内毫米坐标（原点=面心）。"""
+             depth: float | None = None, offset=(0.0, 0.0),
+             pattern=None) -> dict[str, Any]:
+    """在指定面（标签）打圆孔（单孔或阵列）。
+    depth=None 通孔；offset 为面内毫米坐标（原点=面心）。
+    pattern=None 单孔（行为零变化）；pattern dict → linear/circular 阵列（全有全无）。
+    """
     if not face or not isinstance(face, str):
         raise ValueError("face 必须是非空字符串（面标签，如 'A'）")
     if not math.isfinite(diameter) or diameter <= 0:  # NaN 与 <=0 比较恒 False，须显式拒绝
@@ -48,6 +119,13 @@ def add_hole(session: Session, face: str, diameter: float,
             or not all(isinstance(c, (int, float)) and not isinstance(c, bool)
                        and math.isfinite(c) for c in offset)):
         raise ValueError(f"offset 必须是 2 个有限数字 (u, v)（得到 {offset!r}）")
+    # pattern 校验在任何 session 访问前（纯函数，含 (0,0) 首孔）
+    if pattern is not None:
+        deltas = _validate_pattern(pattern)  # 抛 ValueError 若非法
+    else:
+        deltas = [(0.0, 0.0)]  # 单孔：count=1 同路径
+
+    count = len(deltas)
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
     with session._transaction("add_hole"):
         with silence_fd1():
@@ -60,53 +138,68 @@ def add_hole(session: Session, face: str, diameter: float,
             if surface != "Plane":
                 raise ValueError(f"标签 {face} 是 {surface}，只能在平面上打孔")
             n = _outward_normal(shape, face_obj)
-            e1, e2 = _inplane_axes((n.x, n.y, n.z))
+            e1_tup, e2_tup = _inplane_axes((n.x, n.y, n.z))
             c = face_obj.CenterOfMass
             lift = 0.5  # 从面外 0.5mm 起钻，避免共面布尔
-            bx = c.x + e1[0] * offset[0] + e2[0] * offset[1] + n.x * lift
-            by = c.y + e1[1] * offset[0] + e2[1] * offset[1] + n.y * lift
-            bz = c.z + e1[2] * offset[0] + e2[2] * offset[1] + n.z * lift
             length = (depth + lift) if depth is not None \
                 else shape.BoundBox.DiagonalLength + 2 * lift
             base_vol = shape.Volume
             cyl_before = _count_full_cylinder_faces(shape, diameter / 2.0)
-            cyl = session.doc.addObject("Part::Cylinder", "HoleTool")
-            cyl.Radius, cyl.Height = diameter / 2.0, length
-            cyl.Placement = FreeCAD.Placement(
-                FreeCAD.Vector(bx, by, bz),
-                FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), FreeCAD.Vector(-n.x, -n.y, -n.z)))
-            cut = session.doc.addObject("Part::Cut", "Hole")
-            cut.Base, cut.Tool = base_obj, cyl
+
+            # 计算所有孔的绝对面内坐标（offset + delta）
+            abs_offsets = [(float(offset[0]) + float(du),
+                            float(offset[1]) + float(dv)) for du, dv in deltas]
+
+            # 链式 Cut：逐孔创建，base_obj 向后传递
+            last_cut = None
+            for du_abs, dv_abs in abs_offsets:
+                last_cut = _drill(session, base_obj, n, e1_tup, e2_tup, c,
+                                  length, diameter, du_abs, dv_abs, FreeCAD)
+                base_obj = last_cut  # 下一孔以本孔 Cut 为 Base
+
+            # 统一一次 recompute（链式 Cut 全部就绪后）
             session.doc.recompute()
-            session.assert_valid_solid(cut.Shape)
-            if cut.Shape.Volume >= base_vol - 1e-6:
+
+            # 全套断言
+            cut_shape = last_cut.Shape
+            session.assert_valid_solid(cut_shape)
+            if cut_shape.Volume >= base_vol - 1e-6:
                 raise RuntimeError(
                     f"几何断言失败：打孔未移除任何材料（base={base_vol:.3f}, "
-                    f"cut={cut.Shape.Volume:.3f}）——offset/depth 可能让孔落在零件之外")
-            if len(cut.Shape.Solids) != 1:
+                    f"cut={cut_shape.Volume:.3f}）——offset/depth 可能让孔落在零件之外")
+            if len(cut_shape.Solids) != 1:
                 raise RuntimeError(
-                    f"几何断言失败：打孔把零件切成 {len(cut.Shape.Solids)} 块"
+                    f"几何断言失败：打孔把零件切成 {len(cut_shape.Solids)} 块"
                     "——offset 可能越过零件边缘")
-            if _count_full_cylinder_faces(cut.Shape, diameter / 2.0) < cyl_before + 1:
+            cyl_after = _count_full_cylinder_faces(cut_shape, diameter / 2.0)
+            if cyl_after != cyl_before + count:
                 raise RuntimeError(
-                    "几何断言失败：未形成完整圆孔（孔可能与零件边缘相交成开口缺口，"
-                    "或与已有孔/特征重叠）"
-                    "——请调整 offset")
-            if depth is not None:
-                # 盲孔体积核算：超深打穿/侧向越界少切都会让移除量低于名义圆柱体积
-                removed = base_vol - cut.Shape.Volume
+                    f"几何断言失败：期望完整圆孔增加 {count} 个"
+                    f"（{cyl_before}→{cyl_before + count}），实际 {cyl_after}"
+                    "——孔可能与零件边缘相交成开口缺口、孔间重叠（spacing<diameter），"
+                    "或与已有孔/特征重叠，请调整 offset/spacing/radius")
+            if depth is not None and count == 1:
+                # 单盲孔体积核算：仅单孔时精确（多孔阵列场景留 > 0 + 严格减少守护）
+                removed = base_vol - cut_shape.Volume
                 expected = math.pi * (diameter / 2.0) ** 2 * depth
                 if removed < expected * 0.99 - 1e-6:
                     raise RuntimeError(
                         f"几何断言失败：盲孔实际移除体积 {removed:.3f} < 期望 {expected:.3f}"
                         "——depth 可能超出材料厚度（已打穿）、孔越界，"
                         "或与已有孔/特征重叠，请减小 depth 或检查 offset")
-            result = {"ok": True, "name": cut.Name, "volume": cut.Shape.Volume,
-                      "hole": {"face": face, "diameter": diameter,
-                               "depth": depth if depth is not None else "through",
-                               "offset": list(offset)},
-                      "labels_stale": True,
-                      "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"}
+
+            if pattern is not None:
+                result = {"ok": True, "name": last_cut.Name, "volume": cut_shape.Volume,
+                          "holes": {"count": count, "pattern": pattern, "diameter": diameter},
+                          "labels_stale": True,
+                          "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"}
+            else:
+                result = {"ok": True, "name": last_cut.Name, "volume": cut_shape.Volume,
+                          "hole": {"face": face, "diameter": diameter,
+                                   "depth": depth if depth is not None else "through",
+                                   "offset": list(offset)},
+                          "labels_stale": True,
+                          "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"}
     return result
 
 
