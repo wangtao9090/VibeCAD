@@ -66,6 +66,21 @@ def test_inplane_axes_arbitrary_normal():
         assert abs(sum(a * b for a, b in zip(e, n, strict=True))) < 1e-9  # 与法向正交
 
 
+@pytest.mark.parametrize("pattern,msg", [
+    ({"type": "grid"}, "type"),
+    ({"type": "linear"}, "count"),
+    ({"type": "linear", "count": 1, "spacing": 10}, "count"),
+    ({"type": "linear", "count": 51, "spacing": 10}, "count"),
+    ({"type": "linear", "count": 4, "spacing": 0}, "spacing"),
+    ({"type": "linear", "count": 4, "spacing": 10, "direction": [0, 0]}, "direction"),
+    ({"type": "circular", "count": 6}, "radius"),
+    ({"type": "circular", "count": 6, "radius": -1}, "radius"),
+])
+def test_add_hole_pattern_validation(pattern, msg):
+    with pytest.raises(ValueError, match=msg):
+        features.add_hole(_NoopSession(), face="A", diameter=6, pattern=pattern)
+
+
 @pytest.mark.slow
 def test_failed_feature_rolls_back(runtime_env):
     """失败的特征操作必须随事务回滚：无残留对象、result object 不被劫持、会话可恢复。
