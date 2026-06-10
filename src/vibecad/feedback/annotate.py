@@ -199,7 +199,7 @@ def render_annotated(shape: Any, *, mode: str = "faces", edges_of: int | None = 
             pts = [(p.x, p.y, p.z) for p in verts]
             face_meshes.append({"verts": pts, "facets": facets})
             face_info.append({"fp": naming.face_fingerprint(f),
-                              "anchor": largest_triangle_centroid(pts, facets),
+                              "anchor": largest_triangle_centroid(pts, facets, cam),
                               "normal": mesh_normal(pts, facets)})
         if not any(fm["verts"] for fm in face_meshes):
             raise RuntimeError("几何断言失败：形状无法镶嵌为网格（空 tessellation）")
