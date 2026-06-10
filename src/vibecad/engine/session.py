@@ -41,10 +41,14 @@ class Session:
 
     def assert_valid_solid(self, shape: Any) -> None:
         """spec §2.4 规范②：recompute/solve 返回值不可信，几何断言是唯一可信成功判据。"""
-        if not shape.isValid() or shape.isNull():
+        # isNull 必须先于 isValid：BRepCheck_Analyzer 对 NULL shape 不返回 False 而是
+        # 直接抛 Part.OCCError（真机实测：对 fillet 切线缝合边 chamfer → NULL shape），
+        # 那会绕过 RuntimeError/ValueError 契约把原始 OCC 错误泄漏给 server 层
+        if shape.isNull():
             raise RuntimeError(
-                f"几何断言失败：形状无效（isValid={shape.isValid()}, isNull={shape.isNull()}）"
-            )
+                "几何断言失败：形状为 NULL（OCCT 未能产生几何——所选边/面可能不支持该操作）")
+        if not shape.isValid():
+            raise RuntimeError("几何断言失败：形状无效（isValid=False）")
         if shape.Volume <= 0:
             raise RuntimeError(f"几何断言失败：体积为零或负（Volume={shape.Volume}）")
 
