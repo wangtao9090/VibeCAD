@@ -117,3 +117,33 @@ def test_positioned_part(runtime_env, tmp_path):
     pr = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
     assert pr.returncode == 0, pr.stderr
     assert "POSITIONED_OK" in pr.stdout
+
+
+def test_annotated_feature_flow(runtime_env, tmp_path):
+    """端到端指代闭环（Round 5）：标注→顶面标签打孔→重新标注→导出 STEP（真实 FreeCAD）。"""
+    out = str(tmp_path)
+    code = (
+        status._PREP
+        + f"import sys; sys.path.insert(0, {_SRC!r})\n"
+        + "import math, os\n"
+        + "from vibecad.engine.session import Session\n"
+        + "from vibecad.feedback.annotate import render_annotated\n"
+        + "from vibecad.tools import export, features, modeling\n"
+        + "s = Session(); modeling.new_document(s, 'R5Flow')\n"
+        + "modeling.add_box(s, 40, 30, 20)\n"
+        + "png, table, freg, ereg = render_annotated(s.get_result_shape(), mode='faces')\n"
+        + "assert png[:4] == b'\\x89PNG' and len(png) > 2000, len(png)\n"
+        + "s.set_labels(freg, ereg)\n"
+        + "top = next(lab for lab, d in table.items() if '顶面' in d)\n"
+        + "r = features.add_hole(s, top, 8)\n"
+        + "expected = 24000 - math.pi * 16 * 20\n"  # ⌀8 通孔
+        + "assert r['ok'] and abs(r['volume'] - expected) < 1.0, (r['volume'], expected)\n"
+        + "png2, t2, freg2, ereg2 = render_annotated(s.get_result_shape(), mode='faces')\n"
+        + "assert len(s.get_result_shape().Faces) > 6, len(s.get_result_shape().Faces)\n"
+        + f"e = export.export_part(s, {out!r}, fmt='step')\n"
+        + "assert os.path.getsize(e['step']) > 0\n"
+        + "print('R5_FLOW_OK')\n"
+    )
+    p = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0, p.stderr
+    assert "R5_FLOW_OK" in p.stdout
