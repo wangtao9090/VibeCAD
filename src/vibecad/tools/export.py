@@ -26,6 +26,7 @@ def export_part(session: Session, output_dir: str, *, fmt: str = "both",
     """
     if fmt not in ("step", "stl", "gltf", "both", "all"):
         raise ValueError(f"fmt 必须是 step/stl/gltf/both/all（得到 {fmt!r}）")
+    skipped_parts: list[str] = []
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
     os.makedirs(output_dir, exist_ok=True)
 
@@ -42,7 +43,11 @@ def export_part(session: Session, output_dir: str, *, fmt: str = "both",
             # split=True 且多零件：per-part 导出
             if split and session._parts:
                 step_paths: list[str] = []
+                skipped_parts.extend(n for n in session._parts
+                                     if not session._parts[n]["objects"])
                 for part_name in session._parts:
+                    if not session._parts[part_name]["objects"]:
+                        continue  # 空零件无几何可导，记入 skipped 字段
                     part_shape = session.get_result_shape(part_name).transformed(
                         session._parts[part_name]["container"].Placement.toMatrix())
                     # 文件名：<doc>_<零件名>.step（零件名中的空格/斜线替换为下划线）
@@ -71,4 +76,7 @@ def export_part(session: Session, output_dir: str, *, fmt: str = "both",
         _gltf.export_gltf(gltf_shape, gltf_path, doc_name=doc_name)
         _assert_written(gltf_path)
 
-    return {"ok": True, "step": step_path, "stl": stl_path, "gltf": gltf_path}
+    result = {"ok": True, "step": step_path, "stl": stl_path, "gltf": gltf_path}
+    if skipped_parts:
+        result["skipped_parts"] = skipped_parts  # 空零件无几何未导出（与守卫跳过语义一致）
+    return result

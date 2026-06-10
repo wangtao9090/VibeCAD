@@ -377,3 +377,34 @@ def test_server_reload_no_freecad_in_sys_modules_r8():
 
     assert "FreeCAD" not in sys.modules, "server 模块级不得 import FreeCAD（握手秒回纪律）"
     assert "matplotlib" not in sys.modules, "server 模块级不得 import matplotlib"
+
+
+def test_set_active_part_delegates(server, monkeypatch):
+    """切换活动零件：委托 + 附图形态 + 失败结构化。"""
+    from mcp.server.fastmcp import Image
+
+    class _Shape:
+        pass
+
+    seen = {}
+    monkeypatch.setattr(server._session, "set_active_part",
+                        lambda name: seen.update(n=name))
+    monkeypatch.setattr(server._session, "get_assembly_shape", lambda: _Shape())
+    _mock_multiview(server, monkeypatch)
+    monkeypatch.setattr(server._session, "set_labels",
+                        lambda faces, edges, shown=None, part=None: None)
+    monkeypatch.setattr(server._modify, "list_parameters", lambda doc: {})
+    monkeypatch.setattr(type(server._session), "doc", property(lambda self: object()),
+                        raising=False)
+    out = server.set_active_part(name="盖板")
+    assert isinstance(out, list) and isinstance(out[1], Image)
+    assert out[0]["active_part"] == "盖板" and seen["n"] == "盖板"
+
+
+def test_set_active_part_unknown_structured(server, monkeypatch):
+    def _boom(name):
+        raise ValueError(f"零件 {name!r} 不存在")
+
+    monkeypatch.setattr(server._session, "set_active_part", _boom)
+    out = server.set_active_part(name="幽灵")
+    assert out["ok"] is False and "不存在" in out["message"]
