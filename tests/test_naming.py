@@ -70,6 +70,12 @@ def test_match_face_expired_when_area_changed():
         naming.match_face(fp, [_top(area=1086.9)])
 
 
+def test_match_face_radius_mismatch_expired():
+    fp = naming.face_fingerprint(FakeFace(Cylinder(6.0), 750.0, (20, 15, 10)))
+    with pytest.raises(LabelExpiredError):
+        naming.match_face(fp, [FakeFace(Cylinder(5.0), 750.0, (20, 15, 10))])
+
+
 def test_match_face_ambiguous_raises():
     fp = naming.face_fingerprint(_top())
     with pytest.raises(LabelExpiredError):

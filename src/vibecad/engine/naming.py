@@ -8,7 +8,11 @@ from typing import Any
 
 
 class LabelExpiredError(ValueError):
-    """标签指代的几何已变更或无法唯一匹配——需重新标注。"""
+    """标签指代的几何已变更或无法唯一匹配——需重新标注。
+
+    故意继承 ValueError：server 层统一以 except (RuntimeError, ValueError)
+    把它转为结构化 {ok: False}，错误消息携带"重新 annotate"指导原样透传。
+    """
 
 
 def face_fingerprint(face: Any) -> dict:
@@ -37,12 +41,13 @@ def _vec_close(a, b, tol: float) -> bool:
     return all(abs(x - y) <= tol for x, y in zip(a, b, strict=True))
 
 
-def _axis_match(a, b) -> bool:
+def _axis_match(a, b, tol: float) -> bool:
     if (a is None) != (b is None):
         return False
     if a is None:
         return True
-    return _vec_close(a, b, 1e-6) or _vec_close([-x for x in a], b, 1e-6)  # 定向不稳，反号同面
+    t = max(1e-6, tol)  # 轴是单位向量，tol=1e-3 约 0.06°，覆盖 OCC 重算法向噪声
+    return _vec_close(a, b, t) or _vec_close([-x for x in a], b, t)  # 定向不稳，反号同面
 
 
 def match_face(fp: dict, faces: list[Any], *, tol: float = 1e-3) -> int:
@@ -56,7 +61,10 @@ def match_face(fp: dict, faces: list[Any], *, tol: float = 1e-3) -> int:
             continue
         if not _vec_close(cand["center"], fp["center"], tol):
             continue
-        if not _axis_match(cand["axis"], fp["axis"]):
+        if not _axis_match(cand["axis"], fp["axis"], tol):
+            continue
+        if "radius" in fp and abs(cand.get("radius", -1.0) - fp["radius"]) > max(
+                tol, 1e-3 * abs(fp["radius"])):
             continue
         hits.append(i)
     if len(hits) != 1:
@@ -113,7 +121,7 @@ def face_summary(fp: dict, bbox: tuple) -> str:
         head = f"{sem}·平面" if sem else "平面"
         return f"{head} 面积{fp['area']:.0f}mm² 中心{tuple(round(v, 1) for v in fp['center'])}"
     if fp["surface"] == "Cylinder":
-        return f"圆柱面 r={fp.get('radius', 0):g}mm 中心{tuple(round(v, 1) for v in fp['center'])}"
+        return f"圆柱面 r={fp['radius']:g}mm 中心{tuple(round(v, 1) for v in fp['center'])}"
     return f"{fp['surface']} 面积{fp['area']:.0f}mm²"
 
 
