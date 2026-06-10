@@ -21,7 +21,8 @@ def test_render_part_annotate_returns_image_and_table(server, monkeypatch):
     monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
     monkeypatch.setattr(
         server._annotate, "render_annotated",
-        lambda shape, mode, edges_of, view: (b"\x89PNG fake", {"A": "顶面"}, {"A": {}}, {}))
+        lambda shape, mode, edges_of, view, part_map=None:
+        (b"\x89PNG fake", {"A": "顶面"}, {"A": {}}, {}))
     recorded = {}
     monkeypatch.setattr(server._session, "set_labels",
                         lambda faces, edges, shown=None: recorded.update(
@@ -62,7 +63,7 @@ def test_render_part_edges_of_resolves_face_label(server, monkeypatch):
     monkeypatch.setattr(server._session, "resolve_face", lambda label: 3)
     seen = {}
 
-    def _fake_annotated(shape, mode, edges_of, view):
+    def _fake_annotated(shape, mode, edges_of, view, part_map=None):
         seen["edges_of"] = edges_of
         return (b"\x89PNG fake", {}, {}, {})
 
@@ -136,7 +137,8 @@ def test_mcp_call_tool_render_annotate_contract(server, monkeypatch):
     monkeypatch.setattr(server._session, "get_result_shape", lambda: _Shape())
     monkeypatch.setattr(
         server._annotate, "render_annotated",
-        lambda shape, mode, edges_of, view: (b"\x89PNGx", {"A": "顶面"}, {"A": {}}, {}))
+        lambda shape, mode, edges_of, view, part_map=None:
+        (b"\x89PNGx", {"A": "顶面"}, {"A": {}}, {}))
     monkeypatch.setattr(server._session, "set_labels", lambda faces, edges, shown=None: None)
     blocks = anyio.run(lambda: server.mcp.call_tool("render_part", {"annotate": "faces"}))
     # mcp 1.27 实测：call_tool 直接返回 content blocks 列表（tuple 兜底兼容未来变化）

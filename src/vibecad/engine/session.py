@@ -275,10 +275,39 @@ class Session:
             self._labels = {}
         self._labels[key] = {"faces": faces, "edges": edges, "shown": shown}
 
+    def _match_shape(self, part: str | None) -> Any:
+        """resolve_face/resolve_edge 的匹配目标 shape——必须与标注指纹同坐标系。
+
+        单零件模式（_parts 空）：结果 shape（局部即全局），R7 行为逐字不变。
+        装配模式：标注指纹采集自 get_assembly_shape() 的**全局坐标**（容器位姿已
+        应用到 compound），匹配目标必须同为全局——零件容器 Placement 非单位时返回
+        get_result_shape(part).transformed(Placement.toMatrix())，否则原局部 shape。
+
+        "全局匹配、局部消费"语义自洽推演：OCCT transformed() 不重排子元素——变换后
+        shape 的 Faces/Edges 与原局部 shape 严格逐索引同序（真机断言验证），故本方法
+        匹配出的索引可直接用于局部 shape.Faces[idx]/Edges[idx]。消费方（features/
+        sketch/assembly）拿索引后在**局部** shape 上取面心/法向做几何计算，而新建的
+        图元（孔/凸台等）同样落在零件局部坐标系内（容器 Placement 统一应用于整组），
+        因此局部坐标恰是正确坐标——全局只用于"认面"，局部用于"造物"，互不矛盾。
+        """
+        # part=None 时无参调用：单零件模式对外调用形状与 R7 逐字一致（测试 fake 同款签名）
+        shape = self.get_result_shape() if part is None else self.get_result_shape(part)
+        if not self._parts:
+            return shape
+        key = part if part is not None else self._active_part
+        placement = self._parts[key]["container"].Placement
+        if placement.isIdentity():
+            return shape
+        return shape.transformed(placement.toMatrix())
+
     def resolve_face(self, label: str, part: str | None = None) -> int:
         """面标签 → 该零件（默认活动零件）结果形状的面索引；快照缺失/标签未知/未展示/
         匹配失败均抛 LabelExpiredError。未展示 gate：注册表无论 mode 都全量注册，但 AI
-        只见过标签表里画出来的条目——未展示的标签指认是编造，必须响亮拒绝。"""
+        只见过标签表里画出来的条目——未展示的标签指认是编造，必须响亮拒绝。
+
+        装配模式下指纹匹配在全局坐标系进行（见 _match_shape：标注来自装配 compound
+        的全局面，零件容器 Placement 非单位时局部指纹永远对不上）；返回的索引因
+        transformed 不重排子元素而与局部 shape.Faces 同序，消费方安全用于局部几何。"""
         from vibecad.engine import naming  # noqa: PLC0415
         snap = (self._labels or {}).get(self._label_key(part))
         if not snap or label not in snap["faces"]:
@@ -288,11 +317,10 @@ class Session:
             raise naming.LabelExpiredError(
                 f"面标签 {label!r} 尚未在标注图中向你展示过"
                 "——请先调用 render_part(annotate='faces') 查看标注图再指认")
-        # part=None 时无参调用：单零件模式对外调用形状与 R7 逐字一致（测试 fake 同款签名）
-        shape = self.get_result_shape() if part is None else self.get_result_shape(part)
-        return naming.match_face(snap["faces"][label], shape.Faces)
+        return naming.match_face(snap["faces"][label], self._match_shape(part).Faces)
 
     def resolve_edge(self, label: str, part: str | None = None) -> int:
+        """边标签 → 边索引；坐标系纪律与 resolve_face 一致（见 _match_shape）。"""
         from vibecad.engine import naming  # noqa: PLC0415
         snap = (self._labels or {}).get(self._label_key(part))
         if not snap or label not in snap["edges"]:
@@ -302,5 +330,4 @@ class Session:
             raise naming.LabelExpiredError(
                 f"边标签 {label!r} 尚未在标注图中向你展示过"
                 "——请先调用 render_part(annotate='edges') 查看标注图再指认")
-        shape = self.get_result_shape() if part is None else self.get_result_shape(part)
-        return naming.match_edge(snap["edges"][label], shape.Edges)
+        return naming.match_edge(snap["edges"][label], self._match_shape(part).Edges)
