@@ -10,6 +10,7 @@ from typing import Any
 from vibecad.engine.session import Session
 from vibecad.tools._integrity import (
     assert_holes_intact,
+    assert_no_sealed_holes,
     assert_not_touched,
     assert_result_not_drifted,
     assert_single_solid,
@@ -192,6 +193,9 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
             assert_single_solid(shape, "参数修改")
             # 孔完整性断言（快照推演见上）
             assert_holes_intact(shape, expected_counts)
+            # R7 终验移交项热修：改基体尺寸（如 height 加大）可把既有盲孔埋成
+            # 密封内腔（孔完整面仍在、计数不变）——与 reposition 封孔同族，接同一探针
+            assert_no_sealed_holes(session.doc, shape)
             result = {"ok": True,
                       "modified": {"name": obj.Name, "parameter": key,
                                    "from": old, "to": float(value)},
