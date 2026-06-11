@@ -26,7 +26,7 @@ VibeCAD collects no telemetry, no usage statistics, and no account information.
 
 ### Network access
 
-Network access is limited to the one-time runtime download described above. After the runtime is installed, VibeCAD operates locally.
+Network access is limited to software installation: the one-time runtime download described above, and fetching VibeCAD's own open-source dependencies (from PyPI) at install/update time. Your design data is never transmitted.
 
 ### Contact
 
@@ -55,7 +55,7 @@ VibeCAD 不收集遥测数据、不收集使用统计、不收集账号信息。
 
 ### 网络访问
 
-网络访问仅限于上述一次性运行时下载；运行时安装完成后，VibeCAD 在本地离线工作。
+网络访问仅限于软件安装环节：上述一次性运行时下载，以及安装/更新时从 PyPI 获取 VibeCAD 自身的开源依赖。你的设计数据永远不会被传输。
 
 ### 联系方式
 
