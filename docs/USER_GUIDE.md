@@ -81,55 +81,44 @@ uvx --version
 
 ---
 
-## 三、在 Claude Cowork 中配置
+## 三、在 Claude Cowork / Claude Desktop 中配置
 
-接下来把 VibeCAD 接入 Claude Cowork。整个过程就是"添加一个连接器，填三个空"。
+VibeCAD 通过**配置文件**接入（Claude Desktop 与 Cowork 共用同一份配置）。
 
-> 注：Cowork 的界面可能随版本更新略有变化，找不到对应入口时以实际界面为准，按"添加自定义连接器 / 本地 MCP 服务器"的字样寻找。
+> ⚠️ **别走设置界面里的"添加自定义连接器（Add custom connector）"对话框**——实测（2026-06）该对话框只接受**远程服务器网址（Remote MCP server URL）**，而 VibeCAD 是跑在你电脑上的本地程序，没有网址可填。本地程序一律走下面的配置文件方式。
 
-1. 打开 Claude Cowork。
-2. 进入 **设置（Settings）**，找到 **连接器（Connectors）** 或 **扩展（Extensions）** 页面。
-   <!-- screenshot: Cowork 设置入口截图 -->
-3. 点击 **添加自定义连接器（Add custom connector）**，选择 **本地 / stdio** 类型。
-   <!-- screenshot: 添加连接器对话框截图 -->
-4. 按下表填写：
+**第 1 步：查出 uvx 的完整路径**（关键——图形界面应用找不到终端里的命令，必须写完整路径）：
 
-   | 填写项 | 内容 |
-   |---|---|
-   | 名称（Name） | `vibecad` |
-   | 类型（Type） | `stdio`（本地命令） |
-   | 命令（Command） | `uvx` |
-   | 参数（Arguments） | `vibecad` |
+- macOS 终端里运行 `which uvx`，通常得到 `/Users/你的用户名/.local/bin/uvx`
+- Windows PowerShell 里运行 `(Get-Command uvx).Source`，通常得到 `C:\Users\你的用户名\.local\bin\uvx.exe`
 
-5. 保存并启用。连接器列表里出现 **vibecad** 且状态正常（无红色报错）即配置完成。
-   <!-- screenshot: 连接器列表中 vibecad 已启用的截图 -->
-6. 验证：新开一个对话，问 AI——
-
-   > "你能看到 VibeCAD 的 CAD 工具吗？"
-
-   AI 回答能看到一组 CAD 工具，就接好了。
-
-### 3.1 等价配置：Claude Desktop
-
-如果你用的是 Claude Desktop（桌面版聊天应用），改为编辑它的配置文件 `claude_desktop_config.json`：
+**第 2 步：编辑配置文件** `claude_desktop_config.json`：
 
 - macOS 路径：`~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows 路径：`%APPDATA%\Claude\claude_desktop_config.json`
 
-用任意文本编辑器打开（没有此文件就新建一个），写入：
+用任意文本编辑器打开。**如果文件已有内容，只添加 `"mcpServers"` 这一段，别动其他部分**（没有此文件就新建，写入完整内容）：
 
 ```json
 {
   "mcpServers": {
     "vibecad": {
-      "command": "uvx",
+      "command": "/Users/你的用户名/.local/bin/uvx",
       "args": ["vibecad"]
     }
   }
 }
 ```
 
-保存后**完全退出并重启 Claude Desktop**（macOS 注意菜单栏 Quit，不是只关窗口）。
+（`command` 换成第 1 步查到的你自己的完整路径；Windows 注意把 `\` 写成 `\\`，如 `"C:\\Users\\你\\.local\\bin\\uvx.exe"`。）
+
+**第 3 步：完全退出并重启 Claude**（macOS 注意菜单栏 Quit，不是只关窗口）。
+
+**第 4 步：验证**——新开一个对话，问 AI：
+
+> "你能看到 VibeCAD 的 CAD 工具吗？"
+
+AI 回答能看到一组 CAD 工具（ping、ensure_runtime、add_box……），就接好了。
 
 ### 3.2 等价配置：Claude Code
 
