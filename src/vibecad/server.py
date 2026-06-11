@@ -8,6 +8,7 @@ import threading
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP, Image
+from mcp.types import ToolAnnotations
 
 from vibecad import __version__
 from vibecad.engine.session import Session
@@ -34,6 +35,7 @@ from vibecad.tools import transform as _transform
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # m10：杜绝隐式拉起 GUI
 
 mcp = FastMCP("vibecad")
+mcp._mcp_server.version = __version__  # FastMCP 不透传 version；勿用构造参数（1.27.2 TypeError）
 _installer = RuntimeInstaller()  # 进度由 installer 落 status.json，server 读盘
 _session = Session()  # 跨 MCP 调用维持同一活动文档（单零件先行）；构造不 import FreeCAD
 _install_thread: threading.Thread | None = None
@@ -47,13 +49,13 @@ def _in_conda_runtime() -> bool:
         return False
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def ping() -> str:
     """连通性自检。"""
     return f"vibecad ok (v{__version__})"
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def get_runtime_status() -> dict[str, Any]:
     """查询 FreeCAD 运行时安装进度（跨进程读 status.json）。"""
     d = status.read_status().to_dict()
@@ -91,7 +93,7 @@ def _ensure_runtime_impl() -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def ensure_runtime() -> dict[str, Any]:
     """确保 FreeCAD 运行时就绪：未就绪则后台开始安装并立即返回，用 get_runtime_status 轮询。"""
     return _ensure_runtime_impl()
@@ -113,7 +115,7 @@ def _build_box_and_export() -> dict[str, Any]:
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def smoke_cad() -> dict[str, Any]:
     """地基验证：进程内造 10×10×10 Box，导出 STEP，返回体积/包围盒/路径。"""
     if not _installer.is_ready():
@@ -220,13 +222,13 @@ def _attach_view(result: dict[str, Any]) -> Any:
         return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def new_document(name: str) -> dict[str, Any]:
     """新建一个 CAD 文档（单零件工作区）。"""
     return _runtime_guard() or _modeling.new_document(_session, name)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def add_box(length: float, width: float, height: float,
             position: list[float] | None = None) -> Any:
     """添加参数化长方体（mm）；position=[x,y,z] 放置位置（默认原点）。成功后自动附三视图拼图。"""
@@ -242,7 +244,7 @@ def add_box(length: float, width: float, height: float,
     return _attach_view(result)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def add_cylinder(radius: float, height: float,
                  position: list[float] | None = None, axis: str = "z") -> Any:
     """添加参数化圆柱（mm）；position=[x,y,z] 放置位置，axis=x|y|z 圆柱轴向（默认 z）。
@@ -259,7 +261,7 @@ def add_cylinder(radius: float, height: float,
     return _attach_view(result)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def boolean_cut(base_name: str, tool_name: str) -> Any:
     """布尔差集：从 base 减去 tool，返回结果对象名与体积。成功后自动附三视图拼图。"""
     guard = _runtime_guard()
@@ -272,7 +274,7 @@ def boolean_cut(base_name: str, tool_name: str) -> Any:
     return _attach_view(result)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def export_part(output_dir: str, fmt: str = "both", split: bool = False) -> dict[str, Any]:
     """导出当前结果为 STEP/STL/glTF（fmt: step|stl|gltf|both|all）到 output_dir。
     split=True：装配模式时 per-part 导出 STEP（<doc>_<零件名>.step），每文件独立验证。
@@ -286,7 +288,7 @@ def export_part(output_dir: str, fmt: str = "both", split: bool = False) -> dict
         return {"ok": False, "message": f"导出失败：{exc}"}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def describe_part() -> dict[str, Any]:
     """返回当前结果零件的文本诊断（体积/包围盒/质心/实体数/有效性）。
     装配模式：返回 per-part 摘要 + assembly_bbox + interference 清单。
@@ -305,7 +307,7 @@ def describe_part() -> dict[str, Any]:
         return {"ok": False, "message": f"描述失败：{exc}"}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def render_part(view: str = "iso", annotate: str | None = None,
                 edges_of: str | None = None) -> Any:
     """渲染当前零件 PNG（view: iso|front|top|right|back|multi）。
@@ -362,7 +364,7 @@ def render_part(view: str = "iso", annotate: str | None = None,
         return {"ok": False, "message": f"渲染失败：{exc}"}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def add_hole(face: str, diameter: float, depth: float | None = None,
              offset: list[float] | None = None,
              pattern: dict | None = None) -> Any:
@@ -382,7 +384,7 @@ def add_hole(face: str, diameter: float, depth: float | None = None,
     return _attach_view(result)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def fillet_edges(edges: list[str], radius: float) -> Any:
     """对边标签列表做圆角（标签来自 render_part(annotate='edges')）。成功后自动附三视图拼图。"""
     guard = _runtime_guard()
@@ -395,7 +397,7 @@ def fillet_edges(edges: list[str], radius: float) -> Any:
     return _attach_view(result)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def chamfer_edges(edges: list[str], size: float) -> Any:
     """对边标签列表做倒角（标签来自 render_part(annotate='edges')）。成功后自动附三视图拼图。"""
     guard = _runtime_guard()
@@ -408,7 +410,7 @@ def chamfer_edges(edges: list[str], size: float) -> Any:
     return _attach_view(result)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def modify_part(name: str, parameter: str, value: float) -> Any:
     """修改参数化对象的参数（如 name='Box', parameter='length', value=45）——
     依赖链（布尔/孔/圆角）自动重算。可改对象与参数见每步返回的 parts 字段。
@@ -423,7 +425,7 @@ def modify_part(name: str, parameter: str, value: float) -> Any:
     return _attach_view(result)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def move_part(name: str, position: list[float]) -> Any:
     """把图元移动到绝对位置 [x, y, z]（mm）——依赖链自动重算，成功后自动附三视图。
     可移动对象见 parts 字段（布尔/圆角结果跟随其图元，不可直接移动）。
@@ -438,7 +440,7 @@ def move_part(name: str, position: list[float]) -> Any:
     return _attach_view(result)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def rotate_part(name: str, axis: str = "z", angle: float = 90.0) -> Any:
     """绕全局轴旋转图元（以对象包围盒中心为旋转中心，角度制）——依赖链自动重算，成功后自动附三视图。
     可旋转对象见 parts 字段（布尔/圆角结果跟随其图元，不可直接旋转）。
@@ -453,7 +455,7 @@ def rotate_part(name: str, axis: str = "z", angle: float = 90.0) -> Any:
     return _attach_view(result)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def extrude_profile(profile: dict, height: float, face: str | None = None,
                     offset: list[float] | None = None,
                     operation: str = "pad") -> Any:
@@ -480,7 +482,7 @@ def extrude_profile(profile: dict, height: float, face: str | None = None,
 # Round 8：装配工具（18→21）
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def new_part(name: str) -> Any:
     """创建命名零件并将其设为活动零件（开始多零件装配模式）。
     首次调用时，文档中已有几何对象会自动归入隐式零件 "Part1"。
@@ -496,7 +498,7 @@ def new_part(name: str) -> Any:
     return _attach_view(result)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def set_active_part(name: str) -> Any:
     """切换活动零件——后续建模/特征/标注工具默认作用于该零件
     （在非活动零件上继续加工的恢复路径）。成功后自动附三视图拼图。"""
@@ -510,7 +512,7 @@ def set_active_part(name: str) -> Any:
     return _attach_view({"ok": True, "active_part": name})
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def place_part(part: str, position: list[float] | None = None,
                rotation_axis: str | None = None, angle: float | None = None) -> Any:
     """设置零件绝对位置 and/or 叠加旋转（装配位姿）。
@@ -529,7 +531,7 @@ def place_part(part: str, position: list[float] | None = None,
     return _attach_view(result)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def align_parts(moving_part: str, moving_face: str,
                 target_part: str, target_face: str,
                 offset: list[float] | None = None,
