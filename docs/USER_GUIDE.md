@@ -109,8 +109,6 @@ uvx --version
 
    AI 回答能看到一组 CAD 工具，就接好了。
 
-> **尚未发布到 PyPI 期间的临时配法**：在 VibeCAD 正式发布到 PyPI 之前，第 4 步的参数改填 `--from /path/to/VibeCAD vibecad`（把 `/path/to/VibeCAD` 换成你电脑上 VibeCAD 仓库的实际路径），命令仍是 `uvx`。正式发布后改回 `vibecad` 即可。
-
 ### 3.1 等价配置：Claude Desktop
 
 如果你用的是 Claude Desktop（桌面版聊天应用），改为编辑它的配置文件 `claude_desktop_config.json`：
@@ -131,12 +129,6 @@ uvx --version
 }
 ```
 
-PyPI 发布前的临时版本把 `args` 一行换成：
-
-```json
-      "args": ["--from", "/path/to/VibeCAD", "vibecad"]
-```
-
 保存后**完全退出并重启 Claude Desktop**（macOS 注意菜单栏 Quit，不是只关窗口）。
 
 ### 3.2 等价配置：Claude Code
@@ -145,12 +137,6 @@ PyPI 发布前的临时版本把 `args` 一行换成：
 
 ```bash
 claude mcp add --transport stdio vibecad -- uvx vibecad
-```
-
-PyPI 发布前的临时版本：
-
-```bash
-claude mcp add --transport stdio vibecad -- uvx --from /path/to/VibeCAD vibecad
 ```
 
 ---

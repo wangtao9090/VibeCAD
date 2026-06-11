@@ -1,6 +1,6 @@
 # Vibe CAD
 
-[![CI](https://github.com/wangtao9090/VibeCAD/actions/workflows/ci.yml/badge.svg)](https://github.com/wangtao9090/VibeCAD/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org)
+[![CI](https://github.com/wangtao9090/VibeCAD/actions/workflows/ci.yml/badge.svg)](https://github.com/wangtao9090/VibeCAD/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/vibecad)](https://pypi.org/project/vibecad/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org)
 
 **AI-native conversational CAD — an open-source MCP connector for FreeCAD (chat-native, zero-install).**
 
@@ -12,6 +12,15 @@
 
 > **状态**：R1 运行时 → R2 语义建模 → R3 视觉反馈 → R4 位置控制 → R5 可指代性 → R6a 工程图+每步回图 → R6b 参数修改 → R7 阵列/拉伸/重定位 → **R8 装配 DSL**（多零件/贴面对齐/干涉守卫）——已全部本机实跑验证。设计文档见
 > [`docs/superpowers/specs/2026-06-08-vibecad-design.md`](docs/superpowers/specs/2026-06-08-vibecad-design.md)。
+
+## 快速开始（用户）
+
+已发布 [PyPI](https://pypi.org/project/vibecad/)。装好 [uv](https://docs.astral.sh/uv/) 后，在任意 MCP 客户端添加 stdio 连接器：**command `uvx`，args `vibecad`**，对 AI 说"帮我准备好 CAD 环境"即可。逐步图文教程见 **[用户手册](docs/USER_GUIDE.md)**。
+
+```bash
+# Claude Code 一行接入
+claude mcp add --transport stdio vibecad -- uvx vibecad
+```
 
 ## 首发形态：Chat-native 零安装
 
