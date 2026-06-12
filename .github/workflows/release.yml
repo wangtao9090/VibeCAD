@@ -13,6 +13,37 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+      - name: tag/version consistency guard
+        # tag 名约定 = v + PEP 440 版本原文（如 v0.2.0rc1）；产物版本只取自
+        # pyproject，与 tag 名无关——错位会把错版本发上 PyPI（同号永久烧毁），故先拦。
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          PY_VER=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          if [ "$TAG_VER" != "$PY_VER" ]; then
+            echo "::error::tag $GITHUB_REF_NAME 与 pyproject version $PY_VER 不一致——拒绝发布"
+            exit 1
+          fi
       - uses: astral-sh/setup-uv@v6
       - run: uv build
       - uses: pypa/gh-action-pypi-publish@release/v1
+  mcpb:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 创建 GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx -y @anthropic-ai/mcpb@2.1.2 validate manifest.json
+      - run: npx -y @anthropic-ai/mcpb@2.1.2 pack . VibeCAD.mcpb
+      - name: create GitHub Release with .mcpb asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # gh 不从 tag 名推断预发布——rc/alpha/beta 显式 --prerelease，
+          # 否则会顶掉 releases/latest（手册主链路就指它）。
+          EXTRA=""
+          case "$GITHUB_REF_NAME" in
+            *rc*|*a[0-9]*|*b[0-9]*) EXTRA="--prerelease" ;;
+          esac
+          gh release create "${GITHUB_REF_NAME}" VibeCAD.mcpb \
+            --title "VibeCAD ${GITHUB_REF_NAME}" \
+            --generate-notes $EXTRA

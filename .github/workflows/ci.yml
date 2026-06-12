@@ -16,6 +16,8 @@ jobs:
       - run: uv sync
       - run: uv run ruff check .
       - run: uv run pytest -q            # slow 默认跳过
+      - run: npx -y @anthropic-ai/mcpb@2.1.2 validate manifest.json
+        if: matrix.os == 'ubuntu-latest'   # mcpb manifest 回归防线（仅跑一次）
   runtime-integration:
     needs: lint-unit
     strategy:
