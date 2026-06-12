@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP, Image
@@ -14,6 +15,7 @@ from vibecad import __version__
 from vibecad.engine.session import Session
 from vibecad.feedback import annotate as _annotate
 from vibecad.feedback import multiview as _multiview
+from vibecad.feedback import persist as _persist
 from vibecad.feedback import render as _render
 from vibecad.feedback import text as _feedback_text
 from vibecad.freecad_env import (
@@ -182,7 +184,7 @@ def _edges_of_global_index(ef_idx: int, part_map: dict[str, Any] | None) -> int:
         f"活动零件 {_session.active_part!r} 不在装配渲染序列中——无法定位 edges_of 面")
 
 
-def _attach_view(result: dict[str, Any]) -> Any:
+def _attach_view(result: dict[str, Any], tool: str = "step") -> Any:
     """成功结果附三视图拼图 + 当场刷新标签表；附图失败不连坐（保留操作成功 +
     render_error + 退回 labels_stale 提示）——绝不因附图失败把成功操作报成失败，
     也绝不静默吞掉渲染错误。
@@ -207,6 +209,11 @@ def _attach_view(result: dict[str, Any]) -> Any:
             # labels/Image 已就绪，parts 只是辅助清单，兜底空 dict 而非把整个
             # 附图降级到 render_error 路径（消除"渲染成功却报渲染失败"的语义矛盾）
             result["parts"] = {}
+        try:
+            doc_name = getattr(_session.doc, "Name", "untitled")
+            result["view_file"] = _persist.save_view(png, doc_name, tool)
+        except Exception as exc:  # noqa: BLE001 - 落盘失败不连坐（与 render_error 同理）
+            result["view_file_error"] = f"图已生成但落盘失败：{exc}"
         result["labels"] = table
         return [result, Image(data=png, format="png")]
     except Exception as exc:  # noqa: BLE001 - 事务已提交，纯展示阶段刻意宽抓：
@@ -241,7 +248,7 @@ def add_box(length: float, width: float, height: float,
             position=tuple(position) if position is not None else (0.0, 0.0, 0.0))
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"创建失败：{exc}"}
-    return _attach_view(result)
+    return _attach_view(result, tool="add_box")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -258,7 +265,7 @@ def add_cylinder(radius: float, height: float,
             position=tuple(position) if position is not None else (0.0, 0.0, 0.0), axis=axis)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"创建失败：{exc}"}
-    return _attach_view(result)
+    return _attach_view(result, tool="add_cylinder")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -271,7 +278,7 @@ def boolean_cut(base_name: str, tool_name: str) -> Any:
         result = _modeling.boolean_cut(_session, base_name, tool_name)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"布尔运算失败：{exc}"}
-    return _attach_view(result)
+    return _attach_view(result, tool="boolean_cut")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -307,14 +314,30 @@ def describe_part() -> dict[str, Any]:
         return {"ok": False, "message": f"描述失败：{exc}"}
 
 
+def _maybe_save(png: bytes, save_to: str | None) -> dict[str, str]:
+    """render_part 的显式另存：失败不连坐（save_error 字段，渲染结果照常返回）。"""
+    if not save_to:
+        return {}
+    try:
+        p = Path(save_to).expanduser()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(png)
+        return {"saved": str(p)}
+    except OSError as exc:
+        return {"save_error": f"保存失败：{exc}"}
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def render_part(view: str = "iso", annotate: str | None = None,
-                edges_of: str | None = None) -> Any:
+                edges_of: str | None = None,
+                save_to: str | None = None) -> Any:
     """渲染当前零件 PNG（view: iso|front|top|right|back|multi）。
     annotate='faces'：面标注图+标签表+尺寸线（之后可用面标签如 'A' 调 add_hole）；
     annotate='edges'：边标注图（edges_of='A' 只画 A 面的边；
     之后可调 fillet_edges/chamfer_edges）。
-    view='multi'：2×2 三视图+标注 iso 拼图（已含标注，不可与 annotate/edges_of 组合）。"""
+    view='multi'：2×2 三视图+标注 iso 拼图（已含标注，不可与 annotate/edges_of 组合）。
+    save_to=绝对路径：另存渲染 PNG 到该文件。每步建模返回的 view_file 是自动落盘路径——
+    客户端不显示内嵌图时（如 Cowork），可直接用系统命令打开该文件给用户看图。"""
     guard = _runtime_guard()
     if guard:
         return guard
@@ -334,7 +357,8 @@ def render_part(view: str = "iso", annotate: str | None = None,
                     shape, part_map=_build_part_map())
             _store_labels(faces_reg, edges_reg, shown=set(table.keys()))
             return [Image(data=png, format="png"),
-                    json.dumps({"ok": True, "labels": table}, ensure_ascii=False)]
+                    json.dumps({"ok": True, "labels": table,
+                                **_maybe_save(png, save_to)}, ensure_ascii=False)]
         except Exception as exc:  # noqa: BLE001 - 与 _attach_view 同理：同一条
             # render_multiview 渲染链含 TechDraw/matplotlib 深栈（实测有 TypeError），
             # 窄抓会让同一失败在 attach 路径被结构化、在 multi 路径穿透成 isError。
@@ -353,13 +377,18 @@ def render_part(view: str = "iso", annotate: str | None = None,
                 ef_idx = _edges_of_global_index(ef_idx, part_map)
         if annotate is None:
             png = _render.render_png(shape, view=view)
+            extra = _maybe_save(png, save_to)
+            if extra:
+                return [Image(data=png, format="png"),
+                        json.dumps({"ok": True, **extra}, ensure_ascii=False)]
             return Image(data=png, format="png")
         png, table, faces_reg, edges_reg = _annotate.render_annotated(
             shape, mode=annotate, edges_of=ef_idx, view=view, part_map=part_map)
         # shown=本次表里实际展示的键：未展示过的标签不可被指认（防 AI 编造盲选）
         _store_labels(faces_reg, edges_reg, shown=set(table.keys()))
         return [Image(data=png, format="png"),
-                json.dumps({"ok": True, "labels": table}, ensure_ascii=False)]
+                json.dumps({"ok": True, "labels": table,
+                            **_maybe_save(png, save_to)}, ensure_ascii=False)]
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"渲染失败：{exc}"}
 
@@ -381,7 +410,7 @@ def add_hole(face: str, diameter: float, depth: float | None = None,
                                     pattern=pattern)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"打孔失败：{exc}"}
-    return _attach_view(result)
+    return _attach_view(result, tool="add_hole")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -394,7 +423,7 @@ def fillet_edges(edges: list[str], radius: float) -> Any:
         result = _features.fillet_edges(_session, edges, radius)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"圆角失败：{exc}"}
-    return _attach_view(result)
+    return _attach_view(result, tool="fillet_edges")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -407,7 +436,7 @@ def chamfer_edges(edges: list[str], size: float) -> Any:
         result = _features.chamfer_edges(_session, edges, size)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"倒角失败：{exc}"}
-    return _attach_view(result)
+    return _attach_view(result, tool="chamfer_edges")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -422,7 +451,7 @@ def modify_part(name: str, parameter: str, value: float) -> Any:
         result = _modify.modify_part(_session, name, parameter, value)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"参数修改失败：{exc}"}
-    return _attach_view(result)
+    return _attach_view(result, tool="modify_part")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -437,7 +466,7 @@ def move_part(name: str, position: list[float]) -> Any:
         result = _transform.move_part(_session, name, tuple(position) if position else position)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"移动失败：{exc}"}
-    return _attach_view(result)
+    return _attach_view(result, tool="move_part")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -452,7 +481,7 @@ def rotate_part(name: str, axis: str = "z", angle: float = 90.0) -> Any:
         result = _transform.rotate_part(_session, name, axis=axis, angle=angle)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"旋转失败：{exc}"}
-    return _attach_view(result)
+    return _attach_view(result, tool="rotate_part")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -475,7 +504,7 @@ def extrude_profile(profile: dict, height: float, face: str | None = None,
             operation=operation)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"拉伸失败：{exc}"}
-    return _attach_view(result)
+    return _attach_view(result, tool="extrude_profile")
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +524,7 @@ def new_part(name: str) -> Any:
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"新建零件失败：{exc}"}
     result["ok"] = True
-    return _attach_view(result)
+    return _attach_view(result, tool="new_part")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -509,7 +538,7 @@ def set_active_part(name: str) -> Any:
         _session.set_active_part(name)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"切换零件失败：{exc}"}
-    return _attach_view({"ok": True, "active_part": name})
+    return _attach_view({"ok": True, "active_part": name}, tool="set_active_part")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -528,7 +557,7 @@ def place_part(part: str, position: list[float] | None = None,
             rotation_axis=rotation_axis, angle=angle)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"零件位置设置失败：{exc}"}
-    return _attach_view(result)
+    return _attach_view(result, tool="place_part")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -553,7 +582,7 @@ def align_parts(moving_part: str, moving_face: str,
             gap=gap, allow_interference=allow_interference)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"装配对齐失败：{exc}"}
-    return _attach_view(result)
+    return _attach_view(result, tool="align_parts")
 
 
 def main() -> None:
