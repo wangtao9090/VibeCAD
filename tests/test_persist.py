@@ -22,9 +22,18 @@ def test_save_view_rolls_old_files(monkeypatch, tmp_path):
         persist.save_view(PNG, "Doc", f"t{i}")
     files = sorted((tmp_path / "views" / "Doc").glob("*.png"))
     assert len(files) == 20 and files[0].name.startswith("006-")
+    # 删的是最旧的 001-005，不是误删新文件
+    assert not any(f.name.startswith(f"{i:03d}-") for f in files for i in range(1, 6))
 
 
 def test_save_view_sanitizes_names(monkeypatch, tmp_path):
     _home(monkeypatch, tmp_path)
     p = persist.save_view(PNG, "a/b:c", "x y")
     assert "/views/a_b_c/001-x_y.png" in p.replace("\\", "/")
+
+
+def test_save_view_dotdot_doc_name_stays_inside_views(monkeypatch, tmp_path):
+    """doc_name='..' 不得逃逸到 views 上级目录。"""
+    _home(monkeypatch, tmp_path)
+    p = persist.save_view(PNG, "..", "t")
+    assert "/views/untitled/" in p.replace("\\", "/")

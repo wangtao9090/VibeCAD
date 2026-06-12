@@ -9,7 +9,8 @@ _KEEP = 20
 
 
 def _sanitize(name: str) -> str:
-    return re.sub(r"[^\w.-]", "_", name)[:64] or "untitled"
+    # lstrip(".")：防 "."/".." 穿过白名单变成目录元字符（views_dir 会逃逸到上级目录）
+    return re.sub(r"[^\w.-]", "_", name)[:64].lstrip(".") or "untitled"
 
 
 def views_dir(doc_name: str) -> Path:
@@ -23,7 +24,7 @@ def save_view(png: bytes, doc_name: str, tool: str) -> str:
     d = views_dir(doc_name)
     d.mkdir(parents=True, exist_ok=True)
     nums = [int(m.group(1)) for p in d.glob("*.png")
-            if (m := re.match(r"(\d{3})-", p.name))]
+            if (m := re.match(r"(\d{3,})-", p.name))]  # {3,}：第 1000 步起 4 位，不回卷覆盖 001-
     path = d / f"{max(nums, default=0) + 1:03d}-{_sanitize(tool)}.png"
     path.write_bytes(png)
     for old in sorted(d.glob("*.png"))[:-_KEEP]:
