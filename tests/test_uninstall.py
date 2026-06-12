@@ -89,3 +89,43 @@ def test_empty_dir_allowed(monkeypatch, tmp_path):
     d.mkdir(parents=True)
     monkeypatch.setenv("VIBECAD_HOME", str(d))
     assert uninstall.uninstall_now()["ok"] is True
+
+
+def test_refuses_user_project_with_bin(monkeypatch, tmp_path):
+    """含裸 bin/ 的用户项目 → 拒删，源码无恙（特征清单收紧的回归锁）。"""
+    d = tmp_path / "deep" / "myproject"
+    (d / "bin").mkdir(parents=True)
+    (d / "src").mkdir()
+    (d / "src" / "main.c").write_text("int main(){}")
+    monkeypatch.setenv("VIBECAD_HOME", str(d))
+    assert uninstall.uninstall_now()["ok"] is False
+    assert (d / "src" / "main.c").exists()
+
+
+def test_refuses_web_project_with_views(monkeypatch, tmp_path):
+    d = tmp_path / "deep" / "webapp"
+    (d / "views").mkdir(parents=True)
+    (d / "app.py").write_text("app")
+    monkeypatch.setenv("VIBECAD_HOME", str(d))
+    assert uninstall.uninstall_now()["ok"] is False
+    assert (d / "app.py").exists()
+
+
+def test_refuses_symlink_home(monkeypatch, tmp_path):
+    real = tmp_path / "real-dir"
+    real.mkdir()
+    (real / "data.txt").write_text("x")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    monkeypatch.setenv("VIBECAD_HOME", str(link))
+    assert uninstall.uninstall_now()["ok"] is False
+    assert (real / "data.txt").exists()
+
+
+def test_managed_bin_micromamba_allowed(monkeypatch, tmp_path):
+    """bin/micromamba 是我们的安装产物 → 放行（bin 限定逻辑的另一端）。"""
+    d = tmp_path / "deep" / "runtime-home"
+    (d / "bin").mkdir(parents=True)
+    (d / "bin" / "micromamba").write_bytes(b"\x7fELF")
+    monkeypatch.setenv("VIBECAD_HOME", str(d))
+    assert uninstall.uninstall_now()["ok"] is True and not d.exists()
