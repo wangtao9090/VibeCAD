@@ -15,12 +15,9 @@
 
 ## 快速开始（用户）
 
-已发布 [PyPI](https://pypi.org/project/vibecad/)。装好 [uv](https://docs.astral.sh/uv/) 后，在任意 MCP 客户端添加 stdio 连接器：**command `uvx`，args `vibecad`**，对 AI 说"帮我准备好 CAD 环境"即可。逐步图文教程见 **[用户手册](docs/USER_GUIDE.md)**。
+**Claude Desktop / Cowork（推荐）**：去 [Releases 最新版](https://github.com/wangtao9090/VibeCAD/releases/latest) 下载 [`VibeCAD.mcpb`](https://github.com/wangtao9090/VibeCAD/releases/latest)，**双击安装**——Claude Desktop 弹出安装窗口后点安装即可，零终端、零配置文件、无需预装 uv/Python（宿主自动准备隔离 Python 环境）。装好后对 AI 说"帮我准备好 CAD 环境"即可。逐步图文教程见 **[用户手册](docs/USER_GUIDE.md)**。
 
-```bash
-# Claude Code 一行接入
-claude mcp add --transport stdio vibecad -- uvx vibecad
-```
+> 其他客户端（Claude Code / Cursor 等）走 stdio 方式：装好 [uv](https://docs.astral.sh/uv/) 后 `claude mcp add --transport stdio vibecad -- uvx vibecad`（已发布 [PyPI](https://pypi.org/project/vibecad/)），详见用户手册附录 A。
 
 ## 首发形态：Chat-native 零安装
 

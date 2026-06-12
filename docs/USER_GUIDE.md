@@ -7,11 +7,12 @@
 **目录**
 
 1. [这是什么](#一这是什么)
-2. [安装前提：装好 uv](#二安装前提装好-uv)
-3. [在 Claude Cowork 中配置](#三在-claude-cowork-中配置)
+2. [安装前提](#二安装前提)
+3. [安装 VibeCAD（双击即装）](#三安装-vibecad双击即装)
 4. [第一次使用](#四第一次使用)
 5. [场景手册](#五场景手册)
 6. [故障排查](#六故障排查)
+7. [附录 A：其他 MCP 客户端接入（Claude Code / Cursor 等）](#附录-a其他-mcp-客户端接入claude-code--cursor-等)
 
 ---
 
@@ -37,43 +38,14 @@ VibeCAD 是一个"会画三维图的 AI 助手插件"。装好之后，你在 Cl
 
 ---
 
-## 二、安装前提：装好 uv
+## 二、安装前提
 
-你只需要预先装**一个**小工具：**uv**（一个帮你自动下载并运行程序的小帮手，装完就不用再管它了）。另外请确保电脑至少有 **5GB 空闲磁盘空间**——首次使用时会自动下载约 2-3GB 的建模引擎。
+你**不需要**预先装任何命令行工具（不用装 uv、不用装 Python）。只要满足两个条件：
 
-### macOS
+- **Claude Desktop（含 Cowork 模式）最新版**——VibeCAD 以"桌面扩展（Extension）"的形式一键安装，旧版本可能没有扩展安装界面，请先把 Claude Desktop 更新到最新版。
+- **至少 5GB 空闲磁盘空间**——安装扩展后第一次使用时，会自动下载约 2-3GB 的建模引擎。
 
-1. 打开"终端"：按 `Command + 空格` 调出聚焦搜索，输入"终端"（或 Terminal），回车。
-2. 把下面整行复制粘贴进去，回车，等它跑完：
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-3. **关掉终端窗口，重新打开一个**，输入下面这行验证（uvx 是 uv 自带的命令）：
-
-```bash
-uvx --version
-```
-
-显示出版本号（如 `uvx 0.7.x`）就成功了。
-
-### Windows
-
-1. 点开始菜单，输入 "PowerShell"，打开 Windows PowerShell。
-2. 把下面整行复制粘贴进去，回车，等它跑完：
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-3. **关掉 PowerShell 窗口，重新打开一个**，输入下面这行验证：
-
-```powershell
-uvx --version
-```
-
-显示出版本号就成功了。
+安装扩展时，Claude Desktop 会自动准备好运行 VibeCAD 所需的 Python 环境（在扩展专属的隔离环境里），你完全不用操心这些底层细节。
 
 ### 关于首次下载的预期
 
@@ -81,52 +53,40 @@ uvx --version
 
 ---
 
-## 三、在 Claude Cowork / Claude Desktop 中配置
+## 三、安装 VibeCAD（双击即装）
 
-VibeCAD 通过**配置文件**接入（Claude Desktop 与 Cowork 共用同一份配置）。
+VibeCAD 打包成一个**桌面扩展安装包** `VibeCAD.mcpb`，下载下来双击就能装进 Claude Desktop，不用碰终端、不用编辑任何配置文件。
 
-> ⚠️ **别走设置界面里的"添加自定义连接器（Add custom connector）"对话框**——实测（2026-06）该对话框只接受**远程服务器网址（Remote MCP server URL）**，而 VibeCAD 是跑在你电脑上的本地程序，没有网址可填。本地程序一律走下面的配置文件方式。
+### 第 1 步：下载安装包
 
-**第 1 步：查出 uvx 的完整路径**（关键——图形界面应用找不到终端里的命令，必须写完整路径）：
+去发布页下载最新的 `VibeCAD.mcpb`：
 
-- macOS 终端里运行 `which uvx`，通常得到 `/Users/你的用户名/.local/bin/uvx`
-- Windows PowerShell 里运行 `(Get-Command uvx).Source`，通常得到 `C:\Users\你的用户名\.local\bin\uvx.exe`
+> **下载地址**：<https://github.com/wangtao9090/VibeCAD/releases/latest>
 
-**第 2 步：编辑配置文件** `claude_desktop_config.json`：
+在页面下方的 **Assets（资源）** 列表里找到 `VibeCAD.mcpb`，点它下载到本地（一般会落到"下载"文件夹）。
 
-- macOS 路径：`~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows 路径：`%APPDATA%\Claude\claude_desktop_config.json`
+<!-- screenshot: Release 页 Assets 列表中 VibeCAD.mcpb 下载入口 -->
 
-用任意文本编辑器打开。**如果文件已有内容，只添加 `"mcpServers"` 这一段，别动其他部分**（没有此文件就新建，写入完整内容）：
+### 第 2 步：双击安装
 
-```json
-{
-  "mcpServers": {
-    "vibecad": {
-      "command": "/Users/你的用户名/.local/bin/uvx",
-      "args": ["vibecad"]
-    }
-  }
-}
-```
+**双击下载好的 `VibeCAD.mcpb` 文件**——Claude Desktop 会自动弹出一个安装窗口，显示 VibeCAD 的名称、图标和说明，点窗口里的**安装（Install）**按钮即可。
 
-（`command` 换成第 1 步查到的你自己的完整路径；Windows 注意把 `\` 写成 `\\`，如 `"C:\\Users\\你\\.local\\bin\\uvx.exe"`。）
+<!-- screenshot: 双击 .mcpb 后 Claude Desktop 弹出的扩展安装确认窗口 -->
 
-**第 3 步：完全退出并重启 Claude**（macOS 注意菜单栏 Quit，不是只关窗口）。
+> **如果双击没反应**（系统没把 `.mcpb` 关联到 Claude Desktop），改用手动安装：
+> 打开 Claude Desktop → **设置（Settings）→ 扩展（Extensions）→ Advanced settings（高级设置）→ Install Extension…（安装扩展）**，在文件选择框里选中刚下载的 `VibeCAD.mcpb`，确认安装。
 
-**第 4 步：验证**——新开一个对话，问 AI：
+安装时 Claude Desktop 会在后台自动准备运行 VibeCAD 所需的 Python 环境（在扩展专属的隔离环境里完成），稍等片刻即可，全程无需你操作。
+
+### 第 3 步：验证
+
+安装完成后，**完全退出并重启 Claude Desktop**（或新开一个对话）。然后问 AI：
 
 > "你能看到 VibeCAD 的 CAD 工具吗？"
 
-AI 回答能看到一组 CAD 工具（ping、ensure_runtime、add_box……），就接好了。
+AI 回答能看到一组 CAD 工具（ping、ensure_runtime、add_box……），就装好了。你也可以在**设置（Settings）→ 扩展（Extensions）**里看到 VibeCAD 已列出且处于启用状态。
 
-### 3.2 等价配置：Claude Code
-
-如果你用的是 Claude Code（命令行工具），在终端里粘贴一行即可：
-
-```bash
-claude mcp add --transport stdio vibecad -- uvx vibecad
-```
+<!-- screenshot: 设置→扩展列表中 VibeCAD 已启用的状态 -->
 
 ---
 
@@ -273,8 +233,91 @@ AI 会悄悄画一个 10×10×10 的小方块并报告它的体积（1000 立方
 | Windows 防火墙或杀毒软件弹窗询问 | 首次运行要下载引擎、启动本地程序，触发了安全提示 | 选择"允许"。VibeCAD 完全在你本机运行、不向外发送你的设计，组件只从官方源下载，代码开源可查 |
 | 出图里中文文字显示成方块（多见于 Windows） | 系统缺少中文绘图字体 | 只影响个别文字显示，尺寸数字和建模功能完全正常，可忽略 |
 | 试了各种办法都不行，想彻底重来 | 引擎文件可能已损坏 | 删除整个数据目录，然后重新说"帮我准备好 CAD 环境"（会重新下载 2-3GB）。目录位置——macOS：`~/Library/Application Support/VibeCAD`；Windows：`%LOCALAPPDATA%\VibeCAD` |
+| 双击 `VibeCAD.mcpb` 没弹出安装窗口 | 多半是 Claude Desktop 版本过旧，没有扩展安装功能 | 把 Claude Desktop 更新到最新版后重试；仍不行就用手动安装路径：设置（Settings）→ 扩展（Extensions）→ Advanced settings → Install Extension…，选中下载的 `VibeCAD.mcpb` |
+| 想升级 VibeCAD 到新版本 | Claude Desktop 的扩展暂无自动更新 | 去发布页 <https://github.com/wangtao9090/VibeCAD/releases/latest> 下载新版 `VibeCAD.mcpb`，重新双击安装一遍即可（会覆盖旧版本） |
+| 想找扩展的安装位置或日志排查问题 | —— | macOS 扩展安装/日志目录：`~/Library/Application Support/Claude/Claude Extensions/local.mcpb.wang-tao.vibecad/`（在 Finder 按 `Command+Shift+G` 粘贴前往）。Windows 路径见后续验证补充 |
 
 > **报告问题时**：附上安装日志能大大加快定位——日志文件在数据目录下的 `install.log`（macOS：`~/Library/Application Support/VibeCAD/install.log`；Windows：`%LOCALAPPDATA%\VibeCAD\install.log`），连同"你说的话、AI 的回复、你期待的结果"一起发给我们。
+
+---
+
+## 附录 A：其他 MCP 客户端接入（Claude Code / Cursor 等）
+
+> 本附录面向**高级用户**。如果你用的是 Claude Desktop / Cowork，请用第三章的"双击即装"方式，不必读本附录。只有当你要把 VibeCAD 接入 **Claude Code、Cursor 或其他支持 stdio MCP 的客户端**时，才需要下面这套"装 uv + 写配置"的手动方式。
+
+这些客户端不识别 `.mcpb` 扩展包，需要你预先装一个小工具 **uv**（一个帮你自动下载并运行程序的小帮手），再把 VibeCAD 作为 stdio 连接器写进客户端配置。
+
+### A.1 装好 uv
+
+请确保电脑至少有 **5GB 空闲磁盘空间**——首次使用时会自动下载约 2-3GB 的建模引擎。
+
+**macOS**
+
+1. 打开"终端"：按 `Command + 空格` 调出聚焦搜索，输入"终端"（或 Terminal），回车。
+2. 把下面整行复制粘贴进去，回车，等它跑完：
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+3. **关掉终端窗口，重新打开一个**，输入下面这行验证（uvx 是 uv 自带的命令）：
+
+```bash
+uvx --version
+```
+
+显示出版本号（如 `uvx 0.7.x`）就成功了。
+
+**Windows**
+
+1. 点开始菜单，输入 "PowerShell"，打开 Windows PowerShell。
+2. 把下面整行复制粘贴进去，回车，等它跑完：
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+3. **关掉 PowerShell 窗口，重新打开一个**，输入下面这行验证：
+
+```powershell
+uvx --version
+```
+
+显示出版本号就成功了。
+
+### A.2 Claude Code（命令行工具）
+
+在终端里粘贴一行即可：
+
+```bash
+claude mcp add --transport stdio vibecad -- uvx vibecad
+```
+
+### A.3 通过配置文件接入（Cursor 等支持 stdio MCP 的客户端）
+
+各客户端的配置文件位置不同，但条目格式通用。**关键：图形界面应用找不到终端里的命令，`command` 必须写 uvx 的完整路径，不能只写 `uvx`。**
+
+**第 1 步：查出 uvx 的完整路径**：
+
+- macOS 终端里运行 `which uvx`，通常得到 `/Users/你的用户名/.local/bin/uvx`
+- Windows PowerShell 里运行 `(Get-Command uvx).Source`，通常得到 `C:\Users\你的用户名\.local\bin\uvx.exe`
+
+**第 2 步：在客户端的 MCP 配置里加入下面这段**（如已有 `"mcpServers"` 段，只追加 `vibecad` 这一项，别动其他部分）：
+
+```json
+{
+  "mcpServers": {
+    "vibecad": {
+      "command": "/Users/你的用户名/.local/bin/uvx",
+      "args": ["vibecad"]
+    }
+  }
+}
+```
+
+（`command` 换成第 1 步查到的你自己的完整路径；Windows 注意把 `\` 写成 `\\`，如 `"C:\\Users\\你\\.local\\bin\\uvx.exe"`。）
+
+**第 3 步：完全退出并重启客户端**，新开一个对话，问 AI"你能看到 VibeCAD 的 CAD 工具吗？"，AI 能列出一组 CAD 工具即接好。
 
 ---
 
