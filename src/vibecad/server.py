@@ -215,6 +215,8 @@ def _attach_view(result: dict[str, Any], tool: str = "step") -> Any:
         except Exception as exc:  # noqa: BLE001 - 落盘失败不连坐（与 render_error 同理）
             result["view_file_error"] = f"图已生成但落盘失败：{exc}"
         result["labels"] = table
+        # 顺序 [dict, Image] 是有意为之（与 render_part 的 [Image, str] 相反）：
+        # 建模返回以结构化结果为主、图为附件；render_part 以图为主。勿"对齐"。
         return [result, Image(data=png, format="png")]
     except Exception as exc:  # noqa: BLE001 - 事务已提交，纯展示阶段刻意宽抓：
         # 此处任何异常（实测 TechDraw 的 TypeError、潜在 ImportError/IndexError）
