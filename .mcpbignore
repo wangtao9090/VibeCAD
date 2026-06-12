@@ -1,0 +1,21 @@
+# mcpb pack 默认不排除虚拟环境/缓存——必须显式列（仓库 .venv 162MB）
+.venv/
+.claude/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# 测试/文档/CI/过程物——uv 类型扩展只需 manifest + pyproject + src + 入口
+tests/
+docs/
+.github/
+.vibecad/
+.vibecad-test-runtime/
+dist/
+uv.lock
+.gitignore
+.python-version
+CLAUDE.md
+*.mcpb

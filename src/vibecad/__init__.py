@@ -8,4 +8,4 @@
 - rules/    规则引擎（YAML 规则 + OCCT 谓词）
 """
 
-__version__ = "0.1.0"  # 与 pyproject.toml 同步（发布版本）
+__version__ = "0.2.0"  # 与 pyproject.toml + manifest.json 同步（test_mcpb_manifest 守护）

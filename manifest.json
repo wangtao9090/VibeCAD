@@ -1,0 +1,49 @@
+{
+  "manifest_version": "0.4",
+  "name": "vibecad",
+  "display_name": "VibeCAD",
+  "version": "0.2.0",
+  "description": "AI 对话式 CAD：用自然语言画零件、打孔、装配、导出 3D 打印文件（FreeCAD 引擎）",
+  "long_description": "给一年只设计几次东西的人：免费的 FreeCAD + 一个让你永远不用学 FreeCAD 的 AI。每步自动回工程图三视图，支持参数修改、孔阵列、多零件装配与干涉检查，导出 STEP/STL。首次使用自动下载建模引擎（约 2-3GB，仅一次）。",
+  "author": { "name": "Wang Tao", "email": "wangtao9090@gmail.com" },
+  "license": "MIT",
+  "icon": "icon.png",
+  "homepage": "https://github.com/wangtao9090/VibeCAD",
+  "repository": { "type": "git", "url": "https://github.com/wangtao9090/VibeCAD" },
+  "server": {
+    "type": "uv",
+    "entry_point": "mcpb_entry.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--no-dev", "--directory", "${__dirname}", "mcpb_entry.py"]
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32"],
+    "runtimes": { "python": ">=3.12" }
+  },
+  "tools": [
+    { "name": "ping", "description": "连通性检查" },
+    { "name": "get_runtime_status", "description": "查询 FreeCAD 运行时安装状态" },
+    { "name": "ensure_runtime", "description": "确保 FreeCAD 运行时就绪（未装则后台安装）" },
+    { "name": "smoke_cad", "description": "冒烟测试：建 Box 并导出 STEP" },
+    { "name": "new_document", "description": "新建单零件工作文档" },
+    { "name": "add_box", "description": "添加参数化长方体" },
+    { "name": "add_cylinder", "description": "添加参数化圆柱" },
+    { "name": "boolean_cut", "description": "布尔差集（从 base 减去 tool）" },
+    { "name": "export_part", "description": "导出 STEP/STL/glTF 可制造文件" },
+    { "name": "describe_part", "description": "文本诊断：体积/包围盒/质心" },
+    { "name": "render_part", "description": "渲染 PNG 预览图/工程图三视图/标注图" },
+    { "name": "add_hole", "description": "在指定面打圆孔（支持阵列）" },
+    { "name": "fillet_edges", "description": "边圆角" },
+    { "name": "chamfer_edges", "description": "边倒角" },
+    { "name": "modify_part", "description": "修改已有对象参数（依赖链自动重算）" },
+    { "name": "move_part", "description": "移动图元到绝对位置" },
+    { "name": "rotate_part", "description": "旋转图元（绕包围盒中心）" },
+    { "name": "extrude_profile", "description": "自由轮廓拉伸 pad/pocket" },
+    { "name": "new_part", "description": "新建装配零件并设为活动零件" },
+    { "name": "set_active_part", "description": "切换活动零件" },
+    { "name": "place_part", "description": "零件级位姿（整零件移动/旋转）" },
+    { "name": "align_parts", "description": "面贴面对齐（自动干涉检查）" }
+  ]
+}
