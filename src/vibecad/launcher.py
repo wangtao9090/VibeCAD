@@ -1,12 +1,13 @@
 """A3 引导壳：决定在哪个 python 跑 server。纯 stdlib，禁 import mcp/FreeCAD 等重依赖。"""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-from vibecad.runtime import paths, status
+from vibecad.runtime import paths, status, uninstall
 
 
 def _run_server() -> None:
@@ -21,7 +22,23 @@ def _reexec_into(env_py: Path) -> None:
     os.execv(str(env_py), args)
 
 
+def _cli_uninstall() -> None:
+    """`vibecad --uninstall` 救援命令：不依赖 MCP 客户端，直接命令行触发直删。
+    TTY 下无 --yes 需二次确认；非 TTY（CI/管道）或带 --yes 直接执行，避免卡死等待输入。"""
+    home = paths.vibecad_home()
+    if "--yes" not in sys.argv and sys.stdin.isatty():
+        ans = input(f"将删除 {home}（全部 CAD 运行时）。确认？[y/N] ")
+        if ans.strip().lower() not in ("y", "yes"):
+            print("已取消")
+            return
+    print(json.dumps(uninstall.uninstall_now(), ensure_ascii=False))
+
+
 def main() -> None:
+    if "--uninstall" in sys.argv:
+        _cli_uninstall()
+        return
+    uninstall.perform_pending_uninstall()  # 标记→重启后清理链路的接收端；无标记则是无操作
     runtime_py = paths.active_runtime_python()
     try:
         in_runtime = Path(sys.executable).resolve() == Path(runtime_py).resolve()
