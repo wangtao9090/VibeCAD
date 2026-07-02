@@ -25,6 +25,7 @@ from vibecad.freecad_env import (
     silence_fd1 as _silence_fd1,
 )
 from vibecad.runtime import paths, status
+from vibecad.runtime import uninstall as _uninstall
 from vibecad.runtime.installer import RuntimeInstaller
 from vibecad.supervisor import SWAP_EXIT, runtime_swappable  # 单向依赖；换芯判据唯一真源（C1）
 from vibecad.tools import assembly as _assembly
@@ -180,7 +181,18 @@ def smoke_cad() -> dict[str, Any]:
 
 def _runtime_guard() -> dict[str, Any] | None:
     if not _installer.is_ready():
-        return {"ok": False, "message": "FreeCAD 运行时未就绪，请先调用 ensure_runtime"}
+        st = status.read_status()
+        if st.phase == status.Phase.FAILED:
+            return {"ok": False, "phase": st.phase.value,
+                    "message": f"CAD 引擎安装失败：{st.error or st.message}；"
+                               "可调用 ensure_runtime 重试"}
+        if st.phase == status.Phase.NOT_STARTED:
+            return {"ok": False, "phase": st.phase.value,
+                    "message": "CAD 引擎未安装：调用 ensure_runtime 开始（约 2-3GB，仅一次）"}
+        return {"ok": False, "phase": st.phase.value, "percent": st.percent,
+                "message": f"正在准备 CAD 引擎：{st.message or st.phase.value}"
+                           f"（{st.percent:.0f}%）。就绪后自动接管，无需任何手动操作，"
+                           "可用 get_runtime_status 看进度"}
     if not _in_conda_runtime():
         if _try_schedule_swap():  # Round 11：自退换芯替代手动重连
             _msg = "运行时已就绪，正在自动切换到运行时解释器（数秒内完成），请稍后重试本操作"
@@ -638,6 +650,31 @@ def align_parts(moving_part: str, moving_face: str,
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"装配对齐失败：{exc}"}
     return _attach_view(result, tool="align_parts")
+
+
+# ---------------------------------------------------------------------------
+# Round 11：卸载（两段式确认 + 自退换芯执行删除）
+# ---------------------------------------------------------------------------
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+def uninstall_runtime(confirm: bool = False) -> dict[str, Any]:
+    """卸载 CAD 引擎（删除全部已下载的运行时，约 2-3GB；扩展本体请在客户端设置里移除）。
+    不带 confirm：仅预览将删除的路径与大小；confirm=true：执行删除。"""
+    home = paths.vibecad_home()
+    if not confirm:
+        size = _uninstall.dir_size_mb(home) if home.exists() else 0.0
+        return {"ok": True, "confirm_required": True, "path": str(home),
+                "size_mb": round(size, 1),
+                "message": "将删除以上目录；确认请再次调用 uninstall_runtime(confirm=true)"}
+    info = _uninstall.request_uninstall()
+    if info.get("marked"):
+        if _try_schedule_swap():
+            info["message"] = ("已计划删除：server 即将自动重启完成清理。"
+                                "扩展本体如需移除，请在客户端设置（Extensions）里 Remove。")
+        else:  # I4/C1 回退：裸 server 不能自杀，删除要等下次启动早期执行
+            info["message"] = ("已计划删除：请重启 server 后生效（下次启动时自动完成清理）。"
+                                "扩展本体如需移除，请在客户端设置（Extensions）里 Remove。")
+    return info
 
 
 def main() -> None:

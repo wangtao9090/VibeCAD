@@ -30,7 +30,7 @@ def test_ensure_starts_bg(monkeypatch):
 def test_smoke_guard_not_ready(monkeypatch):
     monkeypatch.setattr(srv._installer, "is_ready", lambda: False)
     out = srv.smoke_cad()
-    assert out["ok"] is False and "未就绪" in out["message"]
+    assert out["ok"] is False and "ensure_runtime" in out["message"]
 
 
 def test_smoke_guard_bootstrap_schedules_swap(monkeypatch):

@@ -38,6 +38,29 @@ def test_manifest_uv_type_entry_and_mcp_config():
     assert (ROOT / m["icon"]).exists()     # 安装弹窗/扩展列表展示
 
 
+def test_manifest_env_auto_install_only():
+    """Round 11：宿主一拉起即自动后台装运行时。Spike Q3 已否决 VIBECAD_HOME=
+    ${__dirname}/runtime（升级会清目录重建，见 plan Spike 结果节）——env 只留
+    VIBECAD_AUTO_INSTALL，运行时路径保持默认（扩展目录外）。"""
+    m = _manifest()
+    env = m["server"]["mcp_config"]["env"]
+    assert env == {"VIBECAD_AUTO_INSTALL": "1"}
+
+
+def test_manifest_uninstall_runtime_destructive_hint():
+    """uninstall_runtime 必须显式标注 destructiveHint=True（目录上架审查关注卸载）。"""
+    import vibecad.server as server
+
+    tools = {t.name: t for t in server.mcp._tool_manager.list_tools()}
+    assert tools["uninstall_runtime"].annotations.destructiveHint is True
+
+
+def test_manifest_long_description_mentions_clean_uninstall():
+    """long_description 需带"卸载零残留"卖点（Round 11 设计明细 3.3）。"""
+    m = _manifest()
+    assert "残留" in m["long_description"] or "全删" in m["long_description"]
+
+
 def test_mcpbignore_excludes_heavy_dirs():
     ignore = (ROOT / ".mcpbignore").read_text(encoding="utf-8")
     for pattern in (".venv", ".claude", "__pycache__", ".pytest_cache",

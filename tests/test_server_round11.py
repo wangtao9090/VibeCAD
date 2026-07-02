@@ -496,3 +496,226 @@ def test_ensure_runtime_unsupervised_hints_reconnect(monkeypatch):
     assert out["status"] == "ready"
     assert "重连" in out["message"]
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Task 4 Step 3：uninstall_runtime 两段式 MCP 工具
+# ---------------------------------------------------------------------------
+
+def test_uninstall_runtime_preview_without_confirm(monkeypatch, tmp_path):
+    """不带 confirm：仅预览——路径 + 大小 + confirm_required:true；目录/标记原样不动。"""
+    import vibecad.server as srv
+
+    home = tmp_path / "home"
+    (home / "mamba").mkdir(parents=True)
+    (home / "mamba" / "big.bin").write_bytes(b"x" * 2_000_000)
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    calls = _record_swap(monkeypatch, srv)
+
+    out = srv.uninstall_runtime()
+
+    assert out["ok"] is True
+    assert out["confirm_required"] is True
+    assert out["path"] == str(home)
+    assert out["size_mb"] > 0
+    assert "confirm=true" in out["message"] or "confirm=True" in out["message"]
+    assert home.exists()
+    assert not srv._uninstall.uninstall_marker().exists()
+    assert calls == []
+
+
+def test_uninstall_runtime_confirm_supervised_schedules_swap(monkeypatch, tmp_path):
+    """confirm=true + supervised + swappable：标记文件写入，自退已安排，message 提示自动重启。"""
+    import vibecad.server as srv
+
+    home = tmp_path / "home"
+    (home / "mamba").mkdir(parents=True)
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    calls = _record_swap(monkeypatch, srv)
+
+    out = srv.uninstall_runtime(confirm=True)
+
+    assert out["ok"] is True
+    assert out.get("marked") is True
+    assert srv._uninstall.uninstall_marker().exists()
+    assert len(calls) == 1, "supervised 场景应安排一次自退"
+    assert "自动重启" in out["message"] or "自动切换" in out["message"]
+    assert "Remove" in out["message"] or "移除" in out["message"]
+
+
+def test_uninstall_runtime_confirm_unsupervised_hints_manual_restart(monkeypatch, tmp_path):
+    """confirm=true 裸跑（无 VIBECAD_SUPERVISED）：标记文件仍写入，但不自杀，
+    message 提示需要手动重启 server 才能完成清理。"""
+    import vibecad.server as srv
+
+    home = tmp_path / "home"
+    (home / "mamba").mkdir(parents=True)
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.delenv("VIBECAD_SUPERVISED", raising=False)
+
+    out = srv.uninstall_runtime(confirm=True)
+
+    assert out["ok"] is True
+    assert out.get("marked") is True
+    assert srv._uninstall.uninstall_marker().exists()
+    assert calls == [], "裸 server 不应自杀"
+    assert "重启" in out["message"]
+
+
+def test_uninstall_runtime_confirm_already_clean(monkeypatch, tmp_path):
+    """home 不存在时 confirm=true：already_clean 原样返回，不写标记、不自退。"""
+    import vibecad.server as srv
+
+    home = tmp_path / "no-such-home"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    calls = _record_swap(monkeypatch, srv)
+
+    out = srv.uninstall_runtime(confirm=True)
+
+    assert out["ok"] is True and out.get("already_clean") is True
+    assert not home.exists() and calls == []
+
+
+def test_uninstall_runtime_repeat_confirm_idempotent(monkeypatch, tmp_path):
+    """连续两次 confirm=true：marker touch 幂等、两次都成功报 marked——
+    重复确认不报错也不产生额外副作用（Timer 幂等由 _schedule_swap 自身测试覆盖）。"""
+    import vibecad.server as srv
+
+    home = tmp_path / "home"
+    (home / "mamba").mkdir(parents=True)
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    _record_swap(monkeypatch, srv)
+
+    first = srv.uninstall_runtime(confirm=True)
+    second = srv.uninstall_runtime(confirm=True)
+
+    assert first.get("marked") and second.get("marked")
+    assert srv._uninstall.uninstall_marker().exists()
+
+
+def test_uninstall_runtime_guard_rejection_passthrough(monkeypatch, tmp_path):
+    """护栏拒绝（如目录不含安装产物）：request_uninstall 返回 ok:false 原样透传，
+    不触发自退。"""
+    import vibecad.server as srv
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    _record_swap(monkeypatch, srv)
+    monkeypatch.setattr(
+        srv._uninstall, "request_uninstall",
+        lambda: {"ok": False, "message": "目录不含 VibeCAD 安装产物，拒绝删除"},
+    )
+
+    out = srv.uninstall_runtime(confirm=True)
+
+    assert out == {"ok": False, "message": "目录不含 VibeCAD 安装产物，拒绝删除"}
+
+
+# ---------------------------------------------------------------------------
+# Task 5 Step 2：_runtime_guard 未就绪侧文案带进度（phase/percent），
+# ready+bootstrap 分支（已在上方覆盖）保持不变。
+# ---------------------------------------------------------------------------
+
+def test_runtime_guard_not_started_phase_message(monkeypatch):
+    """NOT_STARTED：提示调用 ensure_runtime 开始，带 phase 字段。"""
+    import vibecad.server as srv
+    from vibecad.runtime import status as _status
+
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: False)
+    monkeypatch.setattr(
+        srv.status, "read_status",
+        lambda: _status.RuntimeStatus(phase=_status.Phase.NOT_STARTED),
+    )
+
+    guard = srv._runtime_guard()
+
+    assert guard is not None and guard["ok"] is False
+    assert guard["phase"] == "not_started"
+    assert "ensure_runtime" in guard["message"]
+
+
+def test_runtime_guard_failed_phase_message(monkeypatch):
+    """FAILED：带 error/message 详情，提示可重试 ensure_runtime。"""
+    import vibecad.server as srv
+    from vibecad.runtime import status as _status
+
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: False)
+    monkeypatch.setattr(
+        srv.status, "read_status",
+        lambda: _status.RuntimeStatus(phase=_status.Phase.FAILED, error="磁盘空间不足"),
+    )
+
+    guard = srv._runtime_guard()
+
+    assert guard is not None and guard["ok"] is False
+    assert guard["phase"] == "failed"
+    assert "磁盘空间不足" in guard["message"]
+    assert "ensure_runtime" in guard["message"]
+
+
+def test_runtime_guard_installing_phase_includes_percent(monkeypatch):
+    """安装进行中（如 creating_env）：guard 带 percent 数值 + 阶段文案，AI 可直接转述进度。"""
+    import vibecad.server as srv
+    from vibecad.runtime import status as _status
+
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: False)
+    monkeypatch.setattr(
+        srv.status, "read_status",
+        lambda: _status.RuntimeStatus(
+            phase=_status.Phase.CREATING_ENV, percent=40.0, message="creating_env"),
+    )
+
+    guard = srv._runtime_guard()
+
+    assert guard is not None and guard["ok"] is False
+    assert guard["phase"] == "creating_env"
+    assert guard["percent"] == 40.0
+    assert "40" in guard["message"]
+    assert "get_runtime_status" in guard["message"]
+
+
+# ---------------------------------------------------------------------------
+# Task 5 Step 4：VIBECAD_AUTO_INSTALL 接线——manifest env 生效的落地点。
+# server.main() 是 `python -m vibecad.server` 子进程入口（supervisor._server_cmd
+# 拉起的真实路径）；auto-install env 必须在这里触发，而不是仅在 launcher/supervisor
+# 层空转。
+# ---------------------------------------------------------------------------
+
+def test_main_spawns_install_when_auto_install_enabled(monkeypatch):
+    import vibecad.server as srv
+
+    monkeypatch.setenv("VIBECAD_AUTO_INSTALL", "1")
+    monkeypatch.setattr(srv, "mcp", type("_M", (), {"run": staticmethod(lambda: None)})())
+    calls = []
+    monkeypatch.setattr(srv, "_spawn_install", lambda: calls.append(1))
+
+    srv.main()
+
+    assert calls == [1]
+
+
+def test_main_skips_install_when_auto_install_disabled(monkeypatch):
+    import vibecad.server as srv
+
+    monkeypatch.delenv("VIBECAD_AUTO_INSTALL", raising=False)
+    monkeypatch.setattr(srv, "mcp", type("_M", (), {"run": staticmethod(lambda: None)})())
+    calls = []
+    monkeypatch.setattr(srv, "_spawn_install", lambda: calls.append(1))
+
+    srv.main()
+
+    assert calls == []
+
+
+def test_auto_install_enabled_rejects_falsy_values(monkeypatch):
+    import vibecad.server as srv
+
+    for falsy in ("0", "false", "False"):
+        monkeypatch.setenv("VIBECAD_AUTO_INSTALL", falsy)
+        assert srv._auto_install_enabled() is False, f"{falsy!r} 应视为关闭"
+    monkeypatch.delenv("VIBECAD_AUTO_INSTALL", raising=False)
+    assert srv._auto_install_enabled() is False, "未设置应默认关闭（仅 mcpb env 显式开启）"
+    monkeypatch.setenv("VIBECAD_AUTO_INSTALL", "1")
+    assert srv._auto_install_enabled() is True
+

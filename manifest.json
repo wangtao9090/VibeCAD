@@ -2,9 +2,9 @@
   "manifest_version": "0.4",
   "name": "vibecad",
   "display_name": "VibeCAD",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "AI 对话式 CAD：用自然语言画零件、打孔、装配、导出 3D 打印文件（FreeCAD 引擎）",
-  "long_description": "给一年只设计几次东西的人：免费的 FreeCAD + 一个让你永远不用学 FreeCAD 的 AI。每步自动回工程图三视图，支持参数修改、孔阵列、多零件装配与干涉检查，导出 STEP/STL。首次使用自动下载建模引擎（约 2-3GB，仅一次）。",
+  "long_description": "给一年只设计几次东西的人：免费的 FreeCAD + 一个让你永远不用学 FreeCAD 的 AI。每步自动回工程图三视图，支持参数修改、孔阵列、多零件装配与干涉检查，导出 STEP/STL。安装即自动在后台准备建模引擎（约 2-3GB，仅一次），无需手动触发。不想要了？卸载零残留：在设置里移除扩展即可连引擎一起删除。",
   "author": { "name": "Wang Tao", "email": "wangtao9090@gmail.com" },
   "license": "MIT",
   "icon": "icon.png",
@@ -15,7 +15,8 @@
     "entry_point": "mcpb_entry.py",
     "mcp_config": {
       "command": "uv",
-      "args": ["run", "--no-dev", "--directory", "${__dirname}", "mcpb_entry.py"]
+      "args": ["run", "--no-dev", "--directory", "${__dirname}", "mcpb_entry.py"],
+      "env": { "VIBECAD_AUTO_INSTALL": "1" }
     }
   },
   "compatibility": {
@@ -44,6 +45,7 @@
     { "name": "new_part", "description": "新建装配零件并设为活动零件" },
     { "name": "set_active_part", "description": "切换活动零件" },
     { "name": "place_part", "description": "零件级位姿（整零件移动/旋转）" },
-    { "name": "align_parts", "description": "面贴面对齐（自动干涉检查）" }
+    { "name": "align_parts", "description": "面贴面对齐（自动干涉检查）" },
+    { "name": "uninstall_runtime", "description": "卸载 CAD 引擎运行时（两段式确认删除）" }
   ]
 }

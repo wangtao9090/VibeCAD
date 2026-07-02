@@ -9,7 +9,7 @@ def _ready(monkeypatch):
 def test_add_box_guard_not_ready(monkeypatch):
     monkeypatch.setattr(srv._installer, "is_ready", lambda: False)
     r = srv.add_box(10, 10, 10)
-    assert r["ok"] is False and "未就绪" in r["message"]
+    assert r["ok"] is False and "ensure_runtime" in r["message"]
 
 
 def test_add_box_guard_bootstrap_schedules_swap(monkeypatch):
