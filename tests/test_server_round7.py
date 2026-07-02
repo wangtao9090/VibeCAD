@@ -191,7 +191,8 @@ def test_add_hole_pattern_passthrough(server, monkeypatch):
     """add_hole pattern 参数透传到 _features.add_hole，并且 mock 收到的 pattern 实参正确。"""
     recorded = {}
 
-    def _mock_add_hole(session, face, diameter, depth, offset, pattern=None):
+    def _mock_add_hole(session, face, diameter, depth, offset, pattern=None,
+                       counterbore_diameter=None, counterbore_depth=None):
         recorded["pattern"] = pattern
         return {"ok": True, "name": "Hole", "volume": 23000.0,
                 "holes": {"count": 3, "pattern": pattern, "diameter": diameter},
@@ -211,6 +212,45 @@ def test_add_hole_pattern_passthrough(server, monkeypatch):
     pat = {"type": "linear", "count": 3, "spacing": 10}
     server.add_hole(face="A", diameter=6, pattern=pat)
     assert recorded["pattern"] == pat
+
+
+def test_add_hole_counterbore_passthrough(server, monkeypatch):
+    """counterbore_diameter/counterbore_depth 透传到 _features.add_hole（成对原值）。"""
+    recorded = {}
+
+    def _mock_add_hole(session, face, diameter, depth, offset, pattern=None,
+                       counterbore_diameter=None, counterbore_depth=None):
+        recorded["cb"] = (counterbore_diameter, counterbore_depth)
+        return {"ok": True, "name": "Counterbore", "volume": 23566.0,
+                "hole": {"face": face, "diameter": diameter, "depth": "through",
+                         "offset": [0.0, 0.0],
+                         "counterbore": {"diameter": counterbore_diameter,
+                                         "depth": counterbore_depth}},
+                "labels_stale": True,
+                "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"}
+
+    monkeypatch.setattr(server._features, "add_hole", _mock_add_hole)
+    monkeypatch.setattr(server._modify, "list_parameters",
+                        lambda doc, session=None: {})
+    _mock_assembly_shape(server, monkeypatch)
+    _mock_multiview(server, monkeypatch)
+    monkeypatch.setattr(server._session, "set_labels",
+                        lambda faces, edges, shown=None: None)
+    monkeypatch.setattr(type(server._session), "doc", property(lambda self: object()),
+                        raising=False)
+
+    out = server.add_hole(face="A", diameter=6,
+                          counterbore_diameter=10.0, counterbore_depth=3.0)
+    assert recorded["cb"] == (10.0, 3.0)
+    assert isinstance(out, list)
+    assert out[0]["hole"]["counterbore"] == {"diameter": 10.0, "depth": 3.0}
+
+
+def test_add_hole_counterbore_validation_structured(server, monkeypatch):
+    """server 层：counterbore 校验 ValueError → 结构化 {ok:False}（不 isError 穿透）。"""
+    out = server.add_hole(face="A", diameter=6, counterbore_diameter=10.0)  # 缺 depth
+    assert isinstance(out, dict) and out["ok"] is False
+    assert "成对" in out["message"]
 
 
 # ─── 握手纯净回归（放文件末尾）────────────────────────────────────────────────

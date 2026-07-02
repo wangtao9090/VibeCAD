@@ -35,7 +35,7 @@
     { "name": "export_part", "description": "导出 STEP/STL/glTF 可制造文件" },
     { "name": "describe_part", "description": "文本诊断：体积/包围盒/质心" },
     { "name": "render_part", "description": "渲染 PNG 预览图/工程图三视图/标注图" },
-    { "name": "add_hole", "description": "在指定面打圆孔（支持阵列）" },
+    { "name": "add_hole", "description": "在指定面打圆孔（支持阵列与沉头孔）" },
     { "name": "fillet_edges", "description": "边圆角" },
     { "name": "chamfer_edges", "description": "边倒角" },
     { "name": "modify_part", "description": "修改已有对象参数（依赖链自动重算）" },

@@ -87,11 +87,14 @@ def _outward_normal(shape: Any, face: Any):
     return n
 
 
-def _drill(session, base_obj, n, e1, e2, c, length, diameter, du, dv, FreeCAD):
+def _drill(session, base_obj, n, e1, e2, c, length, diameter, du, dv, FreeCAD,
+           tool_name="HoleTool", cut_name="Hole"):
     """在基体上打单孔（孔心面内增量 du/dv 相对面心 c），返回新 Cut 对象。
     不做 recompute，由调用方在循环后统一执行一次。
     n/e1/e2 为 FreeCAD.Vector 或 (x,y,z) 元组，c 为 FreeCAD.Vector（面心）。
-    du/dv：面内 e1/e2 方向的偏移（相对 c，mm）。"""
+    du/dv：面内 e1/e2 方向的偏移（相对 c，mm）。
+    tool_name/cut_name：对象名（沉头复用本函数时传 CounterboreTool/Counterbore，
+    便于 parts 字段区分主孔与沉头刀具；守卫按 TypeId 而非名字识别，语义不受影响）。"""
     lift = 0.5  # 从面外 0.5mm 起钻，避免共面布尔
     nx, ny, nz = (n.x, n.y, n.z) if hasattr(n, "x") else (float(n[0]), float(n[1]), float(n[2]))
     e1x, e1y, e1z = (e1.x, e1.y, e1.z) if hasattr(e1, "x") else tuple(float(x) for x in e1)
@@ -99,22 +102,26 @@ def _drill(session, base_obj, n, e1, e2, c, length, diameter, du, dv, FreeCAD):
     bx = c.x + e1x * du + e2x * dv + nx * lift
     by = c.y + e1y * du + e2y * dv + ny * lift
     bz = c.z + e1z * du + e2z * dv + nz * lift
-    cyl = session.doc.addObject("Part::Cylinder", "HoleTool")
+    cyl = session.doc.addObject("Part::Cylinder", tool_name)
     cyl.Radius, cyl.Height = diameter / 2.0, length
     cyl.Placement = FreeCAD.Placement(
         FreeCAD.Vector(bx, by, bz),
         FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), FreeCAD.Vector(-nx, -ny, -nz)))
-    cut = session.doc.addObject("Part::Cut", "Hole")
+    cut = session.doc.addObject("Part::Cut", cut_name)
     cut.Base, cut.Tool = base_obj, cyl
     return cut
 
 
 def add_hole(session: Session, face: str, diameter: float,
              depth: float | None = None, offset=(0.0, 0.0),
-             pattern=None) -> dict[str, Any]:
-    """在指定面（标签）打圆孔（单孔或阵列）。
+             pattern=None, counterbore_diameter: float | None = None,
+             counterbore_depth: float | None = None) -> dict[str, Any]:
+    """在指定面（标签）打圆孔（单孔或阵列，可带沉头 counterbore）。
     depth=None 通孔；offset 为面内毫米坐标（原点=面心）。
     pattern=None 单孔（行为零变化）；pattern dict → linear/circular 阵列（全有全无）。
+    counterbore_diameter/counterbore_depth 必须成对：每孔孔口同轴先切主孔、再切
+    大径浅圆柱（沉头）；阵列时每孔都带沉头（R7 终验摩擦点：pocket 套孔做沉头槽
+    被孔完整性核算正确拒绝——沉头应是打孔工具的一等参数）。
     """
     if not face or not isinstance(face, str):
         raise ValueError("face 必须是非空字符串（面标签，如 'A'）")
@@ -126,6 +133,28 @@ def add_hole(session: Session, face: str, diameter: float,
             or not all(isinstance(c, (int, float)) and not isinstance(c, bool)
                        and math.isfinite(c) for c in offset)):
         raise ValueError(f"offset 必须是 2 个有限数字 (u, v)（得到 {offset!r}）")
+    # counterbore 校验（先于一切 session 访问）：成对 → 数值 → 关系约束
+    if (counterbore_diameter is None) != (counterbore_depth is None):
+        raise ValueError(
+            "counterbore_diameter 与 counterbore_depth 必须成对提供（沉头大径+沉头深度）"
+            f"（得到 counterbore_diameter={counterbore_diameter!r}, "
+            f"counterbore_depth={counterbore_depth!r}）")
+    has_cb = counterbore_diameter is not None
+    if has_cb:
+        if not math.isfinite(counterbore_diameter) or counterbore_diameter <= 0:
+            raise ValueError(
+                f"counterbore_diameter 必须是 > 0 的有限数字（得到 {counterbore_diameter}）")
+        if not math.isfinite(counterbore_depth) or counterbore_depth <= 0:
+            raise ValueError(
+                f"counterbore_depth 必须是 > 0 的有限数字（得到 {counterbore_depth}）")
+        if counterbore_diameter <= diameter:
+            raise ValueError(
+                f"counterbore_diameter 必须大于 diameter（沉头大径 {counterbore_diameter:g} "
+                f"≤ 主孔径 {diameter:g}——沉头必须比主孔大才有台阶）")
+        if depth is not None and counterbore_depth >= depth:
+            raise ValueError(
+                f"counterbore_depth 必须小于盲孔 depth（沉头深 {counterbore_depth:g} "
+                f"≥ 孔深 {depth:g}——沉头会吞掉整段主孔壁）")
     # pattern 校验在任何 session 访问前（纯函数；linear 首孔在 offset 处，
     # circular 首孔在圆周 (R,0) 处——offset 是圆心）
     if pattern is not None:
@@ -153,6 +182,12 @@ def add_hole(session: Session, face: str, diameter: float,
                 else shape.BoundBox.DiagonalLength + 2 * lift
             base_vol = shape.Volume
             cyl_before = _count_full_cylinder_faces(shape, diameter / 2.0)
+            # 沉头径快照：沉头壁是新的完整圆柱面（半径 = counterbore_diameter/2），
+            # 与主径同样用"== before+count"精确增量判据——同径既有孔/沉头不能
+            # 放行新沉头的越界缺口，且既有同径孔被新沉头咬毁时新面顶包也会被
+            # 精确计数逮住（总数对不上）
+            cb_before = (_count_full_cylinder_faces(shape, counterbore_diameter / 2.0)
+                         if has_cb else 0)
             # C2：跨径既有孔保护——快照改前全部刀具径桶的完整圆柱面计数，
             # Cut 后 assert_holes_intact 防新孔咬毁其它半径的既有孔（同径由
             # 下方"== before+count"精确断言覆盖）
@@ -162,12 +197,20 @@ def add_hole(session: Session, face: str, diameter: float,
             abs_offsets = [(float(offset[0]) + float(du),
                             float(offset[1]) + float(dv)) for du, dv in deltas]
 
-            # 链式 Cut：逐孔创建，base_obj 向后传递
+            # 链式 Cut：逐孔创建（有沉头时每孔两刀：主孔 + 孔口同轴大径浅圆柱），
+            # base_obj 向后传递
             last_cut = None
             for du_abs, dv_abs in abs_offsets:
                 last_cut = _drill(session, base_obj, n, e1_tup, e2_tup, c,
                                   length, diameter, du_abs, dv_abs, FreeCAD)
-                base_obj = last_cut  # 下一孔以本孔 Cut 为 Base
+                base_obj = last_cut  # 下一刀以本刀 Cut 为 Base
+                if has_cb:
+                    # 沉头刀具与主孔同轴同起点（面外 lift 起切），切入 counterbore_depth
+                    last_cut = _drill(session, base_obj, n, e1_tup, e2_tup, c,
+                                      counterbore_depth + lift, counterbore_diameter,
+                                      du_abs, dv_abs, FreeCAD,
+                                      tool_name="CounterboreTool", cut_name="Counterbore")
+                    base_obj = last_cut
 
             # 统一一次 recompute（链式 Cut 全部就绪后）
             session.doc.recompute()
@@ -185,36 +228,74 @@ def add_hole(session: Session, face: str, diameter: float,
                     "——offset 可能越过零件边缘")
             cyl_after = _count_full_cylinder_faces(cut_shape, diameter / 2.0)
             if cyl_after != cyl_before + count:
+                cb_hint = ("，或 counterbore_depth ≥ 板厚（沉头吞穿整段主孔壁）"
+                           if has_cb else "")
                 raise RuntimeError(
                     f"几何断言失败：期望完整圆孔增加 {count} 个"
                     f"（{cyl_before}→{cyl_before + count}），实际 {cyl_after}"
                     "——孔可能与零件边缘相交成开口缺口、孔间重叠（spacing<diameter），"
-                    "或与已有孔/特征重叠，请调整 offset/spacing/radius")
-            # C2：其它半径既有孔不得被新孔咬毁（⌀6 阵列咬掉 ⌀8 孔壁仍单 solid，
-            # 须由跨径完整性快照逮住）
+                    f"或与已有孔/特征重叠{cb_hint}，请调整 offset/spacing/radius")
+            if has_cb:
+                # 沉头完整性：每孔恰好新增 1 个沉头径完整圆柱面（精确增量判据，
+                # 与主径同构——存在性判据会被同径旧孔放行新沉头的越界缺口）
+                cb_after = _count_full_cylinder_faces(cut_shape, counterbore_diameter / 2.0)
+                if cb_after != cb_before + count:
+                    raise RuntimeError(
+                        f"几何断言失败：期望完整沉头 ⌀{counterbore_diameter:g} 增加 "
+                        f"{count} 个（{cb_before}→{cb_before + count}），实际 {cb_after}"
+                        "——沉头可能与零件边缘相交成开口缺口、沉头间重叠"
+                        "（spacing<counterbore_diameter），或与已有孔/特征重叠，"
+                        "请调整 offset/spacing/counterbore_diameter")
+            # C2：其它半径既有孔不得被新孔/新沉头咬毁（⌀6 阵列咬掉 ⌀8 孔壁仍
+            # 单 solid，须由跨径完整性快照逮住）
             assert_holes_intact(cut_shape, existing_counts)
+            removed = base_vol - cut_shape.Volume
+            r_main = diameter / 2.0
             if depth is not None:
-                # 盲孔体积核算（单孔与阵列统一）：期望移除 = count·πr²·depth。
-                # 孔间不重叠由上方精确计数断言兜底，故 count 个孔的移除量可直接相加；
-                # 超深打穿/侧向越界少切都会让移除量低于名义值。
-                removed = base_vol - cut_shape.Volume
-                expected = count * math.pi * (diameter / 2.0) ** 2 * depth
+                # 盲孔体积核算（单孔与阵列统一）：期望移除 = count·(πr²·depth
+                # + 沉头环形 π(R²−r²)·cb_depth)——主孔与沉头的重叠圆柱段
+                # （半径 r、深 cb_depth）两刀都覆盖但只移除一次，故沉头贡献
+                # 只计环形部分。孔间不重叠由上方精确计数断言兜底，count 个孔
+                # 的移除量可直接相加；超深打穿/侧向越界少切都让移除量低于名义值。
+                per_hole = math.pi * r_main ** 2 * depth
+                if has_cb:
+                    r_cb = counterbore_diameter / 2.0
+                    per_hole += math.pi * (r_cb ** 2 - r_main ** 2) * counterbore_depth
+                expected = count * per_hole
                 if removed < expected * 0.99 - 1e-6:
                     raise RuntimeError(
                         f"几何断言失败：盲孔实际移除体积 {removed:.3f} < 期望 {expected:.3f}"
                         "——depth 可能超出材料厚度（已打穿）、孔越界，"
                         "或与已有孔/特征重叠，请减小 depth 或检查 offset")
+            elif has_cb:
+                # 通孔+沉头下界核算：板厚 t 未知，但主孔壁存在（上方计数断言）
+                # ⇒ t > cb_depth ⇒ 主孔贯通移除 πr²·t > πr²·cb_depth，加沉头环形
+                # π(R²−r²)·cb_depth ⇒ 总移除 > πR²·cb_depth（沉头整圆柱体积）。
+                r_cb = counterbore_diameter / 2.0
+                lower = count * math.pi * r_cb ** 2 * counterbore_depth
+                if removed < lower * 0.99 - 1e-6:
+                    raise RuntimeError(
+                        f"几何断言失败：沉头通孔实际移除体积 {removed:.3f} < 下界 "
+                        f"{lower:.3f}——沉头可能越界少切，请检查 offset/counterbore 参数")
 
+            cb_field = ({"diameter": counterbore_diameter, "depth": counterbore_depth}
+                        if has_cb else None)
             if pattern is not None:
+                holes = {"count": count, "pattern": pattern, "diameter": diameter}
+                if cb_field is not None:
+                    holes["counterbore"] = cb_field
                 result = {"ok": True, "name": last_cut.Name, "volume": cut_shape.Volume,
-                          "holes": {"count": count, "pattern": pattern, "diameter": diameter},
+                          "holes": holes,
                           "labels_stale": True,
                           "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"}
             else:
+                hole = {"face": face, "diameter": diameter,
+                        "depth": depth if depth is not None else "through",
+                        "offset": list(offset)}
+                if cb_field is not None:
+                    hole["counterbore"] = cb_field
                 result = {"ok": True, "name": last_cut.Name, "volume": cut_shape.Volume,
-                          "hole": {"face": face, "diameter": diameter,
-                                   "depth": depth if depth is not None else "through",
-                                   "offset": list(offset)},
+                          "hole": hole,
                           "labels_stale": True,
                           "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"}
     return result

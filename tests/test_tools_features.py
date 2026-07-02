@@ -81,6 +81,29 @@ def test_add_hole_pattern_validation(pattern, msg):
         features.add_hole(_NoopSession(), face="A", diameter=6, pattern=pattern)
 
 
+@pytest.mark.parametrize("kwargs,msg", [
+    # 成对约束：只给其一 → 响亮报错（校验先于一切 session 访问）
+    ({"counterbore_diameter": 10}, "成对"),
+    ({"counterbore_depth": 3}, "成对"),
+    # 数值合法性
+    ({"counterbore_diameter": 0, "counterbore_depth": 3}, "counterbore_diameter"),
+    ({"counterbore_diameter": -10, "counterbore_depth": 3}, "counterbore_diameter"),
+    ({"counterbore_diameter": float("nan"), "counterbore_depth": 3}, "counterbore_diameter"),
+    ({"counterbore_diameter": 10, "counterbore_depth": 0}, "counterbore_depth"),
+    ({"counterbore_diameter": 10, "counterbore_depth": float("inf")}, "counterbore_depth"),
+    # 大径必须 > 主孔径（== 也拒：无台阶不是沉头）
+    ({"counterbore_diameter": 6, "counterbore_depth": 3}, "大于"),
+    ({"counterbore_diameter": 4, "counterbore_depth": 3}, "大于"),
+    # 盲孔时沉头深必须 < depth（== 也拒：主孔壁不复存在）
+    ({"depth": 5, "counterbore_diameter": 10, "counterbore_depth": 5}, "小于"),
+    ({"depth": 5, "counterbore_diameter": 10, "counterbore_depth": 8}, "小于"),
+])
+def test_add_hole_counterbore_validation(kwargs, msg):
+    """counterbore 参数校验：全部在 session 访问前（_NoopSession 碰到即 AttributeError）。"""
+    with pytest.raises(ValueError, match=msg):
+        features.add_hole(_NoopSession(), face="A", diameter=6, **kwargs)
+
+
 @pytest.mark.slow
 def test_failed_feature_rolls_back(runtime_env):
     """失败的特征操作必须随事务回滚：无残留对象、result object 不被劫持、会话可恢复。
@@ -999,6 +1022,155 @@ print("CIRCULAR_OK")
     assert "CIRCULAR_OK" in out
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# counterbore 沉头孔慢测（R7 终验摩擦点：pocket 套孔被核算正确拒 → 一等参数）
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.slow
+def test_counterbore_through_hole(runtime_env):
+    """60×40×10 板 ⌀6 通孔 + ⌀10×3 沉头：体积 = 24000 − 138π ≈ 23566.46。
+    推导：主孔通孔移除 π·3²·10 = 90π；沉头附加移除只计环形（重叠圆柱段两刀
+    都覆盖但只移除一次）π·(5²−3²)·3 = 48π；合计 138π ≈ 433.540。
+    守卫接线核对：主径/沉头径完整圆柱面各恰 +1；密封探针在沉头几何上不误报
+    （沉头刀具钻底探针落在主孔腔内=材料外）；顶面标签过期（与既有 add_hole 一致）。"""
+    out = _run_in_env(runtime_env, """
+import math
+from vibecad.engine.naming import LabelExpiredError
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import features, modeling
+from vibecad.tools._integrity import _count_full_cylinder_faces, assert_no_sealed_holes
+s = Session()
+modeling.new_document(s, "cbthru")
+modeling.add_box(s, 60, 40, 10)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+r = features.add_hole(s, top, diameter=6,
+                      counterbore_diameter=10, counterbore_depth=3)
+expect = 24000 - 138 * math.pi   # 24000 − 433.540 = 23566.460
+assert r["ok"] and abs(r["volume"] - expect) < 1.0, (r["volume"], expect)
+assert r["hole"]["counterbore"] == {"diameter": 10, "depth": 3}, r["hole"]
+shape = s.get_result_shape()
+assert _count_full_cylinder_faces(shape, 3.0) == 1, "主孔壁应恰 1 个完整圆柱面"
+assert _count_full_cylinder_faces(shape, 5.0) == 1, "沉头壁应恰 1 个完整圆柱面"
+assert_no_sealed_holes(s.doc, shape)   # 沉头几何上探针不得误报（不抛即过）
+try:
+    s.resolve_face(top)
+    raise SystemExit("EXPECTED stale label after counterbore hole")
+except LabelExpiredError:
+    pass
+print("CB_THROUGH_OK")
+""")
+    assert "CB_THROUGH_OK" in out
+
+
+@pytest.mark.slow
+def test_counterbore_blind_hole_and_too_deep_rejected(runtime_env):
+    """盲孔+沉头精确核算：40×30×20 板 ⌀6 盲孔 depth=10 + ⌀10×3 沉头，
+    移除 = π·3²·10 + π·(5²−3²)·3 = 138π（±0.1，盲孔核算精确路径）。
+    沉头超板厚：60×40×10 板通孔 + ⌀10×12 沉头（12 > 板厚 10）→ 沉头吞穿
+    整段主孔壁 → 主径完整面计数断言响亮拒绝 + 回滚（'counterbore_depth < 板厚'
+    无法在参数层校验——板厚未知，由几何守卫兜底）。"""
+    out = _run_in_env(runtime_env, """
+import math
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import features, modeling
+s = Session()
+modeling.new_document(s, "cbblind")
+modeling.add_box(s, 40, 30, 20)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+r = features.add_hole(s, top, diameter=6, depth=10,
+                      counterbore_diameter=10, counterbore_depth=3)
+removed = 24000 - r["volume"]
+assert abs(removed - 138 * math.pi) < 0.1, (removed, 138 * math.pi)
+assert r["hole"]["depth"] == 10 and r["hole"]["counterbore"]["depth"] == 3, r["hole"]
+# 沉头超板厚：几何守卫兜底（主孔壁被沉头吞穿 → 完整圆孔计数不增）
+s.close_document()
+modeling.new_document(s, "cbdeep")
+modeling.add_box(s, 60, 40, 10)
+p2, t2, fr2, er2 = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr2, er2, shown=set(t2.keys()))
+top2 = next(lab for lab, d in t2.items() if "顶面" in d)
+v0 = s.get_result_shape().Volume
+msg = ""
+try:
+    features.add_hole(s, top2, diameter=6,
+                      counterbore_diameter=10, counterbore_depth=12)
+except RuntimeError as exc:
+    msg = str(exc)
+assert "完整圆孔" in msg, msg
+assert abs(s.get_result_shape().Volume - v0) < 1e-6, "拒绝后应全量回滚"
+print("CB_BLIND_OK")
+""")
+    assert "CB_BLIND_OK" in out
+
+
+@pytest.mark.slow
+def test_counterbore_pattern_each_hole(runtime_env):
+    """4 孔线性阵列每孔带沉头：60×40×10 板 ⌀6 通孔 + ⌀10×2 沉头，
+    offset=[-18,0] spacing=12 → 孔心 x=12/24/36/48（沉头 r=5 全在板内、互不重叠）。
+    体积 = 24000 − 4·(π·3²·10 + π·(5²−3²)·2) = 24000 − 4·122π = 24000 − 488π
+    ≈ 22466.902。主径/沉头径完整圆柱面各恰 +4。"""
+    out = _run_in_env(runtime_env, """
+import math
+from vibecad.engine.session import Session
+from vibecad.feedback import multiview
+from vibecad.tools import features, modeling
+from vibecad.tools._integrity import _count_full_cylinder_faces
+s = Session()
+modeling.new_document(s, "cbpat")
+modeling.add_box(s, 60, 40, 10)
+png, table, fr, er = multiview.render_multiview(s.get_result_shape())
+s.set_labels(fr, er, shown=set(table.keys()))
+top = next(lab for lab, d in table.items() if "顶面" in d)
+r = features.add_hole(s, top, diameter=6, offset=[-18, 0],
+                      pattern={"type": "linear", "count": 4, "spacing": 12},
+                      counterbore_diameter=10, counterbore_depth=2)
+expect = 24000 - 488 * math.pi   # 4·(90π + 32π) = 488π ≈ 1533.098
+assert r["ok"] and abs(r["volume"] - expect) < 1.0, (r["volume"], expect)
+assert r["holes"]["count"] == 4, r["holes"]
+assert r["holes"]["counterbore"] == {"diameter": 10, "depth": 2}, r["holes"]
+shape = s.get_result_shape()
+assert _count_full_cylinder_faces(shape, 3.0) == 4, "4 个主孔壁完整圆柱面"
+assert _count_full_cylinder_faces(shape, 5.0) == 4, "4 个沉头壁完整圆柱面"
+print("CB_PATTERN_OK")
+""")
+    assert "CB_PATTERN_OK" in out
+
+
+@pytest.mark.slow
+def test_counterbore_server_flow_and_describe(runtime_env):
+    """server 级端到端：render_part 标注 → add_hole(counterbore) → describe_part
+    有效（valid=True、体积 = 24000 − 138π、单 solid）——沉头孔后诊断链路不被破坏。"""
+    out = _run_in_env(runtime_env, """
+import json, math
+import vibecad.server as srv
+srv._runtime_guard = lambda: None
+srv.new_document("cbsrv")
+srv.add_box(60, 40, 10)
+out_f = srv.render_part(view="iso", annotate="faces")
+assert isinstance(out_f, list), out_f
+table = json.loads(out_f[1])["labels"]
+top = next(lab for lab, d in table.items() if "顶面" in d)
+out_h = srv.add_hole(face=top, diameter=6,
+                     counterbore_diameter=10.0, counterbore_depth=3.0)
+assert isinstance(out_h, list), out_h   # 成功路径 [dict, Image]
+body = out_h[0]
+assert body["ok"] and body["hole"]["counterbore"] == {"diameter": 10.0, "depth": 3.0}, body
+d = srv.describe_part()
+expect = 24000 - 138 * math.pi
+assert d["valid"] is True and d["solid_count"] == 1, d
+assert abs(d["volume"] - expect) < 1.0, (d["volume"], expect)
+print("CB_SERVER_DESCRIBE_OK")
+""")
+    assert "CB_SERVER_DESCRIBE_OK" in out
+
+
 @pytest.mark.slow
 def test_extrude_pad_rect(runtime_env):
     """矩形 pad（20×10，高 5）贴顶面：体积增量 ≈ 1000（1% 容差）。"""
@@ -1328,6 +1500,7 @@ def test_align_parts_face_to_face(runtime_env):
 "r = assembly.align_parts(s, '盖板', bot_lid, '底板', top_base)\n"
 "assert r['ok'], r\n"
 "assert r['interference'] == [], r['interference']\n"
+"assert r['interference_skipped'] is False, '两个非空零件应真的跑过干涉比较'\n"
 "# 验证：盖板底面全局 z ≈ 10（底板顶面 z）\n"
 "lid_shape_global = s.get_result_shape('盖板').transformed(\n"
 "    s._parts['盖板']['container'].Placement.toMatrix())\n"
@@ -1387,6 +1560,7 @@ def test_interference_rejected_and_allowed(runtime_env):
 "r0 = assembly.align_parts(s, '盖板', bot_lid, '底板', top_base)\n"
 "assert r0['ok'], r0\n"
 "assert r0['interference'] == [], r0['interference']\n"
+"assert r0['interference_skipped'] is False, '两个非空零件应真的跑过干涉比较'\n"
 "# 坐标系纪律：容器已动 → 旧标签过期，须以全局 shape 重新标注（与 server 管道同帧）\n"
 "lid_global = s.get_result_shape('盖板').transformed(\n"
 "    s._parts['盖板']['container'].Placement.toMatrix())\n"
@@ -1415,6 +1589,7 @@ def test_interference_rejected_and_allowed(runtime_env):
 "r2 = assembly.align_parts(s, '盖板', bot_lid, '底板', top_base,\n"
 "                          gap=-2, allow_interference=True)\n"
 "assert r2['ok'], r2\n"
+"assert r2['interference_skipped'] is False, '有干涉记录说明检查确实跑了'\n"
 "interferences = r2.get('interference', [])\n"
 "assert len(interferences) > 0, '应有干涉记录'\n"
 "vol = interferences[0]['volume']\n"
@@ -1674,13 +1849,16 @@ def test_interference_empty_part_noted_not_silent(runtime_env):
 "inter = assembly.assert_no_interference(s, allow=True)\n"
 "assert any(it.get('volume') is None and 'B 无几何' in it.get('note', '')\n"
 "           for it in inter), inter\n"
+"assert inter.interference_skipped is True, '唯一非空零件无人可配对，检查未真正跑过'\n"
 "# 取证 2 异常态：B 有几何后 objects 被清空（内部状态不一致）→ 注明而非静默\n"
 "modeling.add_box(s, 30, 30, 10)  # B 与 A 完全重叠\n"
 "inter2 = assembly.assert_no_interference(s, allow=True)\n"
 "assert any(it.get('volume') == 9000.0 for it in inter2), inter2  # 正常态报干涉\n"
+"assert inter2.interference_skipped is False, '两个非空零件应真的跑过比较'\n"
 "s._parts['B']['objects'] = set()\n"
 "inter3 = assembly.assert_no_interference(s, allow=False)\n"
 "assert inter3 and inter3[0]['volume'] is None and '未检查' in inter3[0]['note'], inter3\n"
+"assert inter3.interference_skipped is True, 'B 被清空后又只剩一个可比较零件'\n"
 "print('INTERFERENCE_NOT_SILENT_OK')\n"
 )
     assert "INTERFERENCE_NOT_SILENT_OK" in out
@@ -1747,6 +1925,7 @@ def test_server_relabel_refreshes_all_part_namespaces(runtime_env):
 "                        target_part='底板', target_face=base_top)\n"
 "assert isinstance(out_a, list) and out_a[0]['ok'], out_a\n"
 "assert out_a[0]['interference'] == [], out_a[0]\n"
+"assert out_a[0]['interference_skipped'] is False, out_a[0]\n"
 "print('RELABEL_ALL_NAMESPACES_OK')\n"
 )
     assert "RELABEL_ALL_NAMESPACES_OK" in out

@@ -463,18 +463,25 @@ def render_part(view: str = "iso", annotate: str | None = None,
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def add_hole(face: str, diameter: float, depth: float | None = None,
              offset: list[float] | None = None,
-             pattern: dict | None = None) -> Any:
+             pattern: dict | None = None,
+             counterbore_diameter: float | None = None,
+             counterbore_depth: float | None = None) -> Any:
     """在指定面打圆孔（face=面标签，来自 render_part(annotate='faces')）。
     depth 省略=通孔；offset=[u,v] 面内毫米偏移（省略=面正中）。
     pattern={"type":"linear","count":4,"spacing":10} 或 {"type":"circular","count":6,"radius":18}
-    实现线性/圆形阵列；省略=单孔（向后兼容）。成功后自动附三视图拼图。"""
+    实现线性/圆形阵列；省略=单孔（向后兼容）。
+    counterbore_diameter+counterbore_depth 成对提供=沉头孔（孔口同轴切大径浅圆柱，
+    "安装孔+沉头槽"一步完成；要求大径>diameter、沉头深<盲孔 depth；阵列时每孔都带沉头）。
+    成功后自动附三视图拼图。"""
     guard = _runtime_guard()
     if guard:
         return guard
     try:
         result = _features.add_hole(_session, face, diameter, depth,
                                     tuple(offset) if offset is not None else (0.0, 0.0),
-                                    pattern=pattern)
+                                    pattern=pattern,
+                                    counterbore_diameter=counterbore_diameter,
+                                    counterbore_depth=counterbore_depth)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"打孔失败：{exc}"}
     return _attach_view(result, tool="add_hole")
