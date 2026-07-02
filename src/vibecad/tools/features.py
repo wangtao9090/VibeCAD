@@ -75,13 +75,33 @@ def _inplane_axes(n) -> tuple[tuple[float, float, float], tuple[float, float, fl
     return e1, e2
 
 
-def _outward_normal(shape: Any, face: Any):
-    """面的单位外法向（normalAt 不保证定向——用实体内点探针校正）。返回 FreeCAD.Vector。"""
+def _param_mid(face: Any) -> tuple[float, float]:
+    """面参数范围（UVBounds）中点——offset 原点的稳定基准。
+    内孔的 uv 范围是外环子集，不影响 UVBounds；CenterOfMass 是减除孔面积后的质心，
+    带孔面上会漂移（真机实测 d8 孔致 0.44mm 偏差，对称孔阵列静默不对称）甚至落孔上。"""
     u0, u1, v0, v1 = face.ParameterRange
-    n = face.normalAt((u0 + u1) / 2, (v0 + v1) / 2)
+    return (u0 + u1) / 2, (v0 + v1) / 2
+
+
+def _outward_normal(shape: Any, face: Any):
+    """面的单位外法向（normalAt 不保证定向——用实体内点探针校正）。返回 FreeCAD.Vector。
+    探针锚点取面三角剖分的最大三角形质心（必落材料上）：CenterOfMass/参数中点在带孔面
+    （如打孔后的环形面）会落在孔开口上，探针两侧都是空气、isInside 恒 False、校正失效
+    ——与 annotate.largest_triangle_centroid 标签锚点同方案。法向同在锚点处取，
+    保证探针沿的正是锚点处的法向（曲面上两点法向不同）。"""
+    import FreeCAD  # noqa: PLC0415
+
+    from vibecad.feedback.annotate import largest_triangle_centroid  # noqa: PLC0415
+    verts, facets = face.tessellate(0.1)
+    if facets:
+        anchor = FreeCAD.Vector(*largest_triangle_centroid(verts, facets))
+    else:  # 退化面剖分为空：退回 CenterOfMass（无孔可落，旧行为即正确）
+        anchor = face.CenterOfMass
+    u, v = face.Surface.parameter(anchor)
+    n = face.normalAt(u, v)
     n.normalize()
     solid = shape.Solids[0] if getattr(shape, "Solids", None) else shape
-    probe = face.CenterOfMass + n * 0.01
+    probe = anchor + n * 0.01
     if solid.isInside(probe, 1e-6, False):
         n = -n
     return n
@@ -117,7 +137,8 @@ def add_hole(session: Session, face: str, diameter: float,
              pattern=None, counterbore_diameter: float | None = None,
              counterbore_depth: float | None = None) -> dict[str, Any]:
     """在指定面（标签）打圆孔（单孔或阵列，可带沉头 counterbore）。
-    depth=None 通孔；offset 为面内毫米坐标（原点=面心）。
+    depth=None 通孔；offset 为面内毫米坐标
+    （原点=面外边界包络中点，矩形面即几何中心——不随既有孔漂移）。
     pattern=None 单孔（行为零变化）；pattern dict → linear/circular 阵列（全有全无）。
     counterbore_diameter/counterbore_depth 必须成对：每孔孔口同轴先切主孔、再切
     大径浅圆柱（沉头）；阵列时每孔都带沉头（R7 终验摩擦点：pocket 套孔做沉头槽
@@ -176,7 +197,9 @@ def add_hole(session: Session, face: str, diameter: float,
                 raise ValueError(f"标签 {face} 是 {surface}，只能在平面上打孔")
             n = _outward_normal(shape, face_obj)
             e1_tup, e2_tup = _inplane_axes((n.x, n.y, n.z))
-            c = face_obj.CenterOfMass
+            # offset 原点=面外边界包络中点（不随既有孔漂移）；主孔与沉头两刀
+            # 经 _drill 共用同一基准 c，counterbore 路径一并覆盖
+            c = face_obj.valueAt(*_param_mid(face_obj))
             lift = 0.5  # 从面外 0.5mm 起钻，避免共面布尔
             length = (depth + lift) if depth is not None \
                 else shape.BoundBox.DiagonalLength + 2 * lift

@@ -467,7 +467,8 @@ def add_hole(face: str, diameter: float, depth: float | None = None,
              counterbore_diameter: float | None = None,
              counterbore_depth: float | None = None) -> Any:
     """在指定面打圆孔（face=面标签，来自 render_part(annotate='faces')）。
-    depth 省略=通孔；offset=[u,v] 面内毫米偏移（省略=面正中）。
+    depth 省略=通孔；offset=[u,v] 面内毫米偏移（原点=面外边界包络中点，矩形面即
+    几何中心，不随已打的孔漂移；省略=原点处）。
     pattern={"type":"linear","count":4,"spacing":10} 或 {"type":"circular","count":6,"radius":18}
     实现线性/圆形阵列；省略=单孔（向后兼容）。
     counterbore_diameter+counterbore_depth 成对提供=沉头孔（孔口同轴切大径浅圆柱，
