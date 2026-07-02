@@ -6,6 +6,26 @@
 
 ---
 
+## 0. 提交前置条件核对（复核于 2026-07-02，基于已发布 v0.2.0）
+
+| 项目 | 状态 | 说明 |
+|---|---|---|
+| GitHub Release v0.2.0 已发布 | ✅ | `releases/latest` 302 重定向到 `releases/tag/v0.2.0`，HTTP 200 |
+| `VibeCAD.mcpb` 资产可下载 | ✅ | `releases/latest/download/VibeCAD.mcpb` 302 → 签名 CDN URL，实测下载 200，约 108KB |
+| PyPI 0.2.0 已发布 | ✅ | `pypi.org/pypi/vibecad/json` 确认 `info.version == 0.2.0`，与 `pyproject.toml` 一致 |
+| Homepage / Repository 链接可达 | ✅ | `github.com/wangtao9090/VibeCAD` HTTP 200 |
+| Privacy policy 链接可达 | ✅ | `github.com/.../blob/main/PRIVACY.md` HTTP 200 |
+| PRIVACY.md 内容与第 5 节摘要一致 | ✅ | 本地处理 / 一次性运行时下载 / 无遥测三点逐句对应 |
+| 工具数 22 与 manifest.json / README 一致 | ✅ | manifest.json（已发布 tag 内容）与 README 均为 22 个工具 |
+| `docs/ACCEPTANCE_TESTS.md` 链接可达 | ✅ | GitHub 网页版 HTTP 200 |
+| CI 测试数字准确 | ✅（已修正） | 原文 302 条快测已过期，修正为 v0.2.0 tag 时刻实测的 362 条快测 + 65 条慢测 |
+| 0.3.0 硬编码提醒 | ✅（已加注） | 「22 个工具」标题与合计行已加 HTML 注释，提醒 0.3.0（23 工具 + uninstall_runtime + env VIBECAD_AUTO_INSTALL）发布后更新 |
+| README 与本文档口径一致 | ⚠️ 附带发现，不阻塞提交 | README.md 第 11 行提到导出格式含「3D 打印 3MF、激光 DXF」，与当前 `export_part` 实际支持的 STEP/STL/glTF 不符（本文档 Long description 和 manifest.json 描述准确，未受影响，无需因此修改本文档） |
+
+**结论：材料已达到可提交状态**——所有 URL、版本号、工具数、隐私政策引用均核实无误；已修正一处过期测试数字，已对 0.3.0 即将过时的硬编码内容加注提醒。
+
+---
+
 ## 1. Basic Information（基本信息）
 
 | Field | Value |
@@ -24,6 +44,8 @@
 ---
 
 ## 2. Tool Behavior Classification（22 个工具读写分类，文字版）
+
+<!-- 0.3.0 发布后更新：工具数将从 22 变为 23（新增 uninstall_runtime，写盘类），manifest 同时新增 env VIBECAD_AUTO_INSTALL 声明。届时需同步更新本节标题、下方分类表格与「合计」行，以及第 1 节 Long description 如涉及工具数表述。 -->
 
 > 表单层文字说明用。manifest 不加 annotations（v0.4 schema `tools.items` 为 `additionalProperties: false`，加了 validate 必红）；运行时 `tools/list` 已带 ToolAnnotations。
 
@@ -65,6 +87,7 @@
 | `align_parts` | Face-to-face alignment across parts with automatic interference check (overlap is loudly rejected and rolled back). |
 
 合计 4 + 3 + 15 = 22。
+<!-- 0.3.0 发布后更新：新增 uninstall_runtime（写盘类，删除运行时目录），合计将变为 4 + 4 + 15 = 23。 -->
 
 ---
 
@@ -90,8 +113,9 @@
 
 - **Manual acceptance**: [`docs/ACCEPTANCE_TESTS.md`](ACCEPTANCE_TESTS.md) — 12 conversational scenarios (handshake / runtime install / modeling / hole patterns / slot pocket / assembly / interference guard / export / error recovery), plus a Windows manual-verification appendix.
   人工验收：12 个对话场景清单 + Windows 手动验证附录。
-- **Automated CI**: GitHub Actions — 302 fast tests on every push plus 65 slow integration tests (real 2–3 GB runtime download and in-process FreeCAD modeling), across ubuntu / macos / windows.
-  自动化 CI：302 条快测 + 65 条慢速集成测试（真实运行时下载 + 进程内 FreeCAD 建模），ubuntu / macos / windows 三平台矩阵。
+- **Automated CI**: GitHub Actions — 362 fast tests on every push plus 65 slow integration tests (real 2–3 GB runtime download and in-process FreeCAD modeling), across ubuntu / macos / windows.
+  自动化 CI：362 条快测 + 65 条慢速集成测试（真实运行时下载 + 进程内 FreeCAD 建模），ubuntu / macos / windows 三平台矩阵。
+  <!-- 数字对应 v0.2.0 tag 时刻（git tag v0.2.0）的测试收集结果：uv run pytest --collect-only -q -m "not slow" / -m "slow"。0.3.0 发布后请重新采集并更新此处。 -->
 
 ---
 
