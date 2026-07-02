@@ -157,15 +157,34 @@ def _align_placement(
     return translation, (axis, angle_deg)
 
 
+class InterferenceReport(list):
+    """assert_no_interference 的返回值：仍是原干涉清单 list（含 note 条目，
+    对 == []/索引/迭代/真值判断完全透明），额外挂 interference_skipped 标记
+    （R8 移交项）——可比较的非空零件数 < 2（单零件模式，或零件不足两个非空）
+    时，干涉检查根本没有执行任何布尔比较，避免调用方把"没跑"误读成"跑了但
+    无干涉"（两者都表现为清单为空，语义却完全不同）。
+    """
+
+    def __init__(self, iterable=(), *, interference_skipped: bool):
+        super().__init__(iterable)
+        self.interference_skipped = interference_skipped
+
+
 # ---------------------------------------------------------------------------
 # 干涉守卫
 # ---------------------------------------------------------------------------
 
-def assert_no_interference(session: Session, *, allow: bool = False, context: str = "") -> list:
+def assert_no_interference(session: Session, *, allow: bool = False,
+                            context: str = "") -> InterferenceReport:
     """对每对零件全局 shape 计算 common().Volume > 1e-6 → 干涉。
     allow=False 时抛 RuntimeError（报零件对+干涉量）；
     allow=True 时放行并返回干涉清单 [{"parts": [a, b], "volume": v}]。
     单零件模式（_parts 空）直接返回空列表。
+
+    返回值是 InterferenceReport（list 子类），额外带 .interference_skipped：
+    可比较的非空零件数 < 2 时为 True——检查没有真的跑过一次布尔比较，调用方
+    （place_part/align_parts 的 result、describe_assembly）借此把该信号透传到
+    结果 dict 的 interference_skipped 字段，不与"跑了但无干涉"混淆。
 
     "绝不静默"纪律（终审 C-B：此前 except Exception → vol=0.0 让 9000mm³ 真实
     重叠在内部状态异常时被静默放行——最关键守卫上的唯一破口）：
@@ -178,7 +197,7 @@ def assert_no_interference(session: Session, *, allow: bool = False, context: st
     - OCC 布尔崩溃窄抓 Part.OCCError 转 RuntimeError 报"干涉检查无法完成"。
     """
     if not session._parts:
-        return []
+        return InterferenceReport([], interference_skipped=True)
 
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
     with silence_fd1():
@@ -215,7 +234,7 @@ def assert_no_interference(session: Session, *, allow: bool = False, context: st
     for n in skipped:
         interferences.append({"parts": [n], "volume": None,
                               "note": f"零件 {n} 无几何，干涉未检查"})
-    return interferences
+    return InterferenceReport(interferences, interference_skipped=len(names) < 2)
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +335,7 @@ def place_part(
                     "angle": angle,
                 },
                 "interference": interferences,
+                "interference_skipped": interferences.interference_skipped,
                 "labels_stale": True,
                 "hint": "零件位置已更新，调用 render_part(annotate='faces') 查看最新标注",
             }
@@ -455,6 +475,7 @@ def align_parts(
                 },
                 "gap": gap,
                 "interference": interferences,
+                "interference_skipped": interferences.interference_skipped,
                 "labels_stale": True,
                 "hint": "装配对齐完成，调用 render_part(annotate='faces') 查看最新标注",
             }

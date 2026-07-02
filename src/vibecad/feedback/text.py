@@ -28,7 +28,8 @@ def describe_assembly(session: Session) -> dict[str, Any]:
         ...
       },
       "assembly_bbox": {"x": float, "y": float, "z": float},
-      "interference": [{"parts": [a, b], "volume": float}, ...]
+      "interference": [{"parts": [a, b], "volume": float}, ...],
+      "interference_skipped": bool  # 可比较零件对 < 2 时 True——检查未真正跑过
     }
 
     单零件模式（_parts 空）：返回 describe_shape(get_result_shape()) 原格式。
@@ -74,6 +75,7 @@ def describe_assembly(session: Session) -> dict[str, Any]:
         "parts": parts_info,
         "assembly_bbox": assembly_bbox,
         "interference": interference,
+        "interference_skipped": interference.interference_skipped,
     }
 
 

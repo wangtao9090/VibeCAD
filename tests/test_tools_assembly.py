@@ -178,11 +178,40 @@ def test_assert_solid_integrity_assembly_skips_empty_parts():
 
 
 def test_assert_no_interference_single_part_mode():
-    """单零件模式（_parts 空）：assert_no_interference 直接返回空列表。"""
+    """单零件模式（_parts 空）：assert_no_interference 直接返回空列表，
+    且 interference_skipped=True——根本没有可比较的零件对，检查没有真的跑过
+    （R8 移交项：让"检查是否真的跑了"对调用方显式可见，不与"跑了但无干涉"混淆）。"""
     from vibecad.tools.assembly import assert_no_interference
     session = _FakeSession({})  # _parts 空
     result = assert_no_interference(session)
     assert result == []
+    assert result.interference_skipped is True
+
+
+def test_assert_no_interference_two_parts_actually_ran(monkeypatch):
+    """两个非空、不重叠零件：真的做了一次布尔比较 → interference_skipped=False，
+    即使清单为空也不会被误读成"没跑"。"""
+    from vibecad.tools.assembly import assert_no_interference
+    fake = _fake_part_module(monkeypatch)
+
+    class _NoOverlapShape:
+        def transformed(self, m):
+            return self
+
+        def common(self, other):
+            class _Zero:
+                Volume = 0.0
+            return _Zero()
+
+    session = _FakeSession({"A": _NoOverlapShape(), "B": _NoOverlapShape()})
+    import types as _t
+    for info in session._parts.values():
+        info["container"] = _t.SimpleNamespace(
+            Placement=_t.SimpleNamespace(toMatrix=lambda: "M"))
+    result = assert_no_interference(session)
+    assert result == []
+    assert result.interference_skipped is False
+    assert fake is not None  # stub 确实被注入并使用（common 未抛错）
 
 
 def _fake_part_module(monkeypatch):
@@ -196,13 +225,17 @@ def _fake_part_module(monkeypatch):
 
 def test_assert_no_interference_empty_part_noted(monkeypatch):
     """终审 C-B："绝不静默"——空零件（objects 空）跳过配对但必须显式注明
-    （{"parts": [X], "volume": None, "note": ...}），绝不返回静默 []。"""
+    （{"parts": [X], "volume": None, "note": ...}），绝不返回静默 []。
+
+    此场景下唯一非空零件 A 无人可配对比较，interference_skipped 也应为 True
+    ——note 条目本身已经说明"未检查"，两个信号一致，不冲突。"""
     from vibecad.tools.assembly import assert_no_interference
     _fake_part_module(monkeypatch)
     session = _FakeSession({"A": _FakeSolid(1), "B": None}, objects={"B": set()})
     result = assert_no_interference(session, allow=False)
     assert result == [{"parts": ["B"], "volume": None,
                        "note": "零件 B 无几何，干涉未检查"}]
+    assert result.interference_skipped is True
 
 
 def test_assert_no_interference_occ_error_raises(monkeypatch):
