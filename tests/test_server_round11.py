@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # 公共辅助
 # ---------------------------------------------------------------------------
@@ -201,3 +203,296 @@ def test_render_part_save_to_failure_not_fatal(monkeypatch, tmp_path):
         assert isinstance(out, Image), f"应返回 Image，实际：{out}"
         # 但此时 save_error 信息丢失，断言不合要求——让测试按需失败以驱动实现
         raise AssertionError("应返回包含 save_error 的列表，实际返回单独 Image")
+
+
+# ---------------------------------------------------------------------------
+# Task 3 Step 1：server 自退换芯钩子（_schedule_swap + 四处触发点 + needs_reconnect）
+# 纪律：所有测试 mock Timer / _schedule_swap，绝不让 os._exit 真跑起来杀掉测试进程。
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _no_supervised_leak(monkeypatch):
+    """触发点测试默认不受外部 VIBECAD_SUPERVISED 污染（I4 分支由测试显式控制）。"""
+    monkeypatch.delenv("VIBECAD_SUPERVISED", raising=False)
+
+
+class _FakeTimer:
+    """假 Timer：只记录 daemon/start，绝不真调度 os._exit。"""
+
+    def __init__(self):
+        self.daemon = False
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+
+def _record_swap(monkeypatch, srv):
+    """把 _schedule_swap 换成记录器，并给出默认可换芯环境（受监督 + 判据通过）：
+    触发点测试只关心"是否安排了自退"；C1/I4 反向分支由具体测试覆盖默认值。"""
+    calls = []
+    monkeypatch.setenv("VIBECAD_SUPERVISED", "1")
+    monkeypatch.setattr(srv, "runtime_swappable", lambda: True)
+    monkeypatch.setattr(srv, "_schedule_swap", lambda delay=1.0: calls.append(delay))
+    return calls
+
+
+def test_schedule_swap_idempotent(monkeypatch):
+    """ready+bootstrap 时安排一次延迟自退；重复调用不叠 Timer。"""
+    import vibecad.server as srv
+
+    timers = []
+
+    def _fake_timer_cls(delay, func, args=()):
+        t = _FakeTimer()
+        timers.append((delay, func, args, t))
+        return t
+
+    monkeypatch.setattr(srv.threading, "Timer", _fake_timer_cls)
+    monkeypatch.setattr(srv, "_swap_timer", None)
+
+    srv._schedule_swap()
+    srv._schedule_swap()
+
+    assert len(timers) == 1, f"重复调用不应叠 Timer：{timers}"
+    delay, func, args, t = timers[0]
+    assert delay == 1.0
+    assert func is srv.os._exit and args == (srv.SWAP_EXIT,)
+    assert t.daemon is True and t.started is True
+
+
+def test_runtime_status_triggers_swap_when_ready_in_bootstrap(monkeypatch, tmp_path):
+    """get_runtime_status：ready 且非 conda → needs_reconnect 恒 False + 已安排自退。"""
+    import vibecad.server as srv
+
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.setattr(srv.status, "runtime_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: False)
+
+    d = srv.get_runtime_status()
+
+    assert d["needs_reconnect"] is False, "自退换芯后客户端零感知，needs_reconnect 应恒 False"
+    assert len(calls) == 1, "ready+bootstrap 应安排一次自退"
+
+
+def test_runtime_status_no_swap_when_in_conda(monkeypatch, tmp_path):
+    """get_runtime_status：ready 且已是 conda 解释器 → 不安排自退。"""
+    import vibecad.server as srv
+
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.setattr(srv.status, "runtime_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: True)
+
+    d = srv.get_runtime_status()
+
+    assert d["needs_reconnect"] is False
+    assert calls == [], "已在 conda 运行时不应安排自退"
+
+
+def test_runtime_status_no_swap_when_not_ready(monkeypatch, tmp_path):
+    """get_runtime_status：未就绪 → 不安排自退，needs_reconnect 恒 False。"""
+    import vibecad.server as srv
+
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.setattr(srv.status, "runtime_ready", lambda: False)
+
+    d = srv.get_runtime_status()
+
+    assert d["needs_reconnect"] is False
+    assert calls == [], "未就绪不应安排自退"
+
+
+def test_runtime_guard_triggers_swap_in_bootstrap(monkeypatch):
+    """_runtime_guard：ready+bootstrap → 结构化拒绝 + 已安排自退，不再要求手动重连。"""
+    import vibecad.server as srv
+
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: False)
+
+    guard = srv._runtime_guard()
+
+    assert guard is not None and guard["ok"] is False
+    assert "自动切换" in guard["message"], f"应提示自动切换：{guard['message']}"
+    assert "重连" not in guard["message"], "自退换芯后不应再要求用户手动重连"
+    assert len(calls) == 1
+
+
+def test_runtime_guard_passes_in_conda(monkeypatch):
+    """_runtime_guard：ready 且已在 conda → 放行且不安排自退。"""
+    import vibecad.server as srv
+
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: True)
+
+    assert srv._runtime_guard() is None
+    assert calls == []
+
+
+def test_ensure_runtime_triggers_swap_in_bootstrap(monkeypatch):
+    """_ensure_runtime_impl：ready+bootstrap → status=ready + 已安排自退 + 不再提手动重连。"""
+    import vibecad.server as srv
+
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: False)
+
+    out = srv._ensure_runtime_impl()
+
+    assert out["status"] == "ready"
+    assert "重连" not in out["message"], "自退换芯后不应再要求用户手动重连"
+    assert len(calls) == 1
+
+
+def test_ensure_runtime_no_swap_in_conda(monkeypatch):
+    """_ensure_runtime_impl：ready 且已在 conda → 不安排自退。"""
+    import vibecad.server as srv
+
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: True)
+
+    out = srv._ensure_runtime_impl()
+
+    assert out["status"] == "ready"
+    assert calls == []
+
+
+def test_safe_install_success_triggers_swap(monkeypatch):
+    """_safe_install：安装成功结束后自动安排自退——用户全程不开口也自动换芯。"""
+    import vibecad.server as srv
+
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.setattr(srv._installer, "install", lambda: None)
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: False)
+
+    srv._safe_install()
+
+    assert len(calls) == 1, "安装成功后应安排自退换芯"
+
+
+def test_safe_install_failure_no_swap(monkeypatch):
+    """_safe_install：安装失败（异常已落 status.json）→ 不安排自退。"""
+    import vibecad.server as srv
+
+    calls = _record_swap(monkeypatch, srv)
+
+    def _boom():
+        raise RuntimeError("安装失败")
+
+    monkeypatch.setattr(srv._installer, "install", _boom)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: False)
+
+    srv._safe_install()  # 不应抛出
+
+    assert calls == [], "安装失败不应安排自退"
+
+
+# ---------------------------------------------------------------------------
+# C1：换芯判据单一真源（runtime_swappable）——哨兵在而 conda python 缺失时绝不自杀
+# I4：裸 server（无 VIBECAD_SUPERVISED）自杀无人重启——回退诚实提示重连
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_status_no_swap_when_conda_python_missing(monkeypatch, tmp_path):
+    """C1：哨兵在而 conda python 缺失（runtime_swappable False）→ 绝不安排自杀
+    （否则 supervisor 落 bootstrap、新 server 又自杀成无限循环）；诚实标记
+    needs_reconnect=True。"""
+    import vibecad.server as srv
+
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.setattr(srv, "runtime_swappable", lambda: False)  # 覆盖 helper 默认
+    monkeypatch.setattr(srv.status, "runtime_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: False)
+
+    d = srv.get_runtime_status()
+
+    assert calls == [], "判据不通过时绝不安排自杀（防无限重启循环）"
+    assert d["needs_reconnect"] is True
+
+
+def test_runtime_guard_no_swap_when_conda_python_missing(monkeypatch):
+    """C1：guard 触发点与 supervisor._server_cmd 同判据——不可换芯时不自杀，
+    文案回退提示重连（诚实反馈）。"""
+    import vibecad.server as srv
+
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.setattr(srv, "runtime_swappable", lambda: False)
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: False)
+
+    guard = srv._runtime_guard()
+
+    assert calls == []
+    assert guard is not None and guard["ok"] is False
+    assert "重连" in guard["message"]
+
+
+def test_safe_install_no_swap_when_not_swappable(monkeypatch):
+    """C1：安装结束但判据不通过（如哨兵落了而 python 缺失）→ 不安排自杀。"""
+    import vibecad.server as srv
+
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.setattr(srv, "runtime_swappable", lambda: False)
+    monkeypatch.setattr(srv._installer, "install", lambda: None)
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: False)
+
+    srv._safe_install()
+
+    assert calls == []
+
+
+def test_runtime_guard_unsupervised_falls_back_to_reconnect(monkeypatch):
+    """I4：裸 server（无 VIBECAD_SUPERVISED）自杀后无人重启 = 服务凭空消失——
+    不自杀，guard 文案回退提示重连。"""
+    import vibecad.server as srv
+
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.delenv("VIBECAD_SUPERVISED", raising=False)
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: False)
+
+    guard = srv._runtime_guard()
+
+    assert calls == []
+    assert guard is not None and guard["ok"] is False
+    assert "重连" in guard["message"]
+
+
+def test_runtime_status_unsupervised_reports_needs_reconnect(monkeypatch, tmp_path):
+    """I4：裸 server 就绪后 needs_reconnect 诚实回退 True（不再谎报零感知）。"""
+    import vibecad.server as srv
+
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.delenv("VIBECAD_SUPERVISED", raising=False)
+    monkeypatch.setattr(srv.status, "runtime_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: False)
+
+    d = srv.get_runtime_status()
+
+    assert calls == []
+    assert d["needs_reconnect"] is True
+
+
+def test_ensure_runtime_unsupervised_hints_reconnect(monkeypatch):
+    """I4：ensure_runtime 在裸 server 下就绪 → 不自杀，消息提示重连。"""
+    import vibecad.server as srv
+
+    calls = _record_swap(monkeypatch, srv)
+    monkeypatch.delenv("VIBECAD_SUPERVISED", raising=False)
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: True)
+    monkeypatch.setattr(srv, "_in_conda_runtime", lambda: False)
+
+    out = srv._ensure_runtime_impl()
+
+    assert out["status"] == "ready"
+    assert "重连" in out["message"]
+    assert calls == []

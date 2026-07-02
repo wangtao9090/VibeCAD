@@ -1,25 +1,15 @@
-"""A3 引导壳：决定在哪个 python 跑 server。纯 stdlib，禁 import mcp/FreeCAD 等重依赖。"""
+"""A3 引导壳：CLI 分支（--uninstall 救援）+ 待删清理，随后交棒监督进程常驻。
+
+Round 11 C 分支：原三态判断（在哪个 python 跑 server）迁入 supervisor._server_cmd，
+本模块只做进程入口的一次性事务；退出码 = server 真退出码，原样透传给宿主。
+纯 stdlib，禁 import mcp/FreeCAD 等重依赖。"""
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
-from pathlib import Path
 
-from vibecad.runtime import paths, status, uninstall
-
-
-def _run_server() -> None:
-    from vibecad.server import main as server_main  # 延迟 import（两 env 均已装 mcp）
-    server_main()
-
-
-def _reexec_into(env_py: Path) -> None:
-    args = [str(env_py), "-m", "vibecad.server"]
-    if sys.platform == "win32":
-        sys.exit(subprocess.run(args).returncode)  # Windows 无真 exec
-    os.execv(str(env_py), args)
+from vibecad import supervisor
+from vibecad.runtime import paths, uninstall
 
 
 def _cli_uninstall() -> None:
@@ -44,15 +34,8 @@ def main() -> None:
     if "--uninstall" in sys.argv:
         _cli_uninstall()
         return
-    uninstall.perform_pending_uninstall()  # 标记→重启后清理链路的接收端；无标记则是无操作
-    runtime_py = paths.active_runtime_python()
-    try:
-        in_runtime = Path(sys.executable).resolve() == Path(runtime_py).resolve()
-    except OSError:
-        in_runtime = False
-    if in_runtime:
-        _run_server()                          # 已在 conda python（re-exec 后二次进入）
-    elif status.runtime_ready() and Path(runtime_py).exists():
-        _reexec_into(runtime_py)               # 哨兵就绪 → 交棒
-    else:
-        _run_server()                          # bootstrap：未就绪，只起轻量 server
+    # 标记→重启后清理链路的接收端（无标记则是无操作）。supervisor._spawn 每次也会
+    # 清理（换芯重启不经此处），这里保留是让 CLI/异常路径不依赖 supervisor 内部时序。
+    # 委托 supervisor.run_pending_uninstall：删除未完成时 stderr 响亮警告（I1）。
+    supervisor.run_pending_uninstall()
+    sys.exit(supervisor.Supervisor().run())

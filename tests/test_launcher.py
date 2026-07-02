@@ -1,79 +1,71 @@
-from pathlib import Path
+"""launcher 单元测试：--uninstall CLI 分支、启动清理、对监督进程的委托。
+
+原三态判断（已在 conda / ready re-exec / bootstrap）随 Round 11 C 分支迁入
+supervisor._server_cmd，等价单元测试见 tests/test_supervisor.py（判据不变）。
+"""
+import types
 
 import pytest
 
 from vibecad import launcher
 
 
-def test_already_in_runtime_runs_server(monkeypatch, tmp_path):
-    py = tmp_path / "bin" / "python"
-    py.parent.mkdir(parents=True)
-    py.write_text("")
-    monkeypatch.setattr(launcher.paths, "active_runtime_python", lambda: py)
-    monkeypatch.setattr(launcher.sys, "executable", str(py))
-    started = {}
-    monkeypatch.setattr(launcher, "_run_server", lambda: started.setdefault("server", True))
-    launcher.main()
-    assert started["server"]
-
-
-def test_ready_reexecs(monkeypatch, tmp_path):
-    py = tmp_path / "bin" / "python"
-    py.parent.mkdir(parents=True)
-    py.write_text("")
-    monkeypatch.setattr(launcher.paths, "active_runtime_python", lambda: py)
-    monkeypatch.setattr(launcher.sys, "executable", "/uv/tmp/python")
-    monkeypatch.setattr(launcher.status, "runtime_ready", lambda: True)
-    reexec = {}
-    monkeypatch.setattr(launcher, "_reexec_into", lambda p: reexec.setdefault("py", Path(p)))
-    launcher.main()
-    assert reexec["py"] == py
-
-
-def test_not_ready_bootstraps(monkeypatch, tmp_path):
-    monkeypatch.setattr(launcher.paths, "active_runtime_python", lambda: tmp_path / "nope")
-    monkeypatch.setattr(launcher.sys, "executable", "/uv/tmp/python")
-    monkeypatch.setattr(launcher.status, "runtime_ready", lambda: False)
-    started = {}
-    monkeypatch.setattr(launcher, "_run_server", lambda: started.setdefault("bootstrap", True))
-    launcher.main()
-    assert started["bootstrap"]
-
-
-def test_reexec_posix_uses_execv(monkeypatch, tmp_path):
-    monkeypatch.setattr(launcher.sys, "platform", "linux")
-    called = {}
-    monkeypatch.setattr(launcher.os, "execv", lambda p, a: called.setdefault("execv", (p, a)))
-    launcher._reexec_into(tmp_path / "bin" / "python")
-    assert called["execv"][1][1:] == ["-m", "vibecad.server"]
-
-
-def test_reexec_windows_uses_subprocess(monkeypatch, tmp_path):
-    monkeypatch.setattr(launcher.sys, "platform", "win32")
-
-    class R:
-        returncode = 0
-    monkeypatch.setattr(launcher.subprocess, "run", lambda a: R())
-    raised = False
-    try:
-        launcher._reexec_into(tmp_path / "python.exe")
-    except SystemExit as e:
-        raised = e.code == 0
-    assert raised
-
-
-# --- --uninstall CLI 分支 + 启动清理（Task 4 Step 4） ---
-
-
 @pytest.fixture(autouse=True)
-def _stub_normal_startup(monkeypatch, tmp_path):
-    """未涉及 --uninstall 的用例默认不应真的走三态判断，统一 stub 掉。"""
-    monkeypatch.setattr(launcher.paths, "active_runtime_python", lambda: tmp_path / "nope")
-    monkeypatch.setattr(launcher.status, "runtime_ready", lambda: False)
-    monkeypatch.setattr(launcher, "_run_server", lambda: None)
+def sup_stub(monkeypatch):
+    """替身监督进程：默认返回码 0；记录调用序，绝不真起子进程。"""
+    state = {"code": 0, "calls": []}
+
+    class _FakeSupervisor:
+        def run(self):
+            state["calls"].append("supervisor.run")
+            return state["code"]
+
+    monkeypatch.setattr(launcher, "supervisor", types.SimpleNamespace(
+        Supervisor=_FakeSupervisor,
+        run_pending_uninstall=lambda: state["calls"].append("run_pending_uninstall"),
+    ))
+    return state
 
 
-def test_uninstall_flag_calls_uninstall_now_and_exits(monkeypatch, capsys):
+# --- 委托监督进程（Round 11 C 分支） ---
+
+
+def test_main_delegates_to_supervisor_and_exits_zero(monkeypatch, sup_stub):
+    monkeypatch.setattr(launcher.sys, "argv", ["vibecad"])
+
+    with pytest.raises(SystemExit) as exc:
+        launcher.main()
+
+    assert exc.value.code == 0
+    assert sup_stub["calls"] == ["run_pending_uninstall", "supervisor.run"]
+
+
+def test_main_propagates_supervisor_exit_code(monkeypatch, sup_stub):
+    """server 真崩溃码经 supervisor 返回后，launcher 原样透传给宿主。"""
+    sup_stub["code"] = 3
+    monkeypatch.setattr(launcher.sys, "argv", ["vibecad"])
+
+    with pytest.raises(SystemExit) as exc:
+        launcher.main()
+
+    assert exc.value.code == 3
+
+
+def test_main_runs_pending_uninstall_before_supervisor(monkeypatch, sup_stub):
+    """I1：launcher 委托 supervisor.run_pending_uninstall（含「卸载未完成」响亮
+    警告），且必须先于监督进程启动执行。"""
+    monkeypatch.setattr(launcher.sys, "argv", ["vibecad"])
+
+    with pytest.raises(SystemExit):
+        launcher.main()
+
+    assert sup_stub["calls"] == ["run_pending_uninstall", "supervisor.run"]
+
+
+# --- --uninstall CLI 分支（Task 4 Step 4） ---
+
+
+def test_uninstall_flag_calls_uninstall_now_and_exits(monkeypatch, sup_stub, capsys):
     monkeypatch.setattr(launcher.sys, "argv", ["vibecad", "--uninstall", "--yes"])
     called = {}
 
@@ -81,18 +73,11 @@ def test_uninstall_flag_calls_uninstall_now_and_exits(monkeypatch, capsys):
         called["called"] = True
         return {"ok": True}
     monkeypatch.setattr(launcher.uninstall, "uninstall_now", _fake_uninstall_now)
-    reexec_called = {}
-    monkeypatch.setattr(
-        launcher, "_run_server", lambda: reexec_called.setdefault("server", True)
-    )
-    monkeypatch.setattr(
-        launcher, "_reexec_into", lambda p: reexec_called.setdefault("reexec", True)
-    )
 
     launcher.main()
 
     assert called.get("called") is True
-    assert not reexec_called  # --uninstall 后不应继续走启动逻辑
+    assert sup_stub["calls"] == []  # --uninstall 后不应继续走启动逻辑（不起监督进程）
     assert '"ok": true' in capsys.readouterr().out
 
 
@@ -192,18 +177,3 @@ def test_uninstall_failure_exits_nonzero(monkeypatch):
         launcher.main()
 
     assert exc.value.code == 1
-
-
-def test_main_calls_perform_pending_uninstall(monkeypatch):
-    monkeypatch.setattr(launcher.sys, "argv", ["vibecad"])
-    called = {}
-    monkeypatch.setattr(
-        launcher.uninstall, "perform_pending_uninstall",
-        lambda: called.setdefault("called", True),
-    )
-    monkeypatch.setattr(launcher, "_run_server", lambda: called.setdefault("server", True))
-
-    launcher.main()
-
-    assert called.get("called") is True
-    assert called.get("server") is True  # 清理后仍照常继续启动

@@ -12,11 +12,17 @@ def test_add_box_guard_not_ready(monkeypatch):
     assert r["ok"] is False and "未就绪" in r["message"]
 
 
-def test_add_box_guard_needs_reconnect(monkeypatch):
+def test_add_box_guard_bootstrap_schedules_swap(monkeypatch):
+    """Round 11：ready+bootstrap 不再要求手动重连，而是安排自退换芯后结构化拒绝。"""
+    monkeypatch.setenv("VIBECAD_SUPERVISED", "1")            # I4：受监督才允许自杀
+    monkeypatch.setattr(srv, "runtime_swappable", lambda: True)  # C1：判据通过
     monkeypatch.setattr(srv._installer, "is_ready", lambda: True)
     monkeypatch.setattr(srv, "_in_conda_runtime", lambda: False)
+    calls = []
+    monkeypatch.setattr(srv, "_schedule_swap", lambda delay=1.0: calls.append(delay))
     r = srv.add_box(10, 10, 10)
-    assert r["ok"] is False and "重连" in r["message"]
+    assert r["ok"] is False and "自动切换" in r["message"]
+    assert len(calls) == 1
 
 
 def test_new_document_delegates(monkeypatch):

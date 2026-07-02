@@ -26,6 +26,7 @@ from vibecad.freecad_env import (
 )
 from vibecad.runtime import paths, status
 from vibecad.runtime.installer import RuntimeInstaller
+from vibecad.supervisor import SWAP_EXIT, runtime_swappable  # 单向依赖；换芯判据唯一真源（C1）
 from vibecad.tools import assembly as _assembly
 from vibecad.tools import export as _export
 from vibecad.tools import features as _features
@@ -42,6 +43,11 @@ _installer = RuntimeInstaller()  # 进度由 installer 落 status.json，server 
 _session = Session()  # 跨 MCP 调用维持同一活动文档（单零件先行）；构造不 import FreeCAD
 _install_thread: threading.Thread | None = None
 
+# Round 11 换芯自退：运行时装好后 server 主动退出，由监督进程重启进 conda 解释器。
+# Q2 已锁 C 分支（宿主对意外退出不自动重启，见计划 Spike 结果节）：supervisor 见
+# SWAP_EXIT=75（顶部 import）即换芯重启子进程并重放握手；真退出/崩溃用其他码原样透传给宿主。
+_swap_timer: threading.Timer | None = None
+
 
 def _in_conda_runtime() -> bool:
     """当前进程是否就是 conda 运行时 python（决定能否进程内 import FreeCAD）。"""
@@ -49,6 +55,40 @@ def _in_conda_runtime() -> bool:
         return os.path.realpath(sys.executable) == os.path.realpath(paths.active_runtime_python())
     except OSError:
         return False
+
+
+def _schedule_swap(delay: float = 1.0) -> None:
+    """运行时就绪但本进程仍是引导解释器 → 延迟自退换芯（延迟给当前响应 flush 留时间）。
+    幂等：已安排则不叠加。仅经 _try_schedule_swap 调用（判据 + 监督检查的唯一入口）。
+    C 分支：监督进程见 SWAP_EXIT 即换 conda python 重启子进程并重放握手。
+
+    I5 竞态说明：Timer 到点的 os._exit(SWAP_EXIT) 与进程真崩溃存在竞态——真崩溃恰
+    在此刻可能被 75 掩盖成一次「换芯」。有意接受不加同步：概率极低，且反复形态会被
+    supervisor 的换芯循环护栏拦住并响亮退出。"""
+    global _swap_timer
+    if _swap_timer is not None:
+        return
+    _swap_timer = threading.Timer(delay, os._exit, args=(SWAP_EXIT,))
+    _swap_timer.daemon = True
+    _swap_timer.start()
+
+
+def _supervised() -> bool:
+    """本进程是否由监督进程拉起（I4，见 supervisor._spawn 的 env 注入）。裸 server
+    （直接 python -m vibecad.server）自杀后无人重启 = 服务凭空消失，绝不自杀。"""
+    return os.environ.get("VIBECAD_SUPERVISED") == "1"
+
+
+def _try_schedule_swap() -> bool:
+    """换芯触发点唯一入口：可换芯则安排自退并返回 True；False = 调用方给诚实回退
+    （needs_reconnect / 提示重连文案）。判据两条，缺一不可：
+    ① runtime_swappable()（C1）——与 supervisor._server_cmd 同一真源；哨兵在而
+      conda python 缺失时若照旧自杀，supervisor 只会落回 bootstrap 再自杀，无限循环；
+    ② _supervised()（I4）——裸 server 自杀无人重启。"""
+    if not (runtime_swappable() and _supervised()):
+        return False
+    _schedule_swap()
+    return True
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -61,7 +101,10 @@ def ping() -> str:
 def get_runtime_status() -> dict[str, Any]:
     """查询 FreeCAD 运行时安装进度（跨进程读 status.json）。"""
     d = status.read_status().to_dict()
-    d["needs_reconnect"] = status.runtime_ready() and not _in_conda_runtime()
+    d["needs_reconnect"] = False  # Round 11：自退换芯后客户端零感知（字段保留做兼容）
+    if status.runtime_ready() and not _in_conda_runtime() and not _try_schedule_swap():
+        # 不能自动换芯（裸 server 无人重启 / conda python 缺失）：诚实告知需重连（I4/C1）
+        d["needs_reconnect"] = True
     return d
 
 
@@ -78,13 +121,21 @@ def _safe_install() -> None:
         _installer.install()
     except Exception:  # noqa: BLE001 - 失败态已落 status.json
         pass
+    else:
+        # 安装成功即安排自退换芯——用户全程不开口也自动获得 CAD 能力（Round 11）。
+        # 不可换芯时此处无对话通道，留给 get_runtime_status/_runtime_guard 诚实反馈。
+        if not _in_conda_runtime():
+            _try_schedule_swap()
 
 
 def _ensure_runtime_impl() -> dict[str, Any]:
     if _installer.is_ready():
         msg = "FreeCAD 运行时已就绪"
         if not _in_conda_runtime():
-            msg += "；当前会话运行在引导解释器，请重连本 MCP server 后即可使用 CAD 能力"
+            if _try_schedule_swap():  # Round 11：自退换芯替代手动重连
+                msg += "；正在自动切换到运行时解释器，数秒后即可直接使用 CAD 能力"
+            else:  # I4/C1 回退：不能自杀时诚实提示重连
+                msg += "；需重启/重连 vibecad MCP 连接后方可使用 CAD 能力"
         return {"status": "ready", "message": msg}
     if _install_thread and _install_thread.is_alive():
         return {"status": "in_progress", "message": "安装进行中，请轮询 get_runtime_status"}
@@ -120,11 +171,10 @@ def _build_box_and_export() -> dict[str, Any]:
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
 def smoke_cad() -> dict[str, Any]:
     """地基验证：进程内造 10×10×10 Box，导出 STEP，返回体积/包围盒/路径。"""
-    if not _installer.is_ready():
-        return {"ok": False, "message": "FreeCAD 运行时未就绪，请先调用 ensure_runtime"}
-    if not _in_conda_runtime():
-        _msg = "运行时已就绪，但当前会话运行在引导解释器中，请重连本 MCP server 后再调用 smoke_cad"
-        return {"ok": False, "message": _msg}
+    # Round 11：复用 _runtime_guard（换芯触发逻辑单点收敛，不再各写一份"请重连"文案）
+    guard = _runtime_guard()
+    if guard:
+        return guard
     return _build_box_and_export()
 
 
@@ -132,7 +182,10 @@ def _runtime_guard() -> dict[str, Any] | None:
     if not _installer.is_ready():
         return {"ok": False, "message": "FreeCAD 运行时未就绪，请先调用 ensure_runtime"}
     if not _in_conda_runtime():
-        _msg = "运行时已就绪，但当前会话运行在引导解释器中，请重连本 MCP server 后再试"
+        if _try_schedule_swap():  # Round 11：自退换芯替代手动重连
+            _msg = "运行时已就绪，正在自动切换到运行时解释器（数秒内完成），请稍后重试本操作"
+        else:  # I4/C1 回退：裸 server / 运行时不完整时不自杀，诚实提示重连
+            _msg = "运行时已就绪，但本进程无法自动切换解释器；请重启/重连 vibecad MCP 连接后重试"
         return {"ok": False, "message": _msg}
     return None
 
