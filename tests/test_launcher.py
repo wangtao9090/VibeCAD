@@ -160,6 +160,40 @@ def test_uninstall_tty_prompt_accepted(monkeypatch):
     assert called.get("called") is True
 
 
+def test_uninstall_tty_eof_treated_as_cancel(monkeypatch, capsys):
+    """伪 TTY 下 stdin EOF（Ctrl-D / 管道关闭）不应 traceback，应视为取消。"""
+    monkeypatch.setattr(launcher.sys, "argv", ["vibecad", "--uninstall"])
+    monkeypatch.setattr(launcher.sys.stdin, "isatty", lambda: True)
+
+    def _eof(prompt=""):
+        raise EOFError
+    monkeypatch.setattr("builtins.input", _eof)
+    called = {}
+    monkeypatch.setattr(
+        launcher.uninstall, "uninstall_now",
+        lambda: called.setdefault("called", True),
+    )
+
+    launcher.main()  # 不应抛出
+
+    assert "called" not in called
+    assert "已取消" in capsys.readouterr().out
+
+
+def test_uninstall_failure_exits_nonzero(monkeypatch):
+    """护栏拒删等 ok:false 结果应以非零退出码结束，供脚本化调用方判断。"""
+    monkeypatch.setattr(launcher.sys, "argv", ["vibecad", "--uninstall", "--yes"])
+    monkeypatch.setattr(
+        launcher.uninstall, "uninstall_now",
+        lambda: {"ok": False, "message": "目录不含 VibeCAD 安装产物，拒绝删除"},
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        launcher.main()
+
+    assert exc.value.code == 1
+
+
 def test_main_calls_perform_pending_uninstall(monkeypatch):
     monkeypatch.setattr(launcher.sys, "argv", ["vibecad"])
     called = {}

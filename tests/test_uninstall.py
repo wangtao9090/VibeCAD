@@ -31,6 +31,16 @@ def test_uninstall_now_reports_size(monkeypatch, tmp_path):
     assert info["ok"] and not home.exists() and info["freed_mb"] >= 0
 
 
+def test_uninstall_now_message_scales_units(monkeypatch, tmp_path):
+    """小体量显示 MB 而非 '0.0 GB'（模拟测试逮到的文案问题）。"""
+    home = tmp_path / "home"
+    (home / "mamba").mkdir(parents=True)
+    (home / "mamba" / "f.bin").write_bytes(b"x" * (5 * 1024 * 1024))
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    info = uninstall.uninstall_now()
+    assert info["ok"] and "MB" in info["message"] and "0.0 GB" not in info["message"]
+
+
 def test_override_env_never_deleted(monkeypatch, tmp_path):
     """VIBECAD_FREECAD_ENV 用户自带 env 在 home 之外——删除 home 不得波及。"""
     home, override = tmp_path / "home", tmp_path / "user-env"

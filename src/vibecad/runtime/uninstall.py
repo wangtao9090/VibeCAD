@@ -111,5 +111,6 @@ def uninstall_now() -> dict:
         return {"ok": False, "freed_mb": 0,
                 "message": (f"删除未完成：可能已删除部分文件，残留于 {home}；"
                             "请关闭正在使用运行时的程序后重试，或手动删除该目录")}
+    freed = f"{size / 1000:.1f} GB" if size >= 1000 else f"{size:.1f} MB"
     return {"ok": True, "freed_mb": round(size, 1), "path": str(home),
-            "message": f"已删除 {home}（释放约 {size / 1000:.1f} GB）"}
+            "message": f"已删除 {home}（释放约 {freed}）"}

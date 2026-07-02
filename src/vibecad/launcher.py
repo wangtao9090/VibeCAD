@@ -27,11 +27,17 @@ def _cli_uninstall() -> None:
     TTY 下无 --yes 需二次确认；非 TTY（CI/管道）或带 --yes 直接执行，避免卡死等待输入。"""
     home = paths.vibecad_home()
     if "--yes" not in sys.argv and sys.stdin.isatty():
-        ans = input(f"将删除 {home}（全部 CAD 运行时）。确认？[y/N] ")
+        try:
+            ans = input(f"将删除 {home}（全部 CAD 运行时）。确认？[y/N] ")
+        except (EOFError, KeyboardInterrupt):  # Ctrl-D / Ctrl-C 视为取消，不 traceback
+            ans = "n"
         if ans.strip().lower() not in ("y", "yes"):
             print("已取消")
             return
-    print(json.dumps(uninstall.uninstall_now(), ensure_ascii=False))
+    info = uninstall.uninstall_now()
+    print(json.dumps(info, ensure_ascii=False))
+    if not info.get("ok"):
+        sys.exit(1)  # 护栏拒删/删除未完成：脚本化调用方靠退出码判断
 
 
 def main() -> None:
