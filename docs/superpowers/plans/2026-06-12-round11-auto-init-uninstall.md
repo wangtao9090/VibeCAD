@@ -142,9 +142,13 @@ pyproject.toml 仅依赖 `mcp>=1.2`；`.mcpbignore` 排除 `*.mcpb`。
 
 ### Spike 结果（执行后回填）
 
-- Q1 `${__dirname}` env 展开：＿＿
-- Q2 自退后宿主行为（D 合格线）：＿＿
-- Q3 升级数据保留：＿＿
+> **2026-07-02 文档级预判**（证据：mcpb 官方 MANIFEST.md + 本机 Claude Desktop 1.17377.2 app.asar 反编译源码 + 社区 issues；真机三验为确认性验证，操作卡见 `2026-07-02-r11-spike-user-steps.md`。真机若推翻任一条，按本节条件分支回退）。
+
+- Q1 `${__dirname}` env 展开：**是（高置信）**——宿主替换函数对 mcp_config 整个对象递归替换，env 与 args 同一路径无字段区分；mcpb spec 官方示例本身就在 env 里用 `${__dirname}`。已知平台风险：Windows MSIX 版有"展开出错路径"bug（Windows-MCP#209），Windows 验收时注意。
+- Q2 自退后宿主行为（D 合格线）：**否（中高置信）→ 锁定 C 分支（监督进程）**——宿主源码 onclose 意外退出路径仅记日志+状态 Failed+toast，无任何 relaunch；auto-reconnect 机制只覆盖宿主主动 shutdown（设置变更/升级/卸载）场景；claude-code#61052/#54136/#59274 三个独立 issue 一致证实。残余不确定性：web 前端失败重试逻辑在远程 bundle 无法本地验证。
+- Q3 升级数据保留：**否（高置信）**——宿主安装函数对已存在扩展 preserve settings 后整目录 `remove`（≈rm -rf）重建，包内与运行期文件无差别清除；仅目录外的 settings 保留。**结论：VIBECAD_HOME 不进 manifest env（放弃 `${__dirname}/runtime` 方案），运行时保持默认的扩展目录外路径；Task 5 env 只留 VIBECAD_AUTO_INSTALL。**
+
+**C 分支实现要点（调研派生，实现时必须落地）**：①监督进程在宿主关闭（stdin EOF/transport close）时必须连同子进程干净退出——升级流程是先 shutdown server 再删目录，supervisor 残留会持有已删目录句柄成孤儿进程；②宿主主动重启场景（升级/设置变更）已有 auto-reconnect，supervisor 不自行处理；③**卸载 marker 清理接线**：supervisor 重启子进程不经 launcher.main，须在每次 spawn 子进程前调用 `uninstall.perform_pending_uninstall()`（纯 stdlib 合规），否则 uninstall_runtime 两段式的"重启后清理"在 C 分支下悬空。
 
 ---
 
