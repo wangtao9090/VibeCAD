@@ -1391,6 +1391,48 @@ print("POCKET_OK")
 
 
 @pytest.mark.slow
+def test_extrude_offset_origin_stable_after_existing_hole(runtime_env):
+    """extrude offset 原点必须不受既有孔影响（add_hole 同款修复的 sketch 版）：
+    box(40,30,20) 顶面先打 d8 盲孔 offset=[-10,0]（圆心 (10,15) 精确），重新标注后
+    pocket r3 圆槽 offset=[10,5]——槽壁圆柱面圆心必须精确落在 (30,20)。若原点取
+    face.CenterOfMass（旧实现），第一孔减除的面积使顶面质心 +X 漂移 ≈0.44mm，
+    圆槽静默落在 (30.44,20) 且无任何报错。稳定基准与 add_hole 共用 _param_mid
+    （UVBounds 中点，内孔 uv 范围是外环子集、不影响该中点）。"""
+    out = _run_in_env(runtime_env, """
+from vibecad.engine.session import Session
+from vibecad.feedback.annotate import render_annotated
+from vibecad.tools import features, modeling, sketch
+s = Session()
+modeling.new_document(s, "ExtStable")
+modeling.add_box(s, 40, 30, 20)
+png, table, freg, ereg = render_annotated(s.get_result_shape(), mode="faces")
+s.set_labels(freg, ereg)
+top = next(lab for lab, d in table.items() if "顶面" in d)
+def cyl_centers(radius):
+    return [(f.Surface.Center.x, f.Surface.Center.y)
+            for f in s.get_result_shape().Faces
+            if type(f.Surface).__name__ == "Cylinder"
+            and abs(f.Surface.Radius - radius) < 1e-3]
+r1 = features.add_hole(s, top, diameter=8, depth=10, offset=[-10, 0])
+assert r1["ok"], r1
+c1 = cyl_centers(4.0)  # 无孔面上首孔：新旧实现都精确，作基线
+assert len(c1) == 1 and abs(c1[0][0] - 10) < 1e-3 and abs(c1[0][1] - 15) < 1e-3, c1
+p2, t2, freg2, ereg2 = render_annotated(s.get_result_shape(), mode="faces")
+s.set_labels(freg2, ereg2)  # 首孔使顶面标签过期 → 重新标注
+top2 = next(lab for lab, d in t2.items() if "顶面" in d)
+r2 = sketch.extrude_profile(s, {"type": "circle", "radius": 3}, height=5,
+                            face=top2, offset=[10, 5], operation="pocket")
+assert r2["ok"], r2
+c2 = cyl_centers(3.0)
+assert len(c2) == 1, c2
+assert abs(c2[0][0] - 30.0) < 1e-3, f"圆槽圆心 x 期望 30.0，得到 {c2[0][0]:.4f}"
+assert abs(c2[0][1] - 20.0) < 1e-3, f"圆槽圆心 y 期望 20.0，得到 {c2[0][1]:.4f}"
+print("EXTRUDE_ORIGIN_STABLE_OK")
+""")
+    assert "EXTRUDE_ORIGIN_STABLE_OK" in out
+
+
+@pytest.mark.slow
 def test_floating_pad_rejected(runtime_env):
     """pad 轮廓 offset 出零件（完全不接触基体）→ Fuse 双 solid 或 pad 体积断言 → 拒绝回滚。
     任意 RuntimeError 均算通过（双 solid 断言 / pad 体积增量断言都是合法拒绝原因）。"""
@@ -1697,6 +1739,61 @@ def test_align_parts_face_to_face(runtime_env):
 "print('ALIGN_FACE_OK')\n"
 )
     assert "ALIGN_FACE_OK" in out
+
+
+@pytest.mark.slow
+def test_align_parts_center_stable_after_existing_hole(runtime_env):
+    """align_parts 面基准点必须不受既有孔影响（add_hole 同款修复的 assembly 版）：
+    底板 box(60,40,10) 顶面先打 d8 盲孔 offset=[-20,0]（孔心 (10,20) 精确），重新
+    标注后盖板 box(60,40,5) 底面贴底板顶面——对齐后盖板底面中心必须精确落在
+    (30,20)（两零件边缘齐平）。若基准取 face.CenterOfMass（旧实现），d8 孔减除的
+    面积使底板顶面质心 +X 漂移 ≈0.43mm，盖板静默偏移 (30.43,20)、边缘不齐平且无
+    任何报错。稳定基准与 add_hole/extrude 共用 _param_mid（UVBounds 中点）。"""
+    out = _run_in_env(runtime_env,
+"from vibecad.engine.session import Session\n"
+"from vibecad.feedback import multiview\n"
+"from vibecad.tools import assembly, features, modeling\n"
+"s = Session()\n"
+"modeling.new_document(s, 'alignstable')\n"
+"# 底板（active）：标注 → 打 d8 盲孔（孔心 (10,20) 精确基线）\n"
+"s.new_part('底板')\n"
+"modeling.add_box(s, 60, 40, 10)\n"
+"png_b, t_b, fr_b, er_b = multiview.render_multiview(s.get_result_shape())\n"
+"s.set_labels(fr_b, er_b, shown=set(t_b.keys()), part='底板')\n"
+"top_base = next(lab for lab, d in t_b.items() if '顶面' in d)\n"
+"r1 = features.add_hole(s, top_base, diameter=8, depth=5, offset=[-20, 0])\n"
+"assert r1['ok'], r1\n"
+"c1 = [(f.Surface.Center.x, f.Surface.Center.y)\n"
+"      for f in s.get_result_shape('底板').Faces\n"
+"      if type(f.Surface).__name__ == 'Cylinder'\n"
+"      and abs(f.Surface.Radius - 4.0) < 1e-3]\n"
+"assert len(c1) == 1 and abs(c1[0][0] - 10) < 1e-3 and abs(c1[0][1] - 20) < 1e-3, c1\n"
+"# 打孔使底板标签过期 → 重新标注\n"
+"png_b2, t_b2, fr_b2, er_b2 = multiview.render_multiview(s.get_result_shape())\n"
+"s.set_labels(fr_b2, er_b2, shown=set(t_b2.keys()), part='底板')\n"
+"top_base2 = next(lab for lab, d in t_b2.items() if '顶面' in d)\n"
+"# 盖板（无孔）\n"
+"s.new_part('盖板')\n"
+"modeling.add_box(s, 60, 40, 5)\n"
+"png_l, t_l, fr_l, er_l = multiview.render_multiview(s.get_result_shape())\n"
+"s.set_labels(fr_l, er_l, shown=set(t_l.keys()), part='盖板')\n"
+"bot_lid = next(lab for lab, d in t_l.items() if '底面' in d)\n"
+"# align：盖板底面贴底板带孔顶面\n"
+"r = assembly.align_parts(s, '盖板', bot_lid, '底板', top_base2)\n"
+"assert r['ok'], r\n"
+"# 盖板底面全局中心必须精确 (30,20,10)——盖板无孔，底面 CenterOfMass 即几何中心\n"
+"lid_shape_global = s.get_result_shape('盖板').transformed(\n"
+"    s._parts['盖板']['container'].Placement.toMatrix())\n"
+"lid_bot_face = min(\n"
+"    (f for f in lid_shape_global.Faces if f.Area > 1),\n"
+"    key=lambda f: f.CenterOfMass.z)\n"
+"c = lid_bot_face.CenterOfMass\n"
+"assert abs(c.x - 30.0) < 1e-3, f'盖板底面中心 x 期望 30.0，得到 {c.x:.4f}'\n"
+"assert abs(c.y - 20.0) < 1e-3, f'盖板底面中心 y 期望 20.0，得到 {c.y:.4f}'\n"
+"assert abs(c.z - 10.0) < 1e-3, f'盖板底面全局 z 期望 10.0，得到 {c.z:.4f}'\n"
+"print('ALIGN_CENTER_STABLE_OK')\n"
+)
+    assert "ALIGN_CENTER_STABLE_OK" in out
 
 
 @pytest.mark.slow

@@ -76,7 +76,8 @@ def _inplane_axes(n) -> tuple[tuple[float, float, float], tuple[float, float, fl
 
 
 def _param_mid(face: Any) -> tuple[float, float]:
-    """面参数范围（UVBounds）中点——offset 原点的稳定基准。
+    """面参数范围（UVBounds）中点——offset/对齐原点的稳定基准
+    （add_hole / extrude_profile / align_parts 共用）。
     内孔的 uv 范围是外环子集，不影响 UVBounds；CenterOfMass 是减除孔面积后的质心，
     带孔面上会漂移（真机实测 d8 孔致 0.44mm 偏差，对称孔阵列静默不对称）甚至落孔上。"""
     u0, u1, v0, v1 = face.ParameterRange

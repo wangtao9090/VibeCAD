@@ -16,7 +16,7 @@ from vibecad.tools._integrity import (
     cut_tool_radii,
     hole_count_snapshot,
 )
-from vibecad.tools.features import _inplane_axes, _outward_normal
+from vibecad.tools.features import _inplane_axes, _outward_normal, _param_mid
 
 _PROFILE_REQUIRED: dict[str, tuple[str, ...]] = {
     "rect": ("length", "width"),
@@ -137,6 +137,7 @@ def extrude_profile(session: Session, profile, height: float,
     face=标签 → R5 面标签解析 + 平面校验 + e1/e2 坐标系放置。
     取向约定：profile 局部 X=面内 u（e1）、局部 Y=面内 v（e2）——rect 的 length 沿 e1、
     width 沿 e2，与 offset 的 (u, v) 同一坐标系（旋转用 e1/e2/n 显式矩阵，取向确定）。
+    offset 原点=面外边界包络中点（矩形面即几何中心，不随既有孔漂移，与 add_hole 同基准）。
     pad：沿面外法向拉 height，与基体 Part::Fuse（空文档直接成首个零件）。
     pocket：沿面内法向挖深 height，Part::Cut（无基体 ValueError）。
     断言：pad 体积增量 ≈ area×height（双边 1%+1e-6）+ 孔密封内腔探针（pad 盖住
@@ -206,7 +207,9 @@ def extrude_profile(session: Session, profile, height: float,
                 n_vec = _outward_normal(shape, face_obj)
                 nx, ny, nz = n_vec.x, n_vec.y, n_vec.z
                 e1_tup, e2_tup = _inplane_axes((nx, ny, nz))
-                c = face_obj.CenterOfMass
+                # offset 原点=面外边界包络中点（与 add_hole 同 _param_mid 基准
+                # ——CenterOfMass 在带孔面上漂移，轮廓会静默偏位）
+                c = face_obj.valueAt(*_param_mid(face_obj))
                 cx = c.x + e1_tup[0] * float(offset[0]) + e2_tup[0] * float(offset[1])
                 cy = c.y + e1_tup[1] * float(offset[0]) + e2_tup[1] * float(offset[1])
                 cz = c.z + e1_tup[2] * float(offset[0]) + e2_tup[2] * float(offset[1])

@@ -567,7 +567,8 @@ def extrude_profile(profile: dict, height: float, face: str | None = None,
     profile 示例：{"type":"rect","length":20,"width":10}、{"type":"circle","radius":5}、
     {"type":"slot","length":20,"width":8}、{"type":"polygon","points":[[0,0],[10,0],[0,8]]}。
     face=面标签（来自标注图，见 render_part(annotate='faces') 返回的标签表）；省略=全局 XY 平面。
-    offset=[u,v] 面内毫米偏移轮廓中心；height=拉伸高度（mm）；operation=pad|pocket。"""
+    offset=[u,v] 面内毫米偏移轮廓中心（原点=面外边界包络中点，矩形面即几何中心，
+    不随已打的孔漂移）；height=拉伸高度（mm）；operation=pad|pocket。"""
     guard = _runtime_guard()
     if guard:
         return guard
@@ -643,7 +644,8 @@ def align_parts(moving_part: str, moving_face: str,
                 allow_interference: bool = False) -> Any:
     """面贴面对齐：moving_part 的 moving_face 贴向 target_part 的 target_face。
     面标签来自 render_part(annotate='faces') 的标签表（每零件需分别标注）。
-    offset=[u,v]：面内毫米偏移（默认 [0,0] 面心对齐）。
+    offset=[u,v]：面内毫米偏移（默认 [0,0]=两面基准点对齐；基准=面外边界包络
+    中点，矩形面即几何中心，不随已打的孔漂移）。
     gap：贴合间隙（mm，0=接触，正值=间隙，负值=叠入）。
     allow_interference=True：允许干涉放行（默认 False=检测到干涉则拒绝）。
     成功后自动附三视图拼图。"""

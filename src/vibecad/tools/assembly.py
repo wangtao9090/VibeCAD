@@ -361,8 +361,9 @@ def align_parts(
     - moving_part/moving_face/target_part/target_face 非空
     - moving_part != target_part（不同零件）
     - gap 有限数字
-    流程：校验 → 事务 → resolve_face（跨零件标签）→ 取全局法向/面心（经容器
-    Placement 变换）→ _align_placement → 结果 Placement 左乘到 moving 容器
+    流程：校验 → 事务 → resolve_face（跨零件标签）→ 取全局法向/面基准点（经容器
+    Placement 变换；基准=面外边界包络中点，不随既有孔漂移）→ _align_placement
+    → 结果 Placement 左乘到 moving 容器
     现有 Placement → recompute → 干涉断言 → 每零件完整性守卫 → result。
     """
     # --- 校验 ---
@@ -381,7 +382,11 @@ def align_parts(
         raise ValueError(f"gap 必须是有限数字（得到 {gap!r}）")
 
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
-    from vibecad.tools.features import _inplane_axes, _outward_normal  # noqa: PLC0415
+    from vibecad.tools.features import (  # noqa: PLC0415
+        _inplane_axes,
+        _outward_normal,
+        _param_mid,
+    )
 
     with session._transaction(f"align_parts:{moving_part}→{target_part}"):
         with silence_fd1():
@@ -411,9 +416,11 @@ def align_parts(
             m_global_n.normalize()
             t_global_n.normalize()
 
-            # 面心：全量 Placement.multVec（含平移）
-            m_local_c = m_face.CenterOfMass
-            t_local_c = t_face.CenterOfMass
+            # 面基准点：全量 Placement.multVec（含平移）。基准=面外边界包络中点
+            # （与 add_hole/extrude_profile 同 _param_mid 基准——CenterOfMass 在
+            # 带孔面上漂移，贴合会静默偏位、两零件边缘不齐平）
+            m_local_c = m_face.valueAt(*_param_mid(m_face))
+            t_local_c = t_face.valueAt(*_param_mid(t_face))
             m_global_c = m_pl.multVec(m_local_c)
             t_global_c = t_pl.multVec(t_local_c)
 
