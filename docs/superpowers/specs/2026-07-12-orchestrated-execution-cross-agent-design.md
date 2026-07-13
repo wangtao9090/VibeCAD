@@ -174,12 +174,12 @@ orchestrated-execution/
 │   ├── platform-openclaw.md
 │   └── platform-generic.md
 └── scripts/
-    └── validate-portability.py
+    └── validate_portability.py
 ```
 
 现有 `planning.md`、`gates.md`、`ledger.md` 以最小改写为原则；`delegation.md` 是主要语义改造点。
 
-`validate-portability.py` 只做确定性静态检查：
+`validate_portability.py` 只做确定性静态检查：
 
 - 根 frontmatter 与名称合法；
 - 所有直接引用存在且不逃逸 Skill 目录；
@@ -264,7 +264,7 @@ orchestrated-execution/
 ### 验收门禁
 
 1. Codex `quick_validate.py` 通过。
-2. `validate-portability.py` 通过。
+2. `validate_portability.py` 通过。
 3. 所有 reference 路径解析通过。
 4. Codex 压力场景全部通过。
 5. Claude、WorkBuddy 发现测试通过；OpenClaw 官方扫描路径与 package 静态兼容检查通过，runtime smoke 明确登记为外部待验。
