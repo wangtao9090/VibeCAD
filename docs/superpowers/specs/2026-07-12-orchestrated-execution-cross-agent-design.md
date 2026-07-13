@@ -1,6 +1,6 @@
 # Orchestrated Execution 跨 Agent Skill 设计
 
-> 状态：Proposed（待书面规格审阅）  
+> 状态：Approved（2026-07-12；同日修订：本机不安装 OpenClaw）
 > 日期：2026-07-12  
 > 范围：先完成通用编排 Skill，再继续 VibeCAD Agent Harness  
 > 原始 Skill：`~/.claude/skills/orchestrated-execution`
@@ -29,7 +29,7 @@
 4. Skill 启动后先识别宿主能力，再选择适配器；不得直接假定 Claude 工具存在。
 5. 有原生 Plan/Agent/Memory/Process Session 时使用原生能力；没有时有确定性的串行降级路径。
 6. 不论宿主能力如何，用户批准门禁、每 commit 验证、残差登记和状态快照不得降级消失。
-7. Codex 完成 RED→GREEN 前向测试；其余宿主完成发现测试与至少一条编排 smoke。
+7. Codex 完成 RED→GREEN 前向测试；Claude 与 WorkBuddy 完成发现测试和编排 smoke；OpenClaw 完成官方发现路径与静态兼容验证，runtime smoke 作为外部待验残差，不在本机安装 runtime。
 8. Skill 本体通过结构校验、引用完整性检查和平台专属术语越界扫描。
 
 ## 3. 非目标
@@ -39,6 +39,7 @@
 - 不保证所有宿主都支持并行 subagent；缺失能力时允许串行执行。
 - 不把平台安装说明、历史复盘或用户文档塞进 `SKILL.md`。
 - 不在本阶段发布公共 ClawHub/SkillHub/Codex Plugin；先完成本机通用版本与验证。
+- 不在本机安装 OpenClaw；不得为了 smoke 扩大宿主安装范围。
 
 ## 4. 平台事实与共同基础
 
@@ -258,8 +259,8 @@ orchestrated-execution/
 2. `validate-portability.py` 通过。
 3. 所有 reference 路径解析通过。
 4. Codex 压力场景全部通过。
-5. Claude、WorkBuddy、OpenClaw 发现测试通过。
-6. 原 Claude Skill 有可恢复备份，四端均指向同一 canonical realpath。
+5. Claude、WorkBuddy 发现测试通过；OpenClaw 官方扫描路径与 package 静态兼容检查通过，runtime smoke 明确登记为外部待验。
+6. 原 Claude Skill 有可恢复备份；Claude、WorkBuddy symlink 与 Codex/OpenClaw 扫描目标均收敛到同一 canonical path/hash。
 
 ## 11. 修改边界
 
