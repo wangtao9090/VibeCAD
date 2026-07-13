@@ -148,6 +148,14 @@ adapter 可映射到具体模型。宿主不允许选模型时，忽略分级而
 
 根 frontmatter 保持最小共同集合；不加入某一平台独占字段。
 
+### G-1/G-2 实施补充
+
+以下是对实施阶段的授权补充，不改写 D-1 至 D-9：
+
+- **G-1 备份授权：** 迁移 Claude Skill 前，允许使用 UTC `STAMP` 创建唯一可恢复备份路径 `~/.claude/skill-backups/orchestrated-execution-${STAMP}`。备份必须先完成并校验，失败时按计划原位恢复。
+- **G-2 私有仓库授权：** 允许创建私有仓库 `wangtao9090/orchestrated-execution`，并以 `~/.agents/skills/orchestrated-execution` 作为 canonical checkout；Skill 本体的 commit/push 在该私有仓库中完成。
+- **OpenClaw 边界：** 本机不得安装 OpenClaw。仅进行官方发现路径、canonical package 和 adapter 的静态兼容验证，并将 runtime smoke 保留为外部待验项；不得改动 D-1 至 D-9 或扩大本机宿主安装范围。
+
 ## 6. 目标包结构
 
 ```text

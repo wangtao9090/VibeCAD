@@ -1,0 +1,15 @@
+adapter: Codex 原生适配
+
+capability_profile: approval=Plan artifact；delegation=spawn/send/wait agent；persistence=Plan artifact；process=session command + poll
+
+model_tier: 主模型
+
+approval_gate: 用户批准书面计划前，不得执行迁移或委派 agent
+
+exact_tools: plan artifact、spawn agent、send agent、wait agent、session command、poll
+
+state_source: Plan artifact
+
+next_action: 立即暂停，创建并提交剩余迁移计划及逐 commit 门禁，等待用户书面批准
+
+continue_or_stop: stop

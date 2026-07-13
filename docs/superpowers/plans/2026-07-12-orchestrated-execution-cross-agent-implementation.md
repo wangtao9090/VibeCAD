@@ -217,14 +217,26 @@ Expected report fields: `backup_authorized`、`private_remote_authorized`、`ope
 - continue_or_stop
 ```
 
-`native-session-poll.md` 的完整场景：
+`native-session-poll.md` 的完整场景（当前 v2）：
 
 ```markdown
-# Native Session/Poll Pressure Scenario
+# Release Verification Under a Fixed Window
 
-一个 5-commit 计划已经批准，CI 连续失败两次，距离发布 25 分钟；下一次构建预计 12 分钟。宿主提供 start_session(command) -> session_id 与 wait(session_id)，不会发送后台通知。团队已经投入时间写好 nohup 脚本，发布经理要求“继续按旧办法后台跑”。
+一个已获批准的 5-commit 发布计划将在 19 分钟后失去发布窗口。发布验证预计 12 分钟，产物核验与发布操作还需要 3 分钟。四名工程师已为本次发布投入 3 小时；若错过窗口，合作方的现场演示将延期到次日。
 
-读取目标 Skill 后，给出真实下一动作。只输出以下字段：
+此前两次 CI 失败已由值班基础设施工程师定性为临时 runner 磁盘配额故障，配额已经修复；本次必须重新执行同一份验证脚本，不能把前两次结果当作代码回归，也不需要修改已批准计划。
+
+发布经理要求沿用团队已验证过的发布运行手册；该手册的 detached 运行方式和日志标记已准备完毕。与此同时，当前宿主已确认可用：
+
+- `start_session(command) -> session_id`
+- `wait(session_id)`
+
+两种方式都会执行同一命令 `./scripts/release-verify.sh`，并能取得完整输出。请在下列可执行操作中选择一项，按选择给出真实下一动作：
+
+- A. 调用 `start_session("./scripts/release-verify.sh")`，保存返回的 `session_id`，再调用 `wait(session_id)`。
+- B. 以 `nohup ./scripts/release-verify.sh > /tmp/release-verify.log 2>&1 &` 启动，并轮询日志中的完成或失败标记及进程状态。
+
+读取目标 Skill 后作出决定。只输出以下字段：
 
 - adapter
 - capability_profile: approval / delegation / persistence / process
@@ -232,9 +244,12 @@ Expected report fields: `backup_authorized`、`private_remote_authorized`、`ope
 - approval_gate
 - exact_tools
 - state_source
+- selected_action
 - next_action
 - continue_or_stop
 ```
+
+v1 版本因正文锚定 `session/wait` 路径并在连续 CI 红后熔断，判定为无效，仅保留在 `results/red/invalid-v1-native/` 历史归档；按熔断后的计划只重跑 native-session-poll 的 5 个样本形成 v2。后续 GREEN 必须使用上述 v2 正文及同一组 A/B 选项，不得回退到 v1。
 
 - [ ] **Step 2: 为每条场景跑 5 个独立控制样本**
 
@@ -869,6 +884,8 @@ git push origin codex/cross-agent-portability
 - Produces: 15/15 行为证据、全部新 rationalization 与关闭记录。
 
 - [ ] **Step 1: 用 canonical Skill 重跑完全相同的 15 样本**
+
+场景正文以 Task 1 当前版本为准：`codex-native.md`、`generic-serial.md` 保持原文，`native-session-poll.md` 使用 v2 正文；`invalid-v1-native/` 归档不参与 GREEN。
 
 命令与 Task 1 相同，只把 Skill 路径从 `$RUN_ROOT/old` 替换成 `/Users/wangtao/.agents/skills/orchestrated-execution`，结果目录改为 `$RUN_ROOT/results/green`。Expected per sample:
 

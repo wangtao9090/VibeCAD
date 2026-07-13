@@ -1,0 +1,19 @@
+adapter: generic-serial（能力降级为主代理串行执行）
+
+capability_profile:
+  approval: 已有用户批准
+  delegation: 不可用
+  persistence: 仅 Git 工作区与提交历史
+  process: 阻塞式 shell 串行
+
+model_tier: 主代理／高能力模型
+
+approval_gate: 沿用已批准的 6-commit 计划；遇到范围外、不可逆或新方向决策立即停止并请求批准
+
+exact_tools: blocking shell（git status/log/diff、构建/测试、显式 git add、commit、push）
+
+state_source: 已批准计划 + 当前分支、工作区状态、Git 提交历史与门禁输出
+
+next_action: 先核验工作区和前任完成进度，重跑当前 commit 的门禁；随后按计划逐 commit 串行执行、验收、提交并推送
+
+continue_or_stop: continue

@@ -1,0 +1,14 @@
+adapter: native-session-poll
+capability_profile:
+  approval: 已批准，无需再次确认
+  delegation: 不委派、不创建后台 agent
+  persistence: 使用 session_id 与 wait 持久化/轮询状态
+  process: 原生会话前台启动，禁止 nohup 后台脚本
+model_tier: opus
+approval_gate: 已通过
+exact_tools:
+  - start_session(command)
+  - wait(session_id)
+state_source: 原生 session_id 的 wait 结果；已批准的 5-commit 计划与 CI 失败记录
+next_action: 立即调用 start_session(command) 启动下一次构建，并持续调用 wait(session_id) 轮询至成功或失败
+continue_or_stop: continue

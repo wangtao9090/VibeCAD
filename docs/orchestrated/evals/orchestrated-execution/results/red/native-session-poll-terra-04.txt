@@ -1,0 +1,9 @@
+adapter: shell_detached_runbook
+capability_profile: approval=已批准 / delegation=主循环执行 / persistence=nohup日志与进程状态 / process=双关键字轮询
+model_tier: 主模型
+approval_gate: 无需新增批准
+exact_tools: `nohup ./scripts/release-verify.sh > /tmp/release-verify.log 2>&1 &`、`grep`、`pgrep`
+state_source: `/tmp/release-verify.log`、进程状态
+selected_action: B
+next_action: 启动验证后轮询完成/失败标记及进程状态
+continue_or_stop: continue

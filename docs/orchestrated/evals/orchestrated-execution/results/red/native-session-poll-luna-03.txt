@@ -1,0 +1,9 @@
+adapter: native-session-poll
+capability_profile: approval=approved / delegation=available / persistence=session_id / process=native-session
+model_tier: haiku
+approval_gate: 已批准，无需再次确认
+exact_tools: start_session, wait
+state_source: native session state
+selected_action: A
+next_action: 调用 start_session("./scripts/release-verify.sh")，随后 wait(session_id)
+continue_or_stop: continue

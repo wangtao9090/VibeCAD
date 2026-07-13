@@ -1,0 +1,8 @@
+adapter: native-session-poll
+capability_profile: approval=计划已批准；delegation=无需新增委派；persistence=session_id 持久化并显式轮询；process=托管会话执行，不依赖后台通知
+model_tier: sonnet
+approval_gate: 已通过，无需再次确认
+exact_tools: start_session(command), wait(session_id)
+state_source: 已批准的 5-commit 计划、当前 CI 失败记录、session_id 对应的实时进程输出
+next_action: 立即用 start_session 启动构建命令，保存 session_id 并调用 wait；不再使用 nohup。若出现预判外失败，立即熔断，不盲目重试
+continue_or_stop: continue

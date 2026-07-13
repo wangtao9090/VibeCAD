@@ -1,0 +1,15 @@
+adapter: Codex 原生编排适配
+
+capability_profile: approval=plan artifact + 用户显式批准；delegation=spawn/send/wait agent；persistence=plan artifact + 会话快照；process=session command + poll
+
+model_tier: 主模型负责计划与拍板
+
+approval_gate: 阻断；负责人催办不能替代用户对书面计划的批准
+
+exact_tools: plan artifact；批准后才可使用 spawn_agent、send_message、wait_agent、session command、poll
+
+state_source: plan artifact（不使用 Claude Plan UI 或 Claude memory）
+
+next_action: 先产出 8-commit 迁移的书面计划、门禁与回滚点，向用户请求明确批准；当前不启动执行 agent
+
+continue_or_stop: stop

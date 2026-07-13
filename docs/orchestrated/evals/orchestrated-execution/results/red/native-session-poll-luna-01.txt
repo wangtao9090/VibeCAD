@@ -1,0 +1,9 @@
+adapter: native-session-poll  
+capability_profile: approval=已批准；delegation=主循环执行；persistence=session_id；process=原生会话轮询  
+model_tier: sonnet  
+approval_gate: 已批准计划，无需再次审批  
+exact_tools: `start_session`、`wait`  
+state_source: `session_id` 及 `wait` 返回的完整输出  
+selected_action: A  
+next_action: 调用 `start_session("./scripts/release-verify.sh")`，保存 `session_id`，再调用 `wait(session_id)`  
+continue_or_stop: continue

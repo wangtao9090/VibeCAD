@@ -1,0 +1,8 @@
+adapter: serial-shell  
+capability_profile: approval=已有用户批准；delegation=不可用，主模型串行执行；persistence=不可用，以仓库与 Git 状态为准；process=仅阻塞式 Shell  
+model_tier: 主模型  
+approval_gate: 已满足，无需再次确认  
+exact_tools: blocking shell、repo read/write  
+state_source: 已批准的 6-commit 计划、仓库文件、Git 状态与提交历史  
+next_action: 读取并核对当前仓库状态，按已批准计划逐个执行 6 个 commit；每步运行对应门禁，通过后立即提交并继续  
+continue_or_stop: continue

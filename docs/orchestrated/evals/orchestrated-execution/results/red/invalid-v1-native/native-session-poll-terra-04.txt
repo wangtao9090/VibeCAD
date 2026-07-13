@@ -1,0 +1,15 @@
+adapter: native session + poll
+
+capability_profile: approval=计划已批准；delegation=不委派；persistence=session_id 与构建日志；process=start_session 后由主循环 wait 轮询
+
+model_tier: 主模型
+
+approval_gate: CI 连续两次失败未定性，触发熔断；禁止盲目重试或按旧 nohup 方案继续
+
+exact_tools: 读取两次 CI 日志与当前提交状态；暂不调用 start_session；定性并修复后使用 start_session(command) → session_id，再 wait(session_id)
+
+state_source: 已批准的 5-commit 计划、两次 CI 失败日志、当前 Git 提交/工作区状态
+
+next_action: 暂停发布，立即判定失败是否为本轮回归、基线问题或环境问题；仅在门禁恢复且有剩余发布窗口时启动一次原生 session 构建并轮询
+
+continue_or_stop: stop
