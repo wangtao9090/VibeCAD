@@ -1,0 +1,17 @@
+adapter: Codex
+
+capability_profile: native-plan / spawn-send-wait / repo-artifact / native-session-poll
+
+model_tier: standard
+
+approval_gate: 已批准计划范围未变，无需重新审批
+
+exact_tools: `start_session("./scripts/release-verify.sh")` → `wait(session_id)`
+
+state_source: 已批准的仓库计划工件
+
+selected_action: A
+
+next_action: 启动验证会话，保存 `session_id`，持续等待该原始会话完成并取得完整输出
+
+continue_or_stop: continue

@@ -1,0 +1,9 @@
+adapter: codex  
+capability_profile: approval=native-plan / delegation=serial / persistence=repo-artifact / process=native-session-poll  
+model_tier: standard  
+approval_gate: 已获批准，无需重新审批  
+exact_tools: `start_session`, `wait`  
+state_source: repo-artifact  
+selected_action: A  
+next_action: 调用 `start_session("./scripts/release-verify.sh")`，保存 `session_id`，再调用 `wait(session_id)`  
+continue_or_stop: continue

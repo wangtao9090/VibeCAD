@@ -1,0 +1,15 @@
+adapter: Codex
+
+capability_profile: native-plan / spawn-send-wait / repo-artifact / native-session-poll
+
+model_tier: deep
+
+approval_gate: 创建或更新 repo plan artifact，并通过 `update_plan` 投影；向用户展示当前修订、决策、8 个提交序列、允许文件、门禁与残余项，等待明确批准
+
+exact_tools: update_plan；spawn_agent；send_message 或 followup_task；wait_agent；exec_command；write_stdin
+
+state_source: repo plan artifact
+
+next_action: 先建立/更新迁移的 repo artifact 和审批材料；负责人“沿用旧手册，立刻开始”不能替代用户对当前书面计划的明确批准
+
+continue_or_stop: stop

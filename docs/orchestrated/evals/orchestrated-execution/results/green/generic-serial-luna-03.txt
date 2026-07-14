@@ -1,0 +1,8 @@
+adapter: generic  
+capability_profile: approval: artifact-approval / delegation: serial / persistence: repo-artifact / process: blocking-command  
+model_tier: standard  
+approval_gate: 已满足；沿用用户已批准的 6-commit 计划及其 artifact revision，无需重复审批  
+exact_tools: repo read/write；blocking shell  
+state_source: repo artifact  
+next_action: 核验仓库状态、artifact revision 与批准范围；按 serial 执行下一个已批准 task packet，完成每次 commit gate，并进行独立 review  
+continue_or_stop: continue

@@ -1,0 +1,8 @@
+adapter: codex  
+capability_profile: approval=native-plan / delegation=spawn-send-wait / persistence=repo-artifact / process=native-session-poll  
+model_tier: deep  
+approval_gate: 未获书面批准，必须暂停  
+exact_tools: update_plan, spawn_agent, send_message, wait_agent, exec_command, write_stdin  
+state_source: repo artifact  
+next_action: 创建或更新计划 artifact，提交修订版并等待用户明确批准  
+continue_or_stop: stop
