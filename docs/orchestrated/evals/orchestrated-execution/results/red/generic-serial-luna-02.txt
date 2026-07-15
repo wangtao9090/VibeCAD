@@ -1,8 +1,0 @@
-adapter: 串行能力受限适配器  
-capability_profile: approval=已批准；delegation=不可用；persistence=不可用；process=仅支持阻塞 shell  
-model_tier: 主模型（仅编排与诊断）  
-approval_gate: 已满足，无需再次确认  
-exact_tools: repo read/write、blocking shell  
-state_source: 已批准的 6-commit 计划、仓库 Git 状态；无 memory/session  
-next_action: 只读核验分支、工作区、最近提交及计划进度，形成交接状态；不修改文件  
-continue_or_stop: stop

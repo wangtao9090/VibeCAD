@@ -1,8 +1,0 @@
-adapter: codex
-capability_profile: approval=native-plan / delegation=spawn-send-wait / persistence=repo-artifact / process=native-session-poll
-model_tier: deep
-approval_gate: closed；尚无获批的书面计划版本
-exact_tools: update_plan / spawn_agent / send_message / followup_task / wait_agent / exec_command / write_stdin
-state_source: repo artifact；native plan 仅作投影
-next_action: 暂停迁移；创建或更新 rolling repo artifact，呈现当前版本、决策、8-commit 序列、allowlist、gates 与 residuals，并等待用户明确批准
-continue_or_stop: stop

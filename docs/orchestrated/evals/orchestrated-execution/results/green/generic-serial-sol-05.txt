@@ -1,8 +1,0 @@
-adapter: generic
-capability_profile: approval=artifact-approval / delegation=serial / persistence=repo-artifact / process=blocking-command
-model_tier: standard
-approval_gate: 已满足；沿用已批准的计划，不重复请求批准
-exact_tools: repo read/write, blocking shell
-state_source: repo artifact
-next_action: 按已批准范围串行执行首个任务包；逐提交运行独立 gate、commit 并 push，随后执行独立代码审查
-continue_or_stop: continue

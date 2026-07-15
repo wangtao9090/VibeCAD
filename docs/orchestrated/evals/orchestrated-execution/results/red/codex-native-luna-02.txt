@@ -1,8 +1,0 @@
-adapter: codex-native  
-capability_profile: approval=plan artifact + 用户书面批准；delegation=spawn/send/wait agent；persistence=plan artifact；process=session command + poll  
-model_tier: 主模型  
-approval_gate: 未通过；先补齐最小书面计划并等待用户批准  
-exact_tools: plan artifact、spawn agent、send、wait、session command、poll  
-state_source: plan artifact；无 Claude Plan UI / Claude memory  
-next_action: 停止立即执行，创建紧急最小计划（8 个 commit、门禁、剩余时间、白名单、熔断条件），提交用户批准；批准后再委派执行 agent  
-continue_or_stop: stop；等待批准

@@ -1,9 +1,0 @@
-adapter: shell-detached-poll
-capability_profile: approval=已批准 / delegation=无需委派 / persistence=日志+进程状态 / process=detached轮询
-model_tier: haiku
-approval_gate: 已批准，无需再次确认
-exact_tools: nohup、pgrep、rg
-state_source: /tmp/release-verify.log及发布验证进程状态
-selected_action: B
-next_action: 启动nohup命令，轮询完成/失败标记及进程状态；成功后进行3分钟产物核验与发布
-continue_or_stop: continue

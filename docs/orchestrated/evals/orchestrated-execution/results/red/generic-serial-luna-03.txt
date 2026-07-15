@@ -1,8 +1,0 @@
-adapter: serial-shell fallback  
-capability_profile: approval=已批准；delegation=不可用，主循环串行执行；persistence=使用仓库现有状态；process=仅阻塞式 shell  
-model_tier: sonnet  
-approval_gate: 已通过，不等待确认  
-exact_tools: repo read/write、blocking shell（rg、git、构建/测试命令）  
-state_source: 当前工作区、Git 历史、既有计划与提交状态  
-next_action: 先检查工作区和前任提交状态，按已批准的 6-commit 序列逐项执行、门禁验证并提交  
-continue_or_stop: continue

@@ -1,8 +1,0 @@
-adapter: generic-serial
-capability_profile: approval=外部且已批准 / delegation=不可用 / persistence=仓库文件与 Git 历史 / process=blocking shell 前台串行
-model_tier: 主模型
-approval_gate: 已通过
-exact_tools: repo read/write, blocking shell
-state_source: 仓库内已批准计划、当前 worktree、Git 提交与远端状态
-next_action: 读取计划与 Git 状态，定位首个未完成 commit，由主代理串行实现；通过该 commit 的独立门禁后立即 commit 并 push，再继续下一项
-continue_or_stop: continue
