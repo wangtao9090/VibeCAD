@@ -19,7 +19,7 @@
 | 工具数 23 与 manifest.json / README 一致 | ✅ | 当前发布候选包含 4 个只读、4 个写盘、15 个会话内建模工具，共 23 个工具。 |
 | `docs/ACCEPTANCE_TESTS.md` 链接可达 | ✅ | GitHub 网页版 HTTP 200 |
 | CI 测试数字准确 | ⏳ 待发布门禁 | 发布候选预期为 415 条快测 + 76 条慢测；合入主线后须重新收集并以最终 CI 结果为准。 |
-| README 与本文档口径一致 | ⚠️ 附带发现，不阻塞提交 | README.md 第 11 行提到导出格式含「3D 打印 3MF、激光 DXF」，与当前 `export_part` 实际支持的 STEP/STL/glTF 不符（本文档 Long description 和 manifest.json 描述准确，未受影响，无需因此修改本文档） |
+| README 与本文档口径一致 | ✅ | README、manifest 与本文档均声明当前导出格式为 STEP / STL / glTF。 |
 
 **结论：本地提交材料已更新到 v0.3.0 口径，但尚未达到目录提交门禁。** GitHub Release、`VibeCAD.mcpb`、PyPI 和最终 CI 必须在正式发布后逐项核验；全部通过后方可提交目录审核。
 
