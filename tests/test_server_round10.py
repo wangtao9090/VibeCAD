@@ -17,13 +17,40 @@ def test_all_tools_have_annotations():
     assert not missing, f"缺 annotations 的工具：{missing}"
 
 
-def test_readonly_classification():
-    """只读工具集合显式锁死（防误标）。"""
-    tools = {t.name: t for t in server.mcp._tool_manager.list_tools()}
-    readonly = {n for n, t in tools.items() if t.annotations.readOnlyHint}
-    assert readonly == {"ping", "get_runtime_status", "describe_part"}
-
-    # render_part 可按 save_to 覆盖目标 PNG，并刷新标签状态：属于可能破坏性写操作。
-    render_annotations = tools["render_part"].annotations
-    assert render_annotations.readOnlyHint is False
-    assert render_annotations.destructiveHint is True
+def test_tool_annotation_safety_mapping():
+    """23 个工具的读写、破坏性、幂等和联网提示必须与真实副作用一致。"""
+    expected = {
+        "ping": (True, None, None, False),
+        "describe_part": (True, None, None, False),
+        "get_runtime_status": (False, False, True, False),
+        "ensure_runtime": (False, False, True, True),
+        "smoke_cad": (False, True, True, False),
+        "export_part": (False, True, True, False),
+        "render_part": (False, True, True, False),
+        "uninstall_runtime": (False, True, True, False),
+        "new_document": (False, False, False, False),
+        "add_box": (False, False, False, False),
+        "add_cylinder": (False, False, False, False),
+        "boolean_cut": (False, False, False, False),
+        "add_hole": (False, False, False, False),
+        "fillet_edges": (False, False, False, False),
+        "chamfer_edges": (False, False, False, False),
+        "modify_part": (False, False, False, False),
+        "move_part": (False, False, False, False),
+        "rotate_part": (False, False, False, False),
+        "extrude_profile": (False, False, False, False),
+        "new_part": (False, False, False, False),
+        "set_active_part": (False, False, False, False),
+        "place_part": (False, False, False, False),
+        "align_parts": (False, False, False, False),
+    }
+    actual = {
+        tool.name: (
+            tool.annotations.readOnlyHint,
+            tool.annotations.destructiveHint,
+            tool.annotations.idempotentHint,
+            tool.annotations.openWorldHint,
+        )
+        for tool in server.mcp._tool_manager.list_tools()
+    }
+    assert actual == expected
