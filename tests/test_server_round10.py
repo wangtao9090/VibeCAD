@@ -21,4 +21,9 @@ def test_readonly_classification():
     """只读工具集合显式锁死（防误标）。"""
     tools = {t.name: t for t in server.mcp._tool_manager.list_tools()}
     readonly = {n for n, t in tools.items() if t.annotations.readOnlyHint}
-    assert readonly == {"ping", "get_runtime_status", "describe_part", "render_part"}
+    assert readonly == {"ping", "get_runtime_status", "describe_part"}
+
+    # render_part 可按 save_to 覆盖目标 PNG，并刷新标签状态：属于可能破坏性写操作。
+    render_annotations = tools["render_part"].annotations
+    assert render_annotations.readOnlyHint is False
+    assert render_annotations.destructiveHint is True

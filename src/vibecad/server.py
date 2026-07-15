@@ -394,7 +394,7 @@ def _maybe_save(png: bytes, save_to: str | None) -> dict[str, str]:
         return {"save_error": f"保存失败：{exc}"}
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
 def render_part(view: str = "iso", annotate: str | None = None,
                 edges_of: str | None = None,
                 save_to: str | None = None) -> Any:

@@ -16,7 +16,7 @@
 | Homepage / Repository 链接可达 | ✅ | `github.com/wangtao9090/VibeCAD` HTTP 200 |
 | Privacy policy 链接可达 | ✅ | `github.com/.../blob/main/PRIVACY.md` HTTP 200 |
 | PRIVACY.md 内容与第 5 节摘要一致 | ✅ | 本地处理 / 一次性运行时下载 / 无遥测三点逐句对应 |
-| 工具数 23 与 manifest.json / README 一致 | ✅ | 当前发布候选包含 4 个只读、4 个写盘、15 个会话内建模工具，共 23 个工具。 |
+| 工具数 23 与 manifest.json / README 一致 | ✅ | 当前发布候选包含 3 个只读、5 个主动写文件/状态、15 个会话内建模工具，共 23 个工具。 |
 | `docs/ACCEPTANCE_TESTS.md` 链接可达 | ✅ | GitHub 网页版 HTTP 200 |
 | CI 测试数字准确 | ⏳ 待发布门禁 | 发布候选预期为 415 条快测 + 76 条慢测；合入主线后须重新收集并以最终 CI 结果为准。 |
 | README 与本文档口径一致 | ✅ | README、manifest 与本文档均声明当前导出格式为 STEP / STL / glTF。 |
@@ -46,16 +46,15 @@
 
 > 表单层文字说明用。manifest 不加 annotations（v0.4 schema `tools.items` 为 `additionalProperties: false`，加了 validate 必红）；运行时 `tools/list` 已带 ToolAnnotations。
 
-**Read-only — 只读（4）**：不修改任何状态，不写盘。
+**Read-only — 只读（3）**：不修改任何状态，不写盘。
 
 | Tool | Behavior |
 |---|---|
 | `ping` | Connectivity check; returns server version. |
 | `get_runtime_status` | Reports FreeCAD runtime install status (phase / percent). |
 | `describe_part` | Text diagnostics of the current model: volume, bounding box, center of mass. |
-| `render_part` | Renders PNG previews / three-view engineering drawings / annotated label images. |
 
-**Writes to disk — 写盘（4）**：仅这四个工具会落盘（安装或卸载运行时 / 导出文件）。
+**Primary file/state-writing — 主动写文件/状态（5）**：这些工具的主要行为会安装或卸载运行时、写出文件，或刷新会话标签状态。
 
 | Tool | Behavior |
 |---|---|
@@ -63,8 +62,9 @@
 | `uninstall_runtime` | Previews or, after explicit confirmation, removes VibeCAD's runtime, logs, and view cache from its own data directory without removing the extension itself. |
 | `smoke_cad` | Post-install smoke test: builds a 10×10×10 box in-process and exports a STEP file to verify the runtime. |
 | `export_part` | Exports manufacturable files (STEP / STL / glTF) to the user-specified output directory. |
+| `render_part` | Renders PNG previews / engineering drawings / label images, refreshes face or edge label state, and writes a PNG when `save_to` is supplied; this may overwrite an existing target PNG and is therefore potentially destructive. |
 
-**In-session model edits — 会话内模型修改（15）**：只操作会话内存中的 CAD 文档；每个操作是事务（失败完整回滚），带几何断言守卫（危险修改响亮拒绝）；不读写用户文件。
+**In-session model edits — 会话内模型修改（15）**：主要行为是修改会话内存中的 CAD 文档；每个操作是事务（失败完整回滚），带几何断言守卫（危险修改响亮拒绝）。自动生成预览时可能刷新或写入 VibeCAD 自有视图缓存，这是次要副作用；不会主动导出到用户指定路径。
 
 | Tool | Behavior |
 |---|---|
@@ -84,7 +84,7 @@
 | `place_part` | Part-level pose: moves/rotates a whole part with all its features. |
 | `align_parts` | Face-to-face alignment across parts with automatic interference check (overlap is loudly rejected and rolled back). |
 
-合计 4 + 4 + 15 = 23。
+合计 3 + 5 + 15 = 23。
 
 ---
 
