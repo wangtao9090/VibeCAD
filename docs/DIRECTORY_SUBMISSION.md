@@ -6,22 +6,22 @@
 
 ---
 
-## 0. 提交前置条件核对（复核于 2026-07-14，v0.3.0 待发布）
+## 0. 提交前置条件核对（复核于 2026-07-15，基于已发布 v0.3.0）
 
 | 项目 | 状态 | 说明 |
 |---|---|---|
-| GitHub Release v0.3.0 已发布 | ⏳ 待发布门禁 | 发布完成后确认 `releases/latest` 指向 `releases/tag/v0.3.0` 且页面可达。 |
-| `VibeCAD.mcpb` 资产可下载 | ⏳ 待发布门禁 | 发布完成后下载 `releases/latest/download/VibeCAD.mcpb`，校验 HTTP 状态与包完整性。 |
-| PyPI 0.3.0 已发布 | ⏳ 待发布门禁 | 发布完成后确认 `pypi.org/pypi/vibecad/json` 的 `info.version == 0.3.0`，并与 `pyproject.toml` 一致。 |
+| GitHub Release v0.3.0 已发布 | ✅ | `releases/latest` 已指向 `releases/tag/v0.3.0`，正式 Release 页面 HTTP 200。 |
+| `VibeCAD.mcpb` 资产可下载 | ✅ | Release 资产下载成功（125,452 bytes）；解包后 manifest 为 0.3.0、23 个工具，并通过 MCPB 2.1.2 schema 校验。 |
+| PyPI 0.3.0 已发布 | ✅ | PyPI `info.version == 0.3.0`；wheel/sdist 与干净本地构建 SHA-256 一致，全新环境安装后可加载 23 个工具并成功 `ping`。 |
 | Homepage / Repository 链接可达 | ✅ | `github.com/wangtao9090/VibeCAD` HTTP 200 |
 | Privacy policy 链接可达 | ✅ | `github.com/.../blob/main/PRIVACY.md` HTTP 200 |
 | PRIVACY.md 内容与第 5 节摘要一致 | ✅ | 本地处理 / 一次性运行时下载 / 无遥测三点逐句对应 |
-| 工具数 23 与 manifest.json / README 一致 | ✅ | 当前发布候选包含 2 个只读、6 个主动写文件/状态、15 个会话内建模工具，共 23 个工具。 |
+| 工具数 23 与 manifest.json / README 一致 | ✅ | 正式版包含 2 个只读、6 个主动写文件/状态、15 个会话内建模工具，共 23 个工具。 |
 | `docs/ACCEPTANCE_TESTS.md` 链接可达 | ✅ | GitHub 网页版 HTTP 200 |
-| CI 测试数字准确 | ⏳ 待发布门禁 | 发布候选预期为 415 条快测 + 76 条慢测；合入主线后须重新收集并以最终 CI 结果为准。 |
+| CI 测试数字准确 | ✅ | 主线 CI run 29397187277 全绿：415 条快测覆盖 Ubuntu x64/ARM、macOS、Windows；76 条真实 FreeCAD 慢测覆盖 Ubuntu、macOS、Windows。 |
 | README 与本文档口径一致 | ✅ | README、manifest 与本文档均声明当前导出格式为 STEP / STL / glTF。 |
 
-**结论：本地提交材料已更新到 v0.3.0 口径，但尚未达到目录提交门禁。** GitHub Release、`VibeCAD.mcpb`、PyPI 和最终 CI 必须在正式发布后逐项核验；全部通过后方可提交目录审核。
+**结论：v0.3.0 发布与目录提交门禁已全部核验通过。** GitHub Release、`VibeCAD.mcpb`、PyPI、工具元数据和三平台 CI 均与本文档口径一致，材料可提交目录审核。
 
 ---
 
@@ -112,8 +112,8 @@
 
 - **Manual acceptance**: [`docs/ACCEPTANCE_TESTS.md`](ACCEPTANCE_TESTS.md) — 13 conversational scenarios (handshake / runtime install and uninstall / modeling / hole patterns / slot pocket / assembly / interference guard / export / error recovery), plus a Windows manual-verification appendix.
   人工验收：13 个对话场景清单 + Windows 手动验证附录。
-- **Automated CI**: GitHub Actions — the v0.3.0 release candidate is expected to collect 415 fast tests plus 76 slow integration tests (real 2–3 GB runtime download and in-process FreeCAD modeling), across ubuntu / macos / windows. Re-collect after merging to main and use the final CI result as the release gate.
-  自动化 CI：v0.3.0 发布候选预期为 415 条快测 + 76 条慢速集成测试（真实运行时下载 + 进程内 FreeCAD 建模），覆盖 ubuntu / macos / windows 三平台；合入主线后重新收集，并以最终 CI 结果作为发布门禁。
+- **Automated CI**: GitHub Actions — v0.3.0 passed 415 fast tests across Ubuntu x64/ARM, macOS, and Windows, plus 76 slow integration tests (real 2–3 GB runtime download and in-process FreeCAD modeling) across Ubuntu, macOS, and Windows.
+  自动化 CI：v0.3.0 的 415 条快测已覆盖 Ubuntu x64/ARM、macOS、Windows；76 条慢速集成测试（真实运行时下载 + 进程内 FreeCAD 建模）已覆盖 Ubuntu、macOS、Windows，全部通过。
 
 ---
 
