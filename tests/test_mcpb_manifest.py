@@ -55,10 +55,13 @@ def test_manifest_uninstall_runtime_destructive_hint():
     assert tools["uninstall_runtime"].annotations.destructiveHint is True
 
 
-def test_manifest_long_description_mentions_clean_uninstall():
-    """long_description 需带"卸载零残留"卖点（Round 11 设计明细 3.3）。"""
-    m = _manifest()
-    assert "残留" in m["long_description"] or "全删" in m["long_description"]
+def test_manifest_long_description_describes_two_step_uninstall():
+    """运行时位于扩展目录外，描述必须给出准确的两步卸载流程。"""
+    description = _manifest()["long_description"]
+    assert "uninstall_runtime" in description
+    assert "预览和确认两段式" in description
+    assert "设置中移除扩展本体" in description
+    assert "移除扩展即可连引擎一起删除" not in description
 
 
 def test_mcpbignore_excludes_heavy_dirs():
