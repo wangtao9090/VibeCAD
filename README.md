@@ -21,16 +21,17 @@
 
 ## 首发形态：Chat-native 零安装
 
-用户无需安装 FreeCAD —— MCP server 首次运行自动拉取无头 FreeCAD 运行时（micromamba），
-每步回传文本诊断 + 软渲染图 + 可旋转 glTF 交互预览。装 FreeCAD 解锁 Live 模式是升级而非门槛。
+用户无需自行安装 FreeCAD —— MCP server 首次运行会通过 micromamba 自动安装无头 FreeCAD 运行时。
+每个成功建模步骤回传结构化文本结果和 PNG 软渲染图/工程图；如需 glTF，可调用
+`export_part(fmt="gltf")` 或 `export_part(fmt="all")` 按需导出，再交给外部查看器使用。
 
 ## 架构（方案 B：进程内自建）
 
 - **MCP 框架**：Python 官方 MCP SDK（FastMCP），stdio 起步
 - **几何引擎**：conda-forge FreeCAD 1.1+ 进程内 `import`
 - **运行时分发**：micromamba 自动安装（全平台矩阵）
-- **工具面**：纯语义工具（`add_hole`/`fillet_edges`/`assemble`/`fasten`），每工具事务 + 几何断言 + 规则检查
-- **反馈三级**：glTF artifact（主）/ 软渲染图 / 纯文本诊断
+- **工具面**：纯语义工具（`add_hole`/`fillet_edges`/`new_part`/`place_part`/`align_parts`），每工具事务 + 几何断言 + 规则检查
+- **反馈**：每步结构化文本 + PNG 软渲染图/工程图；glTF 由 `export_part` 按需导出
 
 ## 开发
 
