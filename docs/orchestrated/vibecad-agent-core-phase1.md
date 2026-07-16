@@ -240,7 +240,7 @@ environment, or FreeCAD installation directory may be committed.
 
 | ID | Residual | Disposition | Closure criterion |
 |---|---|---|---|
-| `R-A01` | Current baseline is dirty and unpushed | blocking prerequisite | `B1`–`B3` accepted, pushed, and worktree clean |
+| `R-A01` | Current baseline was dirty and unpushed | **closed** by B1–B3 review, push, and clean-tree verification | closed at `f2e60875b4c8fb6944cad1c0c75abe518015be82` |
 | `R-A02` | Exact origin of every pre-existing hunk has not been independently reviewed | inspect during G0 | reviewer accounts for all named-file diffs |
 | `R-A03` | PR creation is not authorized | intentional | user separately authorizes a PR |
 | `R-A04` | Python 3.13.14 skips Hatch's hidden editable `.pth`, so bare `uv run` cannot import this checkout | gate with `PYTHONPATH=src`; defer toolchain choice | separately approved packaging/toolchain fix makes bare README command pass |
@@ -458,6 +458,8 @@ Stage B may modify only:
 | `R-B02` | No reasoning-owner adapters yet | planned after stable contracts | adapter design and threat model approved |
 | `R-B03` | No transaction/checkpoint/rollback coordinator yet | planned execution stage | deterministic rollback tests pass |
 | `R-B04` | No photo/video-to-mesh, mesh-to-CAD, or simulation providers | architectural extension points only | provider contracts approved later |
+| `R-B05` | Contract parsing has no total node-count, serialized-byte, or string-length cap | defer to external ingress/Task Service where request-wide budgets can be enforced | approved ingress limits with adversarial wide-payload tests |
+| `R-B06` | The architecture's illustrative `ModelProgram.acceptance` array differs from C1's normative nested, versioned `AcceptanceSpec` mapping | record C1 interpretation; do not edit B3 architecture outside the C1 allowlist | user reviews the representation and the public Agent API documentation is aligned before exposure |
 | `R-B05` | Host has no worker model selector | accepted performance limitation | host exposes a live selector or routing is no longer needed |
 | `R-B06` | No PR creation in this campaign | intentional | user separately authorizes publication |
 
@@ -771,6 +773,118 @@ For every accepted commit append:
 - `B3 / independent review` — Verdict `ACCEPT`; no unresolved P0–P2. The
   reviewer inspected all eight product/architecture documents plus committed
   manifest/code/test facts and made no write, stage, commit, or push.
+- `B3 / commit and push` — Commit
+  `f2e60875b4c8fb6944cad1c0c75abe518015be82`
+  (`docs: document VibeCAD 0.4.0 and the target agent architecture`) contains
+  the nine exact B3 files and is pushed to
+  `origin/codex/agent-core-phase1`. HEAD and upstream matched and the worktree
+  was clean before Stage B ledger work began. `R-A01` is closed.
+
+### Task Packet `C1`
+
+1. **Authorization:** Revision R1, `A-001`, Stage B decisions `D-B01`–`D-B08`,
+   and commit plan `C1` are approved. This packet inherits all higher-priority
+   system, developer, and user instructions, applicable directory-scoped
+   repository instructions, and the host sandbox. It cannot expand permissions
+   or bypass any circuit breaker. Routine implementation judgments stay inside
+   the accepted contract boundary; product or architecture choices are logged
+   for the user rather than decided by the worker.
+2. **Workspace anchor:** Repository root
+   `/Users/wangtao/Documents/DevProject/vibecad`; branch
+   `codex/agent-core-phase1`; clean pushed anchor
+   `f2e60875b4c8fb6944cad1c0c75abe518015be82`. Modify only
+   `src/vibecad/workflow/__init__.py`,
+   `src/vibecad/workflow/contracts.py`,
+   `src/vibecad/workflow/errors.py`, `tests/test_workflow_contracts.py`, and
+   this campaign artifact. Existing server, tools, runtime, engine, manifest,
+   dependency metadata, other tests/docs, PRs, releases, and `main` are out of
+   scope.
+3. **Context:** Establish the first provider-neutral, pure-standard-library
+   workflow boundary. Define typed `schema_version=1` representations for
+   intent, acceptance criteria, model commands/programs, execution evidence,
+   normalized errors, and outcomes. Objects must round-trip through plain
+   mappings without FreeCAD, MCP, model SDKs, keys, network, filesystem side
+   effects, or arbitrary code. Supported values fail closed on booleans used as
+   integers, unknown fields, unsupported versions/enums, malformed collections,
+   and missing/blank identifiers. This commit defines data shape only; it does
+   not validate dependency graphs or execute programs.
+4. **Steps and gates:** Inspect package/test conventions; add a focused test
+   that fails for missing modules/behavior and record genuine RED before
+   implementation. Implement the smallest immutable dataclass/enums and stable
+   structured contract error needed for exact mapping round-trip and strict
+   parsing. Cover every contract's valid round-trip plus unsupported version,
+   invalid enum, unknown/missing field, malformed nested item, and import
+   boundary failures. Run the focused suite with `PYTHONPATH=src`, a clean
+   interpreter import assertion that no `FreeCAD`, `Part`, `mcp`, or model SDK
+   module was imported, Ruff on exact files, and `git diff --check`. A distinct
+   read-only reviewer evaluates schema stability, type traps, compatibility,
+   security, and scope. The controller alone accepts review, updates the
+   artifact, stages named files, commits, and pushes.
+5. **Execution discipline:** `spawn-send-wait`; the host has no model-tier
+   selector, so no standard/deep tier claim is made; `native-session-poll`.
+   Maximum two gate/repair attempts. Stop on an out-of-allowlist write, need for
+   a dependency/framework, schema/persisted behavior not settled by R1, import
+   of FreeCAD/MCP/model code, credential/network/file I/O, arbitrary-code field,
+   existing public API change, or failing required gate outside repair budget.
+6. **Delivery boundary:** The bounded implementer may inspect, add the genuine
+   RED test, implement only the four C1 code/test files, and run focused gates.
+   It must not edit this artifact, stage, commit, push, begin C2, or alter
+   existing product files. The distinct reviewer is read-only. Acceptance,
+   ledger updates, named staging, commit, and push are reserved for the
+   controller.
+7. **Final report:** Return anchor/end hashes; exact files changed; RED command
+   and failure reason; contract inventory and strictness rules; focused/import/
+   lint/diff gate outputs; reviewer findings and verdict; deviations/residuals;
+   staged scope; commit/push status; and final workspace state.
+
+### C1 Evidence
+
+- `C1 / genuine RED` — After the first focused fixture was added,
+  `UV_CACHE_DIR=/tmp/vibecad-c1-uv-cache PYTHONPATH=src uv run pytest -q
+  tests/test_workflow_contracts.py` exited 2 with
+  `ModuleNotFoundError: No module named 'vibecad.workflow'`. An earlier default
+  `uv` attempt hit the already-recorded sandbox/cache environment issue and is
+  not counted as behavioral RED.
+- `C1 / contract inventory` — Added pure-standard-library, frozen
+  `schema_version=1` contracts for `IntentAssumption`, `Intent`,
+  `AcceptanceCriterion`, `AcceptanceSpec`, `ModelCommand`, `ModelProgram`,
+  `ExecutionEvidence`, `StepError`, and `StepResult`; typed enums cover task,
+  acceptance, value-source, evidence, and accepted error taxonomies.
+  `ContractValidationError` is itself a strict, versioned, round-trippable
+  mapping with stable code and RFC 6901 input pointer.
+- `C1 / strict boundary` — Parsers reject missing/unknown fields, unsupported
+  versions/enums, blank identifiers/text, malformed nested collections,
+  booleans used as numbers, non-finite/negative elapsed values, non-JSON data,
+  signed integers outside IEEE-754's interoperable safe range, container depth
+  above 64, and cyclic JSON. Caller-owned payloads are copied and deeply frozen;
+  output contains only dict/list/scalars. Shared sibling aliases remain valid.
+  Pointer escaping is collision-free for `~`, `/`, indices, and controls;
+  exception rendering quotes path/message to prevent log-line injection.
+- `C1 / C4-ready result shape` — `StepResult` requires a generic deeply frozen
+  `value` and measured `elapsed_ms`. `StepError` requires explicit retryability,
+  user-input policy, related objects, and diagnostic artifacts. This prevents
+  C4 from inventing undocumented wrappers or adding unknown v1 fields later.
+- `C1 / repair RED→GREEN` — The independent review first rejected missing
+  result/error/version/path fields. The concentrated adversarial test set was
+  RED at collection because `errors.py` did not yet expose the shared schema
+  constant, then passed after implementation. A final probe produced
+  `1 failed, 74 passed` by showing that a 5,001-digit `schema_version` leaked
+  Python's integer-rendering error; safe-range validation was moved before all
+  interpolation. Final focused result: `75 passed`.
+- `C1 / gates` — Exact-file Ruff lint passed; Ruff format reports all four files
+  formatted; `git diff --check` passed. The managed runtime Python 3.12.13 at
+  `/Users/wangtao/Library/Application Support/VibeCAD/mamba/envs/vibecad/bin/python`
+  imported the checkout's workflow package without loading FreeCAD, Part, MCP,
+  Anthropic, OpenAI, Cohere, or Mistral modules.
+- `C1 / independent review` — Initial verdict `REJECT` identified one P1 and
+  five P2 schema/security gaps. After the concentrated repair and huge-version
+  regression repair, final verdict `ACCEPT`; no unresolved P0–P2. The reviewer
+  made no edit, stage, commit, or push.
+- `C1 / interpretations and residuals` — A nested, versioned
+  `AcceptanceSpec` is normative for C1; the raw acceptance array in the
+  architecture example is treated as illustrative. Total node/byte/string
+  limits remain deferred to the external ingress budget. These are recorded as
+  `R-B06` and `R-B05` for user review rather than silently expanded here.
 
 ## Recovery Snapshot
 
@@ -785,23 +899,22 @@ For every accepted commit append:
 ### 2. Current state
 
 - Approval: R1 approved by `A-001`.
-- Active stage: Stage A / packet `B3` accepted and ready to commit.
+- Active stage: Stage B / packet `C1` accepted and ready to commit.
 - Branch: `codex/agent-core-phase1`.
-- Anchor: `a0de03fba86b42cb595478502fdf3c74f2827eb0`.
-- Working tree: dirty only with planned B3 pre-existing changes plus this ledger
-  update.
-- Implementation/delegation/gates: B1, B2, and B3 complete and accepted.
-  Commits/pushes: B1 and B2 complete and pushed; B3 is ready for exact staging.
+- Anchor: `f2e60875b4c8fb6944cad1c0c75abe518015be82`.
+- Working tree: dirty only with the five exact C1 code/test/ledger paths.
+- Implementation/delegation/gates: Stage A complete; C1 implementation and
+  independent review accepted with all required gates green.
+- Commits/pushes: B1, B2, and B3 complete and pushed.
 
 ### 3. Next actions
 
-1. Stage exact B3 files plus ledger, inspect the staged diff, commit, and push.
-2. Confirm the worktree is clean and close `R-A01`.
-3. Issue the seven-section C1 packet before any Stage B implementation change.
+1. Stage exact C1 files plus ledger, inspect the staged diff, commit, and push.
+2. Confirm clean/upstream-equal state.
+3. Issue the seven-section C2 packet before registry implementation.
 
 ### 4. Blockers and residuals
 
-- `R-A01` blocks Stage B until the existing baseline is reviewed, gated,
-  committed, pushed, and clean.
+- `R-A01` is closed at the Stage B anchor.
 - No authorization blocker remains for R1; all scope and circuit breakers stay
   binding.
