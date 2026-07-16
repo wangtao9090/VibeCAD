@@ -1,4 +1,5 @@
 import vibecad.server as srv
+from vibecad.runtime import status
 
 
 def test_ping_has_version():
@@ -10,6 +11,75 @@ def test_status_shape(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))  # m-6：hermetic，不读真实 home
     d = srv.get_runtime_status()
     assert {"phase", "percent", "message", "error", "needs_reconnect"} <= set(d)
+
+
+def test_stale_ready_status_reports_lightweight_upgrade_only_when_safe(monkeypatch):
+    monkeypatch.setattr(
+        srv.status,
+        "read_status",
+        lambda: status.RuntimeStatus(phase=status.Phase.READY),
+    )
+    monkeypatch.setattr(srv.status, "runtime_ready", lambda: False)
+    monkeypatch.setattr(srv.status, "read_runtime_receipt", lambda: {"vibecad_version": "0.3.0"})
+    monkeypatch.setattr(
+        srv.status,
+        "runtime_recovery_kind",
+        lambda: status.RecoveryKind.UPGRADE_REQUIRED,
+    )
+
+    out = srv.get_runtime_status()
+
+    assert out["phase"] == "upgrade_required"
+    assert out["runtime_action"] == "upgrade_required"
+    assert "不会重新下载 FreeCAD" in out["message"]
+
+
+def test_stale_ready_status_reports_repair_when_env_is_not_compatible(monkeypatch):
+    monkeypatch.setattr(
+        srv.status,
+        "read_status",
+        lambda: status.RuntimeStatus(phase=status.Phase.READY),
+    )
+    monkeypatch.setattr(srv.status, "runtime_ready", lambda: False)
+    monkeypatch.setattr(srv.status, "read_runtime_receipt", lambda: None)
+    monkeypatch.setattr(
+        srv.status,
+        "runtime_recovery_kind",
+        lambda: status.RecoveryKind.REPAIR_REQUIRED,
+    )
+
+    out = srv.get_runtime_status()
+
+    assert out["phase"] == "repair_required"
+    assert out["runtime_action"] == "repair_required"
+    assert "2-3GB" in out["message"]
+
+
+def test_runtime_guard_ready_but_incompatible_distinguishes_upgrade_and_repair(monkeypatch):
+    monkeypatch.setattr(srv._installer, "is_ready", lambda: False)
+    monkeypatch.setattr(
+        srv.status,
+        "read_status",
+        lambda: status.RuntimeStatus(phase=status.Phase.READY),
+    )
+
+    monkeypatch.setattr(
+        srv.status,
+        "runtime_recovery_kind",
+        lambda: status.RecoveryKind.UPGRADE_REQUIRED,
+    )
+    upgrade = srv._runtime_guard()
+    assert upgrade["phase"] == "upgrade_required"
+    assert "不会重新下载 FreeCAD" in upgrade["message"]
+
+    monkeypatch.setattr(
+        srv.status,
+        "runtime_recovery_kind",
+        lambda: status.RecoveryKind.REPAIR_REQUIRED,
+    )
+    repair = srv._runtime_guard()
+    assert repair["phase"] == "repair_required"
+    assert "2-3GB" in repair["message"]
 
 
 def test_ensure_ready(monkeypatch):
@@ -29,6 +99,11 @@ def test_ensure_starts_bg(monkeypatch):
 
 def test_smoke_guard_not_ready(monkeypatch):
     monkeypatch.setattr(srv._installer, "is_ready", lambda: False)
+    monkeypatch.setattr(
+        srv.status,
+        "read_status",
+        lambda: status.RuntimeStatus(phase=status.Phase.NOT_STARTED),
+    )
     out = srv.smoke_cad()
     assert out["ok"] is False and "ensure_runtime" in out["message"]
 

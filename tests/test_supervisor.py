@@ -325,7 +325,7 @@ def test_spawn_real_cmd_uninstall_marker_falls_back_to_bootstrap(monkeypatch, tm
     待删标记 + 完整就绪运行时（强哨兵/ready 哨兵/conda python 齐备）→ _spawn 先
     兑现删除（home 消失），真实 _server_cmd 随之落回 bootstrap 解释器——绝不引用
     已删的 conda python。"""
-    from vibecad.runtime import paths
+    from vibecad.runtime import paths, status
 
     monkeypatch.delenv("VIBECAD_FREECAD_ENV", raising=False)
     home = tmp_path / "home"
@@ -333,7 +333,7 @@ def test_spawn_real_cmd_uninstall_marker_falls_back_to_bootstrap(monkeypatch, tm
     py = paths.active_runtime_python()
     py.parent.mkdir(parents=True)
     py.touch()
-    paths.ready_sentinel().touch()
+    status.write_runtime_receipt()
     (home / "status.json").write_text("{}")        # 强哨兵：护栏认定是我们的目录
     (home / ".uninstall_requested").touch()        # 待删标记
     captured: dict = {}
@@ -350,14 +350,14 @@ def test_spawn_real_cmd_uninstall_marker_falls_back_to_bootstrap(monkeypatch, tm
 
 def test_spawn_real_cmd_ready_uses_conda_python(monkeypatch, tmp_path):
     """T3 对照：无待删标记且运行时完整 → 真实 _server_cmd 选 conda python。"""
-    from vibecad.runtime import paths
+    from vibecad.runtime import paths, status
 
     monkeypatch.delenv("VIBECAD_FREECAD_ENV", raising=False)
     monkeypatch.setenv("VIBECAD_HOME", str(tmp_path / "home"))
     py = paths.active_runtime_python()
     py.parent.mkdir(parents=True)
     py.touch()
-    paths.ready_sentinel().touch()
+    status.write_runtime_receipt()
     captured: dict = {}
     monkeypatch.setattr(
         supervisor.subprocess, "Popen",
@@ -367,6 +367,28 @@ def test_spawn_real_cmd_ready_uses_conda_python(monkeypatch, tmp_path):
     supervisor.Supervisor()._spawn()
 
     assert captured["cmd"][0] == str(py)
+
+
+def test_spawn_real_cmd_old_server_receipt_bootstraps(monkeypatch, tmp_path):
+    """新版入口遇到旧 server receipt 时必须留在 bootstrap，绝不能加载旧工具表。"""
+    from vibecad.runtime import paths, spec
+
+    monkeypatch.delenv("VIBECAD_FREECAD_ENV", raising=False)
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path / "home"))
+    py = paths.active_runtime_python()
+    py.parent.mkdir(parents=True)
+    py.touch()
+    receipt = {**spec.expected_receipt(), "vibecad_version": "0.3.0"}
+    paths.ready_sentinel().write_text(json.dumps(receipt), encoding="utf-8")
+    captured: dict = {}
+    monkeypatch.setattr(
+        supervisor.subprocess, "Popen",
+        lambda cmd, **kw: captured.update(cmd=cmd) or "proc",
+    )
+
+    supervisor.Supervisor()._spawn()
+
+    assert captured["cmd"] == [sys.executable, "-m", "vibecad.server"]
 
 
 # --- 单元：泵线程与 run() 骨架 ---

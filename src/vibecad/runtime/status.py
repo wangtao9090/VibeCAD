@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from vibecad.runtime import paths
+from vibecad.runtime import paths, spec
 
 # import FreeCAD 前的跨平台兜底（Windows 把 conda Library/bin 注入 PATH；macOS/Linux 无操作）
 _PREP = (
@@ -31,8 +31,23 @@ _PREP = (
     "        sys.path.insert(0, _m)\n"
 )
 _HEALTH_SNIPPET = _PREP + "import FreeCAD, Part\n"
-# 更严就绪校验：连 vibecad.server（连带 mcp）一起 import，确保 re-exec 进去后 server 真能起（m-4）
-_VERIFY_SNIPPET = _PREP + "import FreeCAD, Part; import vibecad.server\n"
+# 托管 env 复用前必须精确匹配 pins；不能把“可 import 的其他 FreeCAD/Python”盖章成
+# 当前 receipt，否则后续启动会跳过真正的引擎升级。
+_ENGINE_SNIPPET = (
+    _PREP
+    + "import FreeCAD, Part, sys\n"
+    + f"if sys.version_info[:2] != {spec.PYTHON_VERSION!r}:\n"
+    + "    raise RuntimeError('managed runtime Python version mismatch')\n"
+    + f"if tuple(map(int, FreeCAD.Version()[:3])) != {spec.FREECAD_VERSION!r}:\n"
+    + "    raise RuntimeError('managed runtime FreeCAD version mismatch')\n"
+)
+# 更严就绪校验：精确引擎 + vibecad.server（连带 mcp）+ server 版本。
+_VERIFY_SNIPPET = (
+    _ENGINE_SNIPPET
+    + "import vibecad, vibecad.server\n"
+    + f"if vibecad.__version__ != {spec.VIBECAD_VERSION!r}:\n"
+    + "    raise RuntimeError('vibecad runtime version mismatch: ' + vibecad.__version__)\n"
+)
 _STALE_SECONDS = 3600
 
 
@@ -44,6 +59,24 @@ class Phase(StrEnum):
     VERIFYING = "verifying"
     READY = "ready"
     FAILED = "failed"
+
+
+class ReceiptState(StrEnum):
+    """廉价 receipt 分类；installer 据此区分 pip-only 同步与完整建 env。"""
+
+    MISSING = "missing"
+    LEGACY = "legacy"
+    CURRENT = "current"
+    SERVER_MISMATCH = "server_mismatch"
+    INCOMPATIBLE = "incompatible"
+
+
+class RecoveryKind(StrEnum):
+    """启动时只靠 receipt + Python 路径即可判定的保守恢复类别。"""
+
+    READY = "ready"
+    UPGRADE_REQUIRED = "upgrade_required"
+    REPAIR_REQUIRED = "repair_required"
 
 
 @dataclass
@@ -81,9 +114,94 @@ def read_status() -> RuntimeStatus:
         return RuntimeStatus()
 
 
+def _read_receipt_raw() -> str | None:
+    try:
+        return paths.ready_sentinel().read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def read_runtime_receipt() -> dict | None:
+    """读取 JSON receipt；legacy 纯文本、损坏内容和非对象均返回 ``None``。"""
+    raw = _read_receipt_raw()
+    if raw is None:
+        return None
+    try:
+        receipt = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return receipt if isinstance(receipt, dict) else None
+
+
+def runtime_receipt_state() -> ReceiptState:
+    """判定 receipt 与当前 bootstrap 的兼容关系，全程只做小文件读取。"""
+    raw = _read_receipt_raw()
+    if raw is None:
+        return ReceiptState.MISSING
+    if raw.strip() == spec.FREECAD_PIN:
+        return ReceiptState.LEGACY
+    try:
+        receipt = json.loads(raw)
+    except (TypeError, ValueError):
+        return ReceiptState.INCOMPATIBLE
+    if not isinstance(receipt, dict):
+        return ReceiptState.INCOMPATIBLE
+
+    expected = spec.expected_receipt(external=paths.user_override_env() is not None)
+    if receipt == expected:
+        return ReceiptState.CURRENT
+    without_version = {k: v for k, v in expected.items() if k != "vibecad_version"}
+    actual_without_version = {k: v for k, v in receipt.items() if k != "vibecad_version"}
+    if actual_without_version == without_version and isinstance(
+        receipt.get("vibecad_version"), str
+    ):
+        return ReceiptState.SERVER_MISMATCH
+    return ReceiptState.INCOMPATIBLE
+
+
+def write_runtime_receipt() -> None:
+    """验证成功后的提交点：原子替换 JSON receipt，避免 supervisor 读到半文件。"""
+    sentinel = paths.ready_sentinel()
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    tmp = sentinel.with_name(f"{sentinel.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(
+            json.dumps(
+                spec.expected_receipt(external=paths.user_override_env() is not None),
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        os.replace(tmp, sentinel)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
 def runtime_ready() -> bool:
-    """廉价就绪探测：读哨兵文件，不 import FreeCAD（保握手秒回）。"""
-    return paths.ready_sentinel().exists()
+    """廉价就绪探测：receipt 精确匹配且目标 Python 存在，不 import FreeCAD。"""
+    return runtime_recovery_kind() is RecoveryKind.READY
+
+
+def runtime_recovery_kind() -> RecoveryKind:
+    """区分轻量 server 同步与可能重建引擎；不启动子进程，保持握手廉价。
+
+    receipt 缺失/损坏时即使 env 最终可被 installer 原地验证并复用，这里仍保守标为
+    repair_required，避免在尚未验证前向用户承诺只是轻量升级。外部 override 也始终
+    由用户维护；installer 不会改写它，因此版本不匹配不能承诺自动同步。
+    """
+    state = runtime_receipt_state()
+    try:
+        python_exists = paths.active_runtime_python().exists()
+    except OSError:
+        python_exists = False
+    if state is ReceiptState.CURRENT and python_exists:
+        return RecoveryKind.READY
+    if state in {ReceiptState.LEGACY, ReceiptState.SERVER_MISMATCH} and python_exists:
+        if paths.user_override_env() is not None:
+            return RecoveryKind.REPAIR_REQUIRED
+        return RecoveryKind.UPGRADE_REQUIRED
+    return RecoveryKind.REPAIR_REQUIRED
 
 
 def _probe(python: Path | None, snippet: str) -> bool:
@@ -102,9 +220,13 @@ def health_check(python: Path | None = None) -> bool:
     return _probe(python, _HEALTH_SNIPPET)
 
 
+def engine_compatible(python: Path | None = None) -> bool:
+    """托管 env 的 Python 与 FreeCAD 版本精确匹配当前 pins。"""
+    return _probe(python, _ENGINE_SNIPPET)
+
+
 def verify_runtime(python: Path | None = None) -> bool:
-    """安装期/override 校验：import FreeCAD, Part + vibecad.server（连带 mcp），
-    确保 re-exec 目标解释器真能起 server（m-4 / M-B）。"""
+    """安装期/override 校验 FreeCAD、server 及其版本与 bootstrap 精确一致。"""
     return _probe(python, _VERIFY_SNIPPET)
 
 

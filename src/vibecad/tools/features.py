@@ -302,6 +302,8 @@ def add_hole(session: Session, face: str, diameter: float,
                         f"几何断言失败：沉头通孔实际移除体积 {removed:.3f} < 下界 "
                         f"{lower:.3f}——沉头可能越界少切，请检查 offset/counterbore 参数")
 
+            session.set_result_object(last_cut)
+
             cb_field = ({"diameter": counterbore_diameter, "depth": counterbore_depth}
                         if has_cb else None)
             if pattern is not None:
@@ -352,6 +354,7 @@ def _edge_feature(session: Session, edges, value: float, *, kind: str,
                     f"实际 {len(feat.Shape.Faces)}）——OCCT 可能对部分所选边失败：{edges}")
             if abs(feat.Shape.Volume - vol_before) < 1e-9:
                 raise RuntimeError(f"几何断言失败：{kind} 后体积无变化——所选边可能无效：{edges}")
+            session.set_result_object(feat)
             result = {"ok": True, "name": feat.Name, "volume": feat.Shape.Volume,
                       kind: {value_field: value, "edges": list(edges)},
                       "labels_stale": True,

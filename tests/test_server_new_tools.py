@@ -8,6 +8,11 @@ def _ready(monkeypatch):
 
 def test_add_box_guard_not_ready(monkeypatch):
     monkeypatch.setattr(srv._installer, "is_ready", lambda: False)
+    monkeypatch.setattr(
+        srv.status,
+        "read_status",
+        lambda: srv.status.RuntimeStatus(phase=srv.status.Phase.NOT_STARTED),
+    )
     r = srv.add_box(10, 10, 10)
     assert r["ok"] is False and "ensure_runtime" in r["message"]
 
@@ -29,13 +34,14 @@ def test_new_document_delegates(monkeypatch):
     _ready(monkeypatch)
     seen = {}
 
-    def _fake_new_document(s, name):
-        seen["a"] = (s, name)
+    def _fake_new_document(s, name, *, discard_unsaved=False):
+        seen["a"] = (s, name, discard_unsaved)
         return {"ok": True, "name": name}
 
     monkeypatch.setattr(srv._modeling, "new_document", _fake_new_document)
     r = srv.new_document("P")
-    assert r == {"ok": True, "name": "P"} and seen["a"][0] is srv._session and seen["a"][1] == "P"
+    assert r == {"ok": True, "name": "P"}
+    assert seen["a"] == (srv._session, "P", False)
 
 
 def test_add_box_delegates(monkeypatch):
@@ -131,6 +137,60 @@ def test_boolean_cut_delegates(monkeypatch):
                         lambda s, b, t: seen.setdefault("a", (b, t)) or {"ok": True})
     srv.boolean_cut("Box", "Cyl")
     assert seen["a"] == ("Box", "Cyl")
+
+
+def test_new_boolean_tools_delegate(monkeypatch):
+    _ready(monkeypatch)
+    seen = []
+    monkeypatch.setattr(srv, "_attach_view", lambda result, tool: result)
+    monkeypatch.setattr(
+        srv._modeling, "boolean_fuse",
+        lambda s, b, t: seen.append(("fuse", s, b, t)) or {"ok": True})
+    monkeypatch.setattr(
+        srv._modeling, "boolean_common",
+        lambda s, b, t: seen.append(("common", s, b, t)) or {"ok": True})
+    assert srv.boolean_fuse("Box", "Box001")["ok"] is True
+    assert srv.boolean_common("Box", "Box001")["ok"] is True
+    assert [row[0] for row in seen] == ["fuse", "common"]
+    assert all(row[1] is srv._session for row in seen)
+
+
+def test_project_tools_delegate(monkeypatch, tmp_path):
+    _ready(monkeypatch)
+    seen = []
+    monkeypatch.setattr(
+        srv._project, "save_project",
+        lambda s, path, overwrite=True:
+        seen.append(("save", s, path, overwrite)) or {"ok": True})
+    monkeypatch.setattr(
+        srv._project, "open_project",
+        lambda s, path, discard_unsaved=False:
+        seen.append(("open", s, path, discard_unsaved))
+        or {"ok": True, "has_result": False})
+    assert srv.save_project(str(tmp_path / "a.FCStd"), overwrite=False)["ok"] is True
+    assert srv.open_project(str(tmp_path / "a.FCStd"), discard_unsaved=True)["ok"] is True
+    assert seen[0][0] == "save" and seen[0][-1] is False
+    assert seen[1][0] == "open" and seen[1][-1] is True
+
+
+def test_history_delete_and_measure_delegate(monkeypatch):
+    _ready(monkeypatch)
+    monkeypatch.setattr(srv, "_attach_view", lambda result, tool: result)
+    monkeypatch.setattr(
+        srv._project, "delete_object",
+        lambda s, name, cascade=False:
+        {"ok": True, "has_result": False, "name": name, "cascade": cascade})
+    monkeypatch.setattr(
+        srv._project, "undo", lambda s: {"ok": True, "has_result": False})
+    monkeypatch.setattr(
+        srv._project, "redo", lambda s: {"ok": True, "has_result": False})
+    monkeypatch.setattr(
+        srv._measure, "measure",
+        lambda s, **kwargs: {"ok": True, **kwargs})
+    assert srv.delete_object("Box", cascade=True)["cascade"] is True
+    assert srv.undo()["ok"] is True and srv.redo()["ok"] is True
+    out = srv.measure(kind="distance", first="A", second="B")
+    assert out["kind"] == "distance" and out["first"] == "A"
 
 
 def test_export_part_delegates(monkeypatch):

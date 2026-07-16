@@ -1,5 +1,7 @@
+import contextlib
 import os
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,9 +15,15 @@ _SRC = os.path.join(_REPO, "src")
 class MockSession:
     def __init__(self):
         self.opened = None
+        self.doc = None
+
+    def is_dirty(self):
+        return False
 
     def open_document(self, name):
         self.opened = name
+        self.doc = SimpleNamespace(Name=name)
+        return self.doc
 
 
 def test_new_document_returns_ok():
@@ -27,6 +35,15 @@ def test_new_document_returns_ok():
 def test_new_document_rejects_empty():
     with pytest.raises(ValueError):
         modeling.new_document(MockSession(), "")
+
+
+def test_new_document_protects_unsaved_session():
+    s = MockSession()
+    s.doc = object()
+    s.is_dirty = lambda: True
+    with pytest.raises(ValueError, match="未保存"):
+        modeling.new_document(s, "Next")
+    assert modeling.new_document(s, "Next", discard_unsaved=True)["ok"] is True
 
 
 def test_add_box_rejects_zero():
@@ -52,6 +69,75 @@ def test_boolean_cut_rejects_empty_base():
 def test_boolean_cut_rejects_empty_tool():
     with pytest.raises(ValueError, match="tool_name"):
         modeling.boolean_cut(MockSession(), "Box", "")
+
+
+@pytest.mark.parametrize("func", [modeling.boolean_cut, modeling.boolean_fuse,
+                                   modeling.boolean_common])
+def test_boolean_rejects_same_object(func):
+    with pytest.raises(ValueError, match="同一对象"):
+        func(MockSession(), "Box", "Box")
+
+
+class _OwnerSession:
+    _parts = {"A": {}, "B": {}}
+
+    def owner_of(self, name):
+        return {"Box": "A", "Cylinder": "B"}.get(name)
+
+
+@pytest.mark.parametrize("func", [modeling.boolean_cut, modeling.boolean_fuse,
+                                   modeling.boolean_common])
+def test_boolean_rejects_cross_part_operands(func):
+    with pytest.raises(ValueError, match="同一零件"):
+        func(_OwnerSession(), "Box", "Cylinder")
+
+
+def test_boolean_fuse_volume_guard_rejects_lost_material(monkeypatch):
+    """有效单 solid 仍可能因内核异常丢料；并集必须至少容纳较大输入。"""
+    class Shape:
+        def __init__(self, volume):
+            self.Volume = volume
+            self.Solids = [object()]
+
+    class Obj:
+        def __init__(self, name, volume):
+            self.Name = name
+            self.Shape = Shape(volume)
+
+    class Doc:
+        def __init__(self):
+            self.result = Obj("Fuse", 90)
+
+        def recompute(self):
+            return None
+
+        def addObject(self, _type, _label):
+            return self.result
+
+    class Session:
+        _parts = {}
+        _labels = None
+
+        def __init__(self):
+            self.doc = Doc()
+            self.objects = {"Base": Obj("Base", 100), "Tool": Obj("Tool", 50)}
+
+        def get_object(self, name):
+            return self.objects[name]
+
+        def assert_valid_solid(self, _shape):
+            return None
+
+        def set_result_object(self, _obj, part=None):
+            return None
+
+        @contextlib.contextmanager
+        def _transaction(self, _label, part=None):
+            yield
+
+    monkeypatch.setattr(modeling, "assert_solid_integrity", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="丢失材料"):
+        modeling.boolean_fuse(Session(), "Base", "Tool")
 
 
 def test_add_box_rejects_bad_position():
@@ -178,3 +264,26 @@ def test_positioned_centered_through_hole(runtime_env):
     p = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
     assert p.returncode == 0, p.stderr
     assert "POS_OK" in p.stdout
+
+
+@pytest.mark.slow
+def test_boolean_fuse_common_and_explicit_root_real(runtime_env):
+    code = (
+        status._PREP
+        + f"import sys; sys.path.insert(0, {_SRC!r})\n"
+        + "from vibecad.engine.session import Session\n"
+        + "from vibecad.tools import modeling\n"
+        + "s = Session(); modeling.new_document(s, 'Combine')\n"
+        + "a = modeling.add_box(s, 10, 10, 10)\n"
+        + "b = modeling.add_box(s, 10, 10, 10, position=(5,0,0))\n"
+        + "common = modeling.boolean_common(s, a['name'], b['name'])\n"
+        + "assert abs(common['volume'] - 500) < 1e-6, common\n"
+        + "c = modeling.add_box(s, 10, 10, 10, position=(5,0,0))\n"
+        + "fuse = modeling.boolean_fuse(s, a['name'], c['name'])\n"
+        + "assert abs(fuse['volume'] - 1500) < 1e-6, fuse\n"
+        + "assert s.get_result_object().Name == fuse['name']\n"
+        + "print('COMBINE_OK')\n"
+    )
+    p = subprocess.run([runtime_env, "-c", code], capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0, p.stderr
+    assert "COMBINE_OK" in p.stdout

@@ -28,6 +28,14 @@ def test_manifest_tools_match_server_registry():
         f"manifest 缺 {registered - declared}，多 {declared - registered}")
 
 
+def test_manifest_tool_entries_are_unique_and_described():
+    entries = _manifest()["tools"]
+    names = [entry["name"] for entry in entries]
+    assert len(names) == len(set(names))
+    assert all(isinstance(entry.get("description"), str) and entry["description"].strip()
+               for entry in entries)
+
+
 def test_manifest_uv_type_entry_and_mcp_config():
     m = _manifest()
     assert m["server"]["type"] == "uv"

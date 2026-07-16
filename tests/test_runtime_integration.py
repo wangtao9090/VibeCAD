@@ -27,7 +27,8 @@ def test_install_and_smoke(tmp_path, monkeypatch):
     phases = []
     RuntimeInstaller(on_progress=lambda s: phases.append(s.phase.value)).install()  # A2
     assert status.runtime_ready() is True
-    assert status.health_check(paths.env_python()) is True  # A1（subprocess 级）
+    runtime_python = paths.active_runtime_python()
+    assert status.health_check(runtime_python) is True  # A1（subprocess 级）
 
     # A1 进程内 import 经 conda env python 子进程执行后回读（不在 pytest 进程 import）
     step = str(tmp_path / "vc_smoke.step")
@@ -36,7 +37,7 @@ def test_install_and_smoke(tmp_path, monkeypatch):
         "import FreeCAD, Part; b=Part.makeBox(10,10,10);"
         f"assert abs(b.Volume-1000.0)<1e-6; b.exportStep({step!r}); print('OK')"
     )
-    r = subprocess.run([str(paths.env_python()), "-c", code], capture_output=True, text=True)
+    r = subprocess.run([str(runtime_python), "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert os.path.exists(step)
     assert phases[-1] == "ready"
@@ -233,6 +234,11 @@ def test_auto_swap_end_to_end(runtime_env, tmp_path):
         # 真实（重）安装，纯靠恢复哨兵 + get_runtime_status 驱动换芯。
         env = {**os.environ}
         env.pop("VIBECAD_AUTO_INSTALL", None)
+        # 开发态 launcher 应明确从当前 checkout 启动，不依赖 editable .pth 是否被
+        # macOS/uv 标记 hidden；发布安装态则由已安装 wheel 提供同一包。
+        env["PYTHONPATH"] = os.pathsep.join(
+            part for part in (_SRC, env.get("PYTHONPATH")) if part
+        )
         proc = subprocess.Popen(
             [sys.executable, "-m", "vibecad"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env,

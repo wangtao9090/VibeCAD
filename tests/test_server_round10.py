@@ -18,7 +18,7 @@ def test_all_tools_have_annotations():
 
 
 def test_tool_annotation_safety_mapping():
-    """23 个工具的读写、破坏性、幂等和联网提示必须与真实副作用一致。"""
+    """31 个工具的读写、破坏性、幂等和联网提示必须与真实副作用一致。"""
     expected = {
         "ping": (True, None, None, False),
         "describe_part": (True, None, None, False),
@@ -28,10 +28,18 @@ def test_tool_annotation_safety_mapping():
         "export_part": (False, True, True, False),
         "render_part": (False, True, True, False),
         "uninstall_runtime": (False, True, True, False),
-        "new_document": (False, False, False, False),
+        "new_document": (False, True, False, False),
+        "save_project": (False, True, True, False),
+        "open_project": (False, True, False, False),
+        "delete_object": (False, True, False, False),
+        "undo": (False, True, False, False),
+        "redo": (False, True, False, False),
         "add_box": (False, False, False, False),
         "add_cylinder": (False, False, False, False),
         "boolean_cut": (False, False, False, False),
+        "boolean_fuse": (False, False, False, False),
+        "boolean_common": (False, False, False, False),
+        "measure": (True, None, None, False),
         "add_hole": (False, False, False, False),
         "fillet_edges": (False, False, False, False),
         "chamfer_edges": (False, False, False, False),

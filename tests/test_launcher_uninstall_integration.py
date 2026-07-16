@@ -9,6 +9,7 @@ import sys
 import pytest
 
 from vibecad import launcher, supervisor
+from vibecad.runtime import status
 
 
 def test_pending_uninstall_real_delete_then_bootstrap(monkeypatch, tmp_path):
@@ -16,10 +17,10 @@ def test_pending_uninstall_real_delete_then_bootstrap(monkeypatch, tmp_path):
     env = home / "mamba" / "envs" / "vibecad"
     (env / "bin").mkdir(parents=True)
     (env / "bin" / "python").write_text("")
-    (env / ".vibecad_ready").write_text("")  # 删除前哨兵就绪：不删则 _server_cmd 必选 conda
-    (home / ".uninstall_requested").touch()
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     monkeypatch.delenv("VIBECAD_FREECAD_ENV", raising=False)
+    status.write_runtime_receipt()  # 删除前精确就绪：不删则 _server_cmd 必选 conda
+    (home / ".uninstall_requested").touch()
     monkeypatch.delenv("VIBECAD_SUPERVISOR_TEST_CMD", raising=False)
     monkeypatch.setattr(launcher.sys, "argv", ["vibecad"])
     routed = {}
