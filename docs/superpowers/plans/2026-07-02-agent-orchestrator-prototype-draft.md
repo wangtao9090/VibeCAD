@@ -1,10 +1,12 @@
 # Agent Orchestrator 最小原型 — 决策提案 + Implementation Plan（草案）
 
-> **状态：Draft（草案）——本文档所有决策均为提案，待用户确认后生效，任何一条都可改。**
+> **状态：Superseded（历史草案，请勿执行）。**
 > 日期：2026-07-02
-> 上游 Spec：`docs/superpowers/specs/2026-07-02-vibecad-agent-architecture-design.md`（Proposed）
+> 已由：`docs/AGENT_ARCHITECTURE.md`（Accepted，2026-07-16）的开发路线取代。
+> 取代原因：本文绑定 AnthropicProvider 和单次同步 `agent_run`，且以内部模型调用为默认；当前路线改为先做无模型 Task Kernel，再依次接 external plan、可选 Sampling 和用户 BYOK。
+> 上游 Spec：`docs/superpowers/specs/2026-07-02-vibecad-agent-architecture-design.md`（Superseded）
 > 范围锚点：架构文档 **阶段 2 — Agent Orchestrator 原型**（§11），验证标准对齐 §16 五条。
-> **For agentic workers:** 本文档确认后按 superpowers:subagent-driven-development 或 superpowers:executing-plans 逐任务执行。Steps 使用 checkbox（`- [ ]`）语法跟踪。
+> **For agentic workers:** 不要执行本文任务；改按 `docs/AGENT_ARCHITECTURE.md` 的当前阶段和验收门工作。
 
 ---
 

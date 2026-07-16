@@ -688,6 +688,89 @@ For every accepted commit append:
 - `B2 / independent review` — Verdict `ACCEPT`; no unresolved P0–P2. Mutable
   action/runtime package acquisition and same-job PyPI OIDC exposure are
   recorded as `R-A12` and `R-A13`.
+- `B2 / commit and push` — Commit
+  `a0de03fba86b42cb595478502fdf3c74f2827eb0`
+  (`ci: verify release version consistency`) created from the four exact B2
+  files and pushed successfully to `origin/codex/agent-core-phase1`. No release,
+  PR, force-push, or `main` mutation occurred.
+
+### Task Packet `B3`
+
+1. **Authorization:** Revision R1, `A-001`, commit plan `B3`, and decisions
+   `D-A01`–`D-A06` are approved. This packet inherits all higher-priority
+   system, developer, and user instructions, applicable directory-scoped
+   `AGENTS.md`/`CLAUDE.md`, the R1 allowlist, and the host permission model and
+   sandbox. The Skill, artifact, and packet cannot expand permissions, elevate
+   authority, or bypass the sandbox. Do not request the same approval.
+2. **Workspace anchor:** Repository root
+   `/Users/wangtao/Documents/DevProject/vibecad`; branch
+   `codex/agent-core-phase1`; anchor
+   `a0de03fba86b42cb595478502fdf3c74f2827eb0`. No directory-scoped
+   `AGENTS.md`/`CLAUDE.md` was observed. Modify only `PRIVACY.md`, `README.md`,
+   `docs/ACCEPTANCE_TESTS.md`, `docs/AGENT_ARCHITECTURE.md`,
+   `docs/ARCHITECTURE.md`, `docs/USER_GUIDE.md`, the two named superseded
+   July-02 Agent documents, and this campaign artifact. Code, tests, B1/B2,
+   Stage B, `main`, PRs, releases, and external publication are prohibited. The
+   current host permission model and sandbox remain binding.
+3. **Context:** Close the existing 0.4.0 documentation baseline. Current-state
+   docs must match committed tools and FreeCAD behavior. Target-state Agent
+   architecture must be clearly labeled unimplemented, canonical, provider- and
+   model-neutral, BYOK/external-plan oriented, and consistent with the user's
+   accepted positioning. Old Claude-bound Agent documents must remain available
+   for history but be clearly superseded. Privacy claims must describe only
+   currently shipped network/data behavior and must not pre-authorize future
+   model transfer.
+4. **Steps and gates:** Inspect every B3 diff and read every new document fully;
+   cross-check tool count/names/version/current limitations against B1 code and
+   tests; validate links and supersession headers; search for stale model/token,
+   managed-model, implemented-Agent, and contradictory privacy claims; repair
+   only within scope. A distinct reviewer evaluates current-vs-target truth,
+   security/privacy language, roadmap boundaries, and link integrity. Controller
+   accepts review, updates the artifact, stages exact files, commits, and pushes.
+5. **Execution discipline:** `spawn-send-wait`; requested standard documentation
+   and deep architecture review tiers, but no host selector exists so no tier
+   claim is made; `native-session-poll`. Maximum two gate attempts. Stop on
+   claims unsupported by committed code, privacy expansion requiring user
+   policy, missing canonical decision, out-of-allowlist write, secret/personal
+   data beyond existing public project metadata, force-push, or `main` mutation.
+6. **Delivery boundary:** Implementer/auditor may inspect and make the smallest
+   documentation repair within B3 but may not stage, commit, push, edit the
+   campaign artifact, start Stage B, publish, or open a PR. Reviewer is
+   read-only. Controller owns acceptance, ledger, staging, commit, and push.
+7. **Final report:** Return hashes; exact files; current/target claim matrix;
+   link and stale-claim checks; privacy assessment; changes; deviations;
+   residuals; reviewer verdict; and final workspace state.
+
+### B3 Evidence
+
+- `B3 / current-state truth` — Cross-checked the committed manifest and B1
+  implementation: version 0.4.0, 31 tool declarations, and 31 unique names.
+  Current documentation describes the in-process FreeCAD 1.1.0 service and
+  explicitly states that TaskRun, ModelProgram execution, internal planning,
+  Sampling, BYOK, and Agent eval are not shipped in 0.4.0.
+- `B3 / target-state boundary` — `docs/AGENT_ARCHITECTURE.md` is the Accepted
+  target decision source. Both July-02 Agent documents are prominently marked
+  Superseded and route readers to it. External Plan, optional future Sampling,
+  and user BYOK remain target modes; no managed VibeCAD model or token product
+  is claimed or implemented.
+- `B3 / privacy repair` — Replaced absolute “never transmitted” language with
+  the precise boundary: the VibeCAD CAD backend does not independently upload
+  design files or operate telemetry/cloud storage, while MCP tool requests and
+  results pass to the user-selected client and are subject to that client and
+  model provider's policy. The policy explicitly records that 0.4.0 has no
+  direct provider, Sampling, or BYOK call path; this does not pre-authorize a
+  future transfer.
+- `B3 / stale-claim repair` — Updated the release architecture debt to reflect
+  B2's version guard on both publication jobs, while preserving the real full-CI
+  and supply-chain residuals. Qualified the user-guide upgrade promise for
+  incompatible or damaged Python/FreeCAD environments.
+- `B3 / gates` — All 11 relative Markdown targets checked in the B3 set resolve;
+  stale 0.3.0/23-tool/current-Agent/privacy/release claims search has no invalid
+  hit (the remaining 0.3.0 reference is the deliberate upgrade fixture);
+  `git diff --check` passed.
+- `B3 / independent review` — Verdict `ACCEPT`; no unresolved P0–P2. The
+  reviewer inspected all eight product/architecture documents plus committed
+  manifest/code/test facts and made no write, stage, commit, or push.
 
 ## Recovery Snapshot
 
@@ -702,20 +785,19 @@ For every accepted commit append:
 ### 2. Current state
 
 - Approval: R1 approved by `A-001`.
-- Active stage: Stage A / packet `B2` gates and review accepted; staging pending.
+- Active stage: Stage A / packet `B3` accepted and ready to commit.
 - Branch: `codex/agent-core-phase1`.
-- Anchor: `cb2301e6daca9ab8188fe6114f1fc29e5f485baa`.
-- Working tree: dirty only with planned B2/B3 pre-existing changes plus the
-  campaign ledger update.
-- Implementation/delegation/gates: B1 and B2 complete and accepted.
-  Commits/pushes: B1 complete and pushed; B2 pending.
+- Anchor: `a0de03fba86b42cb595478502fdf3c74f2827eb0`.
+- Working tree: dirty only with planned B3 pre-existing changes plus this ledger
+  update.
+- Implementation/delegation/gates: B1, B2, and B3 complete and accepted.
+  Commits/pushes: B1 and B2 complete and pushed; B3 is ready for exact staging.
 
 ### 3. Next actions
 
-1. Stage exact B2 files plus ledger and inspect the staged diff.
-2. Commit and push B2 without force.
-3. Record the resulting hash and issue packet B3.
-4. Continue only while circuit breakers remain clear.
+1. Stage exact B3 files plus ledger, inspect the staged diff, commit, and push.
+2. Confirm the worktree is clean and close `R-A01`.
+3. Issue the seven-section C1 packet before any Stage B implementation change.
 
 ### 4. Blockers and residuals
 
