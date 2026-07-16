@@ -5,33 +5,39 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
-  pypi:
+  version-guard:
     runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
     steps:
       - uses: actions/checkout@v4
       - name: tag/version consistency guard
-        # tag 名约定 = v + PEP 440 版本原文（如 v0.2.0rc1）；产物版本只取自
-        # pyproject，与 tag 名无关——错位会把错版本发上 PyPI（同号永久烧毁），故先拦。
-        run: |
-          TAG_VER="${GITHUB_REF_NAME#v}"
-          PY_VER=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
-          if [ "$TAG_VER" != "$PY_VER" ]; then
-            echo "::error::tag $GITHUB_REF_NAME 与 pyproject version $PY_VER 不一致——拒绝发布"
-            exit 1
-          fi
+        # 不安装项目：纯 stdlib 静态读取四处版本，任一错位都在发布产物产生前拦截。
+        run: python3 .github/scripts/check_release_versions.py "$GITHUB_REF_NAME"
+
+  pypi:
+    needs: version-guard
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv build
       - uses: pypa/gh-action-pypi-publish@release/v1
   mcpb:
+    needs: version-guard
     runs-on: ubuntu-latest
     permissions:
       contents: write   # 创建 GitHub Release
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - run: npx -y @anthropic-ai/mcpb@2.1.2 validate manifest.json
       - run: npx -y @anthropic-ai/mcpb@2.1.2 pack . VibeCAD.mcpb
       - name: create GitHub Release with .mcpb asset

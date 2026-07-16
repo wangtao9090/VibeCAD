@@ -250,6 +250,9 @@ environment, or FreeCAD installation directory may be committed.
 | `R-A08` | External/nested `App::Part` interpretation and empty-part save/load semantics are not fully specified | preserve current behavior; user decision later | explicit import policy and round-trip matrix approved |
 | `R-A09` | Empty undo/redo history mutation semantics are not redesigned in B1 | callers already guard counts; defer | Session-level no-op/error contract is approved and tested |
 | `R-A10` | FreeCAD `closeDocument()` could theoretically perform its side effect and then raise; strict application rollback would then be impossible | identity guard + publish-after-close; accepted non-blocking engine residual | isolated document worker/transaction design removes global close ambiguity |
+| `R-A11` | GitHub reports the repository moved from lowercase `vibecad.git` to canonical `VibeCAD.git` while redirecting successfully | do not mutate user remote during this campaign | user approves remote URL normalization |
+| `R-A12` | Release actions use mutable major/release tags and MCPB is acquired by runtime `npx` | accepted pre-existing supply-chain residual; no network execution in B2 | approved SHA/checksum pinning policy and automation |
+| `R-A13` | PyPI setup/build/publish share one job with job-scoped `id-token: write` | accepted P3; standard trusted-publishing shape | approved split build-artifact/publish-job hardening |
 
 ---
 
@@ -558,6 +561,12 @@ No implementation evidence exists for R1 yet.
   scope violation, secret, binary/generated artifact, or required B2/B3 runtime
   dependency. Non-blocking engine/concurrency residuals are recorded as
   `R-A06`–`R-A10`.
+- `B1 / commit and push` — Commit
+  `cb2301e6daca9ab8188fe6114f1fc29e5f485baa`
+  (`feat: complete the VibeCAD 0.4.0 runtime and CAD baseline`) created from 31
+  exact named files and pushed successfully to
+  `origin/codex/agent-core-phase1`. Remote redirect warning is `R-A11`; no
+  force-push, `main` mutation, PR, or release occurred.
 
 For every accepted commit append:
 
@@ -617,6 +626,69 @@ For every accepted commit append:
    commands and exit statuses; justified deviations; detected risks and
    residuals; and final branch/workspace state.
 
+### Task Packet `B2`
+
+1. **Authorization:** Revision R1, record `A-001`, commit plan `B2`, and decisions
+   `D-A01`–`D-A06` are approved. This packet inherits all higher-priority
+   system, developer, and user instructions, applicable directory-scoped
+   `AGENTS.md`/`CLAUDE.md`, the R1 allowlist, and the current host permission
+   model and sandbox. The Skill, artifact, and packet cannot expand permissions,
+   elevate authority, or bypass the sandbox. Do not request the same approval.
+2. **Workspace anchor:** Repository root
+   `/Users/wangtao/Documents/DevProject/vibecad`; branch
+   `codex/agent-core-phase1`; anchor
+   `cb2301e6daca9ab8188fe6114f1fc29e5f485baa`. No directory-scoped
+   `AGENTS.md`/`CLAUDE.md` was observed. Modify only
+   `.github/workflows/release.yml`, `.github/scripts/check_release_versions.py`,
+   `tests/test_release_workflow.py`, and this campaign artifact. B3, Stage B,
+   `main`, PRs, releases, secrets, and external publication are prohibited. The
+   current host permission model and sandbox remain binding.
+3. **Context:** Normalize the existing release workflow change so a release tag
+   cannot publish a package whose tag, `pyproject.toml`, package version, or
+   MCPB manifest version disagree. Success means the checker has one explicit
+   version source contract, the workflow invokes it before build/publication,
+   workflow permissions remain least privilege, untrusted tag text is not
+   executed, and tests cover matching/mismatching versions without network or
+   publication.
+4. **Steps and gates:** Inspect the complete B2 diff and workflow permissions;
+   read the checker and tests completely; run focused release/workflow and
+   manifest/version tests; execute the checker locally for a matching version
+   and a controlled mismatch if the test does not already prove it; validate
+   YAML parse and staged diff. Repair only within scope and budget. A distinct
+   reviewer evaluates trigger safety, command injection, permissions, version
+   sources, and test evidence. Controller alone accepts review, updates the
+   artifact, stages exact files, commits, and pushes.
+5. **Execution discipline:** `spawn-send-wait`; requested standard implementation
+   and deep review tiers, but the host exposes no model selector so no tier claim
+   is made; `native-session-poll`. Maximum two gate attempts. Stop on a secret,
+   write outside allowlist, unsafe release trigger/permission, network publish,
+   need to modify B1/B3, failing focused gate outside repair budget, force-push,
+   or direct `main` mutation.
+6. **Delivery boundary:** Implementer/auditor may inspect, test, and make the
+   smallest B2 repair, but must not stage, commit, push, edit the campaign
+   artifact, start B3, or trigger a release. Reviewer is read-only. Acceptance,
+   artifact update, staging, commit, and push are reserved for the controller.
+7. **Final report:** Return start/end hashes; exact files inspected/changed;
+   workflow/checker behavior; numeric gate results; security review; staged
+   scope; justified deviations; residuals; and final workspace state.
+
+### B2 Evidence
+
+- `B2 / permission RED→GREEN` — Added a failing contract for explicit least
+  privilege. Workflow now defaults to `contents: read`; PyPI explicitly has
+  `contents: read` plus `id-token: write`; MCPB alone has `contents: write`.
+- `B2 / credential RED→GREEN` — Added a failing contract proving the MCPB
+  checkout persisted its write-capable credential before network-executed
+  `npx`. MCPB checkout now sets `persist-credentials: false`; `GH_TOKEN` remains
+  scoped to the final release step.
+- `B2 / gates` — Release/version and manifest suite: 16 passed. Current
+  repository checker: exit 0 with all four sources at 0.4.0. YAML parse: exit 0.
+  B2 Ruff and `git diff --check`: passed. No workflow, publication, release, or
+  network package execution was triggered.
+- `B2 / independent review` — Verdict `ACCEPT`; no unresolved P0–P2. Mutable
+  action/runtime package acquisition and same-job PyPI OIDC exposure are
+  recorded as `R-A12` and `R-A13`.
+
 ## Recovery Snapshot
 
 ### 1. Completed work
@@ -624,25 +696,26 @@ For every accepted commit append:
 - Target Agent architecture accepted in `docs/AGENT_ARCHITECTURE.md`.
 - Orchestrated campaign revision R1 drafted.
 - Host capability profile and adapter evidence recorded.
-- Current repository anchor and dirty-baseline risk recorded.
+- B1 runtime/CAD baseline committed and pushed as `cb2301e6` after complete
+  normal/FreeCAD gates and independent review.
 
 ### 2. Current state
 
 - Approval: R1 approved by `A-001`.
-- Active stage: Stage A / packet `B1` gates and review accepted; staging pending.
+- Active stage: Stage A / packet `B2` gates and review accepted; staging pending.
 - Branch: `codex/agent-core-phase1`.
-- Anchor: `9af2714c799bb34ca59907514c15cee0db7645f7`.
-- Working tree: dirty, containing the uncommitted `0.4.0` baseline.
-- Implementation/delegation/gates: B1 complete and accepted. Commits/pushes: not
-  started.
+- Anchor: `cb2301e6daca9ab8188fe6114f1fc29e5f485baa`.
+- Working tree: dirty only with planned B2/B3 pre-existing changes plus the
+  campaign ledger update.
+- Implementation/delegation/gates: B1 and B2 complete and accepted.
+  Commits/pushes: B1 complete and pushed; B2 pending.
 
 ### 3. Next actions
 
-1. Stage the exact B1 named files and inspect the staged diff.
-2. Commit B1 and push `codex/agent-core-phase1` without force.
-3. Append the resulting commit/push evidence and issue packet `B2`.
-4. Continue only while circuit breakers remain
-   clear.
+1. Stage exact B2 files plus ledger and inspect the staged diff.
+2. Commit and push B2 without force.
+3. Record the resulting hash and issue packet B3.
+4. Continue only while circuit breakers remain clear.
 
 ### 4. Blockers and residuals
 
