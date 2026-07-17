@@ -1516,3 +1516,388 @@ Required authorization wording: `批准 R3，关闭 R-B12 后继续 R1。`
   Review remained strictly read-only.
 - `R-B12` and `C3-BRK-01` are closed on the accepted C3 tree under `A-003`.
   `R-B13`–`R-B15` remain non-blocking with their recorded closure conditions.
+
+### C3 Commit and Push Closure
+
+- Commit `b7d12ea89bbf25adf13cea178deb72e8bf2338e2`
+  (`feat(workflow): validate model programs before execution`) contains the
+  three exact C3 files and 1,596 insertions with no historical ledger deletion.
+- The commit was pushed non-force to
+  `origin/codex/agent-core-phase1`; local HEAD and upstream both resolved to the
+  full hash and the worktree was clean before C4 ledger work began.
+- The repeated repository redirect remains `R-A11`; no remote mutation, PR,
+  release, `main` mutation, provider/model/key work, or CAD execution occurred.
+
+### Task Packet `C4`
+
+1. **Authorization:** R1, `A-001`, the closed R2/R3 repair authorizations, Stage
+   B decisions `D-B01`–`D-B08`, and commit plan C4 authorize this packet. It
+   inherits every sandbox, allowlist, approval, and no-PR/no-main/no-release/
+   no-provider prohibition. No new product or external authority is implied.
+2. **Workspace anchor:** Repository root
+   `/Users/wangtao/Documents/DevProject/vibecad`; branch
+   `codex/agent-core-phase1`; clean pushed anchor
+   `b7d12ea89bbf25adf13cea178deb72e8bf2338e2`. Modify only
+   `src/vibecad/execution/results.py`,
+   `tests/test_tool_result_normalizer.py`, and this campaign artifact. The
+   implementer must not edit the artifact. C1–C3, registry, server/tools,
+   runtime/engine, manifests/dependencies, other tests/docs, PRs, releases, and
+   `main` are out of scope.
+3. **Context:** Normalize legacy polymorphic semantic-tool values into the C1
+   `StepResult` contract without invoking a handler or owning a clock. Existing
+   tools may return JSON scalars/lists, success mappings with `ok=true`, legacy
+   success mappings with no `ok` key (notably describe output), or structured
+   failures with `ok=false`. C5 will inject measured elapsed time and explicit
+   facts, artifacts, warnings, and evidence. Any explicit error or contradictory
+   success/error state fails closed. Unexpected exception messages and values
+   must never cross the public result; only a local stable diagnostic enum may
+   retain classification.
+4. **Steps and gates:** Add a focused missing-module test and record genuine RED.
+   Implement pure-standard-library stable enums for public normalization codes
+   and local diagnostic classes, an immutable non-serialized normalization
+   wrapper containing public `StepResult` plus optional local classification,
+   `normalize_tool_result`, and `normalize_tool_exception`. Success mappings
+   strip transport keys (`ok` and null `error`) while preserving a deeply
+   frozen JSON value; legacy no-`ok` mappings and JSON scalars/lists succeed.
+   `ok=false` or any non-null `error` always yields failure, even beside
+   success-looking fields. Non-boolean `ok`, contradictory `ok=true` plus error,
+   hostile/cyclic/non-JSON values, and malformed mappings yield fixed
+   `invalid_tool_result`/`contradictory_tool_result` failures rather than raw
+   exceptions. Structured failure metadata is accepted only through exact safe
+   types and bounded printable single-line code/message/reference values;
+   unsafe fields fall back to fixed public values without reflection.
+   Unexpected `Exception` details and class names are absent from
+   `StepResult.to_mapping`; local classification distinguishes timeout,
+   value/runtime, and other exceptions. `BaseException` is not normalized as a
+   tool exception. Tests cover caller mutation, boolean/number traps, nonfinite
+   elapsed/raw values, schema-compatible evidence/warnings/artifacts/facts,
+   nested errors, every failure precedence, public JSON round-trip, and no
+   logging/import/I/O side effect. Run focused C4 and C1–C4 compatibility,
+   managed Python 3.12 clean import, exact Ruff lint/format, and diff checks. A
+   distinct read-only reviewer evaluates error-to-success safety, redaction,
+   local/public separation, C5 usability, hostile containers, and scope.
+   Controller alone accepts, updates the ledger, stages, commits, and pushes.
+5. **Execution discipline:** `spawn-send-wait`; no model-tier selector exists;
+   `native-session-poll`. Maximum two repair/gate attempts. Stop on any raw
+   exception detail in a public mapping, failure converted to success, local
+   diagnostic serialized publicly, swallowed `BaseException`, clock/handler/
+   CAD/I/O/network/model import or action, C1 contract modification,
+   out-of-allowlist write, nondeterministic failure, unexpected red, or required
+   gate failure outside budget.
+6. **Delivery boundary:** Implementer may inspect committed contracts/current
+   tool return shapes, add genuine RED, implement only the two C4 files, and run
+   gates. It must not edit the artifact, stage, commit, push, start C5, or alter
+   existing behavior. Reviewer is read-only. Controller reserves acceptance,
+   residual decisions, artifact updates, exact staging, commit, and immediate
+   push.
+7. **Final report:** Return anchor/end hashes; exact files; RED command/reason;
+   API/enums and success/failure precedence matrix; structured-error safety and
+   exception-redaction rules; public/local separation; focused/compatibility/
+   import/lint/format/diff results; mutation/side-effect evidence; reviewer
+   verdict/residuals; staging/commit/push state; final workspace.
+
+- `R-B16` — Current tools do not share a stable structured error-code taxonomy;
+  C4 therefore uses generic normalized codes and only accepts optional safe
+  structured metadata. Tool-specific public codes and retry/input policy remain
+  a future semantic-tool contract decision before public workflow exposure.
+
+### C4 Evidence and Circuit Breaker
+
+- `C4 / genuine RED` — With only the first focused fixture present,
+  `PYTHONPATH=src .venv/bin/pytest -q
+  tests/test_tool_result_normalizer.py` exited 2 during collection with
+  `ModuleNotFoundError: No module named 'vibecad.execution.results'`. The
+  failure was solely the intended missing C4 module and therefore qualifies as
+  behavioral RED.
+- `C4 / implementation` — Added the pure-standard-library
+  `ToolResultCode`, local-only `ToolDiagnosticClass`, immutable
+  `NormalizedToolOutcome`, `normalize_tool_result`, and
+  `normalize_tool_exception`. The implementation distinguishes legacy
+  success, explicit failure, contradiction, invalid result, and ordinary
+  exception paths; deep-freezes public JSON through C1 contracts; keeps local
+  diagnostics out of `StepResult.to_mapping()`; does not catch
+  `BaseException`; and imports or invokes no handler, clock, CAD runtime,
+  filesystem, network, model provider, or logger.
+- `C4 / gate attempt 1` — The first formal focused GREEN gate exited 1 with
+  77 passed and 1 failed. The failure was a test false positive: the sentinel
+  word `object` also appeared in the legitimate public field name
+  `related_objects`. The test used a unique private sentinel instead; the
+  same focused command then exited 0 with 78 passed. No production semantic
+  behavior changed in this repair.
+- `C4 / gate attempt 2` — The formal Ruff
+  `format --check` gate exited 1 because `results.py` required formatting.
+  The exact-file formatter exited 0 with one file reformatted, and the repeated
+  format check exited 0 with both files formatted. Final implementer and
+  controller gates then passed: focused C4 81 tests; C1–C4 compatibility 321
+  tests; managed Python 3.12.13 clean import and public-redaction probe; exact
+  Ruff lint and format; tracked/new-file whitespace checks; JSON round-trip,
+  mutation, and no-logging/no-CAD-import coverage. Final file hashes were
+  `d5a306b92fa554fc1260d7079cd64765e8624d0d37f197337f6c900e307370af`
+  for `results.py` and
+  `df7ad168a09159140f7a73e055e2181c8ca815788eb5cfe1dc04a28bbe642932`
+  for its test.
+- `C4 / independent review` — Distinct read-only reviewer
+  `/root/c4_review` verdict `REJECT`; P0=0, P1=0, P2=2, P3=0. The reviewer
+  independently repeated focused 81 and compatibility 321 gates, clean import,
+  Ruff, format, and whitespace checks successfully. A dedicated acceptance
+  probe exited 1 with two failures: valid execution context is discarded on
+  invalid raw values, and non-list/tuple artifact/warning containers are
+  silently iterable-coerced. Review made no edit, stage, commit, push, or C5
+  change.
+- `C4-BRK-01` — Packet C4's two formal repair/gate attempts are exhausted.
+  Execution stops without staging, commit, push, or C5 work. The controller
+  applies the same budget calibration used by C3: a formal focused gate red and
+  a formal format gate red each consume an attempt even when the correction is
+  a fixture or mechanical formatting repair. HEAD and upstream remain
+  `b7d12ea89bbf25adf13cea178deb72e8bf2338e2`; the working tree contains only
+  this campaign artifact and the two expected untracked C4 files.
+
+### C4 Blocking Residuals
+
+- `R-B17` — Invalid raw values discard valid execution context. The generic
+  ordinary-exception path calls a minimal failure builder that clears revision,
+  facts, artifacts, warnings, and evidence. It also applies a C4-only
+  256-character operation-ID limit, so an identifier accepted and preserved by
+  C1 on success disappears on fallback. Reproduced for a non-JSON object, a
+  cyclic value, and an MCP-like `[dict, Image]` value. Impact: after a CAD
+  handler has changed state but returned an invalid shape, C5 can lose
+  validation, rollback, artifact, and operation-correlation evidence.
+- `R-B18` — Artifact and warning containers bypass the C1 list/tuple boundary.
+  Direct `tuple(...)` coercion accepts strings as character references,
+  mappings as key lists, and sets with potentially nondeterministic ordering.
+  Reproductions include `artifacts='ab'` becoming `['a', 'b']` and
+  `warnings='cd'` becoming `['c', 'd']`. Impact: C5 can silently publish
+  corrupted artifact and warning references rather than a fixed invalid
+  result.
+- `R-B16` remains non-blocking and unchanged. `R-B17` and `R-B18` block
+  C4 acceptance and all C5 work.
+
+## Proposed Revision R4 — Not Authorized
+
+R4 changes no architecture, operation, schema, public error-code set, handler,
+dependency, external authority, or commit count. It proposes exactly one
+additional concentrated C4 repair pass, limited to `R-B17` and `R-B18` in
+`src/vibecad/execution/results.py` and
+`tests/test_tool_result_normalizer.py`, with this artifact updated only for
+evidence.
+
+The repair must validate and snapshot injected context independently from raw
+tool-result interpretation; accept artifact, warning, and evidence containers
+only through the C1 list/tuple boundary without generic iterable coercion;
+preserve every valid injected context field when raw output alone is invalid;
+retain C1-valid operation IDs and revisions without a C4-only length policy;
+and fall back to fixed minimal public context only when the injected context
+itself is invalid. It must add regressions for non-JSON, cyclic, and MCP-like
+raw values with complete valid context and a long valid operation ID, plus
+string, mapping, set, and hostile context containers. All public redaction,
+failure precedence, `BaseException`, no-side-effect, C1–C4 compatibility,
+managed-import, Ruff/format, and diff gates remain binding. A distinct
+read-only reviewer must accept with no unresolved P0–P2 before exact staging,
+commit, push, or C5.
+
+Required authorization wording:
+`批准 R4，关闭 R-B17 和 R-B18 后继续 R1。`
+
+## Recovery Snapshot `S-C4-BLOCKED-01`
+
+### 1. Completed milestones
+
+- Repository `/Users/wangtao/Documents/DevProject/vibecad`, branch
+  `codex/agent-core-phase1`, verified pushed anchor
+  `b7d12ea89bbf25adf13cea178deb72e8bf2338e2`.
+- B1 `cb2301e6`, B2 `a0de03f`, B3 `f2e6087`, C1 `0fb87ea`, C2
+  `8c3237d`, and C3 `b7d12ea` are committed and pushed. R-B09 and R-B12
+  are closed under A-002 and A-003.
+- C4 implementation, genuine RED, two gate attempts, final green automation,
+  and independent rejection evidence are preserved locally. No C4 commit
+  exists.
+
+### 2. Ordered next packets and branch conditions
+
+1. If the user explicitly approves proposed R4, issue one concentrated
+   `C4-RP1` packet limited to R-B17/R-B18 and first reproduce the two-failure
+   acceptance probe.
+2. If the focused repair, full C4, C1–C4 compatibility, environment/static
+   gates, and distinct final review all accept with no unresolved P0–P2, append
+   evidence, stage the three exact C4 files, commit
+   `feat(execution): normalize CAD tool outcomes`, and immediately push.
+3. Only after accepted C4 HEAD/upstream equality may the controller append and
+   issue C5. C5 must bind JSON-only lower semantic handlers and must not invoke
+   MCP-facing handlers that can return `[dict, Image]`.
+4. If R4 is rejected or changed, preserve the exact working tree and draft a
+   superseding revision; do not infer authority.
+
+### 3. Active decisions and authorization
+
+- R1 remains approved by A-001; R2/A-002 and R3/A-003 are closed by their
+  accepted, pushed repairs.
+- `C4-BRK-01` exhausts the approved C4 repair/gate budget. Proposed R4 is not
+  authorized and grants no implementation authority without the exact explicit
+  user approval above.
+- No PR, main/release mutation, provider/model/key work, paid-token use, remote
+  rewrite, or CAD execution is authorized.
+
+### 4. Execution discipline and recovery checks
+
+- Capability profile remains
+  `native-plan / spawn-send-wait / repo-artifact / native-session-poll`; the
+  recorded four permitted adapter evidence categories remain authoritative.
+- On recovery verify branch, HEAD/upstream, exact dirty-file set, the 321-test
+  C1–C4 green baseline, the two-failure acceptance probe, managed Python
+  3.12.13 import/redaction boundary, Ruff/format/diff, and both file hashes.
+- Preserve genuine RED, a single R4 repair pass, distinct read-only final
+  review, named staging, immediate push, append-only history, and every
+  no-PR/no-main/no-release/no-provider circuit breaker.
+
+## R4 Authorization and Recovery
+
+- `A-004` — At `2026-07-16T22:01:37-07:00`, the user explicitly authorized
+  proposed revision R4 with:
+  `批准 R4，关闭 R-B17 和 R-B18 后继续 R1。`
+- Effect: R4 is active and authorizes exactly one concentrated `C4-RP1`
+  repair for `R-B17` and `R-B18`, its declared gates, distinct read-only
+  final review, exact C4 staging/commit/push after acceptance, and continuation
+  of the approved R1 sequence. It changes no architecture, operation, schema,
+  public error-code set, handler, dependency, external authority, commit count,
+  or existing prohibition.
+- Recovery verification: branch `codex/agent-core-phase1`; HEAD and upstream
+  both `b7d12ea89bbf25adf13cea178deb72e8bf2338e2`; dirty paths exactly this
+  campaign artifact and the two expected untracked C4 files. Their SHA-256
+  values still match the blocked snapshot:
+  `d5a306b92fa554fc1260d7079cd64765e8624d0d37f197337f6c900e307370af`
+  and
+  `df7ad168a09159140f7a73e055e2181c8ca815788eb5cfe1dc04a28bbe642932`.
+  No directory-scoped `AGENTS.md` or `CLAUDE.md` is present.
+
+### R4 Adapter Revalidation
+
+- `live capability declarations`: `update_plan`, `spawn_agent`,
+  `send_message`/`followup_task`, `wait_agent`, controllable
+  `exec_command` sessions, and session polling are declared live; no worker
+  model selector is declared.
+- `observable behavior`: this campaign has already used native plan
+  projection, spawn/send/wait delegation, repo-artifact recovery, and original
+  yielded-session polling successfully; no mismatch is observed.
+- `environment identity`: the passive host identity remains Codex desktop
+  with primary controller `/root`; no model/runtime version selector is
+  exposed.
+- `public configuration`: the declared workspace-write sandbox and current
+  writable roots remain unchanged; no broader authority is configured.
+- Selected Codex adapter profile remains
+  `approval: native-plan / delegation: spawn-send-wait / persistence:
+  repo-artifact / process: native-session-poll`. This record uses exactly the
+  four permitted evidence-source categories above.
+
+### Task Packet `C4-RP1`
+
+1. **Authorization:** R4 and `A-004` authorize one additional repair solely
+   for `R-B17` and `R-B18`. The packet inherits higher-priority system,
+   developer, and user instructions; R1–R3 and `A-001`–`A-003`; Stage B
+   decisions; the approved file allowlist; and the current host permission
+   model and sandbox. The Skill, artifact, and packet cannot grant or expand
+   permissions, elevate authority, or bypass that model or sandbox. Do not
+   request the same approval again.
+2. **Workspace anchor:** Repository root
+   `/Users/wangtao/Documents/DevProject/vibecad`; branch
+   `codex/agent-core-phase1`; pushed anchor
+   `b7d12ea89bbf25adf13cea178deb72e8bf2338e2`. Modify only
+   `src/vibecad/execution/results.py` and
+   `tests/test_tool_result_normalizer.py`; the controller alone may append
+   this campaign artifact. No directory-scoped agent instruction file is
+   present. C1–C3, registry, server/tools, runtime/engine,
+   manifests/dependencies, other tests/docs, PRs, releases, and `main`
+   remain prohibited. The current permission model and sandbox remain binding.
+3. **Context:** C4's public/local error safety, precedence, redaction, deep
+   freeze, ordinary-exception classification, and `BaseException` behavior
+   passed 81 focused and 321 compatibility tests. Independent review rejected
+   only two P2 roots. `R-B17`: invalid raw output calls a minimal failure path
+   that discards otherwise valid revision, facts, artifacts, warnings,
+   evidence, and long C1-valid operation IDs. `R-B18`: generic
+   `tuple(...)` coercion silently accepts strings, mappings, sets, generators,
+   and other non-list/tuple context containers. Close both by independently
+   validating and snapshotting injected context before interpreting raw tool
+   output, without changing accepted valid values or any unrelated C4
+   behavior.
+4. **Steps and gates:** First add concentrated regressions and reproduce genuine
+   repair RED: non-JSON, cyclic, and MCP-like `[dict, attachment]` raw values
+   must retain complete valid context and a greater-than-256-character
+   C1-valid operation ID; string/mapping/set artifact and warning inputs plus a
+   non-list/tuple evidence iterable must become fixed invalid results rather
+   than silently coerce. The expected unchanged baseline is that the first
+   group loses context and the second group is accepted or split; any different
+   failure is a breaker. Implement one unified, pure context validation/snapshot
+   boundary using C1's exact list/tuple and contract semantics. When context is
+   valid, preserve its canonical frozen values on every success and failure,
+   including invalid raw. When context itself is invalid, return the fixed
+   invalid-result envelope with safe minimal context and no reflection. Do not
+   add a C4-only operation-ID or revision length policy. Run the focused repair
+   selection, complete C4 suite, C1–C4 compatibility, the original two-failure
+   acceptance probe, managed Python 3.12 clean import/redaction boundary, exact
+   Ruff lint/format, and tracked/new-file diff checks. The original independent
+   reviewer re-verifies both closures and the full C4 scope read-only.
+   Controller alone accepts, updates the artifact, stages, commits, and pushes.
+5. **Execution discipline:** `spawn-send-wait`; no worker model selector is
+   available, so no tier claim is made; `native-session-poll`. This is the
+   only R4 repair pass. Stop on an unexpected RED signature, remaining P0–P2,
+   loss of any valid context field, acceptance/coercion of a non-list/tuple
+   context sequence, failure converted to success, public raw detail or local
+   diagnostic leakage, swallowed `BaseException`, clock/handler/CAD/I/O/
+   network/model activity, C1 modification, out-of-allowlist write, or required
+   gate failure. Further repair requires a new approved revision.
+6. **Delivery boundary:** Implementer may edit only the two named C4 files and
+   run gates. It must not edit the artifact, stage, commit, push, start C5, or
+   alter existing error codes, precedence, structured-metadata policy, or valid
+   program behavior. Reviewer is strictly read-only. Controller reserves
+   acceptance, residual disposition, artifact updates, exact staging, commit,
+   immediate push, and the C5 transition.
+7. **Final report:** Return anchor/end hashes; exact files; each repair RED
+   command and observed signature; the context snapshot/invalidation rule;
+   focused/full/compatibility/acceptance-probe/import/lint/format/diff evidence;
+   mutation, redaction, `BaseException`, and no-side-effect results; deviations
+   and residuals; reviewer verdict; staging/commit/push state; and final
+   workspace.
+
+### C4-RP1 Evidence and C4 Acceptance
+
+- `C4-RP1 / genuine repair RED` —
+  `PYTHONPATH=src .venv/bin/pytest -q
+  tests/test_tool_result_normalizer.py -k r4_context_boundary` exited 1 with
+  10 failed and 81 deselected. The failure signature matched R4 exactly: three
+  invalid-raw cases lost complete valid context and a long operation ID; six
+  string/mapping/set artifact or warning cases were accepted or split; and one
+  evidence iterator was accepted. No additional or different failure occurred.
+- `C4-RP1 / implementation` — Added one pure context snapshot boundary before
+  raw interpretation. It uses C1 `StepResult` to validate and deeply freeze
+  elapsed time, operation ID, revision, facts, artifacts, warnings, and
+  evidence. Valid context is reused for success and every failure class,
+  including invalid raw. Invalid context returns a fixed invalid-result
+  envelope, clears untrusted payload fields, and preserves only operation ID
+  and revision that independently satisfy C1. Artifact, warning, and evidence
+  containers now accept only C1 list/tuple shapes; no generic iterable coercion
+  or C4-only identifier length policy remains. All error precedence,
+  structured metadata, public/local redaction, exception classification, and
+  `BaseException` behavior remain unchanged.
+- `C4-RP1 / GREEN` — Repair selection: 10 passed and 81 deselected. Full C4:
+  91 passed. C1–C4 compatibility: 331 passed. The exact original controller
+  acceptance probe exited 0 with `context_preserved=True` and
+  `bad_context_rejected=True`. Managed Python 3.12.13 clean import,
+  invalid-raw context preservation, invalid-context redaction, exception
+  redaction, forbidden-import boundary, exact Ruff lint/format, tracked and
+  new-file whitespace, mutation, JSON round-trip, no-logging, and no-CAD
+  side-effect gates all passed.
+- `C4 / final independent review` — Original distinct reviewer
+  `/root/c4_review` verdict `ACCEPT`; P0=0, P1=0, P2=0, P3=0. Independent
+  probes confirmed three invalid-raw preservation cases; 30 result/exception
+  API invalid-container rejections without iterator consumption; 14
+  invalid-context minimal-envelope cases; four valid list/tuple deep-freeze
+  cases; five precedence cases; two same-object `BaseException` cases; public
+  JSON round-trip and redaction; clean import; static gates; exact hashes; and
+  unchanged scope. Review remained strictly read-only.
+- `R-B17`, `R-B18`, and `C4-BRK-01` are closed on the accepted C4 tree
+  under `A-004`. `R-B16` and the existing ingress-budget residual remain
+  non-blocking with their recorded closure conditions.
+- Accepted file hashes before staging:
+  `009e877b539b19c3b364f6a7ffe1b4bb9cd0fb790de80b2ba74257e58d1d57bd`
+  for `src/vibecad/execution/results.py` and
+  `b586ee4a5a1090bd75948c61b1bc069d38295379653096302d57ecab07f78200`
+  for `tests/test_tool_result_normalizer.py`.
