@@ -1901,3 +1901,208 @@ Required authorization wording:
   for `src/vibecad/execution/results.py` and
   `b586ee4a5a1090bd75948c61b1bc069d38295379653096302d57ecab07f78200`
   for `tests/test_tool_result_normalizer.py`.
+
+### C4 Commit and Push Closure
+
+- Commit `24eac3cdf2f0752f303fb18d28f8c22b9149875c`
+  (`feat(execution): normalize CAD tool outcomes`) contains the three exact C4
+  files and 1,648 insertions with the accepted R4 repair and append-only
+  campaign evidence.
+- The commit was pushed non-force to
+  `origin/codex/agent-core-phase1`; local HEAD and upstream both resolved to the
+  full hash and the worktree was clean before C5 ledger work began.
+- The repeated lowercase-to-canonical repository redirect remains `R-A11`.
+  No remote mutation, PR, release, `main` mutation, provider/model/key work,
+  paid-token use, or unapproved CAD execution occurred.
+
+### Task Packet `C5`
+
+1. **Authorization:** R1 and `A-001`, R2–R4 and `A-002`–`A-004`, Stage B
+   decisions `D-B01`–`D-B08`, and the approved C5 commit plan authorize this
+   final Stage B packet. It inherits every higher-priority instruction,
+   sandbox, allowlist, approval, and no-PR/no-main/no-release/no-provider
+   prohibition. It grants no new product, credential, network, model, package,
+   filesystem, or external authority.
+2. **Workspace anchor:** Repository root
+   `/Users/wangtao/Documents/DevProject/vibecad`; branch
+   `codex/agent-core-phase1`; clean pushed anchor
+   `24eac3cdf2f0752f303fb18d28f8c22b9149875c`. Modify only
+   `src/vibecad/execution/adapter.py`,
+   `tests/test_execution_adapter.py`, and this campaign artifact. The
+   implementer must not edit the artifact. C1–C4, registry, server/tools,
+   runtime/engine, manifests/dependencies, other tests/docs, PRs, releases,
+   remotes, and `main` are out of scope. Existing managed FreeCAD may be used
+   only by the opted-in C5 integration gate; installation, upgrade, or runtime
+   mutation is not authorized or required.
+3. **Context:** C5 proves the already accepted C1–C4 contract against existing
+   semantic CAD tools without adding a task service, candidate manager,
+   reasoning backend, provider, MCP surface, or arbitrary-code path. The
+   adapter accepts only an exact authentic `ValidatedProgram` plus a caller-
+   supplied mapping of synchronous callables. It performs no dynamic import,
+   reflection-based discovery, server lookup, retry, fallback model call, or
+   hidden validation. Real integration must bind `Session` to the JSON-only
+   lower handlers `modeling.new_document`, `modeling.add_box`, and
+   `feedback.text.describe_assembly`; it must never use MCP-facing server
+   wrappers that may return `[dict, Image]`. Because `Session` has no public
+   revision API, the adapter accepts an optional caller-owned candidate
+   revision that is validated before execution; it must not read
+   `Session._revision_id` or substitute `ModelProgram.base_revision`.
+4. **Steps and gates:** First add the focused test module and record genuine RED
+   caused only by the missing adapter module. Implement a pure-standard-library
+   `AdapterErrorCode`/`AdapterError` configuration boundary and
+   `execute_validated_program(program, handlers, *, revision=None)`, returning
+   an immutable tuple of C4 `NormalizedToolOutcome` values. Before the first
+   monotonic-clock read or handler call, exact-type check and authenticate the
+   program through the class-owned validator, snapshot its exact
+   `BoundCommand` tuple and integrity-critical fields, validate the optional
+   revision through C1 semantics, resolve every required handler, require it to
+   be callable, and freeze the complete `(command, callable)` execution plan.
+   Missing or non-callable first or final handlers and hostile mapping access
+   must yield fixed adapter configuration errors with zero handler and clock
+   calls and no reflected input. Execution must use only the captured
+   callables, pass the sealed handler kwargs exactly, measure each actual call
+   with the adapter-owned monotonic clock, invoke each handler at most once,
+   normalize ordinary returned values and `Exception` instances through C4,
+   preserve C4's local diagnostic wrapper, propagate each `BaseException` as
+   the same object, and stop globally at the first normalized failure. It must
+   never inspect retry metadata or retry. A successful command whose C2
+   metadata requires evidence receives one deterministic adapter-owned
+   `ExecutionEvidence` observation bound to the command ID and normalized
+   result; this records execution acknowledgement only and is not independent
+   AcceptanceSpec proof. Raw `elapsed_ms`, revision, facts, warnings, artifacts,
+   or evidence fields remain tool value and cannot override the trusted result
+   envelope. Tests cover unvalidated/forged programs, first/final missing and
+   non-callable handlers, hostile and mutable mappings/TOCTOU, exact kwargs and
+   ordering, success, explicit/contradictory/invalid/MCP-like failures,
+   exception redaction/classification, same-object `BaseException`, stop-
+   without-retry, trusted revision/facts/evidence precedence, adapter-owned
+   evidence, mutation resistance, clean import, and no dynamic resolution.
+   The opted-in subprocess slow test validates a three-step
+   `create_document -> create_box(10,20,30) -> inspect_model` flow, volume
+   approximately 6,000, bbox 10 by 20 by 30, valid single-solid inspection,
+   evidence on the two evidence-required commands, normalized candidate
+   revision, non-negative elapsed time, and `finally` document close. Run the
+   focused unit gate, the exact real FreeCAD gate against the existing global
+   environment, C1–C5 compatibility, the full normal suite, managed Python
+   3.12 clean import, exact Ruff lint/format, and tracked/new-file diff checks.
+   A distinct reviewer performs a strictly read-only integration and safety
+   review. Controller alone accepts, updates the ledger, stages, commits, and
+   pushes.
+5. **Execution discipline:** `spawn-send-wait`; no worker model selector exists
+   and no model-tier claim is made; `native-session-poll`. Maximum two formal
+   repair/gate attempts. Stop on an unexpected RED signature; any handler,
+   clock, or mapping access before full program/handler preflight; a missing
+   final handler after an earlier side effect; execution-time lookup of the
+   mutable source mapping; duplicate handler invocation; automatic retry;
+   continuation after any normalized failure; exception text/class-name
+   reflection; swallowed `BaseException`; raw context overriding trusted
+   envelope context; dynamic import/reflection/eval/exec; core import loading
+   FreeCAD, Part, MCP/server/tools, or a model SDK; an out-of-allowlist write;
+   existing-file modification; or a required gate failure outside budget.
+6. **Delivery boundary:** Implementer may inspect committed C1–C4 contracts and
+   existing tool/runtime signatures, add genuine RED, implement only the two C5
+   files, run the declared gates, and use the installed managed runtime for the
+   one opted-in slow test. It must not edit the artifact or any existing source,
+   test, manifest, dependency, environment, runtime, server, or tool file;
+   stage, commit, push, create a PR, start a later architecture phase, install
+   or upgrade software, or call a model/provider/network service. Reviewer is
+   read-only. Controller reserves acceptance, residual disposition, ledger
+   updates, exact staging, the eighth and final campaign commit, immediate
+   non-force push, and final R1 closeout.
+7. **Final report:** Return anchor/end hashes; exact files; RED command and
+   observed signature; public API and stable adapter errors; authentication,
+   full-plan preflight, TOCTOU, ordering, exact-once, failure-stop, retry,
+   exception, clock, trusted-context, and evidence rules; focused/compatibility/
+   full/real-FreeCAD/import/lint/format/diff evidence; real flow values and
+   cleanup; forbidden-import/side-effect results; deviations and residuals;
+   independent verdict; staging/commit/push state; and final workspace.
+
+- `R-B19` — Explicit injected callables are a trusted same-process application
+  boundary. C5 prevents dynamic discovery and mapping TOCTOU but cannot prove a
+  callable's provenance or stop arbitrary same-process Python from using
+  private mutation. Isolated workers and a public binding policy remain later
+  architecture work, aligned with `R-B13`/`R-B14`.
+- `R-B20` — Adapter-owned evidence is an execution observation, not independent
+  geometry or AcceptanceSpec verification. Candidate verification and commit
+  policy remain later Task Service work.
+- `R-B21` — Candidate revision ownership is not implemented in Phase 1. C5
+  accepts only an optional prevalidated caller-owned revision and otherwise
+  reports null; it never reads a private Session revision or fabricates one
+  from the program base revision.
+
+### C5 Evidence and Acceptance
+
+- `C5 / genuine RED` — Before any production adapter file existed,
+  `PYTHONPATH=src .venv/bin/pytest -q tests/test_execution_adapter.py`
+  exited 2 during collection with one error:
+  `ModuleNotFoundError: No module named 'vibecad.execution.adapter'`. The
+  failure was solely the intended missing C5 module; no CAD, dependency,
+  environment, or existing-test failure was present.
+- `C5 / implementation` — Added a pure in-process adapter with fixed
+  `AdapterErrorCode`/`AdapterError` records and
+  `execute_validated_program`. It exact-type checks and authenticates the C3
+  capability, validates its integrity-critical structure and caller-owned
+  candidate revision, copies all sealed command fields, pre-resolves every
+  required synchronous callable, and freezes the full execution plan before
+  the first clock read or handler invocation. Execution invokes each captured
+  handler once in deterministic order, passes only sealed kwargs, normalizes
+  returned values and ordinary exceptions through C4, preserves local
+  diagnostics, propagates handler `BaseException` as the same object, stops at
+  the first normalized failure, and never retries. Successful C2 commands that
+  require evidence receive one adapter-owned execution observation; it is not
+  represented as independent geometry acceptance evidence.
+- `C5 / pre-review hardening` — The first fast implementation gate passed 33
+  tests with one slow test deselected. A distinct read-only pre-review then
+  rejected the test boundary with five P1 and two P2 gaps: an unused import,
+  the shared slow fixture's installer fallback, incomplete command-snapshot and
+  failed-evidence matrices, narrow import/dynamic-resolution checks, and
+  missing non-Mapping/forged-field cases. One concentrated in-scope hardening
+  pass closed every item. Its genuine focused RED produced 5 failed, 53 passed,
+  and 1 deselected: start/end clock exceptions or reversal either escaped,
+  masked a handler `BaseException`, or converted an already successful
+  mutation into an invalid result. The unified fix makes internal timing
+  anomalies degrade to zero elapsed time without changing tool success,
+  retrying, or masking the original handler `BaseException`. The expanded
+  boundary also uses a local read-only existing-runtime fixture, freezes every
+  execution-critical command field, rejects hostile configuration before any
+  clock/handler call, excludes success evidence from all failure classes, and
+  proves clean import and execution without dynamic discovery.
+- `C5 / controller GREEN` — Focused fast C5: 58 passed and 1 slow deselected.
+  C1-C5 compatibility: 389 passed and 1 slow deselected. Full normal suite:
+  882 passed and 81 deselected. Exact Ruff lint, Ruff format, tracked/new-file
+  diff, whitespace, allowlist, isolated execution, and no-dynamic-resolution
+  gates passed. Managed Python 3.12.13 imported and executed the core boundary
+  with no FreeCAD, Part, MCP, server, engine/tool, Anthropic, or OpenAI module
+  loaded.
+- `C5 / real FreeCAD` — With
+  `VIBECAD_RUN_INTEGRATION=1` and the explicit existing environment
+  `/Users/wangtao/Library/Application Support/VibeCAD/mamba/envs/vibecad`, the
+  opted-in C5 slow gate exited 0 with one test passed. It installed or upgraded
+  nothing. The JSON-only lower-handler flow
+  `create_document -> create_box(10,20,30) -> inspect_model` produced three
+  normalized successes, volume approximately 6,000, bbox 10 by 20 by 30, a
+  valid single solid, evidence counts `[1, 1, 0]`, caller revision
+  `candidate-real-r1`, finite non-negative elapsed time, and confirmed document
+  cleanup. No MCP-facing handler, image attachment, render, export, project
+  file, or network path was used.
+- `C5 / final independent review` — Distinct read-only reviewer
+  `/root/c5_final_review` verdict `ACCEPT`; P0=0, P1=0, P2=0, P3=0. It
+  independently repeated 58 focused tests, 389 C1-C5 compatibility tests, the
+  real FreeCAD gate, managed Python clean import, Ruff lint/format, diff,
+  adversarial preflight/TOCTOU/clock/BaseException/evidence probes, hashes, and
+  exact three-file scope. It made no edit, stage, commit, push, install,
+  upgrade, or PR action.
+- Accepted pre-staging hashes are
+  `9260d8d68b7705603ba08c50e2ea107e7bbab6f4fb2ce1487a1c709bc86018d4`
+  for `src/vibecad/execution/adapter.py` and
+  `23cd82c1095faf32a4b99b13ac139d1030bbf040913cdcda136594f6ce7169f2`
+  for `tests/test_execution_adapter.py`. The accepted dirty scope is exactly
+  those two new files plus this append-only campaign artifact.
+- `R-B19`, `R-B20`, and `R-B21` remain accepted non-blocking Phase 1
+  boundaries with their recorded closure conditions. No new blocker or
+  architecture decision is introduced. Controller may now stage the three
+  exact files, run staged gates, create the eighth and final planned commit
+  `test(execution): prove the contract against the FreeCAD adapter`, and push
+  it non-force. The resulting commit hash and HEAD/upstream equality are
+  terminal handoff evidence; a ninth self-referential ledger commit is neither
+  required nor authorized.
