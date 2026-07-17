@@ -1228,3 +1228,291 @@ Required authorization wording: `批准 R2，关闭 R-B09 后继续 R1。`
   budget residual, the unsafe-token list remains defense-in-depth behind the
   exact default allowlist, and `R-B10` remains deferred until public Agent API
   design. No other C2 residual blocks commit.
+
+### C2 Commit and Push Closure
+
+- Commit `8c3237d107dbd7322ab91c4c7d48987eb0f1e2c2`
+  (`feat(execution): register safe semantic CAD operations`) contains the four
+  exact C2 files and 1,386 insertions with no historical ledger deletion.
+- The commit was pushed non-force to
+  `origin/codex/agent-core-phase1`; local HEAD and upstream both resolved to the
+  full commit hash and the worktree was clean before C3 ledger work began.
+- GitHub repeated the already-recorded `R-A11` lowercase-to-canonical repository
+  redirect. The user remote was not mutated. No PR, release, `main` mutation,
+  model/provider/key/network feature, or existing CAD product file change
+  occurred.
+
+### Task Packet `C3`
+
+1. **Authorization:** R1, `A-001`, R2 closure `A-002`, Stage B decisions
+   `D-B01`–`D-B08`, and commit plan C3 authorize this packet. It inherits all
+   higher-priority instructions, sandbox limits, circuit breakers, and R1
+   prohibitions. R2 added no new product authority; C3 remains the originally
+   approved pure validation slice.
+2. **Workspace anchor:** Repository root
+   `/Users/wangtao/Documents/DevProject/vibecad`; branch
+   `codex/agent-core-phase1`; clean pushed anchor
+   `8c3237d107dbd7322ab91c4c7d48987eb0f1e2c2`. Modify only
+   `src/vibecad/workflow/program.py`, `tests/test_model_program.py`, and this
+   campaign artifact. The implementer must not edit the artifact. Existing
+   workflow contracts/errors, execution registry, server/tools/runtime/engine,
+   manifests/dependencies, other tests/docs, PRs, releases, and `main` are out
+   of scope.
+3. **Context:** Add deterministic pre-execution validation for C1
+   `ModelProgram` against the immutable C2 registry. The validator checks a
+   non-empty program, maximum 64 commands by default, duplicate command IDs,
+   duplicate/self/unknown dependencies, cycles, exact operation allowlisting,
+   separate target/argument required and extra fields, and C2 value shapes
+   (nonblank string, finite positive non-boolean number, exact boolean, and
+   finite numeric vector3). It computes stable topological order with original
+   declaration order as the tie-break and binds validated program fields to
+   handler parameter names. It cannot check live object existence or revisions
+   without CAD state; those remain later preflight concerns.
+4. **Steps and gates:** Add a focused test first and record genuine RED caused
+   by missing `vibecad.workflow.program`. Implement a pure-standard-library
+   `ProgramErrorCode`, strict versioned round-trippable
+   `ProgramValidationError` with RFC 6901 paths and bounded printable one-line
+   messages, immutable bound-command data, and a sealed `ValidatedProgram`
+   capability returned only by successful `validate_model_program`. The
+   validator accepts an injected immutable registry and configurable positive
+   safe-integer budget for testing; default is 64. Failures are deterministic,
+   do not reflect hostile IDs/field values, and expose stable codes for invalid
+   input/configuration, empty/budget, duplicate ID/dependency, self/unknown
+   dependency, cycle, unknown operation, missing/extra field, and wrong value
+   shape. Tests cover every default operation, handler binding, stable topo
+   order, boundary 64/65, malformed configuration/error mappings, immutable
+   caller-owned data, all field shapes including booleans/non-finite values,
+   unit rejection under `R-B10`, sealed-capability construction, and spies
+   proving no handler/CAD call. Run focused tests with `PYTHONPATH=src`, C1–C3
+   compatibility, managed Python 3.12 clean import without FreeCAD/Part/MCP or
+   model SDKs, exact Ruff lint/format, and diff checks. A distinct read-only
+   reviewer evaluates adversarial graph/type behavior, deterministic errors,
+   capability authenticity, C5 usability, import/side-effect boundaries, and
+   scope. Controller alone accepts, updates the ledger, stages exact files,
+   commits, and pushes.
+5. **Execution discipline:** `spawn-send-wait`; the host exposes no worker model
+   selector, so no tier claim is made; `native-session-poll`. Maximum two
+   repair/gate attempts. Stop on an out-of-allowlist write, need to modify C1/C2
+   contracts or registry, nondeterministic traversal/error order, a validation
+   path that invokes handlers/imports CAD/does I/O, arbitrary-code behavior,
+   raw hostile value reflection, unsealed success object, unexpected gate red,
+   or required failure outside budget.
+6. **Delivery boundary:** The bounded implementer may inspect committed C1/C2
+   code, add genuine RED, implement only the two C3 code/test files, and run
+   declared gates. It must not edit this artifact, stage, commit, push, start
+   C4, or alter existing code. The reviewer is read-only. Controller reserves
+   acceptance, residual decisions, ledger updates, exact staging, commit, and
+   immediate push.
+7. **Final report:** Return anchor/end hashes; exact changed files; RED command
+   and reason; public types/error codes; validation and topological-order rules;
+   operation/binding/value-shape matrix; capability-seal design; focused/
+   compatibility/import/lint/format/diff results; side-effect spy evidence;
+   reviewer verdict and residuals; staging/commit/push state; final workspace.
+
+- `R-B11` — C3 uses a conservative internal default of 64 commands per program
+  to satisfy the approved hard-budget requirement. The limit is injectable for
+  tests and can be revised before public Agent API exposure; user review is
+  required if product tiers or long generated workflows need a different
+  public limit.
+
+## C3 Attempt Evidence and Circuit Breaker
+
+- `C3 / genuine RED` — With only the first focused availability fixture,
+  `PYTHONPATH=src .venv/bin/pytest -q tests/test_model_program.py` exited 2
+  during collection with `ModuleNotFoundError: No module named
+  'vibecad.workflow.program'`.
+- `C3 / implementation` — Added pure-standard-library program errors,
+  deterministic graph/allowlist/shape/budget validation, stable topological
+  order, immutable handler bindings, and a sealed in-process
+  `ValidatedProgram` capability. No C1/C2 file, handler, CAD module, network,
+  filesystem, MCP, or model integration changed or executed.
+- `C3 / gate attempt 1` — Focused result was 90 passed and 1 failed. The failure
+  was a fixture assumption: a newline-containing string remains nonblank and
+  therefore correctly satisfies the registered `NONBLANK_STRING` shape. The
+  hostile no-reflection case was corrected to use an actually wrong-shaped
+  nested mapping; production semantics did not change for this fixture repair.
+- `C3 / gate attempt 2` — Focused C3: 91 passed. C1–C3 compatibility: 236
+  passed. The no-handler/no-runtime-import spy passed. Managed Python 3.12.13
+  imported the C3 module without FreeCAD, Part, MCP, Anthropic, OpenAI, Cohere,
+  or Mistral. Exact Ruff lint and format and tracked/new-file diff checks passed.
+- `C3 / controller adversarial probe` — A normally constructed C1 command was
+  deliberately corrupted in-process with
+  `MappingProxyType({object(): 1})`. Validation reached extra-field sorting and
+  JSON Pointer construction, then leaked native `AttributeError` rather than a
+  structured program error. Mixed string/integer keys similarly leak native
+  `TypeError`. Normal C1 constructors and serialized parsing already reject
+  these states.
+- `C3 / final independent review` — Distinct reviewer `/root/c3_review` verdict
+  `REJECT`; P0=0, P1=0, P2=1. The single blocking root cause is `R-B12`; review
+  remained strictly read-only. All other packet behavior, gates, bindings,
+  graph order, hard budget, error mapping, import boundary, and C5 capability
+  usability passed review.
+- `C3 / circuit breaker C3-BRK-01` — Packet C3's two gate attempts are
+  exhausted. Execution stopped without staging, commit, push, or C4 work. HEAD
+  and upstream remain
+  `8c3237d107dbd7322ab91c4c7d48987eb0f1e2c2`; the working tree contains only
+  the controller-owned campaign artifact and two expected untracked C3 files.
+
+### C3 Residuals
+
+- `R-B12` — Forged immutable target/args mappings with non-string keys can leak
+  native exceptions during extra-field handling. Disposition: blocking C3.
+  Closure requires validating every field key with exact-string semantics
+  before membership, sorting, or pointer escaping; returning stable
+  `INVALID_INPUT` at the target/args group path without reflection; object-key
+  and mixed string/integer regression cases for both groups; full C3 gates; and
+  independent acceptance.
+- `R-B13` — Direct construction of output type `BoundCommand` with hostile or
+  cyclic caller mappings can raise native recursion/runtime errors. Successful
+  validation cannot produce them. Keep it output-only/internal or harden it
+  before making that constructor a public API.
+- `R-B14` — `object.__setattr__`-forged C2 metadata can bypass constructor
+  invariants and produce native binding failures. Current registries are
+  trusted in-process immutable configuration. Revalidate full metadata if
+  injected registries later become an external/plugin boundary.
+- `R-B15` — `NONBLANK_STRING` intentionally permits control characters and has
+  no local length cap. C3 never reflects values in its errors; before public
+  exposure, ingress limits under `R-B05` and downstream CAD naming/logging
+  policies must define the accepted string boundary.
+
+## Proposed Revision R3 — Not Authorized
+
+R3 changes no architecture, operation, schema, error-code set, hard budget,
+file allowlist, commit count, or external authority. It proposes exactly one
+additional C3 repair pass limited to `R-B12` in
+`src/vibecad/workflow/program.py` and `tests/test_model_program.py`, with this
+artifact updated only for evidence. All R1/R2 prohibitions and the no-C4-before-
+accepted-C3 order remain binding.
+
+Required authorization wording: `批准 R3，关闭 R-B12 后继续 R1。`
+
+## Recovery Snapshot `S-C3-BLOCKED-01`
+
+### 1. Completed milestones
+
+- Repository `/Users/wangtao/Documents/DevProject/vibecad`, branch
+  `codex/agent-core-phase1`, verified pushed anchor
+  `8c3237d107dbd7322ab91c4c7d48987eb0f1e2c2`.
+- B1 `cb2301e6`, B2 `a0de03f`, B3 `f2e6087`, C1 `0fb87ea`, and C2 `8c3237d`
+  are committed and pushed. C2 final independent verdict is ACCEPT and
+  `R-B09` is closed under `A-002`.
+- C3 implementation and test evidence are preserved locally; no C3 commit
+  exists.
+
+### 2. Ordered next packets and branch conditions
+
+1. If the user explicitly approves proposed R3, issue one concentrated
+   `C3-RP1` packet limited to `R-B12` and verify the 236-test recovery baseline.
+2. If the repair gates and distinct final review accept with no unresolved
+   P0–P2, append evidence, stage the three exact C3 files, commit
+   `feat(workflow): validate model programs before execution`, and immediately
+   push.
+3. Only after accepted C3 HEAD/upstream equality may the controller append and
+   issue C4.
+4. If R3 is rejected or changed, preserve the exact working tree and draft a
+   superseding revision; do not infer authority.
+
+### 3. Active decisions and authorization
+
+- R1 remains approved by `A-001`; R2 was approved by `A-002` and is closed by
+  accepted/pushed C2.
+- `C3-BRK-01` exhausts the C3 gate budget. Proposed R3 is not authorized and
+  grants no implementation authority without explicit user approval.
+
+### 4. Execution discipline and recovery checks
+
+- Capability profile remains `native-plan / spawn-send-wait / repo-artifact /
+  native-session-poll`; the original four-category adapter evidence remains
+  authoritative.
+- On recovery verify branch, HEAD/upstream, exact dirty-file set, 236-test C1–C3
+  gate, managed-import boundary, Ruff/format/diff, and the reproducing
+  non-string-key probe. Preserve independent review, named staging, immediate
+  push, and all no-PR/no-main/no-release/no-provider circuit breakers.
+
+## R3 Authorization and Recovery
+
+- `A-003` — At `2026-07-16T21:03:26-07:00`, the user explicitly authorized
+  proposed revision R3 with: `批准 R3，关闭 R-B12 后继续 R1。`
+- Effect: R3 is active and authorizes exactly one concentrated `C3-RP1` repair
+  for `R-B12`, its declared gates, distinct read-only final review, exact C3
+  staging/commit/push after acceptance, and continuation of the approved R1
+  sequence. It changes no architecture, schema, operation, budget, commit
+  count, external authority, or existing prohibition.
+- Recovery verification: branch `codex/agent-core-phase1`; HEAD and upstream
+  both `8c3237d107dbd7322ab91c4c7d48987eb0f1e2c2`; dirty paths exactly the
+  campaign artifact and two expected C3 files; C1–C3 gate 236 passed; diff check
+  passed; the breaker probe reproduced raw `AttributeError` for a forged
+  `MappingProxyType({object(): 1})` args mapping.
+
+### Task Packet `C3-RP1`
+
+1. **Authorization:** R3 and `A-003` authorize one additional repair solely for
+   `R-B12`. The packet inherits R1/R2, `A-001`/`A-002`, Stage B decisions, the
+   host sandbox, and all circuit breakers. It cannot expand permissions or
+   alter any accepted C3 behavior.
+2. **Workspace anchor:** Repository root
+   `/Users/wangtao/Documents/DevProject/vibecad`; branch
+   `codex/agent-core-phase1`; pushed anchor
+   `8c3237d107dbd7322ab91c4c7d48987eb0f1e2c2`. Modify only
+   `src/vibecad/workflow/program.py`, `tests/test_model_program.py`, and this
+   campaign artifact. The implementer must not edit the artifact. Every C1/C2,
+   server/tool/runtime/engine/manifest/dependency/other-test file remains
+   unchanged.
+3. **Context:** C1 serialized parsing and normal constructors already guarantee
+   string JSON object keys, but C3 explicitly defends against in-process forged
+   frozen contracts. `_bind_field_group` currently performs membership,
+   sorting, and RFC-pointer escaping before enforcing exact-string keys, so
+   object-only and mixed-type mappings can leak native exceptions. Close this
+   fail-closed gap without changing valid mappings, error-code vocabulary,
+   operation bindings, shapes, graph order, budget, or capability behavior.
+4. **Steps and gates:** Add four focused regression cases first: object-only and
+   mixed string/integer keys for each target and args group. Run the focused
+   selection and record genuine RED with native `AttributeError`/`TypeError`.
+   Before any membership, sorting, or pointer construction, require every key
+   to have exact type `str`; otherwise raise `ProgramValidationError` with
+   `INVALID_INPUT` at the fixed target/args group path and no value/key
+   reflection. Run the focused repair selection, full C3 suite, C1–C3
+   compatibility, controller reproduction probe, managed Python 3.12 clean
+   import, exact Ruff lint/format, and tracked/new-file diff checks. The same
+   distinct reviewer verifies `R-B12` closure and complete C3 scope read-only.
+   Controller alone accepts, updates the artifact, stages, commits, and pushes.
+5. **Execution discipline:** `spawn-send-wait`; no worker model selector exists,
+   so no tier claim is made; `native-session-poll`. This is the only R3 repair
+   pass. Stop on any unexpected red, remaining P0–P2, behavior beyond early key
+   validation, hostile reflection, caught `BaseException`, handler/CAD/I/O
+   activity, out-of-allowlist write, or required gate failure. Further repair
+   requires a new approved revision.
+6. **Delivery boundary:** The implementer may edit only the two named C3 files
+   and run gates. It must not edit the artifact, stage, commit, push, begin C4,
+   or change existing error codes/valid program behavior. Reviewer is strictly
+   read-only. Controller reserves acceptance, ledger updates, exact staging,
+   commit, immediate push, and the C4 transition.
+7. **Final report:** Return anchor/end hashes; exact files; four-case RED signal;
+   minimal key-validation change; focused/full/compatibility/reproducer/import/
+   lint/format/diff evidence; reflection and side-effect results; reviewer
+   verdict/residuals; staging/commit/push state; final workspace.
+
+### C3-RP1 Evidence and C3 Acceptance
+
+- `C3-RP1 / genuine RED` — With only the four new regression cases,
+  `PYTHONPATH=src .venv/bin/pytest -q tests/test_model_program.py -k
+  forged_non_string_field_keys` produced 4 failed and 91 deselected. Object-only
+  target/args leaked native `AttributeError`; mixed string/integer target/args
+  leaked native `TypeError`.
+- `C3-RP1 / implementation` — `_bind_field_group` now checks every key with
+  exact-string semantics before membership, sorting, or JSON Pointer escaping.
+  Invalid keys return stable `INVALID_INPUT` at the fixed target/args group path
+  with `field names must be strings`; no key or value is reflected. No other C3
+  behavior, code, binding, shape, graph order, budget, or capability changed.
+- `C3-RP1 / GREEN` — Focused repair: 4 passed and 91 deselected. Full C3: 95
+  passed. C1–C3 compatibility: 240 passed. The original breaker probe now
+  returns structured `invalid_input /operations/0/args`. Managed Python 3.12.13
+  clean import, exact Ruff lint/format, tracked and new-file whitespace checks,
+  and no-side-effect coverage all passed.
+- `C3 / final independent review` — Distinct reviewer `/root/c3_review` verdict
+  `ACCEPT`; no unresolved P0–P2. The reviewer confirmed all four required
+  combinations, validation order before unsafe operations, no reflection, no
+  valid-program behavior drift, and unchanged import/side-effect boundaries.
+  Review remained strictly read-only.
+- `R-B12` and `C3-BRK-01` are closed on the accepted C3 tree under `A-003`.
+  `R-B13`–`R-B15` remain non-blocking with their recorded closure conditions.
