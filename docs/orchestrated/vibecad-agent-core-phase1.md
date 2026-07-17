@@ -885,6 +885,71 @@ For every accepted commit append:
   architecture example is treated as illustrative. Total node/byte/string
   limits remain deferred to the external ingress budget. These are recorded as
   `R-B06` and `R-B05` for user review rather than silently expanded here.
+- `C1 / commit and push` — Commit
+  `0fb87eabb3761b8e0859bf9d9402956490ce2886`
+  (`feat(workflow): define versioned agent contracts`) contains the five exact
+  C1 files and is pushed to `origin/codex/agent-core-phase1`. HEAD and upstream
+  matched and the worktree was clean before the C2 ledger update.
+
+### Task Packet `C2`
+
+1. **Authorization:** Revision R1, `A-001`, Stage B decisions `D-B01`–`D-B08`,
+   and commit plan `C2` are approved. This packet inherits all higher-priority
+   instructions, repository-local instructions, and sandbox restrictions. It
+   cannot expand permissions. Routine implementation choices stay inside the
+   narrow Phase-1 registry; adding product coverage or a code-execution path is
+   not authorized.
+2. **Workspace anchor:** Repository root
+   `/Users/wangtao/Documents/DevProject/vibecad`; branch
+   `codex/agent-core-phase1`; clean pushed anchor
+   `0fb87eabb3761b8e0859bf9d9402956490ce2886`. Modify only
+   `src/vibecad/execution/__init__.py`,
+   `src/vibecad/execution/registry.py`,
+   `tests/test_execution_registry.py`, and this campaign artifact. Existing
+   workflow contracts, server, tools, runtime, engine, manifest, dependency
+   metadata, other tests/docs, PRs, releases, and `main` are out of scope.
+3. **Context:** Add an immutable, pure-standard-library metadata registry, not
+   an executor. The default Phase-1 slice contains exactly four provider-neutral
+   operations needed by C3/C5: `create_document` → `new_document`, `create_box`
+   → `add_box`, `modify_parameter` → `modify_part`, and `inspect_model` →
+   `describe_part`. Metadata describes program target fields, argument fields,
+   handler-parameter bindings, value shape, maximum risk class, and whether
+   deterministic evidence is required. `modify_parameter.target.object` binds
+   to the existing tool's `name` parameter; no arbitrary callable, import path,
+   Python source, shell command, provider, credential, network, filesystem
+   action, or CAD side effect belongs in the registry. This is deliberately not
+   a claim that all 31 tools are Agent-ready.
+4. **Steps and gates:** Inspect existing tool signatures and C1 vocabulary; add
+   a focused test that fails because the execution registry does not exist and
+   record genuine RED. Implement the smallest frozen field/operation metadata,
+   risk/value-shape enums, stable machine-readable registry errors, immutable
+   registry lookup, and the four-entry default registry. Validate snake-case
+   names, nonblank/distinct target/argument/tool-parameter fields, duplicate
+   operations/fields/bindings, exact unsafe code/script/shell operation tokens,
+   and unknown lookup. Required/optional field metadata must be sufficient for
+   C3 to reject missing, extra, and wrong-shape values without CAD access.
+   Tests cover exact default mappings/risk/evidence flags, immutability,
+   duplicate and arbitrary-code rejection, unknown lookup, and a clean import
+   boundary. Run focused tests with `PYTHONPATH=src`, managed Python 3.12 import
+   proof, exact-file Ruff lint/format, and `git diff --check`. A distinct
+   read-only reviewer evaluates registry safety, metadata completeness, future
+   C3/C5 usability, and scope. Controller alone accepts, updates the ledger,
+   stages named files, commits, and pushes.
+5. **Execution discipline:** `spawn-send-wait`; no model-tier selector is
+   available, so no tier claim is made; `native-session-poll`. Maximum two
+   gate/repair attempts. Stop on out-of-allowlist writes, callable/dynamic
+   import/source/command fields, need to import existing tool/server/FreeCAD/MCP
+   or a model SDK, unclear operation semantics outside the four-entry slice,
+   public API changes, or a required gate failure outside repair budget.
+6. **Delivery boundary:** The bounded implementer may inspect, add genuine RED,
+   implement only the three C2 code/test files, and run focused gates. It must
+   not edit this artifact, stage, commit, push, begin C3, or alter existing
+   product code. The independent reviewer is read-only. Acceptance, ledger
+   updates, staging, commit, and push remain controller-only.
+7. **Final report:** Return anchor/end hashes; exact files; RED command/failure;
+   registry/metadata inventory and four operation mappings; rejection and
+   immutability rules; focused/import/lint/diff results; reviewer findings;
+   deviations/residuals; staged scope; commit/push status; final workspace.
 
 ## Recovery Snapshot
 
@@ -918,3 +983,248 @@ For every accepted commit append:
 - `R-A01` is closed at the Stage B anchor.
 - No authorization blocker remains for R1; all scope and circuit breakers stay
   binding.
+
+---
+
+## C2 Attempt Evidence and Circuit Breaker
+
+- `C2 / genuine RED` — With the first focused fixture present,
+  `UV_CACHE_DIR=/tmp/vibecad-c2-uv-cache PYTHONPATH=src uv run pytest -q
+  tests/test_execution_registry.py` exited 2 during collection with
+  `ModuleNotFoundError: No module named 'vibecad.execution'`.
+- `C2 / initial implementation` — Added the three exact C2 files and the four
+  default mappings. Focused tests first reached 27 passed. Controller pre-review
+  found that `discard_unsaved` exposed a destructive guard bypass, registry
+  errors were not versioned, unsafe-name tokens overblocked legitimate semantic
+  file/path/source fields, and adversarial lookup coverage was incomplete.
+- `C2 / repair attempt 1` — Removed `discard_unsaved`; retained
+  `create_document` maximum risk `destructive`; added strict schema-v1 registry
+  error round-trip and bounded lookup errors; narrowed unsafe tokens to actual
+  execution primitives. Focused tests reached 44 passed and C1+C2 reached 119
+  passed. The independent reviewer then found two P2 gaps: obvious execution
+  aliases such as `run_bash`, `run_freecad_macro`, and `spawn_process` were
+  accepted, and hostile Mapping/Iterable implementations could leak ordinary
+  runtime exceptions from public constructors/parsers.
+- `C2 / repair attempt 2` — Added exact cross-platform interpreter, shell,
+  macro, spawn, and fork token rejection without blocking legitimate
+  file/path/source/process or substring-only CAD names. Normalized ordinary
+  `Exception` from hostile Mapping/Iterable access to bounded `RegistryError`,
+  preserved existing structured errors, and proved that `BaseException` is not
+  caught. Final controller gates at this attempt: C2 61 passed; C1+C2 136
+  passed; managed Python 3.12.13 clean import passed without FreeCAD, Part, MCP,
+  or model SDKs; exact Ruff lint and format passed; tracked and new-file
+  whitespace checks emitted no diagnostics.
+- `C2 / circuit breaker C2-BRK-01` — The independent read-only re-review proved
+  that `RegistryError` accepts DEL/C1 controls and Unicode line separators in
+  messages while rendering them raw. For example, `bad\u2028forged` is accepted
+  and splits the public exception string into two log lines. This is an
+  unresolved P2 log-forging boundary defect. Because packet C2 permits at most
+  two repair/gate attempts, execution stopped without staging, commit, push, or
+  C3 work. HEAD remains
+  `0fb87eabb3761b8e0859bf9d9402956490ce2886`.
+- `C2 / scope and preserved result` — The worktree contains only the
+  controller-owned campaign artifact plus the three expected C2 files. The
+  exact four operation mappings, frozen metadata, handler bindings, risk and
+  evidence flags, `discard_unsaved` exclusion, pure import boundary, and prior
+  P2 repairs remain locally present but are not accepted or committed while
+  `C2-BRK-01` is open.
+
+### Residual Corrections and Additions
+
+- `R-B07` supersedes the second duplicate `R-B05` row: the host exposes no
+  worker model selector; this remains an accepted performance limitation.
+- `R-B08` supersedes the second duplicate `R-B06` row: this campaign does not
+  authorize PR creation; user authorization remains the closure condition.
+- `R-B09` — Registry error rendering permits non-C0 line-breaking/control
+  characters and can forge multi-line logs. Disposition: blocking C2. Closure
+  requires a focused RED for DEL, U+0085, U+2028, and U+2029; one bounded
+  implementation that either rejects non-printable/line-breaking characters or
+  safely quotes rendering at both constructor and strict-parser boundaries;
+  final C2/C1 compatibility, managed-import, Ruff/format/diff gates; and
+  independent read-only acceptance.
+
+## Proposed Revision R2 — Not Authorized
+
+R2 changes no product architecture, file allowlist, commit count, external
+authority, or C2 semantic scope. It proposes exactly one additional concentrated
+repair pass to close `R-B09` in
+`src/vibecad/execution/registry.py` and
+`tests/test_execution_registry.py`, with this campaign artifact updated only
+for evidence. All R1 prohibitions remain: no C3 start before accepted C2, no
+existing product-file edit, no PR, merge, release, provider/model/key/network
+work, `main` mutation, force-push, or commit beyond the existing campaign
+budget.
+
+Required authorization wording: `批准 R2，关闭 R-B09 后继续 R1。`
+
+## Recovery Snapshot `S-C2-BLOCKED-01`
+
+### 1. Completed milestones
+
+- Repository `/Users/wangtao/Documents/DevProject/vibecad`, branch
+  `codex/agent-core-phase1`, verified pushed anchor
+  `0fb87eabb3761b8e0859bf9d9402956490ce2886`.
+- B1 `cb2301e6`, B2 `a0de03f`, B3 `f2e6087`, and C1 `0fb87ea` are committed and
+  pushed. C1 focused gate is 75 passed and its independent verdict is ACCEPT.
+- C2 has genuine RED and three observable implementation states preserved in
+  the working tree/ledger. No C2 commit exists.
+
+### 2. Ordered next packets and branch conditions
+
+1. If the user explicitly approves proposed R2, issue one concentrated
+   `C2-RP1` packet limited to `R-B09`, run the named gates, and obtain a distinct
+   final read-only verdict.
+2. If final C2 review accepts with no unresolved P0-P2, update this ledger,
+   stage the four exact C2 files, commit
+   `feat(execution): register safe semantic CAD operations`, and immediately
+   push the branch.
+3. Only after HEAD and upstream match at accepted C2 may the controller append
+   and issue packet C3.
+4. If R2 is rejected or changed, preserve the current worktree and draft a new
+   revision; do not infer authorization.
+
+### 3. Active decisions and authorization
+
+- R1 remains approved by `A-001`; `D-B01`–`D-B08`, the Stage B allowlist, and
+  all R1 prohibitions remain active.
+- `C2-BRK-01` exhausts the C2 repair budget. Proposed R2 is not authorized and
+  grants no implementation authority until the user supplies the exact or
+  equivalently explicit approval.
+
+### 4. Execution discipline and recovery checks
+
+- Capability profile remains `native-plan / spawn-send-wait / repo-artifact /
+  native-session-poll`; the four-category adapter evidence record at the top of
+  this artifact remains authoritative.
+- On recovery, verify branch, HEAD/upstream, exact dirty-file set, and the
+  136-test C1+C2 gate before any authorized repair. Preserve the named-file
+  allowlist, independent reviewer boundary, exact staging, immediate push, and
+  no-PR/no-main/no-release circuit breakers.
+
+### C2 Final Review Binding
+
+- Distinct reviewer `/root/c2_review` final verdict: `REJECT — not
+  commit-ready`; no P0/P1 and exactly one unresolved P2, `R-B09`. The reviewer
+  remained read-only.
+- The reviewer independently confirmed that both earlier P2 findings are
+  closed, all four mappings/signatures and metadata are correct,
+  `discard_unsaved` is absent, the registry is immutable and sufficient for
+  C3/C5, imports are pure, and no callable, dynamic import, source/command
+  payload, provider credential, network/filesystem action, or CAD side effect
+  was introduced.
+- Reproduced control characters are DEL, U+0085, U+2028, and U+2029. Minimal
+  closure is centralized printable-message validation in both direct
+  construction and strict parsing, parameterized RED/GREEN coverage for all
+  four characters, bounded `INVALID_ERROR_RECORD` output without the hostile
+  character, the complete C2 gates, and final independent acceptance.
+- Non-blocking reviewer notes: unsafe-name rejection is defense-in-depth while
+  the exact default registry remains the primary allowlist; finite in-process
+  Mapping iteration relies on the broader request-budget residual `R-B05`;
+  Phase-1 dimensions follow the current FreeCAD millimetre convention.
+- `R-B10` — The architecture example includes a `unit` argument while the
+  current `modify_part` handler and C2 registry intentionally expose only
+  `name/parameter/value`. C3 must reject `unit` as extra input for now. Before a
+  public Agent API is exposed, the user must choose either explicit unit-aware
+  v1 conversion semantics or document millimetres as the fixed v1 unit.
+
+## R2 Authorization and Recovery
+
+- `A-002` — At `2026-07-16T18:52:20-07:00`, the user explicitly authorized
+  proposed revision R2 with: `批准 R2，关闭 R-B09 后继续 R1。`
+- Effect: R2 is active and authorizes exactly one concentrated `C2-RP1` repair
+  pass for `R-B09`, its named gates, distinct read-only re-review, exact C2
+  staging/commit/push after acceptance, and continuation of the already
+  approved R1 sequence. It does not expand the product architecture, file or
+  commit budget, external authority, or any R1 prohibition.
+- Recovery verification before state-changing work: branch
+  `codex/agent-core-phase1`; HEAD and upstream both
+  `0fb87eabb3761b8e0859bf9d9402956490ce2886`; dirty paths exactly the campaign
+  artifact plus the three expected C2 paths; C1+C2 recovery gate 136 passed;
+  tracked `git diff --check` passed.
+
+### Task Packet `C2-RP1`
+
+1. **Authorization:** R2 and `A-002` authorize one additional concentrated
+   repair solely to close `R-B09`. This packet inherits R1, `A-001`,
+   `D-B01`–`D-B08`, the host sandbox, repository instructions, and every
+   existing prohibition. It cannot expand permissions, product behavior, or
+   the semantic operation set.
+2. **Workspace anchor:** Repository root
+   `/Users/wangtao/Documents/DevProject/vibecad`; branch
+   `codex/agent-core-phase1`; pushed anchor
+   `0fb87eabb3761b8e0859bf9d9402956490ce2886`. Modify only
+   `src/vibecad/execution/registry.py`,
+   `tests/test_execution_registry.py`, and this campaign artifact. The
+   implementer must not edit the artifact. `src/vibecad/execution/__init__.py`
+   and every existing workflow/server/tool/runtime/engine/manifest file remain
+   unchanged.
+3. **Context:** `RegistryError` currently rejects only C0 characters with
+   ordinal values below 32. DEL, U+0085, U+2028, and U+2029 pass direct
+   construction and strict error-record parsing; raw exception interpolation
+   can then create additional log lines. Close only this boundary while
+   retaining printable Unicode messages, strict schema-v1 round-trip, bounded
+   diagnostics, and all accepted C2 registry behavior.
+4. **Steps and gates:** Add a parameterized focused regression for all four
+   characters at both direct-constructor and `from_mapping` boundaries; run it
+   first and record genuine RED matching the known log-forging behavior.
+   Centralize the smallest printable/non-line-breaking message predicate and
+   use it consistently in construction and parsing. Direct invalid construction
+   returns a fixed safe `ValueError`; strict parsing returns bounded
+   `INVALID_ERROR_RECORD`, with no hostile character in the rendered public
+   error. Run focused C2 tests, C1+C2 compatibility, managed Python 3.12 clean
+   import, exact-file Ruff lint/format, tracked plus new-file whitespace checks,
+   and a direct split-lines probe. The same distinct reviewer re-checks `R-B09`
+   and the complete C2 safety boundary read-only. Controller alone accepts,
+   updates the ledger, stages exact files, commits, and pushes.
+5. **Execution discipline:** `spawn-send-wait`; no worker model selector is
+   available, so no tier claim is made; `native-session-poll`. This is the one
+   R2 repair pass. Stop on any unexpected red, remaining P0–P2, out-of-allowlist
+   write, behavior beyond message safety, caught `BaseException`, non-printable
+   character reflected in a diagnostic, import/side effect, or required-gate
+   failure. A further repair requires a new approval revision.
+6. **Delivery boundary:** The bounded implementer may change only the two named
+   code/test files and run the declared gates. It must not edit the artifact,
+   stage, commit, push, begin C3, or alter the four operation mappings. The
+   reviewer is strictly read-only. The controller reserves ledger updates,
+   exact named staging, commit, immediate push, and the C3 transition.
+7. **Final report:** Return anchor/end hashes; exact changed files; focused RED
+   command and failure signal for all four characters/both boundaries; the
+   centralized validation rule; focused/compatibility/import/lint/format/diff/
+   split-lines results; reviewer verdict and residuals; staging/commit/push
+   state; and final workspace status.
+
+### C2-RP1 Evidence and C2 Acceptance
+
+- `C2-RP1 / genuine RED` — After adding only the focused regression,
+  `UV_CACHE_DIR=/tmp/vibecad-c2-rp1-uv-cache PYTHONPATH=src uv run pytest -q
+  tests/test_execution_registry.py -k registry_error_message_boundary` exited
+  1 with exactly 8 failed and 61 deselected. DEL, U+0085, U+2028, and U+2029
+  were accepted at both direct construction and strict parser boundaries; the
+  probe observed split-line counts 1, 2, 2, and 2 respectively.
+- `C2-RP1 / implementation` — Added one `_is_safe_error_message` predicate:
+  exact string, nonblank, at most 256 characters, printable, and exactly one
+  rendered line. Direct invalid construction raises the fixed safe
+  `ValueError` message; strict parsing raises schema-v1
+  `INVALID_ERROR_RECORD` without hostile input reflection. Printable Unicode
+  (`尺寸验证通过 — café ✅`) round-trips unchanged.
+- `C2-RP1 / GREEN` — Focused boundary gate: 9 passed and 61 deselected. Full C2:
+  70 passed. C1+C2 compatibility: 145 passed. Managed Python 3.12.13 clean
+  import passed without FreeCAD, Part, MCP, Anthropic, OpenAI, Cohere, or
+  Mistral modules. Exact Ruff lint and format passed; tracked and all three
+  new-file whitespace checks produced no diagnostics.
+- `C2-RP1 / controller probe record` — The controller's first supplemental
+  one-line probe exited 1 with a Python `SyntaxError` because literal shell
+  newline escapes reached `python -c`; it never imported or exercised product
+  behavior and is classified as a tool-command construction failure, not
+  semantic RED. The equivalent `exec`-wrapped probe then passed: four
+  characters across two boundaries were rejected and every public rendering
+  remained single-line.
+- `C2 / final independent review` — Distinct reviewer `/root/c2_review` verdict
+  `ACCEPT — C2 is commit-ready`; no unresolved P0–P2. The reviewer independently
+  re-probed `R-B09`, confirmed both former P2 repairs, exact mappings/signatures,
+  immutability, C3/C5 metadata sufficiency, pure imports, no side effects, and
+  exact dirty scope. Review remained strictly read-only.
+- `R-B09` is closed on the accepted C2 tree. `R-B05` remains the request-wide
+  budget residual, the unsafe-token list remains defense-in-depth behind the
+  exact default allowlist, and `R-B10` remains deferred until public Agent API
+  design. No other C2 residual blocks commit.
