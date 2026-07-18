@@ -5908,3 +5908,550 @@ and the exact staged-name inspection passed. The staged full regression exited
 0 with 1479 passing and 81 deselected in 59.89 seconds. Staged-candidate Ruff
 check, Ruff format check, pure module import, and cached diff whitespace check
 all passed. The named commit and non-force push are authorized.
+
+## TK2 Closeout and TK3 Resume — TK3-E000
+
+TK2 was committed as `612ad79c440fd2f9714485fe4ac176febc6bdde4`
+(`feat(workflow): coordinate exclusive resource leases`) and pushed non-force.
+On 2026-07-18 the controller reconfirmed a clean
+`codex/task-kernel-phase2` branch with HEAD equal to its upstream at that exact
+commit. The user then asked whether work was still progressing; no background
+process existed between turns, and this message resumes the already approved
+TK3 packet without expanding scope.
+
+The current capability profile remains:
+
+    approval: native-plan
+    delegation: spawn-send-wait
+    persistence: repo-artifact
+    process: native-session-poll
+
+Adapter evidence is restricted to the required categories:
+
+- live capability declarations
+  - Repository patching, sub-agent follow-up, and native command sessions are
+    declared by the current Codex host; no durable native memory is declared.
+- observable behavior
+  - Exact staging, commit, non-force push, independent review, and native
+    session polling completed for TK2 in this session history.
+- environment identity
+  - Codex desktop controller `/root` in
+    `/Users/wangtao/Documents/DevProject/vibecad`.
+- public configuration
+  - Workspace filesystem access is unrestricted, network is enabled, and the
+    approval policy is `never`; no escalation is required for approved scope.
+
+## Task Packet TK3-P1 — Atomic TaskRun Persistence
+
+### 1. Anchor and authority
+
+TK-R1/TK-A02 explicitly approved TK3, TK-D02–TK-D07, TK-D20, TK-D24, the
+nine-commit sequence, named-file scope, test-first gates, independent review,
+commit, and non-force push. TK-R2/TK-A03 remains controlling for internal
+fail-closed recovery discipline. Anchor:
+`codex/task-kernel-phase2@612ad79c440fd2f9714485fe4ac176febc6bdde4`,
+upstream-equal and clean before this artifact append. No duplicate user
+approval is required.
+
+### 2. Product outcome and contract boundary
+
+Implement an internal local store that durably creates, loads, and
+compare-and-sets immutable `TaskRun` values. `StoredTaskRun` owns a nonnegative
+store generation distinct from TaskRun transition sequence. Records use one
+canonical deterministic JSON envelope containing schema version, generation,
+payload, and SHA-256 checksum. The store rejects malformed, duplicate-key,
+non-finite, oversized, checksum-mismatched, noncanonical, or invariant-invalid
+records and never returns partially decoded state.
+
+Writes are same-directory create-exclusive temporary-file transactions with
+private modes, complete write/flush/file-fsync, atomic `os.replace`, and
+directory fsync. Readers observe only a complete old or complete new record.
+Task identifiers are canonical and select only SHA-256-derived filenames.
+Store and entry roots must be explicitly trusted, private, ordinary local
+filesystem objects. TK3 does not expose MCP, touch CAD, add a database, repair
+corrupt records, or unify the task and project revision durability domains.
+
+### 3. Exact allowlist and public surface
+
+Only these paths may change:
+
+- `docs/orchestrated/vibecad-task-kernel-phase2.md`
+- `src/vibecad/workflow/store.py`
+- `tests/test_task_store.py`
+
+The source must export `StoredTaskRun`, `TaskRunStore`, `TaskStoreError`,
+`TaskStoreErrorCode`, and the explicit trusted-local root marker required by
+TK-D07. Public store operations are `create`, `load`, and `compare_and_set`;
+all IDs, generations, returned envelopes, and error codes use exact types.
+Stable codes are `invalid_id`, `not_found`, `already_exists`, `conflict`,
+`corrupt_record`, `record_too_large`, `unsafe_store`, `lock_unavailable`,
+`io_error`, and `durability_uncertain`.
+
+### 4. Test-first execution and gates
+
+1. Run the unchanged full baseline at the clean TK2 anchor.
+2. Resolve exact API and failure linearization with bounded independent
+   read-only design reviews. Controller writes `tests/test_task_store.py` first.
+3. Freeze an independently accepted test candidate and capture one genuine RED
+   caused solely by the absent `vibecad.workflow.store` module.
+4. Implement the minimum `store.py`. GREEN covers canonical round trips,
+   generation CAS, process races, old-or-new reader visibility, traversal and
+   Unicode IDs, root/entry/temp attacks, record cap, duplicate JSON keys,
+   NaN/Infinity, checksum/truncation, permissions, every write/fsync/replace
+   fault, and owned-temp cleanup.
+5. Run cumulative TK1–TK3 and full repository tests, Ruff check/format, pure
+   import, diff/hash/allowlist, and two distinct complete read-only reviews.
+6. Stage only the three named files, rerun staged gates, commit exactly
+   `feat(workflow): persist task runs atomically`, push non-force, and verify
+   clean HEAD/upstream equality.
+
+### 5. Budgets and circuit breakers
+
+Use one genuine missing-module RED and at most two focused GREEN attempts.
+Synchronous waits and race tests are bounded to five seconds. Stop execution on
+an unexpected RED, second unsuccessful GREEN, deadlock, ambiguous replace/fsync
+linearization, cleanup outside controller-owned temporary names, scope drift,
+unexplained baseline regression, or an unsupported durability claim. Internal
+test-oracle/review defects remain recoverable under TK-A03 but must be recorded
+and independently re-reviewed; they do not require product approval.
+
+### 6. Roles and process discipline
+
+Controller owns artifact/test/source edits, serialized pytest, exact staging,
+commit, and push. `spawn-send-wait` reviewers independently cover filesystem
+transactions/CAS and serialization/security, followed by distinct final review.
+Long-running commands retain their original native session and are polled;
+they are never relaunched while active. No network/model/CAD/environment action
+is part of TK3.
+
+### 7. Delivery and residuals
+
+Deliver one independently accepted, pushed TK3 commit plus exact gate evidence
+and recovery snapshot. Preserve TK-R08 (network filesystems unclaimed), TK-R09
+(same-user malicious tampering outside trust boundary), TK-R10 (TaskRun and CAD
+revision stores remain separate durability domains), and TK-R11 (raw public
+ingress cap deferred). Do not begin TK4 until TK3 is clean and upstream-equal.
+
+## TK3 Baseline Evidence — TK3-E001
+
+At clean pushed TK2 anchor
+`612ad79c440fd2f9714485fe4ac176febc6bdde4`, with only this approved artifact
+append in the worktree, `PYTHONPATH=src .venv/bin/pytest -q` exited 0 with 1479
+passing, 81 deselected, and the same two passing macOS fork deprecation warnings
+in 12.66 seconds. No TK3 source/test, dependency, environment, CAD, network,
+model, Git mutation, or out-of-allowlist action occurred.
+
+## TK3 Resolved Store Contract — TK3-E002
+
+Two independent read-only reviews covered filesystem/CAS and serialization/
+security. The controller adopts their fail-closed findings while preserving
+TK-D04's approved numeric store generation (rather than substituting a content
+revision token).
+
+### API and envelope
+
+- `TaskRunStore(root, lease_manager, *, trust)` receives an existing trusted
+  0700 store root and a `ResourceLeaseManager`; it does not create directories.
+- `create(task_run)`, `load(task_id)`, and
+  `compare_and_set(task_id, expected_generation, task_run)` return an exact
+  immutable `StoredTaskRun`. Generation starts at zero and increments by one;
+  the CAS task ID and value ID must match. No upsert or caller owner token exists.
+- The exact schema-v1 envelope keys are `schema_version`, `generation`,
+  `task_run`, and `checksum`. Checksum is SHA-256 over a domain separator plus
+  canonical JSON bytes of the other three fields. Final bytes are canonical
+  UTF-8 JSON: sorted keys, compact separators, `ensure_ascii=False`, no NaN,
+  whitespace, BOM, newline, or Unicode normalization.
+- Exact built-in types are required. Generation is 0 through the safe JSON
+  integer maximum. The final encoded record cap is 2 MiB inclusive.
+
+### Decode and safety order
+
+Load opens only the hashed coordinator-owned filename relative to a verified
+directory FD. Size is bounded before reading/decode/hash. A pre-scan bounds JSON
+nesting before parsing. Parsing rejects duplicate keys, every float and
+NaN/Infinity token; post-parse validation bounds nodes and strings. Exact
+envelope shape/types, canonical-byte equality, checksum, and only then
+`TaskRun.from_mapping` are checked. A final `to_mapping()` equality check closes
+normalization gaps. All corrupt-input paths return one fixed redacted error.
+
+### Transaction and linearization
+
+Every operation acquires the same canonical `task-store:<task_id>` resource
+lease internally. Mutation validates/encodes before storage work, then under the
+lease validates the root/final state, creates an unpredictable same-directory
+0600 temp with `O_EXCL|O_NOFOLLOW|O_CLOEXEC`, performs a complete short-write
+loop, file fsync and close, revalidates expected state, and atomically replaces
+the final name relative to the directory FD. Replace success is the logical
+linearization point; directory fsync is durability confirmation.
+
+Before replace, failure leaves the final old/absent and removes only the exact
+inode created by that operation. After replace, cleanup never removes final.
+Directory-fsync or release uncertainty after replace reports
+`durability_uncertain` and the committed generation; callers must load/reconcile
+rather than blindly retry. Same-process and cross-process create/CAS races have
+one winner because the expected-state check and replace share the lease.
+
+Root, final, and temp checks reject symlinks, non-directories/non-regular files,
+hardlinks, wrong ownership/mode, identity replacement, unsupported capabilities,
+and inherited descriptors. No stale-temp scan or garbage collection exists.
+Only Darwin/Linux trusted-local POSIX operation is claimed; Windows and network
+filesystems remain fail-closed residuals.
+
+## TK3 Test Review Round 1 and Correction — TK3-E003
+
+The initial formatted test candidate was
+`925a9190e558cf105a22b721f73c3d5678a8925a605db9687ce864a5f7fd1929`
+at 660 lines and 29 top-level test shapes. Two independent static reviews
+REJECTED at P0/P1/P2 = 0/7/3 and 0/5/3. They agreed the sole RED prediction was
+the absent store module, but found checksum/semantic masking in duplicate-key,
+numeric, and envelope tests; insufficient pre-decode resource, TaskRun exact
+round-trip, transaction fault, CAS, lease-release, owned-temp, identity,
+capability, process-race, API-shape, redaction, and source-surface coverage.
+
+The controller corrected those internal oracle defects before RED. Adversarial
+records now carry checksums valid for their precise last-wins/type/number body;
+oversize and depth prove pre-decode ordering; TaskRun decode exceptions,
+checksum ordering, selected-ID binding, and exact mapping round-trip are tested.
+The transaction matrix now includes create/CAS preservation, shared lease key,
+lease acquisition/release outcomes, exact temp flags/mode/dir-fd/inheritance,
+foreign/colliding/replaced temp ownership, root replacement, platform/capability
+fail-closed, reader visibility, and cross-process CAS. Signature and error shape
+are exact, and an AST gate closes imports, path conveniences, broad exceptions,
+and non-dir-fd replace.
+
+The corrected candidate is
+`1fa7a8bac95652df391faca2b1273186abadd2f8a7aaf1fa2b2ed9ff6a475a2e`
+at 1164 lines with 50 top-level test shapes. Ruff check/format and whitespace
+checks pass. Production source remains absent; no pytest or RED has run.
+
+## TK3 Test Review Round 2 and Correction — TK3-E004
+
+Round 2 again predicted only the missing-module RED but REJECTED at P0/P1/P2
+= 0/4/2 and 0/2/4. Remaining material gaps were exact extra-field checks,
+post-parse node/string/integer budgets, transaction open/partial-write/close/
+revalidation/cleanup phases, CAS post-commit uncertainty, in-operation identity
+replacement, complete capability profiles, and AST bypasses. P2 items covered
+depth boundary, Unicode single-factor canonical forms, exact record cap,
+write-side oversize, reader evidence, and broader error redaction.
+
+The controller closed these before RED. The new matrix adds valid-checksum extra
+fields; float exponent anti-masking; depth max/max+1 decode ordering; node,
+string, huge-integer and parser-recursion budgets; exact-cap and encoded-cap
+ordering; isolated Unicode escaping, slash escaping, and normalization; temp
+open, partial-write, close, cleanup and create/CAS revalidation failures; root
+and final replacement during operations; CAS directory-fsync/release committed
+generation; every required POSIX storage capability, exact types and membership;
+directory/final FD call traces; and exact OS/import/dynamic/broad-handler AST
+surfaces. Reader evidence now contains known old and new snapshots.
+
+The Round 3 candidate is
+`afd0827052bc854b5eb72a8335df3bfbe03b2d7c9409ba010e688caf42bd733b`
+at 1753 lines with 70 top-level test shapes. Ruff check/format and whitespace
+checks pass. Source remains absent and no pytest/RED has occurred.
+
+## TK3 Test Review Round 3 and Correction — TK3-E005
+
+Round 3 REJECTED at P0/P1/P2 = 0/2/0 and 0/2/1 while preserving the sole
+missing-module RED prediction. The narrow remaining issues were cleanup after a
+temp-close error, precommit primary-vs-release error precedence, runtime root/
+final/temp ownership and mode, string-aware depth scanning, exact identifier/
+generation subclasses, and explicit resource-budget boundaries.
+
+The controller added exact temp cleanup assertions, a precommit release-failure
+precedence case, runtime chmod and wrong-uid tests for root/final/temp, valid
+strings containing quotes/backslashes and more than 64 bracket characters,
+canonical str/int subclass rejection before storage, and exact 8192-node /
+65536-byte-string helper boundaries. The Round 4 candidate is
+`521a14182c569c28561467ec9338f70368a3dd6c99c790ebb62c7679c3ad863a`
+at 1894 lines with 76 top-level test shapes. Ruff and whitespace gates pass;
+source remains absent and RED has not run.
+
+## TK3 Test Review Round 4 Final Correction — TK3-E006
+
+One reviewer ACCEPTED Round 4 at 0/0/0. The independent serialization reviewer
+found one P1 and one P2: exact TaskRun subclass rejection was not exercised,
+and total JSON depth jumped from 64 to 66 rather than testing 65. The controller
+added an adversarial TaskRun subclass whose `to_mapping` must never execute and
+requires StoredTaskRun/create/CAS rejection before storage, and changed the
+pre-decode depth rejection to exactly envelope-plus-64 arrays (total 65).
+
+The final candidate is
+`cb8670180dcc699d924c3f439fe337c3b9dd9c4742d5d46f81882f2571e7eeb7`
+at 1931 lines with 77 top-level test shapes. Ruff check/format and whitespace
+checks pass. Source remains absent; the expected sole RED remains a top-level
+missing-module collection error.
+
+## TK3 Frozen-Test Static Acceptance — TK3-E007
+
+Two distinct reviewers ACCEPT the final frozen test at P0/P1/P2 = 0/0/0 and
+confirm the exact SHA, 1931 lines, 77 test shapes, source absence, and sole
+missing-module RED prediction. The test is frozen. One genuine RED is now
+authorized; production source may be created only if collection fails solely
+because `vibecad.workflow.store` is absent.
+
+## TK3 Genuine RED Evidence — TK3-E008
+
+`PYTHONPATH=src .venv/bin/pytest -q tests/test_task_store.py` exited 2 in 0.32
+seconds with exactly one collection error: `ModuleNotFoundError: No module named
+'vibecad.workflow.store'` at the frozen top-level import. No test body executed
+and no secondary failure appeared. This is the accepted genuine RED. The
+minimum production implementation is authorized; two focused GREEN attempts
+remain.
+
+## TK3 Pre-GREEN Implementation Review and Controlled Test Reopen — TK3-E009
+
+The first production candidate implemented the complete frozen contract and
+passed Ruff check/format, Python compilation, and whitespace checks without
+running pytest. Independent static review found one guaranteed fixture failure:
+`pathlib.Path(...)` produces the platform's concrete `PosixPath`, so an exact
+`Path` class check rejected every valid store root. The controller corrected
+root coercion to accept only exact `str` or the current platform's exact
+`type(Path("/"))`, preserving subclass and generic `PathLike` rejection.
+
+A proposed compatibility fix then validated import-time native `open`, `stat`,
+and `unlink` membership instead of the active callables. Independent review
+REJECTED this as a P1 false-green: a replaced callable could lack or ignore
+`dir_fd`/`follow_symlinks` while the cached native primitive made the gate pass.
+The controller discarded that production change and retained active-callable
+membership checks.
+
+The accepted RED remains genuine, but the previously frozen test had a related
+oracle defect: seven legitimate runtime `open`/`unlink` wrappers did not declare
+their supported `dir_fd` capability. Under TK-A03 internal-repair authority, the
+controller performed a narrow controlled reopen. A test-only helper now copies
+the exact-set capability registry, adds the wrapper being exercised, and then
+installs it; invalid-input probes and missing-capability/membership tests remain
+unchanged. No test body or product contract was weakened.
+
+The corrected anchors are production
+`4978f1a72d7029110704533c2f1ce26aea9036975cd115709f6a75b533c255c5`
+at 842 lines and test
+`8e58d29a9760d7ce9dd3c267bc7ae0d4e9c735744f21378d215e211fcf6a9f8a`
+at 1938 lines. Ruff check/format, Python compilation, and whitespace checks all
+pass. The test is re-frozen at this anchor pending independent static
+acceptance. No focused GREEN attempt has run; both attempts remain.
+
+## TK3 Re-Freeze Acceptance and Focused GREEN Attempt 1 — TK3-E010
+
+Two independent static reviewers ACCEPTED the controlled capability-oracle
+correction at source
+`4978f1a72d7029110704533c2f1ce26aea9036975cd115709f6a75b533c255c5`
+and test
+`8e58d29a9760d7ce9dd3c267bc7ae0d4e9c735744f21378d215e211fcf6a9f8a`.
+They confirmed all seven wrappers that reach the storage capability gate declare
+their active callable membership, while invalid-input ordering probes and every
+missing/invalid/membership-negative check remain unmodified and fail closed.
+
+Focused GREEN attempt 1,
+`PYTHONPATH=src .venv/bin/pytest -q tests/test_task_store.py`, exited 1 in 2.29
+seconds with 157 passing and exactly one failure:
+`test_precommit_failures_preserve_old_or_absent_record_and_cleanup_temp[fsync]`
+expected task-temp `IO_ERROR` but observed `LOCK_UNAVAILABLE`. The generic
+`os.fsync` injection affected the shared `os` module and therefore failed the
+fresh lease root's directory fsync during first acquisition, before any task
+store mutation. This is an execution-order oracle defect, not a production
+failure; all other focused cases passed.
+
+The controller narrowed only that test injection: directory descriptors delegate
+to the captured real fsync, while a regular-file descriptor raises the intended
+precommit fault. Production remains unchanged. The corrected test is
+`2a930b94de1d72650ebbec23f9ca70c7f8c77b7fb4126d381544a186529e183d`
+at 1946 lines; Ruff check/format, Python compilation, and whitespace checks pass.
+Independent static acceptance is required before focused GREEN attempt 2. One
+focused attempt remains.
+
+## TK3 Focused GREEN Acceptance — TK3-E011
+
+Two independent reviewers ACCEPTED the narrowed precommit-fsync oracle after
+re-reading its exact execution path: the fresh lease-root directory fsync
+delegates to the real primitive, the task temp regular-file fsync raises, the
+store reports precommit `IO_ERROR`, replace is skipped, and the owned temp is
+removed by inode identity. No directory-durability behavior is masked.
+
+Focused GREEN attempt 2,
+`PYTHONPATH=src .venv/bin/pytest -q tests/test_task_store.py`, exited 0 in 2.20
+seconds with all 158 cases passing (pytest reported 1.59 seconds). Both focused
+attempts are now consumed and the TK3 focused contract is GREEN at production
+`4978f1a72d7029110704533c2f1ce26aea9036975cd115709f6a75b533c255c5`
+and test
+`2a930b94de1d72650ebbec23f9ca70c7f8c77b7fb4126d381544a186529e183d`.
+Full regression and delivery gates remain required.
+
+## TK3 Full Regression and Unstaged Delivery Gates — TK3-E012
+
+The full repository command `PYTHONPATH=src .venv/bin/pytest -q` exited 0 in
+15.17 seconds with 1637 passing, 81 deselected, and the same two expected macOS
+fork deprecation warnings; both warned lease tests passed. This is the clean
+cumulative TK1–TK3 regression.
+
+Repository-wide `ruff check .`, pure `vibecad.workflow.store` import with exact
+`__all__`, `git diff --check`, candidate hashes, and the exact three-path status
+allowlist pass. Exact candidate format check for `store.py` and
+`test_task_store.py` passes. A diagnostic `ruff format --check .` also reported
+74 legacy files outside the TK3 allowlist that the repository's current Ruff
+version would reformat; none is modified, and TK3 does not claim or expand into
+a repository-wide formatting migration. The candidate-scoped format gate used
+by prior Stage C deliveries remains authoritative.
+
+The final unstaged review anchors remain production
+`4978f1a72d7029110704533c2f1ce26aea9036975cd115709f6a75b533c255c5`
+at 842 lines and test
+`2a930b94de1d72650ebbec23f9ca70c7f8c77b7fb4126d381544a186529e183d`
+at 1946 lines. Only the approved artifact is modified and those two approved
+paths are untracked. Two distinct complete read-only reviews are now required
+before staging.
+
+## TK3 Final Review Rejection and Ownership Repair — TK3-E013
+
+Both required final reviewers independently REJECTED the previously GREEN
+candidate at P0/P1/P2 = 0/1/0. The shared P1 was an uncovered resource-lifecycle
+failure: successful opens were followed by unguarded `fstat` and
+`get_inheritable` calls, while mutation's initial record read occurred before
+its cleanup state. A native metadata error could escape as raw `OSError`, skip
+lease release, leak root/final/temp descriptors, and leave an owned temp. Even a
+typed corrupt/unsafe initial record in CAS leaked the mutation root descriptor.
+Cleanup-path stat failure could also replace the primary error and skip root
+close. Passing focused/full suites therefore did not authorize staging.
+
+Under TK-A03 internal-repair authority, the controller performed a bounded
+ownership rewrite without changing the public API, record schema, or replace
+linearization point. Exact checked helpers now map `fstat`, inheritability, and
+effective-UID probe failures. Root walking and final-record reads close every
+descriptor they own before returning a typed error. Mutation initializes root,
+temp, identity, replace, and failure state before its first read; every
+precommit stage converges on one cleanup tail, identity-unknown temps are never
+unlinked by name, cleanup stat/unlink cannot replace the primary failure, and
+replace-success failures still promote only to `durability_uncertain` with the
+new generation. Load and mutation release their acquired lease in a nonthrowing
+`finally`, while user errors are constructed only after handlers/finalizers exit
+so cause/context remain empty.
+
+New static oracles cover root/final first and second `fstat`, root/final
+inheritability, temp `fstat` before identity, temp inheritability after identity,
+typed corrupt initial CAS read, native initial-read `OSError`, and cleanup-stat
+failure. They assert exact redacted codes, descriptor closure, old/absent final
+state, identity-safe temp behavior, and a subsequent normal operation proving
+lease release. One reviewer first found that corrupt JSON alone did not exercise
+native `os.read` failure; the controller added that narrow case before any
+repair execution.
+
+The pre-execution repair anchors are production
+`a330bc170c589070b8ef0eb22a01e4a38789c3dfdaa91bc7603c55f9f9a33888`
+at 900 lines and test
+`910c08c018eee410e146a18623d1662c4b42a4511e569c69822f90dd05110cd4`
+at 2189 lines. Ruff check/format, Python compilation, and whitespace checks pass.
+No pytest has run against the repair. Because both focused GREEN attempts are
+already consumed, the independently accepted repair proceeds only to the full
+repository regression; any failure reopens recovery rather than creating a
+third focused attempt.
+
+## TK3 Ownership-Repair Full Regression Failure and Recovery — TK3-E014
+
+After two-reviewer static acceptance, the ownership-repair full command
+`PYTHONPATH=src .venv/bin/pytest -q` exited 1 in 16.41 seconds with 1644 passing,
+81 deselected, four failures, and three warnings. The first failure was the task
+store concurrent-reader test: the main CAS raced the reader's valid exclusive
+lease and received the contractually allowed `lock_unavailable`, but the test
+incorrectly required immediate writer success. Its abrupt exit skipped the
+reader stop/join sequence. The still-running reader then crossed into later
+lease tests while they monkeypatched the shared process registry and OS probes,
+producing one thread `KeyError` warning and three downstream lease failures
+(double-observed close, unresolved path trace, and mismatched adapter registry
+key). Those three are causally explained contamination, not independent product
+regressions.
+
+The concurrency oracle now accepts only that one allowed contention outcome,
+stops and joins the reader, retries CAS after lease release, and unconditionally
+stops/joins in `finally` on every path. It still begins with known generation 0,
+records only complete 0/1 reads, and ends with generation 1, while preventing a
+failed assertion from contaminating subsequent tests.
+
+A parallel final residual audit found one P2 input edge: an exact root string or
+Path containing NUL (or another native-encoding-invalid component) reaches
+component `os.open`, whose `ValueError` was not mapped and could skip parent-FD
+cleanup. Root opens now map exact `OSError`, `TypeError`, and `ValueError` into
+the existing fail-closed state. A new str/Path constructor oracle verifies
+fixed redacted `unsafe_store` and closure of every recorded walk descriptor.
+
+The recovery candidate is production
+`73c1588872719b8b1bff59d34e9fd0e0e42d47aa9d2016121fd5ae18e7e6be6c`
+at 900 lines and test
+`1a20347d313c351adfb33d0b75f7128c2b109c9f3b7152c6ed864394ce57d165`
+at 2227 lines. Ruff check/format, Python compilation, and whitespace checks pass.
+No pytest has run against this recovery candidate; independent static review is
+required before repeating the full regression.
+
+## TK3 Concurrency-Oracle Strengthening — TK3-E015
+
+A stricter independent review accepted the NUL-root fix but rejected the first
+concurrency recovery at P0/P1/P2 = 0/1/1. A reader-side non-TaskStore exception
+could still terminate as a pytest thread warning without entering `unexpected`,
+and the contention fallback could stop the reader before the successful CAS,
+making its concurrent evidence vacuous.
+
+The oracle now requires a successful reader-owned generation-0 load before the
+writer starts. Every ordinary reader exception is captured into `unexpected`
+and signals termination. If the writer first receives the allowed contention
+code, it asks the reader to yield and waits until the reader reaches a bounded
+pause only after its current load and lease release; the CAS then commits while
+the reader thread remains alive. The same reader resumes and must successfully
+observe generation 1. Every wait is bounded to five seconds, and `finally`
+always clears yield, stops, and joins the reader. This both prevents cross-test
+pollution and provides non-vacuous pre/post transition reader evidence.
+
+Independent static re-review ACCEPTED the strengthened schedule at P0/P1/P2 =
+0/0/0. The current recovery anchors are production
+`73c1588872719b8b1bff59d34e9fd0e0e42d47aa9d2016121fd5ae18e7e6be6c`
+at 900 lines and test
+`f8ab294d38019c1cff12109e80914200f14ff047e487a1bea22fc2042a8462dc`
+at 2248 lines. Static gates pass. A repeated full regression is authorized.
+
+## TK3 Ownership-Recovery Full GREEN — TK3-E016
+
+The repeated full repository command `PYTHONPATH=src .venv/bin/pytest -q`
+exited 0 in 15.77 seconds with 1649 passing, 81 deselected, and only the two
+known passing macOS fork deprecation warnings (pytest reported 14.62 seconds).
+The prior concurrency root failure, thread warning, and all three contaminated
+lease failures disappeared together, confirming the recorded causal diagnosis.
+
+The final test count adds twelve ownership/boundary cases to the previously
+focused 158: root/final/temp metadata failures, typed and native initial-read
+recovery, cleanup-stat precedence, and invalid native root input. Public
+behavior, serialization, CAS, process races, and all pre-existing repository
+tests remain GREEN. Final static gates and two fresh complete read-only reviews
+remain required before staging.
+
+## TK3 Final Independent Acceptance — TK3-E017
+
+Two distinct fresh complete read-only reviews ACCEPT the final recovery
+candidate at P0/P1/P2 = 0/0/0. They independently reconfirm exact public API and
+redacted errors; bounded canonical serialization; trusted-root and active
+capability gates; root/final/temp FD ownership; identity-safe cleanup; lease
+release; create/CAS/read concurrency; replace and durability linearization; the
+strengthened non-vacuous reader schedule; AST surface; and every earlier
+rejection's closure. Both also verify the artifact's historical failure and
+recovery evidence and the exact three-path allowlist.
+
+The accepted source/test anchors are
+`73c1588872719b8b1bff59d34e9fd0e0e42d47aa9d2016121fd5ae18e7e6be6c`
+at 900 lines and
+`f8ab294d38019c1cff12109e80914200f14ff047e487a1bea22fc2042a8462dc`
+at 2248 lines. The full recovery regression is 1649 passing with 81 deselected;
+whole-repository Ruff check, candidate format, compilation, pure import,
+whitespace, hash, and status gates pass. Exact three-file staging and staged
+delivery gates are authorized.
+
+## TK3 Staged Gate Acceptance — TK3-E018
+
+Only the three authorized TK3 paths were staged, with no unstaged path.
+`git diff --cached --check` and the exact staged-name inspection passed. The
+staged full regression exited 0 in 15.03 seconds with 1649 passing, 81
+deselected, and the same two known passing macOS fork warnings (pytest reported
+13.76 seconds). Staged-candidate whole-repository Ruff check, candidate format,
+pure module import, cached whitespace, and source/test hash gates all passed.
+
+The staged source/test anchors remain
+`73c1588872719b8b1bff59d34e9fd0e0e42d47aa9d2016121fd5ae18e7e6be6c`
+and `f8ab294d38019c1cff12109e80914200f14ff047e487a1bea22fc2042a8462dc`.
+The exact commit `feat(workflow): persist task runs atomically` and non-force
+push are authorized.
