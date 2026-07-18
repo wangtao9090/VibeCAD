@@ -6455,3 +6455,411 @@ The staged source/test anchors remain
 and `f8ab294d38019c1cff12109e80914200f14ff047e487a1bea22fc2042a8462dc`.
 The exact commit `feat(workflow): persist task runs atomically` and non-force
 push are authorized.
+
+## TK3 Closeout and TK4 Resume — TK4-E000
+
+TK3 was committed as `5883f7d4adf2d1c5617ea594bdf400ddf1c3f362`
+(`feat(workflow): persist task runs atomically`) and pushed non-force. The
+controller verified a clean `codex/task-kernel-phase2` branch with HEAD equal to
+its upstream at that exact commit. Under TK-A02/TK-A03 and the user's standing
+instruction to continue without internal product approvals, the already
+approved ordered TK4 packet now begins. No architecture, public MCP, model,
+environment, CAD, or dependency scope is expanded.
+
+## Task Packet TK4-P1 — Deterministic Acceptance Verification
+
+### 1. Anchor and authority
+
+TK-R1/TK-A02 explicitly approved TK4, TK-D13–TK-D17, TK-D24, the nine-commit
+sequence, named-file scope, genuine RED, independent review, exact commit, and
+non-force push. TK-R2/TK-A03 remains controlling for internal oracle/review
+repair. Anchor:
+`codex/task-kernel-phase2@5883f7d4adf2d1c5617ea594bdf400ddf1c3f362`,
+upstream-equal and clean before this artifact append. No duplicate user approval
+is required.
+
+### 2. Product outcome and contract boundary
+
+Implement a pure deterministic acceptance verifier that compiles the existing
+strict `AcceptanceSpec` into an authentic internal capability and verifies it
+only against a trusted immutable `ObservationSnapshot`. The verifier returns
+the durable `CriterionVerdict` values and `VerificationReport` already defined
+by TK1, plus an opaque receipt bound to candidate revision, manifest SHA-256,
+observation digest, and compiled spec identity.
+
+The closed TK-D15 allowlist is geometry volume, area, bbox, and center of mass;
+topology valid shape and solid count; and artifact exists, non-empty, and
+format. Checks use explicit canonical units and exact scalar/vector tolerance
+rules. Required failures or unsupported criteria fail verification; optional
+unsupported criteria remain diagnostic and cannot independently authorize an
+empty or pure-visual specification. Step results, execution acknowledgements,
+untrusted mappings, dynamic callables, and model output can never satisfy a
+criterion. TK4 reads no files, invokes no CAD, exports nothing, mutates no
+project/task state, and performs no network/model/MCP operation.
+
+### 3. Exact allowlist and public surface
+
+Only these paths may change:
+
+- `docs/orchestrated/vibecad-task-kernel-phase2.md`
+- `src/vibecad/validation/__init__.py`
+- `src/vibecad/validation/contracts.py`
+- `src/vibecad/validation/checks.py`
+- `src/vibecad/validation/engine.py`
+- `tests/test_acceptance_verifier.py`
+
+The public validation package must expose strict immutable shape/artifact/
+snapshot observations, compiled acceptance and receipt types, stable redacted
+validation errors, `compile_acceptance_spec`, and `verify_acceptance`. Exact
+constructor and mapping surfaces, check names, units, tolerance semantics,
+digest domains, receipt authenticity, and report binding are frozen in tests
+before production modules exist. No dependency, compatibility shim, registry,
+plugin discovery, filesystem path, or public server/MCP surface is added.
+
+### 4. Test-first execution and gates
+
+1. Run the unchanged full baseline at the clean TK3 anchor.
+2. Resolve the exact observation, compilation, check, error, digest, and receipt
+   contract with two bounded independent read-only design reviews. The
+   controller writes `tests/test_acceptance_verifier.py` first.
+3. Freeze an independently accepted test candidate and capture one genuine RED
+   caused solely by absent `vibecad.validation` modules.
+4. Implement only the four validation modules. Focused GREEN covers every
+   allowlisted check, pass/fail/exact boundary, required/optional unsupported,
+   bool-as-number, non-finite values, unit/vector/target ambiguity, duplicate or
+   missing facts, empty/pure-visual specs, revision/digest mismatch, and forged,
+   replayed, or mismatched receipts. It proves StepResult and
+   `execution_acknowledged` evidence are unusable.
+5. Run cumulative Stage C and the full repository suite, whole Ruff check,
+   candidate format, pure import, dependency/AST/diff/hash/allowlist gates, and
+   two fresh complete read-only reviews.
+6. Stage only the six named files, rerun staged gates, commit exactly
+   `feat(validation): verify deterministic acceptance criteria`, push
+   non-force, and verify clean HEAD/upstream equality before TK5.
+
+### 5. Budgets and circuit breakers
+
+Use one genuine missing-module RED and at most two focused GREEN attempts.
+Design-test corrections occur before RED whenever possible. Stop on an
+unexpected RED, second unsuccessful GREEN, mutable/authentication state that
+cannot be bounded, ambiguous tolerance or unit semantics, any filesystem/CAD/
+network/model import or side effect, dynamic callable lookup, scope drift,
+unexplained baseline regression, or a receipt that can be forged from public
+data. Internal oracle/review defects remain recoverable under TK-A03 only when
+recorded and independently re-reviewed; they require no product decision.
+
+### 6. Roles and process discipline
+
+The controller owns artifact/test/source edits, serialized executable
+validation, exact staging, commit, and push. Independent reviewers separately
+cover contracts/check semantics and authenticity/security, followed by two
+fresh final complete reviews. Review workers use static read-only shell only;
+they do not run Python, pytest, Ruff, formatters, CAD, network/model services,
+or mutate files/Git. No long-running command is relaunched while its original
+session is active.
+
+### 7. Delivery and residuals
+
+Deliver one independently accepted, pushed TK4 commit plus exact gate evidence
+and a clean recovery snapshot. Preserve unsupported preservation, assembly,
+feature inference, visual verification, implicit unit conversion, and any
+filesystem-backed evidence collection for later packets. Receipt authenticity
+is process-local capability authenticity for trusted same-process handlers, not
+a cross-service cryptographic credential. Do not begin TK5 until TK4 is clean
+and upstream-equal.
+
+## TK4 Baseline Evidence — TK4-E001
+
+At clean pushed TK3 anchor
+`5883f7d4adf2d1c5617ea594bdf400ddf1c3f362`, with only the approved TK4
+artifact append in the worktree, `PYTHONPATH=src .venv/bin/pytest -q` exited 0
+in 15.04 seconds with 1649 passing, 81 deselected, and the same two known
+passing macOS fork deprecation warnings (pytest reported 13.79 seconds). No TK4
+source/test, dependency, environment, CAD, network, model, staging, or Git
+mutation occurred.
+
+## TK4 Resolved Validation Contract — TK4-E002
+
+Two bounded read-only design reviews independently resolved the TK4 check
+semantics and the capability-authenticity boundary before the test candidate
+was written. The controller adopts a closed public package consisting of
+`ValidationErrorCode`, `ValidationError`, immutable `ShapeObservation`,
+`ArtifactObservation`, and `ObservationSnapshot` values, opaque
+`CompiledAcceptance` and `VerificationReceipt` capabilities, an immutable
+`VerificationResult`, and the three functions `compile_acceptance_spec`,
+`verify_acceptance`, and `consume_verification_receipt`. Receipt consumption is
+included now because TK-D17 requires later workflow transitions to distinguish
+an authentic verifier success from a publicly constructible report; deferring
+the consuming boundary would force TK6 to reopen the frozen TK4 allowlist.
+
+The exact supported pairs are `geometry.volume`, `geometry.area`,
+`geometry.bbox`, `geometry.center_of_mass`, `topology.valid_shape`,
+`topology.solid_count`, `artifact.exists`, `artifact.non_empty`, and
+`artifact.format`. Every supported criterion has an explicit target. Geometry
+criteria require exactly one canonical `unit` parameter: `mm^3` for volume,
+`mm^2` for area, and `mm` for bbox and center of mass. Numeric equality is
+inclusive `abs(observed - expected) <= tolerance`; omitted tolerance is zero,
+and the existing scalar-only criterion tolerance is broadcast over every
+vector component. Boolean, integer-count, and format checks are exact and
+forbid tolerance and parameters. Bbox is the existing three-axis size vector
+`(x_length, y_length, z_length)`, not six placement extrema; center of mass is
+the three-axis position vector. Supported output formats are the canonical
+tokens `step` and `fcstd`.
+
+An unknown required kind/check pair is a compile error. An unknown optional
+pair compiles only as an `unsupported` diagnostic, and a specification must
+still contain at least one supported machine criterion. Empty, pure-visual,
+and optional-unsupported-only specifications are rejected. A supported target
+or fact absent from a valid snapshot produces an `unsupported` verdict rather
+than an exception; the existing report invariant therefore fails required
+missing facts while preserving optional diagnostics. Known mismatches always
+produce `fail`, independent of the `required` flag. Verdict order is source
+criterion order and evidence uses stable canonical pointers into sorted,
+unique shape and artifact tuples.
+
+Observation values use exact, finite Python scalar types, reject booleans as
+numbers, require canonical revision and digest syntax, and enforce bounded
+identifier, tuple-count, fact-count, and canonical-byte budgets. There are at
+most 128 shape and 128 artifact observations, 128 criteria, 256 UTF-8 bytes per
+identifier, 64 KiB of canonical snapshot JSON, and 256 KiB of canonical
+acceptance JSON. Snapshot and compiled-spec digests use canonical JSON plus
+the separate `vibecad-observation-snapshot-v1\0` and
+`vibecad-compiled-acceptance-spec-v1\0` domain separators.
+The verifier accepts only an exact `ObservationSnapshot`; it has no adapter for
+`StepResult`, execution facts, `ExecutionEvidence`, mappings, proxies, or
+`execution_acknowledged`. It performs no filesystem, CAD, MCP, model, network,
+dynamic import, registry discovery, or caller-supplied invocation.
+
+Compiled and receipt instances are issued only by a private process-local
+issuer, registered by exact object identity under a lock, and reject public
+construction, subclassing, mutation, copying, deep-copying, and pickling. A
+success receipt binds the exact compiled object, compiled-spec digest,
+acceptance ID, candidate revision, manifest SHA-256, observation digest, and
+the exact deterministic report. Consumption is atomic and one-shot; forged,
+cross-compiled, swapped-binding, and replayed receipts fail closed. This is a
+trusted same-process capability boundary, not a cross-service cryptographic
+credential and not a claim against hostile native-memory or arbitrary Python
+reflection.
+
+One pre-existing upstream residual is recorded without scope expansion:
+`VerificationReport.from_mapping()` omits `candidate_revision` from its
+declared required-field set even though the constructor requires it. TK4
+constructs reports directly and does not compensate for or edit that TK1
+contract defect.
+
+## TK4 Accepted Test Candidate — TK4-E003
+
+The controller wrote the complete TK4 test candidate before any validation
+production module existed. Its final pre-RED anchor is
+`ef4541abe8486bd92045acbc90df959555cbd43e7092fafaea975b6a84bef34f`
+at 1922 lines. Ruff check/format, Python compilation, and whitespace gates pass;
+no pytest has run against it.
+
+Two independent complete read-only reviews ACCEPT the candidate at P0/P1/P2 =
+0/0/0. Review-driven corrections froze literal canonical snapshot and compiled
+spec digest vectors and separate domains; pass/fail and inclusive/exclusive
+boundaries for all nine checks; componentwise vector tolerance; every missing
+fact family; exact tuple/JSON mapping boundaries; shape, artifact, criterion,
+UTF-8, fact, and canonical-byte budgets; hostile-text redaction; snapshot and
+observation subclass/proxy/tamper rejection; exact per-file module-and-symbol
+import allowlists; dynamic-call and broad-exception AST gates; compiled and
+receipt constructor/copy/pickle/reduce/replace/slot/seal attacks; changed-spec
+and equal-report binding; atomic replay; bounded concurrency waits; and weak
+capability lifecycle cleanup.
+
+The accepted bbox contract is the repository's existing three-axis size vector
+`(x_length, y_length, z_length)`. The accepted test collection also ensures
+values rejected by the upstream workflow constructor are injected only after a
+valid construction, so the authorized RED can have exactly one cause: the
+absent `vibecad.validation` package. The genuine focused RED is now authorized.
+
+## TK4 Genuine Missing-Module RED — TK4-E004
+
+With the accepted test anchor still the only TK4 code candidate,
+`PYTHONPATH=src .venv/bin/pytest -q tests/test_acceptance_verifier.py` exited 2
+in 0.78 seconds during collection. The sole error is
+`ModuleNotFoundError: No module named 'vibecad.validation'` at the test's public
+package import; pytest reported one collection error in 0.34 seconds. There are
+no assertion failures, alternate import failures, test-construction errors, or
+production modules present. This is the one authorized genuine RED. The four
+named validation modules may now be implemented, with no further RED run.
+
+## TK4 Pre-GREEN Repair and Static Acceptance — TK4-E005
+
+The four named production modules were implemented without executing the test
+suite. Independent pre-GREEN reviews rejected early static candidates and the
+controller repaired the findings under TK-A03 before consuming a focused GREEN
+attempt. The repairs add exact spec/criterion schema and kind revalidation;
+stable translation of reflected cyclic/deep workflow values; explicit live
+budgets of 256 compiled capabilities and 256 receipts with weak-reference
+capacity recovery; and full-report receipt binding.
+
+The report-binding repair is value-isolating rather than alias-based. Receipt
+issuance hashes the public report then reconstructs every verdict and the
+report into an issuer-owned private copy before the result escapes. Consumption
+revalidates the complete public report digest under the receipt lock, atomically
+marks the receipt consumed, and returns the previously unexposed distinct-equal
+private report. Pre-consume mutation is rejected; post-consume mutation of the
+public alias cannot change the authenticated returned value.
+
+Review-driven oracle additions cover cyclic parameters and optional expected
+values, reflected schema/kind/check corruption, full report/verdict mutation,
+private-copy isolation, and exact registry capacity/recovery. An exact AST
+oracle correction admits only `object.__new__`, `object.__setattr__`,
+`object.__delattr__`, and zero-argument `super().__init__`, without opening
+other dunder calls.
+
+Two complete final static reviews ACCEPT the pre-GREEN candidate at P0/P1/P2 =
+0/0/0. Current anchors are test
+`c4962e1ba4d207a576b12b61d6a4c2bc66e0f457fe28b627ce143b12850f2d7e`
+at 2082 lines, contracts
+`f6ab974cd125630aad8a3a7de79e04f1328e9529f241eac83e7567f0da7990e4`,
+checks `c5934b361b5eabee3ba7285cfc33ebf6174174ce0c68733f52e2771f534e7e6e`,
+engine `5d587feb52f355dcf2c10ee618750bacbffcc50d09c7d6b5b2ba6526baef46f9`,
+and package init
+`73050031b2e173739e99cb4db59c44863eea2015fac1626f8ebf76a1666a836f`.
+Ruff check/format, Python compilation, and whitespace gates pass. The first of
+at most two focused GREEN attempts is authorized.
+
+## TK4 First Focused GREEN — TK4-E006
+
+The first focused command
+`PYTHONPATH=src .venv/bin/pytest -q tests/test_acceptance_verifier.py` exited 0
+in 1.02 seconds with all 108 tests passing (pytest reported 0.59 seconds).
+This single successful attempt exercises the nine-check matrix, exact digest
+vectors, deterministic reports, stable malformed-input handling, observation
+and spec budgets, StepResult/evidence exclusion, snapshot and capability
+tamper resistance, full-report private-copy receipts, atomic replay,
+concurrency, registry bounds/recovery, and the closed import/dynamic-call
+surface. No second focused GREEN attempt is required or authorized unless a
+later cumulative/full regression proves a distinct defect.
+
+## TK4 Cumulative Stage C GREEN — TK4-E007
+
+The cumulative TK1–TK4 plus Phase-1 workflow command covering workflow
+contracts, program validation, result normalization, execution adapter, task
+state, leases, task store, and acceptance verification exited 0 in 5.98
+seconds with 1194 passing and one deselected test (pytest reported 5.19
+seconds). Durable state/report compatibility, exact execution-evidence
+separation, lease/store behavior, and every new validation path remain GREEN.
+The unchanged full repository regression is authorized.
+
+## TK4 Full Repository GREEN — TK4-E008
+
+The full repository command `PYTHONPATH=src .venv/bin/pytest -q` exited 0 in
+16.30 seconds with 1757 passing, 81 deselected, and only the two known passing
+macOS multi-threaded-fork deprecation warnings (pytest reported 15.01
+seconds). The 108 new deterministic-verification tests account exactly for the
+increase from the clean TK3 baseline of 1649 passing tests. No pre-existing
+CAD tool, runtime, MCP, feedback, execution, workflow, lease, persistence, or
+platform behavior regressed. Whole-repository static gates and two fresh final
+complete read-only reviews remain required before staging.
+
+## TK4 Post-Full Controller Repair — TK4-E009
+
+A controller audit after the first full GREEN found one bounded-diagnostics
+edge case: an otherwise valid criterion could supply an overlong, control-
+character-bearing, or RFC 6901-significant parameter key, and the validation
+error path could echo that untrusted key or exceed the frozen path budget.
+TK-A03 authorizes this internal correctness repair without a product decision.
+
+The narrow repair rejects non-exact-string keys before sorting or comparison,
+uses the fixed `/criteria/N/parameters` parent for unsafe or overlong keys,
+escapes printable `~` and `/` keys as `~0` and `~1`, and requires geometry
+units to be exact strings. New oracles cover overlong and multiline keys,
+canonical pointer escaping, and reflected mixed-key mappings while preserving
+fixed redacted messages.
+
+Ruff check/format, Python compilation, and whitespace gates pass. Two
+independent narrow pre-execution reviews verified production hash
+`1d9d15d04870eefd8f10342e5bf44459567266eade023830bbc2e7c9be5f0e67`
+for `checks.py` and test hash
+`824d0b7e750d0ce07121776d5721d200d75a480a54ee8fe6ae318da09ec1a07a`;
+both ACCEPT at P0/P1/P2 = 0/0/0. The other production anchors are unchanged.
+The second and final allowed focused GREEN is authorized, followed by fresh
+cumulative and full regressions because this repair reopens the candidate.
+
+## TK4 Second Focused GREEN — TK4-E010
+
+The second and final focused command
+`PYTHONPATH=src .venv/bin/pytest -q tests/test_acceptance_verifier.py` exited 0
+in 1.06 seconds with all 109 tests passing (pytest reported 0.61 seconds).
+The four new hostile-parameter-key cases close the controller finding without
+regressing the previously accepted deterministic-verification surface. No
+further focused execution is authorized or needed.
+
+## TK4 Reopened Cumulative Stage C GREEN — TK4-E011
+
+The fresh cumulative TK1–TK4 plus Phase-1 workflow command exited 0 in 6.92
+seconds with 1195 passing and one deselected test (pytest reported 5.85
+seconds). The increase of one test from TK4-E007 is exactly the new grouped
+parameter-key regression oracle; all durable-state, execution-evidence,
+lease/store, and validation contracts remain GREEN.
+
+## TK4 Reopened Full Repository GREEN — TK4-E012
+
+The fresh full repository command `PYTHONPATH=src .venv/bin/pytest -q` exited 0
+in 16.27 seconds with 1758 passing, 81 deselected, and only the same two known
+passing macOS multi-threaded-fork deprecation warnings (pytest reported 15.03
+seconds). The total is the clean TK3 baseline plus all 109 TK4 tests. No
+pre-existing CAD tool, runtime, MCP, feedback, execution, workflow, lease,
+persistence, or platform behavior regressed. Whole-repository static gates
+and two fresh complete final reviews are now authorized.
+
+## TK4 Reopened Static Gate Acceptance — TK4-E013
+
+Whole-repository Ruff check, candidate format, Python compilation, exact pure
+package import, and whitespace gates pass after TK4-E012. One controller gate
+invocation initially supplied an incorrect locally written expected-name set
+to the pure-import assertion; it named TK1 report types instead of the frozen
+TK4-E002 public values. No source or test changed. The controller reconciled
+the assertion to the exact accepted 11-name tuple and reran the complete
+static gate under fail-fast execution successfully.
+
+Final production/test anchors are package init
+`73050031b2e173739e99cb4db59c44863eea2015fac1626f8ebf76a1666a836f`,
+contracts
+`f6ab974cd125630aad8a3a7de79e04f1328e9529f241eac83e7567f0da7990e4`,
+checks
+`1d9d15d04870eefd8f10342e5bf44459567266eade023830bbc2e7c9be5f0e67`,
+engine
+`5d587feb52f355dcf2c10ee618750bacbffcc50d09c7d6b5b2ba6526baef46f9`,
+and tests
+`824d0b7e750d0ce07121776d5721d200d75a480a54ee8fe6ae318da09ec1a07a`.
+Only the six authorized TK4 paths are modified or untracked. Two fresh
+complete final read-only reviews are authorized against these exact anchors.
+
+## TK4 Final Independent Acceptance — TK4-E014
+
+Two distinct fresh complete read-only reviews independently ACCEPT the reopened
+final candidate at P0/P1/P2 = 0/0/0. Both verified all six authorized anchors,
+the nine-check deterministic semantics, exact public surface, canonical units
+and tolerances, every type and resource budget, fixed redacted diagnostics,
+closed import/dynamic-call surface, and non-vacuous hostile-parameter tests.
+
+The reviews separately reconfirm authentic compiled capabilities; exact
+identity and weak-registry lifecycle bounds; complete receipt/spec/candidate/
+manifest/observation/report binding; issuer-owned private report isolation;
+atomic one-shot replay rejection; race and capacity behavior; and rejection of
+construction, copy, pickle, subclass, reflection, mutation, and id-reuse
+attacks. They found no false GREEN/RED, scope drift, compatibility regression,
+or artifact inconsistency. The source/test anchors remain exactly those in
+TK4-E013. Exact six-path staging and staged delivery gates are authorized.
+
+## TK4 Staged Gate Acceptance — TK4-E015
+
+Only the six authorized TK4 paths were staged, with no unstaged path.
+`git diff --cached --check` and exact staged-name inspection passed. The staged
+full repository command exited 0 in 15.93 seconds with 1758 passing, 81
+deselected, and the same two known passing macOS fork warnings (pytest reported
+14.80 seconds). Whole-repository Ruff check, candidate format, compilation,
+exact pure package import, cached whitespace, and hash gates all passed.
+
+The staged executable anchors remain exactly those in TK4-E013. The staged
+artifact before this evidence append was
+`76c325ae204169ccbcdaef725aef2989884afa3c39ea85cdd18998bd37fbef6a`.
+The controller must restage only this ledger append, confirm that no executable
+anchor changed, and repeat the exact staged full/static/name/diff gates before
+the authorized commit. On success, commit exactly
+`feat(validation): verify deterministic acceptance criteria` and push
+non-force; otherwise do not commit.
