@@ -6863,3 +6863,1043 @@ anchor changed, and repeat the exact staged full/static/name/diff gates before
 the authorized commit. On success, commit exactly
 `feat(validation): verify deterministic acceptance criteria` and push
 non-force; otherwise do not commit.
+
+## TK4 Closeout and TK5 Resume — TK5-E000
+
+TK4 was committed exactly as
+`f4a305c02af81f72d6196c7a872c8c6374d8d7a6`
+(`feat(validation): verify deterministic acceptance criteria`). The first
+non-force push attempt failed before remote mutation because GitHub port 443
+was unreachable; an immediate bounded retry succeeded. The controller then
+verified a clean `codex/task-kernel-phase2` branch with HEAD exactly equal to
+its upstream at that commit. The exact final staged candidate also repeated
+the full 1758-pass, 81-deselected, two-known-warning regression and all static,
+name, diff, import, and hash gates required by TK4-E015.
+
+Under TK-R1/TK-A02, TK-A03, and the user's standing instruction to continue
+without internal product approvals, the already approved ordered TK5 packet
+now begins. No architecture, public MCP, model, environment, CAD, dependency,
+or external-path authority is expanded.
+
+## Task Packet TK5-P1 — Immutable Local CAD Revisions
+
+### 1. Anchor and authority
+
+TK-R1/TK-A02 explicitly approved TK5, TK-D05–TK-D12, TK-D16, TK-D18, TK-D24,
+the nine-commit sequence, named-file scope, genuine RED, independent review,
+exact commit, and non-force push. TK-R2/TK-A03 remains controlling for internal
+oracle/review repair. Anchor:
+`codex/task-kernel-phase2@f4a305c02af81f72d6196c7a872c8c6374d8d7a6`,
+upstream-equal and clean before this append. No duplicate user approval is
+required.
+
+### 2. Product outcome and contract boundary
+
+Implement a pure local revision repository that turns controller-owned FCStd
+and artifact bytes into immutable project revisions, then atomically advances
+a small authenticated HEAD record. A committed revision has an opaque
+controller-owned identifier, canonical manifest, exact model/artifact hashes
+and sizes, and a journal that distinguishes preparation, HEAD linearization,
+and completed bookkeeping. Recovery must report the only state supported by
+durable evidence; it never guesses, edits an old revision, or rolls back an
+already advanced HEAD.
+
+The store supports an explicitly initialized empty project and import of an
+FCStd supplied by a trusted same-process host. It does not open or interpret
+CAD geometry, create a Session, export a file, expose arbitrary user/model
+paths, acquire a network resource, or invoke MCP/model/FreeCAD. Candidate
+staging and transaction names are generated internally. TK6/TK7 remain the
+only owners of candidate-session behavior and controlled CAD export.
+
+### 3. Exact allowlist and surface
+
+Only these paths may change:
+
+- `docs/orchestrated/vibecad-task-kernel-phase2.md`
+- `src/vibecad/execution/revisions.py`
+- `tests/test_revision_store.py`
+
+The direct `vibecad.execution.revisions` module will expose strict immutable
+revision, artifact, HEAD, journal, reconciliation, trust, and error values plus
+one `LocalRevisionStore`. `src/vibecad/execution/__init__.py` remains unchanged;
+there is no public server/MCP tool, registry entry, dependency, compatibility
+shim, plugin discovery, or import-time storage mutation. Exact constructor,
+mapping, storage-layout, journal, error, and method surfaces are frozen in the
+test anchor before the production module exists.
+
+### 4. Test-first execution and gates
+
+1. Run the unchanged full baseline at the clean pushed TK4 anchor with only
+   this artifact append present.
+2. Resolve the exact value schemas, method state machine, canonical bytes,
+   storage layout, durability boundary, and crash-window reconciliation with
+   two bounded independent read-only design reviews. The controller writes
+   `tests/test_revision_store.py` first.
+3. Freeze an independently accepted test candidate and capture one genuine RED
+   caused solely by absent `vibecad.execution.revisions`.
+4. Implement only `revisions.py`. Focused GREEN covers initialization, trusted
+   FCStd import, prepared revision commit, immutable reads, HEAD advancement,
+   journal completion, and deterministic reconciliation, including every
+   pre-/post-linearization fault window.
+5. Run cumulative TK1–TK5 and Phase-1 workflow tests, the full repository suite,
+   whole Ruff check, candidate format, pure import, dependency/AST/diff/hash/
+   allowlist gates, and two fresh complete read-only reviews.
+6. Stage only the three named files, rerun staged gates, commit exactly
+   `feat(execution): persist immutable CAD revisions`, push non-force, and
+   verify clean HEAD/upstream equality before TK6.
+
+### 5. Required adversarial matrix
+
+Tests must cover malformed, missing, empty, oversized, hash-mismatched,
+directory, symlink, non-regular, and unsafe-link model/artifact inputs;
+project/revision/transaction/path traversal and Unicode/separator attacks;
+private permissions and root/project/revision/HEAD/journal entry replacement;
+partial write, flush, file-fsync, replace, directory-fsync, cleanup, and read
+faults; duplicate-key, noncanonical, truncated, oversized, and checksum-bad
+records; and old-revision byte identity after every failure.
+
+The crash matrix includes candidate staging only; a complete orphan revision
+before HEAD; HEAD advanced with a prepared journal; committed journal after
+HEAD; corrupt or mismatched HEAD/manifest/content; retry and duplicate
+reconciliation; and concurrent or stale transaction observations. Each case
+must produce a stable redacted result or error and must never infer commitment
+from timestamps, names, or incomplete files.
+
+### 6. Budgets and circuit breakers
+
+Use one genuine missing-module RED and at most two focused GREEN attempts.
+Bound manifest/record bytes, JSON depth/nodes/strings, project artifact counts,
+individual and aggregate artifact sizes, copied-stream chunks, and diagnostic
+text. Reject unknown/untrusted roots, network-filesystem claims, absent atomic
+rename/fsync/no-follow capabilities, mutable public state, arbitrary path
+selection, or unbounded recovery scans. Stop on an unexpected RED, second
+unsuccessful GREEN, ambiguous HEAD linearization, recovery that must guess,
+any old-revision mutation, scope drift, or unexplained baseline regression.
+Internal oracle/review defects remain recoverable under TK-A03 when recorded
+and independently re-reviewed; they require no product decision.
+
+### 7. Roles and delivery
+
+The controller owns artifact/test/source edits, serialized executable
+validation, exact staging, commit, and push. Independent reviewers separately
+cover schema/compatibility and filesystem/durability/recovery threats, followed
+by two fresh final complete reviews. Review workers use static read-only shell
+only; they do not run Python, pytest, Ruff, formatters, CAD, network/model
+services, or mutate files/Git. No long-running command is relaunched while its
+original session is active.
+
+Deliver one independently accepted pushed TK5 commit and a clean recovery
+snapshot. Preserve Session creation, receipt consumption, candidate promotion,
+geometry observation, export policy, TaskService orchestration, public MCP,
+cloud/object storage, Windows durability claims, and network filesystem support
+for later packets. Do not begin TK6 until TK5 is clean and upstream-equal.
+
+## TK5 Baseline Evidence — TK5-E001
+
+At clean pushed TK4 anchor
+`f4a305c02af81f72d6196c7a872c8c6374d8d7a6`, with only the approved TK5
+artifact append in the worktree, `PYTHONPATH=src .venv/bin/pytest -q` exited 0
+in 20.56 seconds with 1758 passing, 81 deselected, and the same two known
+passing macOS multi-threaded-fork deprecation warnings (pytest reported 18.57
+seconds). No TK5 source/test, dependency, environment, CAD, network, model,
+staging, or Git mutation occurred.
+
+## TK5 Resolved Revision Contract — TK5-E002
+
+Three bounded static read-only reviews independently covered revision schemas,
+filesystem/durability threats, and TK5→TK6/TK8 compatibility. No product-level
+blocker exists. The controller adopts the conservative Stage-C-only choices
+below under TK-A03 and does not expand format, retention, history, platform, or
+storage scope.
+
+The direct module's exact public surface is `RevisionStoreRootTrust`,
+`RevisionStoreErrorCode`, `RevisionStoreError`, `RevisionArtifactRef`,
+`RevisionRef`, `ProjectHead`, `CommitJournalState`, `CommitJournal`,
+`ReconciliationStatus`, `ReconciliationResult`, and `LocalRevisionStore`.
+Every value is schema-v1, frozen, slotted, keyword-only, strictly mapped, and
+pathless. `RevisionArtifactRef` uses the same id/name/format/SHA-256/size field
+vocabulary as TK1's task artifact reference. `RevisionRef` binds project,
+revision, base revision, manifest digest, optional fixed FCStd model reference,
+and fixed STEP artifact references. `ProjectHead` binds project, generation,
+revision, and manifest digest. Journal and reconciliation values expose only
+opaque IDs/digests and deterministic state, never host paths or native errors.
+
+An empty project has a real initial `revision_<32hex>` and generation-zero
+HEAD, with an immutable manifest whose model is null and artifacts are empty.
+This is metadata for an empty CAD base, not a fabricated FCStd, and is required
+because the already delivered TaskRun contract has a mandatory canonical base
+revision. Trusted FCStd initialization instead creates a generation-zero
+initial revision with fixed `model.FCStd`/`fcstd` metadata and no STEP. Every
+later sealed candidate must contain a nonempty fixed `model.FCStd` plus exactly
+one nonempty fixed `model.step`; only `fcstd` and `step` are admitted.
+
+The exact store lifecycle is:
+
+1. `initialize_empty_project(project_id, lease)` or
+   `import_trusted_fcstd(project_id, source, lease)` atomically creates one new
+   project at generation zero.
+2. `begin_revision(project_id, expected_head, lease)` generates the candidate
+   revision and transaction IDs, creates a private candidate, copies any base
+   model, and persists a `staging` journal.
+3. `candidate_model_path(...)` and `candidate_artifact_path(..., "step", ...)`
+   expose only store-owned fixed paths to the trusted same-process CAD ports.
+   No model/user string selects either path.
+4. `seal_revision(...)` copies those fixed files into a store-owned immutable
+   revision, hashes and sizes them, writes and verifies the canonical manifest,
+   atomically publishes the complete revision, advances the journal to
+   `prepared`, and returns its pathless `RevisionRef`. The old writable paths
+   no longer authorize or influence the sealed bytes.
+5. `commit_revision(project_id, expected_head, revision_id, lease)` revalidates
+   HEAD, journal, manifest, and every byte before atomically replacing HEAD.
+   The replacement is the sole logical commit point. It then records
+   `committed`; no later cleanup or reporting failure may roll HEAD backward.
+6. `rollback_revision(...)` and `reconcile(project_id, lease)` classify clean,
+   committed, not-committed, and cleanup-required states from exact evidence.
+   `load_head`, `load_revision`, `revision_model_path`, and
+   `revision_artifact_path` perform strict immutable readback without scanning.
+
+All project mutations require an exact active matching `ProjectWriteLease`
+issued by the exact manager injected into the store. The store never
+reacquires that lock: TK8's approved order already holds it and the lease is
+intentionally non-reentrant. Atomic immutable reads do not acquire it. A
+candidate revision ID is generated before CAD execution and remains the final
+revision ID, so TK4's receipt candidate/manifest binding cannot be changed at
+commit time.
+
+The single fixed journal states are `staging`, `prepared`, `committed`, and
+`not_committed`. A staging/prepared journal with the exact old HEAD is resolved
+fail-closed as not committed; recovery never resumes the CAD transaction or
+advances HEAD. A prepared/committed journal with the exact new HEAD and valid
+content resolves committed. A terminal journal is idempotent until the next
+begin consumes it. Any third HEAD, foreign/multiple transaction evidence,
+missing or corrupt content, digest mismatch, or inconsistent state raises
+`recovery_required`. Candidate-only and complete orphan evidence never become
+HEAD by name, generation, timestamp, or scan; uncommitted sealed bytes remain
+private and may not mutate an older committed revision.
+
+Canonical JSON is compact, UTF-8, sorted-key, duplicate-key-free, float-free,
+and byte-canonical with separate checksum domains for manifest, HEAD, and
+journal. Project, revision, transaction, and artifact IDs map through separate
+domain-separated SHA-256 path keys. Root/project/revision/candidate directories
+are owner-only; stored files are owner-only ordinary single-link files on the
+trusted root device. Traversal is dir-fd-relative with no-follow semantics and
+identity checks. Fixed caps are 16 KiB HEAD, 32 KiB journal, 256 KiB manifest,
+64 JSON depth, 4096 JSON nodes, 4096 UTF-8 bytes per string, 512 MiB per input,
+1 GiB per revision, one STEP artifact, and 64 KiB copy chunks. Reconciliation
+uses fixed names and never performs an unbounded filesystem scan.
+
+The exact public error codes are `invalid_identifier`, `invalid_input`,
+`not_found`, `already_exists`, `conflict`, `corrupt_record`,
+`corrupt_content`, `budget_exceeded`, `unsafe_store`, `invalid_lease`,
+`io_error`, `durability_uncertain`, `recovery_required`, and
+`cleanup_required`. Messages are fixed and redacted. Only the uncertainty
+error may carry a strict `head_committed` boolean; it never contains source
+path, filename, JSON, errno, or arbitrary exception text.
+
+No `execution.__init__` change, FreeCAD/Session/tool/server/validation/MCP/model
+import, network or dynamic callable, TaskRun mutation, ambient `open`,
+filesystem discovery walk, dependency, or Windows/network durability claim is
+admitted. The reviews agree these choices close TK5 without a user decision.
+The controller may now write the complete test candidate before production
+exists and request two independent static test-oracle reviews.
+
+## TK5 Frozen Test-Oracle Acceptance — TK5-E003
+
+The controller completed the approved production-before-source oracle loop
+under TK-A03. An intermediate 2913-line candidate at
+`1cdab4a55cef1a08d1c5718215753fa5c5baca01fb065748eed5a3bf37192ac1`
+received two zero-finding reviews, while the independent durability review
+correctly rejected it with two P1 and four P2 findings. Those findings exposed
+missing direct proof for staging-journal and imported-FCStd durability, weak
+cross-phase event windows, incomplete exact JSON-resource edges, exceptional
+worker cleanup risk, and a nonbehavioral exact-import assertion. No production
+source or executable test was run at that rejected anchor.
+
+The superseding frozen test is exactly 3141 lines with SHA-256
+`057188533f2d41950b82bd4dd55781b96d05a697602d29799a9b0b06575db5fb`.
+It adds staging journal file/containing-directory fsync ordering and targeted
+faults, imported-model prepublication fsync ordering and failure cleanup,
+strict prepared-journal/HEAD/committed-journal local durability windows, exact
+64/65-depth, 4096/4097-node, and 4096/4097-UTF-8-byte parser edges, bounded
+daemon worker shutdown, and an allowed dependency-boundary AST check without
+irrelevant exact optional imports. It preserves every E002 public contract and
+the source remains absent.
+
+At this exact anchor, Ruff check exited 0, Ruff format check exited 0, Python
+compilation exited 0, `git diff --check` exited 0, and the explicit
+source-absence gate exited 0. Two fresh independent full-file static reviews
+then each returned ACCEPT with P0/P1/P2 exactly `0/0/0`: one covered the whole
+contract/collection oracle and one re-audited every filesystem durability,
+recovery, budget, and concurrency finding. Both confirmed the exact hashes,
+line count, absent production module, and unchanged workspace. This authorizes
+one focused RED. It is accepted only if collection fails solely with
+`ModuleNotFoundError: No module named 'vibecad.execution.revisions'`; every
+other outcome is an unexpected gate red and freezes implementation.
+
+## TK5 Genuine Focused RED — TK5-E004
+
+At artifact revision
+`6ed6bcb610aaf69641a4110909ec24205b74bd2fb462a1e003b7460e8103fdd8`
+and unchanged frozen test
+`057188533f2d41950b82bd4dd55781b96d05a697602d29799a9b0b06575db5fb`,
+the controller reconfirmed that `src/vibecad/execution/revisions.py` did not
+exist and ran exactly one focused command:
+
+    PYTHONPATH=src .venv/bin/pytest -q tests/test_revision_store.py
+
+It exited 2 in 1.3 wall seconds after pytest reported 0.50 seconds. Collection
+produced exactly one error at test line 16 and no executed test: Python raised
+`ModuleNotFoundError: No module named 'vibecad.execution.revisions'`. This is
+the sole predicted missing-production-module RED authorized by TK5-E003. No
+syntax, fixture, dependency, environment, or wrong-path failure appeared. The
+RED is accepted and consumed; do not rerun a missing-module RED. The controller
+may now create only `src/vibecad/execution/revisions.py` and attempt the first
+focused GREEN against the unchanged frozen oracle.
+
+## TK5 Post-RED Oracle Correction Policy — TK5-E005
+
+A third static reviewer returned after TK5-E004 and demonstrated that the AST
+dependency gate could be bypassed by importing or aliasing ambient filesystem
+operations. Because production still did not exist, the controller froze
+source creation and repaired the oracle under TK-A03. Several preserved review
+rounds showed that an attempted general Path data-flow inference created both
+new bypasses and false positives across Python scopes and helper returns. Those
+rejected candidates were never executed and do not supersede E004.
+
+The final correction deliberately uses a smaller auditable source policy:
+inside this security-critical revision module, filesystem operations are made
+only through the closed `os` call/attribute allowlists. Every non-`os`
+attribute whose name denotes an ambient filesystem read, mutation, discovery,
+ownership, link, or metadata operation is forbidden at attribute-load time,
+including aliases; dynamic calls and ambient `open` remain forbidden. This
+also intentionally forbids unrelated same-named conveniences such as
+`dataclasses.replace` or `str.replace` in this one module. Neither is needed by
+the approved implementation, and the restriction avoids claiming an unsound
+Python type/data-flow proof. Pure Path construction, `absolute`, parts,
+is-absolute checks, `/` composition, and returned Path values remain admitted.
+Reflective namespace/attribute access, code/class internals, and call targets
+formed by a subscript or another call are likewise excluded, closing alias
+recovery through `__dict__`, `__getattribute__`, or namespace reflection.
+
+This is an internal implementation constraint, not a product/API or dependency
+change. It narrows the already approved E002 no-ambient-path boundary and
+requires no new user decision. The superseding test must pass static checks,
+receive two fresh zero-finding reviews against this explicit policy, and
+produce one replacement source-absent RED before any production file is
+created. The earlier E004 RED remains valid historical evidence but is not the
+implementation anchor after this append-only correction.
+
+## TK5 Namespace-Relay Review Rejection — TK5-E006
+
+At artifact revision
+`fdb1b0622d29c1819537cc4a48e31d68c9b239f5d19f3d7e0d4f80f7ac031cfe`
+and 3207-line test candidate
+`98d0917fd216dc63abacffa11d7c537ce96f58e70883751d2d21aff6f8a6e2a6`,
+the two fresh independent reviews returned one ACCEPT at P0/P1/P2 `0/0/0`
+and one REJECT at `0/1/0`. The rejecting review demonstrated that an allowed
+non-`os` dependency could still relay filesystem authority: for example, the
+candidate admitted `from vibecad.workflow.lease import _open_root`, and a
+module import could expose that dependency's private `os` binding. The global
+forbidden-name sets did not constitute a positive semantic import boundary.
+
+The production module remains absent and no replacement RED was run at this
+rejected anchor. Under the already approved TK-A03 correction authority, the
+controller will replace the negative non-`os` import filter with a closed
+per-module symbol map. Both direct `from` imports and aliased module attribute
+access must resolve only to approved symbols; dotted module imports without an
+explicit alias are rejected. This is a test-oracle hardening correction within
+E005, not a product, public API, dependency, storage, or platform decision.
+Source creation stays frozen until the superseding candidate passes all static
+gates and receives two fresh zero-finding reviews.
+
+## TK5 Import-Binding Shadow Review Rejection — TK5-E007
+
+At artifact revision
+`e639038942e6082c6032fd3d5fb17f3bdd60bff2605d311aa1308fba47571217`
+and 3209-line test candidate
+`c098d2e2d291f2798cce0168486c24984d2d56260073f2212e1304600736837e`,
+the next fresh reviews again returned one ACCEPT at P0/P1/P2 `0/0/0` and one
+REJECT at `0/1/0`. The positive module map closed the E006 relay, but the
+rejecting review showed that a module alias could be shadowed by a binding
+which is not represented by an `ast.Name`: a function parameter named like an
+`os` alias could receive a `Path` and then call its `open` method while the
+gate continued to classify the name as the original `os` module.
+
+The production module remains absent and no executable gate was run at this
+anchor. The TK-A03 correction is extended conservatively without lexical
+data-flow inference: every approved imported binding must be unique across the
+entire module and may not be rebound. Import aliases, assignment targets,
+arguments, function/class definitions, exception targets, pattern captures,
+and type-parameter bindings are counted. This deliberately forbids harmless
+shadowing inside this one module in exchange for a small auditable policy. The
+superseding candidate still requires static gates and two new independent
+zero-finding reviews before the replacement missing-module RED.
+
+## TK5 Capability-Set Relay Review Rejection — TK5-E008
+
+At artifact revision
+`eaa635e2df0b95f3cc2b68a4044783fd51c94df2df622d997f97d378ce57da7e`
+and 3235-line test candidate
+`cb9c6353c63e48824f41a6070340400f5bc63a24147024ee668c032c8df4ea51`,
+the next reviews returned one ACCEPT at P0/P1/P2 `0/0/0` and one REJECT at
+`0/1/0`. The E007 shadow fix was accepted, but the rejecting review showed
+that the admitted `os.supports_dir_fd` and `os.supports_follow_symlinks` sets
+expose unapproved native functions which could be selected and called through
+an ordinary local name. The controller's same-boundary audit also confirmed
+that approved built-in `os` functions expose their underlying module through
+the reflective `__self__` attribute.
+
+The production module remains absent and no replacement RED was run. Neither
+capability set is required by the frozen contract, so TK-A03 removes both from
+the allowed source surface instead of attempting contextual iteration
+analysis. All double-underscore attribute access is also rejected in the
+production module, closing the function-module reflection route without
+affecting private lease identity fields or any approved public contract. The
+next candidate remains subject to static gates and two fresh independent
+zero-finding reviews.
+
+## TK5 Dependency-Method and Dynamic-Call Review Rejection — TK5-E009
+
+At artifact revision
+`b24fe08bec0470bd12a52af00882be5ccf30867c212a7cbbde5cf3330caabb15`
+and 3234-line test candidate
+`ab4bd431a71447f5bca777fa2a0db69357618782ca0a491ec38547319f5ea0bb`,
+one fresh full review returned ACCEPT at P0/P1/P2 `0/0/0`, while two
+independent adversarial reviews each returned REJECT at `0/1/0`. The first
+rejection showed that the required lease manager or lease instances could
+relay lock-filesystem authority through `acquire`, `acquire_project_write`,
+generic `release`, the manager adapter, or stored lock descriptors. The second
+showed the more general cause: any non-module attribute call such as
+`source.read()` or `self._callback()` was still admitted. Merely extending an
+attribute blacklist would not prove the E005 no-dynamic-call policy.
+
+The production module remains absent and no replacement RED was run. Under
+TK-A03 the source policy now adopts closed semantic call sets. Name calls are
+limited to explicitly admitted built-ins, immutable approved imports, and
+unique top-level callables defined by this module. Non-module attribute calls
+are limited to the small value-operation set required by the frozen
+implementation; module calls are limited separately per approved module.
+Every approved built-in and top-level callable name is non-shadowable. Context
+manager syntax is excluded so a supplied lease cannot implicitly release
+itself. Lease manager adapter/root/descriptor fields and all acquisition or
+release methods are explicitly outside the source surface; only the identity
+fields required by the frozen exact-lease proof remain available. This is a
+stricter implementation constraint, not a public API or product decision.
+
+## TK5 Implicit-Call, Provenance, and Process Review Rejection — TK5-E010
+
+At artifact revision
+`bded7d61a55322224e71d2480759e57bb81b319ed4a284472968e99df72d1ebc`
+and 3306-line test candidate
+`e62532e3ac95e54333c7bd52c2d33d225607d4478416e1263714804dda0bcfc4`,
+the three fresh independent reviews all rejected the candidate. Two reported
+P0/P1/P2 `0/1/0`; the compatibility review reported `0/1/1`. The findings
+were complementary: bare decorators still performed unchecked implicit
+calls; the admitted hash/Path method names and broad conversion built-ins
+still lacked receiver/argument provenance; and a store inherited by a forked
+process could not distinguish its otherwise exact inherited lease because
+`getpid` was absent. The P2 also correctly noted that E005 still described
+Path `absolute`/`is_absolute` calls which the narrowing policy no longer
+needed or consistently admitted.
+
+The production module remains absent and no replacement RED was run. TK-A03
+adopts the following final conservative correction. Only the exact frozen,
+slotted, keyword-only `dataclass` decorator call and exact `staticmethod` on
+the five public `from_mapping` parsers are admitted; class bases and keywords
+are closed. Hash `update` and `hexdigest` receivers must be a unique local
+state created directly by an approved SHA-256 constructor, except that a
+one-shot approved SHA-256 call may receive `hexdigest` directly. General
+Path method calls are removed: an exact constructed Path is checked through
+its pure `parts` value, and E005's mention of `absolute` and `is_absolute` is
+superseded accordingly. Conversion built-ins are reduced and their argument
+shapes are fixed, including only two-argument UTF-8 `bytes`/`str` conversion.
+
+`os.getpid` is added to the closed call set. The store captures its creator
+process and every mutation rejects a different current process before storage
+access. A deterministic process-context oracle will change the observed PID
+while retaining the exact active lease and prove both `invalid_lease` and
+unchanged durable bytes. This is the already implied exact-active-lease
+condition from TK2/TK5, not a new product behavior. These corrections remain
+subject to all static gates and two fresh zero-finding reviews before the
+replacement source-absent RED.
+
+## TK5 Hook, Creator-PID, and Protocol Review Rejection — TK5-E011
+
+At artifact revision
+`a3ce78c15a15f8b1b532b2f79b671a191d1c20badf9dafa1b1ba59453c2f2c48`
+and 3439-line test candidate
+`232bcbd50ca6cad22c569656c071e3e4e811041c5211bb4cd711b84079dc9e11`,
+all three fresh reviews rejected the candidate. The full and blueprint reviews
+reported P0/P1/P2 `0/1/0`; compatibility reported `0/1/1`. Unshaped JSON
+keywords could still invoke `object_hook`, `parse_*`, or `default` callbacks.
+The PID test changed process identity only after an earlier mutation, so a
+module-import capture or first-mutation lazy capture could pass incorrectly;
+it also did not freeze module-qualified `os.getpid`, making a direct imported
+binding invisible to its monkeypatch. Finally, admitted `len` and generator
+`tuple` calls still invoked arbitrary object protocols without provenance.
+
+The production module remains absent and no replacement RED was run. TK-A03
+closes these paths without general data-flow inference. Canonical
+`json.dumps` receives exactly one value plus the four fixed canonicalization
+options. `json.loads` receives exactly one string plus one fixed
+`object_pairs_hook`, which must name the unique top-level duplicate-key parser;
+all other JSON hooks and keyword expansion are excluded. Other approved module
+calls receive closed arity and keyword shapes where they can expose hooks or
+protocol conversion. Direct `from os import getpid` is rejected so the single
+module-qualified PID seam remains observable.
+
+A new fresh-store oracle will construct the manager, store, and exact live
+lease under synthetic PID A before any mutation, change to PID B, and require
+the inherited store to reject before `os.open`. It then constructs a separate
+manager and store under PID B and requires normal initialization, rejecting
+both module-import and first-use capture errors. `len` and callable `tuple`
+are removed entirely; bounded parsing uses explicit counters and the frozen
+zero-or-one artifact model uses tuple literals. These remain internal source
+constraints and require two fresh zero-finding reviews before RED.
+
+## TK5 Import-Time, Expansion, and Handler Review Rejection — TK5-E012
+
+At artifact revision
+`0344186a358e48dfac1eb0cde6dde05f015836c8e5a3daf4b535eb1f985f31d6`
+and 3558-line test candidate
+`2d57fa36af1a43f78eac31245bb9f1ac83ac9f69a8348a32da1dfee0d0a96425`,
+two fresh independent reviews returned ACCEPT at P0/P1/P2 `0/0/0`; the final
+compatibility review returned REJECT at `0/3/0`. Its three demonstrated paths
+remain authoritative despite the two accepts. Approved `os` calls could still
+execute in a module or class body during import. Starred arguments, container
+unpack, and `**` expansion could still invoke arbitrary iteration or mapping
+protocols. A broad exception tuple could alias `BaseException` and bypass the
+direct handler-name check.
+
+The production module remains absent and no replacement RED was run. TK-A03
+requires every explicit call except the exact dataclass decorator to be inside
+the executable body of a top-level function or class method; calls in module
+or class bodies, defaults, annotations, decorators, or nested definitions are
+rejected. Definitions themselves are module-level or methods only. Lambda,
+async/generator/comprehension call surfaces, starred nodes, call `**`, mapping
+unpack, and variadic definitions are excluded because none is needed by the
+frozen implementation.
+
+`Exception` and `BaseException` are forbidden everywhere. Exception handlers
+are positively limited to the non-shadowable built-in `OSError` and
+`UnicodeDecodeError`, plus the exact approved JSON decode error, including
+closed tuples of only those types. Explicit counters, ordinary loops over
+exact type-checked internal values, fixed tuple literals, and `try/finally`
+remain available. This correction preserves the public contract and again
+requires static gates plus two fresh zero-finding reviews before RED.
+
+## TK5 Annotation, Enum, Destructure, and PathLike Review Rejection — TK5-E013
+
+At artifact revision
+`2ca8912a705a6eb35ad1d497999f4b773b8e0bea6627f3b2194bf10b0bc374f2`
+and 3620-line test candidate
+`b2481c20ed27a47f9bb0a56e40e953ab516b67aba220ad8cbf50dd961bdc90cb`,
+the blueprint review returned ACCEPT at P0/P1/P2 `0/0/0`; the full review
+returned REJECT at `0/1/0` and compatibility returned REJECT at `0/3/0`.
+Unforced annotations could invoke a class subscription protocol during import.
+An admitted StrEnum lifecycle method could be invoked by EnumMeta at class
+creation. Ordinary sequence destructuring and structural matching still
+invoked iteration/mapping protocols. Finally, `Path(value)` had no oracle
+proving an arbitrary caller PathLike was rejected before `__fspath__` ran.
+
+The production module remains absent and no replacement RED was run. TK-A03
+now requires exactly one unaliased absolute
+`from __future__ import annotations` directive and rejects any alternate
+future import. Module and class bodies follow a closed grammar: imports,
+literal constants, the exact public classes, top-level helpers, and the exact
+decorators only. There are no internal classes. StrEnum classes expose only
+their frozen member constants and no source methods. The five value classes,
+the public error, and `LocalRevisionStore` each expose only their exact required
+source methods; the only admitted source dunders are the required `__init__`
+and dataclass `__post_init__` methods. Function defaults are literals.
+
+Structural matching, tuple/list store destructuring, deletion, and non-name
+loop targets are excluded. Ordinary loops over values already proven to be
+exact built-in containers remain available. New hostile-PathLike oracles will
+pass a protocol object as the store root and trusted-import source, require the
+closed `unsafe_store`/`invalid_input` error respectively, and prove
+`__fspath__` was never invoked. Production must exact-type-check accepted
+`str` or concrete local Path values before calling the approved Path
+constructor. These restrictions preserve the approved product behavior and
+again require static gates plus two fresh zero-finding reviews.
+
+## TK5 Iteration Provenance and Exact Schema Review Rejection — TK5-E014
+
+At artifact revision
+`92764573c00c66d2e04b1aabac36475b1703c4ff442fe4bbf5b92372739036c1`
+and 3750-line test candidate
+`8e5172536bf0f5cd663d02c511f8fed2d3c9c0f1de2b1b46e534e15dc856e489`,
+the implementation-feasibility review returned ACCEPT at P0/P1/P2 `0/0/0`.
+The full review returned REJECT at `0/1/0`, and compatibility returned REJECT
+at `0/0/2`. The accepting review does not override either concrete finding.
+An ordinary `for` iterator was only required to have a single-name target; it
+was not required to be an exact built-in value before iteration, so an
+untrusted public parameter could still invoke `__iter__`. The hostile input
+only covered `__fspath__`. In addition, the E013 exact `str` root/source
+acceptance had no positive oracle, while the five value-class field schemas
+and three non-error enum member sets were not closed against additions.
+
+The production module remains absent and no replacement RED was run. TK-A03
+now requires every admitted ordinary loop iterator to be a single-binding
+name dominated by an exact built-in type guard whose rejecting branch exits;
+the iterator cannot be rebound between that guard and the loop. This retains
+auditable loops over exact `dict`, `list`, `bytes`, `str`, or literal-tuple
+types without admitting arbitrary iteration protocols. The hostile root and
+trusted-source fixture covers filesystem coercion, iteration, equality,
+indexing, containment, truth, length, hashing, formatting, string/bytes, and
+integer conversion protocols and proves none runs before the closed error.
+
+Positive lifecycle oracles accept exact `str` roots and trusted FCStd source
+paths as well as concrete local Path values. Runtime reflection and the source
+grammar both freeze the exact five dataclass field sequences and constructor
+signatures, including the sole schema-version default. They also freeze the
+exact member names and values for root trust, journal state, reconciliation
+status, and error code, and strict mapping tests reject unknown durable enum
+values. These are internal oracle corrections, preserve the approved product
+surface, and require static gates plus two fresh zero-finding reviews before
+the replacement RED.
+
+## TK5 Corrected Frozen Test-Oracle Acceptance — TK5-E015
+
+The corrected artifact at
+`fe7937a4612eabca59afcf693fcb59e420b72d3eb0d9b48b8335fb2a68d73700`
+and 4025-line test oracle at
+`b5ab7452587be760f251f25c445077575aed5d50b2c610e6fd4f483dba66f963`
+completed every pre-execution gate with the production module absent. Ruff
+check exited 0, Ruff format check exited 0, Python compilation exited 0,
+`git diff --check` exited 0, and the explicit source-absence gate exited 0.
+
+Three fresh independent full-file reviews then returned unconditional ACCEPT
+with P0/P1/P2 exactly `0/0/0`. F10 re-audited implicit protocol, import-time,
+dynamic call, loop-provenance, and filesystem-relay boundaries. B7 derived a
+complete implementation under the exact guard, grammar, exception, and
+iteration restrictions and found no false RED. C10 rechecked every public
+schema, enum, exact `str`/Path input, lifecycle, durability, recovery, budget,
+PID, and lease requirement; its preliminary concern about shadowing `dict`
+and `list` was withdrawn after confirming both names and all bindings are
+protected by the current oracle.
+
+The reviews confirmed HEAD
+`f4a305c02af81f72d6196c7a872c8c6374d8d7a6`, the exact hashes and line counts,
+the absent production source, and an unchanged workspace. This freezes the
+corrected oracle and authorizes exactly one replacement focused RED. It is
+accepted only if collection executes no tests and fails solely because
+`vibecad.execution.revisions` does not exist. Any other result freezes source
+creation for investigation.
+
+## TK5 Corrected Focused RED — TK5-E016
+
+At artifact revision
+`dd1a61ba10dd0f42516d3de0d2a1063322bceb6f6f24206ba0d9a59d8695b26e`
+and unchanged 4025-line frozen test
+`b5ab7452587be760f251f25c445077575aed5d50b2c610e6fd4f483dba66f963`,
+the controller reconfirmed the production module was absent and ran exactly
+one replacement command:
+
+    PYTHONPATH=src .venv/bin/pytest -q tests/test_revision_store.py
+
+It exited 2 in 1.5 wall seconds after pytest reported 0.61 seconds. Collection
+executed no test and produced exactly one error at test line 16:
+`ModuleNotFoundError: No module named 'vibecad.execution.revisions'`. No syntax,
+fixture, dependency, environment, or alternate-path failure appeared. This is
+the sole predicted missing-production-module RED authorized by TK5-E015. The
+RED is accepted and consumed; it must not be rerun while the source remains
+absent. Production implementation may now begin against this exact frozen
+oracle.
+
+## TK5 Python 3.13 Socket-Fixture Compatibility Correction — TK5-E017
+
+With the frozen 4025-line oracle
+`b5ab7452587be760f251f25c445077575aed5d50b2c610e6fd4f483dba66f963`
+and initial production source corrected to
+`718ed002342e0a515beed8bfbaa7dc8e8e30992342e8c2c9b3d4a1f3c3f930de`,
+the first controller GREEN attempt passed 35 tests before exposing an
+over-strict artifact-name validator. Production was correctly narrowed so an
+individual safe basename is admitted while `RevisionRef` still enforces the
+fixed model/STEP roles; the exact failed test then passed.
+
+The next `-x` run passed 83 tests and stopped in test fixture setup before any
+revision-store call. On the installed global Python 3.13.14 runtime,
+`socket.socket.bind` rejected the supplied concrete `PosixPath` with
+`TypeError: a bytes-like object is required, not 'PosixPath'`. The socket entry
+exists only to construct an unsafe Unix-socket source for the import rejection
+oracle. Converting that already trusted pytest temporary Path to exact `str`
+at the bind call preserves every product assertion and still passes the same
+Path object to `import_trusted_fcstd`.
+
+TK-A03 authorizes the literal fixture-only correction from
+`listener.bind(source)` to `listener.bind(str(source))`. Production must not
+import, patch, or otherwise alter socket behavior. This compatibility edit
+does not change the schema, lifecycle, security boundary, expected error, or
+the consumed RED; it requires static gates and two fresh read-only confirmations
+before final TK5 acceptance, but it does not require or authorize another
+missing-module RED now that production exists.
+
+## TK5 macOS AF_UNIX Fixture-Length Correction — TK5-E018
+
+The literal E017 conversion correctly reached `socket.bind`, which then
+failed before the store call with `OSError: AF_UNIX path too long`. macOS caps
+the Unix-domain socket address well below the full pytest temporary path used
+by this parametrized test. The fixture now places only the socket node at the
+short name `s` in the same pytest-owned run directory and continues to pass
+that concrete Path unchanged to `import_trusted_fcstd`. The unsafe source type,
+expected `invalid_input` result, cleanup ownership, and all production behavior
+are unchanged.
+
+Materializing the previously absent first-party production module also caused
+Ruff's import classifier to require the existing `vibecad.execution` import
+before its `revisions` submodule. That reorder is mechanical and has no runtime
+or oracle effect. E017 and E018 together remain a fixture-only Python/macOS
+compatibility correction; they do not reopen the product contract or authorize
+another RED.
+
+## TK5 Focused GREEN — TK5-E019
+
+At artifact revision
+`73b03b76bfe7bfc82fea1b59e6bb2c093a24413d984185ef7a6b55a6b88202ed`,
+the corrected 4026-line test oracle was
+`6fbdc31a1eec1330b7013c7898d536b4c8e2652d20bb3eb08629934a38b30da7`
+and the complete 3060-line production module was
+`718ed002342e0a515beed8bfbaa7dc8e8e30992342e8c2c9b3d4a1f3c3f930de`.
+Ruff check, Ruff format check, Python compilation, and `git diff --check` all
+exited 0 against source and test.
+
+The controller then ran:
+
+    PYTHONPATH=src .venv/bin/pytest -q tests/test_revision_store.py -x
+
+It exited 0 in 3.1 wall seconds after pytest reported 2.26 seconds, with all
+176 parametrized tests passing and no skip, warning, error, or failure. This
+covers the exact public values, strict mappings, trusted root and FCStd import,
+immutable begin/seal/commit/readback, rollback and reconciliation, process and
+lease binding, dirfd/no-follow/link/mode defenses, canonical JSON and budgets,
+partial I/O, every pre/post-HEAD durability fault, concurrency, and the source
+AST boundary.
+
+The focused GREEN freezes the current implementation and corrected fixture
+for independent source review. No product scope, dependency, FreeCAD, MCP,
+network, model, Git, or environment mutation occurred. Final acceptance still
+requires two fresh zero-finding reviews plus cumulative and full regression
+gates.
+
+## TK5 Post-GREEN Source Review Rejection — TK5-E020
+
+At artifact/test/source anchors
+`81367a2c9b3d1562c5ae499b1ed3d9c1fc7bdbeed028e6e51f7a4e8f4a00e7a7`,
+`6fbdc31a1eec1330b7013c7898d536b4c8e2652d20bb3eb08629934a38b30da7`,
+and `718ed002342e0a515beed8bfbaa7dc8e8e30992342e8c2c9b3d4a1f3c3f930de`,
+the controller full suite passed 1934 tests with 81 intentional slow
+deselections and the two known macOS fork deprecation warnings. Repository
+Ruff check, relevant-file format check, Python compilation, and diff check also
+passed. A repository-wide format check remained a non-gate because 72
+pre-existing unrelated files are not Ruff-formatted; none was changed.
+
+The subsequent independent filesystem review returned REJECT at P0/P1/P2
+`0/0/1`. The independent contract review returned REJECT at `0/2/0`. The
+writer's non-independent self-review returned REJECT at `0/4/1`. Their concrete
+findings supersede the GREEN acceptance despite the successful runtime suite:
+
+- root and external-source component traversal can lose a newly opened FD if
+  closing the previous component raises;
+- several cleanup paths short-circuit or ignore close, unlink, rmdir, and
+  candidates-directory fsync failures, including successful seal return;
+- `_entry_stat` collapses every stat error into absence, so journal I/O failure
+  can be reported CLEAN or overwritten by begin;
+- strict pre-stat/open inode equality on atomically replaced immutable records
+  can reject a legitimate complete old-or-new HEAD under concurrent reads;
+- bounded content readback repeatedly concatenates and then re-hashes up to
+  512 MiB, causing avoidable quadratic copying and high peak memory;
+- revision lineage permits self-base, commit/reconcile do not bind the sealed
+  base to the expected HEAD, and a public COMMITTED result need not advance
+  generation by exactly one.
+
+No P0, public API expansion, dependency, environment, FreeCAD, MCP, model, or
+network issue exists. TK-A03 freezes source edits until targeted regression
+oracles reproduce the defects. Fixes must make FD ownership explicit without
+short-circuit cleanup, distinguish ENOENT from other stat errors, retry an
+atomic record open against a stable safe inode, validate and stream content in
+bounded chunks without whole-file materialization for integrity checks, and
+enforce exact base/generation lineage at value, record, commit, and reconcile
+boundaries. After targeted RED/GREEN, two fresh independent zero-finding source
+reviews and the focused/full gates are required again.
+
+## TK5 Post-Review Targeted RED — TK5-E021
+
+At artifact revision
+`0a5bb447abe4fc624f97b06305e4fd6e2001e87c18e98577928b8e5c70594bbe`,
+the 4532-line corrected test was
+`73aab398f58ae4fdf8f3ea87e4b1b8efe29f603913e8d381e34e16e8224e67fa`
+and the unchanged pre-fix source remained
+`718ed002342e0a515beed8bfbaa7dc8e8e30992342e8c2c9b3d4a1f3c3f930de`.
+Ruff check, Ruff format check, Python compilation, and diff check passed for
+the expanded oracle before execution.
+
+The controller ran the exact new-test selection for self lineage, committed
+generation, streaming model access, wrong-base commit/reconcile/begin,
+component-close ownership, non-short-circuit close, candidate authority close,
+seal cleanup, journal-stat recovery, and atomic HEAD inode replacement. It
+exited 1 after pytest reported 3.13 seconds: all 21 selected regression cases
+failed and the 176 prior cases were deselected. Every review finding therefore
+has a non-vacuous RED: no expected exception was raised for lineage, cleanup,
+or journal evidence; content still reached whole-file record reads; tracked
+directory FDs remained unclosed; source/parent and candidate closes were
+skipped; and atomic HEAD replacement raised `unsafe_store`.
+
+The targeted RED is accepted and consumed. The 4532-line oracle is frozen and
+only `src/vibecad/execution/revisions.py` may now change until all 21 cases and
+the prior 176-case focused suite are GREEN.
+
+## TK5 Targeted-Oracle Cross-Review Correction — TK5-E022
+
+After E021, cross-review accepted all controller-authored lineage and streaming
+cases at P0/P1/P2 `0/0/0`, but rejected four details in the FD/stat regression
+packet. The source double-close tracker matched a basename+dirfd open even
+though the frozen security contract opens the source exactly once by absolute
+Path. The atomic HEAD case did not count the required retry. The external
+traversal close fault expected `not_found` instead of `io_error`, and the
+journal-stat case did not prove its injection fired.
+
+The corrected 4540-line oracle at
+`c9b19799ee7cea2ed58e96c2953d5a2407e507983d0e0669ffafa69310eb966e`
+tracks the existing absolute source open with `dir_fd=None` and retains the
+already traversed parent FD; it does not authorize a second source open. It
+requires exactly two HEAD opens after deterministic inode replacement, maps an
+existing-source traversal close failure to `io_error`, and asserts the journal
+stat injection flag. Ruff format/check, Python compilation, and diff check all
+pass. E021 remains authoritative for the other non-vacuous REDs; the corrected
+double-close case is additionally grounded by F11's independent static defect
+trace. No public or product behavior changed.
+
+## TK5 First Corrective GREEN Attempt — TK5-E023
+
+At artifact/test/source anchors
+`fea40850d319c2368c2c010b25f5a7a9f47dd2f73893003879959a965fa29f6f`,
+`c9b19799ee7cea2ed58e96c2953d5a2407e507983d0e0669ffafa69310eb966e`,
+and `9fe3e38816103a59749a5f4178153449a78bf477ab282ac3d02a66c5c3b59bf0`,
+the first post-review corrective selection exited 1 after pytest reported 1.58
+seconds, with 18 passed, 3 failed, and 176 deselected. All lineage, streaming,
+FD-ownership, atomic-HEAD, and four of five seal-cleanup cases were GREEN.
+
+The remaining seal-stat case did not inject after the streaming refactor
+reduced the number of model stat calls. Its fixture must bind the injection to
+successful PREPARED-journal publication instead of a call count. The two
+journal-stat cases exposed one implementation defect: an `OSError` instance
+whose native errno is unavailable is currently confused with a successful
+stat returning `None`. The correction records stat success explicitly, treats
+only errno 2 as absence, and maps every other stat failure to `io_error`; the
+existing public reconcile/begin boundary then maps damaged recovery evidence
+to `recovery_required`. Neither correction changes the approved product
+surface. Static gates and the exact targeted selection are required before
+the focused suite resumes.
+
+## TK5 Corrective GREEN and Regression Gates — TK5-E024
+
+After E023, the corrected 4547-line oracle was
+`484508e4a3441f9df4d3ae05786fb364dd586f1881cd251d1f114c4ccb7f5d30`
+and the 3262-line production source was
+`a3389920188760f000bd3b4ee5713b7e4102da7dbca08f822b2135f99104c949`.
+Relevant-file Ruff check and format check, Python compilation, and repository
+diff check all exited 0. The exact 21-case corrective selection then exited 0
+after pytest reported 0.79 seconds, with 21 passed and the prior 176 cases
+deselected.
+
+The complete revision-store module subsequently exited 0 after pytest
+reported 2.09 seconds, with all 197 cases passing. The repository-wide suite
+exited 0 after pytest reported 17.77 seconds, with 1955 passed, 81 intentional
+slow cases deselected, and only the two known macOS multithreaded-`fork()`
+deprecation warnings in `tests/test_workflow_lease.py`. Repository-wide Ruff
+check also exited 0.
+
+These gates cover both the original TK5 contract and every E020 corrective
+oracle. The implementation is now a final-review candidate; it is not accepted
+until two fresh independent full-file reviews return unconditional ACCEPT with
+P0/P1/P2 exactly `0/0/0` at these source and test anchors.
+
+## TK5 Final-Review FD Reuse Rejection — TK5-E025
+
+The first final independent source review at E024 anchors returned REJECT with
+P0/P1/P2 `0/1/0`. `_close_owned_fd` retried `os.close` on the same numeric FD
+after an error. A close error does not portably prove the descriptor remains
+open; the kernel may already have released it, allowing another thread to
+reuse the number before the retry. Retrying can therefore close an unrelated
+concurrent operation's descriptor.
+
+The correction attempts close exactly once for every owned FD and fails closed
+when that attempt reports uncertainty. The two traversal fault oracles now
+delegate the first close and then report an error, assert that all owned FDs
+received a close attempt, and require exactly one attempt per descriptor. This
+models the portable ambiguous-close boundary and rejects the former numeric-FD
+retry. The review found the other E020 closure areas sound. Static gates,
+targeted/focused/full regression, and two fresh independent zero-finding
+reviews are required again before acceptance.
+
+## TK5 Concurrent Atomic-HEAD Gate Rejection — TK5-E026
+
+At artifact/test/source anchors
+`a235174ab3179f73de112961c3746aa0aec7aef6c4a466e202f616c971ea9c2b`,
+`c198c3b32ced434e51ad08e1d6721764e49e9b17e7d23fa267e0c7150c091c92`,
+and `9073411fc073328bb15f2cbc725500406f4f0fa69015327059490a2a1fffc85f`,
+both fresh final reviews returned ACCEPT with P0/P1/P2 `0/0/0`, but the
+subsequent 197-case controller gate stopped after 189 passes when the
+concurrent atomic-reader oracle timed out. An isolated repetition reproduced
+the timeout; a bounded multi-iteration diagnostic then captured the reader
+exiting with `unsafe_store` during the HEAD open.
+
+The exact race is replacement after opening the old HEAD but before its
+`fstat`. The opened old inode can legitimately have link count zero after the
+atomic replacement removes its directory entry. Treating that complete old
+descriptor as an unsafe immutable record makes an allowed old-or-new reader
+fail. A deterministic oracle now performs that replacement at the first HEAD
+FD stat and requires a successful old-or-new load without constraining whether
+an equivalent safe implementation consumes the complete old FD or closes and
+retries. Production remains frozen until this oracle passes static review and
+fails for the predicted `unsafe_store` reason. The correction may relax only
+the transient unlinked-FD case for explicitly replaceable HEAD/journal records;
+immutable revision records remain strict.
+
+## TK5 Deterministic Post-Open HEAD RED — TK5-E027
+
+At artifact/test/source anchors
+`52fcd68b254c5b772b4842d8a0357b0fdc0ea81317f07f1b0ef6a45715c993f5`,
+`a3eaeb0bd087bfff1977dec744700b2ebc4b7ca3826d679f834d881068b361d5`,
+and `9073411fc073328bb15f2cbc725500406f4f0fa69015327059490a2a1fffc85f`,
+two independent reviews accepted the deterministic oracle with P0/P1/P2
+`0/0/0`. They confirmed exact post-open/pre-fstat timing, non-vacuous injection,
+no FD-reuse false hit, and compatibility with both consuming the complete old
+inode and retrying the canonical new inode.
+
+The controller then ran only
+`test_head_replaced_after_open_is_not_rejected_as_unsafe`. It exited 1 after
+pytest reported 0.67 seconds and failed exactly at `store.load_head` with
+`RevisionStoreErrorCode.UNSAFE_STORE`; no alternate failure occurred. The RED
+is accepted and consumed. Production may now change only inside the replaceable
+record open path: a trusted regular owner-mode-device FD whose link count became
+zero after open must be closed once and retried within the existing three-attempt
+budget. No unlinked FD may be read, returned, or accepted for immutable revision
+content.
+
+## TK5 Concurrent Post-Stat HEAD Rejection — TK5-E028
+
+The E027 correction made the deterministic post-open/pre-fstat oracle GREEN,
+along with the existing pre-open replacement and concurrent-reader cases. A
+100-iteration real concurrency diagnostic nevertheless stopped at iteration
+16 when a reader returned `CORRUPT_RECORD`. Instrumentation localized this
+second race to `_read_bounded_file`: HEAD opened and passed its initial fstat,
+then atomic replacement unlinked the old inode while its complete bytes were
+being read. The final fstat legitimately observed the unlink-induced ctime
+change and the implementation misclassified it as content corruption.
+
+A second deterministic oracle now replaces the canonical HEAD immediately
+after the first native fstat returns but before the implementation consumes
+that result. It requires a successful old-or-new read without constraining
+whether an equivalent implementation accepts the complete old inode or
+restarts against the new pathname. It is scoped exactly to HEAD and does not
+relax immutable revision content. The partial E027 source is frozen until this
+oracle passes static review and fails solely with the predicted
+`CORRUPT_RECORD`; any production correction must still reject changed size,
+mtime, type, owner, mode, device, or a linked inode whose ctime changed.
+
+## TK5 Deterministic Post-Stat HEAD RED — TK5-E029
+
+At artifact/test/source anchors
+`69d6a325def6ac01674e85f138c9924818ede95c56e17fe83ad1213bce85eea6`,
+`e3d64fa5bbc7cb984b53f5c3ca3d3f31af71202c387dad735706f44f2a03a96e`,
+and `ee9d3e894037e6aaf383b3cd7ac5442b69ad7bce2fe7e942fb23233b56ed34e8`,
+two independent reviews accepted the second deterministic oracle with
+P0/P1/P2 `0/0/0`. The controller ran only that case; it exited 1 after pytest
+reported 0.69 seconds and failed exactly with `CORRUPT_RECORD` after the final
+metadata check. No early unsafe error or alternate failure occurred.
+
+The RED is accepted and consumed. Production may recognize an unlinked
+replaceable FD only when its final stat remains a regular owner-owned 0600 file
+on the store device with the same inode, size, and mtime as the initially safe
+opened snapshot. Only the expected nlink transition to zero and its ctime
+effect may differ. The complete bytes must still pass the existing bounded
+read, canonical record, and checksum validation. Linked replaceable records and
+all immutable revision records retain the strict metadata checks.
+
+## TK5 Concurrent Path-Stat HEAD Rejection — TK5-E030
+
+The E029 correction made all four deterministic/concurrent atomic-reader cases
+GREEN. A new 100-iteration diagnostic still stopped at iteration 80 with
+`UNSAFE_STORE`; an instrumented 300-iteration reproduction localized it to
+the initial pathname stat in `_open_checked_file`. The HEAD stat returned the
+old inode after atomic replacement had removed its directory entry, with all
+trusted metadata intact except `st_nlink == 0`. The implementation rejected it
+before opening or retrying the canonical pathname.
+
+A third deterministic oracle now holds the old HEAD inode, atomically replaces
+the pathname, returns the native unlinked old-inode stat for the first exact
+HEAD pathname stat, and proves both injection and `nlink == 0`. It requires a
+successful load but does not constrain retry count or old/new selection. Since
+there is no content FD corresponding to this stale pathname-stat snapshot, the
+safe behavior is to discard it and retry within the existing bounded open
+budget. Immutable revision paths remain strict. The current production source
+is frozen until independent static review and an exact predicted
+`UNSAFE_STORE` RED complete.
+
+## TK5 Deterministic Path-Stat HEAD RED — TK5-E031
+
+At artifact/test/source anchors
+`25c5106e25adc99e1c90e3e1f8400891ea9fe253d313bffb13e08b062193f1ea`,
+`4c80d9419ed1e3fb25702ca74ac6744cc5ce6a7cdd09c20fff55262c4bf4b354`,
+and `27f751f0163baa73f9aefff34355f42c4f85ce7dc5c6db90458b1c045a8b4dec`,
+independent review accepted the third deterministic oracle with P0/P1/P2
+`0/0/0`. The controller then ran only that case; it exited 1 after pytest
+reported 0.70 seconds and failed exactly with `UNSAFE_STORE` at the initial
+HEAD stat safety check. Injection and the native unlinked-inode observation
+both completed before the failure.
+
+The RED is accepted and consumed. The bounded replaceable-record open loop may
+discard a trusted regular owner-mode-device pathname stat with `nlink == 0`
+and retry the canonical name. It may not open or consume that stale snapshot,
+and the same condition remains unsafe for non-replaceable revision content.
+
+## TK5 Atomic-Reader Corrective GREEN — TK5-E032
+
+At artifact/test/source anchors
+`ff857c31e085716a231a7cdfc26ade032fb7dd7531978a65a77c23aac7e88c88`,
+`4c80d9419ed1e3fb25702ca74ac6744cc5ce6a7cdd09c20fff55262c4bf4b354`,
+and `9f3ad67fb1723f82b32d58dedab4428b19adefa087792b4b9b3009b45b1f40e5`,
+relevant Ruff check/format check, Python compilation, and repository diff check
+all exited 0. The three deterministic atomic-replacement cases, the original
+pre-open replacement case, and the concurrent old-or-new reader case all
+passed together. A separate 300-iteration real concurrent begin/seal/commit
+diagnostic then completed with every reader observing only the complete old or
+new HEAD and no exception.
+
+The complete 24-case corrective selection exited 0 after pytest reported 0.42
+seconds, with 24 passed and 176 deselected. The complete revision-store module
+exited 0 after pytest reported 2.09 seconds, with all 200 cases passing. The
+repository-wide suite exited 0 after pytest reported 17.06 seconds, with 1958
+passed, 81 intentional slow cases deselected, and only the two known macOS
+multithreaded-`fork()` deprecation warnings. Repository-wide Ruff check also
+exited 0.
+
+All dynamic gates are GREEN. Final acceptance still requires two fresh
+independent full-file reviews at the exact test/source anchors above, each with
+P0/P1/P2 `0/0/0`.
+
+## TK5 Final Acceptance — TK5-E033
+
+At artifact/test/source anchors
+`dadb330d96c7f64c9fe56524dcf52596c402d23a6dbba1960caf074577088893`,
+`4c80d9419ed1e3fb25702ca74ac6744cc5ce6a7cdd09c20fff55262c4bf4b354`,
+and `9f3ad67fb1723f82b32d58dedab4428b19adefa087792b4b9b3009b45b1f40e5`,
+two fresh independent full-file reviews returned unconditional ACCEPT with
+P0/P1/P2 exactly `0/0/0`.
+
+The first review re-derived FD ownership, single-attempt close behavior,
+durable publish ordering, HEAD linearization, recovery evidence, lineage,
+streaming integrity, and all three atomic replacement windows directly from
+source. The second independently cross-checked every regression oracle against
+the implementation, including exact replaceable-name scoping and retained
+immutable-record constraints. Neither review changed or executed the candidate.
+
+Together with E032's static, targeted, focused, stress, and repository-wide
+GREEN evidence, this closes TK5. The accepted deliverable is the local immutable
+CAD revision store plus its complete contract and regression suite. It adds no
+dependency, network, model, MCP, FreeCAD, environment, or public UI mutation.
+The exact commit message is
+`feat(execution): persist immutable CAD revisions`; the branch must be pushed
+non-force and verified clean and upstream-equal.
