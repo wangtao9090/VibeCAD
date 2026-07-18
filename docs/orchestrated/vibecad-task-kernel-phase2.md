@@ -4181,3 +4181,1730 @@ This append is documentation-only G0 evidence. Controller must restage only the
 artifact, recheck the final cached names/diff and an empty unstaged diff, then
 create the approved commit
 `feat(workflow): define durable task-run state contracts` and push it non-force.
+
+## TK1 Commit and Push Closeout — TK1-E043
+
+The controller restaged only the artifact after TK1-E042. Final cached paths
+were exactly the approved three files, cached diff check exited 0, and no
+unstaged difference remained. Final index hashes were artifact
+`a0c248d8653189edf2aac383dcfad2beb4b13dc0fc0e86f1d8865d74847adfe4`,
+source `d11ca0830ee6069cc5080c58d60c61fc5e7c28083d074430ec5c77af614dd294`,
+and tests `aaf7e43f5f1a9fe7f96e997d83fe9564fb465ef8599cb51b9210b524749a1ae1`.
+
+Commit `1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a` was created with the approved
+message `feat(workflow): define durable task-run state contracts`. It contains
+exactly the artifact, `state.py`, and `test_task_state.py`. Non-force push to
+`origin/codex/task-kernel-phase2` succeeded and established the upstream.
+Local HEAD and `@{upstream}` both resolved to the exact commit, and the
+workspace was clean. The remote repeated its existing redirect notice to
+`https://github.com/wangtao9090/VibeCAD.git`; residual TK-R19 remains open and
+the controller did not rewrite the user remote. TK1 is completed and pushed;
+commit budget usage is 1 of 9.
+
+## Task Packet TK2-P1 — Exclusive Resource Leases Under TK-A02/TK-A03
+
+### 1. Authorization
+
+TK-R1/TK-A02 approved TK2, decisions TK-D05-TK-D07 and TK-D24, the exact
+allowlist, gates, budgets, non-force push, and recovery discipline. TK-R2/
+TK-A03 remains active where it governs Stage C fail-closed repair discipline.
+This packet inherits all higher-priority system, developer, and user
+instructions, applicable directory-scoped instructions, the approved
+allowlist, and the current host permission model and sandbox. The Skill,
+artifact, and packet cannot grant or expand permissions, elevate authority, or
+bypass that model or sandbox. Do not request the same approval again.
+
+### 2. Workspace anchor
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`.
+- Branch/HEAD/upstream:
+  `codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`,
+  equal to `origin/codex/task-kernel-phase2` before this append.
+- TK2 write allowlist is exactly
+  `docs/orchestrated/vibecad-task-kernel-phase2.md`,
+  `src/vibecad/workflow/lease.py`, and `tests/test_workflow_lease.py`.
+- All other source/tests, dependencies, configuration, CAD, environment,
+  network, install, model, server, public MCP, publication, and TK3 scope is
+  prohibited. No VibeCAD-scoped `AGENTS.md` or `CLAUDE.md` was observed.
+- Current host permissions and sandbox remain binding.
+
+### 3. Context
+
+TK2 provides the process-local and operating-system exclusion primitive used by
+later project writes. The file descriptor and OS advisory lock are
+authoritative; owner text is diagnostic only. Resource identifiers never
+select paths directly: a stable SHA-256 key under the configured lock root is
+used. A lease has one manager-issued owner token and one exact release; wrong-
+owner, double-release, unsafe path, unsupported platform, invalid input, and
+contention failures use stable typed errors. There is no TTL, stale-lock
+deletion, PID ownership claim, lock stealing, or unlocked fallback.
+
+The configured root is an explicit trusted-local boundary. The implementation
+must reject symlink/non-directory roots and symlink/non-regular lock entries,
+use non-following ordinary-file opens where supported, and never claim network-
+filesystem durability. POSIX behavior must be exercised on this host. Windows
+adapter logic may be statically and deterministically tested, but live Windows
+semantics remain unclaimed unless observed on Windows.
+
+### 4. Steps and gates
+
+1. Reconfirm the clean pushed TK1 anchor and run the unchanged full baseline.
+   Stop on an unexplained failure or any path outside the TK2 allowlist.
+2. Collect bounded independent read-only design/test reviews for cross-manager
+   thread exclusion, OS descriptor ownership, path safety, owner-token exact
+   release, POSIX subprocess behavior, Windows fail-closed adaptation, and
+   deterministic tests. Controller resolves them inside this approved design.
+3. Controller creates `tests/test_workflow_lease.py` first. A distinct static
+   review must return P0=P1=P2=0 before one genuine missing-module RED. The RED
+   must be collection failure solely because `vibecad.workflow.lease` is absent.
+4. Freeze tests and implement only `src/vibecad/workflow/lease.py`. Provide
+   `ResourceLeaseManager`, `ResourceLease`, `ProjectWriteLease`, stable public
+   error codes/types, SHA-256 resource keys, manager-issued owner tokens, exact
+   release and context management. Coordinate distinct manager instances in
+   one process and hold a nonblocking/bounded OS advisory lock for the lease
+   lifetime. Never reclaim by elapsed time.
+5. GREEN must cover two-manager threads, subprocess contention, process-exit
+   release, wrong owner, double release, exception context release, different
+   resources, symlink/non-regular paths, invalid/bounded identifiers, and the
+   POSIX adapter. Windows branches must be deterministic and fail closed when
+   unobservable; record TK-R07 rather than claiming a live Windows pass.
+6. Use at most two bounded GREEN attempts. Then run full compatibility,
+   focused tests, Ruff check/format, pure import, diff/hash/allowlist, and a
+   distinct complete read-only review. ACCEPT requires P0=P1=P2=0.
+7. Controller stages only the three TK2 files, runs staged gates, commits with
+   `feat(workflow): coordinate exclusive resource leases`, pushes non-force,
+   and verifies HEAD/upstream equality and a clean workspace before TK3.
+
+### 5. Execution discipline
+
+- Delegation: `spawn-send-wait`; model tier: `standard` for implementation and
+  `deep` for adversarial review; process: `native-session-poll` for any returned
+  live command session.
+- Controller alone edits the artifact and tests; production source is written
+  only after an accepted RED and then tests freeze. Read-only design reviews
+  may run in parallel; all writes and pytest runs are serialized.
+- Acquisition tests and synchronous paths are nonblocking or bounded to at
+  most 5 seconds. Stop on deadlock, ambiguous process state, unsafe cleanup,
+  unexpected RED, second unsuccessful GREEN, path drift, or any campaign
+  breaker. Test cleanup may remove only its own pytest temporary paths.
+
+### 6. Delivery boundary
+
+Complete only the lease primitive, its tests, evidence, review, named-file
+commit, and non-force push. Do not integrate TaskStore/TaskService, touch CAD,
+change dependencies, expose MCP, rewrite the remote, create a PR, or start TK3
+before accepted TK2 publication.
+
+### 7. Final report
+
+Return resolved API/semantics, exact hashes and line counts, baseline and
+RED/GREEN evidence, platform observations and unclaimed branches, contention/
+cleanup evidence, independent review P0/P1/P2, residuals, commit/push state,
+prohibited-action confirmation, and final workspace anchor.
+
+## Recovery Snapshot — TK-S020
+
+### 1. Completed milestones
+
+- TK1 is independently accepted, committed at
+  `1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`, pushed, upstream-equal, and was
+  clean before this TK2 artifact append.
+- TK2-P1 is activated under existing approval; no TK2 source/test exists yet.
+
+### 2. Next steps
+
+1. Run the unchanged full baseline and collect the bounded read-only TK2 design
+   reviews. Stop on unexplained baseline red or scope drift.
+2. Controller records the resolved test contract, writes only the TK2 test
+   file, obtains static zero-finding acceptance, and runs one missing-module RED.
+3. On the exact RED, freeze tests, implement only `lease.py`, run bounded GREEN
+   and full gates, then assign a distinct final review.
+
+### 3. Approved decisions
+
+- TK-R1/TK-A02, TK-R2/TK-A03, TK-D05-TK-D07, and TK-D24 remain active.
+- TK2 is an internal deterministic lease primitive; Windows live behavior is
+  unclaimed on this POSIX host and is recorded under TK-R07 unless later
+  observed on Windows.
+
+### 4. Execution discipline
+
+- Capability profile remains `native-plan`, `spawn-send-wait`,
+  `repo-artifact`, and `native-session-poll` on the Codex adapter.
+- Exact TK2 allowlist: artifact, `lease.py`, and `test_workflow_lease.py`.
+- Preserve test-first ordering, the 5-second lock budget, named-file staging,
+  immediate non-force push, and every campaign circuit breaker.
+
+## TK2 Baseline Evidence — TK2-E001
+
+At the clean pushed TK1 anchor
+`1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`, with artifact
+`dc9578ffd5cf97ffb2732ca979097aa2444b2fc8216ac62ef1b332834c6fcde2`
+at 4336 lines as the only modified path, the unchanged full command
+`PYTHONPATH=src .venv/bin/pytest -q` completed normally: exit 0, 1300 passed
+and 81 deselected in 52.34 seconds. No source/test, dependency, environment,
+CAD, network, model, install, Git mutation, TK3, or external action occurred.
+
+## TK2 Resolved Lease and Test Contract — TK2-E002
+
+Two bounded independent read-only reviews completed for filesystem/platform
+and deterministic-test risks. A third API review exceeded its bounded wait and
+was stopped without a report; silence was not classified as a finding or tool
+failure. The controller independently resolved the public contract inside
+TK-D05-TK-D07 and adopts every P1/P2 item from the two completed reviews before
+creating tests.
+
+### Public contract
+
+- `LeaseRootTrust` has one accepted value, `TRUSTED_LOCAL`; manager construction
+  without that exact value fails with `UNTRUSTED_ROOT` before storage work.
+- `LeaseErrorCode` is the exact closed set `INVALID_RESOURCE`, `INVALID_OWNER`,
+  `UNTRUSTED_ROOT`, `UNSAFE_ROOT`, `UNSAFE_LOCK_ENTRY`, `CONTENDED`,
+  `WRONG_OWNER`, `ALREADY_RELEASED`, `WRONG_PROCESS`, `INVALID_LEASE`,
+  `UNSUPPORTED_PLATFORM`, `LOCK_UNAVAILABLE`, and `IO_ERROR`.
+- `LeaseError` uses fixed bounded non-reflective messages and may expose only a
+  validated 64-lowercase-hex resource key, never raw root/resource/token text.
+- `ResourceLeaseManager(lock_root, *, trust)` exposes nonblocking
+  `acquire(resource_id)`, `acquire_project_write(project_id)`, and
+  `release(lease, *, owner_token)`.
+- `ResourceLease` exposes immutable `resource_key`, `owner_token`, and
+  `released`, exact-owner `release(*, owner_token)`, and context management.
+  `ProjectWriteLease` is the exact project-specific lease type and exposes the
+  canonical project identifier. Wrong manager/forged lease is `INVALID_LEASE`.
+- Resource input is exact bounded printable single-line Unicode; project input
+  is exact `project_<32-lowercase-hex>`. The lock key is lowercase SHA-256 of
+  `b"vibecad-resource-lease-v1\0" + resource_id.encode("utf-8")`; the only
+  selected entry is `<resource_key>.lock`. Owner tokens are manager-issued
+  64-lowercase-hex values and never select a path.
+
+### Exclusion and filesystem contract
+
+- The process registry key is `(platform, root st_dev, root st_ino,
+  resource_key)`, not a pathname. It reserves before any second same-process
+  adapter call and permits different roots/resources. No reentrant acquisition.
+- The root is a pre-existing absolute private directory. POSIX opens every
+  component with directory FD, `O_DIRECTORY`, `O_NOFOLLOW`, and `O_CLOEXEC`,
+  requires current-euid ownership and mode 0700, fsync support, and rechecks the
+  pinned root identity on every acquisition. Any missing primitive fails closed.
+- Entries use 0600, `O_RDWR|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK`, no truncate or
+  append, exact regular-file/current-euid/mode/nlink-one checks, and matching
+  directory-entry versus FD identity before and after lock acquisition.
+  Existing regular contents, including PID/time-like text, are non-authoritative.
+- A lock entry is persistent: release, context failure, child exit, and all
+  cleanup paths never unlink, rename, replace, reclaim, or change its inode.
+  Symlink/non-regular/hard-linked/unsafe-mode entries fail without target damage.
+- POSIX uses `flock(LOCK_EX|LOCK_NB)` and exact `LOCK_UN`; only
+  EACCES/EAGAIN is contention, ENOSYS/ENOTSUP is lock unavailable, and other
+  native failures become IO error. Descriptor and process reservation lifetime
+  are independently tested.
+- Manager/lease objects record creator PID. File descriptors are non-inheritable;
+  at-fork child handling closes inherited active lock descriptors and resets
+  process registry state. An inherited object fails `WRONG_PROCESS` before
+  owner/state/FD work.
+- Release validates creator PID, exact lease/manager, owner token, and state
+  before adapter or FD work. It performs unlock, close, then registry removal;
+  wrong-owner/double-release paths perform none of those operations.
+- Windows byte-range adapter calls seek-to-zero then nonblocking one-byte lock,
+  and seek-to-zero then exact one-byte unlock. It is injectable only through a
+  private test seam. Production `win32` and unknown selectors return
+  `UNSUPPORTED_PLATFORM` until a live Windows gate exists; no POSIX or unlocked
+  fallback is permitted.
+
+### Deterministic test contract
+
+- Target approximately 48 collected nodes. Independently prove the process
+  registry with an always-grant recording adapter and the OS layer with a live
+  POSIX subprocess holding a descriptor.
+- Thread tests use `Event` handshakes. Subprocess tests use unbuffered JSON-line
+  stdin/stdout handshakes, explicit `PYTHONPATH=src`, child module-path proof,
+  and one monotonic deadline of at most 5 seconds. No sleeps, timing inference,
+  marker files, mtime/PID ownership, or unreachable notification waits.
+- Process-exit tests first prove contention, then use child `os._exit(0)`, wait
+  for real termination, and reacquire the same persistent inode. Fixture
+  cleanup kills/waits only its own live children and closes its pipes.
+- Tests cover public exports/pure import; hash/token/input boundaries; root and
+  entry symlink/non-regular/hardlink/mode/identity cases; same/different
+  manager/root/resource; adapter failure rollback; wrong-owner/manager/double
+  release; normal/exception context; persistent inode; POSIX flag/error/live
+  contention/fork/exit; Windows fake call order/error mapping; and fail-closed
+  platform selection.
+- Windows live mutual exclusion, reparse/ACL behavior, handle inheritance,
+  process-exit release, and directory durability remain unclaimed as TK-R07.
+  Static adapter success cannot close that residual.
+
+Controller now owns the test-file candidate. A distinct static review must
+confirm these resolved items and P0=P1=P2=0 before the one missing-module RED.
+
+## TK2 Test-Design Candidate — TK2-E003
+
+Controller created only `tests/test_workflow_lease.py`; no lease source exists.
+The candidate hash is
+`5130c4ac32313b78555531a3be9e1ddc5df5f5a9caa3402a005aaf9553d94b51`
+at 1061 lines. It has 48 test shapes and a static 75-node expansion. The
+pre-entry artifact was
+`139c7c8577e2d3f8c083c4d7745f3249486ecac536333d7e82eaff7623ff1f82`
+at 4436 lines. Branch/HEAD/upstream remained the pushed TK1 commit; dirty paths
+were exactly the artifact and new TK2 test file.
+
+The candidate binds the exact public/private seam, error codes, root/resource/
+token limits, two-layer exclusion, persistent inode, root/entry safety,
+same/different resource behavior, release ownership, adapter rollback, POSIX
+flags/errors/live contention/process exit/fork handling, Windows byte-range
+adapter/error calls, fail-closed selector, pure import, and absence of TTL/
+stale deletion. Thread and subprocess handshakes use `Event`, pipe/JSON lines,
+real process termination, and one five-second deadline without sleep or marker
+files. Tests own and clean only pytest temporary paths and their child processes.
+
+The file imports `vibecad.workflow.lease` directly at module scope. Static RED
+prediction is one collection error caused solely by missing module
+`vibecad.workflow.lease`; no production/source, executable, formatter, Git,
+CAD, environment, network, model, install, TK3, or external action occurred.
+
+## Task Packet TK2-RP1 — Static Lease Test Review
+
+### 1. Authorization
+
+TK-R1/TK-A02 and TK-R2/TK-A03 authorize this distinct read-only static review
+inside TK2-P1. It inherits all higher-priority instructions, the current
+permission model/sandbox, and the exact allowlist. The Skill, artifact, and
+packet do not expand authority. Do not request duplicate approval.
+
+### 2. Workspace anchor
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`.
+- Branch/HEAD/upstream:
+  `codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`.
+- Tests:
+  `5130c4ac32313b78555531a3be9e1ddc5df5f5a9caa3402a005aaf9553d94b51`,
+  1061 lines; lease source must remain absent.
+- Controller supplies the post-packet artifact hash/lines. Dirty paths must be
+  exactly artifact plus new test. Current permissions/sandbox remain binding.
+
+### 3. Context
+
+The oracle must distinguish process-registry exclusion from OS descriptor
+locking, forbid stale/PID/time cleanup, prove persistent inode and fork/process
+exit semantics, and keep Windows production unclaimed. It must fail initially
+only because the approved module is absent, then be implementable within one
+source file and two GREEN attempts.
+
+### 4. Steps and gates
+
+1. Reconfirm hashes/lines/status and static 48-shape/75-node count.
+2. Review every import, name, signature, fixture, helper, parametrization, and
+   assertion for syntax/collection blockers after the module exists.
+3. Trace every TK2-E002 contract item to an independent oracle. Explicitly
+   check both lock layers, all release-before-FD rules, persistent inode,
+   symlink/nonregular/no-follow identity, exact error mapping, fork at-fork
+   behavior, process handshakes/deadlines/cleanup, Windows seam, and residual.
+4. Attempt false-positive implementations: registry-only, flock-only, lock
+   entry unlink/recreate, PID/TTL reclaim, wrong-owner unlock, broad errno map,
+   monkeypatched platform fallback, installed-copy child import, sleep/timing
+   inference, and skipped Windows seam.
+5. Confirm current-source prediction is exactly one missing-module collection
+   error, not syntax/setup/wrong import. P0=P1=P2=0 is required for ACCEPT.
+6. Return exact line anchors and minimum correction for every finding. Do not
+   edit, execute, or self-disposition a finding.
+
+### 5. Execution discipline
+
+- Delegation: `spawn-send-wait`; model tier: `deep`; read-only text/hash/status
+  only. No pytest/Python/Ruff/formatter or other executable validation.
+- Stop on anchor/allowlist drift or any P0/P1/P2. Reviewer must not edit, stage,
+  commit, push, install, touch CAD/environment/network/model, or start TK3.
+
+### 6. Delivery boundary
+
+Deliver only the static finding ledger and ACCEPT/REJECT. Controller retains
+all artifact/test corrections, RED, production implementation, gates, Git, and
+publication authority.
+
+### 7. Final report
+
+Return anchors, shape/node count, missing-module RED prediction, contract
+coverage, false-positive analysis, platform residual accuracy, P0/P1/P2,
+prohibited-action confirmation, and verdict.
+
+## TK2 Static Test Review Rejection — TK2-E004
+
+Two distinct read-only shards reviewed the exact TK2-E003 candidate without
+executing it and returned REJECT. Shard A reported P0/P1/P2 = 0/5/2; shard B
+reported 0/8/1. The controller accepted every finding. No source existed and
+no RED, Python, pytest, Ruff, formatter, environment, dependency, CAD, network,
+model, Git mutation, TK3, or external action occurred.
+
+The blocking gaps were: release-validation tests did not independently prove
+that invalid/wrong owner, wrong manager, forged lease, and repeated release
+leave the adapter and descriptor untouched; acquisition and release error
+cleanup did not fully prove close/deregister/order/reacquisition; generic and
+project-write APIs lacked cross-domain contention; entry identity and current
+euid were incomplete across path stat, fd stat, and post-lock recheck; POSIX
+capabilities and open flags were bundled or weak; Windows flags and release
+mapping were incomplete; inherited manager, at-fork registry reset, and child
+cleanup/reaping were incomplete; the orphan-grandchild shape could leak; and
+the static no-TTL/no-deletion oracle missed ImportFrom, aliases, bare calls,
+additional deletion/time calls, and broad exception handlers. The P2 findings
+also required exact enum/string proxy rejection, token uniqueness, immutable
+public state, and bounded thread/fork cleanup.
+
+## TK2 Corrected Test Candidate — TK2-E005
+
+Starting from artifact
+`b7ec1c3f74f746c5d97264bccff39c3a71b7eee1175f3292163d008eb11f5df6`
+at 4526 lines, the controller corrected only
+`tests/test_workflow_lease.py`. The frozen corrected test hash is
+`fd8b6310e40fd6d945101dbf0cc9360db0d0d9aec988dd48919db68348961051`
+at 1465 lines. The production source remains absent.
+
+The correction adds independent adapter/close spies for every release
+validation boundary; exact forged/subclass/proxy rejection; cross-API
+contention; acquisition and release rollback with unlock-close-deregister
+order, terminal state, persistent inode, and reacquisition; token uniqueness
+and immutable fields; pre-existing future/expired/binary content invariance;
+path-stat, fd-fstat, and post-lock identity/current-euid checks; component and
+entry open-flag oracles; one-at-a-time missing POSIX primitive checks; Windows
+binary/noninheritable/non-destructive flags and operation-aware release errors;
+and a direct bounded fork handshake proving inherited lease/manager rejection
+plus fresh child-manager reacquisition after parent release. The orphan shape
+was removed. The AST oracle now covers Import/ImportFrom aliases, attribute and
+bare calls, TTL/time sources, deletion/replacement APIs, and broad handlers.
+
+Static correction inspection found no whitespace error and no allowlist drift.
+The corrected candidate still imports the absent source directly, so the only
+permitted RED prediction remains one missing-module collection error. The file
+is frozen pending a distinct full static acceptance; it must not be executed or
+changed before that disposition.
+
+## Task Packet TK2-RP2 — Corrected Static Lease Test Review
+
+### 1. Authorization and anchor
+
+TK-R1/TK-A02 and TK-R2/TK-A03 authorize this bounded read-only correction
+review. Repository branch/HEAD/upstream remain
+`codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`.
+Review exactly the frozen test
+`fd8b6310e40fd6d945101dbf0cc9360db0d0d9aec988dd48919db68348961051`
+at 1465 lines against TK2-E002 and TK2-E004. Lease source must remain absent.
+
+### 2. Required disposition
+
+Review the entire file, not only changed lines. Recount test shapes and static
+parameter expansion; inspect syntax/name/signature/fixture consistency; map
+every public, registry, filesystem, adapter, process, cleanup, and residual
+contract to an independent behavior oracle; and retry every false-positive
+implementation listed in TK2-RP1. In particular confirm exact release-before-FD
+validation, persistent inode on all failures, individually missing primitives,
+post-lock ordering, fork child registry reset/fresh-manager acquisition, one
+waitpid waiter, Windows operation-aware mapping, and AST alias/broad-handler
+coverage.
+
+P0=P1=P2=0 is required for ACCEPT. Return exact anchors and minimum corrections
+for any finding. Stay read-only: no Python/pytest/Ruff/formatter, edits, source,
+stage/commit/push, environment/CAD/network/model action, TK3, or self-disposition.
+
+## TK2 Static Review Convergence — TK2-E006
+
+The TK2-E005 candidate did not pass its distinct static review. At test hash
+`fd8b6310e40fd6d945101dbf0cc9360db0d0d9aec988dd48919db68348961051`
+and 1465 lines, the reviewer returned REJECT with P0/P1/P2 = 0/7/1. The next
+corrected candidate,
+`d4e5aa9e9599af71739245df68c6458d8bf09c528a91e5a3505ff789a188801f`
+at 1665 lines, received REJECT with P0/P1/P2 = 0/11/6. The subsequent whole-file
+candidate,
+`d06f41cc291c98622947041daa447923af1802fe2ff105f70896748b0ad406b8`
+at 2204 lines and 70 test shapes, was reviewed by two distinct read-only
+reviewers. They independently returned REJECT with 0/8/0 and 0/2/6. Every
+finding was accepted; no severity was downgraded and no user approval was
+requested because all corrections remain inside the approved TK2 outcome.
+
+Across those convergence rounds, the controller strengthened exact public
+exports/enums/signatures and fixed non-reflective errors; exact resource text,
+Unicode, identifier, and token boundaries; trust and capability failure before
+storage work; registry ordering and its platform/root-device/root-inode key;
+generic/project cross-contention; root and entry path-versus-FD checks before
+and after lock; full metadata, euid, mode, kind, and link-count checks; failure
+cleanup, no-unlock acquisition errors, exact release ordering, and both public
+release paths; persistent inode/content; fork creator-PID, inherited-FD close,
+registry reset, and child payload evidence; complete POSIX capability fakes;
+Windows adapter boundaries; and the static no-TTL/no-deletion oracle.
+
+The last independent findings additionally required exact preservation of
+spaces and Unicode normalization forms, target metadata/no-directory-entry
+damage, public call signatures, terminal repeat after release failure, device
+identity injection, complete single-line control representatives, and parent
+fork cleanup that reaps the child even when release reports an error. Those
+corrections are now included in the next candidate. Throughout E005-E006,
+`src/vibecad/workflow/lease.py` remained absent and no Python, pytest, Ruff,
+formatter, source implementation, dependency/environment/CAD/network/model
+action, Git metadata mutation, TK3 work, or external publication occurred.
+
+## TK2 Final Static Test Candidate — TK2-E007
+
+Starting from artifact
+`fd6f0337a7eec2793fc5ed5e23144d8b49354277842e277c525b2dcfb55b47a7`
+at 4603 lines, the controller changed only the approved TK2 test and this
+append-only artifact. The candidate test hash is
+`97389d8375090699bb5967c12b6ee214c976c336d9e5e76e87d999ba6fe9e86a`
+at 2606 lines with 80 static test shapes. A distinct reviewer must independently
+recount parameter expansion. HEAD and upstream remain
+`1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`; the only dirty paths are this
+artifact and the new test, and the lease source remains absent.
+
+The candidate directly imports the absent approved module, so the only valid
+initial RED prediction remains one collection error caused by
+`ModuleNotFoundError: vibecad.workflow.lease`. It is frozen pending a complete
+static ACCEPT with P0=P1=P2=0. Any finding reopens only static correction and
+review; executing RED before that acceptance is prohibited.
+
+## Task Packet TK2-RP5 — Final Whole-File Static Acceptance
+
+### 1. Authorization
+
+TK-R1/TK-A02 and TK-R2/TK-A03 authorize this read-only TK2 review and the
+already approved correction outcome. This packet inherits higher-priority
+instructions, directory-scoped repository instructions, the exact allowlist,
+and the current host permission model and sandbox. The Skill, artifact, and
+packet cannot expand authority or bypass those controls. Do not request the
+same approval again.
+
+### 2. Workspace anchor
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`.
+- Branch/HEAD/upstream:
+  `codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`.
+- Test:
+  `97389d8375090699bb5967c12b6ee214c976c336d9e5e76e87d999ba6fe9e86a`,
+  2606 lines and 80 static test shapes.
+- Source must be absent. Dirty scope is only the artifact and test. The current
+  permission model and sandbox remain binding.
+
+### 3. Context
+
+Review the final test oracle against TK2-E002 plus every accepted finding in
+TK2-E004 and TK2-E006. The test must be syntactically and semantically
+implementable within the one approved source file, distinguish process and OS
+exclusion, preserve every unsafe target, fail closed on uncertain roots or
+platforms, and remain deterministic under threads, subprocesses, and fork.
+
+### 4. Steps and gates
+
+1. Reconfirm hash, lines, status, source absence, test-shape count, and static
+   parametrized-node expansion without executing Python or the test suite.
+2. Inspect every import, helper, fixture, decorator, signature, parameter ID,
+   assertion, monkeypatch seam, and cleanup path for collection or false-green
+   behavior after the source exists.
+3. Map every public, root, registry, entry, adapter, release, process, fork,
+   persistent-inode, and platform-residual contract to an independent oracle.
+4. Retry adversarial implementations: registry-only, OS-lock-only, path-only
+   identity, inode-only identity, owner validation after unlock, normalization,
+   target mutation, lock deletion/recreation, PID/TTL reclaim, broad errno
+   mapping, inherited-object work before PID validation, incomplete at-fork
+   cleanup, unlocked platform fallback, and AST aliases.
+5. Confirm the predicted RED is exactly the missing approved module. ACCEPT
+   requires P0/P1/P2 = 0/0/0; otherwise return every exact anchor and minimum
+   correction without editing or self-disposition.
+
+### 5. Execution discipline
+
+Use `spawn-send-wait`, deep review, `repo-artifact`, and read-only static shell
+inspection. Do not run Python, pytest, Ruff, a formatter, CAD, install, access
+the network/model, edit, stage, commit, push, or start TK3. Stop on anchor or
+allowlist drift.
+
+### 6. Delivery boundary
+
+Deliver only the independent finding ledger, counts, RED prediction, platform
+residual assessment, prohibited-action confirmation, and ACCEPT/REJECT. The
+controller owns all corrections, RED, implementation, gates, staging, commit,
+push, recovery evidence, and transition to TK3.
+
+### 7. Final report
+
+Return exact anchors, static shape/node counts, contract and false-positive
+coverage, P0/P1/P2, residual accuracy, confirmation of zero prohibited actions,
+and a final verdict.
+
+## TK2 Final Static Candidate Rejection — TK2-E008
+
+Two distinct reviewers completed TK2-RP5 against exact test
+`97389d8375090699bb5967c12b6ee214c976c336d9e5e76e87d999ba6fe9e86a`
+at 2606 lines and artifact
+`951e9c516d9ef18a68599f3ef847a918a62cea5157b859875ec8119276e4b16c`
+at 4725 lines. They returned REJECT with P0/P1/P2 = 0/2/1 and 0/2/4.
+The union is three distinct P1 findings and four distinct P2 findings; every
+finding was accepted without downgrading.
+
+The P1 findings were: `phase` and `identity_field` parametrization decorators
+had drifted from their intended entry-metadata tests onto unrelated resource
+and project identifier tests, producing latent collection errors once the
+source exists; `trust=None` was not included in the before-I/O/adapter zero-call
+oracle; and path-like resource tests did not prohibit the raw identifier from
+first selecting an external path before the hashed lock entry was used. The P2
+findings were: the registry key did not directly prove its root-device field;
+the missing-capability matrix omitted `O_CREAT`; close-failure terminal state
+did not repeat both public release paths with zero further work; and the exact
+Unicode/space acquisition loop entered cleanup only after all acquisitions,
+which could leak the first lease under a deliberately incorrect normalizing
+implementation.
+
+The controller corrected the decorator placement; added `None` to the strong
+trust-order oracle; added raw `open/stat/lstat/chmod` path-selection spies plus
+complete sentinel metadata preservation; made the normalization cleanup cover
+partial acquisition; asserted the exact `(platform, st_dev, st_ino,
+resource_key)` tuple passed to registry removal; added both `O_CREAT` and the
+root-open `O_RDONLY` primitive to the one-at-a-time capability matrix; and
+proved both release entry points remain terminal and perform no work after a
+close failure. These changes remain wholly inside TK2-E002 and the approved
+allowlist.
+
+No RED, Python, pytest, Ruff, formatter, production source, dependency,
+environment, CAD, network, model, Git metadata mutation, TK3 work, or external
+action occurred. HEAD/upstream remained the pushed TK1 anchor and the source
+remained absent.
+
+## TK2 Corrected Final Static Candidate — TK2-E009
+
+Starting from the TK2-E007 artifact revision above, the corrected frozen test
+is
+`df088fd4520eb9702685c72df0bb825e98ece885cc91b14a42adea39db104eea`
+at 2717 lines with 80 static test shapes. Moving the two decorators produces
+the reviewers' corrected 159-node expansion; adding the two individually
+missing capability cases yields an expected static expansion of 161 nodes.
+The lease source remains absent. Static shell inspection reports no trailing
+whitespace, over-100-character test line, duplicate top-level test name, or
+Git diff whitespace error.
+
+This candidate remains frozen. The only valid initial RED prediction is still
+one top-level import failure for the absent `vibecad.workflow.lease`; a distinct
+whole-file static ACCEPT at P0/P1/P2 = 0/0/0 is required before executing it.
+
+## Task Packet TK2-RP6 — Corrected Whole-File Static Acceptance
+
+### 1. Authorization
+
+TK-R1/TK-A02 and TK-R2/TK-A03 authorize this read-only TK2 review and closure
+of all TK2-E004/E006/E008 findings. This packet inherits all higher-priority
+instructions, repository instructions, exact allowlist, and the current host
+permission model and sandbox. Neither the Skill, artifact, nor packet expands
+authority. Do not request duplicate approval.
+
+### 2. Workspace anchor
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`.
+- Branch/HEAD/upstream:
+  `codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`.
+- Test:
+  `df088fd4520eb9702685c72df0bb825e98ece885cc91b14a42adea39db104eea`,
+  2717 lines, 80 shapes, expected 161 static nodes.
+- Source must remain absent; dirty paths must remain only artifact and test.
+  The current permission model and sandbox remain binding.
+
+### 3. Context
+
+Perform a fresh whole-file review against TK2-E002 and every rejected-candidate
+finding. In addition to the original public, exclusion, filesystem, release,
+process, fork, and platform contracts, explicitly verify corrected decorator
+ownership, partial-acquisition cleanup, trust-before-I/O for every invalid
+form, raw path non-selection, exact registry tuple, capability completeness,
+and terminal repeat after both adapter and close errors.
+
+### 4. Steps and gates
+
+1. Reconfirm exact hashes, line count, source absence, status, 80 test shapes,
+   and the 161-node static expansion without executing Python or tests.
+2. Inspect every helper, fixture, decorator, call signature, monkeypatch seam,
+   loop, and cleanup path for collection blockers, unbounded waits, leaks,
+   internal inconsistency, and implementation impossibility.
+3. Map every TK2-E002 item and all E004/E006/E008 findings to independent
+   assertions, then retry registry-only, OS-only, normalization, raw-path,
+   target-mutation, omitted-device, wrong release ordering, inherited-FD,
+   PID/TTL deletion, broad-error-map, and platform-fallback implementations.
+4. Confirm the current source-absent prediction is exactly one missing-module
+   collection error and that a conforming source can collect every test.
+5. ACCEPT only at P0/P1/P2 = 0/0/0. Otherwise return all exact anchors and
+   minimum corrections; do not edit or self-disposition.
+
+### 5. Execution discipline
+
+Use `spawn-send-wait`, deep independent review, `repo-artifact`, and read-only
+static shell inspection. Do not run Python, pytest, Ruff, formatter, CAD,
+install, access network/model services, edit, stage, commit, push, or start TK3.
+Stop on anchor or allowlist drift.
+
+### 6. Delivery boundary
+
+Deliver only the static counts, finding ledger, false-positive analysis,
+missing-module RED prediction, platform residual assessment, prohibited-action
+confirmation, and verdict. The controller retains correction, RED,
+implementation, gates, Git, recovery, and continuation authority.
+
+### 7. Final report
+
+Return exact anchors, 80/161 count confirmation or corrected count, complete
+contract/finding coverage, P0/P1/P2, residual accuracy, zero prohibited-action
+confirmation, and ACCEPT/REJECT.
+
+## TK2 Corrected Candidate Rejection — TK2-E010
+
+Two independent reviewers completed TK2-RP6 against exact test
+`df088fd4520eb9702685c72df0bb825e98ece885cc91b14a42adea39db104eea`
+at 2717 lines and artifact
+`be1c3a79b14608faf8f77a76c75952db43826dd78aaf8a7bf5057f18da5fc21c`
+at 4845 lines. Both confirmed 80 test shapes and 161 static expanded nodes,
+and confirmed that every TK2-E008 correction was closed. They returned REJECT
+with P0/P1/P2 = 0/1/0 and 0/2/0. The union contains two P1 findings.
+
+First, the raw-path oracle intercepted `os.open/stat/lstat/chmod` but not
+`Path.open`, `io.open`, `builtins.open`, aliases captured before monkeypatch,
+or equivalent read-only probes such as access, directory enumeration,
+readlink, statvfs, and chdir. A deliberately wrong implementation could select
+an absolute resource path without changing the sentinel metadata. Second, the
+fork proof allowed the child to call inherited or fresh VibeCAD APIs before
+the parent closed its descriptor. An implementation could omit at-fork close,
+then perform lazy child cleanup on that first API call and falsely pass.
+
+The controller expanded the runtime raw-path oracle to `Path.open`, `io.open`,
+`builtins.open`, access, chdir, listdir, readlink, scandir, and statvfs; added a
+static rule that permits only a resolved direct `os.open` attribute call,
+detects simple captured pathname-call aliases, and forbids the added pathname
+probe surface. The fork handshake now blocks the child immediately after fork
+before any VibeCAD API. While the child remains blocked, the parent first proves
+contention, releases through a close-only adapter, and proves an independent
+process can acquire and release the same resource. Only then may the child call
+inherited/fresh APIs. This distinguishes at-fork descriptor closure from lazy
+cleanup.
+
+No RED, Python, pytest, Ruff, formatter, production source, dependency,
+environment, CAD, network, model, Git metadata mutation, TK3 work, or external
+action occurred. HEAD/upstream remained the pushed TK1 anchor and the lease
+source remained absent.
+
+## TK2 Static Acceptance Candidate — TK2-E011
+
+The new frozen test is
+`18673569b30d3d4cbb6cc1fd7066a9bc5c8f3a509b9d4b61d702a5c81102ae40`
+at 2808 lines. It retains 80 test shapes and the previously confirmed 161
+static expanded nodes; the correction changes only assertions, spies, and
+handshake ordering. Starting artifact revision was TK2-E009/RP6 artifact
+`be1c3a79b14608faf8f77a76c75952db43826dd78aaf8a7bf5057f18da5fc21c`
+at 4845 lines. Static shell checks report no trailing whitespace,
+over-100-character test line, duplicate top-level test name, or Git diff
+whitespace error. Source remains absent and the only initial RED prediction
+remains the missing approved module.
+
+## Task Packet TK2-RP7 — Static Zero-Finding Acceptance
+
+### 1. Authorization
+
+TK-R1/TK-A02 and TK-R2/TK-A03 authorize this final read-only TK2 test review
+and closure of all prior findings. This packet inherits higher-priority and
+repository instructions, the exact allowlist, and the current host permission
+model/sandbox. The Skill, artifact, and packet do not expand authority. Do not
+request duplicate approval.
+
+### 2. Workspace anchor
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`.
+- Branch/HEAD/upstream:
+  `codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`.
+- Test:
+  `18673569b30d3d4cbb6cc1fd7066a9bc5c8f3a509b9d4b61d702a5c81102ae40`,
+  2808 lines, 80 shapes, 161 static nodes.
+- Source must remain absent; dirty paths are only artifact and test. Current
+  permission/sandbox remains binding.
+
+### 3. Context
+
+Freshly review the complete final oracle against TK2-E002 and every rejection
+through TK2-E010. Explicitly challenge non-`os.open` and aliased raw-path
+selection, every read-only pathname probe, and lazy fork-child descriptor or
+registry cleanup before reviewing the original public, filesystem, exclusion,
+release, persistence, process, adapter, and residual contracts.
+
+### 4. Steps and gates
+
+1. Reconfirm hash, lines, source absence, dirty scope, 80 shapes, and 161 nodes
+   using static read-only inspection only.
+2. Inspect every import, fixture, decorator, signature, spy, AST rule, thread,
+   subprocess, fork handshake, deadline, and cleanup path for collection,
+   false-green, leak, or implementation blockers.
+3. Replay every prior adversary plus non-OS open, captured aliases, read-only
+   path probes, child lazy FD cleanup, and child lazy registry reset.
+4. Confirm one missing-module RED prediction and accurate unclaimed Windows
+   residual. ACCEPT only with P0/P1/P2 = 0/0/0; otherwise report all exact
+   findings and minimum corrections without editing or self-disposition.
+
+### 5. Execution discipline
+
+Use `spawn-send-wait`, deep independent review, `repo-artifact`, and read-only
+static shell inspection. Do not execute Python, pytest, Ruff, formatter, CAD,
+install, network/model access, edit, stage, commit, push, or TK3. Stop on anchor
+or allowlist drift.
+
+### 6. Delivery boundary
+
+Deliver only the counts, finding ledger, adversarial analysis, RED prediction,
+platform residual assessment, prohibited-action confirmation, and verdict.
+The controller retains every state-changing action and continuation decision.
+
+### 7. Final report
+
+Return exact anchors, 80/161 confirmation, full contract and adversary coverage,
+P0/P1/P2, residual accuracy, zero prohibited actions, and ACCEPT/REJECT.
+
+## TK2 Static Acceptance Rejection — TK2-E012
+
+The two TK2-RP7 reviewers independently confirmed exact test
+`18673569b30d3d4cbb6cc1fd7066a9bc5c8f3a509b9d4b61d702a5c81102ae40`
+at 2808 lines, artifact
+`0415a5199a3cb7aaad92b585ccefe96149d4e4317a791ba20d81e59d159b2a5c`
+at 4953 lines, 80 test shapes, 161 static nodes, source absence, and the
+pushed TK1 anchor. They returned REJECT with P0/P1/P2 = 0/2/0 and 0/3/0.
+The three-finding union was accepted in full.
+
+The raw-path rule still missed module-import-time captures such as
+`_raw_open = open` and `_raw_stat = os.stat`, transitive/default captures,
+component-by-component `os.open` below a non-root directory FD, and pathconf or
+xattr probes. The fork test proved pre-API FD closure but did not directly
+observe that the copied registry and its lock were reset before the first child
+API. The no-TTL AST rule did not resolve aliases such as
+`_clock = os.times`; broad exception aliases had the analogous supporting gap.
+
+The controller now tracks every returned `os.open` FD to its recursively
+resolved parent path and removes that lineage on close; expands runtime/static
+path probes through pathconf and xattrs; resolves direct, transitive, annotated,
+and default-parameter captures of path, content, deletion, and time calls; bans
+non-`os` direct open/stat/lstat calls, captured calls, sensitive dynamic
+`getattr`, and the newly identified time attributes. Broad exception aliases,
+including tuples, now feed the broad-handler/suppression oracle. Before the
+fork child emits its first ready message or calls any VibeCAD API, it directly
+asserts the private copied reservation mapping is empty and the registry lock
+identity differs from the parent. The production implementation must therefore
+expose `_PROCESS_RESERVATIONS` and `_PROCESS_REGISTRY_LOCK` as the exact private
+state used by its at-fork callback.
+
+No RED, Python, pytest, Ruff, formatter, production source, dependency,
+environment, CAD, network, model, Git metadata mutation, TK3 work, or external
+action occurred. The lease source remained absent.
+
+## TK2 Zero-Finding Static Candidate — TK2-E013
+
+The frozen test is
+`e7665b7c7f0116ed15a39ffec7f40013d623bc548a9062fbbff106a8ff6361f3`
+at 2930 lines. It retains 80 test shapes and 161 static expanded nodes. Static
+shell checks report no trailing whitespace, over-100-character test line,
+duplicate top-level test name, or Git diff whitespace error. The only initial
+RED prediction remains the absent `vibecad.workflow.lease` import.
+
+## Task Packet TK2-RP8 — Zero-Finding Static Acceptance
+
+### 1. Authorization
+
+TK-R1/TK-A02 and TK-R2/TK-A03 authorize this read-only final test review and
+closure of every TK2 finding through E012. Higher-priority instructions,
+repository rules, the exact allowlist, and current permission model/sandbox
+remain binding; no artifact or packet expands authority. Do not request
+duplicate approval.
+
+### 2. Workspace anchor
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`.
+- Branch/HEAD/upstream:
+  `codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`.
+- Test:
+  `e7665b7c7f0116ed15a39ffec7f40013d623bc548a9062fbbff106a8ff6361f3`,
+  2930 lines, 80 shapes, 161 static nodes.
+- Source must be absent; dirty paths remain only artifact and test. Current
+  permission model/sandbox remains binding.
+
+### 3. Context
+
+Perform another complete static acceptance against TK2-E002 and every
+subsequent accepted finding. Focus first on import-time/transitive/default path
+aliases, recursive directory-FD lineage, all direct pathname probes, time and
+broad-exception aliases, and direct pre-API child registry/lock reset; then
+repeat the entire public/filesystem/exclusion/release/process/platform review.
+
+### 4. Steps and gates
+
+1. Reconfirm exact anchor, source absence, dirty scope, lines, 80 shapes, and
+   161 nodes by static read-only inspection only.
+2. Inspect every import, fixture, decorator, helper, monkeypatch, AST traversal,
+   bounded fixed-point loop, subprocess/fork handshake, and cleanup path for
+   collection, false-green, leak, hang, or implementation impossibility.
+3. Replay all prior adversaries, including captured `open/stat/lstat`, chained
+   directory opens, dynamic path/time lookup, tuple exception aliases, lazy FD
+   close, lazy registry clear, and inherited lock reuse.
+4. Confirm one missing-module RED prediction and accurate Windows residual.
+   ACCEPT requires P0/P1/P2 = 0/0/0; otherwise return every finding and minimum
+   correction without editing or self-disposition.
+
+### 5. Execution discipline
+
+Use `spawn-send-wait`, deep independent review, `repo-artifact`, and read-only
+static shell inspection. Do not execute Python, pytest, Ruff, formatter, CAD,
+install, network/model access, edit, stage, commit, push, or TK3. Stop on anchor
+or allowlist drift.
+
+### 6. Delivery boundary
+
+Deliver only counts, findings, adversarial analysis, RED prediction, residual
+assessment, prohibited-action confirmation, and verdict. The controller owns
+every state-changing action and continuation decision.
+
+### 7. Final report
+
+Return exact anchors, 80/161 confirmation, full contract/adversary coverage,
+P0/P1/P2, residual accuracy, zero prohibited actions, and ACCEPT/REJECT.
+
+## TK2 Zero-Finding Candidate Rejection — TK2-E014
+
+Two independent TK2-RP8 reviewers reconfirmed exact test
+`e7665b7c7f0116ed15a39ffec7f40013d623bc548a9062fbbff106a8ff6361f3`
+at 2930 lines, artifact
+`ceb31c8b2a4c392cf433ff40e124e4607bcb90fd3a9f9b237f11b54e7fff4cbf`
+at 5058 lines, 80 static test shapes, 161 static expanded nodes, source
+absence, and the pushed TK1 anchor. They returned REJECT with P0/P1/P2 =
+0/3/0 and 0/4/0. The full union is retained without downgrade.
+
+The runtime pathname oracle still lost the lineage of descriptors retained
+before spy installation or copied through `dup`/`dup2`; it also omitted
+`setxattr` and `removexattr`, allowing reversible external-path mutation. The
+AST oracle still allowed imported or computed `getattr`, callable wrappers
+such as `partial`, container/subscript capture, and broad-exception default
+aliases. Finally, the fork first-frame names were not behavior-bound strongly
+enough to exclude an implementation that coordinated through hidden registry
+and lock objects while exposing decoy `_PROCESS_RESERVATIONS` and
+`_PROCESS_REGISTRY_LOCK` globals.
+
+The controller moved manager construction under the complete runtime spy,
+tracks `dup`/`dup2` lineage, rejects every unresolved path operation, and
+intercepts both xattr mutation calls without executing them. The exported
+registry is now a guarded mapping whose mutation fails unless the exact
+exported lock is held; normal reserve, contention, drop, fork preparation,
+parent preservation, and child replacement are all tied to those same object
+identities and the exact registry tuple. The AST oracle now resolves imported
+and assigned module/string aliases, folds constant string concatenation,
+rejects unknown or sensitive dynamic lookup, rejects indirect call targets,
+and permits path-sensitive callables only as immediate direct
+`os.open/stat/lstat(...)` callees. Sensitive callable references and broad
+exception references/defaults are independently rejected.
+
+No RED, Python, pytest, Ruff, formatter, production source, dependency,
+environment, CAD, network/model access, Git metadata mutation, TK3 work, or
+external action occurred. The source remains absent.
+
+## TK2 RP9 Static Acceptance Candidate — TK2-E015
+
+The corrected frozen test is
+`3ea574abe56ed5bc0a5e5121fa74489a149a7d49822e9e943eef715533459305`
+at 3226 lines. It retains 80 static test shapes and the previously confirmed
+161 static expanded nodes; only helpers and assertions changed. Static shell
+checks report no trailing whitespace, over-100-character test line, duplicate
+top-level test name, or Git diff whitespace error. The approved production
+source remains absent. The sole valid initial RED prediction remains one
+top-level import failure for `vibecad.workflow.lease`.
+
+## Task Packet TK2-RP9 — Static Zero-Finding Acceptance
+
+### 1. Authorization
+
+TK-R1/TK-A02 and TK-R2/TK-A03 authorize this read-only TK2 review and closure
+of all findings through TK2-E014. Higher-priority instructions, repository
+rules, the exact allowlist, and the current permission model/sandbox remain
+binding; neither this artifact nor packet expands authority. Do not request
+duplicate approval.
+
+### 2. Workspace anchor
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`.
+- Branch/HEAD/upstream:
+  `codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`.
+- Test:
+  `3ea574abe56ed5bc0a5e5121fa74489a149a7d49822e9e943eef715533459305`,
+  3226 lines, 80 shapes, 161 expected static nodes.
+- Source must remain absent; dirty paths remain only artifact and test.
+  Current permission and sandbox constraints remain binding.
+
+### 3. Context
+
+Perform a fresh whole-file static review against TK2-E002 and every accepted
+finding through E014. Begin with the new guarded registry/lock helpers,
+pre-spy and copied/unknown descriptor lineage, mutation probes, structural
+sensitive-callable rule, dynamic lookup, indirect calls, and broad-exception
+references. Then repeat the complete public, filesystem, exclusion, release,
+process, fork, platform, and residual review.
+
+### 4. Steps and gates
+
+1. Reconfirm exact anchor, test hash and lines, source absence, dirty scope,
+   80 shapes, and 161 expected nodes using static read-only inspection only.
+2. Inspect every import, helper, fixture, decorator, signature, spy, guarded
+   mapping mutation route, AST traversal/fixed point, thread, subprocess, fork
+   handshake, deadline, and cleanup path for collection blockers,
+   false-positives, false-greens, leaks, hangs, or implementation impossibility.
+3. Replay every prior adversary plus hidden/decoy registries, mutation outside
+   the exported lock, import-time root FDs, duplicated descriptors, xattr
+   mutation, imported/computed `getattr`, partial/container capture, indirect
+   calls, and default-parameter broad exception aliases.
+4. Confirm the absent-source prediction is exactly one missing-module import
+   failure and that the Windows live residual remains explicitly unclaimed.
+   ACCEPT requires P0/P1/P2 = 0/0/0; otherwise report every finding and minimum
+   correction without editing or self-disposition.
+
+### 5. Execution discipline
+
+Use `spawn-send-wait`, deep independent review, `repo-artifact`, and read-only
+static shell inspection. Do not execute Python, pytest, Ruff, a formatter,
+CAD, install, network/model access, edit, stage, commit, push, or begin TK3.
+Stop on anchor or allowlist drift.
+
+### 6. Delivery boundary
+
+Deliver only static counts, finding ledger, adversarial analysis, RED
+prediction, platform residual assessment, prohibited-action confirmation, and
+ACCEPT/REJECT. The controller retains correction, RED, implementation, gates,
+Git, recovery evidence, and continuation authority.
+
+### 7. Final report
+
+Return exact anchors, 80/161 confirmation or correction, complete contract and
+adversary coverage, P0/P1/P2, residual accuracy, confirmation of zero
+prohibited actions, and the final verdict.
+
+## TK2 RP9 Static Candidate Rejection — TK2-E016
+
+Two independent reviewers completed TK2-RP9 against exact test
+`3ea574abe56ed5bc0a5e5121fa74489a149a7d49822e9e943eef715533459305`
+at 3226 lines and artifact
+`688db81fad1d3072fca4bdb3198ea301d92080af959e1d20decde01f76bb6fe3`
+at 5173 lines. They reconfirmed 80 test shapes, 161 static expanded nodes,
+source absence, the pushed TK1 anchor, the single missing-module RED
+prediction, and the unclaimed Windows live residual. Their dispositions were
+REJECT at P0/P1/P2 = 0/5/0 and 0/3/2. The complete union is retained.
+
+The dict-subclass registry probe allowed base-dict bypass and did not enforce
+atomic absent-check plus insertion under the exact exported lock. The fork
+test did not prove the parent callback released that lock, and runtime mirroring
+still left room for an alternate hidden authority. Dynamic/static reflection
+through `__builtins__`, `__import__`, `inspect.getattr_static`, or unresolved
+exception aliases remained fail-open. Conversely, the structural callable
+rule rejected the exact `open`/`stat` support-set identity comparisons required
+by the capability contract, while cardinality/name-only checks could pass.
+Trust and capability gates omitted several read-only storage probes. Pure
+import did not statically exclude module-level filesystem/network side
+effects. Entry flags omitted `O_CREAT`, root flags did not prove read-only
+access mode, and two cleanup waits extended beyond their one five-second
+deadline.
+
+The controller replaced the registry probe with a non-dict `MutableMapping`:
+all reads and writes require the exact exported probe lock, and an absent read
+must be consumed by insertion before the outer lock can release. Test snapshots
+acquire the lock without using production mapping operations. Fork now proves
+the parent thread and a distinct thread can acquire the same exported lock
+immediately after the parent callback. Static authority rules allow mutable
+module/process state and lock construction only at the two exported names,
+require exact reserve/attach/drop/fork helper references, prohibit alternate
+global mutable authority, and bind the registered at-fork callbacks by name.
+
+Reflection/import aliases, unknown exception handler expressions, indirect
+lookup helpers, mutable defaults, and shared mutable attribute construction are
+now fail-closed. Sensitive `open`/`stat` references receive one structural
+exception: exact same-receiver membership comparison inside
+`_require_posix_capabilities`. Runtime instrumentation adds its wrappers to
+the advertised support sets, and same-name decoy callables must still fail the
+fake capability profile. Trust/capability zero-I/O spies now cover OS, Path,
+built-in/io open, and socket surfaces. Module-import calls have an exact
+allowlist for regex compilation, the one exported RLock, and exact at-fork
+registration; forbidden import roots and alternate creation primitives are
+closed. Root and entry flag assertions now include read-only access mode and
+`O_CREAT`. Reap paths reserve cleanup time but never exceed the original
+deadline.
+
+No RED, Python, pytest, Ruff, formatter, production source, dependency,
+environment, CAD, network/model access, Git metadata mutation, TK3 work, or
+external action occurred. The source remains absent.
+
+## TK2 RP10 Static Acceptance Candidate — TK2-E017
+
+The corrected frozen test is
+`4d54ca51071c287784c8179683d84c0649f882250290daa1e7830ed138d6824e`
+at 3644 lines. It retains 80 static test shapes and 161 expected static
+expanded nodes. Static shell checks report no trailing whitespace,
+over-100-character test line, duplicate top-level test name, extra one-second
+wait, or Git diff whitespace error. The approved production source remains
+absent, and the sole valid initial RED prediction remains one top-level import
+failure for `vibecad.workflow.lease`.
+
+## Task Packet TK2-RP10 — Static Zero-Finding Acceptance
+
+### 1. Authorization
+
+TK-R1/TK-A02 and TK-R2/TK-A03 authorize this read-only TK2 review and closure
+of all findings through TK2-E016. Higher-priority instructions, repository
+rules, the exact allowlist, and current permission model/sandbox remain
+binding. Neither artifact nor packet expands authority; do not request
+duplicate approval.
+
+### 2. Workspace anchor
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`.
+- Branch/HEAD/upstream:
+  `codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`.
+- Test:
+  `4d54ca51071c287784c8179683d84c0649f882250290daa1e7830ed138d6824e`,
+  3644 lines, 80 shapes, 161 expected static nodes.
+- Source must remain absent; dirty paths remain only artifact and test.
+  Current permission and sandbox constraints remain binding.
+
+### 3. Context
+
+Perform a fresh whole-file static review against TK2-E002 and every accepted
+finding through E016. Begin with the new non-dict guarded mapping and pending
+insert invariant, exported-authority structural rules, parent/child fork-lock
+behavior, capability identity exception and decoy cases, gate spies,
+import-time side effects, creation flags, and deadline accounting. Then repeat
+the complete public, filesystem, exclusion, release, process, platform, and
+residual review.
+
+### 4. Steps and gates
+
+1. Reconfirm exact anchor, hash/lines, source absence, dirty scope, 80 shapes,
+   and 161 expected nodes through static read-only inspection only.
+2. Inspect every import, helper, fixture, decorator, guarded mapping method,
+   signature, monkeypatch, AST traversal/fixed point, thread, subprocess, fork
+   handshake, deadline, and cleanup route for collection blockers,
+   false-positives, false-greens, leaks, hangs, or implementation impossibility.
+3. Replay all prior adversaries plus base-dict bypass, unlocked absent-check,
+   hidden registry/lock authority, unreleased parent fork lock, builtins/static
+   reflection, unresolved exception aliases, capability decoys, pre-gate Path
+   enumeration, module-level I/O, alternate file creation, missing create/read
+   flags, and cleanup deadline extension.
+4. Confirm the sole absent-source RED and accurate Windows residual. ACCEPT
+   requires P0/P1/P2 = 0/0/0; otherwise report every finding and minimum
+   correction without editing or self-disposition.
+
+### 5. Execution discipline
+
+Use `spawn-send-wait`, deep independent review, `repo-artifact`, and read-only
+static shell inspection. Do not execute Python, pytest, Ruff, formatter, CAD,
+install, network/model access, edit, stage, commit, push, or begin TK3. Stop on
+anchor or allowlist drift.
+
+### 6. Delivery boundary
+
+Deliver only counts, finding ledger, adversarial analysis, RED prediction,
+platform residual assessment, prohibited-action confirmation, and verdict.
+The controller retains corrections, RED, implementation, gates, Git, recovery,
+and continuation authority.
+
+### 7. Final report
+
+Return exact anchors, 80/161 confirmation or correction, complete contract and
+adversary coverage, P0/P1/P2, residual accuracy, zero prohibited actions, and
+the final disposition.
+
+## TK2 RP10 Static Candidate Rejection — TK2-E018
+
+Two independent reviewers completed TK2-RP10 against frozen test
+`4d54ca51071c287784c8179683d84c0649f882250290daa1e7830ed138d6824e`
+at 3644 lines and artifact
+`a1e8781fd72360ea2190913c57c0730bc58382dce5c045444c9032b9a047a089`
+at 5305 lines. They reconfirmed 80 test shapes, 161 expected expanded nodes,
+source absence, the pushed TK1 anchor, the single missing-module RED
+prediction, and the unclaimed Windows live residual. Their dispositions were
+REJECT at P0/P1/P2 = 0/8/1 and 0/4/1; the complete union is retained here.
+
+The guarded registry still allowed blind insertion and enumeration-based
+absence checks, while its simultaneous-start test did not alone force an
+atomic first-winner decision. Exported registry and lock objects could be
+captured through module aliases, defaults, containers, dead references, or
+indirect helpers. Reflection through function globals or frames and rebinding
+a broad exception under a permitted narrow name remained possible. Import
+rules were denylist-based, alternate file creators and `umask` remained, and
+explicit-call scanning missed decorators, class construction, metaclasses,
+descriptors, and import side effects.
+
+Capability checks did not require callable primitives, valid support-set
+types, or exact integer flag types; pre-gate storage primitives could still be
+captured before runtime spies were installed. The open-flags oracle classified
+directory operations from the very flag being validated, treated bytes paths
+incorrectly, did not require exact entry access mode or exact hashed filename,
+and did not prove that the pinned-root `os.open` was the first creator. Finally,
+an implementation could clear `O_CLOEXEC` after open by making the active file
+descriptor inheritable.
+
+The controller made insertion consume an exact keyed miss, added explicit
+guarded membership, disabled ordinary registry enumeration, and added a
+two-thread first-acquisition oracle. Static authority analysis now rejects
+capture of either exported object and verifies exact lock, mapping, keyed
+load/store/delete, attach, fork callback, child reset, and manager-release
+relationships. Reflection/frame access and allowed-exception rebinding are
+closed. Imports, top-level statements, decorators, class bases/bodies, nested
+functions, and lambdas now use exact structural rules; alternate creators,
+`umask`, and FD-flag mutation routes are rejected.
+
+Capability adversaries now cover seven non-callable primitives, invalid
+support containers, and seven non-integer flags, with a narrow structural
+exception for direct capability `callable` checks. The complete storage probe
+surface participates in alias analysis. Runtime open instrumentation classifies
+the returned FD with `fstat`, decodes bytes safely, requires the exact hashed
+entry and pinned parent, proves the entry was absent before its sole creator,
+checks exact access modes, observes active-FD inheritance, and rejects attempts
+to make a descriptor inheritable.
+
+No RED, Python, pytest, Ruff, formatter, production source, dependency,
+environment, CAD, network/model access, Git metadata mutation, TK3 work, or
+external action occurred. The source remains absent.
+
+## TK2 RP11 Static Acceptance Candidate — TK2-E019
+
+The corrected frozen test is
+`408d85aaa5027f541e335f467b31ee8d81ed4a7bc2e96f0cfe224ca7bde3b203`
+at 4352 lines. It contains 81 static test shapes and 178 expected expanded
+nodes. Static shell checks report no trailing whitespace, over-100-character
+test line, duplicate top-level test name, extra one-second wait, or Git diff
+whitespace error. The approved production source remains absent, and the sole
+valid initial RED prediction remains one top-level import failure for
+`vibecad.workflow.lease`.
+
+## Task Packet TK2-RP11 — Static Zero-Finding Acceptance
+
+### 1. Authorization
+
+TK-R1/TK-A02 and TK-R2/TK-A03 authorize this read-only TK2 review and closure
+of all findings through TK2-E018. Higher-priority instructions, repository
+rules, the exact allowlist, and current permission model remain binding. This
+packet does not expand authority; do not request duplicate approval.
+
+### 2. Workspace anchor
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`.
+- Branch/HEAD/upstream:
+  `codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`.
+- Test:
+  `408d85aaa5027f541e335f467b31ee8d81ed4a7bc2e96f0cfe224ca7bde3b203`,
+  4352 lines, 81 shapes, 178 expected expanded nodes.
+- Source must remain absent; dirty paths remain only artifact and test.
+
+### 3. Context
+
+Perform a fresh whole-file static review against TK2-E002 and every accepted
+finding through E018. Begin with strict missing-key consumption, enumeration
+gating, concurrent first acquisition, authority-use structure, reflection and
+exception binding, exact import/top-level/class grammar, capability types,
+storage alias capture, FD-derived open classification, exact creator identity,
+bytes paths, and final descriptor inheritance. Then replay the complete public,
+filesystem, exclusion, release, process, fork, platform, and residual review.
+
+### 4. Steps and gates
+
+1. Reconfirm the exact anchor, hash/lines, source absence, dirty scope,
+   81 shapes, and 178 expected nodes through static read-only inspection only.
+2. Inspect every import, helper, fixture, decorator, guarded mapping route,
+   monkeypatch, AST traversal, thread, subprocess, fork handshake, deadline,
+   and cleanup route for collection blockers, false positives, false greens,
+   leaks, hangs, or implementation impossibility.
+3. Replay all prior adversaries plus blind insert, enumeration absence checks,
+   authority capture/defaults/dead refs, function-global/frame reflection,
+   exception rebinding, alternate creators, implicit import-time calls,
+   malformed capabilities, pre-captured gate primitives, bytes paths, decoy
+   regular opens, omitted access flags, and post-open inheritance mutation.
+4. Confirm the sole absent-source RED and accurate Windows residual. ACCEPT
+   requires P0/P1/P2 = 0/0/0; otherwise report every finding and minimum
+   correction without editing or self-disposition.
+
+### 5. Execution discipline
+
+Use deep independent review, repository artifacts, and read-only static shell
+inspection. Do not execute Python, pytest, Ruff, formatter, CAD, install,
+network/model access, edit, stage, commit, push, or begin TK3. Stop on anchor or
+allowlist drift.
+
+### 6. Delivery boundary
+
+Deliver only counts, finding ledger, adversarial analysis, RED prediction,
+platform residual assessment, prohibited-action confirmation, and verdict.
+The controller retains corrections, RED, implementation, gates, Git,
+recovery, and continuation authority.
+
+### 7. Final report
+
+Return exact anchors, 81/178 confirmation or correction, complete contract and
+adversary coverage, P0/P1/P2, residual accuracy, zero prohibited actions, and
+the final disposition.
+
+## TK2 RP11 Static Candidate Rejection — TK2-E020
+
+Two independent reviewers completed TK2-RP11 against test
+`408d85aaa5027f541e335f467b31ee8d81ed4a7bc2e96f0cfe224ca7bde3b203`
+at 4352 lines and artifact
+`5f4373fb434eb0d033a8363a5933bf81bcd00f1dc451356da55bac1684a09fe9`
+at 5435 lines. Both reconfirmed 81 shapes, 178 expected nodes, source
+absence, the pushed TK1 anchor, the single missing-module RED prediction, and
+the Windows live residual. One reviewer accepted at 0/0/0; the full reviewer
+rejected at P0/P1/P2 = 0/4/1. The union is retained.
+
+The still-mutable error-message dictionary could double as hidden process
+authority. Import restrictions did not yet restrict the complete `os`
+attribute surface, leaving process-launch and alternate external-work calls.
+Malformed capability tests used ordinary objects but did not prove rejection
+of `bool`, integer subclasses, or set subclasses. A direct-lock requirement on
+`ResourceLeaseManager.release` was simultaneously a false red for delegated
+cleanup and satisfiable by dead code. Finally, `dup2(..., inheritable=True)`
+could create an unobserved inheritable descriptor copy.
+
+The controller removed every mutable module container except the exact exported
+process reservation mapping; fixed error messages must therefore use immutable
+structure or a pure function. Direct `os` attributes now have an exact
+allowlist, and `dup`/`dup2` are forbidden. A new runtime capability-type oracle
+uses `True`, an integer subclass, and a set subclass, requiring exact integer
+flags and exact support sets. The manager direct-lock shape requirement was
+removed; existing runtime release tests continue to prove terminal transition,
+unlock, close, and the exact locked drop ordering.
+
+No RED, Python, pytest, Ruff, formatter, production source, dependency,
+environment, CAD, network/model access, Git metadata mutation, TK3 work, or
+external action occurred. The source remains absent.
+
+## TK2 RP12 Static Acceptance Candidate — TK2-E021
+
+The corrected frozen test is
+`2eb7233624e6966013b3e569f189db8c9484763242f9b06862cb2b0b00abc6b2`
+at 4394 lines. It contains 82 static test shapes and 179 expected expanded
+nodes. Static shell checks report no trailing whitespace, over-100-character
+test line, duplicate top-level test name, extra one-second wait, or Git diff
+whitespace error. Production source remains absent; the valid initial RED
+prediction remains one top-level missing-module import failure.
+
+## Task Packet TK2-RP12 — Static Zero-Finding Acceptance
+
+### 1. Authorization
+
+TK-R1/TK-A02 and TK-R2/TK-A03 authorize this read-only TK2 review and closure
+through TK2-E020. Existing rules and the exact allowlist remain binding; do not
+request duplicate approval.
+
+### 2. Workspace anchor
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`.
+- Branch/HEAD/upstream:
+  `codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`.
+- Test:
+  `2eb7233624e6966013b3e569f189db8c9484763242f9b06862cb2b0b00abc6b2`,
+  4394 lines, 82 shapes, 179 expected nodes.
+- Source remains absent; dirty paths remain artifact and test only.
+
+### 3. Review focus and gates
+
+Reconfirm the anchor and replay the complete TK2 contract and every finding
+through E020. Begin with unique mutable authority, exact `os` attributes,
+process-launch denial, exact capability flag/support types, delegated release
+without a source-shape false red, and prohibition of descriptor duplication.
+Then repeat public API, root/entry, exclusion, cleanup, fork, platform,
+deadline, reflection, import-time, and residual analysis. ACCEPT requires
+P0/P1/P2 = 0/0/0; otherwise report every finding and minimum correction.
+
+### 4. Execution discipline and delivery
+
+Use only read-only static inspection. Do not execute Python, pytest, Ruff,
+formatter, CAD, install, network/model access, edits, Git mutation, or TK3.
+Return exact anchors, 82/179 confirmation, complete findings, RED prediction,
+Windows residual, prohibited-action confirmation, and ACCEPT/REJECT.
+
+## TK2 RP15 Static Acceptance — TK2-E028
+
+Two independent whole-file static reviewers accepted frozen test
+`aaf9eee3a58c49e66229c45b35d9540bc98bd4d23d4d6ee426e4d46d2a923dc9`
+at 4679 lines and artifact
+`6dd72c6b0eb5d511ed54e266327c5ad04ba6699c129432500cd6ba0cd9512f7d`
+at 5719 lines. Both returned P0/P1/P2 = 0/0/0 and reconfirmed 82 unique
+test shapes, 179 expected expanded nodes, source absence, exact dirty scope,
+the pushed TK1 anchor, the one missing-module RED prediction, implementation
+feasibility, and the explicitly unclaimed Windows live residual.
+
+The RP15 test is now frozen through focused RED and production implementation.
+The authorized and predicted RED command is exactly:
+
+`PYTHONPATH=src .venv/bin/pytest -q tests/test_workflow_lease.py`
+
+Genuine RED requires exit status 2 with one collection error caused by the
+top-level import of absent module `vibecad.workflow.lease`, and no other error.
+The command may run exactly once before production source creation. Any other
+result is anchor drift and requires recovery before implementation.
+
+No Python, pytest, Ruff, formatter, production source, dependency, environment,
+CAD, network/model access, Git mutation, TK3 work, or external action occurred
+before this acceptance record.
+
+## TK2 Genuine Focused RED — TK2-E029
+
+The exact authorized command ran once against frozen test
+`aaf9eee3a58c49e66229c45b35d9540bc98bd4d23d4d6ee426e4d46d2a923dc9`:
+
+`PYTHONPATH=src .venv/bin/pytest -q tests/test_workflow_lease.py`
+
+It exited 2 after 1.34 seconds with exactly one collection error at test line
+28: `ModuleNotFoundError: No module named 'vibecad.workflow.lease'`. Pytest
+reported one error in 0.62 seconds and no other collection or execution error.
+This exactly matches the frozen prediction and authorizes the first focused
+GREEN implementation attempt. Production source remained absent throughout
+RED; the test remains frozen.
+
+## TK2 RP14 Static Candidate Rejection — TK2-E026
+
+Two independent reviewers completed TK2-RP14 against test
+`1041690b8ff703f9dfec047923298afcd227139ec15e2cd2fa02af2bf4035c1f`
+at 4548 lines and artifact
+`34ebad224f70632d13f7991f0c32f4734f695fa6b788e85b4dd089e52abb54ce`
+at 5648 lines. They reconfirmed 82 shapes, 179 expected nodes, source
+absence, the pushed TK1 anchor, the sole missing-module RED, and the Windows
+residual. Each rejected at P0/P1/P2 = 0/1/0; their two distinct findings are
+retained.
+
+Module-shaped adapter parameters were recognized by guessed variable names,
+but private constructor signatures were not fixed. Renaming a parameter and
+capturing it on the adapter could bypass exact module attributes. Separately,
+the two POSIX capability support sets could be captured outside their intended
+checks and reused as a second mutable process authority.
+
+The controller now requires exact `_PosixFileLock(fcntl_module)` and
+`_WindowsFileLock(msvcrt_module)` constructor AST signatures. The named module
+parameters may only provide exact approved attributes and cannot be captured as
+whole objects. Support-set references are sensitive: they are allowed only in
+the exact same-receiver membership comparisons and exact built-in-set type
+comparisons inside `_require_posix_capabilities`. Capturing, forwarding,
+returning, or mutating them is rejected; general set/dictionary mutation methods
+are independently forbidden. Type objects may only be queried in direct
+comparisons, and additional hierarchy reflection is closed.
+
+No RED, Python, pytest, Ruff, formatter, production source, dependency,
+environment, CAD, network/model access, Git mutation, TK3 work, or external
+action occurred. The source remains absent.
+
+## TK2 RP15 Static Acceptance Candidate — TK2-E027
+
+The corrected frozen test is
+`aaf9eee3a58c49e66229c45b35d9540bc98bd4d23d4d6ee426e4d46d2a923dc9`
+at 4679 lines. It retains 82 static test shapes and 179 expected expanded
+nodes. Static shell checks report no trailing whitespace, over-100-character
+test line, duplicate top-level test name, extra one-second wait, or Git diff
+whitespace error. Production source remains absent; the sole valid RED remains
+the top-level missing-module import failure.
+
+## Task Packet TK2-RP15 — Static Zero-Finding Acceptance
+
+### 1. Anchor and authority
+
+TK-R1/TK-A02 and TK-R2/TK-A03 authorize this read-only review. Repository:
+`/Users/wangtao/Documents/DevProject/vibecad`; branch/HEAD/upstream:
+`codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`.
+Test:
+`aaf9eee3a58c49e66229c45b35d9540bc98bd4d23d4d6ee426e4d46d2a923dc9`,
+4679 lines, 82 shapes, 179 nodes. Source remains absent; dirty scope remains
+artifact plus test only. Existing rules remain binding.
+
+### 2. Review focus and gate
+
+Reconfirm the anchor and replay the complete contract and all findings through
+E026. Begin with adapter formal signatures, module-parameter capture and
+attributes, support-set membership/type-only roles, capture and mutation,
+ephemeral exact-set typing, type-object containment, and implementability.
+Then repeat public API, capabilities, root/entry, unique authority, exclusion,
+release, fork inheritance, process boundaries, deadlines, platform, and
+residual analysis. ACCEPT requires P0/P1/P2 = 0/0/0; otherwise report every
+finding and minimum correction.
+
+### 3. Discipline and delivery
+
+Use only read-only static inspection. Do not execute Python, pytest, Ruff,
+formatter, CAD, install, network/model access, edits, Git mutation, or TK3.
+Return exact anchors, 82/179 confirmation, complete findings, RED prediction,
+Windows residual, prohibited-action confirmation, and ACCEPT/REJECT.
+
+## TK2 RP13 Static Candidate Rejection — TK2-E024
+
+Two independent reviewers completed TK2-RP13 against test
+`ebd2f531711e4ad1fd246e6daba60ae263c2208550ecbb89aeb25f4a2fe46b94`
+at 4488 lines and artifact
+`3565e30862f2c140cdf70c85c73a4a264b7e7d71280100bba4f7572d0f13d6ee`
+at 5580 lines. They reconfirmed 82 shapes, 179 expected nodes, source
+absence, the pushed TK1 anchor, the sole missing-module RED, and the Windows
+residual. Their dispositions were REJECT at P0/P1/P2 = 0/2/0 and 0/1/0.
+
+Imported class objects were omitted from bare-object restrictions and could be
+forwarded through containers before invoking unapproved class methods or
+reflection. Separately, instance attributes such as Path parser/flavour
+surfaces could return transitive modules without a statically qualified module
+receiver. The receiver-independent process family also omitted fork and
+external-process control leaves.
+
+The controller now subjects imported classes to the same bare-load rule as
+modules. Only exact Path construction, exact StrEnum inheritance, and true
+annotation positions are allowed; containers, returns, and other forwarding
+are rejected. Parser/flavour, environment state, class hierarchy/reflection,
+cwd/home, fork/forkpty, kill, wait, environment mutation, and related process
+leaves are independently forbidden regardless of receiver qualification.
+
+No RED, Python, pytest, Ruff, formatter, production source, dependency,
+environment, CAD, network/model access, Git mutation, TK3 work, or external
+action occurred. The source remains absent.
+
+## TK2 RP14 Static Acceptance Candidate — TK2-E025
+
+The corrected frozen test is
+`1041690b8ff703f9dfec047923298afcd227139ec15e2cd2fa02af2bf4035c1f`
+at 4548 lines. It retains 82 static test shapes and 179 expected expanded
+nodes. Static shell checks report no trailing whitespace, over-100-character
+test line, duplicate top-level test name, extra one-second wait, or Git diff
+whitespace error. Production source remains absent; the sole valid RED
+prediction remains the top-level missing-module import failure.
+
+## Task Packet TK2-RP14 — Static Zero-Finding Acceptance
+
+### 1. Anchor and authority
+
+TK-R1/TK-A02 and TK-R2/TK-A03 authorize this read-only review. Repository:
+`/Users/wangtao/Documents/DevProject/vibecad`; branch/HEAD/upstream:
+`codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`.
+Test:
+`1041690b8ff703f9dfec047923298afcd227139ec15e2cd2fa02af2bf4035c1f`,
+4548 lines, 82 shapes, 179 expected nodes. Source remains absent; dirty scope
+remains artifact plus test only. Existing rules remain binding.
+
+### 2. Review focus and gate
+
+Reconfirm the anchor and replay the complete contract and all findings through
+E024. Begin with imported-class containers/returns/call arguments, annotation
+and constructor exceptions, instance parser/flavour module returns, environment
+authority, hierarchy reflection, fork and external-process control leaves, and
+module-rule implementability. Then repeat public API, capabilities, root/entry,
+unique authority, exclusion, release, fork inheritance, deadlines, platform,
+and residual analysis. ACCEPT requires P0/P1/P2 = 0/0/0; otherwise report every
+finding and minimum correction.
+
+### 3. Discipline and delivery
+
+Use only read-only static inspection. Do not execute Python, pytest, Ruff,
+formatter, CAD, install, network/model access, edits, Git mutation, or TK3.
+Return exact anchors, 82/179 confirmation, complete findings, RED prediction,
+Windows residual, prohibited-action confirmation, and ACCEPT/REJECT.
+
+## TK2 RP12 Static Candidate Rejection — TK2-E022
+
+Two independent reviewers completed TK2-RP12 against test
+`2eb7233624e6966013b3e569f189db8c9484763242f9b06862cb2b0b00abc6b2`
+at 4394 lines and artifact
+`122dd9d4fbccec7ac47cf64858c5fd819c6022c8a0134870d808e5d1c1575ec9`
+at 5513 lines. Both reconfirmed 82 shapes, 179 expected nodes, source absence,
+the pushed TK1 anchor, the sole missing-module RED, and the Windows residual.
+One accepted at 0/0/0; the full reviewer rejected at P0/P1/P2 = 0/1/0.
+
+Exact `os` attributes did not close transitive module access. An implementation
+could reach process functions through `threading._os` or store hidden authority
+in imported mutable state such as `re._cache`, including after first capturing
+those objects. This bypassed both the direct-`os` rule and the source-owned
+mutable-container rule.
+
+The controller added independent bans for every process-launch call family and
+replaced the single-module check with exact attribute tables for every allowed
+module, imported class, and module-shaped adapter parameter. Bare module objects
+may now appear only as the receiver of an approved attribute; the sole argument
+exceptions are the exact `os` capability check and exact POSIX adapter
+construction. Returning, capturing, containing, or forwarding imported modules
+is rejected, as are all private module caches and transitive OS references.
+
+No RED, Python, pytest, Ruff, formatter, production source, dependency,
+environment, CAD, network/model access, Git mutation, TK3 work, or external
+action occurred. The source remains absent.
+
+## TK2 RP13 Static Acceptance Candidate — TK2-E023
+
+The corrected frozen test is
+`ebd2f531711e4ad1fd246e6daba60ae263c2208550ecbb89aeb25f4a2fe46b94`
+at 4488 lines. It retains 82 static test shapes and 179 expected expanded
+nodes. Static shell checks report no trailing whitespace, over-100-character
+test line, duplicate top-level test name, extra one-second wait, or Git diff
+whitespace error. Production source remains absent, and the valid RED
+prediction remains one top-level missing-module import failure.
+
+## Task Packet TK2-RP13 — Static Zero-Finding Acceptance
+
+### 1. Anchor and authority
+
+TK-R1/TK-A02 and TK-R2/TK-A03 authorize this read-only review. Repository:
+`/Users/wangtao/Documents/DevProject/vibecad`; branch/HEAD/upstream:
+`codex/task-kernel-phase2@1ef1d5df4aaa67e43ea0041a0404cdb9b3388e4a`.
+Test:
+`ebd2f531711e4ad1fd246e6daba60ae263c2208550ecbb89aeb25f4a2fe46b94`,
+4488 lines, 82 shapes, 179 nodes. Source remains absent and dirty scope remains
+artifact plus test only. Existing higher-priority rules remain binding.
+
+### 2. Review focus and gate
+
+Reconfirm the anchor, replay the complete TK2 contract and all findings through
+E022, and begin with transitive module access, private module state, bare module
+capture/forwarding, module-shaped adapter parameters, and every process-launch
+family. Then repeat public API, capability, root/entry, unique authority,
+exclusion, release, fork, inheritance, reflection, import-time, deadline,
+platform, and residual analysis. ACCEPT requires P0/P1/P2 = 0/0/0; otherwise
+report every finding and the minimum correction.
+
+### 3. Discipline and delivery
+
+Use only read-only static inspection. Do not execute Python, pytest, Ruff,
+formatter, CAD, install, network/model access, edits, Git mutation, or TK3.
+Return exact anchors, 82/179 confirmation, complete findings, RED prediction,
+Windows residual, prohibited-action confirmation, and ACCEPT/REJECT.
+
+## TK2 Focused GREEN Attempt 1 and Recovery — TK2-E030
+
+The first approved focused GREEN command was
+`PYTHONPATH=src .venv/bin/pytest -q tests/test_workflow_lease.py`. It exited 1
+after 2.20 seconds with 175 passing and four failing nodes. This consumed the
+first of the two permitted focused GREEN attempts. The failures were:
+
+1. `test_path_like_resource_identifiers_are_always_hashed` attempted to capture
+   an optional `os.getxattr` attribute absent from this Python/macOS build before
+   exercising production behavior.
+2. `test_socket_lock_entry_is_rejected` attempted to bind an AF_UNIX socket at
+   a pytest temporary path longer than the platform socket-path limit before
+   exercising production behavior.
+3. `test_posix_open_flags_are_fail_closed` treated only the first absolute-root
+   open across several independently correct root walks as valid, despite its
+   later per-walk partition assertions.
+4. The production fork-child cleanup used mapping `.values()`, which preserved
+   runtime behavior but violated the frozen static forbidden-call policy.
+
+These are internal recovery items within TK-R2/TK-A03 and do not change product
+scope, authority, API, persistence semantics, or the TK2 allowlist. No further
+user approval is required. The controller corrected the three test-harness
+portability/false-red defects and replaced `.values()` with direct key
+iteration plus lookup without changing cleanup semantics.
+
+The recovery candidate is source
+`b47bad0e1a63c924df750e3a8874c0f27b7fd39250e1c4a8c432dcf05555a8e8`
+at 709 lines and test
+`33620f8cf831bbf141896fd62d1626aefe60d20f35238c652e7332a0ccc998db`
+at 4686 lines, retaining 82 static test shapes. `git diff --check`, Python
+syntax compilation, the 100-character line check, and the targeted forbidden
+`.values()` search are clean. One focused GREEN attempt remains. Two distinct
+static reviewers must accept this recovery candidate before that final attempt.
+
+## TK2 Recovery Static Acceptance — TK2-E031
+
+The first recovery review found that the initial short socket root was specific
+to Darwin and that setup failures were not fully covered by cleanup. A second
+review found that cleanup could touch a pre-existing colliding path when root
+creation failed. The controller closed both findings without changing product
+behavior: the test now uses `Path(os.path.realpath("/tmp"))`, covers the complete
+fixture lifecycle with `try/finally`, and guards path/root deletion with proof
+that the test created the root.
+
+Two distinct reviewers independently ACCEPT the final recovery candidate with
+P0/P1/P2 = 0/0/0. The accepted source remains
+`b47bad0e1a63c924df750e3a8874c0f27b7fd39250e1c4a8c432dcf05555a8e8`
+at 709 lines. The accepted test is
+`2559defdc3e579f060fa64434d74976388f049d7675beaefe4f55f235ec73104`
+at 4692 lines with 82 static test shapes. Static syntax, whitespace,
+line-length, forbidden `.values()`, ownership, lifecycle, POSIX portability,
+root-walk, optional-probe, and fork-child checks are clean. The sole remaining
+focused GREEN attempt is now authorized.
+
+## TK2 Focused GREEN Attempt 2 Breaker — TK2-E032
+
+The second focused GREEN command exited 1 after 2.32 seconds with 178 passing
+and one failing node. All runtime behavior nodes passed. The remaining static
+node reported only that its collected call names intersected its forbidden
+call set. A read-only AST diagnostic identified the exact intersection as
+`compile`, produced solely by the three approved top-level `re.compile` calls.
+
+This exposes an internally contradictory oracle: the same static test expressly
+permits exactly those three `re.compile` import-time assignments at lines
+4257-4258 while its broad call-name set independently forbids every `compile`
+attribute call. No production implementation can both use that explicit
+allowance and satisfy the broad prohibition. The controller therefore removed
+only `compile` from `forbidden_calls`; the exact `re.compile` receiver, target,
+import-time, module-attribute, capture, and alias restrictions remain binding.
+This is a frozen-test false-red correction, not a product or implementation
+scope change.
+
+Both originally budgeted focused GREEN attempts are consumed. No third focused
+attempt is permitted. Before proceeding, two distinct static reviewers must
+confirm the contradiction and minimum correction. If accepted, the next
+executable gate is the already-required repository regression rather than a
+third focused retry; any lease failure there is a new circuit breaker.
+
+## TK2 Full Regression Breaker and Recovery — TK2-E033
+
+After two independent reviewers accepted the node-sensitive `compile` oracle,
+the controller ran the required full repository regression rather than a third
+focused retry. It exited 1 with 1478 passing, 81 deselected, two platform fork
+deprecation warnings, and one lease static-oracle failure. The failure reported
+one unsafe module-object load at production line 205: the dynamic
+`hasattr(os_module, name)` capability-presence loop. All runtime nodes passed.
+
+The implementation now removes that dynamic lookup loop. Every required POSIX
+flag, support set, callable, and membership remains checked through its exact
+approved attribute expression; a missing exact attribute is caught as
+`AttributeError` and mapped fail-closed to `LOCK_UNAVAILABLE`. This preserves
+the public missing-capability behavior while satisfying the no-dynamic-module-
+lookup boundary. Two distinct static reviewers must accept this recovery before
+the full regression is rerun. A further unexplained lease failure remains a
+circuit breaker.
+
+## TK2 Capability Recovery Review Correction — TK2-E034
+
+The first recovery candidate mapped `AttributeError` to `LeaseError` inside the
+active exception handler. Independent review correctly found that this would
+retain the native exception in `LeaseError.__context__`, violating the stable
+error contract even though the visible code was correct. The handler now only
+records a boolean; `LeaseError(LOCK_UNAVAILABLE)` is raised after leaving the
+handler, preserving both fail-closed behavior and empty cause/context. The
+candidate must retain two-reviewer zero-finding acceptance before regression.
+
+## TK2 GREEN and Compatibility Acceptance Candidate — TK2-E035
+
+Two independent reviewers accepted the corrected capability recovery with
+P0/P1/P2 = 0/0/0. The repeated full command
+`PYTHONPATH=src .venv/bin/pytest -q` then exited 0 with 1479 passing, 81
+deselected, and two expected macOS deprecation warnings for the deliberate
+fork-in-a-multithreaded-process tests; both warned tests passed. Runtime was
+47.23 seconds.
+
+Ruff check passed. Ruff format check initially requested a mechanical test-file
+format, which the controller applied. After formatting, the focused lease suite
+exited 0 with 179 passing in 6.02 seconds; Ruff check, Ruff format check, pure
+module import, `git diff --check`, and the exact three-path allowlist all pass.
+
+The final review candidate is source
+`7b2a7689d29a2246f4f126c8d3c0d68756e9414ce801c51468a31ce897d55fcf`
+at 691 lines and test
+`ecedf0f172c3fda97b68ae0bac6e84d796d7c1340583bb0fd3fcb4f6c7eadd22`
+at 4616 lines. The artifact is the only modified tracked path; source and test
+are the only untracked paths. A distinct complete read-only review must return
+P0/P1/P2 = 0/0/0 before named-file staging and staged gates.
+
+## TK2 Final Independent Acceptance — TK2-E036
+
+Two distinct complete read-only reviews ACCEPT the formatted final candidate at
+P0/P1/P2 = 0/0/0. They independently reconfirm public API and stable errors,
+same-process and cross-process exclusion, fork isolation, exact-owner release,
+descriptor cleanup/rollback, root and entry safety, capability fail-closed
+behavior, the static source boundary, and absence of material false-red or
+false-green risk.
+
+The accepted residuals remain deliberate: Windows byte-range locking has only
+deterministic adapter coverage and the production selector fails closed there;
+live behavior is unclaimed. POSIX operation requires the declared dir-fd,
+no-follow, advisory-lock, and at-fork capabilities and fails closed when they
+are unavailable. Network/distributed-filesystem durability is outside TK2.
+The candidate is authorized for exact three-file staging and staged gates.
+
+## TK2 Staged Gate Acceptance — TK2-E037
+
+Only the three authorized TK2 paths were staged. `git diff --cached --check`
+and the exact staged-name inspection passed. The staged full regression exited
+0 with 1479 passing and 81 deselected in 59.89 seconds. Staged-candidate Ruff
+check, Ruff format check, pure module import, and cached diff whitespace check
+all passed. The named commit and non-force push are authorized.
