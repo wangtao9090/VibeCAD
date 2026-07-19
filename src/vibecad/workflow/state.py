@@ -150,6 +150,7 @@ class TaskEvent(StrEnum):
     REQUIRE_CLEANUP = "require_cleanup"
     CONFIRM_COMMITTED = "confirm_committed"
     CONFIRM_UNCOMMITTED = "confirm_uncommitted"
+    CONFIRM_PRE_CANDIDATE = "confirm_pre_candidate"
 
 
 class NextAction(StrEnum):
@@ -189,6 +190,8 @@ _TRANSITIONS: dict[tuple[TaskStatus, TaskEvent], TaskStatus] = {
     (TaskStatus.PROGRAM_READY, TaskEvent.START_VALIDATION): TaskStatus.VALIDATING_PROGRAM,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.VALIDATE_PROGRAM): TaskStatus.EXECUTING,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REJECT_PROGRAM): TaskStatus.NEEDS_INPUT,
+    (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
+    (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.EXECUTING, TaskEvent.COMPLETE_EXECUTION): TaskStatus.VERIFYING,
     (TaskStatus.EXECUTING, TaskEvent.FAIL_EXECUTION): TaskStatus.ROLLING_BACK,
     (TaskStatus.EXECUTING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
@@ -201,13 +204,15 @@ _TRANSITIONS: dict[tuple[TaskStatus, TaskEvent], TaskStatus] = {
     (TaskStatus.COMMITTING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.COMMITTING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.ROLLING_BACK, TaskEvent.COMPLETE_ROLLBACK): TaskStatus.FAILED,
-    (TaskStatus.ROLLING_BACK, TaskEvent.REQUEST_INPUT): TaskStatus.NEEDS_INPUT,
     (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.RECOVERY_REQUIRED, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
     (TaskStatus.RECOVERY_REQUIRED, TaskEvent.CONFIRM_UNCOMMITTED): TaskStatus.ROLLING_BACK,
+    (TaskStatus.RECOVERY_REQUIRED, TaskEvent.CONFIRM_PRE_CANDIDATE): TaskStatus.PROGRAM_READY,
+    (TaskStatus.CLEANUP_REQUIRED, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
     (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_UNCOMMITTED): TaskStatus.ROLLING_BACK,
+    (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_PRE_CANDIDATE): TaskStatus.PROGRAM_READY,
 }
 
 
@@ -1066,9 +1071,10 @@ class TaskRun:
         candidate_required = self.status in _CANDIDATE_ACTIVE_STATUSES | {
             TaskStatus.SUCCEEDED,
             TaskStatus.FAILED,
-            TaskStatus.RECOVERY_REQUIRED,
-            TaskStatus.CLEANUP_REQUIRED,
-        }
+        } or (
+            candidate_created
+            and self.status in {TaskStatus.RECOVERY_REQUIRED, TaskStatus.CLEANUP_REQUIRED}
+        )
         if candidate_required and self.candidate_revision is None:
             raise _failure(
                 TaskStateErrorCode.INVARIANT_VIOLATION,
@@ -1119,6 +1125,12 @@ class TaskRun:
                     TaskStateErrorCode.INVARIANT_VIOLATION,
                     "/committed_revision",
                     "succeeded task requires committed revision",
+                )
+            if self.committed_revision != self.candidate_revision:
+                raise _failure(
+                    TaskStateErrorCode.INVARIANT_VIOLATION,
+                    "/committed_revision",
+                    "committed revision must equal the verified candidate",
                 )
             if not any(
                 report.passed and report.candidate_revision == self.candidate_revision
@@ -1241,12 +1253,11 @@ class TaskRun:
                 "candidate failure must pass through rolling_back",
             )
         if self.status is TaskStatus.NEEDS_INPUT and self.candidate_revision is not None:
-            if TaskStatus.ROLLING_BACK not in {record.to_status for record in self.transitions}:
-                raise _failure(
-                    TaskStateErrorCode.INVARIANT_VIOLATION,
-                    "/transitions",
-                    "candidate needs_input must pass through rolling_back",
-                )
+            raise _failure(
+                TaskStateErrorCode.INVARIANT_VIOLATION,
+                "/candidate_revision",
+                "needs_input cannot retain a published candidate",
+            )
 
     @property
     def next_action(self) -> NextAction:
@@ -1378,6 +1389,7 @@ def _sequences(values: list[int], path: str) -> None:
 
 def _transition_history(records: tuple[TaskTransitionRecord, ...], status: TaskStatus) -> None:
     current = TaskStatus.CREATED
+    candidate_published = False
     for record in records:
         if record.from_status is not current:
             raise _failure(
@@ -1392,6 +1404,22 @@ def _transition_history(records: tuple[TaskTransitionRecord, ...], status: TaskS
                 "/transitions",
                 "transition history contains an illegal event",
             )
+        if record.event is TaskEvent.CONFIRM_PRE_CANDIDATE and candidate_published:
+            raise _failure(
+                TaskStateErrorCode.INVARIANT_VIOLATION,
+                "/transitions",
+                "pre-candidate confirmation has candidate provenance",
+            )
+        if record.event in {TaskEvent.CONFIRM_COMMITTED, TaskEvent.CONFIRM_UNCOMMITTED} and not (
+            candidate_published
+        ):
+            raise _failure(
+                TaskStateErrorCode.INVARIANT_VIOLATION,
+                "/transitions",
+                "candidate confirmation lacks candidate provenance",
+            )
+        if record.event is TaskEvent.VALIDATE_PROGRAM:
+            candidate_published = True
         current = record.to_status
     if current is not status:
         raise _failure(
@@ -1441,6 +1469,20 @@ def transition_task(
             TaskStateErrorCode.INVALID_TRANSITION,
             "/event",
             "event is not allowed from current status",
+        )
+    if event is TaskEvent.CONFIRM_PRE_CANDIDATE and task.candidate_revision is not None:
+        raise _failure(
+            TaskStateErrorCode.INVALID_TRANSITION,
+            "/event",
+            "pre-candidate confirmation requires no published candidate",
+        )
+    if event in {TaskEvent.CONFIRM_COMMITTED, TaskEvent.CONFIRM_UNCOMMITTED} and (
+        task.candidate_revision is None
+    ):
+        raise _failure(
+            TaskStateErrorCode.INVALID_TRANSITION,
+            "/event",
+            "candidate confirmation requires a published candidate",
         )
     if event is TaskEvent.SUBMIT_PROGRAM:
         if type(program) is not ModelProgram:
@@ -1495,13 +1537,6 @@ def transition_task(
             )
         if type(error) is not StepError:
             raise _failure(TaskStateErrorCode.INVALID_TYPE, "/error", "expected StepError")
-    elif event is TaskEvent.REQUEST_INPUT:
-        if error is not None and type(error) is not StepError:
-            raise _failure(TaskStateErrorCode.INVALID_TYPE, "/error", "expected StepError or null")
-        if error is None and task.last_error is None:
-            raise _failure(
-                TaskStateErrorCode.MISSING_ERROR, "/error", "needs_input requires structured error"
-            )
     elif error is not None:
         raise _failure(
             TaskStateErrorCode.INVALID_VALUE, "/error", "error is only accepted on failure events"
@@ -1545,6 +1580,12 @@ def transition_task(
                 "/committed_revision",
                 "committed revision is required",
             )
+        if committed_revision != task.candidate_revision:
+            raise _failure(
+                TaskStateErrorCode.INVARIANT_VIOLATION,
+                "/committed_revision",
+                "committed revision must equal the verified candidate",
+            )
         if not any(
             report.passed and report.candidate_revision == task.candidate_revision
             for report in task.verification_reports
@@ -1576,9 +1617,9 @@ def transition_task(
         verification_reports=reports,
         last_error=(
             None
-            if event is TaskEvent.SUBMIT_PROGRAM
+            if event in {TaskEvent.SUBMIT_PROGRAM, TaskEvent.CONFIRM_PRE_CANDIDATE}
             else error
-            if event in failure_events or (event is TaskEvent.REQUEST_INPUT and error is not None)
+            if event in failure_events
             else task.last_error
         ),
         transitions=task.transitions

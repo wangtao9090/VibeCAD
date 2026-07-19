@@ -17,7 +17,12 @@ from pathlib import Path
 import pytest
 
 import vibecad.workflow.store as store_module
-from vibecad.workflow.contracts import AcceptanceSpec, ModelProgram
+from vibecad.workflow.contracts import (
+    AcceptanceSpec,
+    ModelCommand,
+    ModelProgram,
+    ValueSource,
+)
 from vibecad.workflow.lease import (
     LeaseError,
     LeaseErrorCode,
@@ -80,6 +85,32 @@ def _task_with_unicode(text: str) -> TaskRun:
         base_revision=BASE_REVISION,
         operations=(),
         acceptance=AcceptanceSpec(id=text, criteria=()),
+    )
+    return transition_task(task, TaskEvent.SUBMIT_PROGRAM, program=program)
+
+
+def _task_with_float() -> TaskRun:
+    task = transition_task(_task(), TaskEvent.REQUEST_PLAN)
+    program = ModelProgram(
+        task_id=TASK_ID,
+        base_revision=BASE_REVISION,
+        operations=(
+            ModelCommand(
+                id="inspect-float",
+                op="inspect_model",
+                target={},
+                args={
+                    "threshold": 1.25,
+                    "negative_zero": -0.0,
+                    "subnormal": 5e-324,
+                    "maximum": 1.7976931348623157e308,
+                },
+                preserve=(),
+                source=ValueSource.MODEL,
+                depends_on=(),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-float", criteria=()),
     )
     return transition_task(task, TaskEvent.SUBMIT_PROGRAM, program=program)
 
@@ -216,6 +247,7 @@ def test_public_api_and_exact_signatures_are_stable():
         "create": ("self", "task_run"),
         "load": ("self", "task_id"),
         "compare_and_set": ("self", "task_id", "expected_generation", "task_run"),
+        "validate_record": ("self", "task_run", "generation"),
     }
     for method_name, names in expected.items():
         parameters = inspect.signature(getattr(TaskRunStore, method_name)).parameters
@@ -254,6 +286,35 @@ def test_create_load_and_compare_and_set_round_trip(store: TaskRunStore, store_r
     path = store_root / _record_name()
     assert path.read_bytes() == _record_bytes(_task(), generation=1)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_finite_float_task_content_round_trips_canonically(store: TaskRunStore) -> None:
+    task = _task_with_float()
+    assert store.validate_record(task, 0) is None
+    assert store.create(task) == StoredTaskRun(generation=0, task_run=task)
+    loaded = store.load(TASK_ID)
+    assert loaded == StoredTaskRun(generation=0, task_run=task)
+    assert loaded.task_run.program is not None
+    args = loaded.task_run.program.operations[0].args
+    assert all(type(args[name]) is float for name in args)
+    assert float.hex(args["threshold"]) == float.hex(1.25)
+    assert float.hex(args["negative_zero"]) == float.hex(-0.0)
+    assert float.hex(args["subnormal"]) == float.hex(5e-324)
+    assert float.hex(args["maximum"]) == float.hex(1.7976931348623157e308)
+
+
+def test_write_preflight_uses_the_same_task_decode_budget(
+    store: TaskRunStore,
+    store_root: Path,
+) -> None:
+    assert store.validate_record(_task_with_unicode("x" * 4096), 0) is None
+    with pytest.raises(TaskStoreError) as caught:
+        store.validate_record(_task_with_unicode("x" * 4097), 0)
+    _assert_error(caught, TaskStoreErrorCode.CORRUPT_RECORD)
+    with pytest.raises(TaskStoreError) as caught:
+        store.create(_task_with_unicode("x" * 4097))
+    _assert_error(caught, TaskStoreErrorCode.CORRUPT_RECORD)
+    assert list(store_root.iterdir()) == []
 
 
 def test_stored_task_run_is_frozen_and_uses_exact_types():
@@ -516,7 +577,7 @@ def test_duplicate_keys_are_rejected_even_when_last_wins_has_valid_checksum(
 
 
 @pytest.mark.parametrize("number", [b"1.0", b"1e0", b"-0.0", b"NaN", b"Infinity", b"-Infinity"])
-def test_every_float_or_nonfinite_number_is_rejected_with_matching_checksum(
+def test_integer_envelope_field_rejects_float_or_nonfinite_with_matching_checksum(
     store: TaskRunStore, store_root: Path, number: bytes
 ):
     task_raw = _canonical(_task().to_mapping())
@@ -2125,6 +2186,7 @@ def test_source_uses_only_closed_storage_and_import_surfaces():
         "enum",
         "hashlib",
         "json",
+        "math",
         "os",
         "pathlib",
         "re",

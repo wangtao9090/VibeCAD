@@ -187,11 +187,12 @@ The acceptance gate is:
   base conflict can enter needs_input directly. Terminal states have no
   successors.
 - TK-D21 — Stage C performs zero automatic step retries and zero automatic
-  repair/replan loops. label_expired, conflict, or a structured needs_input
-  failure rolls the candidate back and returns needs_input. Geometry, runtime,
-  policy, cancellation, and required verification failures roll back to failed.
-  R-B16 prevents broader tool-specific retry policy until stable semantic tool
-  error codes exist.
+  repair/replan loops. Pre-candidate validation, lease, or base conflicts may
+  return needs_input. After a candidate revision is durably published, every
+  execution, geometry, runtime, policy, cancellation, and required-verification
+  failure rolls back to failed; a revised plan starts a new TaskRun under
+  TK-D33. R-B16 prevents broader tool-specific retry policy until stable
+  semantic tool error codes and multi-attempt lineage exist.
 - TK-D22 — Existing low-level MCP tools and server.py remain unchanged. The new
   TaskService is internal and must not be publicly exposed while those write
   paths can bypass its project lease.
@@ -416,7 +417,9 @@ Gates:
 
 Named files:
 
+- src/vibecad/workflow/state.py
 - src/vibecad/workflow/service.py
+- tests/test_task_state.py
 - tests/test_task_service.py
 - docs/orchestrated/vibecad-task-kernel-phase2.md
 
@@ -439,7 +442,9 @@ Gates:
 2. Fake-port coverage of every state and failure edge, including proof that
    rejection before candidate creation performs no project/CAD call.
 3. Store-CAS conflict and project-writer contention; recovery after each
-   commit window; candidate-present failures always traverse rolling_back.
+   commit window; every failure after candidate publication traverses
+   rolling_back, while an unpublished begin/CAS prepare abort performs no
+   ModelProgram command and is recorded as a pre-candidate conflict.
 4. Invalid/failed/forged verification can never invoke HEAD commit.
 5. Cumulative Stage C, C1-C5, full normal suite, lint, format, diff, and
    independent review.
@@ -8911,3 +8916,165 @@ trusted-same-process boundary, and (2) ZIP central-directory parsing before the
 post-open entry-count budget. Neither surface is model-controlled or publicly
 exposed in Stage C. TK8 must preserve the no-callback interval between
 seal/immutable reload, evidence collection, verification, and commit.
+
+## TK7 Commit, Push, and TK8 Contract Resolution — TK8-E001
+
+TK7 was committed as `2a5aebbf61a1bdd119e9250e25835f728099ff7f`
+with the exact message
+`feat(execution): collect trusted CAD verification evidence` and pushed
+non-force. The local branch, upstream branch, and clean worktree then matched
+exactly before TK8.
+
+Three independent TK8 composition reviews found two contradictions in the
+earlier service-only packet. First, a rolled-back candidate cannot enter
+`NEEDS_INPUT` and later bind a different revision in the same schema-v1
+TaskRun: its audit histories are intentionally bound to one candidate, while
+the terminal coordinator capability and removed staging revision cannot be
+reused. Second, `CandidateCoordinator.begin` may require cleanup or recovery
+before it can return a candidate revision, while the earlier
+`VALIDATING_PROGRAM` state could not persist either attention outcome.
+
+TK8 resolves these without weakening isolation, reusing a revision, deleting
+diagnostics, or adding a repair loop:
+
+- TK-D33 — In TK-R1, only failures before a candidate is durably published may
+  produce `NEEDS_INPUT`. Once `VALIDATE_PROGRAM` has bound a candidate,
+  execution, geometry, policy, cancellation, and required-verification
+  failures roll back to `FAILED`, even if a low-level StepError carries
+  `needs_input=true`. A caller that wants a revised plan creates a new TaskRun;
+  multi-attempt lineage is deferred to a future schema rather than silently
+  overwriting the one-candidate audit record. This supersedes only the
+  candidate-origin `NEEDS_INPUT` clause of TK-D21.
+- TK-D34 — `VALIDATING_PROGRAM` may enter `RECOVERY_REQUIRED` or
+  `CLEANUP_REQUIRED` before a candidate revision is published. A successful
+  reconcile proving that no candidate was committed uses the new explicit
+  `CONFIRM_PRE_CANDIDATE` event to return to `PROGRAM_READY`, clearing the
+  attention error; retry still requires an explicit caller `continue_task`.
+  `CLEANUP_REQUIRED` may escalate to `RECOVERY_REQUIRED` if reconciliation
+  discovers ambiguity.
+- TK-D35 — A candidate returned by `begin` is a private prepare result until
+  the `VALIDATE_PROGRAM` CAS publishes its revision. If that CAS cannot be
+  confirmed, TaskService invokes exactly one coordinator rollback before
+  releasing the lease and records a pre-candidate conflict when task storage
+  is available. No ModelProgram command has executed, and the unpublished
+  staging attempt is not represented as a durable candidate. Every failure
+  after the publish CAS still enters durable `ROLLING_BACK` before rollback.
+- TK-D36 — Mutating service calls require an explicit expected TaskRun
+  generation. `DURABILITY_UNCERTAIN` is accepted only after exact generation
+  and TaskRun readback; semantic CAD, receipt, commit, and rollback calls are
+  never repeated to resolve a task-store write.
+
+The TK8 named-file packet therefore adds the already-approved overall-allowlist
+paths `src/vibecad/workflow/state.py` and `tests/test_task_state.py` to
+`service.py`, `test_task_service.py`, and this artifact. The nine-commit budget,
+public/MCP boundary, model policy, dependency set, and TK9 scope are unchanged.
+This is an internal consistency repair under the user's standing instruction
+to continue without internal approval pauses; it does not introduce a new
+product capability or public behavior surface.
+
+## TK8 State Repair and Genuine RED — TK8-E002
+
+The TK-D33/TK-D34 state repair was first frozen in executable tests. Candidate
+failures can no longer transition from `ROLLING_BACK` to `NEEDS_INPUT`; an
+input hint on a published candidate remains diagnostic data but the attempt
+finishes `FAILED`. Pre-candidate cleanup/recovery attention has explicit origin
+guards, serialized transition provenance checks, cleanup-to-recovery
+escalation, and `CONFIRM_PRE_CANDIDATE` clears the attention error before an
+explicit retry. The focused state suite passed `434` tests.
+
+Before any service implementation existed, the new transactional service
+oracle passed Ruff, formatting, byte-code compilation, and `git diff --check`.
+The exact command
+`PYTHONPATH=src .venv/bin/pytest -q tests/test_task_service.py` then failed only
+during collection with
+`ModuleNotFoundError: No module named 'vibecad.workflow.service'`. This is the
+genuine absent-module RED for TK8. The oracle includes the unpublished
+begin/publish window, exact and non-exact durability-uncertain readback,
+post-publication CAS conflict, coordinator-internal abort, rollback attention,
+post-HEAD final-CAS recovery, and no-recommit reconciliation cases before the
+production module is introduced.
+
+## TK8 Transactional GREEN, Store Repair, and Final Acceptance — TK8-E003
+
+`TaskService` now composes the exact TaskRunStore, LocalRevisionStore,
+ResourceLeaseManager, CandidateCoordinator, InProcessCadExecutor, and trusted
+acceptance verifier as one internal transactional boundary. The successful
+path durably publishes every state transition, step result, artifact, and
+verification report before the one permitted candidate commit. Pre-candidate
+failure remains retryable through an explicit caller action; every published
+candidate failure durably rolls back to `FAILED`; post-HEAD ambiguity never
+recommits or rolls back. The service remains direct-module-only and adds no
+MCP, network, model, callback, repair loop, semantic retry, or public tool
+surface.
+
+Real TaskRunStore composition review exposed and closed three fake-hidden
+defects. These decisions supersede the narrower TK3 assumptions only where
+stated:
+
+- TK-D37 — Task records accept finite canonical Python JSON float tokens
+  because ModelProgram, StepResult, and VerificationReport legitimately carry
+  binary64 values. NaN and infinities remain forbidden, envelope integer
+  fields remain exact integers, and canonical byte equality rejects alternate
+  numeric spellings. Every create, compare-and-set, and `validate_record`
+  performs the same encode-then-full-decode self-check before any lease or file
+  mutation. This supersedes TK3's blanket float-free wording without changing
+  its duplicate-key, checksum, canonical JSON, or bounded-resource guarantees.
+- TK-D38 — A submitted program must fit both the 512 KiB service budget and the
+  complete durable TaskRun decode envelope before the first SUBMIT CAS.
+  Oversized strings, node floods, excessive depth, or domain decode-budget
+  violations return fixed `INVALID_INPUT` while the original generation and
+  `NEEDS_PLAN`/`NEEDS_INPUT` state remain unchanged. Store create and CAS use
+  the identical self-check, so later step or verification values can never
+  replace a readable record with an unreadable one.
+- TK-D39 — Project reconciliation journal state describes only the latest
+  project transaction and is not a TaskRun commit certificate. After exact
+  durable HEAD and live SessionBinding agreement, TaskService walks at most
+  256 immutable RevisionRef parents and validates the HEAD manifest, candidate,
+  and exact task base record. A passing report bound to the immutable candidate
+  confirms success even after later descendants replace HEAD; reaching the
+  verified base first confirms non-commit. Missing, malformed, cyclic, broken,
+  or over-budget ancestry remains `RECOVERY_REQUIRED`.
+- TK-D40 — `VALIDATING_PROGRAM` is a recoverable crash state. Reconcile first
+  acquires the project lease, then durably marks recovery, then asks the
+  coordinator to settle either a no-begin attempt or a private begin result
+  that crashed before candidate publication. Exact pre-candidate settlement
+  returns to `PROGRAM_READY` and clears the attention error.
+
+The final non-vacuous evidence is:
+
+- focused state/store/service group: `673 passed in 2.95s`;
+- cumulative TK1–TK8 plus Phase-1 compatibility: `1770 passed, 1 deselected
+  in 11.97s`;
+- full normal repository: `2263 passed, 81 deselected, 2 warnings in 23.71s`;
+  the warnings are only the two accepted macOS multi-threaded-fork
+  deprecations;
+- whole-repository Ruff, six-file format, Python byte-compilation, pure import,
+  forbidden-module, whitespace, exact branch/upstream, and seven-path
+  allowlist gates passed; and
+- a real TaskRunStore test traversed float-bearing ModelProgram, StepResult,
+  and VerificationReport values from submit through terminal reload. Finite
+  values including `-0.0`, the minimum subnormal, and maximum finite binary64
+  retain their exact `float.hex()` representation.
+
+Independent store and service/recovery reviews both returned ACCEPT with
+P0/P1 `0/0`. The final service review additionally ran the complete Store +
+Service pair (`238 passed`) and confirmed the validating crash window,
+candidate/base ancestry, missing-base fail-closed behavior, and write-before-
+side-effect ordering. The accepted residuals are the deliberately narrower
+durable subset of the in-memory domain contract, same-CPython canonical float
+representation, and the 256-revision recovery walk budget; all reject or hold
+for recovery before unsafe mutation.
+
+The pre-E003 anchors are:
+
+- artifact SHA-256
+  `e4cbe50dde80df602b88d193c177ce89916b786badfd8f690e75773eed9e59c4`,
+  8995 lines;
+- state/store/service SHA-256 respectively
+  `af74511fceb6ad228a6218593190153e8b9bc4a2284e6e36fecffe123f1a7867`,
+  `a7225b78c1deadc3701cca4fc85e836ccc3b4f462dbd29f9eba89d4931790d84`,
+  and `a60b8f851a3dba61d2d03b6b6eed8c19dabc83dd4fd2927e3fa4978abb33757d`;
+- state/store/service test SHA-256 respectively
+  `3bb4a1cf9c07b696b0d38a367385d77bc919b2f0c05b842433f2cc07916c4a03`,
+  `05da8ccd5e8b354fbec82a0bcd10802ecf190849799384099475f817f790309b`,
+  and `46e5e104cdf8f3c6d843b33e1a88f376971e9f2598844c89b532a504e6d0a246`.

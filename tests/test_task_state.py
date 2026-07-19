@@ -47,7 +47,8 @@ TASK_ID = "task_0123456789abcdef0123456789abcdef"
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
 BASE_REVISION = "revision_0123456789abcdef0123456789abcdef"
 CANDIDATE_REVISION = "revision_11111111111111111111111111111111"
-COMMITTED_REVISION = "revision_22222222222222222222222222222222"
+COMMITTED_REVISION = CANDIDATE_REVISION
+OTHER_REVISION = "revision_22222222222222222222222222222222"
 
 
 def _error(*, needs_input: bool = False) -> StepError:
@@ -160,8 +161,6 @@ def test_pre_candidate_transition_paths(events, expected):
         ),
         ((TaskEvent.FAIL_EXECUTION, TaskEvent.COMPLETE_ROLLBACK), TaskStatus.FAILED, False),
         ((TaskEvent.FAIL_VERIFICATION, TaskEvent.COMPLETE_ROLLBACK), TaskStatus.FAILED, False),
-        ((TaskEvent.FAIL_EXECUTION, TaskEvent.REQUEST_INPUT), TaskStatus.NEEDS_INPUT, True),
-        ((TaskEvent.FAIL_VERIFICATION, TaskEvent.REQUEST_INPUT), TaskStatus.NEEDS_INPUT, True),
         ((TaskEvent.REQUIRE_RECOVERY,), TaskStatus.RECOVERY_REQUIRED, False),
         ((TaskEvent.REQUIRE_CLEANUP,), TaskStatus.CLEANUP_REQUIRED, False),
     ],
@@ -188,7 +187,7 @@ def test_candidate_transition_paths(events, expected, needs_input):
     assert task.status is expected
     if expected is TaskStatus.SUCCEEDED:
         assert task.committed_revision == COMMITTED_REVISION
-    if expected in {TaskStatus.FAILED, TaskStatus.NEEDS_INPUT}:
+    if expected is TaskStatus.FAILED:
         assert task.last_error == _error(needs_input=needs_input)
 
 
@@ -441,6 +440,132 @@ def test_reconciliation_requires_durable_candidate_evidence_and_preserves_error(
     assert rollback.last_error == _error()
 
 
+def test_committed_revision_must_equal_the_verified_candidate_at_transition_and_parse():
+    committing = _to_committing()
+    with pytest.raises(TaskStateError) as caught:
+        transition_task(
+            committing,
+            TaskEvent.COMMIT,
+            committed_revision=OTHER_REVISION,
+        )
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/committed_revision",
+    )
+
+    succeeded = transition_task(
+        committing,
+        TaskEvent.COMMIT,
+        committed_revision=CANDIDATE_REVISION,
+    ).to_mapping()
+    succeeded["committed_revision"] = OTHER_REVISION
+    with pytest.raises(TaskStateError) as caught:
+        TaskRun.from_mapping(succeeded)
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/committed_revision",
+    )
+
+
+@pytest.mark.parametrize(
+    "attention_event",
+    [TaskEvent.REQUIRE_CLEANUP, TaskEvent.REQUIRE_RECOVERY],
+)
+def test_pre_candidate_attention_round_trips_and_confirms_back_to_program_ready(
+    attention_event,
+):
+    validating = transition_task(
+        transition_task(
+            transition_task(_task(), TaskEvent.REQUEST_PLAN),
+            TaskEvent.SUBMIT_PROGRAM,
+            program=_program(),
+        ),
+        TaskEvent.START_VALIDATION,
+    )
+    attention = transition_task(validating, attention_event, error=_error())
+    assert attention.candidate_revision is None
+    assert TaskRun.from_mapping(attention.to_mapping()) == attention
+
+    resumed = transition_task(attention, TaskEvent.CONFIRM_PRE_CANDIDATE)
+    assert resumed.status is TaskStatus.PROGRAM_READY
+    assert resumed.program == validating.program
+    assert resumed.candidate_revision is None
+    assert resumed.last_error is None
+
+
+def test_pre_candidate_cleanup_can_escalate_but_candidate_confirmations_cannot_cross_origins():
+    validating = transition_task(
+        transition_task(
+            transition_task(_task(), TaskEvent.REQUEST_PLAN),
+            TaskEvent.SUBMIT_PROGRAM,
+            program=_program(),
+        ),
+        TaskEvent.START_VALIDATION,
+    )
+    cleanup = transition_task(validating, TaskEvent.REQUIRE_CLEANUP, error=_error())
+    recovery = transition_task(cleanup, TaskEvent.REQUIRE_RECOVERY, error=_error())
+    assert recovery.status is TaskStatus.RECOVERY_REQUIRED
+    assert recovery.candidate_revision is None
+
+    with pytest.raises(TaskStateError) as caught:
+        transition_task(recovery, TaskEvent.CONFIRM_UNCOMMITTED)
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVALID_TRANSITION,
+        "/event",
+    )
+    with pytest.raises(TaskStateError) as caught:
+        transition_task(
+            recovery,
+            TaskEvent.CONFIRM_COMMITTED,
+            committed_revision=COMMITTED_REVISION,
+        )
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVALID_TRANSITION,
+        "/event",
+    )
+
+    candidate_attention = transition_task(
+        _to_executing(),
+        TaskEvent.REQUIRE_RECOVERY,
+        error=_error(),
+    )
+    with pytest.raises(TaskStateError) as caught:
+        transition_task(candidate_attention, TaskEvent.CONFIRM_PRE_CANDIDATE)
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVALID_TRANSITION,
+        "/event",
+    )
+
+    forged_pre = transition_task(recovery, TaskEvent.CONFIRM_PRE_CANDIDATE).to_mapping()
+    forged_pre["status"] = TaskStatus.SUCCEEDED.value
+    forged_pre["transitions"][-1]["event"] = TaskEvent.CONFIRM_COMMITTED.value
+    forged_pre["transitions"][-1]["to_status"] = TaskStatus.SUCCEEDED.value
+    with pytest.raises(TaskStateError) as caught:
+        TaskRun.from_mapping(forged_pre)
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/transitions",
+    )
+
+    forged_candidate = candidate_attention.to_mapping()
+    forged_candidate["status"] = TaskStatus.PROGRAM_READY.value
+    forged_candidate["transitions"].append(
+        {
+            "schema_version": 1,
+            "sequence": len(forged_candidate["transitions"]) + 1,
+            "event": TaskEvent.CONFIRM_PRE_CANDIDATE.value,
+            "from_status": TaskStatus.RECOVERY_REQUIRED.value,
+            "to_status": TaskStatus.PROGRAM_READY.value,
+        }
+    )
+    with pytest.raises(TaskStateError) as caught:
+        TaskRun.from_mapping(forged_candidate)
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/transitions",
+    )
+
+
 def test_nested_contract_errors_are_translated_with_full_escaped_parent_pointer():
     task = _to_executing().to_mapping()
     task["steps"] = [
@@ -547,9 +672,17 @@ def test_every_status_event_pair_has_exact_transition_or_rejection():
         verification=_report(passed=True),
     )
     rolling_back = transition_task(executing, TaskEvent.FAIL_EXECUTION, error=_error())
+    validating = transition_task(
+        transition_task(
+            transition_task(_task(), TaskEvent.REQUEST_PLAN),
+            TaskEvent.SUBMIT_PROGRAM,
+            program=_program(),
+        ),
+        TaskEvent.START_VALIDATION,
+    )
     needs_input = transition_task(
-        rolling_back,
-        TaskEvent.REQUEST_INPUT,
+        validating,
+        TaskEvent.REJECT_PROGRAM,
         error=_error(needs_input=True),
     )
     status_tasks = {
@@ -597,6 +730,8 @@ def test_every_status_event_pair_has_exact_transition_or_rejection():
         (TaskStatus.PROGRAM_READY, TaskEvent.START_VALIDATION): TaskStatus.VALIDATING_PROGRAM,
         (TaskStatus.VALIDATING_PROGRAM, TaskEvent.VALIDATE_PROGRAM): TaskStatus.EXECUTING,
         (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REJECT_PROGRAM): TaskStatus.NEEDS_INPUT,
+        (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
+        (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
         (TaskStatus.EXECUTING, TaskEvent.COMPLETE_EXECUTION): TaskStatus.VERIFYING,
         (TaskStatus.EXECUTING, TaskEvent.FAIL_EXECUTION): TaskStatus.ROLLING_BACK,
         (TaskStatus.EXECUTING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
@@ -609,11 +744,11 @@ def test_every_status_event_pair_has_exact_transition_or_rejection():
         (TaskStatus.COMMITTING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
         (TaskStatus.COMMITTING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
         (TaskStatus.ROLLING_BACK, TaskEvent.COMPLETE_ROLLBACK): TaskStatus.FAILED,
-        (TaskStatus.ROLLING_BACK, TaskEvent.REQUEST_INPUT): TaskStatus.NEEDS_INPUT,
         (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
         (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
         (TaskStatus.RECOVERY_REQUIRED, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
         (TaskStatus.RECOVERY_REQUIRED, TaskEvent.CONFIRM_UNCOMMITTED): TaskStatus.ROLLING_BACK,
+        (TaskStatus.CLEANUP_REQUIRED, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
         (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
         (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_UNCOMMITTED): TaskStatus.ROLLING_BACK,
     }
@@ -633,8 +768,6 @@ def test_every_status_event_pair_has_exact_transition_or_rejection():
             TaskEvent.REQUIRE_CLEANUP,
         }:
             kwargs["error"] = _error(needs_input=event is TaskEvent.REJECT_PROGRAM)
-        elif event is TaskEvent.REQUEST_INPUT:
-            kwargs["error"] = _error(needs_input=True)
         elif event is TaskEvent.PASS_VERIFICATION:
             kwargs["verification"] = _report(passed=True)
         elif event in {TaskEvent.COMMIT, TaskEvent.CONFIRM_COMMITTED}:
@@ -712,11 +845,6 @@ def _matrix_task(status: TaskStatus) -> TaskRun:
         TaskEvent.FAIL_EXECUTION,
         error=_error(needs_input=True),
     )
-    candidate_input = transition_task(
-        rolling_back,
-        TaskEvent.REQUEST_INPUT,
-        error=_error(needs_input=True),
-    )
     program_ready = transition_task(
         _task(),
         TaskEvent.REQUEST_PLAN,
@@ -728,7 +856,11 @@ def _matrix_task(status: TaskStatus) -> TaskRun:
     )
     validating = transition_task(program_ready, TaskEvent.START_VALIDATION)
     needs_plan = transition_task(_task(), TaskEvent.REQUEST_PLAN)
-    needs_input = candidate_input
+    needs_input = transition_task(
+        validating,
+        TaskEvent.REJECT_PROGRAM,
+        error=_error(needs_input=True),
+    )
     cases = {
         TaskStatus.CREATED: _task(),
         TaskStatus.NEEDS_PLAN: needs_plan,
@@ -766,6 +898,8 @@ LEGAL_EDGES = {
     (TaskStatus.PROGRAM_READY, TaskEvent.START_VALIDATION): TaskStatus.VALIDATING_PROGRAM,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.VALIDATE_PROGRAM): TaskStatus.EXECUTING,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REJECT_PROGRAM): TaskStatus.NEEDS_INPUT,
+    (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
+    (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.EXECUTING, TaskEvent.COMPLETE_EXECUTION): TaskStatus.VERIFYING,
     (TaskStatus.EXECUTING, TaskEvent.FAIL_EXECUTION): TaskStatus.ROLLING_BACK,
     (TaskStatus.EXECUTING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
@@ -778,11 +912,11 @@ LEGAL_EDGES = {
     (TaskStatus.COMMITTING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.COMMITTING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.ROLLING_BACK, TaskEvent.COMPLETE_ROLLBACK): TaskStatus.FAILED,
-    (TaskStatus.ROLLING_BACK, TaskEvent.REQUEST_INPUT): TaskStatus.NEEDS_INPUT,
     (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.RECOVERY_REQUIRED, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
     (TaskStatus.RECOVERY_REQUIRED, TaskEvent.CONFIRM_UNCOMMITTED): TaskStatus.ROLLING_BACK,
+    (TaskStatus.CLEANUP_REQUIRED, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
     (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_UNCOMMITTED): TaskStatus.ROLLING_BACK,
 }
@@ -1365,35 +1499,25 @@ def test_exact_container_types_are_required_at_state_and_nested_contract_boundar
     assert (caught.value.code, caught.value.path) == (TaskStateErrorCode.INVALID_TYPE, "/steps")
 
 
-def test_candidate_provenance_bindings_report_phase_errors_and_recovery_are_fail_closed():
-    candidate_input = transition_task(
-        transition_task(
-            _to_executing(),
-            TaskEvent.FAIL_EXECUTION,
-            error=_error(needs_input=True),
-        ),
-        TaskEvent.REQUEST_INPUT,
+def test_candidate_failure_with_input_hint_is_terminal_and_provenance_is_fail_closed():
+    rolling = transition_task(
+        _to_executing(),
+        TaskEvent.FAIL_EXECUTION,
         error=_error(needs_input=True),
     )
-    resumed = transition_task(candidate_input, TaskEvent.SUBMIT_PROGRAM, program=_program())
-    resumed = transition_task(resumed, TaskEvent.START_VALIDATION)
-    assert (
-        transition_task(
-            resumed,
-            TaskEvent.VALIDATE_PROGRAM,
-            candidate_revision=CANDIDATE_REVISION,
-        ).candidate_revision
-        == CANDIDATE_REVISION
-    )
+    failed = transition_task(rolling, TaskEvent.COMPLETE_ROLLBACK)
+    assert failed.status is TaskStatus.FAILED
+    assert failed.last_error == _error(needs_input=True)
+
     with pytest.raises(TaskStateError) as caught:
         transition_task(
-            resumed,
-            TaskEvent.VALIDATE_PROGRAM,
-            candidate_revision=COMMITTED_REVISION,
+            rolling,
+            TaskEvent.REQUEST_INPUT,
+            error=_error(needs_input=True),
         )
     assert (caught.value.code, caught.value.path) == (
-        TaskStateErrorCode.INVARIANT_VIOLATION,
-        "/candidate_revision",
+        TaskStateErrorCode.INVALID_TRANSITION,
+        "/event",
     )
 
     with pytest.raises(TaskStateError) as caught:
@@ -1451,7 +1575,7 @@ def test_artifact_names_are_pathless_and_artifact_reconciliation_guards_are_exac
     with pytest.raises(TaskStateError) as caught:
         state_module.append_artifact(
             _to_executing(),
-            _artifact(candidate_revision=COMMITTED_REVISION),
+            _artifact(candidate_revision=OTHER_REVISION),
         )
     assert (caught.value.code, caught.value.path) == (
         TaskStateErrorCode.INVARIANT_VIOLATION,
@@ -1519,15 +1643,18 @@ def test_hostile_keys_nested_prefix_error_rendering_and_public_exports_are_stabl
     } <= set(state_module.__all__)
 
 
-def _candidate_needs_input() -> TaskRun:
-    rolling_back = transition_task(
-        _to_executing(),
-        TaskEvent.FAIL_EXECUTION,
-        error=_error(needs_input=True),
+def _pre_candidate_needs_input() -> TaskRun:
+    validating = transition_task(
+        transition_task(
+            transition_task(_task(), TaskEvent.REQUEST_PLAN),
+            TaskEvent.SUBMIT_PROGRAM,
+            program=_program(),
+        ),
+        TaskEvent.START_VALIDATION,
     )
     return transition_task(
-        rolling_back,
-        TaskEvent.REQUEST_INPUT,
+        validating,
+        TaskEvent.REJECT_PROGRAM,
         error=_error(needs_input=True),
     )
 
@@ -1681,13 +1808,6 @@ def test_required_identifiers_have_omitted_null_type_and_malformed_precedence(
             "/error",
         ),
         (
-            TaskStatus.ROLLING_BACK,
-            TaskEvent.REQUEST_INPUT,
-            {"error": object()},
-            TaskStateErrorCode.INVALID_TYPE,
-            "/error",
-        ),
-        (
             TaskStatus.RECOVERY_REQUIRED,
             TaskEvent.CONFIRM_UNCOMMITTED,
             {"committed_revision": COMMITTED_REVISION},
@@ -1743,6 +1863,8 @@ def test_required_identifier_null_wrong_type_and_malformed_values_are_distinct(
     ("status", "event"),
     [
         (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REJECT_PROGRAM),
+        (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUIRE_RECOVERY),
+        (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUIRE_CLEANUP),
         (TaskStatus.EXECUTING, TaskEvent.REQUIRE_RECOVERY),
         (TaskStatus.EXECUTING, TaskEvent.REQUIRE_CLEANUP),
         (TaskStatus.VERIFYING, TaskEvent.REQUIRE_RECOVERY),
@@ -1751,6 +1873,7 @@ def test_required_identifier_null_wrong_type_and_malformed_values_are_distinct(
         (TaskStatus.COMMITTING, TaskEvent.REQUIRE_CLEANUP),
         (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_RECOVERY),
         (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_CLEANUP),
+        (TaskStatus.CLEANUP_REQUIRED, TaskEvent.REQUIRE_RECOVERY),
     ],
 )
 def test_every_failure_event_requires_exact_structured_error_payload(status, event):
@@ -1837,22 +1960,12 @@ def test_authoritative_budget_constants_and_direct_exact_collections_are_accepte
 
 
 def test_exact_128_transition_history_is_legal_and_directly_reconstructible():
-    task = _to_executing()
-    for _ in range(20):
-        task = transition_task(task, TaskEvent.COMPLETE_EXECUTION)
-        task = transition_task(task, TaskEvent.FAIL_VERIFICATION, error=_error(needs_input=True))
-        task = transition_task(task, TaskEvent.REQUEST_INPUT, error=_error(needs_input=True))
-        task = transition_task(task, TaskEvent.SUBMIT_PROGRAM, program=_program())
+    task = transition_task(_task(), TaskEvent.REQUEST_PLAN)
+    task = transition_task(task, TaskEvent.SUBMIT_PROGRAM, program=_program())
+    for _ in range(42):
         task = transition_task(task, TaskEvent.START_VALIDATION)
-        task = transition_task(
-            task,
-            TaskEvent.VALIDATE_PROGRAM,
-            candidate_revision=CANDIDATE_REVISION,
-        )
-    task = transition_task(task, TaskEvent.COMPLETE_EXECUTION)
-    task = transition_task(task, TaskEvent.PASS_VERIFICATION, verification=_report_with())
-    task = transition_task(task, TaskEvent.REQUIRE_RECOVERY, error=_error())
-    task = transition_task(task, TaskEvent.CONFIRM_UNCOMMITTED)
+        task = transition_task(task, TaskEvent.REQUIRE_RECOVERY, error=_error())
+        task = transition_task(task, TaskEvent.CONFIRM_PRE_CANDIDATE)
     assert len(task.transitions) == 128
     direct = TaskRun(
         id=task.id,
@@ -1861,9 +1974,9 @@ def test_exact_128_transition_history_is_legal_and_directly_reconstructible():
         reasoning_owner=task.reasoning_owner,
         status=task.status,
         program=task.program,
-        candidate_revision=task.candidate_revision,
-        verification_reports=task.verification_reports,
-        last_error=task.last_error,
+        candidate_revision=None,
+        verification_reports=(),
+        last_error=None,
         transitions=task.transitions,
     )
     assert direct == task
@@ -2178,15 +2291,15 @@ def test_reachable_report_candidate_and_error_provenance_forgeries_are_rejected(
             "/verification_reports",
         )
 
-    needs_input = _candidate_needs_input()
+    needs_input = _pre_candidate_needs_input()
     resumed = transition_task(needs_input, TaskEvent.SUBMIT_PROGRAM, program=_program())
     assert resumed.last_error is None
-    assert resumed.candidate_revision == CANDIDATE_REVISION
+    assert resumed.candidate_revision is None
 
     with pytest.raises(TaskStateError) as caught:
         append_step_result(
             _to_executing(),
-            StepResult(ok=True, value=None, elapsed_ms=0, revision=COMMITTED_REVISION),
+            StepResult(ok=True, value=None, elapsed_ms=0, revision=OTHER_REVISION),
         )
     assert (caught.value.code, caught.value.path) == (
         TaskStateErrorCode.INVARIANT_VIOLATION,
@@ -2194,7 +2307,7 @@ def test_reachable_report_candidate_and_error_provenance_forgeries_are_rejected(
     )
 
     with pytest.raises(TaskStateError) as caught:
-        append_verification(_to_verifying(), _report_with(candidate_revision=COMMITTED_REVISION))
+        append_verification(_to_verifying(), _report_with(candidate_revision=OTHER_REVISION))
     assert (caught.value.code, caught.value.path) == (
         TaskStateErrorCode.INVARIANT_VIOLATION,
         "/report/candidate_revision",
@@ -2338,7 +2451,6 @@ def test_every_legal_event_rejects_each_unrelated_payload_family():
         TaskEvent.REJECT_PROGRAM: {"error"},
         TaskEvent.FAIL_EXECUTION: {"error"},
         TaskEvent.FAIL_VERIFICATION: {"error"},
-        TaskEvent.REQUEST_INPUT: {"error"},
         TaskEvent.REQUIRE_RECOVERY: {"error"},
         TaskEvent.REQUIRE_CLEANUP: {"error"},
         TaskEvent.PASS_VERIFICATION: {"verification"},
@@ -2675,17 +2787,17 @@ def test_durable_candidate_and_acceptance_bindings_reject_raw_forgeries():
     )
     step_task = append_step_result(_to_executing(), result)
     step_raw = step_task.to_mapping()
-    step_raw["steps"][0]["result"]["revision"] = COMMITTED_REVISION
+    step_raw["steps"][0]["result"]["revision"] = OTHER_REVISION
 
     report_task = append_verification(_to_verifying(), _report_with())
     report_candidate_raw = report_task.to_mapping()
-    report_candidate_raw["verification_reports"][0]["candidate_revision"] = COMMITTED_REVISION
+    report_candidate_raw["verification_reports"][0]["candidate_revision"] = OTHER_REVISION
     report_acceptance_raw = report_task.to_mapping()
     report_acceptance_raw["verification_reports"][0]["acceptance_id"] = "acceptance-other"
 
     artifact_task = state_module.append_artifact(_to_executing(), _artifact())
     artifact_raw = artifact_task.to_mapping()
-    artifact_raw["artifacts"][0]["candidate_revision"] = COMMITTED_REVISION
+    artifact_raw["artifacts"][0]["candidate_revision"] = OTHER_REVISION
 
     for raw, path in (
         (step_raw, "/steps"),

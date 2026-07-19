@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -130,8 +131,13 @@ def _duplicate_checked_object(pairs):
     return result
 
 
-def _reject_float(_value: str):
-    raise _RecordDecodeError("floating point values are forbidden")
+def _parse_float(value: str) -> float:
+    if len(value) > 64:
+        raise _RecordDecodeError("floating point token is too large")
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise _RecordDecodeError("non-finite values are forbidden")
+    return parsed
 
 
 def _reject_constant(_value: str):
@@ -187,6 +193,9 @@ def _validate_json_resources(value) -> None:
             stack.extend(current.keys())
         elif current is None or type(current) in (bool, int):
             continue
+        elif type(current) is float:
+            if not math.isfinite(current):
+                raise TaskStoreError(TaskStoreErrorCode.CORRUPT_RECORD)
         else:
             raise TaskStoreError(TaskStoreErrorCode.CORRUPT_RECORD)
 
@@ -251,6 +260,12 @@ def _encode_record(task_run: TaskRun, generation: int) -> bytes:
     raw = _canonical_json({**body, "checksum": checksum})
     if len(raw) > _MAX_RECORD_BYTES:
         raise TaskStoreError(TaskStoreErrorCode.RECORD_TOO_LARGE)
+    if not _json_depth_is_safe(raw):
+        raise TaskStoreError(TaskStoreErrorCode.CORRUPT_RECORD)
+    _validate_json_resources({**body, "checksum": checksum})
+    decoded = _decode_record(raw, task_run.id)
+    if decoded.generation != generation or decoded.task_run != task_run:
+        raise TaskStoreError(TaskStoreErrorCode.CORRUPT_RECORD)
     return raw
 
 
@@ -268,7 +283,7 @@ def _decode_record(raw: bytes, selected_task_id: str) -> StoredTaskRun:
         decoded = json.loads(
             text,
             object_pairs_hook=_duplicate_checked_object,
-            parse_float=_reject_float,
+            parse_float=_parse_float,
             parse_int=_parse_integer,
             parse_constant=_reject_constant,
         )
@@ -715,6 +730,10 @@ class TaskRunStore:
             raise TypeError("task_run must be an exact TaskRun")
         raw = _encode_record(task_run, 0)
         return self._mutate(task_run.id, None, 0, task_run, raw)
+
+    def validate_record(self, task_run, generation):
+        generation = _generation(generation)
+        _encode_record(task_run, generation)
 
     def compare_and_set(
         self,
