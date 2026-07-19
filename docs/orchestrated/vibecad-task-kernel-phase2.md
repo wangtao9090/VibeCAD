@@ -9078,3 +9078,263 @@ The pre-E003 anchors are:
   `3bb4a1cf9c07b696b0d38a367385d77bc919b2f0c05b842433f2cc07916c4a03`,
   `05da8ccd5e8b354fbec82a0bcd10802ecf190849799384099475f817f790309b`,
   and `46e5e104cdf8f3c6d843b33e1a88f376971e9f2598844c89b532a504e6d0a246`.
+
+## TK8 Commit, Push, and TK9 Real-FreeCAD RED — TK9-E001
+
+TK8 was staged through its exact seven-file packet, committed as
+`079bb6b46c7328d93f0ad9690fd5773d5ab98751` with the approved message
+`feat(workflow): execute task runs transactionally`, and pushed non-force.
+Local HEAD and upstream were equal and the worktree was clean before TK9.
+
+TK9 reused only the already-installed ready environment at
+`/Users/wangtao/Library/Application Support/VibeCAD/mamba/envs/vibecad`; it did
+not install, download, create, or upgrade an environment. The first authentic
+three-scenario gate reached FreeCAD and reported three failures. This was a
+valid unexpected environment RED, not an unavailable-runtime failure:
+
+- all three ModelProgram operations returned successful authentic StepResults;
+- immediately before checkpoint the isolated candidate contained `Box`, an
+  explicit result root, and the expected 7200 mm3 geometry;
+- `checkpoint_fcstd` returned without an exception, but the existing candidate
+  `model.FCStd` retained the exact baseline size and SHA-256;
+- the coordinator reload therefore contained zero objects, and controlled STEP
+  export failed with the fixed CAD error before seal or HEAD commit; and
+- rollback kept the baseline revision bytes and HEAD unchanged.
+
+An independent reproduction proved that FreeCAD `Document.saveCopy()` can
+silently leave an existing destination unchanged and returns `None` in both
+the successful-new-file and stale-existing-file cases. The old executor then
+validated the still-well-formed baseline FCStd and mistook the stale file for
+a completed checkpoint. Saving the same live Session to a previously absent
+sibling produced a reloadable FCStd with the expected Box. This is a concrete
+TK7 implementation defect exposed by the approved TK9 gate, not a fixture or
+product-boundary change.
+
+TK-D41 — Within the already-approved overall allowlist, TK9 may close this
+checkpoint defect in `src/vibecad/execution/executor.py` and
+`tests/test_program_executor.py` before rerunning the unchanged end-to-end
+contract. The executor must save to one unpredictable, previously absent,
+same-directory temporary FCStd; validate it; set the candidate file mode;
+atomically replace the store-derived destination; validate the final file; and
+best-effort remove only its own ordinary temporary leaf on every failure. A
+silent no-op must fail without accepting the stale destination. No Session,
+store schema, public API, dependency, retry, alternate path authority, MCP,
+model, or network surface changes. This bounded repair remains part of the
+single TK9 real-flow semantic commit and does not increase the nine-commit
+budget.
+
+The active authorization remains TK-R1/TK-A02 plus the fail-closed internal
+repair authority established by TK-R2/TK-A03. The user's current exact
+instruction, “好的 你持续推进  知道 TK9 完成”, directs the controller to complete
+the already-approved TK9 outcome without another internal pause. TK-D41 does
+not require a user-level product choice and does not expand the Stage C product
+contract.
+
+Capability profile re-evaluated for this resumed controller session:
+
+    approval: native-plan
+    delegation: spawn-send-wait
+    persistence: repo-artifact
+    process: native-session-poll
+
+Adapter: Codex. Evidence uses exactly the permitted categories:
+
+- `live capability declarations`: `update_plan`, `spawn_agent`,
+  `followup_task`, `send_message`, `wait_agent`, `exec_command`,
+  `write_stdin`, and `apply_patch` are declared live.
+- `observable behavior`: native plan projection, repository commands, direct
+  FreeCAD subprocess gates, and independent agent follow-up all returned
+  observable results in this session; no duplicate process was launched.
+- `environment identity`: Codex desktop controller `/root`, workspace
+  `/Users/wangtao/Documents/DevProject/vibecad`, branch
+  `codex/task-kernel-phase2`.
+- `public configuration`: filesystem access is unrestricted, network is
+  enabled but unused for TK9, and the approval policy is `never` with no
+  escalation path.
+
+No capability fallback or environment residual is active. The repo artifact
+remains authoritative and native plan is only a projection. The revised TK9
+working allowlist is the original three TK9 paths plus the two TK-D41 paths:
+`tests/test_task_kernel_integration.py`, `docs/AGENT_ARCHITECTURE.md`, this
+artifact, `src/vibecad/execution/executor.py`, and
+`tests/test_program_executor.py`. Any other source change, inability to retain
+the old candidate on a synthetic save failure, real gate failure after the
+bounded correction, P0/P1 review finding, installer fallback, or public/API
+expansion remains a circuit breaker.
+
+## TK9 Checkpoint Repair and Authentic Three-Scenario GREEN — TK9-E002
+
+The TK-D41 oracle first produced a genuine focused RED against the unchanged
+TK7 executor. The two exact cases reported `2 failed`: the old executor wrote
+directly to the destination instead of a fresh sibling, and a synthetic
+FreeCAD silent no-op accepted the still-valid baseline FCStd instead of
+failing. No fixture, syntax, import, or unavailable-runtime error contributed.
+
+`InProcessCadExecutor.checkpoint_fcstd` now recomputes and persists the live
+Session, selects an unpredictable previously absent same-directory FCStd
+sibling, asks FreeCAD to write only that fresh leaf, validates its complete
+FCStd envelope and identity, applies the POSIX candidate mode where supported,
+revalidates, atomically replaces the store-derived destination, and rereads the
+final bytes. Failure before replace retains the previous candidate; cleanup
+removes only the executor-owned ordinary temporary leaf. Filesystem/name
+failures are classified as artifact failures, while authentic FreeCAD document
+or save exceptions retain the fixed CAD classification.
+
+The final focused executor suite reported `48 passed in 0.40s`. Its non-vacuous
+fault matrix covers the original silent no-op, malformed fresh output,
+injected `os.replace` failure, repeated name collision, old-target byte
+preservation, temp cleanup, and exact 0600 mode on POSIX. The Windows test path
+continues to exercise fresh-write/replace/cleanup but does not claim POSIX mode
+semantics.
+
+After removing all diagnostic monkeypatches, the exact approved installed-CAD
+gate ran:
+
+    VIBECAD_RUN_INTEGRATION=1 \
+    VIBECAD_FREECAD_ENV="/Users/wangtao/Library/Application Support/VibeCAD/mamba/envs/vibecad" \
+    PYTHONPATH=src .venv/bin/pytest -q -m slow tests/test_task_kernel_integration.py
+
+It reported `3 passed in 2.56s`. The test process imported no FreeCAD module;
+each case launched the existing ready environment and composed the real lease,
+TaskRun store, revision store, candidate coordinator, in-process executor,
+verifier, and TaskService in the child. No installer, download, environment
+creation, upgrade, alternate runtime, network call, or user project was used.
+
+The three accepted cases prove:
+
+- success: Box creation returned 6000 mm3, length modification returned 7200
+  mm3, all ten required criteria passed, HEAD advanced exactly one generation,
+  TaskRun/revision artifact ids, sizes, hashes and formats matched, and the
+  committed FCStd reloaded as bbox 12×20×30 mm, area 2400 mm2, center
+  (6,10,15), one valid solid;
+- partial execution failure: the first 6000 mm3 mutation was real, the missing
+  object failed with `unexpected_tool_exception`, no candidate revision or
+  artifact became durable, HEAD and baseline bytes stayed exact, and the
+  committed loaded Session remained open, clean, empty and usable; and
+- verification failure: execution, checkpoint, STEP, seal and immutable
+  revision all succeeded, only the deliberately incorrect required 7201 mm3
+  criterion failed against observed 7200, diagnostics/artifacts remained
+  cross-linked, and HEAD/baseline/committed Session remained unchanged.
+
+Every case additionally proved one HEAD record, one terminal journal, one
+TaskRun record, zero ordinary candidate files, exact manifest count and journal
+state for its terminal outcome, and confinement of all generated paths to its
+owned pytest root.
+
+Final regression evidence on the same source anchor:
+
+- executor plus TaskService focused composition: `114 passed in 0.60s`;
+- cumulative TK1–TK9 deterministic kernel and Phase-1 compatibility:
+  `1774 passed, 1 deselected in 11.85s`;
+- full normal repository: `2267 passed, 84 deselected, 2 warnings in 21.41s`;
+  the four-pass increase is exactly the new executor fault coverage and the
+  three new real-CAD cases account for the deselection increase;
+- both warnings remain the accepted macOS multi-threaded-fork deprecations in
+  `tests/test_workflow_lease.py`;
+- whole-repository Ruff check, relevant-file Ruff format check, Python
+  byte-compilation, fresh pure import, forbidden-import check, diff whitespace,
+  five-path allowlist, branch identity, and exact HEAD/upstream anchor all
+  passed; and
+- an exploratory whole-tree formatter check listed 72 pre-existing legacy
+  formatting differences outside this packet. No such file was modified; this
+  is not the declared relevant-file format gate and does not affect TK9.
+
+`docs/AGENT_ARCHITECTURE.md` now separates the current 31-tool legacy MCP,
+internal-only deterministic Task Kernel, and future task MCP/skill, reasoning,
+Provider, simulation, and code-worker layers. It records the exact 13-state
+machine, four operation allowlist, nine verifier checks, TaskRun fields,
+pre-HEAD rollback versus post-HEAD reconcile boundary, and Stage 3 as the next
+public product delivery. It does not claim task MCP, Sampling, BYOK, repair,
+Provider, simulation, arbitrary code, or multi-host conformance is implemented.
+
+The checkpoint implementation review first returned P0/P1/P2 `0/1/0` solely
+because a POSIX mode assertion was unconditional on Windows. After guarding
+only that permission assertion while retaining every behavioral fault test,
+the same independent reviewer reran the 48 cases and static gates and returned
+ACCEPT with P0/P1/P2 `0/0/0`.
+
+## TK9 Final Architecture and Acceptance Review — TK9-E003
+
+An independent architecture/fact reviewer validated the rewritten architecture
+against the live source and round-tripped its ModelProgram JSON example through
+`from_mapping`, program validation, and acceptance compilation. The first
+review returned ACCEPT with P0/P1 `0/0` and two P2 refinements: qualify `FAILED`
+as the result only after rollback is proven, and inspect geometry on the
+promoted live Session as well as an independent committed-file reload.
+
+Both P2 items were closed without production changes. The document now keeps
+uncertain rollback in `CLEANUP_REQUIRED`/`RECOVERY_REQUIRED`. The success gate
+now reads the promoted Session and the separately loaded committed FCStd and
+asserts the same volume, area, bbox, center of mass, validity, and solid count
+on both. The exact authentic gate then reported `3 passed in 2.58s`, and the
+normal full suite reported `2267 passed, 84 deselected, 2 warnings in 20.92s`.
+The reviewer returned final ACCEPT with P0/P1/P2 `0/0/0`.
+
+The two distinct final review boundaries are therefore both closed:
+
+- checkpoint implementation/fault matrix: ACCEPT, P0/P1/P2 `0/0/0`;
+- architecture and end-to-end acceptance proof: ACCEPT, P0/P1/P2 `0/0/0`.
+
+No unresolved TK9 P0, P1, or P2 remains. Accepted residuals are only the
+pre-existing Windows real-FreeCAD runtime non-validation, the 72 legacy files
+outside this packet that differ from the current whole-tree formatter, and the
+two known macOS fork deprecation warnings. None invalidates the supported
+installed macOS real-CAD contract or the declared relevant-file gates.
+
+## TK9 Pre-Commit Recovery Snapshot — TK9-S001
+
+### 1. Completed milestones
+
+- Repository `/Users/wangtao/Documents/DevProject/vibecad`, branch
+  `codex/task-kernel-phase2`, remains anchored at the pushed TK8 commit
+  `079bb6b46c7328d93f0ad9690fd5773d5ab98751` before the TK9 commit.
+- TK9 genuine RED, TK-D41 checkpoint repair, 48 focused executor cases, 114
+  executor/service cases, 1774 cumulative cases, 2267 normal full cases, three
+  authentic FreeCAD cases, architecture rewrite, static/import gates, and two
+  independent zero-finding final reviews are complete.
+- Only the five TK9/TK-D41 paths are dirty. No environment, dependency, public
+  MCP, model, provider, network, user project, Git history, or remote state was
+  changed.
+- The current artifact through TK9-E003 is the authoritative final pre-commit
+  revision. The self-containing TK9 commit hash and push state must be verified
+  from Git after this artifact is committed; a commit cannot contain its own
+  final hash.
+
+### 2. Next steps
+
+1. Recheck exact five-path allowlist, diff whitespace, relevant Ruff
+   check/format, Python compilation, branch, HEAD and upstream.
+2. Stage only the five named paths and inspect the staged diff/stat.
+3. Commit exactly as
+   `test(workflow): prove candidate commit and rollback with FreeCAD`.
+4. Push the current branch non-force, then verify clean worktree and exact
+   local HEAD/upstream equality.
+5. If staging includes another path, a gate changes, commit fails, push is
+   rejected, or HEAD/upstream diverges, stop without force/rewrite and preserve
+   this snapshot. Otherwise Stage C/TK9 is complete and Stage 3 is next.
+
+### 3. Approved decisions
+
+- TK-R1/TK-A02 approves Stage C TK1–TK9, the overall allowlist, gates, exact
+  semantic commits, and non-force pushes.
+- TK-R2/TK-A03 remains the internal fail-closed repair authority. TK-D41 is the
+  bounded real-gate correction inside the already-approved executor/test
+  allowlist and does not alter product architecture or public authority.
+- The user's exact current direction “好的 你持续推进  知道 TK9 完成” requires
+  continuation through the already-approved TK9 commit and push without a
+  duplicate internal approval pause.
+
+### 4. Execution discipline
+
+- Capability profile: `native-plan`, `spawn-send-wait`, `repo-artifact`,
+  `native-session-poll`; adapter: Codex; no fallback or environment residual.
+- Final allowlist: `docs/AGENT_ARCHITECTURE.md`, this artifact,
+  `src/vibecad/execution/executor.py`, `tests/test_program_executor.py`, and
+  `tests/test_task_kernel_integration.py`.
+- Required final gates are the accepted focused, cumulative, full, authentic
+  FreeCAD, Ruff, relevant-format, compile, import, diff, allowlist, independent
+  review, exact staging, commit, push, clean-tree, and upstream-equality gates.
+- Circuit breakers remain any out-of-allowlist change, gate regression,
+  installer/network/model/public-surface action, P0/P1/P2, force/rewrite, or
+  ambiguous Git/process state. Residuals remain recorded and deferred rather
+  than opportunistically changed.

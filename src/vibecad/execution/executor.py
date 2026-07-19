@@ -13,6 +13,7 @@ import hashlib
 import math
 import os
 import re
+import secrets
 import stat
 import zipfile
 from dataclasses import dataclass
@@ -61,6 +62,7 @@ _MAX_ARTIFACT_BYTES = 536_870_912
 _READ_CHUNK_BYTES = 1024 * 1024
 _SIGNATURE_WINDOW_BYTES = 1024 * 1024
 _MAX_ZIP_ENTRIES = 4096
+_CHECKPOINT_NAME_ATTEMPTS = 8
 _REVISION_PATTERN = re.compile(r"revision_[0-9a-f]{32}")
 
 
@@ -379,6 +381,20 @@ def _remove_failed_artifact(path: Path) -> None:
         pass
 
 
+def _fresh_checkpoint_path(path: Path) -> Path:
+    """Reserve a name FreeCAD has never seen without creating the leaf first."""
+
+    for _ in range(_CHECKPOINT_NAME_ATTEMPTS):
+        candidate = path.with_name(f".vibecad-checkpoint-{secrets.token_hex(16)}.FCStd")
+        try:
+            os.lstat(candidate)
+        except FileNotFoundError:
+            return candidate
+        except OSError:
+            raise _ArtifactReadFailure from None
+    raise _ArtifactReadFailure
+
+
 def _require_revision_layout(revision: object) -> tuple[RevisionArtifactRef, RevisionArtifactRef]:
     if type(revision) is not RevisionRef or type(revision.model) is not RevisionArtifactRef:
         raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
@@ -451,14 +467,32 @@ class InProcessCadExecutor(CadSnapshotPort):
             document = session.doc
             document.recompute()
             session.persist_state()
-            with _silence_fd1():
-                document.saveCopy(str(path))
         except Exception:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
         try:
-            _read_artifact(path, "fcstd")
-        except _ArtifactReadFailure:
+            temporary = _fresh_checkpoint_path(path)
+        except Exception:
             raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        try:
+            try:
+                with _silence_fd1():
+                    document.saveCopy(str(temporary))
+            except Exception:
+                raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+            try:
+                saved = _read_artifact(temporary, "fcstd")
+                os.chmod(temporary, 0o600)
+                if _read_artifact(temporary, "fcstd") != saved:
+                    raise _ArtifactReadFailure
+                os.replace(temporary, path)
+                temporary = None
+                if _read_artifact(path, "fcstd") != saved:
+                    raise _ArtifactReadFailure
+            except (_ArtifactReadFailure, OSError):
+                raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        finally:
+            if temporary is not None:
+                _remove_failed_artifact(temporary)
 
     def close(self, session: object) -> None:
         """Close one owned Session exactly once."""

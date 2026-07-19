@@ -9,20 +9,20 @@ import zipfile
 from pathlib import Path
 
 import pytest
-import vibecad.execution.executor as executor_module
-from vibecad.execution.executor import (
-    CandidateEvidence,
-    ExecutorError,
-    ExecutorErrorCode,
-    InProcessCadExecutor,
-)
 
+import vibecad.execution.executor as executor_module
 from vibecad.execution.candidate import (
     ActiveCandidate,
     CadSnapshotPort,
     CheckpointedCandidate,
     SealedCandidate,
     SessionBinding,
+)
+from vibecad.execution.executor import (
+    CandidateEvidence,
+    ExecutorError,
+    ExecutorErrorCode,
+    InProcessCadExecutor,
 )
 from vibecad.execution.revisions import (
     LocalRevisionStore,
@@ -372,9 +372,111 @@ def test_create_load_checkpoint_and_close_use_public_session_surface(
     assert made[1].loaded == [source]
     assert made[1].doc.recompute_calls == 1
     assert made[1].persist_calls == 1
-    assert made[1].doc.save_calls == [str(checkpoint)]
+    assert len(made[1].doc.save_calls) == 1
+    fresh_checkpoint = Path(made[1].doc.save_calls[0])
+    assert fresh_checkpoint != checkpoint
+    assert fresh_checkpoint.parent == checkpoint.parent
+    assert fresh_checkpoint.suffix.lower() == ".fcstd"
+    assert not fresh_checkpoint.exists()
     assert checkpoint.is_file()
+    if os.name == "posix":
+        assert checkpoint.stat().st_mode & 0o777 == 0o600
     assert made[1].close_calls == 1
+
+
+def test_checkpoint_rejects_silent_save_noop_and_preserves_existing_candidate(
+    tmp_path: Path,
+) -> None:
+    class SilentDocument(_FakeDocument):
+        def saveCopy(self, path: str) -> None:  # noqa: N802 - FreeCAD API spelling
+            self.save_calls.append(path)
+
+    session = _FakeSession()
+    session.doc = SilentDocument()
+    checkpoint = tmp_path / "model.FCStd"
+    with zipfile.ZipFile(checkpoint, "w") as archive:
+        archive.writestr("Document.xml", "<Baseline />")
+    baseline = checkpoint.read_bytes()
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).checkpoint_fcstd(session, checkpoint)
+
+    assert caught.value.code is ExecutorErrorCode.ARTIFACT_FAILURE
+    assert checkpoint.read_bytes() == baseline
+    assert len(session.doc.save_calls) == 1
+    fresh_checkpoint = Path(session.doc.save_calls[0])
+    assert fresh_checkpoint != checkpoint
+    assert fresh_checkpoint.parent == checkpoint.parent
+    assert not fresh_checkpoint.exists()
+
+
+def test_checkpoint_rejects_malformed_fresh_copy_and_preserves_existing_candidate(
+    tmp_path: Path,
+) -> None:
+    class MalformedDocument(_FakeDocument):
+        def saveCopy(self, path: str) -> None:  # noqa: N802 - FreeCAD API spelling
+            self.save_calls.append(path)
+            Path(path).write_bytes(b"not-an-fcstd")
+
+    session = _FakeSession()
+    session.doc = MalformedDocument()
+    checkpoint = tmp_path / "model.FCStd"
+    with zipfile.ZipFile(checkpoint, "w") as archive:
+        archive.writestr("Document.xml", "<Baseline />")
+    baseline = checkpoint.read_bytes()
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).checkpoint_fcstd(session, checkpoint)
+
+    assert caught.value.code is ExecutorErrorCode.ARTIFACT_FAILURE
+    assert checkpoint.read_bytes() == baseline
+    assert len(session.doc.save_calls) == 1
+    assert not Path(session.doc.save_calls[0]).exists()
+
+
+def test_checkpoint_replace_failure_preserves_existing_candidate_and_cleans_temp(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = _FakeSession()
+    checkpoint = tmp_path / "model.FCStd"
+    with zipfile.ZipFile(checkpoint, "w") as archive:
+        archive.writestr("Document.xml", "<Baseline />")
+    baseline = checkpoint.read_bytes()
+
+    def reject_replace(source: Path, destination: Path) -> None:
+        assert source != checkpoint
+        assert destination == checkpoint
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(executor_module.os, "replace", reject_replace)
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).checkpoint_fcstd(session, checkpoint)
+
+    assert caught.value.code is ExecutorErrorCode.ARTIFACT_FAILURE
+    assert checkpoint.read_bytes() == baseline
+    assert len(session.doc.save_calls) == 1
+    assert not Path(session.doc.save_calls[0]).exists()
+
+
+def test_checkpoint_name_collisions_fail_closed_before_freecad_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token = "0" * 32
+    collision = tmp_path / f".vibecad-checkpoint-{token}.FCStd"
+    collision.write_bytes(b"owned-collision")
+    checkpoint = tmp_path / "model.FCStd"
+    session = _FakeSession()
+    monkeypatch.setattr(executor_module.secrets, "token_hex", lambda size: token)
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).checkpoint_fcstd(session, checkpoint)
+
+    assert caught.value.code is ExecutorErrorCode.ARTIFACT_FAILURE
+    assert session.doc.save_calls == []
+    assert collision.read_bytes() == b"owned-collision"
+    assert not checkpoint.exists()
 
 
 @pytest.mark.parametrize("method", ["load_fcstd", "checkpoint_fcstd", "close"])

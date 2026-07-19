@@ -1,623 +1,436 @@
-# VibeCAD 目标架构与开发路线
+# VibeCAD Agent 架构与开发路线
 
-> 状态：Accepted
-> 日期：2026-07-16
-> 当前实现基线：VibeCAD 0.4.0
-> 文档角色：本文件是 Agent、模型接入和后续工作流开发的当前决策真源。
-> 当前代码事实见 [`ARCHITECTURE.md`](ARCHITECTURE.md)；2026-07-02 的 Agent spec 和 prototype plan 为历史方案，已被本文取代。
+> 状态：Accepted，按实现事实更新
+>
+> 日期：2026-07-18
+>
+> 当前实现基线：VibeCAD 0.4.0，Stage 2 内部窄切片完成
+>
+> 文档角色：Agent 定位、已实现边界和后续阶段的决策真源
+>
+> 当前项目通用架构见 [`ARCHITECTURE.md`](ARCHITECTURE.md)
 
-## 1. 已锁定的产品定位
+## 1. 结论先行
 
-VibeCAD 是一个可独立运行、也可被 Claude Code、Codex、WorkBuddy 等外部 Agent 调用的垂直 CAD Agent。它的核心价值不是提供模型，而是把不稳定的模型意图变成可执行、可验证、可编辑、可回滚的 CAD 产物。
+VibeCAD 的目标定位是一个 **CAD 专家 Agent**，不是通用自主 Agent，也不是模型供应商。它负责把外部模型或用户给出的设计意图收敛成受控程序，在隔离候选版本中执行，以 FreeCAD/OCCT 的事实独立验收，然后提交或回滚。
+
+截至 2026-07-18，准确的产品状态是：
+
+| 层次 | 当前状态 | 用户现在能否直接使用 |
+|---|---|---|
+| 现有低层 FastMCP | 已有 31 个低层 CAD/运行时工具 | 能，但它们仍走原有 Session 路径 |
+| 确定性 Task Kernel | TK1–TK9 已形成内部 Python 组合，并通过真实 FreeCAD 三场景 | 只能由代码直接组合调用 |
+| 任务级 MCP | 尚未注册 `create_task` 等高层工具 | 不能 |
+| Codex/Claude 等宿主 skill | 尚未交付 | 不能 |
+| Sampling / BYOK | 只有枚举预留，没有 backend 或模型调用 | 不能 |
+| 自动 repair / replan / retry | 未实现，当前为零次语义重试 | 不能 |
+| 照片、视频、STL、仿真 Provider | 只有架构预留，源码中没有 Provider 包 | 不能 |
+| 任意 Python/FreeCAD 代码 Worker | 未来实验方向，当前不存在 | 不能 |
+
+因此，Stage 2 完成的是“专家 Agent 的确定性内部内核”，不是已经可被 Claude、Codex 直接调用的完整 Agent 产品。下一产品阶段是 Stage 3：把这套内核安全地暴露为任务级 MCP 和宿主无关 skill。
+
+## 2. 已锁定的产品定位
 
 ```text
-模型 / 外部 Agent：理解目标、提出方案、处理歧义
-VibeCAD：约束方案、管理任务、执行、验证、版本化、回滚
+用户 / 外部 Agent：理解目标、处理自然语言和歧义、生成受控计划
+VibeCAD：校验计划、隔离执行、收集事实、验收、版本化和恢复
 FreeCAD / OCCT：几何计算、文档重算、格式导入导出
 ```
 
-以下约束已经锁定：
+锁定约束：
 
 | 决策 | 结论 |
 |---|---|
-| 模型商业模式 | 用户自带模型授权；短期不采购、补贴或转售模型 Token |
-| 主要接入协议 | 标准 MCP；不为单个开源 Agent 维护独立核心实现 |
-| 主要宿主 | 欧美优先 Claude Code、Codex；中国优先 WorkBuddy/CodeBuddy；VS Code/Copilot 用作完整 MCP Sampling 基准 |
-| OpenClaw / Hermes | 保持标准 MCP 自然兼容；Hermes 可作 Sampling 协议测试，不作为首要获客入口 |
-| 主执行路径 | 版本化 `ModelProgram` 调用受控语义 CAD 操作 |
-| 任意代码生成 | 上限高但风险高，只能作为未来隔离的高级通道，禁止成为主路径 |
-| 几何正确性 | 模型不能自证成功；必须由 FreeCAD 事实和独立验证器验收 |
-| 前置重建 | 照片/视频到 Mesh、Mesh/STL 到 CAD 只预留 Provider，不自研底层引擎 |
-| 仿真 | 只预留 Simulation Provider，当前不实现 |
-| 当前重点 | 把 CAD 中间闭环做实：计划、候选执行、验证、修复、提交、回滚、导出 |
+| 模型商业模式 | 用户自带宿主订阅或 API 授权；短期不采购、补贴或转售模型 Token |
+| 首要宿主 | 欧美优先 Claude Code、Codex；亚洲补充 WorkBuddy/CodeBuddy 等支持标准 MCP 的宿主 |
+| 核心协议 | 标准 MCP + 宿主无关 skill；不为每个 Agent 复制 CAD 业务逻辑 |
+| 主执行路径 | 版本化 `ModelProgram` + 固定语义操作，不执行模型任意代码 |
+| 提交权 | 模型和工具返回都不能自证成功；确定性 verifier 拥有提交权 |
+| 版本策略 | 所有修改先进入隔离 candidate；通过后才原子推进 HEAD |
+| 照片/STL/仿真 | 后续调用现有外部引擎，通过 artifact Provider 接入，不自研底层引擎 |
+| 任意代码 | 表达上限高，但只可能成为未来隔离 Worker，永不作为默认主路径 |
 
-## 2. 产品边界
+## 3. 当前已经实现的内部闭环
 
-### 2.1 VibeCAD 负责
-
-- 任务状态和生命周期。
-- 用户目标、约束、假设和验收条件的结构化。
-- `ModelProgram` schema、操作白名单和参数校验。
-- FreeCAD 候选执行、事务、checkpoint、回滚和项目保存。
-- 几何、拓扑、尺寸、文件产物和装配干涉的确定性验证。
-- 失败分类、有限重试、需要用户确认时暂停。
-- Artifact、Revision、TaskRun、诊断和评估记录。
-- MCP、未来桌面端/CLI/API 共用的领域内核。
-- 用户自带模型授权的适配与安全隔离。
-
-### 2.2 VibeCAD 当前不负责
-
-- 自营模型、模型额度套餐或 Token 差价。
-- 自研摄影测量、NeRF、Gaussian Splatting 或图生 3D 基础模型。
-- 自研通用 STL 逆向工程内核。
-- 自研有限元、CFD 或 CAM 求解器。
-- 让模型直接判断最终几何是否正确。
-- 把任意 Python/FreeCAD 代码直接暴露为默认 MCP 工具。
-- 为 OpenClaw、Hermes 等每个 Agent 复制一套业务逻辑。
-
-## 3. 端到端目标流程
+当前 `TaskService` 是 direct-module-only 的同步服务，只接受外部已经生成的 `ModelProgram`。一次提交执行一个确定性尝试，不调用模型，不自动修改计划。
 
 ```mermaid
 flowchart LR
-    U["用户目标 / 修改要求"] --> I["Intent + AcceptanceSpec"]
-    A["外部 Agent / Sampling / BYOK"] --> P["ModelProgram"]
-    I --> P
-    P --> S["Schema + Policy 检查"]
-    S --> C["创建 Candidate Revision"]
-    C --> E["FreeCAD Executor"]
-    E --> O["Observation + Artifacts"]
-    O --> V["独立 Verifier"]
-    V -->|通过| M["Commit + Export"]
-    V -->|可修复| R["有限 Repair / Replan"]
-    R --> S
-    V -->|歧义或风险| Q["暂停并询问用户"]
-    V -->|不可恢复| B["Rollback + 失败报告"]
+    P["外部预制 ModelProgram"] --> F["预算、schema、program、acceptance preflight"]
+    F --> T["TaskRun CAS"]
+    T --> L["Project write lease + HEAD/base recheck"]
+    L --> C["从 committed FCStd 建立隔离 candidate Session"]
+    C --> E["四个固定 CAD operation"]
+    E --> K["fresh checkpoint + reload"]
+    K --> X["受控 STEP export"]
+    X --> S["seal + immutable reload"]
+    S --> O["可信几何与 artifact observation"]
+    O --> V["确定性 Acceptance verifier"]
+    V -->|"全部 required 通过"| H["原子推进 HEAD + 发布 committed Session"]
+    V -->|"执行或验收失败"| R["丢弃/结算 candidate，HEAD 与 baseline 不变"]
 ```
 
-核心原则是先产生候选版本，再验收，最后提交。任何一次模型调用、工具调用或渲染成功都不等同于任务成功。
+TK9 已在现有 FreeCAD 环境中证明：
 
-## 4. 总体分层
+- 成功路径：空 committed FCStd → 创建 10×20×30 Box → 长度修改为 12 → inspect → checkpoint → STEP → seal → verify → commit。
+- 重载事实：bbox 12×20×30 mm、体积 7200 mm³、面积 2400 mm²、质心 (6, 10, 15)、一个有效 solid。
+- 执行失败：第一步已创建 6000 mm³ Box，第二步操作不存在对象而失败；candidate 不提交，HEAD 和 baseline 哈希不变。
+- 验收失败：全部 CAD 操作和 artifact 生成成功，但 required volume 故意要求 7201 mm³；candidate 不提交，失败 verdict 与 artifact 诊断保留。
+- 三个终态都留下可重读 TaskRun；candidate 目录不残留普通文件，HEAD、journal、manifest 和 artifact 哈希与终态一致。
 
-```mermaid
-flowchart TB
-    subgraph Entry["接入层"]
-        MCP["MCP Tools"]
-        DESKTOP["未来 Desktop / CLI"]
-        API["未来 HTTP API"]
-    end
+## 4. 当前代码分层
 
-    subgraph Control["任务控制平面"]
-        TASK["Task Service / State Machine"]
-        POLICY["Policy + Approval"]
-        REASON["Reasoning Gateway"]
-        STORE["TaskRun / Artifact / Revision Store"]
-    end
+### 4.1 当前公共入口
 
-    subgraph Domain["CAD 领域内核"]
-        INTENT["Intent + AcceptanceSpec"]
-        PROGRAM["ModelProgram Validator"]
-        COMMAND["Command Registry"]
-        VERIFY["Deterministic Verifiers"]
-    end
+`src/vibecad/server.py` 注册 31 个低层 FastMCP 工具，包括项目、建模、修改、测量、渲染和运行时工具。它们早于 Task Kernel 存在，仍操作原有进程内 Session。
 
-    subgraph DataPlane["CAD 执行平面"]
-        WORKER["FreeCAD Worker / Session"]
-        TOOLS["Semantic CAD Tools"]
-        ENGINE["FreeCAD + OCCT"]
-        FEEDBACK["Measure / Render / Export"]
-    end
+当前没有任务级 MCP 工具。`TaskService.create_task()`、`get_task()`、`submit_model_program()`、`continue_task()` 和 `reconcile_task()` 只是内部 Python 方法，没有在 `server.py` 注册。
 
-    subgraph Providers["可插拔 Provider（当前只预留）"]
-        PHOTO["Photo/Video → Mesh"]
-        RECON["Mesh/STL → CAD"]
-        SIM["Simulation"]
-        LIB["Parts / Rules / External Engines"]
-    end
+在 Stage 3 完成共享 lease/session ownership 前，不能把 TaskService 与低层 mutating MCP 同时用于同一项目，否则会形成两条未同步写路径。Stage 3 必须选择并落实以下边界：
 
-    Entry --> TASK
-    TASK --> POLICY
-    TASK --> REASON
-    TASK --> INTENT
-    INTENT --> PROGRAM
-    PROGRAM --> COMMAND
-    COMMAND --> WORKER
-    WORKER --> TOOLS
-    TOOLS --> ENGINE
-    ENGINE --> FEEDBACK
-    FEEDBACK --> VERIFY
-    VERIFY --> TASK
-    TASK <--> STORE
-    Providers -. "Artifact / Provider Port" .-> TASK
-```
+- mutating 低层工具也进入同一个 project lease/session authority；或
+- legacy 低层写路径与 task-managed project 明确隔离。
 
-### 4.1 接入层
+只把五个方法套一层 MCP decorator 不算完成 Stage 3。
 
-接入层只做协议转换、能力协商和身份上下文传递，不包含 CAD 业务逻辑。
+### 4.2 当前任务控制平面
 
-- 当前：FastMCP stdio。
-- 后续：桌面端、CLI、HTTP API 都调用同一个 Task Service。
-- 低层 31 个语义工具继续保留，便于外部 Agent 精细控制和兼容已有用户。
-- 新增高层任务工具，但不能在 `server.py` 中重新实现执行逻辑。
+已实现：
 
-### 4.2 任务控制平面
+- 严格、版本化的 `TaskRun` 状态与 transition history。
+- 有 generation 的 `TaskRunStore` compare-and-set 与原子持久化。
+- 同项目排他写 lease。
+- `LocalRevisionStore` 的 immutable revision、HEAD、journal 和 reconcile。
+- `CandidateCoordinator` 的 Session 隔离、checkpoint、seal、commit、rollback/reconcile。
+- `TaskService` 的单次同步事务编排。
 
-Task Service 是未来 Agent 的中心，而不是某个模型 SDK：
+未实现：
 
-- 创建并恢复 `TaskRun`。
-- 决定当前 `reasoning_owner`。
-- 驱动状态机和有限重试。
-- 管理 project lock、candidate revision 和审批点。
-- 记录每一步输入、输出、耗时、模型用量和 artifact。
-- 把失败转换为明确的 `next_action`，而不是一段不可机器处理的文案。
+- 自然语言 Intent 解析、计划生成、模型调用和 usage 统计。
+- 自动 repair/replan、语义 retry、取消或异步 job worker。
+- 公共任务 envelope、MCP capability negotiation 和宿主接入。
 
-### 4.3 CAD 领域内核
+### 4.3 当前 CAD 领域与执行平面
 
-领域内核不依赖具体宿主和模型厂商：
+已实现的 `ModelProgram` operation 只有四个：
 
-- `Intent`：用户要达到什么结果。
-- `AcceptanceSpec`：如何证明达到结果。
-- `ModelProgram`：允许执行哪些操作、顺序、前后置条件和参数来源。
-- `Command Registry`：把稳定 operation 映射到现有语义工具。
-- `Verifier`：读取几何事实并作确定性判断。
+| operation | 固定 handler | 作用 |
+|---|---|---|
+| `create_document` | `new_document` | 新建文档 |
+| `create_box` | `add_box` | 创建参数化 Box |
+| `modify_parameter` | `modify_part` | 修改一个对象参数 |
+| `inspect_model` | `describe_part` | 返回执行反馈 |
 
-### 4.4 CAD 执行平面
+FCStd checkpoint、STEP export、seal、observation 和 commit 是 TaskService 固定内核步骤，不是模型可以排列或省略的 operation。
 
-现阶段继续复用 `Session + tools + FreeCAD` 的进程内路径，避免重做已经稳定的几何能力。
+当前执行器是 same-process 的 `InProcessCadExecutor`，复用既有 `Session + tools + FreeCAD`。独立 FreeCAD Worker 仍是未来目标；当前不能宣称 OCCT 崩溃与控制平面已经进程隔离。
 
-短期约束：
+### 4.4 当前 verifier
 
-- 同一 Session 写操作串行化。
-- 同一时刻只允许一个 TaskRun 修改一个项目。
-- 每个程序执行前创建 checkpoint/candidate。
-- 执行失败或验收失败必须恢复到基线版本。
+提交权只来自 sealed candidate 的可信 observation。当前白名单是：
 
-长期目标：将 FreeCAD 移入独立 Worker，使 OCCT 崩溃不带走任务控制平面。进程边界只传 `ModelProgram`、结构化 Observation 和 Artifact 引用，不序列化活的 OCCT Shape。
+| 类别 | checks |
+|---|---|
+| geometry | `volume`、`area`、`bbox`、`center_of_mass` |
+| topology | `valid_shape`、`solid_count` |
+| artifact | `exists`、`non_empty`、`format` |
 
-## 5. 三种推理模式
+artifact `format` 当前只接受 `fcstd` 和 `step`。孔径/深度、preservation、装配干涉、视觉、制造规则和深层 STEP 语义检查尚未拥有 commit authority。
 
-每个 TaskRun 必须且只能有一个推理所有者：
+## 5. 当前契约事实
+
+### 5.1 ReasoningOwner
+
+schema 预留了：
 
 ```text
-reasoning_owner = external_plan | mcp_sampling | byok
+external_plan | mcp_sampling | byok
 ```
 
-### 5.1 External Plan
+但当前 `TaskService.create_task()` 只接受 `external_plan`；另外两个值会返回固定的 unsupported 错误。源码中没有 Sampling backend、BYOK Provider、Keychain、模型 SDK、模型预算或嵌套推理。
 
-```text
-Claude Code / Codex / WorkBuddy
-→ 生成 Intent / AcceptanceSpec / ModelProgram
-→ VibeCAD 校验、执行和验收
-```
+### 5.2 ModelProgram v1
 
-这是外部 Agent 调用 VibeCAD 时的默认主路径。它不要求 VibeCAD 持有任何模型 Key，也不产生嵌套模型调用。
-
-### 5.2 MCP Sampling
-
-```text
-VibeCAD MCP Server
-→ sampling/createMessage
-→ 宿主使用其模型授权完成受约束推理
-→ VibeCAD 校验返回内容
-```
-
-Sampling 是可选增强，必须先检查客户端 capability。第一版只允许基本 Sampling，不开放 `sampling.tools`，嵌套深度最多 1，并限制每个 TaskRun 的调用次数、最大输出和超时。
-
-### 5.3 BYOK
-
-```text
-VibeCAD Reasoning Gateway
-→ 用户选择的 Provider API
-→ 用户自己的 API Key / Endpoint
-```
-
-BYOK 用于 VibeCAD 独立入口或宿主不负责规划时。它不是托管模型：账单直接发生在用户和模型供应商之间。
-
-安全要求：
-
-- Key 不得出现在 MCP 参数、项目文件、TaskRun、日志或导出产物中。
-- 本地桌面环境优先使用系统 Keychain；仅允许环境变量作为开发/无 UI 回退。
-- FreeCAD Worker 不得获得模型 Key。
-- 日志统一做 secret redaction。
-- Provider 连接失败不得切换到 VibeCAD 付费模型，因为不存在该后端。
-
-### 5.4 推理选择规则
-
-```python
-if caller_supplied_program:
-    reasoning_owner = "external_plan"
-elif client_declares_sampling and user_allows_sampling:
-    reasoning_owner = "mcp_sampling"
-elif user_configured_byok:
-    reasoning_owner = "byok"
-else:
-    status = "needs_reasoning_configuration"
-```
-
-禁止在同一阶段自动叠加多个来源。例如外层 Agent 已提交计划后，VibeCAD 不得为了“再确认一下”自行 Sampling 或调用 BYOK。
-
-## 6. 核心数据契约
-
-所有契约必须版本化、可持久化、可脱离模型单独测试。
-
-### 6.1 Intent
-
-至少包含：
-
-- 用户目标和任务类型（创建、修改、装配、导出）。
-- 输入项目和 artifact 引用。
-- 用户明确给出的尺寸、材料或制造要求。
-- 允许的假设及其来源。
-- 未解决问题。
-
-用户值和模型假设必须区分，修复流程不能悄悄改写用户给出的尺寸。
-
-### 6.2 AcceptanceSpec
-
-验收条件分为：
-
-- `geometry`：bbox、体积、面积、质心、solid 数、孔径/深度等。
-- `topology`：封闭实体、有效 shape、单 solid、依赖完整。
-- `assembly`：位置、间隙、对齐和干涉上限。
-- `artifact`：FCStd/STEP/STL 是否存在、非空、格式正确。
-- `preservation`：哪些中心、轴、特征、尺寸或对象必须保持不变。
-- `visual`：只用于辅助展示，不单独作为制造级通过依据。
-
-### 6.3 ModelProgram
-
-主路径不是 Python，而是受控 IR：
+下面是当前代码可以 round-trip 的真实结构，不是未来示意：
 
 ```json
 {
   "schema_version": 1,
-  "task_id": "task_123",
-  "base_revision": "rev_004",
+  "task_id": "task_11111111111111111111111111111111",
+  "base_revision": "revision_22222222222222222222222222222222",
   "operations": [
     {
-      "id": "op_1",
+      "schema_version": 1,
+      "id": "box",
+      "op": "create_box",
+      "target": {},
+      "args": {"length": 10, "width": 20, "height": 30},
+      "preserve": [],
+      "source": "model",
+      "depends_on": []
+    },
+    {
+      "schema_version": 1,
+      "id": "length",
       "op": "modify_parameter",
-      "target": {"object": "HoleFeature001"},
-      "args": {"parameter": "Diameter", "value": 8, "unit": "mm"},
-      "preserve": ["center", "axis", "depth"],
-      "source": "user"
+      "target": {"object": "Box"},
+      "args": {"parameter": "length", "value": 12},
+      "preserve": [],
+      "source": "model",
+      "depends_on": ["box"]
     }
   ],
-  "acceptance": [
-    {"check": "diameter", "target": "HoleFeature001", "expected": 8,
-     "tolerance": 0.01},
-    {"check": "center_unchanged", "target": "HoleFeature001",
-     "tolerance": 0.01}
-  ]
+  "acceptance": {
+    "schema_version": 1,
+    "id": "acceptance-box",
+    "criteria": [
+      {
+        "schema_version": 1,
+        "id": "volume",
+        "kind": "geometry",
+        "check": "volume",
+        "target": "body",
+        "expected": 7200,
+        "tolerance": 0,
+        "parameters": {"unit": "mm^3"},
+        "required": true
+      },
+      {
+        "schema_version": 1,
+        "id": "solid",
+        "kind": "topology",
+        "check": "solid_count",
+        "target": "body",
+        "expected": 1,
+        "tolerance": null,
+        "parameters": {},
+        "required": true
+      }
+    ]
+  }
 }
 ```
 
-执行前必须验证：
+`preserve` 字段已存在于契约，但当前 verifier 没有通用 preservation check；不能把“字段可序列化”解释成“约束已经被证明”。
 
-- schema/version。
-- operation 白名单和参数类型。
-- 引用对象是否存在且唯一。
-- 单位、数值范围和公差。
-- `base_revision` 是否仍是当前版本。
-- 是否触发用户确认或禁止操作。
+### 5.3 TaskRun v1
 
-### 6.4 StepResult
+当前持久化字段只有：
 
-统一结果 envelope，替代当前 dict/Image/list 多态向 Agent 内核扩散：
+- id、project id、base revision 和 reasoning owner。
+- status、program、candidate revision、committed revision。
+- step records、verification reports、artifact refs、last error 和 transitions。
 
-```json
-{
-  "ok": true,
-  "operation_id": "op_1",
-  "revision": "candidate_005",
-  "facts": {},
-  "artifacts": [],
-  "warnings": [],
-  "error": null
-}
-```
+AcceptanceSpec 通过 `program` 持久化；step 可以保存 elapsed time。TaskRun 当前不保存独立 goal、Intent、assumptions、approvals、模型 usage 或通用 repair history。
 
-错误至少包含稳定 `code`、用户可读 `message`、是否可重试、是否需要用户输入、关联对象和诊断 artifact。图片仍可通过 MCP content 返回，但 Task Service 只消费统一 envelope 和 artifact 引用。
+`workflow.contracts` 中已经有 versioned `Intent` 数据契约，但当前 TaskService 不接收它，TaskRun 也不持久化它；它尚未进入执行闭环。
 
-### 6.5 TaskRun / Revision / Artifact
+当前也没有独立的通用 Artifact Store。任务保存 path-free artifact refs；FCStd/STEP 文件由 revision store 拥有。
 
-`TaskRun` 保存：
+## 6. 当前状态机与恢复语义
 
-- goal、intent、acceptance 和 reasoning owner。
-- base/candidate/committed revision。
-- program、step results、verification 和 repair history。
-- assumptions、approvals、模型 usage、耗时和最终状态。
-- 输入和输出 artifact 引用。
-
-初期使用原子写 JSON 目录即可；当跨任务检索、团队并发或规模化统计成为真实需求时再迁移数据库。
-
-## 7. 状态机和恢复
+当前有 13 个 durable status，没有 `planning`、`repairing`、`cancelled` 或 `timed_out`：
 
 ```mermaid
 stateDiagram-v2
     [*] --> created
-    created --> needs_plan
-    needs_plan --> planning: sampling / BYOK
-    needs_plan --> program_ready: 外部提交
-    planning --> needs_input: 缺少关键参数
-    planning --> program_ready
-    program_ready --> validating_program
-    validating_program --> needs_input: 歧义或需审批
-    validating_program --> executing
-    executing --> verifying
-    executing --> repairing: 可恢复失败
-    repairing --> executing
-    repairing --> needs_input
-    verifying --> committing: 全部通过
-    verifying --> repairing: 可修复
-    verifying --> rolling_back: 不可恢复
-    committing --> succeeded
-    rolling_back --> failed
-    needs_input --> program_ready: 补充计划/参数
+    created --> needs_plan: request_plan
+    needs_plan --> program_ready: submit_program
+    needs_input --> program_ready: submit_program
+    program_ready --> validating_program: start_validation
+    validating_program --> executing: validate_program
+    validating_program --> needs_input: reject_program
+    executing --> verifying: complete_execution
+    executing --> rolling_back: fail_execution
+    verifying --> committing: pass_verification
+    verifying --> rolling_back: fail_verification
+    committing --> succeeded: commit
+    rolling_back --> failed: complete_rollback
+    validating_program --> recovery_required: require_recovery
+    executing --> recovery_required: require_recovery
+    verifying --> recovery_required: require_recovery
+    committing --> recovery_required: require_recovery
+    rolling_back --> recovery_required: require_recovery
+    validating_program --> cleanup_required: require_cleanup
+    executing --> cleanup_required: require_cleanup
+    verifying --> cleanup_required: require_cleanup
+    committing --> cleanup_required: require_cleanup
+    rolling_back --> cleanup_required: require_cleanup
+    cleanup_required --> recovery_required: require_recovery
+    recovery_required --> succeeded: confirm_committed
+    recovery_required --> rolling_back: confirm_uncommitted
+    recovery_required --> program_ready: confirm_pre_candidate
+    cleanup_required --> succeeded: confirm_committed
+    cleanup_required --> rolling_back: confirm_uncommitted
+    cleanup_required --> program_ready: confirm_pre_candidate
 ```
 
-规则：
+恢复边界必须精确理解：
 
-- 每个 step 默认最多重试 1 次；同一 TaskRun 的重规划次数和模型调用次数有硬上限。
-- 标签过期可以重新标注后重试。
-- 模型假设导致的几何冲突可以在约束内修正。
-- 用户明确给出的尺寸冲突必须暂停询问，不能自行修改。
-- 未通过 AcceptanceSpec 的 candidate 永远不能提交。
-- render/preview 失败不撤销已经通过的几何，但必须形成 warning/artifact error。
-- 取消、超时、进程崩溃和客户端断开都必须留下可诊断状态。
+- HEAD 前：执行或 required verification 失败会结算 candidate；committed HEAD、baseline revision bytes 和 committed Session 不变。
+- seal 后但 HEAD 前：immutable、未提交 revision 可以保留，用于证据与 reconcile；它不是 committed revision。
+- HEAD 原子前移后：HEAD 绝不倒退。后续 TaskRun CAS、Session 发布或清理出现歧义时进入 recovery/cleanup，由 HEAD、manifest、revision ancestry、journal 和 live binding 共同判定。
+- “rollback”绝不表示撤销已经提交的 HEAD。
+- 当前没有自动语义重试。已发布 candidate 只有在 rollback 被明确证明完成后才终止为 `failed`；清理或持久化结果不确定时会停在 `cleanup_required` / `recovery_required`。clean failure 后的新计划需要新 TaskRun；validation rejection 需要外部重新提交 program，而 pre-candidate crash 只有在 reconcile 明确回到 `program_ready` 后才能显式继续。
 
-## 8. 执行通道
+## 7. 推理模式的当前与目标边界
 
-### 8.1 语义工具通道（主路径）
-
-`ModelProgram` operation 映射到当前稳定工具或后续新增的领域 command。优点是参数可验证、副作用可预测、事务和后置断言可复用。
-
-第一版只纳入高质量白名单，不要求一次覆盖全部 31 个工具。优先覆盖：
-
-- 项目打开/保存和 revision。
-- 基础实体、布尔和 profile extrude。
-- 孔、圆角、倒角和参数修改。
-- 测量、描述、渲染和 STEP/STL 导出。
-- 必要的零件放置和干涉检查。
-
-### 8.2 程序化通道（未来实验）
-
-模型生成 Python/FreeCAD 代码能表达语义工具尚未覆盖的复杂建模，能力上限更高，但只允许在以下条件全部满足后进入实验：
-
-- 独立沙箱/Worker，无模型 Key 和用户全盘文件权限。
-- CPU、内存、时间、输出目录和 import 白名单限制。
-- 基于只读输入复制创建 candidate。
-- 代码、stdout/stderr 和产物完整审计。
-- 与主路径相同的独立 AcceptanceSpec 验证。
-- 失败只销毁 candidate，不污染已提交项目。
-
-它不能替代语义工具，也不能由外部 Agent 直接请求“关闭安全检查”。
-
-## 9. Provider 端口
-
-当前只定义边界，不实现底层算法：
-
-```python
-class SourceToMeshProvider(Protocol):
-    def reconstruct_mesh(self, source_artifacts, constraints) -> MeshArtifact: ...
-
-class MeshToCadProvider(Protocol):
-    def reconstruct_cad(self, mesh_artifact, constraints) -> CadArtifact: ...
-
-class SimulationProvider(Protocol):
-    def run(self, cad_artifact, study_spec) -> SimulationArtifact: ...
-```
-
-未来数据流：
+### 7.1 External Plan：当前内部可用
 
 ```text
-照片/视频 Provider → Mesh Artifact
-Mesh/STL 逆向 Provider → STEP/BRep/参数化候选 Artifact
-VibeCAD Core → 精细编辑、验证、版本化
-Simulation Provider → 报告和场结果 Artifact
+Claude / Codex / WorkBuddy / 用户代码
+→ 生成 ModelProgram + AcceptanceSpec
+→ VibeCAD 内部 TaskService 校验、执行和验收
 ```
 
-Provider 只能通过 artifact 和 versioned request/response 与核心交互。VibeCAD 不依赖某个照片建模或逆向工程引擎的内部对象模型，也不把 Provider 结果直接视为已验收 CAD。
+这是 Stage 3 要公开的第一条主路径。VibeCAD 不持有模型 Key，也不产生嵌套模型调用。当前缺的是公共 MCP/skill 适配，不是内核执行能力。
 
-## 10. 对外 MCP 契约
+### 7.2 MCP Sampling：未来可选
 
-现有低层语义工具继续工作。新增任务级工具建议保持小而稳定：
+目标是由支持 Sampling 的宿主使用自己的模型授权返回受约束计划。落地前必须有 capability negotiation、用户授权、调用/输出/超时预算和 depth=1 限制。当前没有任何实现。
 
-| 工具 | 作用 |
-|---|---|
-| `create_task` | 创建 TaskRun，返回 task id、当前事实、能力和 `next_action` |
-| `submit_model_program` | 外部 Agent 提交版本化程序和验收条件 |
-| `continue_task` | 从当前状态执行、恢复或在 Sampling/BYOK 模式推进一步 |
-| `get_task` | 获取状态、失败、usage、artifact 和下一步，不产生写副作用 |
-| `cancel_task` | 请求取消并回滚未提交 candidate（在异步/长任务阶段加入） |
+### 7.3 BYOK：未来独立入口
 
-每次返回必须含：
+目标是用户直接配置 Provider API。Key 不得进入 MCP 参数、TaskRun、项目、日志、artifact 或 FreeCAD Worker。当前没有 secret store、Provider adapter 或参考模型后端。
 
-```json
-{
-  "task_id": "task_123",
-  "status": "needs_plan",
-  "next_action": "submit_model_program",
-  "result": null,
-  "artifacts": [],
-  "error": null
-}
+同一 TaskRun 任何时候只能有一个 reasoning owner。外部已经提交 program 后，VibeCAD 不得为了“再确认”隐式调用 Sampling 或 BYOK。
+
+## 8. 计划中的任务级 MCP 与 skill
+
+Stage 3 的候选公共面来自现有内部方法：
+
+| 计划工具 | 内部基础 | 说明 |
+|---|---|---|
+| `create_task` | 已有内部方法 | 绑定 project HEAD，创建 external-plan TaskRun |
+| `submit_model_program` | 已有内部方法 | 按 expected generation 提交并同步执行一个尝试 |
+| `continue_task` | 已有内部方法 | 显式继续 `program_ready` 的同一预制 program |
+| `get_task` | 已有内部方法 | 只读获取 durable TaskRun |
+| `reconcile_task` | 已有内部方法 | 处理 crash/HEAD/Session 不确定窗口；是否公开给普通宿主需在 Stage 3 决定 |
+
+当前没有 `cancel_task`，也没有通用 `agent_run(request)`。取消、异步任务、长时间 worker 和流式进度应在存在真实需求后单独设计，不能在文档中提前宣称。
+
+宿主 skill 应只教授：
+
+- 如何从用户目标构造合法 ModelProgram/AcceptanceSpec。
+- 如何读取 schema、固定错误、TaskStatus 和 next action。
+- 如何在 generation conflict、needs_input、failed 和 recovery_required 时响应。
+- 哪些能力尚不支持，不能退化为任意 Python。
+
+skill 不复制状态机、revision 或 CAD 执行逻辑。
+
+## 9. 未来 Provider 与高级代码通道
+
+源码当前没有 `providers/` 包或以下 Protocol；这些只是目标端口：
+
+```python
+class SourceToMeshProvider(Protocol): ...
+class MeshToCadProvider(Protocol): ...
+class SimulationProvider(Protocol): ...
 ```
 
-不采用旧草案的单一同步 `agent_run(request)` 作为唯一入口，因为长任务、用户确认、客户端断开和失败恢复都需要可恢复 TaskRun。
+目标数据流：
 
-## 11. 推荐包边界
+```text
+照片/视频引擎 → Mesh Artifact
+Mesh/STL 逆向引擎 → STEP/BRep/参数化候选 Artifact
+VibeCAD Task Kernel → 精细编辑、验证、版本化
+Simulation Provider → 报告与场结果 Artifact
+```
 
-在不大规模搬动现有代码的前提下新增：
+Provider 结果只能作为有来源、有哈希的输入或候选 artifact，不能直接获得 commit authority。
+
+任意 Python/FreeCAD 代码的表达上限高，但当前没有代码 Worker。若未来实验，必须同时具备独立进程/沙箱、只读输入副本、CPU/内存/时间/import/输出限制、完整审计，以及与主路径相同的独立验收。它永不替代 ModelProgram 主路径。
+
+## 10. 当前包边界
+
+已存在：
 
 ```text
 src/vibecad/
 ├── workflow/
-│   ├── contracts.py       # Intent / AcceptanceSpec / ModelProgram / Result
-│   ├── program.py         # schema、版本和 policy 校验
-│   ├── state.py           # 状态机
-│   ├── service.py         # Task Service
-│   ├── store.py           # TaskRun / Revision / Artifact 持久化
-│   └── repair.py          # 有界恢复策略
-├── reasoning/
-│   ├── base.py            # ReasoningBackend Protocol
-│   ├── sampling.py        # MCP Sampling，可选
-│   └── byok.py            # 用户 Provider，后续实现
+│   ├── contracts.py
+│   ├── errors.py
+│   ├── program.py
+│   ├── state.py
+│   ├── store.py          # TaskRun persistence
+│   ├── lease.py
+│   └── service.py
 ├── execution/
-│   ├── registry.py        # ModelProgram op → semantic command
-│   ├── adapter.py         # 当前 in-process FreeCAD adapter
-│   └── candidate.py       # checkpoint / commit / rollback
-├── validation/
-│   ├── engine.py          # AcceptanceSpec 调度
-│   └── checks.py          # 纯确定性检查
-└── providers/
-    ├── source_to_mesh.py  # 仅 Protocol
-    ├── mesh_to_cad.py     # 仅 Protocol
-    └── simulation.py      # 仅 Protocol
+│   ├── registry.py
+│   ├── results.py
+│   ├── adapter.py
+│   ├── revisions.py      # Revision/HEAD/journal/artifact persistence
+│   ├── candidate.py
+│   └── executor.py
+└── validation/
+    ├── contracts.py
+    ├── checks.py
+    └── engine.py
 ```
 
-已有 `runtime/`、`engine/`、`tools/`、`feedback/` 保持职责，不让模型 SDK 依赖向下渗透。
-
-依赖方向必须是：
+尚不存在：
 
 ```text
-server/UI → workflow → contracts
-workflow → reasoning / execution / validation / artifacts
-execution → existing tools → engine/session → FreeCAD
-reasoning 不得依赖 FreeCAD
-FreeCAD Worker 不得依赖 reasoning 或访问模型 Key
+workflow/repair.py
+reasoning/
+providers/
+独立 FreeCAD worker
+任务级 MCP / host-neutral Agent skill
 ```
 
-## 12. 开发路线和验收门
+依赖方向继续保持：
 
-开发按“先证明确定性内核，再接模型”的顺序推进。每一阶段必须通过验收门，不能因为模型 demo 看起来可用而跳过。
+```text
+server / future UI → workflow
+workflow → execution + validation
+execution → existing semantic tools → engine/session → FreeCAD
+future reasoning 不得依赖 FreeCAD
+future FreeCAD worker 不得获得模型 Key
+```
 
-### 阶段 0：决策和基线固化
+## 11. 开发路线与可见交付
 
-交付：
+| 阶段 | 状态 | 完成后用户能看到什么 |
+|---|---|---|
+| Stage 0 决策与基线 | 已完成 | 产品边界、模型策略和主路径明确 |
+| Stage 1 稳定执行契约 | 已完成 | versioned contracts、registry、normalizer、program validation |
+| Stage 2 确定性 Task Kernel | 已完成内部窄切片 | 真实 FreeCAD 成功提交及两类失败回滚可重复证明 |
+| Stage 3 外部 Agent 主路径 | 下一阶段 | Claude/Codex 等可通过任务级 MCP + skill 调用 VibeCAD |
+| Stage 4 Eval 与产品验收 | 未开始 | 固定任务集、跨宿主与几何一致性指标 |
+| Stage 5 Sampling / BYOK | 未开始 | 可选使用宿主模型或用户 Provider Key |
+| Stage 6 扩大 CAD 能力 | 未开始 | profile、孔/圆角、preservation、装配等进入受控 IR |
+| Stage 7 外部重建/仿真/代码 Worker | 未开始 | 照片/STL/仿真作为 artifact Provider 接入 |
 
-- 本文档成为 Agent 架构真源。
-- 历史自建模型草案标记为 superseded。
-- 当前 0.4.0 全量快速测试和真实 FreeCAD 测试结果保留为基线。
+Stage 3 的开发顺序：
 
-验收门：团队能明确回答 VibeCAD 负责什么、模型负责什么，以及当前哪些能力尚未实现。
+1. 先统一 FastMCP 与 TaskService 的 lease/session ownership，禁止双写路径。
+2. 增加薄的任务级 MCP adapter，不复制 TaskService 逻辑。
+3. 对入口做 schema、record、请求大小和 generation 预算；固定错误不泄露本地路径。
+4. 编写宿主无关 skill，先覆盖 external-plan，不接模型。
+5. 用至少两个宿主执行同一 conformance program，验证状态、artifact 和几何等价。
+6. 再决定低层 mutating MCP 的兼容迁移方式；Sampling/BYOK 仍留在 Stage 5。
 
-### 阶段 1：稳定执行契约
+Stage 3 完成时，用户应能看到的最小产品闭环是：在 Claude Code 或 Codex 中提出一个当前白名单可表达的任务，宿主提交 ModelProgram，VibeCAD 返回 task id 和可重读终态；成功时获得 committed FCStd/STEP，失败时原项目不变并得到结构化原因。
 
-实现：
+## 12. 架构不变量
 
-1. `Intent`、`AcceptanceSpec`、`ModelProgram v1`、`StepResult` schema。
-2. 稳定错误分类：validation、conflict、label_expired、geometry、runtime、policy、cancelled。
-3. Command Registry，首批映射高质量语义操作。
-4. 当前多态工具返回在 adapter 层归一化，不强制立即破坏外部兼容。
-5. 纯 schema/contract 单测和恶意/越界程序拒绝测试。
+后续每次设计和评审必须检查：
 
-验收门：不启动模型、不依赖自然语言，给定一个合法 ModelProgram 可以完成静态校验；非法或越权程序在访问 FreeCAD 前被拒绝。
+1. 一个 TaskRun 是否始终只有一个 reasoning owner。
+2. program 大小、持久化 envelope、schema、acceptance 和 operation 是否在 project mutation、candidate 创建和 FreeCAD 调用前完成 preflight。
+3. 模型输出是否只能进入固定 operation registry，不能提供 handler、输出路径或任意代码。
+4. StepResult、模型文本或渲染是否被错误地当作 commit 证据。
+5. 修改是否发生在隔离 candidate，而不是 committed Session/revision。
+6. HEAD 前移后是否只 reconcile、不倒退、不重复 CAD side effect。
+7. public MCP 与低层工具是否共享唯一 lease/session authority。
+8. 是否把未来 Sampling、BYOK、repair、Provider 或 Worker 写成当前能力。
+9. 模型 Key 是否可能进入 FreeCAD、TaskRun、日志、artifact 或 MCP 参数。
+10. 每项新增 CAD operation 是否同时具有参数契约、确定性 observation/verifier 和真实回归。
 
-### 阶段 2：确定性 Task Kernel
+## 13. 目标成功标准
 
-实现：
+最终目标不是“模型能生成一段 FreeCAD 代码”，而是：
 
-1. TaskRun JSON 原子持久化和状态机。
-2. project/session 写锁，先明确只支持单活动 writer。
-3. candidate checkpoint、commit、rollback。
-4. ModelProgram Executor。
-5. AcceptanceSpec verifier。
-6. 标签过期、模型假设冲突和不可恢复几何失败的规则化处理。
+> 不同模型和不同宿主都能提交同一种受控设计意图；VibeCAD 在隔离候选版本上执行，使用几何与 artifact 事实证明结果，通过后提交，失败时保持 committed 项目不变，并留下可恢复、可重放、可审计的 TaskRun。
 
-验收门：使用预先编写的 ModelProgram，在真实 FreeCAD 上完成“创建、修改、验证、导出”；注入任一步失败后，已提交基线保持不变且 TaskRun 可诊断。
-
-### 阶段 3：外部 Agent 主路径
-
-实现：
-
-1. `create_task / submit_model_program / continue_task / get_task` MCP 工具。
-2. 外部 Agent 所需的 schema、能力清单和紧凑几何上下文。
-3. Claude Code、Codex、WorkBuddy 的最小接入说明和 conformance 用例。
-4. 通用 MCP 兼容测试；OpenClaw/Hermes 不做专属业务分支。
-
-验收门：至少两个不同宿主能对同一任务提交 ModelProgram，VibeCAD 得到等价几何结果；宿主退出后可通过 task id 读取最终或失败状态。
-
-### 阶段 4：Eval 和产品级验收
-
-建立固定任务集，至少覆盖：
-
-- 从零创建单零件。
-- 打孔、槽、圆角和尺寸修改。
-- “孔中心不变，只改直径”等 preservation 约束。
-- 项目打开、候选修改、失败回滚。
-- 两零件放置和干涉。
-- STEP/STL/FCStd 产物验证。
-- 缺参、旧标签、非法尺寸和执行失败。
-
-指标：首次计划通过率、闭环成功率、几何验收通过率、回滚成功率、平均步骤数、模型调用数、延迟和用户确认次数。
-
-验收门：所有确定性 fixture 100% 可重复；模型 eval 单独报告波动，不得掩盖执行内核回归。
-
-### 阶段 5：可选推理后端
-
-先后实现：
-
-1. `ExternalPlanBackend`（实际在阶段 3 已成立）。
-2. `McpSamplingBackend`：capability negotiation、授权、限额、超时、depth=1。
-3. `ByokBackend`：窄 Provider Protocol、secret store、usage/budget、至少一个参考 Provider。
-4. 更新 `PRIVACY.md`：明确用户选择的宿主/Provider、最小发送内容、Key 存储和日志策略。
-5. 通过相同 contract tests 验证不同推理来源输出同一种 ModelProgram。
-
-验收门：每个 TaskRun 恰有一个 reasoning owner；禁用或拒绝 Sampling、缺少 Key、Provider 超时时，都能返回明确的 `next_action`，且日志中没有 Key。
-
-### 阶段 6：扩大中间 CAD 能力
-
-优先投入会直接提高真实任务完成率的能力：
-
-- 参数化 profile 和更丰富的特征修改。
-- 更稳定的语义选择器和 preservation 检查。
-- STEP/FCStd 输入 artifact、现有模型识别与修改。
-- 装配约束、标准件/规则 Provider 接口。
-- 工程图和可制造性检查。
-- 多项目/多 Worker 和崩溃恢复。
-
-每一项都先增加领域 command、确定性验证和 eval，再允许模型规划调用。
-
-### 阶段 7：外部重建、仿真和高级代码通道
-
-只有核心闭环稳定后才进入：
-
-- 接现成照片/视频到 Mesh Provider。
-- 接现成 Mesh/STL 到 STEP/BRep/参数化重建 Provider。
-- 接外部仿真 Provider。
-- 实验性隔离代码生成 Worker。
-
-这些能力全部以 artifact 进出，不改变 Task Service、ModelProgram 和验收主链。
-
-## 13. 第一轮实现切片
-
-下一轮代码工作建议只做阶段 1，不立即接任何模型：
-
-1. 定义四个 versioned contract。
-2. 建立 `ModelProgram` validator 和错误 taxonomy。
-3. 建立首批 command registry。
-4. 写 tool-result normalizer，兼容现有 31 个工具返回形态。
-5. 用 3 个纯 fixture 覆盖创建、尺寸修改和非法程序拒绝。
-6. 用 1 个真实 FreeCAD slow test 证明合法程序可执行，但暂不加入 TaskRun/模型循环。
-
-这一步完成后再进入 Task Kernel，可以最大限度避免先写一个看似聪明、实际不可验证的 Agent loop。
-
-## 14. 架构不变量
-
-后续每次设计和代码评审都检查：
-
-1. 是否出现两个 reasoning owner 或重复模型调用。
-2. 是否在 schema/policy 校验前触碰 FreeCAD 或文件系统。
-3. 是否让模型输出绕过 operation 白名单。
-4. 是否把模型判断当作几何验收。
-5. 是否先修改 committed revision，再尝试回滚，而不是在 candidate 上执行。
-6. 是否把模型 Key 传给 MCP 参数、FreeCAD Worker、日志或 artifact。
-7. 是否为某个宿主复制领域逻辑，而不是通过标准 adapter 接入。
-8. 是否把未来 Provider 的内部对象泄漏进 VibeCAD 核心。
-9. 是否在没有对应确定性测试和 eval 的情况下新增模型可调用能力。
-10. 是否把实验性任意代码通道升级成默认主路径。
-
-## 15. 成功标准
-
-目标不是“模型能生成一段 FreeCAD 代码”，而是：
-
-> 不同模型和不同宿主都能提交同一种受控设计意图；VibeCAD 能在候选版本上执行，使用几何事实证明结果，成功后提交，失败时完整回滚，并留下可以重放和审计的 TaskRun。
+当前已经证明其中的内部确定性执行、验证、提交与回滚部分。跨宿主公共协议、自然语言推理、扩大 CAD 白名单和外部 Provider 仍需按上述阶段逐步交付。
