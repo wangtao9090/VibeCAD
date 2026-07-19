@@ -7903,3 +7903,874 @@ dependency, network, model, MCP, FreeCAD, environment, or public UI mutation.
 The exact commit message is
 `feat(execution): persist immutable CAD revisions`; the branch must be pushed
 non-force and verified clean and upstream-equal.
+
+## TK5 Closeout and TK6 Resume — TK6-E000
+
+### 1. Completed milestones
+
+- TK5 was committed exactly as
+  `4fe3c4c1100822dddb1262bd5603bac0a3d989b5`
+  (`feat(execution): persist immutable CAD revisions`) and pushed non-force.
+- The controller verified a clean `codex/task-kernel-phase2` branch with HEAD
+  exactly equal to `origin/codex/task-kernel-phase2` at that commit.
+- TK5 closed with 24/24 corrective tests, 200/200 revision-store tests, 1958
+  full-suite passes, 81 intentional deselections, two known macOS fork
+  deprecation warnings, 300/300 concurrent atomic-reader iterations, whole
+  Ruff GREEN, and two independent P0/P1/P2 `0/0/0` reviews.
+- The authoritative artifact at the committed closeout is
+  `2012ceaebf15eb4eaef4566f96e2e17fb78937abfae4489aec22833b5303d332`.
+  No source, test, dependency, environment, CAD, model, MCP, PR, or remote
+  rewrite is active at this recovery point.
+
+### 2. Next steps
+
+1. Run the unchanged full baseline at the clean pushed TK5 anchor with only
+   this approved artifact append present.
+   - If the result differs from 1958 passes, 81 intentional deselections, and
+     the two known macOS warnings without a demonstrated environment reason,
+     stop TK6 as an unexpected gate RED.
+2. Resolve the exact candidate/session ownership contract with bounded,
+   independent, read-only reviews; the controller writes and freezes
+   `tests/test_candidate_revision.py` before production exists.
+   - If the contract requires a Session private field, server-global Session,
+     public MCP change, new dependency, or a fourth named path, stop for TK-R2.
+3. Execute one genuine missing-module RED, then implement only
+   `src/vibecad/execution/candidate.py` against the frozen oracle.
+   - If RED is not solely the absent module, source creation remains frozen.
+4. Run focused, cumulative Stage C, full, pure-import, Ruff, format, diff,
+   allowlist, and independent review gates.
+   - Any invalid receipt that reaches HEAD commit, base/candidate object alias,
+     rollback mutation of the committed binding, or ambiguous post-HEAD result
+     is a circuit breaker.
+5. Stage only the three TK6 files, commit the prewritten message, push
+   non-force, and verify clean HEAD/upstream equality before TK7.
+
+### 3. Approved decisions
+
+- Active revision: TK-R1; authorization: TK-A02, exact user wording
+  “批准 TK-R1，按计划开始 Stage C。”
+- The user's standing direction to continue without internal product approvals
+  and the current “还在继续推进吗？” request continuation within that already
+  approved scope; neither expands authority.
+- Active TK6 decisions: TK-D05–TK-D12, TK-D17–TK-D19, TK-D23, and TK-D24.
+  TK-A03 remains controlling for recorded internal oracle/review corrections.
+- TK6, its exact named files, gates, commit message, and non-force push were
+  already ordered and approved. No duplicate approval is required.
+
+### 4. Execution discipline
+
+Capability profile re-evaluated for this resumed controller session:
+
+    approval: native-plan
+    delegation: spawn-send-wait
+    persistence: repo-artifact
+    process: native-session-poll
+
+Adapter: Codex. Evidence uses exactly the permitted categories:
+
+- live capability declarations
+  - `update_plan` is declared live.
+  - `spawn_agent`, `followup_task`, `send_message`, and `wait_agent` are
+    declared live.
+  - `exec_command` can return a session identifier and `write_stdin` can poll
+    that exact session; `apply_patch` is declared for repository edits.
+- observable behavior
+  - Native plan projection accepted the TK5 closeout and TK6-resume state.
+  - Spawn/follow-up/wait collaboration returned distinct TK5 implementation
+    and independent review evidence in this controller thread.
+  - A full-suite command returned a live session and was completed by polling
+    the original session; no duplicate launch occurred.
+- environment identity
+  - Host/runtime: Codex desktop; controller: `/root`.
+  - Workspace: `/Users/wangtao/Documents/DevProject/vibecad`.
+- public configuration
+  - Filesystem access is unrestricted for the declared workspace, network is
+    enabled, and approval policy is `never` with no escalation path.
+
+No capability fallback or environment residual is active. The artifact remains
+authoritative and native plan remains a projection. TK6 uses
+`spawn-send-wait`, standard implementation work, deep independent review, and
+`native-session-poll` for any long gate. Its allowlist is only
+`docs/orchestrated/vibecad-task-kernel-phase2.md`,
+`tests/test_candidate_revision.py`, and
+`src/vibecad/execution/candidate.py`. Unexpected RED, out-of-allowlist writes,
+second unsuccessful focused GREEN, ambiguous process state, P0/P1, unresolved
+P2, or architecture expansion stops the packet. Residuals remain deferred
+unless they invalidate a gate.
+
+## Task Packet TK6-P1 — Isolated Candidate Sessions
+
+### 1. Authorization
+
+TK-R1/TK-A02 explicitly approved TK6, the decisions and three-file allowlist
+above, genuine RED, independent review, exact commit, and non-force push. This
+packet inherits all higher-priority system, developer, and user instructions,
+applicable directory-scoped instructions, the current host permission model,
+and sandbox. Neither the Skill, artifact, nor packet grants or expands
+permission, elevates authority, or bypasses those controls. Do not request the
+same approval again.
+
+### 2. Workspace anchor
+
+Repository: `/Users/wangtao/Documents/DevProject/vibecad`.
+Branch and upstream-equal anchor:
+`codex/task-kernel-phase2@4fe3c4c1100822dddb1262bd5603bac0a3d989b5`.
+No applicable repository `AGENTS.md` or `CLAUDE.md` exists. Modify only the
+three TK6 allowlisted files. Do not alter execution package exports, Session,
+revision/validation/workflow modules, server/MCP surfaces, dependencies,
+environment, Git history, or remote configuration. The current permission
+model and sandbox remain binding.
+
+### 3. Context
+
+TK5 provides immutable candidate staging, sealed revision publication, atomic
+HEAD, and reconciliation. TK4 provides authentic verification receipts. TK6
+must join those capabilities to injected CAD Session ownership without running
+a ModelProgram or collecting geometry; those remain TK7/TK8.
+
+An active candidate owns a newly created or base-loaded Session distinct from
+the committed Session binding. Checkpoint produces controller-owned FCStd
+staging, seal reloads that exact snapshot as a read-only verification Session,
+and commit consumes a successful receipt before HEAD advancement. Rollback
+closes only candidate/sealed Sessions and never reloads, mutates, or replaces
+the committed baseline. After HEAD advances, cleanup or SessionSlot promotion
+failure reports committed recovery state and never rolls HEAD back.
+
+Success requires exact-once terminal behavior, lease and HEAD/base rechecks,
+receipt binding, immutable sealed content, SessionSlot compare-and-swap, and
+deterministic reconcile results. No Session private field, server-global
+Session, dynamic callable discovery, user/model path, FreeCAD import, network,
+retry loop, or public API exposure is permitted.
+
+### 4. Steps and gates
+
+1. Verify the clean TK5 baseline and current environment fingerprint.
+2. Resolve strict immutable value schemas, `CadSnapshotPort` method boundary,
+   Session binding/slot CAS, coordinator state machine, error taxonomy, receipt
+   consumption, revision-store call order, close ownership, and recovery
+   semantics with independent static reviews.
+3. Write `tests/test_candidate_revision.py` first. Static review must freeze
+   the public direct-module surface and prove fake base/candidate/sealed Session
+   separation, rollback isolation, exact-once terminal calls, forged/replayed/
+   mismatched/failed receipt rejection, changing HEAD, seal-after-write,
+   checkpoint/load/close/CAS faults, and pre-/post-HEAD error classification.
+4. Run exactly one focused RED accepted only when collection fails solely
+   because `vibecad.execution.candidate` is absent.
+5. Implement only `candidate.py`; run focused GREEN, then cumulative TK1–TK6,
+   Phase-1 C1–C5 compatibility, full normal suite, pure-import and dependency
+   boundaries, Ruff check/format, Python compilation, diff/hash/allowlist, and
+   two fresh complete independent reviews.
+6. Stage the exact three files, repeat staged gates, commit exactly
+   `feat(execution): isolate candidate sessions`, push non-force, and verify
+   clean upstream equality.
+
+### 5. Execution discipline
+
+Delegation is `spawn-send-wait`; implementation tier is standard and review
+tier is deep where selectors are used. Long processes use
+`native-session-poll`; never relaunch an active command. The controller owns
+artifact/test/source edits, executable tests, staging, commit, push, and final
+acceptance. Review workers are read-only and do not run Python, pytest, Ruff,
+CAD, network/model services, or Git mutation.
+
+Use one missing-module RED and at most two focused GREEN attempts. Bound all
+record counts, diagnostic text, coordinator calls, close attempts, and terminal
+transitions. Stop on an unexpected baseline/RED, unverifiable oracle, any
+aliasing of committed and candidate Session objects, mutation after sealing,
+receipt bypass, HEAD rollback after linearization, guessed recovery, private
+Session access, out-of-allowlist write, or scope/authority expansion.
+
+### 6. Delivery boundary
+
+Complete one independently accepted, pushed TK6 commit and a clean recovery
+snapshot. The controller reserves executable validation, acceptance, exact
+staging, commit, and push. TK6 does not execute ModelProgram steps, observe
+geometry, export STEP, orchestrate TaskRun, expose MCP, install/upgrade, or run
+real FreeCAD. Those remain TK7–TK9.
+
+### 7. Final report
+
+Return exact artifact/test/source hashes and line counts, focused/cumulative/
+full/static gate commands and numeric results, independent P0/P1/P2 verdicts,
+any justified deviation or residual, commit/push state, and final workspace
+status. No silence, elapsed wait, or prose-only claim counts as evidence.
+
+## TK6 Baseline Evidence — TK6-E001
+
+At clean pushed TK5 executable anchor
+`4fe3c4c1100822dddb1262bd5603bac0a3d989b5`, with only the approved TK6
+artifact append at
+`4a4eefb90f76f3f693576312785fcb95a1a5598d99099edcd20f3e5bcbff3d23`,
+the controller verified that both TK6 source and test paths were absent and
+ran `PYTHONPATH=src .venv/bin/pytest -q` through one native session. It exited
+0 after pytest reported 17.08 seconds with exactly 1958 passed, 81 intentional
+deselections, and the same two known macOS multithreaded-`fork()` deprecation
+warnings. Repository status and diff check were clean except for the named
+artifact append. No CAD, install, dependency, model, MCP, source, test, staging,
+commit, push, or other external mutation occurred.
+
+The baseline matches E032 exactly and authorizes bounded read-only TK6 contract
+resolution. Production and tests remain frozen until the controller records
+the resolved surface and independently accepted oracle strategy.
+
+## TK6 Resolved Candidate Contract — TK6-E002
+
+### Contract review and correction
+
+Two bounded, independent, read-only compatibility reviews inspected the full
+TK6 packet and the current Session, lease, revision-store, validation, and
+execution boundaries. The first candidate was ACCEPT with P0/P1/P2 `0/0/0`,
+but the later close-order review produced more specific evidence and therefore
+supersedes that provisional verdict with REJECT `0/3/2` before oracle freeze.
+The findings are internal correctness corrections authorized by TK-A03, not a
+product or scope change:
+
+1. A staging FCStd must be checkpointed and reloaded before TK7 exports STEP;
+   `seal_revision` cannot run first because TK5 requires the STEP input.
+2. If durable seal succeeds but closing the staging-reloaded Session fails,
+   HEAD is still old and the operation must terminally reconcile as
+   not-committed. It must not issue a commit-capable handle.
+3. After HEAD advancement, SessionSlot ownership must be derived from both the
+   CAS outcome and a read-back identity check. A return value alone cannot
+   authorize closing either Session.
+4. Terminal results carry orthogonal durable, promotion, cleanup, and recovery
+   facts rather than asking one status value to encode every dimension.
+5. Cleanup identity is retained without permitting receipt, commit, CAS, or
+   close replay. A close attempt is never repeated after a side-effect-then-
+   raise result, and a current live slot Session is never cleanup-owned.
+
+This section closes those findings in the oracle. No fourth path, dependency,
+Session edit/private field, concrete FreeCAD adapter, STEP exporter, public
+package export, server-global Session, MCP, model, network, install, or product
+decision is introduced. The corrected oracle may now be written; production
+remains absent until the genuine RED.
+
+### Exact direct-module surface
+
+`vibecad.execution.candidate` exports only:
+
+    CandidateErrorCode, CandidateError,
+    CandidateCommitStatus, CandidateRollbackStatus,
+    CandidateReconcileStatus, CadSnapshotPort, SessionBinding, SessionSlot,
+    ActiveCandidate, CheckpointedCandidate, SealedCandidate,
+    CandidateCommitResult, CandidateRollbackResult,
+    CandidateReconcileResult, CandidateCoordinator
+
+The execution package root remains unchanged. There are no free commit,
+rollback, reconcile, serialization, mapping, dynamic discovery, or adapter
+functions.
+
+`CadSnapshotPort` is the trusted injected base boundary with exactly four CAD
+responsibilities:
+
+    create_empty(*, revision_id: str) -> object
+    load_fcstd(path: Path) -> object
+    checkpoint_fcstd(session: object, path: Path) -> None
+    close(session: object) -> None
+
+It does not export STEP, hash files, import FreeCAD, discover callables, choose
+paths, or expose Session internals. A create/load implementation owns and must
+clean any partial Session until it returns one object; return transfers that
+Session to the coordinator.
+
+`SessionBinding` is frozen, slotted, keyword-only, identity-equality-only, and
+non-serializable, with exact fields `project_id`, `revision_id`, and `session`.
+`SessionSlot(initial)` requires one exact non-null binding and belongs to that
+project. Its only public instance methods are `current()` and
+`compare_and_set(expected, replacement)`. CAS compares `current is expected`,
+never invokes binding or Session equality, rejects a different project and a
+replacement Session alias, and publishes at most once under its lock.
+
+The three candidate handles are frozen, slotted, keyword-only, identity-
+equality-only, non-serializable process capabilities. Their exact fields are:
+
+- `ActiveCandidate`: `project_id`, `base_head`, `binding`, `model_path`,
+  `step_path`.
+- `CheckpointedCandidate`: the same five fields, where `binding` owns the
+  independently staging-reloaded read-only export Session.
+- `SealedCandidate`: `project_id`, `base_head`, `revision`, and `binding`, where
+  `binding` owns the independently immutable-revision-reloaded verification
+  Session.
+
+Direct construction, copy, replacement, serialization, a stale transition
+handle, or a handle from another coordinator cannot authorize an operation;
+the coordinator registry authenticates exact object identity. Candidate
+handles never expose the committed baseline binding.
+
+`CandidateCoordinator` is constructed keyword-only with one exact
+`LocalRevisionStore`, one trusted `CadSnapshotPort`, and one exact
+`SessionSlot`. Its public lifecycle is:
+
+    begin(*, project_id, expected_head, lease) -> ActiveCandidate
+    checkpoint(*, candidate, lease) -> CheckpointedCandidate
+    seal(*, candidate, lease) -> SealedCandidate
+    commit(*, candidate, receipt, compiled, snapshot, lease)
+        -> CandidateCommitResult
+    rollback(*, candidate, lease) -> CandidateRollbackResult
+    reconcile(*, project_id, lease) -> CandidateReconcileResult
+
+The caller owns and releases the original `ProjectWriteLease`; the coordinator
+never acquires, replaces, steals, or releases it. Every later operation
+requires the exact same live lease object captured by begin, and the revision
+store performs the authoritative issuer/HEAD check before any CAD or receipt
+side effect.
+
+### Results and errors
+
+All result values are frozen, slotted, keyword-only, and non-serializable.
+Commit status is `committed`, `committed_cleanup_required`, or
+`committed_recovery_required`; rollback status is `not_committed`,
+`cleanup_required`, or `recovery_required`; reconcile status is `clean`,
+`committed`, `not_committed`, `cleanup_required`, or `recovery_required`.
+
+`CandidateCommitResult` contains `schema_version`, `status`, `head`,
+`revision`, `live_binding`, `report`, `head_committed`, `slot_promoted`,
+`cleanup_required`, `recovery_required`, and `cleanup_binding`.
+`CandidateRollbackResult` contains `schema_version`, `status`, `head`,
+`live_binding`, `reconciliation`, `head_committed`, `slot_promoted`,
+`cleanup_required`, `recovery_required`, and `cleanup_binding`.
+`CandidateReconcileResult` has the same fields as rollback. Nullable head,
+binding, reconciliation, and cleanup identity are explicit only where durable
+or live state could not be read safely. Invariants reject contradictory result
+construction.
+
+`CandidateError` has a closed fixed-message taxonomy: `invalid_input`,
+`invalid_identifier`, `invalid_candidate`, `invalid_transition`,
+`invalid_binding`, `invalid_lease`, `session_alias`, `terminal_in_progress`,
+`already_terminal`, `receipt_rejected`, `cad_failure`, `store_failure`,
+`conflict`, `cleanup_required`, and `recovery_required`. It also reports the
+orthogonal booleans `head_committed`, `cleanup_required`, and
+`recovery_required`; it never reflects an identifier, path, Session, receipt,
+or underlying exception text. Underlying trusted exceptions may remain only as
+local exception causes.
+
+### Lifecycle, identity, and exact-once order
+
+1. `begin` strictly validates exact public values, the slot's current project
+   and revision, current HEAD, and immutable base revision. `begin_revision`
+   atomically rechecks lease and HEAD. An imported base loads only the fixed
+   candidate model path; an empty base calls `create_empty` with the internally
+   generated revision ID. The returned Session must differ by identity from
+   the baseline. Any post-begin fault closes only a returned non-baseline
+   Session and reconciles the staging journal before returning an error.
+2. `checkpoint` revalidates exact lease, HEAD, slot, and fixed store-owned
+   paths; writes FCStd once; reloads that staging FCStd into a second,
+   non-aliased Session; and only then closes the active Session once. It returns
+   a `CheckpointedCandidate`. Any save/load/alias/close fault terminally closes
+   remaining owned Sessions and reconciles not-committed, with no retry.
+3. TK7, not TK6, may use only the checkpointed read-only Session to export STEP
+   to the exposed fixed `step_path`. No ModelProgram operation is valid on that
+   handle.
+4. `seal` calls TK5 `seal_revision`, reloads `revision_model_path` into a third
+   non-aliased Session, and only then closes the checkpoint/export Session. It
+   returns `SealedCandidate` only after all three succeed. Missing STEP, seal,
+   reload, alias, or close failure remains pre-HEAD and terminally reconciles
+   not-committed; no commit capability escapes.
+5. Observation and verification use only the immutable-reloaded sealed
+   Session. `commit` reserves terminal ownership, rechecks exact lease, HEAD,
+   and `slot.current is baseline`, then calls only
+   `consume_verification_receipt` with the exact revision and manifest. Invalid,
+   failed, forged, mismatched, or replayed receipt reaches no HEAD mutation.
+6. Receipt success is terminal even if the following store commit fails. Every
+   pre-HEAD failure automatically closes remaining candidate-owned Sessions and
+   reconciles not-committed; the old slot Session is never touched and the
+   consumed receipt is never reused.
+7. HEAD replacement is the only commit linearization point. A successful
+   commit or `DURABILITY_UNCERTAIN(head_committed=True)` can never call rollback.
+   The coordinator performs at most one baseline-to-sealed CAS, then reads the
+   slot identity before deciding ownership.
+8. A successful transition retires the prior handle. A terminal operation is
+   reserved before its first side effect. Duplicate or concurrent terminal
+   calls either receive the bounded cached same-operation result or a fixed
+   terminal error; they never re-consume, recommit, re-reconcile, re-CAS, or
+   re-close.
+
+### Post-HEAD CAS and cleanup matrix
+
+- CAS `True` and current is replacement: `slot_promoted=True`; ownership has
+  transferred and sealed is never closed. Close the displaced baseline once.
+- CAS `False` and current is baseline: `slot_promoted=False`; baseline remains
+  live and sealed may be closed once; recovery is required.
+- CAS raises and current is replacement: promotion occurred; never close
+  sealed, report recovery because the adapter result was ambiguous, and close
+  the displaced baseline once.
+- CAS raises and current is baseline: promotion did not occur; never close
+  baseline, close sealed once, and report recovery.
+- CAS `False` but current is replacement: treat the identity read-back as
+  promoted, never close sealed, and report recovery for the contradictory CAS.
+- CAS `True` but current is not replacement, or current is a third binding, or
+  current cannot be read: ownership is unknown. Close neither baseline nor
+  sealed, set `slot_promoted=None`, and report recovery.
+
+Any close is marked attempted before invocation and is never retried after an
+exception. `cleanup_binding` identifies only an unattempted, non-live binding
+that a later bounded reconciliation may clean. It never identifies the current
+slot binding, never authorizes closing a side-effect-uncertain prior attempt,
+and never authorizes receipt, HEAD commit, or CAS replay.
+
+### Reconciliation
+
+`reconcile` calls `store.reconcile` first; HEAD, journal, and immutable records
+are the durable truth. It then reads the exact slot binding:
+
+- Matching slot revision and reconciled HEAD is stable and performs zero CAS or
+  close.
+- A committed journal that exactly proves old HEAD to candidate permits one
+  load of the immutable model and one identity CAS from the captured old
+  binding. The full post-HEAD CAS/read-back matrix applies.
+- Not-committed or cleanup-required leaves the old slot untouched and closes
+  only same-coordinator candidate-owned Sessions not previously attempted.
+- Clean durable state with a mismatched slot, a divergent third binding,
+  corrupt/ambiguous evidence, or failed identity read-back is recovery-required
+  and never guessed into consistency.
+
+Process restart cannot recreate an Active/Checkpointed/Sealed capability.
+Reconcile may use durable HEAD/journal evidence and the currently captured slot
+identity only. A sealed-but-not-committed immutable revision may remain a valid
+orphan; that is not a committed live Session.
+
+### Frozen oracle matrix and residuals
+
+The controller test owns: exact surface/signatures/value invariants; hostile
+input and forged/cross-coordinator handles with zero side effects; invalid,
+foreign, and released lease ordering; empty/imported begin; baseline/active/
+checkpoint/sealed identity separation; fixed paths; staging reload before STEP;
+missing STEP; immutable reload before observation; save/load/close/seal faults;
+HEAD/slot changes; forged/failed/wrong/replayed receipts; receipt consumption
+order; pre-/post-HEAD store faults; every CAS/read-back branch; cleanup identity;
+explicit rollback; concurrent/duplicate terminals; and the complete durable
+reconciliation matrix. Static tests forbid Session private names, FreeCAD,
+server, MCP, network, dynamic discovery, user paths, STEP synthesis, dependency
+changes, package-root exports, and serialization surfaces.
+
+Residuals do not invalidate TK6: the concrete Session port, STEP exporter,
+trusted observation executor, real FreeCAD proof, TaskService orchestration,
+and server slot composition remain TK7–TK9/Stage 3; a consumed receipt cannot be
+reused after a pre-HEAD fault; legal sealed orphans can remain; process-local
+handles do not survive restart; a close side-effect-then-raise cannot be safely
+retried; and no public task/MCP surface exists yet.
+
+## TK6 Durable-Truth Oracle Correction — TK6-E003
+
+An independent read-only adversarial oracle review challenged E002 before any
+production existed. Its P0 durable-truth finding is accepted under TK-A03 and
+supersedes any E002 wording that could be read as trusting a commit exception's
+code or `head_committed` metadata:
+
+- After a receipt has been consumed, every exception from `commit_revision`,
+  including an ordinary exception and contradictory durability metadata, is an
+  ambiguous outcome until the coordinator calls durable reconciliation.
+- `store.reconcile` and an exact durable HEAD read are authoritative. A
+  reconciled committed candidate enters the post-HEAD CAS path and can never
+  roll back, even if the exception claimed pre-HEAD failure. A reconciled
+  not-committed candidate closes only candidate-owned Sessions and terminates
+  with the baseline slot untouched, even if the exception claimed the HEAD was
+  committed.
+- If reconciliation and exact HEAD cannot agree on old versus candidate, the
+  operation terminates recovery-required. It does not replay receipt, commit,
+  rollback, CAS, or an already-attempted close and does not guess ownership.
+- A genuine pre-HEAD fault oracle must wrap the real store before the HEAD
+  mutation and prove `consume → commit fault → durable reconcile → old HEAD`.
+  A genuine post-HEAD oracle must execute the real commit and then throw a
+  generic exception; acceptance requires discovery of the advanced HEAD and
+  completion of the post-HEAD SessionSlot path.
+
+CAS is likewise judged by exact slot read-back identity after every `True`,
+`False`, or raised result. Only the exact replacement binding establishes
+promotion; only the exact old binding establishes non-promotion. A divergent
+or unreadable slot is recovery-required. Closing a Session still follows the
+more conservative E002 ownership rule: if it might have crossed the live slot
+boundary, no close is guessed.
+
+The oracle uses authentic `compile_acceptance_spec`, `verify_acceptance`, and
+`consume_verification_receipt` behavior. It proves a successful receipt is
+burned after both a successful commit and a later pre-HEAD store fault; a
+binding mismatch that fails before receipt consumption remains consumable on
+its original exact binding, even though the candidate lifecycle itself is
+terminally rolled back under TK-D21. No mocked or constructed receipt can make
+a commit test GREEN.
+
+The review also requires repeated reconciliation to be side-effect stable and
+an explicit post-HEAD displaced-baseline close-failure case. The former may
+return the same semantic facts without repeating load, CAS, or close; the
+latter is committed with `slot_promoted=True`, `cleanup_required=True`, and no
+sealed-Session close or HEAD rollback. These corrections close the adversarial
+P0/P1 oracle findings without expanding TK6's API, allowlist, or authority.
+
+## TK6 Test-Oracle Review Corrections — TK6-E004
+
+Two independent full-file reviews rejected the initial 1177-line oracle at
+test/artifact anchors
+`344797c4c288c782dca02f7744e7303fafcf390908c10d8af7dc3ace2eccfda5`
+and
+`bdd2cc90879b92f89abb9add9aef1881c448b4593ec32248a8ed6acabd361bf9`.
+The verdicts were P0/P1/P2 `1/5/3` and `2/5/3`. Production remained absent
+and no RED was spent. The controller accepts the overlapping durable-truth,
+precondition-order, ownership-leak, receipt-matrix, reconcile, concurrency, and
+value/static findings and expands the pre-production oracle before review.
+
+The corrected test design now additionally requires:
+
+- old durable HEAD despite falsely claimed `head_committed=True`, and new
+  durable HEAD despite falsely claimed `head_committed=False`;
+- one real durable reconcile after every accepted commit exception, zero
+  rollback replay, and recovery when reconciled classification and exact HEAD
+  disagree;
+- wrong, foreign, and released lease, changed HEAD, and changed exact slot
+  rejection before receipt consumption or HEAD mutation, with the authentic
+  receipt still consumable on its original binding;
+- absent, forged, failed, wrong-compiled, wrong-revision, wrong-manifest,
+  mismatched-snapshot, and replayed authentic receipt cases;
+- begin/create/load alias and fault cleanup, checkpoint alias and secondary
+  Session cleanup, immutable reload alias/fault cleanup, and all close attempts
+  counted by object identity;
+- every CAS outcome plus exact replacement, exact baseline, divergent, and
+  unreadable read-back, with exactly one CAS and conservative close ownership;
+- fresh-coordinator committed recovery, not-committed zero-load/zero-CAS
+  idempotence, cleanup/recovery mapping, CAS-failure then reconcile convergence,
+  and rollback confronted with an already advanced durable HEAD;
+- commit-versus-commit, commit-versus-rollback, and rollback-versus-rollback
+  terminal races; and
+- exact fields, keyword-only construction, frozen slots, identity equality,
+  result invariants, nonserialization, fixed nonreflective errors, cross-project
+  slot rejection, concurrent one-winner CAS, and provenance-based static
+  boundaries for imports, dynamic execution, Session internals, and file writes.
+
+The slot-retirement finding is closed without adding a public method:
+`SessionSlot` may maintain a private weak retirement registry and the
+coordinator atomically marks a non-live candidate binding retired before
+closing it. Public CAS rejects that exact retired binding, so a stale
+`SealedCandidate.binding` cannot later publish its closed Session. Retirement
+and the “is this binding/session current?” check share the slot lock; if a
+binding may already be live, the coordinator does not close it. Constructing a
+new binding around a Session and mutating the slot outside the coordinator and
+project lease remains a violation of the trusted same-process boundary, not an
+untrusted ingress capability; the all-public-write ownership policy remains
+TK-R14/Stage 3.
+
+One implementation constraint is also explicit. TK5 has no non-mutating public
+issuer-validation operation for a PREPARED journal. Therefore a sealed commit
+can check the exact captured lease object, its public project/liveness, current
+HEAD, and exact slot before receipt consumption; `commit_revision` performs
+the authoritative issuer/process check immediately afterward. A released or
+foreign lease is rejected before receipt. A process-fork-invalid lease can
+consume a receipt before the store rejects it, after which durable reconciliation
+terminates safely; avoiding that fail-closed receipt burn would require a new
+lease/store API outside TK6's allowlist. This host/process residual does not
+weaken HEAD or Session safety and is deferred rather than hidden.
+
+## TK6 Precondition and Oracle Unification — TK6-E005
+
+The fresh reviews of the E004 oracle again returned REJECT before RED:
+P0/P1/P2 were `2/6/2` and `0/4/3`. The controller accepts the concrete
+coverage findings and resolves one wording ambiguity before another review.
+
+E005 supersedes E002's broad phrase “every pre-HEAD failure” as follows. A call
+has not entered the candidate terminal operation until exact handle ownership,
+exact captured live lease, expected durable HEAD, and exact baseline slot
+identity all pass. A forged/cross-coordinator/stale handle, foreign/released/
+replacement lease, changed HEAD, or changed slot is a rejected precondition:
+it performs zero CAD, receipt, commit, rollback, reconcile, CAS, or close and
+leaves the authentic sealed candidate available for a corrected call or an
+explicit rollback. Terminal reservation occurs immediately after those checks
+and before receipt consumption. From that point, receipt rejection or any CAD/
+store failure is an accepted candidate failure and terminally closes/reconciles
+without retry. This is consistent with TK-D21: invalid invocation authority is
+not a verification/execution failure, while an accepted invalid verification
+capability is.
+
+The genuine pre-HEAD oracle no longer replaces `commit_revision`. It runs the
+real LocalRevisionStore commit path through all validation and prepared-record
+checks, then injects an I/O result, ordinary exception, or falsely committed
+durability exception at TK5's internal HEAD replacement seam before replacement.
+It requires exactly one subsequent durable reconciliation, old HEAD, zero
+rollback replay, a burned authentic receipt, terminal handle, and closed sealed
+Session. Post-HEAD claimed-true, claimed-false, and generic exceptions likewise
+each require exactly one real store reconciliation and zero rollback. Both
+directions of reconciliation-versus-HEAD disagreement are fail-closed.
+
+Session retirement is an ownership operation, not just a stale-handle error.
+Before every coordinator-owned Session close, the coordinator asks the slot
+under the slot lock to atomically retire the exact binding only if neither that
+binding nor its Session is current. Failure to retire means the Session may be
+live and cannot be closed. The active binding is retired before checkpoint
+close, the checkpoint binding before seal close, every candidate binding before
+rollback/terminal cleanup, and the displaced baseline before post-promotion
+close. Public CAS rejects retired bindings. Tests invoke CAS from inside the
+port's close hook, after each transition, after receipt failure, after explicit
+rollback, and after promotion to prove retire-before-close ordering. This does
+not authorize arbitrary external slot mutation; all legitimate CAS remains
+inside the project-lease ownership discipline.
+
+The next oracle revision also adds: forced overlap while a winning terminal
+operation is blocked inside its first real store side effect; rollback-wins
+proof that receipt remains unconsumed; same-issuer replacement-lease rejection;
+all True/False/raise plus unreadable commit read-backs; fresh committed
+reconcile load/CAS/divergent/unreadable ownership cases; forged checkpointed and
+sealed handles; cleanup/recovery repeat stability; and an exact import allowlist
+plus direct dynamic-execution/file-write prohibitions. A loser may report either
+`terminal_in_progress` or `already_terminal`; neither permits a second side
+effect.
+
+## TK6 Third Oracle Correction — TK6-E006
+
+The E005 fresh reviews again stopped before RED. Their exact verdicts were
+P0/P1/P2 `1/3/1` and `1/4/2`. The shared P0 was an oracle bookkeeping defect:
+a forged-handle assertion compared the port log captured before a legitimate
+rollback with the log after that rollback. The comparison anchor is now
+recaptured after rollback. No production or executable RED occurred.
+
+All shared P1 corrections are incorporated. Receipt rejection and explicit
+rollback now attempt stale publication from inside the fake port's close hook,
+proving retire-before-close rather than merely checking afterward. The forced
+terminal race no longer requires a loser thread to remain alive because an
+immediate `terminal_in_progress` is valid. The fresh committed-reconcile matrix
+now independently covers load failure, baseline alias, false/raise at baseline,
+false/raise after replacement publication, true without publication,
+false/true/raise with a divergent binding, and true/false/raise with unreadable
+read-back. Each case proves CAS count and exact baseline/replacement close
+ownership. Checkpoint and seal also reject a new same-issuer lease after the
+captured lease is released.
+
+The source boundary now combines an exact import allowlist with bans on direct
+`open`, `write`, `replace`, rename/unlink/touch/mkdir, convenience writes,
+dynamic import/execution, and Session private/document access. Candidate.py
+therefore cannot synthesize STEP or write arbitrary content; only the injected
+port and existing revision store own such effects. SessionSlot's public callable
+surface remains exactly `current` and `compare_and_set`; retirement stays a
+private coordinator/slot ownership operation.
+
+## TK6 Frozen-Test Final Acceptance — TK6-E007
+
+The controller completed the remaining pre-RED correction and convergence
+rounds without creating or importing the production module and without running
+the candidate tests. The final oracle closes constructor-parameter rebinding,
+Session implicit-protocol and carrier reflection paths, hidden mutable module
+or class state, unbounded strong retirement records, arbitrary CAD path
+construction or derivation, lifecycle-external dunder hooks, public dependency
+fields, unused-lock false greens, and the previously open CandidateError
+surface. It also replaces name-only path checks with provenance from the exact
+authenticated candidate or LocalRevisionStore path APIs, and proves all Slot
+and Coordinator state access occurs inside the corresponding direct RLock
+region.
+
+The final frozen candidate is:
+
+- `tests/test_candidate_revision.py` SHA-256
+  `3e4ac0ff1e397426e79a5b4ddb3ad817968f232f6bd6be6d0fce8bf7b1a99e2e`,
+  6342 lines;
+- this artifact before E007 SHA-256
+  `3b2b00d635e2594eeea4c5d923e89945f83cef295969775e735cacf5d98e8b62`,
+  8541 lines;
+- repository HEAD
+  `4fe3c4c1100822dddb1262bd5603bac0a3d989b5`; and
+- `src/vibecad/execution/candidate.py` absent.
+
+Static pre-RED gates passed for the final candidate: Ruff format, Ruff check,
+Python byte-compilation, and diff whitespace validation. Three separate
+read-only reviews then accepted these exact anchors with P0/P1/P2 `0/0/0`:
+one lifecycle/oracle convergence review, one ordinary code-quality review, and
+one implementation-compatibility review. They performed no pytest run, Python
+execution, project import, or repository write. The review circuit breaker is
+therefore closed and the next permitted executable evidence is the single
+genuine missing-module RED.
+
+## TK6 Genuine Missing-Module RED — TK6-E008
+
+With the E007 oracle frozen, the controller ran exactly:
+
+    PYTHONPATH=src .venv/bin/pytest -q tests/test_candidate_revision.py
+
+The command exited `2` during collection in `1.17s`. Its only error was:
+
+    ModuleNotFoundError: No module named 'vibecad.execution.candidate'
+
+Pytest reported one collection error and executed no candidate test. This is
+the required genuine absent-production RED; no fallback, placeholder, partial
+module, or unrelated failure contributed to it. The artifact immediately
+before E008 was SHA-256
+`b8d71c6eef01655b2a478cb202773a40971ab83fb2f6b38671452703f69b8fb8`
+at 8576 lines. Production implementation is now permitted within the unchanged
+TK6 three-file allowlist and the two-attempt focused GREEN budget.
+
+## TK6 Fixture-Gate Correction — TK6-E009
+
+The first post-implementation focused invocation did not reach candidate
+behavior. Pytest reported `6 passed, 159 failed in 29.25s`; every failure arose
+during `_rig` setup because the new strict lease and revision roots had not
+been created before their constructors ran. The coordinator and its lifecycle
+assertions were therefore not exercised. This invocation is classified as an
+invalid fixture/environment gate, not either of the two permitted focused
+GREEN attempts.
+
+The fixture now creates every temporary `ResourceLeaseManager` and
+`LocalRevisionStore` root through one private helper that uses mode `0700` and
+then explicitly applies `chmod(0700)`, making the required permission exact
+under the host's `umask 022`. No assertion, parameter matrix, identity check,
+or side-effect oracle was weakened. Ruff format, Ruff check, Python
+byte-compilation, and both standalone structural candidate oracles pass.
+
+The corrected frozen anchors are:
+
+- `tests/test_candidate_revision.py` SHA-256
+  `719492f33bc7ab59ae26bfae8fc84413bd43df96a4d8c8481bcb1e6c09ecca21`,
+  6351 lines;
+- `src/vibecad/execution/candidate.py` SHA-256
+  `5677801a63c41ed75f6026eb6b28c807c3ed57d6d29158a01884bcbbeef4dd0b`,
+  1774 lines; and
+- this artifact before E009 SHA-256
+  `005d002e0948b54d40c99b7d862b4bb357da06d33b8c04ba5464cc4dcc81e7a9`,
+  8594 lines.
+
+An independent read-only fixture review accepted the corrected test anchor
+with P0/P1/P2 `0/0/0` and confirmed that all constructor roots are covered.
+Pre-GREEN implementation review also identified and corrected a deterministic
+ownership defect: divergent third-binding reconciliation now closes retained
+candidate Sessions without closing a still-authoritative pending baseline.
+
+## TK6 Focused GREEN — TK6-E010
+
+Two pre-GREEN read-only implementation reviews converged after one additional
+exact-once correction. Accepted pre-HEAD faults previously attempted
+`rollback_revision` and then, if that call raised, attempted `reconcile`; that
+could cross two durable terminal boundaries. `_abort` now makes exactly one
+rollback attempt, never falls through to a second durable call, and reports a
+durable exception or committed outcome as `RECOVERY_REQUIRED`. A durable
+cleanup outcome or Session close failure reports `CLEANUP_REQUIRED`; otherwise
+the originating CAD, store, alias, or receipt error remains unchanged. Both
+the exact-once/lifecycle reviewer and the implementation-compatibility reviewer
+accepted the corrected implementation with P0/P1/P2 `0/0/0`.
+
+The first valid focused GREEN invocation then ran exactly:
+
+    PYTHONPATH=src .venv/bin/pytest -q tests/test_candidate_revision.py
+
+Pytest executed all 165 frozen candidate tests and reported:
+
+    165 passed in 3.65s
+
+There were no skips, xfails, retries, or environment/fixture failures. This is
+focused GREEN attempt 1 of the two-attempt budget; attempt 2 remains unused.
+The accepted anchors are:
+
+- `src/vibecad/execution/candidate.py` SHA-256
+  `79d4392c4b0d22eee1006aa7e01a62c293e08f6b9ddfc6904204e6803408bb20`,
+  1792 lines;
+- `tests/test_candidate_revision.py` SHA-256
+  `719492f33bc7ab59ae26bfae8fc84413bd43df96a4d8c8481bcb1e6c09ecca21`,
+  6351 lines; and
+- this artifact before E010 SHA-256
+  `a836e0f71b08a9391a103bbf6538ed9d0c3cf961f7105a731cb060f17ca5f961`,
+  8629 lines.
+
+## TK6 Cumulative, Full, and Static GREEN — TK6-E011
+
+The cumulative TK1–TK6 plus Phase-1 compatibility command covered task state,
+workflow contracts, execution registry, ModelProgram validation, tool-result
+normalization, execution adapter, project leases, task store, acceptance
+verification, immutable revisions, and isolated candidates. It exited 0 with
+`1630 passed, 1 deselected in 10.82s`.
+
+The unchanged full normal repository command
+`PYTHONPATH=src .venv/bin/pytest -q` then exited 0 with
+`2123 passed, 81 deselected, 2 warnings in 21.63s`. The 165 new TK6 cases
+account exactly for the increase from the 1958-test clean TK5 baseline. The two
+warnings are the already accepted macOS multi-threaded-`fork()` deprecations in
+`tests/test_workflow_lease.py`; there are no new warnings, skips, xfails,
+errors, or failures.
+
+Whole-repository Ruff check, relevant-file Ruff format check, Python
+byte-compilation, fresh pure import, forbidden-module scan, whitespace diff,
+three-path allowlist, branch identity, and upstream-anchor checks all exited 0.
+Pure import loaded none of FreeCAD, Part, MCP, model SDK, network, or socket
+modules. The only dirty paths are the three TK6 allowlisted files, and HEAD and
+upstream remain equal at
+`4fe3c4c1100822dddb1262bd5603bac0a3d989b5` on
+`codex/task-kernel-phase2`.
+
+The exact pre-review anchors are:
+
+- artifact SHA-256
+  `5be6de188e43afb7fd40bbe611db82a1634394fda35bef5f3563dab533c01ae1`,
+  8664 lines before E011;
+- source SHA-256
+  `79d4392c4b0d22eee1006aa7e01a62c293e08f6b9ddfc6904204e6803408bb20`,
+  1792 lines; and
+- test SHA-256
+  `719492f33bc7ab59ae26bfae8fc84413bd43df96a4d8c8481bcb1e6c09ecca21`,
+  6351 lines.
+
+## TK6 Final-Review Recovery Repair — TK6-E012
+
+The two final complete read-only reviews rejected the E011 implementation with
+P0/P1/P2 `0/2/0` and `0/1/0`. They independently identified the same durable
+begin boundary: a `begin_revision` exception after persistence did not perform
+one authoritative reconcile, while a later candidate-path failure swallowed
+the outcome of its one rollback attempt. The lifecycle review additionally
+found that divergent-slot retained cleanup discarded a Session close failure.
+No public API, normal lifecycle, HEAD linearization, or product decision was
+affected.
+
+The controller added bounded regression oracles for three begin-reconcile
+outcomes, both fixed path getters across three rollback outcomes, and both
+commit/fresh divergent bindings with and without close side-effect failure. An
+independent test-only review first caught and corrected an invalid
+`DURABILITY_UNCERTAIN` fixture constructor. The first targeted invocation then
+reported 11 failures and 2 passes; two failures exposed an oracle assumption
+that terminal `NOT_COMMITTED` journals disappear. LocalRevisionStore preserves
+that terminal journal, so later reconcile stably returns `NOT_COMMITTED`.
+Changing only those two final-state assertions produced the independently
+accepted test anchor. The corrected targeted RED reported exactly `9 failed,
+4 passed in 2.55s`, all at the three reviewed production gaps.
+
+Production now uses exactly one durable boundary for each accepted begin
+failure. If the revision id is unknown, it reconciles once; if known, it rolls
+back that exact revision once. `NOT_COMMITTED` preserves `STORE_FAILURE`,
+`CLEANUP_REQUIRED` reports its matching attention error, and an exception or
+committed outcome reports `RECOVERY_REQUIRED`. A pre-begin `load_revision`
+read failure remains a plain store failure and performs no durable mutation.
+Divergent retained-candidate cleanup now propagates its close-failure boolean
+without closing the still-authoritative pending baseline or retrying a
+side-effecting close.
+
+Evidence after the repair:
+
+- targeted regression group: `13 passed in 0.43s`;
+- second and final focused GREEN: `176 passed in 3.86s`;
+- cumulative TK1–TK6 plus Phase-1 compatibility: `1641 passed, 1 deselected
+  in 10.93s`;
+- full normal repository: `2134 passed, 81 deselected, 2 warnings in 20.51s`;
+  the warnings remain only the two accepted macOS fork deprecations; and
+- whole Ruff, relevant format, Python compilation, pure/forbidden import,
+  whitespace, and exact three-path allowlist gates all passed.
+
+The final pre-review anchors are:
+
+- artifact before E012 SHA-256
+  `cb94d86de35a5b3a6c9ce6a1dacf904743f1c34777ae1e2760bb5ba49f23e492`,
+  8701 lines;
+- source SHA-256
+  `d9c37f95e4a50a51102854fa81b7031a155cb8021a522e5928f84867a8aa27fc`,
+  1837 lines; and
+- test SHA-256
+  `6adb738aa29fa7b48fda8b8851dc57cdc495964e7c2955c91b4e7bc07e83a23b`,
+  6483 lines.
+
+## TK6 Final Independent Acceptance — TK6-E013
+
+Two fresh complete read-only reviews inspected the exact E012 artifact, source,
+test, and HEAD anchors. The lifecycle/concurrency review and the API/dependency
+review both returned ACCEPT with P0/P1/P2 `0/0/0`. They confirmed closure of
+both prior durable-begin findings and the divergent cleanup-reporting finding,
+including exact-one reconcile-versus-rollback selection, attention flags,
+retire-before-close ownership, baseline preservation, and the new non-vacuous
+regression matrix.
+
+They also accepted the unchanged closed public surface, identity-only
+capabilities, fixed redacted errors, store-derived path provenance, pure import
+boundary, and compatibility evidence. Remaining non-blocking residuals are the
+already declared process-local capability lifetime, non-retryable
+side-effect-then-raise close, legal sealed orphan recovery case, coarse
+coordinator RLock, and the concrete FreeCAD/STEP/observation/TaskService work
+reserved for TK7–TK9. No source, test, artifact, dependency, environment, CAD,
+network, model, MCP, or Git mutation occurred during either review.
