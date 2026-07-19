@@ -149,10 +149,12 @@ The acceptance gate is:
 - TK-D11 — Candidate revision IDs are generated and owned by the revision
   coordinator. They are not Session._revision_id, a document name, a user path,
   a base-revision derivative, or a value invented by the ModelProgram.
-- TK-D12 — After execution, the candidate is checkpointed to private staging,
-  reloaded as the exact sealed FCStd, and only trusted read-only observation and
-  export operations run on that sealed content. The final manifest hashes the
-  model and artifacts.
+- TK-D12 — After execution, the candidate is checkpointed to private staging
+  and reloaded. The STEP export runs once against that checkpoint-reloaded,
+  read-only Session because sealing requires both artifacts to exist. The
+  revision is then sealed and reloaded from immutable FCStd; only trusted
+  read-only geometry and artifact observation runs after sealing. The final
+  manifest hashes the model and STEP artifact.
 - TK-D13 — Independent acceptance evidence comes from a trusted
   ObservationSnapshot. StepResult values and C5 execution_acknowledged evidence
   cannot satisfy a criterion.
@@ -425,8 +427,9 @@ Deliver:
 - Exact order:
   request budget and contract checks; acceptance compile; program validation;
   TaskRun CAS; project lease; HEAD/base recheck; candidate begin; execution;
-  checkpoint/reload; controlled export; trusted observation; verification;
-  committing record; candidate commit or rollback; final TaskRun CAS.
+  checkpoint/reload; controlled export; seal/immutable reload; trusted
+  observation; verification; committing record; candidate commit or rollback;
+  final TaskRun CAS.
 - Policy for needs_input, failed, durability_uncertain, cleanup_required, and
   recovery_required. No automatic repairing state is entered in TK-R1.
 
@@ -8774,3 +8777,137 @@ side-effect-then-raise close, legal sealed orphan recovery case, coarse
 coordinator RLock, and the concrete FreeCAD/STEP/observation/TaskService work
 reserved for TK7–TK9. No source, test, artifact, dependency, environment, CAD,
 network, model, MCP, or Git mutation occurred during either review.
+
+## TK6 Commit, Push, and TK7 Start — TK7-E001
+
+TK6 was staged through its exact three-file allowlist, committed as
+`54522681ea9cc79bd183b0e9637a37b9a72aa043` with the approved message
+`feat(execution): isolate candidate sessions`, and pushed non-force. The local
+branch, upstream branch, and clean worktree then matched exactly before TK7.
+
+TK7 freezes one internal `InProcessCadExecutor` that also implements the
+`CadSnapshotPort` required by TK6. It exposes only program validation, the
+four fixed default-operation bindings, exact-once execution, controlled STEP
+export, public Session checkpoint/load/close operations, and trusted sealed
+evidence collection. Export uses only the store-derived candidate STEP path;
+evidence re-reads the immutable RevisionRef, independently hashes and detects
+the FCStd/STEP formats, and reads geometry directly from the sealed Session.
+Neither tool-returned text nor StepResult evidence can enter the acceptance
+snapshot. There is no configurable handler registry, output directory, retry,
+dynamic discovery, model path, server-global Session, model call, or network
+surface.
+
+The initial frozen test candidate is `tests/test_program_executor.py`. It
+covers the fixed/redacted contract, authentic validation, public Session port,
+four-handler binding, ordered stop-on-first-failure behavior, zero retries,
+candidate/lease/path authority, export failure, geometry ownership, immutable
+artifact hashes, FCStd/STEP signature detection, mutation between trusted
+reads, malformed/non-finite shape facts, and immutable evidence values. The
+next permitted executable evidence is the single genuine absent-module RED;
+`src/vibecad/execution/executor.py` remains absent.
+
+## TK7 Frozen Oracle and Independent Pre-RED Acceptance — TK7-E002
+
+Three independent read-only reviews examined the final TK7 oracle without
+running Python, pytest, CAD, or network code and without modifying the
+repository. Their earlier P1 findings were closed by non-vacuous tests for
+`CadSnapshotPort` composition, exact handler kwargs and all-handler preflight,
+partial-load cleanup, store-rejected leases, wrong lifecycle stages, unsafe
+symlink/directory/hardlink export entries, same-size SHA-256 mutations, deep
+FCStd/STEP signatures, first-read and actual-file mutation, untrusted inspect
+facts, boundary redaction, a second independent geometry fact set, and exact
+TaskArtifactRef lineage and metadata. The compatibility, contract, and
+security reviews then each returned ACCEPT with P0/P1 `0/0`.
+
+The frozen pre-RED anchors are:
+
+- `tests/test_program_executor.py` SHA-256
+  `3738c73c39c22aa86f02f3fe513b57ffd447eba6a39f2a4743868015afe5059f`,
+  1068 lines;
+- this artifact before E002 SHA-256
+  `b98d887f5f5951835f433a3eec045f527e7c1c81f10529bf52e9b0046e352921`,
+  8807 lines; and
+- repository HEAD/upstream
+  `54522681ea9cc79bd183b0e9637a37b9a72aa043` with the executor module absent.
+
+Static Ruff check/format, Python byte-compilation, and diff whitespace checks
+passed for the frozen test candidate. The next and only permitted executable
+test evidence is the genuine missing-module RED.
+
+## TK7 Genuine Missing-Module RED — TK7-E003
+
+The controller ran exactly:
+
+    PYTHONPATH=src .venv/bin/pytest -q tests/test_program_executor.py
+
+Pytest exited `2` during collection in `0.25s`. Its only error was
+`ModuleNotFoundError: No module named 'vibecad.execution.executor'`; no TK7 test
+executed and no unrelated failure contributed. This is the required genuine
+absent-production RED. The frozen oracle remains unchanged at SHA-256
+`3738c73c39c22aa86f02f3fe513b57ffd447eba6a39f2a4743868015afe5059f`.
+Production implementation is now permitted within the unchanged TK7
+three-file allowlist and two-attempt focused GREEN budget.
+
+## TK7 Focused, Regression, and Real-CAD GREEN — TK7-E004
+
+The first focused GREEN executed all 44 frozen TK7 cases and reported
+`44 passed in 0.27s`. Independent implementation review then requested
+defense-in-depth classification and cleanup improvements, without identifying
+a product-level decision: nonblocking artifact opens, broad fixed preflight
+redaction, distinct CAD classification for shape acquisition, and safe
+best-effort cleanup of a failed ordinary STEP leaf. The second and final
+focused invocation reported `44 passed in 0.23s`; no test or public contract
+changed, and no retry was introduced.
+
+Final regression evidence after those improvements is:
+
+- cumulative TK1–TK7 plus Phase-1 compatibility: `1685 passed, 1 deselected
+  in 11.02s`;
+- full normal repository suite: `2178 passed, 81 deselected, 2 warnings in
+  20.67s`; both warnings are the already accepted macOS multi-threaded-fork
+  deprecations in `tests/test_workflow_lease.py`;
+- whole-repository Ruff check, relevant-file Ruff format, Python compilation,
+  pure import, forbidden-module scan, diff whitespace, and exact three-path
+  allowlist checks passed; and
+- the existing opt-in FreeCAD adapter smoke reported `1 passed, 58 deselected
+  in 1.04s` using only the installed ready environment.
+
+A bounded direct installed-FreeCAD smoke additionally created a 10×20×30 Box,
+checkpointed FCStd, closed and reloaded it, modified length to 12, checkpointed
+to the same candidate pathname, closed and reloaded again, and independently
+confirmed bbox `(12, 20, 30)`, volume `7200`, validity, and one solid. It exited
+0 with `executor-real-fcstd-smoke-ok`. Its first harness construction used an
+untrusted temporary lease-root ancestry and was correctly rejected before CAD;
+the corrected port-only smoke used an exact inert LocalRevisionStore instance,
+created no environment, performed no install/download/upgrade, and confined
+all artifacts to its auto-removed temporary directory.
+
+The final anchors before artifact E004 are:
+
+- `src/vibecad/execution/executor.py` SHA-256
+  `9323295b26d1f91f02c9db5ac26b48ed14c29d76fdbae0f522fb78390bb9b29b`,
+  666 lines;
+- frozen `tests/test_program_executor.py` SHA-256
+  `3738c73c39c22aa86f02f3fe513b57ffd447eba6a39f2a4743868015afe5059f`,
+  1068 lines; and
+- this artifact before E004 SHA-256
+  `77d6d15821e2b3aae481c2d1f4b66445c78bbd212da8744753595c5f8d34a3ee`,
+  8849 lines.
+
+## TK7 Final Independent Acceptance — TK7-E005
+
+Three independent complete read-only implementation reviews converged on
+ACCEPT with P0/P1 `0/0`. They confirmed the exact TK8 composition order,
+fixed-handler adapter reuse, public Session-port compatibility, candidate and
+lease gates, controlled artifact path, immutable manifest re-read, direct
+sealed geometry ownership, fixed errors, zero retry, and partial STEP cleanup.
+The apparent checkpoint concern was withdrawn after confirming that this is a
+disposable candidate staging copy: any failure rolls the candidate back and
+cannot alter the immutable baseline revision or live committed binding.
+
+Accepted P2 residuals are limited to (1) a same-UID malicious pathname/ABA race
+that requires violating the approved TRUSTED_LOCAL, private-0700, held-lease,
+trusted-same-process boundary, and (2) ZIP central-directory parsing before the
+post-open entry-count budget. Neither surface is model-controlled or publicly
+exposed in Stage C. TK8 must preserve the no-callback interval between
+seal/immutable reload, evidence collection, verification, and commit.
