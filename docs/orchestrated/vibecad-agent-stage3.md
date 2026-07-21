@@ -651,6 +651,148 @@ operation registry 的扩展路径。
    `feat(execution): add typed result references and execution profiles` 与 clean worktree；push 仍
    未授权；若 HEAD 或 worktree 不符，先按 named-file diff 审计，禁止重复执行已完成的 S3-1。
 
+## 8.5 Packet S3-2A — stable entity selectors and preservation evidence
+
+### 1. Authorization and anchor
+
+- Approval ID: S3-A01；bound decisions: S3-D01 through S3-D08。
+- Stable anchor: `dc8250e88c6dd084f0553223c6f63164e6cf4326`；branch:
+  `codex/agent-stage3`；worktree clean at issue time。
+- 本 packet 只执行 S3-2；不迁移 S3-3 的六个默认 operation，不获得 push、PR、release、
+  外部花费、G1 Workbench 或 Level B face/edge selector 权限。
+- 三个未参与写入的只读 design/test/runtime 分析一致通过；正确 baseline 为
+  `369 passed, 5 deselected in 6.29s`。
+
+### 2. Mechanical allowlist
+
+本 packet 只允许修改：
+
+- `src/vibecad/execution/selectors.py`（新）
+- `src/vibecad/execution/__init__.py`
+- `src/vibecad/execution/registry.py`
+- `src/vibecad/execution/adapter.py`
+- `src/vibecad/execution/executor.py`
+- `src/vibecad/engine/session.py`
+- `src/vibecad/workflow/program.py`
+- `src/vibecad/workflow/service.py`
+- `src/vibecad/validation/contracts.py`
+- `src/vibecad/validation/checks.py`
+- `src/vibecad/validation/engine.py`
+- `src/vibecad/validation/__init__.py`
+- `tests/test_object_selectors.py`（新）
+- `tests/test_engine_session.py`
+- `tests/test_execution_registry.py`
+- `tests/test_model_program.py`
+- `tests/test_execution_adapter.py`
+- `tests/test_acceptance_verifier.py`
+- `tests/test_program_executor.py`
+- `tests/test_task_service.py`
+- `tests/test_candidate_revision.py`（仅 execution/validation public surface）
+- `tests/test_revision_store.py`（仅 execution public surface）
+- `tests/test_task_kernel_integration.py`
+- `docs/orchestrated/vibecad-agent-stage3.md`
+
+若最小实现不需要其中某文件则不触碰；写出此清单立即 breaker。
+
+### 3. SelectorV1 Level A contract
+
+Persistent selector 是 exact-key schema；不接受额外字段、Name、Label、DocumentObject.ID、
+FaceN、EdgeN 或未绑定 revision：
+
+```json
+{
+  "schema_version": 1,
+  "project_id": "project_<32 lowercase hex>",
+  "revision_id": "revision_<32 lowercase hex>",
+  "entity_kind": "object | feature",
+  "object_id": "object_<32 lowercase hex>",
+  "feature_id": "feature_<32 lowercase hex> | null",
+  "object_type": "exact FreeCAD TypeId",
+  "semantic_role": "part | primitive | feature | support",
+  "provenance": {
+    "source": "user | model | system | imported",
+    "operation_id": "bounded command id | null"
+  },
+  "expected_cardinality": 1
+}
+```
+
+- 每个受管 DocumentObject 的 object_id 全文档唯一；可建模对象另有全文档唯一 feature_id。
+  recompute、原位参数修改和 Placement 修改保持两者；新 DocumentObject 生成新 ID。
+- `entity_kind=object` 时 feature_id 必须为 null；`entity_kind=feature` 时 feature_id 必须存在。
+  Level A 不实现跨 PartDesign feature chain 的逻辑 object identity 转移。
+- FreeCAD 持久属性固定为 `VibeCADObjectId`、`VibeCADFeatureId`、
+  `VibeCADSemanticRole` 和 `VibeCADProvenance`；普通受管写入使用 persistent、read-only、
+  hidden、locked dynamic properties。resolver 仍把属性值视为不可信并重新严格解析。
+- program preflight 要求 selector revision 等于 ModelProgram.base_revision；executor 在遍历
+  document 前要求 project/revision 分别等于 ActiveCandidate.project_id/base_head.revision_id。
+- resolver 按全部 identity/type/role/provenance 字段 exact match；0 hit、multiple hit、duplicate
+  object/feature IDs、malformed identity、wrong project 和 stale revision 全部固定 fail closed，
+  不修复、不重发 ID、不回退到名称或对象顺序。
+- `result_ref` 不嵌套进 persistent selector。本批保留 S3-1 result-ref 契约；S3-3 把 operation
+  target 定义为 `SelectorV1 | ResultRef` 封闭 union，并完成默认 registry migration。
+
+### 4. Observation and preservation contract
+
+- sealed ObservationSnapshot 增加按 object_id 排序、唯一的 per-entity observation；至少绑定
+  identity、TypeId、role、provenance、白名单参数、规范 Placement、volume、area、bbox、
+  center of mass、valid_shape 和 solid_count，全部进入 observation digest。
+- executor 对 commit-authority observation 必须重载 sealed candidate FCStd 后采集，并与 live
+  candidate 对应事实交叉检查；handler result、模型字段、图片或 Name 不能提供 trusted facts。
+- validation 层提供纯确定性的 preservation comparison 与
+  `AcceptanceKind.PRESERVATION / unchanged` check；missing before/after、identity/inventory 漂移、
+  非目标对象变化或声明字段变化均不得得到 passing observation。
+- S3-2 完整证明“已有 FCStd 对象”的 base-vs-sealed preservation。单个 program 内
+  `create → modify` 的中间态 before/after capture 与默认 operation target union 在 S3-3
+  固定 handler binding 时完成；本批不得声称已覆盖。
+- 未经 isolated identity normalization 的外部/legacy FCStd 不公开 selector；import bootstrap
+  在 S3-7 project ingress 完成。managed identity 一旦存在，非法或重复只拒绝，不静默重键。
+
+### 5. RED, GREEN and managed gates
+
+Genuine RED 固定为三个目标行为：旧 5-field selector 必须被完整 Level A schema 拒绝；required
+preservation criterion 必须可编译；sealed evidence 必须是 reload-bound per-object observation。
+import/setup/syntax failure 不计 RED。
+
+Focused GREEN：
+
+```text
+PYTHONPATH=src uv run pytest -q tests/test_object_selectors.py tests/test_engine_session.py
+tests/test_execution_registry.py tests/test_model_program.py tests/test_execution_adapter.py
+tests/test_acceptance_verifier.py tests/test_program_executor.py tests/test_task_service.py
+tests/test_candidate_revision.py tests/test_revision_store.py
+```
+
+Managed FreeCAD 使用唯一现有 ready runtime，不安装第二套环境；至少证明：双对象中只解析并
+修改目标；对照对象逐字段不变；identity 在 recompute、checkpoint、close/load/recompute 后
+保持；duplicate copied UUID、zero hit 和 stale revision 拒绝；失败不推进 HEAD。
+
+完成前还必须通过全仓 pytest、全仓 Ruff、`git diff --check` 和至少一位未参与写入 agent 的
+最终只读 review。
+
+### 6. Delivery and recovery boundary
+
+- 预写 commit：`feat(validation): add stable object selectors and preservation checks`。
+- 只做 named-file staging 和本地 commit；push 固定 not authorized / S3-RES-01。
+- 任一 unexpected regression、live/reload observation mismatch、identity 自动修复、Name fallback、
+  selector 跨 project/revision 解析、Level B 偷渡或需要写出 allowlist 立即 breaker。
+
+| Entry | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| S3-E03 / 2026-07-21T03:52:07Z | S3-A01；S3-2A three-way design gate PASS | dc8250e / not authorized | clean anchor；focused baseline 369 passed, 5 deselected；selector/test/managed-runtime analyses converged | S3-RES-01, S3-RES-04, S3-RES-07 | S3-S03 | packet-issued |
+
+### Recovery snapshot S3-S03
+
+1. **Completed:** S3-1 committed at `dc8250e`；S3-2 selector、observation、preservation 和真实
+   FreeCAD gate 已由三路只读分析收敛；Packet S3-2A issued；push not authorized。
+2. **Next:** commit this packet record；写三个 genuine RED；实现最小 strict selector/property
+   lifecycle/per-entity snapshot/preservation verifier；跑 focused、full、managed gates；独立 review；
+   本地语义 commit。
+3. **Do not broaden:** default operation target/result migration、create→modify intermediate trace、
+   import normalization、face/edge fingerprint selector、Workbench/daemon 均不属于 S3-2。
+4. **Recovery:** verify branch、clean worktree、HEAD `dc8250e` 和 packet allowlist；长命令若返回
+   session_id 只能轮询原 session；不得重放已经完成的 S3-1 或安装第二套 FreeCAD。
+
 ## 9. 用户决策与持续执行规则
 
 本修订依据已经明确的用户方向：
