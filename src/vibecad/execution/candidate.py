@@ -5,6 +5,7 @@ from __future__ import annotations
 import re as _re
 import threading as _threading
 import weakref as _weakref
+from collections import OrderedDict as _OrderedDict
 from dataclasses import dataclass as _dataclass
 from enum import StrEnum as _StrEnum
 from pathlib import Path as _Path
@@ -45,6 +46,7 @@ __all__ = (
 
 _PROJECT_PATTERN = "project_[0-9a-f]{32}"
 _REVISION_PATTERN = "revision_[0-9a-f]{32}"
+_TERMINAL_REPLAY_LIMIT = 32
 
 
 class CandidateErrorCode(_StrEnum):
@@ -624,10 +626,14 @@ class CandidateCoordinator:
         "_bindings",
         "_terminal_kinds",
         "_terminal_results",
+        "_terminal_order",
         "_retained",
         "_pending_baselines",
         "_attempted",
+        "_unresolved",
         "_load_failures",
+        "_close_failed",
+        "_runtime_closed",
     )
 
     def __init__(
@@ -657,10 +663,84 @@ class CandidateCoordinator:
         self._bindings = dict()
         self._terminal_kinds = dict()
         self._terminal_results = dict()
+        self._terminal_order = _OrderedDict()
         self._retained = dict()
         self._pending_baselines = dict()
         self._attempted = _weakref.WeakSet()
+        self._unresolved = _weakref.WeakSet()
         self._load_failures = set()
+        self._close_failed = False
+        self._runtime_closed = False
+
+    def _close_runtime(self, *, project_id: str) -> bool:
+        """Close an idle project baseline without discarding recovery authority."""
+
+        with self._lock:
+            if self._runtime_closed:
+                return True
+            if self._close_failed:
+                return False
+            try:
+                current = self._session_slot.current()
+            except Exception:
+                return False
+            if current.project_id != project_id:
+                return False
+            if any(
+                head.project_id == project_id and self._stages.get(token) != "terminal"
+                for token, head in self._heads.items()
+            ):
+                return False
+            if self._cleanup_retained(project_id, current):
+                return False
+            if self._retained.get(project_id, ()) or self._pending_baselines.get(project_id, ()):
+                return False
+            self._attempted.add(current)
+            try:
+                self._snapshot_port.close(current.session)
+            except BaseException as error:
+                self._unresolved.add(current)
+                self._close_failed = True
+                if isinstance(error, Exception):
+                    return False
+                raise
+            self._runtime_closed = True
+            self._purge_terminal_replay()
+            return True
+
+    def _evict_terminal(self, token):
+        with self._lock:
+            if self._stages.get(token) != "terminal":
+                return
+            handles = self._handles.pop(token, ())
+            for handle in handles:
+                if self._owners.get(handle) is token:
+                    self._owners.pop(handle, None)
+            self._stages.pop(token, None)
+            self._leases.pop(token, None)
+            self._heads.pop(token, None)
+            self._baselines.pop(token, None)
+            self._paths.pop(token, None)
+            self._bindings.pop(token, None)
+            self._terminal_kinds.pop(token, None)
+            self._terminal_results.pop(token, None)
+            self._terminal_order.pop(token, None)
+
+    def _remember_terminal(self, token):
+        with self._lock:
+            if self._stages.get(token) != "terminal":
+                return
+            self._terminal_order.update({token: None})
+            self._terminal_order.move_to_end(token)
+            while len(self._terminal_order) > _TERMINAL_REPLAY_LIMIT:
+                expired, _value = self._terminal_order.popitem(last=False)
+                self._evict_terminal(expired)
+
+    def _purge_terminal_replay(self):
+        with self._lock:
+            while self._terminal_order:
+                token, _value = self._terminal_order.popitem(last=False)
+                self._evict_terminal(token)
 
     def _start_lineage(self, project_id, base_head, baseline, lease, revision_id, paths):
         with self._lock:
@@ -718,12 +798,14 @@ class CandidateCoordinator:
             self._stages.update({token: "terminal"})
             self._terminal_kinds.update({token: operation})
             self._terminal_results.update({token: result})
+            self._remember_terminal(token)
 
     def _fail(self, token):
         with self._lock:
             self._stages.update({token: "terminal"})
             self._terminal_kinds.update({token: "failed"})
             self._terminal_results.update({token: None})
+            self._remember_terminal(token)
 
     def _check_lease(self, token, lease):
         with self._lock:
@@ -745,6 +827,16 @@ class CandidateCoordinator:
             except Exception:
                 return False
             return True
+
+    def _require_session_creation_allowed(self):
+        with self._lock:
+            if self._close_failed:
+                raise CandidateError(
+                    CandidateErrorCode.CLEANUP_REQUIRED,
+                    cleanup_required=True,
+                )
+            if self._runtime_closed:
+                raise CandidateError(CandidateErrorCode.INVALID_TRANSITION)
 
     def _check_preconditions(self, token, lease):
         with self._lock:
@@ -783,6 +875,8 @@ class CandidateCoordinator:
 
     def _close_binding(self, binding):
         with self._lock:
+            if binding in self._unresolved:
+                return True
             if binding in self._attempted:
                 return False
             try:
@@ -794,8 +888,13 @@ class CandidateCoordinator:
             self._attempted.add(binding)
             try:
                 self._snapshot_port.close(binding.session)
-            except Exception:
-                return True
+            except BaseException as error:
+                self._unresolved.add(binding)
+                self._retain(binding.project_id, binding)
+                self._close_failed = True
+                if isinstance(error, Exception):
+                    return True
+                raise
             return False
 
     def _close_owned(self, token):
@@ -922,6 +1021,7 @@ class CandidateCoordinator:
                     keep = keep + (binding,)
                 elif self._close_binding(binding):
                     failed = True
+                    keep = keep + (binding,)
             self._retained.update({project_id: keep})
             return failed
 
@@ -937,6 +1037,7 @@ class CandidateCoordinator:
                     keep_baselines = keep_baselines + (binding,)
                 elif self._close_binding(binding):
                     failed = True
+                    keep_baselines = keep_baselines + (binding,)
             self._pending_baselines.update({project_id: keep_baselines})
             return failed
 
@@ -949,10 +1050,12 @@ class CandidateCoordinator:
             retained = self._retained.get(project_id)
             if retained is None:
                 retained = ()
+            keep = ()
             for binding in retained:
                 if self._close_binding(binding):
                     failed = True
-            self._retained.update({project_id: ()})
+                    keep = keep + (binding,)
+            self._retained.update({project_id: keep})
             return failed
 
     def _settle_review_prepare_failure(self, token, project_id, lease, cleanup_hint):
@@ -1108,6 +1211,7 @@ class CandidateCoordinator:
                 raise CandidateError(CandidateErrorCode.INVALID_INPUT)
             if not self._store_lease_is_valid(project_id, lease):
                 raise CandidateError(CandidateErrorCode.INVALID_LEASE)
+            self._require_session_creation_allowed()
             try:
                 durable_head = self._store.load_head(project_id)
             except Exception:
@@ -1197,6 +1301,7 @@ class CandidateCoordinator:
             if cached is not None:
                 raise CandidateError(CandidateErrorCode.ALREADY_TERMINAL)
             self._check_preconditions(token, lease)
+            self._require_session_creation_allowed()
             try:
                 self._snapshot_port.checkpoint_fcstd(
                     candidate.binding.session,
@@ -1243,6 +1348,7 @@ class CandidateCoordinator:
             if cached is not None:
                 raise CandidateError(CandidateErrorCode.ALREADY_TERMINAL)
             self._check_preconditions(token, lease)
+            self._require_session_creation_allowed()
             try:
                 revision = self._store.seal_revision(
                     candidate.project_id,
@@ -1300,6 +1406,7 @@ class CandidateCoordinator:
                 raise CandidateError(CandidateErrorCode.CONFLICT)
             if not self._store_lease_is_valid(project_id, lease):
                 raise CandidateError(CandidateErrorCode.INVALID_LEASE)
+            self._require_session_creation_allowed()
             try:
                 durable_head = self._store.load_head(project_id)
             except Exception:
@@ -1316,10 +1423,7 @@ class CandidateCoordinator:
                 baseline = self._session_slot.current()
             except Exception:
                 raise CandidateError(CandidateErrorCode.CONFLICT) from None
-            if (
-                baseline.project_id != project_id
-                or baseline.revision_id != base_head.revision_id
-            ):
+            if baseline.project_id != project_id or baseline.revision_id != base_head.revision_id:
                 raise CandidateError(CandidateErrorCode.CONFLICT)
             try:
                 immutable_path = self._store.revision_model_path(project_id, revision.id)
@@ -1892,6 +1996,11 @@ class CandidateCoordinator:
         lease: _ProjectWriteLease,
     ) -> CandidateReconcileResult:
         with self._lock:
+            if self._close_failed or self._runtime_closed:
+                _require_project(project_id)
+                if not self._store_lease_is_valid(project_id, lease):
+                    raise CandidateError(CandidateErrorCode.INVALID_LEASE)
+                self._require_session_creation_allowed()
             try:
                 reconciliation = self._store.reconcile(project_id, lease)
             except _RevisionStoreError as error:

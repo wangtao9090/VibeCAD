@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import copy
 import dataclasses
+import hashlib
 import inspect
 import pickle
 import sys
@@ -359,7 +360,14 @@ def _rig(tmp_path: Path, *, imported: bool = False, suffix: str = "main"):
         source = root / "base.FCStd"
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_bytes(b"imported-base-fcstd")
-        head = store.import_trusted_fcstd(PROJECT_ID, source, lease)
+        source_bytes = source.read_bytes()
+        head = store.import_trusted_fcstd(
+            PROJECT_ID,
+            source,
+            hashlib.sha256(source_bytes).hexdigest(),
+            len(source_bytes),
+            lease,
+        )
         payload = b"imported-base-fcstd"
     else:
         head = store.initialize_empty_project(PROJECT_ID, lease)
@@ -2511,11 +2519,14 @@ def test_prepare_review_rejects_unrelated_staging_journal_without_mutation_and_c
             rig.coordinator.prepare_review(candidate=reopened, lease=rig.lease)
 
         _assert_candidate_error(caught, CandidateErrorCode.CONFLICT)
-        assert rig.store.candidate_model_path(
-            PROJECT_ID,
-            unrelated_revision,
-            rig.lease,
-        ) == unrelated_model
+        assert (
+            rig.store.candidate_model_path(
+                PROJECT_ID,
+                unrelated_revision,
+                rig.lease,
+            )
+            == unrelated_model
+        )
         assert rig.store.load_head(PROJECT_ID) == rig.head
         assert rig.store.load_revision(PROJECT_ID, revision.id) == revision
         assert rig.slot.current() is rig.baseline_binding
@@ -3760,7 +3771,7 @@ def test_post_head_exact_head_unreadable_returns_recovery_without_cas_or_close(
             )
 
 
-def test_post_head_displaced_baseline_close_failure_is_cleanup_not_rollback(
+def test_post_head_displaced_baseline_close_failure_stays_cleanup_not_rollback(
     tmp_path: Path,
 ) -> None:
     with _rig(tmp_path) as rig:
@@ -3777,8 +3788,12 @@ def test_post_head_displaced_baseline_close_failure_is_cleanup_not_rollback(
         assert rig.slot.current().session is sealed.binding.session
         assert rig.port.close_count(rig.baseline) == 1
         assert rig.port.close_count(sealed.binding.session) == 0
-        repeated = rig.coordinator.reconcile(project_id=PROJECT_ID, lease=rig.lease)
-        assert repeated.status is CandidateReconcileStatus.COMMITTED
+        calls_before = tuple(rig.port.calls)
+        with pytest.raises(CandidateError) as caught:
+            rig.coordinator.reconcile(project_id=PROJECT_ID, lease=rig.lease)
+        error = _assert_candidate_error(caught, CandidateErrorCode.CLEANUP_REQUIRED)
+        assert error.cleanup_required is True
+        assert tuple(rig.port.calls) == calls_before
         assert rig.port.close_count(rig.baseline) == 1
 
 
@@ -3942,12 +3957,15 @@ def test_post_head_unpromoted_candidate_close_failure_is_cleanup_and_recovery(
         assert rig.port.close_count(rig.baseline) == 0
 
         monkeypatch.setattr(SessionSlot, "compare_and_set", original_cas)
-        recovered = rig.coordinator.reconcile(project_id=PROJECT_ID, lease=rig.lease)
-        assert recovered.status is CandidateReconcileStatus.COMMITTED
-        assert recovered.slot_promoted is True
-        assert rig.slot.current().revision_id == sealed.revision.id
+        calls_before = tuple(rig.port.calls)
+        with pytest.raises(CandidateError) as caught:
+            rig.coordinator.reconcile(project_id=PROJECT_ID, lease=rig.lease)
+        error = _assert_candidate_error(caught, CandidateErrorCode.CLEANUP_REQUIRED)
+        assert error.cleanup_required is True
+        assert rig.slot.current() is rig.baseline_binding
         assert rig.port.close_count(sealed.binding.session) == 1
-        assert rig.port.close_count(rig.baseline) == 1
+        assert rig.port.close_count(rig.baseline) == 0
+        assert tuple(rig.port.calls) == calls_before
 
 
 def test_retained_commit_cleanup_binding_is_retired_and_reconciled_once(
@@ -4111,11 +4129,12 @@ def test_explicit_rollback_close_failure_is_cached_cleanup_required(
         duplicate = rig.coordinator.rollback(candidate=active, lease=rig.lease)
         assert duplicate is result
         assert rig.port.close_count(active.binding.session) == 1
-        repeated = rig.coordinator.reconcile(project_id=PROJECT_ID, lease=rig.lease)
-        assert repeated.status in {
-            CandidateReconcileStatus.CLEAN,
-            CandidateReconcileStatus.NOT_COMMITTED,
-        }
+        calls_before = tuple(rig.port.calls)
+        with pytest.raises(CandidateError) as caught:
+            rig.coordinator.reconcile(project_id=PROJECT_ID, lease=rig.lease)
+        error = _assert_candidate_error(caught, CandidateErrorCode.CLEANUP_REQUIRED)
+        assert error.cleanup_required is True
+        assert tuple(rig.port.calls) == calls_before
         assert rig.port.close_count(active.binding.session) == 1
 
 
@@ -5615,6 +5634,410 @@ def test_fresh_retained_cleanup_binding_is_retired_and_reconciled_once(
         assert sum(1 for call in rig.port.calls if call[0] == "load_fcstd") == (loads_before + 1)
 
 
+def test_runtime_close_failure_before_side_effect_is_sticky(tmp_path: Path) -> None:
+    with _rig(tmp_path, suffix="runtime-close-sticky") as rig:
+
+        def fail_before_close() -> None:
+            raise RuntimeError("close failed before side effect")
+
+        rig.port.close_hooks[id(rig.baseline)] = fail_before_close
+
+        assert rig.coordinator._close_runtime(project_id=PROJECT_ID) is False
+        assert rig.baseline.closed is False
+        assert rig.port.close_count(rig.baseline) == 1
+
+        assert rig.coordinator._close_runtime(project_id=PROJECT_ID) is False
+        assert rig.baseline.closed is False
+        assert rig.port.close_count(rig.baseline) == 1
+
+
+def test_runtime_baseline_keyboard_interrupt_is_sticky_before_propagation(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="runtime-close-keyboard-interrupt") as rig:
+
+        def interrupt_before_close() -> None:
+            raise KeyboardInterrupt
+
+        rig.port.close_hooks[id(rig.baseline)] = interrupt_before_close
+        with pytest.raises(KeyboardInterrupt):
+            rig.coordinator._close_runtime(project_id=PROJECT_ID)
+
+        assert rig.baseline.closed is False
+        assert rig.baseline_binding in rig.coordinator._attempted
+        assert rig.baseline_binding in rig.coordinator._unresolved
+        assert rig.coordinator._close_failed is True
+        assert rig.port.close_count(rig.baseline) == 1
+        assert rig.coordinator._close_runtime(project_id=PROJECT_ID) is False
+        assert rig.port.close_count(rig.baseline) == 1
+
+        with pytest.raises(CandidateError) as caught:
+            _begin(rig)
+        error = _assert_candidate_error(caught, CandidateErrorCode.CLEANUP_REQUIRED)
+        assert error.cleanup_required is True
+        assert rig.port.close_count(rig.baseline) == 1
+
+
+def test_owned_binding_system_exit_is_retained_and_never_reclosed(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="owned-close-system-exit") as rig:
+        active = _begin(rig)
+
+        def exit_before_close() -> None:
+            raise SystemExit(91)
+
+        rig.port.close_hooks[id(active.binding.session)] = exit_before_close
+        with pytest.raises(SystemExit) as caught:
+            rig.coordinator._close_binding(active.binding)
+        assert caught.value.code == 91
+
+        assert active.binding.session.closed is False
+        assert active.binding in rig.coordinator._attempted
+        assert active.binding in rig.coordinator._unresolved
+        assert active.binding in rig.coordinator._retained[PROJECT_ID]
+        assert rig.coordinator._close_failed is True
+        assert rig.port.close_count(active.binding.session) == 1
+        assert rig.coordinator._close_binding(active.binding) is True
+        assert rig.coordinator._close_runtime(project_id=PROJECT_ID) is False
+        assert rig.port.close_count(active.binding.session) == 1
+        assert rig.port.close_count(rig.baseline) == 0
+
+        with pytest.raises(CandidateError) as blocked:
+            _begin(rig)
+        error = _assert_candidate_error(blocked, CandidateErrorCode.CLEANUP_REQUIRED)
+        assert error.cleanup_required is True
+        assert rig.port.close_count(active.binding.session) == 1
+
+
+@pytest.mark.parametrize("owner", ["retained", "pending_baseline"])
+def test_owned_cleanup_close_failure_stays_unresolved_and_blocks_runtime_eviction(
+    tmp_path: Path,
+    owner: str,
+) -> None:
+    with _rig(tmp_path, suffix=f"{owner}-close-sticky") as rig:
+        cleanup_binding = SessionBinding(
+            project_id=PROJECT_ID,
+            revision_id=OTHER_REVISION,
+            session=FakeSession(owner, owner.encode()),
+        )
+
+        def fail_before_close() -> None:
+            raise RuntimeError("close failed before side effect")
+
+        collection = rig.coordinator._retained
+        if owner == "retained":
+            rig.coordinator._retain(PROJECT_ID, cleanup_binding)
+        else:
+            rig.coordinator._remember_baseline(PROJECT_ID, cleanup_binding)
+            collection = rig.coordinator._pending_baselines
+        rig.port.close_hooks[id(cleanup_binding.session)] = fail_before_close
+
+        assert rig.coordinator._close_runtime(project_id=PROJECT_ID) is False
+        assert cleanup_binding.session.closed is False
+        assert rig.baseline.closed is False
+        assert rig.port.close_count(cleanup_binding.session) == 1
+        assert cleanup_binding in collection[PROJECT_ID]
+
+        assert rig.coordinator._close_runtime(project_id=PROJECT_ID) is False
+        assert cleanup_binding.session.closed is False
+        assert rig.baseline.closed is False
+        assert rig.port.close_count(cleanup_binding.session) == 1
+        assert rig.port.close_count(rig.baseline) == 0
+        assert cleanup_binding in collection[PROJECT_ID]
+
+
+def test_terminal_owned_close_failure_is_sticky_before_runtime_eviction(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="terminal-owned-close-sticky") as rig:
+        active = _begin(rig)
+
+        def fail_before_close() -> None:
+            raise RuntimeError("close failed before side effect")
+
+        rig.port.close_hooks[id(active.binding.session)] = fail_before_close
+        result = rig.coordinator.rollback(candidate=active, lease=rig.lease)
+        assert result.status is CandidateRollbackStatus.CLEANUP_REQUIRED
+        assert active.binding.session.closed is False
+        assert rig.port.close_count(active.binding.session) == 1
+
+        assert rig.coordinator._close_runtime(project_id=PROJECT_ID) is False
+        assert active.binding.session.closed is False
+        assert rig.baseline.closed is False
+        assert rig.port.close_count(active.binding.session) == 1
+        assert rig.port.close_count(rig.baseline) == 0
+
+
+@pytest.mark.parametrize("entry", ["begin", "reopen_review", "reconcile"])
+def test_close_poisoned_root_entry_rejects_without_store_or_cad_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry: str,
+) -> None:
+    mutations = _track_store_mutations(monkeypatch)
+    with _rig(tmp_path, suffix=f"close-poisoned-{entry}") as rig:
+        revision = None
+        if entry == "reopen_review":
+            revision = _detached_review_revision(rig)
+        elif entry == "reconcile":
+            revision_id = rig.store.begin_revision(PROJECT_ID, rig.head, rig.lease)
+            model_path = rig.store.candidate_model_path(PROJECT_ID, revision_id, rig.lease)
+            step_path = rig.store.candidate_artifact_path(
+                PROJECT_ID,
+                revision_id,
+                "step",
+                rig.lease,
+            )
+            model_path.write_bytes(b"committed-fcstd")
+            step_path.write_bytes(b"ISO-10303-21;COMMITTED;END-ISO-10303-21;")
+            sealed = rig.store.seal_revision(PROJECT_ID, revision_id, rig.lease)
+            rig.store.commit_revision(PROJECT_ID, rig.head, sealed.id, rig.lease)
+
+        def fail_before_close() -> None:
+            raise RuntimeError("close failed before side effect")
+
+        rig.port.close_hooks[id(rig.baseline)] = fail_before_close
+        assert rig.coordinator._close_runtime(project_id=PROJECT_ID) is False
+        calls_before = tuple(rig.port.calls)
+        _reset_store_mutations(mutations)
+
+        for _attempt in range(2):
+            with pytest.raises(CandidateError) as caught:
+                if entry == "begin":
+                    _begin(rig)
+                elif entry == "reopen_review":
+                    assert revision is not None
+                    rig.coordinator.reopen_review(
+                        project_id=PROJECT_ID,
+                        base_head=rig.head,
+                        revision=revision,
+                        lease=rig.lease,
+                    )
+                else:
+                    rig.coordinator.reconcile(project_id=PROJECT_ID, lease=rig.lease)
+            error = _assert_candidate_error(caught, CandidateErrorCode.CLEANUP_REQUIRED)
+            assert error.cleanup_required is True
+            assert error.recovery_required is False
+
+        assert not any(mutations.values())
+        assert tuple(rig.port.calls) == calls_before
+        assert rig.port.close_count(rig.baseline) == 1
+
+
+@pytest.mark.parametrize("entry", ["checkpoint", "seal"])
+def test_close_poisoned_candidate_transition_cannot_load_another_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry: str,
+) -> None:
+    mutations = _track_store_mutations(monkeypatch)
+    with _rig(tmp_path, suffix=f"close-poisoned-{entry}") as rig:
+        candidate = _begin(rig)
+        if entry == "seal":
+            candidate = _checkpoint(rig, candidate)
+            candidate.step_path.write_bytes(b"ISO-10303-21;END-ISO-10303-21;")
+        poison = SessionBinding(
+            project_id=PROJECT_ID,
+            revision_id=OTHER_REVISION,
+            session=FakeSession("poison", b"poison"),
+        )
+
+        def fail_before_close() -> None:
+            raise RuntimeError("close failed before side effect")
+
+        rig.port.close_hooks[id(poison.session)] = fail_before_close
+        assert rig.coordinator._close_binding(poison) is True
+        calls_before = tuple(rig.port.calls)
+        _reset_store_mutations(mutations)
+
+        for _attempt in range(2):
+            with pytest.raises(CandidateError) as caught:
+                if entry == "checkpoint":
+                    rig.coordinator.checkpoint(candidate=candidate, lease=rig.lease)
+                else:
+                    rig.coordinator.seal(candidate=candidate, lease=rig.lease)
+            error = _assert_candidate_error(caught, CandidateErrorCode.CLEANUP_REQUIRED)
+            assert error.cleanup_required is True
+            assert error.recovery_required is False
+
+        assert not any(mutations.values())
+        assert tuple(rig.port.calls) == calls_before
+        assert rig.port.close_count(poison.session) == 1
+
+
+def test_terminal_replay_is_bounded_and_evicts_the_oldest_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limit = 32
+    mutations = _track_store_mutations(monkeypatch)
+    with _rig(tmp_path, suffix="bounded-terminal-replay") as rig:
+        candidates = []
+        results = []
+        for _index in range(limit + 1):
+            candidate = _begin(rig)
+            result = rig.coordinator.rollback(candidate=candidate, lease=rig.lease)
+            candidates.append(candidate)
+            results.append(result)
+
+        lineage_fields = (
+            "_stages",
+            "_leases",
+            "_heads",
+            "_baselines",
+            "_paths",
+            "_handles",
+            "_bindings",
+            "_terminal_kinds",
+            "_terminal_results",
+        )
+        assert all(len(getattr(rig.coordinator, name)) == limit for name in lineage_fields)
+        assert len(rig.coordinator._owners) == limit
+        assert candidate_module._TERMINAL_REPLAY_LIMIT == limit
+
+        _reset_store_mutations(mutations)
+        calls_before = tuple(rig.port.calls)
+        with pytest.raises(CandidateError) as caught:
+            rig.coordinator.rollback(candidate=candidates[0], lease=rig.lease)
+        _assert_candidate_error(caught, CandidateErrorCode.INVALID_CANDIDATE)
+        assert rig.coordinator.rollback(candidate=candidates[1], lease=rig.lease) is results[1]
+        assert rig.coordinator.rollback(candidate=candidates[-1], lease=rig.lease) is results[-1]
+        assert not any(mutations.values())
+        assert tuple(rig.port.calls) == calls_before
+
+
+def test_terminal_replay_eviction_never_reclaims_a_nonterminal_capability(
+    tmp_path: Path,
+) -> None:
+    limit = 32
+    with _rig(tmp_path, suffix="bounded-terminal-active") as rig:
+        revision = _detached_review_revision(rig)
+        protected = rig.coordinator.reopen_review(
+            project_id=PROJECT_ID,
+            base_head=rig.head,
+            revision=revision,
+            lease=rig.lease,
+        )
+        completed = []
+        for _index in range(limit + 1):
+            candidate = rig.coordinator.reopen_review(
+                project_id=PROJECT_ID,
+                base_head=rig.head,
+                revision=revision,
+                lease=rig.lease,
+            )
+            rig.coordinator.discard_review(candidate=candidate, lease=rig.lease)
+            completed.append(candidate)
+
+        assert len(rig.coordinator._stages) == limit + 1
+        assert rig.coordinator._owners.get(protected) is not None
+        calls_before = tuple(rig.port.calls)
+        with pytest.raises(CandidateError) as caught:
+            rig.coordinator.discard_review(candidate=completed[0], lease=rig.lease)
+        _assert_candidate_error(caught, CandidateErrorCode.INVALID_CANDIDATE)
+        assert rig.coordinator.discard_review(candidate=completed[-1], lease=rig.lease) is None
+        assert tuple(rig.port.calls) == calls_before
+
+        protected_session = protected.binding.session
+        assert rig.coordinator.discard_review(candidate=protected, lease=rig.lease) is None
+        assert rig.port.close_count(protected_session) == 1
+        assert len(rig.coordinator._stages) == limit
+
+
+def test_failed_lineage_rejection_is_cached_then_safely_evicted(tmp_path: Path) -> None:
+    limit = 32
+    with _rig(tmp_path, suffix="bounded-terminal-failed") as rig:
+        failed = _begin(rig)
+        rig.port.fail_checkpoint = True
+        with pytest.raises(CandidateError) as caught:
+            _checkpoint(rig, failed)
+        _assert_candidate_error(caught, CandidateErrorCode.CAD_FAILURE)
+        rig.port.fail_checkpoint = False
+
+        with pytest.raises(CandidateError) as caught:
+            rig.coordinator.rollback(candidate=failed, lease=rig.lease)
+        _assert_candidate_error(caught, CandidateErrorCode.ALREADY_TERMINAL)
+
+        for _index in range(limit):
+            candidate = _begin(rig)
+            rig.coordinator.rollback(candidate=candidate, lease=rig.lease)
+
+        calls_before = tuple(rig.port.calls)
+        with pytest.raises(CandidateError) as caught:
+            rig.coordinator.rollback(candidate=failed, lease=rig.lease)
+        _assert_candidate_error(caught, CandidateErrorCode.INVALID_CANDIDATE)
+        assert tuple(rig.port.calls) == calls_before
+        assert len(rig.coordinator._stages) == limit
+
+
+def test_successful_runtime_close_purges_terminal_replay_authority(tmp_path: Path) -> None:
+    with _rig(tmp_path, suffix="runtime-close-purges-terminal") as rig:
+        oldest = None
+        for _index in range(3):
+            candidate = _begin(rig)
+            rig.coordinator.rollback(candidate=candidate, lease=rig.lease)
+            if oldest is None:
+                oldest = candidate
+
+        assert rig.coordinator._close_runtime(project_id=PROJECT_ID) is True
+        assert rig.baseline.closed is True
+        lineage_fields = (
+            "_owners",
+            "_stages",
+            "_leases",
+            "_heads",
+            "_baselines",
+            "_paths",
+            "_handles",
+            "_bindings",
+            "_terminal_kinds",
+            "_terminal_results",
+        )
+        assert all(not getattr(rig.coordinator, name) for name in lineage_fields)
+
+        calls_before = tuple(rig.port.calls)
+        assert oldest is not None
+        with pytest.raises(CandidateError) as caught:
+            rig.coordinator.rollback(candidate=oldest, lease=rig.lease)
+        _assert_candidate_error(caught, CandidateErrorCode.INVALID_CANDIDATE)
+        assert tuple(rig.port.calls) == calls_before
+
+
+@pytest.mark.parametrize("entry", ["begin", "reopen_review", "reconcile"])
+def test_closed_runtime_root_entry_is_stably_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry: str,
+) -> None:
+    mutations = _track_store_mutations(monkeypatch)
+    with _rig(tmp_path, suffix=f"runtime-closed-{entry}") as rig:
+        revision = _detached_review_revision(rig) if entry == "reopen_review" else None
+        assert rig.coordinator._close_runtime(project_id=PROJECT_ID) is True
+        calls_before = tuple(rig.port.calls)
+        _reset_store_mutations(mutations)
+
+        for _attempt in range(2):
+            with pytest.raises(CandidateError) as caught:
+                if entry == "begin":
+                    _begin(rig)
+                elif entry == "reopen_review":
+                    assert revision is not None
+                    rig.coordinator.reopen_review(
+                        project_id=PROJECT_ID,
+                        base_head=rig.head,
+                        revision=revision,
+                        lease=rig.lease,
+                    )
+                else:
+                    rig.coordinator.reconcile(project_id=PROJECT_ID, lease=rig.lease)
+            _assert_candidate_error(caught, CandidateErrorCode.INVALID_TRANSITION)
+
+        assert not any(mutations.values())
+        assert tuple(rig.port.calls) == calls_before
+        assert rig.port.close_count(rig.baseline) == 1
+
+
 @pytest.mark.parametrize("origin", ["commit", "fresh"])
 def test_retained_cleanup_waits_for_authoritative_reconcile_before_close(
     tmp_path: Path,
@@ -5692,8 +6115,10 @@ def test_retained_cleanup_waits_for_authoritative_reconcile_before_close(
         assert sum(1 for call in rig.port.calls if call[0] == "load_fcstd") == (loads_before + 1)
 
         stable_calls = tuple(rig.port.calls)
-        repeated = coordinator.reconcile(project_id=PROJECT_ID, lease=rig.lease)
-        assert repeated.status is CandidateReconcileStatus.COMMITTED
+        with pytest.raises(CandidateError) as caught:
+            coordinator.reconcile(project_id=PROJECT_ID, lease=rig.lease)
+        error = _assert_candidate_error(caught, CandidateErrorCode.CLEANUP_REQUIRED)
+        assert error.cleanup_required is True
         assert rig.port.close_count(retained_session) == 1
         assert rig.port.close_count(rig.baseline) == 1
         assert tuple(rig.port.calls) == stable_calls
@@ -5786,9 +6211,15 @@ def test_retained_cleanup_is_bounded_when_live_slot_is_third_binding(
         assert cas_calls == 0
         assert sum(1 for call in rig.port.calls if call[0] == "load_fcstd") == loads_before
 
-        repeated = coordinator.reconcile(project_id=PROJECT_ID, lease=rig.lease)
-        assert repeated.status is CandidateReconcileStatus.RECOVERY_REQUIRED
-        assert repeated.live_binding is third
+        if close_failure:
+            with pytest.raises(CandidateError) as caught:
+                coordinator.reconcile(project_id=PROJECT_ID, lease=rig.lease)
+            error = _assert_candidate_error(caught, CandidateErrorCode.CLEANUP_REQUIRED)
+            assert error.cleanup_required is True
+        else:
+            repeated = coordinator.reconcile(project_id=PROJECT_ID, lease=rig.lease)
+            assert repeated.status is CandidateReconcileStatus.RECOVERY_REQUIRED
+            assert repeated.live_binding is third
         assert rig.port.close_count(retained_session) == 1
         assert rig.port.close_count(third.session) == 0
         assert rig.port.close_count(rig.baseline) == 0
@@ -5832,8 +6263,10 @@ def test_fresh_committed_reconcile_baseline_close_failure_is_not_retried(
         assert rig.port.close_count(rig.baseline) == 1
         assert retirement_rejections == [CandidateErrorCode.INVALID_BINDING]
         load_calls = sum(1 for call in rig.port.calls if call[0] == "load_fcstd")
-        repeated = fresh.reconcile(project_id=PROJECT_ID, lease=rig.lease)
-        assert repeated.status is CandidateReconcileStatus.COMMITTED
+        with pytest.raises(CandidateError) as caught:
+            fresh.reconcile(project_id=PROJECT_ID, lease=rig.lease)
+        error = _assert_candidate_error(caught, CandidateErrorCode.CLEANUP_REQUIRED)
+        assert error.cleanup_required is True
         assert rig.port.close_count(rig.baseline) == 1
         assert sum(1 for call in rig.port.calls if call[0] == "load_fcstd") == load_calls
 

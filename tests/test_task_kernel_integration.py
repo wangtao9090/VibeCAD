@@ -451,6 +451,7 @@ def review_composition(head):
         lease_manager=manager,
         coordinator=review_coordinator,
         executor=executor,
+        runtime_head=head,
     )
     return baseline, review_slot, review_service
 
@@ -624,6 +625,8 @@ try:
             head_before = revision_store.import_trusted_fcstd(
                 PROJECT_ID,
                 baseline_source,
+                sha256(baseline_source),
+                baseline_source.stat().st_size,
                 lease,
             )
         base_ref_before = revision_store.load_revision(PROJECT_ID, head_before.revision_id)
@@ -650,6 +653,7 @@ try:
         lease_manager=manager,
         coordinator=coordinator,
         executor=executor,
+        runtime_head=head_before,
     )
 
     created = service.create_task(
@@ -1002,7 +1006,13 @@ try:
         baseline_source = ROOT / "base.FCStd"
         executor.checkpoint_fcstd(seed_session, baseline_source)
         baseline_source.chmod(0o600)
-        head = store.import_trusted_fcstd(PROJECT_ID, baseline_source, lease)
+        head = store.import_trusted_fcstd(
+            PROJECT_ID,
+            baseline_source,
+            sha256(baseline_source),
+            baseline_source.stat().st_size,
+            lease,
+        )
         base_path = store.revision_model_path(PROJECT_ID, head.revision_id)
         base_digest = sha256(base_path)
         executor.close(seed_session)
@@ -1193,6 +1203,578 @@ print("S3_SELECTOR_RESULT=" + json.dumps(payload, ensure_ascii=False, sort_keys=
 """
 
 
+_APPLICATION_CHILD = r"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, __SOURCE__)
+os.environ.pop("VIBECAD_FREECAD_ENV", None)
+os.environ.pop("VIBECAD_HOME", None)
+
+from vibecad.application.agent import AgentApplication
+from vibecad.execution.executor import InProcessCadExecutor
+from vibecad.interaction.checkouts import HeadCheckoutSource
+from vibecad.runtime import paths as runtime_paths
+from vibecad.runtime import status as runtime_status
+from vibecad.runtime.installer import RuntimeInstaller
+from vibecad.workflow.contracts import (
+    AcceptanceCriterion,
+    AcceptanceKind,
+    AcceptanceSpec,
+    ModelCommand,
+    ModelProgram,
+    ValueSource,
+)
+from vibecad.workflow.state import ReasoningOwner, ReviewPolicy
+from vibecad.workflow.store import StoredTaskRun
+
+PHASE = __PHASE__
+STATE = json.loads(__STATE__)
+ROOT = Path(__WORK_ROOT__)
+EXPECTED_PREFIX = Path(__EXPECTED_PREFIX__)
+DATA_ROOT = ROOT / "data"
+REVIEW_TASK_ID = "task_dddddddddddddddddddddddddddddddd"
+IMPORT_TASK_ID = "task_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+
+def secure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+    return path
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def command(
+    command_id: str,
+    operation: str,
+    *,
+    args: dict[str, object] | None = None,
+) -> ModelCommand:
+    return ModelCommand(
+        id=command_id,
+        op=operation,
+        target={},
+        args={} if args is None else args,
+        preserve=(),
+        source=ValueSource.MODEL,
+        depends_on=(),
+    )
+
+
+def criterion(
+    criterion_id: str,
+    kind: AcceptanceKind,
+    check: str,
+    target: str,
+    expected: object,
+    *,
+    tolerance: float | None = None,
+    parameters: dict[str, object] | None = None,
+) -> AcceptanceCriterion:
+    return AcceptanceCriterion(
+        id=criterion_id,
+        kind=kind,
+        check=check,
+        target=target,
+        expected=expected,
+        tolerance=tolerance,
+        parameters={} if parameters is None else parameters,
+        required=True,
+    )
+
+
+def acceptance(
+    acceptance_id: str,
+    *,
+    volume: float,
+    bbox: tuple[float, float, float],
+    solids: int,
+) -> AcceptanceSpec:
+    return AcceptanceSpec(
+        id=acceptance_id,
+        criteria=(
+            criterion(
+                "volume",
+                AcceptanceKind.GEOMETRY,
+                "volume",
+                "body",
+                volume,
+                tolerance=1e-7,
+                parameters={"unit": "mm^3"},
+            ),
+            criterion(
+                "bbox",
+                AcceptanceKind.GEOMETRY,
+                "bbox",
+                "body",
+                bbox,
+                tolerance=1e-7,
+                parameters={"unit": "mm"},
+            ),
+            criterion("valid", AcceptanceKind.TOPOLOGY, "valid_shape", "body", True),
+            criterion("solids", AcceptanceKind.TOPOLOGY, "solid_count", "body", solids),
+            criterion("step-exists", AcceptanceKind.ARTIFACT, "exists", "export", True),
+            criterion(
+                "step-non-empty",
+                AcceptanceKind.ARTIFACT,
+                "non_empty",
+                "export",
+                True,
+            ),
+            criterion("step-format", AcceptanceKind.ARTIFACT, "format", "export", "step"),
+            criterion("model-exists", AcceptanceKind.ARTIFACT, "exists", "model", True),
+            criterion(
+                "model-non-empty",
+                AcceptanceKind.ARTIFACT,
+                "non_empty",
+                "model",
+                True,
+            ),
+            criterion("model-format", AcceptanceKind.ARTIFACT, "format", "model", "fcstd"),
+        ),
+    )
+
+
+def empty_program(task_id: str, base_revision: str) -> ModelProgram:
+    return ModelProgram(
+        task_id=task_id,
+        base_revision=base_revision,
+        operations=(
+            command(
+                "box",
+                "create_box",
+                args={
+                    "length_mm": 10,
+                    "width_mm": 20,
+                    "height_mm": 30,
+                    "position_mm": (0, 0, 0),
+                },
+            ),
+        ),
+        acceptance=acceptance(
+            "acceptance-application-empty",
+            volume=6000.0,
+            bbox=(10.0, 20.0, 30.0),
+            solids=1,
+        ),
+    )
+
+
+def imported_program(task_id: str, base_revision: str) -> ModelProgram:
+    return ModelProgram(
+        task_id=task_id,
+        base_revision=base_revision,
+        operations=(command("inspect", "inspect_model"),),
+        acceptance=acceptance(
+            "acceptance-application-import",
+            volume=6000.0 + 20.0 * math.pi,
+            bbox=(32.0, 22.0, 30.0),
+            solids=2,
+        ),
+    )
+
+
+def require_task(value: object) -> StoredTaskRun:
+    if type(value) is not StoredTaskRun:
+        raise AssertionError("AgentApplication returned a task-service failure")
+    return value
+
+
+def create_import_source(path: Path) -> None:
+    import FreeCAD
+
+    document = FreeCAD.newDocument("S36PhotoImport")
+    try:
+        box = document.addObject("Part::Box", "PhotoBox")
+        box.Length = 10
+        box.Width = 20
+        box.Height = 30
+        cylinder = document.addObject("Part::Cylinder", "PhotoCylinder")
+        cylinder.Radius = 2
+        cylinder.Height = 5
+        cylinder.Placement.Base.x = 30
+        document.recompute()
+        document.saveAs(str(path))
+    finally:
+        FreeCAD.closeDocument(document.Name)
+    path.chmod(0o600)
+
+
+def import_entities(app: AgentApplication, project_id: str, revision_id: str):
+    port = InProcessCadExecutor(store=app._revision_store)
+    session = port.load_fcstd(
+        app._revision_store.revision_model_path(project_id, revision_id)
+    )
+    try:
+        return [
+            {
+                "object_id": identity.object_id,
+                "feature_id": identity.feature_id,
+                "object_type": identity.object_type,
+                "source": identity.provenance.source.value,
+                "volume": float(obj.Shape.Volume),
+            }
+            for obj, identity in session.list_object_identities()
+        ]
+    finally:
+        port.close(session)
+
+
+secure_dir(ROOT)
+legacy_prefix = runtime_paths.legacy_env_prefix()
+legacy_sentinel = legacy_prefix / ".vibecad_ready"
+sentinel_before = (
+    legacy_sentinel.stat().st_dev,
+    legacy_sentinel.stat().st_ino,
+    legacy_sentinel.stat().st_size,
+    sha256(legacy_sentinel),
+)
+installer_calls = []
+
+
+def forbidden_install(_self):
+    installer_calls.append("install")
+    raise AssertionError("AgentApplication invoked the runtime installer")
+
+
+RuntimeInstaller.install = forbidden_install
+runtime_facts = {
+    "expected_prefix": str(EXPECTED_PREFIX),
+    "legacy_prefix": str(legacy_prefix),
+    "active_prefix": str(runtime_paths.active_runtime_prefix()),
+    "interpreter_under_prefix": Path(sys.executable).resolve().is_relative_to(
+        legacy_prefix.resolve()
+    ),
+    "external_receipt": runtime_status.legacy_external_receipt(legacy_prefix),
+}
+
+app = None
+payload = {}
+try:
+    app = AgentApplication.open(data_root=DATA_ROOT)
+    if PHASE == "prepare":
+        empty = app.bootstrap_empty()
+        if not (
+            empty.head.generation == 0
+            and empty.revision.base_revision is None
+            and empty.revision.model is None
+        ):
+            raise AssertionError("empty bootstrap did not publish exact revision zero")
+
+        source = ROOT / "photo-source.FCStd"
+        create_import_source(source)
+        source_before = sha256(source)
+        imported = app.bootstrap_import(source=source)
+        source_after = sha256(source)
+        entities = import_entities(
+            app,
+            imported.head.project_id,
+            imported.head.revision_id,
+        )
+        if not (
+            imported.head.generation == 0
+            and imported.revision.base_revision is None
+            and imported.revision.model is not None
+            and source_before == source_after
+        ):
+            raise AssertionError("import bootstrap did not preserve its revision-zero contract")
+
+        created_review = require_task(
+            app.create_task(
+                task_id=REVIEW_TASK_ID,
+                project_id=empty.head.project_id,
+                reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+                review_policy=ReviewPolicy.REQUIRE_REVIEW,
+            )
+        )
+        awaiting = require_task(
+            app.submit_model_program(
+                task_id=REVIEW_TASK_ID,
+                expected_generation=created_review.generation,
+                program=empty_program(REVIEW_TASK_ID, empty.head.revision_id),
+            )
+        )
+        if awaiting.task_run.draft is None:
+            raise AssertionError("review draft was not published")
+
+        created_import = require_task(
+            app.create_task(
+                task_id=IMPORT_TASK_ID,
+                project_id=imported.head.project_id,
+                reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+                review_policy=ReviewPolicy.AUTO_COMMIT,
+            )
+        )
+        imported_terminal = require_task(
+            app.submit_model_program(
+                task_id=IMPORT_TASK_ID,
+                expected_generation=created_import.generation,
+                program=imported_program(IMPORT_TASK_ID, imported.head.revision_id),
+            )
+        )
+
+        empty_runtime = app._runtimes[empty.head.project_id]
+        imported_runtime = app._runtimes[imported.head.project_id]
+        empty_binding = empty_runtime._coordinator._session_slot.current()
+        imported_binding = imported_runtime._coordinator._session_slot.current()
+        isolated = (
+            empty_runtime is not imported_runtime
+            and empty_runtime._coordinator is not imported_runtime._coordinator
+            and empty_runtime.service._executor is not imported_runtime.service._executor
+            and empty_binding.session is not imported_binding.session
+            and empty_binding.project_id == empty.head.project_id
+            and imported_binding.project_id == imported.head.project_id
+        )
+
+        checkout_head_before = app._revision_store.load_head(imported.head.project_id)
+        checkout_source = app._revision_store.revision_model_path(
+            imported.head.project_id,
+            checkout_head_before.revision_id,
+        )
+        checkout_source_before = sha256(checkout_source)
+        checkout = app.open_checkout(
+            open_key="checkout_open_ffffffffffffffffffffffffffffffff",
+            source=HeadCheckoutSource(project_id=imported.head.project_id),
+        )
+        if checkout.local_path is None:
+            raise AssertionError("managed checkout did not expose its local copy")
+        edit_port = InProcessCadExecutor(store=app._revision_store)
+        edit_session = edit_port.load_fcstd(checkout.local_path)
+        edited_model = ROOT / "freecad-checkout-edit.FCStd"
+        try:
+            edited_box = next(
+                obj for obj in edit_session.doc.Objects if obj.TypeId == "Part::Box"
+            )
+            edited_box.Length = 14
+            edit_session.doc.recompute()
+            edit_session.doc.saveAs(str(edited_model))
+        finally:
+            edit_port.close(edit_session)
+        edited_model.chmod(0o600)
+        os.replace(edited_model, checkout.local_path)
+        dirty = app.get_checkout(checkout_id=checkout.checkout_id)
+        checkout_source_after = sha256(checkout_source)
+        checkout_head_after = app._revision_store.load_head(imported.head.project_id)
+        closed_checkout = app.close_checkout(checkout_id=checkout.checkout_id)
+
+        payload = {
+            "phase": PHASE,
+            "pid": os.getpid(),
+            "runtime": runtime_facts,
+            "empty": {
+                "head": empty.head.to_mapping(),
+                "revision": empty.revision.to_mapping(),
+            },
+            "imported": {
+                "head": imported.head.to_mapping(),
+                "revision": imported.revision.to_mapping(),
+                "entities": entities,
+                "source_unchanged": source_before == source_after,
+            },
+            "isolation": {
+                "isolated": isolated,
+                "runtime_count": len(app._runtimes),
+            },
+            "import_task": {
+                "status": imported_terminal.task_run.status.value,
+                "committed_revision": imported_terminal.task_run.committed_revision,
+            },
+            "checkout": {
+                "dirty": dirty.dirty,
+                "source_unchanged": checkout_source_before == checkout_source_after,
+                "head_unchanged": checkout_head_before == checkout_head_after,
+                "closed_state": closed_checkout.state.value,
+                "closed_path": closed_checkout.local_path,
+                "wire_has_path": "local_path" in dirty.to_wire_mapping(),
+            },
+            "restart": {
+                "project_id": empty.head.project_id,
+                "task_id": REVIEW_TASK_ID,
+                "draft_id": awaiting.task_run.draft.id,
+                "generation": awaiting.generation,
+                "draft_revision": awaiting.task_run.draft.revision_id,
+                "head_before": empty.head.to_mapping(),
+            },
+        }
+    elif PHASE == "accept":
+        before = require_task(app.get_task(task_id=STATE["task_id"]))
+        if not (
+            before.generation == STATE["generation"]
+            and before.task_run.draft is not None
+            and before.task_run.draft.id == STATE["draft_id"]
+        ):
+            raise AssertionError("durable draft did not survive Application restart")
+        accepted = require_task(
+            app.accept_draft(
+                task_id=STATE["task_id"],
+                draft_id=STATE["draft_id"],
+                expected_generation=before.generation,
+            )
+        )
+        final_head = app._revision_store.load_head(STATE["project_id"])
+        entities = import_entities(
+            app,
+            final_head.project_id,
+            final_head.revision_id,
+        )
+        payload = {
+            "phase": PHASE,
+            "pid": os.getpid(),
+            "runtime": runtime_facts,
+            "before_generation": before.generation,
+            "accepted": {
+                "status": accepted.task_run.status.value,
+                "committed_revision": accepted.task_run.committed_revision,
+                "generation": accepted.generation,
+            },
+            "final_head": final_head.to_mapping(),
+            "entities": entities,
+        }
+    else:
+        raise AssertionError("unknown Application integration phase")
+finally:
+    if app is not None:
+        app.close()
+        payload["application_closed"] = app._closed and not app._runtimes
+    sentinel_after = (
+        legacy_sentinel.stat().st_dev,
+        legacy_sentinel.stat().st_ino,
+        legacy_sentinel.stat().st_size,
+        sha256(legacy_sentinel),
+    )
+    payload["installer_calls"] = installer_calls
+    payload["legacy_runtime_unchanged"] = sentinel_before == sentinel_after
+
+print("S3_APPLICATION_RESULT=" + json.dumps(payload, ensure_ascii=False, sort_keys=True))
+"""
+
+
+_RUNTIME_ADOPTION_CHILD = r"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, __SOURCE__)
+os.environ.pop("VIBECAD_FREECAD_ENV", None)
+os.environ.pop("VIBECAD_HOME", None)
+
+from vibecad.runtime import installer as installer_module
+from vibecad.runtime import micromamba, paths, spec, status
+from vibecad.runtime.installer import RuntimeInstaller
+
+EXPECTED_PREFIX = Path(__EXPECTED_PREFIX__)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def signature(path: Path) -> tuple[int, int, int, int, str]:
+    info = path.stat()
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        sha256(path),
+    )
+
+
+legacy = paths.legacy_env_prefix()
+sentinel = legacy / ".vibecad_ready"
+python = paths.env_python_for(legacy)
+freecadcmd = legacy / "bin" / "freecadcmd"
+before = {
+    "sentinel": signature(sentinel),
+    "python": signature(python.resolve()),
+    "freecadcmd": signature(freecadcmd),
+}
+receipt_before = paths.external_runtime_receipt().is_file()
+blocked_commands = []
+verify_calls = []
+
+
+def forbidden(name):
+    def fail(*_args, **_kwargs):
+        blocked_commands.append(name)
+        raise AssertionError(f"runtime adoption invoked forbidden operation: {name}")
+
+    return fail
+
+
+original_verify = status.verify_runtime
+
+
+def observed_verify(selected=None):
+    verify_calls.append(str(selected or paths.active_runtime_python()))
+    return original_verify(selected)
+
+
+status.verify_runtime = observed_verify
+installer_module._run = forbidden("command")
+micromamba.ensure_micromamba = forbidden("micromamba")
+RuntimeInstaller._install_server_package = forbidden("pip")
+RuntimeInstaller._remove_managed_env = forbidden("delete")
+
+probe_ready = status.verify_runtime(paths.env_python_for(legacy))
+RuntimeInstaller().install()
+
+receipt_path = paths.external_runtime_receipt()
+raw = receipt_path.read_text(encoding="utf-8")
+receipt = json.loads(raw)
+prefix_info = legacy.stat()
+after = {
+    "sentinel": signature(sentinel),
+    "python": signature(python.resolve()),
+    "freecadcmd": signature(freecadcmd),
+}
+payload = {
+    "expected_prefix": str(EXPECTED_PREFIX),
+    "legacy_prefix": str(legacy),
+    "active_prefix": str(paths.active_runtime_prefix()),
+    "receipt_before": receipt_before,
+    "receipt_path": str(receipt_path),
+    "receipt_canonical": raw == json.dumps(receipt, sort_keys=True),
+    "receipt": receipt,
+    "receipt_validated": status._validated_external_binding() == receipt,
+    "expected_receipt": {
+        **spec.expected_receipt(external=True),
+        "prefix": str(legacy),
+        "prefix_device": prefix_info.st_dev,
+        "prefix_inode": prefix_info.st_ino,
+        "python_version": ".".join(map(str, spec.PYTHON_VERSION)),
+        "freecad_version": ".".join(map(str, spec.FREECAD_VERSION)),
+    },
+    "probe_ready": probe_ready,
+    "verify_calls": verify_calls,
+    "blocked_commands": blocked_commands,
+    "external_runtime_unchanged": before == after,
+}
+print("S3_RUNTIME_ADOPTION_RESULT=" + json.dumps(payload, sort_keys=True))
+"""
+
+
 def _run_case(
     existing_freecad_python: str,
     tmp_path: Path,
@@ -1248,11 +1830,7 @@ def _run_review_restart_case(
             check=False,
         )
         assert process.returncode == 0, process.stderr + "\n" + process.stdout
-        lines = [
-            line
-            for line in process.stdout.splitlines()
-            if line.startswith("TK9_RESULT=")
-        ]
+        lines = [line for line in process.stdout.splitlines() if line.startswith("TK9_RESULT=")]
         assert len(lines) == 1, process.stdout
         payload = json.loads(lines[0].removeprefix("TK9_RESULT="))
         assert payload["case"] == case
@@ -1272,9 +1850,8 @@ def _run_selector_preservation_case(
     work_root = tmp_path / "selector-preservation"
     work_root.mkdir(mode=0o700)
     work_root.chmod(0o700)
-    code = (
-        _SELECTOR_PRESERVATION_CHILD.replace("__SOURCE__", repr(str(source)))
-        .replace("__WORK_ROOT__", repr(str(work_root)))
+    code = _SELECTOR_PRESERVATION_CHILD.replace("__SOURCE__", repr(str(source))).replace(
+        "__WORK_ROOT__", repr(str(work_root))
     )
     process = subprocess.run(
         [existing_freecad_python, "-c", code],
@@ -1284,13 +1861,87 @@ def _run_selector_preservation_case(
         check=False,
     )
     assert process.returncode == 0, process.stderr + "\n" + process.stdout
+    lines = [line for line in process.stdout.splitlines() if line.startswith("S3_SELECTOR_RESULT=")]
+    assert len(lines) == 1, process.stdout
+    return json.loads(lines[0].removeprefix("S3_SELECTOR_RESULT="))
+
+
+def _run_application_restart_case(
+    existing_freecad_python: str,
+    tmp_path: Path,
+) -> dict[str, dict[str, object]]:
+    source = Path(__file__).resolve().parent.parent / "src"
+    prefix = Path(existing_freecad_python).parent.parent.resolve()
+    work_root = tmp_path / "agent-application"
+    work_root.mkdir(mode=0o700)
+    work_root.chmod(0o700)
+    environment = os.environ.copy()
+    environment["FREECAD_USER_HOME"] = str(Path.home())
+    environment["PYTHONPATH"] = os.pathsep.join((str(prefix / "lib"), str(source)))
+    environment.pop("VIBECAD_HOME", None)
+
+    def run_phase(
+        phase: str,
+        state: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        code = (
+            _APPLICATION_CHILD.replace("__SOURCE__", repr(str(source)))
+            .replace("__WORK_ROOT__", repr(str(work_root)))
+            .replace("__EXPECTED_PREFIX__", repr(str(prefix)))
+            .replace("__PHASE__", repr(phase))
+            .replace("__STATE__", repr(json.dumps(state or {}, sort_keys=True)))
+        )
+        process = subprocess.run(
+            [existing_freecad_python, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=360,
+            check=False,
+            env=environment,
+        )
+        assert process.returncode == 0, process.stderr + "\n" + process.stdout
+        lines = [
+            line
+            for line in process.stdout.splitlines()
+            if line.startswith("S3_APPLICATION_RESULT=")
+        ]
+        assert len(lines) == 1, process.stdout
+        payload = json.loads(lines[0].removeprefix("S3_APPLICATION_RESULT="))
+        assert payload["phase"] == phase
+        return payload
+
+    prepared = run_phase("prepare")
+    accepted = run_phase("accept", prepared["restart"])
+    assert prepared["pid"] != accepted["pid"]
+    return {"prepared": prepared, "accepted": accepted}
+
+
+def _run_legacy_runtime_adoption(existing_freecad_python: str) -> dict[str, object]:
+    source = Path(__file__).resolve().parent.parent / "src"
+    prefix = Path(existing_freecad_python).parent.parent.resolve()
+    environment = os.environ.copy()
+    environment["FREECAD_USER_HOME"] = str(Path.home())
+    environment["PYTHONPATH"] = os.pathsep.join((str(prefix / "lib"), str(source)))
+    environment.pop("VIBECAD_HOME", None)
+    code = _RUNTIME_ADOPTION_CHILD.replace("__SOURCE__", repr(str(source))).replace(
+        "__EXPECTED_PREFIX__", repr(str(prefix))
+    )
+    process = subprocess.run(
+        [existing_freecad_python, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=240,
+        check=False,
+        env=environment,
+    )
+    assert process.returncode == 0, process.stderr + "\n" + process.stdout
     lines = [
         line
         for line in process.stdout.splitlines()
-        if line.startswith("S3_SELECTOR_RESULT=")
+        if line.startswith("S3_RUNTIME_ADOPTION_RESULT=")
     ]
     assert len(lines) == 1, process.stdout
-    return json.loads(lines[0].removeprefix("S3_SELECTOR_RESULT="))
+    return json.loads(lines[0].removeprefix("S3_RUNTIME_ADOPTION_RESULT="))
 
 
 def _assert_rollback(payload: dict[str, object]) -> None:
@@ -1409,9 +2060,7 @@ def test_real_task_kernel_commits_verified_candidate(
         values[0]["object_id"],
         values[1]["object_id"],
     }
-    assert values[5]["shape"]["volume_mm3"] == pytest.approx(
-        7200.0 + 20.0 * math.pi
-    )
+    assert values[5]["shape"]["volume_mm3"] == pytest.approx(7200.0 + 20.0 * math.pi)
     assert payload["report_passed"] == [True]
     assert len(payload["verdicts"]) == 10
     assert {item["outcome"] for item in payload["verdicts"]} == {"pass"}
@@ -1533,9 +2182,7 @@ def test_real_task_kernel_rolls_back_after_partial_execution_failure(
     assert payload["step_oks"] == [True, True, False]
     assert payload["step_operations"] == ["box", "cylinder", "modify"]
     assert payload["step_values"][0]["after"]["volume_mm3"] == pytest.approx(6000.0)
-    assert payload["step_values"][1]["after"]["volume_mm3"] == pytest.approx(
-        20.0 * math.pi
-    )
+    assert payload["step_values"][1]["after"]["volume_mm3"] == pytest.approx(20.0 * math.pi)
     assert payload["step_error_codes"][:2] == [None, None]
     assert payload["step_error_codes"][2] == "unexpected_tool_exception"
     assert payload["step_values"][2] is None
@@ -1561,9 +2208,7 @@ def test_real_task_kernel_rolls_back_failed_verification_with_diagnostics(
     assert payload["candidate_revision_durable"] is True
     assert payload["step_oks"] == [True, True, True, True, True, True]
     assert payload["step_values"][0]["after"]["volume_mm3"] == pytest.approx(6000.0)
-    assert payload["step_values"][1]["after"]["volume_mm3"] == pytest.approx(
-        20.0 * math.pi
-    )
+    assert payload["step_values"][1]["after"]["volume_mm3"] == pytest.approx(20.0 * math.pi)
     assert payload["step_values"][2]["after"]["volume_mm3"] == pytest.approx(7200.0)
     assert payload["report_passed"] == [False]
     assert len(payload["verdicts"]) == 10
@@ -1638,24 +2283,14 @@ def test_real_task_kernel_rotates_imported_partial_cylinder_about_bound_box_cent
     after = rotation["after"]
     expected_parameters = {"angle": 180.0, "height": 6.0, "radius": 10.0}
     assert before["object_type"] == after["object_type"] == "Part::Cylinder"
-    assert {item["name"]: item["value"] for item in before["parameters"]} == (
-        expected_parameters
-    )
-    assert {item["name"]: item["value"] for item in after["parameters"]} == (
-        expected_parameters
-    )
+    assert {item["name"]: item["value"] for item in before["parameters"]} == (expected_parameters)
+    assert {item["name"]: item["value"] for item in after["parameters"]} == (expected_parameters)
     assert before["placement"][:3] == pytest.approx([0.0, 0.0, 0.0])
     assert after["placement"][:3] == pytest.approx([5.0, 5.0, 0.0])
-    assert after["placement"][3:] == pytest.approx(
-        [0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)]
-    )
-    assert before["center_of_mass_mm"] == pytest.approx(
-        [0.0, 40.0 / (3.0 * math.pi), 3.0]
-    )
+    assert after["placement"][3:] == pytest.approx([0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)])
+    assert before["center_of_mass_mm"] == pytest.approx([0.0, 40.0 / (3.0 * math.pi), 3.0])
     assert before["center_of_mass_mm"] != pytest.approx([0.0, 5.0, 3.0])
-    assert after["center_of_mass_mm"] == pytest.approx(
-        [5.0 - 40.0 / (3.0 * math.pi), 5.0, 3.0]
-    )
+    assert after["center_of_mass_mm"] == pytest.approx([5.0 - 40.0 / (3.0 * math.pi), 5.0, 3.0])
     assert before["volume_mm3"] == pytest.approx(300.0 * math.pi)
     assert after["volume_mm3"] == pytest.approx(300.0 * math.pi)
     assert before["bbox_mm"] == pytest.approx([20.0, 10.0, 6.0])
@@ -1717,3 +2352,92 @@ def test_real_selector_preservation_is_reload_bound_and_failure_isolated(
     assert payload["final_head"] == payload["base_head"]
     assert payload["base_digest_unchanged"] is True
     assert payload["baseline_open"] is True
+
+
+@pytest.mark.slow
+def test_real_external_legacy_runtime_is_identity_bound_without_engine_install(
+    existing_freecad_python: str,
+) -> None:
+    payload = _run_legacy_runtime_adoption(existing_freecad_python)
+    assert payload["legacy_prefix"] == payload["expected_prefix"]
+    assert payload["active_prefix"] == payload["expected_prefix"]
+    assert payload["receipt_path"].endswith("/runtime/external-runtime.json")
+    assert payload["receipt_canonical"] is True
+    assert payload["receipt"] == payload["expected_receipt"]
+    assert payload["receipt_validated"] is True
+    assert payload["probe_ready"] is True
+    assert payload["external_runtime_unchanged"] is True
+    assert payload["blocked_commands"] == []
+    expected_python = str(Path(existing_freecad_python).parent.parent / "bin" / "python")
+    assert payload["verify_calls"][0] == expected_python
+    if payload["receipt_before"] is False:
+        assert payload["verify_calls"] == [expected_python, expected_python]
+
+
+@pytest.mark.slow
+def test_real_agent_application_bootstrap_isolation_checkout_and_restart_accept(
+    existing_freecad_python: str,
+    tmp_path: Path,
+) -> None:
+    result = _run_application_restart_case(existing_freecad_python, tmp_path)
+    prepared = result["prepared"]
+    accepted = result["accepted"]
+
+    for phase in (prepared, accepted):
+        runtime = phase["runtime"]
+        assert runtime["legacy_prefix"] == runtime["expected_prefix"]
+        assert runtime["active_prefix"] == runtime["expected_prefix"]
+        assert runtime["interpreter_under_prefix"] is True
+        assert runtime["external_receipt"] == {
+            "runtime_kind": "external",
+            "schema": 1,
+            "vibecad_version": "0.4.0",
+        }
+        assert phase["installer_calls"] == []
+        assert phase["legacy_runtime_unchanged"] is True
+        assert phase["application_closed"] is True
+
+    empty = prepared["empty"]
+    assert empty["head"]["generation"] == 0
+    assert empty["head"]["revision_id"] == empty["revision"]["id"]
+    assert empty["revision"]["base_revision"] is None
+    assert empty["revision"]["model"] is None
+
+    imported = prepared["imported"]
+    assert imported["head"]["generation"] == 0
+    assert imported["head"]["revision_id"] == imported["revision"]["id"]
+    assert imported["revision"]["base_revision"] is None
+    assert imported["revision"]["model"]["format"] == "fcstd"
+    assert imported["source_unchanged"] is True
+    assert {item["object_type"] for item in imported["entities"]} == {
+        "Part::Box",
+        "Part::Cylinder",
+    }
+    assert {item["source"] for item in imported["entities"]} == {"imported"}
+    assert len({item["object_id"] for item in imported["entities"]}) == 2
+    assert len({item["feature_id"] for item in imported["entities"]}) == 2
+    assert sorted(item["volume"] for item in imported["entities"]) == pytest.approx(
+        [20.0 * math.pi, 6000.0]
+    )
+
+    assert prepared["isolation"] == {"isolated": True, "runtime_count": 2}
+    assert prepared["import_task"]["status"] == "succeeded"
+    assert prepared["import_task"]["committed_revision"] is not None
+    assert prepared["checkout"] == {
+        "dirty": True,
+        "source_unchanged": True,
+        "head_unchanged": True,
+        "closed_state": "closed",
+        "closed_path": None,
+        "wire_has_path": False,
+    }
+
+    restart = prepared["restart"]
+    assert accepted["before_generation"] == restart["generation"]
+    assert accepted["accepted"]["status"] == "succeeded"
+    assert accepted["accepted"]["committed_revision"] == restart["draft_revision"]
+    assert accepted["final_head"]["project_id"] == restart["project_id"]
+    assert accepted["final_head"]["generation"] == 1
+    assert accepted["final_head"]["revision_id"] == restart["draft_revision"]
+    assert [item["object_type"] for item in accepted["entities"]] == ["Part::Box"]
+    assert accepted["entities"][0]["volume"] == pytest.approx(6000.0)

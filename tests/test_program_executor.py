@@ -137,6 +137,8 @@ class _FakeDocument:
 
 
 class _FakeSession:
+    freecad_version = (1, 1)
+
     def __init__(self, shape: _FakeShape | None = None) -> None:
         self.doc = _FakeDocument()
         self.shape = shape or _FakeShape()
@@ -312,8 +314,7 @@ def _fake_add_cylinder(
         area=2 * math.pi * radius * (radius + height),
         bbox=bbox,
         center=tuple(
-            origin + offset
-            for origin, offset in zip(position, center_offset, strict=True)
+            origin + offset for origin, offset in zip(position, center_offset, strict=True)
         ),
     )
     session.doc.Objects = (*session.doc.Objects, obj)
@@ -333,12 +334,7 @@ def _fake_modify_part(
     position = (obj.Placement.Base.x, obj.Placement.Base.y, obj.Placement.Base.z)
     obj.Shape = _FakeShape(
         volume=obj.Length * obj.Width * obj.Height,
-        area=2
-        * (
-            obj.Length * obj.Width
-            + obj.Length * obj.Height
-            + obj.Width * obj.Height
-        ),
+        area=2 * (obj.Length * obj.Width + obj.Length * obj.Height + obj.Width * obj.Height),
         bbox=(obj.Length, obj.Width, obj.Height),
         center=(
             position[0] + obj.Length / 2,
@@ -1041,7 +1037,8 @@ def test_execute_program_binds_fixed_handlers_once_and_preserves_order(
     assert all(outcome.result.ok for outcome in outcomes)
     assert all(outcome.result.revision == CANDIDATE_REVISION for outcome in outcomes)
     assert all(
-        payload[0] is session for _, payload in calls  # type: ignore[index]
+        payload[0] is session
+        for _, payload in calls  # type: ignore[index]
     )
     assert calls[0][1][1] == {  # type: ignore[index]
         "length": 10,
@@ -1053,6 +1050,68 @@ def test_execute_program_binds_fixed_handlers_once_and_preserves_order(
         "parameter": "length",
         "value": 12,
     }
+
+
+def test_execute_program_supplies_trusted_profile_version_and_object_counter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def adapter(program: object, handlers: object, **kwargs: object) -> tuple[object, ...]:
+        captured.update(kwargs)
+        captured["program"] = program
+        captured["handlers"] = handlers
+        return ()
+
+    monkeypatch.setattr(executor_module, "_execute_validated_program", adapter)
+    executor = InProcessCadExecutor(store=_store())
+    program = executor.validate_program(_program())
+    session = _FakeSession()
+
+    assert (
+        executor.execute_program(
+            program=program,
+            candidate=_active(session, tmp_path),
+        )
+        == ()
+    )
+    assert captured["execution_profile"] is executor.execution_profile
+    assert captured["freecad_version"] == (1, 1)
+    assert captured["gui_main_thread"] is False
+    counter = captured["object_count"]
+    assert callable(counter)
+    assert counter() == 0
+    session.doc.Objects = (object(),)
+    assert counter() == 1
+
+
+def test_execute_program_rejects_runtime_version_before_any_cad_handler(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def add_box(session: object, **kwargs: object) -> object:
+        nonlocal calls
+        del session, kwargs
+        calls += 1
+        return object()
+
+    monkeypatch.setattr(executor_module, "_add_box", add_box)
+    executor = InProcessCadExecutor(store=_store())
+    session = _FakeSession()
+    session.freecad_version = (2, 0)
+
+    with pytest.raises(ExecutorError) as caught:
+        executor.execute_program(
+            program=executor.validate_program(_program()),
+            candidate=_active(session, tmp_path),
+        )
+
+    assert caught.value.code is ExecutorErrorCode.INVALID_INPUT
+    assert calls == 0
+    assert session.doc.Objects == ()
 
 
 def test_execute_program_runs_all_six_managed_operations_with_fixed_traces(
@@ -1186,9 +1245,7 @@ def test_rotate_uses_live_bound_box_center_for_partial_cylinder(
     cylinder.VibeCADObjectId = object_id
     cylinder.VibeCADFeatureId = ""
     cylinder.VibeCADSemanticRole = "primitive"
-    cylinder.VibeCADProvenance = (
-        '{"operation_id":"import-partial-cylinder","source":"imported"}'
-    )
+    cylinder.VibeCADProvenance = '{"operation_id":"import-partial-cylinder","source":"imported"}'
     session = _FakeSession()
     session.doc.Objects = (cylinder,)
     selector = {
@@ -1226,9 +1283,7 @@ def test_rotate_uses_live_bound_box_center_for_partial_cylinder(
     assert [outcome.result.ok for outcome in outcomes] == [True]
     rotated = outcomes[0].result.value["after"]
     assert rotated["placement"][:3] == pytest.approx([5.0, 5.0, 0.0])
-    assert rotated["center_of_mass_mm"] == pytest.approx(
-        [5.0 - 4 * 10 / (3 * math.pi), 5.0, 3.0]
-    )
+    assert rotated["center_of_mass_mm"] == pytest.approx([5.0 - 4 * 10 / (3 * math.pi), 5.0, 3.0])
 
 
 def test_managed_aggregate_compounds_every_identified_primitive(
@@ -1374,10 +1429,10 @@ def test_repeated_create_handler_keeps_each_authenticated_command_context(
     )
 
     assert [outcome.result.ok for outcome in outcomes] == [True, True]
-    assert [
-        identity.provenance.operation_id
-        for _, identity in session.attached_identities
-    ] == ["box_a", "box_b"]
+    assert [identity.provenance.operation_id for _, identity in session.attached_identities] == [
+        "box_a",
+        "box_b",
+    ]
     assert [
         outcome.result.value["object_id"]  # type: ignore[index]
         for outcome in outcomes
@@ -1624,9 +1679,7 @@ def test_execute_rejects_custom_registry_authority_before_session_traversal(
                 handler_name="modify_parameter",
                 risk_class=RiskClass.READ_ONLY,
                 evidence_required=False,
-                target_fields=(
-                    FieldMetadata("object", "target", ValueShape.OBJECT_ID),
-                ),
+                target_fields=(FieldMetadata("object", "target", ValueShape.OBJECT_ID),),
                 argument_fields=(
                     FieldMetadata(
                         "parameter",
@@ -1946,9 +1999,7 @@ def test_collect_evidence_compares_base_and_sealed_entities_for_preservation(
         lambda session: session.shape,
     )
 
-    snapshot = InProcessCadExecutor(store=_store()).collect_evidence(
-        candidate=sealed
-    ).snapshot
+    snapshot = InProcessCadExecutor(store=_store()).collect_evidence(candidate=sealed).snapshot
 
     by_target = {item.target: item for item in snapshot.preservations}
     assert set(by_target) == {
@@ -2042,9 +2093,7 @@ def test_collect_evidence_rechecks_step_after_observation_window(
     class StepMutatingProbe(_FakeSession):
         def load_document(self, path: Path) -> object:
             loaded = super().load_document(path)
-            step_path.write_bytes(
-                b"ISO-10303-21;\nDATA;\n#2=B;\nENDSEC;\nEND-ISO-10303-21;\n"
-            )
+            step_path.write_bytes(b"ISO-10303-21;\nDATA;\n#2=B;\nENDSEC;\nEND-ISO-10303-21;\n")
             return loaded
 
     live = _FakeSession()
@@ -2330,9 +2379,8 @@ def test_candidate_evidence_is_immutable_and_validates_exact_types(
     evidence = InProcessCadExecutor(store=_store()).collect_evidence(candidate=sealed)
     with pytest.raises((AttributeError, TypeError)):
         evidence.artifacts = ()  # type: ignore[misc]
-    with pytest.raises(ExecutorError) as caught:
+    with pytest.raises(ValueError):
         CandidateEvidence(snapshot=object(), artifacts=())  # type: ignore[arg-type]
-    assert caught.value.code is ExecutorErrorCode.INVALID_INPUT
     wrong_revision = TaskArtifactRef(
         id=MODEL_ID,
         name="model.FCStd",
@@ -2341,9 +2389,8 @@ def test_candidate_evidence_is_immutable_and_validates_exact_types(
         size_bytes=evidence.artifacts[0].size_bytes,
         candidate_revision="revision_22222222222222222222222222222222",
     )
-    with pytest.raises(ExecutorError) as mismatch:
+    with pytest.raises(ValueError):
         CandidateEvidence(snapshot=evidence.snapshot, artifacts=(wrong_revision,))
-    assert mismatch.value.code is ExecutorErrorCode.INVALID_INPUT
 
 
 def test_executor_has_no_configurable_handler_or_path_surface() -> None:

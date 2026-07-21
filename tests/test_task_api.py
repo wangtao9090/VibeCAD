@@ -59,6 +59,7 @@ ERROR_MESSAGES = {
     "conflict": "The task record changed concurrently.",
     "store_failure": "The task record operation failed.",
     "lease_unavailable": "The project write lease is unavailable.",
+    "resource_exhausted": "The application resource capacity is exhausted.",
     "recovery_required": "The task requires explicit reconciliation.",
     "internal_error": "The request could not be completed.",
 }
@@ -364,6 +365,7 @@ def test_public_surface_error_taxonomies_and_method_signatures_are_closed():
         "conflict",
         "store_failure",
         "lease_unavailable",
+        "resource_exhausted",
         "recovery_required",
     }
     api_methods = {
@@ -805,9 +807,7 @@ def test_review_decision_semantic_replays_and_conflicts_are_port_owned_and_singl
     )
     for method, terminal in (("accept_draft", succeeded), ("reject_draft", rejected)):
         port = _FakePort(terminal)
-        response = getattr(TaskApi(port=port), method)(
-            _decision_request(expected_generation=0)
-        )
+        response = getattr(TaskApi(port=port), method)(_decision_request(expected_generation=0))
         _assert_success(response)
         assert port.calls == [
             (
@@ -964,6 +964,15 @@ def test_all_neutral_port_failures_map_to_fixed_path_free_public_errors(code):
     _assert_error(response, code.value, "")
 
 
+def test_resource_exhausted_is_a_closed_path_free_port_and_api_failure():
+    code = TaskServicePortErrorCode("resource_exhausted")
+    assert TaskApiErrorCode("resource_exhausted").value == code.value
+    response = TaskApi(port=_FakePort(TaskServicePortFailure(code=code))).get_task(
+        {"schema_version": 1, "task_id": TASK_ID}
+    )
+    _assert_error(response, "resource_exhausted", "")
+
+
 @pytest.mark.parametrize("raised", [RuntimeError("secret /tmp/model"), KeyboardInterrupt()])
 def test_port_raises_are_redacted_as_internal_error_without_retry(raised):
     port = _FakePort(raised)
@@ -1016,9 +1025,7 @@ def test_forged_exact_port_failure_with_a_public_code_is_internal():
     forged = object.__new__(TaskServicePortFailure)
     object.__setattr__(forged, "code", TaskApiErrorCode.MISSING_FIELD)
 
-    response = TaskApi(port=_FakePort(forged)).get_task(
-        {"schema_version": 1, "task_id": TASK_ID}
-    )
+    response = TaskApi(port=_FakePort(forged)).get_task({"schema_version": 1, "task_id": TASK_ID})
 
     _assert_error(response, "internal_error", "")
 
@@ -1085,9 +1092,7 @@ def test_missing_fields_have_deterministic_paths(method, payload, path):
 
 
 def test_unknown_fields_are_sorted_and_json_pointer_escaped():
-    response = TaskApi(port=object()).get_capabilities(
-        {"schema_version": 1, "z": 0, "a/b~c": 0}
-    )
+    response = TaskApi(port=object()).get_capabilities({"schema_version": 1, "z": 0, "a/b~c": 0})
     _assert_error(response, "unknown_field", "/a~1b~0c")
 
 
@@ -1346,9 +1351,7 @@ def test_deep_or_long_unknown_outer_input_never_recurses_or_expands_error_path()
     deep_response = TaskApi(port=object()).get_capabilities(
         {"schema_version": 1, "unknown": nested}
     )
-    long_response = TaskApi(port=object()).get_capabilities(
-        {"schema_version": 1, long_name: 0}
-    )
+    long_response = TaskApi(port=object()).get_capabilities({"schema_version": 1, long_name: 0})
 
     _assert_error(deep_response, "unknown_field", "/unknown")
     _assert_error(long_response, "unknown_field", "/_truncated")
@@ -1399,9 +1402,7 @@ def test_program_value_string_and_key_utf8_budgets_are_exact():
     string_over_response = TaskApi(port=object()).submit_model_program(
         {**base, "program_json": string_over}
     )
-    key_at_response = TaskApi(port=object()).submit_model_program(
-        {**base, "program_json": key_at}
-    )
+    key_at_response = TaskApi(port=object()).submit_model_program({**base, "program_json": key_at})
     key_over_response = TaskApi(port=object()).submit_model_program(
         {**base, "program_json": key_over}
     )

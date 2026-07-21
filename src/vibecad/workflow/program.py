@@ -23,6 +23,7 @@ from vibecad.execution.registry import (
     FieldMetadata,
     OperationMetadata,
     OperationRegistry,
+    ResourceBudget,
     ResultSlotMetadata,
     RiskClass,
     ValueShape,
@@ -203,6 +204,10 @@ class BoundCommand:
     risk_class: RiskClass
     evidence_required: bool
     execution_profiles: tuple[ExecutionProfile, ...] = (ExecutionProfile.HEADLESS,)
+    minimum_freecad_version: tuple[int, int] = (1, 0)
+    maximum_freecad_version_exclusive: tuple[int, int] = (2, 0)
+    requires_gui_main_thread: bool = False
+    resource_budget: ResourceBudget = ResourceBudget()
     result_slots: tuple[ResultSlotMetadata, ...] = ()
 
     def __post_init__(self) -> None:
@@ -213,6 +218,16 @@ class BoundCommand:
         object.__setattr__(self, "depends_on", tuple(self.depends_on))
         object.__setattr__(self, "preserve", tuple(self.preserve))
         object.__setattr__(self, "execution_profiles", tuple(self.execution_profiles))
+        object.__setattr__(
+            self,
+            "minimum_freecad_version",
+            tuple(self.minimum_freecad_version),
+        )
+        object.__setattr__(
+            self,
+            "maximum_freecad_version_exclusive",
+            tuple(self.maximum_freecad_version_exclusive),
+        )
         object.__setattr__(self, "result_slots", tuple(self.result_slots))
 
 
@@ -746,6 +761,10 @@ def _bind_command(
         risk_class=metadata.risk_class,
         evidence_required=metadata.evidence_required,
         execution_profiles=metadata.execution_profiles,
+        minimum_freecad_version=metadata.minimum_freecad_version,
+        maximum_freecad_version_exclusive=metadata.maximum_freecad_version_exclusive,
+        requires_gui_main_thread=metadata.requires_gui_main_thread,
+        resource_budget=metadata.resource_budget,
         result_slots=metadata.result_slots,
     )
 

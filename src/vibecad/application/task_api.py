@@ -63,6 +63,7 @@ class TaskApiErrorCode(StrEnum):
     CONFLICT = "conflict"
     STORE_FAILURE = "store_failure"
     LEASE_UNAVAILABLE = "lease_unavailable"
+    RESOURCE_EXHAUSTED = "resource_exhausted"
     RECOVERY_REQUIRED = "recovery_required"
     INTERNAL_ERROR = "internal_error"
 
@@ -83,6 +84,7 @@ _ERROR_MESSAGES = {
     TaskApiErrorCode.CONFLICT: "The task record changed concurrently.",
     TaskApiErrorCode.STORE_FAILURE: "The task record operation failed.",
     TaskApiErrorCode.LEASE_UNAVAILABLE: "The project write lease is unavailable.",
+    TaskApiErrorCode.RESOURCE_EXHAUSTED: ("The application resource capacity is exhausted."),
     TaskApiErrorCode.RECOVERY_REQUIRED: "The task requires explicit reconciliation.",
     TaskApiErrorCode.INTERNAL_ERROR: "The request could not be completed.",
 }
@@ -98,6 +100,7 @@ class TaskServicePortErrorCode(StrEnum):
     CONFLICT = "conflict"
     STORE_FAILURE = "store_failure"
     LEASE_UNAVAILABLE = "lease_unavailable"
+    RESOURCE_EXHAUSTED = "resource_exhausted"
     RECOVERY_REQUIRED = "recovery_required"
 
 
@@ -111,6 +114,7 @@ _PORT_ERROR_MAP = {
     TaskServicePortErrorCode.CONFLICT: TaskApiErrorCode.CONFLICT,
     TaskServicePortErrorCode.STORE_FAILURE: TaskApiErrorCode.STORE_FAILURE,
     TaskServicePortErrorCode.LEASE_UNAVAILABLE: TaskApiErrorCode.LEASE_UNAVAILABLE,
+    TaskServicePortErrorCode.RESOURCE_EXHAUSTED: TaskApiErrorCode.RESOURCE_EXHAUSTED,
     TaskServicePortErrorCode.RECOVERY_REQUIRED: TaskApiErrorCode.RECOVERY_REQUIRED,
 }
 
@@ -260,9 +264,7 @@ def _validate_exact_json(value: object, *, program_json_path: str | None) -> Non
 
         if type(current) is list:
             for index in range(len(current) - 1, -1, -1):
-                stack.append(
-                    (current[index], _bounded_pointer(path, str(index)), depth + 1)
-                )
+                stack.append((current[index], _bounded_pointer(path, str(index)), depth + 1))
             continue
 
         assert type(current) is dict
@@ -541,9 +543,7 @@ def _operation_projection(metadata: OperationMetadata) -> dict[str, object]:
         ],
         "execution_profiles": sorted(profile.value for profile in metadata.execution_profiles),
         "minimum_freecad_version": list(metadata.minimum_freecad_version),
-        "maximum_freecad_version_exclusive": list(
-            metadata.maximum_freecad_version_exclusive
-        ),
+        "maximum_freecad_version_exclusive": list(metadata.maximum_freecad_version_exclusive),
         "requires_gui_main_thread": metadata.requires_gui_main_thread,
         "resource_budget": {
             "max_runtime_ms": metadata.resource_budget.max_runtime_ms,
@@ -728,9 +728,7 @@ class TaskApi:
                     and task.committed_revision == draft.revision_id
                 ):
                     _raise(TaskApiErrorCode.INTERNAL_ERROR)
-            elif not (
-                task.status is TaskStatus.REJECTED and task.committed_revision is None
-            ):
+            elif not (task.status is TaskStatus.REJECTED and task.committed_revision is None):
                 _raise(TaskApiErrorCode.INTERNAL_ERROR)
             return self._task_result(stored, task_id=task_id)
 

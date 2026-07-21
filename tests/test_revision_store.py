@@ -148,7 +148,14 @@ EXPECTED_STORE_METHODS = {
     "candidate_artifact_path": ("self", "project_id", "revision_id", "format", "lease"),
     "candidate_model_path": ("self", "project_id", "revision_id", "lease"),
     "commit_revision": ("self", "project_id", "expected_head", "revision_id", "lease"),
-    "import_trusted_fcstd": ("self", "project_id", "source", "lease"),
+    "import_trusted_fcstd": (
+        "self",
+        "project_id",
+        "source",
+        "expected_sha256",
+        "expected_size",
+        "lease",
+    ),
     "initialize_empty_project": ("self", "project_id", "lease"),
     "load_head": ("self", "project_id"),
     "load_revision": ("self", "project_id", "revision_id"),
@@ -474,8 +481,31 @@ def _initialize_imported(
     source: Path,
     project_id: str = PROJECT_ID,
 ) -> ProjectHead:
+    raw = source.read_bytes()
     with manager.acquire_project_write(project_id) as lease:
-        return store.import_trusted_fcstd(project_id, source, lease)
+        return store.import_trusted_fcstd(
+            project_id,
+            source,
+            hashlib.sha256(raw).hexdigest(),
+            len(raw),
+            lease,
+        )
+
+
+def _import_trusted(
+    store: LocalRevisionStore,
+    project_id: str,
+    source: str | Path,
+    lease: ProjectWriteLease,
+) -> ProjectHead:
+    raw = Path(source).read_bytes()
+    return store.import_trusted_fcstd(
+        project_id,
+        source,
+        hashlib.sha256(raw).hexdigest(),
+        len(raw),
+        lease,
+    )
 
 
 def _begin_and_fill(
@@ -956,7 +986,7 @@ def test_exact_string_root_and_trusted_source_are_accepted(roots, tmp_path: Path
         trust=RevisionStoreRootTrust.TRUSTED_LOCAL,
     )
     with manager.acquire_project_write(PROJECT_ID) as lease:
-        head = store.import_trusted_fcstd(PROJECT_ID, string_source, lease)
+        head = _import_trusted(store, PROJECT_ID, string_source, lease)
     assert store.revision_model_path(PROJECT_ID, head.revision_id).read_bytes() == source_bytes
 
 
@@ -1761,7 +1791,7 @@ def test_every_existing_project_mutation_rejects_all_invalid_lease_classes(
         for invalid in (wrong, foreign, released, object(), None):
             calls = (
                 lambda invalid=invalid: store.initialize_empty_project(PROJECT_ID, invalid),
-                lambda invalid=invalid: store.import_trusted_fcstd(PROJECT_ID, source, invalid),
+                lambda invalid=invalid: _import_trusted(store, PROJECT_ID, source, invalid),
                 lambda invalid=invalid: store.begin_revision(PROJECT_ID, head, invalid),
                 lambda invalid=invalid: store.candidate_model_path(PROJECT_ID, REVISION_B, invalid),
                 lambda invalid=invalid: store.candidate_artifact_path(
@@ -1795,7 +1825,7 @@ def test_every_mutation_rejects_an_inherited_process_context_before_storage_acce
     lease = manager.acquire_project_write(PROJECT_ID)
     calls = (
         lambda: store.initialize_empty_project(PROJECT_ID, lease),
-        lambda: store.import_trusted_fcstd(PROJECT_ID, source, lease),
+        lambda: _import_trusted(store, PROJECT_ID, source, lease),
         lambda: store.begin_revision(PROJECT_ID, head, lease),
         lambda: store.candidate_model_path(PROJECT_ID, REVISION_B, lease),
         lambda: store.candidate_artifact_path(PROJECT_ID, REVISION_B, "step", lease),
@@ -1953,7 +1983,7 @@ def test_store_does_not_reacquire_nonreentrant_project_lease(
         store.reconcile(PROJECT_ID, lease)
         rollback_id = store.begin_revision(PROJECT_ID, committed, lease)
         store.rollback_revision(PROJECT_ID, rollback_id, lease)
-        store.import_trusted_fcstd(OTHER_PROJECT_ID, source, other_lease)
+        _import_trusted(store, OTHER_PROJECT_ID, source, other_lease)
     finally:
         lease.release(owner_token=lease.owner_token)
         other_lease.release(owner_token=other_lease.owner_token)
@@ -2016,7 +2046,7 @@ def test_import_rejects_unsafe_or_empty_sources(store_parts, tmp_path: Path, kin
             listener.bind(str(source))
     with manager.acquire_project_write(PROJECT_ID) as lease:
         with pytest.raises(RevisionStoreError) as captured:
-            store.import_trusted_fcstd(PROJECT_ID, source, lease)
+            store.import_trusted_fcstd(PROJECT_ID, source, DIGEST_A, 1, lease)
     _assert_closed_error(captured.value, expected)
 
 
@@ -2026,7 +2056,7 @@ def test_import_rejects_hostile_input_before_any_implicit_protocol(store_parts):
     before = _all_tree_bytes(root)
     with manager.acquire_project_write(PROJECT_ID) as lease:
         with pytest.raises(RevisionStoreError) as captured:
-            store.import_trusted_fcstd(PROJECT_ID, hostile, lease)
+            store.import_trusted_fcstd(PROJECT_ID, hostile, DIGEST_A, 1, lease)
     _assert_closed_error(captured.value, RevisionStoreErrorCode.INVALID_INPUT)
     assert hostile.protocol_calls == []
     assert _all_tree_bytes(root) == before
@@ -2050,7 +2080,7 @@ def test_import_opens_regular_source_nofollow_cloexec_nonblocking_and_read_only(
 
     with manager.acquire_project_write(PROJECT_ID) as lease:
         monkeypatch.setattr(revisions_module.os, "open", tracked_open)
-        store.import_trusted_fcstd(PROJECT_ID, source, lease)
+        _import_trusted(store, PROJECT_ID, source, lease)
     assert len(observed) == 1
     flags, _dir_fd = observed[0]
     assert flags & os.O_NOFOLLOW
@@ -2091,7 +2121,7 @@ def test_imported_model_is_fsynced_before_atomic_project_publication(
         monkeypatch.setattr(revisions_module.os, "open", tracked_open)
         monkeypatch.setattr(revisions_module.os, "fsync", tracked_fsync)
         monkeypatch.setattr(revisions_module.os, "rename", tracked_rename)
-        store.import_trusted_fcstd(PROJECT_ID, source, lease)
+        _import_trusted(store, PROJECT_ID, source, lease)
     publication = events.index(("rename", _project_dir(root).name))
     assert ("fsync", "model.FCStd") in events[:publication]
     assert ("fsync", "manifest.json") in events[:publication]
@@ -2129,7 +2159,7 @@ def test_imported_model_fsync_failure_prevents_project_publication(
         monkeypatch.setattr(revisions_module.os, "open", tracked_open)
         monkeypatch.setattr(revisions_module.os, "fsync", fail_imported_model_fsync)
         with pytest.raises(RevisionStoreError) as captured:
-            store.import_trusted_fcstd(PROJECT_ID, source, lease)
+            _import_trusted(store, PROJECT_ID, source, lease)
     _assert_closed_error(captured.value, RevisionStoreErrorCode.IO_ERROR)
     assert failed
     assert tuple(root.iterdir()) == ()
@@ -2144,7 +2174,7 @@ def test_import_size_budget_is_checked_before_project_publication(
     monkeypatch.setattr(revisions_module, "_MAX_FILE_BYTES", 3)
     with manager.acquire_project_write(PROJECT_ID) as lease:
         with pytest.raises(RevisionStoreError) as captured:
-            store.import_trusted_fcstd(PROJECT_ID, source, lease)
+            _import_trusted(store, PROJECT_ID, source, lease)
     assert captured.value.code is RevisionStoreErrorCode.BUDGET_EXCEEDED
     assert tuple(root.iterdir()) == ()
 
@@ -2169,8 +2199,35 @@ def test_import_detects_source_mutation_during_bounded_copy(
     monkeypatch.setattr(revisions_module.os, "read", mutating_read)
     with manager.acquire_project_write(PROJECT_ID) as lease:
         with pytest.raises(RevisionStoreError) as captured:
-            store.import_trusted_fcstd(PROJECT_ID, source, lease)
+            _import_trusted(store, PROJECT_ID, source, lease)
     assert captured.value.code is RevisionStoreErrorCode.CORRUPT_CONTENT
+
+
+def test_import_requires_exact_prevalidated_digest_and_size_before_publication(
+    store_parts, tmp_path: Path
+):
+    store, manager, root = store_parts
+    source = tmp_path / "normalized.FCStd"
+    validated = b"validated normalized model"
+    source.write_bytes(validated)
+    expected_sha256 = hashlib.sha256(validated).hexdigest()
+    expected_size = len(validated)
+
+    # Simulate replacement after the CAD port validated the staging file but
+    # before the revision store reopens it for its authoritative copy.
+    source.write_bytes(b"swapped after semantic validation")
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        with pytest.raises(RevisionStoreError) as captured:
+            store.import_trusted_fcstd(
+                PROJECT_ID,
+                source,
+                expected_sha256,
+                expected_size,
+                lease,
+            )
+
+    assert captured.value.code is RevisionStoreErrorCode.CORRUPT_CONTENT
+    assert tuple(root.iterdir()) == ()
 
 
 def test_copy_reads_are_bounded_to_the_frozen_chunk_and_exact_size_boundary_passes(
@@ -3607,7 +3664,7 @@ def test_external_source_parent_close_fault_attempts_each_owned_fd_once(
         monkeypatch.setattr(revisions_module.os, "close", close_fault)
         try:
             with pytest.raises(RevisionStoreError) as captured:
-                store.import_trusted_fcstd(PROJECT_ID, source, lease)
+                _import_trusted(store, PROJECT_ID, source, lease)
             _assert_closed_error(captured.value, RevisionStoreErrorCode.IO_ERROR)
             assert injected
             assert opened <= attempted.keys()
@@ -3658,7 +3715,7 @@ def test_import_attempts_source_and_parent_close_after_first_close_fault(
         monkeypatch.setattr(revisions_module.os, "open", tracked_open)
         monkeypatch.setattr(revisions_module.os, "close", fail_source_closes)
         with pytest.raises(RevisionStoreError) as captured:
-            store.import_trusted_fcstd(PROJECT_ID, source, lease)
+            _import_trusted(store, PROJECT_ID, source, lease)
     _assert_closed_error(captured.value, RevisionStoreErrorCode.IO_ERROR)
     assert source_fd is not None and source_parent_fd is not None
     assert source_fd in attempted

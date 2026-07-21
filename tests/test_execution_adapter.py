@@ -26,6 +26,7 @@ from vibecad.execution.registry import (
     FieldMetadata,
     OperationMetadata,
     OperationRegistry,
+    ResourceBudget,
     ResultSlotMetadata,
     RiskClass,
     ValueShape,
@@ -187,9 +188,7 @@ def _selector_program() -> ValidatedProgram:
                 handler_name="select_object",
                 risk_class=RiskClass.READ_ONLY,
                 evidence_required=False,
-                target_fields=(
-                    FieldMetadata("object", "selector", ValueShape.OBJECT_SELECTOR),
-                ),
+                target_fields=(FieldMetadata("object", "selector", ValueShape.OBJECT_SELECTOR),),
             ),
         )
     )
@@ -348,6 +347,14 @@ def test_privately_forged_validated_program_structure_is_rejected(
         pytest.param("risk_class", "read_only", id="untyped-risk"),
         pytest.param("evidence_required", 1, id="non-boolean-evidence-flag"),
         pytest.param("execution_profiles", [], id="mutable-execution-profiles"),
+        pytest.param("resource_budget", object(), id="untyped-resource-budget"),
+        pytest.param("minimum_freecad_version", [1, 0], id="mutable-minimum-version"),
+        pytest.param(
+            "maximum_freecad_version_exclusive",
+            [2, 0],
+            id="mutable-maximum-version",
+        ),
+        pytest.param("requires_gui_main_thread", 1, id="untyped-gui-thread-flag"),
         pytest.param("result_slots", [], id="mutable-result-slots"),
     ],
 )
@@ -1087,16 +1094,22 @@ def test_handler_base_exception_wins_when_final_clock_raises(
 
 
 @pytest.mark.parametrize(
-    "clock_values",
+    ("clock_values", "expected_handler_calls", "expected_clock_calls"),
     [
-        (RuntimeError("private start-clock failure"), 10),
-        (0, RuntimeError("private finish-clock failure")),
-        (10, 5),
+        (
+            (RuntimeError("private start-clock failure"), 10),
+            0,
+            1,
+        ),
+        ((0, RuntimeError("private finish-clock failure")), 1, 2),
+        ((10, 5), 1, 2),
     ],
     ids=["start-exception", "finish-exception", "backwards"],
 )
-def test_clock_failures_degrade_success_to_zero_without_retry(
+def test_clock_failures_fail_closed_without_retry(
     clock_values: tuple[int | BaseException, int | BaseException],
+    expected_handler_calls: int,
+    expected_clock_calls: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
@@ -1113,24 +1126,278 @@ def test_clock_failures_degrade_success_to_zero_without_retry(
     clock = _install_clock(monkeypatch, *clock_values)
     program = _validated(
         _command(
-            "box",
+            "box-1",
             "create_box",
             args={"length_mm": 1, "width_mm": 2, "height_mm": 3},
         ),
+        _command(
+            "box-2",
+            "create_box",
+            args={"length_mm": 4, "width_mm": 5, "height_mm": 6},
+        ),
     )
 
-    outcome = execute_validated_program(
+    outcomes = execute_validated_program(
         program,
         {"create_box": box},
+    )
+
+    assert len(outcomes) == 1
+    assert calls == expected_handler_calls
+    assert clock.calls == expected_clock_calls
+    outcome = outcomes[0]
+    assert outcome.result.ok is False
+    assert outcome.result.elapsed_ms == 0
+    assert outcome.result.error is not None
+    assert outcome.result.error.code == "resource_budget_exceeded"
+    assert outcome.result.error.retryable is False
+    assert outcome.result.evidence == ()
+
+
+def test_equal_monotonic_readings_are_a_valid_zero_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def inspect() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"ok": True}
+
+    clock = _install_clock(monkeypatch, 10, 10)
+
+    outcome = execute_validated_program(
+        _inspect_program(),
+        {"inspect_model": inspect},
     )[0]
 
     assert calls == 1
     assert clock.calls == 2
     assert outcome.result.ok is True
     assert outcome.result.elapsed_ms == 0
-    assert outcome.result.error is None
-    assert len(outcome.result.evidence) == 1
-    assert outcome.result.evidence[0].operation_id == "box"
+
+
+def _resource_program(
+    budget: ResourceBudget,
+    *,
+    evidence_required: bool = False,
+    profiles: tuple[ExecutionProfile, ...] = (ExecutionProfile.HEADLESS,),
+    minimum_version: tuple[int, int] = (1, 0),
+    maximum_version: tuple[int, int] = (2, 0),
+    requires_gui_main_thread: bool = False,
+    command_count: int = 1,
+) -> ValidatedProgram:
+    registry = OperationRegistry(
+        (
+            OperationMetadata(
+                operation="bounded_inspect",
+                handler_name="bounded_inspect",
+                risk_class=RiskClass.READ_ONLY,
+                evidence_required=evidence_required,
+                execution_profiles=profiles,
+                minimum_freecad_version=minimum_version,
+                maximum_freecad_version_exclusive=maximum_version,
+                requires_gui_main_thread=requires_gui_main_thread,
+                resource_budget=budget,
+            ),
+        )
+    )
+    return validate_model_program(
+        _model_program(
+            *(_command(f"bounded-{index}", "bounded_inspect") for index in range(command_count))
+        ),
+        registry=registry,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "ceiling"),
+    [
+        ("max_runtime_ms", 30_000),
+        ("max_created_objects", 1),
+        ("max_result_bytes", 262_144),
+    ],
+)
+def test_admission_ceilings_accept_n_and_reject_n_plus_one_before_handler(
+    field: str,
+    ceiling: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def budget(value: int) -> ResourceBudget:
+        values = {
+            "max_runtime_ms": 30_000,
+            "max_created_objects": 1,
+            "max_result_bytes": 262_144,
+        }
+        values[field] = value
+        return ResourceBudget(**values)
+
+    accepted_calls = 0
+
+    def accepted_handler() -> dict[str, object]:
+        nonlocal accepted_calls
+        accepted_calls += 1
+        return {"ok": True}
+
+    _install_clock(monkeypatch, 0, 1)
+    accepted = _execute_validated_program(
+        _resource_program(budget(ceiling)),
+        {"bounded_inspect": accepted_handler},
+        execution_profile=ExecutionProfile.HEADLESS,
+        freecad_version=(1, 1),
+        gui_main_thread=False,
+        object_count=lambda: 0,
+    )
+    assert accepted_calls == 1
+    assert accepted[0].result.ok is True
+
+    rejected_calls = 0
+
+    def rejected_handler() -> dict[str, object]:
+        nonlocal rejected_calls
+        rejected_calls += 1
+        return {"ok": True}
+
+    with pytest.raises(AdapterError) as caught:
+        _execute_validated_program(
+            _resource_program(budget(ceiling + 1)),
+            {"bounded_inspect": rejected_handler},
+            execution_profile=ExecutionProfile.HEADLESS,
+            freecad_version=(1, 1),
+            gui_main_thread=False,
+            object_count=lambda: 0,
+        )
+    assert caught.value.code is AdapterErrorCode.INVALID_PROGRAM
+    assert rejected_calls == 0
+
+
+def test_version_and_gui_thread_constraints_are_preflighted_before_handler() -> None:
+    calls = 0
+
+    def handler() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"ok": True}
+
+    versioned = _resource_program(
+        ResourceBudget(),
+        minimum_version=(1, 1),
+        maximum_version=(1, 2),
+    )
+    with pytest.raises(AdapterError) as version_error:
+        _execute_validated_program(
+            versioned,
+            {"bounded_inspect": handler},
+            execution_profile=ExecutionProfile.HEADLESS,
+            freecad_version=(1, 0),
+            gui_main_thread=False,
+            object_count=lambda: 0,
+        )
+    assert version_error.value.code is AdapterErrorCode.UNSUPPORTED_EXECUTION_PROFILE
+
+    gui_program = _resource_program(
+        ResourceBudget(),
+        profiles=(ExecutionProfile.OFFSCREEN_GUI,),
+        requires_gui_main_thread=True,
+    )
+    with pytest.raises(AdapterError) as thread_error:
+        _execute_validated_program(
+            gui_program,
+            {"bounded_inspect": handler},
+            execution_profile=ExecutionProfile.OFFSCREEN_GUI,
+            freecad_version=(1, 1),
+            gui_main_thread=False,
+            object_count=lambda: 0,
+        )
+    assert thread_error.value.code is AdapterErrorCode.UNSUPPORTED_EXECUTION_PROFILE
+    assert calls == 0
+
+
+@pytest.mark.parametrize("resource", ["runtime", "objects", "result"])
+def test_authentic_lower_command_budget_fails_after_return_and_stops_program(
+    resource: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    budgets = {
+        "runtime": ResourceBudget(
+            max_runtime_ms=1,
+            max_created_objects=1,
+            max_result_bytes=262_144,
+        ),
+        "objects": ResourceBudget(
+            max_runtime_ms=30_000,
+            max_created_objects=1,
+            max_result_bytes=262_144,
+        ),
+        "result": ResourceBudget(
+            max_runtime_ms=30_000,
+            max_created_objects=1,
+            max_result_bytes=1,
+        ),
+    }
+    calls = 0
+
+    def handler() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"ok": True, "payload": "bounded"}
+
+    _install_clock(monkeypatch, 0, 2_000_000)
+    counts = iter((0, 2) if resource == "objects" else (0, 0))
+    outcomes = _execute_validated_program(
+        _resource_program(budgets[resource], command_count=2),
+        {"bounded_inspect": handler},
+        execution_profile=ExecutionProfile.HEADLESS,
+        freecad_version=(1, 1),
+        gui_main_thread=False,
+        object_count=lambda: next(counts),
+    )
+
+    assert calls == 1
+    assert len(outcomes) == 1
+    assert outcomes[0].result.ok is False
+
+
+def test_result_budget_applies_after_trusted_execution_evidence_is_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generous = ResourceBudget(
+        max_runtime_ms=30_000,
+        max_created_objects=0,
+        max_result_bytes=262_144,
+    )
+    _install_clock(monkeypatch, 0, 1, 2, 3)
+    successful = _execute_validated_program(
+        _resource_program(generous, evidence_required=True),
+        {"bounded_inspect": lambda: {"ok": True}},
+        execution_profile=ExecutionProfile.HEADLESS,
+        object_count=lambda: 0,
+    )[0]
+    final_size = len(
+        json.dumps(
+            successful.result.to_mapping(),
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    assert successful.result.ok is True
+    assert len(successful.result.evidence) == 1
+
+    limited = ResourceBudget(
+        max_runtime_ms=30_000,
+        max_created_objects=0,
+        max_result_bytes=final_size - 1,
+    )
+    outcome = _execute_validated_program(
+        _resource_program(limited, evidence_required=True),
+        {"bounded_inspect": lambda: {"ok": True}},
+        execution_profile=ExecutionProfile.HEADLESS,
+        object_count=lambda: 0,
+    )[0]
+
+    assert outcome.result.ok is False
+    assert outcome.result.error is not None
+    assert outcome.result.error.code == "resource_budget_exceeded"
 
 
 def test_raw_context_like_fields_cannot_override_trusted_envelope(

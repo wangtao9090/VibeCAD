@@ -2099,15 +2099,33 @@ def _open_store_root(store):
     return _open_root(store._parts, store._identity)
 
 
-def _initialize_project(store, project_id, source, lease):
+def _initialize_project(
+    store,
+    project_id,
+    source,
+    expected_sha256,
+    expected_size,
+    lease,
+):
     mutation_code = _require_mutation(store, project_id, lease)
     if mutation_code is not None:
         raise RevisionStoreError(mutation_code)
     source_open = None
     if source is not None:
+        if (
+            type(expected_sha256) is not str
+            or re.fullmatch(_DIGEST_PATTERN, expected_sha256) is None
+            or type(expected_size) is not int
+            or expected_size <= 0
+        ):
+            raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+        if expected_size > _MAX_FILE_BYTES:
+            raise RevisionStoreError(RevisionStoreErrorCode.BUDGET_EXCEEDED)
         source_open = _open_external_source(source)
         if source_open[4] is not None:
             raise RevisionStoreError(source_open[4])
+    elif expected_sha256 is not None or expected_size is not None:
+        raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
     root_open = _open_store_root(store)
     if root_open[2] is not None:
         if source_open is not None:
@@ -2178,6 +2196,8 @@ def _initialize_project(store, project_id, source, lease):
         )
         if copied[2] is not None:
             code = copied[2]
+        elif copied[0] != expected_sha256 or copied[1] != expected_size:
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
         else:
             model = RevisionArtifactRef(
                 id=_new_artifact_id(),
@@ -2770,11 +2790,25 @@ class LocalRevisionStore:
     def commit_revision(self, project_id, expected_head, revision_id, lease):
         return _commit_revision(self, project_id, expected_head, revision_id, lease)
 
-    def import_trusted_fcstd(self, project_id, source, lease):
-        return _initialize_project(self, project_id, source, lease)
+    def import_trusted_fcstd(
+        self,
+        project_id,
+        source,
+        expected_sha256,
+        expected_size,
+        lease,
+    ):
+        return _initialize_project(
+            self,
+            project_id,
+            source,
+            expected_sha256,
+            expected_size,
+            lease,
+        )
 
     def initialize_empty_project(self, project_id, lease):
-        return _initialize_project(self, project_id, None, lease)
+        return _initialize_project(self, project_id, None, None, None, lease)
 
     def load_head(self, project_id):
         return _load_head(self, project_id)

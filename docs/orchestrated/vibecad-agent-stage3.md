@@ -2087,6 +2087,122 @@ mechanical stale-test correction under the packet's autonomous defect rule, not 
    initialize data under a deletable runtime target；if S3-6 semantic commit exists, use S3-S12 instead of
    replaying RED。
 
+### S3-6 completion evidence
+
+The semantic write set stayed inside Packet S3-6A and its S3-6C1 test-only correction.  The pre-existing
+untracked `docs/CAD_BACKEND_RESEARCH.md` remained outside the packet and was not read, edited or staged.
+
+- application and interaction runtime: `src/vibecad/application/agent.py`,
+  `src/vibecad/application/data.py`, `src/vibecad/application/project.py`,
+  `src/vibecad/application/task_api.py`, `src/vibecad/interaction/__init__.py`,
+  `src/vibecad/interaction/cad.py`, `src/vibecad/interaction/checkouts.py`,
+  `src/vibecad/interaction/protocol.py`, `src/vibecad/interaction/storage.py`;
+- workflow and execution composition: `src/vibecad/workflow/catalog.py`,
+  `src/vibecad/workflow/program.py`, `src/vibecad/workflow/service.py`,
+  `src/vibecad/execution/adapter.py`, `src/vibecad/execution/candidate.py`,
+  `src/vibecad/execution/executor.py`, `src/vibecad/execution/revisions.py`;
+- replaceable runtime boundary: `src/vibecad/runtime/installer.py`,
+  `src/vibecad/runtime/paths.py`, `src/vibecad/runtime/status.py`,
+  `src/vibecad/runtime/uninstall.py`, `src/vibecad/server.py`;
+- focused regression files: `tests/test_agent_application.py`,
+  `tests/test_cad_execution_port.py`, `tests/test_candidate_revision.py`,
+  `tests/test_execution_adapter.py`, `tests/test_installer.py`,
+  `tests/test_interaction_protocol.py`, `tests/test_launcher_uninstall_integration.py`,
+  `tests/test_managed_checkout.py`, `tests/test_model_program.py`, `tests/test_paths.py`,
+  `tests/test_program_executor.py`, `tests/test_project_bootstrap.py`,
+  `tests/test_revision_store.py`, `tests/test_server_round11.py`, `tests/test_status.py`,
+  `tests/test_supervisor.py`, `tests/test_task_api.py`, `tests/test_task_catalog.py`,
+  `tests/test_task_kernel_integration.py`, `tests/test_task_service.py`,
+  `tests/test_uninstall.py`;
+- orchestration record: `docs/orchestrated/vibecad-agent-stage3.md`.
+
+Evidence chain:
+
+1. The seven planned RED wave families each reached the intended missing contract: runtime/data ownership and
+   uninstall preservation; store-only Application dispatch; empty/import generation-zero bootstrap;
+   CadExecutionPort metadata/profile/version/thread/resource enforcement; per-project lazy isolation and the
+   global CAD gate; managed checkout confinement/replay/budgets; and strict non-runnable IPC G0 values.  No
+   setup, import or syntax error was accepted as RED.
+2. `AgentApplication` now composes one durable data root, one shared task/revision/lease authority, isolated
+   per-project Session/Slot/Coordinator runtimes, one process-wide CAD gate and a deterministic four-runtime
+   clean-idle LRU. `TaskApi` exposes seven transport-neutral operations. CAD-bearing submit/resume/accept paths
+   derive project routing from the durable TaskRun; create validates the caller-supplied project against its
+   current full HEAD, get/reject are store-only, and capability reads are registry-only. These non-CAD paths
+   remain FreeCAD-lazy.
+3. Empty-project bootstrap publishes an exact generation-zero HEAD through empty initialization and exact
+   readback; normalized FCStd import publishes only after private no-follow staging, semantic reload and an
+   evidence-bound store copy. Pre-publication import swaps leave no project. A recordable post-publication
+   staging-cleanup failure retains the successful project plus bounded retry state; inability to persist that
+   cleanup record returns explicit durability uncertainty without rolling back the published project. Accept
+   and CAD reconciliation/restart use the isolated runtime; Reject remains a store-only CAS and never creates
+   a CAD runtime.
+4. `CadExecutionPort` is the single trusted local CAD capability.  It enforces the closed profile, FreeCAD
+   version, GUI-thread and admission budgets before handlers, then elapsed time, created-object and result-byte
+   budgets after each synchronous handler.  This closes `S3-RES-08`; hard interruption/crash containment remains
+   correctly assigned to `S3-RES-05`.
+5. Managed checkout is path-free on the wire, non-authoritative, source/HEAD immutable and restart-safe.  A
+   final correctness review exposed an authentic-digest/forged-`local_path` root-swap window: `get`, same-key
+   replay and fresh publication produced `3 failed` before the fix.  Reopening the live SafeRoot and rebinding
+   the exact checkout/model entry before every OPEN descriptor made the targeted cases `3 passed` and the full
+   checkout file `39 passed`; an independent re-review returned PASS.
+6. Runtime/data separation is cumulative across status, install, preview, direct/pending uninstall and server
+   reporting. External-kind prefixes are identity/evidence-bound and read-only. Exact managed legacy prefixes
+   are reused in place and may receive only the authorized server pip-only sync when stale; ambiguous legacy
+   content, `data/` and `views/` are preserved. Status/receipt/log/lock/uninstall publication and removal use
+   bounded no-follow FD-relative operations, atomic no-replace recovery and fixed-generation validation.
+7. Runtime final review found that pinned-directory checks alone did not prevent absolute-path download,
+   create/pip or verification from first touching a replacement tree.  Five race families (six parameterized
+   cases) drove FD-relative download, pre-created exact env binding, a digest-validated private runner and
+   evidence-bound Python probing; the final race gate is `6 passed` and replacement fingerprints/receipts remain
+   unchanged.  A second review then found `preexec_fn=fchdir` unsafe in the real multi-threaded server parent;
+   the genuine contract gate was `2 failed, 1 passed`.  A fixed stdlib helper now starts first, receives only
+   `pass_fds` and argv, then performs `fchdir/execv` in its clean single-threaded process.  The final no-preexec
+   gate is `3 passed`, with no production `preexec_fn` or shell execution.
+8. Final objective gates on the settled tree: runtime aggregate `225 passed`; cumulative Agent/Application/
+   bootstrap/CAD/checkout/protocol focused gate `1081 passed, 11 deselected`; full repository `3117 passed,
+   92 deselected` with three existing macOS `fork()` deprecation warnings; real installed FreeCAD 1.1 Task
+   Kernel integration `10 passed`.  Full Ruff, changed-file format check (`42 files already formatted`),
+   `git diff --check`, compileall, fresh import/capability purity (`2 passed, 185 deselected`) and offline sdist/
+   wheel build all PASS.
+9. Independent final reviews cover both product architecture and the repaired boundaries.  Architecture/core
+   composition and the checkout rebind returned PASS; installer R3 reran nine no-preexec/race cases plus
+   installer/status `103 passed` and returned PASS.  No Critical, Important or Minor finding remains inside the
+   approved S3-6 trust boundary.
+
+Residual disposition appended at closeout:
+
+| ID | Evidence / impact | Disposition / closure condition |
+|---|---|---|
+| S3-RES-08-C1 | profile/version/thread/admission and post-handler budgets are executable CadExecutionPort gates | closed by S3-E12 |
+| S3-RES-02-O2 | Windows lacks the POSIX directory-FD guarantees used by installer/status/uninstall; compatibility fallback rejects visible aliases but is weaker | remains under S3-RES-02 until native Windows G3/junction/parent-replacement matrix passes |
+| S3-RES-11 | a same-UID process can still replace a helper launcher or a single runner/Python entry inside an already pinned parent; after an OPEN descriptor returns it can also replace the local checkout Path before the caller opens it | accepted local-host trust boundary for G0; close with a descriptor-native worker/broker capability and handle/token-based checkout delivery, or an explicitly narrower threat model |
+| S3-RES-12 | process death after parking an unhealthy managed env can retain an unreferenced private tree of up to the env size | defer; close with a durable identity-bound installer recovery journal and bounded restart cleanup |
+
+The wide `src/vibecad/server.py` diff is mechanical Ruff formatting around the one approved uninstall-preview
+preserve-data change; it is recorded rather than presented as additional server behavior.
+
+| Entry | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| S3-E12 / 2026-07-21T13:07:56Z | S3-A01; Packet S3-6A/S3-6C1; architecture, checkout and installer R3 independent reviews PASS after all Critical/Important findings closed | S3-6 semantic commit containing this snapshot / not authorized | RED seven contract families; checkout 3; installer races 6; no-preexec 2/1 then 3 green; runtime 225; focused 1081/11; full 3117/92; managed FreeCAD 10; Ruff/format/diff/compile/import/build PASS | S3-RES-01..06, S3-RES-09, S3-RES-11..12 remain; closes S3-RES-08; S3-RES-02-O2 clarifies Windows | S3-S12 | completed |
+
+### Recovery snapshot S3-S12
+
+1. **Completed:** branch `codex/agent-stage3` from control anchor `c993431`; S3-6 composes the isolated expert
+   Agent application, generation-zero bootstrap, durable review/restart path, trusted CadExecutionPort, managed
+   checkout and non-runnable G0 protocol; runtime/data split and legacy/external reuse preserve user state.  All
+   final objective gates and independent reviews PASS; push is not authorized.
+2. **Next:** create the exact named-file local semantic commit
+   `feat(application): compose isolated task project runtime`; then issue S3-7's independently reviewed packet
+   for verified artifact materialization and thin MCP/Skill adapters over the same TaskApi/AgentApplication.
+   Do not publish the old module-global Session surface or claim Workbench/authenticated IPC.
+3. **Approved decisions:** S3-D01 through S3-D08 under S3-A01 and the standing continuous-execution authority;
+   no product decision changed.  Public MCP/manifest cutover, external artifact delivery, G1 Workbench,
+   push/PR/release/marketplace and external spend remain outside this packet.
+4. **Recovery:** verify the local semantic commit subject above, final gate counts in S3-E12, no active pytest
+   process and no staged/out-of-allowlist file.  The S3-6 allowlist must be clean after commit; preserve the
+   unrelated untracked `docs/CAD_BACKEND_RESEARCH.md`.  Never move the installed legacy conda env, write an
+   external override, initialize data under runtime, replay S3-6 RED implementation or expose G0 as runnable IPC.
+
 ## 9. 用户决策与持续执行规则
 
 本修订依据已经明确的用户方向：

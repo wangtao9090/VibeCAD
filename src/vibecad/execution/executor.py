@@ -33,7 +33,6 @@ from vibecad.execution.adapter import (
 )
 from vibecad.execution.candidate import (
     ActiveCandidate,
-    CadSnapshotPort,
     CheckpointedCandidate,
     SealedCandidate,
 )
@@ -56,6 +55,13 @@ from vibecad.execution.selectors import (
     resolve_selector,
 )
 from vibecad.freecad_env import silence_fd1 as _silence_fd1
+from vibecad.interaction.cad import (
+    CadCapabilityStatus,
+    CadExecutionPort,
+    CadProfileCapability,
+    CandidateEvidence,
+    ValidatedImportEvidence,
+)
 from vibecad.tools.modeling import add_box as _add_box
 from vibecad.tools.modeling import add_cylinder as _add_cylinder
 from vibecad.tools.modify import modify_part as _modify_part
@@ -126,30 +132,6 @@ class ExecutorError(ValueError):
             "code": self.code.value,
             "message": self.message,
         }
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CandidateEvidence:
-    """Trusted sealed observations and path-free durable artifact references."""
-
-    snapshot: ObservationSnapshot
-    artifacts: tuple[TaskArtifactRef, ...]
-
-    def __post_init__(self) -> None:
-        if type(self.snapshot) is not ObservationSnapshot:
-            raise ExecutorError(ExecutorErrorCode.INVALID_INPUT)
-        if type(self.artifacts) is not tuple or len(self.artifacts) != 2:
-            raise ExecutorError(ExecutorErrorCode.INVALID_INPUT)
-        if not all(type(item) is TaskArtifactRef for item in self.artifacts):
-            raise ExecutorError(ExecutorErrorCode.INVALID_INPUT)
-        if tuple(item.name for item in self.artifacts) != ("model.FCStd", "model.step"):
-            raise ExecutorError(ExecutorErrorCode.INVALID_INPUT)
-        if tuple(item.format for item in self.artifacts) != ("fcstd", "step"):
-            raise ExecutorError(ExecutorErrorCode.INVALID_INPUT)
-        if any(
-            item.candidate_revision != self.snapshot.candidate_revision for item in self.artifacts
-        ):
-            raise ExecutorError(ExecutorErrorCode.INVALID_INPUT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,11 +347,7 @@ def _managed_assembly_shape(session: object) -> object:
     if not callable(list_identities):
         return session.get_assembly_shape()  # type: ignore[attr-defined]
     pairs = tuple(list_identities())
-    modelable = tuple(
-        obj
-        for obj, identity in pairs
-        if identity.object_type in _PARAMETER_FIELDS
-    )
+    modelable = tuple(obj for obj, identity in pairs if identity.object_type in _PARAMETER_FIELDS)
     if not modelable:
         return session.get_assembly_shape()  # type: ignore[attr-defined]
     shapes = tuple(obj.Shape for obj in modelable)
@@ -489,9 +467,7 @@ def _canonical_placement(value: object) -> tuple[int | float, ...]:
         raise _ObservationFailure from None
     if len(raw_quaternion) != 4:
         raise _ObservationFailure
-    quaternion = tuple(
-        _finite_number(component, nonnegative=False) for component in raw_quaternion
-    )
+    quaternion = tuple(_finite_number(component, nonnegative=False) for component in raw_quaternion)
     try:
         norm = math.sqrt(sum(component * component for component in quaternion))
     except (ArithmeticError, OverflowError):
@@ -624,17 +600,11 @@ def _entity_observations(session: object) -> tuple[EntityObservation, ...]:
             identities = index_entity_identities(document_objects)
             pairs = tuple(zip(document_objects, identities, strict=True))
         modelable_objects = tuple(
-            obj
-            for obj in document_objects
-            if getattr(obj, "TypeId", None) in _PARAMETER_FIELDS
+            obj for obj in document_objects if getattr(obj, "TypeId", None) in _PARAMETER_FIELDS
         )
         if any(
-            sum(current is obj for current, _ in pairs) != 1
-            for obj in modelable_objects
-        ) or any(
-            not any(current is obj for obj in document_objects)
-            for current, _ in pairs
-        ):
+            sum(current is obj for current, _ in pairs) != 1 for obj in modelable_objects
+        ) or any(not any(current is obj for obj in document_objects) for current, _ in pairs):
             raise _ObservationFailure
         observations = tuple(
             sorted(
@@ -644,9 +614,7 @@ def _entity_observations(session: object) -> tuple[EntityObservation, ...]:
         )
         if len({item.object_id for item in observations}) != len(observations):
             raise _ObservationFailure
-        feature_ids = tuple(
-            item.feature_id for item in observations if item.feature_id is not None
-        )
+        feature_ids = tuple(item.feature_id for item in observations if item.feature_id is not None)
         if len(set(feature_ids)) != len(feature_ids):
             raise _ObservationFailure
         return observations
@@ -700,10 +668,7 @@ def _preservation_observations(
             (reference.feature_id,) if reference.feature_id is not None else ()
         )
         comparisons.extend(
-            compare_entity_preservation(
-                old, new, target=target
-            )
-            for target in targets
+            compare_entity_preservation(old, new, target=target) for target in targets
         )
     return tuple(sorted(comparisons, key=lambda item: item.target))
 
@@ -712,9 +677,7 @@ def _bound_selectors(value: object) -> tuple[SelectorV1, ...]:
     if type(value) is SelectorV1:
         return (value,)
     if type(value) is MappingProxyType:
-        return tuple(
-            selector for item in value.values() for selector in _bound_selectors(item)
-        )
+        return tuple(selector for item in value.values() for selector in _bound_selectors(item))
     if type(value) is tuple:
         return tuple(selector for item in value for selector in _bound_selectors(item))
     return ()
@@ -800,6 +763,82 @@ def _same_rotation(
     except (TypeError, ValueError):
         return False
     return math.isclose(abs(dot), 1.0, rel_tol=0.0, abs_tol=1e-9)
+
+
+def _same_optional_geometry_number(actual: object, expected: object) -> bool:
+    if actual is None or expected is None:
+        return actual is expected
+    return _same_geometry_number(actual, expected)
+
+
+def _same_optional_geometry_vector(actual: object, expected: object) -> bool:
+    if actual is None or expected is None:
+        return actual is expected
+    return type(actual) is tuple and _same_geometry_vector(actual, expected)
+
+
+def _same_import_parameter(
+    actual: EntityParameterObservation,
+    expected: EntityParameterObservation,
+) -> bool:
+    return (
+        type(actual) is EntityParameterObservation
+        and type(expected) is EntityParameterObservation
+        and actual.schema_version == expected.schema_version
+        and actual.name == expected.name
+        and type(actual.value) is type(expected.value)
+        and actual.value == expected.value
+        and actual.unit == expected.unit
+    )
+
+
+def _same_import_observation(
+    actual: EntityObservation,
+    expected: EntityObservation,
+) -> bool:
+    """Compare one save/reload boundary without treating OCC float noise as drift."""
+
+    return (
+        type(actual) is EntityObservation
+        and type(expected) is EntityObservation
+        and actual.object_id == expected.object_id
+        and actual.feature_id == expected.feature_id
+        and actual.object_type == expected.object_type
+        and actual.semantic_role == expected.semantic_role
+        and actual.provenance == expected.provenance
+        and len(actual.placement) == len(expected.placement) == 7
+        and _same_vector(actual.placement[:3], expected.placement[:3])
+        and _same_rotation(actual.placement[3:], expected.placement[3:])
+        and len(actual.parameters) == len(expected.parameters)
+        and all(
+            _same_import_parameter(left, right)
+            for left, right in zip(actual.parameters, expected.parameters, strict=True)
+        )
+        and _same_optional_geometry_number(actual.volume_mm3, expected.volume_mm3)
+        and _same_optional_geometry_number(actual.area_mm2, expected.area_mm2)
+        and _same_optional_geometry_vector(actual.bbox_mm, expected.bbox_mm)
+        and _same_optional_geometry_vector(
+            actual.center_of_mass_mm,
+            expected.center_of_mass_mm,
+        )
+        and actual.valid_shape is expected.valid_shape
+        and actual.solid_count == expected.solid_count
+    )
+
+
+def _same_import_observations(actual: object, expected: object) -> bool:
+    """Keep non-contract test doubles exact while comparing real observations semantically."""
+
+    if not (
+        type(actual) is tuple
+        and type(expected) is tuple
+        and len(actual) == len(expected)
+        and all(type(item) is EntityObservation for item in (*actual, *expected))
+    ):
+        return actual == expected
+    return all(
+        _same_import_observation(left, right) for left, right in zip(actual, expected, strict=True)
+    )
 
 
 def _axis_rotation(axis: object, angle: object) -> tuple[float, float, float, float]:
@@ -912,9 +951,7 @@ def _managed_create(
         if any(not any(current is obj for current in document_after) for obj in document_before):
             raise ValueError
         added = tuple(
-            obj
-            for obj in document_after
-            if not any(obj is current for current in document_before)
+            obj for obj in document_after if not any(obj is current for current in document_before)
         )
         if len(added) != 1 or len(document_after) != len(document_before) + 1:
             raise ValueError
@@ -1079,9 +1116,7 @@ def _resolve_entity_target(
                 revision_id=revision_id,
             )
         elif _matches_value_shape(target, ValueShape.OBJECT_ID):
-            matches = tuple(
-                obj for obj, identity in pairs if identity.object_id == target
-            )
+            matches = tuple(obj for obj, identity in pairs if identity.object_id == target)
             if len(matches) != 1:
                 raise ValueError
             obj = matches[0]
@@ -1168,10 +1203,13 @@ def _managed_mutation(
             "solid_count",
             "valid_shape",
         }
-        if any(
-            not math.isclose(float(actual), float(expected), rel_tol=0.0, abs_tol=1e-9)
-            for actual, expected in zip(new.placement[:3], position, strict=True)
-        ) or new.placement[3:] != old.placement[3:]:
+        if (
+            any(
+                not math.isclose(float(actual), float(expected), rel_tol=0.0, abs_tol=1e-9)
+                for actual, expected in zip(new.placement[:3], position, strict=True)
+            )
+            or new.placement[3:] != old.placement[3:]
+        ):
             raise _operation_failure()
     elif context.operation == "rotate_part":
         fixed = {
@@ -1195,8 +1233,7 @@ def _managed_mutation(
             ),
         )
         expected_translation = tuple(
-            float(center) + offset
-            for center, offset in zip(pivot, rotated_offset, strict=True)
+            float(center) + offset for center, offset in zip(pivot, rotated_offset, strict=True)
         )
         rotated_center_offset = _rotate_vector(
             delta_rotation,
@@ -1405,7 +1442,168 @@ def _require_revision_layout(revision: object) -> tuple[RevisionArtifactRef, Rev
     return revision.model, step
 
 
-class InProcessCadExecutor(CadSnapshotPort):
+_IN_PROCESS_CAPABILITIES = (
+    CadProfileCapability(
+        profile=ExecutionProfile.HEADLESS,
+        status=CadCapabilityStatus.VERIFIED,
+        available=True,
+        requires_gui_main_thread=False,
+    ),
+    CadProfileCapability(
+        profile=ExecutionProfile.OFFSCREEN_GUI,
+        status=CadCapabilityStatus.PLANNED,
+        available=False,
+        requires_gui_main_thread=True,
+    ),
+    CadProfileCapability(
+        profile=ExecutionProfile.INTERACTIVE_GUI,
+        status=CadCapabilityStatus.PLANNED,
+        available=False,
+        requires_gui_main_thread=True,
+    ),
+)
+
+
+def _document_object_count(session: object) -> int:
+    try:
+        objects = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+    except Exception:
+        raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+    return len(objects)
+
+
+def _session_freecad_version(session: object) -> tuple[int, int]:
+    """Read the active engine version after the Session has loaded FreeCAD."""
+
+    raw = getattr(session, "freecad_version", None)
+    if raw is None:
+        try:
+            session._ensure_freecad()  # type: ignore[attr-defined]
+            import FreeCAD  # type: ignore[import-not-found]  # noqa: PLC0415
+
+            raw = tuple(FreeCAD.Version()[:2])
+        except Exception:
+            raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+    if type(raw) not in {tuple, list} or len(raw) != 2:
+        raise _fixed_error(ExecutorErrorCode.CAD_FAILURE)
+
+    def component(value: object) -> int:
+        if type(value) is int and value >= 0:
+            return value
+        if type(value) is str and value.isascii() and value.isdigit():
+            return int(value)
+        raise _fixed_error(ExecutorErrorCode.CAD_FAILURE)
+
+    return component(raw[0]), component(raw[1])
+
+
+def _supported_import_object_type(obj: object) -> bool:
+    object_type = getattr(obj, "TypeId", None)
+    return type(object_type) is str and object_type in _PARAMETER_FIELDS
+
+
+def _import_objects(
+    session: object,
+) -> tuple[tuple[object, ...], dict[int, EntityIdentity]]:
+    """Validate the supported import envelope and snapshot existing identities."""
+
+    try:
+        objects = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+        pairs = tuple(session.list_object_identities())  # type: ignore[attr-defined]
+    except Exception:
+        raise _fixed_error(ExecutorErrorCode.INVALID_INPUT) from None
+    supported = tuple(obj for obj in objects if getattr(obj, "TypeId", None) in _PARAMETER_FIELDS)
+    if not supported:
+        raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+    if any(not _supported_import_object_type(obj) for obj in objects):
+        raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+
+    identities: dict[int, EntityIdentity] = {}
+    for pair in pairs:
+        if type(pair) is not tuple or len(pair) != 2:
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+        obj, identity = pair
+        if (
+            type(identity) is not EntityIdentity
+            or not any(obj is current for current in supported)
+            or identity.object_type != getattr(obj, "TypeId", None)
+            or identity.feature_id is None
+            or id(obj) in identities
+        ):
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+        identities[id(obj)] = identity
+    return supported, identities
+
+
+def _normalize_import_identities(session: object) -> tuple[EntityObservation, ...]:
+    """Preserve complete identities and attach UUIDs only to untagged primitives."""
+
+    supported, identities = _import_objects(session)
+    missing = tuple(obj for obj in supported if id(obj) not in identities)
+    if missing:
+        try:
+            document = session.doc  # type: ignore[attr-defined]
+            attach = session.attach_object_identity  # type: ignore[attr-defined]
+            read = session.read_object_identity  # type: ignore[attr-defined]
+            document.openTransaction("VibeCAD Import Identity Normalization")
+            try:
+                for obj in missing:
+                    identity = EntityIdentity(
+                        object_id=f"object_{secrets.token_hex(16)}",
+                        feature_id=f"feature_{secrets.token_hex(16)}",
+                        object_type=obj.TypeId,
+                        semantic_role=SemanticRole.PRIMITIVE,
+                        provenance=Provenance(
+                            source=ProvenanceSource.IMPORTED,
+                            operation_id=None,
+                        ),
+                    )
+                    if attach(obj, identity) != identity or read(obj) != identity:
+                        raise ValueError
+                document.commitTransaction()
+            except BaseException:
+                try:
+                    document.abortTransaction()
+                except Exception:
+                    pass
+                raise
+            document.recompute()
+        except ExecutorError:
+            raise
+        except Exception:
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT) from None
+    return _validated_import_observations(session, expected_objects=supported)
+
+
+def _validated_import_observations(
+    session: object,
+    *,
+    expected_objects: tuple[object, ...] | None = None,
+) -> tuple[EntityObservation, ...]:
+    """Read a fully normalized import without attaching or repairing identities."""
+
+    supported_after, identities_after = _import_objects(session)
+    if (
+        (expected_objects is not None and len(supported_after) != len(expected_objects))
+        or len(identities_after) != len(supported_after)
+        or (
+            expected_objects is not None
+            and any(
+                not any(after is before for after in supported_after) for before in expected_objects
+            )
+        )
+    ):
+        raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+    try:
+        observations = _entity_observations(session)
+    except _ObservationFailure:
+        raise _fixed_error(ExecutorErrorCode.INVALID_INPUT) from None
+    if len(observations) != len(supported_after):
+        raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+    return observations
+
+
+class InProcessCadExecutor(CadExecutionPort):
     """Compose validated programs with isolated CAD candidate Sessions."""
 
     __slots__ = ("_store",)
@@ -1414,6 +1612,18 @@ class InProcessCadExecutor(CadSnapshotPort):
         if type(store) is not LocalRevisionStore:
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
         self._store = store
+
+    @property
+    def execution_profile(self) -> ExecutionProfile:
+        """Return the only execution profile verified by this implementation."""
+
+        return ExecutionProfile.HEADLESS
+
+    @property
+    def capabilities(self) -> tuple[CadProfileCapability, ...]:
+        """Return immutable truthful profile capabilities without probing FreeCAD."""
+
+        return _IN_PROCESS_CAPABILITIES
 
     def validate_program(self, program: ModelProgram) -> ValidatedProgram:
         """Validate a raw ModelProgram before any project or CAD mutation."""
@@ -1427,6 +1637,69 @@ class InProcessCadExecutor(CadSnapshotPort):
         ):
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
         return validated
+
+    def validate_import(self, path: Path) -> ValidatedImportEvidence:
+        """Normalize and seal one private Box/Cylinder FCStd staging file."""
+
+        if not isinstance(path, Path) or path.suffix.lower() != ".fcstd":
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+        session = self.load_fcstd(path)
+        normalized: tuple[EntityObservation, ...] | None = None
+        failed: ExecutorError | None = None
+        try:
+            try:
+                session.doc.recompute()
+            except Exception:
+                raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+            normalized = _normalize_import_identities(session)
+            self.checkpoint_fcstd(session, path)
+        except ExecutorError as error:
+            failed = error
+        finally:
+            try:
+                self.close(session)
+            except ExecutorError as close_error:
+                if failed is None:
+                    failed = close_error
+        if failed is not None:
+            raise failed
+        assert normalized is not None
+        try:
+            normalized_artifact = _read_artifact(path, "fcstd")
+        except _ArtifactReadFailure:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+
+        probe = self.load_fcstd(path)
+        reloaded: tuple[EntityObservation, ...] | None = None
+        failed = None
+        try:
+            try:
+                probe.doc.recompute()
+            except Exception:
+                raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+            reloaded = _validated_import_observations(probe)
+        except ExecutorError as error:
+            failed = error
+        finally:
+            try:
+                self.close(probe)
+            except ExecutorError as close_error:
+                if failed is None:
+                    failed = close_error
+        if failed is not None:
+            raise failed
+        if not _same_import_observations(reloaded, normalized):
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        try:
+            artifact = _read_artifact(path, "fcstd")
+        except _ArtifactReadFailure:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        if artifact != normalized_artifact:
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        return ValidatedImportEvidence(
+            sha256=artifact.sha256,
+            size_bytes=artifact.size_bytes,
+        )
 
     def create_empty(self, *, revision_id: str) -> object:
         """Create an isolated Session and trusted revision-owned document."""
@@ -1616,11 +1889,15 @@ class InProcessCadExecutor(CadSnapshotPort):
         except Exception:
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT) from None
         try:
+            freecad_version = _session_freecad_version(session)
             return _execute_validated_program(
                 program,
                 handlers,
-                execution_profile=ExecutionProfile.HEADLESS,
+                execution_profile=self.execution_profile,
                 revision=candidate.binding.revision_id,
+                freecad_version=freecad_version,
+                gui_main_thread=False,
+                object_count=partial(_document_object_count, session),
             )
         except _AdapterError:
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT) from None

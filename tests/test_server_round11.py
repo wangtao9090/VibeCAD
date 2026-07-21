@@ -2,6 +2,7 @@
 
 参照 test_server_new_tools.py / test_server_round6.py 的 monkeypatch 范式。
 """
+
 from __future__ import annotations
 
 import json
@@ -13,6 +14,7 @@ import pytest
 # 公共辅助
 # ---------------------------------------------------------------------------
 
+
 def _ready(monkeypatch, server):
     monkeypatch.setattr(server._installer, "is_ready", lambda: True)
     monkeypatch.setattr(server, "_in_conda_runtime", lambda: True)
@@ -20,7 +22,8 @@ def _ready(monkeypatch, server):
 
 def _mock_multiview(server, monkeypatch, png=b"\x89PNG fake"):
     monkeypatch.setattr(
-        server._multiview, "render_multiview",
+        server._multiview,
+        "render_multiview",
         lambda shape, part_map=None: (png, {"A": "顶面"}, {"A": {}}, {"E1": {}}),
     )
 
@@ -38,6 +41,7 @@ def _mock_assembly(server, monkeypatch):
 # 测试 1：_attach_view 成功附图时 result 带 view_file（落盘路径，文件真实存在）
 # ---------------------------------------------------------------------------
 
+
 def test_attach_view_includes_view_file(monkeypatch, tmp_path):
     """成功附图时 result 带落盘绝对路径；文件真实存在、在 tmp_path/views 下。"""
     import vibecad.server as srv
@@ -49,12 +53,14 @@ def test_attach_view_includes_view_file(monkeypatch, tmp_path):
 
     # mock 建模操作
     monkeypatch.setattr(
-        srv._modeling, "add_box",
+        srv._modeling,
+        "add_box",
         lambda s, ln, w, h, position: {"ok": True, "name": "Box", "volume": 1000.0},
     )
     # mock 参数清单（_attach_view 内会调用）
     monkeypatch.setattr(
-        srv._modify, "list_parameters",
+        srv._modify,
+        "list_parameters",
         lambda doc, session=None: {},
     )
     # mock doc.Name
@@ -86,6 +92,7 @@ def test_attach_view_includes_view_file(monkeypatch, tmp_path):
 # 测试 2：落盘失败不连坐
 # ---------------------------------------------------------------------------
 
+
 def test_attach_view_persist_failure_not_fatal(monkeypatch):
     """落盘抛 OSError → 操作仍成功，带 view_file_error，Image 仍返回。"""
     from mcp.server.fastmcp import Image
@@ -101,11 +108,13 @@ def test_attach_view_persist_failure_not_fatal(monkeypatch):
     monkeypatch.setattr(srv._persist, "save_view", _boom_save)
 
     monkeypatch.setattr(
-        srv._modeling, "add_box",
+        srv._modeling,
+        "add_box",
         lambda s, ln, w, h, position: {"ok": True, "name": "Box", "volume": 1000.0},
     )
     monkeypatch.setattr(
-        srv._modify, "list_parameters",
+        srv._modify,
+        "list_parameters",
         lambda doc, session=None: {},
     )
     mock_doc = type("FakeDoc", (), {"Name": "TestDoc"})()
@@ -131,6 +140,7 @@ def test_attach_view_persist_failure_not_fatal(monkeypatch):
 # 测试 3：render_part(save_to=...) 文件写入 + 返回含 saved 字段
 # ---------------------------------------------------------------------------
 
+
 def test_render_part_save_to(monkeypatch, tmp_path):
     """render_part(save_to=...) → 文件写入 + 返回含 saved 字段。"""
     from mcp.server.fastmcp import Image
@@ -140,8 +150,7 @@ def test_render_part_save_to(monkeypatch, tmp_path):
     _ready(monkeypatch, srv)
 
     fake_png = b"\x89PNG fake"
-    monkeypatch.setattr(srv._render, "render_png",
-                        lambda shape, view="iso": fake_png)
+    monkeypatch.setattr(srv._render, "render_png", lambda shape, view="iso": fake_png)
     _mock_assembly(srv, monkeypatch)
 
     out_path = str(tmp_path / "out" / "x.png")
@@ -166,6 +175,7 @@ def test_render_part_save_to(monkeypatch, tmp_path):
 # 测试 4：save_to 指向不可写位置 → 渲染仍成功，带 save_error
 # ---------------------------------------------------------------------------
 
+
 def test_render_part_save_to_failure_not_fatal(monkeypatch, tmp_path):
     """save_to 指向不可写位置 → 渲染仍成功返回 Image，带 save_error。"""
     from mcp.server.fastmcp import Image
@@ -175,8 +185,7 @@ def test_render_part_save_to_failure_not_fatal(monkeypatch, tmp_path):
     _ready(monkeypatch, srv)
 
     fake_png = b"\x89PNG fake"
-    monkeypatch.setattr(srv._render, "render_png",
-                        lambda shape, view="iso": fake_png)
+    monkeypatch.setattr(srv._render, "render_png", lambda shape, view="iso": fake_png)
     _mock_assembly(srv, monkeypatch)
 
     # 不可写路径：已存在的文件作为目录名（OSError：父路径是文件，mkdir 失败）
@@ -209,6 +218,7 @@ def test_render_part_save_to_failure_not_fatal(monkeypatch, tmp_path):
 # Task 3 Step 1：server 自退换芯钩子（_schedule_swap + 四处触发点 + needs_reconnect）
 # 纪律：所有测试 mock Timer / _schedule_swap，绝不让 os._exit 真跑起来杀掉测试进程。
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(autouse=True)
 def _no_supervised_leak(monkeypatch):
@@ -502,13 +512,16 @@ def test_ensure_runtime_unsupervised_hints_reconnect(monkeypatch):
 # Task 4 Step 3：uninstall_runtime 两段式 MCP 工具
 # ---------------------------------------------------------------------------
 
+
 def test_uninstall_runtime_preview_without_confirm(monkeypatch, tmp_path):
     """不带 confirm：仅预览——路径 + 大小 + confirm_required:true；目录/标记原样不动。"""
     import vibecad.server as srv
 
     home = tmp_path / "home"
-    (home / "mamba").mkdir(parents=True)
-    (home / "mamba" / "big.bin").write_bytes(b"x" * 2_000_000)
+    (home / "runtime").mkdir(parents=True)
+    (home / "runtime" / "big.bin").write_bytes(b"x" * 2_000_000)
+    (home / "data").mkdir()
+    (home / "data" / "project.fcstd").write_bytes(b"d" * 3_000_000)
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     calls = _record_swap(monkeypatch, srv)
 
@@ -516,8 +529,9 @@ def test_uninstall_runtime_preview_without_confirm(monkeypatch, tmp_path):
 
     assert out["ok"] is True
     assert out["confirm_required"] is True
-    assert out["path"] == str(home)
-    assert out["size_mb"] > 0
+    assert out["path"] == str(home / "runtime")
+    assert 1.9 < out["size_mb"] < 2.1
+    assert out["data_preserved"] is True
     assert "confirm=true" in out["message"] or "confirm=True" in out["message"]
     assert home.exists()
     assert not srv._uninstall.uninstall_marker().exists()
@@ -529,7 +543,7 @@ def test_uninstall_runtime_confirm_supervised_schedules_swap(monkeypatch, tmp_pa
     import vibecad.server as srv
 
     home = tmp_path / "home"
-    (home / "mamba").mkdir(parents=True)
+    (home / "runtime").mkdir(parents=True)
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     calls = _record_swap(monkeypatch, srv)
 
@@ -549,7 +563,7 @@ def test_uninstall_runtime_confirm_unsupervised_hints_manual_restart(monkeypatch
     import vibecad.server as srv
 
     home = tmp_path / "home"
-    (home / "mamba").mkdir(parents=True)
+    (home / "runtime").mkdir(parents=True)
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     calls = _record_swap(monkeypatch, srv)
     monkeypatch.delenv("VIBECAD_SUPERVISED", raising=False)
@@ -583,7 +597,7 @@ def test_uninstall_runtime_repeat_confirm_idempotent(monkeypatch, tmp_path):
     import vibecad.server as srv
 
     home = tmp_path / "home"
-    (home / "mamba").mkdir(parents=True)
+    (home / "runtime").mkdir(parents=True)
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     _record_swap(monkeypatch, srv)
 
@@ -603,7 +617,8 @@ def test_uninstall_runtime_guard_rejection_passthrough(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     _record_swap(monkeypatch, srv)
     monkeypatch.setattr(
-        srv._uninstall, "request_uninstall",
+        srv._uninstall,
+        "request_uninstall",
         lambda: {"ok": False, "message": "目录不含 VibeCAD 安装产物，拒绝删除"},
     )
 
@@ -617,6 +632,7 @@ def test_uninstall_runtime_guard_rejection_passthrough(monkeypatch, tmp_path):
 # ready+bootstrap 分支（已在上方覆盖）保持不变。
 # ---------------------------------------------------------------------------
 
+
 def test_runtime_guard_not_started_phase_message(monkeypatch):
     """NOT_STARTED：提示调用 ensure_runtime 开始，带 phase 字段。"""
     import vibecad.server as srv
@@ -624,7 +640,8 @@ def test_runtime_guard_not_started_phase_message(monkeypatch):
 
     monkeypatch.setattr(srv._installer, "is_ready", lambda: False)
     monkeypatch.setattr(
-        srv.status, "read_status",
+        srv.status,
+        "read_status",
         lambda: _status.RuntimeStatus(phase=_status.Phase.NOT_STARTED),
     )
 
@@ -642,7 +659,8 @@ def test_runtime_guard_failed_phase_message(monkeypatch):
 
     monkeypatch.setattr(srv._installer, "is_ready", lambda: False)
     monkeypatch.setattr(
-        srv.status, "read_status",
+        srv.status,
+        "read_status",
         lambda: _status.RuntimeStatus(phase=_status.Phase.FAILED, error="磁盘空间不足"),
     )
 
@@ -661,9 +679,11 @@ def test_runtime_guard_installing_phase_includes_percent(monkeypatch):
 
     monkeypatch.setattr(srv._installer, "is_ready", lambda: False)
     monkeypatch.setattr(
-        srv.status, "read_status",
+        srv.status,
+        "read_status",
         lambda: _status.RuntimeStatus(
-            phase=_status.Phase.CREATING_ENV, percent=40.0, message="creating_env"),
+            phase=_status.Phase.CREATING_ENV, percent=40.0, message="creating_env"
+        ),
     )
 
     guard = srv._runtime_guard()
@@ -681,6 +701,7 @@ def test_runtime_guard_installing_phase_includes_percent(monkeypatch):
 # 拉起的真实路径）；auto-install env 必须在这里触发，而不是仅在 launcher/supervisor
 # 层空转。
 # ---------------------------------------------------------------------------
+
 
 def test_main_spawns_install_when_auto_install_enabled(monkeypatch):
     import vibecad.server as srv
@@ -718,4 +739,3 @@ def test_auto_install_enabled_rejects_falsy_values(monkeypatch):
     assert srv._auto_install_enabled() is False, "未设置应默认关闭（仅 mcpb env 显式开启）"
     monkeypatch.setenv("VIBECAD_AUTO_INSTALL", "1")
     assert srv._auto_install_enabled() is True
-

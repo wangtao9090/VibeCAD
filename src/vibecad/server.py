@@ -1,4 +1,5 @@
 """VibeCAD MCP server（FastMCP, stdio）。握手必须秒回：模块级不 import FreeCAD、不下载。"""
+
 from __future__ import annotations
 
 import json
@@ -100,17 +101,19 @@ def ping() -> str:
     return f"vibecad ok (v{__version__})"
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=True, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 def get_runtime_status() -> dict[str, Any]:
     """查询 FreeCAD 运行时安装进度（跨进程读 status.json）。"""
     d = status.read_status().to_dict()
     compatible = status.runtime_ready()
-    recovery = (
-        status.RecoveryKind.READY if compatible else status.runtime_recovery_kind()
-    )
+    recovery = status.RecoveryKind.READY if compatible else status.runtime_recovery_kind()
     # receipt 可能恰在两次廉价读取之间原子升级；采用较新的 READY 结果，避免瞬时误报修复。
     compatible = compatible or recovery is status.RecoveryKind.READY
     receipt = status.read_runtime_receipt() or {}
@@ -123,12 +126,14 @@ def get_runtime_status() -> dict[str, Any]:
             d["phase"] = recovery.value
             d["message"] = (
                 f"FreeCAD 引擎可复用，但 server 需要同步到 VibeCAD v{__version__}；"
-                "调用 ensure_runtime 开始轻量同步（不会重新下载 FreeCAD）")
+                "调用 ensure_runtime 开始轻量同步（不会重新下载 FreeCAD）"
+            )
         else:
             d["phase"] = status.RecoveryKind.REPAIR_REQUIRED.value
             d["message"] = (
                 "运行时凭据或环境不完整，需要修复；调用 ensure_runtime 后会先尝试复用，"
-                "若引擎不健康则重建 FreeCAD（约 2-3GB）")
+                "若引擎不健康则重建 FreeCAD（约 2-3GB）"
+            )
     d["needs_reconnect"] = False  # Round 11：自退换芯后客户端零感知（字段保留做兼容）
     if compatible and not _in_conda_runtime() and not _try_schedule_swap():
         # 不能自动换芯（裸 server 无人重启 / conda python 缺失）：诚实告知需重连（I4/C1）
@@ -174,35 +179,49 @@ def _ensure_runtime_impl() -> dict[str, Any]:
     }
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=True, openWorldHint=True,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 def ensure_runtime() -> dict[str, Any]:
     """确保 FreeCAD 运行时就绪：未就绪则后台开始安装并立即返回，用 get_runtime_status 轮询。"""
     return _ensure_runtime_impl()
 
 
-
 def _build_box_and_export() -> dict[str, Any]:
     import tempfile
+
     _prepare_freecad_import()
     out = os.path.join(tempfile.gettempdir(), "vibecad_smoke.step")
     with _silence_fd1():
         import FreeCAD  # noqa: PLC0415 - 懒加载：仅 conda runtime 进程内 import
         import Part  # noqa: PLC0415
+
         box = Part.makeBox(10, 10, 10)
         box.exportStep(out)
         bb = box.BoundBox
-        result = {"ok": True, "volume": box.Volume, "bbox": [bb.XLength, bb.YLength, bb.ZLength],
-                  "step": out, "freecad_version": list(FreeCAD.Version())}
+        result = {
+            "ok": True,
+            "volume": box.Volume,
+            "bbox": [bb.XLength, bb.YLength, bb.ZLength],
+            "step": out,
+            "freecad_version": list(FreeCAD.Version()),
+        }
     return result
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True,
-    idempotentHint=True, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 def smoke_cad() -> dict[str, Any]:
     """地基验证：进程内造 10×10×10 Box，导出 STEP，返回体积/包围盒/路径。"""
     # Round 11：复用 _runtime_guard（换芯触发逻辑单点收敛，不再各写一份"请重连"文案）
@@ -216,26 +235,42 @@ def _runtime_guard() -> dict[str, Any] | None:
     if not _installer.is_ready():
         st = status.read_status()
         if st.phase == status.Phase.FAILED:
-            return {"ok": False, "phase": st.phase.value,
-                    "message": f"CAD 引擎安装失败：{st.error or st.message}；"
-                               "可调用 ensure_runtime 重试"}
+            return {
+                "ok": False,
+                "phase": st.phase.value,
+                "message": f"CAD 引擎安装失败：{st.error or st.message}；"
+                "可调用 ensure_runtime 重试",
+            }
         if st.phase == status.Phase.NOT_STARTED:
-            return {"ok": False, "phase": st.phase.value,
-                    "message": "CAD 引擎未安装：调用 ensure_runtime 开始（约 2-3GB，仅一次）"}
+            return {
+                "ok": False,
+                "phase": st.phase.value,
+                "message": "CAD 引擎未安装：调用 ensure_runtime 开始（约 2-3GB，仅一次）",
+            }
         if st.phase == status.Phase.READY:
             recovery = status.runtime_recovery_kind()
             if recovery is status.RecoveryKind.UPGRADE_REQUIRED:
-                return {"ok": False, "phase": recovery.value,
-                        "message": f"CAD 引擎可复用，但 server 需要同步到 VibeCAD "
-                                   f"v{__version__}；调用 ensure_runtime 开始轻量同步"
-                                   "（不会重新下载 FreeCAD）"}
-            return {"ok": False, "phase": status.RecoveryKind.REPAIR_REQUIRED.value,
-                    "message": "CAD 运行时凭据或环境不完整；调用 ensure_runtime 修复。"
-                               "若现有引擎不健康，将重建 FreeCAD（约 2-3GB）"}
-        return {"ok": False, "phase": st.phase.value, "percent": st.percent,
-                "message": f"正在准备 CAD 引擎：{st.message or st.phase.value}"
-                           f"（{st.percent:.0f}%）。就绪后自动接管，无需任何手动操作，"
-                           "可用 get_runtime_status 看进度"}
+                return {
+                    "ok": False,
+                    "phase": recovery.value,
+                    "message": f"CAD 引擎可复用，但 server 需要同步到 VibeCAD "
+                    f"v{__version__}；调用 ensure_runtime 开始轻量同步"
+                    "（不会重新下载 FreeCAD）",
+                }
+            return {
+                "ok": False,
+                "phase": status.RecoveryKind.REPAIR_REQUIRED.value,
+                "message": "CAD 运行时凭据或环境不完整；调用 ensure_runtime 修复。"
+                "若现有引擎不健康，将重建 FreeCAD（约 2-3GB）",
+            }
+        return {
+            "ok": False,
+            "phase": st.phase.value,
+            "percent": st.percent,
+            "message": f"正在准备 CAD 引擎：{st.message or st.phase.value}"
+            f"（{st.percent:.0f}%）。就绪后自动接管，无需任何手动操作，"
+            "可用 get_runtime_status 看进度",
+        }
     if not _in_conda_runtime():
         if _try_schedule_swap():  # Round 11：自退换芯替代手动重连
             _msg = "运行时已就绪，正在自动切换到运行时解释器（数秒内完成），请稍后重试本操作"
@@ -253,9 +288,9 @@ def _build_part_map() -> dict[str, Any] | None:
     if not _session._parts:
         return None
     return {
-        name: _session.get_result_shape(name).transformed(
-            info["container"].Placement.toMatrix())
-        for name, info in _session._parts.items() if info["objects"]
+        name: _session.get_result_shape(name).transformed(info["container"].Placement.toMatrix())
+        for name, info in _session._parts.items()
+        if info["objects"]
     }
 
 
@@ -289,7 +324,8 @@ def _edges_of_global_index(ef_idx: int, part_map: dict[str, Any] | None) -> int:
         offset += len(p_shape.Faces)
     # 活动零件不在 part_map（空零件等异常态）——静默用错索引画错图违反纪律
     raise RuntimeError(
-        f"活动零件 {_session.active_part!r} 不在装配渲染序列中——无法定位 edges_of 面")
+        f"活动零件 {_session.active_part!r} 不在装配渲染序列中——无法定位 edges_of 面"
+    )
 
 
 def _attach_view(result: dict[str, Any], tool: str = "step") -> Any:
@@ -306,7 +342,8 @@ def _attach_view(result: dict[str, Any], tool: str = "step") -> Any:
         with _silence_fd1():
             shape = _session.get_assembly_shape()
             png, table, faces_reg, edges_reg = _multiview.render_multiview(
-                shape, part_map=_build_part_map())
+                shape, part_map=_build_part_map()
+            )
         _store_labels(faces_reg, edges_reg, shown=set(table.keys()))
         result.pop("labels_stale", None)
         result.pop("hint", None)
@@ -339,26 +376,33 @@ def _attach_view(result: dict[str, Any], tool: str = "step") -> Any:
         return result
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def new_document(name: str, discard_unsaved: bool = False) -> dict[str, Any]:
     """新建 CAD 文档。当前项目未保存时默认拒绝；明确 discard_unsaved=true 才替换。"""
     guard = _runtime_guard()
     if guard:
         return guard
     try:
-        return _modeling.new_document(
-            _session, name, discard_unsaved=discard_unsaved)
+        return _modeling.new_document(_session, name, discard_unsaved=discard_unsaved)
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"新建文档失败：{exc}"}
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True,
-    idempotentHint=True, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 def save_project(path: str, overwrite: bool = True) -> dict[str, Any]:
     """保存完整参数化项目为 .FCStd；默认覆盖同名文件，overwrite=false 可禁止覆盖。"""
     guard = _runtime_guard()
@@ -370,27 +414,34 @@ def save_project(path: str, overwrite: bool = True) -> dict[str, Any]:
         return {"ok": False, "message": f"保存项目失败：{exc}"}
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def open_project(path: str, discard_unsaved: bool = False) -> Any:
     """打开 .FCStd 项目并恢复活动零件/结果根；未保存修改默认受保护。"""
     guard = _runtime_guard()
     if guard:
         return guard
     try:
-        result = _project.open_project(
-            _session, path, discard_unsaved=discard_unsaved)
+        result = _project.open_project(_session, path, discard_unsaved=discard_unsaved)
     except (OSError, RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"打开项目失败：{exc}"}
     return _attach_view(result, tool="open_project") if result["has_result"] else result
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def delete_object(name: str, cascade: bool = False) -> Any:
     """删除对象。若有下游依赖默认拒绝；cascade=true 时按依赖顺序级联删除。"""
     guard = _runtime_guard()
@@ -403,10 +454,14 @@ def delete_object(name: str, cascade: bool = False) -> Any:
     return _attach_view(result, tool="delete_object") if result["has_result"] else result
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def undo() -> Any:
     """撤销当前文档最近一个 VibeCAD/FreeCAD 事务；打开项目后历史从零开始。"""
     guard = _runtime_guard()
@@ -419,10 +474,14 @@ def undo() -> Any:
     return _attach_view(result, tool="undo") if result["has_result"] else result
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def redo() -> Any:
     """重做当前文档最近一个已撤销事务。"""
     guard = _runtime_guard()
@@ -435,31 +494,43 @@ def redo() -> Any:
     return _attach_view(result, tool="redo") if result["has_result"] else result
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
-def add_box(length: float, width: float, height: float,
-            position: list[float] | None = None) -> Any:
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
+def add_box(length: float, width: float, height: float, position: list[float] | None = None) -> Any:
     """添加参数化长方体（mm）；position=[x,y,z] 放置位置（默认原点）。成功后自动附三视图拼图。"""
     guard = _runtime_guard()
     if guard:
         return guard
     try:
         result = _modeling.add_box(
-            _session, length, width, height,
-            position=tuple(position) if position is not None else (0.0, 0.0, 0.0))
+            _session,
+            length,
+            width,
+            height,
+            position=tuple(position) if position is not None else (0.0, 0.0, 0.0),
+        )
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"创建失败：{exc}"}
     return _attach_view(result, tool="add_box")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
-def add_cylinder(radius: float, height: float,
-                 position: list[float] | None = None, axis: str = "z") -> Any:
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
+def add_cylinder(
+    radius: float, height: float, position: list[float] | None = None, axis: str = "z"
+) -> Any:
     """添加参数化圆柱（mm）；position=[x,y,z] 放置位置，axis=x|y|z 圆柱轴向（默认 z）。
     成功后自动附三视图拼图。"""
     guard = _runtime_guard()
@@ -467,17 +538,25 @@ def add_cylinder(radius: float, height: float,
         return guard
     try:
         result = _modeling.add_cylinder(
-            _session, radius, height,
-            position=tuple(position) if position is not None else (0.0, 0.0, 0.0), axis=axis)
+            _session,
+            radius,
+            height,
+            position=tuple(position) if position is not None else (0.0, 0.0, 0.0),
+            axis=axis,
+        )
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"创建失败：{exc}"}
     return _attach_view(result, tool="add_cylinder")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def boolean_cut(base_name: str, tool_name: str) -> Any:
     """布尔差集：从 base 减去 tool，返回结果对象名与体积。成功后自动附三视图拼图。"""
     guard = _runtime_guard()
@@ -490,10 +569,14 @@ def boolean_cut(base_name: str, tool_name: str) -> Any:
     return _attach_view(result, tool="boolean_cut")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def boolean_fuse(base_name: str, tool_name: str) -> Any:
     """布尔并集：合并同一零件内两个相交/相接 solid；断开多实体会被拒绝。"""
     guard = _runtime_guard()
@@ -506,10 +589,14 @@ def boolean_fuse(base_name: str, tool_name: str) -> Any:
     return _attach_view(result, tool="boolean_fuse")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def boolean_common(base_name: str, tool_name: str) -> Any:
     """布尔交集：保留同一零件内两个 solid 的实体交叠部分。"""
     guard = _runtime_guard()
@@ -522,10 +609,14 @@ def boolean_common(base_name: str, tool_name: str) -> Any:
     return _attach_view(result, tool="boolean_common")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True,
-    idempotentHint=True, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 def export_part(output_dir: str, fmt: str = "both", split: bool = False) -> dict[str, Any]:
     """导出当前结果为 STEP/STL/glTF（fmt: step|stl|gltf|both|all）到 output_dir。
     split=True：装配模式时 per-part 导出 STEP（<doc>_<零件名>.step），每文件独立验证。
@@ -577,8 +668,14 @@ def measure(
     try:
         with _silence_fd1():
             return _measure.measure(
-                _session, kind=kind, first=first, second=second, entity=entity,
-                part_a=part_a, part_b=part_b)
+                _session,
+                kind=kind,
+                first=first,
+                second=second,
+                entity=entity,
+                part_a=part_a,
+                part_b=part_b,
+            )
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"测量失败：{exc}"}
 
@@ -596,13 +693,20 @@ def _maybe_save(png: bytes, save_to: str | None) -> dict[str, str]:
         return {"save_error": f"保存失败：{exc}"}
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True,
-    idempotentHint=True, openWorldHint=False,
-))
-def render_part(view: str = "iso", annotate: str | None = None,
-                edges_of: str | None = None,
-                save_to: str | None = None) -> Any:
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
+def render_part(
+    view: str = "iso",
+    annotate: str | None = None,
+    edges_of: str | None = None,
+    save_to: str | None = None,
+) -> Any:
     """渲染当前零件 PNG（view: iso|front|top|right|back|multi）。
     annotate='faces'：面标注图+标签表+尺寸线（之后可用面标签如 'A' 调 add_hole）；
     annotate='edges'：边标注图（edges_of='A' 只画 A 面的边；
@@ -614,23 +718,31 @@ def render_part(view: str = "iso", annotate: str | None = None,
     if guard:
         return guard
     if edges_of is not None and annotate != "edges":
-        _msg = ("edges_of 仅在 annotate='edges' 时有效"
-                "——要看某面的边，请 render_part(annotate='edges', edges_of='A')")
+        _msg = (
+            "edges_of 仅在 annotate='edges' 时有效"
+            "——要看某面的边，请 render_part(annotate='edges', edges_of='A')"
+        )
         return {"ok": False, "message": _msg}
     if view == "multi":
         if annotate is not None or edges_of is not None:
-            return {"ok": False,
-                    "message": "view='multi' 已含标注 iso 格，不能与 annotate/edges_of 组合"}
+            return {
+                "ok": False,
+                "message": "view='multi' 已含标注 iso 格，不能与 annotate/edges_of 组合",
+            }
         try:
             with _silence_fd1():
                 # Round 8：改用装配 shape；装配模式传入 part_map 用于分色和归属标注
                 shape = _session.get_assembly_shape()
                 png, table, faces_reg, edges_reg = _multiview.render_multiview(
-                    shape, part_map=_build_part_map())
+                    shape, part_map=_build_part_map()
+                )
             _store_labels(faces_reg, edges_reg, shown=set(table.keys()))
-            return [Image(data=png, format="png"),
-                    json.dumps({"ok": True, "labels": table,
-                                **_maybe_save(png, save_to)}, ensure_ascii=False)]
+            return [
+                Image(data=png, format="png"),
+                json.dumps(
+                    {"ok": True, "labels": table, **_maybe_save(png, save_to)}, ensure_ascii=False
+                ),
+            ]
         except Exception as exc:  # noqa: BLE001 - 与 _attach_view 同理：同一条
             # render_multiview 渲染链含 TechDraw/matplotlib 深栈（实测有 TypeError），
             # 窄抓会让同一失败在 attach 路径被结构化、在 multi 路径穿透成 isError。
@@ -651,29 +763,43 @@ def render_part(view: str = "iso", annotate: str | None = None,
             png = _render.render_png(shape, view=view)
             extra = _maybe_save(png, save_to)
             if extra:
-                return [Image(data=png, format="png"),
-                        json.dumps({"ok": True, **extra}, ensure_ascii=False)]
+                return [
+                    Image(data=png, format="png"),
+                    json.dumps({"ok": True, **extra}, ensure_ascii=False),
+                ]
             return Image(data=png, format="png")
         png, table, faces_reg, edges_reg = _annotate.render_annotated(
-            shape, mode=annotate, edges_of=ef_idx, view=view, part_map=part_map)
+            shape, mode=annotate, edges_of=ef_idx, view=view, part_map=part_map
+        )
         # shown=本次表里实际展示的键：未展示过的标签不可被指认（防 AI 编造盲选）
         _store_labels(faces_reg, edges_reg, shown=set(table.keys()))
-        return [Image(data=png, format="png"),
-                json.dumps({"ok": True, "labels": table,
-                            **_maybe_save(png, save_to)}, ensure_ascii=False)]
+        return [
+            Image(data=png, format="png"),
+            json.dumps(
+                {"ok": True, "labels": table, **_maybe_save(png, save_to)}, ensure_ascii=False
+            ),
+        ]
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"渲染失败：{exc}"}
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
-def add_hole(face: str, diameter: float, depth: float | None = None,
-             offset: list[float] | None = None,
-             pattern: dict | None = None,
-             counterbore_diameter: float | None = None,
-             counterbore_depth: float | None = None) -> Any:
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
+def add_hole(
+    face: str,
+    diameter: float,
+    depth: float | None = None,
+    offset: list[float] | None = None,
+    pattern: dict | None = None,
+    counterbore_diameter: float | None = None,
+    counterbore_depth: float | None = None,
+) -> Any:
     """在指定面打圆孔（face=面标签，来自 render_part(annotate='faces')）。
     depth 省略=通孔；offset=[u,v] 面内毫米偏移（原点=面外边界包络中点，矩形面即
     几何中心，不随已打的孔漂移；省略=原点处）。
@@ -686,20 +812,29 @@ def add_hole(face: str, diameter: float, depth: float | None = None,
     if guard:
         return guard
     try:
-        result = _features.add_hole(_session, face, diameter, depth,
-                                    tuple(offset) if offset is not None else (0.0, 0.0),
-                                    pattern=pattern,
-                                    counterbore_diameter=counterbore_diameter,
-                                    counterbore_depth=counterbore_depth)
+        result = _features.add_hole(
+            _session,
+            face,
+            diameter,
+            depth,
+            tuple(offset) if offset is not None else (0.0, 0.0),
+            pattern=pattern,
+            counterbore_diameter=counterbore_diameter,
+            counterbore_depth=counterbore_depth,
+        )
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"打孔失败：{exc}"}
     return _attach_view(result, tool="add_hole")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def fillet_edges(edges: list[str], radius: float) -> Any:
     """对边标签列表做圆角（标签来自 render_part(annotate='edges')）。成功后自动附三视图拼图。"""
     guard = _runtime_guard()
@@ -712,10 +847,14 @@ def fillet_edges(edges: list[str], radius: float) -> Any:
     return _attach_view(result, tool="fillet_edges")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def chamfer_edges(edges: list[str], size: float) -> Any:
     """对边标签列表做倒角（标签来自 render_part(annotate='edges')）。成功后自动附三视图拼图。"""
     guard = _runtime_guard()
@@ -728,10 +867,14 @@ def chamfer_edges(edges: list[str], size: float) -> Any:
     return _attach_view(result, tool="chamfer_edges")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def modify_part(name: str, parameter: str, value: float) -> Any:
     """修改参数化对象的参数（如 name='Box', parameter='length', value=45）——
     依赖链（布尔/孔/圆角）自动重算。可改对象与参数见每步返回的 parts 字段。
@@ -746,10 +889,14 @@ def modify_part(name: str, parameter: str, value: float) -> Any:
     return _attach_view(result, tool="modify_part")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def move_part(name: str, position: list[float]) -> Any:
     """把图元移动到绝对位置 [x, y, z]（mm）——依赖链自动重算，成功后自动附三视图。
     可移动对象见 parts 字段（布尔/圆角结果跟随其图元，不可直接移动）。
@@ -764,10 +911,14 @@ def move_part(name: str, position: list[float]) -> Any:
     return _attach_view(result, tool="move_part")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def rotate_part(name: str, axis: str = "z", angle: float = 90.0) -> Any:
     """绕全局轴旋转图元（以对象包围盒中心为旋转中心，角度制）——依赖链自动重算，成功后自动附三视图。
     可旋转对象见 parts 字段（布尔/圆角结果跟随其图元，不可直接旋转）。
@@ -782,13 +933,21 @@ def rotate_part(name: str, axis: str = "z", angle: float = 90.0) -> Any:
     return _attach_view(result, tool="rotate_part")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
-def extrude_profile(profile: dict, height: float, face: str | None = None,
-                    offset: list[float] | None = None,
-                    operation: str = "pad") -> Any:
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
+def extrude_profile(
+    profile: dict,
+    height: float,
+    face: str | None = None,
+    offset: list[float] | None = None,
+    operation: str = "pad",
+) -> Any:
     """拉伸 profile 轮廓（pad 加料 / pocket 减料），成功后自动附三视图。
     profile 示例：{"type":"rect","length":20,"width":10}、{"type":"circle","radius":5}、
     {"type":"slot","length":20,"width":8}、{"type":"polygon","points":[[0,0],[10,0],[0,8]]}。
@@ -800,10 +959,13 @@ def extrude_profile(profile: dict, height: float, face: str | None = None,
         return guard
     try:
         result = _sketch.extrude_profile(
-            _session, profile, height,
+            _session,
+            profile,
+            height,
             face=face,
             offset=tuple(offset) if offset is not None else (0.0, 0.0),
-            operation=operation)
+            operation=operation,
+        )
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"拉伸失败：{exc}"}
     return _attach_view(result, tool="extrude_profile")
@@ -813,10 +975,15 @@ def extrude_profile(profile: dict, height: float, face: str | None = None,
 # Round 8：装配工具（18→21）
 # ---------------------------------------------------------------------------
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def new_part(name: str) -> Any:
     """创建命名零件并将其设为活动零件（开始多零件装配模式）。
     首次调用时，文档中已有几何对象会自动归入隐式零件 "Part1"。
@@ -832,10 +999,14 @@ def new_part(name: str) -> Any:
     return _attach_view(result, tool="new_part")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 def set_active_part(name: str) -> Any:
     """切换活动零件——后续建模/特征/标注工具默认作用于该零件
     （在非活动零件上继续加工的恢复路径）。成功后自动附三视图拼图。"""
@@ -849,12 +1020,20 @@ def set_active_part(name: str) -> Any:
     return _attach_view({"ok": True, "active_part": name}, tool="set_active_part")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
-def place_part(part: str, position: list[float] | None = None,
-               rotation_axis: str | None = None, angle: float | None = None) -> Any:
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
+def place_part(
+    part: str,
+    position: list[float] | None = None,
+    rotation_axis: str | None = None,
+    angle: float | None = None,
+) -> Any:
     """设置零件绝对位置 and/or 叠加旋转（装配位姿）。
     position=[x,y,z]：零件原点移到绝对坐标（mm）。
     rotation_axis=x|y|z + angle：绕零件包围盒中心旋转（角度制，(-360,360) 内非零）。
@@ -864,22 +1043,30 @@ def place_part(part: str, position: list[float] | None = None,
         return guard
     try:
         result = _assembly.place_part(
-            _session, part, position=position,
-            rotation_axis=rotation_axis, angle=angle)
+            _session, part, position=position, rotation_axis=rotation_axis, angle=angle
+        )
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"零件位置设置失败：{exc}"}
     return _attach_view(result, tool="place_part")
 
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False,
-    idempotentHint=False, openWorldHint=False,
-))
-def align_parts(moving_part: str, moving_face: str,
-                target_part: str, target_face: str,
-                offset: list[float] | None = None,
-                gap: float = 0.0,
-                allow_interference: bool = False) -> Any:
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
+def align_parts(
+    moving_part: str,
+    moving_face: str,
+    target_part: str,
+    target_face: str,
+    offset: list[float] | None = None,
+    gap: float = 0.0,
+    allow_interference: bool = False,
+) -> Any:
     """面贴面对齐：moving_part 的 moving_face 贴向 target_part 的 target_face。
     面标签来自 render_part(annotate='faces') 的标签表（每零件需分别标注）。
     offset=[u,v]：面内毫米偏移（默认 [0,0]=两面基准点对齐；基准=面外边界包络
@@ -892,9 +1079,15 @@ def align_parts(moving_part: str, moving_face: str,
         return guard
     try:
         result = _assembly.align_parts(
-            _session, moving_part, moving_face, target_part, target_face,
+            _session,
+            moving_part,
+            moving_face,
+            target_part,
+            target_face,
             offset=tuple(offset) if offset is not None else (0.0, 0.0),
-            gap=gap, allow_interference=allow_interference)
+            gap=gap,
+            allow_interference=allow_interference,
+        )
     except (RuntimeError, ValueError) as exc:
         return {"ok": False, "message": f"装配对齐失败：{exc}"}
     return _attach_view(result, tool="align_parts")
@@ -904,27 +1097,38 @@ def align_parts(moving_part: str, moving_face: str,
 # Round 11：卸载（两段式确认 + 自退换芯执行删除）
 # ---------------------------------------------------------------------------
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True,
-    idempotentHint=True, openWorldHint=False,
-))
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 def uninstall_runtime(confirm: bool = False) -> dict[str, Any]:
     """卸载 CAD 引擎（删除全部已下载的运行时，约 2-3GB；扩展本体请在客户端设置里移除）。
     不带 confirm：仅预览将删除的路径与大小；confirm=true：执行删除。"""
-    home = paths.vibecad_home()
     if not confirm:
-        size = _uninstall.dir_size_mb(home) if home.exists() else 0.0
-        return {"ok": True, "confirm_required": True, "path": str(home),
-                "size_mb": round(size, 1),
-                "message": "将删除以上目录；确认请再次调用 uninstall_runtime(confirm=true)"}
+        info = _uninstall.preview_uninstall()
+        if info.get("ok"):
+            info["message"] = (
+                "将只删除以上运行时目标，项目与草图数据会保留；"
+                "确认请再次调用 uninstall_runtime(confirm=true)"
+            )
+        return info
     info = _uninstall.request_uninstall()
     if info.get("marked"):
         if _try_schedule_swap():
-            info["message"] = ("已计划删除：server 即将自动重启完成清理。"
-                                "扩展本体如需移除，请在客户端设置（Extensions）里 Remove。")
+            info["message"] = (
+                "已计划删除：server 即将自动重启完成清理。"
+                "扩展本体如需移除，请在客户端设置（Extensions）里 Remove。"
+            )
         else:  # I4/C1 回退：裸 server 不能自杀，删除要等下次启动早期执行
-            info["message"] = ("已计划删除：请重启 server 后生效（下次启动时自动完成清理）。"
-                                "扩展本体如需移除，请在客户端设置（Extensions）里 Remove。")
+            info["message"] = (
+                "已计划删除：请重启 server 后生效（下次启动时自动完成清理）。"
+                "扩展本体如需移除，请在客户端设置（Extensions）里 Remove。"
+            )
     return info
 
 

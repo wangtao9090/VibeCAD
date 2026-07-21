@@ -22,7 +22,6 @@ from vibecad.execution.candidate import (
     CandidateRollbackStatus,
     SessionBinding,
 )
-from vibecad.execution.executor import CandidateEvidence, InProcessCadExecutor
 from vibecad.execution.results import NormalizedToolOutcome
 from vibecad.execution.revisions import (
     CommitJournal,
@@ -33,11 +32,17 @@ from vibecad.execution.revisions import (
     ReconciliationStatus,
     RevisionRef,
 )
+from vibecad.interaction.cad import CadExecutionPort, CandidateEvidence
 from vibecad.validation import (
     CompiledAcceptance,
     VerificationResult,
     compile_acceptance_spec,
     verify_acceptance,
+)
+from vibecad.workflow.catalog import (
+    TaskCatalogError,
+    TaskCatalogErrorCode,
+    TaskCatalogService,
 )
 from vibecad.workflow.contracts import ErrorCategory, ModelProgram, StepError
 from vibecad.workflow.lease import LeaseError, ResourceLeaseManager
@@ -52,7 +57,6 @@ from vibecad.workflow.state import (
     append_artifact,
     append_step_result,
     append_verification,
-    new_task_run,
     transition_task,
 )
 from vibecad.workflow.store import (
@@ -204,6 +208,28 @@ def _raise(code: TaskServiceErrorCode) -> None:
     raise TaskServiceError(code)
 
 
+_CATALOG_ERROR_MAP = {
+    TaskCatalogErrorCode.INVALID_INPUT: TaskServiceErrorCode.INVALID_INPUT,
+    TaskCatalogErrorCode.UNSUPPORTED_REASONING_OWNER: (
+        TaskServiceErrorCode.UNSUPPORTED_REASONING_OWNER
+    ),
+    TaskCatalogErrorCode.INVALID_STATE: TaskServiceErrorCode.INVALID_STATE,
+    TaskCatalogErrorCode.NOT_FOUND: TaskServiceErrorCode.NOT_FOUND,
+    TaskCatalogErrorCode.CONFLICT: TaskServiceErrorCode.CONFLICT,
+    TaskCatalogErrorCode.STORE_FAILURE: TaskServiceErrorCode.STORE_FAILURE,
+}
+
+
+def _catalog_call(action):
+    failure = None
+    try:
+        return action()
+    except TaskCatalogError as error:
+        failure = _CATALOG_ERROR_MAP[error.code]
+    assert failure is not None
+    raise TaskServiceError(failure)
+
+
 def _expected_generation(value: object) -> int:
     if type(value) is not int or value < 0:
         _raise(TaskServiceErrorCode.INVALID_INPUT)
@@ -232,10 +258,13 @@ class TaskService:
     """Compose trusted task, revision, lease, candidate, executor, and verifier ports."""
 
     __slots__ = (
+        "_catalog",
         "_coordinator",
         "_executor",
         "_lease_manager",
         "_revision_store",
+        "_runtime_head",
+        "_runtime_stale",
         "_task_store",
     )
 
@@ -246,14 +275,16 @@ class TaskService:
         revision_store: LocalRevisionStore,
         lease_manager: ResourceLeaseManager,
         coordinator: CandidateCoordinator,
-        executor: InProcessCadExecutor,
+        executor: CadExecutionPort,
+        runtime_head: ProjectHead,
     ) -> None:
         if not (
             isinstance(task_store, TaskRunStore)
             and isinstance(revision_store, LocalRevisionStore)
             and isinstance(lease_manager, ResourceLeaseManager)
             and isinstance(coordinator, CandidateCoordinator)
-            and isinstance(executor, InProcessCadExecutor)
+            and isinstance(executor, CadExecutionPort)
+            and type(runtime_head) is ProjectHead
         ):
             _raise(TaskServiceErrorCode.INVALID_INPUT)
         if not (
@@ -261,7 +292,6 @@ class TaskService:
             and getattr(revision_store, "_lease_manager", None) is lease_manager
             and getattr(coordinator, "_store", None) is revision_store
             and getattr(coordinator, "_snapshot_port", None) is executor
-            and getattr(executor, "_store", None) is revision_store
         ):
             _raise(TaskServiceErrorCode.INVALID_INPUT)
         self._task_store = task_store
@@ -269,6 +299,34 @@ class TaskService:
         self._lease_manager = lease_manager
         self._coordinator = coordinator
         self._executor = executor
+        self._runtime_head = runtime_head
+        self._runtime_stale = False
+        self._catalog = TaskCatalogService(
+            task_store=task_store,
+            revision_store=revision_store,
+        )
+
+    @property
+    def runtime_stale(self) -> bool:
+        return self._runtime_stale
+
+    @property
+    def runtime_head(self) -> ProjectHead:
+        return self._runtime_head
+
+    def _guard_runtime_head(self, project_id: str) -> ProjectHead:
+        try:
+            current = self._revision_store.load_head(project_id)
+        except Exception:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        if not (
+            type(current) is ProjectHead
+            and current == self._runtime_head
+            and current.project_id == project_id
+        ):
+            self._runtime_stale = True
+            _raise(TaskServiceErrorCode.CONFLICT)
+        return current
 
     def create_task(
         self,
@@ -278,65 +336,17 @@ class TaskService:
         reasoning_owner: ReasoningOwner,
         review_policy: ReviewPolicy,
     ) -> StoredTaskRun:
-        if type(reasoning_owner) is not ReasoningOwner:
-            _raise(TaskServiceErrorCode.INVALID_INPUT)
-        if type(review_policy) is not ReviewPolicy:
-            _raise(TaskServiceErrorCode.INVALID_INPUT)
-        if reasoning_owner is not ReasoningOwner.EXTERNAL_PLAN:
-            _raise(TaskServiceErrorCode.UNSUPPORTED_REASONING_OWNER)
-        task: TaskRun | None = None
-        stored: StoredTaskRun | None = None
-        failure: TaskServiceErrorCode | None = None
-        uncertain_generation: int | None = None
-        try:
-            head = self._revision_store.load_head(project_id)
-            if type(head) is not ProjectHead or head.project_id != project_id:
-                failure = TaskServiceErrorCode.STORE_FAILURE
-                head = None
-            if head is None:
-                raise RuntimeError
-            task = new_task_run(
+        return _catalog_call(
+            lambda: self._catalog.create_task(
                 task_id=task_id,
                 project_id=project_id,
-                base_revision=head.revision_id,
                 reasoning_owner=reasoning_owner,
                 review_policy=review_policy,
             )
-            task = transition_task(task, TaskEvent.REQUEST_PLAN)
-            stored = self._task_store.create(task)
-        except TaskStoreError as error:
-            if error.code is TaskStoreErrorCode.DURABILITY_UNCERTAIN:
-                uncertain_generation = getattr(error, "committed_generation", None)
-            elif error.code is TaskStoreErrorCode.ALREADY_EXISTS:
-                failure = TaskServiceErrorCode.CONFLICT
-            elif error.code is TaskStoreErrorCode.INVALID_ID:
-                failure = TaskServiceErrorCode.INVALID_INPUT
-            else:
-                failure = TaskServiceErrorCode.STORE_FAILURE
-        except TaskStateError:
-            failure = TaskServiceErrorCode.INVALID_INPUT
-        except Exception:
-            failure = failure or TaskServiceErrorCode.STORE_FAILURE
-        if uncertain_generation is not None and task is not None:
-            try:
-                readback = self._task_store.load(task.id)
-            except Exception:
-                readback = None
-            if (
-                uncertain_generation == 0
-                and type(readback) is StoredTaskRun
-                and readback.generation == 0
-                and readback.task_run == task
-            ):
-                return readback
-            failure = TaskServiceErrorCode.STORE_FAILURE
-        if failure is not None:
-            _raise(failure)
-        assert stored is not None
-        return stored
+        )
 
     def get_task(self, *, task_id: str) -> StoredTaskRun:
-        return self._load(task_id)
+        return _catalog_call(lambda: self._catalog.get_task(task_id=task_id))
 
     def accept_draft(
         self,
@@ -380,9 +390,9 @@ class TaskService:
         caught: TaskServiceError | None = None
         try:
             try:
-                head = self._revision_store.load_head(task.project_id)
+                head = self._guard_runtime_head(task.project_id)
                 expected_head = self._draft_head(draft)
-                if type(head) is not ProjectHead or head != expected_head:
+                if head != expected_head:
                     _raise(TaskServiceErrorCode.CONFLICT)
                 accepting = self._cas(
                     stored,
@@ -410,29 +420,13 @@ class TaskService:
         draft_id: str,
         expected_generation: int,
     ) -> StoredTaskRun:
-        expected = _expected_generation(expected_generation)
-        stored = self._load(task_id)
-        task = stored.task_run
-        draft = task.draft
-        if type(draft) is not ReviewDraft:
-            _raise(TaskServiceErrorCode.INVALID_STATE)
-        if type(draft_id) is not str or draft.id != draft_id:
-            _raise(TaskServiceErrorCode.CONFLICT)
-        if task.status is TaskStatus.REJECTED:
-            return stored
-        if task.status in {TaskStatus.ACCEPTING_DRAFT, TaskStatus.SUCCEEDED}:
-            _raise(TaskServiceErrorCode.CONFLICT)
-        if task.status is not TaskStatus.AWAITING_USER_REVIEW:
-            _raise(TaskServiceErrorCode.INVALID_STATE)
-        if stored.generation != expected:
-            _raise(TaskServiceErrorCode.CONFLICT)
-        try:
-            return self._cas(
-                stored,
-                transition_task(task, TaskEvent.REJECT_DRAFT),
+        return _catalog_call(
+            lambda: self._catalog.reject_draft(
+                task_id=task_id,
+                draft_id=draft_id,
+                expected_generation=expected_generation,
             )
-        except TaskStateError:
-            _raise(TaskServiceErrorCode.INVALID_STATE)
+        )
 
     def submit_model_program(
         self,
@@ -462,11 +456,16 @@ class TaskService:
             _raise(TaskServiceErrorCode.INVALID_INPUT)
         self._ensure_persistable(submitted, stored.generation + 1)
         preflight = self._preflight(program)
-        stored = self._cas(stored, submitted)
         if preflight is None:
+            stored = self._cas(stored, submitted)
             return self._reject_validation(stored)
         compiled, validated = preflight
-        return self._continue_preflighted(stored, compiled, validated)
+        return self._continue_preflighted(
+            stored,
+            compiled,
+            validated,
+            submitted=submitted,
+        )
 
     def continue_task(
         self,
@@ -552,6 +551,7 @@ class TaskService:
         post_release_event: TaskEvent | None = None
         try:
             try:
+                self._guard_runtime_head(stored.task_run.project_id)
                 if stored.task_run.status in {
                     TaskStatus.VALIDATING_PROGRAM,
                     TaskStatus.EXECUTING,
@@ -798,7 +798,8 @@ class TaskService:
             return False
         if not (
             journal.project_id == task.project_id
-            and journal.state in {
+            and journal.state
+            in {
                 CommitJournalState.NOT_COMMITTED,
                 CommitJournalState.COMMITTED,
             }
@@ -824,69 +825,13 @@ class TaskService:
         return False
 
     def _load(self, task_id: str) -> StoredTaskRun:
-        stored: StoredTaskRun | None = None
-        failure: TaskServiceErrorCode | None = None
-        try:
-            stored = self._task_store.load(task_id)
-        except TaskStoreError as error:
-            if error.code is TaskStoreErrorCode.NOT_FOUND:
-                failure = TaskServiceErrorCode.NOT_FOUND
-            elif error.code is TaskStoreErrorCode.INVALID_ID:
-                failure = TaskServiceErrorCode.INVALID_INPUT
-            else:
-                failure = TaskServiceErrorCode.STORE_FAILURE
-        except Exception:
-            failure = TaskServiceErrorCode.STORE_FAILURE
-        if failure is not None:
-            _raise(failure)
-        if type(stored) is not StoredTaskRun:
-            _raise(TaskServiceErrorCode.STORE_FAILURE)
-        return stored
+        return _catalog_call(lambda: self._catalog.get_task(task_id=task_id))
 
     def _load_expected(self, task_id: str, generation: object) -> StoredTaskRun:
-        expected = _expected_generation(generation)
-        stored = self._load(task_id)
-        if stored.generation != expected:
-            _raise(TaskServiceErrorCode.CONFLICT)
-        return stored
+        return _catalog_call(lambda: self._catalog.load_expected(task_id, generation))
 
     def _cas(self, stored: StoredTaskRun, task: TaskRun) -> StoredTaskRun:
-        result: StoredTaskRun | None = None
-        failure: TaskServiceErrorCode | None = None
-        uncertain_generation: int | None = None
-        try:
-            result = self._task_store.compare_and_set(
-                stored.task_run.id,
-                stored.generation,
-                task,
-            )
-        except TaskStoreError as error:
-            if error.code is TaskStoreErrorCode.DURABILITY_UNCERTAIN:
-                uncertain_generation = getattr(error, "committed_generation", None)
-            elif error.code is TaskStoreErrorCode.CONFLICT:
-                failure = TaskServiceErrorCode.CONFLICT
-            else:
-                failure = TaskServiceErrorCode.STORE_FAILURE
-        except Exception:
-            failure = TaskServiceErrorCode.STORE_FAILURE
-        if uncertain_generation is not None:
-            try:
-                readback = self._task_store.load(stored.task_run.id)
-            except Exception:
-                readback = None
-            if (
-                uncertain_generation == stored.generation + 1
-                and type(readback) is StoredTaskRun
-                and readback.generation == uncertain_generation
-                and readback.task_run == task
-            ):
-                return readback
-            failure = TaskServiceErrorCode.STORE_FAILURE
-        if failure is not None:
-            _raise(failure)
-        if type(result) is not StoredTaskRun:
-            _raise(TaskServiceErrorCode.STORE_FAILURE)
-        return result
+        return _catalog_call(lambda: self._catalog.compare_and_set(stored, task))
 
     def _reject_validation(self, stored: StoredTaskRun) -> StoredTaskRun:
         try:
@@ -912,32 +857,35 @@ class TaskService:
         stored: StoredTaskRun,
         compiled: CompiledAcceptance,
         validated: object,
+        *,
+        submitted: TaskRun | None = None,
     ) -> StoredTaskRun:
-        try:
-            validating = self._cas(
-                stored,
-                transition_task(stored.task_run, TaskEvent.START_VALIDATION),
-            )
-        except TaskStateError:
-            _raise(TaskServiceErrorCode.INVALID_STATE)
-
-        try:
-            lease = self._acquire(validating.task_run.project_id)
-        except TaskServiceError:
-            return self._reject_pre_candidate(validating, _PRE_CANDIDATE_CONFLICT)
+        project_id = stored.task_run.project_id
+        lease = self._acquire(project_id)
 
         result: StoredTaskRun | None = None
         caught: TaskServiceError | None = None
         try:
             try:
+                head = self._guard_runtime_head(project_id)
+                current = stored
+                if submitted is not None:
+                    current = self._cas(stored, submitted)
+                validating = self._cas(
+                    current,
+                    transition_task(current.task_run, TaskEvent.START_VALIDATION),
+                )
                 result = self._run_with_lease(
                     validating,
                     compiled,
                     validated,
                     lease,
+                    head,
                 )
             except TaskServiceError as error:
                 caught = error
+            except TaskStateError:
+                caught = TaskServiceError(TaskServiceErrorCode.INVALID_STATE)
         finally:
             release_failed = self._release(lease)
         if release_failed:
@@ -972,9 +920,7 @@ class TaskService:
     @staticmethod
     def _draft_report(task: TaskRun, draft: ReviewDraft) -> object:
         reports = tuple(
-            report
-            for report in task.verification_reports
-            if report.id == draft.verification_id
+            report for report in task.verification_reports if report.id == draft.verification_id
         )
         if len(reports) != 1:
             _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
@@ -1036,11 +982,7 @@ class TaskService:
         if type(published) is not CandidateRollbackResult:
             return False
         reconciliation = published.reconciliation
-        journal = (
-            reconciliation.journal
-            if type(reconciliation) is ReconciliationResult
-            else None
-        )
+        journal = reconciliation.journal if type(reconciliation) is ReconciliationResult else None
         try:
             durable_head = self._revision_store.load_head(task.project_id)
         except Exception:
@@ -1187,13 +1129,10 @@ class TaskService:
         compiled: CompiledAcceptance,
         validated: object,
         lease: object,
+        head: ProjectHead,
     ) -> StoredTaskRun:
         task = validating.task_run
-        try:
-            head = self._revision_store.load_head(task.project_id)
-        except Exception:
-            return self._reject_pre_candidate(validating, _PRE_CANDIDATE_CONFLICT)
-        if type(head) is not ProjectHead or head.revision_id != task.base_revision:
+        if head.revision_id != task.base_revision:
             return self._reject_pre_candidate(validating, _PRE_CANDIDATE_CONFLICT)
 
         try:
@@ -1594,6 +1533,10 @@ class TaskService:
             or head.manifest_sha256 != candidate_manifest
         ):
             return self._post_receipt_attention(committing)
+        if getattr(result, "slot_promoted", None) is True:
+            self._runtime_head = head
+        else:
+            self._runtime_stale = True
         status = getattr(result, "status", None)
         attention = _attention_event(result)
         try:

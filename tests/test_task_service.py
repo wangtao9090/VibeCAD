@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import inspect
+import os
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import vibecad.workflow.service as service_module
+from vibecad.application.agent import AgentApplication
+from vibecad.application.task_api import (
+    TaskServicePortErrorCode,
+    TaskServicePortFailure,
+)
 from vibecad.execution.candidate import (
     CandidateCommitStatus,
     CandidateCoordinator,
@@ -753,6 +761,17 @@ class _Rig:
             lease_manager=self.leases,
             coordinator=self.coordinator,
             executor=self.executor,
+            runtime_head=self.revisions.head,
+        )
+
+    def refresh_runtime(self) -> None:
+        self.service = TaskService(
+            task_store=self.tasks,
+            revision_store=self.revisions,
+            lease_manager=self.leases,
+            coordinator=self.coordinator,
+            executor=self.executor,
+            runtime_head=self.revisions.head,
         )
 
     def create(
@@ -797,6 +816,7 @@ def _real_task_store_rig(tmp_path: Path) -> SimpleNamespace:
         lease_manager=leases,
         coordinator=coordinator,
         executor=executor,
+        runtime_head=revisions.head,
     )
     return SimpleNamespace(
         log=log,
@@ -896,6 +916,7 @@ def test_constructor_requires_trusted_concrete_ports() -> None:
             lease_manager=rig.leases,
             coordinator=rig.coordinator,
             executor=rig.executor,
+            runtime_head=rig.revisions.head,
         )
     assert caught.value.code is TaskServiceErrorCode.INVALID_INPUT
 
@@ -907,6 +928,7 @@ def test_constructor_requires_trusted_concrete_ports() -> None:
             lease_manager=rig.leases,
             coordinator=rig.coordinator,
             executor=rig.executor,
+            runtime_head=rig.revisions.head,
         )
     assert caught.value.code is TaskServiceErrorCode.INVALID_INPUT
 
@@ -1115,8 +1137,11 @@ def test_store_envelope_rejects_unreadable_program_before_submit(
     assert not any(item.startswith("task.cas:") for item in rig.log)
 
 
-def test_lease_contention_and_head_drift_are_pre_candidate_needs_input() -> None:
-    for mode in ("lease", "head"):
+def test_lease_contention_and_runtime_head_drift_leave_task_unchanged() -> None:
+    for mode, code in (
+        ("lease", TaskServiceErrorCode.LEASE_UNAVAILABLE),
+        ("head", TaskServiceErrorCode.CONFLICT),
+    ):
         rig = _Rig()
         created = rig.create()
         if mode == "lease":
@@ -1128,17 +1153,17 @@ def test_lease_contention_and_head_drift_are_pre_candidate_needs_input() -> None
                 revision_id="revision_22222222222222222222222222222222",
                 manifest_sha256="e" * 64,
             )
-        stored = rig.service.submit_model_program(
-            task_id=TASK_ID,
-            expected_generation=created.generation,
-            program=_program(),
-        )
-        assert stored.task_run.status is TaskStatus.NEEDS_INPUT
-        assert stored.task_run.candidate_revision is None
-        assert stored.task_run.last_error is not None
-        assert stored.task_run.last_error.category is ErrorCategory.CONFLICT
+        with pytest.raises(TaskServiceError) as caught:
+            rig.service.submit_model_program(
+                task_id=TASK_ID,
+                expected_generation=created.generation,
+                program=_program(),
+            )
+        assert caught.value.code is code
+        assert rig.tasks.records[TASK_ID] == created
         assert "candidate.begin" not in rig.log
         assert "executor.execute" not in rig.log
+        assert rig.service.runtime_stale is (mode == "head")
 
 
 def test_execution_failure_rolls_back_after_durable_rolling_back() -> None:
@@ -1390,6 +1415,7 @@ def test_reconcile_uses_revision_ancestry_not_a_later_project_journal(
     rig.revisions.revisions[DESCENDANT_REVISION] = _descendant_revision()
     rig.revisions.head = _descendant_head()
     rig.coordinator.reconcile_status = reconcile_status
+    rig.refresh_runtime()
     recovered = rig.service.reconcile_task(
         task_id=TASK_ID,
         expected_generation=durable.generation,
@@ -1405,6 +1431,7 @@ def test_reconcile_fails_closed_when_revision_ancestry_cannot_be_proved() -> Non
     attention = rig.run()
     rig.coordinator.reconcile_status = CandidateReconcileStatus.CLEAN
     rig.revisions.head = _descendant_head()
+    rig.refresh_runtime()
     reconciled = rig.service.reconcile_task(
         task_id=TASK_ID,
         expected_generation=attention.generation,
@@ -1437,6 +1464,7 @@ def test_reconcile_never_confirms_committed_through_a_missing_base_revision(
     if head_mode == "descendant":
         rig.revisions.revisions[DESCENDANT_REVISION] = _descendant_revision()
         rig.revisions.head = _descendant_head()
+        rig.refresh_runtime()
     rig.coordinator.reconcile_status = CandidateReconcileStatus.CLEAN
     reconciled = rig.service.reconcile_task(
         task_id=TASK_ID,
@@ -1529,7 +1557,8 @@ def test_task_store_durability_uncertain_rejects_nonmatching_readback() -> None:
     with pytest.raises(TaskServiceError) as caught:
         rig.run()
     assert caught.value.code is TaskServiceErrorCode.STORE_FAILURE
-    assert "lease.acquire" not in rig.log
+    assert "lease.acquire" in rig.log
+    assert "lease.release" in rig.log
     assert "candidate.begin" not in rig.log
 
 
@@ -1655,6 +1684,7 @@ def test_reconcile_never_confirms_success_without_exact_candidate_head(mode: str
             revision_id=CANDIDATE_REVISION,
             manifest_sha256="f" * 64,
         )
+    rig.refresh_runtime()
     reconciled = rig.service.reconcile_task(
         task_id=TASK_ID,
         expected_generation=attention.generation,
@@ -1772,13 +1802,9 @@ def test_require_review_detaches_and_releases_before_publishing_awaiting() -> No
     assert rig.revisions.head == _base_head()
     assert rig.coordinator.publish_review_calls == 1
     assert rig.coordinator.commit_calls == 0
-    assert rig.log.index("task.cas:preparing_review") < rig.log.index(
-        "candidate.publish_review"
-    )
+    assert rig.log.index("task.cas:preparing_review") < rig.log.index("candidate.publish_review")
     assert rig.log.index("candidate.publish_review") < rig.log.index("lease.release")
-    assert rig.log.index("lease.release") < rig.log.index(
-        "task.cas:awaiting_user_review"
-    )
+    assert rig.log.index("lease.release") < rig.log.index("task.cas:awaiting_user_review")
 
 
 def test_attribute_compatible_detach_claim_cannot_publish_a_draft() -> None:
@@ -1849,9 +1875,7 @@ def test_accept_reacquires_reverifies_commits_once_and_replays_read_only() -> No
     assert rig.coordinator.prepare_review_calls == 1
     assert rig.coordinator.commit_calls == 1
     assert rig.log.index("lease.acquire") < rig.log.index("task.cas:accepting_draft")
-    assert rig.log.index("task.cas:accepting_draft") < rig.log.index(
-        "candidate.reopen_review"
-    )
+    assert rig.log.index("task.cas:accepting_draft") < rig.log.index("candidate.reopen_review")
     assert rig.log.index("executor.collect") < rig.log.index("candidate.prepare_review")
     assert rig.log.index("candidate.prepare_review") < rig.log.index("candidate.commit")
     assert rig.log.index("candidate.commit") < rig.log.index("lease.release")
@@ -1910,9 +1934,7 @@ def test_review_release_failure_never_publishes_awaiting_and_resume_recovers() -
     assert recovered.task_run.status is TaskStatus.AWAITING_USER_REVIEW
     final_release = max(index for index, item in enumerate(rig.log) if item == "lease.release")
     final_publish = max(
-        index
-        for index, item in enumerate(rig.log)
-        if item == "task.cas:awaiting_user_review"
+        index for index, item in enumerate(rig.log) if item == "task.cas:awaiting_user_review"
     )
     assert final_release < final_publish
 
@@ -1975,6 +1997,183 @@ def test_accept_response_loss_reconciles_exact_head_without_second_commit() -> N
     assert rig.coordinator.commit_calls == 1
 
 
+def test_accepting_response_loss_rejects_stale_runtime_before_lineage_recovery() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    rig.tasks.fail_status = TaskStatus.SUCCEEDED
+    with pytest.raises(TaskServiceError):
+        rig.service.accept_draft(
+            task_id=TASK_ID,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+    accepting = rig.tasks.records[TASK_ID]
+    assert accepting.task_run.status is TaskStatus.ACCEPTING_DRAFT
+    assert rig.revisions.head == _candidate_head()
+    assert rig.coordinator.commit_calls == 1
+    rig.tasks.fail_status = None
+    rig.service = TaskService(
+        task_store=rig.tasks,
+        revision_store=rig.revisions,
+        lease_manager=rig.leases,
+        coordinator=rig.coordinator,
+        executor=rig.executor,
+        runtime_head=_base_head(),
+    )
+    reconciles_before = rig.log.count("candidate.reconcile")
+    with pytest.raises(TaskServiceError) as stale:
+        rig.service.accept_draft(
+            task_id=TASK_ID,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+    assert stale.value.code is TaskServiceErrorCode.CONFLICT
+    assert rig.tasks.records[TASK_ID] == accepting
+    assert rig.log.count("candidate.reconcile") == reconciles_before
+    assert rig.service.runtime_stale is True
+
+    rig.coordinator.reconcile_status = CandidateReconcileStatus.COMMITTED
+    rig.coordinator.reconcile_live_revision = CANDIDATE_REVISION
+    rig.refresh_runtime()
+    recovered = rig.service.accept_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+    assert recovered.task_run.status is TaskStatus.SUCCEEDED
+    assert recovered.task_run.committed_revision == CANDIDATE_REVISION
+    assert rig.coordinator.commit_calls == 1
+
+
+def test_application_accepting_gap_evicts_then_recovers_descendant_without_recommit() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    rig.tasks.fail_status = TaskStatus.SUCCEEDED
+    with pytest.raises(TaskServiceError):
+        rig.service.accept_draft(
+            task_id=TASK_ID,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+    accepting = rig.tasks.records[TASK_ID]
+    assert accepting.task_run.status is TaskStatus.ACCEPTING_DRAFT
+    assert rig.revisions.head == _candidate_head()
+    assert rig.coordinator.commit_calls == 1
+
+    rig.tasks.fail_status = None
+    rig.revisions.revisions[DESCENDANT_REVISION] = _descendant_revision()
+    rig.coordinator.reconcile_status = CandidateReconcileStatus.CLEAN
+    rig.coordinator.reconcile_live_revision = DESCENDANT_REVISION
+    advanced = False
+    built_heads: list[ProjectHead] = []
+    runtimes: list[object] = []
+
+    class Runtime:
+        def __init__(self, service: TaskService) -> None:
+            self.service = service
+            self.close_calls = 0
+
+        @property
+        def head(self) -> ProjectHead:
+            return self.service.runtime_head
+
+        @property
+        def stale(self) -> bool:
+            return self.service.runtime_stale
+
+        def close(self) -> bool:
+            self.close_calls += 1
+            return True
+
+    class AdvanceInApplicationGap:
+        def __init__(self, service: TaskService) -> None:
+            self._service = service
+
+        @property
+        def runtime_head(self) -> ProjectHead:
+            return self._service.runtime_head
+
+        @property
+        def runtime_stale(self) -> bool:
+            return self._service.runtime_stale
+
+        def accept_draft(self, **kwargs):
+            nonlocal advanced
+            if not advanced:
+                advanced = True
+                rig.revisions.head = _descendant_head()
+            return self._service.accept_draft(**kwargs)
+
+    def runtime_factory(**kwargs):
+        service = TaskService(
+            task_store=rig.tasks,
+            revision_store=rig.revisions,
+            lease_manager=rig.leases,
+            coordinator=rig.coordinator,
+            executor=rig.executor,
+            runtime_head=kwargs["head"],
+        )
+        built_heads.append(kwargs["head"])
+        runtime = Runtime(AdvanceInApplicationGap(service))
+        runtimes.append(runtime)
+        return runtime
+
+    app = object.__new__(AgentApplication)
+    app._cad_gate = threading.Lock()  # noqa: SLF001
+    app._catalog = SimpleNamespace(  # noqa: SLF001
+        get_task=lambda *, task_id: rig.tasks.load(task_id)
+    )
+    app._cad_port_factory = None  # noqa: SLF001
+    app._checkouts = None  # noqa: SLF001
+    app._closed = False  # noqa: SLF001
+    app._creator_pid = os.getpid()  # noqa: SLF001
+    app._layout = None  # noqa: SLF001
+    app._lease_manager = rig.leases  # noqa: SLF001
+    app._revision_store = rig.revisions  # noqa: SLF001
+    app._runtime_factory = runtime_factory  # noqa: SLF001
+    app._runtimes = OrderedDict()  # noqa: SLF001
+    app._task_store = rig.tasks  # noqa: SLF001
+
+    reconciles_before = rig.log.count("candidate.reconcile")
+    executes_before = rig.log.count("executor.execute")
+    reopens_before = rig.coordinator.reopen_review_calls
+    prepares_before = rig.coordinator.prepare_review_calls
+    revisions_before = dict(rig.revisions.revisions)
+    first = app.accept_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+    assert first == TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT)
+    assert rig.tasks.records[TASK_ID] == accepting
+    assert rig.coordinator.commit_calls == 1
+    assert rig.log.count("candidate.reconcile") == reconciles_before
+    assert rig.log.count("executor.execute") == executes_before
+    assert rig.coordinator.reopen_review_calls == reopens_before
+    assert rig.coordinator.prepare_review_calls == prepares_before
+    assert rig.revisions.revisions == revisions_before
+    assert rig.revisions.head == _descendant_head()
+    assert built_heads == [_candidate_head()]
+    assert runtimes[0].close_calls == 1
+    assert PROJECT_ID not in app._runtimes  # noqa: SLF001
+
+    recovered = app.accept_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+    assert type(recovered) is StoredTaskRun
+    assert recovered.task_run.status is TaskStatus.SUCCEEDED
+    assert recovered.task_run.committed_revision == CANDIDATE_REVISION
+    assert rig.revisions.head == _descendant_head()
+    assert rig.coordinator.commit_calls == 1
+    assert built_heads == [_candidate_head(), _descendant_head()]
+    assert rig.log.count("candidate.reconcile") == reconciles_before + 1
+    app.close()
+
+
 def test_accept_response_loss_reconciles_through_a_later_descendant_without_recommit() -> None:
     rig = _Rig()
     awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
@@ -1994,6 +2193,7 @@ def test_accept_response_loss_reconciles_through_a_later_descendant_without_reco
     rig.revisions.head = _descendant_head()
     rig.coordinator.reconcile_status = CandidateReconcileStatus.CLEAN
     rig.coordinator.reconcile_live_revision = DESCENDANT_REVISION
+    rig.refresh_runtime()
 
     recovered = rig.service.accept_draft(
         task_id=TASK_ID,

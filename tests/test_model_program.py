@@ -13,9 +13,11 @@ import pytest
 
 from vibecad.execution.registry import (
     DEFAULT_OPERATION_REGISTRY,
+    ExecutionProfile,
     FieldMetadata,
     OperationMetadata,
     OperationRegistry,
+    ResourceBudget,
     ResultSlotMetadata,
     RiskClass,
     ValueShape,
@@ -112,9 +114,7 @@ def _label_registry() -> OperationRegistry:
                 handler_name="set_label",
                 risk_class=RiskClass.MUTATING,
                 evidence_required=True,
-                argument_fields=(
-                    FieldMetadata("name", "name", ValueShape.NONBLANK_STRING),
-                ),
+                argument_fields=(FieldMetadata("name", "name", ValueShape.NONBLANK_STRING),),
             ),
         )
     )
@@ -193,9 +193,7 @@ def _level_a_selector_registry() -> OperationRegistry:
                 handler_name="select_object",
                 risk_class=RiskClass.READ_ONLY,
                 evidence_required=False,
-                target_fields=(
-                    FieldMetadata("object", "selector", ValueShape.OBJECT_SELECTOR),
-                ),
+                target_fields=(FieldMetadata("object", "selector", ValueShape.OBJECT_SELECTOR),),
             ),
         )
     )
@@ -283,9 +281,7 @@ def test_default_entity_target_accepts_base_selector_or_dependency_object_ref() 
         ),
         acceptance=AcceptanceSpec(id="acceptance-default-selector", criteria=()),
     )
-    selector_bound = validate_model_program(selector_program).commands[0].handler_kwargs[
-        "target"
-    ]
+    selector_bound = validate_model_program(selector_program).commands[0].handler_kwargs["target"]
     assert type(selector_bound).__name__ == "SelectorV1"
 
     result_program = ModelProgram(
@@ -326,9 +322,7 @@ def test_default_entity_target_accepts_base_selector_or_dependency_object_ref() 
             id="partial-selector",
         ),
         pytest.param(
-            _level_a_selector(
-                revision_id="revision_55555555555555555555555555555555"
-            ),
+            _level_a_selector(revision_id="revision_55555555555555555555555555555555"),
             id="stale-selector",
         ),
     ],
@@ -1097,9 +1091,7 @@ def test_object_id_shape_accepts_only_canonical_lowercase_ids():
                 handler_name="bind_object",
                 risk_class=RiskClass.READ_ONLY,
                 evidence_required=False,
-                argument_fields=(
-                    FieldMetadata("object_id", "object_id", ValueShape.OBJECT_ID),
-                ),
+                argument_fields=(FieldMetadata("object_id", "object_id", ValueShape.OBJECT_ID),),
             ),
         )
     )
@@ -1239,6 +1231,40 @@ def test_validated_bound_data_is_deeply_immutable_and_detached_from_callers():
         command.handler_kwargs["position"][2]["axis"] = ()
     with pytest.raises(dataclasses.FrozenInstanceError):
         command.handler_name = "other"
+
+
+def test_bound_command_retains_exact_execution_admission_metadata() -> None:
+    budget = ResourceBudget(
+        max_runtime_ms=1_234,
+        max_created_objects=0,
+        max_result_bytes=4_321,
+    )
+    registry = OperationRegistry(
+        (
+            OperationMetadata(
+                operation="inspect_offscreen",
+                handler_name="inspect_offscreen",
+                risk_class=RiskClass.READ_ONLY,
+                evidence_required=False,
+                execution_profiles=(ExecutionProfile.OFFSCREEN_GUI,),
+                minimum_freecad_version=(1, 1),
+                maximum_freecad_version_exclusive=(1, 2),
+                requires_gui_main_thread=True,
+                resource_budget=budget,
+            ),
+        )
+    )
+
+    validated = validate_model_program(
+        _program(_command("inspect", "inspect_offscreen")),
+        registry=registry,
+    )
+    command = validated.commands[0]
+
+    assert command.resource_budget is budget
+    assert command.minimum_freecad_version == (1, 1)
+    assert command.maximum_freecad_version_exclusive == (1, 2)
+    assert command.requires_gui_main_thread is True
 
 
 def test_validated_program_is_sealed_immutable_and_not_serializable():
