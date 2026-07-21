@@ -14,7 +14,13 @@ from time import monotonic_ns as _monotonic_ns
 from types import MappingProxyType
 from typing import Any
 
-from vibecad.execution.registry import RiskClass
+from vibecad.execution.registry import (
+    ExecutionProfile,
+    ResultSlotMetadata,
+    RiskClass,
+    ValueShape,
+    _matches_value_shape,
+)
 from vibecad.execution.results import (
     NormalizedToolOutcome,
     normalize_tool_exception,
@@ -28,7 +34,11 @@ from vibecad.workflow.contracts import (
     ValueSource,
 )
 from vibecad.workflow.errors import SCHEMA_VERSION
-from vibecad.workflow.program import BoundCommand, ValidatedProgram
+from vibecad.workflow.program import (
+    BoundCommand,
+    BoundResultRef,
+    ValidatedProgram,
+)
 
 
 class AdapterErrorCode(StrEnum):
@@ -39,6 +49,8 @@ class AdapterErrorCode(StrEnum):
     INVALID_REVISION = "invalid_revision"
     MISSING_HANDLER = "missing_handler"
     NON_CALLABLE_HANDLER = "non_callable_handler"
+    INVALID_EXECUTION_PROFILE = "invalid_execution_profile"
+    UNSUPPORTED_EXECUTION_PROFILE = "unsupported_execution_profile"
 
 
 _ERROR_MESSAGES = {
@@ -47,6 +59,10 @@ _ERROR_MESSAGES = {
     AdapterErrorCode.INVALID_REVISION: "Candidate revision is invalid.",
     AdapterErrorCode.MISSING_HANDLER: "A required handler is missing.",
     AdapterErrorCode.NON_CALLABLE_HANDLER: "A required handler is not callable.",
+    AdapterErrorCode.INVALID_EXECUTION_PROFILE: "Execution profile is invalid.",
+    AdapterErrorCode.UNSUPPORTED_EXECUTION_PROFILE: (
+        "An operation does not support the requested execution profile."
+    ),
 }
 
 
@@ -79,6 +95,9 @@ class _PlannedCommand:
     handler_kwargs: Mapping[str, Any]
     risk_class: RiskClass
     evidence_required: bool
+    depends_on: tuple[str, ...]
+    execution_profiles: tuple[ExecutionProfile, ...]
+    result_slots: tuple[ResultSlotMetadata, ...]
     handler: Callable[..., object]
 
 
@@ -90,6 +109,11 @@ class _CommandSnapshot:
     handler_kwargs: Mapping[str, Any]
     risk_class: RiskClass
     evidence_required: bool
+    depends_on: tuple[str, ...]
+    preserve: tuple[str, ...]
+    source: ValueSource
+    execution_profiles: tuple[ExecutionProfile, ...]
+    result_slots: tuple[ResultSlotMetadata, ...]
 
 
 def _invalid_program() -> AdapterError:
@@ -99,6 +123,13 @@ def _invalid_program() -> AdapterError:
 def _freeze_bound_value(value: object) -> object:
     """Copy the already-sealed JSON-like command value into adapter ownership."""
 
+    if type(value) is BoundResultRef:
+        if type(value.value_shape) is not ValueShape or not _matches_value_shape(
+            MappingProxyType({"command_id": value.command_id, "slot": value.slot}),
+            ValueShape.RESULT_REF,
+        ):
+            raise _invalid_program()
+        return BoundResultRef(value.command_id, value.slot, value.value_shape)
     if type(value) is MappingProxyType:
         try:
             keys = tuple(value)
@@ -116,6 +147,100 @@ def _freeze_bound_value(value: object) -> object:
     raise _invalid_program()
 
 
+def _exactly_equal(left: object, right: object) -> bool:
+    """Compare sealed adapter data without Python's cross-type coercions."""
+
+    if type(left) is not type(right):
+        return False
+    if type(left) is MappingProxyType:
+        assert type(right) is MappingProxyType
+        try:
+            left_keys = tuple(left)
+            right_keys = tuple(right)
+            return left_keys == right_keys and all(
+                _exactly_equal(left[key], right[key]) for key in left_keys
+            )
+        except Exception:
+            return False
+    if type(left) is tuple:
+        assert type(right) is tuple
+        return len(left) == len(right) and all(
+            _exactly_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    if type(left) is BoundResultRef:
+        assert type(right) is BoundResultRef
+        return all(
+            _exactly_equal(left_item, right_item)
+            for left_item, right_item in zip(
+                (left.command_id, left.slot, left.value_shape),
+                (right.command_id, right.slot, right.value_shape),
+                strict=True,
+            )
+        )
+    if type(left) is ResultSlotMetadata:
+        assert type(right) is ResultSlotMetadata
+        return all(
+            _exactly_equal(left_item, right_item)
+            for left_item, right_item in zip(
+                (
+                    left.name,
+                    left.result_field,
+                    left.value_shape,
+                    left.enum_values,
+                    left.allowed_units,
+                ),
+                (
+                    right.name,
+                    right.result_field,
+                    right.value_shape,
+                    right.enum_values,
+                    right.allowed_units,
+                ),
+                strict=True,
+            )
+        )
+    if type(left) is _CommandSnapshot:
+        assert type(right) is _CommandSnapshot
+        return all(
+            _exactly_equal(left_item, right_item)
+            for left_item, right_item in zip(
+                (
+                    left.operation_id,
+                    left.operation,
+                    left.handler_name,
+                    left.handler_kwargs,
+                    left.risk_class,
+                    left.evidence_required,
+                    left.depends_on,
+                    left.preserve,
+                    left.source,
+                    left.execution_profiles,
+                    left.result_slots,
+                ),
+                (
+                    right.operation_id,
+                    right.operation,
+                    right.handler_name,
+                    right.handler_kwargs,
+                    right.risk_class,
+                    right.evidence_required,
+                    right.depends_on,
+                    right.preserve,
+                    right.source,
+                    right.execution_profiles,
+                    right.result_slots,
+                ),
+                strict=True,
+            )
+        )
+    if isinstance(left, (ExecutionProfile, RiskClass, ValueShape, ValueSource)):
+        return left is right
+    if left is None or type(left) in {str, int, float, bool}:
+        return left == right
+    return False
+
+
 def _snapshot_command(command: object) -> _CommandSnapshot:
     if type(command) is not BoundCommand:
         raise _invalid_program()
@@ -129,6 +254,8 @@ def _snapshot_command(command: object) -> _CommandSnapshot:
         source = command.source
         risk_class = command.risk_class
         evidence_required = command.evidence_required
+        execution_profiles = command.execution_profiles
+        result_slots = command.result_slots
     except Exception:
         raise _invalid_program() from None
 
@@ -139,8 +266,11 @@ def _snapshot_command(command: object) -> _CommandSnapshot:
         raise _invalid_program()
     if type(handler_kwargs) is not MappingProxyType:
         raise _invalid_program()
-    if type(depends_on) is not tuple or not all(
-        type(item) is str and bool(item.strip()) for item in depends_on
+    if (
+        type(depends_on) is not tuple
+        or not all(type(item) is str and bool(item.strip()) for item in depends_on)
+        or len(set(depends_on)) != len(depends_on)
+        or operation_id in depends_on
     ):
         raise _invalid_program()
     if type(preserve) is not tuple or not all(
@@ -150,6 +280,36 @@ def _snapshot_command(command: object) -> _CommandSnapshot:
     if type(source) is not ValueSource or type(risk_class) is not RiskClass:
         raise _invalid_program()
     if type(evidence_required) is not bool:
+        raise _invalid_program()
+    if (
+        type(execution_profiles) is not tuple
+        or not execution_profiles
+        or not all(type(item) is ExecutionProfile for item in execution_profiles)
+        or len(set(execution_profiles)) != len(execution_profiles)
+    ):
+        raise _invalid_program()
+    if type(result_slots) is not tuple or not all(
+        type(item) is ResultSlotMetadata for item in result_slots
+    ):
+        raise _invalid_program()
+    try:
+        frozen_result_slots = tuple(
+            ResultSlotMetadata(
+                item.name,
+                item.result_field,
+                item.value_shape,
+                item.enum_values,
+                item.allowed_units,
+            )
+            for item in result_slots
+        )
+    except Exception:
+        raise _invalid_program() from None
+    if (
+        len({item.name for item in frozen_result_slots}) != len(frozen_result_slots)
+        or len({item.result_field for item in frozen_result_slots})
+        != len(frozen_result_slots)
+    ):
         raise _invalid_program()
 
     frozen_kwargs = _freeze_bound_value(handler_kwargs)
@@ -161,6 +321,11 @@ def _snapshot_command(command: object) -> _CommandSnapshot:
         handler_kwargs=frozen_kwargs,
         risk_class=risk_class,
         evidence_required=evidence_required,
+        depends_on=depends_on,
+        preserve=preserve,
+        source=source,
+        execution_profiles=execution_profiles,
+        result_slots=frozen_result_slots,
     )
 
 
@@ -179,6 +344,15 @@ def _snapshot_program(program: object) -> tuple[_CommandSnapshot, ...]:
     snapshots = tuple(_snapshot_command(command) for command in commands)
     identifiers = tuple(command.operation_id for command in snapshots)
     if len(set(identifiers)) != len(identifiers):
+        raise _invalid_program()
+    try:
+        canonical = program._revalidate_source()
+        canonical_snapshots = tuple(_snapshot_command(command) for command in canonical.commands)
+    except AdapterError:
+        raise
+    except Exception:
+        raise _invalid_program() from None
+    if not _exactly_equal(snapshots, canonical_snapshots):
         raise _invalid_program()
     return snapshots
 
@@ -200,7 +374,13 @@ def _validated_revision(revision: object) -> str | None:
 def _freeze_plan(
     commands: tuple[_CommandSnapshot, ...],
     handlers: object,
+    execution_profile: object,
 ) -> tuple[_PlannedCommand, ...]:
+    if type(execution_profile) is not ExecutionProfile:
+        raise AdapterError(AdapterErrorCode.INVALID_EXECUTION_PROFILE)
+    if any(execution_profile not in command.execution_profiles for command in commands):
+        raise AdapterError(AdapterErrorCode.UNSUPPORTED_EXECUTION_PROFILE)
+    _validate_result_references(commands)
     if not isinstance(handlers, Mapping):
         raise AdapterError(AdapterErrorCode.INVALID_HANDLERS)
 
@@ -227,17 +407,62 @@ def _freeze_plan(
                 handler_kwargs=command.handler_kwargs,
                 risk_class=command.risk_class,
                 evidence_required=command.evidence_required,
+                depends_on=command.depends_on,
+                execution_profiles=command.execution_profiles,
+                result_slots=command.result_slots,
                 handler=handler,
             )
         )
     return tuple(plan)
 
 
-def _facts(command: _PlannedCommand) -> Mapping[str, object]:
+def _bound_result_refs(value: object) -> tuple[BoundResultRef, ...]:
+    if type(value) is BoundResultRef:
+        return (value,)
+    if type(value) is MappingProxyType:
+        return tuple(ref for item in value.values() for ref in _bound_result_refs(item))
+    if type(value) is tuple:
+        return tuple(ref for item in value for ref in _bound_result_refs(item))
+    return ()
+
+
+def _validate_result_references(commands: tuple[_CommandSnapshot, ...]) -> None:
+    closures: dict[str, frozenset[str]] = {}
+    slots_by_command: dict[str, Mapping[str, ResultSlotMetadata]] = {}
+    for command in commands:
+        closure: set[str] = set()
+        for dependency in command.depends_on:
+            inherited = closures.get(dependency)
+            if inherited is None:
+                raise _invalid_program()
+            closure.add(dependency)
+            closure.update(inherited)
+        closures[command.operation_id] = frozenset(closure)
+
+        for reference in _bound_result_refs(command.handler_kwargs):
+            if reference.command_id not in closure:
+                raise _invalid_program()
+            producer_slots = slots_by_command.get(reference.command_id)
+            if producer_slots is None:
+                raise _invalid_program()
+            slot = producer_slots.get(reference.slot)
+            if slot is None or slot.value_shape is not reference.value_shape:
+                raise _invalid_program()
+
+        slots_by_command[command.operation_id] = MappingProxyType(
+            {slot.name: slot for slot in command.result_slots}
+        )
+
+
+def _facts(
+    command: _PlannedCommand,
+    execution_profile: ExecutionProfile,
+) -> Mapping[str, object]:
     return {
         "operation": command.operation,
         "handler_name": command.handler_name,
         "risk_class": command.risk_class.value,
+        "execution_profile": execution_profile.value,
     }
 
 
@@ -287,23 +512,92 @@ def _with_execution_evidence(
     return NormalizedToolOutcome(result=enriched, diagnostic=outcome.diagnostic)
 
 
+def _resolve_bound_value(
+    value: object,
+    result_values: Mapping[str, Mapping[str, object]],
+) -> object:
+    if type(value) is BoundResultRef:
+        try:
+            return result_values[value.command_id][value.slot]
+        except Exception:
+            raise _invalid_program() from None
+    if type(value) is MappingProxyType:
+        return MappingProxyType(
+            {key: _resolve_bound_value(item, result_values) for key, item in value.items()}
+        )
+    if type(value) is tuple:
+        return tuple(_resolve_bound_value(item, result_values) for item in value)
+    return value
+
+
+def _resolve_handler_kwargs(
+    values: Mapping[str, Any],
+    result_values: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    return {key: _resolve_bound_value(value, result_values) for key, value in values.items()}
+
+
+def _extract_result_slots(
+    command: _PlannedCommand,
+    outcome: NormalizedToolOutcome,
+) -> Mapping[str, object] | None:
+    if not command.result_slots:
+        return MappingProxyType({})
+    value = outcome.result.value
+    if not isinstance(value, Mapping):
+        return None
+    extracted: dict[str, object] = {}
+    try:
+        for slot in command.result_slots:
+            item = value[slot.result_field]
+            if not _matches_value_shape(
+                item,
+                slot.value_shape,
+                enum_values=slot.enum_values,
+                allowed_units=slot.allowed_units,
+            ):
+                return None
+            extracted[slot.name] = item
+    except Exception:
+        return None
+    return MappingProxyType(extracted)
+
+
+def _invalid_result_slot_outcome(
+    outcome: NormalizedToolOutcome,
+) -> NormalizedToolOutcome:
+    result = outcome.result
+    return normalize_tool_result(
+        object(),
+        operation_id=result.operation_id,
+        elapsed_ms=result.elapsed_ms,
+        revision=result.revision,
+        facts=result.facts,
+        artifacts=result.artifacts,
+        warnings=result.warnings,
+    )
+
+
 def execute_validated_program(
     program: ValidatedProgram,
     handlers: Mapping[str, Callable[..., object]],
     *,
+    execution_profile: ExecutionProfile,
     revision: str | None = None,
 ) -> tuple[NormalizedToolOutcome, ...]:
     """Execute a sealed program once per command through a frozen handler plan."""
 
     commands = _snapshot_program(program)
     trusted_revision = _validated_revision(revision)
-    plan = _freeze_plan(commands, handlers)
+    plan = _freeze_plan(commands, handlers, execution_profile)
 
     outcomes: list[NormalizedToolOutcome] = []
+    result_values: dict[str, Mapping[str, object]] = {}
     for command in plan:
+        handler_kwargs = _resolve_handler_kwargs(command.handler_kwargs, result_values)
         started = _read_monotonic_ns()
         try:
-            raw = command.handler(**command.handler_kwargs)
+            raw = command.handler(**handler_kwargs)
         except BaseException as exc:
             if not isinstance(exc, Exception):
                 try:
@@ -317,7 +611,7 @@ def execute_validated_program(
                 operation_id=command.operation_id,
                 elapsed_ms=_elapsed_ms(started, finished),
                 revision=trusted_revision,
-                facts=_facts(command),
+                facts=_facts(command, execution_profile),
             )
         else:
             finished = _read_monotonic_ns()
@@ -326,9 +620,15 @@ def execute_validated_program(
                 operation_id=command.operation_id,
                 elapsed_ms=_elapsed_ms(started, finished),
                 revision=trusted_revision,
-                facts=_facts(command),
+                facts=_facts(command, execution_profile),
             )
 
+        if outcome.result.ok:
+            slots = _extract_result_slots(command, outcome)
+            if slots is None:
+                outcome = _invalid_result_slot_outcome(outcome)
+            else:
+                result_values[command.operation_id] = slots
         if outcome.result.ok and command.evidence_required:
             outcome = _with_execution_evidence(outcome, command.operation_id)
         outcomes.append(outcome)

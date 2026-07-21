@@ -16,6 +16,7 @@ from vibecad.execution.registry import (
     FieldMetadata,
     OperationMetadata,
     OperationRegistry,
+    ResultSlotMetadata,
     RiskClass,
     ValueShape,
 )
@@ -103,19 +104,50 @@ def _custom_registry(
     )
 
 
+def _label_registry() -> OperationRegistry:
+    return OperationRegistry(
+        (
+            OperationMetadata(
+                operation="set_label",
+                handler_name="set_label",
+                risk_class=RiskClass.MUTATING,
+                evidence_required=True,
+                argument_fields=(
+                    FieldMetadata("name", "name", ValueShape.NONBLANK_STRING),
+                ),
+            ),
+        )
+    )
+
+
+def _dimension_registry() -> OperationRegistry:
+    return OperationRegistry(
+        (
+            OperationMetadata(
+                operation="set_dimension",
+                handler_name="set_dimension",
+                risk_class=RiskClass.MUTATING,
+                evidence_required=True,
+                argument_fields=(
+                    FieldMetadata("parameter", "parameter", ValueShape.NONBLANK_STRING),
+                    FieldMetadata("value", "value", ValueShape.POSITIVE_NUMBER),
+                ),
+            ),
+        )
+    )
+
+
 def test_every_default_operation_is_bound_for_execution_without_invocation():
     program = _program(
-        _command("document", "create_document", args={"name": "Bracket"}),
         _command(
             "box",
             "create_box",
             args={"length": 10, "width": 5.5, "height": 2, "position": [-1, 0, 3]},
-            depends_on=("document",),
         ),
         _command(
             "modify",
             "modify_parameter",
-            target={"object": "Box"},
+            target={"object": {"command_id": "box", "slot": "object"}},
             args={"parameter": "Length", "value": 12},
             depends_on=("box",),
             preserve=("width", "height"),
@@ -127,33 +159,194 @@ def test_every_default_operation_is_bound_for_execution_without_invocation():
 
     assert validated.program is program
     assert [command.id for command in validated.commands] == [
-        "document",
         "box",
         "modify",
         "inspect",
     ]
     assert [command.handler_name for command in validated] == [
-        "new_document",
         "add_box",
         "modify_part",
         "describe_part",
     ]
-    assert dict(validated.commands[0].handler_kwargs) == {"name": "Bracket"}
-    assert dict(validated.commands[1].handler_kwargs) == {
+    assert dict(validated.commands[0].handler_kwargs) == {
         "length": 10,
         "width": 5.5,
         "height": 2,
         "position": (-1, 0, 3),
     }
-    assert dict(validated.commands[2].handler_kwargs) == {
-        "name": "Box",
+    assert validated.commands[1].handler_kwargs["name"].command_id == "box"
+    assert validated.commands[1].handler_kwargs["name"].slot == "object"
+    assert dict(validated.commands[1].handler_kwargs) == {
+        "name": validated.commands[1].handler_kwargs["name"],
         "parameter": "Length",
         "value": 12,
     }
-    assert dict(validated.commands[3].handler_kwargs) == {}
-    assert validated.commands[2].preserve == ("width", "height")
-    assert validated.commands[3].risk_class is RiskClass.READ_ONLY
-    assert validated.commands[3].evidence_required is False
+    assert dict(validated.commands[2].handler_kwargs) == {}
+    assert validated.commands[1].preserve == ("width", "height")
+    assert validated.commands[2].risk_class is RiskClass.READ_ONLY
+    assert validated.commands[2].evidence_required is False
+
+
+def test_result_ref_binds_a_declared_dependency_slot_without_resolving_it():
+    program = _program(
+        _command(
+            "box",
+            "create_box",
+            args={"length": 10, "width": 5, "height": 2},
+        ),
+        _command(
+            "modify",
+            "modify_parameter",
+            target={"object": {"command_id": "box", "slot": "object"}},
+            args={"parameter": "Length", "value": 12},
+            depends_on=("box",),
+        ),
+    )
+
+    validated = validate_model_program(program)
+    bound_ref = validated.commands[1].handler_kwargs["name"]
+
+    assert type(bound_ref).__name__ == "BoundResultRef"
+    assert bound_ref.command_id == "box"
+    assert bound_ref.slot == "object"
+
+
+def test_create_document_is_no_longer_a_model_program_operation():
+    _error(
+        _program(_command("document", "create_document", args={"name": "Part"})),
+        ProgramErrorCode.UNKNOWN_OPERATION,
+        "/operations/0/op",
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"command_id": "box"},
+        {"command_id": "box", "slot": "object", "extra": True},
+        {"command_id": "missing", "slot": "object"},
+        {"command_id": "box", "slot": "missing"},
+        "Box",
+    ],
+)
+def test_result_ref_rejects_malformed_unknown_and_injected_values(target):
+    program = _program(
+        _command(
+            "box",
+            "create_box",
+            args={"length": 10, "width": 5, "height": 2},
+        ),
+        _command(
+            "modify",
+            "modify_parameter",
+            target={"object": target},
+            args={"parameter": "Length", "value": 12},
+            depends_on=("box",),
+        ),
+    )
+
+    _error(
+        program,
+        ProgramErrorCode.INVALID_RESULT_REFERENCE,
+        "/operations/1/target/object",
+    )
+
+
+def test_result_ref_requires_a_prior_transitive_dependency():
+    valid = _program(
+        _command(
+            "box",
+            "create_box",
+            args={"length": 10, "width": 5, "height": 2},
+        ),
+        _command("inspect", depends_on=("box",)),
+        _command(
+            "modify",
+            "modify_parameter",
+            target={"object": {"command_id": "box", "slot": "object"}},
+            args={"parameter": "Length", "value": 12},
+            depends_on=("inspect",),
+        ),
+    )
+    validated = validate_model_program(valid)
+    assert validated.commands[2].handler_kwargs["name"].command_id == "box"
+
+    non_dependency = _program(
+        valid.operations[0],
+        _command(
+            "modify",
+            "modify_parameter",
+            target={"object": {"command_id": "box", "slot": "object"}},
+            args={"parameter": "Length", "value": 12},
+        ),
+    )
+    _error(
+        non_dependency,
+        ProgramErrorCode.INVALID_RESULT_REFERENCE,
+        "/operations/1/target/object",
+    )
+
+    forward = _program(
+        _command(
+            "modify",
+            "modify_parameter",
+            target={"object": {"command_id": "box", "slot": "object"}},
+            args={"parameter": "Length", "value": 12},
+            depends_on=("box",),
+        ),
+        valid.operations[0],
+    )
+    _error(
+        forward,
+        ProgramErrorCode.INVALID_RESULT_REFERENCE,
+        "/operations/0/target/object",
+    )
+
+
+def test_result_ref_rejects_declared_slot_shape_mismatch():
+    registry = OperationRegistry(
+        (
+            OperationMetadata(
+                operation="measure_value",
+                handler_name="measure_value",
+                risk_class=RiskClass.READ_ONLY,
+                evidence_required=False,
+                result_slots=(
+                    ResultSlotMetadata("measurement", "value", ValueShape.FINITE_NUMBER),
+                ),
+            ),
+            OperationMetadata(
+                operation="set_label",
+                handler_name="set_label",
+                risk_class=RiskClass.MUTATING,
+                evidence_required=True,
+                argument_fields=(
+                    FieldMetadata(
+                        "name",
+                        "name",
+                        ValueShape.RESULT_REF,
+                        referenced_value_shape=ValueShape.NONBLANK_STRING,
+                    ),
+                ),
+            ),
+        )
+    )
+    program = _program(
+        _command("measure", "measure_value"),
+        _command(
+            "label",
+            "set_label",
+            args={"name": {"command_id": "measure", "slot": "measurement"}},
+            depends_on=("measure",),
+        ),
+    )
+
+    _error(
+        program,
+        ProgramErrorCode.INVALID_RESULT_REFERENCE,
+        "/operations/1/args/name",
+        registry=registry,
+    )
 
 
 def test_topological_order_uses_declaration_index_as_the_ready_tie_break():
@@ -314,8 +507,7 @@ def test_extra_fields_are_sorted_and_use_escaped_exact_paths():
         _program(
             _command(
                 "modify",
-                "modify_parameter",
-                target={"object": "Box"},
+                "set_dimension",
                 args={
                     "parameter": "Length",
                     "value": 10,
@@ -326,6 +518,7 @@ def test_extra_fields_are_sorted_and_use_escaped_exact_paths():
         ),
         ProgramErrorCode.EXTRA_FIELD,
         "/operations/0/args/unit~1name~0",
+        registry=_dimension_registry(),
     )
 
 
@@ -334,22 +527,23 @@ def test_unit_is_rejected_as_an_extra_field_under_r_b10():
         _program(
             _command(
                 "modify",
-                "modify_parameter",
-                target={"object": "Box"},
+                "set_dimension",
                 args={"parameter": "Length", "value": 10, "unit": "mm"},
             )
         ),
         ProgramErrorCode.EXTRA_FIELD,
         "/operations/0/args/unit",
+        registry=_dimension_registry(),
     )
 
 
 def test_hostile_extra_field_uses_safe_group_path_and_is_not_reflected():
     hostile = "unknown\nFORGED"
     error = _error(
-        _program(_command("document", "create_document", args={"name": "Part", hostile: 1})),
+        _program(_command("label", "set_label", args={"name": "Part", hostile: 1})),
         ProgramErrorCode.EXTRA_FIELD,
         "/operations/0/args",
+        registry=_label_registry(),
     )
 
     assert hostile not in str(error)
@@ -381,9 +575,10 @@ def test_forged_non_string_field_keys_fail_closed_at_the_group_path(group, field
 @pytest.mark.parametrize("value", ["", "   ", 1, True, None])
 def test_nonblank_string_shape_is_enforced(value):
     _error(
-        _program(_command("document", "create_document", args={"name": value})),
+        _program(_command("label", "set_label", args={"name": value})),
         ProgramErrorCode.INVALID_VALUE_SHAPE,
         "/operations/0/args/name",
+        registry=_label_registry(),
     )
 
 
@@ -393,13 +588,13 @@ def test_positive_number_shape_excludes_non_positive_boolean_and_other_types(val
         _program(
             _command(
                 "modify",
-                "modify_parameter",
-                target={"object": "Box"},
+                "set_dimension",
                 args={"parameter": "Length", "value": value},
             )
         ),
         ProgramErrorCode.INVALID_VALUE_SHAPE,
         "/operations/0/args/value",
+        registry=_dimension_registry(),
     )
 
 
@@ -407,8 +602,7 @@ def test_positive_number_shape_excludes_non_positive_boolean_and_other_types(val
 def test_non_finite_positive_numbers_are_rejected_even_for_forged_contracts(value):
     command = _command(
         "modify",
-        "modify_parameter",
-        target={"object": "Box"},
+        "set_dimension",
         args={"parameter": "Length", "value": 1},
     )
     object.__setattr__(
@@ -421,6 +615,7 @@ def test_non_finite_positive_numbers_are_rejected_even_for_forged_contracts(valu
         _program(command),
         ProgramErrorCode.INVALID_VALUE_SHAPE,
         "/operations/0/args/value",
+        registry=_dimension_registry(),
     )
 
 
@@ -491,12 +686,68 @@ def test_boolean_shape_rejects_integer_string_and_null(value):
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "accepted", "rejected"),
+    [
+        (FieldMetadata("value", "value", ValueShape.INTEGER), -2, True),
+        (FieldMetadata("value", "value", ValueShape.FINITE_NUMBER), -2.5, "inf"),
+        (
+            FieldMetadata(
+                "value",
+                "value",
+                ValueShape.ENUM,
+                enum_values=("x", "y", "z"),
+            ),
+            "z",
+            "w",
+        ),
+        (FieldMetadata("value", "value", ValueShape.VECTOR2), (-1, 2.5), (1, 2, 3)),
+        (
+            FieldMetadata(
+                "value",
+                "value",
+                ValueShape.QUANTITY,
+                allowed_units=("mm", "deg"),
+            ),
+            {"value": 12.5, "unit": "mm"},
+            {"value": 12.5, "unit": "cm"},
+        ),
+    ],
+)
+def test_extended_closed_value_shapes(field, accepted, rejected):
+    registry = OperationRegistry(
+        (
+            OperationMetadata(
+                operation="set_value",
+                handler_name="set_value",
+                risk_class=RiskClass.MUTATING,
+                evidence_required=True,
+                argument_fields=(field,),
+            ),
+        )
+    )
+
+    validated = validate_model_program(
+        _program(_command("set", "set_value", args={"value": accepted})),
+        registry=registry,
+    )
+    assert validated.commands[0].handler_kwargs["value"] is not None
+
+    _error(
+        _program(_command("set", "set_value", args={"value": rejected})),
+        ProgramErrorCode.INVALID_VALUE_SHAPE,
+        "/operations/0/args/value",
+        registry=registry,
+    )
+
+
 def test_wrong_shape_errors_do_not_reflect_hostile_field_values():
     hostile = "secret\nFORGED LOG LINE"
     error = _error(
-        _program(_command("document", "create_document", args={"name": {hostile: 1}})),
+        _program(_command("label", "set_label", args={"name": {hostile: 1}})),
         ProgramErrorCode.INVALID_VALUE_SHAPE,
         "/operations/0/args/name",
+        registry=_label_registry(),
     )
 
     assert hostile not in str(error)

@@ -107,11 +107,14 @@ JOURNAL_CHECKSUM_DOMAIN = b"vibecad-commit-journal-v1\0"
 
 EXPECTED_EXECUTION_EXPORTS = [
     "DEFAULT_OPERATION_REGISTRY",
+    "ExecutionProfile",
     "FieldMetadata",
     "OperationMetadata",
     "OperationRegistry",
     "RegistryError",
     "RegistryErrorCode",
+    "ResourceBudget",
+    "ResultSlotMetadata",
     "RiskClass",
     "ValueShape",
 ]

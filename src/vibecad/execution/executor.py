@@ -34,6 +34,7 @@ from vibecad.execution.candidate import (
     CheckpointedCandidate,
     SealedCandidate,
 )
+from vibecad.execution.registry import ExecutionProfile
 from vibecad.execution.results import NormalizedToolOutcome
 from vibecad.execution.revisions import (
     LocalRevisionStore,
@@ -45,7 +46,6 @@ from vibecad.execution.revisions import (
 from vibecad.feedback.text import describe_shape as _describe_shape
 from vibecad.freecad_env import silence_fd1 as _silence_fd1
 from vibecad.tools.modeling import add_box as _add_box
-from vibecad.tools.modeling import new_document as _new_document
 from vibecad.tools.modify import modify_part as _modify_part
 from vibecad.validation import (
     ArtifactObservation,
@@ -425,17 +425,33 @@ class InProcessCadExecutor(CadSnapshotPort):
 
         if type(program) is not ModelProgram:
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
-        return validate_model_program(program)
+        validated = validate_model_program(program)
+        if any(
+            ExecutionProfile.HEADLESS not in command.execution_profiles
+            for command in validated.commands
+        ):
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+        return validated
 
     def create_empty(self, *, revision_id: str) -> object:
-        """Create an isolated Session without opening a document."""
+        """Create an isolated Session and trusted revision-owned document."""
 
         if type(revision_id) is not str or _REVISION_PATTERN.fullmatch(revision_id) is None:
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
         try:
-            return _Session()
+            session = _Session()
         except Exception:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+        try:
+            suffix = revision_id.removeprefix("revision_")
+            session.open_document(f"VibeCADCandidate_{suffix}")
+        except Exception:
+            try:
+                session.close_document()
+            except Exception:
+                pass
+            raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+        return session
 
     def load_fcstd(self, path: Path) -> object:
         """Load one validated FCStd into a newly owned Session."""
@@ -510,7 +526,7 @@ class InProcessCadExecutor(CadSnapshotPort):
         program: ValidatedProgram,
         candidate: ActiveCandidate,
     ) -> tuple[NormalizedToolOutcome, ...]:
-        """Execute one authentic program using the four fixed CAD bindings."""
+        """Execute one authentic program using the three fixed CAD bindings."""
 
         if type(candidate) is not ActiveCandidate:
             raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
@@ -523,7 +539,6 @@ class InProcessCadExecutor(CadSnapshotPort):
                 raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
             session = candidate.binding.session
             handlers = {
-                "new_document": partial(_new_document, session),
                 "add_box": partial(_add_box, session),
                 "modify_part": partial(_modify_part, session),
                 "describe_part": partial(_describe_part, session),
@@ -536,6 +551,7 @@ class InProcessCadExecutor(CadSnapshotPort):
             return _execute_validated_program(
                 program,
                 handlers,
+                execution_profile=ExecutionProfile.HEADLESS,
                 revision=candidate.binding.revision_id,
             )
         except _AdapterError:

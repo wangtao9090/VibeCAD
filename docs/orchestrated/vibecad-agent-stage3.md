@@ -474,6 +474,9 @@ Stage 3 的全局机械 allowlist 为以下 repository-relative 路径；每个 
 | S3-RES-04 | face/edge SelectorV1 Level B 未实现 | P1 | planned | 歧义、高亮、recompute/reload matrix 通过 |
 | S3-RES-05 | same-process FreeCAD 尚无独立 crash containment | P3 | defer | independent Worker 和 crash recovery gate 通过 |
 | S3-RES-06 | 第二个兼容 MCP 宿主的授权与可用性未在本阶段证明 | release acceptance | defer | 同一 canonical program 的跨宿主 conformance 通过 |
+| S3-RES-07 | S3-1 ResultRef 只在单次 program run 内稳定，尚不能引用已有 FCStd 对象 | S3-2 | planned | SelectorV1 Level A、重算与重载门禁通过 |
+| S3-RES-08 | resource budget、FreeCAD version range 与 GUI main-thread 仍是声明性 metadata | S3-6 | planned | CadExecutionPort 在 handler 前强制预算、版本与线程约束 |
+| S3-RES-09 | offscreen/interactive profile 已有封闭枚举，但当前真实 executor 只证明 headless | G0/G1 | planned | capability discovery 与对应 GUI worker/Workbench E2E 通过 |
 
 ## 8.3 Append-only execution ledger
 
@@ -604,6 +607,49 @@ Baseline evidence：第一次无 `PYTHONPATH=src` 的命令以四个 `ModuleNotF
    dependency result slots, profile selection is explicit, no silent GUI/headless fallback。
 4. **Recovery:** verify branch `codex/agent-stage3`, HEAD, worktree and S3-1A allowlist before
    editing；do not relaunch any command whose original session is still live。
+
+### S3-1 completion record
+
+实际修改范围严格落在 Packet S3-1A allowlist：
+
+- `src/vibecad/execution/__init__.py`
+- `src/vibecad/execution/adapter.py`
+- `src/vibecad/execution/executor.py`
+- `src/vibecad/execution/registry.py`
+- `src/vibecad/workflow/program.py`
+- `tests/test_candidate_revision.py`
+- `tests/test_execution_adapter.py`
+- `tests/test_execution_registry.py`
+- `tests/test_model_program.py`
+- `tests/test_program_executor.py`
+- `tests/test_revision_store.py`
+- `tests/test_task_kernel_integration.py`
+- `docs/orchestrated/vibecad-agent-stage3.md`
+
+Genuine RED 以 3 个目标失败证明旧实现仍暴露 `create_document`、把 result ref 当普通字符串、
+且空 candidate 未创建 trusted document；setup/import failure 未计入 RED。实现后的权威
+registry 重绑定使用 `ValidatedProgram` 自身封存的 authority，并用 exact-type canonical
+snapshot 在任何 handler、mapping 或 clock 访问前拒绝 metadata 改写，同时保留 custom
+operation registry 的扩展路径。
+
+| Entry | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| S3-E02 / 2026-07-21T03:39:48Z | S3-A01；S3-1A；两次独立只读正确性 review PASS | S3-1 semantic commit containing this snapshot / not authorized | RED 3 targeted failures；focused 321 passed, 5 deselected；full 2315 passed, 85 deselected, 2 existing warnings；managed FreeCAD 5 passed, 73 deselected；Ruff all passed；diff check passed | S3-RES-01, S3-RES-07..09 | S3-S02 | completed |
+
+### Recovery snapshot S3-S02
+
+1. **Completed:** S3-1 typed result refs、execution profiles、trusted empty-document bootstrap、
+   custom registry authority preservation 与 fail-closed canonical rebinding 已完成；两位未参与
+   写入的 reviewer 均 PASS；本 snapshot 与生产改动由同一个本地语义 commit 固化。
+2. **Evidence:** focused 321 passed / 5 deselected；全仓 2315 passed / 85 deselected / 2 个
+   既有 fork deprecation warnings；真实 managed FreeCAD 5 passed / 73 deselected；全仓 Ruff、
+   `git diff --check` 均通过；无活跃测试 session。
+3. **Next:** 从已提交 S3-1 HEAD 签发 S3-2 packet；先写 SelectorV1 Level A 与 preservation
+   的 genuine RED，再实现 object/feature UUID、per-object observation、recompute/reload gate；
+   不在 S3-2 扩大到 face/edge Level B。
+4. **Recovery:** verify branch `codex/agent-stage3`、最新 commit subject
+   `feat(execution): add typed result references and execution profiles` 与 clean worktree；push 仍
+   未授权；若 HEAD 或 worktree 不符，先按 named-file diff 审计，禁止重复执行已完成的 S3-1。
 
 ## 9. 用户决策与持续执行规则
 

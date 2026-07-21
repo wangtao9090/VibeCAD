@@ -171,7 +171,7 @@ def acceptance(expected_volume: float) -> AcceptanceSpec:
 
 
 def program(base_revision: str) -> ModelProgram:
-    target = "MissingBox" if CASE == "execution_failure" else "Box"
+    parameter = "missing_parameter" if CASE == "execution_failure" else "length"
     expected_volume = 7201.0 if CASE == "verification_failure" else 7200.0
     return ModelProgram(
         task_id=TASK_ID,
@@ -185,8 +185,8 @@ def program(base_revision: str) -> ModelProgram:
             command(
                 "modify",
                 "modify_parameter",
-                target={"object": target},
-                args={"parameter": "length", "value": 12},
+                target={"object": {"command_id": "box", "slot": "object"}},
+                args={"parameter": parameter, "value": 12},
                 depends_on=("box",),
             ),
             command("inspect", "inspect_model", depends_on=("modify",)),
@@ -238,28 +238,37 @@ revision_store = LocalRevisionStore(
 task_store = TaskRunStore(tasks_root, manager, trust=TaskStoreRootTrust.TRUSTED_LOCAL)
 executor = InProcessCadExecutor(store=revision_store)
 
-seed_session = Session()
+seed_session = None
 baseline_session = None
 probe_session = None
 slot = None
 payload = {}
 try:
-    new_document(seed_session, name="TaskKernelBaseline")
-    baseline_source = ROOT / "baseline.FCStd"
-    executor.checkpoint_fcstd(seed_session, baseline_source)
-    baseline_source.chmod(0o600)
-    with manager.acquire_project_write(PROJECT_ID) as lease:
-        head_before = revision_store.import_trusted_fcstd(
-            PROJECT_ID,
-            baseline_source,
-            lease,
-        )
-    base_ref_before = revision_store.load_revision(PROJECT_ID, head_before.revision_id)
-    base_model_path = revision_store.revision_model_path(PROJECT_ID, head_before.revision_id)
-    base_digest_before = sha256(base_model_path)
-    executor.close(seed_session)
-    seed_session = None
-    baseline_session = executor.load_fcstd(base_model_path)
+    if CASE == "empty_success":
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            head_before = revision_store.initialize_empty_project(PROJECT_ID, lease)
+        base_ref_before = revision_store.load_revision(PROJECT_ID, head_before.revision_id)
+        base_model_path = None
+        base_digest_before = None
+        baseline_session = executor.create_empty(revision_id=head_before.revision_id)
+    else:
+        seed_session = Session()
+        new_document(seed_session, name="TaskKernelBaseline")
+        baseline_source = ROOT / "baseline.FCStd"
+        executor.checkpoint_fcstd(seed_session, baseline_source)
+        baseline_source.chmod(0o600)
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            head_before = revision_store.import_trusted_fcstd(
+                PROJECT_ID,
+                baseline_source,
+                lease,
+            )
+        base_ref_before = revision_store.load_revision(PROJECT_ID, head_before.revision_id)
+        base_model_path = revision_store.revision_model_path(PROJECT_ID, head_before.revision_id)
+        base_digest_before = sha256(base_model_path)
+        executor.close(seed_session)
+        seed_session = None
+        baseline_session = executor.load_fcstd(base_model_path)
 
     baseline_binding = SessionBinding(
         project_id=PROJECT_ID,
@@ -294,7 +303,7 @@ try:
     task = terminal.task_run
     head_after = revision_store.load_head(PROJECT_ID)
     base_ref_after = revision_store.load_revision(PROJECT_ID, head_before.revision_id)
-    base_digest_after = sha256(base_model_path)
+    base_digest_after = None if base_model_path is None else sha256(base_model_path)
     current_binding = slot.current()
 
     candidate_ref = None
@@ -356,10 +365,14 @@ try:
         probe_session = executor.load_fcstd(candidate_model)
         reload_geometry = geometry(probe_session)
 
-    slot_geometry = geometry(current_binding.session) if CASE == "success" else None
+    slot_geometry = (
+        geometry(current_binding.session)
+        if CASE in {"success", "empty_success"}
+        else None
+    )
 
     baseline_usable = None
-    if CASE != "success":
+    if CASE not in {"success", "empty_success"}:
         current_binding.session.doc.recompute()
         baseline_usable = (
             current_binding is baseline_binding
@@ -400,6 +413,7 @@ try:
         "base_head": head_before.to_mapping(),
         "final_head": head_after.to_mapping(),
         "base_revision_unchanged": base_ref_before == base_ref_after,
+        "base_model_was_empty": base_ref_before.model is None,
         "base_model_digest_unchanged": base_digest_before == base_digest_after,
         "candidate_revision": task.candidate_revision,
         "committed_revision": task.committed_revision,
@@ -560,6 +574,28 @@ def test_real_task_kernel_commits_verified_candidate(
     assert len(payload["verdicts"]) == 10
     assert {item["outcome"] for item in payload["verdicts"]} == {"pass"}
     assert [item["format"] for item in payload["artifacts"]] == ["fcstd", "step"]
+    _assert_artifact_lineage(payload)
+    _assert_box_geometry(payload["slot_geometry"])
+    _assert_box_geometry(payload["reload_geometry"])
+    assert payload["transitions"][-1] == "commit"
+    _assert_layout(payload, journal_state="committed", manifest_count=2)
+
+
+@pytest.mark.slow
+def test_real_task_kernel_bootstraps_empty_project_and_resolves_result_ref(
+    existing_freecad_python: str,
+    tmp_path: Path,
+) -> None:
+    payload = _run_case(existing_freecad_python, tmp_path, "empty_success")
+    assert payload["base_model_was_empty"] is True
+    assert payload["status"] == "succeeded"
+    assert payload["candidate_revision"] == payload["committed_revision"]
+    assert payload["candidate_revision"] == payload["final_head"]["revision_id"]
+    assert payload["slot_is_baseline"] is False
+    assert payload["step_oks"] == [True, True, True]
+    assert payload["step_operations"] == ["box", "modify", "inspect"]
+    assert payload["step_values"][0]["name"] == "Box"
+    assert payload["step_values"][1]["volume"] == pytest.approx(7200.0)
     _assert_artifact_lineage(payload)
     _assert_box_geometry(payload["slot_geometry"])
     _assert_box_geometry(payload["reload_geometry"])

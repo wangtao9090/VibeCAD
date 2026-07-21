@@ -100,11 +100,16 @@ class _FakeSession:
         self.shape = shape or _FakeShape()
         self.persist_calls = 0
         self.loaded: list[Path] = []
+        self.opened: list[str] = []
         self.close_calls = 0
         self.shape_calls = 0
 
     def load_document(self, path: Path) -> object:
         self.loaded.append(path)
+        return self.doc
+
+    def open_document(self, name: str) -> object:
+        self.opened.append(name)
         return self.doc
 
     def persist_state(self) -> None:
@@ -232,17 +237,15 @@ def _program() -> ModelProgram:
         task_id="task-executor",
         base_revision=BASE_REVISION,
         operations=(
-            _command("document", "create_document", args={"name": "ExecutorDoc"}),
             _command(
                 "box",
                 "create_box",
                 args={"length": 10, "width": 20, "height": 30},
-                depends_on=("document",),
             ),
             _command(
                 "modify",
                 "modify_parameter",
-                target={"object": "Box"},
+                target={"object": {"command_id": "box", "slot": "object"}},
                 args={"parameter": "length", "value": 12},
                 depends_on=("box",),
             ),
@@ -338,7 +341,6 @@ def test_validate_program_reuses_authentic_validator() -> None:
     assert type(validated) is ValidatedProgram
     validated.require_authentic()
     assert tuple(command.handler_name for command in validated.commands) == (
-        "new_document",
         "add_box",
         "modify_part",
         "describe_part",
@@ -368,6 +370,7 @@ def test_create_load_checkpoint_and_close_use_public_session_surface(
     executor.close(loaded)
 
     assert empty is made[0]
+    assert made[0].opened == ["VibeCADCandidate_11111111111111111111111111111111"]
     assert loaded is made[1]
     assert made[1].loaded == [source]
     assert made[1].doc.recompute_calls == 1
@@ -382,6 +385,81 @@ def test_create_load_checkpoint_and_close_use_public_session_surface(
     if os.name == "posix":
         assert checkpoint.stat().st_mode & 0o777 == 0o600
     assert made[1].close_calls == 1
+
+
+def test_create_empty_bootstraps_a_trusted_document_outside_the_model_program(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EmptySession:
+        def __init__(self) -> None:
+            self.close_calls = 0
+            self.opened: list[str] = []
+
+        def open_document(self, name: str) -> object:
+            self.opened.append(name)
+            return object()
+
+        def close_document(self) -> None:
+            self.close_calls += 1
+
+    session = EmptySession()
+    monkeypatch.setattr(executor_module, "_Session", lambda: session)
+
+    created = InProcessCadExecutor(store=_store()).create_empty(
+        revision_id=CANDIDATE_REVISION,
+    )
+
+    assert created is session
+    assert session.opened == [
+        "VibeCADCandidate_11111111111111111111111111111111",
+    ]
+    assert session.close_calls == 0
+
+
+def test_create_empty_closes_failed_bootstrap_and_redacts_runtime_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenSession:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def open_document(self, name: str) -> object:
+            del name
+            raise RuntimeError("secret-bootstrap-detail")
+
+        def close_document(self) -> None:
+            self.close_calls += 1
+
+    session = BrokenSession()
+    monkeypatch.setattr(executor_module, "_Session", lambda: session)
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).create_empty(
+            revision_id=CANDIDATE_REVISION,
+        )
+
+    assert caught.value.code is ExecutorErrorCode.CAD_FAILURE
+    assert "secret" not in str(caught.value)
+    assert session.close_calls == 1
+
+
+def test_create_empty_rejects_invalid_revision_before_constructing_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def forbidden() -> object:
+        nonlocal calls
+        calls += 1
+        return object()
+
+    monkeypatch.setattr(executor_module, "_Session", forbidden)
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).create_empty(revision_id="untrusted")
+
+    assert caught.value.code is ExecutorErrorCode.INVALID_INPUT
+    assert calls == 0
 
 
 def test_checkpoint_rejects_silent_save_noop_and_preserves_existing_candidate(
@@ -528,13 +606,9 @@ def test_execute_program_binds_fixed_handlers_once_and_preserves_order(
 ) -> None:
     calls: list[tuple[str, object]] = []
 
-    def new_document(session: object, **kwargs: object) -> dict[str, object]:
-        calls.append(("new_document", (session, kwargs)))
-        return {"ok": True}
-
     def add_box(session: object, **kwargs: object) -> dict[str, object]:
         calls.append(("add_box", (session, kwargs)))
-        return {"ok": True}
+        return {"ok": True, "name": "Box"}
 
     def modify_part(session: object, **kwargs: object) -> dict[str, object]:
         calls.append(("modify_part", (session, kwargs)))
@@ -544,7 +618,6 @@ def test_execute_program_binds_fixed_handlers_once_and_preserves_order(
         calls.append(("describe_part", session))
         return {"ok": True, "untrusted": "never acceptance evidence"}
 
-    monkeypatch.setattr(executor_module, "_new_document", new_document)
     monkeypatch.setattr(executor_module, "_add_box", add_box)
     monkeypatch.setattr(executor_module, "_modify_part", modify_part)
     monkeypatch.setattr(executor_module, "_describe_part", describe_part)
@@ -558,24 +631,22 @@ def test_execute_program_binds_fixed_handlers_once_and_preserves_order(
     )
 
     assert tuple(name for name, _ in calls) == (
-        "new_document",
         "add_box",
         "modify_part",
         "describe_part",
     )
-    assert len(outcomes) == 4
+    assert len(outcomes) == 3
     assert all(outcome.result.ok for outcome in outcomes)
     assert all(outcome.result.revision == CANDIDATE_REVISION for outcome in outcomes)
     assert all(
         (payload[0] if type(payload) is tuple else payload) is session for _, payload in calls
     )
-    assert calls[0][1][1] == {"name": "ExecutorDoc"}  # type: ignore[index]
-    assert calls[1][1][1] == {  # type: ignore[index]
+    assert calls[0][1][1] == {  # type: ignore[index]
         "length": 10,
         "width": 20,
         "height": 30,
     }
-    assert calls[2][1][1] == {  # type: ignore[index]
+    assert calls[1][1][1] == {  # type: ignore[index]
         "name": "Box",
         "parameter": "length",
         "value": 12,
@@ -594,7 +665,6 @@ def test_execute_preflights_all_fixed_handlers_before_first_cad_call(
         calls += 1
         return {"ok": True}
 
-    monkeypatch.setattr(executor_module, "_new_document", forbidden)
     monkeypatch.setattr(executor_module, "_add_box", forbidden)
     monkeypatch.setattr(executor_module, "_modify_part", forbidden)
     monkeypatch.setattr(executor_module, "_describe_part", None)
@@ -614,12 +684,7 @@ def test_execute_program_stops_on_first_failure_without_retry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    calls = {"document": 0, "box": 0, "modify": 0, "inspect": 0}
-
-    def document(session: object, **kwargs: object) -> dict[str, bool]:
-        del session, kwargs
-        calls["document"] += 1
-        return {"ok": True}
+    calls = {"box": 0, "modify": 0, "inspect": 0}
 
     def box(session: object, **kwargs: object) -> object:
         del session, kwargs
@@ -630,7 +695,6 @@ def test_execute_program_stops_on_first_failure_without_retry(
         del args, kwargs
         raise AssertionError("execution did not stop")
 
-    monkeypatch.setattr(executor_module, "_new_document", document)
     monkeypatch.setattr(executor_module, "_add_box", box)
     monkeypatch.setattr(executor_module, "_modify_part", forbidden)
     monkeypatch.setattr(executor_module, "_describe_part", forbidden)
@@ -641,8 +705,8 @@ def test_execute_program_stops_on_first_failure_without_retry(
         candidate=_active(_FakeSession(), tmp_path),
     )
 
-    assert calls == {"document": 1, "box": 1, "modify": 0, "inspect": 0}
-    assert len(outcomes) == 2
+    assert calls == {"box": 1, "modify": 0, "inspect": 0}
+    assert len(outcomes) == 1
     assert outcomes[-1].result.ok is False
     assert "secret" not in json.dumps(outcomes[-1].result.to_mapping())
 
@@ -906,8 +970,11 @@ def test_untrusted_inspect_result_cannot_supply_acceptance_evidence(
     session = _FakeSession()
     sealed = _sealed(session, model_path, step_path)
     _install_store_paths(monkeypatch, sealed, model_path, step_path)
-    monkeypatch.setattr(executor_module, "_new_document", lambda *args, **kwargs: {"ok": True})
-    monkeypatch.setattr(executor_module, "_add_box", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(
+        executor_module,
+        "_add_box",
+        lambda *args, **kwargs: {"ok": True, "name": "Box"},
+    )
     monkeypatch.setattr(executor_module, "_modify_part", lambda *args, **kwargs: {"ok": True})
     monkeypatch.setattr(
         executor_module,

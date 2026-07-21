@@ -17,9 +17,18 @@ import vibecad.execution.adapter as adapter_module
 from vibecad.execution.adapter import (
     AdapterError,
     AdapterErrorCode,
-    execute_validated_program,
 )
-from vibecad.execution.registry import RiskClass
+from vibecad.execution.adapter import (
+    execute_validated_program as _execute_validated_program,
+)
+from vibecad.execution.registry import (
+    ExecutionProfile,
+    OperationMetadata,
+    OperationRegistry,
+    ResultSlotMetadata,
+    RiskClass,
+    ValueShape,
+)
 from vibecad.execution.results import ToolDiagnosticClass, ToolResultCode
 from vibecad.workflow.contracts import (
     AcceptanceSpec,
@@ -29,7 +38,11 @@ from vibecad.workflow.contracts import (
     ValueSource,
 )
 from vibecad.workflow.errors import SCHEMA_VERSION
-from vibecad.workflow.program import ValidatedProgram, validate_model_program
+from vibecad.workflow.program import (
+    BoundResultRef,
+    ValidatedProgram,
+    validate_model_program,
+)
 
 
 class _Clock:
@@ -110,13 +123,23 @@ def _validated(*commands: ModelCommand) -> ValidatedProgram:
     return validate_model_program(_model_program(*commands))
 
 
+def execute_validated_program(
+    program: object,
+    handlers: object,
+    **kwargs: object,
+):
+    """Run legacy adapter-focused assertions through the explicit headless profile."""
+
+    kwargs.setdefault("execution_profile", ExecutionProfile.HEADLESS)
+    return _execute_validated_program(program, handlers, **kwargs)  # type: ignore[arg-type]
+
+
 def _inspect_program(count: int = 1) -> ValidatedProgram:
     return _validated(*(_command(f"inspect-{index}") for index in range(count)))
 
 
 def _three_step_program() -> ValidatedProgram:
     return _validated(
-        _command("document", "create_document", args={"name": "AdapterDoc"}),
         _command(
             "box",
             "create_box",
@@ -126,9 +149,15 @@ def _three_step_program() -> ValidatedProgram:
                 "height": 30,
                 "position": [1, 2, 3],
             },
-            depends_on=("document",),
         ),
-        _command("inspect", depends_on=("box",)),
+        _command(
+            "modify",
+            "modify_parameter",
+            target={"object": {"command_id": "box", "slot": "object"}},
+            args={"parameter": "Length", "value": 12},
+            depends_on=("box",),
+        ),
+        _command("inspect", depends_on=("modify",)),
     )
 
 
@@ -184,6 +213,8 @@ def test_adapter_error_codes_and_records_are_fixed() -> None:
         "invalid_revision",
         "missing_handler",
         "non_callable_handler",
+        "invalid_execution_profile",
+        "unsupported_execution_profile",
     }
 
     for code in AdapterErrorCode:
@@ -267,6 +298,8 @@ def test_privately_forged_validated_program_structure_is_rejected(
         pytest.param("source", "model", id="untyped-source"),
         pytest.param("risk_class", "read_only", id="untyped-risk"),
         pytest.param("evidence_required", 1, id="non-boolean-evidence-flag"),
+        pytest.param("execution_profiles", [], id="mutable-execution-profiles"),
+        pytest.param("result_slots", [], id="mutable-result-slots"),
     ],
 )
 def test_forged_bound_command_critical_fields_are_rejected_before_preflight(
@@ -283,6 +316,161 @@ def test_forged_bound_command_critical_fields_are_rejected_before_preflight(
 
     assert handlers.accesses == 0
     assert clock.calls == 0
+
+
+def test_forged_nested_result_slot_is_rejected_before_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program = _validated(
+        _command(
+            "box",
+            "create_box",
+            args={"length": 1, "width": 2, "height": 3},
+        )
+    )
+    original = program.commands[0].result_slots[0]
+    slot = ResultSlotMetadata(original.name, original.result_field, original.value_shape)
+    object.__setattr__(slot, "result_field", ["name"])
+    object.__setattr__(program.commands[0], "result_slots", (slot,))
+    handlers = _HostileHandlers()
+    clock = _install_clock(monkeypatch)
+
+    _assert_adapter_error(AdapterErrorCode.INVALID_PROGRAM, program, handlers)
+
+    assert handlers.accesses == 0
+    assert clock.calls == 0
+
+
+def test_forged_result_ref_cannot_escape_dependency_closure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program = _three_step_program()
+    reference = program.commands[1].handler_kwargs["name"]
+    object.__setattr__(reference, "command_id", "inspect")
+    handlers = _HostileHandlers()
+    clock = _install_clock(monkeypatch)
+
+    _assert_adapter_error(AdapterErrorCode.INVALID_PROGRAM, program, handlers)
+
+    assert handlers.accesses == 0
+    assert clock.calls == 0
+
+
+def test_well_typed_result_contract_forgery_is_rejected_before_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program = _three_step_program()
+    forged_slot = ResultSlotMetadata(
+        "object",
+        "volume",
+        ValueShape.FINITE_NUMBER,
+    )
+    forged_ref = BoundResultRef("box", "object", ValueShape.FINITE_NUMBER)
+    object.__setattr__(program.commands[0], "result_slots", (forged_slot,))
+    object.__setattr__(
+        program.commands[1],
+        "handler_kwargs",
+        MappingProxyType(
+            {
+                "name": forged_ref,
+                "parameter": "Length",
+                "value": 12,
+            }
+        ),
+    )
+    handlers = _HostileHandlers()
+    clock = _install_clock(monkeypatch)
+
+    _assert_adapter_error(AdapterErrorCode.INVALID_PROGRAM, program, handlers)
+
+    assert handlers.accesses == 0
+    assert clock.calls == 0
+
+
+def test_well_typed_execution_profile_forgery_is_rejected_before_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program = _inspect_program()
+    object.__setattr__(
+        program.commands[0],
+        "execution_profiles",
+        (ExecutionProfile.INTERACTIVE_GUI,),
+    )
+    handlers = _HostileHandlers()
+    clock = _install_clock(monkeypatch)
+
+    with pytest.raises(AdapterError) as caught:
+        _execute_validated_program(
+            program,
+            handlers,
+            execution_profile=ExecutionProfile.INTERACTIVE_GUI,
+        )
+
+    assert caught.value.code is AdapterErrorCode.INVALID_PROGRAM
+    assert handlers.accesses == 0
+    assert clock.calls == 0
+
+
+def test_cross_type_scalar_equality_cannot_bypass_canonical_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program = _validated(
+        _command(
+            "box",
+            "create_box",
+            args={"length": 1, "width": 2, "height": 3},
+        )
+    )
+    forged_kwargs = dict(program.commands[0].handler_kwargs)
+    forged_kwargs["length"] = True
+    object.__setattr__(
+        program.commands[0],
+        "handler_kwargs",
+        MappingProxyType(forged_kwargs),
+    )
+    handlers = _HostileHandlers()
+    clock = _install_clock(monkeypatch)
+
+    _assert_adapter_error(AdapterErrorCode.INVALID_PROGRAM, program, handlers)
+
+    assert handlers.accesses == 0
+    assert clock.calls == 0
+
+
+def test_program_validated_by_custom_registry_keeps_its_execution_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = OperationRegistry(
+        (
+            OperationMetadata(
+                operation="custom_inspect",
+                handler_name="custom_handler",
+                risk_class=RiskClass.READ_ONLY,
+                evidence_required=False,
+            ),
+        )
+    )
+    program = validate_model_program(
+        _model_program(_command("custom", "custom_inspect")),
+        registry=registry,
+    )
+    calls = 0
+    _install_clock(monkeypatch, 0, 1)
+
+    def custom_handler() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"ok": True, "source": "custom"}
+
+    outcomes = _execute_validated_program(
+        program,
+        {"custom_handler": custom_handler},
+        execution_profile=ExecutionProfile.HEADLESS,
+    )
+
+    assert calls == 1
+    assert len(outcomes) == 1
+    assert outcomes[0].result.ok is True
 
 
 @pytest.mark.parametrize("revision", ["", "   ", 7, True, object()])
@@ -326,13 +514,13 @@ def test_non_mapping_handlers_are_fixed_errors_before_clock(
     ("handlers", "code"),
     [
         ({"describe_part": lambda: {}}, AdapterErrorCode.MISSING_HANDLER),
-        ({"new_document": lambda **kwargs: kwargs}, AdapterErrorCode.MISSING_HANDLER),
+        ({"add_box": lambda **kwargs: kwargs}, AdapterErrorCode.MISSING_HANDLER),
         (
-            {"new_document": object(), "describe_part": lambda: {}},
+            {"add_box": object(), "describe_part": lambda: {}},
             AdapterErrorCode.NON_CALLABLE_HANDLER,
         ),
         (
-            {"new_document": lambda **kwargs: kwargs, "describe_part": object()},
+            {"add_box": lambda **kwargs: kwargs, "describe_part": object()},
             AdapterErrorCode.NON_CALLABLE_HANDLER,
         ),
     ],
@@ -344,14 +532,18 @@ def test_first_and_final_handler_configuration_is_preflighted_before_execution(
 ) -> None:
     calls: list[str] = []
     supplied = dict(handlers)
-    if callable(supplied.get("new_document")):
-        supplied["new_document"] = lambda **kwargs: calls.append("document") or kwargs
+    if callable(supplied.get("add_box")):
+        supplied["add_box"] = lambda **kwargs: calls.append("box") or kwargs
     if callable(supplied.get("describe_part")):
         supplied["describe_part"] = lambda: calls.append("inspect") or {}
     clock = _install_clock(monkeypatch)
     program = _validated(
-        _command("document", "create_document", args={"name": "Doc"}),
-        _command("inspect", depends_on=("document",)),
+        _command(
+            "box",
+            "create_box",
+            args={"length": 1, "width": 2, "height": 3},
+        ),
+        _command("inspect", depends_on=("box",)),
     )
 
     _assert_adapter_error(code, program, supplied)
@@ -383,27 +575,31 @@ def test_handler_mapping_is_snapshotted_once_before_any_side_effect(
     calls: list[str] = []
     handlers: _TrackingHandlers
 
-    def document(name: str) -> dict[str, object]:
-        calls.append(f"document:{name}")
+    def box(**kwargs: object) -> dict[str, object]:
+        calls.append(f"box:{kwargs['length']}")
         handlers["describe_part"] = lambda: calls.append("replacement") or {"valid": False}
-        return {"ok": True, "name": name}
+        return {"ok": True, "name": "Box"}
 
     def inspect() -> dict[str, object]:
         calls.append("captured-inspect")
         return {"valid": True}
 
-    handlers = _TrackingHandlers({"new_document": document, "describe_part": inspect})
+    handlers = _TrackingHandlers({"add_box": box, "describe_part": inspect})
     _install_clock(monkeypatch, 0, 1_000_000, 2_000_000, 3_000_000)
     program = _validated(
-        _command("document", "create_document", args={"name": "Doc"}),
-        _command("inspect", depends_on=("document",)),
+        _command(
+            "box",
+            "create_box",
+            args={"length": 1, "width": 2, "height": 3},
+        ),
+        _command("inspect", depends_on=("box",)),
     )
 
     outcomes = execute_validated_program(program, handlers)
 
     assert [item.result.ok for item in outcomes] == [True, True]
-    assert calls == ["document:Doc", "captured-inspect"]
-    assert handlers.accesses == ["new_document", "describe_part"]
+    assert calls == ["box:1", "captured-inspect"]
+    assert handlers.accesses == ["add_box", "describe_part"]
 
 
 def test_repeated_handler_name_is_resolved_once_but_each_command_runs_once(
@@ -430,53 +626,51 @@ def test_bound_command_fields_are_snapshotted_before_handlers_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     program = _validated(
-        _command("document", "create_document", args={"name": "Doc"}),
         _command(
             "box",
             "create_box",
             args={"length": 10, "width": 20, "height": 30},
-            depends_on=("document",),
         ),
+        _command("inspect", depends_on=("box",)),
     )
-    box_command = program.commands[1]
+    inspect_command = program.commands[1]
     seen: list[dict[str, object]] = []
 
-    def document(name: str) -> dict[str, object]:
+    def box(**kwargs: object) -> dict[str, object]:
         replacements = {
             "id": "replacement-id",
-            "operation": "inspect_model",
+            "operation": "create_box",
             "handler_name": "replacement",
-            "risk_class": RiskClass.READ_ONLY,
-            "evidence_required": False,
-            "handler_kwargs": MappingProxyType({"length": 99, "width": 99, "height": 99}),
+            "risk_class": RiskClass.MUTATING,
+            "evidence_required": True,
+            "handler_kwargs": MappingProxyType({"forged": 99}),
         }
         for field, value in replacements.items():
-            object.__setattr__(box_command, field, value)
-        return {"ok": True, "name": name}
+            object.__setattr__(inspect_command, field, value)
+        return {"ok": True, "name": "Box"}
 
-    def box(**kwargs: object) -> dict[str, object]:
+    def inspect(**kwargs: object) -> dict[str, object]:
         seen.append(kwargs)
-        return {"ok": True, "volume": 6000}
+        return {"ok": True, "valid": True}
 
     _install_clock(monkeypatch, 0, 1, 2, 3)
 
     outcomes = execute_validated_program(
         program,
-        {"new_document": document, "add_box": box},
+        {"add_box": box, "describe_part": inspect},
     )
 
     assert len(outcomes) == 2
-    assert seen == [{"length": 10, "width": 20, "height": 30}]
-    box_result = outcomes[1].result
-    assert box_result.operation_id == "box"
-    assert dict(box_result.facts) == {
-        "operation": "create_box",
-        "handler_name": "add_box",
-        "risk_class": "mutating",
+    assert seen == [{}]
+    inspect_result = outcomes[1].result
+    assert inspect_result.operation_id == "inspect"
+    assert dict(inspect_result.facts) == {
+        "operation": "inspect_model",
+        "handler_name": "describe_part",
+        "risk_class": "read_only",
+        "execution_profile": "headless",
     }
-    assert len(box_result.evidence) == 1
-    assert box_result.evidence[0].id == "box:execution"
-    assert box_result.evidence[0].operation_id == "box"
+    assert inspect_result.evidence == ()
 
 
 def test_order_kwargs_clock_trusted_facts_and_adapter_evidence(
@@ -484,13 +678,13 @@ def test_order_kwargs_clock_trusted_facts_and_adapter_evidence(
 ) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
-    def document(**kwargs: object) -> dict[str, object]:
-        calls.append(("document", kwargs))
-        return {"ok": True, "name": kwargs["name"]}
-
     def box(**kwargs: object) -> dict[str, object]:
         calls.append(("box", kwargs))
-        return {"ok": True, "volume": 6000}
+        return {"ok": True, "name": "Box", "volume": 6000}
+
+    def modify(**kwargs: object) -> dict[str, object]:
+        calls.append(("modify", kwargs))
+        return {"ok": True, "name": kwargs["name"]}
 
     def inspect(**kwargs: object) -> dict[str, object]:
         calls.append(("inspect", kwargs))
@@ -508,48 +702,144 @@ def test_order_kwargs_clock_trusted_facts_and_adapter_evidence(
 
     outcomes = execute_validated_program(
         _three_step_program(),
-        {"new_document": document, "add_box": box, "describe_part": inspect},
+        {"add_box": box, "modify_part": modify, "describe_part": inspect},
         revision="candidate-r1",
     )
 
     assert isinstance(outcomes, tuple)
     assert calls == [
-        ("document", {"name": "AdapterDoc"}),
         (
             "box",
             {"length": 10, "width": 20, "height": 30, "position": (1, 2, 3)},
         ),
+        ("modify", {"name": "Box", "parameter": "Length", "value": 12}),
         ("inspect", {}),
     ]
     assert clock.calls == 6
     assert [item.result.elapsed_ms for item in outcomes] == [1, 2, 3]
-    assert [item.result.operation_id for item in outcomes] == ["document", "box", "inspect"]
+    assert [item.result.operation_id for item in outcomes] == ["box", "modify", "inspect"]
     assert all(item.result.revision == "candidate-r1" for item in outcomes)
     assert [dict(item.result.facts) for item in outcomes] == [
-        {
-            "operation": "create_document",
-            "handler_name": "new_document",
-            "risk_class": "destructive",
-        },
         {
             "operation": "create_box",
             "handler_name": "add_box",
             "risk_class": "mutating",
+            "execution_profile": "headless",
+        },
+        {
+            "operation": "modify_parameter",
+            "handler_name": "modify_part",
+            "risk_class": "mutating",
+            "execution_profile": "headless",
         },
         {
             "operation": "inspect_model",
             "handler_name": "describe_part",
             "risk_class": "read_only",
+            "execution_profile": "headless",
         },
     ]
     assert [len(item.result.evidence) for item in outcomes] == [1, 1, 0]
-    for outcome, command_id in zip(outcomes[:2], ("document", "box"), strict=True):
+    for outcome, command_id in zip(outcomes[:2], ("box", "modify"), strict=True):
         evidence = outcome.result.evidence[0]
         assert evidence.id == f"{command_id}:execution"
         assert evidence.kind is EvidenceKind.OBSERVATION
         assert evidence.name == "execution_acknowledged"
         assert evidence.operation_id == command_id
         assert evidence.value == {"result_ok": True}
+
+
+@pytest.mark.parametrize(
+    ("profile", "code"),
+    [
+        ("headless", AdapterErrorCode.INVALID_EXECUTION_PROFILE),
+        (ExecutionProfile.INTERACTIVE_GUI, AdapterErrorCode.UNSUPPORTED_EXECUTION_PROFILE),
+    ],
+)
+def test_execution_profile_is_explicit_and_preflighted_before_handlers_or_clock(
+    profile: object,
+    code: AdapterErrorCode,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handlers = _TrackingHandlers({"describe_part": lambda: {"valid": True}})
+    clock = _install_clock(monkeypatch)
+
+    with pytest.raises(AdapterError) as caught:
+        _execute_validated_program(
+            _inspect_program(),
+            handlers,
+            execution_profile=profile,  # type: ignore[arg-type]
+        )
+
+    assert caught.value.code is code
+    assert handlers.accesses == []
+    assert clock.calls == 0
+
+
+def test_typed_result_ref_resolves_normalized_slot_before_consumer_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: list[dict[str, object]] = []
+    _install_clock(monkeypatch, 0, 1, 2, 3, 4, 5)
+
+    def modify(**kwargs: object) -> dict[str, object]:
+        received.append(kwargs)
+        return {"ok": True}
+
+    outcomes = _execute_validated_program(
+        _three_step_program(),
+        {
+            "add_box": lambda **kwargs: {"ok": True, "name": "Box007"},
+            "modify_part": modify,
+            "describe_part": lambda: {"valid": True},
+        },
+        execution_profile=ExecutionProfile.HEADLESS,
+    )
+
+    assert [item.result.ok for item in outcomes] == [True, True, True]
+    assert received == [{"name": "Box007", "parameter": "Length", "value": 12}]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"ok": True},
+        {"ok": True, "name": ""},
+        {"ok": True, "name": 7},
+        {"ok": True, "name": "x" * 257},
+    ],
+)
+def test_invalid_declared_result_slot_fails_producer_and_stops(
+    raw: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    consumer_calls = 0
+    _install_clock(monkeypatch, 0, 1)
+
+    def forbidden(**kwargs: object) -> object:
+        nonlocal consumer_calls
+        del kwargs
+        consumer_calls += 1
+        raise AssertionError("consumer must not run")
+
+    outcomes = _execute_validated_program(
+        _three_step_program(),
+        {
+            "add_box": lambda **kwargs: raw,
+            "modify_part": forbidden,
+            "describe_part": forbidden,
+        },
+        execution_profile=ExecutionProfile.HEADLESS,
+    )
+
+    assert len(outcomes) == 1
+    assert consumer_calls == 0
+    assert outcomes[0].result.ok is False
+    assert outcomes[0].result.error is not None
+    assert outcomes[0].result.error.code == ToolResultCode.INVALID_TOOL_RESULT.value
+    assert outcomes[0].diagnostic is ToolDiagnosticClass.INVALID_RESULT
+    assert outcomes[0].result.evidence == ()
+    assert "x" * 257 not in json.dumps(outcomes[0].result.to_mapping())
 
 
 @pytest.mark.parametrize(
@@ -694,19 +984,24 @@ def test_clock_failures_degrade_success_to_zero_without_retry(
 ) -> None:
     calls = 0
 
-    def document(name: str) -> dict[str, object]:
+    def box(**kwargs: object) -> dict[str, object]:
         nonlocal calls
+        del kwargs
         calls += 1
-        return {"ok": True, "name": name}
+        return {"ok": True, "name": "Box"}
 
     clock = _install_clock(monkeypatch, *clock_values)
     program = _validated(
-        _command("document", "create_document", args={"name": "ClockDoc"}),
+        _command(
+            "box",
+            "create_box",
+            args={"length": 1, "width": 2, "height": 3},
+        ),
     )
 
     outcome = execute_validated_program(
         program,
-        {"new_document": document},
+        {"add_box": box},
     )[0]
 
     assert calls == 1
@@ -715,7 +1010,7 @@ def test_clock_failures_degrade_success_to_zero_without_retry(
     assert outcome.result.elapsed_ms == 0
     assert outcome.result.error is None
     assert len(outcome.result.evidence) == 1
-    assert outcome.result.evidence[0].operation_id == "document"
+    assert outcome.result.evidence[0].operation_id == "box"
 
 
 def test_raw_context_like_fields_cannot_override_trusted_envelope(
@@ -729,25 +1024,30 @@ def test_raw_context_like_fields_cannot_override_trusted_envelope(
         "artifacts": ["untrusted.step"],
         "warnings": ["untrusted warning"],
         "evidence": ["untrusted evidence"],
-        "name": "Doc",
+        "name": "Box",
     }
     _install_clock(monkeypatch, 0, 2_500_000)
     program = _validated(
-        _command("document", "create_document", args={"name": "Doc"}),
+        _command(
+            "box",
+            "create_box",
+            args={"length": 1, "width": 2, "height": 3},
+        ),
     )
 
     outcome = execute_validated_program(
         program,
-        {"new_document": lambda **kwargs: raw},
+        {"add_box": lambda **kwargs: raw},
         revision="candidate-r2",
     )[0]
 
     assert outcome.result.elapsed_ms == 2.5
     assert outcome.result.revision == "candidate-r2"
     assert dict(outcome.result.facts) == {
-        "operation": "create_document",
-        "handler_name": "new_document",
-        "risk_class": "destructive",
+        "operation": "create_box",
+        "handler_name": "add_box",
+        "risk_class": "mutating",
+        "execution_profile": "headless",
     }
     assert outcome.result.artifacts == ()
     assert outcome.result.warnings == ()
@@ -804,16 +1104,20 @@ def test_failed_evidence_required_command_receives_no_success_observation(
 ) -> None:
     _install_clock(monkeypatch, 0, 1)
     program = _validated(
-        _command("document", "create_document", args={"name": "Doc"}),
+        _command(
+            "box",
+            "create_box",
+            args={"length": 1, "width": 2, "height": 3},
+        ),
     )
 
-    def document(**kwargs: object) -> object:
+    def box(**kwargs: object) -> object:
         del kwargs
         if isinstance(failure, Exception):
             raise failure
         return failure
 
-    outcome = execute_validated_program(program, {"new_document": document})[0]
+    outcome = execute_validated_program(program, {"add_box": box})[0]
 
     assert outcome.result.ok is False
     assert outcome.result.evidence == ()
@@ -850,6 +1154,7 @@ def test_isolated_execution_path_remains_free_of_cad_mcp_and_model_imports() -> 
 import sys
 sys.path.insert(0, {str(source)!r})
 from vibecad.execution.adapter import execute_validated_program
+from vibecad.execution.registry import ExecutionProfile
 from vibecad.workflow.contracts import AcceptanceSpec, ModelCommand, ModelProgram, ValueSource
 from vibecad.workflow.program import validate_model_program
 command = ModelCommand(
@@ -870,6 +1175,7 @@ program = ModelProgram(
 outcomes = execute_validated_program(
     validate_model_program(program),
     {{"describe_part": lambda: {{"valid": True}}}},
+    execution_profile=ExecutionProfile.HEADLESS,
 )
 assert len(outcomes) == 1 and outcomes[0].result.ok
 prefixes = (
@@ -932,16 +1238,17 @@ sys.path.insert(0, __SOURCE__)
 
 from vibecad.engine.session import Session
 from vibecad.execution.adapter import execute_validated_program
+from vibecad.execution.registry import ExecutionProfile
 from vibecad.feedback.text import describe_assembly
-from vibecad.tools import modeling
+from vibecad.tools import modeling, modify
 from vibecad.workflow.contracts import AcceptanceSpec, ModelCommand, ModelProgram, ValueSource
 from vibecad.workflow.program import validate_model_program
 
-def command(command_id, op, args=None, depends_on=()):
+def command(command_id, op, args=None, target=None, depends_on=()):
     return ModelCommand(
         id=command_id,
         op=op,
-        target={},
+        target={} if target is None else target,
         args={} if args is None else args,
         depends_on=depends_on,
         preserve=(),
@@ -952,14 +1259,19 @@ program = ModelProgram(
     task_id="real-adapter",
     base_revision="untrusted-base",
     operations=(
-        command("document", "create_document", {"name": "AdapterReal"}),
         command(
             "box",
             "create_box",
             {"length": 10, "width": 20, "height": 30},
-            ("document",),
         ),
-        command("inspect", "inspect_model", depends_on=("box",)),
+        command(
+            "modify",
+            "modify_parameter",
+            {"parameter": "Length", "value": 12},
+            {"object": {"command_id": "box", "slot": "object"}},
+            ("box",),
+        ),
+        command("inspect", "inspect_model", depends_on=("modify",)),
     ),
     acceptance=AcceptanceSpec(id="real-acceptance", criteria=()),
 )
@@ -967,13 +1279,15 @@ validated = validate_model_program(program)
 session = Session()
 payload = {}
 try:
+    session.open_document("AdapterReal")
     outcomes = execute_validated_program(
         validated,
         {
-            "new_document": lambda **kwargs: modeling.new_document(session, **kwargs),
             "add_box": lambda **kwargs: modeling.add_box(session, **kwargs),
+            "modify_part": lambda **kwargs: modify.modify_part(session, **kwargs),
             "describe_part": lambda: describe_assembly(session),
         },
+        execution_profile=ExecutionProfile.HEADLESS,
         revision="candidate-real-r1",
     )
     payload["outcomes"] = [item.result.to_mapping() for item in outcomes]
@@ -997,11 +1311,12 @@ print(json.dumps(payload, ensure_ascii=False))
     assert payload["closed"] is True
     assert len(outcomes) == 3
     assert all(item["ok"] is True for item in outcomes)
-    assert outcomes[1]["value"]["volume"] == pytest.approx(6000)
+    assert outcomes[0]["value"]["volume"] == pytest.approx(6000)
+    assert outcomes[1]["value"]["volume"] == pytest.approx(7200)
     inspection = outcomes[2]["value"]
     assert inspection["valid"] is True
-    assert inspection["volume"] == pytest.approx(6000)
-    assert inspection["bbox"] == pytest.approx({"x": 10, "y": 20, "z": 30})
+    assert inspection["volume"] == pytest.approx(7200)
+    assert inspection["bbox"] == pytest.approx({"x": 12, "y": 20, "z": 30})
     assert inspection["solid_count"] == 1
     assert [len(item["evidence"]) for item in outcomes] == [1, 1, 0]
     assert all(item["revision"] == "candidate-real-r1" for item in outcomes)

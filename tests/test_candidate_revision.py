@@ -71,11 +71,14 @@ MANIFEST = "a" * 64
 
 EXPECTED_EXECUTION_EXPORTS = [
     "DEFAULT_OPERATION_REGISTRY",
+    "ExecutionProfile",
     "FieldMetadata",
     "OperationMetadata",
     "OperationRegistry",
     "RegistryError",
     "RegistryErrorCode",
+    "ResourceBudget",
+    "ResultSlotMetadata",
     "RiskClass",
     "ValueShape",
 ]

@@ -8,6 +8,7 @@ and execution are separate later stages.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -15,10 +16,11 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Self
 
-from vibecad.workflow.errors import SCHEMA_VERSION
+from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER, SCHEMA_VERSION
 
 _SNAKE_CASE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 _MAX_NAME_LENGTH = 64
+_MAX_VALUE_TEXT_LENGTH = 256
 _MAX_ERROR_MESSAGE_LENGTH = 256
 _INVALID_ERROR_MESSAGE = "message must be bounded printable single-line text"
 _UNSAFE_NAME_TOKENS = frozenset(
@@ -79,13 +81,150 @@ class RiskClass(StrEnum):
     DESTRUCTIVE = "destructive"
 
 
+class ExecutionProfile(StrEnum):
+    """Closed FreeCAD execution surfaces; routing never silently downgrades."""
+
+    HEADLESS = "headless"
+    OFFSCREEN_GUI = "offscreen_gui"
+    INTERACTIVE_GUI = "interactive_gui"
+
+
 class ValueShape(StrEnum):
-    """Closed Phase-1 value shapes available to the program validator."""
+    """Closed value shapes available to program and result-slot validation."""
 
     NONBLANK_STRING = "nonblank_string"
-    POSITIVE_NUMBER = "positive_number"
     BOOLEAN = "boolean"
+    INTEGER = "integer"
+    FINITE_NUMBER = "finite_number"
+    POSITIVE_NUMBER = "positive_number"
+    ENUM = "enum"
+    VECTOR2 = "vector2"
     VECTOR3 = "vector3"
+    QUANTITY = "quantity"
+    RESULT_REF = "result_ref"
+    OBJECT_SELECTOR = "object_selector"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ResourceBudget:
+    """Static per-operation limits declared for trusted execution adapters."""
+
+    max_runtime_ms: int = 30_000
+    max_created_objects: int = 1
+    max_result_bytes: int = 65_536
+
+    def __post_init__(self) -> None:
+        values = (
+            ("max_runtime_ms", self.max_runtime_ms, False),
+            ("max_created_objects", self.max_created_objects, True),
+            ("max_result_bytes", self.max_result_bytes, False),
+        )
+        for name, value, allow_zero in values:
+            if (
+                type(value) is not int
+                or value > MAX_SAFE_JSON_INTEGER
+                or value < (0 if allow_zero else 1)
+            ):
+                raise RegistryError(
+                    RegistryErrorCode.INVALID_METADATA,
+                    f"{name} must be a bounded integer budget",
+                )
+
+
+def _is_safe_value_text(value: object) -> bool:
+    return (
+        type(value) is str
+        and bool(value.strip())
+        and len(value) <= _MAX_VALUE_TEXT_LENGTH
+        and value.isprintable()
+        and len(value.splitlines()) == 1
+    )
+
+
+def _is_finite_number(value: object, *, positive: bool) -> bool:
+    if type(value) not in {int, float}:
+        return False
+    if type(value) is int and abs(value) > MAX_SAFE_JSON_INTEGER:
+        return False
+    return math.isfinite(value) and (not positive or value > 0)
+
+
+def _snapshot_strict_mapping(value: object) -> Mapping[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        keys = tuple(value)
+        if any(type(key) is not str for key in keys) or len(set(keys)) != len(keys):
+            return None
+        return MappingProxyType({key: value[key] for key in keys})
+    except Exception:
+        return None
+
+
+def _matches_value_shape(
+    value: object,
+    shape: ValueShape,
+    *,
+    enum_values: tuple[str, ...] = (),
+    allowed_units: tuple[str, ...] = (),
+) -> bool:
+    """Match one already-frozen JSON value against a closed registry shape."""
+
+    if shape is ValueShape.NONBLANK_STRING:
+        return _is_safe_value_text(value)
+    if shape is ValueShape.BOOLEAN:
+        return type(value) is bool
+    if shape is ValueShape.INTEGER:
+        return type(value) is int and abs(value) <= MAX_SAFE_JSON_INTEGER
+    if shape is ValueShape.FINITE_NUMBER:
+        return _is_finite_number(value, positive=False)
+    if shape is ValueShape.POSITIVE_NUMBER:
+        return _is_finite_number(value, positive=True)
+    if shape is ValueShape.ENUM:
+        return type(value) is str and value in enum_values
+    if shape in {ValueShape.VECTOR2, ValueShape.VECTOR3}:
+        expected = 2 if shape is ValueShape.VECTOR2 else 3
+        return type(value) is tuple and len(value) == expected and all(
+            _is_finite_number(component, positive=False) for component in value
+        )
+    if shape is ValueShape.QUANTITY:
+        snapshot = _snapshot_strict_mapping(value)
+        return (
+            snapshot is not None
+            and set(snapshot) == {"value", "unit"}
+            and _is_finite_number(snapshot["value"], positive=False)
+            and type(snapshot["unit"]) is str
+            and snapshot["unit"] in allowed_units
+        )
+    if shape is ValueShape.RESULT_REF:
+        snapshot = _snapshot_strict_mapping(value)
+        return (
+            snapshot is not None
+            and set(snapshot) == {"command_id", "slot"}
+            and _is_safe_value_text(snapshot["command_id"])
+            and _is_safe_value_text(snapshot["slot"])
+        )
+    if shape is ValueShape.OBJECT_SELECTOR:
+        snapshot = _snapshot_strict_mapping(value)
+        if snapshot is None or set(snapshot) != {
+            "schema_version",
+            "project_id",
+            "revision_id",
+            "object_id",
+            "expected_cardinality",
+        }:
+            return False
+        return (
+            type(snapshot["schema_version"]) is int
+            and snapshot["schema_version"] == SCHEMA_VERSION
+            and all(
+                _is_safe_value_text(snapshot[name])
+                for name in ("project_id", "revision_id", "object_id")
+            )
+            and type(snapshot["expected_cardinality"]) is int
+            and 1 <= snapshot["expected_cardinality"] <= 64
+        )
+    return False
 
 
 class RegistryErrorCode(StrEnum):
@@ -261,6 +400,107 @@ def _validate_name(
     return value
 
 
+def _freeze_choices(
+    values: Iterable[str],
+    *,
+    label: str,
+    field_name: str,
+) -> tuple[str, ...]:
+    try:
+        frozen = tuple(values)
+    except RegistryError:
+        raise
+    except Exception as exc:
+        raise RegistryError(
+            RegistryErrorCode.INVALID_METADATA,
+            f"{label} must be an iterable of bounded strings",
+            field=field_name,
+        ) from exc
+    if (
+        not frozen
+        or not all(_is_safe_value_text(item) for item in frozen)
+        or len(set(frozen)) != len(frozen)
+    ):
+        raise RegistryError(
+            RegistryErrorCode.INVALID_METADATA,
+            f"{label} must contain unique bounded strings",
+            field=field_name,
+        )
+    return frozen
+
+
+def _validate_shape_constraints(
+    *,
+    value_shape: ValueShape,
+    enum_values: Iterable[str],
+    allowed_units: Iterable[str],
+    referenced_value_shape: ValueShape | None,
+    field_name: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if not isinstance(value_shape, ValueShape):
+        raise RegistryError(
+            RegistryErrorCode.INVALID_METADATA,
+            "value_shape must be a ValueShape",
+            field=field_name,
+        )
+
+    if isinstance(enum_values, (str, bytes, bytearray)) or isinstance(
+        allowed_units,
+        (str, bytes, bytearray),
+    ):
+        raise RegistryError(
+            RegistryErrorCode.INVALID_METADATA,
+            "shape constraints must be string collections, not scalar text",
+            field=field_name,
+        )
+    try:
+        enums = tuple(enum_values)
+        units = tuple(allowed_units)
+    except RegistryError:
+        raise
+    except Exception as exc:
+        raise RegistryError(
+            RegistryErrorCode.INVALID_METADATA,
+            "shape constraints must be bounded string collections",
+            field=field_name,
+        ) from exc
+    if value_shape is ValueShape.ENUM:
+        enums = _freeze_choices(enums, label="enum_values", field_name=field_name)
+    elif enums:
+        raise RegistryError(
+            RegistryErrorCode.INVALID_METADATA,
+            "enum_values are only valid for enum fields",
+            field=field_name,
+        )
+    if value_shape is ValueShape.QUANTITY:
+        units = _freeze_choices(units, label="allowed_units", field_name=field_name)
+    elif units:
+        raise RegistryError(
+            RegistryErrorCode.INVALID_METADATA,
+            "allowed_units are only valid for quantity fields",
+            field=field_name,
+        )
+    if value_shape is ValueShape.RESULT_REF:
+        if not isinstance(referenced_value_shape, ValueShape) or referenced_value_shape in {
+            ValueShape.ENUM,
+            ValueShape.QUANTITY,
+            ValueShape.RESULT_REF,
+            ValueShape.OBJECT_SELECTOR,
+        }:
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "result_ref requires a concrete referenced_value_shape",
+                field=field_name,
+            )
+    elif referenced_value_shape is not None:
+        raise RegistryError(
+            RegistryErrorCode.INVALID_METADATA,
+            "referenced_value_shape is only valid for result_ref fields",
+            field=field_name,
+        )
+    return enums, units
+
+
 @dataclass(frozen=True, slots=True)
 class FieldMetadata:
     """One target/argument field and its injected-handler parameter binding."""
@@ -269,6 +509,9 @@ class FieldMetadata:
     handler_parameter: str
     value_shape: ValueShape
     required: bool = True
+    enum_values: tuple[str, ...] = ()
+    allowed_units: tuple[str, ...] = ()
+    referenced_value_shape: ValueShape | None = None
 
     def __post_init__(self) -> None:
         _validate_name(self.name, label="field name", field_name=self.name)
@@ -277,18 +520,55 @@ class FieldMetadata:
             label="handler parameter",
             field_name=self.name,
         )
-        if not isinstance(self.value_shape, ValueShape):
-            raise RegistryError(
-                RegistryErrorCode.INVALID_METADATA,
-                "value_shape must be a ValueShape",
-                field=self.name,
-            )
         if type(self.required) is not bool:
             raise RegistryError(
                 RegistryErrorCode.INVALID_METADATA,
                 "required must be a boolean",
                 field=self.name,
             )
+        enums, units = _validate_shape_constraints(
+            value_shape=self.value_shape,
+            enum_values=self.enum_values,
+            allowed_units=self.allowed_units,
+            referenced_value_shape=self.referenced_value_shape,
+            field_name=self.name,
+        )
+        object.__setattr__(self, "enum_values", enums)
+        object.__setattr__(self, "allowed_units", units)
+
+
+@dataclass(frozen=True, slots=True)
+class ResultSlotMetadata:
+    """One typed value extracted from a normalized successful handler result."""
+
+    name: str
+    result_field: str
+    value_shape: ValueShape
+    enum_values: tuple[str, ...] = ()
+    allowed_units: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_name(self.name, label="result slot", field_name=self.name)
+        _validate_name(
+            self.result_field,
+            label="result field",
+            field_name=self.name,
+        )
+        enums, units = _validate_shape_constraints(
+            value_shape=self.value_shape,
+            enum_values=self.enum_values,
+            allowed_units=self.allowed_units,
+            referenced_value_shape=None,
+            field_name=self.name,
+        )
+        if self.value_shape is ValueShape.RESULT_REF:
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "result slots must expose concrete values",
+                field=self.name,
+            )
+        object.__setattr__(self, "enum_values", enums)
+        object.__setattr__(self, "allowed_units", units)
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +581,13 @@ class OperationMetadata:
     evidence_required: bool
     target_fields: tuple[FieldMetadata, ...] = ()
     argument_fields: tuple[FieldMetadata, ...] = ()
+    execution_profiles: tuple[ExecutionProfile, ...] = (ExecutionProfile.HEADLESS,)
+    minimum_freecad_version: tuple[int, int] = (1, 0)
+    maximum_freecad_version_exclusive: tuple[int, int] = (2, 0)
+    requires_gui_main_thread: bool = False
+    resource_budget: ResourceBudget = ResourceBudget()
+    direct_exposed: bool = False
+    result_slots: tuple[ResultSlotMetadata, ...] = ()
 
     def __post_init__(self) -> None:
         operation = _validate_name(
@@ -325,6 +612,53 @@ class OperationMetadata:
                 "evidence_required must be a boolean",
                 operation=operation,
             )
+
+        profiles = self._freeze_profiles(self.execution_profiles, operation=operation)
+        minimum = self._freeze_version(
+            self.minimum_freecad_version,
+            operation=operation,
+            label="minimum_freecad_version",
+        )
+        maximum = self._freeze_version(
+            self.maximum_freecad_version_exclusive,
+            operation=operation,
+            label="maximum_freecad_version_exclusive",
+        )
+        if minimum >= maximum:
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "FreeCAD version range must be non-empty",
+                operation=operation,
+            )
+        if type(self.requires_gui_main_thread) is not bool:
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "requires_gui_main_thread must be a boolean",
+                operation=operation,
+            )
+        if self.requires_gui_main_thread and ExecutionProfile.HEADLESS in profiles:
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "headless execution cannot require the GUI main thread",
+                operation=operation,
+            )
+        if type(self.resource_budget) is not ResourceBudget:
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "resource_budget must be a ResourceBudget",
+                operation=operation,
+            )
+        if type(self.direct_exposed) is not bool:
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "direct_exposed must be a boolean",
+                operation=operation,
+            )
+        slots = self._freeze_result_slots(self.result_slots, operation=operation)
+        object.__setattr__(self, "execution_profiles", profiles)
+        object.__setattr__(self, "minimum_freecad_version", minimum)
+        object.__setattr__(self, "maximum_freecad_version_exclusive", maximum)
+        object.__setattr__(self, "result_slots", slots)
 
         targets = self._freeze_fields(self.target_fields, operation=operation, group="target")
         arguments = self._freeze_fields(
@@ -355,6 +689,26 @@ class OperationMetadata:
                 )
             bindings.add(item.handler_parameter)
 
+        slot_names: set[str] = set()
+        result_fields: set[str] = set()
+        for slot in slots:
+            if slot.name in slot_names:
+                raise RegistryError(
+                    RegistryErrorCode.DUPLICATE_FIELD,
+                    "result slot is declared more than once",
+                    operation=operation,
+                    field=slot.name,
+                )
+            slot_names.add(slot.name)
+            if slot.result_field in result_fields:
+                raise RegistryError(
+                    RegistryErrorCode.DUPLICATE_BINDING,
+                    "normalized result field is bound more than once",
+                    operation=operation,
+                    field=slot.result_field,
+                )
+            result_fields.add(slot.result_field)
+
     @staticmethod
     def _freeze_fields(
         values: Iterable[FieldMetadata],
@@ -376,6 +730,86 @@ class OperationMetadata:
             raise RegistryError(
                 RegistryErrorCode.INVALID_METADATA,
                 f"{group}_fields must contain only FieldMetadata",
+                operation=operation,
+            )
+        return frozen
+
+    @staticmethod
+    def _freeze_profiles(
+        values: Iterable[ExecutionProfile],
+        *,
+        operation: str,
+    ) -> tuple[ExecutionProfile, ...]:
+        try:
+            frozen = tuple(values)
+        except RegistryError:
+            raise
+        except Exception as exc:
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "execution_profiles must be an iterable of ExecutionProfile",
+                operation=operation,
+            ) from exc
+        if (
+            not frozen
+            or not all(type(item) is ExecutionProfile for item in frozen)
+            or len(set(frozen)) != len(frozen)
+        ):
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "execution_profiles must contain unique ExecutionProfile values",
+                operation=operation,
+            )
+        return frozen
+
+    @staticmethod
+    def _freeze_version(
+        value: Iterable[int],
+        *,
+        operation: str,
+        label: str,
+    ) -> tuple[int, int]:
+        try:
+            frozen = tuple(value)
+        except RegistryError:
+            raise
+        except Exception as exc:
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                f"{label} must be a major/minor pair",
+                operation=operation,
+            ) from exc
+        if (
+            len(frozen) != 2
+            or not all(type(item) is int and 0 <= item <= 999 for item in frozen)
+        ):
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                f"{label} must be a bounded major/minor pair",
+                operation=operation,
+            )
+        return (frozen[0], frozen[1])
+
+    @staticmethod
+    def _freeze_result_slots(
+        values: Iterable[ResultSlotMetadata],
+        *,
+        operation: str,
+    ) -> tuple[ResultSlotMetadata, ...]:
+        try:
+            frozen = tuple(values)
+        except RegistryError:
+            raise
+        except Exception as exc:
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "result_slots must be an iterable of ResultSlotMetadata",
+                operation=operation,
+            ) from exc
+        if not all(type(item) is ResultSlotMetadata for item in frozen):
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "result_slots must contain only ResultSlotMetadata",
                 operation=operation,
             )
         return frozen
@@ -446,13 +880,6 @@ class OperationRegistry:
 DEFAULT_OPERATION_REGISTRY = OperationRegistry(
     (
         OperationMetadata(
-            operation="create_document",
-            handler_name="new_document",
-            risk_class=RiskClass.DESTRUCTIVE,
-            evidence_required=True,
-            argument_fields=(FieldMetadata("name", "name", ValueShape.NONBLANK_STRING),),
-        ),
-        OperationMetadata(
             operation="create_box",
             handler_name="add_box",
             risk_class=RiskClass.MUTATING,
@@ -463,34 +890,69 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                 FieldMetadata("height", "height", ValueShape.POSITIVE_NUMBER),
                 FieldMetadata("position", "position", ValueShape.VECTOR3, required=False),
             ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=1,
+                max_result_bytes=65_536,
+            ),
+            direct_exposed=True,
+            result_slots=(
+                ResultSlotMetadata(
+                    "object",
+                    "name",
+                    ValueShape.NONBLANK_STRING,
+                ),
+            ),
         ),
         OperationMetadata(
             operation="modify_parameter",
             handler_name="modify_part",
             risk_class=RiskClass.MUTATING,
             evidence_required=True,
-            target_fields=(FieldMetadata("object", "name", ValueShape.NONBLANK_STRING),),
+            target_fields=(
+                FieldMetadata(
+                    "object",
+                    "name",
+                    ValueShape.RESULT_REF,
+                    referenced_value_shape=ValueShape.NONBLANK_STRING,
+                ),
+            ),
             argument_fields=(
                 FieldMetadata("parameter", "parameter", ValueShape.NONBLANK_STRING),
                 FieldMetadata("value", "value", ValueShape.POSITIVE_NUMBER),
             ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=0,
+                max_result_bytes=65_536,
+            ),
+            direct_exposed=True,
         ),
         OperationMetadata(
             operation="inspect_model",
             handler_name="describe_part",
             risk_class=RiskClass.READ_ONLY,
             evidence_required=False,
+            resource_budget=ResourceBudget(
+                max_runtime_ms=10_000,
+                max_created_objects=0,
+                max_result_bytes=262_144,
+            ),
+            direct_exposed=True,
         ),
     )
 )
 
 __all__ = [
     "DEFAULT_OPERATION_REGISTRY",
+    "ExecutionProfile",
     "FieldMetadata",
     "OperationMetadata",
     "OperationRegistry",
     "RegistryError",
     "RegistryErrorCode",
+    "ResourceBudget",
+    "ResultSlotMetadata",
     "RiskClass",
     "ValueShape",
 ]

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import heapq
 import json
-import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -20,15 +19,17 @@ from typing import Any, Self
 
 from vibecad.execution.registry import (
     DEFAULT_OPERATION_REGISTRY,
+    ExecutionProfile,
     FieldMetadata,
     OperationMetadata,
     OperationRegistry,
+    ResultSlotMetadata,
     RiskClass,
     ValueShape,
+    _matches_value_shape,
 )
 from vibecad.workflow.contracts import ModelCommand, ModelProgram, ValueSource
 from vibecad.workflow.errors import (
-    MAX_SAFE_JSON_INTEGER,
     SCHEMA_VERSION,
     is_canonical_json_pointer,
     join_json_pointer,
@@ -58,6 +59,7 @@ class ProgramErrorCode(StrEnum):
     MISSING_FIELD = "missing_field"
     EXTRA_FIELD = "extra_field"
     INVALID_VALUE_SHAPE = "invalid_value_shape"
+    INVALID_RESULT_REFERENCE = "invalid_result_reference"
     INVALID_ERROR_RECORD = "invalid_error_record"
     UNSUPPORTED_VERSION = "unsupported_version"
 
@@ -178,6 +180,15 @@ def _failure(code: ProgramErrorCode, path: str, message: str) -> ProgramValidati
 
 
 @dataclass(frozen=True, slots=True)
+class BoundResultRef:
+    """Validated reference to one concrete result slot in this program run."""
+
+    command_id: str
+    slot: str
+    value_shape: ValueShape
+
+
+@dataclass(frozen=True, slots=True)
 class BoundCommand:
     """One validated command in deterministic execution order."""
 
@@ -190,6 +201,8 @@ class BoundCommand:
     source: ValueSource
     risk_class: RiskClass
     evidence_required: bool
+    execution_profiles: tuple[ExecutionProfile, ...] = (ExecutionProfile.HEADLESS,)
+    result_slots: tuple[ResultSlotMetadata, ...] = ()
 
     def __post_init__(self) -> None:
         frozen_kwargs = {
@@ -198,11 +211,15 @@ class BoundCommand:
         object.__setattr__(self, "handler_kwargs", MappingProxyType(frozen_kwargs))
         object.__setattr__(self, "depends_on", tuple(self.depends_on))
         object.__setattr__(self, "preserve", tuple(self.preserve))
+        object.__setattr__(self, "execution_profiles", tuple(self.execution_profiles))
+        object.__setattr__(self, "result_slots", tuple(self.result_slots))
 
 
 def _freeze_bound_value(value: object) -> object:
     """Defensively freeze caller-owned JSON containers in bound data."""
 
+    if type(value) is BoundResultRef:
+        return value
     if isinstance(value, Mapping):
         return MappingProxyType({key: _freeze_bound_value(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
@@ -217,7 +234,7 @@ class ValidatedProgram:
     use :meth:`require_authentic` before trusting the bound handler metadata.
     """
 
-    __slots__ = ("_commands", "_program", "_seal")
+    __slots__ = ("_commands", "_max_commands", "_program", "_registry", "_seal")
 
     def __new__(cls, *args: object, **kwargs: object) -> Self:
         del args, kwargs
@@ -242,10 +259,29 @@ class ValidatedProgram:
 
         try:
             seal = object.__getattribute__(self, "_seal")
+            registry = object.__getattribute__(self, "_registry")
+            max_commands = object.__getattribute__(self, "_max_commands")
         except AttributeError as exc:
             raise TypeError("validated program capability is not authentic") from exc
-        if type(self) is not ValidatedProgram or seal is not _VALIDATED_PROGRAM_SEAL:
+        if (
+            type(self) is not ValidatedProgram
+            or seal is not _VALIDATED_PROGRAM_SEAL
+            or type(registry) is not OperationRegistry
+            or type(max_commands) is not int
+            or max_commands <= 0
+            or max_commands > DEFAULT_MAX_COMMANDS
+        ):
             raise TypeError("validated program capability is not authentic")
+
+    def _revalidate_source(self) -> Self:
+        """Rebind the sealed source with the exact authority used originally."""
+
+        self.require_authentic()
+        return validate_model_program(
+            self._program,
+            registry=self._registry,
+            max_commands=self._max_commands,
+        )
 
     def __len__(self) -> int:
         return len(self.commands)
@@ -273,10 +309,14 @@ class ValidatedProgram:
 def _make_validated_program(
     program: ModelProgram,
     commands: tuple[BoundCommand, ...],
+    registry: OperationRegistry,
+    max_commands: int,
 ) -> ValidatedProgram:
     result = object.__new__(ValidatedProgram)
     object.__setattr__(result, "_program", program)
     object.__setattr__(result, "_commands", commands)
+    object.__setattr__(result, "_registry", registry)
+    object.__setattr__(result, "_max_commands", max_commands)
     object.__setattr__(result, "_seal", _VALIDATED_PROGRAM_SEAL)
     return result
 
@@ -460,26 +500,69 @@ def _validate_graph(
     return tuple(ordered)
 
 
-def _is_finite_number(value: object, *, positive: bool) -> bool:
-    if type(value) not in {int, float}:
-        return False
-    if type(value) is int and abs(value) > MAX_SAFE_JSON_INTEGER:
-        return False
-    return math.isfinite(value) and (not positive or value > 0)
+def _dependency_closures(
+    operations: tuple[ModelCommand, ...],
+) -> Mapping[str, frozenset[str]]:
+    commands = {command.id: command for command in operations}
+    memo: dict[str, frozenset[str]] = {}
+
+    def visit(command_id: str) -> frozenset[str]:
+        known = memo.get(command_id)
+        if known is not None:
+            return known
+        dependencies: set[str] = set()
+        for dependency in commands[command_id].depends_on:
+            dependencies.add(dependency)
+            dependencies.update(visit(dependency))
+        result = frozenset(dependencies)
+        memo[command_id] = result
+        return result
+
+    for command in operations:
+        visit(command.id)
+    return MappingProxyType(memo)
 
 
-def _validate_value_shape(value: object, shape: ValueShape) -> bool:
-    if shape is ValueShape.NONBLANK_STRING:
-        return type(value) is str and bool(value.strip())
-    if shape is ValueShape.POSITIVE_NUMBER:
-        return _is_finite_number(value, positive=True)
-    if shape is ValueShape.BOOLEAN:
-        return type(value) is bool
-    if shape is ValueShape.VECTOR3:
-        if type(value) is not tuple or len(value) != 3:
-            return False
-        return all(_is_finite_number(component, positive=False) for component in value)
-    return False
+def _invalid_result_reference(path: str) -> ProgramValidationError:
+    return _failure(
+        ProgramErrorCode.INVALID_RESULT_REFERENCE,
+        path,
+        "result reference is invalid or unavailable",
+    )
+
+
+def _bind_result_reference(
+    value: object,
+    metadata: FieldMetadata,
+    *,
+    path: str,
+    dependency_ids: frozenset[str],
+    prior_command_ids: frozenset[str],
+    operation_metadata: Mapping[str, OperationMetadata],
+) -> BoundResultRef:
+    if not _matches_value_shape(value, ValueShape.RESULT_REF):
+        raise _invalid_result_reference(path)
+    assert isinstance(value, Mapping)
+    try:
+        command_id = value["command_id"]
+        slot_name = value["slot"]
+    except Exception:
+        raise _invalid_result_reference(path) from None
+    if type(command_id) is not str or type(slot_name) is not str:
+        raise _invalid_result_reference(path)
+    if command_id not in dependency_ids or command_id not in prior_command_ids:
+        raise _invalid_result_reference(path)
+    producer = operation_metadata.get(command_id)
+    if producer is None:
+        raise _invalid_result_reference(path)
+    slot = next((item for item in producer.result_slots if item.name == slot_name), None)
+    if slot is None or slot.value_shape is not metadata.referenced_value_shape:
+        raise _invalid_result_reference(path)
+    return BoundResultRef(
+        command_id=command_id,
+        slot=slot_name,
+        value_shape=slot.value_shape,
+    )
 
 
 def _bind_field_group(
@@ -489,6 +572,9 @@ def _bind_field_group(
     index: int,
     group: str,
     destination: dict[str, Any],
+    dependency_ids: frozenset[str],
+    prior_command_ids: frozenset[str],
+    operation_metadata: Mapping[str, OperationMetadata],
 ) -> None:
     path = _operation_path(index, group)
     if not all(type(name) is str for name in values):
@@ -517,10 +603,26 @@ def _bind_field_group(
         if item.name not in values:
             continue
         value = values[item.name]
-        if not _validate_value_shape(value, item.value_shape):
+        field_path = join_json_pointer(path, item.name)
+        if item.value_shape is ValueShape.RESULT_REF:
+            destination[item.handler_parameter] = _bind_result_reference(
+                value,
+                item,
+                path=field_path,
+                dependency_ids=dependency_ids,
+                prior_command_ids=prior_command_ids,
+                operation_metadata=operation_metadata,
+            )
+            continue
+        if not _matches_value_shape(
+            value,
+            item.value_shape,
+            enum_values=item.enum_values,
+            allowed_units=item.allowed_units,
+        ):
             raise _failure(
                 ProgramErrorCode.INVALID_VALUE_SHAPE,
-                join_json_pointer(path, item.name),
+                field_path,
                 "field value does not match the registered shape",
             )
         destination[item.handler_parameter] = value
@@ -530,6 +632,9 @@ def _bind_command(
     command: ModelCommand,
     metadata: OperationMetadata,
     index: int,
+    dependency_ids: frozenset[str],
+    prior_command_ids: frozenset[str],
+    operation_metadata: Mapping[str, OperationMetadata],
 ) -> BoundCommand:
     kwargs: dict[str, Any] = {}
     _bind_field_group(
@@ -538,6 +643,9 @@ def _bind_command(
         index=index,
         group="target",
         destination=kwargs,
+        dependency_ids=dependency_ids,
+        prior_command_ids=prior_command_ids,
+        operation_metadata=operation_metadata,
     )
     _bind_field_group(
         values=command.args,
@@ -545,6 +653,9 @@ def _bind_command(
         index=index,
         group="args",
         destination=kwargs,
+        dependency_ids=dependency_ids,
+        prior_command_ids=prior_command_ids,
+        operation_metadata=operation_metadata,
     )
     return BoundCommand(
         id=command.id,
@@ -556,6 +667,8 @@ def _bind_command(
         source=command.source,
         risk_class=metadata.risk_class,
         evidence_required=metadata.evidence_required,
+        execution_profiles=metadata.execution_profiles,
+        result_slots=metadata.result_slots,
     )
 
 
@@ -587,7 +700,8 @@ def validate_model_program(
         )
 
     order = _validate_graph(operations)
-    bound_by_index: list[BoundCommand] = []
+    dependency_closures = _dependency_closures(operations)
+    operation_metadata: dict[str, OperationMetadata] = {}
     for index, command in enumerate(operations):
         metadata = checked_registry.operations.get(command.op)
         if metadata is None:
@@ -596,15 +710,36 @@ def validate_model_program(
                 _operation_path(index, "op"),
                 "operation is not registered",
             )
-        bound_by_index.append(_bind_command(command, metadata, index))
+        operation_metadata[command.id] = metadata
+    frozen_operation_metadata = MappingProxyType(operation_metadata)
+
+    bound_by_index: list[BoundCommand] = []
+    for index, command in enumerate(operations):
+        metadata = operation_metadata[command.id]
+        bound_by_index.append(
+            _bind_command(
+                command,
+                metadata,
+                index,
+                dependency_closures[command.id],
+                frozenset(item.id for item in operations[:index]),
+                frozen_operation_metadata,
+            )
+        )
 
     commands = tuple(bound_by_index[index] for index in order)
-    return _make_validated_program(checked_program, commands)
+    return _make_validated_program(
+        checked_program,
+        commands,
+        checked_registry,
+        checked_budget,
+    )
 
 
 __all__ = [
     "DEFAULT_MAX_COMMANDS",
     "BoundCommand",
+    "BoundResultRef",
     "ProgramErrorCode",
     "ProgramValidationError",
     "ValidatedProgram",

@@ -9,13 +9,17 @@ from collections.abc import Iterator, Mapping
 
 import pytest
 
+import vibecad.execution.registry as registry_module
 from vibecad.execution.registry import (
     DEFAULT_OPERATION_REGISTRY,
+    ExecutionProfile,
     FieldMetadata,
     OperationMetadata,
     OperationRegistry,
     RegistryError,
     RegistryErrorCode,
+    ResourceBudget,
+    ResultSlotMetadata,
     RiskClass,
     ValueShape,
 )
@@ -58,6 +62,7 @@ def _operation(
     handler_name: str = "add_sphere",
     target_fields: tuple[FieldMetadata, ...] = (),
     argument_fields: tuple[FieldMetadata, ...] = (),
+    result_slots: tuple[ResultSlotMetadata, ...] = (),
 ) -> OperationMetadata:
     return OperationMetadata(
         operation=operation,
@@ -66,22 +71,188 @@ def _operation(
         evidence_required=True,
         target_fields=target_fields,
         argument_fields=argument_fields,
+        result_slots=result_slots,
     )
 
 
-def test_default_registry_exposes_only_the_phase_one_operations():
+def test_default_registry_exposes_only_the_stage3_s3_1_operations():
     assert tuple(DEFAULT_OPERATION_REGISTRY) == (
-        "create_document",
         "create_box",
         "modify_parameter",
         "inspect_model",
     )
-    assert len(DEFAULT_OPERATION_REGISTRY) == 4
+    assert len(DEFAULT_OPERATION_REGISTRY) == 3
+
+
+def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contracts():
+    assert tuple(DEFAULT_OPERATION_REGISTRY) == (
+        "create_box",
+        "modify_parameter",
+        "inspect_model",
+    )
+
+    create_box = DEFAULT_OPERATION_REGISTRY.lookup("create_box")
+    assert create_box.execution_profiles == (registry_module.ExecutionProfile.HEADLESS,)
+    assert create_box.direct_exposed is True
+    assert tuple(slot.name for slot in create_box.result_slots) == ("object",)
+    assert create_box.result_slots[0].result_field == "name"
+
+    for operation in DEFAULT_OPERATION_REGISTRY.operations.values():
+        assert operation.execution_profiles == (ExecutionProfile.HEADLESS,)
+        assert operation.minimum_freecad_version == (1, 0)
+        assert operation.maximum_freecad_version_exclusive == (2, 0)
+        assert operation.requires_gui_main_thread is False
+        assert type(operation.resource_budget) is ResourceBudget
+        assert operation.direct_exposed is True
+
+    modify = DEFAULT_OPERATION_REGISTRY.lookup("modify_parameter")
+    assert modify.target_fields[0].value_shape is ValueShape.RESULT_REF
+    assert modify.target_fields[0].referenced_value_shape is ValueShape.NONBLANK_STRING
+    assert DEFAULT_OPERATION_REGISTRY.lookup("inspect_model").result_slots == ()
+
+    with pytest.raises(RegistryError) as caught:
+        DEFAULT_OPERATION_REGISTRY.lookup("create_document")
+    assert caught.value.code is RegistryErrorCode.UNKNOWN_OPERATION
+
+
+def test_stage3_value_shapes_and_execution_profiles_are_closed():
+    assert {item.value for item in ExecutionProfile} == {
+        "headless",
+        "offscreen_gui",
+        "interactive_gui",
+    }
+    assert {item.value for item in ValueShape} == {
+        "nonblank_string",
+        "boolean",
+        "integer",
+        "finite_number",
+        "positive_number",
+        "enum",
+        "vector2",
+        "vector3",
+        "quantity",
+        "result_ref",
+        "object_selector",
+    }
+
+
+@pytest.mark.parametrize(
+    "profiles",
+    [(), (ExecutionProfile.HEADLESS, ExecutionProfile.HEADLESS), ("headless",)],
+)
+def test_operation_profiles_are_nonempty_unique_and_typed(profiles):
+    with pytest.raises(RegistryError) as caught:
+        OperationMetadata(
+            operation="create_sphere",
+            handler_name="add_sphere",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            execution_profiles=profiles,
+        )
+
+    assert caught.value.code is RegistryErrorCode.INVALID_METADATA
+
+
+def test_headless_profile_cannot_claim_a_gui_main_thread_requirement():
+    with pytest.raises(RegistryError) as caught:
+        OperationMetadata(
+            operation="create_sphere",
+            handler_name="add_sphere",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            execution_profiles=(
+                ExecutionProfile.HEADLESS,
+                ExecutionProfile.INTERACTIVE_GUI,
+            ),
+            requires_gui_main_thread=True,
+        )
+
+    assert caught.value.code is RegistryErrorCode.INVALID_METADATA
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [
+        ResourceBudget(max_runtime_ms=1, max_created_objects=0, max_result_bytes=1),
+        object(),
+    ],
+)
+def test_operation_resource_budget_is_typed(budget):
+    if type(budget) is ResourceBudget:
+        operation = OperationMetadata(
+            operation="create_sphere",
+            handler_name="add_sphere",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            resource_budget=budget,
+        )
+        assert operation.resource_budget is budget
+        return
+    with pytest.raises(RegistryError) as caught:
+        OperationMetadata(
+            operation="create_sphere",
+            handler_name="add_sphere",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            resource_budget=budget,
+        )
+    assert caught.value.code is RegistryErrorCode.INVALID_METADATA
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_runtime_ms": 0},
+        {"max_created_objects": -1},
+        {"max_result_bytes": True},
+    ],
+)
+def test_resource_budget_rejects_unbounded_or_untyped_values(kwargs):
+    with pytest.raises(RegistryError) as caught:
+        ResourceBudget(**kwargs)
+    assert caught.value.code is RegistryErrorCode.INVALID_METADATA
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"minimum_freecad_version": (2, 0), "maximum_freecad_version_exclusive": (2, 0)},
+        {"minimum_freecad_version": (1,)},
+        {"maximum_freecad_version_exclusive": (2, True)},
+    ],
+)
+def test_freecad_version_range_is_bounded_and_nonempty(kwargs):
+    with pytest.raises(RegistryError) as caught:
+        OperationMetadata(
+            operation="create_sphere",
+            handler_name="add_sphere",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            **kwargs,
+        )
+    assert caught.value.code is RegistryErrorCode.INVALID_METADATA
+
+
+def test_result_slot_and_result_ref_metadata_fail_closed():
+    slot = ResultSlotMetadata("object", "name", ValueShape.NONBLANK_STRING)
+    operation = _operation(result_slots=(slot,))
+    assert operation.result_slots == (slot,)
+
+    with pytest.raises(RegistryError) as caught:
+        FieldMetadata("object", "name", ValueShape.RESULT_REF)
+    assert caught.value.code is RegistryErrorCode.INVALID_METADATA
+
+    with pytest.raises(RegistryError) as caught:
+        ResultSlotMetadata("object", "name", ValueShape.RESULT_REF)
+    assert caught.value.code is RegistryErrorCode.INVALID_METADATA
+
+    with pytest.raises(RegistryError) as caught:
+        _operation(result_slots=(slot, slot))
+    assert caught.value.code is RegistryErrorCode.DUPLICATE_FIELD
 
 
 def test_default_registry_has_exact_handler_risk_and_evidence_metadata():
     expected = {
-        "create_document": ("new_document", RiskClass.DESTRUCTIVE, True),
         "create_box": ("add_box", RiskClass.MUTATING, True),
         "modify_parameter": ("modify_part", RiskClass.MUTATING, True),
         "inspect_model": ("describe_part", RiskClass.READ_ONLY, False),
@@ -100,12 +271,6 @@ def test_default_registry_has_exact_handler_risk_and_evidence_metadata():
 
 
 def test_default_registry_has_exact_field_shapes_and_bindings():
-    create_document = DEFAULT_OPERATION_REGISTRY.lookup("create_document")
-    assert create_document.target_fields == ()
-    assert _fields(create_document.argument_fields) == (
-        ("name", "name", ValueShape.NONBLANK_STRING, True),
-    )
-
     create_box = DEFAULT_OPERATION_REGISTRY.lookup("create_box")
     assert create_box.target_fields == ()
     assert _fields(create_box.argument_fields) == (
@@ -117,7 +282,11 @@ def test_default_registry_has_exact_field_shapes_and_bindings():
 
     modify_parameter = DEFAULT_OPERATION_REGISTRY.lookup("modify_parameter")
     assert _fields(modify_parameter.target_fields) == (
-        ("object", "name", ValueShape.NONBLANK_STRING, True),
+        ("object", "name", ValueShape.RESULT_REF, True),
+    )
+    assert (
+        modify_parameter.target_fields[0].referenced_value_shape
+        is ValueShape.NONBLANK_STRING
     )
     assert _fields(modify_parameter.argument_fields) == (
         ("parameter", "parameter", ValueShape.NONBLANK_STRING, True),
@@ -533,6 +702,13 @@ def test_registry_contains_metadata_only_not_execution_hooks():
         "evidence_required",
         "target_fields",
         "argument_fields",
+        "execution_profiles",
+        "minimum_freecad_version",
+        "maximum_freecad_version_exclusive",
+        "requires_gui_main_thread",
+        "resource_budget",
+        "direct_exposed",
+        "result_slots",
     }
     assert all(
         not callable(value)
