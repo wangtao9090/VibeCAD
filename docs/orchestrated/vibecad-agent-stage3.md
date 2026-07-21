@@ -523,6 +523,8 @@ Stage 3 的全局机械 allowlist 为以下 repository-relative 路径；每个 
   - `tests/test_execution_adapter.py`
   - `tests/test_program_executor.py`
   - `tests/test_task_kernel_integration.py`
+  - `tests/test_candidate_revision.py`（仅 execution package public export contract）
+  - `tests/test_revision_store.py`（仅 execution package public export contract）
   - `docs/orchestrated/vibecad-agent-stage3.md`
 
 ### 3. Contract 与不变量
@@ -555,8 +557,10 @@ Stage 3 的全局机械 allowlist 为以下 repository-relative 路径；每个 
    `PYTHONPATH=src uv run pytest -q tests/test_execution_registry.py tests/test_model_program.py
    tests/test_execution_adapter.py tests/test_program_executor.py`。
 4. Integration regression：
-   `PYTHONPATH=src uv run pytest -q tests/test_task_kernel_integration.py`；若真实 FreeCAD gate
-   需要 managed runtime，则使用现有 ready environment，不安装第二套 runtime。
+   `PYTHONPATH=src uv run pytest -q tests/test_task_kernel_integration.py
+   tests/test_candidate_revision.py::test_public_surface_signatures_and_closed_enums
+   tests/test_revision_store.py::test_public_surface_is_direct_module_only_and_exact`；若真实
+   FreeCAD gate 需要 managed runtime，则使用现有 ready environment，不安装第二套 runtime。
 5. Static gate：`uv run ruff check` 仅覆盖本 packet 修改的 Python 文件。
 6. 由未参与写入的 agent 做 read-only diff review；controller 关闭普通缺陷后才可 named-file
    stage 和本地语义 commit。
