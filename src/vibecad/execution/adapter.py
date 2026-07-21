@@ -26,6 +26,7 @@ from vibecad.execution.results import (
     normalize_tool_exception,
     normalize_tool_result,
 )
+from vibecad.execution.selectors import SelectorV1
 from vibecad.workflow.contracts import (
     EvidenceKind,
     ExecutionEvidence,
@@ -130,6 +131,11 @@ def _freeze_bound_value(value: object) -> object:
         ):
             raise _invalid_program()
         return BoundResultRef(value.command_id, value.slot, value.value_shape)
+    if type(value) is SelectorV1:
+        try:
+            return SelectorV1.from_mapping(value.to_mapping())
+        except Exception:
+            raise _invalid_program() from None
     if type(value) is MappingProxyType:
         try:
             keys = tuple(value)
@@ -178,6 +184,14 @@ def _exactly_equal(left: object, right: object) -> bool:
                 strict=True,
             )
         )
+    if type(left) is SelectorV1:
+        assert type(right) is SelectorV1
+        try:
+            checked_left = SelectorV1.from_mapping(left.to_mapping())
+            checked_right = SelectorV1.from_mapping(right.to_mapping())
+        except Exception:
+            return False
+        return checked_left == checked_right
     if type(left) is ResultSlotMetadata:
         assert type(right) is ResultSlotMetadata
         return all(

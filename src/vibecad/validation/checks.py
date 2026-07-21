@@ -31,6 +31,7 @@ _SUPPORTED = frozenset(
         (AcceptanceKind.ARTIFACT, "exists"),
         (AcceptanceKind.ARTIFACT, "non_empty"),
         (AcceptanceKind.ARTIFACT, "format"),
+        (AcceptanceKind.PRESERVATION, "unchanged"),
     }
 )
 
@@ -241,6 +242,16 @@ def _compile_supported(
         expected = criterion.expected
         tolerance = None
         family = "artifact"
+    elif key == (AcceptanceKind.PRESERVATION, "unchanged"):
+        _empty_parameters(criterion, index)
+        _forbid_tolerance(criterion, index)
+        if type(criterion.expected) is not bool:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, expected_path)
+        if criterion.expected is not True:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, expected_path)
+        expected = True
+        tolerance = None
+        family = "preservation"
     else:
         _empty_parameters(criterion, index)
         _forbid_tolerance(criterion, index)
@@ -401,11 +412,17 @@ def evaluate_criterion(
                 observed = _shape_value(shape, criterion.check)
                 evidence = f"/shapes/{index}/{_shape_field(criterion.check)}"
                 break
-    else:
+    elif criterion.family == "artifact":
         for index, artifact in enumerate(snapshot.artifacts):
             if artifact.target == criterion.target:
                 observed = _artifact_value(artifact, criterion.check)
                 evidence = f"/artifacts/{index}/{criterion.check}"
+                break
+    else:
+        for index, preservation in enumerate(snapshot.preservations):
+            if preservation.target == criterion.target:
+                observed = preservation.preserved
+                evidence = f"/preservations/{index}/preserved"
                 break
     if observed is None:
         return _unsupported_verdict(criterion, missing=True)

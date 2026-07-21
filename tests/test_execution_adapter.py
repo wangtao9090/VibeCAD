@@ -23,6 +23,7 @@ from vibecad.execution.adapter import (
 )
 from vibecad.execution.registry import (
     ExecutionProfile,
+    FieldMetadata,
     OperationMetadata,
     OperationRegistry,
     ResultSlotMetadata,
@@ -30,6 +31,7 @@ from vibecad.execution.registry import (
     ValueShape,
 )
 from vibecad.execution.results import ToolDiagnosticClass, ToolResultCode
+from vibecad.execution.selectors import SelectorV1
 from vibecad.workflow.contracts import (
     AcceptanceSpec,
     EvidenceKind,
@@ -158,6 +160,53 @@ def _three_step_program() -> ValidatedProgram:
             depends_on=("box",),
         ),
         _command("inspect", depends_on=("modify",)),
+    )
+
+
+def _selector_mapping(revision_id: str) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "project_id": "project_11111111111111111111111111111111",
+        "revision_id": revision_id,
+        "entity_kind": "feature",
+        "object_id": "object_22222222222222222222222222222222",
+        "feature_id": "feature_33333333333333333333333333333333",
+        "object_type": "Part::Box",
+        "semantic_role": "primitive",
+        "provenance": {"source": "model", "operation_id": "box"},
+        "expected_cardinality": 1,
+    }
+
+
+def _selector_program() -> ValidatedProgram:
+    revision = "revision_44444444444444444444444444444444"
+    registry = OperationRegistry(
+        (
+            OperationMetadata(
+                operation="select_object",
+                handler_name="select_object",
+                risk_class=RiskClass.READ_ONLY,
+                evidence_required=False,
+                target_fields=(
+                    FieldMetadata("object", "selector", ValueShape.OBJECT_SELECTOR),
+                ),
+            ),
+        )
+    )
+    return validate_model_program(
+        ModelProgram(
+            task_id="task-selector-adapter",
+            base_revision=revision,
+            operations=(
+                _command(
+                    "select",
+                    "select_object",
+                    target={"object": _selector_mapping(revision)},
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="acceptance-selector-adapter", criteria=()),
+        ),
+        registry=registry,
     )
 
 
@@ -407,6 +456,44 @@ def test_well_typed_execution_profile_forgery_is_rejected_before_preflight(
         )
 
     assert caught.value.code is AdapterErrorCode.INVALID_PROGRAM
+    assert handlers.accesses == 0
+    assert clock.calls == 0
+
+
+def test_typed_selector_survives_canonical_rebind_and_reaches_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program = _selector_program()
+    received: list[SelectorV1] = []
+    _install_clock(monkeypatch, 0, 1)
+
+    def select_object(*, selector: SelectorV1) -> dict[str, object]:
+        received.append(selector)
+        return {"ok": True}
+
+    outcomes = execute_validated_program(program, {"select_object": select_object})
+
+    assert outcomes[0].result.ok is True
+    assert len(received) == 1
+    assert type(received[0]) is SelectorV1
+    assert received[0].object_id == "object_22222222222222222222222222222222"
+
+
+def test_well_typed_selector_forgery_is_rejected_before_handler_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program = _selector_program()
+    selector = program.commands[0].handler_kwargs["selector"]
+    object.__setattr__(
+        selector,
+        "object_id",
+        "object_55555555555555555555555555555555",
+    )
+    handlers = _HostileHandlers()
+    clock = _install_clock(monkeypatch)
+
+    _assert_adapter_error(AdapterErrorCode.INVALID_PROGRAM, program, handlers)
+
     assert handlers.accesses == 0
     assert clock.calls == 0
 

@@ -71,16 +71,28 @@ MANIFEST = "a" * 64
 
 EXPECTED_EXECUTION_EXPORTS = [
     "DEFAULT_OPERATION_REGISTRY",
+    "EntityIdentity",
+    "EntityKind",
     "ExecutionProfile",
     "FieldMetadata",
     "OperationMetadata",
     "OperationRegistry",
+    "Provenance",
+    "ProvenanceSource",
     "RegistryError",
     "RegistryErrorCode",
     "ResourceBudget",
     "ResultSlotMetadata",
     "RiskClass",
+    "SelectorError",
+    "SelectorErrorCode",
+    "SelectorV1",
+    "SemanticRole",
     "ValueShape",
+    "encode_provenance_metadata",
+    "index_entity_identities",
+    "parse_entity_identity",
+    "resolve_selector",
 ]
 EXPECTED_CANDIDATE_EXPORTS = (
     "CandidateErrorCode",

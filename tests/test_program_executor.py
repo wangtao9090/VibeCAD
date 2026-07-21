@@ -24,6 +24,13 @@ from vibecad.execution.executor import (
     ExecutorErrorCode,
     InProcessCadExecutor,
 )
+from vibecad.execution.registry import (
+    FieldMetadata,
+    OperationMetadata,
+    OperationRegistry,
+    RiskClass,
+    ValueShape,
+)
 from vibecad.execution.revisions import (
     LocalRevisionStore,
     ProjectHead,
@@ -35,7 +42,7 @@ from vibecad.execution.revisions import (
 from vibecad.workflow.contracts import AcceptanceSpec, ModelCommand, ModelProgram, ValueSource
 from vibecad.workflow.errors import SCHEMA_VERSION
 from vibecad.workflow.lease import ProjectWriteLease
-from vibecad.workflow.program import ValidatedProgram
+from vibecad.workflow.program import ValidatedProgram, validate_model_program
 from vibecad.workflow.state import TaskArtifactRef
 
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
@@ -84,6 +91,7 @@ class _FakeDocument:
     def __init__(self) -> None:
         self.recompute_calls = 0
         self.save_calls: list[str] = []
+        self.Objects: tuple[object, ...] = ()
 
     def recompute(self) -> None:
         self.recompute_calls += 1
@@ -103,6 +111,8 @@ class _FakeSession:
         self.opened: list[str] = []
         self.close_calls = 0
         self.shape_calls = 0
+        self.identity_object = type("ManagedBox", (), {"TypeId": "Part::Box"})()
+        self.attached_identities: list[tuple[object, object]] = []
 
     def load_document(self, path: Path) -> object:
         self.loaded.append(path)
@@ -121,6 +131,45 @@ class _FakeSession:
     def get_assembly_shape(self) -> _FakeShape:
         self.shape_calls += 1
         return self.shape
+
+    def get_object(self, name: str) -> object:
+        if name != "Box":
+            raise KeyError(name)
+        return self.identity_object
+
+    def attach_object_identity(self, obj: object, identity: object) -> object:
+        self.attached_identities.append((obj, identity))
+        return identity
+
+    def read_object_identity(self, obj: object) -> object:
+        for current, identity in reversed(self.attached_identities):
+            if current is obj:
+                return identity
+        raise ValueError("identity missing")
+
+
+class _FakeRotation:
+    Q = (0.0, 0.0, 0.0, 1.0)
+
+
+class _FakePlacement:
+    def __init__(self, x: float) -> None:
+        self.Base = _FakeVector(x, 0.0, 0.0)
+        self.Rotation = _FakeRotation()
+
+
+class _FakeEntity:
+    def __init__(self, suffix: str, *, x: float, length: float) -> None:
+        self.VibeCADObjectId = f"object_{suffix * 32}"
+        self.VibeCADFeatureId = f"feature_{suffix * 32}"
+        self.VibeCADSemanticRole = "primitive"
+        self.VibeCADProvenance = '{"operation_id":"box","source":"model"}'
+        self.TypeId = "Part::Box"
+        self.Length = length
+        self.Width = 20.0
+        self.Height = 30.0
+        self.Placement = _FakePlacement(x)
+        self.Shape = _FakeShape()
 
 
 def _store() -> LocalRevisionStore:
@@ -262,17 +311,41 @@ def _install_store_paths(
     step_path: Path,
 ) -> list[str]:
     calls: list[str] = []
+    assert sealed.revision.model is not None
+    base_revision = RevisionRef(
+        id=BASE_REVISION,
+        project_id=PROJECT_ID,
+        base_revision=None,
+        manifest_sha256=sealed.base_head.manifest_sha256,
+        model=sealed.revision.model,
+        artifacts=(),
+    )
+
+    live = sealed.binding.session
+
+    def session_factory() -> _FakeSession:
+        probe = _FakeSession(getattr(live, "shape", None))
+        probe.doc.Objects = tuple(getattr(getattr(live, "doc", None), "Objects", ()))
+        return probe
 
     def load_revision(self: LocalRevisionStore, project_id: str, revision_id: str) -> RevisionRef:
         del self
-        calls.append("load")
-        assert (project_id, revision_id) == (PROJECT_ID, CANDIDATE_REVISION)
-        return sealed.revision
+        assert project_id == PROJECT_ID
+        if revision_id == CANDIDATE_REVISION:
+            calls.append("load")
+            return sealed.revision
+        assert revision_id == BASE_REVISION
+        calls.append("base_load")
+        return base_revision
 
     def revision_model_path(self: LocalRevisionStore, project_id: str, revision_id: str) -> Path:
         del self
-        calls.append("model_path")
-        assert (project_id, revision_id) == (PROJECT_ID, CANDIDATE_REVISION)
+        assert project_id == PROJECT_ID
+        if revision_id == CANDIDATE_REVISION:
+            calls.append("model_path")
+        else:
+            assert revision_id == BASE_REVISION
+            calls.append("base_model_path")
         return model_path
 
     def revision_artifact_path(
@@ -293,6 +366,7 @@ def _install_store_paths(
     monkeypatch.setattr(LocalRevisionStore, "load_revision", load_revision)
     monkeypatch.setattr(LocalRevisionStore, "revision_model_path", revision_model_path)
     monkeypatch.setattr(LocalRevisionStore, "revision_artifact_path", revision_artifact_path)
+    monkeypatch.setattr(executor_module, "_Session", session_factory)
     return calls
 
 
@@ -653,6 +727,130 @@ def test_execute_program_binds_fixed_handlers_once_and_preserves_order(
     }
 
 
+def test_managed_create_attaches_fresh_typed_identity_before_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class ManagedSession(_FakeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.obj = type("ManagedBox", (), {"TypeId": "Part::Box"})()
+
+        def get_object(self, name: str) -> object:
+            assert name == "Box"
+            return self.obj
+
+    monkeypatch.setattr(
+        executor_module,
+        "_add_box",
+        lambda session, **kwargs: {"ok": True, "name": "Box"},
+    )
+    program = ModelProgram(
+        task_id="task-managed-create",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "box",
+                "create_box",
+                args={"length": 10, "width": 20, "height": 30},
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-managed-create", criteria=()),
+    )
+    session = ManagedSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert outcomes[0].result.ok is True
+    assert len(session.attached_identities) == 1
+    obj, identity = session.attached_identities[0]
+    assert obj is session.obj
+    assert identity.object_id.startswith("object_")
+    assert identity.feature_id.startswith("feature_")
+    assert identity.object_type == "Part::Box"
+    assert identity.semantic_role.value == "primitive"
+    assert identity.provenance.to_mapping() == {
+        "source": "model",
+        "operation_id": None,
+    }
+
+
+def test_managed_create_fails_closed_when_identity_authority_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class UnmanagedSession(_FakeSession):
+        attach_object_identity = None
+
+    monkeypatch.setattr(
+        executor_module,
+        "_add_box",
+        lambda _session, **_kwargs: {"ok": True, "name": "Box"},
+    )
+    executor = InProcessCadExecutor(store=_store())
+    program = ModelProgram(
+        task_id="task-unmanaged-create",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "box",
+                "create_box",
+                args={"length": 10, "width": 20, "height": 30},
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-unmanaged-create", criteria=()),
+    )
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(program),
+        candidate=_active(UnmanagedSession(), tmp_path),
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].result.ok is False
+    assert "identity" not in json.dumps(outcomes[0].result.to_mapping()).lower()
+
+
+def test_managed_create_rejects_callable_noop_identity_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class NoOpIdentitySession(_FakeSession):
+        def attach_object_identity(self, obj: object, identity: object) -> object:
+            del obj
+            return identity
+
+    monkeypatch.setattr(
+        executor_module,
+        "_add_box",
+        lambda _session, **_kwargs: {"ok": True, "name": "Box"},
+    )
+    executor = InProcessCadExecutor(store=_store())
+    program = ModelProgram(
+        task_id="task-noop-identity",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "box",
+                "create_box",
+                args={"length": 10, "width": 20, "height": 30},
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-noop-identity", criteria=()),
+    )
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(program),
+        candidate=_active(NoOpIdentitySession(), tmp_path),
+    )
+
+    assert outcomes[0].result.ok is False
+
+
 def test_execute_preflights_all_fixed_handlers_before_first_cad_call(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -719,6 +917,59 @@ def test_execute_rejects_non_active_candidate_before_handlers(candidate: object)
             program=executor.validate_program(_program()),
             candidate=candidate,  # type: ignore[arg-type]
         )
+    assert caught.value.code is ExecutorErrorCode.INVALID_CANDIDATE
+
+
+def test_execute_rejects_selector_project_before_session_traversal(tmp_path: Path) -> None:
+    class SessionTraversalBomb:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"session traversal occurred: {name}")
+
+    registry = OperationRegistry(
+        (
+            OperationMetadata(
+                operation="select_object",
+                handler_name="select_object",
+                risk_class=RiskClass.READ_ONLY,
+                evidence_required=False,
+                target_fields=(
+                    FieldMetadata("object", "selector", ValueShape.OBJECT_SELECTOR),
+                ),
+            ),
+        )
+    )
+    selector = {
+        "schema_version": 1,
+        "project_id": "project_ffffffffffffffffffffffffffffffff",
+        "revision_id": BASE_REVISION,
+        "entity_kind": "feature",
+        "object_id": "object_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "feature_id": "feature_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "object_type": "Part::Box",
+        "semantic_role": "primitive",
+        "provenance": {"source": "model", "operation_id": "box"},
+        "expected_cardinality": 1,
+    }
+    program = ModelProgram(
+        task_id="task-wrong-project-selector",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "select",
+                "select_object",
+                target={"object": selector},
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-wrong-project-selector", criteria=()),
+    )
+    validated = validate_model_program(program, registry=registry)
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).execute_program(
+            program=validated,
+            candidate=_active(SessionTraversalBomb(), tmp_path),
+        )
+
     assert caught.value.code is ExecutorErrorCode.INVALID_CANDIDATE
 
 
@@ -929,7 +1180,184 @@ def test_collect_evidence_is_geometry_owned_and_manifest_bound(
         sealed.revision.artifacts[0].size_bytes,
     )
     assert all(item.candidate_revision == CANDIDATE_REVISION for item in evidence.artifacts)
-    assert calls == ["load", "model_path", "step_path", "load"]
+    assert calls == [
+        "load",
+        "model_path",
+        "step_path",
+        "load",
+        "base_load",
+        "base_model_path",
+        "load",
+        "base_load",
+    ]
+
+
+def test_collect_evidence_is_per_object_and_reload_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    model_path, step_path = _write_artifacts(tmp_path)
+    entities = (
+        _FakeEntity("a", x=0.0, length=12.0),
+        _FakeEntity("b", x=100.0, length=7.0),
+    )
+    live = _FakeSession()
+    live.doc.Objects = entities
+    probe = _FakeSession()
+    probe.doc.Objects = entities
+    base_probe = _FakeSession()
+    base_probe.doc.Objects = entities
+    sealed = _sealed(live, model_path, step_path)
+    _install_store_paths(monkeypatch, sealed, model_path, step_path)
+    probes = iter((probe, base_probe))
+    monkeypatch.setattr(executor_module, "_Session", lambda: next(probes))
+
+    evidence = InProcessCadExecutor(store=_store()).collect_evidence(candidate=sealed)
+
+    assert probe.loaded == [model_path]
+    assert probe.close_calls == 1
+    assert tuple(item.object_id for item in evidence.snapshot.entities) == (
+        "object_" + "a" * 32,
+        "object_" + "b" * 32,
+    )
+
+
+def test_collect_evidence_compares_base_and_sealed_entities_for_preservation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    model_path, step_path = _write_artifacts(tmp_path)
+    after = (
+        _FakeEntity("a", x=0.0, length=12.0),
+        _FakeEntity("b", x=100.0, length=7.0),
+    )
+    before = (
+        _FakeEntity("a", x=0.0, length=10.0),
+        _FakeEntity("b", x=100.0, length=7.0),
+    )
+    live = _FakeSession()
+    live.doc.Objects = after
+    candidate_probe = _FakeSession()
+    candidate_probe.doc.Objects = after
+    base_probe = _FakeSession()
+    base_probe.doc.Objects = before
+    sealed = _sealed(live, model_path, step_path)
+    _install_store_paths(monkeypatch, sealed, model_path, step_path)
+    probes = iter((candidate_probe, base_probe))
+    monkeypatch.setattr(executor_module, "_Session", lambda: next(probes))
+
+    snapshot = InProcessCadExecutor(store=_store()).collect_evidence(
+        candidate=sealed
+    ).snapshot
+
+    by_target = {item.target: item for item in snapshot.preservations}
+    assert set(by_target) == {
+        "object_" + "a" * 32,
+        "object_" + "b" * 32,
+        "feature_" + "a" * 32,
+        "feature_" + "b" * 32,
+    }
+    for target in ("object_" + "a" * 32, "feature_" + "a" * 32):
+        assert by_target[target].preserved is False
+        assert by_target[target].changed_fields == ("parameters.length",)
+    for target in ("object_" + "b" * 32, "feature_" + "b" * 32):
+        assert by_target[target].preserved is True
+        assert by_target[target].changed_fields == ()
+    assert candidate_probe.close_calls == 1
+    assert base_probe.close_calls == 1
+
+
+def test_collect_evidence_rejects_live_vs_reloaded_entity_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    model_path, step_path = _write_artifacts(tmp_path)
+    live = _FakeSession()
+    live.doc.Objects = (_FakeEntity("a", x=0.0, length=12.0),)
+    probe = _FakeSession()
+    probe.doc.Objects = (_FakeEntity("a", x=0.0, length=11.0),)
+    sealed = _sealed(live, model_path, step_path)
+    _install_store_paths(monkeypatch, sealed, model_path, step_path)
+    monkeypatch.setattr(executor_module, "_Session", lambda: probe)
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).collect_evidence(candidate=sealed)
+
+    assert caught.value.code is ExecutorErrorCode.INTEGRITY_FAILURE
+    assert probe.close_calls == 1
+
+
+def test_collect_evidence_rejects_partially_managed_modelable_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class PartialIdentitySession(_FakeSession):
+        def list_object_identities(self) -> tuple[object, ...]:
+            return ()
+
+    model_path, step_path = _write_artifacts(tmp_path)
+    live = PartialIdentitySession()
+    live.doc.Objects = (type("UntaggedBox", (), {"TypeId": "Part::Box"})(),)
+    sealed = _sealed(live, model_path, step_path)
+    _install_store_paths(monkeypatch, sealed, model_path, step_path)
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).collect_evidence(candidate=sealed)
+
+    assert caught.value.code is ExecutorErrorCode.CAD_FAILURE
+
+
+def test_collect_evidence_rechecks_fcstd_after_freecad_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class MutatingProbe(_FakeSession):
+        def load_document(self, path: Path) -> object:
+            loaded = super().load_document(path)
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("Document.xml", "<Document changed='true' />")
+            return loaded
+
+    model_path, step_path = _write_artifacts(tmp_path)
+    live = _FakeSession()
+    probe = MutatingProbe()
+    sealed = _sealed(live, model_path, step_path)
+    _install_store_paths(monkeypatch, sealed, model_path, step_path)
+    monkeypatch.setattr(executor_module, "_Session", lambda: probe)
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).collect_evidence(candidate=sealed)
+
+    assert caught.value.code is ExecutorErrorCode.INTEGRITY_FAILURE
+    assert probe.loaded == [model_path]
+    assert probe.close_calls == 1
+
+
+def test_collect_evidence_rechecks_step_after_observation_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    model_path, step_path = _write_artifacts(tmp_path)
+
+    class StepMutatingProbe(_FakeSession):
+        def load_document(self, path: Path) -> object:
+            loaded = super().load_document(path)
+            step_path.write_bytes(
+                b"ISO-10303-21;\nDATA;\n#2=B;\nENDSEC;\nEND-ISO-10303-21;\n"
+            )
+            return loaded
+
+    live = _FakeSession()
+    probe = StepMutatingProbe()
+    sealed = _sealed(live, model_path, step_path)
+    _install_store_paths(monkeypatch, sealed, model_path, step_path)
+    monkeypatch.setattr(executor_module, "_Session", lambda: probe)
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).collect_evidence(candidate=sealed)
+
+    assert caught.value.code is ExecutorErrorCode.INTEGRITY_FAILURE
+    assert probe.close_calls == 1
 
 
 def test_geometry_observation_copies_independent_non_box_facts(

@@ -27,6 +27,23 @@ _IMPLICIT_PART = "Part1"
 _STATE_PROPERTY = "VibeCADState"
 _STATE_SCHEMA = 1
 
+# Object-level identity lives on each FreeCAD DocumentObject.  These properties are the
+# persistence boundary: Session deliberately keeps no parallel identity registry that could
+# become authoritative after recompute, checkpoint, close, or reload.
+_IDENTITY_PROPERTIES = (
+    "VibeCADObjectId",
+    "VibeCADFeatureId",
+    "VibeCADSemanticRole",
+    "VibeCADProvenance",
+)
+_IDENTITY_GROUP = "VibeCAD"
+_IDENTITY_PROPERTY_DOCS = {
+    "VibeCADObjectId": "Persistent VibeCAD object identity",
+    "VibeCADFeatureId": "Persistent VibeCAD feature identity",
+    "VibeCADSemanticRole": "VibeCAD semantic object role",
+    "VibeCADProvenance": "Canonical VibeCAD provenance JSON",
+}
+
 
 class Session:
     def __init__(self, checkpoint_dir: Path | None = None) -> None:
@@ -257,6 +274,164 @@ class Session:
         if obj is None:
             raise KeyError(name)
         return obj
+
+    # ---- Stage 3：持久 object / feature identity primitives ----
+    def _require_owned_identity_object(self, obj: Any) -> Any:
+        """Return one live object owned by this Session's current Document.
+
+        A stale Python proxy from a closed or replaced document must never be accepted merely
+        because its ``Name`` happens to match an object in the new document.
+        """
+        self._require_doc()
+        name = getattr(obj, "Name", None)
+        if not isinstance(name, str) or not name:
+            raise ValueError("identity 对象必须有非空 Name")
+        try:
+            current = self._doc.getObject(name)
+        except Exception as exc:
+            raise ValueError("identity 对象不属于当前文档") from exc
+        if current is not obj:
+            raise ValueError("identity 对象不属于当前文档")
+        return obj
+
+    @staticmethod
+    def _identity_property_presence(obj: Any) -> tuple[bool, ...]:
+        try:
+            properties = set(obj.PropertiesList)
+        except Exception as exc:
+            raise ValueError("对象 identity 属性列表不可读取") from exc
+        return tuple(name in properties for name in _IDENTITY_PROPERTIES)
+
+    @staticmethod
+    def _validate_identity_property_envelope(obj: Any) -> bool:
+        """Validate property storage without interpreting selector-domain values.
+
+        ``False`` means the object has never been attached.  A partial attachment, wrong
+        property type, or missing persistence/editor flags is corruption and fails loudly.
+        """
+        presence = Session._identity_property_presence(obj)
+        if not any(presence):
+            return False
+        if not all(presence):
+            raise ValueError("对象 identity 属性不完整")
+        for name in _IDENTITY_PROPERTIES:
+            try:
+                property_type = obj.getTypeIdOfProperty(name)
+                editor_modes = set(obj.getEditorMode(name))
+                property_status = set(obj.getPropertyStatus(name))
+            except Exception as exc:
+                raise ValueError("对象 identity 属性元数据不可读取") from exc
+            if property_type != "App::PropertyString":
+                raise ValueError("对象 identity 属性必须是 App::PropertyString")
+            if not {"ReadOnly", "Hidden"}.issubset(editor_modes):
+                raise ValueError("对象 identity property flags 缺少 ReadOnly/Hidden")
+            if "LockDynamic" not in property_status:
+                raise ValueError("对象 identity property flags 缺少 LockDynamic")
+        return True
+
+    @staticmethod
+    def _parse_identity(obj: Any) -> Any:
+        # Selector owns canonical identifier / role / provenance validation.  The import is
+        # intentionally lazy so Session construction and ordinary legacy CAD use remain free of
+        # workflow imports and FreeCAD can still be imported only inside its managed runtime.
+        from vibecad.execution.selectors import parse_entity_identity  # noqa: PLC0415
+
+        return parse_entity_identity(obj)
+
+    def iter_identified_objects(self) -> tuple[tuple[Any, Any], ...]:
+        """Read all attached identities from the live Document, with their object proxies.
+
+        Completely untagged legacy/internal FreeCAD objects are not silently migrated.  Partial,
+        malformed, or duplicate authority fails; callers decide when an import transaction may
+        attach new identities.
+        """
+        self._require_doc()
+        tracked: list[Any] = []
+        for obj in tuple(self._doc.Objects):
+            if self._validate_identity_property_envelope(obj):
+                tracked.append(obj)
+
+        from vibecad.execution.selectors import index_entity_identities  # noqa: PLC0415
+
+        # The selector index is the single authority for canonical parsing and duplicate checks.
+        # Reparse below only to return stable object/identity pairs; nothing is cached in Session.
+        index_entity_identities(tuple(tracked))
+        records = tuple((obj, self._parse_identity(obj)) for obj in tracked)
+        return tuple(sorted(records, key=lambda item: item[1].object_id))
+
+    def list_object_identities(self) -> tuple[tuple[Any, Any], ...]:
+        """Return fresh ``(DocumentObject, EntityIdentity)`` pairs in object-id order."""
+        return self.iter_identified_objects()
+
+    def read_object_identity(self, obj: Any) -> Any:
+        """Read one identity through the full-document duplicate/malformed gate."""
+        target = self._require_owned_identity_object(obj)
+        if not self._validate_identity_property_envelope(target):
+            raise ValueError("对象未附加 VibeCAD identity")
+        for current, identity in self.iter_identified_objects():
+            if current is target:
+                return identity
+        raise ValueError("对象未附加 VibeCAD identity")
+
+    def attach_object_identity(self, obj: Any, identity: Any) -> Any:
+        """Attach one already validated ``EntityIdentity`` as locked dynamic properties.
+
+        The caller owns the surrounding FreeCAD transaction.  Existing authority is never
+        overwritten: an exact retry is idempotent; partial, malformed, duplicate, or different
+        identity fails closed.  Every read after attachment comes back from Document properties.
+        """
+        target = self._require_owned_identity_object(obj)
+        from vibecad.execution.selectors import (  # noqa: PLC0415
+            EntityIdentity,
+            encode_provenance_metadata,
+        )
+
+        if type(identity) is not EntityIdentity:
+            raise TypeError("identity 必须是 EntityIdentity")
+        if identity.object_type != getattr(target, "TypeId", None):
+            raise ValueError("identity object_type 与 FreeCAD 对象 TypeId 不一致")
+        provenance = encode_provenance_metadata(identity.provenance)
+        values = {
+            "VibeCADObjectId": identity.object_id,
+            "VibeCADFeatureId": identity.feature_id or "",
+            "VibeCADSemanticRole": identity.semantic_role.value,
+            "VibeCADProvenance": provenance,
+        }
+
+        presence = self._identity_property_presence(target)
+        if any(presence):
+            current = self.read_object_identity(target)
+            if current == identity:
+                return current
+            raise ValueError("对象已附加不同的 VibeCAD identity")
+
+        # Detect duplicate authority before adding locked properties.  Any exception leaves the
+        # object untouched; creation itself should be part of the caller's document transaction.
+        existing = self.iter_identified_objects()
+        for _, current in existing:
+            if current.object_id == identity.object_id:
+                raise ValueError("重复 object_id")
+            if identity.feature_id is not None and current.feature_id == identity.feature_id:
+                raise ValueError("重复 feature_id")
+
+        for name in _IDENTITY_PROPERTIES:
+            target.addProperty(
+                "App::PropertyString",
+                name,
+                _IDENTITY_GROUP,
+                _IDENTITY_PROPERTY_DOCS[name],
+                0,
+                True,
+                True,
+                True,
+            )
+        for name, value in values.items():
+            setattr(target, name, value)
+
+        attached = self.read_object_identity(target)
+        if attached != identity:
+            raise ValueError("FreeCAD identity 属性写入后校验失败")
+        return attached
 
     def _reset_model_state(self) -> None:
         self._labels = None

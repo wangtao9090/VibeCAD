@@ -8,8 +8,10 @@ import math
 import re
 import threading
 import weakref
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, Self
 
 from vibecad.workflow.errors import (
@@ -21,17 +23,31 @@ from vibecad.workflow.errors import (
 from vibecad.workflow.state import CriterionVerdict, VerificationReport
 
 _OBSERVATION_DOMAIN = b"vibecad-observation-snapshot-v1\0"
+_ENTITY_OBSERVATION_DOMAIN = b"vibecad-entity-observation-v1\0"
+_MISSING_ENTITY_DOMAIN = b"vibecad-missing-entity-observation-v1\0"
 _REVISION_RE = re.compile(r"^revision_[0-9a-f]{32}$")
+_OBJECT_RE = re.compile(r"^object_[0-9a-f]{32}$")
+_FEATURE_RE = re.compile(r"^feature_[0-9a-f]{32}$")
+_TYPE_ID_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_]*(?:::[A-Za-z][A-Za-z0-9_]*)+$"
+)
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_IDENTIFIER_BYTES = 256
+_MAX_OBJECT_TYPE_BYTES = 128
 _MAX_ERROR_PATH_LENGTH = 256
 _MAX_SHAPES = 128
 _MAX_ARTIFACTS = 128
+_MAX_ENTITIES = 128
+_MAX_PRESERVATIONS = 256
+_MAX_ENTITY_PARAMETERS = 128
+_MAX_CHANGED_FIELDS = 256
 _MAX_OBSERVATION_FACTS = 2048
 _MAX_SNAPSHOT_BYTES = 64 * 1024
 _MAX_ACTIVE_COMPILED = 256
 _MAX_ACTIVE_RECEIPTS = 256
 _FORMATS = frozenset({"fcstd", "step"})
+_PROVENANCE_SOURCES = frozenset({"user", "model", "system", "imported"})
+_SEMANTIC_ROLES = frozenset({"part", "primitive", "feature", "support"})
 _RECEIPT_REPORT_DOMAIN = b"vibecad-verification-receipt-report-v1\0"
 
 
@@ -391,6 +407,420 @@ class ShapeObservation:
         )
 
 
+def _validate_entity_identifier(
+    value: object,
+    pattern: re.Pattern[str],
+    path: str,
+    *,
+    optional: bool = False,
+) -> str | None:
+    if optional and value is None:
+        return None
+    if type(value) is not str:
+        _raise_validation(ValidationErrorCode.INVALID_TYPE, path)
+    if pattern.fullmatch(value) is None:
+        _raise_validation(ValidationErrorCode.INVALID_VALUE, path)
+    return value
+
+
+def _parameter_value(value: object, path: str) -> bool | int | float | str:
+    if type(value) is bool:
+        return value
+    if type(value) in {int, float}:
+        return _finite_number(value, path)
+    if type(value) is str:
+        return _validate_bounded_text(value, path)
+    _raise_validation(ValidationErrorCode.INVALID_TYPE, path)
+
+
+def _provenance(value: object, path: str = "/provenance") -> Mapping[str, str | None]:
+    if type(value) not in {dict, MappingProxyType}:
+        _raise_validation(ValidationErrorCode.INVALID_TYPE, path)
+    keys = tuple(value)
+    if not all(type(key) is str for key in keys):
+        _raise_validation(ValidationErrorCode.INVALID_TYPE, path)
+    required = {"source", "operation_id"}
+    unknown = sorted(key for key in keys if key not in required)
+    if unknown:
+        _raise_validation(
+            ValidationErrorCode.UNKNOWN_FIELD,
+            join_json_pointer(path, unknown[0]),
+        )
+    missing = sorted(required - set(keys))
+    if missing:
+        _raise_validation(
+            ValidationErrorCode.MISSING_FIELD,
+            join_json_pointer(path, missing[0]),
+        )
+    source = value["source"]
+    operation_id = value["operation_id"]
+    if type(source) is not str:
+        _raise_validation(ValidationErrorCode.INVALID_TYPE, f"{path}/source")
+    if source not in _PROVENANCE_SOURCES:
+        _raise_validation(ValidationErrorCode.INVALID_VALUE, f"{path}/source")
+    if operation_id is not None:
+        operation_id = _validate_bounded_text(operation_id, f"{path}/operation_id")
+    return MappingProxyType({"source": source, "operation_id": operation_id})
+
+
+def _text_tuple(value: object, path: str) -> tuple[str, ...]:
+    if type(value) is not tuple:
+        _raise_validation(ValidationErrorCode.INVALID_TYPE, path)
+    result: list[str] = []
+    for index, item in enumerate(value):
+        result.append(_validate_bounded_text(item, join_json_pointer(path, str(index))))
+    frozen = tuple(result)
+    if len(frozen) != len(set(frozen)):
+        _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, path)
+    if frozen != tuple(sorted(frozen)):
+        _raise_validation(ValidationErrorCode.INVALID_VALUE, path)
+    return frozen
+
+
+def _json_text_tuple(value: object, path: str) -> tuple[object, ...]:
+    if type(value) is not list:
+        _raise_validation(ValidationErrorCode.INVALID_TYPE, path)
+    return tuple(value)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EntityParameterObservation:
+    """One canonical scalar parameter read directly from a CAD entity."""
+
+    name: str
+    value: bool | int | float | str
+    unit: str | None = None
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "schema_version",
+            _validate_schema(self.schema_version, "/schema_version"),
+        )
+        object.__setattr__(self, "name", _validate_bounded_text(self.name, "/name"))
+        object.__setattr__(self, "value", _parameter_value(self.value, "/value"))
+        if self.unit is not None:
+            object.__setattr__(self, "unit", _validate_bounded_text(self.unit, "/unit"))
+            if type(self.value) not in {int, float}:
+                _raise_validation(ValidationErrorCode.INVALID_VALUE, "/unit")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "name": self.name,
+            "value": self.value,
+            "unit": self.unit,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        required = {"schema_version", "name", "value", "unit"}
+        data = _fields(value, allowed=required, required=required)
+        return cls(
+            schema_version=data["schema_version"],
+            name=data["name"],
+            value=data["value"],
+            unit=data["unit"],
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EntityObservation:
+    """Stable identity, placement, parameters, and geometry for one CAD entity.
+
+    ``placement`` is the canonical seven-value tuple
+    ``(x_mm, y_mm, z_mm, qx, qy, qz, qw)``.  The execution boundary owns
+    quaternion sign canonicalization before constructing this contract.
+    """
+
+    object_id: str
+    feature_id: str | None
+    object_type: str
+    semantic_role: str
+    provenance: Mapping[str, str | None]
+    placement: tuple[int | float, ...]
+    parameters: tuple[EntityParameterObservation, ...] = ()
+    volume_mm3: int | float | None = None
+    area_mm2: int | float | None = None
+    bbox_mm: tuple[int | float, ...] | None = None
+    center_of_mass_mm: tuple[int | float, ...] | None = None
+    valid_shape: bool | None = None
+    solid_count: int | None = None
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "schema_version",
+            _validate_schema(self.schema_version, "/schema_version"),
+        )
+        object.__setattr__(
+            self,
+            "object_id",
+            _validate_entity_identifier(self.object_id, _OBJECT_RE, "/object_id"),
+        )
+        object.__setattr__(
+            self,
+            "feature_id",
+            _validate_entity_identifier(
+                self.feature_id,
+                _FEATURE_RE,
+                "/feature_id",
+                optional=True,
+            ),
+        )
+        object_type = _validate_bounded_text(self.object_type, "/object_type")
+        try:
+            encoded_object_type = object_type.encode("ascii")
+        except UnicodeError:
+            encoded_object_type = None
+        if (
+            encoded_object_type is None
+            or len(encoded_object_type) > _MAX_OBJECT_TYPE_BYTES
+            or _TYPE_ID_RE.fullmatch(object_type) is None
+        ):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/object_type")
+        object.__setattr__(self, "object_type", object_type)
+        semantic_role = _validate_bounded_text(self.semantic_role, "/semantic_role")
+        if semantic_role not in _SEMANTIC_ROLES:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/semantic_role")
+        object.__setattr__(self, "semantic_role", semantic_role)
+        object.__setattr__(self, "provenance", _provenance(self.provenance))
+
+        placement = _vector(self.placement, "/placement", length=7, nonnegative=False)
+        assert placement is not None
+        if all(component == 0 for component in placement[3:]):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/placement")
+        object.__setattr__(self, "placement", placement)
+
+        if type(self.parameters) is not tuple:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/parameters")
+        if len(self.parameters) > _MAX_ENTITY_PARAMETERS:
+            _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED, "/parameters")
+        for index, parameter in enumerate(self.parameters):
+            if type(parameter) is not EntityParameterObservation:
+                _raise_validation(
+                    ValidationErrorCode.INVALID_TYPE,
+                    join_json_pointer("/parameters", str(index)),
+                )
+        names = tuple(parameter.name for parameter in self.parameters)
+        if len(names) != len(set(names)):
+            _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/parameters")
+        if names != tuple(sorted(names)):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/parameters")
+
+        object.__setattr__(
+            self,
+            "volume_mm3",
+            _optional_number(self.volume_mm3, "/volume_mm3", nonnegative=True),
+        )
+        object.__setattr__(
+            self,
+            "area_mm2",
+            _optional_number(self.area_mm2, "/area_mm2", nonnegative=True),
+        )
+        object.__setattr__(
+            self,
+            "bbox_mm",
+            _vector(self.bbox_mm, "/bbox_mm", length=3, nonnegative=True),
+        )
+        object.__setattr__(
+            self,
+            "center_of_mass_mm",
+            _vector(
+                self.center_of_mass_mm,
+                "/center_of_mass_mm",
+                length=3,
+                nonnegative=False,
+            ),
+        )
+        if self.valid_shape is not None and type(self.valid_shape) is not bool:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/valid_shape")
+        if self.solid_count is not None:
+            if type(self.solid_count) is not int:
+                _raise_validation(ValidationErrorCode.INVALID_TYPE, "/solid_count")
+            if self.solid_count < 0 or self.solid_count > MAX_SAFE_JSON_INTEGER:
+                _raise_validation(ValidationErrorCode.INVALID_VALUE, "/solid_count")
+
+    @property
+    def target(self) -> str:
+        """Return the stable feature identity, or the object identity for objects."""
+
+        return self.feature_id or self.object_id
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "object_id": self.object_id,
+            "feature_id": self.feature_id,
+            "object_type": self.object_type,
+            "semantic_role": self.semantic_role,
+            "provenance": dict(self.provenance),
+            "placement": list(self.placement),
+            "parameters": [item.to_mapping() for item in self.parameters],
+            "volume_mm3": self.volume_mm3,
+            "area_mm2": self.area_mm2,
+            "bbox_mm": list(self.bbox_mm) if self.bbox_mm is not None else None,
+            "center_of_mass_mm": (
+                list(self.center_of_mass_mm) if self.center_of_mass_mm is not None else None
+            ),
+            "valid_shape": self.valid_shape,
+            "solid_count": self.solid_count,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        required = {
+            "schema_version",
+            "object_id",
+            "feature_id",
+            "object_type",
+            "semantic_role",
+            "provenance",
+            "placement",
+            "parameters",
+            "volume_mm3",
+            "area_mm2",
+            "bbox_mm",
+            "center_of_mass_mm",
+            "valid_shape",
+            "solid_count",
+        }
+        data = _fields(value, allowed=required, required=required)
+        if type(data["parameters"]) is not list:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/parameters")
+        parameters: list[EntityParameterObservation] = []
+        for index, raw_parameter in enumerate(data["parameters"]):
+            caught = None
+            try:
+                parameter = EntityParameterObservation.from_mapping(raw_parameter)
+            except ValidationError as error:
+                caught = error
+                parameter = None
+            if caught is not None:
+                raise _prefix_nested_error(
+                    caught,
+                    join_json_pointer("/parameters", str(index)),
+                )
+            assert parameter is not None
+            parameters.append(parameter)
+        placement = _json_vector(data["placement"], "/placement")
+        if placement is None:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/placement")
+        return cls(
+            schema_version=data["schema_version"],
+            object_id=data["object_id"],
+            feature_id=data["feature_id"],
+            object_type=data["object_type"],
+            semantic_role=data["semantic_role"],
+            provenance=data["provenance"],
+            placement=placement,
+            parameters=tuple(parameters),
+            volume_mm3=data["volume_mm3"],
+            area_mm2=data["area_mm2"],
+            bbox_mm=_json_vector(data["bbox_mm"], "/bbox_mm"),
+            center_of_mass_mm=_json_vector(
+                data["center_of_mass_mm"],
+                "/center_of_mass_mm",
+            ),
+            valid_shape=data["valid_shape"],
+            solid_count=data["solid_count"],
+        )
+
+
+def _entity_observation_digest(value: EntityObservation) -> str:
+    if type(value) is not EntityObservation:
+        _raise_validation(ValidationErrorCode.INVALID_TYPE, "/entity")
+    rebuilt = EntityObservation.from_mapping(value.to_mapping())
+    canonical = _canonical_json_bytes(rebuilt.to_mapping(), "/entity")
+    return hashlib.sha256(_ENTITY_OBSERVATION_DOMAIN + canonical).hexdigest()
+
+
+def _missing_entity_digest(target: object, side: str) -> str:
+    checked_target = _validate_bounded_text(target, "/target")
+    if side not in {"before", "after"}:
+        raise ValueError("side must be before or after")
+    canonical = _canonical_json_bytes({"target": checked_target, "side": side}, "/target")
+    return hashlib.sha256(_MISSING_ENTITY_DOMAIN + canonical).hexdigest()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PreservationObservation:
+    """Trusted result of comparing one declared preservation boundary."""
+
+    target: str
+    preserved: bool
+    before_digest: str
+    after_digest: str
+    changed_fields: tuple[str, ...] = ()
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "schema_version",
+            _validate_schema(self.schema_version, "/schema_version"),
+        )
+        object.__setattr__(self, "target", _validate_bounded_text(self.target, "/target"))
+        if type(self.preserved) is not bool:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/preserved")
+        object.__setattr__(
+            self,
+            "before_digest",
+            _validate_digest(self.before_digest, "/before_digest"),
+        )
+        object.__setattr__(
+            self,
+            "after_digest",
+            _validate_digest(self.after_digest, "/after_digest"),
+        )
+        if (
+            type(self.changed_fields) is tuple
+            and len(self.changed_fields) > _MAX_CHANGED_FIELDS
+        ):
+            _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED, "/changed_fields")
+        changed = _text_tuple(self.changed_fields, "/changed_fields")
+        object.__setattr__(self, "changed_fields", changed)
+        if self.preserved != (not changed):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/preserved")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "target": self.target,
+            "preserved": self.preserved,
+            "before_digest": self.before_digest,
+            "after_digest": self.after_digest,
+            "changed_fields": list(self.changed_fields),
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        required = {
+            "schema_version",
+            "target",
+            "preserved",
+            "before_digest",
+            "after_digest",
+            "changed_fields",
+        }
+        data = _fields(value, allowed=required, required=required)
+        if (
+            type(data["changed_fields"]) is list
+            and len(data["changed_fields"]) > _MAX_CHANGED_FIELDS
+        ):
+            _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED, "/changed_fields")
+        return cls(
+            schema_version=data["schema_version"],
+            target=data["target"],
+            preserved=data["preserved"],
+            before_digest=data["before_digest"],
+            after_digest=data["after_digest"],
+            changed_fields=_json_text_tuple(data["changed_fields"], "/changed_fields"),
+        )
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ArtifactObservation:
     """Trusted existence, size-state, and format facts for one artifact target."""
@@ -458,6 +888,8 @@ class ObservationSnapshot:
     candidate_revision: str
     shapes: tuple[ShapeObservation, ...] = ()
     artifacts: tuple[ArtifactObservation, ...] = ()
+    entities: tuple[EntityObservation, ...] = ()
+    preservations: tuple[PreservationObservation, ...] = ()
     schema_version: int = SCHEMA_VERSION
     observation_digest: str = field(init=False)
 
@@ -490,6 +922,26 @@ class ObservationSnapshot:
                     ValidationErrorCode.INVALID_TYPE,
                     join_json_pointer("/artifacts", str(index)),
                 )
+        if type(self.entities) is not tuple:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/entities")
+        if len(self.entities) > _MAX_ENTITIES:
+            _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED, "/entities")
+        for index, entity in enumerate(self.entities):
+            if type(entity) is not EntityObservation:
+                _raise_validation(
+                    ValidationErrorCode.INVALID_TYPE,
+                    join_json_pointer("/entities", str(index)),
+                )
+        if type(self.preservations) is not tuple:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/preservations")
+        if len(self.preservations) > _MAX_PRESERVATIONS:
+            _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED, "/preservations")
+        for index, preservation in enumerate(self.preservations):
+            if type(preservation) is not PreservationObservation:
+                _raise_validation(
+                    ValidationErrorCode.INVALID_TYPE,
+                    join_json_pointer("/preservations", str(index)),
+                )
 
         shape_targets = tuple(item.target for item in self.shapes)
         if len(shape_targets) != len(set(shape_targets)):
@@ -501,6 +953,21 @@ class ObservationSnapshot:
             _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/artifacts")
         if artifact_targets != tuple(sorted(artifact_targets)):
             _raise_validation(ValidationErrorCode.INVALID_VALUE, "/artifacts")
+        entity_object_ids = tuple(item.object_id for item in self.entities)
+        if len(entity_object_ids) != len(set(entity_object_ids)):
+            _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/entities")
+        if entity_object_ids != tuple(sorted(entity_object_ids)):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/entities")
+        entity_feature_ids = tuple(
+            item.feature_id for item in self.entities if item.feature_id is not None
+        )
+        if len(entity_feature_ids) != len(set(entity_feature_ids)):
+            _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/entities")
+        preservation_targets = tuple(item.target for item in self.preservations)
+        if len(preservation_targets) != len(set(preservation_targets)):
+            _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/preservations")
+        if preservation_targets != tuple(sorted(preservation_targets)):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/preservations")
 
         facts = 0
         for shape in self.shapes:
@@ -514,6 +981,22 @@ class ObservationSnapshot:
             facts += 1
             facts += int(artifact.non_empty is not None)
             facts += int(artifact.format is not None)
+        for entity in self.entities:
+            facts += 5
+            facts += len(entity.placement)
+            facts += sum(2 + int(parameter.unit is not None) for parameter in entity.parameters)
+            facts += int(entity.volume_mm3 is not None)
+            facts += int(entity.area_mm2 is not None)
+            facts += len(entity.bbox_mm) if entity.bbox_mm is not None else 0
+            facts += (
+                len(entity.center_of_mass_mm)
+                if entity.center_of_mass_mm is not None
+                else 0
+            )
+            facts += int(entity.valid_shape is not None)
+            facts += int(entity.solid_count is not None)
+        for preservation in self.preservations:
+            facts += 4 + len(preservation.changed_fields)
         if facts > _MAX_OBSERVATION_FACTS:
             _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED)
 
@@ -529,6 +1012,8 @@ class ObservationSnapshot:
             "candidate_revision": self.candidate_revision,
             "shapes": [item.to_mapping() for item in self.shapes],
             "artifacts": [item.to_mapping() for item in self.artifacts],
+            "entities": [item.to_mapping() for item in self.entities],
+            "preservations": [item.to_mapping() for item in self.preservations],
         }
 
     def to_mapping(self) -> dict[str, object]:
@@ -538,14 +1023,21 @@ class ObservationSnapshot:
 
     @classmethod
     def from_mapping(cls, value: object) -> Self:
-        required = {
+        legacy_required = {
             "schema_version",
             "candidate_revision",
             "shapes",
             "artifacts",
             "observation_digest",
         }
-        data = _fields(value, allowed=required, required=required)
+        allowed = legacy_required | {"entities", "preservations"}
+        data = _fields(value, allowed=allowed, required=legacy_required)
+        has_entities = "entities" in data
+        has_preservations = "preservations" in data
+        if has_entities != has_preservations:
+            missing = "preservations" if has_entities else "entities"
+            _raise_validation(ValidationErrorCode.MISSING_FIELD, f"/{missing}")
+        legacy = not has_entities
         if type(data["shapes"]) is not list:
             _raise_validation(ValidationErrorCode.INVALID_TYPE, "/shapes")
         shapes: list[ShapeObservation] = []
@@ -577,15 +1069,65 @@ class ObservationSnapshot:
                 )
             assert parsed_artifact is not None
             artifacts.append(parsed_artifact)
+        raw_entities = data.get("entities", [])
+        if type(raw_entities) is not list:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/entities")
+        entities: list[EntityObservation] = []
+        for index, raw_entity in enumerate(raw_entities):
+            caught = None
+            try:
+                parsed_entity = EntityObservation.from_mapping(raw_entity)
+            except ValidationError as error:
+                caught = error
+                parsed_entity = None
+            if caught is not None:
+                raise _prefix_nested_error(
+                    caught,
+                    join_json_pointer("/entities", str(index)),
+                )
+            assert parsed_entity is not None
+            entities.append(parsed_entity)
+        raw_preservations = data.get("preservations", [])
+        if type(raw_preservations) is not list:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/preservations")
+        preservations: list[PreservationObservation] = []
+        for index, raw_preservation in enumerate(raw_preservations):
+            caught = None
+            try:
+                parsed_preservation = PreservationObservation.from_mapping(raw_preservation)
+            except ValidationError as error:
+                caught = error
+                parsed_preservation = None
+            if caught is not None:
+                raise _prefix_nested_error(
+                    caught,
+                    join_json_pointer("/preservations", str(index)),
+                )
+            assert parsed_preservation is not None
+            preservations.append(parsed_preservation)
         supplied_digest = _validate_digest(data["observation_digest"], "/observation_digest")
         snapshot = cls(
             schema_version=data["schema_version"],
             candidate_revision=data["candidate_revision"],
             shapes=tuple(shapes),
             artifacts=tuple(artifacts),
+            entities=tuple(entities),
+            preservations=tuple(preservations),
         )
         if supplied_digest != snapshot.observation_digest:
-            _raise_validation(ValidationErrorCode.BINDING_MISMATCH, "/observation_digest")
+            if not legacy:
+                _raise_validation(ValidationErrorCode.BINDING_MISMATCH, "/observation_digest")
+            legacy_mapping = {
+                "schema_version": snapshot.schema_version,
+                "candidate_revision": snapshot.candidate_revision,
+                "shapes": [item.to_mapping() for item in snapshot.shapes],
+                "artifacts": [item.to_mapping() for item in snapshot.artifacts],
+            }
+            legacy_digest = hashlib.sha256(
+                _OBSERVATION_DOMAIN + _canonical_json_bytes(legacy_mapping)
+            ).hexdigest()
+            if supplied_digest != legacy_digest:
+                _raise_validation(ValidationErrorCode.BINDING_MISMATCH, "/observation_digest")
         return snapshot
 
 
@@ -597,6 +1139,8 @@ def _validated_snapshot(value: object) -> ObservationSnapshot:
         revision = value.candidate_revision
         shapes = value.shapes
         artifacts = value.artifacts
+        entities = value.entities
+        preservations = value.preservations
         schema_version = value.schema_version
         supplied_digest = value.observation_digest
     except AttributeError:
@@ -604,6 +1148,8 @@ def _validated_snapshot(value: object) -> ObservationSnapshot:
         revision = None
         shapes = ()
         artifacts = ()
+        entities = ()
+        preservations = ()
         schema_version = SCHEMA_VERSION
         supplied_digest = None
     if incomplete:
@@ -614,6 +1160,8 @@ def _validated_snapshot(value: object) -> ObservationSnapshot:
             candidate_revision=revision,
             shapes=shapes,
             artifacts=artifacts,
+            entities=entities,
+            preservations=preservations,
             schema_version=schema_version,
         )
     except ValidationError as error:

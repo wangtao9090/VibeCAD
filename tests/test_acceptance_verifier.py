@@ -7,7 +7,9 @@ import builtins
 import copy
 import dataclasses
 import gc
+import hashlib
 import inspect
+import json
 import pickle
 import re
 import threading
@@ -23,12 +25,16 @@ import vibecad.validation as validation_package
 from vibecad.validation import (
     ArtifactObservation,
     CompiledAcceptance,
+    EntityObservation,
+    EntityParameterObservation,
     ObservationSnapshot,
+    PreservationObservation,
     ShapeObservation,
     ValidationError,
     ValidationErrorCode,
     VerificationReceipt,
     VerificationResult,
+    compare_entity_preservation,
     compile_acceptance_spec,
     consume_verification_receipt,
     verify_acceptance,
@@ -49,6 +55,10 @@ MANIFEST = "2" * 64
 OTHER_MANIFEST = "3" * 64
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 VERIFICATION_ID_RE = re.compile(r"^verification_[0-9a-f]{32}$")
+OBJECT_A = "object_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+OBJECT_B = "object_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+FEATURE_A = "feature_11111111111111111111111111111111"
+FEATURE_B = "feature_22222222222222222222222222222222"
 
 
 def _shape(target: str = "body", **overrides: object) -> ShapeObservation:
@@ -76,16 +86,72 @@ def _artifact(target: str = "export", **overrides: object) -> ArtifactObservatio
     return ArtifactObservation(**values)  # type: ignore[arg-type]
 
 
+def _parameter(
+    name: str,
+    value: bool | int | float | str,
+    unit: str | None = None,
+) -> EntityParameterObservation:
+    return EntityParameterObservation(name=name, value=value, unit=unit)
+
+
+def _entity(
+    *,
+    object_id: str = OBJECT_A,
+    feature_id: str | None = FEATURE_A,
+    **overrides: object,
+) -> EntityObservation:
+    values: dict[str, object] = {
+        "object_id": object_id,
+        "feature_id": feature_id,
+        "object_type": "Part::Box",
+        "semantic_role": "primitive",
+        "provenance": {"source": "model", "operation_id": "create-box"},
+        "placement": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        "parameters": (
+            _parameter("Height", 2.0, "mm"),
+            _parameter("Length", 10.0, "mm"),
+            _parameter("Width", 5.0, "mm"),
+        ),
+        "volume_mm3": 100.0,
+        "area_mm2": 160.0,
+        "bbox_mm": (10.0, 5.0, 2.0),
+        "center_of_mass_mm": (5.0, 2.5, 1.0),
+        "valid_shape": True,
+        "solid_count": 1,
+    }
+    values.update(overrides)
+    return EntityObservation(**values)  # type: ignore[arg-type]
+
+
+def _preservation(
+    target: str = "modify",
+    *,
+    preserved: bool = True,
+    changed_fields: tuple[str, ...] = (),
+) -> PreservationObservation:
+    return PreservationObservation(
+        target=target,
+        preserved=preserved,
+        before_digest="a" * 64,
+        after_digest="b" * 64,
+        changed_fields=changed_fields,
+    )
+
+
 def _snapshot(
     *,
     revision: str = REVISION,
     shapes: tuple[ShapeObservation, ...] | None = None,
     artifacts: tuple[ArtifactObservation, ...] | None = None,
+    entities: tuple[EntityObservation, ...] = (),
+    preservations: tuple[PreservationObservation, ...] = (),
 ) -> ObservationSnapshot:
     return ObservationSnapshot(
         candidate_revision=revision,
         shapes=(_shape(),) if shapes is None else shapes,
         artifacts=(_artifact(),) if artifacts is None else artifacts,
+        entities=entities,
+        preservations=preservations,
     )
 
 
@@ -141,6 +207,20 @@ def _compiled(*criteria: AcceptanceCriterion) -> CompiledAcceptance:
     return compile_acceptance_spec(_spec(*(criteria or (_volume(),))))
 
 
+def test_required_preservation_check_is_compiled() -> None:
+    criterion = _criterion(
+        "preserve-modify",
+        AcceptanceKind.PRESERVATION,
+        "unchanged",
+        target="modify",
+        expected=True,
+    )
+
+    compiled = compile_acceptance_spec(_spec(criterion))
+
+    assert compiled.acceptance_id == "acceptance-main"
+
+
 def _verify(
     compiled: CompiledAcceptance,
     snapshot: ObservationSnapshot | object | None = None,
@@ -154,6 +234,102 @@ def _verify(
         candidate_revision=revision,
         manifest_sha256=manifest,
     )
+
+
+def test_required_preservation_pass_fail_and_missing_are_fail_closed() -> None:
+    criterion = _criterion(
+        "preserve-modify",
+        AcceptanceKind.PRESERVATION,
+        "unchanged",
+        target="modify",
+        expected=True,
+    )
+    compiled = compile_acceptance_spec(_spec(criterion))
+
+    passing = _verify(
+        compiled,
+        _snapshot(preservations=(_preservation(),)),
+    )
+    assert passing.report.passed is True
+    assert type(passing.receipt) is VerificationReceipt
+    assert passing.report.verdicts[0].outcome is CriterionOutcome.PASS
+    assert passing.report.verdicts[0].observed is True
+    assert passing.report.verdicts[0].evidence == ("/preservations/0/preserved",)
+
+    failing = _verify(
+        compiled,
+        _snapshot(
+            preservations=(
+                _preservation(
+                    preserved=False,
+                    changed_fields=("parameters.Width",),
+                ),
+            )
+        ),
+    )
+    assert failing.report.passed is False
+    assert failing.receipt is None
+    assert failing.report.verdicts[0].outcome is CriterionOutcome.FAIL
+    assert failing.report.verdicts[0].observed is False
+
+    missing = _verify(compiled)
+    assert missing.report.passed is False
+    assert missing.receipt is None
+    assert missing.report.verdicts[0].outcome is CriterionOutcome.UNSUPPORTED
+    assert missing.report.verdicts[0].observed is None
+    assert missing.report.verdicts[0].evidence == ()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code", "path"),
+    [
+        ({"expected": 1}, ValidationErrorCode.INVALID_TYPE, "/criteria/0/expected"),
+        ({"expected": False}, ValidationErrorCode.INVALID_VALUE, "/criteria/0/expected"),
+        (
+            {"tolerance": 0},
+            ValidationErrorCode.INVALID_TOLERANCE,
+            "/criteria/0/tolerance",
+        ),
+        (
+            {"parameters": {"mode": "loose"}},
+            ValidationErrorCode.INVALID_VALUE,
+            "/criteria/0/parameters/mode",
+        ),
+    ],
+)
+def test_preservation_check_rejects_noncanonical_expectations(
+    overrides: dict[str, object],
+    code: ValidationErrorCode,
+    path: str,
+) -> None:
+    values: dict[str, object] = {
+        "criterion_id": "preserve-modify",
+        "kind": AcceptanceKind.PRESERVATION,
+        "check": "unchanged",
+        "target": "modify",
+        "expected": True,
+    }
+    values.update(overrides)
+    criterion = _criterion(**values)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError) as caught:
+        compile_acceptance_spec(_spec(criterion))
+    error = _assert_error(caught, code)
+    assert error.path == path
+
+
+def test_optional_missing_preservation_does_not_block_other_required_checks() -> None:
+    optional = _criterion(
+        "preserve-modify",
+        AcceptanceKind.PRESERVATION,
+        "unchanged",
+        target="modify",
+        expected=True,
+        required=False,
+    )
+    result = _verify(_compiled(_volume(), optional))
+    assert result.report.passed is True
+    assert type(result.receipt) is VerificationReceipt
+    assert result.report.verdicts[1].outcome is CriterionOutcome.UNSUPPORTED
 
 
 def _assert_error(caught: pytest.ExceptionInfo[ValidationError], code: ValidationErrorCode):
@@ -184,12 +360,16 @@ def test_public_surface_is_closed_and_function_signatures_have_no_evidence_escap
     expected = {
         "ArtifactObservation",
         "CompiledAcceptance",
+        "EntityObservation",
+        "EntityParameterObservation",
         "ObservationSnapshot",
+        "PreservationObservation",
         "ShapeObservation",
         "ValidationError",
         "ValidationErrorCode",
         "VerificationReceipt",
         "VerificationResult",
+        "compare_entity_preservation",
         "compile_acceptance_spec",
         "consume_verification_receipt",
         "verify_acceptance",
@@ -208,6 +388,10 @@ def test_public_surface_is_closed_and_function_signatures_have_no_evidence_escap
     )
     assert verify_signature.parameters["candidate_revision"].kind is inspect.Parameter.KEYWORD_ONLY
     assert verify_signature.parameters["manifest_sha256"].kind is inspect.Parameter.KEYWORD_ONLY
+    compare_signature = inspect.signature(compare_entity_preservation)
+    assert tuple(compare_signature.parameters) == ("before", "after", "target", "preserve")
+    assert compare_signature.parameters["target"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert compare_signature.parameters["preserve"].kind is inspect.Parameter.KEYWORD_ONLY
     consume_signature = inspect.signature(consume_verification_receipt)
     assert tuple(consume_signature.parameters) == (
         "receipt",
@@ -351,6 +535,242 @@ def test_artifact_observation_is_frozen_strict_and_absence_is_canonical() -> Non
         assert caught.value.path == path
 
 
+def test_entity_parameter_observation_is_frozen_strict_and_round_trips() -> None:
+    parameter = _parameter("Length", 10.0, "mm")
+    assert parameter.to_mapping() == {
+        "schema_version": 1,
+        "name": "Length",
+        "value": 10.0,
+        "unit": "mm",
+    }
+    assert EntityParameterObservation.from_mapping(parameter.to_mapping()) == parameter
+    with pytest.raises(FrozenInstanceError):
+        parameter.value = 11.0  # type: ignore[misc]
+
+    for overrides, code, path in (
+        ({"name": ""}, ValidationErrorCode.INVALID_VALUE, "/name"),
+        ({"value": None}, ValidationErrorCode.INVALID_TYPE, "/value"),
+        ({"value": float("nan")}, ValidationErrorCode.INVALID_VALUE, "/value"),
+        ({"value": 2**53}, ValidationErrorCode.INVALID_VALUE, "/value"),
+        (
+            {"value": "ten", "unit": "mm"},
+            ValidationErrorCode.INVALID_VALUE,
+            "/unit",
+        ),
+        ({"unit": 1}, ValidationErrorCode.INVALID_TYPE, "/unit"),
+    ):
+        values = {"name": "Length", "value": 10.0, "unit": "mm"}
+        values.update(overrides)
+        with pytest.raises(ValidationError) as caught:
+            EntityParameterObservation(**values)  # type: ignore[arg-type]
+        error = _assert_error(caught, code)
+        assert error.path == path
+
+
+def test_entity_observation_is_strict_frozen_and_round_trips() -> None:
+    entity = _entity()
+    mapping = entity.to_mapping()
+    assert mapping == {
+        "schema_version": 1,
+        "object_id": OBJECT_A,
+        "feature_id": FEATURE_A,
+        "object_type": "Part::Box",
+        "semantic_role": "primitive",
+        "provenance": {"source": "model", "operation_id": "create-box"},
+        "placement": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        "parameters": [
+            {"schema_version": 1, "name": "Height", "value": 2.0, "unit": "mm"},
+            {"schema_version": 1, "name": "Length", "value": 10.0, "unit": "mm"},
+            {"schema_version": 1, "name": "Width", "value": 5.0, "unit": "mm"},
+        ],
+        "volume_mm3": 100.0,
+        "area_mm2": 160.0,
+        "bbox_mm": [10.0, 5.0, 2.0],
+        "center_of_mass_mm": [5.0, 2.5, 1.0],
+        "valid_shape": True,
+        "solid_count": 1,
+    }
+    assert EntityObservation.from_mapping(mapping) == entity
+    assert entity.target == FEATURE_A
+    assert _entity(feature_id=None).target == OBJECT_A
+    assert _entity(object_type="App::Feature::Python").object_type == "App::Feature::Python"
+    assert type(entity.provenance) is MappingProxyType
+    with pytest.raises(TypeError):
+        entity.provenance["source"] = "user"  # type: ignore[index]
+    with pytest.raises(FrozenInstanceError):
+        entity.object_id = OBJECT_B  # type: ignore[misc]
+
+    copied = entity.to_mapping()
+    copied_provenance = copied["provenance"]
+    assert type(copied_provenance) is dict
+    copied_provenance["source"] = "user"
+    assert entity.provenance["source"] == "model"
+
+    with pytest.raises(ValidationError) as caught:
+        EntityObservation.from_mapping(MappingProxyType(mapping))
+    _assert_error(caught, ValidationErrorCode.INVALID_TYPE)
+    nested = entity.to_mapping()
+    nested["parameters"][0]["value"] = None  # type: ignore[index]
+    with pytest.raises(ValidationError) as caught:
+        EntityObservation.from_mapping(nested)
+    error = _assert_error(caught, ValidationErrorCode.INVALID_TYPE)
+    assert error.path == "/parameters/0/value"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code", "path"),
+    [
+        ({"object_id": 1}, ValidationErrorCode.INVALID_TYPE, "/object_id"),
+        ({"object_id": "a" * 32}, ValidationErrorCode.INVALID_VALUE, "/object_id"),
+        (
+            {"object_id": "object_" + "A" * 32},
+            ValidationErrorCode.INVALID_VALUE,
+            "/object_id",
+        ),
+        ({"feature_id": "feature_bad"}, ValidationErrorCode.INVALID_VALUE, "/feature_id"),
+        ({"object_type": "Box"}, ValidationErrorCode.INVALID_VALUE, "/object_type"),
+        ({"object_type": "A" * 126 + "::B"}, ValidationErrorCode.INVALID_VALUE, "/object_type"),
+        ({"semantic_role": "solid_feature"}, ValidationErrorCode.INVALID_VALUE, "/semantic_role"),
+        (
+            {"provenance": {"source": "model"}},
+            ValidationErrorCode.MISSING_FIELD,
+            "/provenance/operation_id",
+        ),
+        (
+            {
+                "provenance": {
+                    "source": "model",
+                    "operation_id": "box",
+                    "extra": True,
+                }
+            },
+            ValidationErrorCode.UNKNOWN_FIELD,
+            "/provenance/extra",
+        ),
+        (
+            {"provenance": {"source": "agent", "operation_id": None}},
+            ValidationErrorCode.INVALID_VALUE,
+            "/provenance/source",
+        ),
+        ({"placement": [0, 0, 0, 0, 0, 0, 1]}, ValidationErrorCode.INVALID_TYPE, "/placement"),
+        ({"placement": (0, 0, 0, 0, 0, 0, 0)}, ValidationErrorCode.INVALID_VALUE, "/placement"),
+        ({"placement": (0, 0, 0, 0, 0, 0)}, ValidationErrorCode.INVALID_VALUE, "/placement"),
+        (
+            {"parameters": [_parameter("Length", 10)]},
+            ValidationErrorCode.INVALID_TYPE,
+            "/parameters",
+        ),
+        (
+            {
+                "parameters": (
+                    _parameter("Width", 5),
+                    _parameter("Length", 10),
+                )
+            },
+            ValidationErrorCode.INVALID_VALUE,
+            "/parameters",
+        ),
+        (
+            {
+                "parameters": (
+                    _parameter("Length", 10),
+                    _parameter("Length", 10),
+                )
+            },
+            ValidationErrorCode.DUPLICATE_TARGET,
+            "/parameters",
+        ),
+    ],
+)
+def test_entity_observation_rejects_noncanonical_identity_and_facts(
+    overrides: dict[str, object],
+    code: ValidationErrorCode,
+    path: str,
+) -> None:
+    with pytest.raises(ValidationError) as caught:
+        _entity(**overrides)
+    error = _assert_error(caught, code)
+    assert error.path == path
+
+
+def test_entity_parameter_budget_and_json_tuple_boundaries_are_enforced() -> None:
+    parameters = tuple(_parameter(f"P{index:03d}", index) for index in range(129))
+    with pytest.raises(ValidationError) as caught:
+        _entity(parameters=parameters)
+    error = _assert_error(caught, ValidationErrorCode.BUDGET_EXCEEDED)
+    assert error.path == "/parameters"
+
+    mapping = _entity().to_mapping()
+    mapping["placement"] = None
+    with pytest.raises(ValidationError) as caught:
+        EntityObservation.from_mapping(mapping)
+    error = _assert_error(caught, ValidationErrorCode.INVALID_TYPE)
+    assert error.path == "/placement"
+
+    mapping = _entity().to_mapping()
+    mapping["parameters"] = tuple(mapping["parameters"])
+    with pytest.raises(ValidationError) as caught:
+        EntityObservation.from_mapping(mapping)
+    error = _assert_error(caught, ValidationErrorCode.INVALID_TYPE)
+    assert error.path == "/parameters"
+
+
+def test_preservation_observation_is_strict_frozen_and_round_trips() -> None:
+    passing = _preservation()
+    assert PreservationObservation.from_mapping(passing.to_mapping()) == passing
+    failing = _preservation(
+        preserved=False,
+        changed_fields=("placement", "volume_mm3"),
+    )
+    assert PreservationObservation.from_mapping(failing.to_mapping()) == failing
+    with pytest.raises(FrozenInstanceError):
+        passing.preserved = False  # type: ignore[misc]
+
+    for overrides, code, path in (
+        ({"preserved": 1}, ValidationErrorCode.INVALID_TYPE, "/preserved"),
+        ({"before_digest": "bad"}, ValidationErrorCode.INVALID_VALUE, "/before_digest"),
+        ({"after_digest": "A" * 64}, ValidationErrorCode.INVALID_VALUE, "/after_digest"),
+        (
+            {"preserved": True, "changed_fields": ("placement",)},
+            ValidationErrorCode.INVALID_VALUE,
+            "/preserved",
+        ),
+        (
+            {"preserved": False, "changed_fields": ()},
+            ValidationErrorCode.INVALID_VALUE,
+            "/preserved",
+        ),
+        (
+            {
+                "preserved": False,
+                "changed_fields": ("volume_mm3", "placement"),
+            },
+            ValidationErrorCode.INVALID_VALUE,
+            "/changed_fields",
+        ),
+    ):
+        values = {
+            "target": "modify",
+            "preserved": True,
+            "before_digest": "a" * 64,
+            "after_digest": "b" * 64,
+            "changed_fields": (),
+        }
+        values.update(overrides)
+        with pytest.raises(ValidationError) as caught:
+            PreservationObservation(**values)  # type: ignore[arg-type]
+        error = _assert_error(caught, code)
+        assert error.path == path
+
+    with pytest.raises(ValidationError) as caught:
+        _preservation(
+            preserved=False,
+            changed_fields=tuple(f"field-{index:03d}" for index in range(257)),
+        )
+    error = _assert_error(caught, ValidationErrorCode.BUDGET_EXCEEDED)
+    assert error.path == "/changed_fields"
+
+
 def test_snapshot_is_canonical_bounded_and_digest_round_trips() -> None:
     snapshot = ObservationSnapshot(
         candidate_revision=REVISION,
@@ -373,10 +793,159 @@ def test_snapshot_is_canonical_bounded_and_digest_round_trips() -> None:
     _assert_error(caught, ValidationErrorCode.BINDING_MISMATCH)
 
 
+def test_snapshot_binds_sorted_per_entity_and_preservation_facts() -> None:
+    entity_a = _entity(object_id=OBJECT_A, feature_id=FEATURE_B)
+    entity_b = _entity(object_id=OBJECT_B, feature_id=FEATURE_A)
+    preservation = _preservation()
+    snapshot = _snapshot(
+        entities=(entity_a, entity_b),
+        preservations=(preservation,),
+    )
+    mapping = snapshot.to_mapping()
+    assert mapping["entities"] == [entity_a.to_mapping(), entity_b.to_mapping()]
+    assert mapping["preservations"] == [preservation.to_mapping()]
+    assert ObservationSnapshot.from_mapping(mapping) == snapshot
+
+    changed_entity = _snapshot(
+        entities=(
+            _entity(
+                parameters=(
+                    _parameter("Height", 2.0, "mm"),
+                    _parameter("Length", 11.0, "mm"),
+                    _parameter("Width", 5.0, "mm"),
+                )
+            ),
+        )
+    )
+    changed_preservation = _snapshot(
+        preservations=(
+            _preservation(preserved=False, changed_fields=("placement",)),
+        )
+    )
+    assert changed_entity.observation_digest != snapshot.observation_digest
+    assert changed_preservation.observation_digest != snapshot.observation_digest
+
+
+def test_snapshot_reads_legacy_wire_digest_and_upgrades_new_digest_fields() -> None:
+    current = _snapshot()
+    legacy_payload = {
+        "schema_version": current.schema_version,
+        "candidate_revision": current.candidate_revision,
+        "shapes": [item.to_mapping() for item in current.shapes],
+        "artifacts": [item.to_mapping() for item in current.artifacts],
+    }
+    canonical = json.dumps(
+        legacy_payload,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    legacy_digest = hashlib.sha256(
+        b"vibecad-observation-snapshot-v1\0" + canonical
+    ).hexdigest()
+    parsed = ObservationSnapshot.from_mapping(
+        {**legacy_payload, "observation_digest": legacy_digest}
+    )
+    assert parsed.entities == ()
+    assert parsed.preservations == ()
+    assert parsed.observation_digest == current.observation_digest
+    assert parsed.observation_digest != legacy_digest
+    assert parsed.to_mapping()["entities"] == []
+    assert parsed.to_mapping()["preservations"] == []
+
+    incomplete = current.to_mapping()
+    del incomplete["preservations"]
+    with pytest.raises(ValidationError) as caught:
+        ObservationSnapshot.from_mapping(incomplete)
+    error = _assert_error(caught, ValidationErrorCode.MISSING_FIELD)
+    assert error.path == "/preservations"
+
+
+@pytest.mark.parametrize(
+    ("factory", "code", "path"),
+    [
+        (
+            lambda: _snapshot(
+                entities=(
+                    _entity(object_id=OBJECT_B, feature_id=FEATURE_B),
+                    _entity(object_id=OBJECT_A, feature_id=FEATURE_A),
+                )
+            ),
+            ValidationErrorCode.INVALID_VALUE,
+            "/entities",
+        ),
+        (
+            lambda: _snapshot(
+                entities=(
+                    _entity(object_id=OBJECT_A, feature_id=FEATURE_A),
+                    _entity(object_id=OBJECT_A, feature_id=FEATURE_B),
+                )
+            ),
+            ValidationErrorCode.DUPLICATE_TARGET,
+            "/entities",
+        ),
+        (
+            lambda: _snapshot(
+                entities=(
+                    _entity(object_id=OBJECT_A, feature_id=FEATURE_A),
+                    _entity(object_id=OBJECT_B, feature_id=FEATURE_A),
+                )
+            ),
+            ValidationErrorCode.DUPLICATE_TARGET,
+            "/entities",
+        ),
+        (
+            lambda: _snapshot(
+                preservations=(_preservation("z"), _preservation("a"))
+            ),
+            ValidationErrorCode.INVALID_VALUE,
+            "/preservations",
+        ),
+        (
+            lambda: _snapshot(
+                preservations=(_preservation("a"), _preservation("a"))
+            ),
+            ValidationErrorCode.DUPLICATE_TARGET,
+            "/preservations",
+        ),
+        (
+            lambda: _snapshot(
+                entities=tuple(
+                    _entity(
+                        object_id=f"object_{index:032x}",
+                        feature_id=f"feature_{index:032x}",
+                    )
+                    for index in range(129)
+                )
+            ),
+            ValidationErrorCode.BUDGET_EXCEEDED,
+            "/entities",
+        ),
+        (
+            lambda: _snapshot(
+                preservations=tuple(_preservation(f"p{index:03d}") for index in range(257))
+            ),
+            ValidationErrorCode.BUDGET_EXCEEDED,
+            "/preservations",
+        ),
+    ],
+)
+def test_snapshot_rejects_bad_entity_and_preservation_order_or_identity(
+    factory,
+    code: ValidationErrorCode,
+    path: str,
+) -> None:
+    with pytest.raises(ValidationError) as caught:
+        factory()
+    error = _assert_error(caught, code)
+    assert error.path == path
+
+
 def test_snapshot_and_compiled_spec_digests_have_frozen_domain_separated_vectors() -> None:
     snapshot = _snapshot()
     assert snapshot.observation_digest == (
-        "60859fd638aa8911c4a72365e80db95f9def3febf3d649bd68306bad75c3b2e8"
+        "16facfdd4877c1145841e80306ff6c1f76888e983373e82de34bbf52ffa640b2"
     )
 
     compiled = _compiled()
@@ -532,6 +1101,148 @@ def test_snapshot_enforces_canonical_byte_and_total_fact_budgets() -> None:
         )
     error = _assert_error(caught, ValidationErrorCode.BUDGET_EXCEEDED)
     assert error.path == ""
+
+
+def test_compare_entity_preservation_is_pure_and_full_by_default() -> None:
+    before = _entity()
+    unchanged = compare_entity_preservation(before, _entity(), target="control")
+    assert unchanged.preserved is True
+    assert unchanged.changed_fields == ()
+    assert unchanged.before_digest == unchanged.after_digest
+
+    moved = _entity(placement=(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+    changed = compare_entity_preservation(before, moved, target="control")
+    assert changed.preserved is False
+    assert changed.changed_fields == ("placement",)
+    assert changed.before_digest != changed.after_digest
+    assert before.placement == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+
+
+def test_compare_entity_preservation_selects_declared_parameters_and_geometry() -> None:
+    before = _entity()
+    changed_parameters = (
+        _parameter("Height", 2.0, "mm"),
+        _parameter("Length", 12.0, "mm"),
+        _parameter("Width", 5.0, "mm"),
+    )
+    after = _entity(
+        parameters=changed_parameters,
+        volume_mm3=120.0,
+        area_mm2=172.0,
+        bbox_mm=(12.0, 5.0, 2.0),
+        center_of_mass_mm=(6.0, 2.5, 1.0),
+    )
+
+    height_only = compare_entity_preservation(
+        before,
+        after,
+        target="modify",
+        preserve=("Height",),
+    )
+    assert height_only.preserved is True
+    assert height_only.before_digest != height_only.after_digest
+
+    length = compare_entity_preservation(
+        before,
+        after,
+        target="modify",
+        preserve=("Length",),
+    )
+    assert length.preserved is False
+    assert length.changed_fields == ("parameters.Length",)
+
+    geometry = compare_entity_preservation(
+        before,
+        after,
+        target="modify",
+        preserve=("geometry",),
+    )
+    assert geometry.preserved is False
+    assert geometry.changed_fields == (
+        "area_mm2",
+        "bbox_mm",
+        "center_of_mass_mm",
+        "volume_mm3",
+    )
+
+    all_parameters = compare_entity_preservation(
+        before,
+        after,
+        target="modify",
+        preserve=("parameters",),
+    )
+    assert all_parameters.changed_fields == ("parameters.Length",)
+
+
+def test_compare_entity_preservation_always_checks_identity_and_missing_facts() -> None:
+    before = _entity()
+    identity_drift = compare_entity_preservation(
+        before,
+        _entity(feature_id=FEATURE_B),
+        target="modify",
+        preserve=("Height",),
+    )
+    assert identity_drift.preserved is False
+    assert identity_drift.changed_fields == ("feature_id",)
+
+    missing_parameter = compare_entity_preservation(
+        before,
+        _entity(parameters=()),
+        target="modify",
+        preserve=("Length",),
+    )
+    assert missing_parameter.changed_fields == ("parameters.Length.missing",)
+
+    missing_geometry = compare_entity_preservation(
+        _entity(volume_mm3=None),
+        _entity(volume_mm3=None),
+        target="modify",
+        preserve=("volume_mm3",),
+    )
+    assert missing_geometry.changed_fields == ("volume_mm3.missing",)
+
+    no_before = compare_entity_preservation(None, before, target="modify")
+    no_after = compare_entity_preservation(before, None, target="modify")
+    neither = compare_entity_preservation(None, None, target="modify")
+    assert no_before.changed_fields == ("before.missing",)
+    assert no_after.changed_fields == ("after.missing",)
+    assert neither.changed_fields == ("after.missing", "before.missing")
+    assert not no_before.preserved and not no_after.preserved and not neither.preserved
+
+
+def test_compare_entity_preservation_revalidates_inputs_and_preserve_budget() -> None:
+    entity = _entity()
+    with pytest.raises(ValidationError) as caught:
+        compare_entity_preservation(entity, entity, target="modify", preserve=["Length"])
+    error = _assert_error(caught, ValidationErrorCode.INVALID_TYPE)
+    assert error.path == "/preserve"
+
+    with pytest.raises(ValidationError) as caught:
+        compare_entity_preservation(
+            entity,
+            entity,
+            target="modify",
+            preserve=("Length", "Length"),
+        )
+    error = _assert_error(caught, ValidationErrorCode.DUPLICATE_TARGET)
+    assert error.path == "/preserve"
+
+    with pytest.raises(ValidationError) as caught:
+        compare_entity_preservation(
+            entity,
+            entity,
+            target="modify",
+            preserve=tuple(f"P{index:03d}" for index in range(129)),
+        )
+    error = _assert_error(caught, ValidationErrorCode.BUDGET_EXCEEDED)
+    assert error.path == "/preserve"
+
+    forged = _entity()
+    object.__setattr__(forged, "provenance", {"source": "forged"})
+    with pytest.raises(ValidationError) as caught:
+        compare_entity_preservation(forged, entity, target="modify")
+    error = _assert_error(caught, ValidationErrorCode.MISSING_FIELD)
+    assert error.path == "/before/provenance/operation_id"
 
 
 def test_compile_returns_an_opaque_authentic_capability() -> None:
@@ -1930,7 +2641,10 @@ def test_validation_modules_are_pure_closed_and_do_not_reference_execution_evide
             "vibecad.validation.contracts": {
                 "ArtifactObservation",
                 "CompiledAcceptance",
+                "EntityObservation",
+                "EntityParameterObservation",
                 "ObservationSnapshot",
+                "PreservationObservation",
                 "ShapeObservation",
                 "ValidationError",
                 "ValidationErrorCode",
@@ -1938,6 +2652,7 @@ def test_validation_modules_are_pure_closed_and_do_not_reference_execution_evide
                 "VerificationResult",
             },
             "vibecad.validation.engine": {
+                "compare_entity_preservation",
                 "compile_acceptance_spec",
                 "consume_verification_receipt",
                 "verify_acceptance",
@@ -1945,8 +2660,10 @@ def test_validation_modules_are_pure_closed_and_do_not_reference_execution_evide
         },
         "contracts.py": {
             "__future__": {"annotations"},
+            "collections.abc": {"Mapping"},
             "dataclasses": {"dataclass", "field"},
             "enum": {"StrEnum"},
+            "types": {"MappingProxyType"},
             "typing": {"Any", "Self"},
             "vibecad.workflow.errors": {
                 "MAX_SAFE_JSON_INTEGER",
@@ -1985,7 +2702,10 @@ def test_validation_modules_are_pure_closed_and_do_not_reference_execution_evide
             },
             "vibecad.validation.contracts": {
                 "CompiledAcceptance",
+                "EntityObservation",
                 "ObservationSnapshot",
+                "PreservationObservation",
+                "ValidationError",
                 "ValidationErrorCode",
                 "VerificationReceipt",
                 "VerificationResult",
@@ -1993,10 +2713,14 @@ def test_validation_modules_are_pure_closed_and_do_not_reference_execution_evide
                 "_ReceiptBinding",
                 "_canonical_json_bytes",
                 "_consume_receipt",
+                "_entity_observation_digest",
                 "_issue_compiled",
                 "_issue_receipt",
                 "_lookup_compiled",
+                "_missing_entity_digest",
+                "_prefix_nested_error",
                 "_raise_validation",
+                "_validate_bounded_text",
                 "_validate_digest",
                 "_validate_revision",
                 "_validated_snapshot",

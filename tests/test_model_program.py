@@ -137,6 +137,137 @@ def _dimension_registry() -> OperationRegistry:
     )
 
 
+def test_level_a_selector_requires_complete_bound_identity() -> None:
+    registry = OperationRegistry(
+        (
+            OperationMetadata(
+                operation="select_object",
+                handler_name="select_object",
+                risk_class=RiskClass.READ_ONLY,
+                evidence_required=False,
+                target_fields=(
+                    FieldMetadata(
+                        "object",
+                        "selector",
+                        ValueShape.OBJECT_SELECTOR,
+                    ),
+                ),
+            ),
+        )
+    )
+    revision = "revision_22222222222222222222222222222222"
+    program = ModelProgram(
+        task_id="task-selector-red",
+        base_revision=revision,
+        operations=(
+            _command(
+                "select",
+                "select_object",
+                target={
+                    "object": {
+                        "schema_version": 1,
+                        "project_id": "project_11111111111111111111111111111111",
+                        "revision_id": revision,
+                        "object_id": "object_33333333333333333333333333333333",
+                        "expected_cardinality": 1,
+                    }
+                },
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-selector-red", criteria=()),
+    )
+
+    _error(
+        program,
+        ProgramErrorCode.INVALID_VALUE_SHAPE,
+        "/operations/0/target/object",
+        registry=registry,
+    )
+
+
+def _level_a_selector_registry() -> OperationRegistry:
+    return OperationRegistry(
+        (
+            OperationMetadata(
+                operation="select_object",
+                handler_name="select_object",
+                risk_class=RiskClass.READ_ONLY,
+                evidence_required=False,
+                target_fields=(
+                    FieldMetadata("object", "selector", ValueShape.OBJECT_SELECTOR),
+                ),
+            ),
+        )
+    )
+
+
+def _level_a_selector(*, revision_id: str) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "project_id": "project_11111111111111111111111111111111",
+        "revision_id": revision_id,
+        "entity_kind": "feature",
+        "object_id": "object_33333333333333333333333333333333",
+        "feature_id": "feature_44444444444444444444444444444444",
+        "object_type": "Part::Box",
+        "semantic_role": "primitive",
+        "provenance": {"source": "model", "operation_id": "box"},
+        "expected_cardinality": 1,
+    }
+
+
+def test_level_a_selector_is_typed_and_bound_to_program_base_revision() -> None:
+    revision = "revision_22222222222222222222222222222222"
+    validated = validate_model_program(
+        ModelProgram(
+            task_id="task-selector",
+            base_revision=revision,
+            operations=(
+                _command(
+                    "select",
+                    "select_object",
+                    target={"object": _level_a_selector(revision_id=revision)},
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="acceptance-selector", criteria=()),
+        ),
+        registry=_level_a_selector_registry(),
+    )
+
+    bound = validated.commands[0].handler_kwargs["selector"]
+    assert type(bound).__name__ == "SelectorV1"
+    assert bound.revision_id == revision
+    assert bound.object_id == "object_33333333333333333333333333333333"
+    assert bound.provenance.operation_id == "box"
+
+
+def test_level_a_selector_rejects_stale_revision_before_execution() -> None:
+    base_revision = "revision_22222222222222222222222222222222"
+    program = ModelProgram(
+        task_id="task-selector-stale",
+        base_revision=base_revision,
+        operations=(
+            _command(
+                "select",
+                "select_object",
+                target={
+                    "object": _level_a_selector(
+                        revision_id="revision_55555555555555555555555555555555"
+                    )
+                },
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-selector-stale", criteria=()),
+    )
+
+    _error(
+        program,
+        ProgramErrorCode.INVALID_VALUE_SHAPE,
+        "/operations/0/target/object",
+        registry=_level_a_selector_registry(),
+    )
+
+
 def test_every_default_operation_is_bound_for_execution_without_invocation():
     program = _program(
         _command(

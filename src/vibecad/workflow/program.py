@@ -28,6 +28,7 @@ from vibecad.execution.registry import (
     ValueShape,
     _matches_value_shape,
 )
+from vibecad.execution.selectors import SelectorV1
 from vibecad.workflow.contracts import ModelCommand, ModelProgram, ValueSource
 from vibecad.workflow.errors import (
     SCHEMA_VERSION,
@@ -220,6 +221,8 @@ def _freeze_bound_value(value: object) -> object:
 
     if type(value) is BoundResultRef:
         return value
+    if type(value) is SelectorV1:
+        return SelectorV1.from_mapping(value.to_mapping())
     if isinstance(value, Mapping):
         return MappingProxyType({key: _freeze_bound_value(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
@@ -575,6 +578,7 @@ def _bind_field_group(
     dependency_ids: frozenset[str],
     prior_command_ids: frozenset[str],
     operation_metadata: Mapping[str, OperationMetadata],
+    base_revision: str,
 ) -> None:
     path = _operation_path(index, group)
     if not all(type(name) is str for name in values):
@@ -614,6 +618,23 @@ def _bind_field_group(
                 operation_metadata=operation_metadata,
             )
             continue
+        if item.value_shape is ValueShape.OBJECT_SELECTOR:
+            try:
+                selector = SelectorV1.from_mapping(value)
+            except Exception:
+                raise _failure(
+                    ProgramErrorCode.INVALID_VALUE_SHAPE,
+                    field_path,
+                    "field value does not match the registered shape",
+                ) from None
+            if selector.revision_id != base_revision:
+                raise _failure(
+                    ProgramErrorCode.INVALID_VALUE_SHAPE,
+                    field_path,
+                    "field value does not match the registered shape",
+                )
+            destination[item.handler_parameter] = selector
+            continue
         if not _matches_value_shape(
             value,
             item.value_shape,
@@ -635,6 +656,7 @@ def _bind_command(
     dependency_ids: frozenset[str],
     prior_command_ids: frozenset[str],
     operation_metadata: Mapping[str, OperationMetadata],
+    base_revision: str,
 ) -> BoundCommand:
     kwargs: dict[str, Any] = {}
     _bind_field_group(
@@ -646,6 +668,7 @@ def _bind_command(
         dependency_ids=dependency_ids,
         prior_command_ids=prior_command_ids,
         operation_metadata=operation_metadata,
+        base_revision=base_revision,
     )
     _bind_field_group(
         values=command.args,
@@ -656,6 +679,7 @@ def _bind_command(
         dependency_ids=dependency_ids,
         prior_command_ids=prior_command_ids,
         operation_metadata=operation_metadata,
+        base_revision=base_revision,
     )
     return BoundCommand(
         id=command.id,
@@ -724,6 +748,7 @@ def validate_model_program(
                 dependency_closures[command.id],
                 frozenset(item.id for item in operations[:index]),
                 frozen_operation_metadata,
+                checked_program.base_revision,
             )
         )
 

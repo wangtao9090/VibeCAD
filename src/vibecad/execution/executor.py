@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
+from types import MappingProxyType
 
 from vibecad.engine.session import Session as _Session
 from vibecad.execution.adapter import (
@@ -43,14 +44,26 @@ from vibecad.execution.revisions import (
     RevisionStoreError,
     RevisionStoreErrorCode,
 )
+from vibecad.execution.selectors import (
+    EntityIdentity,
+    Provenance,
+    ProvenanceSource,
+    SelectorV1,
+    SemanticRole,
+    index_entity_identities,
+)
 from vibecad.feedback.text import describe_shape as _describe_shape
 from vibecad.freecad_env import silence_fd1 as _silence_fd1
 from vibecad.tools.modeling import add_box as _add_box
 from vibecad.tools.modify import modify_part as _modify_part
 from vibecad.validation import (
     ArtifactObservation,
+    EntityObservation,
+    EntityParameterObservation,
     ObservationSnapshot,
+    PreservationObservation,
     ShapeObservation,
+    compare_entity_preservation,
 )
 from vibecad.workflow.contracts import ModelProgram
 from vibecad.workflow.errors import SCHEMA_VERSION
@@ -146,6 +159,20 @@ class _ArtifactReadFailure(Exception):
 
 class _ObservationFailure(Exception):
     """Private marker whose details never cross the executor boundary."""
+
+
+_PARAMETER_FIELDS = {
+    "Part::Box": (
+        ("height", "Height", "mm"),
+        ("length", "Length", "mm"),
+        ("width", "Width", "mm"),
+    ),
+    "Part::Cylinder": (
+        ("angle", "Angle", "deg"),
+        ("height", "Height", "mm"),
+        ("radius", "Radius", "mm"),
+    ),
+}
 
 
 def _fixed_error(code: ExecutorErrorCode) -> ExecutorError:
@@ -352,6 +379,284 @@ def _shape_observation(session: object) -> ShapeObservation:
         raise _ObservationFailure from None
 
 
+def _quantity_value(value: object) -> int | float:
+    if type(value) in {int, float}:
+        return _finite_number(value, nonnegative=False)
+    try:
+        raw = value.Value  # type: ignore[attr-defined]
+    except Exception:
+        raise _ObservationFailure from None
+    return _finite_number(raw, nonnegative=False)
+
+
+def _canonical_placement(value: object) -> tuple[int | float, ...]:
+    try:
+        base = value.Base  # type: ignore[attr-defined]
+        rotation = value.Rotation  # type: ignore[attr-defined]
+        translation = (
+            _finite_number(base.x, nonnegative=False),
+            _finite_number(base.y, nonnegative=False),
+            _finite_number(base.z, nonnegative=False),
+        )
+        raw_quaternion = tuple(rotation.Q)
+    except _ObservationFailure:
+        raise
+    except Exception:
+        raise _ObservationFailure from None
+    if len(raw_quaternion) != 4:
+        raise _ObservationFailure
+    quaternion = tuple(
+        _finite_number(component, nonnegative=False) for component in raw_quaternion
+    )
+    try:
+        norm = math.sqrt(sum(component * component for component in quaternion))
+    except (ArithmeticError, OverflowError):
+        raise _ObservationFailure from None
+    if not math.isfinite(norm) or norm <= 0:
+        raise _ObservationFailure
+    normalized = tuple(component / norm for component in quaternion)
+    first_nonzero = next((component for component in normalized if component != 0), 0)
+    if first_nonzero < 0:
+        normalized = tuple(-component for component in normalized)
+    return (*translation, *normalized)
+
+
+def _entity_geometry(shape: object) -> dict[str, object]:
+    try:
+        null_check = getattr(shape, "isNull", None)
+        if null_check is not None:
+            if not callable(null_check):
+                raise _ObservationFailure
+            is_null = null_check()
+            if type(is_null) is not bool:
+                raise _ObservationFailure
+            if is_null:
+                return {
+                    "volume_mm3": None,
+                    "area_mm2": None,
+                    "bbox_mm": None,
+                    "center_of_mass_mm": None,
+                    "valid_shape": None,
+                    "solid_count": None,
+                }
+        bound_box = shape.BoundBox  # type: ignore[attr-defined]
+        center = shape.CenterOfMass  # type: ignore[attr-defined]
+        valid_shape = shape.isValid()  # type: ignore[attr-defined]
+        if type(valid_shape) is not bool:
+            raise _ObservationFailure
+        solid_count = len(shape.Solids)  # type: ignore[attr-defined]
+        if type(solid_count) is not int or solid_count < 0:
+            raise _ObservationFailure
+        return {
+            "volume_mm3": _finite_number(shape.Volume, nonnegative=True),  # type: ignore[attr-defined]
+            "area_mm2": _finite_number(shape.Area, nonnegative=True),  # type: ignore[attr-defined]
+            "bbox_mm": (
+                _finite_number(bound_box.XLength, nonnegative=True),
+                _finite_number(bound_box.YLength, nonnegative=True),
+                _finite_number(bound_box.ZLength, nonnegative=True),
+            ),
+            "center_of_mass_mm": (
+                _finite_number(center.x, nonnegative=False),
+                _finite_number(center.y, nonnegative=False),
+                _finite_number(center.z, nonnegative=False),
+            ),
+            "valid_shape": valid_shape,
+            "solid_count": solid_count,
+        }
+    except _ObservationFailure:
+        raise
+    except Exception:
+        raise _ObservationFailure from None
+
+
+def _entity_observation(obj: object, identity: EntityIdentity) -> EntityObservation:
+    try:
+        parameters = tuple(
+            EntityParameterObservation(
+                name=name,
+                value=_quantity_value(getattr(obj, property_name)),
+                unit=unit,
+            )
+            for name, property_name, unit in _PARAMETER_FIELDS.get(identity.object_type, ())
+        )
+        placement = _canonical_placement(obj.Placement)  # type: ignore[attr-defined]
+        shape = getattr(obj, "Shape", None)
+        geometry = (
+            {
+                "volume_mm3": None,
+                "area_mm2": None,
+                "bbox_mm": None,
+                "center_of_mass_mm": None,
+                "valid_shape": None,
+                "solid_count": None,
+            }
+            if shape is None
+            else _entity_geometry(shape)
+        )
+        return EntityObservation(
+            object_id=identity.object_id,
+            feature_id=identity.feature_id,
+            object_type=identity.object_type,
+            semantic_role=identity.semantic_role.value,
+            provenance=identity.provenance.to_mapping(),
+            placement=placement,
+            parameters=parameters,
+            **geometry,
+        )
+    except _ObservationFailure:
+        raise
+    except Exception:
+        raise _ObservationFailure from None
+
+
+def _entity_observations(session: object) -> tuple[EntityObservation, ...]:
+    try:
+        document_objects = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+        list_identities = getattr(session, "list_object_identities", None)
+        if callable(list_identities):
+            pairs = tuple(list_identities())
+        else:
+            identities = index_entity_identities(document_objects)
+            pairs = tuple(zip(document_objects, identities, strict=True))
+        modelable_objects = tuple(
+            obj
+            for obj in document_objects
+            if getattr(obj, "TypeId", None) in _PARAMETER_FIELDS
+        )
+        if any(
+            sum(current is obj for current, _ in pairs) != 1
+            for obj in modelable_objects
+        ) or any(
+            not any(current is obj for obj in document_objects)
+            for current, _ in pairs
+        ):
+            raise _ObservationFailure
+        observations = tuple(
+            sorted(
+                (_entity_observation(obj, identity) for obj, identity in pairs),
+                key=lambda item: item.object_id,
+            )
+        )
+        if len({item.object_id for item in observations}) != len(observations):
+            raise _ObservationFailure
+        feature_ids = tuple(
+            item.feature_id for item in observations if item.feature_id is not None
+        )
+        if len(set(feature_ids)) != len(feature_ids):
+            raise _ObservationFailure
+        return observations
+    except _ObservationFailure:
+        raise
+    except Exception:
+        raise _ObservationFailure from None
+
+
+def _reloaded_observations(
+    path: Path,
+    *,
+    include_shape: bool,
+) -> tuple[ShapeObservation | None, tuple[EntityObservation, ...]]:
+    probe = None
+    failed = False
+    shape: ShapeObservation | None = None
+    entities: tuple[EntityObservation, ...] = ()
+    try:
+        probe = _Session()
+        probe.load_document(path)
+        if include_shape:
+            shape = _shape_observation(probe)
+        entities = _entity_observations(probe)
+    except Exception:
+        failed = True
+    finally:
+        if probe is not None:
+            try:
+                probe.close_document()
+            except Exception:
+                failed = True
+    if failed:
+        raise _ObservationFailure
+    return shape, entities
+
+
+def _preservation_observations(
+    before: tuple[EntityObservation, ...],
+    after: tuple[EntityObservation, ...],
+) -> tuple[PreservationObservation, ...]:
+    before_by_id = {item.object_id: item for item in before}
+    after_by_id = {item.object_id: item for item in after}
+    comparisons = []
+    for object_id in sorted(set(before_by_id) | set(after_by_id)):
+        old = before_by_id.get(object_id)
+        new = after_by_id.get(object_id)
+        reference = old if old is not None else new
+        assert reference is not None
+        targets = (reference.object_id,) + (
+            (reference.feature_id,) if reference.feature_id is not None else ()
+        )
+        comparisons.extend(
+            compare_entity_preservation(
+                old, new, target=target
+            )
+            for target in targets
+        )
+    return tuple(sorted(comparisons, key=lambda item: item.target))
+
+
+def _bound_selectors(value: object) -> tuple[SelectorV1, ...]:
+    if type(value) is SelectorV1:
+        return (value,)
+    if type(value) is MappingProxyType:
+        return tuple(
+            selector for item in value.values() for selector in _bound_selectors(item)
+        )
+    if type(value) is tuple:
+        return tuple(selector for item in value for selector in _bound_selectors(item))
+    return ()
+
+
+def _managed_add_box(session: object, **kwargs: object) -> object:
+    """Run the fixed box primitive and attach managed identity before sealing."""
+
+    result = _add_box(session, **kwargs)
+    attach = getattr(session, "attach_object_identity", None)
+    read_identity = getattr(session, "read_object_identity", None)
+    if not callable(attach) or not callable(read_identity):
+        raise RuntimeError("managed object identity is unavailable")
+    try:
+        if type(result) is not dict:
+            raise ValueError
+        name = result["name"]
+        if type(name) is not str or not name:
+            raise ValueError
+        obj = session.get_object(name)
+        object_type = obj.TypeId
+        if type(object_type) is not str:
+            raise ValueError
+        identity = EntityIdentity(
+            object_id=f"object_{secrets.token_hex(16)}",
+            feature_id=f"feature_{secrets.token_hex(16)}",
+            object_type=object_type,
+            semantic_role=SemanticRole.PRIMITIVE,
+            provenance=Provenance(
+                source=ProvenanceSource.MODEL,
+                operation_id=None,
+            ),
+        )
+        attached = attach(obj, identity)
+        observed = read_identity(obj)
+        if (
+            type(attached) is not EntityIdentity
+            or attached != identity
+            or type(observed) is not EntityIdentity
+            or observed != identity
+        ):
+            raise ValueError
+    except Exception:
+        raise RuntimeError("managed object identity could not be attached") from None
+    return result
+
+
 def _describe_part(session: object) -> dict[str, object]:
     """Return execution feedback only; this value is never trusted evidence."""
 
@@ -537,9 +842,20 @@ class InProcessCadExecutor(CadSnapshotPort):
             source = program.program
             if source.base_revision != candidate.base_head.revision_id:
                 raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
+            selectors = tuple(
+                selector
+                for command in program.commands
+                for selector in _bound_selectors(command.handler_kwargs)
+            )
+            if any(
+                selector.project_id != candidate.project_id
+                or selector.revision_id != candidate.base_head.revision_id
+                for selector in selectors
+            ):
+                raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
             session = candidate.binding.session
             handlers = {
-                "add_box": partial(_add_box, session),
+                "add_box": partial(_managed_add_box, session),
                 "modify_part": partial(_modify_part, session),
                 "describe_part": partial(_describe_part, session),
             }
@@ -666,12 +982,114 @@ class InProcessCadExecutor(CadSnapshotPort):
         if confirmed != durable or confirmed != candidate.revision:
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
         try:
-            shape = _shape_observation(candidate.binding.session)
+            live_shape = _shape_observation(candidate.binding.session)
+            live_entities = _entity_observations(candidate.binding.session)
         except _ObservationFailure:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+        try:
+            sealed_shape, entities = _reloaded_observations(
+                model_path,
+                include_shape=True,
+            )
+        except _ObservationFailure:
+            raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+        try:
+            model_after_reload = _read_artifact(model_path, "fcstd")
+            step_after_reload = _read_artifact(step_path, "step")
+        except _ArtifactReadFailure:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        if (
+            model_after_reload != model_actual
+            or step_after_reload != step_actual
+            or not _artifact_matches(model_after_reload, model_ref)
+            or not _artifact_matches(step_after_reload, step_ref)
+        ):
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        if sealed_shape is None or sealed_shape != live_shape or entities != live_entities:
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+
+        try:
+            base = self._store.load_revision(
+                candidate.project_id,
+                candidate.base_head.revision_id,
+            )
+        except Exception:
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE) from None
+        if (
+            type(base) is not RevisionRef
+            or base.id != candidate.base_head.revision_id
+            or base.project_id != candidate.project_id
+            or base.manifest_sha256 != candidate.base_head.manifest_sha256
+            or durable.base_revision != base.id
+        ):
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        before_entities: tuple[EntityObservation, ...] = ()
+        base_path: Path | None = None
+        base_actual: _ArtifactSnapshot | None = None
+        if base.model is not None:
+            if (base.model.name, base.model.format) != ("model.FCStd", "fcstd"):
+                raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+            try:
+                base_path = self._store.revision_model_path(candidate.project_id, base.id)
+                base_actual = _read_artifact(base_path, "fcstd")
+            except _ArtifactReadFailure:
+                raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+            except Exception:
+                raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE) from None
+            if not _artifact_matches(base_actual, base.model):
+                raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+            try:
+                _, before_entities = _reloaded_observations(
+                    base_path,
+                    include_shape=False,
+                )
+            except _ObservationFailure:
+                raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+            try:
+                base_after_reload = _read_artifact(base_path, "fcstd")
+            except _ArtifactReadFailure:
+                raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+            if base_after_reload != base_actual or not _artifact_matches(
+                base_after_reload,
+                base.model,
+            ):
+                raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        try:
+            final_model = _read_artifact(model_path, "fcstd")
+            final_step = _read_artifact(step_path, "step")
+            final_durable = self._store.load_revision(candidate.project_id, durable.id)
+            final_base = self._store.load_revision(candidate.project_id, base.id)
+        except _ArtifactReadFailure:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        except Exception:
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE) from None
+        if (
+            final_model != model_actual
+            or final_step != step_actual
+            or not _artifact_matches(final_model, model_ref)
+            or not _artifact_matches(final_step, step_ref)
+            or final_durable != durable
+            or final_base != base
+        ):
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        if base.model is not None:
+            assert base_path is not None and base_actual is not None
+            try:
+                final_base_model = _read_artifact(base_path, "fcstd")
+            except _ArtifactReadFailure:
+                raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+            if final_base_model != base_actual or not _artifact_matches(
+                final_base_model,
+                base.model,
+            ):
+                raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        try:
+            preservations = _preservation_observations(before_entities, entities)
+        except Exception:
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE) from None
         snapshot = ObservationSnapshot(
             candidate_revision=durable.id,
-            shapes=(shape,),
+            shapes=(sealed_shape,),
             artifacts=(
                 ArtifactObservation(
                     target="export",
@@ -686,6 +1104,8 @@ class InProcessCadExecutor(CadSnapshotPort):
                     format="fcstd",
                 ),
             ),
+            entities=entities,
+            preservations=preservations,
         )
         artifacts = (
             TaskArtifactRef(

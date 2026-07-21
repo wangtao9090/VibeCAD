@@ -466,6 +466,351 @@ print("TK9_RESULT=" + json.dumps(payload, ensure_ascii=False, sort_keys=True))
 """
 
 
+_SELECTOR_PRESERVATION_CHILD = r"""
+from __future__ import annotations
+
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, __SOURCE__)
+
+from vibecad.engine.session import Session
+from vibecad.execution.candidate import CandidateCoordinator, SessionBinding, SessionSlot
+from vibecad.execution.executor import InProcessCadExecutor
+from vibecad.execution.revisions import (
+    LocalRevisionStore,
+    RevisionStoreRootTrust,
+)
+from vibecad.execution.selectors import (
+    EntityIdentity,
+    EntityKind,
+    Provenance,
+    ProvenanceSource,
+    SelectorError,
+    SelectorErrorCode,
+    SelectorV1,
+    SemanticRole,
+    resolve_selector,
+)
+from vibecad.tools.modeling import add_box, new_document
+from vibecad.tools.modify import modify_part
+from vibecad.workflow.lease import LeaseRootTrust, ResourceLeaseManager
+
+ROOT = Path(__WORK_ROOT__)
+PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
+TARGET_OBJECT_ID = "object_11111111111111111111111111111111"
+TARGET_FEATURE_ID = "feature_11111111111111111111111111111111"
+CONTROL_OBJECT_ID = "object_22222222222222222222222222222222"
+CONTROL_FEATURE_ID = "feature_22222222222222222222222222222222"
+IDENTITY_PROPERTIES = frozenset(
+    {
+        "VibeCADObjectId",
+        "VibeCADFeatureId",
+        "VibeCADSemanticRole",
+        "VibeCADProvenance",
+    }
+)
+
+
+def secure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+    return path
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def close_best_effort(session: object | None) -> None:
+    if session is None:
+        return
+    try:
+        if session.doc is not None:
+            session.close_document()
+    except Exception:
+        pass
+
+
+def identity(object_id: str, feature_id: str, operation_id: str) -> EntityIdentity:
+    return EntityIdentity(
+        object_id=object_id,
+        feature_id=feature_id,
+        object_type="Part::Box",
+        semantic_role=SemanticRole.PRIMITIVE,
+        provenance=Provenance(
+            source=ProvenanceSource.SYSTEM,
+            operation_id=operation_id,
+        ),
+    )
+
+
+def parameter(entity: object, name: str) -> float:
+    values = {item.name: float(item.value) for item in entity.parameters}
+    return values[name]
+
+
+def identified_objects(session: object) -> tuple[object, ...]:
+    return tuple(
+        obj
+        for obj in session.doc.Objects
+        if IDENTITY_PROPERTIES.issubset(set(obj.PropertiesList))
+    )
+
+
+secure_dir(ROOT)
+locks_root = secure_dir(ROOT / "locks")
+revisions_root = secure_dir(ROOT / "revisions")
+manager = ResourceLeaseManager(locks_root, trust=LeaseRootTrust.TRUSTED_LOCAL)
+store = LocalRevisionStore(
+    revisions_root,
+    manager,
+    trust=RevisionStoreRootTrust.TRUSTED_LOCAL,
+)
+executor = InProcessCadExecutor(store=store)
+
+seed_session = None
+baseline_session = None
+payload = {}
+try:
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        seed_session = Session()
+        new_document(seed_session, "SelectorPreservationBase")
+        target_name = add_box(
+            seed_session,
+            length=10,
+            width=5,
+            height=4,
+            position=(0, 0, 0),
+        )["name"]
+        control_name = add_box(
+            seed_session,
+            length=7,
+            width=6,
+            height=3,
+            position=(30, 0, 0),
+        )["name"]
+        target_identity = identity(
+            TARGET_OBJECT_ID,
+            TARGET_FEATURE_ID,
+            "seed-target",
+        )
+        control_identity = identity(
+            CONTROL_OBJECT_ID,
+            CONTROL_FEATURE_ID,
+            "seed-control",
+        )
+        with seed_session._transaction("attach-stable-identities"):
+            seed_session.attach_object_identity(
+                seed_session.get_object(target_name),
+                target_identity,
+            )
+            seed_session.attach_object_identity(
+                seed_session.get_object(control_name),
+                control_identity,
+            )
+            seed_session.doc.recompute()
+
+        baseline_source = ROOT / "base.FCStd"
+        executor.checkpoint_fcstd(seed_session, baseline_source)
+        baseline_source.chmod(0o600)
+        head = store.import_trusted_fcstd(PROJECT_ID, baseline_source, lease)
+        base_path = store.revision_model_path(PROJECT_ID, head.revision_id)
+        base_digest = sha256(base_path)
+        executor.close(seed_session)
+        seed_session = None
+
+        baseline_session = executor.load_fcstd(base_path)
+        baseline_binding = SessionBinding(
+            project_id=PROJECT_ID,
+            revision_id=head.revision_id,
+            session=baseline_session,
+        )
+        slot = SessionSlot(baseline_binding)
+        coordinator = CandidateCoordinator(
+            store=store,
+            snapshot_port=executor,
+            session_slot=slot,
+        )
+
+        target_selector_mapping = target_identity.to_selector(
+            project_id=PROJECT_ID,
+            revision_id=head.revision_id,
+            entity_kind=EntityKind.FEATURE,
+        ).to_mapping()
+        control_selector_mapping = control_identity.to_selector(
+            project_id=PROJECT_ID,
+            revision_id=head.revision_id,
+            entity_kind=EntityKind.FEATURE,
+        ).to_mapping()
+
+        # The wire contract is closed: no legacy Name fallback or partial selector is accepted.
+        malformed_codes = []
+        for malformed in (
+            {key: value for key, value in target_selector_mapping.items() if key != "provenance"},
+            {**target_selector_mapping, "Name": target_name},
+        ):
+            try:
+                SelectorV1.from_mapping(malformed)
+            except SelectorError as error:
+                malformed_codes.append(error.code.value)
+            else:
+                raise AssertionError("malformed selector was accepted")
+
+        active = coordinator.begin(
+            project_id=PROJECT_ID,
+            expected_head=head,
+            lease=lease,
+        )
+        target_selector = SelectorV1.from_mapping(target_selector_mapping)
+        target = resolve_selector(
+            target_selector,
+            identified_objects(active.binding.session),
+            project_id=PROJECT_ID,
+            revision_id=active.base_head.revision_id,
+        )
+        resolved_identity = active.binding.session.read_object_identity(target)
+        if resolved_identity != target_identity:
+            raise AssertionError("selector resolved the wrong identity")
+        modify_part(active.binding.session, target.Name, "length", 15)
+
+        control_selector = SelectorV1.from_mapping(control_selector_mapping)
+        control = resolve_selector(
+            control_selector,
+            identified_objects(active.binding.session),
+            project_id=PROJECT_ID,
+            revision_id=active.base_head.revision_id,
+        )
+        if float(control.Length) != 7.0:
+            raise AssertionError("control object changed during targeted modification")
+
+        checkpointed = coordinator.checkpoint(candidate=active, lease=lease)
+        executor.export_step(candidate=checkpointed, lease=lease)
+        sealed = coordinator.seal(candidate=checkpointed, lease=lease)
+        evidence = executor.collect_evidence(candidate=sealed)
+        snapshot = evidence.snapshot
+        entities = {item.object_id: item for item in snapshot.entities}
+        preservations = {item.target: item for item in snapshot.preservations}
+        target_observation = entities[TARGET_OBJECT_ID]
+        control_observation = entities[CONTROL_OBJECT_ID]
+        target_preservation = preservations[TARGET_FEATURE_ID]
+        control_preservation = preservations[CONTROL_FEATURE_ID]
+
+        sealed_target = resolve_selector(
+            target_selector,
+            identified_objects(sealed.binding.session),
+            project_id=PROJECT_ID,
+            revision_id=sealed.base_head.revision_id,
+        )
+        sealed_identity = sealed.binding.session.read_object_identity(sealed_target)
+
+        success_facts = {
+            "candidate_revision": sealed.revision.id,
+            "snapshot_revision": snapshot.candidate_revision,
+            "selector_revision": target_selector.revision_id,
+            "base_revision": sealed.base_head.revision_id,
+            "target_length": parameter(target_observation, "length"),
+            "control_length": parameter(control_observation, "length"),
+            "target_preserved": target_preservation.preserved,
+            "target_changed_fields": list(target_preservation.changed_fields),
+            "target_digest_changed": (
+                target_preservation.before_digest != target_preservation.after_digest
+            ),
+            "control_preserved": control_preservation.preserved,
+            "control_changed_fields": list(control_preservation.changed_fields),
+            "control_digest_stable": (
+                control_preservation.before_digest == control_preservation.after_digest
+            ),
+            "sealed_identity_stable": sealed_identity == target_identity,
+            "entity_ids": sorted(entities),
+            "malformed_codes": malformed_codes,
+        }
+
+        success_rollback = coordinator.rollback(candidate=sealed, lease=lease)
+        if success_rollback.head_committed:
+            raise AssertionError("evidence-only candidate unexpectedly advanced HEAD")
+        if store.load_head(PROJECT_ID) != head or slot.current() is not baseline_binding:
+            raise AssertionError("success rollback did not restore the base authority")
+
+        failure_codes = []
+        head_stable_after_failure = []
+        slot_stable_after_failure = []
+        for case in ("stale", "zero", "duplicate"):
+            failed_candidate = coordinator.begin(
+                project_id=PROJECT_ID,
+                expected_head=head,
+                lease=lease,
+            )
+            try:
+                if case == "stale":
+                    raw_selector = {
+                        **target_selector_mapping,
+                        "revision_id": "revision_ffffffffffffffffffffffffffffffff",
+                    }
+                    expected_code = SelectorErrorCode.STALE_REVISION
+                elif case == "zero":
+                    raw_selector = {
+                        **target_selector_mapping,
+                        "object_id": "object_ffffffffffffffffffffffffffffffff",
+                    }
+                    expected_code = SelectorErrorCode.ZERO_MATCH
+                else:
+                    raw_selector = target_selector_mapping
+                    expected_code = SelectorErrorCode.DUPLICATE_IDENTITY
+                    duplicate_source = resolve_selector(
+                        SelectorV1.from_mapping(control_selector_mapping),
+                        identified_objects(failed_candidate.binding.session),
+                        project_id=PROJECT_ID,
+                        revision_id=failed_candidate.base_head.revision_id,
+                    )
+                    failed_candidate.binding.session.doc.copyObject(duplicate_source)
+                    failed_candidate.binding.session.doc.recompute()
+                try:
+                    resolve_selector(
+                        SelectorV1.from_mapping(raw_selector),
+                        identified_objects(failed_candidate.binding.session),
+                        project_id=PROJECT_ID,
+                        revision_id=failed_candidate.base_head.revision_id,
+                    )
+                except SelectorError as error:
+                    if error.code is not expected_code:
+                        raise AssertionError(
+                            f"{case} selector returned {error.code.value}"
+                        ) from error
+                    failure_codes.append(error.code.value)
+                else:
+                    raise AssertionError(f"{case} selector failure was accepted")
+            finally:
+                rollback = coordinator.rollback(candidate=failed_candidate, lease=lease)
+            head_stable_after_failure.append(
+                not rollback.head_committed and store.load_head(PROJECT_ID) == head
+            )
+            slot_stable_after_failure.append(slot.current() is baseline_binding)
+
+        payload = {
+            **success_facts,
+            "failure_codes": failure_codes,
+            "head_stable_after_failure": head_stable_after_failure,
+            "slot_stable_after_failure": slot_stable_after_failure,
+            "base_digest_unchanged": sha256(base_path) == base_digest,
+            "final_head": store.load_head(PROJECT_ID).to_mapping(),
+            "base_head": head.to_mapping(),
+            "baseline_open": baseline_binding.session.doc is not None,
+        }
+finally:
+    close_best_effort(baseline_session)
+    close_best_effort(seed_session)
+
+print("S3_SELECTOR_RESULT=" + json.dumps(payload, ensure_ascii=False, sort_keys=True))
+"""
+
+
 def _run_case(
     existing_freecad_python: str,
     tmp_path: Path,
@@ -496,6 +841,35 @@ def _run_case(
     assert payload["base_revision_unchanged"] is True
     assert payload["base_model_digest_unchanged"] is True
     return payload
+
+
+def _run_selector_preservation_case(
+    existing_freecad_python: str,
+    tmp_path: Path,
+) -> dict[str, object]:
+    source = Path(__file__).resolve().parent.parent / "src"
+    work_root = tmp_path / "selector-preservation"
+    work_root.mkdir(mode=0o700)
+    work_root.chmod(0o700)
+    code = (
+        _SELECTOR_PRESERVATION_CHILD.replace("__SOURCE__", repr(str(source)))
+        .replace("__WORK_ROOT__", repr(str(work_root)))
+    )
+    process = subprocess.run(
+        [existing_freecad_python, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=240,
+        check=False,
+    )
+    assert process.returncode == 0, process.stderr + "\n" + process.stdout
+    lines = [
+        line
+        for line in process.stdout.splitlines()
+        if line.startswith("S3_SELECTOR_RESULT=")
+    ]
+    assert len(lines) == 1, process.stdout
+    return json.loads(lines[0].removeprefix("S3_SELECTOR_RESULT="))
 
 
 def _assert_rollback(payload: dict[str, object]) -> None:
@@ -650,3 +1024,40 @@ def test_real_task_kernel_rolls_back_failed_verification_with_diagnostics(
     _assert_box_geometry(payload["reload_geometry"])
     assert "fail_verification" in payload["transitions"]
     _assert_layout(payload, journal_state="not_committed", manifest_count=2)
+
+
+@pytest.mark.slow
+def test_real_selector_preservation_is_reload_bound_and_failure_isolated(
+    existing_freecad_python: str,
+    tmp_path: Path,
+) -> None:
+    payload = _run_selector_preservation_case(existing_freecad_python, tmp_path)
+
+    assert payload["snapshot_revision"] == payload["candidate_revision"]
+    assert payload["candidate_revision"] != payload["base_revision"]
+    assert payload["selector_revision"] == payload["base_revision"]
+    assert payload["target_length"] == pytest.approx(15.0)
+    assert payload["control_length"] == pytest.approx(7.0)
+    assert payload["target_preserved"] is False
+    assert payload["target_digest_changed"] is True
+    assert "parameters.length" in payload["target_changed_fields"]
+    assert payload["control_preserved"] is True
+    assert payload["control_changed_fields"] == []
+    assert payload["control_digest_stable"] is True
+    assert payload["sealed_identity_stable"] is True
+    assert payload["entity_ids"] == [
+        "object_11111111111111111111111111111111",
+        "object_22222222222222222222222222222222",
+    ]
+    assert payload["malformed_codes"] == ["missing_field", "unknown_field"]
+
+    assert payload["failure_codes"] == [
+        "stale_revision",
+        "zero_match",
+        "duplicate_identity",
+    ]
+    assert payload["head_stable_after_failure"] == [True, True, True]
+    assert payload["slot_stable_after_failure"] == [True, True, True]
+    assert payload["final_head"] == payload["base_head"]
+    assert payload["base_digest_unchanged"] is True
+    assert payload["baseline_open"] is True

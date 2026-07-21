@@ -16,6 +16,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Self
 
+from vibecad.execution.selectors import SelectorV1
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER, SCHEMA_VERSION
 
 _SNAKE_CASE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
@@ -205,25 +206,11 @@ def _matches_value_shape(
             and _is_safe_value_text(snapshot["slot"])
         )
     if shape is ValueShape.OBJECT_SELECTOR:
-        snapshot = _snapshot_strict_mapping(value)
-        if snapshot is None or set(snapshot) != {
-            "schema_version",
-            "project_id",
-            "revision_id",
-            "object_id",
-            "expected_cardinality",
-        }:
+        try:
+            SelectorV1.from_mapping(value)
+        except Exception:
             return False
-        return (
-            type(snapshot["schema_version"]) is int
-            and snapshot["schema_version"] == SCHEMA_VERSION
-            and all(
-                _is_safe_value_text(snapshot[name])
-                for name in ("project_id", "revision_id", "object_id")
-            )
-            and type(snapshot["expected_cardinality"]) is int
-            and 1 <= snapshot["expected_cardinality"] <= 64
-        )
+        return True
     return False
 
 
