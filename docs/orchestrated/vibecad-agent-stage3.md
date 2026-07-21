@@ -2203,6 +2203,900 @@ preserve-data change; it is recorded rather than presented as additional server 
    unrelated untracked `docs/CAD_BACKEND_RESEARCH.md`.  Never move the installed legacy conda env, write an
    external override, initialize data under runtime, replay S3-6 RED implementation or expose G0 as runnable IPC.
 
+## 8.10 Packet S3-7A — verified artifacts and atomic Agent MCP cutover
+
+### 1. Authorization and unchanged product boundary
+
+- Approval ID: S3-A01；artifact revision: S3-R3 / S3-R3.1 / S3-R3.2；bound decisions:
+  S3-D01 through S3-D08。The user's standing instructions “你继续 猛猛的推进吧”、
+  “好的 你持续推进  知道 TK9 完成” and “我睡觉去了  你可以持续推进” authorize
+  continuous local implementation, tests, review, fixes and named-file commits inside that unchanged scope；
+  no repeated internal-blocker approval is required。
+- This packet inherits every higher-priority system、developer and user instruction、the repository
+  allowlist、the current host permission model and sandbox。The Skill、artifact and packet cannot grant or
+  expand permissions、elevate authority or bypass those controls。
+- S3-7 only delivers verified artifact materialization、durable project ingress、stable Agent controls、
+  registry-derived direct tools and one atomic legacy-public/manifest cutover。It does not implement the
+  S3-8 skill/version/docs acceptance、G1 daemon/authenticated IPC/Workbench、G2 GUI worker、SelectorV1 Level B、
+  arbitrary Python、Provider/model calls、second-OS support、push、PR、release、marketplace or external spend。
+- Four read-only audits independently covered authoritative artifact copy-out、MCP/direct compilation、the
+  current endpoint/manifest inventory and create-project response-loss recovery。They found no product-level
+  decision change。Engineering corrections below narrow public claims to what the current Task Kernel can
+  prove；they do not reopen S3-A01。
+
+### 2. Workspace anchor, baseline and mechanical allowlist
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`；branch `codex/agent-stage3`；current anchor
+  `505a224aaeade6f36afbe54a749c0fae75b4ed79`。The S3-6 semantic anchor is `cf0f9b9`; the only later commit is
+  the user's independent `docs: add multi-CAD backend research report`, which does not change any S3-7 source
+  or test dependency and must be preserved。
+- No applicable repository-local `AGENTS.md` or `CLAUDE.md` was observed。Issue-time worktree is clean and no
+  test process is active。
+- A first baseline command named nonexistent `tests/test_runtime_paths.py` and exited 4 before collection；it is
+  retained as setup evidence and is not a semantic RED。The corrected focused baseline is:
+
+  ```text
+  PYTHONPATH=src uv run pytest -q \
+    tests/test_task_api.py tests/test_agent_application.py \
+    tests/test_project_bootstrap.py tests/test_revision_store.py \
+    tests/test_task_kernel_integration.py tests/test_runtime_purity.py \
+    tests/test_uninstall.py tests/test_mcpb_manifest.py \
+    tests/test_server_round10.py tests/test_server_tools.py
+  # 487 passed, 10 deselected
+  ```
+
+- The S3-7 control commit may modify only this file。The S3-7 semantic implementation may modify or add only:
+  - `pyproject.toml`
+  - `uv.lock`
+  - `src/vibecad/application/__init__.py`
+  - `src/vibecad/application/data.py`
+  - `src/vibecad/application/project.py`
+  - `src/vibecad/application/project_create.py`（new）
+  - `src/vibecad/application/project_api.py`（new）
+  - `src/vibecad/application/artifacts.py`（new）
+  - `src/vibecad/application/task_api.py`
+  - `src/vibecad/application/agent.py`
+  - `src/vibecad/application/public_surface.py`（new）
+  - `src/vibecad/execution/candidate.py`
+  - `src/vibecad/execution/revisions.py`
+  - `src/vibecad/execution/executor.py`
+  - `src/vibecad/interaction/cad.py`
+  - `src/vibecad/interaction/storage.py`
+  - `src/vibecad/mcp_transport.py`（new）
+  - `src/vibecad/runtime/spec.py`
+  - `src/vibecad/runtime/status.py`
+  - `src/vibecad/supervisor.py`
+  - `src/vibecad/workflow/store.py`
+  - `src/vibecad/workflow/catalog.py`
+  - `src/vibecad/workflow/service.py`
+  - `src/vibecad/server.py`
+  - `.mcpbignore`
+  - `manifest.json`
+  - `tests/test_project_api.py`（new）
+  - `tests/test_artifact_materialization.py`（new）
+  - `tests/test_server_agent_surface.py`（new）
+  - `tests/test_mcp_transport.py`（new）
+  - `tests/test_project_bootstrap.py`
+  - `tests/test_revision_store.py`
+  - `tests/test_candidate_revision.py`
+  - `tests/test_cad_execution_port.py`
+  - `tests/test_agent_application.py`
+  - `tests/test_task_api.py`
+  - `tests/test_task_store.py`
+  - `tests/test_task_catalog.py`
+  - `tests/test_task_service.py`
+  - `tests/test_task_kernel_integration.py`
+  - `tests/test_mcpb_manifest.py`
+  - `tests/test_server_tools.py`
+  - `tests/test_server_round5.py`
+  - `tests/test_server_round6.py`
+  - `tests/test_server_round7.py`
+  - `tests/test_server_round8.py`
+  - `tests/test_server_round10.py`
+  - `tests/test_server_round11.py`
+  - `tests/test_server_new_tools.py`
+  - `tests/test_runtime_integration.py`
+  - `tests/test_runtime_purity.py`
+  - `tests/test_status.py`
+  - `tests/test_installer.py`
+  - `tests/test_supervisor.py`
+  - `tests/test_uninstall.py`
+  - `tests/test_release_workflow.py`
+  - `docs/orchestrated/vibecad-agent-stage3.md`
+- Legacy server-adapter assertions may be removed or rewritten only after equivalent reusable engine/tool
+  behavior is confirmed in its existing module tests。Low-level `workflow/state`、registry
+  metadata、engine/tools/feedback、runtime installer and G0 protocol semantics are outside this packet；a
+  genuine RED proving an unavoidable domain gap triggers the breaker rather than an opportunistic edit。
+
+### 3. Exact public surface and one-writer cutover
+
+The checked-in manifest and live `tools/list` are one deterministic ordered projection, never a literal-count
+product boundary：
+
+```text
+stable controls in this order:
+  ping
+  get_runtime_status
+  ensure_runtime
+  uninstall_runtime
+  get_capabilities
+  create_project
+  get_project
+  create_task
+  get_task
+  submit_model_program
+  resume_task
+  accept_draft
+  reject_draft
+  export_task_artifacts
+
+then registry operation names sorted where direct_exposed == true:
+  create_box
+  create_cylinder
+  inspect_model
+  modify_parameter
+  move_part
+  rotate_part
+```
+
+The current derived total happens to be twenty but no code、test or product document may use `20` as the
+boundary。`smoke_cad` becomes a private installer/runtime probe。Every other legacy public Session endpoint is
+removed from both registration and manifest in the same semantic commit。`move_part` and `rotate_part` retain
+only their names；their schema、handler and state authority are replaced completely。
+
+The bootstrap process has a pre-application runtime guard。Only `ping`、`get_runtime_status`、`ensure_runtime`、
+`uninstall_runtime` and pure `get_capabilities` may execute there。Every project/task/review/export/direct call
+and every resource read checks the guard before constructing/opening AgentApplication or touching Task/CAD；it
+returns the exact fixed `runtime_unavailable` envelope/resource error with zero application-port calls。If the
+managed runtime has become ready, the owned transport first flushes that fixed response and only then schedules
+the supervised swap, so non-idempotent `create_task` is never pending across the normal swap。A process-wide
+latch forbids a normal runtime-ready SWAP_EXIT after application opening/effect entry。Confirmed uninstall is the
+sole exception：the owned transport enters `DRAINING`, blocks new application/resource admissions, boundedly
+waits for every other slot/worker, closes the exact AgentApplication, flushes the marked-uninstall response and
+only then exits for supervisor cleanup/bootstrap respawn。Drain/close/flush failure keeps the marker, returns fixed
+`recovery_required` and does not exit。Barrier RED around readiness/flush proves every guarded call executes zero
+times pre-swap and at most once after caller retry；uninstall versus create/direct/resource proves no request is
+killed/replayed twice, durable data is preserved and only managed runtime is removed。
+
+`server.py` must not import or construct `Session`, keep `_session`, decorate a legacy CAD handler or call
+`vibecad.tools.*`。It owns only a PID-bound, thread-safe single-flight `AgentApplication` composition slot with
+the exact states `UNOPENED -> OPENING -> READY -> CLOSING -> CLOSED`。Only one opener may run in one process；
+concurrent first callers wait for and observe that same result。Open failure closes every partial instance and
+atomically returns to `UNOPENED`。A fork/PID mismatch never uses an inherited instance and fails closed or resets
+only after closing its own process-local partial state。Shutdown detaches the exact READY instance under the
+slot lock, closes it exactly once outside the lock and leaves `CLOSED`, after which reopen is forbidden。The
+module import、MCP initialize、`tools/list`、`resources/templates/list` and `resources/list` paths do not create
+an application/runtime/data directory or load `FreeCAD`/`Part`。The lifecycle RED uses barriers for concurrent
+open、open-failure retry、close/open races and wrong-process access, and accounts for a close receipt for every
+constructed instance。
+
+Public MCP annotations describe the whole adapter side effect rather than only CAD geometry risk。Every one of
+the four hints is explicit；the exact independent expected table is:
+
+| tool(s) | readOnly | destructive | idempotent | openWorld |
+|---|---:|---:|---:|---:|
+| `ping`, `get_capabilities` | true | false | true | false |
+| `get_runtime_status` | false | false | true | false |
+| `ensure_runtime` | false | true | true | true |
+| `uninstall_runtime` | false | true | true | false |
+| `create_project` | false | false | true | true |
+| `get_project`, `get_task` | false | false | true | false |
+| `create_task` | false | false | false | false |
+| `submit_model_program`, `resume_task`, `accept_draft`, `reject_draft` | false | true | true | false |
+| `export_task_artifacts` | false | false | true | false |
+| `create_box`, `create_cylinder`, `inspect_model` | false | false | true | false |
+| `modify_parameter`, `move_part`, `rotate_part` | false | true | true | false |
+
+`get_project`/`get_task` are conservatively non-read-only because the full adapter may single-flight open and
+recover durable application state；direct `inspect_model` is non-read-only because it writes TaskRun、candidate
+and Revision evidence；`get_runtime_status` is non-read-only because it can schedule interpreter swap。One test
+compares runtime `tools/list` field-for-field against this separately hand-written literal table；comparing two
+projections made by the same generator is insufficient。
+
+FastMCP's decorator/Pydantic layer is not the strict-ingress or exception-sanitization boundary。A
+VibeCAD-owned low-level adapter authoritatively registers `tools/list` and `tools/call` on the SDK server；the
+default FastMCP tool manager may help construct internal metadata but never receives a public call first。
+`tools/list` returns the exact ordered public-surface projection with each complete
+`additionalProperties:false` schema and the annotation table above。`tools/call` first resolves the name from
+that closed projection, then validates the already protocol-parsed argument object itself：exact key set、exact
+non-coercing types/identifiers/safe integers、nested schema and all byte/node/depth/count budgets。Unknown fields
+are rejected rather than ignored and the selected API is invoked at most once only after ingress passes。
+`acceptance_json` and every durable raw JSON record additionally use the same duplicate-key-rejecting decoder。
+Unknown tool、schema、
+validator、API and unexpected exceptions map to fixed path-free MCP error/envelope values。Exact successful
+domain projections intentionally return their frozen persisted task/program/result/request-key fields；outside
+those projections, error/control responses and logs echo no caller-derived parameter、handler exception、argument
+repr、source path or URI。Logs contain only a fixed error code and random correlation id；JSON-RPC's validated
+request `id` is the only unavoidable protocol echo in failures。No-reflection/no-secret tests therefore preserve
+the exact successful domain projection while placing secrets in failing `params`/handler values/exceptions。
+Public error `path` values likewise contain only independently frozen schema tokens and numeric indices；an
+unknown key maps to its known enclosing path plus `/_unknown`, and a nested ContractValidationError is projected
+through the schema with the first unknown token replaced。No caller key text is echoed。Secret-as-key RED covers
+outer/direct、AcceptanceSpec and ModelProgram nesting。
+After FastMCP construction and before the owned transport starts, the `mcp` namespace
+logger receives one fixed discard-only handler with `propagate=False`, and every already-instantiated child is
+disabled；present and future `mcp.*` loggers therefore cannot reach a root handler added later。A persistent
+pathname filter on the root logger and existing handlers separately drops the SDK's direct root `logging.*`
+calls。This covers pre-dispatch raw-message and session validation logging at DEBUG。
+VibeCAD error logging uses one dedicated non-propagating logger and never logs request values。Real JSON-RPC RED
+at root/SDK DEBUG proves an extra field keeps the API spy at zero, wrong type/oversize/
+secret `source_path` cannot be found in response or captured logs, and `tools/list` matches the independent
+literal contract field-for-field；protocol-invalid secret-bearing calls/URIs/notifications and forced handler
+exceptions receive the same no-secret log assertion。
+
+Every public tool returns the exact four-field schema-v1 envelope。The owned adapter constructs
+`CallToolResult` directly：`structuredContent` is that envelope, `content` is exactly one
+`TextContent(type="text", text=<compact canonical JSON of the same envelope>)`, and `isError` is exactly
+`!envelope.ok`；each `Tool.outputSchema` is the independently frozen specialized envelope schema。No SDK result
+normalizer or exception builder participates。
+
+An unknown tool name uses fixed MCP `-32602` / `Tool name is not available.` with zero API access；a malformed
+tools/call container rejected before one tool schema is selected uses `-32602` / `Tool request is invalid.`；a
+known tool's argument/schema failure uses that tool's exact public error envelope/CallToolResult；an unexpected
+adapter failure uses `-32603` / `Tool request could not be completed.`。None includes input or `str(e)`。
+
+Runtime-control wire shapes are literal too。`ping` takes `{}` and its result is exactly
+`{schema_version,service:"vibecad",version}`；`get_runtime_status` takes `{}` and returns exactly
+`{schema_version,phase,percent,message,error,runtime_compatible,runtime_action,installed_version,
+required_version,needs_reconnect}` with bounded enums/strings and no raw installer exception；`ensure_runtime`
+takes `{}` and returns exactly `{schema_version,status,message}` where status is `started|in_progress|ready`；
+`uninstall_runtime` takes exactly `{confirm:<bool>}` and returns exactly
+`{schema_version,status,confirm_required,estimated_size_bytes,data_preserved:true,message}` where status is
+`preview|marked|already_clean`。Its public result never exposes a local path。Control ingress/failure codes and
+messages are exactly `missing_field,unknown_field,invalid_type,invalid_value,runtime_failure,store_failure,
+recovery_required,internal_error`, each with a fixed path-free message except bounded ingress JSON pointer；they use the same
+envelope/error shape。All schemas set `additionalProperties:false`。Wire RED covers ok/error `isError`、content/
+structured byte equivalence and outputSchema independently。
+
+The owned boundary also replaces the SDK's unbounded `stdio_server` and unbounded per-message `Server.run`
+dispatch loop。It reads newline frames incrementally in at most 65,536-byte chunks with a 2,097,152-byte request
+wire ceiling, strict UTF-8 and duplicate-key-rejecting JSON；an oversize/unterminated frame is drained with
+constant memory, receives one fixed JSON-RPC parse error with null id when possible, then closes。Invalid UTF-8、
+duplicate keys and malformed JSON use the same closed no-input error。Before object decoding, an incremental
+lexical scan caps depth at 64、tokens/nodes at 65,536、keys at 256 UTF-8
+bytes、each decoded string at 1,048,576 UTF-8 bytes and integers at safe-JSON range/16 decimal digits；finite
+float decimal/exponent tokens are allowed up to 64 lexical bytes, while NaN/Infinity and ambiguous numeric forms
+are rejected。These limits admit the 512-KiB ModelProgram and fractional dimension/position/angle ingress without
+allowing a compact adversarial frame to expand beyond the aggregate memory proof。
+Only bounded raw mappings then pass a VibeCAD-owned exact prevalidator for the complete supported ClientRequest/
+ClientNotification union, including method、params and URI；any typed/AnyUrl/unknown-method failure is sanitized
+there。Only objects guaranteed to survive the SDK's repeated typed validation reach pinned low-level handlers,
+so `mcp.shared.session` never receives an invalid secret-bearing request。SDK stdio parsing never sees raw
+unbounded input。
+Response frames are capped at 100,663,296 bytes, enough for the bounded resource result and no more。
+
+Eight pre-created in-flight slots apply before dispatching any request or notification；the reader backpressures
+application dispatch when full and releases a slot only after response/drop plus actual worker cleanup。A
+separate single slot permits at most one full-buffer `resources/read` at a time；N/N+1 cannot enter application/
+CAD or allocate/read any payload, and that slot is held through result serialization and completed write。
+Blocking CAD/file/tool work runs only through four pre-created workers behind the same eight-slot bounded queue；
+the event loop never submits to an unbounded default executor。Disconnect/cancellation marks response suppression
+but retains occupied work slots until workers return；only a pre-dispatch protocol error releases immediately。
+The child-process request-path incremental allocation, including one 402,653,184-byte resource path plus seven
+bounded frames/tasks, is at most 536,870,912 bytes；this is deliberately not mislabeled as absolute RSS because
+the bounded four-runtime cache and loaded FreeCAD/Part have a preexisting baseline。
+
+When all eight work slots are full, one separately bounded 2,097,152-byte control lane keeps reading frames。
+It handles EOF or a fully prevalidated `notifications/cancelled`；a non-control request immediately receives fixed
+`-32005` / `Server is busy.` with zero dispatch, and a non-control notification is dropped, leaving the lane free
+for later cancellation。Cancellation marks `CANCEL_REQUESTED` but does not call the SDK's immediate responder
+cancel or release work/worker/resource slots。Only after the synchronous worker and cleanup actually return does
+the child emit exactly one fixed `-32800` / `Request cancelled` response for the original id, then release its
+slots。The supervisor mirrors this one
+control lane without retaining another replayable work request。Eight-full→ninth-work→cancel and
+cancelled-blocking-CAD barriers prove liveness without early capacity reuse。
+
+The child also reserves every active non-null JSON-RPC id before SDK dispatch；a duplicate id gets fixed
+`-32600` / `Invalid Request` with zero handler access and cannot replace SDK/session state。The reservation is
+released only after response/drop and actual worker/cleanup completion。On cancellation, the child id reservation
+and supervisor `CANCEL_REQUESTED` tombstone remain until that final cancellation response；supervisor consumes it,
+clears bounded pending state and forwards it unless the client disconnected。A cancel paused after create +
+same-id resend, disconnect→worker-return and post-ack reuse RED prove no overlap or capacity leak。
+
+The stdlib supervisor enforces the same 2,097,152-byte inbound frame ceiling and eight-request pending/
+backpressure bound plus the same request lexical limits before forwarding or retaining replay bytes。Its
+child-response reader uses bounded chunks
+and rejects a line above 100,663,296 bytes before `json.loads`；one resource response has a measured supervisor
+incremental peak cap of 402,653,184 bytes。Real supervised-stdio gates cover request/response N/N+1、invalid UTF-8、duplicate/
+unterminated frames、request/resource floods、disconnect/cancel slot release and separate child/supervisor RSS
+bounds；neither process logs secret frame content。
+
+Supervisor accepts exactly one `initialize` then one `notifications/initialized`; duplicate/out-of-order
+handshake frames are rejected, and both retained handshake frames count with the eight pending frames/bytes。
+Duplicate in-flight JSON-RPC ids are rejected before forwarding and cannot overwrite `_pending`。Across a
+SWAP_EXIT it may replay only the handshake plus this exact method-level safe set：`ping`、`tools/list`、
+`resources/list`、`resources/templates/list` and
+`resources/read` (whose bootstrap guard has zero application effect), union `tools/call` names whose frozen
+annotation is idempotent。A pending
+`create_task` or unclassified call is dropped and receives fixed `-32003` / `Tool outcome is unknown; inspect
+durable state before retry.`；its bytes are never replayed。The normal bootstrap guard flush-before-swap rule
+means this fallback is exceptional, but crash-after-create-before-response RED still proves at most one task。
+Swap barriers in every discovery/resource method prove initial host negotiation remains replay-safe。
+
+The same atomic cutover replaces manifest top-level `description` and `long_description` with only the proven
+Darwin Agent surface：durable project/task/review、explicit ModelProgram、the six current direct operations and
+verified FCStd/STEP resources。It must not claim hole、fillet、render/three-view、assembly/interference、STL、
+Workbench、Windows or any removed legacy endpoint；negative package tests freeze those exclusions。The manifest
+declares only `darwin`, the sole platform with real AgentApplication/managed-FreeCAD evidence。
+
+Dependency closure is package evidence, not an ambient cache assumption。The semantic change pins
+`mcp==1.27.2` in `pyproject.toml`, regenerates `uv.lock` offline, removes that lock from `.mcpbignore`, changes
+the manifest launch to frozen mode and requires the unpacked MCPB to contain the byte-identical regenerated
+lock。The exact manifest argv is
+`["run","--frozen","--no-dev","--directory","${__dirname}","mcpb_entry.py"]`。An unpacked-directory
+gate runs with `--frozen`, asserts the live SDK version before initialize/tools and resource checks, and fails
+on any lock/hash/version drift。Because public version remains 0.4.0 until S3-8, `runtime.spec` also increments a
+private integer `SERVER_PACKAGE_EPOCH`。Every managed and external receipt/binding has exact
+`server_package_epoch`、`mcp_version:"1.27.2"` and the canonical new `public_surface_sha256`；
+`_VERIFY_SNIPPET` independently imports the installed epoch/MCP and recomputes that surface fingerprint before
+issuing a receipt。A prior S3-6 same-version managed receipt therefore classifies as server mismatch, triggers the
+existing pip-only package sync rather than an engine rebuild, is reverified and only then may supervisor swap。
+An old external/override receipt is incompatible and is never auto-modified；an adopted legacy external env must
+either pass the new verification and receive a new binding, cause creation of a fresh owned current env, or
+return explicit repair—never stale-swap。Post-swap gates cover both the real pre-S3-7 managed shape and this
+host's old external-legacy shape, prove current installed identity from `active_runtime_python`, exercise the
+low-level surface and do not mask it with repository `PYTHONPATH`。S3-8 later performs the public version bump。
+A future SDK/epoch/surface change needs its own lock update and compatibility evidence。
+
+### 4. Frozen application contracts
+
+#### 4.1 Durable project create/get
+
+`ProjectApi` is independent of `TaskApi` and uses the same strict schema-v1 success/error envelope。Exact
+requests are:
+
+```json
+{"schema_version":1,"create_key":"project_create_<32 lowercase hex>","kind":"empty"}
+```
+
+```json
+{"schema_version":1,"create_key":"project_create_<32 lowercase hex>","kind":"import_fcstd","source_path":"/absolute/input.FCStd"}
+```
+
+```json
+{"schema_version":1,"project_id":"project_<32 lowercase hex>"}
+```
+
+`source_path` is required only for `import_fcstd` and forbidden for `empty`；relative paths、`..`、URI、FIFO、
+socket、directory、empty/oversize file and every alias of the managed VibeCAD data root are rejected before
+FreeCAD。Ingress walks from an opened `/` descriptor one component at a time with
+`O_DIRECTORY|O_NOFOLLOW` and opens the final entry with `openat(..., O_NOFOLLOW|O_NONBLOCK)`。It compares every
+opened ancestor `(st_dev,st_ino)` with the already pinned data-root identity, checks descriptors again after
+copy, and never relies on `resolve()`、case-folded text or string-prefix containment；parent symlink、case/data
+alias、root swap、final symlink/hardlink、non-ordinary/non-single-link/wrong-UID input all fail closed。The raw
+path is used only by that first bounded descriptor copy；it never appears in a response、log、CAD call or durable
+record。A random 32-byte per-store HMAC-SHA256 key is created once in an identity-pinned 0600 single-link exact
+envelope `{schema_version:1,key_hex:<64 lowercase hex>,key_id:<64 lowercase hex>}` where `key_id` is the
+domain-separated SHA-256 of the decoded key；the file and directory are fsynced before the first `RESERVED`
+record and every request binds that `key_id`。Key envelope/checksum identity is verified before comparing intent,
+so a bit flip cannot be misreported as different intent。The key authenticates canonical request digests without
+persisting the path and is never rotated/regenerated while any record exists；missing、replaced or corrupt key
+with existing records fails `store_failure`/`recovery_required`。Concurrent first creation and restart/key-loss
+RED freeze that lifecycle。
+
+The durable per-key state machine below `data/bootstrap/requests` is:
+
+```text
+RESERVED -> STAGED -> VALIDATED -> CLEANUP_REQUIRED(outcome=PUBLISHED) -> PUBLISHED
+     |          |           `----> CLEANUP_REQUIRED(outcome=REJECTED)  -> REJECTED
+     |          `----------------> CLEANUP_REQUIRED(outcome=REJECTED)  -> REJECTED
+     `---------------- empty ------------------------------------------> PUBLISHED
+```
+
+- `RESERVED` is created and fsynced before project publication and binds the create key、HMAC canonical-intent
+  digest and exactly one server-generated random project id。Same-key concurrency can therefore have only one
+  project-id winner。
+- `STAGED` binds the exact immutable private input name、inode identity、digest and size after the external file
+  was streamed once with before/after descriptor equality。Retries never reopen the external source。The STAGED
+  inode is never passed to CAD because current `validate_import` mutates its input；each attempt descriptor-copies
+  it into one record-bound nonce work file and CAD may mutate only that work file。
+- `VALIDATED` binds the exact immutable normalized FCStd digest/size after successful work-file validation and
+  rename。Recovery uses a new read-only normalized-FCStd seam；it never calls mutating `validate_import` again、
+  changes project id or selects another normalized file。
+- Deterministically malformed FCStd first durably records a path-free fixed `invalid_input` failure receipt and
+  then performs identity-bound cleanup。Successful cleanup reaches `REJECTED`；cleanup failure reaches
+  `CLEANUP_REQUIRED(outcome=REJECTED)` and returns fixed `recovery_required` until cleanup converges, then every
+  replay returns the original fixed failure without source/CAD access。Transient I/O、durability、lease or CAD
+  availability failures retain a resumable preterminal phase and never masquerade as deterministic rejection。
+- Generation-zero publication is exact-read back before the record stores a terminal published outcome。If
+  cleanup remains, `CLEANUP_REQUIRED(outcome=PUBLISHED)` already binds the immutable successful identity and
+  generation-zero projection and returns it with `cleanup_required:true`；successful cleanup reaches
+  `PUBLISHED` and only changes that flag to false。Replay verifies the exact base-null Revision/manifest/model
+  exists without requiring current HEAD generation zero and never rewrites create key、kind、project id or
+  `generation_zero`, even after current HEAD advances。
+- Same key + byte-identical canonical request replays across processes；same key + different intent conflicts；
+  different keys intentionally create distinct projects。If generation-zero publication completed before a
+  lost response, recovery matches only the record-owned project and exact base-null publication and converges
+  the phase forward；a later HEAD is never rolled back or replaced。
+
+Cleanup occurs only after the outcome receipt is durable。It uses each record-bound name and `(dev,ino)` plus
+unlink and parent fsync；a missing exact entry is converged, while a replacement/mismatch fails closed without
+touching it。Every STAGED、normalized、nonce work and cleanup remnant counts until its identity-bound cleanup is
+fsynced。No final replay depends on a staging file。
+
+The request root and its fixed lock entries are descriptor-pinned private same-UID single-link objects。A fixed
+catalog quota lock serializes request admission/count/bytes and the O_EXCL `RESERVED` winner；only after a
+durable known-key record exists may code create/acquire its deterministic per-key lock。The catalog lock is never
+held while waiting for that per-key lock；later phase updates hold the per-key lock and take the catalog lock only
+for short record/quota CAS, never across CAD。OS lock release after process death permits exact-record recovery。
+Concurrent same/different intent、different-key N/N+1、crash-held lock、hardlinked lock entry and root-swap RED
+freeze these semantics and ensure forged keys cannot create unbounded lock files。
+
+Every request/phase/failure record uses an exact
+`{"schema_version":1,"body":{...},"body_sha256":"<64 lowercase hex>"}` envelope；the digest is a
+domain-separated SHA-256 over canonical body bytes。Raw parsing rejects duplicate or unknown keys、wrong schema、
+non-safe JSON integers、depth above 64、more than 8192 nodes、keys above 256 UTF-8 bytes and strings/raw records
+above 64 KiB before any identifier becomes a lookup name。Records must be 0600 same-UID single-link files on the
+pinned root/device；descriptor and
+entry identity are checked before and after read, then checksum is verified before any path/id lookup。Bit flip、
+valid-id substitution、duplicate key or malformed record returns `integrity_failure`/`store_failure` and is never
+repaired by overwrite。
+
+Project limits are request 8 KiB、path 4096 UTF-8 bytes、source 512 MiB、2 GiB across every request record、
+STAGED、normalized、nonce work and cleanup-remnant byte regardless of phase、eight active creations and 4096
+durable create records。“Active” means an OS-live per-key lease plus its current work/CAD attempt, not merely a
+nonterminal record；a crash-released RESERVED record therefore remains replayable under the 4096-record bound
+but cannot consume one of eight live slots forever。Eight crash-abandoned RESERVED keys do not block a ninth
+independent empty create, while same-key retry retains its original project id。Admission checks N/N+1 while
+holding the fixed catalog lock；exhaustion creates、evicts
+and overwrites nothing。Published/rejected receipts are not automatically deleted in Stage 3 because that would
+break replay。
+
+The eight live slots are eight pre-created fixed authenticated OS-lock entries, not a scan of caller-derived
+locks。After durable RESERVED and per-key ownership, an attempt waits boundedly for one deterministic free slot,
+holds it only through that copy/CAD/publication/cleanup attempt and releases in reverse；process death releases it
+automatically。The catalog lock is never held while waiting for per-key or slot ownership。Barrier/crash RED
+proves eight simultaneous live attempts bound the ninth while eight abandoned RESERVED records consume zero
+slots。
+
+All responses use the exact TaskApi envelope
+`{schema_version,ok,result,error}`。A successful create result has exactly
+`{schema_version,create_key,kind,cleanup_required,project_id,generation_zero:{head,revision}}`；a successful get
+result has exactly `{schema_version,project_id,current:{head,revision}}`。`head` is exactly
+`{schema_version,project_id,generation,revision_id,manifest_sha256}`；`revision` is exactly
+`{schema_version,id,project_id,base_revision,manifest_sha256,model,artifacts}`。`model` and each ordered artifact
+are exactly `{schema_version,id,name,format,sha256,size_bytes}`；`model` is null only for an empty base-null
+generation-zero Revision, otherwise it has that object shape。Every base-null generation-zero `artifacts` is
+exactly `[]`; later revisions return their exact ordered authoritative set。Generation-zero has
+`base_revision:null`。Create
+therefore returns the original generation-zero
+authority while get performs HEAD → Revision → HEAD and conflicts if either complete HEAD value differs。
+
+Project ingress errors are exactly `missing_field,unknown_field,unsupported_version,invalid_type,invalid_value,
+budget_exceeded`；semantic errors are exactly `invalid_input,not_found,conflict,lease_unavailable,
+resource_exhausted,runtime_unavailable,integrity_failure,cad_failure,store_failure,recovery_required,
+internal_error`。The error value
+is exactly `{schema_version:1,code,path,message}` with a bounded JSON-pointer path only for schema ingress and a
+fixed message per code。Unsafe/path/I/O store failures map to `store_failure`；uncertain publication or cleanup
+maps to `recovery_required`；unknown/wrong-process failures map to `internal_error`。No path or exception text is
+reflected。`runtime_unavailable` always uses empty path and `The managed CAD runtime is not active.`。
+
+The same single `runtime_unavailable` code/message is added to TaskApi's closed public taxonomy solely for the
+pre-application guard；active-process task/direct handlers never synthesize it from an internal exception。
+
+Public task admission is bounded at the durable store, not in `server.py` memory。`TaskRunStore` permits exactly
+1024 records, keeps the existing 2 MiB per-record bound and caps all physical ordinary bytes below the task root
+at 2,147,483,648, including records、journal、live temp and crash remnants。One fixed
+descriptor-authenticated cross-process catalog lock covers create count/byte admission；
+the only nested order is catalog lock → existing/budget-admitted task lease for both create and replacement。
+Create checks N/N+1 before the first per-id lock entry can be created, then holds catalog through the task lease
+and durable write；replacement first requires physical `all_current_ordinary_bytes + new_temp_bytes <=
+2,147,483,648` (the old record still exists before rename), separately validates final logical
+`canonical_total-old+new`, and releases in reverse。
+N/N+1 exhaustion creates、evicts、overwrites、lock entries and executes CAD nothing；barrier tests cover
+create/replace inversion/deadlock and 10,000 over-cap create attempts。Waits are bounded/fail closed, catalog is
+never acquired while holding a task lease, and neither lock is held across CAD。
+Because all mutation is catalog-serialized, at most one identity-bound write temp may exist。After acquiring the
+catalog lock, a fixed checksummed mutation-intent journal is fsynced in `RESERVED` with target、old/new digests
+and one unpredictable temp name before create；after create/write it is fsynced as `STAGED` with exact
+`(dev,ino,uid,mode,size,sha256)`。Crash between create and STAGED may adopt only the RESERVED name when strict
+private-file metadata and expected new digest match；a mismatch is never unlinked。Rename/exact readback precedes
+journal clear + parent fsync。Journal/temp bytes count physically；unknown/corrupt entries or more than one
+remnant fail closed/resource-exhausted, nothing is silently deleted, and no new temp is made。Crash at journal、
+write、file fsync、replace、readback and directory fsync plus aggregate N/N+1 RED cover this bound。
+Before any caller-derived task lease name is opened, `load` performs a bounded no-create descriptor probe of the
+task record；absence linearizes as earlier `not_found`, while presence is followed by lease acquisition and an
+authoritative reread。Thus 10,000 well-formed forged task ids leave the lock/data tree byte-and-inode snapshot
+unchanged, whereas an existing task still receives normal CAS serialization。`artifact-export:<task_id>` is
+likewise acquired only after proving that exact task record exists, so public input cannot generate unbounded
+lease files。The response-loss task orphan in S3-RES-14 remains discoverability work, but is capacity-bounded。
+
+Task capacity propagation is exact：`TaskStoreErrorCode.RESOURCE_EXHAUSTED ->
+TaskCatalogErrorCode.RESOURCE_EXHAUSTED -> TaskServiceErrorCode.RESOURCE_EXHAUSTED ->
+TaskServicePortErrorCode.RESOURCE_EXHAUSTED ->` public `resource_exhausted`。Create and every replacement N/N+1
+test the complete mapping；capacity is never collapsed into `store_failure` or a persisted rejected task。
+
+Authoritative `LocalRevisionStore` has its own physical quota before this surface becomes public。Across every
+ordinary file below `data/projects`—published/candidate model and STEP、manifests、HEAD、journals、quota records、
+temps and cleanup remnants—the hard aggregate is 17,179,869,184 bytes。Counts are at most 4096 project dirs、
+8192 immutable revision dirs、1024 candidate/reservation dirs and 65,536 ordinary files；existing 512-MiB/file
+and 1-GiB/revision limits remain。Unknown/corrupt extras count physically and fail closed；over-quota preexisting
+stores remain read-only but every mutation returns resource exhaustion。Nothing is evicted or overwritten。
+
+One fixed descriptor-authenticated cross-process revision-quota lock protects strict checksummed reservation
+records and count/byte admission。Every current mutation already owns the exact project write lease；the only
+nested order is project write lease → revision quota lock → internal project/revision descriptors, never inverse。
+The global lock is held only for bounded scan/reserve/phase/accounting transitions, not across CAD。Generation-zero
+publication reserves 1,074,790,400 bytes；each candidate effect reserves 2,151,677,952 bytes, covering the full
+1-GiB candidate plus simultaneous immutable commit copy and metadata。Every ordinary file is either unreserved
+physical usage or bound to exactly one durable reservation whose observed bytes must remain within its ceiling；
+admission requires `unreserved_bytes + sum(active_reservation_ceilings) <= 17,179,869,184` before making a name。
+
+Reservation states bind all temp/candidate identities and progress before external CAD can write。Publication
+under the quota lock converts exact actual immutable bytes to unreserved usage only after readback/fsync, then
+releases remaining headroom；rollback/cleanup releases a reservation only after identity-bound deletion and
+parent fsync。Crash keeps the reservation charged and recoverable, preventing repeated-crash disk growth。
+Before any managed FreeCAD write, the process CAD gate verifies `RLIMIT_FSIZE` support/hard ceiling, installs a
+startup main-thread `SIGXFSZ` ignore-to-EFBIG policy, sets the process soft limit to the effective value below
+and restores the exact previous soft limit in `finally`。The effective soft value is
+`min(previous_soft,536870912)` with infinity handled explicitly；neither soft nor hard limit is ever raised, and
+a preexisting stricter host limit remains authoritative。Thus a candidate FCStd/STEP file cannot exceed the existing
+per-file bound before post-write accounting；unsupported/wrong-process/restore failure fails closed and an
+injected 536,870,913-byte writer must produce zero publication with a fixed resource/CAD failure。
+Concurrent project/candidate N/N+1、publication duplication peak、released-candidate accounting、extra-file/
+root corruption and every reserve/write/rename/fsync crash are fault-injected。A quota failure occurs before
+candidate/gen-zero effect and maps to public `resource_exhausted`。
+
+That mapping is end-to-end, not an Agent-side precheck：`CandidateErrorCode.RESOURCE_EXHAUSTED` preserves the
+RevisionStore code and `TaskServiceErrorCode.RESOURCE_EXHAUSTED` passes it through Agent/TaskApi。For initial
+submission, TaskService obtains the project lease and quota reservation before `SUBMIT_PROGRAM`/
+`START_VALIDATION` CAS；capacity failure releases the lease and leaves task generation/bytes/inode unchanged。
+A later CAS conflict/store-capacity failure cleans/fsyncs the unused reservation before returning its exact
+error；cleanup uncertainty returns recovery_required with the reservation still charged。Existing PROGRAM_READY
+continuation similarly returns capacity failure without a new task transition。It is never converted into a
+persisted rejected task or generic reconciliation error。
+
+#### 4.2 Registry-derived direct tools
+
+Every direct operation has this exact strict outer contract, with registry-derived nested target/argument
+schemas and no additional properties：
+
+```json
+{
+  "schema_version": 1,
+  "task_id": "task_<32 lowercase hex>",
+  "expected_generation": 0,
+  "target": {},
+  "arguments": {},
+  "preserve": [],
+  "acceptance_json": "{\"schema_version\":1,...}"
+}
+```
+
+All outer fields are required。The tool name fixes the operation；the request cannot provide project、base
+revision、review policy、handler/import/code/path/output or commit authority。Create operations require empty
+target；`inspect_model` requires empty target and arguments；the three existing-object mutators require one full
+SelectorV1 Level A and never accept `result_ref` because a one-command direct call has no prior command result。
+
+`acceptance_json` uses a duplicate-key-rejecting raw UTF-8 decoder with a 262,144-byte limit、depth 64、8192
+nodes、64 KiB strings、256-byte keys、safe JSON integers and at most 128 acceptance criteria。Its canonical
+AcceptanceSpec is at most 262,144 bytes；the canonical non-acceptance request portion is at most 4096 bytes and
+the total logical request is at most 266,240 bytes。All registry-derived target/argument/preserve bounds and
+outer exact-key/type checks run before any durable task read。The adapter then parses the explicit
+AcceptanceSpec and constructs exactly:
+
+```text
+task/base revision = the exact durable task read at expected_generation
+one ModelCommand(id="direct_operation", op=<tool name>, source=model,
+                 target=<validated target>, args=<validated arguments>,
+                 preserve=<validated list>, depends_on=[])
+explicit caller AcceptanceSpec
+```
+
+After schema validation it performs one non-effecting durable task read, requires exact
+`expected_generation`、status `NEEDS_PLAN` or `NEEDS_INPUT`、no candidate and the program's exact task/base
+revision。For every direct mutator, SelectorV1 `project_id` and `revision_id` must equal that task's project and
+base revision。Before any effecting port call, the adapter runs pure `compile_acceptance_spec(acceptance)` and
+`validate_model_program(program)` and discards their outputs；TaskService remains authoritative and repeats its
+own validation。Acceptance、selector、registry、arguments、preserve、graph or program-budget failure leaves the
+task record generation/bytes/inode unchanged and the effecting port spy at zero。
+
+Only then does it perform exactly one effecting `submit_model_program` through the injected
+TaskServicePort。It does not create a task、resume semantically、retry or synthesize a permissive acceptance
+rule。The effective durable effect key required by S3-D03 is `(task_id, expected_generation)`；a lost-response
+replay may return conflict but cannot execute a second CAD effect。A future one-call create+execute convenience
+requires a separate durable request catalog and is not smuggled into `server.py`。
+
+Every direct tool returns exactly the TaskApi success/error envelope and the same complete stored-task projection
+that `submit_model_program` returns for this compiled one-command program；it uses the closed TaskApi error
+taxonomy unchanged and adds no direct-only verdict、draft or artifact response shape。
+
+S3-D03-C1 records the executable equivalence claim precisely：each direct call is byte-equivalent at the
+ModelProgram contract to the corresponding explicit one-command program；a sequence of direct tasks over
+successive committed heads must have equivalent final geometry/verdict semantics to the same operation sequence
+where selectors and policies permit, but revision ids/history are intentionally different。Stage 3 does not
+claim a hidden multi-command plan builder or identical revision ids。
+
+#### 4.3 Verified task artifacts and MCP resources
+
+The export request accepts no output path、directory、filename、format list、overwrite flag or URL：
+
+```json
+{
+  "schema_version": 1,
+  "export_key": "export_<32 lowercase hex>",
+  "task_id": "task_<32 lowercase hex>",
+  "expected_generation": 17,
+  "revision_id": "revision_<32 lowercase hex>",
+  "draft_id": null
+}
+```
+
+All six fields are required and `additionalProperties:false`；export/task/revision identifiers use their exact
+lowercase grammars, `draft_id` is null or `draft_<32 lowercase hex>`, and `expected_generation` is a non-bool
+safe nonnegative JSON integer。The canonical outer request is at most 8 KiB with depth 16、256 nodes、4096-byte
+strings and 256-byte keys。Every ingress failure returns before task/store/CAD access, so an extra path、URL or
+output field is rejected rather than ignored。
+
+- Null draft requires exact `SUCCEEDED` + committed revision。
+- Non-null draft requires exact `AWAITING_USER_REVIEW` + task/draft/generation/revision/manifest/verification/
+  artifact bindings。
+- Failed、rejected、active or merely detached/unproven revisions are never export authority。
+
+The exact success envelope is `{schema_version:1,ok:true,result:<value>,error:null}` where `result` has exactly
+`{schema_version,export_key,materialization_id,source_kind,task_id,task_generation,project_id,revision_id,
+manifest_sha256,authoritative,artifacts}`。`source_kind` is `committed` or `draft`、`authoritative` is the literal
+false, and `artifacts` contains exactly ordered FCStd then STEP entries, each exactly
+`{schema_version,id,name,format,sha256,size_bytes,resource_uri}`。The names are `model.FCStd` and `model.step`；
+the URI is `vibecad://artifact/<materialization_id>/<artifact_id>`。No local path is returned。
+
+The materialization suffix is a domain-separated SHA-256 over one canonical immutable source descriptor：schema
+version、source kind、task id/generation、project/revision/revision-manifest and the ordered authoritative
+artifact id/name/format/hash/size tuple；it never includes export key。Thus a draft later accepted as committed
+receives a different identity even for byte-identical files；only an exactly identical descriptor may reuse an
+exact-readback materialization。A digest collision or existing-directory descriptor mismatch fails closed and
+is never overwritten。Materializations are immutable delivery copies；Revision Store remains sole authority。
+
+Private layout：
+
+```text
+data/artifacts/
+├── requests/<hash(export_key)>.json
+├── materializations/materialization_<64hex>/
+│   ├── model.FCStd
+│   ├── model.step
+│   └── manifest.json
+└── .materialization_<64hex>.<nonce>.tmp/
+```
+
+Every request uses the same strict checksummed-record envelope and parser invariants frozen in §4.1。Its durable
+state machine is:
+
+```text
+RESERVED -> STAGING -> COPIED -> VALIDATED -> MATERIALIZED -> PUBLISHED
+    `-- deterministic conflict/invalid binding --> CLEANUP_REQUIRED -> REJECTED
+```
+
+Under the fixed authenticated artifact mutation lock and before any temporary directory or copy, `RESERVED` is
+file/directory-fsynced and binds export key、full canonical request digest、the exact immutable eligibility/source
+descriptor、ordered authoritative refs、deterministic materialization id、expected delivery-manifest digest and
+one unpredictable record-owned temporary name/nonce。After the exact empty private directory is created and
+fsynced, `STAGING` binds its `(dev,ino,uid,mode)` before any file write。Crash between mkdir and STAGING may adopt
+only the RESERVED exact name when it is still an empty private safe directory；anything else is identity-bound
+cleanup or fail-closed。Same key + different intent conflicts in every phase；same intent resumes only that
+record-owned state。A partial STAGING copy is prefix-rehashed and continued only with exact directory/file
+identity and unchanged authoritative descriptor, never forked into a second temp/materialization；mismatch enters
+proven cleanup rather than overwrite。`COPIED` binds both complete private file identities/hash/sizes；
+`VALIDATED` binds read-only CAD evidence；
+`MATERIALIZED` binds the exact renamed/fsynced directory；`PUBLISHED` binds and exact-readbacks the frozen response。
+
+Only deterministic ineligibility、invalid binding or stable conflict can record `REJECTED` after proven cleanup。
+Transient store/I/O、lease、CAD availability or durability failures retain the exact resumable phase or return
+`recovery_required`；they never masquerade as deterministic rejection。
+
+Directory rename + directory fsync and request-record replace + request-directory fsync are separate durability
+points, never described as one atomic action。After restart, a record may adopt only its exact descriptor-bound
+temporary or materialization directory after manifest、inode、root and both hash/size readback；mismatch/collision
+fails closed。A PUBLISHED replay exact-reads that immutable materialization and returns its frozen original
+response without task/draft/CAD access, even after a draft was accepted or rejected；it never copies again。
+
+Key-first terminal lookup briefly holds only the fixed artifact lock。For a new/nonterminal request, code releases
+that lock, proves the task record exists without creating a caller-derived lease, acquires the bounded
+`artifact-export:<task_id>` gate, then reacquires the artifact lock；the only nested order is task gate → artifact
+lock → process CAD gate → internal store/project locks。The first export holds the task gate from its eligibility
+read through copy、validation、final task+Revision reload、PUBLISHED fsync and exact readback。`AgentApplication`
+accept/reject and every transition away from `AWAITING_USER_REVIEW` acquire that same task gate before TaskRun
+CAS。Contention is bounded/fail-closed。A barrier paused after the final reload proves export versus Accept/Reject
+has exactly one first linearization；after PUBLISHED, later task state never revokes the delivered copy。
+
+A new descriptor-pinned RevisionStore seam opens authoritative source files no-follow and streams only into the
+record-owned private temporary directory while hashing/counting；it never returns a source Path for reopen。
+Source/destination must be same-UID ordinary 0600 single-link files on bound roots with distinct inodes；link、
+root swap、copy-time mutation or manifest/hash/size mismatch fails closed。
+
+Add exact `ValidatedMaterializationEvidence` containing ordered FCStd and STEP `(sha256,size_bytes)` values and
+a distinct `CadExecutionPort.validate_materialization(*, fcstd: Path, step: Path) ->
+ValidatedMaterializationEvidence` seam。From the descriptor-pinned private work directory it opens only the fixed
+relative names, reloads/recomputes FCStd and validates the complete STEP envelope without checkpoint、save、
+export、identity normalization or any byte mutation；`validate_import` is forbidden。The service then rehashes
+both files and requires exact equality with returned evidence and authoritative Revision refs before rename。
+Eligibility is re-read immediately before rename and PUBLISHED；change enters stable conflict/cleanup and cannot
+publish。
+
+Materialization budgets are 512 MiB per source file、1 GiB per pair、2 GiB total across every ordinary file
+under the artifact store（published、temporary、manifests and requests）、eight temporary entries、4096 durable
+export-request records、4096 published materializations、64 KiB per manifest/request record and 64 KiB copy
+chunks。Admission holds the authenticated mutation lock and computes count/byte N/N+1 before creating a request
+or temporary entry；exhaustion creates、evicts and overwrites nothing。Abandoned temporary cleanup uses a
+86,400-second TTL only as an additional condition, never orphan proof。State-driven cleanup does not wait for TTL：
+under the catalog lock it may delete the exact entry bound by the sole CLEANUP_REQUIRED owner only after its
+failure/outcome receipt is durable and no other record/PUBLISHED descriptor shares it。Background orphan cleanup
+requires TTL、no request binding、no active lease and durable creation identity。Both paths keep identity exact
+through unlink/rmdir + parent fsync。A failed request cannot remove content shared by another same-descriptor
+PUBLISHED request；published materializations are never silently evicted。Cleanup failure remains durable and
+same-key recovery touches only record-owned entries。
+
+`resources/templates/list` advertises exactly
+`vibecad://artifact/{materialization_id}/{artifact_id}`, but `resources/read` is a VibeCAD-owned sanitized
+low-level handler rather than FastMCP's default ResourceTemplate exception path。The accepted URI is exactly 141
+ASCII bytes with scheme/host `vibecad://artifact/`, `materialization_<64 lowercase hex>` and
+`artifact_<32 lowercase hex>` path segments and no query、fragment、percent encoding or alternate form。Before
+payload allocation, under the bounded artifact catalog lock, the handler must prove at least one exact
+checksummed `PUBLISHED` export request binds that materialization descriptor/manifest/artifact tuple；a plausible
+directory or manifest alone is never authority。The bounded 4096-record proof scans one strict ≤64-KiB record at
+a time with no materialized catalog/list allocation。It then descriptor-opens and revalidates manifest、descriptor、
+artifact id/hash/size/inode/root and streams/hashes one no-follow fd with before/after identity。Guessed URIs for
+RESERVED/STAGING/MATERIALIZED/CLEANUP_REQUIRED/REJECTED or orphan directories return the fixed unavailable error
+and zero bytes。
+
+Raw content is at most 67,108,864 bytes and base64 text at most 89,478,488 bytes。The owned handler performs one
+bounded read/hash and explicit base64 construction into `BlobResourceContents`；including raw、encoded bytes、
+ASCII string、serialized message and 32 MiB bounded overhead, incremental peak allocation is at most
+402,653,184 bytes。
+N/N+1 size and peak gates run against the real locked SDK；larger verified artifacts stay materialized but are
+not read through MCP。Streaming/local broker delivery remains S3-RES-13。
+
+Success is one `ReadResourceResult` containing exactly one `BlobResourceContents`：its `uri` is reconstructed
+from the validated descriptor ids rather than raw-echoed, `blob` is the bounded base64 string, and `mimeType` is
+exactly `application/vnd.freecad.fcstd` for FCStd or `model/step` for STEP。Only this successful canonical result
+contains a URI；failures and logs never contain the submitted URI。
+
+Resource errors are separate from export envelopes。A URI rejected by the owned prevalidator before SDK dispatch
+uses fixed `-32602` / `Invalid request parameters`；a typed URI that fails the exact VibeCAD grammar uses
+`-32602` with `Artifact resource identifier is invalid.`；unmatched/not-found/forged/integrity/
+unsafe uses `-32002` with
+`Artifact resource is unavailable.`；bootstrap guard uses `-32004` with
+`The managed CAD runtime is not active.`；N/N+1 uses `-32001` with
+`Artifact resource exceeds the read limit.`；an
+unexpected internal failure uses `-32603` with `Artifact resource could not be read.`。The handler and SDK log
+filter never reflect or log URI、path or `str(e)`；only fixed code + correlation id is allowed。
+
+Artifact envelope ingress errors are exactly `missing_field,unknown_field,unsupported_version,invalid_type,
+invalid_value,budget_exceeded`；semantic errors are exactly `invalid_input,not_found,invalid_state,conflict,
+lease_unavailable,resource_exhausted,integrity_failure,cad_failure,store_failure,recovery_required,
+runtime_unavailable,internal_error` with the same exact `{schema_version,code,path,message}` error shape。Internal unsafe/I/O maps to
+`store_failure`；durability/cleanup maps to `recovery_required`；wrong-process/unknown maps to `internal_error`。
+No exception text、URI or path is reflected。
+
+### 5. RED waves, implementation order and objective gates
+
+All behavior starts with a genuine focused RED hitting the intended missing contract。Syntax/setup/dependency
+failure is rejected as RED evidence；the earlier nonexistent-file baseline remains separately recorded。
+
+1. **Project ingress RED:** strict empty/import schema、key replay/conflict、all phase/receipt/checksum/key crash
+   points、parent/final link/data-alias/root-swap and source mutation、fixed catalog/per-key/eight-slot barriers、
+   4096/count/byte N/N+1、eight abandoned RESERVED then ninth create、create → HEAD N → same-key stable
+   generation-zero replay、publish/failure-receipt before identity cleanup and double-HEAD current get。
+2. **Task-store RED:** 1024/2-GiB record+temp N/N+1 under catalog→task lock order、all replace/fsync crashes、
+   RESERVED/STAGED mutation journal and one proven remnant、10,000 forged gets/over-cap creates with identical
+   lock tree、existing-task CAS、error propagation and inversion/deadlock barriers。
+3. **Revision-quota RED:** project→revision-lock order、4096/8192/1024/65536 and 16-GiB N/N+1、gen-zero/
+   candidate reservation ceilings、publication duplication peak、536,870,913-byte CAD writer、crash-held
+   reservation/restart、cleanup release、preexisting-overquota read-only and corrupt/extra-entry fail-closed。
+4. **Artifact RED:** exact eligibility and RESERVED/STAGING/COPIED/VALIDATED/MATERIALIZED/PUBLISHED/
+   CLEANUP_REQUIRED/REJECTED phase/fsync crashes、
+   descriptor-pinned source copy、link/root/mutation races、read-only FCStd/STEP evidence、final Accept/Reject
+   barrier、restart/frozen replay、same-descriptor shared cleanup、request/materialization count-and-byte N/N+1、
+   exact URI/error table and 64-MiB/base64/incremental-allocation N/N+1 after real FreeCAD export with all four
+   runtime-cache slots populated。
+5. **Direct compiler RED:** six registry-derived schemas、exact one-command projection、explicit acceptance、
+   Selector-only direct target、real fractional create/move transport、invalid-before-port behavior、lost-response
+   no-second-effect and direct/program equivalence。
+6. **Atomic surface/transport RED:** exact CallToolResult/outputSchema、owned deterministic tools/resources、
+   frame/lexical N/N+1、typed-prevalidation no-SDK-log path、eight/four/one slot barriers、duplicate active ids、
+   response/RSS caps、supervisor handshake/pending bounds/non-replay create_task、unknown/extra/secret cases at
+   DEBUG、legacy/manifest negatives、no Session path and lazy single-flight close/fork races。
+7. **Runtime/package RED:** bootstrap guard flush-before-swap、pinned dependency/lock、old managed epoch pip-only
+   sync、old external fail/fresh-owned
+   migration、post-swap exact installed surface + MCP 1.27.2 and real project/direct operation rather than public
+   `smoke_cad`；uninstall preserves every data child；MCPB validate/pack/unpack/frozen launch contents match。
+
+Implementation order is TaskRun physical quota/journal → RevisionStore reservation/error propagation → project
+request catalog → artifact materializer/resource → direct compiler/public metadata → bounded owned child/
+supervisor transport and runtime epoch → one atomic server/manifest cutover。Prerequisite classes may exist
+unregistered while the commit is in progress, but no intermediate staged/committed state may expose a mixed
+old/new public surface。
+
+Required final gates：
+
+- focused project/artifact/API/server/revision/CadExecutionPort suites；
+- cumulative task API、Task Kernel、review/restart、runtime/data/uninstall and underlying engine/tool suites；
+- full `pytest`、full Ruff、changed-file format、`git diff --check`、compile/import purity and offline wheel/sdist；
+- `mcpb validate`、pack、unpack allowlist、lock hash、frozen SDK 1.27.2 and real low-level initialize/tools/
+  resources calls from the unpacked directory；
+- installed managed FreeCAD for empty/import project、all six direct operations、program/direct equivalence、
+  committed artifact and durable-draft artifact reload/hash/resource paths、Accept/Reject/restart and failure
+  atomicity；
+- at least two independent final read-only reviews after every finding is closed。
+
+Acceptance evidence requires no sleeping-user presence：
+
+| lane | exact observation | decisions | executor / user needed |
+|---|---|---|---|
+| deterministic fault suite | record/lock/quota/crash/TOCTOU gates above, exact frozen envelopes | S3-D01,D03,D05,D06 | controller / no |
+| managed FreeCAD | old-runtime migration, empty/import, explicit program + six direct tools, committed/draft artifact reload/hash/resource, Accept/Reject/restart | S3-D01,D03,D04,D05,D06,D08 | controller / no |
+| unpacked MCPB | pinned installed identity, initialize, independent exact tools/list, strict calls, resources/read, DEBUG no-secret logs, Darwin claim | S3-D02,D03,D04,D08 | controller / no |
+
+Expected intentional test impact：old public adapter assertions in round 5–8/new-tools are superseded only at
+the atomic cutover；their reusable modeling/feature/transform/assembly/render behavior remains covered by
+existing module suites。Manifest platform expectation changes from Darwin+Windows to verified Darwin only。
+No version bump occurs until S3-8。
+
+### 6. Execution discipline, breakers and residuals
+
+Capability profile remains CP-S3-20260720：approval `native-plan`；delegation `spawn-send-wait`；persistence
+`repo-artifact`；process `native-session-poll` when `exec_command` yields a session, otherwise one bounded
+blocking command。The selected adapter is Codex。
+
+- `live capability declarations`: update_plan；spawn_agent/send_message/followup_task/wait_agent；apply_patch
+  and workspace exec；exec_command session id plus write_stdin polling。
+- `observable behavior`: this resumed controller observed native plan projection、spawn/follow-up/wait
+  completion、bounded exec and polling the exact live pytest session to exit 0；named-file patch/commit behavior
+  was previously observed in the same campaign。
+- `environment identity`: Codex Desktop controller `/root`；workspace
+  `/Users/wangtao/Documents/DevProject/vibecad`；no additional passive host identity observed。
+- `public configuration`: filesystem permission profile is unrestricted and approval policy is never；these
+  constrain execution but prove neither user authorization nor broader authority。
+
+Immediate breakers：any public legacy Session/decorator survives；a direct CAD adapter or ModelProgram controls
+code、handler、import/output path or commit policy；`create_project` may accept only its bounded one-shot
+`source_path` under §4.1 and export never accepts a path；server synthesizes acceptance；same effect executes
+twice after replay；project id changes for one create key；raw import path persists or reaches CAD；export uses
+an unverified candidate、mutates task/
+HEAD or aliases authoritative inode；resource read allocates past its bound；manifest claims Windows/G1/GUI；
+mixed public cutover；unexpected gate red or expected-baseline mismatch；ambiguous long-process state；
+out-of-allowlist write；need to change S3-D01..D08 or exceed the eighth semantic commit budget。
+
+Residual additions：
+
+| ID | Evidence / impact | Owner / disposition / closure |
+|---|---|---|
+| S3-RES-13 | MCP 1.27.2 BlobResourceContents buffers a complete base64 payload；Stage 3 owns and bounds that path at 64 MiB, so larger verified materializations cannot be delivered through this call | G1/P1；close with authenticated streaming/local broker or bounded chunk protocol plus cross-host E2E |
+| S3-RES-14 | `create_task` still owns a random id without a caller request key；response loss can orphan a pre-CAD task, though it cannot duplicate CAD effects | P0-B；close with durable task-request catalog or list/recover tasks and exact replay tests |
+| S3-RES-15 | TaskRun records/temps、project-create receipts、immutable RevisionStore payloads/reservations and artifact request/materialization records have finite hard quotas but no automatic retention/GC in Stage 3；valid use can exhaust them | P0-B；close all four stores with policy-governed list/archive/delete/GC that preserves HEAD、draft、replay and ancestry authority and passes crash/restart audit |
+
+Ordinary schema naming、test migration、fault-injection defects and review findings are closed autonomously
+inside this packet。Only a breaker that changes product position、public trust boundary or approved scope waits
+for the user。
+
+### 7. Delivery, commit and recovery boundary
+
+- Prewritten control commit: `docs(orchestration): issue S3-7 verified public surface packet`。
+- Prewritten semantic commit: `feat(mcp): publish verified agent CAD surface`。
+- Stage only exact named files；never use broad staging。Push remains not authorized / S3-RES-01。
+- Before the control commit, two agents not writing this packet must independently review the seven-section
+  contract、allowlist、trust boundaries、project/artifact replay、direct equivalence and gates。Before the semantic
+  commit, two different read-only reviews inspect the settled diff and final gate evidence。
+- Completion appends exact RED/GREEN counts、managed FreeCAD evidence、MCPB/package hashes、review closure、
+  residual disposition、semantic commit hash/push state and Recovery Snapshot S3-S14。AR-1 starts only from the
+  verified S3-7 semantic anchor；it may schedule P0-B/G1/P1 but cannot retroactively widen this packet。
+
+| Evidence | Authorization / review | Anchor / push | Objective evidence | Residuals | Snapshot | Status |
+|---|---|---|---|---|---|---|
+| S3-E13 / 2026-07-21T16:32:00Z | S3-A01；four read-only dependency audits；independent architecture and adversarial final reviews PASS after every Critical/Important was closed | 505a224 / not authorized | corrected focused baseline 487 passed, 10 deselected；exact allowlist；packet diff-check PASS；no production mutation | S3-RES-01..06, S3-RES-09, S3-RES-11..15；S3-7 implementation pending | S3-S13 | control-ready |
+
+### Recovery snapshot S3-S13
+
+1. **Status:** S3-7A control packet is review-PASS and is the only worktree change；production remains at S3-6
+   semantic commit `cf0f9b9` plus the user's independent research-doc commit `505a224`。
+2. **Next:** commit only this control document with the prewritten subject；then execute the seven genuine RED
+   waves and implementation order in §5 without exposing an intermediate mixed public surface。
+3. **Authority:** S3-A01 and S3-D01..D08 permit continuous local RED/GREEN、tests、review、fix and named-file
+   commits；push/PR/release/marketplace/external spend and G1/P1 remain unauthorized in this packet。
+4. **Recovery:** verify branch `codex/agent-stage3`、find the exact control-commit subject、confirm no active test
+   process and inspect the §2 semantic allowlist；if S3-7 semantic commit exists, use S3-S14 instead of replaying
+   this control step。
+
 ## 9. 用户决策与持续执行规则
 
 本修订依据已经明确的用户方向：
