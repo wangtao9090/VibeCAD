@@ -863,6 +863,151 @@ managed inventory 全部 fail closed，失败不会推进 HEAD。
    by verifying branch、S3-2 commit subject、clean worktree、S3-E04 evidence 和 S3-3 packet anchor，
    禁止重放已完成 S3-2 或把 legacy Name/Label 变成 Agent authority。
 
+## 8.6 Packet S3-3A — first-wave fixed CAD operations
+
+### 1. Authorization
+
+- Approval ID: S3-A01；artifact revision: S3-R3 / S3-R3.1；bound decisions: S3-D01 through
+  S3-D08；starting anchor: `c394412` on `codex/agent-stage3`。
+- 本 packet 继承 system、developer、user、directory-scoped instruction、当前 permission model /
+  sandbox 与本文件 allowlist。Skill、artifact 和 packet 都不能扩大权限、提升 authority 或绕过
+  sandbox；不重复请求已经绑定的批准。
+- 只执行 S3-3：首批六个 object-level operation、固定 executor binding 与 command-level
+  preservation。它不获得 push、PR、release、外部花费、任意 Python、旧 31 endpoint 迁移、
+  import normalization、Level B selector、GUI profile 或 G1 Workbench 权限。
+- 两个未参与写入的只读设计分别从 registry/binding 与真实 FreeCAD gate 方向 PASS；结论一致：
+  当前没有产品级决策阻塞。
+
+### 2. Workspace anchor and mechanical allowlist
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`；branch:
+  `codex/agent-stage3`；anchor: `c394412`；issue-time worktree clean。
+- 未观察到 repository-local `AGENTS.md` 或 `CLAUDE.md`；当前 host permission model 与 sandbox
+  始终继续生效。
+- 本 packet 只允许修改：
+  - `src/vibecad/execution/registry.py`
+  - `src/vibecad/workflow/program.py`
+  - `src/vibecad/execution/adapter.py`
+  - `src/vibecad/execution/executor.py`
+  - `tests/test_execution_registry.py`
+  - `tests/test_model_program.py`
+  - `tests/test_execution_adapter.py`
+  - `tests/test_program_executor.py`
+  - `tests/test_task_service.py`
+  - `tests/test_task_kernel_integration.py`
+  - `docs/orchestrated/vibecad-agent-stage3.md`
+- 首批 operation 复用现有 trusted leaf functions，但 raw Name 只允许存在于 executor 内部；
+  不修改 legacy tool/server/manifest。需要写出清单立即 breaker，不自行扩大范围。
+
+### 3. Context and exact operation contract
+
+默认 registry 必须精确包含以下六项，handler name 与 operation name 一致，模型不能提供
+callable、import path 或 handler mapping：
+
+| Operation | Agent input | Fixed semantics |
+|---|---|---|
+| `create_box` | `length_mm`、`width_mm`、`height_mm`；可选 `position_mm` | 创建并标识恰好一个 `Part::Box` |
+| `create_cylinder` | `radius_mm`、`height_mm`；可选 `position_mm`、`axis` | 创建并标识恰好一个 `Part::Cylinder` |
+| `modify_parameter` | target `object`；`parameter`、`value_mm` | 只改 box/cylinder 白名单参数及必然几何后果 |
+| `move_part` | target `object`；`position_mm` | 设置绝对位置，不改参数、旋转、体积、面积、validity 或 solid count |
+| `rotate_part` | target `object`；`axis`、`angle_deg` | 围绕 x/y/z 旋转；参数、体积、面积、validity 和 solid count 不变 |
+| `inspect_model` | 无 target/args | 返回按 object_id 排序的 per-object observation 与完整 managed aggregate |
+
+Registry 增加封闭 shape：strict `OBJECT_ID`、`ENTITY_TARGET` 与 `ANGLE_DEGREES`。
+`ENTITY_TARGET` 只接受两种 exact mapping：与 program base revision 绑定的 `SelectorV1`，或
+指向 dependency closure 内 `OBJECT_ID` result slot 的 `ResultRef`。不接受裸字符串、Name、
+Label、对象顺序、部分 selector 或跨 project/revision selector。创建结果的 `object` slot 从
+top-level `object_id` 提取；新建对象在同一 program 内只用 ResultRef，提交后才生成新 revision
+绑定的 persistent selector。
+
+所有长度使用 mm、角度使用 degree；`position_mm` 是有限 vector3；`axis` 仅 x/y/z；
+`angle_deg` 为 `(-360, 360)` 内非零有限数；`parameter` 仅 length/width/height/radius，并由
+fixed handler 继续执行 TypeId×parameter 矩阵。
+
+每条命令执行前后都从 live candidate 采集完整 identified inventory：
+
+- create 只允许新增一个受管 primitive；已有实体逐项不变；identity provenance 绑定
+  `command.source` 和 `command.id`；结果由实际 object/entity observation 重建，不信任旧 tool dict。
+- mutator 先按 selector/object_id 唯一解析，再把内部 `obj.Name` 交给 trusted leaf；执行后固定
+  检查 identity、目标字段、非目标字段和所有非目标实体。`ModelCommand.preserve` 只能增加检查，
+  不能削弱固定不变量；create/inspect 的非空 preserve 在 handler 前拒绝。
+- move 必须精确达到请求位置且保持原 quaternion；rotate 必须产生 placement 变化；两者都保持
+  parameters、volume、area、valid_shape 和 solid_count。modify 保持 placement 与所有非目标参数。
+- inspect 前后 inventory 必须完全一致。handler result 保存 strict before/after 或 inspection trace，
+  供 durable StepResult 诊断；commit authority 仍只来自 sealed/reloaded CandidateEvidence。
+- aggregate observation 与 STEP export 必须覆盖完整 managed primitive inventory，不能沿用单一
+  legacy result root 而静默遗漏第二个对象。
+
+### 4. Steps and objective gates
+
+1. 在 allowlist 内写三个 genuine focused RED：
+   - default registry 仍只有三项，而不是上述精确六项；
+   - default mutator 仍只接受 ResultRef<string>，不能接受 `SelectorV1 | ResultRef<OBJECT_ID>`；
+   - `create_box → modify_parameter(preserve=("length",))` 当前仍会成功，证明 command-level
+     preservation 尚未执行。
+   setup/import/syntax failure 不计 RED；任一失败未命中预期路径立即 breaker。
+2. 实现最小 registry/program/adapter/executor correction。不得加入 boolean、PartDesign、assembly、
+   face/edge selector、动态 handler、public MCP generation 或 GUI 代码。
+3. Focused GREEN：
+   `PYTHONPATH=src uv run pytest -q tests/test_execution_registry.py tests/test_model_program.py
+   tests/test_execution_adapter.py tests/test_program_executor.py tests/test_task_service.py`。
+4. Managed FreeCAD G3：至少覆盖六操作成功、base Selector 与 same-program ResultRef、双对象
+   aggregate/STEP/reload、execution preservation failure rollback、acceptance failure rollback；失败场景
+   必须证明 HEAD/manifest/generation/base hash/live slot 不变、后续 command 未执行且无 retry。
+5. 累计 gate：全仓 pytest、全仓 Ruff、`git diff --check`；至少一位未参与写入 agent 做最终
+   read-only diff review。Baseline：上述六个现有 focused/integration 文件在 anchor 上为
+   `400 passed, 6 deselected in 3.00s`。
+
+### 5. Execution discipline and circuit breakers
+
+- Revalidated profile：approval `native-plan`；delegation `spawn-send-wait`；persistence
+  `repo-artifact`；process `native-session-poll`；adapter `Codex`；model tier `standard` for
+  implementation、`deep` for independent review（选择不可用时只记录 fallback，不降低 gate）。
+- `live capability declarations`: update_plan；spawn_agent/send_message/followup_task/wait_agent；
+  apply_patch/exec_command/write_stdin 均在当前 tool declarations 中。
+- `observable behavior`: 本阶段已观察到 native plan update、spawn/send/wait completion、named-file
+  commit，以及 exec_command 返回 session_id 后由 write_stdin 轮询到真实 exit 0。
+- `environment identity`: Codex Desktop controller `/root`；workspace
+  `/Users/wangtao/Documents/DevProject/vibecad`；未使用 repo 内容证明 host capability。
+- `public configuration`: filesystem unrestricted、approval policy never；这些只约束当前执行，
+  不证明用户批准，也不扩大外部 authority。
+- 同一生产文件同一时刻只由 controller 写；sub-agent 只做独立分析/review。长进程一旦返回
+  session_id，只轮询原 session。unexpected red、out-of-allowlist write、Name authority、遗漏 managed
+  object 的 artifact、preservation 可被模型削弱或需要改变 S3-D01..D08 都立即 breaker。
+
+### 6. Delivery boundary
+
+- 预写本地语义 commit：`feat(execution): migrate first-wave CAD operations`。
+- 只做 named-file staging、本地 commit、ledger 和 recovery snapshot；controller 保留 acceptance /
+  revert 权。Push 固定 `not authorized` / S3-RES-01；不创建 PR 或 release。
+- S3-3 完成只表示 ModelProgram/Task Kernel 可执行首批六操作；公共 direct MCP 工具仍属于 S3-4，
+  不提前宣称用户已经能直接看到六个新 MCP endpoint。
+
+### 7. Final report contract
+
+完成时追加 actual file list、RED/GREEN/full/Ruff/managed FreeCAD 数字证据、独立 review、commit
+hash/push state、residual disposition 与四节 recovery snapshot。工作树必须 clean；S3-RES-10 只有在
+target union 与 command-level preservation 均通过真实门后才能关闭。
+
+| Entry | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| S3-E05 / 2026-07-21T04:49:12Z | S3-A01；S3-3A two-way read-only design PASS；independent packet review PASS | c394412 / not authorized | clean anchor；focused/integration baseline 400 passed, 6 deselected；registry and G3 gate designs converged；seven-section/allowlist/scope review PASS | S3-RES-01, S3-RES-08..10 | S3-S05 | packet-issued |
+
+### Recovery snapshot S3-S05
+
+1. **Completed:** S3-2 committed at `c394412`；worktree clean；Packet S3-3A issued from two
+   independent read-only designs and one independent packet review PASS；baseline 400 passed /
+   6 deselected；push not authorized。
+2. **Next:** commit this control packet；write the three exact REDs；if they match, implement only
+   fixed six-operation registry/bindings/preservation；run focused, full, managed FreeCAD and review；
+   if any branch condition mismatches, stop at the named breaker rather than broadening scope。
+3. **Approved decisions:** S3-D01..D08 under S3-A01；exact authorization “你继续 猛猛的推进吧”；
+   no repeated approval for this packet；S3-4 direct MCP、S3-7 import normalization、G1 and external
+   actions remain outside。
+4. **Recovery:** verify `codex/agent-stage3`、HEAD `c394412`、packet allowlist and clean worktree；
+   verify no active test session before RED；use only named-file staging；if packet control commit is
+   present, anchor implementation to that commit and never replay S3-2。
+
 ## 9. 用户决策与持续执行规则
 
 本修订依据已经明确的用户方向：
