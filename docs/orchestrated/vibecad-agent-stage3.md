@@ -2502,7 +2502,9 @@ unterminated frames、request/resource floods、disconnect/cancel slot release a
 bounds；neither process logs secret frame content。
 
 Supervisor accepts exactly one `initialize` then one `notifications/initialized`; duplicate/out-of-order
-handshake frames are rejected, and both retained handshake frames count with the eight pending frames/bytes。
+handshake frames are rejected。The two retained handshake frames use a separate fixed replay budget of exactly
+two frames and at most 4,194,304 bytes；they do not consume the eight active request/id slots or their bounded
+pending bytes。A third handshake frame or bytes above that separate budget are rejected before forwarding。
 Duplicate in-flight JSON-RPC ids are rejected before forwarding and cannot overwrite `_pending`。Across a
 SWAP_EXIT it may replay only the handshake plus this exact method-level safe set：`ping`、`tools/list`、
 `resources/list`、`resources/templates/list` and
@@ -3084,6 +3086,7 @@ for the user。
 | Evidence | Authorization / review | Anchor / push | Objective evidence | Residuals | Snapshot | Status |
 |---|---|---|---|---|---|---|
 | S3-E13 / 2026-07-21T16:32:00Z | S3-A01；four read-only dependency audits；independent architecture and adversarial final reviews PASS after every Critical/Important was closed | 505a224 / not authorized | corrected focused baseline 487 passed, 10 deselected；exact allowlist；packet diff-check PASS；no production mutation | S3-RES-01..06, S3-RES-09, S3-RES-11..15；S3-7 implementation pending | S3-S13 | control-ready |
+| S3-E14 / 2026-07-21T16:36:41Z | S3-A01；post-control independent transport cross-check found and then re-reviewed the sole Important capacity contradiction | ec485ca / not authorized | handshake replay now has a separate exact two-frame / 4,194,304-byte budget and leaves all eight active request/id slots available；focused rereview PASS with no remaining Critical/Important | unchanged；S3-7 implementation pending | S3-S13 + this append-only correction | control-ready |
 
 ### Recovery snapshot S3-S13
 
