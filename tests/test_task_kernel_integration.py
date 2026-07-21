@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -49,7 +51,14 @@ from vibecad.execution.revisions import (
     RevisionStoreErrorCode,
     RevisionStoreRootTrust,
 )
-from vibecad.tools.modeling import new_document
+from vibecad.execution.selectors import (
+    EntityIdentity,
+    EntityKind,
+    Provenance,
+    ProvenanceSource,
+    SemanticRole,
+)
+from vibecad.tools.modeling import add_box, new_document
 from vibecad.workflow.contracts import (
     AcceptanceCriterion,
     AcceptanceKind,
@@ -67,6 +76,15 @@ CASE = __CASE__
 ROOT = Path(__WORK_ROOT__)
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
 TASK_ID = "task_0123456789abcdef0123456789abcdef"
+SEED_OBJECT_ID = "object_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+SEED_FEATURE_ID = "feature_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+SIX_OPERATION_VOLUME = 12.0 * 20.0 * 30.0 + math.pi * 2.0**2 * 5.0
+SIX_OPERATION_BBOX = (46.0, 13.0, 30.0)
+SELECTOR_VOLUME = 15.0 * 5.0 * 4.0
+SELECTOR_BBOX = (5.0, 15.0, 4.0)
+PARTIAL_CYLINDER_VOLUME = 300.0 * math.pi
+PARTIAL_CYLINDER_BBOX = (10.0, 20.0, 6.0)
 
 
 def secure_dir(path: Path) -> Path:
@@ -89,6 +107,7 @@ def command(
     *,
     args: dict[str, object] | None = None,
     target: dict[str, object] | None = None,
+    preserve: tuple[str, ...] = (),
     depends_on: tuple[str, ...] = (),
 ) -> ModelCommand:
     return ModelCommand(
@@ -96,7 +115,7 @@ def command(
         op=op,
         target={} if target is None else target,
         args={} if args is None else args,
-        preserve=(),
+        preserve=preserve,
         source=ValueSource.MODEL,
         depends_on=depends_on,
     )
@@ -124,7 +143,11 @@ def criterion(
     )
 
 
-def acceptance(expected_volume: float) -> AcceptanceSpec:
+def acceptance(
+    expected_volume: float,
+    expected_bbox: tuple[float, float, float],
+    expected_solids: int,
+) -> AcceptanceSpec:
     return AcceptanceSpec(
         id="acceptance-task-kernel-real",
         criteria=(
@@ -134,7 +157,7 @@ def acceptance(expected_volume: float) -> AcceptanceSpec:
                 "volume",
                 "body",
                 expected_volume,
-                tolerance=0.0,
+                tolerance=1e-7,
                 parameters={"unit": "mm^3"},
             ),
             criterion(
@@ -142,12 +165,18 @@ def acceptance(expected_volume: float) -> AcceptanceSpec:
                 AcceptanceKind.GEOMETRY,
                 "bbox",
                 "body",
-                (12.0, 20.0, 30.0),
-                tolerance=0.0,
+                expected_bbox,
+                tolerance=1e-7,
                 parameters={"unit": "mm"},
             ),
             criterion("valid", AcceptanceKind.TOPOLOGY, "valid_shape", "body", True),
-            criterion("solids", AcceptanceKind.TOPOLOGY, "solid_count", "body", 1),
+            criterion(
+                "solids",
+                AcceptanceKind.TOPOLOGY,
+                "solid_count",
+                "body",
+                expected_solids,
+            ),
             criterion("step-exists", AcceptanceKind.ARTIFACT, "exists", "export", True),
             criterion(
                 "step-non-empty",
@@ -170,9 +199,87 @@ def acceptance(expected_volume: float) -> AcceptanceSpec:
     )
 
 
+def seed_identity(object_type: str = "Part::Box") -> EntityIdentity:
+    return EntityIdentity(
+        object_id=SEED_OBJECT_ID,
+        feature_id=SEED_FEATURE_ID,
+        object_type=object_type,
+        semantic_role=SemanticRole.PRIMITIVE,
+        provenance=Provenance(
+            source=ProvenanceSource.SYSTEM,
+            operation_id="selector-seed",
+        ),
+    )
+
+
 def program(base_revision: str) -> ModelProgram:
-    parameter = "missing_parameter" if CASE == "execution_failure" else "length"
-    expected_volume = 7201.0 if CASE == "verification_failure" else 7200.0
+    if CASE == "partial_cylinder_rotation":
+        selector = seed_identity("Part::Cylinder").to_selector(
+            project_id=PROJECT_ID,
+            revision_id=base_revision,
+            entity_kind=EntityKind.OBJECT,
+        ).to_mapping()
+        return ModelProgram(
+            task_id=TASK_ID,
+            base_revision=base_revision,
+            operations=(
+                command(
+                    "rotate",
+                    "rotate_part",
+                    target={"object": selector},
+                    args={"axis": "z", "angle_deg": 90},
+                ),
+                command("inspect", "inspect_model", depends_on=("rotate",)),
+            ),
+            acceptance=acceptance(
+                PARTIAL_CYLINDER_VOLUME,
+                PARTIAL_CYLINDER_BBOX,
+                1,
+            ),
+        )
+
+    if CASE == "selector_success":
+        selector = seed_identity().to_selector(
+            project_id=PROJECT_ID,
+            revision_id=base_revision,
+            entity_kind=EntityKind.OBJECT,
+        ).to_mapping()
+        return ModelProgram(
+            task_id=TASK_ID,
+            base_revision=base_revision,
+            operations=(
+                command(
+                    "modify",
+                    "modify_parameter",
+                    target={"object": selector},
+                    args={"parameter": "length", "value_mm": 15},
+                ),
+                command(
+                    "move",
+                    "move_part",
+                    target={"object": selector},
+                    args={"position_mm": (20, 0, 0)},
+                    depends_on=("modify",),
+                ),
+                command(
+                    "rotate",
+                    "rotate_part",
+                    target={"object": selector},
+                    args={"axis": "z", "angle_deg": 90},
+                    depends_on=("move",),
+                ),
+                command("inspect", "inspect_model", depends_on=("rotate",)),
+            ),
+            acceptance=acceptance(SELECTOR_VOLUME, SELECTOR_BBOX, 1),
+        )
+
+    parameter = "length"
+    modify_target = "box"
+    expected_volume = (
+        SIX_OPERATION_VOLUME + 1.0
+        if CASE == "verification_failure"
+        else SIX_OPERATION_VOLUME
+    )
     return ModelProgram(
         task_id=TASK_ID,
         base_revision=base_revision,
@@ -180,23 +287,63 @@ def program(base_revision: str) -> ModelProgram:
             command(
                 "box",
                 "create_box",
-                args={"length": 10, "width": 20, "height": 30},
+                args={
+                    "length_mm": 10,
+                    "width_mm": 20,
+                    "height_mm": 30,
+                    "position_mm": (0, 0, 0),
+                },
+            ),
+            command(
+                "cylinder",
+                "create_cylinder",
+                args={
+                    "radius_mm": 2,
+                    "height_mm": 5,
+                    "position_mm": (30, 0, 0),
+                    "axis": "z",
+                },
             ),
             command(
                 "modify",
                 "modify_parameter",
-                target={"object": {"command_id": "box", "slot": "object"}},
-                args={"parameter": parameter, "value": 12},
-                depends_on=("box",),
+                target={
+                    "object": {"command_id": modify_target, "slot": "object"}
+                },
+                args={"parameter": parameter, "value_mm": 12},
+                preserve=("length",) if CASE == "execution_failure" else (),
+                depends_on=(modify_target,),
             ),
-            command("inspect", "inspect_model", depends_on=("modify",)),
+            command(
+                "move",
+                "move_part",
+                target={
+                    "object": {"command_id": "cylinder", "slot": "object"}
+                },
+                args={"position_mm": (40, 5, 0)},
+                depends_on=("cylinder",),
+            ),
+            command(
+                "rotate",
+                "rotate_part",
+                target={
+                    "object": {"command_id": modify_target, "slot": "object"}
+                },
+                args={"axis": "z", "angle_deg": 90},
+                depends_on=("modify",),
+            ),
+            command(
+                "inspect",
+                "inspect_model",
+                depends_on=("move", "rotate"),
+            ),
         ),
-        acceptance=acceptance(expected_volume),
+        acceptance=acceptance(expected_volume, SIX_OPERATION_BBOX, 2),
     )
 
 
-def geometry(session: object) -> dict[str, object]:
-    shape = session.get_assembly_shape()
+def shape_geometry(shape: object) -> dict[str, object]:
+    center = getattr(shape, "CenterOfMass", None)
     return {
         "volume": float(shape.Volume),
         "area": float(shape.Area),
@@ -205,14 +352,52 @@ def geometry(session: object) -> dict[str, object]:
             float(shape.BoundBox.YLength),
             float(shape.BoundBox.ZLength),
         ],
-        "center_of_mass": [
-            float(shape.CenterOfMass.x),
-            float(shape.CenterOfMass.y),
-            float(shape.CenterOfMass.z),
-        ],
+        "center_of_mass": (
+            None
+            if center is None
+            else [float(center.x), float(center.y), float(center.z)]
+        ),
         "valid": bool(shape.isValid()),
         "solid_count": len(shape.Solids),
     }
+
+
+def managed_shape(session: object) -> object:
+    pairs = tuple(session.list_object_identities())
+    shapes = tuple(
+        obj.Shape
+        for obj, identity in pairs
+        if identity.object_type in {"Part::Box", "Part::Cylinder"}
+    )
+    if not shapes:
+        raise AssertionError("managed model contains no primitive shape")
+    if len(shapes) == 1:
+        return shapes[0]
+    import Part
+
+    return Part.makeCompound(list(shapes))
+
+
+def geometry(session: object) -> dict[str, object]:
+    return shape_geometry(managed_shape(session))
+
+
+def entity_facts(session: object) -> list[dict[str, object]]:
+    return [
+        {
+            "name": obj.Name,
+            "type": obj.TypeId,
+            "object_id": identity.object_id,
+            "feature_id": identity.feature_id,
+        }
+        for obj, identity in session.list_object_identities()
+    ]
+
+
+def step_geometry(path: Path) -> dict[str, object]:
+    import Part
+
+    return shape_geometry(Part.read(str(path)))
 
 
 def close_best_effort(session: object | None) -> None:
@@ -254,6 +439,32 @@ try:
     else:
         seed_session = Session()
         new_document(seed_session, name="TaskKernelBaseline")
+        if CASE == "partial_cylinder_rotation":
+            with seed_session._transaction("seed-imported-partial-cylinder"):
+                seed_object = seed_session.doc.addObject(
+                    "Part::Cylinder",
+                    "ImportedPartialCylinder",
+                )
+                seed_object.Radius = 10
+                seed_object.Height = 6
+                seed_object.Angle = 180
+                seed_session.doc.recompute()
+                seed_session.set_result_object(seed_object)
+                seed_session.attach_object_identity(
+                    seed_object,
+                    seed_identity("Part::Cylinder"),
+                )
+        elif CASE == "selector_success":
+            seeded = add_box(
+                seed_session,
+                length=10,
+                width=5,
+                height=4,
+                position=(0, 0, 0),
+            )
+            seed_object = seed_session.get_object(seeded["name"])
+            with seed_session._transaction("attach-selector-seed"):
+                seed_session.attach_object_identity(seed_object, seed_identity())
         baseline_source = ROOT / "baseline.FCStd"
         executor.checkpoint_fcstd(seed_session, baseline_source)
         baseline_source.chmod(0o600)
@@ -314,10 +525,7 @@ try:
                 task.candidate_revision,
             )
         except RevisionStoreError as error:
-            if not (
-                CASE == "execution_failure"
-                and error.code is RevisionStoreErrorCode.NOT_FOUND
-            ):
+            if error.code is not RevisionStoreErrorCode.NOT_FOUND:
                 raise
 
     artifact_files = []
@@ -360,25 +568,43 @@ try:
             )
 
     reload_geometry = None
+    reload_entities = None
+    step_reload_geometry = None
     if candidate_ref is not None:
         candidate_model = revision_store.revision_model_path(PROJECT_ID, candidate_ref.id)
         probe_session = executor.load_fcstd(candidate_model)
         reload_geometry = geometry(probe_session)
+        reload_entities = entity_facts(probe_session)
+        step_ref = next(
+            artifact for artifact in candidate_ref.artifacts if artifact.format == "step"
+        )
+        step_path = revision_store.revision_artifact_path(
+            PROJECT_ID,
+            candidate_ref.id,
+            step_ref.id,
+        )
+        step_reload_geometry = step_geometry(step_path)
 
     slot_geometry = (
         geometry(current_binding.session)
-        if CASE in {"success", "empty_success"}
+        if task.status.value == "succeeded"
+        else None
+    )
+    slot_entities = (
+        entity_facts(current_binding.session)
+        if task.status.value == "succeeded"
         else None
     )
 
     baseline_usable = None
-    if CASE not in {"success", "empty_success"}:
+    if task.status.value == "failed":
         current_binding.session.doc.recompute()
+        expected_object_count = 1 if CASE == "selector_success" else 0
         baseline_usable = (
             current_binding is baseline_binding
             and current_binding.session.doc is not None
             and not current_binding.session.is_dirty()
-            and len(current_binding.session.doc.Objects) == 0
+            and len(current_binding.session.doc.Objects) == expected_object_count
         )
 
     head_files = tuple(revisions_root.rglob("HEAD.json"))
@@ -422,6 +648,7 @@ try:
         "slot_revision": current_binding.revision_id,
         "slot_session_open": current_binding.session.doc is not None,
         "slot_geometry": slot_geometry,
+        "slot_entities": slot_entities,
         "baseline_usable": baseline_usable,
         "step_oks": [record.result.ok for record in task.steps],
         "step_operations": [record.result.operation_id for record in task.steps],
@@ -447,6 +674,8 @@ try:
         "revision_artifacts": revision_artifacts,
         "transitions": [record.event.value for record in task.transitions],
         "reload_geometry": reload_geometry,
+        "reload_entities": reload_entities,
+        "step_reload_geometry": step_reload_geometry,
         "layout": layout,
     }
 finally:
@@ -874,8 +1103,11 @@ def _run_selector_preservation_case(
 
 def _assert_rollback(payload: dict[str, object]) -> None:
     assert payload["status"] == "failed"
+    assert payload["durable_roundtrip"] is True
     assert payload["committed_revision"] is None
     assert payload["final_head"] == payload["base_head"]
+    assert payload["base_revision_unchanged"] is True
+    assert payload["base_model_digest_unchanged"] is True
     assert payload["slot_is_baseline"] is True
     assert payload["slot_revision"] == payload["base_head"]["revision_id"]
     assert payload["slot_session_open"] is True
@@ -918,13 +1150,35 @@ def _assert_artifact_lineage(payload: dict[str, object]) -> None:
     )
 
 
-def _assert_box_geometry(value: dict[str, object]) -> None:
-    assert value["volume"] == pytest.approx(7200.0)
-    assert value["area"] == pytest.approx(2400.0)
-    assert value["bbox"] == pytest.approx([12.0, 20.0, 30.0])
-    assert value["center_of_mass"] == pytest.approx([6.0, 10.0, 15.0])
+def _assert_six_operation_geometry(value: dict[str, object]) -> None:
+    expected_volume = 7200.0 + 20.0 * math.pi
+    assert value["volume"] == pytest.approx(expected_volume)
+    assert value["area"] == pytest.approx(2400.0 + 28.0 * math.pi)
+    assert value["bbox"] == pytest.approx([46.0, 13.0, 30.0])
+    assert value["valid"] is True
+    assert value["solid_count"] == 2
+
+
+def _assert_selector_geometry(value: dict[str, object]) -> None:
+    assert value["volume"] == pytest.approx(300.0)
+    assert value["area"] == pytest.approx(310.0)
+    assert value["bbox"] == pytest.approx([5.0, 15.0, 4.0])
     assert value["valid"] is True
     assert value["solid_count"] == 1
+
+
+def _assert_two_managed_entities(payload: dict[str, object]) -> None:
+    slot_entities = payload["slot_entities"]
+    reload_entities = payload["reload_entities"]
+    assert len(slot_entities) == 2
+    assert len(reload_entities) == 2
+    assert {item["type"] for item in slot_entities} == {"Part::Box", "Part::Cylinder"}
+    assert {item["object_id"] for item in slot_entities} == {
+        item["object_id"] for item in reload_entities
+    }
+    assert {item["feature_id"] for item in slot_entities} == {
+        item["feature_id"] for item in reload_entities
+    }
 
 
 @pytest.mark.slow
@@ -940,17 +1194,41 @@ def test_real_task_kernel_commits_verified_candidate(
     assert payload["slot_is_baseline"] is False
     assert payload["slot_revision"] == payload["candidate_revision"]
     assert payload["slot_session_open"] is True
-    assert payload["step_oks"] == [True, True, True]
-    assert payload["step_operations"] == ["box", "modify", "inspect"]
-    assert payload["step_values"][0]["volume"] == pytest.approx(6000.0)
-    assert payload["step_values"][1]["volume"] == pytest.approx(7200.0)
+    assert payload["step_oks"] == [True, True, True, True, True, True]
+    assert payload["step_operations"] == [
+        "box",
+        "cylinder",
+        "modify",
+        "move",
+        "rotate",
+        "inspect",
+    ]
+    values = payload["step_values"]
+    assert values[0]["after"]["volume_mm3"] == pytest.approx(6000.0)
+    assert values[1]["after"]["volume_mm3"] == pytest.approx(20.0 * math.pi)
+    assert values[2]["after"]["volume_mm3"] == pytest.approx(7200.0)
+    assert values[3]["after"]["volume_mm3"] == pytest.approx(20.0 * math.pi)
+    assert values[4]["after"]["volume_mm3"] == pytest.approx(7200.0)
+    assert values[2]["object_id"] == values[0]["object_id"]
+    assert values[3]["object_id"] == values[1]["object_id"]
+    assert values[4]["object_id"] == values[0]["object_id"]
+    assert values[4]["after"]["placement"][:3] == pytest.approx([16.0, 4.0, 0.0])
+    assert {item["object_id"] for item in values[5]["entities"]} == {
+        values[0]["object_id"],
+        values[1]["object_id"],
+    }
+    assert values[5]["shape"]["volume_mm3"] == pytest.approx(
+        7200.0 + 20.0 * math.pi
+    )
     assert payload["report_passed"] == [True]
     assert len(payload["verdicts"]) == 10
     assert {item["outcome"] for item in payload["verdicts"]} == {"pass"}
     assert [item["format"] for item in payload["artifacts"]] == ["fcstd", "step"]
     _assert_artifact_lineage(payload)
-    _assert_box_geometry(payload["slot_geometry"])
-    _assert_box_geometry(payload["reload_geometry"])
+    _assert_two_managed_entities(payload)
+    _assert_six_operation_geometry(payload["slot_geometry"])
+    _assert_six_operation_geometry(payload["reload_geometry"])
+    _assert_six_operation_geometry(payload["step_reload_geometry"])
     assert payload["transitions"][-1] == "commit"
     _assert_layout(payload, journal_state="committed", manifest_count=2)
 
@@ -966,13 +1244,27 @@ def test_real_task_kernel_bootstraps_empty_project_and_resolves_result_ref(
     assert payload["candidate_revision"] == payload["committed_revision"]
     assert payload["candidate_revision"] == payload["final_head"]["revision_id"]
     assert payload["slot_is_baseline"] is False
-    assert payload["step_oks"] == [True, True, True]
-    assert payload["step_operations"] == ["box", "modify", "inspect"]
-    assert payload["step_values"][0]["name"] == "Box"
-    assert payload["step_values"][1]["volume"] == pytest.approx(7200.0)
+    assert payload["step_oks"] == [True, True, True, True, True, True]
+    assert payload["step_operations"] == [
+        "box",
+        "cylinder",
+        "modify",
+        "move",
+        "rotate",
+        "inspect",
+    ]
+    values = payload["step_values"]
+    assert values[0]["object_id"].startswith("object_")
+    assert values[1]["object_id"].startswith("object_")
+    assert values[0]["object_id"] != values[1]["object_id"]
+    assert values[2]["object_id"] == values[0]["object_id"]
+    assert values[3]["object_id"] == values[1]["object_id"]
+    assert values[4]["object_id"] == values[0]["object_id"]
     _assert_artifact_lineage(payload)
-    _assert_box_geometry(payload["slot_geometry"])
-    _assert_box_geometry(payload["reload_geometry"])
+    _assert_two_managed_entities(payload)
+    _assert_six_operation_geometry(payload["slot_geometry"])
+    _assert_six_operation_geometry(payload["reload_geometry"])
+    _assert_six_operation_geometry(payload["step_reload_geometry"])
     assert payload["transitions"][-1] == "commit"
     _assert_layout(payload, journal_state="committed", manifest_count=2)
 
@@ -986,11 +1278,17 @@ def test_real_task_kernel_rolls_back_after_partial_execution_failure(
     _assert_rollback(payload)
     assert payload["candidate_revision"] is not None
     assert payload["candidate_revision_durable"] is False
-    assert payload["step_oks"] == [True, False]
-    assert payload["step_operations"] == ["box", "modify"]
-    assert payload["step_values"][0]["volume"] == pytest.approx(6000.0)
-    assert payload["step_error_codes"][0] is None
-    assert payload["step_error_codes"][1] == "unexpected_tool_exception"
+    assert payload["step_oks"] == [True, True, False]
+    assert payload["step_operations"] == ["box", "cylinder", "modify"]
+    assert payload["step_values"][0]["after"]["volume_mm3"] == pytest.approx(6000.0)
+    assert payload["step_values"][1]["after"]["volume_mm3"] == pytest.approx(
+        20.0 * math.pi
+    )
+    assert payload["step_error_codes"][:2] == [None, None]
+    assert payload["step_error_codes"][2] == "unexpected_tool_exception"
+    assert payload["step_values"][2] is None
+    assert payload["step_operations"].count("modify") == 1
+    assert not {"move", "rotate", "inspect"} & set(payload["step_operations"])
     assert payload["last_error"] == "unexpected_tool_exception"
     assert payload["report_passed"] == []
     assert payload["artifacts"] == []
@@ -1009,21 +1307,127 @@ def test_real_task_kernel_rolls_back_failed_verification_with_diagnostics(
     _assert_rollback(payload)
     assert payload["candidate_revision"] is not None
     assert payload["candidate_revision_durable"] is True
-    assert payload["step_oks"] == [True, True, True]
-    assert payload["step_values"][0]["volume"] == pytest.approx(6000.0)
-    assert payload["step_values"][1]["volume"] == pytest.approx(7200.0)
+    assert payload["step_oks"] == [True, True, True, True, True, True]
+    assert payload["step_values"][0]["after"]["volume_mm3"] == pytest.approx(6000.0)
+    assert payload["step_values"][1]["after"]["volume_mm3"] == pytest.approx(
+        20.0 * math.pi
+    )
+    assert payload["step_values"][2]["after"]["volume_mm3"] == pytest.approx(7200.0)
     assert payload["report_passed"] == [False]
     assert len(payload["verdicts"]) == 10
     failed = [item for item in payload["verdicts"] if item["outcome"] == "fail"]
     assert [item["id"] for item in failed] == ["volume"]
-    assert failed[0]["expected"] == pytest.approx(7201.0)
-    assert failed[0]["observed"] == pytest.approx(7200.0)
+    assert failed[0]["expected"] == pytest.approx(7201.0 + 20.0 * math.pi)
+    assert failed[0]["observed"] == pytest.approx(7200.0 + 20.0 * math.pi)
     assert payload["last_error"] == "acceptance_verification_failed"
     assert [item["format"] for item in payload["artifacts"]] == ["fcstd", "step"]
     _assert_artifact_lineage(payload)
-    _assert_box_geometry(payload["reload_geometry"])
+    _assert_six_operation_geometry(payload["reload_geometry"])
+    _assert_six_operation_geometry(payload["step_reload_geometry"])
     assert "fail_verification" in payload["transitions"]
     _assert_layout(payload, journal_state="not_committed", manifest_count=2)
+
+
+@pytest.mark.slow
+def test_real_task_kernel_resolves_revision_bound_selector_targets(
+    existing_freecad_python: str,
+    tmp_path: Path,
+) -> None:
+    payload = _run_case(existing_freecad_python, tmp_path, "selector_success")
+    assert payload["status"] == "succeeded"
+    assert payload["candidate_revision"] == payload["committed_revision"]
+    assert payload["candidate_revision"] == payload["final_head"]["revision_id"]
+    assert payload["final_head"]["generation"] == payload["base_head"]["generation"] + 1
+    assert payload["slot_is_baseline"] is False
+    assert payload["step_oks"] == [True, True, True, True]
+    assert payload["step_operations"] == ["modify", "move", "rotate", "inspect"]
+    values = payload["step_values"]
+    assert [value["object_id"] for value in values[:3]] == [
+        "object_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] * 3
+    assert values[0]["after"]["volume_mm3"] == pytest.approx(300.0)
+    assert values[1]["after"]["placement"][:3] == pytest.approx([20.0, 0.0, 0.0])
+    assert values[2]["after"]["placement"][:3] == pytest.approx([30.0, -5.0, 0.0])
+    assert values[2]["after"]["placement"] != values[1]["after"]["placement"]
+    assert [item["object_id"] for item in values[3]["entities"]] == [
+        "object_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+    assert payload["report_passed"] == [True]
+    assert {item["outcome"] for item in payload["verdicts"]} == {"pass"}
+    assert [item["format"] for item in payload["artifacts"]] == ["fcstd", "step"]
+    _assert_artifact_lineage(payload)
+    assert [item["object_id"] for item in payload["slot_entities"]] == [
+        "object_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+    assert payload["slot_entities"] == payload["reload_entities"]
+    _assert_selector_geometry(payload["slot_geometry"])
+    _assert_selector_geometry(payload["reload_geometry"])
+    _assert_selector_geometry(payload["step_reload_geometry"])
+    assert payload["transitions"][-1] == "commit"
+    _assert_layout(payload, journal_state="committed", manifest_count=2)
+
+
+@pytest.mark.slow
+def test_real_task_kernel_rotates_imported_partial_cylinder_about_bound_box_center(
+    existing_freecad_python: str,
+    tmp_path: Path,
+) -> None:
+    payload = _run_case(existing_freecad_python, tmp_path, "partial_cylinder_rotation")
+    assert payload["status"] == "succeeded"
+    assert payload["candidate_revision"] == payload["committed_revision"]
+    assert payload["candidate_revision"] == payload["final_head"]["revision_id"]
+    assert payload["final_head"]["generation"] == payload["base_head"]["generation"] + 1
+    assert payload["slot_is_baseline"] is False
+    assert payload["step_oks"] == [True, True]
+    assert payload["step_operations"] == ["rotate", "inspect"]
+
+    rotation = payload["step_values"][0]
+    before = rotation["before"]
+    after = rotation["after"]
+    expected_parameters = {"angle": 180.0, "height": 6.0, "radius": 10.0}
+    assert before["object_type"] == after["object_type"] == "Part::Cylinder"
+    assert {item["name"]: item["value"] for item in before["parameters"]} == (
+        expected_parameters
+    )
+    assert {item["name"]: item["value"] for item in after["parameters"]} == (
+        expected_parameters
+    )
+    assert before["placement"][:3] == pytest.approx([0.0, 0.0, 0.0])
+    assert after["placement"][:3] == pytest.approx([5.0, 5.0, 0.0])
+    assert after["placement"][3:] == pytest.approx(
+        [0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)]
+    )
+    assert before["center_of_mass_mm"] == pytest.approx(
+        [0.0, 40.0 / (3.0 * math.pi), 3.0]
+    )
+    assert before["center_of_mass_mm"] != pytest.approx([0.0, 5.0, 3.0])
+    assert after["center_of_mass_mm"] == pytest.approx(
+        [5.0 - 40.0 / (3.0 * math.pi), 5.0, 3.0]
+    )
+    assert before["volume_mm3"] == pytest.approx(300.0 * math.pi)
+    assert after["volume_mm3"] == pytest.approx(300.0 * math.pi)
+    assert before["bbox_mm"] == pytest.approx([20.0, 10.0, 6.0])
+    assert after["bbox_mm"] == pytest.approx([10.0, 20.0, 6.0])
+    assert before["valid_shape"] is after["valid_shape"] is True
+    assert before["solid_count"] == after["solid_count"] == 1
+
+    assert payload["report_passed"] == [True]
+    assert {item["outcome"] for item in payload["verdicts"]} == {"pass"}
+    assert [item["format"] for item in payload["artifacts"]] == ["fcstd", "step"]
+    _assert_artifact_lineage(payload)
+    assert payload["slot_entities"] == payload["reload_entities"]
+    assert [item["type"] for item in payload["slot_entities"]] == ["Part::Cylinder"]
+    for geometry in (
+        payload["slot_geometry"],
+        payload["reload_geometry"],
+        payload["step_reload_geometry"],
+    ):
+        assert geometry["volume"] == pytest.approx(300.0 * math.pi)
+        assert geometry["bbox"] == pytest.approx([10.0, 20.0, 6.0])
+        assert geometry["valid"] is True
+        assert geometry["solid_count"] == 1
+    assert payload["transitions"][-1] == "commit"
+    _assert_layout(payload, journal_state="committed", manifest_count=2)
 
 
 @pytest.mark.slow

@@ -75,19 +75,29 @@ def _operation(
     )
 
 
-def test_default_registry_exposes_only_the_stage3_s3_1_operations():
+def test_default_registry_exposes_exact_first_wave_six_operations():
     assert tuple(DEFAULT_OPERATION_REGISTRY) == (
         "create_box",
+        "create_cylinder",
         "modify_parameter",
+        "move_part",
+        "rotate_part",
         "inspect_model",
     )
-    assert len(DEFAULT_OPERATION_REGISTRY) == 3
+    assert len(DEFAULT_OPERATION_REGISTRY) == 6
+    assert all(
+        metadata.handler_name == operation
+        for operation, metadata in DEFAULT_OPERATION_REGISTRY.operations.items()
+    )
 
 
 def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contracts():
     assert tuple(DEFAULT_OPERATION_REGISTRY) == (
         "create_box",
+        "create_cylinder",
         "modify_parameter",
+        "move_part",
+        "rotate_part",
         "inspect_model",
     )
 
@@ -95,7 +105,11 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
     assert create_box.execution_profiles == (registry_module.ExecutionProfile.HEADLESS,)
     assert create_box.direct_exposed is True
     assert tuple(slot.name for slot in create_box.result_slots) == ("object",)
-    assert create_box.result_slots[0].result_field == "name"
+    assert create_box.result_slots[0].result_field == "object_id"
+    assert create_box.result_slots[0].value_shape is ValueShape.OBJECT_ID
+
+    create_cylinder = DEFAULT_OPERATION_REGISTRY.lookup("create_cylinder")
+    assert create_cylinder.result_slots == create_box.result_slots
 
     for operation in DEFAULT_OPERATION_REGISTRY.operations.values():
         assert operation.execution_profiles == (ExecutionProfile.HEADLESS,)
@@ -106,8 +120,8 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
         assert operation.direct_exposed is True
 
     modify = DEFAULT_OPERATION_REGISTRY.lookup("modify_parameter")
-    assert modify.target_fields[0].value_shape is ValueShape.RESULT_REF
-    assert modify.target_fields[0].referenced_value_shape is ValueShape.NONBLANK_STRING
+    assert modify.target_fields[0].value_shape is ValueShape.ENTITY_TARGET
+    assert modify.target_fields[0].referenced_value_shape is ValueShape.OBJECT_ID
     assert DEFAULT_OPERATION_REGISTRY.lookup("inspect_model").result_slots == ()
 
     with pytest.raises(RegistryError) as caught:
@@ -133,6 +147,9 @@ def test_stage3_value_shapes_and_execution_profiles_are_closed():
         "quantity",
         "result_ref",
         "object_selector",
+        "object_id",
+        "entity_target",
+        "angle_degrees",
     }
 
 
@@ -234,7 +251,7 @@ def test_freecad_version_range_is_bounded_and_nonempty(kwargs):
 
 
 def test_result_slot_and_result_ref_metadata_fail_closed():
-    slot = ResultSlotMetadata("object", "name", ValueShape.NONBLANK_STRING)
+    slot = ResultSlotMetadata("object", "object_id", ValueShape.OBJECT_ID)
     operation = _operation(result_slots=(slot,))
     assert operation.result_slots == (slot,)
 
@@ -253,9 +270,12 @@ def test_result_slot_and_result_ref_metadata_fail_closed():
 
 def test_default_registry_has_exact_handler_risk_and_evidence_metadata():
     expected = {
-        "create_box": ("add_box", RiskClass.MUTATING, True),
-        "modify_parameter": ("modify_part", RiskClass.MUTATING, True),
-        "inspect_model": ("describe_part", RiskClass.READ_ONLY, False),
+        "create_box": ("create_box", RiskClass.MUTATING, True),
+        "create_cylinder": ("create_cylinder", RiskClass.MUTATING, True),
+        "modify_parameter": ("modify_parameter", RiskClass.MUTATING, True),
+        "move_part": ("move_part", RiskClass.MUTATING, True),
+        "rotate_part": ("rotate_part", RiskClass.MUTATING, True),
+        "inspect_model": ("inspect_model", RiskClass.READ_ONLY, False),
     }
 
     actual = {
@@ -274,28 +294,88 @@ def test_default_registry_has_exact_field_shapes_and_bindings():
     create_box = DEFAULT_OPERATION_REGISTRY.lookup("create_box")
     assert create_box.target_fields == ()
     assert _fields(create_box.argument_fields) == (
-        ("length", "length", ValueShape.POSITIVE_NUMBER, True),
-        ("width", "width", ValueShape.POSITIVE_NUMBER, True),
-        ("height", "height", ValueShape.POSITIVE_NUMBER, True),
-        ("position", "position", ValueShape.VECTOR3, False),
+        ("length_mm", "length", ValueShape.POSITIVE_NUMBER, True),
+        ("width_mm", "width", ValueShape.POSITIVE_NUMBER, True),
+        ("height_mm", "height", ValueShape.POSITIVE_NUMBER, True),
+        ("position_mm", "position", ValueShape.VECTOR3, False),
     )
+
+    create_cylinder = DEFAULT_OPERATION_REGISTRY.lookup("create_cylinder")
+    assert create_cylinder.target_fields == ()
+    assert _fields(create_cylinder.argument_fields) == (
+        ("radius_mm", "radius", ValueShape.POSITIVE_NUMBER, True),
+        ("height_mm", "height", ValueShape.POSITIVE_NUMBER, True),
+        ("position_mm", "position", ValueShape.VECTOR3, False),
+        ("axis", "axis", ValueShape.ENUM, False),
+    )
+    assert create_cylinder.argument_fields[3].enum_values == ("x", "y", "z")
 
     modify_parameter = DEFAULT_OPERATION_REGISTRY.lookup("modify_parameter")
     assert _fields(modify_parameter.target_fields) == (
-        ("object", "name", ValueShape.RESULT_REF, True),
+        ("object", "target", ValueShape.ENTITY_TARGET, True),
     )
     assert (
         modify_parameter.target_fields[0].referenced_value_shape
-        is ValueShape.NONBLANK_STRING
+        is ValueShape.OBJECT_ID
     )
     assert _fields(modify_parameter.argument_fields) == (
-        ("parameter", "parameter", ValueShape.NONBLANK_STRING, True),
-        ("value", "value", ValueShape.POSITIVE_NUMBER, True),
+        ("parameter", "parameter", ValueShape.ENUM, True),
+        ("value_mm", "value", ValueShape.POSITIVE_NUMBER, True),
     )
+    assert modify_parameter.argument_fields[0].enum_values == (
+        "height",
+        "length",
+        "radius",
+        "width",
+    )
+
+    move_part = DEFAULT_OPERATION_REGISTRY.lookup("move_part")
+    assert _fields(move_part.target_fields) == (
+        ("object", "target", ValueShape.ENTITY_TARGET, True),
+    )
+    assert move_part.target_fields[0].referenced_value_shape is ValueShape.OBJECT_ID
+    assert _fields(move_part.argument_fields) == (
+        ("position_mm", "position", ValueShape.VECTOR3, True),
+    )
+
+    rotate_part = DEFAULT_OPERATION_REGISTRY.lookup("rotate_part")
+    assert _fields(rotate_part.target_fields) == (
+        ("object", "target", ValueShape.ENTITY_TARGET, True),
+    )
+    assert rotate_part.target_fields[0].referenced_value_shape is ValueShape.OBJECT_ID
+    assert _fields(rotate_part.argument_fields) == (
+        ("axis", "axis", ValueShape.ENUM, True),
+        ("angle_deg", "angle", ValueShape.ANGLE_DEGREES, True),
+    )
+    assert rotate_part.argument_fields[0].enum_values == ("x", "y", "z")
 
     inspect_model = DEFAULT_OPERATION_REGISTRY.lookup("inspect_model")
     assert inspect_model.target_fields == ()
     assert inspect_model.argument_fields == ()
+
+
+def test_only_entity_mutators_declare_the_closed_preservation_vocabulary():
+    expected = (
+        "angle",
+        "area_mm2",
+        "bbox_mm",
+        "center_of_mass_mm",
+        "geometry",
+        "height",
+        "length",
+        "parameters",
+        "placement",
+        "radius",
+        "solid_count",
+        "valid_shape",
+        "volume_mm3",
+        "width",
+    )
+
+    for operation in ("modify_parameter", "move_part", "rotate_part"):
+        assert DEFAULT_OPERATION_REGISTRY.lookup(operation).preservation_fields == expected
+    for operation in ("create_box", "create_cylinder", "inspect_model"):
+        assert DEFAULT_OPERATION_REGISTRY.lookup(operation).preservation_fields == ()
 
 
 def test_registry_and_nested_metadata_are_immutable():
@@ -323,6 +403,52 @@ def test_operation_metadata_freezes_caller_owned_field_collections():
     fields.clear()
 
     assert tuple(field.name for field in operation.argument_fields) == ("radius",)
+
+
+def test_operation_metadata_freezes_sorts_and_validates_preservation_fields():
+    fields = ["width", "length"]
+    operation = _operation()
+    operation = OperationMetadata(
+        operation=operation.operation,
+        handler_name=operation.handler_name,
+        risk_class=operation.risk_class,
+        evidence_required=operation.evidence_required,
+        preservation_fields=fields,  # type: ignore[arg-type]
+    )
+    fields.clear()
+
+    assert operation.preservation_fields == ("length", "width")
+
+    for invalid in (("length", "length"), ("bad-field",), "length"):
+        with pytest.raises(RegistryError) as caught:
+            OperationMetadata(
+                operation="create_sphere",
+                handler_name="add_sphere",
+                risk_class=RiskClass.MUTATING,
+                evidence_required=True,
+                preservation_fields=invalid,  # type: ignore[arg-type]
+            )
+        assert caught.value.code is RegistryErrorCode.INVALID_METADATA
+
+
+def test_entity_target_metadata_requires_object_id_result_authority():
+    valid = FieldMetadata(
+        "object",
+        "target",
+        ValueShape.ENTITY_TARGET,
+        referenced_value_shape=ValueShape.OBJECT_ID,
+    )
+    assert valid.referenced_value_shape is ValueShape.OBJECT_ID
+
+    for referenced_shape in (None, ValueShape.NONBLANK_STRING, ValueShape.RESULT_REF):
+        with pytest.raises(RegistryError) as caught:
+            FieldMetadata(
+                "object",
+                "target",
+                ValueShape.ENTITY_TARGET,
+                referenced_value_shape=referenced_shape,
+            )
+        assert caught.value.code is RegistryErrorCode.INVALID_METADATA
 
 
 @pytest.mark.parametrize(
@@ -709,6 +835,7 @@ def test_registry_contains_metadata_only_not_execution_hooks():
         "resource_budget",
         "direct_exposed",
         "result_slots",
+        "preservation_fields",
     }
     assert all(
         not callable(value)

@@ -1008,6 +1008,68 @@ target union 与 command-level preservation 均通过真实门后才能关闭。
    verify no active test session before RED；use only named-file staging；if packet control commit is
    present, anchor implementation to that commit and never replay S3-2。
 
+### S3-3 completion evidence
+
+Actual write set stayed inside Packet S3-3A:
+
+- production: `src/vibecad/execution/registry.py`、`src/vibecad/workflow/program.py`、
+  `src/vibecad/execution/executor.py`；
+- focused tests: `tests/test_execution_registry.py`、`tests/test_model_program.py`、
+  `tests/test_execution_adapter.py`、`tests/test_program_executor.py`；
+- managed gate: `tests/test_task_kernel_integration.py`；
+- orchestration record: `docs/orchestrated/vibecad-agent-stage3.md`。
+
+Evidence chain:
+
+1. The three packet REDs failed for their intended reasons: the default registry exposed only three
+   operations, ENTITY_TARGET could not bind the Selector/OBJECT_ID union, and command preservation
+   did not reject `create_box -> modify_parameter(preserve=("length",))`.
+2. Independent review produced two more genuine REDs: custom-registry metadata could reach the fixed
+   executor without default-authority rebinding, and duplicate preserve fields were not rejected
+   before CAD execution. Both now fail at the closed validation boundary.
+3. Managed FreeCAD produced and closed two numeric/runtime REDs: OCC rigid-motion roundoff required a
+   mixed derived-geometry tolerance while parameter/placement checks remain strict; FreeCAD's
+   `Part.Compound` has no aggregate `CenterOfMass`, so the observation boundary now derives the
+   volume-weighted center from its solids and fails closed on an invalid aggregate.
+4. Final review produced and closed three Important findings: rotation now rejects an otherwise-correct
+   quaternion with an extra translation; rollback asserts the durable base revision/hash and live
+   baseline; and rotation uses the live target `Shape.BoundBox` center rather than assuming its center
+   of mass is the pivot. The last case has both a non-concentric fake regression and a real imported
+   180-degree Cylinder TaskService -> commit -> FCStd/STEP reload gate.
+5. Final focused gate: `431 passed, 1 deselected`; full gate: `2457 passed, 89 deselected` with the two
+   pre-existing macOS `fork()` deprecation warnings; managed Task Kernel plus adapter gate:
+   `8 passed, 75 deselected`; full Ruff、`git diff --check` and pycompile passed.
+6. Two independent read-only reviewers found no Critical or Important issue. Non-blocking hardening for
+   a later cumulative gate is real FreeCAD x/y cylinder orientation, repeated non-identity rotations,
+   and an explicit cross-FCStd/STEP aggregate-center assertion; current unit and managed geometry,
+   identity, artifact and rollback gates pass.
+
+| Residual disposition | Result |
+|---|---|
+| S3-RES-10-C1 | closed: default `SelectorV1 \| ResultRef<OBJECT_ID>` targets, six fixed handlers and real command-level preservation rollback passed |
+| S3-RES-01 | remains: push is not authorized |
+| S3-RES-04, S3-RES-08, S3-RES-09 | remain in their planned later stages; S3-3 did not broaden into face/edge selectors, runtime budget enforcement or GUI profiles |
+
+| Entry | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| S3-E06 / 2026-07-21T05:30:46Z | S3-A01；S3-3A；two independent final read-only reviews PASS after closing three final-review Important findings | S3-3 semantic commit containing this snapshot / not authorized | packet RED 3；review RED 2；managed runtime RED 2；final-review findings 3 closed；focused 431 passed, 1 deselected；full 2457 passed, 89 deselected；managed 8 passed, 75 deselected；Ruff/diff/pycompile PASS | S3-RES-01, S3-RES-04, S3-RES-08..09；closes S3-RES-10 | S3-S06 | completed |
+
+### Recovery snapshot S3-S06
+
+1. **Completed:** S3-3 implements the six-operation Agent-first execution wave, default-authority
+   rebinding, stable target union, strict observation-derived results, managed aggregate export and
+   real preservation/acceptance rollback; all objective gates and two independent reviews passed。
+2. **Next:** create the S3-4 control packet from committed S3-3 HEAD; implement only public bounded
+   Task API envelopes/lifecycle tools and capability discovery named by the plan; do not replay S3-3
+   or expose arbitrary Python/FreeCAD execution。
+3. **Approved decisions:** S3-D01..D08 under S3-A01 and the user's standing instruction to continue
+   without internal approvals; direct public MCP work starts only in S3-4; push/PR/release remain
+   unauthorized。
+4. **Recovery:** verify branch `codex/agent-stage3`, the local S3-3 semantic commit, clean worktree and
+   no active test process; rerun the focused gate plus managed G3 before any S3-4 mutation; if the
+   semantic commit is absent, use Packet S3-3A and this evidence record rather than replaying earlier
+   stages。
+
 ## 9. 用户决策与持续执行规则
 
 本修订依据已经明确的用户方向：

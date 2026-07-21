@@ -1,6 +1,6 @@
 """Trusted in-process CAD execution and sealed-observation boundary.
 
-The executor binds only the four operations in the default ModelProgram
+The executor binds only the six operations in the default ModelProgram
 registry.  It never accepts a handler mapping, output path, observation, or
 retry policy from the program.  STEP export and verification evidence are
 derived from coordinator-owned candidate capabilities and the immutable local
@@ -16,6 +16,8 @@ import re
 import secrets
 import stat
 import zipfile
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
@@ -35,7 +37,7 @@ from vibecad.execution.candidate import (
     CheckpointedCandidate,
     SealedCandidate,
 )
-from vibecad.execution.registry import ExecutionProfile
+from vibecad.execution.registry import ExecutionProfile, ValueShape, _matches_value_shape
 from vibecad.execution.results import NormalizedToolOutcome
 from vibecad.execution.revisions import (
     LocalRevisionStore,
@@ -51,11 +53,14 @@ from vibecad.execution.selectors import (
     SelectorV1,
     SemanticRole,
     index_entity_identities,
+    resolve_selector,
 )
-from vibecad.feedback.text import describe_shape as _describe_shape
 from vibecad.freecad_env import silence_fd1 as _silence_fd1
 from vibecad.tools.modeling import add_box as _add_box
+from vibecad.tools.modeling import add_cylinder as _add_cylinder
 from vibecad.tools.modify import modify_part as _modify_part
+from vibecad.tools.transform import move_part as _move_part
+from vibecad.tools.transform import rotate_part as _rotate_part
 from vibecad.validation import (
     ArtifactObservation,
     EntityObservation,
@@ -65,7 +70,7 @@ from vibecad.validation import (
     ShapeObservation,
     compare_entity_preservation,
 )
-from vibecad.workflow.contracts import ModelProgram
+from vibecad.workflow.contracts import ModelProgram, ValueSource
 from vibecad.workflow.errors import SCHEMA_VERSION
 from vibecad.workflow.lease import ProjectWriteLease
 from vibecad.workflow.program import ValidatedProgram, validate_model_program
@@ -159,6 +164,14 @@ class _ArtifactReadFailure(Exception):
 
 class _ObservationFailure(Exception):
     """Private marker whose details never cross the executor boundary."""
+
+
+@dataclass(frozen=True, slots=True)
+class _InvocationContext:
+    operation_id: str
+    operation: str
+    preserve: tuple[str, ...]
+    source: ValueSource
 
 
 _PARAMETER_FIELDS = {
@@ -341,9 +354,84 @@ def _finite_number(value: object, *, nonnegative: bool) -> int | float:
     return value
 
 
+def _managed_assembly_shape(session: object) -> object:
+    """Build the aggregate from the complete managed primitive inventory.
+
+    Legacy/fake Session implementations without the managed identity authority retain their
+    existing result-root shape.  A real managed Session never falls back once identities exist.
+    """
+
+    list_identities = getattr(session, "list_object_identities", None)
+    if not callable(list_identities):
+        return session.get_assembly_shape()  # type: ignore[attr-defined]
+    pairs = tuple(list_identities())
+    modelable = tuple(
+        obj
+        for obj, identity in pairs
+        if identity.object_type in _PARAMETER_FIELDS
+    )
+    if not modelable:
+        return session.get_assembly_shape()  # type: ignore[attr-defined]
+    shapes = tuple(obj.Shape for obj in modelable)
+    if len(shapes) == 1:
+        return shapes[0]
+    with _silence_fd1():
+        import Part  # noqa: PLC0415
+
+        return Part.makeCompound(list(shapes))
+
+
+def _shape_center_of_mass(
+    shape: object,
+    solids: tuple[object, ...],
+) -> tuple[int | float, int | float, int | float]:
+    try:
+        center = shape.CenterOfMass  # type: ignore[attr-defined]
+    except AttributeError:
+        weighted = [0.0, 0.0, 0.0]
+        total_volume = 0.0
+        try:
+            for solid in solids:
+                volume = _finite_number(solid.Volume, nonnegative=True)  # type: ignore[attr-defined]
+                solid_center = solid.CenterOfMass  # type: ignore[attr-defined]
+                components = (
+                    _finite_number(solid_center.x, nonnegative=False),
+                    _finite_number(solid_center.y, nonnegative=False),
+                    _finite_number(solid_center.z, nonnegative=False),
+                )
+                total_volume += float(volume)
+                for index, component in enumerate(components):
+                    weighted[index] += float(volume) * float(component)
+        except _ObservationFailure:
+            raise
+        except Exception:
+            raise _ObservationFailure from None
+        if (
+            not math.isfinite(total_volume)
+            or total_volume <= 0
+            or not _same_geometry_number(
+                total_volume,
+                _finite_number(shape.Volume, nonnegative=True),  # type: ignore[attr-defined]
+            )
+        ):
+            raise _ObservationFailure from None
+        return (
+            weighted[0] / total_volume,
+            weighted[1] / total_volume,
+            weighted[2] / total_volume,
+        )
+    except Exception:
+        raise _ObservationFailure from None
+    return (
+        _finite_number(center.x, nonnegative=False),
+        _finite_number(center.y, nonnegative=False),
+        _finite_number(center.z, nonnegative=False),
+    )
+
+
 def _shape_observation(session: object) -> ShapeObservation:
     try:
-        shape = session.get_assembly_shape()
+        shape = _managed_assembly_shape(session)
         volume = _finite_number(shape.Volume, nonnegative=True)
         area = _finite_number(shape.Area, nonnegative=True)
         bound_box = shape.BoundBox
@@ -352,16 +440,12 @@ def _shape_observation(session: object) -> ShapeObservation:
             _finite_number(bound_box.YLength, nonnegative=True),
             _finite_number(bound_box.ZLength, nonnegative=True),
         )
-        center = shape.CenterOfMass
-        center_of_mass = (
-            _finite_number(center.x, nonnegative=False),
-            _finite_number(center.y, nonnegative=False),
-            _finite_number(center.z, nonnegative=False),
-        )
+        solids = tuple(shape.Solids)
+        center_of_mass = _shape_center_of_mass(shape, solids)
         valid_shape = shape.isValid()
         if type(valid_shape) is not bool:
             raise _ObservationFailure
-        solid_count = len(shape.Solids)
+        solid_count = len(solids)
         if type(solid_count) is not int or solid_count < 0:
             raise _ObservationFailure
         return ShapeObservation(
@@ -467,6 +551,27 @@ def _entity_geometry(shape: object) -> dict[str, object]:
         raise
     except Exception:
         raise _ObservationFailure from None
+
+
+def _bound_box_center(shape: object) -> tuple[int | float, int | float, int | float]:
+    """Return the live global center used by the fixed legacy rotation leaf."""
+
+    try:
+        bound_box = shape.BoundBox  # type: ignore[attr-defined]
+        bounds = tuple(
+            (
+                _finite_number(getattr(bound_box, f"{axis}Min"), nonnegative=False),
+                _finite_number(getattr(bound_box, f"{axis}Max"), nonnegative=False),
+            )
+            for axis in ("X", "Y", "Z")
+        )
+    except _ObservationFailure:
+        raise
+    except Exception:
+        raise _ObservationFailure from None
+    if any(high < low for low, high in bounds):
+        raise _ObservationFailure
+    return tuple((float(low) + float(high)) / 2.0 for low, high in bounds)  # type: ignore[return-value]
 
 
 def _entity_observation(obj: object, identity: EntityIdentity) -> EntityObservation:
@@ -615,23 +720,207 @@ def _bound_selectors(value: object) -> tuple[SelectorV1, ...]:
     return ()
 
 
-def _managed_add_box(session: object, **kwargs: object) -> object:
-    """Run the fixed box primitive and attach managed identity before sealing."""
+def _operation_failure() -> RuntimeError:
+    return RuntimeError("managed operation invariant failed")
 
-    result = _add_box(session, **kwargs)
+
+def _same_number(actual: object, expected: object) -> bool:
+    if type(actual) not in {int, float} or type(expected) not in {int, float}:
+        return False
+    return math.isclose(float(actual), float(expected), rel_tol=0.0, abs_tol=1e-9)
+
+
+def _same_geometry_number(actual: object, expected: object) -> bool:
+    if type(actual) not in {int, float} or type(expected) not in {int, float}:
+        return False
+    return math.isclose(float(actual), float(expected), rel_tol=1e-9, abs_tol=1e-9)
+
+
+def _same_vector(actual: tuple[int | float, ...], expected: object) -> bool:
+    return (
+        type(expected) is tuple
+        and len(actual) == len(expected)
+        and all(
+            _same_number(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual, expected, strict=True)
+        )
+    )
+
+
+def _same_geometry_vector(actual: tuple[int | float, ...], expected: object) -> bool:
+    return (
+        type(expected) is tuple
+        and len(actual) == len(expected)
+        and all(
+            _same_geometry_number(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual, expected, strict=True)
+        )
+    )
+
+
+def _quaternion_product(
+    left: tuple[int | float, ...],
+    right: tuple[int | float, ...],
+) -> tuple[float, float, float, float]:
+    lx, ly, lz, lw = (float(item) for item in left)
+    rx, ry, rz, rw = (float(item) for item in right)
+    return (
+        lw * rx + lx * rw + ly * rz - lz * ry,
+        lw * ry - lx * rz + ly * rw + lz * rx,
+        lw * rz + lx * ry - ly * rx + lz * rw,
+        lw * rw - lx * rx - ly * ry - lz * rz,
+    )
+
+
+def _rotate_vector(
+    quaternion: tuple[int | float, ...],
+    vector: tuple[int | float, ...],
+) -> tuple[float, float, float]:
+    qx, qy, qz, qw = (float(item) for item in quaternion)
+    vx, vy, vz = (float(item) for item in vector)
+    tx = 2.0 * (qy * vz - qz * vy)
+    ty = 2.0 * (qz * vx - qx * vz)
+    tz = 2.0 * (qx * vy - qy * vx)
+    return (
+        vx + qw * tx + qy * tz - qz * ty,
+        vy + qw * ty + qz * tx - qx * tz,
+        vz + qw * tz + qx * ty - qy * tx,
+    )
+
+
+def _same_rotation(
+    actual: tuple[int | float, ...],
+    expected: tuple[int | float, ...],
+) -> bool:
+    try:
+        dot = sum(
+            float(actual_item) * float(expected_item)
+            for actual_item, expected_item in zip(actual, expected, strict=True)
+        )
+    except (TypeError, ValueError):
+        return False
+    return math.isclose(abs(dot), 1.0, rel_tol=0.0, abs_tol=1e-9)
+
+
+def _axis_rotation(axis: object, angle: object) -> tuple[float, float, float, float]:
+    if type(axis) is not str or axis not in {"x", "y", "z"}:
+        raise _operation_failure()
+    if type(angle) not in {int, float}:
+        raise _operation_failure()
+    half_angle = math.radians(float(angle)) / 2.0
+    sine = math.sin(half_angle)
+    components = {
+        "x": (sine, 0.0, 0.0),
+        "y": (0.0, sine, 0.0),
+        "z": (0.0, 0.0, sine),
+    }[axis]
+    return (*components, math.cos(half_angle))
+
+
+def _observation_map(
+    observations: tuple[EntityObservation, ...],
+) -> dict[str, EntityObservation]:
+    result = {item.object_id: item for item in observations}
+    if len(result) != len(observations):
+        raise _operation_failure()
+    return result
+
+
+def _identified_pairs(session: object) -> tuple[tuple[object, EntityIdentity], ...]:
+    try:
+        objects = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+        list_identities = getattr(session, "list_object_identities", None)
+        if callable(list_identities):
+            raw_pairs = tuple(list_identities())
+        else:
+            identities = index_entity_identities(objects)
+            raw_pairs = tuple(zip(objects, identities, strict=True))
+        if not all(type(identity) is EntityIdentity for _, identity in raw_pairs):
+            raise ValueError
+        return tuple((obj, identity) for obj, identity in raw_pairs)
+    except Exception:
+        raise _operation_failure() from None
+
+
+def _require_preserved(
+    before: EntityObservation | None,
+    after: EntityObservation | None,
+    *,
+    target: str,
+    preserve: tuple[str, ...] = (),
+) -> PreservationObservation:
+    try:
+        comparison = compare_entity_preservation(
+            before,
+            after,
+            target=target,
+            preserve=preserve,
+        )
+    except Exception:
+        raise _operation_failure() from None
+    if not comparison.preserved:
+        raise _operation_failure()
+    return comparison
+
+
+def _require_non_target_preservation(
+    before: dict[str, EntityObservation],
+    after: dict[str, EntityObservation],
+    *,
+    target: str | None,
+) -> list[PreservationObservation]:
+    if set(before) != set(after):
+        raise _operation_failure()
+    comparisons: list[PreservationObservation] = []
+    for object_id in sorted(before):
+        if object_id == target:
+            continue
+        comparisons.append(
+            _require_preserved(
+                before[object_id],
+                after[object_id],
+                target=object_id,
+            )
+        )
+    return comparisons
+
+
+def _managed_create(
+    session: object,
+    context: _InvocationContext,
+    *,
+    leaf: Callable[..., object],
+    expected_type: str,
+    **kwargs: object,
+) -> dict[str, object]:
+    """Create one primitive, bind identity, and rebuild the result from live facts."""
+
+    if context.preserve:
+        raise _operation_failure()
+    before = _entity_observations(session)
+    try:
+        document_before = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+    except Exception:
+        raise _operation_failure() from None
+    leaf(session, **kwargs)
     attach = getattr(session, "attach_object_identity", None)
     read_identity = getattr(session, "read_object_identity", None)
     if not callable(attach) or not callable(read_identity):
-        raise RuntimeError("managed object identity is unavailable")
+        raise _operation_failure()
     try:
-        if type(result) is not dict:
+        document_after = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+        if any(not any(current is obj for current in document_after) for obj in document_before):
             raise ValueError
-        name = result["name"]
-        if type(name) is not str or not name:
+        added = tuple(
+            obj
+            for obj in document_after
+            if not any(obj is current for current in document_before)
+        )
+        if len(added) != 1 or len(document_after) != len(document_before) + 1:
             raise ValueError
-        obj = session.get_object(name)
+        obj = added[0]
         object_type = obj.TypeId
-        if type(object_type) is not str:
+        if object_type != expected_type:
             raise ValueError
         identity = EntityIdentity(
             object_id=f"object_{secrets.token_hex(16)}",
@@ -639,8 +928,8 @@ def _managed_add_box(session: object, **kwargs: object) -> object:
             object_type=object_type,
             semantic_role=SemanticRole.PRIMITIVE,
             provenance=Provenance(
-                source=ProvenanceSource.MODEL,
-                operation_id=None,
+                source=ProvenanceSource(context.source.value),
+                operation_id=context.operation_id,
             ),
         )
         attached = attach(obj, identity)
@@ -653,14 +942,415 @@ def _managed_add_box(session: object, **kwargs: object) -> object:
         ):
             raise ValueError
     except Exception:
-        raise RuntimeError("managed object identity could not be attached") from None
-    return result
+        raise _operation_failure() from None
+
+    after = _entity_observations(session)
+    before_by_id = _observation_map(before)
+    after_by_id = _observation_map(after)
+    if set(before_by_id) - set(after_by_id) or set(after_by_id) - set(before_by_id) != {
+        identity.object_id
+    }:
+        raise _operation_failure()
+    comparisons = _require_non_target_preservation(
+        before_by_id,
+        {key: value for key, value in after_by_id.items() if key != identity.object_id},
+        target=None,
+    )
+    created = after_by_id[identity.object_id]
+    if created.object_type != expected_type or created.feature_id != identity.feature_id:
+        raise _operation_failure()
+    parameters = {item.name: item.value for item in created.parameters}
+    expected_position = kwargs.get("position", (0.0, 0.0, 0.0))
+    if type(expected_position) is not tuple or len(expected_position) != 3:
+        raise _operation_failure()
+    if context.operation == "create_box":
+        expected_parameters = {
+            "length": kwargs.get("length"),
+            "width": kwargs.get("width"),
+            "height": kwargs.get("height"),
+        }
+        expected_rotation = (0.0, 0.0, 0.0, 1.0)
+        length, width, height = (
+            expected_parameters["length"],
+            expected_parameters["width"],
+            expected_parameters["height"],
+        )
+        if any(type(item) not in {int, float} for item in (length, width, height)):
+            raise _operation_failure()
+        expected_volume = float(length) * float(width) * float(height)
+        expected_area = 2.0 * (
+            float(length) * float(width)
+            + float(length) * float(height)
+            + float(width) * float(height)
+        )
+        expected_bbox = (length, width, height)
+        expected_center = tuple(
+            float(origin) + float(dimension) / 2.0
+            for origin, dimension in zip(
+                expected_position,
+                expected_bbox,
+                strict=True,
+            )
+        )
+    elif context.operation == "create_cylinder":
+        expected_parameters = {
+            "radius": kwargs.get("radius"),
+            "height": kwargs.get("height"),
+            "angle": 360.0,
+        }
+        radius, height = expected_parameters["radius"], expected_parameters["height"]
+        if type(radius) not in {int, float} or type(height) not in {int, float}:
+            raise _operation_failure()
+        expected_volume = math.pi * float(radius) ** 2 * float(height)
+        expected_area = 2.0 * math.pi * float(radius) * (float(radius) + float(height))
+        cylinder_axis = kwargs.get("axis", "z")
+        if cylinder_axis == "x":
+            expected_rotation = _axis_rotation("y", 90.0)
+            expected_bbox = (height, 2.0 * float(radius), 2.0 * float(radius))
+            center_offset = (float(height) / 2.0, 0.0, 0.0)
+        elif cylinder_axis == "y":
+            expected_rotation = _axis_rotation("x", -90.0)
+            expected_bbox = (2.0 * float(radius), height, 2.0 * float(radius))
+            center_offset = (0.0, float(height) / 2.0, 0.0)
+        elif cylinder_axis == "z":
+            expected_rotation = (0.0, 0.0, 0.0, 1.0)
+            expected_bbox = (2.0 * float(radius), 2.0 * float(radius), height)
+            center_offset = (0.0, 0.0, float(height) / 2.0)
+        else:
+            raise _operation_failure()
+        expected_center = tuple(
+            float(origin) + offset
+            for origin, offset in zip(expected_position, center_offset, strict=True)
+        )
+    else:
+        raise _operation_failure()
+    if set(parameters) != set(expected_parameters) or any(
+        not _same_number(parameters[name], expected)
+        for name, expected in expected_parameters.items()
+    ):
+        raise _operation_failure()
+    if not _same_vector(created.placement[:3], expected_position) or not _same_rotation(
+        created.placement[3:],
+        expected_rotation,
+    ):
+        raise _operation_failure()
+    if (
+        created.valid_shape is not True
+        or created.solid_count != 1
+        or created.volume_mm3 is None
+        or created.volume_mm3 <= 0
+        or created.area_mm2 is None
+        or created.area_mm2 <= 0
+        or created.bbox_mm is None
+        or any(component <= 0 for component in created.bbox_mm)
+        or created.center_of_mass_mm is None
+        or not _same_geometry_number(created.volume_mm3, expected_volume)
+        or not _same_geometry_number(created.area_mm2, expected_area)
+        or not _same_geometry_vector(created.bbox_mm, expected_bbox)
+        or not _same_geometry_vector(created.center_of_mass_mm, expected_center)
+    ):
+        raise _operation_failure()
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "entity_created",
+        "operation": context.operation,
+        "object_id": created.object_id,
+        "feature_id": created.feature_id,
+        "after": created.to_mapping(),
+        "preservation": [item.to_mapping() for item in comparisons],
+    }
 
 
-def _describe_part(session: object) -> dict[str, object]:
-    """Return execution feedback only; this value is never trusted evidence."""
+def _resolve_entity_target(
+    session: object,
+    target: object,
+    *,
+    project_id: str,
+    revision_id: str,
+) -> tuple[object, EntityIdentity]:
+    pairs = _identified_pairs(session)
+    objects = tuple(obj for obj, _ in pairs)
+    try:
+        if type(target) is SelectorV1:
+            obj = resolve_selector(
+                target,
+                objects,
+                project_id=project_id,
+                revision_id=revision_id,
+            )
+        elif _matches_value_shape(target, ValueShape.OBJECT_ID):
+            matches = tuple(
+                obj for obj, identity in pairs if identity.object_id == target
+            )
+            if len(matches) != 1:
+                raise ValueError
+            obj = matches[0]
+        else:
+            raise ValueError
+        identity = next(identity for current, identity in pairs if current is obj)
+        if identity.object_id != getattr(target, "object_id", identity.object_id):
+            raise ValueError
+        return obj, identity
+    except Exception:
+        raise _operation_failure() from None
 
-    return _describe_shape(session.get_assembly_shape())
+
+def _parameter_value(observation: EntityObservation, name: str) -> int | float:
+    try:
+        parameter = next(item for item in observation.parameters if item.name == name)
+    except StopIteration:
+        raise _operation_failure() from None
+    if type(parameter.value) not in {int, float}:
+        raise _operation_failure()
+    return parameter.value
+
+
+def _managed_mutation(
+    session: object,
+    context: _InvocationContext,
+    *,
+    project_id: str,
+    revision_id: str,
+    target: object,
+    leaf: Callable[..., object],
+    leaf_kwargs: dict[str, object],
+    parameter: str | None = None,
+    value: object = None,
+    position: object = None,
+) -> dict[str, object]:
+    before = _entity_observations(session)
+    before_by_id = _observation_map(before)
+    obj, identity = _resolve_entity_target(
+        session,
+        target,
+        project_id=project_id,
+        revision_id=revision_id,
+    )
+    old = before_by_id.get(identity.object_id)
+    if old is None:
+        raise _operation_failure()
+    rotation_pivot: tuple[int | float, int | float, int | float] | None = None
+    if context.operation == "rotate_part":
+        try:
+            rotation_pivot = _bound_box_center(obj.Shape)
+        except _ObservationFailure:
+            raise _operation_failure() from None
+    set_result = getattr(session, "set_result_object", None)
+    if not callable(set_result):
+        raise _operation_failure()
+    set_result(obj)
+    leaf(session, name=obj.Name, **leaf_kwargs)
+
+    after = _entity_observations(session)
+    after_by_id = _observation_map(after)
+    new = after_by_id.get(identity.object_id)
+    if new is None:
+        raise _operation_failure()
+    comparisons = _require_non_target_preservation(
+        before_by_id,
+        after_by_id,
+        target=identity.object_id,
+    )
+    parameter_names = {item.name for item in old.parameters}
+    fixed: set[str]
+    if context.operation == "modify_parameter":
+        if type(parameter) is not str or type(value) not in {int, float}:
+            raise _operation_failure()
+        fixed = {"placement", *(parameter_names - {parameter})}
+        actual = _parameter_value(new, parameter)
+        if not math.isclose(float(actual), float(value), rel_tol=0.0, abs_tol=1e-9):
+            raise _operation_failure()
+    elif context.operation == "move_part":
+        if type(position) is not tuple or len(position) != 3:
+            raise _operation_failure()
+        fixed = {
+            *parameter_names,
+            "solid_count",
+            "valid_shape",
+        }
+        if any(
+            not math.isclose(float(actual), float(expected), rel_tol=0.0, abs_tol=1e-9)
+            for actual, expected in zip(new.placement[:3], position, strict=True)
+        ) or new.placement[3:] != old.placement[3:]:
+            raise _operation_failure()
+    elif context.operation == "rotate_part":
+        fixed = {
+            *parameter_names,
+            "solid_count",
+            "valid_shape",
+        }
+        axis = leaf_kwargs.get("axis")
+        angle = leaf_kwargs.get("angle")
+        delta_rotation = _axis_rotation(axis, angle)
+        expected_rotation = _quaternion_product(delta_rotation, old.placement[3:])
+        pivot = rotation_pivot
+        old_center = old.center_of_mass_mm
+        if pivot is None or old_center is None:
+            raise _operation_failure()
+        rotated_offset = _rotate_vector(
+            delta_rotation,
+            tuple(
+                float(origin) - float(center)
+                for origin, center in zip(old.placement[:3], pivot, strict=True)
+            ),
+        )
+        expected_translation = tuple(
+            float(center) + offset
+            for center, offset in zip(pivot, rotated_offset, strict=True)
+        )
+        rotated_center_offset = _rotate_vector(
+            delta_rotation,
+            tuple(
+                float(center_of_mass) - float(center)
+                for center_of_mass, center in zip(old_center, pivot, strict=True)
+            ),
+        )
+        expected_center = tuple(
+            float(center) + offset
+            for center, offset in zip(pivot, rotated_center_offset, strict=True)
+        )
+        if (
+            new.placement == old.placement
+            or not _same_rotation(new.placement[3:], expected_rotation)
+            or not _same_geometry_vector(new.placement[:3], expected_translation)
+            or new.center_of_mass_mm is None
+            or not _same_geometry_vector(new.center_of_mass_mm, expected_center)
+        ):
+            raise _operation_failure()
+    else:
+        raise _operation_failure()
+    if context.operation in {"move_part", "rotate_part"} and (
+        not _same_geometry_number(old.volume_mm3, new.volume_mm3)
+        or not _same_geometry_number(old.area_mm2, new.area_mm2)
+    ):
+        raise _operation_failure()
+    requested_fields = fixed | set(context.preserve)
+    for tolerant_field, old_value, new_value in (
+        ("volume_mm3", old.volume_mm3, new.volume_mm3),
+        ("area_mm2", old.area_mm2, new.area_mm2),
+    ):
+        if tolerant_field in requested_fields:
+            if not _same_geometry_number(old_value, new_value):
+                raise _operation_failure()
+            requested_fields.remove(tolerant_field)
+    requested = tuple(sorted(requested_fields))
+    comparisons.append(
+        _require_preserved(
+            old,
+            new,
+            target=identity.object_id,
+            preserve=requested,
+        )
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "entity_modified",
+        "operation": context.operation,
+        "object_id": new.object_id,
+        "feature_id": new.feature_id,
+        "before": old.to_mapping(),
+        "after": new.to_mapping(),
+        "preservation": [item.to_mapping() for item in comparisons],
+    }
+
+
+def _managed_inspect(
+    session: object,
+    context: _InvocationContext,
+) -> dict[str, object]:
+    if context.preserve:
+        raise _operation_failure()
+    before = _entity_observations(session)
+    shape = _shape_observation(session)
+    after = _entity_observations(session)
+    if before != after:
+        raise _operation_failure()
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "model_inspection",
+        "operation": context.operation,
+        "shape": shape.to_mapping(),
+        "entities": [item.to_mapping() for item in after],
+    }
+
+
+def _queued_handler(
+    contexts: deque[_InvocationContext],
+    callback: Callable[..., object],
+) -> Callable[..., object]:
+    def invoke(**kwargs: object) -> object:
+        try:
+            context = contexts.popleft()
+        except IndexError:
+            raise _operation_failure() from None
+        return callback(context, **kwargs)
+
+    return invoke
+
+
+def _managed_modify_parameter(
+    session: object,
+    context: _InvocationContext,
+    *,
+    project_id: str,
+    revision_id: str,
+    target: object,
+    parameter: str,
+    value: object,
+) -> dict[str, object]:
+    return _managed_mutation(
+        session,
+        context,
+        project_id=project_id,
+        revision_id=revision_id,
+        target=target,
+        leaf=_modify_part,
+        leaf_kwargs={"parameter": parameter, "value": value},
+        parameter=parameter,
+        value=value,
+    )
+
+
+def _managed_move_part(
+    session: object,
+    context: _InvocationContext,
+    *,
+    project_id: str,
+    revision_id: str,
+    target: object,
+    position: object,
+) -> dict[str, object]:
+    return _managed_mutation(
+        session,
+        context,
+        project_id=project_id,
+        revision_id=revision_id,
+        target=target,
+        leaf=_move_part,
+        leaf_kwargs={"position": position},
+        position=position,
+    )
+
+
+def _managed_rotate_part(
+    session: object,
+    context: _InvocationContext,
+    *,
+    project_id: str,
+    revision_id: str,
+    target: object,
+    axis: str,
+    angle: object,
+) -> dict[str, object]:
+    return _managed_mutation(
+        session,
+        context,
+        project_id=project_id,
+        revision_id=revision_id,
+        target=target,
+        leaf=_rotate_part,
+        leaf_kwargs={"axis": axis, "angle": angle},
+    )
 
 
 def _artifact_matches(actual: _ArtifactSnapshot, expected: RevisionArtifactRef) -> bool:
@@ -831,7 +1521,7 @@ class InProcessCadExecutor(CadSnapshotPort):
         program: ValidatedProgram,
         candidate: ActiveCandidate,
     ) -> tuple[NormalizedToolOutcome, ...]:
-        """Execute one authentic program using the three fixed CAD bindings."""
+        """Execute one authentic program using the six fixed CAD bindings."""
 
         if type(candidate) is not ActiveCandidate:
             raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
@@ -839,6 +1529,7 @@ class InProcessCadExecutor(CadSnapshotPort):
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
         try:
             program.require_authentic()
+            program = self.validate_program(program.program)
             source = program.program
             if source.base_revision != candidate.base_head.revision_id:
                 raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
@@ -853,11 +1544,72 @@ class InProcessCadExecutor(CadSnapshotPort):
                 for selector in selectors
             ):
                 raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
+            fixed_leaves = (_add_box, _add_cylinder, _modify_part, _move_part, _rotate_part)
+            if not all(callable(item) for item in fixed_leaves):
+                raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
             session = candidate.binding.session
+            contexts: dict[str, deque[_InvocationContext]] = {}
+            for command in program.commands:
+                contexts.setdefault(command.handler_name, deque()).append(
+                    _InvocationContext(
+                        operation_id=command.id,
+                        operation=command.operation,
+                        preserve=command.preserve,
+                        source=command.source,
+                    )
+                )
+            project_id = candidate.project_id
+            revision_id = candidate.base_head.revision_id
             handlers = {
-                "add_box": partial(_managed_add_box, session),
-                "modify_part": partial(_modify_part, session),
-                "describe_part": partial(_describe_part, session),
+                "create_box": _queued_handler(
+                    contexts.get("create_box", deque()),
+                    partial(
+                        _managed_create,
+                        session,
+                        leaf=_add_box,
+                        expected_type="Part::Box",
+                    ),
+                ),
+                "create_cylinder": _queued_handler(
+                    contexts.get("create_cylinder", deque()),
+                    partial(
+                        _managed_create,
+                        session,
+                        leaf=_add_cylinder,
+                        expected_type="Part::Cylinder",
+                    ),
+                ),
+                "modify_parameter": _queued_handler(
+                    contexts.get("modify_parameter", deque()),
+                    partial(
+                        _managed_modify_parameter,
+                        session,
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "move_part": _queued_handler(
+                    contexts.get("move_part", deque()),
+                    partial(
+                        _managed_move_part,
+                        session,
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "rotate_part": _queued_handler(
+                    contexts.get("rotate_part", deque()),
+                    partial(
+                        _managed_rotate_part,
+                        session,
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "inspect_model": _queued_handler(
+                    contexts.get("inspect_model", deque()),
+                    partial(_managed_inspect, session),
+                ),
             }
         except ExecutorError:
             raise
@@ -925,7 +1677,7 @@ class InProcessCadExecutor(CadSnapshotPort):
             parent = os.lstat(trusted_path.parent)
             if not stat.S_ISDIR(parent.st_mode):
                 raise _ArtifactReadFailure
-            shape = candidate.binding.session.get_assembly_shape()
+            shape = _managed_assembly_shape(candidate.binding.session)
         except _ArtifactReadFailure:
             raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
         except Exception:

@@ -268,22 +268,141 @@ def test_level_a_selector_rejects_stale_revision_before_execution() -> None:
     )
 
 
+def test_default_entity_target_accepts_base_selector_or_dependency_object_ref() -> None:
+    revision = "revision_22222222222222222222222222222222"
+    selector_program = ModelProgram(
+        task_id="task-default-selector",
+        base_revision=revision,
+        operations=(
+            _command(
+                "modify",
+                "modify_parameter",
+                target={"object": _level_a_selector(revision_id=revision)},
+                args={"parameter": "length", "value_mm": 12},
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-default-selector", criteria=()),
+    )
+    selector_bound = validate_model_program(selector_program).commands[0].handler_kwargs[
+        "target"
+    ]
+    assert type(selector_bound).__name__ == "SelectorV1"
+
+    result_program = ModelProgram(
+        task_id="task-default-result-ref",
+        base_revision=revision,
+        operations=(
+            _command(
+                "box",
+                "create_box",
+                args={"length_mm": 10, "width_mm": 5, "height_mm": 2},
+            ),
+            _command(
+                "modify",
+                "modify_parameter",
+                target={"object": {"command_id": "box", "slot": "object"}},
+                args={"parameter": "length", "value_mm": 12},
+                depends_on=("box",),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-default-result-ref", criteria=()),
+    )
+    result_bound = validate_model_program(result_program).commands[1].handler_kwargs["target"]
+    assert type(result_bound).__name__ == "BoundResultRef"
+    assert result_bound.value_shape is ValueShape.OBJECT_ID
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        pytest.param(
+            {
+                key: value
+                for key, value in _level_a_selector(
+                    revision_id="revision_22222222222222222222222222222222"
+                ).items()
+                if key != "feature_id"
+            },
+            id="partial-selector",
+        ),
+        pytest.param(
+            _level_a_selector(
+                revision_id="revision_55555555555555555555555555555555"
+            ),
+            id="stale-selector",
+        ),
+    ],
+)
+def test_default_entity_target_rejects_partial_and_stale_selectors(target) -> None:
+    revision = "revision_22222222222222222222222222222222"
+    program = ModelProgram(
+        task_id="task-default-invalid-selector",
+        base_revision=revision,
+        operations=(
+            _command(
+                "modify",
+                "modify_parameter",
+                target={"object": target},
+                args={"parameter": "length", "value_mm": 12},
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-default-invalid-selector", criteria=()),
+    )
+
+    _error(
+        program,
+        ProgramErrorCode.INVALID_VALUE_SHAPE,
+        "/operations/0/target/object",
+    )
+
+
 def test_every_default_operation_is_bound_for_execution_without_invocation():
     program = _program(
         _command(
             "box",
             "create_box",
-            args={"length": 10, "width": 5.5, "height": 2, "position": [-1, 0, 3]},
+            args={
+                "length_mm": 10,
+                "width_mm": 5.5,
+                "height_mm": 2,
+                "position_mm": [-1, 0, 3],
+            },
+        ),
+        _command(
+            "cylinder",
+            "create_cylinder",
+            args={
+                "radius_mm": 2,
+                "height_mm": 8,
+                "position_mm": [4, 5, 6],
+                "axis": "z",
+            },
         ),
         _command(
             "modify",
             "modify_parameter",
             target={"object": {"command_id": "box", "slot": "object"}},
-            args={"parameter": "Length", "value": 12},
+            args={"parameter": "length", "value_mm": 12},
             depends_on=("box",),
             preserve=("width", "height"),
         ),
-        _command("inspect", depends_on=("modify",)),
+        _command(
+            "move",
+            "move_part",
+            target={"object": {"command_id": "box", "slot": "object"}},
+            args={"position_mm": [10, 20, 30]},
+            depends_on=("modify",),
+            preserve=("parameters",),
+        ),
+        _command(
+            "rotate",
+            "rotate_part",
+            target={"object": {"command_id": "box", "slot": "object"}},
+            args={"axis": "y", "angle_deg": -90},
+            depends_on=("move",),
+            preserve=("volume_mm3",),
+        ),
+        _command("inspect", depends_on=("cylinder", "rotate")),
     )
 
     validated = validate_model_program(program)
@@ -291,13 +410,19 @@ def test_every_default_operation_is_bound_for_execution_without_invocation():
     assert validated.program is program
     assert [command.id for command in validated.commands] == [
         "box",
+        "cylinder",
         "modify",
+        "move",
+        "rotate",
         "inspect",
     ]
     assert [command.handler_name for command in validated] == [
-        "add_box",
-        "modify_part",
-        "describe_part",
+        "create_box",
+        "create_cylinder",
+        "modify_parameter",
+        "move_part",
+        "rotate_part",
+        "inspect_model",
     ]
     assert dict(validated.commands[0].handler_kwargs) == {
         "length": 10,
@@ -305,17 +430,34 @@ def test_every_default_operation_is_bound_for_execution_without_invocation():
         "height": 2,
         "position": (-1, 0, 3),
     }
-    assert validated.commands[1].handler_kwargs["name"].command_id == "box"
-    assert validated.commands[1].handler_kwargs["name"].slot == "object"
     assert dict(validated.commands[1].handler_kwargs) == {
-        "name": validated.commands[1].handler_kwargs["name"],
-        "parameter": "Length",
+        "radius": 2,
+        "height": 8,
+        "position": (4, 5, 6),
+        "axis": "z",
+    }
+    assert validated.commands[2].handler_kwargs["target"].command_id == "box"
+    assert validated.commands[2].handler_kwargs["target"].slot == "object"
+    assert dict(validated.commands[2].handler_kwargs) == {
+        "target": validated.commands[2].handler_kwargs["target"],
+        "parameter": "length",
         "value": 12,
     }
-    assert dict(validated.commands[2].handler_kwargs) == {}
-    assert validated.commands[1].preserve == ("width", "height")
-    assert validated.commands[2].risk_class is RiskClass.READ_ONLY
-    assert validated.commands[2].evidence_required is False
+    assert dict(validated.commands[3].handler_kwargs) == {
+        "target": validated.commands[3].handler_kwargs["target"],
+        "position": (10, 20, 30),
+    }
+    assert dict(validated.commands[4].handler_kwargs) == {
+        "target": validated.commands[4].handler_kwargs["target"],
+        "axis": "y",
+        "angle": -90,
+    }
+    assert dict(validated.commands[5].handler_kwargs) == {}
+    assert validated.commands[2].preserve == ("width", "height")
+    assert validated.commands[3].preserve == ("parameters",)
+    assert validated.commands[4].preserve == ("volume_mm3",)
+    assert validated.commands[5].risk_class is RiskClass.READ_ONLY
+    assert validated.commands[5].evidence_required is False
 
 
 def test_result_ref_binds_a_declared_dependency_slot_without_resolving_it():
@@ -323,19 +465,19 @@ def test_result_ref_binds_a_declared_dependency_slot_without_resolving_it():
         _command(
             "box",
             "create_box",
-            args={"length": 10, "width": 5, "height": 2},
+            args={"length_mm": 10, "width_mm": 5, "height_mm": 2},
         ),
         _command(
             "modify",
             "modify_parameter",
             target={"object": {"command_id": "box", "slot": "object"}},
-            args={"parameter": "Length", "value": 12},
+            args={"parameter": "length", "value_mm": 12},
             depends_on=("box",),
         ),
     )
 
     validated = validate_model_program(program)
-    bound_ref = validated.commands[1].handler_kwargs["name"]
+    bound_ref = validated.commands[1].handler_kwargs["target"]
 
     assert type(bound_ref).__name__ == "BoundResultRef"
     assert bound_ref.command_id == "box"
@@ -355,23 +497,51 @@ def test_create_document_is_no_longer_a_model_program_operation():
     [
         {"command_id": "box"},
         {"command_id": "box", "slot": "object", "extra": True},
-        {"command_id": "missing", "slot": "object"},
-        {"command_id": "box", "slot": "missing"},
         "Box",
     ],
 )
-def test_result_ref_rejects_malformed_unknown_and_injected_values(target):
+def test_entity_target_rejects_malformed_refs_and_raw_names_as_invalid_shapes(target):
     program = _program(
         _command(
             "box",
             "create_box",
-            args={"length": 10, "width": 5, "height": 2},
+            args={"length_mm": 10, "width_mm": 5, "height_mm": 2},
         ),
         _command(
             "modify",
             "modify_parameter",
             target={"object": target},
-            args={"parameter": "Length", "value": 12},
+            args={"parameter": "length", "value_mm": 12},
+            depends_on=("box",),
+        ),
+    )
+
+    _error(
+        program,
+        ProgramErrorCode.INVALID_VALUE_SHAPE,
+        "/operations/1/target/object",
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"command_id": "missing", "slot": "object"},
+        {"command_id": "box", "slot": "missing"},
+    ],
+)
+def test_entity_target_rejects_well_shaped_but_unavailable_result_refs(target):
+    program = _program(
+        _command(
+            "box",
+            "create_box",
+            args={"length_mm": 10, "width_mm": 5, "height_mm": 2},
+        ),
+        _command(
+            "modify",
+            "modify_parameter",
+            target={"object": target},
+            args={"parameter": "length", "value_mm": 12},
             depends_on=("box",),
         ),
     )
@@ -388,19 +558,19 @@ def test_result_ref_requires_a_prior_transitive_dependency():
         _command(
             "box",
             "create_box",
-            args={"length": 10, "width": 5, "height": 2},
+            args={"length_mm": 10, "width_mm": 5, "height_mm": 2},
         ),
         _command("inspect", depends_on=("box",)),
         _command(
             "modify",
             "modify_parameter",
             target={"object": {"command_id": "box", "slot": "object"}},
-            args={"parameter": "Length", "value": 12},
+            args={"parameter": "length", "value_mm": 12},
             depends_on=("inspect",),
         ),
     )
     validated = validate_model_program(valid)
-    assert validated.commands[2].handler_kwargs["name"].command_id == "box"
+    assert validated.commands[2].handler_kwargs["target"].command_id == "box"
 
     non_dependency = _program(
         valid.operations[0],
@@ -408,7 +578,7 @@ def test_result_ref_requires_a_prior_transitive_dependency():
             "modify",
             "modify_parameter",
             target={"object": {"command_id": "box", "slot": "object"}},
-            args={"parameter": "Length", "value": 12},
+            args={"parameter": "length", "value_mm": 12},
         ),
     )
     _error(
@@ -422,7 +592,7 @@ def test_result_ref_requires_a_prior_transitive_dependency():
             "modify",
             "modify_parameter",
             target={"object": {"command_id": "box", "slot": "object"}},
-            args={"parameter": "Length", "value": 12},
+            args={"parameter": "length", "value_mm": 12},
             depends_on=("box",),
         ),
         valid.operations[0],
@@ -620,16 +790,79 @@ def test_required_target_and_argument_fields_are_checked_separately():
             _command(
                 "modify",
                 "modify_parameter",
-                args={"parameter": "Length", "value": 10},
+                args={"parameter": "length", "value_mm": 10},
             )
         ),
         ProgramErrorCode.MISSING_FIELD,
         "/operations/0/target/object",
     )
     _error(
-        _program(_command("box", "create_box", args={"width": 2, "height": 3})),
+        _program(
+            _command(
+                "box",
+                "create_box",
+                args={"width_mm": 2, "height_mm": 3},
+            )
+        ),
         ProgramErrorCode.MISSING_FIELD,
-        "/operations/0/args/length",
+        "/operations/0/args/length_mm",
+    )
+
+
+def test_preserve_is_restricted_to_the_operation_vocabulary_with_exact_index_paths():
+    _error(
+        _program(
+            _command(
+                "box",
+                "create_box",
+                args={"length_mm": 1, "width_mm": 2, "height_mm": 3},
+                preserve=("length",),
+            )
+        ),
+        ProgramErrorCode.INVALID_VALUE_SHAPE,
+        "/operations/0/preserve/0",
+    )
+
+    revision = "revision_22222222222222222222222222222222"
+    _error(
+        ModelProgram(
+            task_id="task-invalid-preserve",
+            base_revision=revision,
+            operations=(
+                _command(
+                    "modify",
+                    "modify_parameter",
+                    target={"object": _level_a_selector(revision_id=revision)},
+                    args={"parameter": "length", "value_mm": 4},
+                    preserve=("width", "label"),
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="acceptance-invalid-preserve", criteria=()),
+        ),
+        ProgramErrorCode.INVALID_VALUE_SHAPE,
+        "/operations/0/preserve/1",
+    )
+
+
+def test_duplicate_preserve_field_is_rejected_before_execution():
+    revision = "revision_22222222222222222222222222222222"
+    _error(
+        ModelProgram(
+            task_id="task-duplicate-preserve",
+            base_revision=revision,
+            operations=(
+                _command(
+                    "modify",
+                    "modify_parameter",
+                    target={"object": _level_a_selector(revision_id=revision)},
+                    args={"parameter": "length", "value_mm": 4},
+                    preserve=("width", "width"),
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="acceptance-duplicate-preserve", criteria=()),
+        ),
+        ProgramErrorCode.INVALID_INPUT,
+        "/operations/0/preserve/1",
     )
 
 
@@ -765,11 +998,16 @@ def test_vector3_shape_requires_exactly_three_non_boolean_numbers(position):
             _command(
                 "box",
                 "create_box",
-                args={"length": 1, "width": 2, "height": 3, "position": position},
+                args={
+                    "length_mm": 1,
+                    "width_mm": 2,
+                    "height_mm": 3,
+                    "position_mm": position,
+                },
             )
         ),
         ProgramErrorCode.INVALID_VALUE_SHAPE,
-        "/operations/0/args/position",
+        "/operations/0/args/position_mm",
     )
 
 
@@ -779,7 +1017,12 @@ def test_vector3_accepts_zero_and_negative_finite_coordinates_and_is_optional():
             _command(
                 "box",
                 "create_box",
-                args={"length": 1, "width": 2, "height": 3, "position": (-1, 0, 2.5)},
+                args={
+                    "length_mm": 1,
+                    "width_mm": 2,
+                    "height_mm": 3,
+                    "position_mm": (-1, 0, 2.5),
+                },
             )
         )
     )
@@ -788,13 +1031,98 @@ def test_vector3_accepts_zero_and_negative_finite_coordinates_and_is_optional():
             _command(
                 "box",
                 "create_box",
-                args={"length": 1, "width": 2, "height": 3},
+                args={"length_mm": 1, "width_mm": 2, "height_mm": 3},
             )
         )
     )
 
     assert with_position.commands[0].handler_kwargs["position"] == (-1, 0, 2.5)
     assert "position" not in without_position.commands[0].handler_kwargs
+
+
+def _rotation_program(angle: object) -> ModelProgram:
+    return _program(
+        _command(
+            "box",
+            "create_box",
+            args={"length_mm": 1, "width_mm": 2, "height_mm": 3},
+        ),
+        _command(
+            "rotate",
+            "rotate_part",
+            target={"object": {"command_id": "box", "slot": "object"}},
+            args={"axis": "x", "angle_deg": angle},
+            depends_on=("box",),
+        ),
+    )
+
+
+@pytest.mark.parametrize("angle", [-359.999, -1, 1, 359.999])
+def test_angle_degrees_accepts_finite_nonzero_open_interval(angle):
+    validated = validate_model_program(_rotation_program(angle))
+
+    assert validated.commands[1].handler_kwargs["angle"] == angle
+
+
+@pytest.mark.parametrize("angle", [0, -360, 360, True, "90", None])
+def test_angle_degrees_rejects_zero_boundaries_boolean_and_non_numbers(angle):
+    _error(
+        _rotation_program(angle),
+        ProgramErrorCode.INVALID_VALUE_SHAPE,
+        "/operations/1/args/angle_deg",
+    )
+
+
+@pytest.mark.parametrize("angle", [float("nan"), float("inf"), -float("inf")])
+def test_angle_degrees_rejects_forged_non_finite_numbers(angle):
+    program = _rotation_program(90)
+    object.__setattr__(
+        program.operations[1],
+        "args",
+        MappingProxyType({"axis": "x", "angle_deg": angle}),
+    )
+
+    _error(
+        program,
+        ProgramErrorCode.INVALID_VALUE_SHAPE,
+        "/operations/1/args/angle_deg",
+    )
+
+
+def test_object_id_shape_accepts_only_canonical_lowercase_ids():
+    registry = OperationRegistry(
+        (
+            OperationMetadata(
+                operation="bind_object",
+                handler_name="bind_object",
+                risk_class=RiskClass.READ_ONLY,
+                evidence_required=False,
+                argument_fields=(
+                    FieldMetadata("object_id", "object_id", ValueShape.OBJECT_ID),
+                ),
+            ),
+        )
+    )
+    canonical = "object_0123456789abcdef0123456789abcdef"
+    validated = validate_model_program(
+        _program(_command("bind", "bind_object", args={"object_id": canonical})),
+        registry=registry,
+    )
+    assert validated.commands[0].handler_kwargs["object_id"] == canonical
+
+    for invalid in (
+        "0123456789abcdef0123456789abcdef",
+        "object_0123456789abcdef0123456789abcde",
+        "object_0123456789abcdef0123456789abcdef0",
+        "object_0123456789ABCDEF0123456789ABCDEF",
+        True,
+    ):
+        _error(
+            _program(_command("bind", "bind_object", args={"object_id": invalid})),
+            ProgramErrorCode.INVALID_VALUE_SHAPE,
+            "/operations/0/args/object_id",
+            registry=registry,
+        )
 
 
 @pytest.mark.parametrize("value", [True, False])

@@ -20,6 +20,7 @@ from vibecad.execution.selectors import SelectorV1
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER, SCHEMA_VERSION
 
 _SNAKE_CASE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+_OBJECT_ID = re.compile(r"^object_[0-9a-f]{32}$")
 _MAX_NAME_LENGTH = 64
 _MAX_VALUE_TEXT_LENGTH = 256
 _MAX_ERROR_MESSAGE_LENGTH = 256
@@ -104,6 +105,9 @@ class ValueShape(StrEnum):
     QUANTITY = "quantity"
     RESULT_REF = "result_ref"
     OBJECT_SELECTOR = "object_selector"
+    OBJECT_ID = "object_id"
+    ENTITY_TARGET = "entity_target"
+    ANGLE_DEGREES = "angle_degrees"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -181,6 +185,12 @@ def _matches_value_shape(
         return _is_finite_number(value, positive=False)
     if shape is ValueShape.POSITIVE_NUMBER:
         return _is_finite_number(value, positive=True)
+    if shape is ValueShape.ANGLE_DEGREES:
+        return (
+            _is_finite_number(value, positive=False)
+            and value != 0
+            and -360 < value < 360
+        )
     if shape is ValueShape.ENUM:
         return type(value) is str and value in enum_values
     if shape in {ValueShape.VECTOR2, ValueShape.VECTOR3}:
@@ -208,6 +218,19 @@ def _matches_value_shape(
     if shape is ValueShape.OBJECT_SELECTOR:
         try:
             SelectorV1.from_mapping(value)
+        except Exception:
+            return False
+        return True
+    if shape is ValueShape.OBJECT_ID:
+        return type(value) is str and _OBJECT_ID.fullmatch(value) is not None
+    if shape is ValueShape.ENTITY_TARGET:
+        snapshot = _snapshot_strict_mapping(value)
+        if snapshot is None:
+            return False
+        if set(snapshot) == {"command_id", "slot"}:
+            return _matches_value_shape(snapshot, ValueShape.RESULT_REF)
+        try:
+            SelectorV1.from_mapping(snapshot)
         except Exception:
             return False
         return True
@@ -467,22 +490,32 @@ def _validate_shape_constraints(
             "allowed_units are only valid for quantity fields",
             field=field_name,
         )
-    if value_shape is ValueShape.RESULT_REF:
+    if value_shape in {ValueShape.RESULT_REF, ValueShape.ENTITY_TARGET}:
         if not isinstance(referenced_value_shape, ValueShape) or referenced_value_shape in {
             ValueShape.ENUM,
             ValueShape.QUANTITY,
             ValueShape.RESULT_REF,
             ValueShape.OBJECT_SELECTOR,
+            ValueShape.ENTITY_TARGET,
         }:
             raise RegistryError(
                 RegistryErrorCode.INVALID_METADATA,
-                "result_ref requires a concrete referenced_value_shape",
+                "reference-bearing fields require a concrete referenced_value_shape",
+                field=field_name,
+            )
+        if (
+            value_shape is ValueShape.ENTITY_TARGET
+            and referenced_value_shape is not ValueShape.OBJECT_ID
+        ):
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "entity_target must reference an object_id result slot",
                 field=field_name,
             )
     elif referenced_value_shape is not None:
         raise RegistryError(
             RegistryErrorCode.INVALID_METADATA,
-            "referenced_value_shape is only valid for result_ref fields",
+            "referenced_value_shape is only valid for reference-bearing fields",
             field=field_name,
         )
     return enums, units
@@ -575,6 +608,7 @@ class OperationMetadata:
     resource_budget: ResourceBudget = ResourceBudget()
     direct_exposed: bool = False
     result_slots: tuple[ResultSlotMetadata, ...] = ()
+    preservation_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         operation = _validate_name(
@@ -642,10 +676,15 @@ class OperationMetadata:
                 operation=operation,
             )
         slots = self._freeze_result_slots(self.result_slots, operation=operation)
+        preservation_fields = self._freeze_preservation_fields(
+            self.preservation_fields,
+            operation=operation,
+        )
         object.__setattr__(self, "execution_profiles", profiles)
         object.__setattr__(self, "minimum_freecad_version", minimum)
         object.__setattr__(self, "maximum_freecad_version_exclusive", maximum)
         object.__setattr__(self, "result_slots", slots)
+        object.__setattr__(self, "preservation_fields", preservation_fields)
 
         targets = self._freeze_fields(self.target_fields, operation=operation, group="target")
         arguments = self._freeze_fields(
@@ -801,6 +840,39 @@ class OperationMetadata:
             )
         return frozen
 
+    @staticmethod
+    def _freeze_preservation_fields(
+        values: Iterable[str],
+        *,
+        operation: str,
+    ) -> tuple[str, ...]:
+        if isinstance(values, (str, bytes, bytearray)):
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "preservation_fields must be a collection of field names",
+                operation=operation,
+            )
+        try:
+            frozen = tuple(values)
+        except RegistryError:
+            raise
+        except Exception as exc:
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "preservation_fields must be a collection of field names",
+                operation=operation,
+            ) from exc
+        if (
+            not all(_is_bounded_name(item) for item in frozen)
+            or len(set(frozen)) != len(frozen)
+        ):
+            raise RegistryError(
+                RegistryErrorCode.INVALID_METADATA,
+                "preservation_fields must contain unique bounded field names",
+                operation=operation,
+            )
+        return tuple(sorted(frozen))
+
 
 @dataclass(frozen=True, slots=True)
 class OperationRegistry:
@@ -864,18 +936,36 @@ class OperationRegistry:
         return len(self._operations)
 
 
+_ENTITY_PRESERVATION_FIELDS = (
+    "angle",
+    "area_mm2",
+    "bbox_mm",
+    "center_of_mass_mm",
+    "geometry",
+    "height",
+    "length",
+    "parameters",
+    "placement",
+    "radius",
+    "solid_count",
+    "valid_shape",
+    "volume_mm3",
+    "width",
+)
+
+
 DEFAULT_OPERATION_REGISTRY = OperationRegistry(
     (
         OperationMetadata(
             operation="create_box",
-            handler_name="add_box",
+            handler_name="create_box",
             risk_class=RiskClass.MUTATING,
             evidence_required=True,
             argument_fields=(
-                FieldMetadata("length", "length", ValueShape.POSITIVE_NUMBER),
-                FieldMetadata("width", "width", ValueShape.POSITIVE_NUMBER),
-                FieldMetadata("height", "height", ValueShape.POSITIVE_NUMBER),
-                FieldMetadata("position", "position", ValueShape.VECTOR3, required=False),
+                FieldMetadata("length_mm", "length", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata("width_mm", "width", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata("height_mm", "height", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata("position_mm", "position", ValueShape.VECTOR3, required=False),
             ),
             resource_budget=ResourceBudget(
                 max_runtime_ms=30_000,
@@ -886,27 +976,63 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
             result_slots=(
                 ResultSlotMetadata(
                     "object",
-                    "name",
-                    ValueShape.NONBLANK_STRING,
+                    "object_id",
+                    ValueShape.OBJECT_ID,
+                ),
+            ),
+        ),
+        OperationMetadata(
+            operation="create_cylinder",
+            handler_name="create_cylinder",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            argument_fields=(
+                FieldMetadata("radius_mm", "radius", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata("height_mm", "height", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata("position_mm", "position", ValueShape.VECTOR3, required=False),
+                FieldMetadata(
+                    "axis",
+                    "axis",
+                    ValueShape.ENUM,
+                    required=False,
+                    enum_values=("x", "y", "z"),
+                ),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=1,
+                max_result_bytes=65_536,
+            ),
+            direct_exposed=True,
+            result_slots=(
+                ResultSlotMetadata(
+                    "object",
+                    "object_id",
+                    ValueShape.OBJECT_ID,
                 ),
             ),
         ),
         OperationMetadata(
             operation="modify_parameter",
-            handler_name="modify_part",
+            handler_name="modify_parameter",
             risk_class=RiskClass.MUTATING,
             evidence_required=True,
             target_fields=(
                 FieldMetadata(
                     "object",
-                    "name",
-                    ValueShape.RESULT_REF,
-                    referenced_value_shape=ValueShape.NONBLANK_STRING,
+                    "target",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
                 ),
             ),
             argument_fields=(
-                FieldMetadata("parameter", "parameter", ValueShape.NONBLANK_STRING),
-                FieldMetadata("value", "value", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata(
+                    "parameter",
+                    "parameter",
+                    ValueShape.ENUM,
+                    enum_values=("height", "length", "radius", "width"),
+                ),
+                FieldMetadata("value_mm", "value", ValueShape.POSITIVE_NUMBER),
             ),
             resource_budget=ResourceBudget(
                 max_runtime_ms=30_000,
@@ -914,10 +1040,65 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                 max_result_bytes=65_536,
             ),
             direct_exposed=True,
+            preservation_fields=_ENTITY_PRESERVATION_FIELDS,
+        ),
+        OperationMetadata(
+            operation="move_part",
+            handler_name="move_part",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "object",
+                    "target",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            argument_fields=(
+                FieldMetadata("position_mm", "position", ValueShape.VECTOR3),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=0,
+                max_result_bytes=65_536,
+            ),
+            direct_exposed=True,
+            preservation_fields=_ENTITY_PRESERVATION_FIELDS,
+        ),
+        OperationMetadata(
+            operation="rotate_part",
+            handler_name="rotate_part",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "object",
+                    "target",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            argument_fields=(
+                FieldMetadata(
+                    "axis",
+                    "axis",
+                    ValueShape.ENUM,
+                    enum_values=("x", "y", "z"),
+                ),
+                FieldMetadata("angle_deg", "angle", ValueShape.ANGLE_DEGREES),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=0,
+                max_result_bytes=65_536,
+            ),
+            direct_exposed=True,
+            preservation_fields=_ENTITY_PRESERVATION_FIELDS,
         ),
         OperationMetadata(
             operation="inspect_model",
-            handler_name="describe_part",
+            handler_name="inspect_model",
             risk_class=RiskClass.READ_ONLY,
             evidence_required=False,
             resource_budget=ResourceBudget(

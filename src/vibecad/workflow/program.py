@@ -423,6 +423,15 @@ def _validate_command_integrity(command: ModelCommand, index: int) -> None:
             _operation_path(index, "preserve"),
             "preserve must be an immutable tuple of nonblank strings",
         )
+    seen_preservation_fields: set[str] = set()
+    for preserve_index, field_name in enumerate(command.preserve):
+        if field_name in seen_preservation_fields:
+            raise _failure(
+                ProgramErrorCode.INVALID_INPUT,
+                _operation_path(index, "preserve", str(preserve_index)),
+                "preserve field is listed more than once",
+            )
+        seen_preservation_fields.add(field_name)
     if not isinstance(command.source, ValueSource):
         raise _failure(
             ProgramErrorCode.INVALID_INPUT,
@@ -618,6 +627,33 @@ def _bind_field_group(
                 operation_metadata=operation_metadata,
             )
             continue
+        if item.value_shape is ValueShape.ENTITY_TARGET:
+            if _matches_value_shape(value, ValueShape.RESULT_REF):
+                destination[item.handler_parameter] = _bind_result_reference(
+                    value,
+                    item,
+                    path=field_path,
+                    dependency_ids=dependency_ids,
+                    prior_command_ids=prior_command_ids,
+                    operation_metadata=operation_metadata,
+                )
+                continue
+            try:
+                selector = SelectorV1.from_mapping(value)
+            except Exception:
+                raise _failure(
+                    ProgramErrorCode.INVALID_VALUE_SHAPE,
+                    field_path,
+                    "field value does not match the registered shape",
+                ) from None
+            if selector.revision_id != base_revision:
+                raise _failure(
+                    ProgramErrorCode.INVALID_VALUE_SHAPE,
+                    field_path,
+                    "field value does not match the registered shape",
+                )
+            destination[item.handler_parameter] = selector
+            continue
         if item.value_shape is ValueShape.OBJECT_SELECTOR:
             try:
                 selector = SelectorV1.from_mapping(value)
@@ -658,6 +694,24 @@ def _bind_command(
     operation_metadata: Mapping[str, OperationMetadata],
     base_revision: str,
 ) -> BoundCommand:
+    unsupported_preservation = next(
+        (
+            (preserve_index, field_name)
+            for preserve_index, field_name in enumerate(command.preserve)
+            if field_name not in metadata.preservation_fields
+        ),
+        None,
+    )
+    if unsupported_preservation is not None:
+        preserve_index, _ = unsupported_preservation
+        raise _failure(
+            ProgramErrorCode.INVALID_VALUE_SHAPE,
+            join_json_pointer(
+                _operation_path(index, "preserve"),
+                str(preserve_index),
+            ),
+            "preservation field is not supported by the registered operation",
+        )
     kwargs: dict[str, Any] = {}
     _bind_field_group(
         values=command.target,

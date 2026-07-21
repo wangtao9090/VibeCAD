@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 import zipfile
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -39,6 +41,7 @@ from vibecad.execution.revisions import (
     RevisionStoreError,
     RevisionStoreErrorCode,
 )
+from vibecad.execution.selectors import index_entity_identities
 from vibecad.workflow.contracts import AcceptanceSpec, ModelCommand, ModelProgram, ValueSource
 from vibecad.workflow.errors import SCHEMA_VERSION
 from vibecad.workflow.lease import ProjectWriteLease
@@ -61,18 +64,49 @@ class _FakeVector:
 
 
 class _FakeBoundBox:
-    XLength = 12.0
-    YLength = 20.0
-    ZLength = 30.0
+    def __init__(
+        self,
+        x: float = 12.0,
+        y: float = 20.0,
+        z: float = 30.0,
+        *,
+        center: tuple[float, float, float] | None = None,
+    ) -> None:
+        self.XLength = x
+        self.YLength = y
+        self.ZLength = z
+        cx, cy, cz = center or (x / 2.0, y / 2.0, z / 2.0)
+        self.XMin = cx - x / 2.0
+        self.XMax = cx + x / 2.0
+        self.YMin = cy - y / 2.0
+        self.YMax = cy + y / 2.0
+        self.ZMin = cz - z / 2.0
+        self.ZMax = cz + z / 2.0
+
+    def translate(self, x: float, y: float, z: float) -> None:
+        self.XMin += x
+        self.XMax += x
+        self.YMin += y
+        self.YMax += y
+        self.ZMin += z
+        self.ZMax += z
 
 
 class _FakeShape:
-    Volume = 7200.0
-    Area = 2400.0
-    BoundBox = _FakeBoundBox()
-    CenterOfMass = _FakeVector(6.0, 10.0, 15.0)
-
-    def __init__(self, *, export_error: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        export_error: BaseException | None = None,
+        volume: float = 7200.0,
+        area: float = 2400.0,
+        bbox: tuple[float, float, float] = (12.0, 20.0, 30.0),
+        center: tuple[float, float, float] = (6.0, 10.0, 15.0),
+        bbox_center: tuple[float, float, float] | None = None,
+    ) -> None:
+        self.Volume = volume
+        self.Area = area
+        self.BoundBox = _FakeBoundBox(*bbox, center=bbox_center or center)
+        self.CenterOfMass = _FakeVector(*center)
         self.Solids = (object(),)
         self.export_error = export_error
         self.export_calls: list[str] = []
@@ -111,8 +145,16 @@ class _FakeSession:
         self.opened: list[str] = []
         self.close_calls = 0
         self.shape_calls = 0
-        self.identity_object = type("ManagedBox", (), {"TypeId": "Part::Box"})()
+        self.identity_object = type("ManagedBox", (), {})()
+        self.identity_object.Name = "Box"
+        self.identity_object.TypeId = "Part::Box"
+        self.identity_object.Length = 10.0
+        self.identity_object.Width = 20.0
+        self.identity_object.Height = 30.0
+        self.identity_object.Placement = _FakePlacement(0.0)
+        self.identity_object.Shape = _FakeShape()
         self.attached_identities: list[tuple[object, object]] = []
+        self.result_object: object | None = None
 
     def load_document(self, path: Path) -> object:
         self.loaded.append(path)
@@ -133,11 +175,26 @@ class _FakeSession:
         return self.shape
 
     def get_object(self, name: str) -> object:
-        if name != "Box":
-            raise KeyError(name)
-        return self.identity_object
+        for obj in self.doc.Objects:
+            if getattr(obj, "Name", None) == name:
+                return obj
+        if name == "Box":
+            return self.identity_object
+        raise KeyError(name)
 
     def attach_object_identity(self, obj: object, identity: object) -> object:
+        obj.VibeCADObjectId = identity.object_id  # type: ignore[attr-defined]
+        obj.VibeCADFeatureId = identity.feature_id or ""  # type: ignore[attr-defined]
+        obj.VibeCADSemanticRole = identity.semantic_role.value  # type: ignore[attr-defined]
+        obj.VibeCADProvenance = (  # type: ignore[attr-defined]
+            '{"operation_id":"'
+            + str(identity.provenance.operation_id)
+            + '","source":"'
+            + identity.provenance.source.value
+            + '"}'
+        )
+        if not any(current is obj for current in self.doc.Objects):
+            self.doc.Objects = (*self.doc.Objects, obj)
         self.attached_identities.append((obj, identity))
         return identity
 
@@ -147,15 +204,30 @@ class _FakeSession:
                 return identity
         raise ValueError("identity missing")
 
+    def list_object_identities(self) -> tuple[tuple[object, object], ...]:
+        identities = index_entity_identities(self.doc.Objects)
+        return tuple(zip(self.doc.Objects, identities, strict=True))
+
+    def set_result_object(self, obj: object) -> None:
+        self.result_object = obj
+
 
 class _FakeRotation:
-    Q = (0.0, 0.0, 0.0, 1.0)
+    def __init__(self, q: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)) -> None:
+        self.Q = q
 
 
 class _FakePlacement:
-    def __init__(self, x: float) -> None:
-        self.Base = _FakeVector(x, 0.0, 0.0)
-        self.Rotation = _FakeRotation()
+    def __init__(
+        self,
+        x: float,
+        y: float = 0.0,
+        z: float = 0.0,
+        *,
+        q: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
+    ) -> None:
+        self.Base = _FakeVector(x, y, z)
+        self.Rotation = _FakeRotation(q)
 
 
 class _FakeEntity:
@@ -170,6 +242,211 @@ class _FakeEntity:
         self.Height = 30.0
         self.Placement = _FakePlacement(x)
         self.Shape = _FakeShape()
+
+
+def _fake_add_box(
+    session: _FakeSession,
+    *,
+    length: float,
+    width: float,
+    height: float,
+    position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+) -> object:
+    obj = session.identity_object
+    if any(current is obj for current in session.doc.Objects):
+        obj = type("ManagedBox", (), {})()
+        obj.Name = f"Box{len(session.doc.Objects):03d}"
+        obj.TypeId = "Part::Box"
+    obj.Length = length
+    obj.Width = width
+    obj.Height = height
+    obj.Placement = _FakePlacement(*position)
+    obj.Shape = _FakeShape(
+        volume=length * width * height,
+        area=2 * (length * width + length * height + width * height),
+        bbox=(length, width, height),
+        center=(
+            position[0] + length / 2,
+            position[1] + width / 2,
+            position[2] + height / 2,
+        ),
+    )
+    session.doc.Objects = (*session.doc.Objects, obj)
+    session.set_result_object(obj)
+    return object()
+
+
+def _fake_add_cylinder(
+    session: _FakeSession,
+    *,
+    radius: float,
+    height: float,
+    position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    axis: str = "z",
+) -> object:
+    obj = type("ManagedCylinder", (), {})()
+    obj.Name = "Cylinder"
+    obj.TypeId = "Part::Cylinder"
+    obj.Radius = radius
+    obj.Height = height
+    obj.Angle = 360.0
+    sine = math.sin(math.pi / 4)
+    rotations = {
+        "x": (0.0, sine, 0.0, sine),
+        "y": (-sine, 0.0, 0.0, sine),
+        "z": (0.0, 0.0, 0.0, 1.0),
+    }
+    q = rotations[axis]
+    obj.Placement = _FakePlacement(*position, q=q)
+    if axis == "x":
+        bbox = (height, 2 * radius, 2 * radius)
+        center_offset = (height / 2, 0.0, 0.0)
+    elif axis == "y":
+        bbox = (2 * radius, height, 2 * radius)
+        center_offset = (0.0, height / 2, 0.0)
+    else:
+        bbox = (2 * radius, 2 * radius, height)
+        center_offset = (0.0, 0.0, height / 2)
+    obj.Shape = _FakeShape(
+        volume=math.pi * radius**2 * height,
+        area=2 * math.pi * radius * (radius + height),
+        bbox=bbox,
+        center=tuple(
+            origin + offset
+            for origin, offset in zip(position, center_offset, strict=True)
+        ),
+    )
+    session.doc.Objects = (*session.doc.Objects, obj)
+    session.set_result_object(obj)
+    return object()
+
+
+def _fake_modify_part(
+    session: _FakeSession,
+    *,
+    name: str,
+    parameter: str,
+    value: float,
+) -> object:
+    obj = session.get_object(name)
+    setattr(obj, parameter.capitalize(), value)
+    position = (obj.Placement.Base.x, obj.Placement.Base.y, obj.Placement.Base.z)
+    obj.Shape = _FakeShape(
+        volume=obj.Length * obj.Width * obj.Height,
+        area=2
+        * (
+            obj.Length * obj.Width
+            + obj.Length * obj.Height
+            + obj.Width * obj.Height
+        ),
+        bbox=(obj.Length, obj.Width, obj.Height),
+        center=(
+            position[0] + obj.Length / 2,
+            position[1] + obj.Width / 2,
+            position[2] + obj.Height / 2,
+        ),
+    )
+    return object()
+
+
+def _fake_move_part(
+    session: _FakeSession,
+    *,
+    name: str,
+    position: tuple[float, float, float],
+) -> object:
+    obj = session.get_object(name)
+    old = (obj.Placement.Base.x, obj.Placement.Base.y, obj.Placement.Base.z)
+    obj.Placement = _FakePlacement(*position, q=obj.Placement.Rotation.Q)
+    center = obj.Shape.CenterOfMass
+    obj.Shape.BoundBox.translate(
+        position[0] - old[0],
+        position[1] - old[1],
+        position[2] - old[2],
+    )
+    obj.Shape.CenterOfMass = _FakeVector(
+        center.x + position[0] - old[0],
+        center.y + position[1] - old[1],
+        center.z + position[2] - old[2],
+    )
+    return object()
+
+
+def _fake_rotate_part(
+    session: _FakeSession,
+    *,
+    name: str,
+    axis: str,
+    angle: float,
+) -> object:
+    obj = session.get_object(name)
+    delta = executor_module._axis_rotation(axis, angle)
+    q = executor_module._quaternion_product(delta, obj.Placement.Rotation.Q)
+    base = obj.Placement.Base
+    bound_box = obj.Shape.BoundBox
+    center = _FakeVector(
+        (bound_box.XMin + bound_box.XMax) / 2.0,
+        (bound_box.YMin + bound_box.YMax) / 2.0,
+        (bound_box.ZMin + bound_box.ZMax) / 2.0,
+    )
+    radians = math.radians(angle)
+    sine = math.sin(radians)
+    cosine = math.cos(radians)
+    offset = (base.x - center.x, base.y - center.y, base.z - center.z)
+    if axis == "x":
+        rotated = (
+            offset[0],
+            cosine * offset[1] - sine * offset[2],
+            sine * offset[1] + cosine * offset[2],
+        )
+    elif axis == "y":
+        rotated = (
+            cosine * offset[0] + sine * offset[2],
+            offset[1],
+            -sine * offset[0] + cosine * offset[2],
+        )
+    else:
+        rotated = (
+            cosine * offset[0] - sine * offset[1],
+            sine * offset[0] + cosine * offset[1],
+            offset[2],
+        )
+    obj.Placement = _FakePlacement(
+        center.x + rotated[0],
+        center.y + rotated[1],
+        center.z + rotated[2],
+        q=q,
+    )
+    old_center = obj.Shape.CenterOfMass
+    center_offset = (
+        old_center.x - center.x,
+        old_center.y - center.y,
+        old_center.z - center.z,
+    )
+    if axis == "x":
+        rotated_center = (
+            center_offset[0],
+            cosine * center_offset[1] - sine * center_offset[2],
+            sine * center_offset[1] + cosine * center_offset[2],
+        )
+    elif axis == "y":
+        rotated_center = (
+            cosine * center_offset[0] + sine * center_offset[2],
+            center_offset[1],
+            -sine * center_offset[0] + cosine * center_offset[2],
+        )
+    else:
+        rotated_center = (
+            cosine * center_offset[0] - sine * center_offset[1],
+            sine * center_offset[0] + cosine * center_offset[1],
+            center_offset[2],
+        )
+    obj.Shape.CenterOfMass = _FakeVector(
+        center.x + rotated_center[0],
+        center.y + rotated_center[1],
+        center.z + rotated_center[2],
+    )
+    return object()
 
 
 def _store() -> LocalRevisionStore:
@@ -269,6 +546,7 @@ def _command(
     args: dict[str, object] | None = None,
     target: dict[str, object] | None = None,
     depends_on: tuple[str, ...] = (),
+    preserve: tuple[str, ...] = (),
 ) -> ModelCommand:
     return ModelCommand(
         id=command_id,
@@ -276,7 +554,7 @@ def _command(
         target={} if target is None else target,
         args={} if args is None else args,
         depends_on=depends_on,
-        preserve=(),
+        preserve=preserve,
         source=ValueSource.MODEL,
     )
 
@@ -289,18 +567,74 @@ def _program() -> ModelProgram:
             _command(
                 "box",
                 "create_box",
-                args={"length": 10, "width": 20, "height": 30},
+                args={"length_mm": 10, "width_mm": 20, "height_mm": 30},
             ),
             _command(
                 "modify",
                 "modify_parameter",
                 target={"object": {"command_id": "box", "slot": "object"}},
-                args={"parameter": "length", "value": 12},
+                args={"parameter": "length", "value_mm": 12},
                 depends_on=("box",),
             ),
             _command("inspect", "inspect_model", depends_on=("modify",)),
         ),
         acceptance=AcceptanceSpec(id="acceptance-executor", criteria=()),
+    )
+
+
+def _six_operation_program() -> ModelProgram:
+    return ModelProgram(
+        task_id="task-executor-six",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "box",
+                "create_box",
+                args={
+                    "length_mm": 10,
+                    "width_mm": 20,
+                    "height_mm": 30,
+                    "position_mm": (1, 2, 3),
+                },
+            ),
+            _command(
+                "cylinder",
+                "create_cylinder",
+                args={
+                    "radius_mm": 4,
+                    "height_mm": 18,
+                    "position_mm": (50, 0, 0),
+                    "axis": "x",
+                },
+            ),
+            _command(
+                "modify",
+                "modify_parameter",
+                target={"object": {"command_id": "box", "slot": "object"}},
+                args={"parameter": "length", "value_mm": 12},
+                depends_on=("box",),
+            ),
+            _command(
+                "move",
+                "move_part",
+                target={"object": {"command_id": "cylinder", "slot": "object"}},
+                args={"position_mm": (60, 5, 1)},
+                depends_on=("cylinder",),
+            ),
+            _command(
+                "rotate",
+                "rotate_part",
+                target={"object": {"command_id": "box", "slot": "object"}},
+                args={"axis": "z", "angle_deg": 90},
+                depends_on=("box", "modify"),
+            ),
+            _command(
+                "inspect",
+                "inspect_model",
+                depends_on=("rotate", "move"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-executor-six", criteria=()),
     )
 
 
@@ -415,9 +749,9 @@ def test_validate_program_reuses_authentic_validator() -> None:
     assert type(validated) is ValidatedProgram
     validated.require_authentic()
     assert tuple(command.handler_name for command in validated.commands) == (
-        "add_box",
-        "modify_part",
-        "describe_part",
+        "create_box",
+        "modify_parameter",
+        "inspect_model",
     )
 
 
@@ -680,21 +1014,16 @@ def test_execute_program_binds_fixed_handlers_once_and_preserves_order(
 ) -> None:
     calls: list[tuple[str, object]] = []
 
-    def add_box(session: object, **kwargs: object) -> dict[str, object]:
+    def add_box(session: _FakeSession, **kwargs: object) -> object:
         calls.append(("add_box", (session, kwargs)))
-        return {"ok": True, "name": "Box"}
+        return _fake_add_box(session, **kwargs)  # type: ignore[arg-type]
 
-    def modify_part(session: object, **kwargs: object) -> dict[str, object]:
+    def modify_part(session: _FakeSession, **kwargs: object) -> object:
         calls.append(("modify_part", (session, kwargs)))
-        return {"ok": True}
-
-    def describe_part(session: object) -> dict[str, object]:
-        calls.append(("describe_part", session))
-        return {"ok": True, "untrusted": "never acceptance evidence"}
+        return _fake_modify_part(session, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(executor_module, "_add_box", add_box)
     monkeypatch.setattr(executor_module, "_modify_part", modify_part)
-    monkeypatch.setattr(executor_module, "_describe_part", describe_part)
     executor = InProcessCadExecutor(store=_store())
     validated = executor.validate_program(_program())
     session = _FakeSession()
@@ -707,13 +1036,12 @@ def test_execute_program_binds_fixed_handlers_once_and_preserves_order(
     assert tuple(name for name, _ in calls) == (
         "add_box",
         "modify_part",
-        "describe_part",
     )
     assert len(outcomes) == 3
     assert all(outcome.result.ok for outcome in outcomes)
     assert all(outcome.result.revision == CANDIDATE_REVISION for outcome in outcomes)
     assert all(
-        (payload[0] if type(payload) is tuple else payload) is session for _, payload in calls
+        payload[0] is session for _, payload in calls  # type: ignore[index]
     )
     assert calls[0][1][1] == {  # type: ignore[index]
         "length": 10,
@@ -727,23 +1055,253 @@ def test_execute_program_binds_fixed_handlers_once_and_preserves_order(
     }
 
 
+def test_execute_program_runs_all_six_managed_operations_with_fixed_traces(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_add_cylinder", _fake_add_cylinder)
+    monkeypatch.setattr(executor_module, "_modify_part", _fake_modify_part)
+    monkeypatch.setattr(executor_module, "_move_part", _fake_move_part)
+    monkeypatch.setattr(executor_module, "_rotate_part", _fake_rotate_part)
+    monkeypatch.setattr(
+        executor_module,
+        "_managed_assembly_shape",
+        lambda session: session.shape,
+    )
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_six_operation_program()),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert tuple(outcome.result.operation_id for outcome in outcomes) == (
+        "box",
+        "cylinder",
+        "modify",
+        "move",
+        "rotate",
+        "inspect",
+    )
+    assert all(outcome.result.ok for outcome in outcomes)
+    values = [outcome.result.value for outcome in outcomes]
+    assert [value["operation"] for value in values] == [  # type: ignore[index]
+        "create_box",
+        "create_cylinder",
+        "modify_parameter",
+        "move_part",
+        "rotate_part",
+        "inspect_model",
+    ]
+    identities = [identity for _, identity in session.attached_identities]
+    assert [identity.provenance.operation_id for identity in identities] == [
+        "box",
+        "cylinder",
+    ]
+    assert len({identity.object_id for identity in identities}) == 2
+    assert values[0]["object_id"] == identities[0].object_id  # type: ignore[index]
+    assert values[1]["object_id"] == identities[1].object_id  # type: ignore[index]
+
+
+def test_rotate_rejects_requested_quaternion_with_wrong_translation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+
+    def rotate_with_extra_translation(
+        session: _FakeSession,
+        *,
+        name: str,
+        axis: str,
+        angle: float,
+    ) -> object:
+        result = _fake_rotate_part(
+            session,
+            name=name,
+            axis=axis,
+            angle=angle,
+        )
+        obj = session.get_object(name)
+        obj.Placement.Base.x += 1.0
+        return result
+
+    monkeypatch.setattr(
+        executor_module,
+        "_rotate_part",
+        rotate_with_extra_translation,
+    )
+    program = ModelProgram(
+        task_id="task-rotate-wrong-translation",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "box",
+                "create_box",
+                args={"length_mm": 10, "width_mm": 20, "height_mm": 30},
+            ),
+            _command(
+                "rotate",
+                "rotate_part",
+                target={"object": {"command_id": "box", "slot": "object"}},
+                args={"axis": "z", "angle_deg": 90},
+                depends_on=("box",),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-rotate-translation", criteria=()),
+    )
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(program),
+        candidate=_active(_FakeSession(), tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, False]
+
+
+def test_rotate_uses_live_bound_box_center_for_partial_cylinder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_rotate_part", _fake_rotate_part)
+    object_id = "object_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    operation_id = "import-partial-cylinder"
+    cylinder = type("ManagedPartialCylinder", (), {})()
+    cylinder.Name = "Cylinder"
+    cylinder.TypeId = "Part::Cylinder"
+    cylinder.Radius = 10.0
+    cylinder.Height = 6.0
+    cylinder.Angle = 180.0
+    cylinder.Placement = _FakePlacement(0.0)
+    cylinder.Shape = _FakeShape(
+        volume=300 * math.pi,
+        area=100 * math.pi + 60 * math.pi + 120,
+        bbox=(20.0, 10.0, 6.0),
+        center=(0.0, 40 / (3 * math.pi), 3.0),
+        bbox_center=(0.0, 5.0, 3.0),
+    )
+    cylinder.VibeCADObjectId = object_id
+    cylinder.VibeCADFeatureId = ""
+    cylinder.VibeCADSemanticRole = "primitive"
+    cylinder.VibeCADProvenance = (
+        '{"operation_id":"import-partial-cylinder","source":"imported"}'
+    )
+    session = _FakeSession()
+    session.doc.Objects = (cylinder,)
+    selector = {
+        "schema_version": 1,
+        "project_id": PROJECT_ID,
+        "revision_id": BASE_REVISION,
+        "entity_kind": "object",
+        "object_id": object_id,
+        "feature_id": None,
+        "object_type": "Part::Cylinder",
+        "semantic_role": "primitive",
+        "provenance": {"source": "imported", "operation_id": operation_id},
+        "expected_cardinality": 1,
+    }
+    program = ModelProgram(
+        task_id="task-rotate-partial-cylinder",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "rotate",
+                "rotate_part",
+                target={"object": selector},
+                args={"axis": "z", "angle_deg": 90},
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-partial-cylinder", criteria=()),
+    )
+
+    executor = InProcessCadExecutor(store=_store())
+    outcomes = executor.execute_program(
+        program=executor.validate_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True]
+    rotated = outcomes[0].result.value["after"]
+    assert rotated["placement"][:3] == pytest.approx([5.0, 5.0, 0.0])
+    assert rotated["center_of_mass_mm"] == pytest.approx(
+        [5.0 - 4 * 10 / (3 * math.pi), 5.0, 3.0]
+    )
+
+
+def test_managed_aggregate_compounds_every_identified_primitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession()
+    entities = (
+        _FakeEntity("a", x=0.0, length=12.0),
+        _FakeEntity("b", x=100.0, length=7.0),
+    )
+    session.doc.Objects = entities
+    aggregate = _FakeShape(volume=11_400.0, bbox=(107.0, 20.0, 30.0))
+    calls: list[list[object]] = []
+    part = ModuleType("Part")
+
+    def make_compound(shapes: list[object]) -> object:
+        calls.append(shapes)
+        return aggregate
+
+    part.makeCompound = make_compound  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "Part", part)
+
+    observed = executor_module._managed_assembly_shape(session)
+
+    assert observed is aggregate
+    assert calls == [[entities[0].Shape, entities[1].Shape]]
+    assert session.shape_calls == 0
+
+
+def test_compound_observation_derives_volume_weighted_center_of_mass() -> None:
+    class Solid:
+        def __init__(self, volume: float, center: tuple[float, float, float]) -> None:
+            self.Volume = volume
+            self.CenterOfMass = _FakeVector(*center)
+
+    class CompoundWithoutCenter:
+        Volume = 30.0
+        Area = 40.0
+        BoundBox = _FakeBoundBox(30.0, 2.0, 2.0)
+        Solids = (
+            Solid(10.0, (0.0, 0.0, 0.0)),
+            Solid(20.0, (30.0, 3.0, 6.0)),
+        )
+
+        @staticmethod
+        def isValid() -> bool:  # noqa: N802 - FreeCAD API spelling
+            return True
+
+    class CompoundSession:
+        @staticmethod
+        def get_assembly_shape() -> object:
+            return CompoundWithoutCenter()
+
+    observation = executor_module._shape_observation(CompoundSession())
+
+    assert observation.center_of_mass_mm == (20.0, 2.0, 4.0)
+    assert observation.solid_count == 2
+
+
+def test_derived_geometry_tolerance_accepts_roundoff_but_rejects_material_error() -> None:
+    reference = 11_650_984.713_924_531
+    assert executor_module._same_geometry_number(reference, reference + 1.862_645e-9)
+    assert not executor_module._same_geometry_number(reference, reference + 0.1)
+
+
 def test_managed_create_attaches_fresh_typed_identity_before_success(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    class ManagedSession(_FakeSession):
-        def __init__(self) -> None:
-            super().__init__()
-            self.obj = type("ManagedBox", (), {"TypeId": "Part::Box"})()
-
-        def get_object(self, name: str) -> object:
-            assert name == "Box"
-            return self.obj
-
     monkeypatch.setattr(
         executor_module,
         "_add_box",
-        lambda session, **kwargs: {"ok": True, "name": "Box"},
+        _fake_add_box,
     )
     program = ModelProgram(
         task_id="task-managed-create",
@@ -752,12 +1310,12 @@ def test_managed_create_attaches_fresh_typed_identity_before_success(
             _command(
                 "box",
                 "create_box",
-                args={"length": 10, "width": 20, "height": 30},
+                args={"length_mm": 10, "width_mm": 20, "height_mm": 30},
             ),
         ),
         acceptance=AcceptanceSpec(id="acceptance-managed-create", criteria=()),
     )
-    session = ManagedSession()
+    session = _FakeSession()
     executor = InProcessCadExecutor(store=_store())
 
     outcomes = executor.execute_program(
@@ -768,15 +1326,62 @@ def test_managed_create_attaches_fresh_typed_identity_before_success(
     assert outcomes[0].result.ok is True
     assert len(session.attached_identities) == 1
     obj, identity = session.attached_identities[0]
-    assert obj is session.obj
+    assert obj is session.identity_object
     assert identity.object_id.startswith("object_")
     assert identity.feature_id.startswith("feature_")
     assert identity.object_type == "Part::Box"
     assert identity.semantic_role.value == "primitive"
     assert identity.provenance.to_mapping() == {
         "source": "model",
-        "operation_id": None,
+        "operation_id": "box",
     }
+
+
+def test_repeated_create_handler_keeps_each_authenticated_command_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    program = ModelProgram(
+        task_id="task-repeated-create",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "box_a",
+                "create_box",
+                args={"length_mm": 2, "width_mm": 3, "height_mm": 4},
+            ),
+            _command(
+                "box_b",
+                "create_box",
+                args={
+                    "length_mm": 5,
+                    "width_mm": 6,
+                    "height_mm": 7,
+                    "position_mm": (20, 0, 0),
+                },
+                depends_on=("box_a",),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-repeated-create", criteria=()),
+    )
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True]
+    assert [
+        identity.provenance.operation_id
+        for _, identity in session.attached_identities
+    ] == ["box_a", "box_b"]
+    assert [
+        outcome.result.value["object_id"]  # type: ignore[index]
+        for outcome in outcomes
+    ] == [identity.object_id for _, identity in session.attached_identities]
 
 
 def test_managed_create_fails_closed_when_identity_authority_is_unavailable(
@@ -789,7 +1394,7 @@ def test_managed_create_fails_closed_when_identity_authority_is_unavailable(
     monkeypatch.setattr(
         executor_module,
         "_add_box",
-        lambda _session, **_kwargs: {"ok": True, "name": "Box"},
+        _fake_add_box,
     )
     executor = InProcessCadExecutor(store=_store())
     program = ModelProgram(
@@ -799,7 +1404,7 @@ def test_managed_create_fails_closed_when_identity_authority_is_unavailable(
             _command(
                 "box",
                 "create_box",
-                args={"length": 10, "width": 20, "height": 30},
+                args={"length_mm": 10, "width_mm": 20, "height_mm": 30},
             ),
         ),
         acceptance=AcceptanceSpec(id="acceptance-unmanaged-create", criteria=()),
@@ -827,7 +1432,7 @@ def test_managed_create_rejects_callable_noop_identity_authority(
     monkeypatch.setattr(
         executor_module,
         "_add_box",
-        lambda _session, **_kwargs: {"ok": True, "name": "Box"},
+        _fake_add_box,
     )
     executor = InProcessCadExecutor(store=_store())
     program = ModelProgram(
@@ -837,7 +1442,7 @@ def test_managed_create_rejects_callable_noop_identity_authority(
             _command(
                 "box",
                 "create_box",
-                args={"length": 10, "width": 20, "height": 30},
+                args={"length_mm": 10, "width_mm": 20, "height_mm": 30},
             ),
         ),
         acceptance=AcceptanceSpec(id="acceptance-noop-identity", criteria=()),
@@ -864,8 +1469,10 @@ def test_execute_preflights_all_fixed_handlers_before_first_cad_call(
         return {"ok": True}
 
     monkeypatch.setattr(executor_module, "_add_box", forbidden)
+    monkeypatch.setattr(executor_module, "_add_cylinder", forbidden)
     monkeypatch.setattr(executor_module, "_modify_part", forbidden)
-    monkeypatch.setattr(executor_module, "_describe_part", None)
+    monkeypatch.setattr(executor_module, "_move_part", forbidden)
+    monkeypatch.setattr(executor_module, "_rotate_part", None)
     executor = InProcessCadExecutor(store=_store())
 
     with pytest.raises(ExecutorError) as caught:
@@ -882,7 +1489,7 @@ def test_execute_program_stops_on_first_failure_without_retry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    calls = {"box": 0, "modify": 0, "inspect": 0}
+    calls = {"box": 0}
 
     def box(session: object, **kwargs: object) -> object:
         del session, kwargs
@@ -894,8 +1501,10 @@ def test_execute_program_stops_on_first_failure_without_retry(
         raise AssertionError("execution did not stop")
 
     monkeypatch.setattr(executor_module, "_add_box", box)
+    monkeypatch.setattr(executor_module, "_add_cylinder", forbidden)
     monkeypatch.setattr(executor_module, "_modify_part", forbidden)
-    monkeypatch.setattr(executor_module, "_describe_part", forbidden)
+    monkeypatch.setattr(executor_module, "_move_part", forbidden)
+    monkeypatch.setattr(executor_module, "_rotate_part", forbidden)
     executor = InProcessCadExecutor(store=_store())
 
     outcomes = executor.execute_program(
@@ -903,10 +1512,50 @@ def test_execute_program_stops_on_first_failure_without_retry(
         candidate=_active(_FakeSession(), tmp_path),
     )
 
-    assert calls == {"box": 1, "modify": 0, "inspect": 0}
+    assert calls == {"box": 1}
     assert len(outcomes) == 1
     assert outcomes[-1].result.ok is False
     assert "secret" not in json.dumps(outcomes[-1].result.to_mapping())
+
+
+def test_created_entity_preservation_is_enforced_between_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        executor_module,
+        "_add_box",
+        _fake_add_box,
+    )
+
+    monkeypatch.setattr(executor_module, "_modify_part", _fake_modify_part)
+    program = ModelProgram(
+        task_id="task-command-preservation",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "box",
+                "create_box",
+                args={"length_mm": 10, "width_mm": 20, "height_mm": 30},
+            ),
+            _command(
+                "modify",
+                "modify_parameter",
+                target={"object": {"command_id": "box", "slot": "object"}},
+                args={"parameter": "length", "value_mm": 12},
+                depends_on=("box",),
+                preserve=("length",),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-command-preservation", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(_FakeSession(), tmp_path),
+    )
+
+    assert tuple(outcome.result.ok for outcome in outcomes) == (True, False)
 
 
 @pytest.mark.parametrize("candidate", [object(), None])
@@ -925,19 +1574,6 @@ def test_execute_rejects_selector_project_before_session_traversal(tmp_path: Pat
         def __getattr__(self, name: str) -> object:
             raise AssertionError(f"session traversal occurred: {name}")
 
-    registry = OperationRegistry(
-        (
-            OperationMetadata(
-                operation="select_object",
-                handler_name="select_object",
-                risk_class=RiskClass.READ_ONLY,
-                evidence_required=False,
-                target_fields=(
-                    FieldMetadata("object", "selector", ValueShape.OBJECT_SELECTOR),
-                ),
-            ),
-        )
-    )
     selector = {
         "schema_version": 1,
         "project_id": "project_ffffffffffffffffffffffffffffffff",
@@ -956,11 +1592,65 @@ def test_execute_rejects_selector_project_before_session_traversal(tmp_path: Pat
         operations=(
             _command(
                 "select",
-                "select_object",
+                "modify_parameter",
                 target={"object": selector},
+                args={"parameter": "length", "value_mm": 12},
             ),
         ),
         acceptance=AcceptanceSpec(id="acceptance-wrong-project-selector", criteria=()),
+    )
+    validated = validate_model_program(program)
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).execute_program(
+            program=validated,
+            candidate=_active(SessionTraversalBomb(), tmp_path),
+        )
+
+    assert caught.value.code is ExecutorErrorCode.INVALID_CANDIDATE
+
+
+def test_execute_rejects_custom_registry_authority_before_session_traversal(
+    tmp_path: Path,
+) -> None:
+    class SessionTraversalBomb:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"session traversal occurred: {name}")
+
+    registry = OperationRegistry(
+        (
+            OperationMetadata(
+                operation="modify_parameter",
+                handler_name="modify_parameter",
+                risk_class=RiskClass.READ_ONLY,
+                evidence_required=False,
+                target_fields=(
+                    FieldMetadata("object", "target", ValueShape.OBJECT_ID),
+                ),
+                argument_fields=(
+                    FieldMetadata(
+                        "parameter",
+                        "parameter",
+                        ValueShape.ENUM,
+                        enum_values=("length",),
+                    ),
+                    FieldMetadata("value_mm", "value", ValueShape.POSITIVE_NUMBER),
+                ),
+            ),
+        )
+    )
+    program = ModelProgram(
+        task_id="task-custom-registry-bypass",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "modify",
+                "modify_parameter",
+                target={"object": "object_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                args={"parameter": "length", "value_mm": 12},
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-custom-registry-bypass", criteria=()),
     )
     validated = validate_model_program(program, registry=registry)
 
@@ -970,7 +1660,7 @@ def test_execute_rejects_selector_project_before_session_traversal(tmp_path: Pat
             candidate=_active(SessionTraversalBomb(), tmp_path),
         )
 
-    assert caught.value.code is ExecutorErrorCode.INVALID_CANDIDATE
+    assert caught.value.code is ExecutorErrorCode.INVALID_INPUT
 
 
 def test_controlled_step_export_uses_only_store_derived_exact_path(
@@ -1211,6 +1901,11 @@ def test_collect_evidence_is_per_object_and_reload_bound(
     _install_store_paths(monkeypatch, sealed, model_path, step_path)
     probes = iter((probe, base_probe))
     monkeypatch.setattr(executor_module, "_Session", lambda: next(probes))
+    monkeypatch.setattr(
+        executor_module,
+        "_managed_assembly_shape",
+        lambda session: session.shape,
+    )
 
     evidence = InProcessCadExecutor(store=_store()).collect_evidence(candidate=sealed)
 
@@ -1245,6 +1940,11 @@ def test_collect_evidence_compares_base_and_sealed_entities_for_preservation(
     _install_store_paths(monkeypatch, sealed, model_path, step_path)
     probes = iter((candidate_probe, base_probe))
     monkeypatch.setattr(executor_module, "_Session", lambda: next(probes))
+    monkeypatch.setattr(
+        executor_module,
+        "_managed_assembly_shape",
+        lambda session: session.shape,
+    )
 
     snapshot = InProcessCadExecutor(store=_store()).collect_evidence(
         candidate=sealed
@@ -1401,20 +2101,9 @@ def test_untrusted_inspect_result_cannot_supply_acceptance_evidence(
     monkeypatch.setattr(
         executor_module,
         "_add_box",
-        lambda *args, **kwargs: {"ok": True, "name": "Box"},
+        _fake_add_box,
     )
-    monkeypatch.setattr(executor_module, "_modify_part", lambda *args, **kwargs: {"ok": True})
-    monkeypatch.setattr(
-        executor_module,
-        "_describe_part",
-        lambda *args, **kwargs: {
-            "ok": True,
-            "volume": -999,
-            "bbox": {"x": 999, "y": 999, "z": 999},
-            "valid": False,
-            "solid_count": 0,
-        },
-    )
+    monkeypatch.setattr(executor_module, "_modify_part", _fake_modify_part)
     executor = InProcessCadExecutor(store=_store())
     outcomes = executor.execute_program(
         program=executor.validate_program(_program()),

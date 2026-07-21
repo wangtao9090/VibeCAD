@@ -146,17 +146,17 @@ def _three_step_program() -> ValidatedProgram:
             "box",
             "create_box",
             args={
-                "length": 10,
-                "width": 20,
-                "height": 30,
-                "position": [1, 2, 3],
+                "length_mm": 10,
+                "width_mm": 20,
+                "height_mm": 30,
+                "position_mm": [1, 2, 3],
             },
         ),
         _command(
             "modify",
             "modify_parameter",
             target={"object": {"command_id": "box", "slot": "object"}},
-            args={"parameter": "Length", "value": 12},
+            args={"parameter": "length", "value_mm": 12},
             depends_on=("box",),
         ),
         _command("inspect", depends_on=("modify",)),
@@ -374,7 +374,7 @@ def test_forged_nested_result_slot_is_rejected_before_preflight(
         _command(
             "box",
             "create_box",
-            args={"length": 1, "width": 2, "height": 3},
+            args={"length_mm": 1, "width_mm": 2, "height_mm": 3},
         )
     )
     original = program.commands[0].result_slots[0]
@@ -394,7 +394,7 @@ def test_forged_result_ref_cannot_escape_dependency_closure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     program = _three_step_program()
-    reference = program.commands[1].handler_kwargs["name"]
+    reference = program.commands[1].handler_kwargs["target"]
     object.__setattr__(reference, "command_id", "inspect")
     handlers = _HostileHandlers()
     clock = _install_clock(monkeypatch)
@@ -421,8 +421,8 @@ def test_well_typed_result_contract_forgery_is_rejected_before_preflight(
         "handler_kwargs",
         MappingProxyType(
             {
-                "name": forged_ref,
-                "parameter": "Length",
+                "target": forged_ref,
+                "parameter": "length",
                 "value": 12,
             }
         ),
@@ -505,7 +505,7 @@ def test_cross_type_scalar_equality_cannot_bypass_canonical_rebinding(
         _command(
             "box",
             "create_box",
-            args={"length": 1, "width": 2, "height": 3},
+            args={"length_mm": 1, "width_mm": 2, "height_mm": 3},
         )
     )
     forged_kwargs = dict(program.commands[0].handler_kwargs)
@@ -580,7 +580,7 @@ def test_invalid_revision_is_rejected_before_handler_mapping(
     assert repr(revision) not in str(error)
 
 
-@pytest.mark.parametrize("handlers", [None, object(), [], (), "describe_part"])
+@pytest.mark.parametrize("handlers", [None, object(), [], (), "inspect_model"])
 def test_non_mapping_handlers_are_fixed_errors_before_clock(
     handlers: object,
     monkeypatch: pytest.MonkeyPatch,
@@ -594,20 +594,20 @@ def test_non_mapping_handlers_are_fixed_errors_before_clock(
     )
 
     assert clock.calls == 0
-    assert "describe_part" not in str(error)
+    assert "inspect_model" not in str(error)
 
 
 @pytest.mark.parametrize(
     ("handlers", "code"),
     [
-        ({"describe_part": lambda: {}}, AdapterErrorCode.MISSING_HANDLER),
-        ({"add_box": lambda **kwargs: kwargs}, AdapterErrorCode.MISSING_HANDLER),
+        ({"inspect_model": lambda: {}}, AdapterErrorCode.MISSING_HANDLER),
+        ({"create_box": lambda **kwargs: kwargs}, AdapterErrorCode.MISSING_HANDLER),
         (
-            {"add_box": object(), "describe_part": lambda: {}},
+            {"create_box": object(), "inspect_model": lambda: {}},
             AdapterErrorCode.NON_CALLABLE_HANDLER,
         ),
         (
-            {"add_box": lambda **kwargs: kwargs, "describe_part": object()},
+            {"create_box": lambda **kwargs: kwargs, "inspect_model": object()},
             AdapterErrorCode.NON_CALLABLE_HANDLER,
         ),
     ],
@@ -619,16 +619,16 @@ def test_first_and_final_handler_configuration_is_preflighted_before_execution(
 ) -> None:
     calls: list[str] = []
     supplied = dict(handlers)
-    if callable(supplied.get("add_box")):
-        supplied["add_box"] = lambda **kwargs: calls.append("box") or kwargs
-    if callable(supplied.get("describe_part")):
-        supplied["describe_part"] = lambda: calls.append("inspect") or {}
+    if callable(supplied.get("create_box")):
+        supplied["create_box"] = lambda **kwargs: calls.append("box") or kwargs
+    if callable(supplied.get("inspect_model")):
+        supplied["inspect_model"] = lambda: calls.append("inspect") or {}
     clock = _install_clock(monkeypatch)
     program = _validated(
         _command(
             "box",
             "create_box",
-            args={"length": 1, "width": 2, "height": 3},
+            args={"length_mm": 1, "width_mm": 2, "height_mm": 3},
         ),
         _command("inspect", depends_on=("box",)),
     )
@@ -664,20 +664,23 @@ def test_handler_mapping_is_snapshotted_once_before_any_side_effect(
 
     def box(**kwargs: object) -> dict[str, object]:
         calls.append(f"box:{kwargs['length']}")
-        handlers["describe_part"] = lambda: calls.append("replacement") or {"valid": False}
-        return {"ok": True, "name": "Box"}
+        handlers["inspect_model"] = lambda: calls.append("replacement") or {"valid": False}
+        return {
+            "ok": True,
+            "object_id": "object_22222222222222222222222222222222",
+        }
 
     def inspect() -> dict[str, object]:
         calls.append("captured-inspect")
         return {"valid": True}
 
-    handlers = _TrackingHandlers({"add_box": box, "describe_part": inspect})
+    handlers = _TrackingHandlers({"create_box": box, "inspect_model": inspect})
     _install_clock(monkeypatch, 0, 1_000_000, 2_000_000, 3_000_000)
     program = _validated(
         _command(
             "box",
             "create_box",
-            args={"length": 1, "width": 2, "height": 3},
+            args={"length_mm": 1, "width_mm": 2, "height_mm": 3},
         ),
         _command("inspect", depends_on=("box",)),
     )
@@ -686,7 +689,7 @@ def test_handler_mapping_is_snapshotted_once_before_any_side_effect(
 
     assert [item.result.ok for item in outcomes] == [True, True]
     assert calls == ["box:1", "captured-inspect"]
-    assert handlers.accesses == ["add_box", "describe_part"]
+    assert handlers.accesses == ["create_box", "inspect_model"]
 
 
 def test_repeated_handler_name_is_resolved_once_but_each_command_runs_once(
@@ -699,14 +702,14 @@ def test_repeated_handler_name_is_resolved_once_but_each_command_runs_once(
         calls += 1
         return {"valid": True, "call": calls}
 
-    handlers = _TrackingHandlers({"describe_part": inspect})
+    handlers = _TrackingHandlers({"inspect_model": inspect})
     _install_clock(monkeypatch, 0, 1, 2, 3)
 
     outcomes = execute_validated_program(_inspect_program(2), handlers)
 
     assert len(outcomes) == 2
     assert calls == 2
-    assert handlers.accesses == ["describe_part"]
+    assert handlers.accesses == ["inspect_model"]
 
 
 def test_bound_command_fields_are_snapshotted_before_handlers_run(
@@ -716,7 +719,7 @@ def test_bound_command_fields_are_snapshotted_before_handlers_run(
         _command(
             "box",
             "create_box",
-            args={"length": 10, "width": 20, "height": 30},
+            args={"length_mm": 10, "width_mm": 20, "height_mm": 30},
         ),
         _command("inspect", depends_on=("box",)),
     )
@@ -734,7 +737,10 @@ def test_bound_command_fields_are_snapshotted_before_handlers_run(
         }
         for field, value in replacements.items():
             object.__setattr__(inspect_command, field, value)
-        return {"ok": True, "name": "Box"}
+        return {
+            "ok": True,
+            "object_id": "object_22222222222222222222222222222222",
+        }
 
     def inspect(**kwargs: object) -> dict[str, object]:
         seen.append(kwargs)
@@ -744,7 +750,7 @@ def test_bound_command_fields_are_snapshotted_before_handlers_run(
 
     outcomes = execute_validated_program(
         program,
-        {"add_box": box, "describe_part": inspect},
+        {"create_box": box, "inspect_model": inspect},
     )
 
     assert len(outcomes) == 2
@@ -753,7 +759,7 @@ def test_bound_command_fields_are_snapshotted_before_handlers_run(
     assert inspect_result.operation_id == "inspect"
     assert dict(inspect_result.facts) == {
         "operation": "inspect_model",
-        "handler_name": "describe_part",
+        "handler_name": "inspect_model",
         "risk_class": "read_only",
         "execution_profile": "headless",
     }
@@ -767,11 +773,15 @@ def test_order_kwargs_clock_trusted_facts_and_adapter_evidence(
 
     def box(**kwargs: object) -> dict[str, object]:
         calls.append(("box", kwargs))
-        return {"ok": True, "name": "Box", "volume": 6000}
+        return {
+            "ok": True,
+            "object_id": "object_22222222222222222222222222222222",
+            "volume": 6000,
+        }
 
     def modify(**kwargs: object) -> dict[str, object]:
         calls.append(("modify", kwargs))
-        return {"ok": True, "name": kwargs["name"]}
+        return {"ok": True, "object_id": kwargs["target"]}
 
     def inspect(**kwargs: object) -> dict[str, object]:
         calls.append(("inspect", kwargs))
@@ -789,7 +799,11 @@ def test_order_kwargs_clock_trusted_facts_and_adapter_evidence(
 
     outcomes = execute_validated_program(
         _three_step_program(),
-        {"add_box": box, "modify_part": modify, "describe_part": inspect},
+        {
+            "create_box": box,
+            "modify_parameter": modify,
+            "inspect_model": inspect,
+        },
         revision="candidate-r1",
     )
 
@@ -799,7 +813,14 @@ def test_order_kwargs_clock_trusted_facts_and_adapter_evidence(
             "box",
             {"length": 10, "width": 20, "height": 30, "position": (1, 2, 3)},
         ),
-        ("modify", {"name": "Box", "parameter": "Length", "value": 12}),
+        (
+            "modify",
+            {
+                "target": "object_22222222222222222222222222222222",
+                "parameter": "length",
+                "value": 12,
+            },
+        ),
         ("inspect", {}),
     ]
     assert clock.calls == 6
@@ -809,19 +830,19 @@ def test_order_kwargs_clock_trusted_facts_and_adapter_evidence(
     assert [dict(item.result.facts) for item in outcomes] == [
         {
             "operation": "create_box",
-            "handler_name": "add_box",
+            "handler_name": "create_box",
             "risk_class": "mutating",
             "execution_profile": "headless",
         },
         {
             "operation": "modify_parameter",
-            "handler_name": "modify_part",
+            "handler_name": "modify_parameter",
             "risk_class": "mutating",
             "execution_profile": "headless",
         },
         {
             "operation": "inspect_model",
-            "handler_name": "describe_part",
+            "handler_name": "inspect_model",
             "risk_class": "read_only",
             "execution_profile": "headless",
         },
@@ -848,7 +869,7 @@ def test_execution_profile_is_explicit_and_preflighted_before_handlers_or_clock(
     code: AdapterErrorCode,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    handlers = _TrackingHandlers({"describe_part": lambda: {"valid": True}})
+    handlers = _TrackingHandlers({"inspect_model": lambda: {"valid": True}})
     clock = _install_clock(monkeypatch)
 
     with pytest.raises(AdapterError) as caught:
@@ -876,24 +897,33 @@ def test_typed_result_ref_resolves_normalized_slot_before_consumer_call(
     outcomes = _execute_validated_program(
         _three_step_program(),
         {
-            "add_box": lambda **kwargs: {"ok": True, "name": "Box007"},
-            "modify_part": modify,
-            "describe_part": lambda: {"valid": True},
+            "create_box": lambda **kwargs: {
+                "ok": True,
+                "object_id": "object_22222222222222222222222222222222",
+            },
+            "modify_parameter": modify,
+            "inspect_model": lambda: {"valid": True},
         },
         execution_profile=ExecutionProfile.HEADLESS,
     )
 
     assert [item.result.ok for item in outcomes] == [True, True, True]
-    assert received == [{"name": "Box007", "parameter": "Length", "value": 12}]
+    assert received == [
+        {
+            "target": "object_22222222222222222222222222222222",
+            "parameter": "length",
+            "value": 12,
+        }
+    ]
 
 
 @pytest.mark.parametrize(
     "raw",
     [
         {"ok": True},
-        {"ok": True, "name": ""},
-        {"ok": True, "name": 7},
-        {"ok": True, "name": "x" * 257},
+        {"ok": True, "object_id": ""},
+        {"ok": True, "object_id": 7},
+        {"ok": True, "object_id": "x" * 257},
     ],
 )
 def test_invalid_declared_result_slot_fails_producer_and_stops(
@@ -912,9 +942,9 @@ def test_invalid_declared_result_slot_fails_producer_and_stops(
     outcomes = _execute_validated_program(
         _three_step_program(),
         {
-            "add_box": lambda **kwargs: raw,
-            "modify_part": forbidden,
-            "describe_part": forbidden,
+            "create_box": lambda **kwargs: raw,
+            "modify_parameter": forbidden,
+            "inspect_model": forbidden,
         },
         execution_profile=ExecutionProfile.HEADLESS,
     )
@@ -965,7 +995,7 @@ def test_first_normalized_failure_stops_globally_without_retry(
 
     outcomes = execute_validated_program(
         _inspect_program(2),
-        {"describe_part": inspect},
+        {"inspect_model": inspect},
     )
 
     assert len(outcomes) == 1
@@ -994,7 +1024,7 @@ def test_handler_exception_is_redacted_classified_and_not_retried(
 
     outcomes = execute_validated_program(
         _inspect_program(2),
-        {"describe_part": inspect},
+        {"inspect_model": inspect},
     )
 
     assert len(outcomes) == 1
@@ -1024,7 +1054,7 @@ def test_handler_base_exception_is_propagated_as_same_object(
     with pytest.raises(type(exception)) as caught:
         execute_validated_program(
             _inspect_program(2),
-            {"describe_part": inspect},
+            {"inspect_model": inspect},
         )
 
     assert caught.value is exception
@@ -1050,7 +1080,7 @@ def test_handler_base_exception_wins_when_final_clock_raises(
     clock = _install_clock(monkeypatch, 0, clock_exception)
 
     with pytest.raises(type(exception)) as caught:
-        execute_validated_program(_inspect_program(), {"describe_part": inspect})
+        execute_validated_program(_inspect_program(), {"inspect_model": inspect})
 
     assert caught.value is exception
     assert clock.calls == 2
@@ -1075,20 +1105,23 @@ def test_clock_failures_degrade_success_to_zero_without_retry(
         nonlocal calls
         del kwargs
         calls += 1
-        return {"ok": True, "name": "Box"}
+        return {
+            "ok": True,
+            "object_id": "object_22222222222222222222222222222222",
+        }
 
     clock = _install_clock(monkeypatch, *clock_values)
     program = _validated(
         _command(
             "box",
             "create_box",
-            args={"length": 1, "width": 2, "height": 3},
+            args={"length_mm": 1, "width_mm": 2, "height_mm": 3},
         ),
     )
 
     outcome = execute_validated_program(
         program,
-        {"add_box": box},
+        {"create_box": box},
     )[0]
 
     assert calls == 1
@@ -1111,20 +1144,20 @@ def test_raw_context_like_fields_cannot_override_trusted_envelope(
         "artifacts": ["untrusted.step"],
         "warnings": ["untrusted warning"],
         "evidence": ["untrusted evidence"],
-        "name": "Box",
+        "object_id": "object_22222222222222222222222222222222",
     }
     _install_clock(monkeypatch, 0, 2_500_000)
     program = _validated(
         _command(
             "box",
             "create_box",
-            args={"length": 1, "width": 2, "height": 3},
+            args={"length_mm": 1, "width_mm": 2, "height_mm": 3},
         ),
     )
 
     outcome = execute_validated_program(
         program,
-        {"add_box": lambda **kwargs: raw},
+        {"create_box": lambda **kwargs: raw},
         revision="candidate-r2",
     )[0]
 
@@ -1132,7 +1165,7 @@ def test_raw_context_like_fields_cannot_override_trusted_envelope(
     assert outcome.result.revision == "candidate-r2"
     assert dict(outcome.result.facts) == {
         "operation": "create_box",
-        "handler_name": "add_box",
+        "handler_name": "create_box",
         "risk_class": "mutating",
         "execution_profile": "headless",
     }
@@ -1152,7 +1185,7 @@ def test_absent_candidate_revision_does_not_use_program_base_revision(
 
     outcome = execute_validated_program(
         _inspect_program(),
-        {"describe_part": lambda: {"valid": True}},
+        {"inspect_model": lambda: {"valid": True}},
     )[0]
 
     assert outcome.result.revision is None
@@ -1166,7 +1199,7 @@ def test_return_value_is_deeply_frozen_against_handler_owned_mutation(
 
     outcome = execute_validated_program(
         _inspect_program(),
-        {"describe_part": lambda: raw},
+        {"inspect_model": lambda: raw},
     )[0]
     before = outcome.result.to_mapping()
 
@@ -1194,7 +1227,7 @@ def test_failed_evidence_required_command_receives_no_success_observation(
         _command(
             "box",
             "create_box",
-            args={"length": 1, "width": 2, "height": 3},
+            args={"length_mm": 1, "width_mm": 2, "height_mm": 3},
         ),
     )
 
@@ -1204,7 +1237,7 @@ def test_failed_evidence_required_command_receives_no_success_observation(
             raise failure
         return failure
 
-    outcome = execute_validated_program(program, {"add_box": box})[0]
+    outcome = execute_validated_program(program, {"create_box": box})[0]
 
     assert outcome.result.ok is False
     assert outcome.result.evidence == ()
@@ -1261,7 +1294,7 @@ program = ModelProgram(
 )
 outcomes = execute_validated_program(
     validate_model_program(program),
-    {{"describe_part": lambda: {{"valid": True}}}},
+    {{"inspect_model": lambda: {{"valid": True}}}},
     execution_profile=ExecutionProfile.HEADLESS,
 )
 assert len(outcomes) == 1 and outcomes[0].result.ok
@@ -1316,7 +1349,9 @@ def test_adapter_source_has_no_dynamic_or_reflective_handler_resolution() -> Non
 
 
 @pytest.mark.slow
-def test_real_freecad_three_step_flow_and_cleanup(existing_freecad_python: str) -> None:
+def test_real_freecad_legacy_custom_registry_flow_and_cleanup(
+    existing_freecad_python: str,
+) -> None:
     source = Path(__file__).resolve().parent.parent / "src"
     code = """
 import json
@@ -1325,7 +1360,15 @@ sys.path.insert(0, __SOURCE__)
 
 from vibecad.engine.session import Session
 from vibecad.execution.adapter import execute_validated_program
-from vibecad.execution.registry import ExecutionProfile
+from vibecad.execution.registry import (
+    ExecutionProfile,
+    FieldMetadata,
+    OperationMetadata,
+    OperationRegistry,
+    ResultSlotMetadata,
+    RiskClass,
+    ValueShape,
+)
 from vibecad.feedback.text import describe_assembly
 from vibecad.tools import modeling, modify
 from vibecad.workflow.contracts import AcceptanceSpec, ModelCommand, ModelProgram, ValueSource
@@ -1341,6 +1384,55 @@ def command(command_id, op, args=None, target=None, depends_on=()):
         preserve=(),
         source=ValueSource.MODEL,
     )
+
+legacy_registry = OperationRegistry(
+    (
+        OperationMetadata(
+            operation="create_box",
+            handler_name="add_box",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            argument_fields=(
+                FieldMetadata("length", "length", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata("width", "width", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata("height", "height", ValueShape.POSITIVE_NUMBER),
+                FieldMetadata(
+                    "position",
+                    "position",
+                    ValueShape.VECTOR3,
+                    required=False,
+                ),
+            ),
+            result_slots=(
+                ResultSlotMetadata("object", "name", ValueShape.NONBLANK_STRING),
+            ),
+        ),
+        OperationMetadata(
+            operation="modify_parameter",
+            handler_name="modify_part",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "object",
+                    "name",
+                    ValueShape.RESULT_REF,
+                    referenced_value_shape=ValueShape.NONBLANK_STRING,
+                ),
+            ),
+            argument_fields=(
+                FieldMetadata("parameter", "parameter", ValueShape.NONBLANK_STRING),
+                FieldMetadata("value", "value", ValueShape.POSITIVE_NUMBER),
+            ),
+        ),
+        OperationMetadata(
+            operation="inspect_model",
+            handler_name="describe_part",
+            risk_class=RiskClass.READ_ONLY,
+            evidence_required=False,
+        ),
+    )
+)
 
 program = ModelProgram(
     task_id="real-adapter",
@@ -1362,7 +1454,7 @@ program = ModelProgram(
     ),
     acceptance=AcceptanceSpec(id="real-acceptance", criteria=()),
 )
-validated = validate_model_program(program)
+validated = validate_model_program(program, registry=legacy_registry)
 session = Session()
 payload = {}
 try:
