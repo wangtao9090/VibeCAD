@@ -497,6 +497,110 @@ Stage 3 的全局机械 allowlist 为以下 repository-relative 路径；每个 
    per-commit gates in section 5；breakers in section 6.2；recover by verifying branch, HEAD,
    worktree, artifact revision and the last focused gate before executing the next packet。
 
+## 8.4 Packet S3-1A — typed execution contract
+
+### 1. Authorization
+
+- Approval ID: S3-A01；control revision: S3-R3.1。
+- Stable anchor: `90eec36ef0f5d44cddfcd1750f5187321db2c4e3`。
+- 本 packet 只执行 S3-1，不重开已经批准的产品决策，不继承远端 push、PR、release、
+  marketplace、外部模型花费或 G1 Workbench 权限。
+
+### 2. Anchor 与机械 allowlist
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`。
+- Branch: `codex/agent-stage3`；starting HEAD: `90eec36`。
+- 未观察到 repository-local `AGENTS.md` 或 `CLAUDE.md`；system、developer、user、
+  skill 和 permission 指令继续生效。
+- 本 packet 只允许修改：
+  - `src/vibecad/execution/registry.py`
+  - `src/vibecad/execution/__init__.py`
+  - `src/vibecad/workflow/program.py`
+  - `src/vibecad/execution/adapter.py`
+  - `src/vibecad/execution/executor.py`
+  - `tests/test_execution_registry.py`
+  - `tests/test_model_program.py`
+  - `tests/test_execution_adapter.py`
+  - `tests/test_program_executor.py`
+  - `tests/test_task_kernel_integration.py`
+  - `docs/orchestrated/vibecad-agent-stage3.md`
+
+### 3. Contract 与不变量
+
+- Wire result ref 固定为严格对象
+  `{"command_id": "<dependency command>", "slot": "<declared slot>"}`；不接受额外字段、
+  已解析值、任意 JSON pointer 或未声明 slot。
+- ref source 必须在当前 command 的 transitive dependency closure 内，slot 的 concrete
+  ValueShape 必须与目标 field 声明一致；self、forward、non-dependency、unknown、type
+  mismatch 全部在 handler 解析前 fail closed。
+- `create_box` 声明 `object` result slot，从成功结果的 `name` 字段提取 bounded string；
+  adapter 在调用消费者前解析，并在 producer slot 缺失或 shape 错误时返回固定、不可反射
+  的失败并停止。
+- ExecutionProfile 固定为 `headless`、`offscreen_gui`、`interactive_gui`。每个 operation
+  声明 profiles、FreeCAD version range、risk、resource budget、direct exposure 和 GUI
+  main-thread requirement；S3-1 真实 executor 只显式请求 `headless`，不得静默降级。
+- `create_document` 从默认 ModelProgram registry 移除。空 candidate 的固定 document
+  lifecycle 属于 trusted executor；bootstrap 失败必须 best-effort close，不能泄漏半初始化
+  Session。
+- S3-1 建立 enum、integer、finite number、quantity、vector2/3、result_ref 等封闭 shape；
+  SelectorV1 的稳定 object/feature 语义仍由 S3-2 实现，S3-1 不声称已交付。
+
+### 4. Steps 与 gates
+
+1. 在 packet allowlist 内写 genuine focused RED；RED 必须命中缺失的 metadata、ref、profile
+   或 lifecycle 行为，setup/import/syntax failure 不计。
+2. 实现最小 registry/program/adapter/executor correction，不加入首批其余 CAD handler、
+   SelectorV1、direct MCP generation 或 GUI 代码。
+3. GREEN：
+   `PYTHONPATH=src uv run pytest -q tests/test_execution_registry.py tests/test_model_program.py
+   tests/test_execution_adapter.py tests/test_program_executor.py`。
+4. Integration regression：
+   `PYTHONPATH=src uv run pytest -q tests/test_task_kernel_integration.py`；若真实 FreeCAD gate
+   需要 managed runtime，则使用现有 ready environment，不安装第二套 runtime。
+5. Static gate：`uv run ruff check` 仅覆盖本 packet 修改的 Python 文件。
+6. 由未参与写入的 agent 做 read-only diff review；controller 关闭普通缺陷后才可 named-file
+   stage 和本地语义 commit。
+
+Baseline evidence：第一次无 `PYTHONPATH=src` 的命令以四个 `ModuleNotFoundError: vibecad`
+退出 2，被判定为 setup failure；正确 baseline 以 exit 0 完成 `271 passed, 1 deselected in
+2.44s`。
+
+### 5. Execution discipline 与 breakers
+
+- Adapter: Codex；delegation: spawn-send-wait；persistence: repo-artifact；process:
+  native-session-poll。长命令若返回 session_id，只能轮询原 session。
+- 同一生产文件在任一时刻只允许 controller 写入；sub-agent 只做只读分析或独立 review。
+- 立即 breaker：预期 RED 未命中目标路径；结果 ref 能越过 dependency/type boundary；profile
+  未在首个 handler 前拒绝；bootstrap failure 泄漏 document；focused/integration gate 出现
+  不可解释回归；需要写出 allowlist；需要修改 S3-D01 至 S3-D08。
+
+### 6. Delivery boundary
+
+- 预写 commit：`feat(execution): add typed result references and execution profiles`。
+- 只做 named-file staging 和本地 commit；controller 保留 commit acceptance 与 revert 权。
+- Push 状态固定为 `not authorized`，归入 S3-RES-01。
+
+### 7. Final report contract
+
+完成时 ledger 必须追加：commit hash、RED/GREEN/集成/Ruff/独立 review 证据、实际修改文件、
+残留风险、push 状态和新的 recovery snapshot；工作树必须无未解释修改。
+
+| Entry | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| S3-E01 / 2026-07-21T03:18:00Z | S3-A01；S3-R3.1 independent plan gate PASS | 90eec36 / not authorized | diff check exit 0；plan review PASS；focused baseline 271 passed, 1 deselected | S3-RES-01 | S3-S01 | packet-issued |
+
+### Recovery snapshot S3-S01
+
+1. **Completed:** S3-R3.1 committed at `90eec36`；independent plan gate PASS；S3-1A issued；
+   correct focused baseline 271 passed, 1 deselected；push not authorized。
+2. **Next:** commit this packet control record；write genuine S3-1 RED；implement the smallest
+   contract correction；run focused, integration and Ruff gates；independent diff review；local
+   semantic commit；append ledger and snapshot。
+3. **Invariant:** one Task Kernel, model cannot own document lifecycle, refs only bind declared
+   dependency result slots, profile selection is explicit, no silent GUI/headless fallback。
+4. **Recovery:** verify branch `codex/agent-stage3`, HEAD, worktree and S3-1A allowlist before
+   editing；do not relaunch any command whose original session is still live。
+
 ## 9. 用户决策与持续执行规则
 
 本修订依据已经明确的用户方向：
