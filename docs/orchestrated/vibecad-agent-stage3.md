@@ -1332,6 +1332,257 @@ Evidence chain:
    no active pytest process and exact S3-4 allowlist；if semantic commit exists, do not replay RED or managed
    gates，continue from this snapshot into S3-5 design/review。
 
+## 8.8 Packet S3-5A — durable draft/review
+
+### 1. Authorization and dependency finding
+
+- Approval ID: S3-A01；artifact revision: S3-R3 / S3-R3.1 / S3-R3.2；bound decisions:
+  S3-D01 through S3-D08；starting anchor: `1c792aa` on `codex/agent-stage3`。
+- 本 packet 只执行 S3-5：explicit review policy、immutable durable draft identity、review-aware
+  TaskRun/state/service、Accept/Reject、sealed revision detach/re-prepare、lease reacquisition、exact HEAD
+  CAS、restart/replay recovery，以及 S3-4 transport-neutral API 的窄幅七方法扩展。它不获得
+  MCP/server/manifest、runtime/project bootstrap、artifact delivery、Workbench/IPC、manual revise、
+  provider、push、PR、release 或外部花费权限。
+- 三路只读审计一致确认：现有 sealed `RevisionRef`、Task generation CAS、project lease、HEAD CAS 和
+  reconciliation 可复用，但现有唯一 `PREPARED` commit journal、进程内 `SealedCandidate` handle 和
+  one-shot `VerificationReceipt` 都不能冒充 durable draft。长期保留 `PREPARED` 会阻塞同项目后续
+  写入，并令 stale-base 分支不可达；跨重启持久化 receipt/Session/lease 又破坏当前 capability
+  边界。因此 S3-5 必须先把 verified sealed revision 从活动提交事务安全脱离，Accept 时再在新 lease
+  下重新准备、重新观察和重新验证。
+- 这不是新产品决策：S3-D05 已明确 auto-commit 与 require-review 两条路径、Accept 的 HEAD CAS、
+  Reject 不改 HEAD 和 restart recovery。S3-5 不引入 policy 默认值、自动 rebase、reviewer 权限、
+  comment、expiry/retention/GC；这些才需要未来产品判断。
+
+### 2. Workspace anchor and mechanical allowlist
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`；branch:
+  `codex/agent-stage3`；anchor: `1c792aa`；issue-time worktree clean；focused baseline is
+  `1180 passed` for revision/candidate/task-state/task-store/task-service/task-API suites。
+- 未观察到 repository-local `AGENTS.md` 或 `CLAUDE.md`；当前 host permission model、sandbox 与
+  system/developer/user constraints 始终继续生效。
+- S3-5 control commit 只允许修改 `docs/orchestrated/vibecad-agent-stage3.md`。
+- S3-5 semantic implementation 只允许修改：
+  - `src/vibecad/workflow/state.py`
+  - `src/vibecad/workflow/service.py`
+  - `src/vibecad/execution/revisions.py`
+  - `src/vibecad/execution/candidate.py`
+  - `src/vibecad/application/task_api.py`
+  - `src/vibecad/workflow/__init__.py`、`src/vibecad/execution/__init__.py`、
+    `src/vibecad/application/__init__.py`，仅在公开 export 必需时修改
+  - `tests/test_task_state.py`
+  - `tests/test_task_store.py`
+  - `tests/test_revision_store.py`
+  - `tests/test_candidate_revision.py`
+  - `tests/test_task_service.py`
+  - `tests/test_task_api.py`
+  - `tests/test_task_kernel_integration.py`
+  - `docs/orchestrated/vibecad-agent-stage3.md`
+- 不修改 workflow contract/program/lease/store implementation、validation receipt model、registry、
+  server、manifest、runtime、engine 或 legacy Session。TaskRunStore 继续是 task+draft decision 的唯一
+  generation-CAS authority；不得新增独立 mutable DraftStore 造成双写 split-brain。需要写出清单
+  立即 breaker，不自行扩大范围。
+
+### 3. Exact durable domain contract
+
+新增 closed enum `ReviewPolicy = auto_commit | require_review`。Public `create_task` 必须显式提供
+`review_policy`；TaskService/new TaskRun 也必须收到 exact enum，创建后不可在 submit/resume 中改变。
+是否自动改变 HEAD 是调用语义，不允许隐藏默认值。
+
+TaskRun 新增 immutable `review_policy` 与 `draft: ReviewDraft | null`。`ReviewDraft` 是 frozen、
+schema-v1、path-free durable value；它本身不保存 mutable decision，exact fields 为：
+
+| Field | Binding |
+|---|---|
+| `id` | `draft_<32hex>`，由 `revision_<32hex>` 同 suffix 一一派生 |
+| `task_id`, `project_id` | owning TaskRun identity |
+| `base_revision`, `base_generation`, `base_manifest_sha256` | 可精确重建 draft base `ProjectHead` 的三元组 |
+| `revision_id`, `manifest_sha256` | immutable sealed draft revision |
+| `verification_id`, `acceptance_id`, `observation_digest` | exact passing verifier report identity |
+
+Draft 必须与 TaskRun candidate、program acceptance、passing report、revision manifest、task/project
+和 base revision 精确互绑。Immutable CAD bytes 继续只由 RevisionStore 保存；TaskRun 内 draft ref 与
+decision status 由同一次 TaskRunStore generation CAS 保存。严禁序列化 compiled acceptance、snapshot、
+receipt、lease、Session、binding 或 candidate handle。
+
+TaskStatus 精确增加 `preparing_review`、`awaiting_user_review`、`accepting_draft` 和 terminal
+`rejected`；TaskEvent 精确增加 `prepare_review`、`publish_draft`、`accept_draft`、`reject_draft`、
+`abort_accept`、`confirm_draft_uncommitted`；NextAction 精确增加 `review_draft`。Transitions：
+
+```text
+VERIFYING --prepare_review(pass report + ReviewDraft)--> PREPARING_REVIEW
+PREPARING_REVIEW --publish_draft--> AWAITING_USER_REVIEW
+AWAITING_USER_REVIEW --accept_draft--> ACCEPTING_DRAFT
+AWAITING_USER_REVIEW --reject_draft--> REJECTED
+ACCEPTING_DRAFT --commit/confirm_committed--> SUCCEEDED
+ACCEPTING_DRAFT --abort_accept--> AWAITING_USER_REVIEW
+PREPARING_REVIEW|ACCEPTING_DRAFT --require_recovery/cleanup--> RECOVERY_REQUIRED|CLEANUP_REQUIRED
+review-origin RECOVERY_REQUIRED|CLEANUP_REQUIRED --confirm_draft_uncommitted--> AWAITING_USER_REVIEW
+```
+
+`preparing_review` 与 `accepting_draft` 的 next action 是 `reconcile`；`awaiting_user_review` 是
+`review_draft`；`rejected` 是 `none`。Rejected 是正常用户决定：保留 draft/report/artifact evidence、
+`committed_revision=null`、`last_error=null`，不得伪装成 failed。Auto-commit TaskRun 永远无 draft，
+继续走原 `PASS_VERIFICATION -> COMMITTING -> SUCCEEDED`。`pass_verification` 事件只允许
+auto-commit；`prepare_review` 只允许 require-review。Auto-commit 禁止任何 review event/status/draft；
+require-review 禁止从 VERIFYING 进入原 COMMITTING，且一旦 `prepare_review` 出现，draft identity
+必须永久存在且不得改变。Review status、rejected 和 reviewed success 都必须有 matching draft + passing
+report provenance；`confirm_draft_uncommitted` 只允许 transition history 能证明 attention 源自
+preparing/accepting review，且 exact HEAD 仍是 draft base、journal 已 terminal not-committed。进入
+recovery/cleanup 必须持久化 fixed `last_error`；回到 awaiting 时清除它。未知 HEAD/journal/ancestry
+保持 recovery-required，不允许用普通 publish/abort event 绕过。
+
+### 4. Revision/candidate transaction contract
+
+Require-review 在原 lease 内按固定顺序执行：sealed evidence verification passes → TaskRun CAS to
+`preparing_review` with exact report+draft → coordinator consumes/validates the one-shot receipt and settles
+the old `PREPARED` journal as terminal `NOT_COMMITTED` without deleting the sealed Revision → closes only
+the candidate Session and keeps baseline/HEAD unchanged → returns durable `preparing_review` to the outer
+service scope → service successfully releases project lease → only then TaskRun CAS to
+`awaiting_user_review`。Awaiting 必须意味着旧 active commit transaction 已 terminal 且本次 service 已
+成功释放 lease；release failure leaves durable preparing and returns `lease_unavailable`，不得先发布
+awaiting。若 detach、release 或 final task CAS 不确定，durable `preparing_review` 由 resume/reconcile
+收敛；restart 后失效的旧进程 lease 不被当作持久状态，仍须在新的 reconcile lease 释放成功后才 publish。
+
+RevisionStore 新增一个窄 primitive，用新 transaction id 把 existing immutable revision 重新准备为
+commit candidate。它必须在同一 live project lease 下：验证 current HEAD exact equals supplied full
+base head；验证现有 journal absent 或与 current HEAD 匹配且 terminal；重新加载 revision 并验证
+project/base/manifest/artifact integrity；最后 atomic durable replace 为 matching `PREPARED` journal。
+Stale base、nonterminal unrelated journal、revision/manifest mismatch 在任何 journal/HEAD mutation 前
+fail closed。现有 `commit_revision` 仍是唯一 HEAD mutation primitive。
+
+CandidateCoordinator 新增 restart-safe reopen path：从 exact durable base head + revision ref，在新 lease
+和 current baseline Session 下加载新的 isolated draft Session，先签发 process-local review handle，但
+**不写 PREPARED journal**。Accept 随后重新 collect immutable evidence、compile stored acceptance、运行
+verifier并取得 fresh one-shot receipt；fresh report 必须 exact 等于 TaskRun 中持久报告。只有这些检查
+全部通过，coordinator 才调用上述 prepare primitive，把 handle 推进为 commit-capable sealed handle，再
+调用现有 commit。Persisted report 只能作为审计/binding truth，不能自充跨进程 commit authority。
+
+Pre-prepare 的 reopen/evidence/compile/verify/report-equality 失败必须关闭 isolated draft Session、保持
+journal 与 HEAD 不变，并把 accepting task 以 fixed review-integrity error 推进 recovery-required；它不
+自动重试。PREPARED 写入后到 HEAD 前的任何失败必须立即 reconcile：若 exact old base + terminal
+NOT_COMMITTED 可证明，则 `abort_accept`（或 attention 后 `confirm_draft_uncommitted`）回到 awaiting；
+若 exact draft HEAD 可证明则 succeeded；cleanup ambiguity 进入 cleanup-required；其他情况进入
+recovery-required。任何路径都不能留下 accepting + unknown nonterminal journal 后返回 public success。
+
+### 5. Exact service/API behavior
+
+S3-4 的 transport-neutral边界窄幅 supersede method-count，不推翻 envelope、budget、error、import 或
+capability 约束。TaskApi 的 exact seven methods 为 create/get/submit/resume/capabilities/accept/reject；
+TaskServicePort 的 exact seven methods 为 create/get/submit/continue/reconcile/accept/reject，其中 create
+接收 exact `ReviewPolicy`。新增 public methods：
+
+```text
+accept_draft({schema_version, task_id, draft_id, expected_generation})
+reject_draft({schema_version, task_id, draft_id, expected_generation})
+```
+
+两者返回现有 exact task result `{generation,next_action,task_run}` 和 exact four-field envelope。
+Create request exact fields 改为 `{schema_version,project_id,review_policy}`；unknown/missing/type/value 和
+4096-byte outer budget 保持不变。Draft id 使用 `draft_<32hex>` strict ingress；不新增 public error code，
+stale base/decision race/generation race 使用现有 `conflict`，wrong state 使用 `invalid_state`，unexpected
+port/result/exception 仍只映射 fixed `internal_error`。
+
+Accept fixed order：load exact task/draft → same-decision terminal replay check → require exact expected
+generation while awaiting → acquire project lease → load current HEAD and compare the entire persisted base
+triple before any task/journal mutation → CAS task to `accepting_draft` → reopen/reobserve/reverify/prepare/
+commit → CAS succeeded → release lease。Stale base keeps TaskRun generation/status、journal and HEAD entirely
+unchanged，仍可 Reject/inspect。Reject does not acquire project lease or touch RevisionStore/HEAD；it only CASes
+awaiting task to rejected。
+
+Idempotency key is semantic `(task_id,draft_id,decision)`。Request 先完成 outer type/range 校验，再按下表
+固定路由；一旦 task 存在 draft，mismatched `draft_id` 一律 `conflict`，不存在 draft 则一律
+`invalid_state`：
+
+| Durable state（matching draft） | Accept | Reject | expected_generation |
+|---|---|---|---|
+| `awaiting_user_review` | execute Accept | execute Reject | 必须 exact current，否则 `conflict` |
+| `accepting_draft` | same-decision replay → one reconcile, never recommit | `conflict` | replay 忽略 stale generation |
+| reviewed `succeeded` | read-only same-decision success | `conflict` | terminal replay 忽略 stale generation |
+| `rejected` | `conflict` | read-only same-decision success | terminal replay 忽略 stale generation |
+| `preparing_review` | `invalid_state` | `invalid_state` | 不执行 decision |
+| any other lifecycle | `invalid_state` | `invalid_state` | 不执行 decision |
+
+Accept 的 public success 必须是 terminal `succeeded`；若 one reconcile 仍不能证明 exact committed draft，
+service 返回 fixed recovery/conflict failure，而不是把 in-progress 状态伪装为成功。Same-decision terminal
+replay 不增加 generation；opposite decision 永远 `conflict`。Every HEAD mutation is at-most-once；no semantic
+CAD execution or model retry is introduced。
+
+API 对 conforming port 的 semantic postcondition 也固定：create 必须返回 generation zero、matching
+project、external-plan owner、needs-plan status 和 requested review policy；Accept success 必须保留 matching
+draft、status succeeded、`committed_revision == draft.revision_id` 和 require-review policy；Reject success
+必须保留 matching draft、status rejected、null committed revision 和 require-review policy。任意 exact
+StoredTaskRun 虽结构合法但不满足对应 postcondition，一律 fixed `internal_error`，不得返回 `ok:true`。
+
+`resume_task` routes `preparing_review` and `accepting_draft` to internal reconcile；it returns rejected as a
+terminal read and refuses to choose for `awaiting_user_review` with `invalid_state`。Its existing one-read plus
+at-most-one service dispatch bound remains。Capability projection remains exactly the six operation entries；
+S3-5 does not claim runtime, MCP registration or artifact delivery。
+
+### 6. Recovery matrix and objective gates
+
+Recovery is decided only from task generation/status、full draft base、revision ancestry/manifest、HEAD and
+journal truth：
+
+| Crash/replay point | Required convergence |
+|---|---|
+| task is preparing, old HEAD + PREPARED/NOT_COMMITTED sealed draft | settle terminal journal, preserve revision, publish awaiting exactly once |
+| task is awaiting after process restart | exact draft/report/artifacts reload；no lease retained；Accept/Reject callable |
+| Accept CAS persisted, HEAD still base | reconcile transaction and continue the already-authorized accept only after fresh exact reverify |
+| HEAD equals exact draft but final task response/CAS lost | prove revision/report/ancestry, mark succeeded without second HEAD commit |
+| HEAD differs from both exact base and exact draft | no commit；recovery-required/conflict, never infer success |
+| Reject response lost / repeated | same rejected task returned read-only, HEAD unchanged |
+| two drafts share a base and one commits | second Accept is stale-base conflict with no mutation；second Reject still works |
+
+Genuine RED waves must prove: state schema/status/policy/draft invariants absent；revision re-prepare and coordinator
+reopen absent；service auto/review split and durable detach absent；public create policy + Accept/Reject/replay
+absent。Setup/import/syntax failure does not count RED。Implementation then must pass：
+
+1. focused state/store/revision/candidate/service/API suite，including N/N+1 and malformed mapping coverage；
+2. real restart with a new TaskRunStore/RevisionStore/lease manager/coordinator/executor composition at
+   `awaiting_user_review`，then Accept and Reject branches；
+3. auto-commit regression、lease release/reacquire、stale full-HEAD、same/opposite duplicate decision、task CAS
+   race、prepare/HEAD/final-task durability-uncertain and unknown lineage fail-closed tests；
+4. full pytest、full Ruff、`git diff --check`、pycompile、fresh Application import forbidden-module gate；
+5. managed FreeCAD Task Kernel integration rerun with the installed environment and supported
+   `FREECAD_USER_HOME=/Users/wangtao` override；at least two independent final read-only reviews。
+
+### 7. Execution discipline, delivery and breakers
+
+- Capability profile、live capability declarations、host identity、public configuration and no-background-
+  session fabrication rules remain CP-S3-20260720 / Packet S3-4A。Sub-agents may own disjoint allowlisted files
+  after this packet is independently reviewed；no two writers may edit the same production file concurrently。
+- Control docs are independently reviewed and committed before RED/production mutation。Unexpected baseline
+  failure、out-of-allowlist write、awaiting with nonterminal journal、stale HEAD mutation、serialized receipt/
+  Session/lease、draft double-store、hidden policy default、Accept without fresh exact verification、Reject
+  touching HEAD、second HEAD commit、MCP/FreeCAD import through public API or need to change S3-D01..D08 are
+  immediate breakers。
+- Control commit: `docs(orchestration): issue S3-5 durable review packet`。Prewritten local semantic commit:
+  `feat(workflow): add durable draft review`。Only named-file staging/local commits are authorized；push remains
+  `not authorized` / S3-RES-01；no PR or release。
+- Completion evidence must append exact file list、RED/GREEN/full/Ruff/import/managed numbers、crash/replay
+  matrix、independent reviews、commit hash/push state and four-part recovery snapshot。S3-5 closes only durable
+  review residuals；runtime/project bootstrap/artifact/MCP/Workbench/second-host remain later stages。
+
+| Entry | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| S3-E09 / 2026-07-21T07:29:18Z | S3-A01；three-way dependency audit；two independent packet reviews PASS after closing state/recovery/API findings | 1c792aa / not authorized | clean anchor；focused baseline 1180；journal/receipt audit；4 state Important + 2 API Important + 2 Minor closed；diff check PASS | S3-RES-01..06, S3-RES-08..09；durable review implementation pending | S3-S09 | packet-issued |
+
+### Recovery snapshot S3-S09
+
+1. **Completed:** S3-4 semantic commit `1c792aa`；S3-5A freezes explicit review policy、immutable
+   task-owned draft ref、review state machine、detach/re-prepare transaction、release-before-awaiting、fresh
+   verification、Accept/Reject replay and exact public postconditions；two independent packet reviews PASS。
+2. **Next:** commit this docs-only control packet；from the clean control anchor create genuine disjoint RED
+   waves for state/store、revision/candidate、service/restart and TaskApi；implement only the S3-5 allowlist；
+   run focused/full/import/managed gates and two final read-only reviews；then local semantic commit。
+3. **Approved decisions:** S3-D01 through S3-D08 under S3-A01；explicit no-default policy and seven-method
+   Application contract are consequences of S3-D05, not new product scope；no repeated user approval needed；
+   push/PR/release remain unauthorized。
+4. **Recovery:** verify branch `codex/agent-stage3`、HEAD `1c792aa` or the subsequent S3-5 control commit、
+   only this document modified before control commit and no active test process；do not preserve a PREPARED
+   journal as draft or serialize process capabilities；if semantic commit exists, use its completion evidence
+   instead of replaying RED。
+
 ## 9. 用户决策与持续执行规则
 
 本修订依据已经明确的用户方向：
