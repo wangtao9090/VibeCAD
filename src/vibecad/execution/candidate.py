@@ -729,15 +729,22 @@ class CandidateCoordinator:
         with self._lock:
             captured = self._leases.get(token)
             head = self._heads.get(token)
-            if type(lease) is not _ProjectWriteLease:
+            if head is None or not self._store_lease_is_valid(head.project_id, lease):
                 raise CandidateError(CandidateErrorCode.INVALID_LEASE)
             if (
                 lease is not captured
                 or lease.released is not False
-                or head is None
                 or lease.project_id != head.project_id
             ):
                 raise CandidateError(CandidateErrorCode.INVALID_LEASE)
+
+    def _store_lease_is_valid(self, project_id, lease):
+        with self._lock:
+            try:
+                self._store.validate_project_write_lease(project_id, lease)
+            except Exception:
+                return False
+            return True
 
     def _check_preconditions(self, token, lease):
         with self._lock:
@@ -948,6 +955,49 @@ class CandidateCoordinator:
             self._retained.update({project_id: ()})
             return failed
 
+    def _settle_review_prepare_failure(self, token, project_id, lease, cleanup_hint):
+        with self._lock:
+            try:
+                reconciliation = self._store.reconcile(project_id, lease)
+            except Exception:
+                reconciliation = None
+            cleanup_failed = self._close_owned(token)
+            head = self._heads.get(token)
+            self._fail(token)
+            if reconciliation is None or head is None:
+                return CandidateError(
+                    CandidateErrorCode.RECOVERY_REQUIRED,
+                    recovery_required=True,
+                )
+            if reconciliation.head != head:
+                return CandidateError(
+                    CandidateErrorCode.RECOVERY_REQUIRED,
+                    recovery_required=True,
+                )
+            if reconciliation.status is _ReconciliationStatus.COMMITTED:
+                return CandidateError(
+                    CandidateErrorCode.RECOVERY_REQUIRED,
+                    recovery_required=True,
+                )
+            if (
+                cleanup_hint
+                or cleanup_failed
+                or reconciliation.status is _ReconciliationStatus.CLEANUP_REQUIRED
+            ):
+                return CandidateError(
+                    CandidateErrorCode.CLEANUP_REQUIRED,
+                    cleanup_required=True,
+                )
+            if reconciliation.status in {
+                _ReconciliationStatus.CLEAN,
+                _ReconciliationStatus.NOT_COMMITTED,
+            }:
+                return CandidateError(CandidateErrorCode.STORE_FAILURE)
+            return CandidateError(
+                CandidateErrorCode.RECOVERY_REQUIRED,
+                recovery_required=True,
+            )
+
     def _commit_result(
         self,
         candidate,
@@ -1056,9 +1106,7 @@ class CandidateCoordinator:
             _require_project(project_id)
             if type(expected_head) is not _ProjectHead or expected_head.project_id != project_id:
                 raise CandidateError(CandidateErrorCode.INVALID_INPUT)
-            if type(lease) is not _ProjectWriteLease:
-                raise CandidateError(CandidateErrorCode.INVALID_LEASE)
-            if lease.project_id != project_id or lease.released is not False:
+            if not self._store_lease_is_valid(project_id, lease):
                 raise CandidateError(CandidateErrorCode.INVALID_LEASE)
             try:
                 durable_head = self._store.load_head(project_id)
@@ -1233,6 +1281,212 @@ class CandidateCoordinator:
             )
             self._issue(token, "sealed", sealed, replacement)
             return sealed
+
+    def reopen_review(
+        self,
+        *,
+        project_id: str,
+        base_head: _ProjectHead,
+        revision: _RevisionRef,
+        lease: _ProjectWriteLease,
+    ) -> SealedCandidate:
+        with self._lock:
+            _require_project(project_id)
+            if type(base_head) is not _ProjectHead or base_head.project_id != project_id:
+                raise CandidateError(CandidateErrorCode.INVALID_INPUT)
+            if type(revision) is not _RevisionRef or revision.project_id != project_id:
+                raise CandidateError(CandidateErrorCode.INVALID_INPUT)
+            if revision.base_revision != base_head.revision_id:
+                raise CandidateError(CandidateErrorCode.CONFLICT)
+            if not self._store_lease_is_valid(project_id, lease):
+                raise CandidateError(CandidateErrorCode.INVALID_LEASE)
+            try:
+                durable_head = self._store.load_head(project_id)
+            except Exception:
+                raise CandidateError(CandidateErrorCode.STORE_FAILURE) from None
+            if durable_head != base_head:
+                raise CandidateError(CandidateErrorCode.CONFLICT)
+            try:
+                durable_revision = self._store.load_revision(project_id, revision.id)
+            except Exception:
+                raise CandidateError(CandidateErrorCode.STORE_FAILURE) from None
+            if durable_revision != revision:
+                raise CandidateError(CandidateErrorCode.CONFLICT)
+            try:
+                baseline = self._session_slot.current()
+            except Exception:
+                raise CandidateError(CandidateErrorCode.CONFLICT) from None
+            if (
+                baseline.project_id != project_id
+                or baseline.revision_id != base_head.revision_id
+            ):
+                raise CandidateError(CandidateErrorCode.CONFLICT)
+            try:
+                immutable_path = self._store.revision_model_path(project_id, revision.id)
+            except Exception:
+                raise CandidateError(CandidateErrorCode.STORE_FAILURE) from None
+            token = self._start_lineage(
+                project_id,
+                base_head,
+                baseline,
+                lease,
+                revision.id,
+                (immutable_path, immutable_path),
+            )
+            try:
+                binding = SessionBinding(
+                    project_id=project_id,
+                    revision_id=revision.id,
+                    session=self._snapshot_port.load_fcstd(immutable_path),
+                )
+            except Exception:
+                self._fail(token)
+                raise CandidateError(CandidateErrorCode.CAD_FAILURE) from None
+            if self._aliases_owned(token, binding):
+                self._fail(token)
+                raise CandidateError(CandidateErrorCode.SESSION_ALIAS)
+            reopened = SealedCandidate(
+                project_id=project_id,
+                base_head=base_head,
+                revision=durable_revision,
+                binding=binding,
+            )
+            self._issue(token, "review_open", reopened, binding)
+            return reopened
+
+    def prepare_review(
+        self,
+        *,
+        candidate: SealedCandidate,
+        lease: _ProjectWriteLease,
+    ) -> SealedCandidate:
+        with self._lock:
+            token, cached = self._lookup(candidate, "review_open", "prepare_review")
+            if cached is not None:
+                raise CandidateError(CandidateErrorCode.ALREADY_TERMINAL)
+            self._check_preconditions(token, lease)
+            try:
+                prepared_revision = self._store.prepare_revision(
+                    candidate.project_id,
+                    candidate.base_head,
+                    candidate.revision.id,
+                    candidate.revision.manifest_sha256,
+                    lease,
+                )
+            except _RevisionStoreError as error:
+                if error.code is _RevisionStoreErrorCode.INVALID_LEASE:
+                    raise CandidateError(CandidateErrorCode.INVALID_LEASE) from None
+                if error.code is _RevisionStoreErrorCode.CONFLICT:
+                    cleanup_failed = self._close_owned(token)
+                    self._fail(token)
+                    if cleanup_failed:
+                        raise CandidateError(
+                            CandidateErrorCode.CLEANUP_REQUIRED,
+                            cleanup_required=True,
+                        ) from None
+                    raise CandidateError(CandidateErrorCode.CONFLICT) from None
+                raise self._settle_review_prepare_failure(
+                    token,
+                    candidate.project_id,
+                    lease,
+                    error.code is _RevisionStoreErrorCode.CLEANUP_REQUIRED,
+                ) from None
+            except Exception:
+                raise self._settle_review_prepare_failure(
+                    token,
+                    candidate.project_id,
+                    lease,
+                    False,
+                ) from None
+            if prepared_revision != candidate.revision:
+                raise self._settle_review_prepare_failure(
+                    token,
+                    candidate.project_id,
+                    lease,
+                    False,
+                )
+            prepared = SealedCandidate(
+                project_id=candidate.project_id,
+                base_head=candidate.base_head,
+                revision=prepared_revision,
+                binding=candidate.binding,
+            )
+            self._issue(token, "sealed", prepared, candidate.binding)
+            return prepared
+
+    def discard_review(
+        self,
+        *,
+        candidate: SealedCandidate,
+        lease: _ProjectWriteLease,
+    ) -> None:
+        with self._lock:
+            token = self._owners.get(candidate)
+            if (
+                token is not None
+                and self._stages.get(token) == "terminal"
+                and self._terminal_kinds.get(token) == "discard_review"
+            ):
+                return None
+            token, cached = self._lookup(candidate, "review_open", "discard_review")
+            if cached is not None:
+                raise CandidateError(CandidateErrorCode.ALREADY_TERMINAL)
+            self._check_preconditions(token, lease)
+            if self._close_owned(token):
+                self._fail(token)
+                raise CandidateError(
+                    CandidateErrorCode.CLEANUP_REQUIRED,
+                    cleanup_required=True,
+                )
+            self._finish(token, "discard_review", None)
+            return None
+
+    def publish_review(
+        self,
+        *,
+        candidate: SealedCandidate,
+        receipt: _VerificationReceipt,
+        compiled: _CompiledAcceptance,
+        snapshot: _ObservationSnapshot,
+        lease: _ProjectWriteLease,
+    ) -> CandidateRollbackResult:
+        with self._lock:
+            token, cached = self._lookup(candidate, "sealed", "publish_review")
+            if cached is not None:
+                return cached
+            self._check_preconditions(token, lease)
+            try:
+                _consume_verification_receipt(
+                    receipt,
+                    compiled,
+                    snapshot,
+                    candidate_revision=candidate.revision.id,
+                    manifest_sha256=candidate.revision.manifest_sha256,
+                )
+            except _ValidationError:
+                raise self._abort(
+                    token,
+                    lease,
+                    CandidateErrorCode.RECEIPT_REJECTED,
+                ) from None
+            except Exception:
+                raise self._abort(
+                    token,
+                    lease,
+                    CandidateErrorCode.RECEIPT_REJECTED,
+                ) from None
+            try:
+                result = CandidateCoordinator.rollback(
+                    self,
+                    candidate=candidate,
+                    lease=lease,
+                )
+            except CandidateError:
+                self._close_owned(token)
+                self._fail(token)
+                raise
+            self._terminal_kinds.update({token: "publish_review"})
+            return result
 
     def commit(
         self,

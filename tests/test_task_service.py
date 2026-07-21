@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,15 +14,21 @@ from vibecad.execution.candidate import (
     CandidateCoordinator,
     CandidateError,
     CandidateErrorCode,
+    CandidateReconcileResult,
     CandidateReconcileStatus,
+    CandidateRollbackResult,
     CandidateRollbackStatus,
     SessionBinding,
 )
 from vibecad.execution.executor import CandidateEvidence, InProcessCadExecutor
 from vibecad.execution.results import NormalizedToolOutcome
 from vibecad.execution.revisions import (
+    CommitJournal,
+    CommitJournalState,
     LocalRevisionStore,
     ProjectHead,
+    ReconciliationResult,
+    ReconciliationStatus,
     RevisionArtifactRef,
     RevisionRef,
 )
@@ -56,6 +63,7 @@ from vibecad.workflow.service import (
 )
 from vibecad.workflow.state import (
     ReasoningOwner,
+    ReviewPolicy,
     TaskArtifactRef,
     TaskEvent,
     TaskStatus,
@@ -404,10 +412,22 @@ class _Coordinator(CandidateCoordinator):
         self.commit_status = CandidateCommitStatus.COMMITTED
         self.reconcile_status = CandidateReconcileStatus.CLEAN
         self.reconcile_live_revision: str | None = None
+        self.reconcile_journal_candidate: str | None = None
+        self.reconcile_journal_manifest: str | None = None
         self.commit_calls = 0
         self.rollback_calls = 0
         self.rollback_invocations = 0
+        self.publish_review_calls = 0
+        self.reopen_review_calls = 0
+        self.prepare_review_calls = 0
+        self.discard_review_calls = 0
         self.receipt = None
+        self.review_live_binding = SessionBinding(
+            project_id=PROJECT_ID,
+            revision_id=BASE_REVISION,
+            session=object(),
+        )
+        self.publish_review_override: object | None = None
 
     def _maybe_fail(self, stage: str) -> None:
         if self.terminal_failure_stage == stage:
@@ -467,6 +487,93 @@ class _Coordinator(CandidateCoordinator):
             recovery_required=self.rollback_status is CandidateRollbackStatus.RECOVERY_REQUIRED,
         )
 
+    def publish_review(
+        self,
+        *,
+        candidate: object,
+        receipt: object,
+        compiled: object,
+        snapshot: object,
+        lease: object,
+    ) -> object:
+        del compiled, snapshot, lease
+        self.log.append("candidate.publish_review")
+        self.publish_review_calls += 1
+        self.receipt = receipt
+        self.rollback_calls += 1
+        if self.publish_review_override is not None:
+            return self.publish_review_override
+        if self.rollback_status is CandidateRollbackStatus.NOT_COMMITTED:
+            journal = CommitJournal(
+                id="transaction_0123456789abcdef0123456789abcdef",
+                project_id=PROJECT_ID,
+                expected_head=self.revisions.head,
+                candidate_revision=candidate.revision.id,
+                manifest_sha256=candidate.revision.manifest_sha256,
+                state=CommitJournalState.NOT_COMMITTED,
+            )
+            reconciliation = ReconciliationResult(
+                project_id=PROJECT_ID,
+                status=ReconciliationStatus.NOT_COMMITTED,
+                head=self.revisions.head,
+                journal=journal,
+            )
+            return CandidateRollbackResult(
+                status=CandidateRollbackStatus.NOT_COMMITTED,
+                head=self.revisions.head,
+                live_binding=self.review_live_binding,
+                reconciliation=reconciliation,
+                head_committed=False,
+                slot_promoted=False,
+                cleanup_required=False,
+                recovery_required=False,
+                cleanup_binding=None,
+            )
+        return SimpleNamespace(
+            status=self.rollback_status,
+            head=self.revisions.head,
+            head_committed=False,
+            cleanup_required=self.rollback_status is CandidateRollbackStatus.CLEANUP_REQUIRED,
+            recovery_required=self.rollback_status is CandidateRollbackStatus.RECOVERY_REQUIRED,
+        )
+
+    def reopen_review(
+        self,
+        *,
+        project_id: str,
+        base_head: ProjectHead,
+        revision: RevisionRef,
+        lease: object,
+    ) -> object:
+        del lease
+        self.log.append("candidate.reopen_review")
+        self.reopen_review_calls += 1
+        self._maybe_fail("reopen_review")
+        return SimpleNamespace(
+            project_id=project_id,
+            base_head=base_head,
+            revision=revision,
+            binding=SessionBinding(
+                project_id=project_id,
+                revision_id=revision.id,
+                session=object(),
+            ),
+            stage="review_open",
+        )
+
+    def prepare_review(self, *, candidate: object, lease: object) -> object:
+        del lease
+        self.log.append("candidate.prepare_review")
+        self.prepare_review_calls += 1
+        self._maybe_fail("prepare_review")
+        return SimpleNamespace(**{**candidate.__dict__, "stage": "sealed"})
+
+    def discard_review(self, *, candidate: object, lease: object) -> None:
+        del candidate, lease
+        self.log.append("candidate.discard_review")
+        self.discard_review_calls += 1
+        self._maybe_fail("discard_review")
+
     def commit(
         self,
         *,
@@ -499,6 +606,72 @@ class _Coordinator(CandidateCoordinator):
     def reconcile(self, *, project_id: str, lease: object) -> object:
         del project_id, lease
         self.log.append("candidate.reconcile")
+        if self.reconcile_status in {
+            CandidateReconcileStatus.CLEAN,
+            CandidateReconcileStatus.NOT_COMMITTED,
+            CandidateReconcileStatus.COMMITTED,
+        }:
+            head = self.revisions.head
+            journal = None
+            reconciliation_status = ReconciliationStatus.CLEAN
+            head_committed = True
+            slot_promoted = True
+            if self.reconcile_status is CandidateReconcileStatus.NOT_COMMITTED:
+                reconciliation_status = ReconciliationStatus.NOT_COMMITTED
+                candidate_revision = self.reconcile_journal_candidate or CANDIDATE_REVISION
+                manifest_sha256 = self.reconcile_journal_manifest or CANDIDATE_MANIFEST
+                if head.revision_id == candidate_revision:
+                    candidate_revision = DESCENDANT_REVISION
+                    manifest_sha256 = "e" * 64
+                journal = CommitJournal(
+                    id="transaction_abcdefabcdefabcdefabcdefabcdefab",
+                    project_id=PROJECT_ID,
+                    expected_head=head,
+                    candidate_revision=candidate_revision,
+                    manifest_sha256=manifest_sha256,
+                    state=CommitJournalState.NOT_COMMITTED,
+                )
+                head_committed = False
+                slot_promoted = False
+            elif self.reconcile_status is CandidateReconcileStatus.COMMITTED:
+                reconciliation_status = ReconciliationStatus.COMMITTED
+                expected_head = _base_head()
+                if head == _base_head():
+                    expected_head = ProjectHead(
+                        project_id=PROJECT_ID,
+                        generation=0,
+                        revision_id=BASE_PARENT_REVISION,
+                        manifest_sha256="0" * 64,
+                    )
+                journal = CommitJournal(
+                    id="transaction_fedcbafedcbafedcbafedcbafedcbafe",
+                    project_id=PROJECT_ID,
+                    expected_head=expected_head,
+                    candidate_revision=head.revision_id,
+                    manifest_sha256=head.manifest_sha256,
+                    state=CommitJournalState.COMMITTED,
+                )
+            reconciliation = ReconciliationResult(
+                project_id=PROJECT_ID,
+                status=reconciliation_status,
+                head=head,
+                journal=journal,
+            )
+            return CandidateReconcileResult(
+                status=self.reconcile_status,
+                head=head,
+                live_binding=SessionBinding(
+                    project_id=PROJECT_ID,
+                    revision_id=self.reconcile_live_revision or head.revision_id,
+                    session=object(),
+                ),
+                reconciliation=reconciliation,
+                head_committed=head_committed,
+                slot_promoted=slot_promoted,
+                cleanup_required=False,
+                recovery_required=False,
+                cleanup_binding=None,
+            )
         return SimpleNamespace(
             status=self.reconcile_status,
             head=self.revisions.head,
@@ -582,15 +755,24 @@ class _Rig:
             executor=self.executor,
         )
 
-    def create(self) -> StoredTaskRun:
+    def create(
+        self,
+        review_policy: ReviewPolicy = ReviewPolicy.AUTO_COMMIT,
+    ) -> StoredTaskRun:
         return self.service.create_task(
             task_id=TASK_ID,
             project_id=PROJECT_ID,
             reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+            review_policy=review_policy,
         )
 
-    def run(self, program: ModelProgram | None = None) -> StoredTaskRun:
-        created = self.create()
+    def run(
+        self,
+        program: ModelProgram | None = None,
+        *,
+        review_policy: ReviewPolicy = ReviewPolicy.AUTO_COMMIT,
+    ) -> StoredTaskRun:
+        created = self.create(review_policy)
         return self.service.submit_model_program(
             task_id=TASK_ID,
             expected_generation=created.generation,
@@ -760,7 +942,12 @@ def test_create_rejects_non_external_reasoning_without_store_or_project(
 ) -> None:
     rig = _Rig()
     with pytest.raises(TaskServiceError) as caught:
-        rig.service.create_task(task_id=TASK_ID, project_id=PROJECT_ID, reasoning_owner=owner)
+        rig.service.create_task(
+            task_id=TASK_ID,
+            project_id=PROJECT_ID,
+            reasoning_owner=owner,
+            review_policy=ReviewPolicy.AUTO_COMMIT,
+        )
     assert caught.value.code is TaskServiceErrorCode.UNSUPPORTED_REASONING_OWNER
     assert rig.log == []
 
@@ -812,6 +999,7 @@ def test_real_task_store_round_trips_float_rich_submit_to_terminal(
         task_id=TASK_ID,
         project_id=PROJECT_ID,
         reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
     )
     terminal = rig.service.submit_model_program(
         task_id=TASK_ID,
@@ -1557,3 +1745,505 @@ def test_get_missing_and_invalid_continue_state_are_fixed() -> None:
     with pytest.raises(TaskServiceError) as invalid:
         rig.service.continue_task(task_id=TASK_ID, expected_generation=created.generation)
     assert invalid.value.code is TaskServiceErrorCode.INVALID_STATE
+
+
+def test_durable_review_service_contract_is_explicit() -> None:
+    state_module = __import__("vibecad.workflow.state", fromlist=["ReviewPolicy"])
+    assert hasattr(state_module, "ReviewPolicy")
+    assert hasattr(state_module, "ReviewDraft")
+    create_parameters = inspect.signature(TaskService.create_task).parameters
+    assert "review_policy" in create_parameters
+    assert hasattr(TaskService, "accept_draft")
+    assert hasattr(TaskService, "reject_draft")
+
+
+def test_require_review_detaches_and_releases_before_publishing_awaiting() -> None:
+    rig = _Rig()
+    stored = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    task = stored.task_run
+    assert task.status is TaskStatus.AWAITING_USER_REVIEW
+    assert task.review_policy is ReviewPolicy.REQUIRE_REVIEW
+    assert task.draft is not None
+    assert task.draft.revision_id == CANDIDATE_REVISION
+    assert task.draft.base_revision == BASE_REVISION
+    assert task.draft.base_generation == _base_head().generation
+    assert task.draft.base_manifest_sha256 == BASE_MANIFEST
+    assert task.committed_revision is None
+    assert rig.revisions.head == _base_head()
+    assert rig.coordinator.publish_review_calls == 1
+    assert rig.coordinator.commit_calls == 0
+    assert rig.log.index("task.cas:preparing_review") < rig.log.index(
+        "candidate.publish_review"
+    )
+    assert rig.log.index("candidate.publish_review") < rig.log.index("lease.release")
+    assert rig.log.index("lease.release") < rig.log.index(
+        "task.cas:awaiting_user_review"
+    )
+
+
+def test_attribute_compatible_detach_claim_cannot_publish_a_draft() -> None:
+    rig = _Rig()
+    rig.coordinator.publish_review_override = SimpleNamespace(
+        status=CandidateRollbackStatus.NOT_COMMITTED,
+        head=_base_head(),
+        head_committed=False,
+        cleanup_required=False,
+        recovery_required=False,
+    )
+
+    stored = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+
+    assert stored.task_run.status is TaskStatus.RECOVERY_REQUIRED
+    assert stored.task_run.draft is not None
+    assert stored.task_run.committed_revision is None
+    assert rig.revisions.head == _base_head()
+    assert rig.coordinator.commit_calls == 0
+    assert "task.cas:awaiting_user_review" not in rig.log
+
+
+def test_reject_is_head_neutral_and_same_decision_replay_is_read_only() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    rig.log.clear()
+    rejected = rig.service.reject_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+    assert rejected.task_run.status is TaskStatus.REJECTED
+    assert rejected.task_run.committed_revision is None
+    assert rig.revisions.head == _base_head()
+    assert "lease.acquire" not in rig.log
+    generation = rejected.generation
+    replay = rig.service.reject_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+    assert replay == rejected
+    assert replay.generation == generation
+    with pytest.raises(TaskServiceError) as opposite:
+        rig.service.accept_draft(
+            task_id=TASK_ID,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+    assert opposite.value.code is TaskServiceErrorCode.CONFLICT
+
+
+def test_accept_reacquires_reverifies_commits_once_and_replays_read_only() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    rig.log.clear()
+    accepted = rig.service.accept_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+    assert accepted.task_run.status is TaskStatus.SUCCEEDED
+    assert accepted.task_run.committed_revision == CANDIDATE_REVISION
+    assert accepted.task_run.draft == awaiting.task_run.draft
+    assert rig.coordinator.reopen_review_calls == 1
+    assert rig.coordinator.prepare_review_calls == 1
+    assert rig.coordinator.commit_calls == 1
+    assert rig.log.index("lease.acquire") < rig.log.index("task.cas:accepting_draft")
+    assert rig.log.index("task.cas:accepting_draft") < rig.log.index(
+        "candidate.reopen_review"
+    )
+    assert rig.log.index("executor.collect") < rig.log.index("candidate.prepare_review")
+    assert rig.log.index("candidate.prepare_review") < rig.log.index("candidate.commit")
+    assert rig.log.index("candidate.commit") < rig.log.index("lease.release")
+    replay = rig.service.accept_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+    assert replay == accepted
+    assert rig.coordinator.commit_calls == 1
+    with pytest.raises(TaskServiceError) as opposite:
+        rig.service.reject_draft(
+            task_id=TASK_ID,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+    assert opposite.value.code is TaskServiceErrorCode.CONFLICT
+
+
+def test_stale_draft_accept_changes_no_task_journal_or_head() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    rig.revisions.revisions[DESCENDANT_REVISION] = _descendant_revision()
+    rig.revisions.head = _descendant_head()
+    rig.log.clear()
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.accept_draft(
+            task_id=TASK_ID,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+    assert caught.value.code is TaskServiceErrorCode.CONFLICT
+    assert rig.tasks.records[TASK_ID] == awaiting
+    assert rig.revisions.head == _descendant_head()
+    assert rig.coordinator.reopen_review_calls == 0
+    assert rig.coordinator.prepare_review_calls == 0
+    assert rig.coordinator.commit_calls == 0
+
+
+def test_review_release_failure_never_publishes_awaiting_and_resume_recovers() -> None:
+    rig = _Rig()
+    rig.leases.issuer.error = True
+    with pytest.raises(TaskServiceError) as caught:
+        rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert caught.value.code is TaskServiceErrorCode.LEASE_UNAVAILABLE
+    preparing = rig.tasks.records[TASK_ID]
+    assert preparing.task_run.status is TaskStatus.PREPARING_REVIEW
+    assert not any(item == "task.cas:awaiting_user_review" for item in rig.log)
+    rig.leases.issuer.error = False
+    rig.coordinator.reconcile_status = CandidateReconcileStatus.NOT_COMMITTED
+    recovered = rig.service.reconcile_task(
+        task_id=TASK_ID,
+        expected_generation=preparing.generation,
+    )
+    assert recovered.task_run.status is TaskStatus.AWAITING_USER_REVIEW
+    final_release = max(index for index, item in enumerate(rig.log) if item == "lease.release")
+    final_publish = max(
+        index
+        for index, item in enumerate(rig.log)
+        if item == "task.cas:awaiting_user_review"
+    )
+    assert final_release < final_publish
+
+
+@pytest.mark.parametrize("journal_mode", ["missing", "wrong_candidate", "wrong_manifest"])
+def test_preparing_review_requires_its_exact_terminal_journal(journal_mode: str) -> None:
+    rig = _Rig()
+    rig.leases.issuer.error = True
+    with pytest.raises(TaskServiceError):
+        rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    preparing = rig.tasks.records[TASK_ID]
+    assert preparing.task_run.status is TaskStatus.PREPARING_REVIEW
+    rig.leases.issuer.error = False
+    if journal_mode == "missing":
+        rig.coordinator.reconcile_status = CandidateReconcileStatus.CLEAN
+    else:
+        rig.coordinator.reconcile_status = CandidateReconcileStatus.NOT_COMMITTED
+        if journal_mode == "wrong_candidate":
+            rig.coordinator.reconcile_journal_candidate = DESCENDANT_REVISION
+        else:
+            rig.coordinator.reconcile_journal_manifest = "e" * 64
+
+    recovered = rig.service.reconcile_task(
+        task_id=TASK_ID,
+        expected_generation=preparing.generation,
+    )
+
+    assert recovered.task_run.status is TaskStatus.RECOVERY_REQUIRED
+    assert recovered.task_run.committed_revision is None
+    assert rig.revisions.head == _base_head()
+    assert "task.cas:awaiting_user_review" not in rig.log
+
+
+def test_accept_response_loss_reconciles_exact_head_without_second_commit() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    rig.tasks.fail_status = TaskStatus.SUCCEEDED
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.accept_draft(
+            task_id=TASK_ID,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+    assert caught.value.code is TaskServiceErrorCode.RECOVERY_REQUIRED
+    accepting = rig.tasks.records[TASK_ID]
+    assert accepting.task_run.status is TaskStatus.ACCEPTING_DRAFT
+    assert rig.revisions.head == _candidate_head()
+    assert rig.coordinator.commit_calls == 1
+    rig.tasks.fail_status = None
+    rig.coordinator.reconcile_status = CandidateReconcileStatus.COMMITTED
+    rig.coordinator.reconcile_live_revision = CANDIDATE_REVISION
+    recovered = rig.service.accept_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+    assert recovered.task_run.status is TaskStatus.SUCCEEDED
+    assert recovered.task_run.committed_revision == CANDIDATE_REVISION
+    assert rig.coordinator.commit_calls == 1
+
+
+def test_accept_response_loss_reconciles_through_a_later_descendant_without_recommit() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    rig.tasks.fail_status = TaskStatus.SUCCEEDED
+    with pytest.raises(TaskServiceError):
+        rig.service.accept_draft(
+            task_id=TASK_ID,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+    accepting = rig.tasks.records[TASK_ID]
+    assert accepting.task_run.status is TaskStatus.ACCEPTING_DRAFT
+    assert rig.coordinator.commit_calls == 1
+    rig.tasks.fail_status = None
+    rig.revisions.revisions[DESCENDANT_REVISION] = _descendant_revision()
+    rig.revisions.head = _descendant_head()
+    rig.coordinator.reconcile_status = CandidateReconcileStatus.CLEAN
+    rig.coordinator.reconcile_live_revision = DESCENDANT_REVISION
+
+    recovered = rig.service.accept_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+
+    assert recovered.task_run.status is TaskStatus.SUCCEEDED
+    assert recovered.task_run.committed_revision == CANDIDATE_REVISION
+    assert rig.revisions.head == _descendant_head()
+    assert rig.coordinator.commit_calls == 1
+
+
+@pytest.mark.parametrize("terminal_mode", ["absent", "unrelated", "prior_committed"])
+def test_accepting_restart_allows_any_terminal_base_transaction(
+    terminal_mode: str,
+) -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    accepting = StoredTaskRun(
+        generation=awaiting.generation + 1,
+        task_run=transition_task(awaiting.task_run, TaskEvent.ACCEPT_DRAFT),
+    )
+    rig.tasks.records[TASK_ID] = accepting
+    if terminal_mode == "absent":
+        rig.coordinator.reconcile_status = CandidateReconcileStatus.CLEAN
+    elif terminal_mode == "unrelated":
+        rig.coordinator.reconcile_status = CandidateReconcileStatus.NOT_COMMITTED
+        rig.coordinator.reconcile_journal_candidate = DESCENDANT_REVISION
+        rig.coordinator.reconcile_journal_manifest = "e" * 64
+    else:
+        rig.coordinator.reconcile_status = CandidateReconcileStatus.COMMITTED
+
+    recovered = rig.service.accept_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+
+    assert recovered.task_run.status is TaskStatus.SUCCEEDED
+    assert recovered.task_run.committed_revision == CANDIDATE_REVISION
+    assert rig.coordinator.reopen_review_calls == 1
+    assert rig.coordinator.prepare_review_calls == 1
+    assert rig.coordinator.commit_calls == 1
+
+
+def test_preprepare_recovery_with_unrelated_terminal_journal_returns_to_review() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    rig.executor.failure_stage = "collect"
+    with pytest.raises(TaskServiceError):
+        rig.service.accept_draft(
+            task_id=TASK_ID,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+    recovery = rig.tasks.records[TASK_ID]
+    assert recovery.task_run.status is TaskStatus.RECOVERY_REQUIRED
+    assert rig.coordinator.commit_calls == 0
+    rig.executor.failure_stage = None
+    rig.coordinator.reconcile_status = CandidateReconcileStatus.NOT_COMMITTED
+    rig.coordinator.reconcile_journal_candidate = DESCENDANT_REVISION
+    rig.coordinator.reconcile_journal_manifest = "e" * 64
+
+    resumed = rig.service.reconcile_task(
+        task_id=TASK_ID,
+        expected_generation=recovery.generation,
+    )
+
+    assert resumed.task_run.status is TaskStatus.AWAITING_USER_REVIEW
+    assert resumed.task_run.last_error is None
+    assert rig.revisions.head == _base_head()
+    assert rig.coordinator.commit_calls == 0
+
+
+def test_preparing_restart_never_publishes_a_missing_draft_revision() -> None:
+    rig = _Rig()
+    rig.leases.issuer.error = True
+    with pytest.raises(TaskServiceError):
+        rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    preparing = rig.tasks.records[TASK_ID]
+    assert preparing.task_run.status is TaskStatus.PREPARING_REVIEW
+    rig.leases.issuer.error = False
+    rig.revisions.revisions.pop(CANDIDATE_REVISION)
+    rig.coordinator.reconcile_status = CandidateReconcileStatus.NOT_COMMITTED
+    recovered = rig.service.reconcile_task(
+        task_id=TASK_ID,
+        expected_generation=preparing.generation,
+    )
+    assert recovered.task_run.status is TaskStatus.RECOVERY_REQUIRED
+    assert recovered.task_run.last_error is not None
+    assert recovered.task_run.last_error.code == "draft_integrity_failed"
+    assert rig.revisions.head == _base_head()
+
+
+@pytest.mark.parametrize("failure", ["reopen_review", "collect", "prepare_review"])
+def test_prepared_accept_integrity_failures_never_mutate_head(failure: str) -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    if failure == "collect":
+        rig.executor.failure_stage = failure
+    else:
+        rig.coordinator.failure_stage = failure
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.accept_draft(
+            task_id=TASK_ID,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+    assert caught.value.code is TaskServiceErrorCode.RECOVERY_REQUIRED
+    durable = rig.tasks.records[TASK_ID]
+    assert durable.task_run.status is TaskStatus.RECOVERY_REQUIRED
+    assert durable.task_run.last_error is not None
+    assert durable.task_run.last_error.code == "draft_integrity_failed"
+    assert rig.revisions.head == _base_head()
+    assert rig.coordinator.commit_calls == 0
+
+
+def test_review_decision_wrong_draft_and_stale_generation_are_side_effect_free() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    for operation in (rig.service.accept_draft, rig.service.reject_draft):
+        with pytest.raises(TaskServiceError) as wrong:
+            operation(
+                task_id=TASK_ID,
+                draft_id="draft_22222222222222222222222222222222",
+                expected_generation=awaiting.generation,
+            )
+        assert wrong.value.code is TaskServiceErrorCode.CONFLICT
+        with pytest.raises(TaskServiceError) as stale:
+            operation(
+                task_id=TASK_ID,
+                draft_id=awaiting.task_run.draft.id,
+                expected_generation=awaiting.generation - 1,
+            )
+        assert stale.value.code is TaskServiceErrorCode.CONFLICT
+    assert rig.tasks.records[TASK_ID] == awaiting
+    assert rig.revisions.head == _base_head()
+
+
+def test_accepting_task_cas_conflict_precedes_all_review_cad_work() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    rig.tasks.fail_status = TaskStatus.ACCEPTING_DRAFT
+    rig.log.clear()
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.accept_draft(
+            task_id=TASK_ID,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+
+    assert caught.value.code is TaskServiceErrorCode.CONFLICT
+    assert rig.tasks.records[TASK_ID] == awaiting
+    assert rig.revisions.head == _base_head()
+    assert rig.coordinator.reopen_review_calls == 0
+    assert rig.coordinator.prepare_review_calls == 0
+    assert rig.coordinator.commit_calls == 0
+
+
+def test_publish_draft_durability_uncertain_mismatch_resumes_from_preparing() -> None:
+    rig = _Rig()
+    rig.tasks.uncertain_status = TaskStatus.AWAITING_USER_REVIEW
+    rig.tasks.persist_uncertain = False
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+
+    assert caught.value.code is TaskServiceErrorCode.STORE_FAILURE
+    preparing = rig.tasks.records[TASK_ID]
+    assert preparing.task_run.status is TaskStatus.PREPARING_REVIEW
+    assert rig.revisions.head == _base_head()
+    rig.tasks.uncertain_status = None
+    rig.coordinator.reconcile_status = CandidateReconcileStatus.NOT_COMMITTED
+    resumed = rig.service.reconcile_task(
+        task_id=TASK_ID,
+        expected_generation=preparing.generation,
+    )
+    assert resumed.task_run.status is TaskStatus.AWAITING_USER_REVIEW
+
+
+def test_accepting_draft_durability_uncertain_exact_readback_commits_once() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    rig.tasks.uncertain_status = TaskStatus.ACCEPTING_DRAFT
+
+    accepted = rig.service.accept_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+
+    assert accepted.task_run.status is TaskStatus.SUCCEEDED
+    assert accepted.task_run.committed_revision == CANDIDATE_REVISION
+    assert rig.coordinator.commit_calls == 1
+
+
+def test_reviewed_success_durability_uncertain_mismatch_never_recommits() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    rig.tasks.uncertain_status = TaskStatus.SUCCEEDED
+    rig.tasks.persist_uncertain = False
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.accept_draft(
+            task_id=TASK_ID,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+
+    assert caught.value.code is TaskServiceErrorCode.RECOVERY_REQUIRED
+    accepting = rig.tasks.records[TASK_ID]
+    assert accepting.task_run.status is TaskStatus.ACCEPTING_DRAFT
+    assert rig.revisions.head == _candidate_head()
+    assert rig.coordinator.commit_calls == 1
+    rig.tasks.uncertain_status = None
+    rig.coordinator.reconcile_status = CandidateReconcileStatus.COMMITTED
+    rig.coordinator.reconcile_live_revision = CANDIDATE_REVISION
+    recovered = rig.service.accept_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+    assert recovered.task_run.status is TaskStatus.SUCCEEDED
+    assert rig.coordinator.commit_calls == 1
+
+
+def test_reject_durability_uncertain_exact_readback_and_replay_are_idempotent() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    assert awaiting.task_run.draft is not None
+    rig.tasks.uncertain_status = TaskStatus.REJECTED
+    rejected = rig.service.reject_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+    assert rejected.task_run.status is TaskStatus.REJECTED
+    assert rig.revisions.head == _base_head()
+    replay = rig.service.reject_draft(
+        task_id=TASK_ID,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+    assert replay == rejected

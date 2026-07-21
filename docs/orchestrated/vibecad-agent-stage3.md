@@ -1583,6 +1583,88 @@ absent。Setup/import/syntax failure does not count RED。Implementation then mu
    journal as draft or serialize process capabilities；if semantic commit exists, use its completion evidence
    instead of replaying RED。
 
+### S3-5 completion evidence
+
+Actual write set stayed inside Packet S3-5A:
+
+- production: `src/vibecad/application/task_api.py`、`src/vibecad/execution/candidate.py`、
+  `src/vibecad/execution/revisions.py`、`src/vibecad/workflow/service.py`、
+  `src/vibecad/workflow/state.py`；
+- focused and managed gates: `tests/test_candidate_revision.py`、`tests/test_revision_store.py`、
+  `tests/test_task_api.py`、`tests/test_task_kernel_integration.py`、`tests/test_task_service.py`、
+  `tests/test_task_state.py`、`tests/test_task_store.py`；
+- orchestration record: `docs/orchestrated/vibecad-agent-stage3.md`。
+
+Evidence chain:
+
+1. Four genuine RED waves failed for their intended missing contracts: state/store `4`、
+   revision/candidate `13`、Task API `10` and service `1`; none was an import, syntax or setup failure.
+2. The implementation adds an explicit no-default `auto_commit | require_review` policy, an immutable
+   task-owned `ReviewDraft`, review-aware persisted state transitions and exact seven-method service/API
+   boundaries. A reviewed success requires durable `accept_draft` provenance; forged direct and persisted
+   round trips fail closed.
+3. Awaiting review is now durably detached from the original transaction. Accept reacquires a valid local
+   lease, reopens an isolated immutable revision, recollects evidence, recompiles stored acceptance, obtains
+   a fresh one-shot receipt, prepares a fresh transaction and commits only under the exact full base HEAD.
+   Lease authority is validated before loading CAD or consuming the receipt.
+4. Durability-uncertain directory fsync、project-fd close、root-fd close、review publish、Accept finalization
+   and Reject finalization paths converge from journal/HEAD/task truth. A failed re-prepare remains
+   HEAD-neutral and settles as terminal `NOT_COMMITTED`; coordinator/session handles close exactly once.
+5. Final adversarial review findings were closed with regressions: spoofed detach results cannot publish;
+   missing/CLEAN/wrong candidate or manifest journals cannot publish `preparing_review`; a single later
+   project journal cannot strand another detached draft; missing Accept provenance cannot forge success;
+   a foreign lease cannot touch CAD/store or burn a receipt; and an Accept response lost before a later
+   legitimate descendant commit proves ancestry and succeeds without a second commit. Sibling/divergent
+   ancestry remains recovery-required.
+6. A real managed-FreeCAD two-process gate creates two same-base drafts in process one, reconstructs all
+   stores/lease/coordinator/executor/service objects from disk in process two, accepts draft A, proves draft
+   B Accept is stale and mutation-free, and still rejects B. Result: `8 passed in 10.97s`.
+7. Final focused cumulative gate: `1447 passed`; revision/candidate focused subset: `397 passed`; service
+   subset: `92 passed`. Final full gate: `2855 passed, 90 deselected` with the two pre-existing macOS
+   `fork()` deprecation warnings. Full Ruff、`git diff --check`、pycompile and fresh-Application import gate
+   (`1 passed`) all passed.
+8. Two fresh, independent, non-writing reviewers each returned PASS after the response-loss/descendant
+   recovery correction. Both confirmed stale/sibling fail-closed behavior, exact durable acceptance
+   provenance, ancestry/report/manifest proof and no recommit path; neither found a remaining Critical or
+   Important issue.
+
+Crash/replay convergence:
+
+| Durable observation | Convergence and mutation authority |
+|---|---|
+| preparing + exact own terminal `NOT_COMMITTED` journal | release lease, publish awaiting exactly once |
+| preparing + missing/CLEAN/mismatched journal | recovery-required; never publish a draft claim |
+| accepting + exact base + absent/unrelated/prior-committed terminal transaction | fresh reopen/reverify/re-prepare; no stale capability reuse |
+| recovery/cleanup + base + any matching terminal `NOT_COMMITTED` journal | return to awaiting; a single later project journal cannot strand another detached draft |
+| exact draft or legitimate descendant HEAD after Accept response loss | prove revision ancestry/manifest/passing report; mark succeeded without recommit |
+| stale full base, sibling or divergent HEAD | conflict/recovery; task/journal/HEAD remain mutation-free |
+| repeated Reject or same terminal decision | return the same terminal task read-only; opposite decision conflicts |
+| re-prepare fsync/fd-close uncertainty | settle terminal `NOT_COMMITTED`; preserve exact base HEAD |
+| foreign or forged project lease | reject before CAD load, revision mutation or receipt consumption |
+
+S3-5 closes the durable draft/review slice and its restart/lease/CAS obligations. S3-RES-01 through
+S3-RES-06 and S3-RES-08 through S3-RES-09 remain assigned to later local-runtime、artifact/MCP、second-host、
+profile and external-publication stages; S3-5 does not claim any of those deliveries.
+
+| Entry | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| S3-E10 / 2026-07-21T08:35:10Z | S3-A01；S3-5A；two independent final reviews PASS after all Important findings were closed | S3-5 semantic commit containing this snapshot / not authorized | RED 4/13/10/1；focused 1447；full 2855/90；managed 8；Ruff/diff/pycompile/import PASS | S3-RES-01..06, S3-RES-08..09；durable review slice closed | S3-S10 | completed |
+
+### Recovery snapshot S3-S10
+
+1. **Completed:** S3-5 delivers explicit review policy, immutable durable drafts, release-before-awaiting,
+   restart-safe fresh verification, exact full-HEAD/ancestry recovery, mutation-free stale/reject behavior
+   and real two-process managed-FreeCAD double-draft acceptance; all objective gates and two independent
+   final reviews passed。
+2. **Next:** issue Packet S3-6A for isolated `AgentApplication` composition、`CadExecutionPort`、revision-zero
+   and import bootstrap、lazy per-project runtime、durable data root、uninstall-preserves-data、managed
+   checkout and IPC G0; do not expose public MCP or implement G1 Workbench in S3-6。
+3. **Approved decisions:** S3-D01 through S3-D08 under S3-A01 and the standing continuous-execution
+   authorization; push、PR、release、marketplace、external spend and G1 Workbench remain unauthorized。
+4. **Recovery:** verify branch `codex/agent-stage3`、the local S3-5 semantic commit subject
+   `feat(workflow): add durable draft review`、a clean worktree and S3-E10 evidence; do not replay S3-5.
+   Continue by auditing S3-6 dependencies and issuing its independently reviewed docs-only control packet。
+
 ## 9. 用户决策与持续执行规则
 
 本修订依据已经明确的用户方向：

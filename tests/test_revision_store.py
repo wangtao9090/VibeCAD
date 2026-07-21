@@ -152,11 +152,20 @@ EXPECTED_STORE_METHODS = {
     "initialize_empty_project": ("self", "project_id", "lease"),
     "load_head": ("self", "project_id"),
     "load_revision": ("self", "project_id", "revision_id"),
+    "prepare_revision": (
+        "self",
+        "project_id",
+        "expected_head",
+        "revision_id",
+        "manifest_sha256",
+        "lease",
+    ),
     "reconcile": ("self", "project_id", "lease"),
     "revision_artifact_path": ("self", "project_id", "revision_id", "artifact_id"),
     "revision_model_path": ("self", "project_id", "revision_id"),
     "rollback_revision": ("self", "project_id", "revision_id", "lease"),
     "seal_revision": ("self", "project_id", "revision_id", "lease"),
+    "validate_project_write_lease": ("self", "project_id", "lease"),
 }
 EXPECTED_VALUE_FIELDS = {
     "CommitJournal": (
@@ -1408,6 +1417,283 @@ def test_prepared_rollback_never_advances_head_or_mutates_old_revision(store_par
     assert store.load_head(PROJECT_ID) == head
     assert store.load_revision(PROJECT_ID, revision_id) == sealed
     assert _all_tree_bytes(_revision_dir(root, head.revision_id)) == before
+
+
+def test_terminal_sealed_revision_can_be_reprepared_with_new_transaction_and_committed(
+    store_parts,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(store, lease, head)
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+        detached = store.rollback_revision(PROJECT_ID, revision_id, lease)
+        assert detached.status is ReconciliationStatus.NOT_COMMITTED
+        assert detached.journal is not None
+        assert detached.journal.state is CommitJournalState.NOT_COMMITTED
+        terminal_transaction = detached.journal.id
+        immutable_before = _all_tree_bytes(_revision_dir(root, revision_id))
+
+        prepared = store.prepare_revision(
+            PROJECT_ID,
+            head,
+            revision_id,
+            sealed.manifest_sha256,
+            lease,
+        )
+
+        assert prepared == sealed
+        assert prepared is not sealed
+        assert store.load_revision(PROJECT_ID, revision_id) == sealed
+        assert _all_tree_bytes(_revision_dir(root, revision_id)) == immutable_before
+        assert store.load_head(PROJECT_ID) == head
+        journal_mapping = json.loads(
+            (_project_dir(root) / "journal.json").read_text(encoding="utf-8")
+        )
+        assert journal_mapping["state"] == CommitJournalState.PREPARED.value
+        assert journal_mapping["id"] != terminal_transaction
+        assert journal_mapping["project_id"] == PROJECT_ID
+        assert journal_mapping["expected_head"] == head.to_mapping()
+        assert journal_mapping["candidate_revision"] == sealed.id
+        assert journal_mapping["manifest_sha256"] == sealed.manifest_sha256
+
+        committed = store.commit_revision(PROJECT_ID, head, revision_id, lease)
+
+    assert committed.generation == head.generation + 1
+    assert committed.revision_id == sealed.id
+    assert committed.manifest_sha256 == sealed.manifest_sha256
+    assert store.load_head(PROJECT_ID) == committed
+    assert store.load_revision(PROJECT_ID, revision_id) == sealed
+
+
+@pytest.mark.parametrize("failure", ["directory_fsync", "project_fd_close", "root_fd_close"])
+def test_reprepare_durability_uncertainty_converges_to_terminal_not_committed(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(store, lease, head)
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+        store.rollback_revision(PROJECT_ID, revision_id, lease)
+        immutable_before = _all_tree_bytes(_revision_dir(root, revision_id))
+        original_open = revisions_module.os.open
+        original_fsync = revisions_module.os.fsync
+        original_replace = revisions_module.os.replace
+        original_close_project = revisions_module._close_project_fds
+        original_close_fd = revisions_module._close_fd
+        roles: dict[int, str] = {}
+        prepared_replaced = False
+        failed = False
+
+        def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+            if dir_fd is None:
+                fd = original_open(path, flags, mode)
+            else:
+                fd = original_open(path, flags, mode, dir_fd=dir_fd)
+            roles[fd] = str(path)
+            return fd
+
+        def tracked_replace(src, dst, *args, **kwargs):
+            nonlocal prepared_replaced
+            result = original_replace(src, dst, *args, **kwargs)
+            if dst == "journal.json":
+                prepared_replaced = True
+            return result
+
+        def targeted_fsync(fd):
+            nonlocal failed
+            if (
+                failure == "directory_fsync"
+                and prepared_replaced
+                and not failed
+                and roles.get(fd) == _project_dir(root).name
+            ):
+                failed = True
+                raise OSError("SECRET review prepare directory fsync")
+            return original_fsync(fd)
+
+        def targeted_close_project(project_open):
+            nonlocal failed
+            close_failed = original_close_project(project_open)
+            if failure == "project_fd_close" and prepared_replaced and not failed:
+                failed = True
+                return True
+            return close_failed
+
+        def targeted_close_fd(fd):
+            nonlocal failed
+            close_failed = original_close_fd(fd)
+            if (
+                failure == "root_fd_close"
+                and prepared_replaced
+                and not failed
+                and roles.get(fd) == root.name
+            ):
+                failed = True
+                return True
+            return close_failed
+
+        monkeypatch.setattr(revisions_module.os, "open", tracked_open)
+        monkeypatch.setattr(revisions_module.os, "replace", tracked_replace)
+        monkeypatch.setattr(revisions_module.os, "fsync", targeted_fsync)
+        monkeypatch.setattr(revisions_module, "_close_project_fds", targeted_close_project)
+        monkeypatch.setattr(revisions_module, "_close_fd", targeted_close_fd)
+        with pytest.raises(RevisionStoreError) as captured:
+            store.prepare_revision(
+                PROJECT_ID,
+                head,
+                revision_id,
+                sealed.manifest_sha256,
+                lease,
+            )
+        _assert_closed_error(
+            captured.value,
+            RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+            head_committed=False,
+        )
+        assert prepared_replaced and failed
+        assert store.load_head(PROJECT_ID) == head
+        assert store.load_revision(PROJECT_ID, revision_id) == sealed
+        assert _all_tree_bytes(_revision_dir(root, revision_id)) == immutable_before
+        reconciled = store.reconcile(PROJECT_ID, lease)
+        assert reconciled.status is ReconciliationStatus.NOT_COMMITTED
+        assert reconciled.head == head
+        assert reconciled.journal is not None
+        assert reconciled.journal.candidate_revision == revision_id
+        assert reconciled.journal.state is CommitJournalState.NOT_COMMITTED
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ["base_generation", "base_revision", "base_manifest", "draft_manifest"],
+)
+def test_prepare_existing_revision_rejects_stale_full_head_and_manifest_without_mutation(
+    store_parts,
+    mismatch: str,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(store, lease, head)
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+        store.rollback_revision(PROJECT_ID, revision_id, lease)
+        supplied_head = head
+        supplied_manifest = sealed.manifest_sha256
+        if mismatch == "base_generation":
+            supplied_head = replace(head, generation=head.generation + 1)
+        elif mismatch == "base_revision":
+            supplied_head = replace(head, revision_id=REVISION_C)
+        elif mismatch == "base_manifest":
+            supplied_head = replace(head, manifest_sha256="c" * 64)
+        else:
+            supplied_manifest = "c" * 64
+        before = _all_tree_bytes(root)
+
+        with pytest.raises(RevisionStoreError) as captured:
+            store.prepare_revision(
+                PROJECT_ID,
+                supplied_head,
+                revision_id,
+                supplied_manifest,
+                lease,
+            )
+
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.CONFLICT)
+        assert _all_tree_bytes(root) == before
+        assert store.load_head(PROJECT_ID) == head
+        assert store.load_revision(PROJECT_ID, revision_id) == sealed
+
+
+def test_prepare_existing_revision_rejects_unrelated_nonterminal_journal_without_mutation(
+    store_parts,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(store, lease, head)
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+        store.rollback_revision(PROJECT_ID, revision_id, lease)
+        unrelated_revision = store.begin_revision(PROJECT_ID, head, lease)
+        before = _all_tree_bytes(root)
+
+        with pytest.raises(RevisionStoreError) as captured:
+            store.prepare_revision(
+                PROJECT_ID,
+                head,
+                revision_id,
+                sealed.manifest_sha256,
+                lease,
+            )
+
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.CONFLICT)
+        assert _all_tree_bytes(root) == before
+        assert store.load_head(PROJECT_ID) == head
+        assert store.load_revision(PROJECT_ID, revision_id) == sealed
+        store.rollback_revision(PROJECT_ID, unrelated_revision, lease)
+
+
+def test_prepare_existing_revision_rejects_terminal_journal_not_matching_current_head(
+    store_parts,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(store, lease, head)
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+        detached = store.rollback_revision(PROJECT_ID, revision_id, lease)
+        assert detached.journal is not None
+        journal_path = _project_dir(root) / "journal.json"
+        body = detached.journal.to_mapping()
+        body["expected_head"] = replace(
+            head,
+            generation=head.generation + 1,
+        ).to_mapping()
+        _write_checked_record(journal_path, body, JOURNAL_CHECKSUM_DOMAIN)
+        before = _all_tree_bytes(root)
+
+        with pytest.raises(RevisionStoreError) as captured:
+            store.prepare_revision(
+                PROJECT_ID,
+                head,
+                revision_id,
+                sealed.manifest_sha256,
+                lease,
+            )
+
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        assert _all_tree_bytes(root) == before
+        assert store.load_head(PROJECT_ID) == head
+        assert store.load_revision(PROJECT_ID, revision_id) == sealed
+
+
+def test_prepare_existing_revision_requires_exact_live_project_lease_without_mutation(
+    store_parts,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(store, lease, head)
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+        store.rollback_revision(PROJECT_ID, revision_id, lease)
+    assert lease.released
+    before = _all_tree_bytes(root)
+
+    with pytest.raises(RevisionStoreError) as captured:
+        store.prepare_revision(
+            PROJECT_ID,
+            head,
+            revision_id,
+            sealed.manifest_sha256,
+            lease,
+        )
+
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.INVALID_LEASE)
+    assert _all_tree_bytes(root) == before
+    assert store.load_head(PROJECT_ID) == head
+    assert store.load_revision(PROJECT_ID, revision_id) == sealed
 
 
 def test_stale_head_and_wrong_candidate_are_conflicts(store_parts):

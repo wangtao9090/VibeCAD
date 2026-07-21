@@ -15,6 +15,7 @@ import vibecad.application.task_api as task_api_module
 from vibecad.application.task_api import (
     TaskApi,
     TaskApiErrorCode,
+    TaskServicePort,
     TaskServicePortErrorCode,
     TaskServicePortFailure,
 )
@@ -25,6 +26,8 @@ from vibecad.workflow.state import (
     CriterionOutcome,
     CriterionVerdict,
     ReasoningOwner,
+    ReviewDraft,
+    ReviewPolicy,
     TaskEvent,
     TaskRun,
     TaskStatus,
@@ -39,6 +42,9 @@ OTHER_TASK_ID = "task_11111111111111111111111111111111"
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
 BASE_REVISION = "revision_0123456789abcdef0123456789abcdef"
 CANDIDATE_REVISION = "revision_11111111111111111111111111111111"
+DRAFT_ID = "draft_11111111111111111111111111111111"
+OTHER_CANDIDATE_REVISION = "revision_22222222222222222222222222222222"
+OTHER_DRAFT_ID = "draft_22222222222222222222222222222222"
 ERROR_MESSAGES = {
     "missing_field": "A required request field is missing.",
     "unknown_field": "The request contains an unknown field.",
@@ -89,11 +95,11 @@ def _step_error(*, needs_input: bool = False) -> StepError:
     )
 
 
-def _report() -> VerificationReport:
+def _report(*, candidate_revision: str = CANDIDATE_REVISION) -> VerificationReport:
     return VerificationReport(
         id="verification_0123456789abcdef0123456789abcdef",
         acceptance_id="acceptance-api",
-        candidate_revision=CANDIDATE_REVISION,
+        candidate_revision=candidate_revision,
         manifest_sha256="a" * 64,
         observation_digest="b" * 64,
         passed=True,
@@ -108,16 +114,88 @@ def _report() -> VerificationReport:
     )
 
 
-def _created(*, task_id: str = TASK_ID, project_id: str = PROJECT_ID) -> TaskRun:
+def _created(
+    *,
+    task_id: str = TASK_ID,
+    project_id: str = PROJECT_ID,
+    review_policy: ReviewPolicy = ReviewPolicy.AUTO_COMMIT,
+) -> TaskRun:
     return new_task_run(
         task_id=task_id,
         project_id=project_id,
         base_revision=BASE_REVISION,
         reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=review_policy,
     )
 
 
+def _review_draft(*, candidate_revision: str = CANDIDATE_REVISION) -> ReviewDraft:
+    return ReviewDraft(
+        id=f"draft_{candidate_revision.removeprefix('revision_')}",
+        task_id=TASK_ID,
+        project_id=PROJECT_ID,
+        base_revision=BASE_REVISION,
+        base_generation=0,
+        base_manifest_sha256="c" * 64,
+        revision_id=candidate_revision,
+        manifest_sha256="a" * 64,
+        verification_id="verification_0123456789abcdef0123456789abcdef",
+        acceptance_id="acceptance-api",
+        observation_digest="b" * 64,
+    )
+
+
+def _review_task_at(
+    status: TaskStatus,
+    *,
+    candidate_revision: str = CANDIDATE_REVISION,
+) -> TaskRun:
+    created = _created(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    needs_plan = transition_task(created, TaskEvent.REQUEST_PLAN)
+    program_ready = transition_task(
+        needs_plan,
+        TaskEvent.SUBMIT_PROGRAM,
+        program=_program(),
+    )
+    validating = transition_task(program_ready, TaskEvent.START_VALIDATION)
+    executing = transition_task(
+        validating,
+        TaskEvent.VALIDATE_PROGRAM,
+        candidate_revision=candidate_revision,
+    )
+    verifying = transition_task(executing, TaskEvent.COMPLETE_EXECUTION)
+    preparing = transition_task(
+        verifying,
+        TaskEvent.PREPARE_REVIEW,
+        verification=_report(candidate_revision=candidate_revision),
+        draft=_review_draft(candidate_revision=candidate_revision),
+    )
+    awaiting = transition_task(preparing, TaskEvent.PUBLISH_DRAFT)
+    accepting = transition_task(awaiting, TaskEvent.ACCEPT_DRAFT)
+    rejected = transition_task(awaiting, TaskEvent.REJECT_DRAFT)
+    succeeded = transition_task(
+        accepting,
+        TaskEvent.COMMIT,
+        committed_revision=candidate_revision,
+    )
+    return {
+        TaskStatus.PREPARING_REVIEW: preparing,
+        TaskStatus.AWAITING_USER_REVIEW: awaiting,
+        TaskStatus.ACCEPTING_DRAFT: accepting,
+        TaskStatus.REJECTED: rejected,
+        TaskStatus.SUCCEEDED: succeeded,
+    }[status]
+
+
 def _task_at(status: TaskStatus) -> TaskRun:
+    review_status_values = {
+        "preparing_review",
+        "awaiting_user_review",
+        "accepting_draft",
+        "rejected",
+    }
+    if status.value in review_status_values:
+        return _review_task_at(status)
     created = _created()
     needs_plan = transition_task(created, TaskEvent.REQUEST_PLAN)
     program_ready = transition_task(
@@ -211,6 +289,12 @@ class _FakePort:
     def reconcile_task(self, **kwargs):
         return self._reply("reconcile_task", kwargs)
 
+    def accept_draft(self, **kwargs):
+        return self._reply("accept_draft", kwargs)
+
+    def reject_draft(self, **kwargs):
+        return self._reply("reject_draft", kwargs)
+
 
 class _HostileMapping(Mapping):
     def __getitem__(self, key):
@@ -282,14 +366,51 @@ def test_public_surface_error_taxonomies_and_method_signatures_are_closed():
         "lease_unavailable",
         "recovery_required",
     }
-    for name in (
+    api_methods = {
+        name
+        for name, value in vars(TaskApi).items()
+        if not name.startswith("_") and inspect.isfunction(value)
+    }
+    assert api_methods == {
         "create_task",
         "get_task",
         "submit_model_program",
         "resume_task",
         "get_capabilities",
-    ):
+        "accept_draft",
+        "reject_draft",
+    }
+    for name in api_methods:
         assert tuple(inspect.signature(getattr(TaskApi, name)).parameters) == ("self", "request")
+
+    port_methods = {
+        name
+        for name, value in vars(TaskServicePort).items()
+        if not name.startswith("_") and inspect.isfunction(value)
+    }
+    assert port_methods == {
+        "create_task",
+        "get_task",
+        "submit_model_program",
+        "continue_task",
+        "reconcile_task",
+        "accept_draft",
+        "reject_draft",
+    }
+    assert tuple(inspect.signature(TaskServicePort.create_task).parameters) == (
+        "self",
+        "task_id",
+        "project_id",
+        "reasoning_owner",
+        "review_policy",
+    )
+    for name in ("accept_draft", "reject_draft"):
+        assert tuple(inspect.signature(getattr(TaskServicePort, name)).parameters) == (
+            "self",
+            "task_id",
+            "draft_id",
+            "expected_generation",
+        )
 
 
 def test_port_failure_requires_an_exact_closed_code():
@@ -307,10 +428,15 @@ def test_create_owns_the_task_id_external_plan_and_exact_result_envelope():
         return TASK_ID
 
     response = TaskApi(port=port, task_id_factory=id_factory).create_task(
-        {"schema_version": 1, "project_id": PROJECT_ID}
+        {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "review_policy": "auto_commit",
+        }
     )
 
     result = _assert_success(response)
+    auto_commit = ReviewPolicy.AUTO_COMMIT
     assert calls == 1
     assert port.calls == [
         (
@@ -319,6 +445,7 @@ def test_create_owns_the_task_id_external_plan_and_exact_result_envelope():
                 "task_id": TASK_ID,
                 "project_id": PROJECT_ID,
                 "reasoning_owner": ReasoningOwner.EXTERNAL_PLAN,
+                "review_policy": auto_commit,
             },
         )
     ]
@@ -330,6 +457,96 @@ def test_create_owns_the_task_id_external_plan_and_exact_result_envelope():
     }
 
 
+def test_create_requires_an_explicit_review_policy_before_allocating_an_id():
+    port = _FakePort(_stored())
+    generated: list[str] = []
+
+    response = TaskApi(
+        port=port,
+        task_id_factory=lambda: generated.append(TASK_ID) or TASK_ID,
+    ).create_task({"schema_version": 1, "project_id": PROJECT_ID})
+
+    _assert_error(response, "missing_field", "/review_policy")
+    assert generated == []
+    assert port.calls == []
+
+
+@pytest.mark.parametrize(
+    ("value", "code"),
+    [
+        (True, "invalid_type"),
+        (1, "invalid_type"),
+        (None, "invalid_type"),
+        ("AUTO_COMMIT", "invalid_value"),
+        ("manual", "invalid_value"),
+    ],
+)
+def test_create_review_policy_ingress_is_exact(value, code):
+    port = _FakePort(_stored())
+
+    response = TaskApi(port=port).create_task(
+        {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "review_policy": value,
+        }
+    )
+
+    _assert_error(response, code, "/review_policy")
+    assert port.calls == []
+
+
+def test_create_require_review_passes_the_exact_enum_and_requires_matching_result():
+    require_review = ReviewPolicy.REQUIRE_REVIEW
+    needs_plan = transition_task(
+        _created(review_policy=require_review),
+        TaskEvent.REQUEST_PLAN,
+    )
+    port = _FakePort(StoredTaskRun(generation=0, task_run=needs_plan))
+
+    response = TaskApi(port=port, task_id_factory=lambda: TASK_ID).create_task(
+        {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "review_policy": "require_review",
+        }
+    )
+
+    result = _assert_success(response)
+    assert result["task_run"]["review_policy"] == "require_review"
+    assert port.calls == [
+        (
+            "create_task",
+            {
+                "task_id": TASK_ID,
+                "project_id": PROJECT_ID,
+                "reasoning_owner": ReasoningOwner.EXTERNAL_PLAN,
+                "review_policy": require_review,
+            },
+        )
+    ]
+
+
+def test_create_mismatched_review_policy_port_result_is_internal():
+    auto_commit = ReviewPolicy.AUTO_COMMIT
+    needs_plan = transition_task(
+        _created(review_policy=auto_commit),
+        TaskEvent.REQUEST_PLAN,
+    )
+    port = _FakePort(StoredTaskRun(generation=0, task_run=needs_plan))
+
+    response = TaskApi(port=port, task_id_factory=lambda: TASK_ID).create_task(
+        {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "review_policy": "require_review",
+        }
+    )
+
+    _assert_error(response, "internal_error", "")
+    assert [name for name, _ in port.calls] == ["create_task"]
+
+
 def test_create_collision_calls_the_id_source_and_port_exactly_once():
     failure = TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT)
     port = _FakePort(failure)
@@ -338,7 +555,13 @@ def test_create_collision_calls_the_id_source_and_port_exactly_once():
     response = TaskApi(
         port=port,
         task_id_factory=lambda: generated.append(TASK_ID) or TASK_ID,
-    ).create_task({"schema_version": 1, "project_id": PROJECT_ID})
+    ).create_task(
+        {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "review_policy": "auto_commit",
+        }
+    )
 
     _assert_error(response, "conflict", "")
     assert generated == [TASK_ID]
@@ -350,7 +573,13 @@ def test_invalid_generated_id_is_internal_and_never_reaches_the_port(generated):
     port = _FakePort(_stored())
     api = TaskApi(port=port, task_id_factory=lambda: generated)
 
-    response = api.create_task({"schema_version": 1, "project_id": PROJECT_ID})
+    response = api.create_task(
+        {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "review_policy": "auto_commit",
+        }
+    )
 
     _assert_error(response, "internal_error", "")
     assert port.calls == []
@@ -366,7 +595,11 @@ def test_id_factory_raise_is_redacted_and_not_retried():
         raise RuntimeError("/private/path secret")
 
     response = TaskApi(port=port, task_id_factory=fail).create_task(
-        {"schema_version": 1, "project_id": PROJECT_ID}
+        {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "review_policy": "auto_commit",
+        }
     )
 
     _assert_error(response, "internal_error", "")
@@ -386,12 +619,37 @@ def test_internal_failure_type_raised_by_factory_or_port_is_never_trusted():
     factory_response = TaskApi(
         port=_FakePort(_stored()),
         task_id_factory=lambda: (_ for _ in ()).throw(injected),
-    ).create_task({"schema_version": 1, "project_id": PROJECT_ID})
+    ).create_task(
+        {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "review_policy": "auto_commit",
+        }
+    )
 
     _assert_error(port_response, "internal_error", "")
     _assert_error(factory_response, "internal_error", "")
     assert "/secret" not in json.dumps(port_response)
     assert "/secret" not in json.dumps(factory_response)
+
+
+def test_review_port_attribute_lookup_cannot_inject_an_api_failure():
+    injected = task_api_module._ApiFailure(  # type: ignore[attr-defined]
+        TaskApiErrorCode.INVALID_INPUT,
+        "/secret/private/path",
+    )
+
+    class HostileReviewPort:
+        def __getattribute__(self, name):
+            if name in {"accept_draft", "reject_draft"}:
+                raise injected
+            return super().__getattribute__(name)
+
+    api = TaskApi(port=HostileReviewPort())
+    for method in ("accept_draft", "reject_draft"):
+        response = getattr(api, method)(_decision_request())
+        _assert_error(response, "internal_error", "")
+        assert "/secret" not in json.dumps(response)
 
 
 @pytest.mark.parametrize("status", list(TaskStatus))
@@ -462,6 +720,171 @@ def test_program_task_id_mismatch_is_rejected_before_the_port():
     assert port.calls == []
 
 
+def _decision_request(
+    *,
+    draft_id: str = DRAFT_ID,
+    expected_generation: int = 7,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "task_id": TASK_ID,
+        "draft_id": draft_id,
+        "expected_generation": expected_generation,
+    }
+
+
+@pytest.mark.parametrize(
+    ("api_method", "port_method", "terminal_status"),
+    [
+        ("accept_draft", "accept_draft", TaskStatus.SUCCEEDED),
+        ("reject_draft", "reject_draft", "rejected"),
+    ],
+)
+def test_review_decision_requests_are_exact_and_return_only_terminal_results(
+    api_method,
+    port_method,
+    terminal_status,
+):
+    status = TaskStatus.REJECTED if terminal_status == "rejected" else terminal_status
+    stored = StoredTaskRun(generation=8, task_run=_review_task_at(status))
+    port = _FakePort(stored)
+
+    response = getattr(TaskApi(port=port), api_method)(_decision_request())
+
+    result = _assert_success(response)
+    assert result["generation"] == 8
+    assert result["task_run"]["draft"]["id"] == DRAFT_ID
+    assert port.calls == [
+        (
+            port_method,
+            {
+                "task_id": TASK_ID,
+                "draft_id": DRAFT_ID,
+                "expected_generation": 7,
+            },
+        )
+    ]
+
+
+def test_review_decision_ingress_requires_exact_fields_and_draft_identity():
+    api = TaskApi(port=object())
+    cases = [
+        ("accept_draft", {"schema_version": 1}, "missing_field", "/draft_id"),
+        (
+            "reject_draft",
+            {**_decision_request(), "unknown": 1},
+            "unknown_field",
+            "/unknown",
+        ),
+        (
+            "accept_draft",
+            _decision_request(draft_id="revision_" + "1" * 32),
+            "invalid_value",
+            "/draft_id",
+        ),
+        (
+            "reject_draft",
+            {**_decision_request(), "expected_generation": True},
+            "invalid_type",
+            "/expected_generation",
+        ),
+    ]
+    for method, request, code, path in cases:
+        response = getattr(api, method)(request)
+        _assert_error(response, code, path)
+
+
+def test_review_decision_semantic_replays_and_conflicts_are_port_owned_and_single_call():
+    succeeded = StoredTaskRun(
+        generation=19,
+        task_run=_review_task_at(TaskStatus.SUCCEEDED),
+    )
+    rejected = StoredTaskRun(
+        generation=13,
+        task_run=_review_task_at(TaskStatus.REJECTED),
+    )
+    for method, terminal in (("accept_draft", succeeded), ("reject_draft", rejected)):
+        port = _FakePort(terminal)
+        response = getattr(TaskApi(port=port), method)(
+            _decision_request(expected_generation=0)
+        )
+        _assert_success(response)
+        assert port.calls == [
+            (
+                method,
+                {
+                    "task_id": TASK_ID,
+                    "draft_id": DRAFT_ID,
+                    "expected_generation": 0,
+                },
+            )
+        ]
+
+    conflict = TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT)
+    conflict_requests = [
+        ("accept_draft", _decision_request(draft_id=OTHER_DRAFT_ID)),
+        ("reject_draft", _decision_request(expected_generation=999)),
+        ("reject_draft", _decision_request()),
+    ]
+    for method, request in conflict_requests:
+        port = _FakePort(conflict)
+        response = getattr(TaskApi(port=port), method)(request)
+        _assert_error(response, "conflict", "")
+        assert port.calls == [
+            (
+                method,
+                {
+                    "task_id": TASK_ID,
+                    "draft_id": request["draft_id"],
+                    "expected_generation": request["expected_generation"],
+                },
+            )
+        ]
+
+
+def test_review_decision_malformed_semantic_port_results_are_internal():
+    malformed = [
+        (
+            "accept_draft",
+            StoredTaskRun(generation=8, task_run=_task_at(TaskStatus.SUCCEEDED)),
+        ),
+        (
+            "accept_draft",
+            StoredTaskRun(
+                generation=8,
+                task_run=_review_task_at(TaskStatus.AWAITING_USER_REVIEW),
+            ),
+        ),
+        (
+            "reject_draft",
+            StoredTaskRun(
+                generation=8,
+                task_run=_review_task_at(TaskStatus.SUCCEEDED),
+            ),
+        ),
+        (
+            "reject_draft",
+            StoredTaskRun(
+                generation=8,
+                task_run=_review_task_at(TaskStatus.AWAITING_USER_REVIEW),
+            ),
+        ),
+        (
+            "accept_draft",
+            StoredTaskRun(
+                generation=8,
+                task_run=_review_task_at(
+                    TaskStatus.SUCCEEDED,
+                    candidate_revision=OTHER_CANDIDATE_REVISION,
+                ),
+            ),
+        ),
+    ]
+    for method, stored in malformed:
+        response = getattr(TaskApi(port=_FakePort(stored)), method)(_decision_request())
+        _assert_error(response, "internal_error", "")
+
+
 @pytest.mark.parametrize(
     ("status", "expected_calls", "success"),
     [
@@ -496,6 +919,28 @@ def test_resume_dispatches_every_status_once(status, expected_calls, success):
     for name, kwargs in port.calls:
         if name != "get_task":
             assert kwargs["expected_generation"] == 7
+
+
+def test_resume_routes_all_four_review_statuses_without_choosing_for_the_user():
+    cases = [
+        ("preparing_review", ["get_task", "reconcile_task"], True),
+        ("accepting_draft", ["get_task", "reconcile_task"], True),
+        ("awaiting_user_review", ["get_task"], False),
+        ("rejected", ["get_task"], True),
+    ]
+    for status_value, expected_calls, success in cases:
+        status = TaskStatus(status_value)
+        port = _FakePort(StoredTaskRun(generation=7, task_run=_review_task_at(status)))
+
+        response = TaskApi(port=port).resume_task(
+            {"schema_version": 1, "task_id": TASK_ID, "expected_generation": 7}
+        )
+
+        if success:
+            _assert_success(response)
+        else:
+            _assert_error(response, "invalid_state", "")
+        assert [name for name, _ in port.calls] == expected_calls
 
 
 @pytest.mark.parametrize("status", list(TaskStatus))
@@ -592,7 +1037,11 @@ def test_create_rejects_a_created_or_wrong_project_port_result_as_internal():
     ]
     for value in values:
         response = TaskApi(port=_FakePort(value), task_id_factory=lambda: TASK_ID).create_task(
-            {"schema_version": 1, "project_id": PROJECT_ID}
+            {
+                "schema_version": 1,
+                "project_id": PROJECT_ID,
+                "review_policy": "auto_commit",
+            }
         )
         _assert_error(response, "internal_error", "")
 
@@ -664,10 +1113,19 @@ def test_unsafe_schema_version_is_invalid_value_before_version_dispatch():
 @pytest.mark.parametrize(
     ("method", "payload", "code", "path"),
     [
-        ("create_task", {"schema_version": 1, "project_id": 1}, "invalid_type", "/project_id"),
         (
             "create_task",
-            {"schema_version": 1, "project_id": "PROJECT_" + "A" * 32},
+            {"schema_version": 1, "project_id": 1, "review_policy": "auto_commit"},
+            "invalid_type",
+            "/project_id",
+        ),
+        (
+            "create_task",
+            {
+                "schema_version": 1,
+                "project_id": "PROJECT_" + "A" * 32,
+                "review_policy": "auto_commit",
+            },
             "invalid_value",
             "/project_id",
         ),
@@ -704,7 +1162,9 @@ def test_identifier_and_generation_fields_are_exact(method, payload, code, path)
 @pytest.mark.parametrize("value", [(1,), b"bytes", {1}, object(), float("nan"), float("inf")])
 def test_hostile_outer_values_fail_closed_without_calling_the_port(value):
     port = _FakePort(_stored())
-    response = TaskApi(port=port).create_task({"schema_version": 1, "project_id": value})
+    response = TaskApi(port=port).create_task(
+        {"schema_version": 1, "project_id": value, "review_policy": "auto_commit"}
+    )
     assert response["ok"] is False
     assert response["error"]["code"] in {"invalid_type", "invalid_value"}
     assert port.calls == []
@@ -728,12 +1188,36 @@ def test_outer_cycle_alias_and_invalid_unicode_fail_closed():
 @pytest.mark.parametrize(
     ("method", "base", "padding_field"),
     [
-        ("create_task", {"schema_version": 1, "project_id": ""}, "project_id"),
+        (
+            "create_task",
+            {"schema_version": 1, "project_id": "", "review_policy": "auto_commit"},
+            "project_id",
+        ),
         ("get_task", {"schema_version": 1, "task_id": ""}, "task_id"),
         (
             "resume_task",
             {"schema_version": 1, "task_id": "", "expected_generation": 0},
             "task_id",
+        ),
+        (
+            "accept_draft",
+            {
+                "schema_version": 1,
+                "task_id": TASK_ID,
+                "draft_id": "",
+                "expected_generation": 0,
+            },
+            "draft_id",
+        ),
+        (
+            "reject_draft",
+            {
+                "schema_version": 1,
+                "task_id": TASK_ID,
+                "draft_id": "",
+                "expected_generation": 0,
+            },
+            "draft_id",
         ),
         ("get_capabilities", {"schema_version": ""}, "schema_version"),
     ],
@@ -834,7 +1318,11 @@ def test_huge_outer_and_program_strings_fail_before_utf8_encoding(monkeypatch):
     monkeypatch.setattr(task_api_module, "_utf8_length", bounded_encode)
 
     outer = TaskApi(port=object()).create_task(
-        {"schema_version": 1, "project_id": "x" * 4_097}
+        {
+            "schema_version": 1,
+            "project_id": "x" * 4_097,
+            "review_policy": "auto_commit",
+        }
     )
     with pytest.raises(task_api_module._ApiFailure) as caught:  # type: ignore[attr-defined]
         task_api_module._decode_model_program(  # type: ignore[attr-defined]
@@ -1110,8 +1598,13 @@ import json
 import sys
 from vibecad.application.task_api import TaskApi
 
-response = TaskApi(port=object()).get_capabilities({"schema_version": 1})
+api = TaskApi(port=object())
+response = api.get_capabilities({"schema_version": 1})
 assert response["ok"] is True
+for method in ("accept_draft", "reject_draft"):
+    response = getattr(api, method)({"schema_version": 1})
+    assert response["ok"] is False
+    assert response["error"]["code"] == "missing_field"
 forbidden = (
     "FreeCAD", "Part", "mcp", "fastmcp", "vibecad.server", "vibecad.runtime",
     "vibecad.engine", "vibecad.tools", "vibecad.workflow.service",

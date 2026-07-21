@@ -2501,6 +2501,152 @@ def _begin_revision(store, project_id, expected_head, lease):
     return revision_id
 
 
+def _prepare_revision(
+    store,
+    project_id,
+    expected_head,
+    revision_id,
+    manifest_sha256,
+    lease,
+):
+    mutation_code = _require_mutation(store, project_id, lease)
+    if mutation_code is not None:
+        raise RevisionStoreError(mutation_code)
+    revision_code = _identifier_code(revision_id, _REVISION_PATTERN)
+    if revision_code is not None:
+        raise RevisionStoreError(revision_code)
+    if type(expected_head) is not ProjectHead or expected_head.project_id != project_id:
+        raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+    if _digest_code(manifest_sha256) is not None:
+        raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+    loaded = _load_store_project(store, project_id)
+    if loaded[2] is not None:
+        raise RevisionStoreError(loaded[2])
+    root_open = loaded[0]
+    project_open = loaded[1]
+    project_fd = project_open[0]
+    revisions_fd = project_open[1]
+    root_device = root_open[1].st_dev
+    head_result = _load_head_fd(
+        project_fd,
+        revisions_fd,
+        root_device,
+        project_id,
+    )
+    if head_result[1] is not None:
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        raise RevisionStoreError(head_result[1])
+    head = head_result[0]
+    if head != expected_head:
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        raise RevisionStoreError(RevisionStoreErrorCode.CONFLICT)
+    journal_result = _load_journal_fd(project_fd, root_device)
+    if journal_result[1] is not None:
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    journal = journal_result[0]
+    if journal is not None:
+        if journal.state not in {
+            CommitJournalState.COMMITTED,
+            CommitJournalState.NOT_COMMITTED,
+        }:
+            _close_project_fds(project_open)
+            _close_fd(root_open[0])
+            raise RevisionStoreError(RevisionStoreErrorCode.CONFLICT)
+        if not _terminal_journal_matches(head, journal):
+            _close_project_fds(project_open)
+            _close_fd(root_open[0])
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        if journal.state is CommitJournalState.COMMITTED:
+            terminal_revision = _load_revision_fd(
+                revisions_fd,
+                root_device,
+                project_id,
+                journal.candidate_revision,
+            )
+            if terminal_revision[1] is not None:
+                _close_project_fds(project_open)
+                _close_fd(root_open[0])
+                raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+            if (
+                terminal_revision[0].manifest_sha256 != journal.manifest_sha256
+                or terminal_revision[0].base_revision != journal.expected_head.revision_id
+            ):
+                _close_project_fds(project_open)
+                _close_fd(root_open[0])
+                raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    sealed_result = _load_revision_fd(
+        revisions_fd,
+        root_device,
+        project_id,
+        revision_id,
+    )
+    if sealed_result[1] is not None:
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        raise RevisionStoreError(sealed_result[1])
+    sealed = sealed_result[0]
+    if (
+        sealed.base_revision != expected_head.revision_id
+        or sealed.manifest_sha256 != manifest_sha256
+    ):
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        raise RevisionStoreError(RevisionStoreErrorCode.CONFLICT)
+    if (
+        journal is not None
+        and journal.state is CommitJournalState.NOT_COMMITTED
+        and journal.candidate_revision == revision_id
+        and journal.manifest_sha256 != sealed.manifest_sha256
+    ):
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    transaction_id = _new_transaction_id()
+    if _identifier_code(transaction_id, _TRANSACTION_PATTERN) is not None:
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        raise RevisionStoreError(RevisionStoreErrorCode.INVALID_IDENTIFIER)
+    if journal is not None and transaction_id == journal.id:
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        raise RevisionStoreError(RevisionStoreErrorCode.CONFLICT)
+    prepared = CommitJournal(
+        id=transaction_id,
+        project_id=project_id,
+        expected_head=expected_head,
+        candidate_revision=revision_id,
+        manifest_sha256=sealed.manifest_sha256,
+        state=CommitJournalState.PREPARED,
+    )
+    prepared_raw = _checked_record_bytes(
+        _journal_mapping(prepared),
+        _JOURNAL_CHECKSUM_DOMAIN,
+    )
+    code = _replace_durable_record(
+        project_fd,
+        "journal.json",
+        prepared_raw,
+        secrets.token_hex(16),
+        RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+    )
+    close_failed = _close_project_fds(project_open)
+    close_failed = _close_fd(root_open[0]) or close_failed
+    if code is RevisionStoreErrorCode.DURABILITY_UNCERTAIN:
+        raise RevisionStoreError(code, head_committed=False)
+    if code is not None:
+        raise RevisionStoreError(code)
+    if close_failed:
+        raise RevisionStoreError(
+            RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+            head_committed=False,
+        )
+    return sealed
+
+
 def _candidate_authority(store, project_id, revision_id, lease):
     mutation_code = _require_mutation(store, project_id, lease)
     if mutation_code is not None:
@@ -2636,6 +2782,23 @@ class LocalRevisionStore:
     def load_revision(self, project_id, revision_id):
         return _load_revision(self, project_id, revision_id)
 
+    def prepare_revision(
+        self,
+        project_id,
+        expected_head,
+        revision_id,
+        manifest_sha256,
+        lease,
+    ):
+        return _prepare_revision(
+            self,
+            project_id,
+            expected_head,
+            revision_id,
+            manifest_sha256,
+            lease,
+        )
+
     def reconcile(self, project_id, lease):
         return _reconcile(self, project_id, lease)
 
@@ -2650,6 +2813,12 @@ class LocalRevisionStore:
 
     def seal_revision(self, project_id, revision_id, lease):
         return _seal_revision(self, project_id, revision_id, lease)
+
+    def validate_project_write_lease(self, project_id, lease):
+        code = _require_mutation(self, project_id, lease)
+        if code is not None:
+            raise RevisionStoreError(code)
+        return None
 
 
 def _load_head(store, project_id):

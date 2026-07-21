@@ -39,6 +39,7 @@ from vibecad.execution.revisions import (
     LocalRevisionStore,
     ProjectHead,
     ReconciliationStatus,
+    RevisionRef,
     RevisionStoreError,
     RevisionStoreErrorCode,
     RevisionStoreRootTrust,
@@ -413,6 +414,18 @@ def _sealed(rig: Rig) -> SealedCandidate:
     return rig.coordinator.seal(candidate=checkpointed, lease=rig.lease)
 
 
+def _detached_review_revision(rig: Rig) -> RevisionRef:
+    revision_id = rig.store.begin_revision(PROJECT_ID, rig.head, rig.lease)
+    model_path = rig.store.candidate_model_path(PROJECT_ID, revision_id, rig.lease)
+    step_path = rig.store.candidate_artifact_path(PROJECT_ID, revision_id, "step", rig.lease)
+    model_path.write_bytes(b"review-draft-fcstd")
+    step_path.write_bytes(b"ISO-10303-21;REVIEW-DRAFT;END-ISO-10303-21;")
+    revision = rig.store.seal_revision(PROJECT_ID, revision_id, rig.lease)
+    detached = rig.store.rollback_revision(PROJECT_ID, revision_id, rig.lease)
+    assert detached.status is ReconciliationStatus.NOT_COMMITTED
+    return revision
+
+
 def _verification_for(
     revision_id: str,
     manifest_sha256: str,
@@ -610,6 +623,17 @@ def test_public_surface_signatures_and_closed_enums() -> None:
         "begin": ("self", "project_id", "expected_head", "lease"),
         "checkpoint": ("self", "candidate", "lease"),
         "seal": ("self", "candidate", "lease"),
+        "reopen_review": ("self", "project_id", "base_head", "revision", "lease"),
+        "prepare_review": ("self", "candidate", "lease"),
+        "discard_review": ("self", "candidate", "lease"),
+        "publish_review": (
+            "self",
+            "candidate",
+            "receipt",
+            "compiled",
+            "snapshot",
+            "lease",
+        ),
         "commit": ("self", "candidate", "receipt", "compiled", "snapshot", "lease"),
         "rollback": ("self", "candidate", "lease"),
         "reconcile": ("self", "project_id", "lease"),
@@ -632,6 +656,31 @@ def test_public_surface_signatures_and_closed_enums() -> None:
             "candidate": CheckpointedCandidate,
             "lease": ProjectWriteLease,
             "return": SealedCandidate,
+        },
+        "reopen_review": {
+            "project_id": str,
+            "base_head": ProjectHead,
+            "revision": RevisionRef,
+            "lease": ProjectWriteLease,
+            "return": SealedCandidate,
+        },
+        "prepare_review": {
+            "candidate": SealedCandidate,
+            "lease": ProjectWriteLease,
+            "return": SealedCandidate,
+        },
+        "discard_review": {
+            "candidate": SealedCandidate,
+            "lease": ProjectWriteLease,
+            "return": None,
+        },
+        "publish_review": {
+            "candidate": SealedCandidate,
+            "receipt": VerificationReceipt,
+            "compiled": CompiledAcceptance,
+            "snapshot": ObservationSnapshot,
+            "lease": ProjectWriteLease,
+            "return": CandidateRollbackResult,
         },
         "commit": {
             "candidate": SealedCandidate,
@@ -1565,8 +1614,7 @@ def test_begin_lease_authority_is_checked_before_any_cad(
                     lease=supplied,
                 )
             _assert_candidate_error(caught, CandidateErrorCode.INVALID_LEASE)
-            assert mutations["begin_revision"] == (1 if kind == "foreign" else 0)
-            assert sum(mutations.values()) == mutations["begin_revision"]
+            assert not any(mutations.values())
             assert rig.port.calls == []
             assert rig.store.load_head(PROJECT_ID) == rig.head
             assert rig.slot.current() is rig.baseline_binding
@@ -2260,6 +2308,430 @@ def test_seal_store_uncertainty_issues_no_handle_and_reconciles_exactly_once(
         reconciled = original_reconcile(rig.store, PROJECT_ID, rig.lease)
         assert reconciled.status is ReconciliationStatus.NOT_COMMITTED
         assert (rollback_calls, reconcile_calls) == durable_calls
+
+
+def test_publish_review_consumes_receipt_then_detaches_sealed_revision_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    consumer_name = _candidate_receipt_consumer_name()
+    original_consume = getattr(candidate_module, consumer_name)
+    original_rollback = LocalRevisionStore.rollback_revision
+
+    def observed_consume(*args, **kwargs):
+        events.append("consume")
+        return original_consume(*args, **kwargs)
+
+    def observed_rollback(self, project_id, revision_id, lease):
+        events.append("rollback")
+        return original_rollback(self, project_id, revision_id, lease)
+
+    monkeypatch.setattr(candidate_module, consumer_name, observed_consume)
+    monkeypatch.setattr(LocalRevisionStore, "rollback_revision", observed_rollback)
+    with _rig(tmp_path, suffix="publish-review") as rig:
+        sealed = _sealed(rig)
+        compiled, snapshot, receipt, _report = _verification(sealed)
+        result = rig.coordinator.publish_review(
+            candidate=sealed,
+            receipt=receipt,
+            compiled=compiled,
+            snapshot=snapshot,
+            lease=rig.lease,
+        )
+
+        assert type(result) is CandidateRollbackResult
+        assert result.status is CandidateRollbackStatus.NOT_COMMITTED
+        assert result.head == rig.head
+        assert result.head_committed is False
+        assert result.live_binding is rig.baseline_binding
+        assert events == ["consume", "rollback"]
+        assert rig.store.load_head(PROJECT_ID) == rig.head
+        assert rig.store.load_revision(PROJECT_ID, sealed.revision.id) == sealed.revision
+        assert rig.slot.current() is rig.baseline_binding
+        assert rig.port.close_count(sealed.binding.session) == 1
+        assert rig.port.close_count(rig.baseline) == 0
+
+        repeated = rig.coordinator.publish_review(
+            candidate=sealed,
+            receipt=receipt,
+            compiled=compiled,
+            snapshot=snapshot,
+            lease=rig.lease,
+        )
+        assert repeated is result
+        assert events == ["consume", "rollback"]
+        with pytest.raises(ValidationError):
+            consume_verification_receipt(
+                receipt,
+                compiled,
+                snapshot,
+                candidate_revision=sealed.revision.id,
+                manifest_sha256=sealed.revision.manifest_sha256,
+            )
+
+
+def test_reopened_review_has_no_prepared_authority_until_explicit_prepare_then_commits(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="review-reopen-prepare-commit") as rig:
+        revision = _detached_review_revision(rig)
+        detached_truth = rig.store.reconcile(PROJECT_ID, rig.lease)
+        assert detached_truth.status is ReconciliationStatus.NOT_COMMITTED
+
+        reopened = rig.coordinator.reopen_review(
+            project_id=PROJECT_ID,
+            base_head=rig.head,
+            revision=revision,
+            lease=rig.lease,
+        )
+
+        assert type(reopened) is SealedCandidate
+        assert reopened.base_head == rig.head
+        assert reopened.revision == revision
+        assert reopened.binding.revision_id == revision.id
+        assert reopened.binding.session is not rig.baseline
+        assert reopened.binding.session.payload == b"review-draft-fcstd"
+        assert rig.slot.current() is rig.baseline_binding
+        assert rig.store.reconcile(PROJECT_ID, rig.lease) == detached_truth
+
+        compiled, snapshot, receipt, report = _verification_for(
+            revision.id,
+            revision.manifest_sha256,
+        )
+        with pytest.raises(CandidateError) as caught:
+            rig.coordinator.commit(
+                candidate=reopened,
+                receipt=receipt,
+                compiled=compiled,
+                snapshot=snapshot,
+                lease=rig.lease,
+            )
+        _assert_candidate_error(caught, CandidateErrorCode.INVALID_CANDIDATE)
+        assert rig.store.reconcile(PROJECT_ID, rig.lease) == detached_truth
+        assert rig.store.load_head(PROJECT_ID) == rig.head
+
+        prepared = rig.coordinator.prepare_review(candidate=reopened, lease=rig.lease)
+        assert type(prepared) is SealedCandidate
+        assert prepared is not reopened
+        assert prepared.revision == revision
+        assert prepared.binding is reopened.binding
+        result = rig.coordinator.commit(
+            candidate=prepared,
+            receipt=receipt,
+            compiled=compiled,
+            snapshot=snapshot,
+            lease=rig.lease,
+        )
+
+        assert result.status is CandidateCommitStatus.COMMITTED
+        assert result.report == report
+        assert result.head.revision_id == revision.id
+        assert result.head.manifest_sha256 == revision.manifest_sha256
+        assert rig.store.load_head(PROJECT_ID) == result.head
+        assert rig.slot.current() is prepared.binding
+
+
+def test_discard_reopened_review_is_idempotent_close_only_and_never_mutates_head(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="review-discard") as rig:
+        revision = _detached_review_revision(rig)
+        detached_truth = rig.store.reconcile(PROJECT_ID, rig.lease)
+        reopened = rig.coordinator.reopen_review(
+            project_id=PROJECT_ID,
+            base_head=rig.head,
+            revision=revision,
+            lease=rig.lease,
+        )
+        review_session = reopened.binding.session
+
+        assert rig.coordinator.discard_review(candidate=reopened, lease=rig.lease) is None
+        assert rig.coordinator.discard_review(candidate=reopened, lease=rig.lease) is None
+
+        assert rig.port.close_count(review_session) == 1
+        assert rig.port.close_count(rig.baseline) == 0
+        assert rig.slot.current() is rig.baseline_binding
+        assert rig.store.load_head(PROJECT_ID) == rig.head
+        assert rig.store.reconcile(PROJECT_ID, rig.lease) == detached_truth
+        with pytest.raises(CandidateError) as caught:
+            rig.coordinator.prepare_review(candidate=reopened, lease=rig.lease)
+        _assert_candidate_error(caught, CandidateErrorCode.ALREADY_TERMINAL)
+
+
+def test_discard_reopened_review_close_failure_is_cleanup_required_and_not_retried(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="review-discard-cleanup") as rig:
+        revision = _detached_review_revision(rig)
+        detached_truth = rig.store.reconcile(PROJECT_ID, rig.lease)
+        reopened = rig.coordinator.reopen_review(
+            project_id=PROJECT_ID,
+            base_head=rig.head,
+            revision=revision,
+            lease=rig.lease,
+        )
+        review_session = reopened.binding.session
+        rig.port.close_failures.add(id(review_session))
+
+        with pytest.raises(CandidateError) as caught:
+            rig.coordinator.discard_review(candidate=reopened, lease=rig.lease)
+
+        _assert_candidate_error(caught, CandidateErrorCode.CLEANUP_REQUIRED)
+        assert rig.port.close_count(review_session) == 1
+        assert rig.port.close_count(rig.baseline) == 0
+        assert rig.store.load_head(PROJECT_ID) == rig.head
+        assert rig.store.reconcile(PROJECT_ID, rig.lease) == detached_truth
+        with pytest.raises(CandidateError) as repeated:
+            rig.coordinator.discard_review(candidate=reopened, lease=rig.lease)
+        _assert_candidate_error(repeated, CandidateErrorCode.ALREADY_TERMINAL)
+        assert rig.port.close_count(review_session) == 1
+
+
+def test_prepare_review_rejects_unrelated_staging_journal_without_mutation_and_closes(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="review-prepare-nonterminal") as rig:
+        revision = _detached_review_revision(rig)
+        reopened = rig.coordinator.reopen_review(
+            project_id=PROJECT_ID,
+            base_head=rig.head,
+            revision=revision,
+            lease=rig.lease,
+        )
+        review_session = reopened.binding.session
+        unrelated_revision = rig.store.begin_revision(PROJECT_ID, rig.head, rig.lease)
+        unrelated_model = rig.store.candidate_model_path(
+            PROJECT_ID,
+            unrelated_revision,
+            rig.lease,
+        )
+
+        with pytest.raises(CandidateError) as caught:
+            rig.coordinator.prepare_review(candidate=reopened, lease=rig.lease)
+
+        _assert_candidate_error(caught, CandidateErrorCode.CONFLICT)
+        assert rig.store.candidate_model_path(
+            PROJECT_ID,
+            unrelated_revision,
+            rig.lease,
+        ) == unrelated_model
+        assert rig.store.load_head(PROJECT_ID) == rig.head
+        assert rig.store.load_revision(PROJECT_ID, revision.id) == revision
+        assert rig.slot.current() is rig.baseline_binding
+        assert rig.port.close_count(review_session) == 1
+        assert rig.port.close_count(rig.baseline) == 0
+        rig.store.rollback_revision(PROJECT_ID, unrelated_revision, rig.lease)
+
+
+def test_prepare_review_durability_uncertainty_settles_and_closes_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _rig(tmp_path, suffix="review-prepare-durability-uncertain") as rig:
+        revision = _detached_review_revision(rig)
+        reopened = rig.coordinator.reopen_review(
+            project_id=PROJECT_ID,
+            base_head=rig.head,
+            revision=revision,
+            lease=rig.lease,
+        )
+        review_session = reopened.binding.session
+        original_open = revisions_module.os.open
+        original_fsync = revisions_module.os.fsync
+        original_replace = revisions_module.os.replace
+        roles: dict[int, str] = {}
+        prepared_replaced = False
+        failed = False
+
+        def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+            if dir_fd is None:
+                fd = original_open(path, flags, mode)
+            else:
+                fd = original_open(path, flags, mode, dir_fd=dir_fd)
+            roles[fd] = str(path)
+            return fd
+
+        def tracked_replace(src, dst, *args, **kwargs):
+            nonlocal prepared_replaced
+            result = original_replace(src, dst, *args, **kwargs)
+            if dst == "journal.json":
+                prepared_replaced = True
+            return result
+
+        def fail_first_project_fsync(fd):
+            nonlocal failed
+            if (
+                prepared_replaced
+                and not failed
+                and roles.get(fd) == revisions_module._project_key(PROJECT_ID)
+            ):
+                failed = True
+                raise OSError("SECRET review prepare fsync")
+            return original_fsync(fd)
+
+        monkeypatch.setattr(revisions_module.os, "open", tracked_open)
+        monkeypatch.setattr(revisions_module.os, "replace", tracked_replace)
+        monkeypatch.setattr(revisions_module.os, "fsync", fail_first_project_fsync)
+        with pytest.raises(CandidateError) as caught:
+            rig.coordinator.prepare_review(candidate=reopened, lease=rig.lease)
+
+        _assert_candidate_error(caught, CandidateErrorCode.STORE_FAILURE)
+        assert prepared_replaced and failed
+        assert rig.store.load_head(PROJECT_ID) == rig.head
+        assert rig.store.load_revision(PROJECT_ID, revision.id) == revision
+        settled = rig.store.reconcile(PROJECT_ID, rig.lease)
+        assert settled.status is ReconciliationStatus.NOT_COMMITTED
+        assert settled.journal is not None
+        assert settled.journal.candidate_revision == revision.id
+        assert rig.slot.current() is rig.baseline_binding
+        assert rig.port.close_count(review_session) == 1
+        assert rig.port.close_count(rig.baseline) == 0
+        with pytest.raises(CandidateError) as repeated:
+            rig.coordinator.prepare_review(candidate=reopened, lease=rig.lease)
+        _assert_candidate_error(repeated, CandidateErrorCode.ALREADY_TERMINAL)
+        assert rig.port.close_count(review_session) == 1
+
+
+def test_reopen_review_rejects_stale_or_mismatched_durable_identity_before_cad_load(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="review-reopen-mismatch") as rig:
+        revision = _detached_review_revision(rig)
+        calls_before = tuple(rig.port.calls)
+        for base_head, supplied_revision in (
+            (replace(rig.head, generation=rig.head.generation + 1), revision),
+            (rig.head, replace(revision, manifest_sha256="c" * 64)),
+        ):
+            with pytest.raises(CandidateError) as caught:
+                rig.coordinator.reopen_review(
+                    project_id=PROJECT_ID,
+                    base_head=base_head,
+                    revision=supplied_revision,
+                    lease=rig.lease,
+                )
+            _assert_candidate_error(caught, CandidateErrorCode.CONFLICT)
+            assert tuple(rig.port.calls) == calls_before
+            assert rig.store.load_head(PROJECT_ID) == rig.head
+            assert rig.store.load_revision(PROJECT_ID, revision.id) == revision
+
+
+def test_reopen_review_rejects_foreign_manager_lease_before_cad_or_store_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mutations = _track_store_mutations(monkeypatch)
+    with _rig(tmp_path, suffix="review-reopen-foreign-lease") as rig:
+        revision = _detached_review_revision(rig)
+        other_manager = ResourceLeaseManager(
+            _secure_root(tmp_path / "review-reopen-foreign-locks"),
+            trust=LeaseRootTrust.TRUSTED_LOCAL,
+        )
+        foreign = other_manager.acquire_project_write(PROJECT_ID)
+        calls_before = tuple(rig.port.calls)
+        _reset_store_mutations(mutations)
+        try:
+            with pytest.raises(CandidateError) as caught:
+                rig.coordinator.reopen_review(
+                    project_id=PROJECT_ID,
+                    base_head=rig.head,
+                    revision=revision,
+                    lease=foreign,
+                )
+            _assert_candidate_error(caught, CandidateErrorCode.INVALID_LEASE)
+            assert not any(mutations.values())
+            assert tuple(rig.port.calls) == calls_before
+            assert rig.store.load_head(PROJECT_ID) == rig.head
+            assert rig.store.load_revision(PROJECT_ID, revision.id) == revision
+        finally:
+            foreign.release(owner_token=foreign.owner_token)
+
+
+def test_publish_review_foreign_lease_cannot_burn_receipt_before_store_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mutations = _track_store_mutations(monkeypatch)
+    with _rig(tmp_path, suffix="publish-review-foreign-lease") as rig:
+        sealed = _sealed(rig)
+        compiled, snapshot, receipt, _report = _verification(sealed)
+        other_manager = ResourceLeaseManager(
+            _secure_root(tmp_path / "publish-review-foreign-locks"),
+            trust=LeaseRootTrust.TRUSTED_LOCAL,
+        )
+        foreign = other_manager.acquire_project_write(PROJECT_ID)
+        _reset_store_mutations(mutations)
+        try:
+            with pytest.raises(CandidateError) as caught:
+                rig.coordinator.publish_review(
+                    candidate=sealed,
+                    receipt=receipt,
+                    compiled=compiled,
+                    snapshot=snapshot,
+                    lease=foreign,
+                )
+            _assert_candidate_error(caught, CandidateErrorCode.INVALID_LEASE)
+            assert not any(mutations.values())
+            assert rig.store.load_head(PROJECT_ID) == rig.head
+        finally:
+            foreign.release(owner_token=foreign.owner_token)
+
+        result = rig.coordinator.publish_review(
+            candidate=sealed,
+            receipt=receipt,
+            compiled=compiled,
+            snapshot=snapshot,
+            lease=rig.lease,
+        )
+        assert result.status is CandidateRollbackStatus.NOT_COMMITTED
+
+
+def test_review_reopen_is_restart_safe_session_isolated_and_process_local(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="review-restart") as rig:
+        revision = _detached_review_revision(rig)
+        detached_truth = rig.store.reconcile(PROJECT_ID, rig.lease)
+        first = rig.coordinator.reopen_review(
+            project_id=PROJECT_ID,
+            base_head=rig.head,
+            revision=revision,
+            lease=rig.lease,
+        )
+        first_session = first.binding.session
+        rig.coordinator.discard_review(candidate=first, lease=rig.lease)
+        rig.lease.release(owner_token=rig.lease.owner_token)
+
+        with rig.manager.acquire_project_write(PROJECT_ID) as restarted_lease:
+            restarted_port = FakeCadSnapshotPort()
+            restarted = CandidateCoordinator(
+                store=rig.store,
+                snapshot_port=restarted_port,
+                session_slot=rig.slot,
+            )
+            second = restarted.reopen_review(
+                project_id=PROJECT_ID,
+                base_head=rig.head,
+                revision=revision,
+                lease=restarted_lease,
+            )
+            second_session = second.binding.session
+
+            assert second_session is not first_session
+            assert second_session is not rig.baseline
+            assert second_session.payload == first_session.payload == b"review-draft-fcstd"
+            assert rig.slot.current() is rig.baseline_binding
+            with pytest.raises(CandidateError) as caught:
+                restarted.prepare_review(candidate=first, lease=restarted_lease)
+            _assert_candidate_error(caught, CandidateErrorCode.INVALID_CANDIDATE)
+            assert restarted.discard_review(candidate=second, lease=restarted_lease) is None
+            assert restarted_port.close_count(second_session) == 1
+
+        assert rig.port.close_count(first_session) == 1
+        assert rig.port.close_count(rig.baseline) == 0
+        assert rig.store.load_head(PROJECT_ID) == rig.head
+        with rig.manager.acquire_project_write(PROJECT_ID) as inspection_lease:
+            assert rig.store.reconcile(PROJECT_ID, inspection_lease) == detached_truth
 
 
 def test_successful_commit_consumes_receipt_advances_head_and_transfers_session(
@@ -5936,7 +6408,18 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
 
     for locked_method in ("current", "compare_and_set", "_retire"):
         assert_method_uses_one_lock("SessionSlot", locked_method, slot_lock_field)
-    for locked_method in ("begin", "checkpoint", "seal", "commit", "rollback", "reconcile"):
+    for locked_method in (
+        "begin",
+        "checkpoint",
+        "seal",
+        "reopen_review",
+        "prepare_review",
+        "discard_review",
+        "publish_review",
+        "commit",
+        "rollback",
+        "reconcile",
+    ):
         assert_method_uses_one_lock("CandidateCoordinator", locked_method, coordinator_lock_field)
 
     ordered_dict_aliases = {
@@ -6079,10 +6562,12 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         "commit_revision",
         "load_head",
         "load_revision",
+        "prepare_revision",
         "reconcile",
         "revision_model_path",
         "rollback_revision",
         "seal_revision",
+        "validate_project_write_lease",
     }
     snapshot_port_calls = {"checkpoint_fcstd", "close", "create_empty", "load_fcstd"}
     session_slot_calls = {"compare_and_set", "current", "_retire"}
@@ -6095,6 +6580,10 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         "begin",
         "checkpoint",
         "seal",
+        "reopen_review",
+        "prepare_review",
+        "discard_review",
+        "publish_review",
         "commit",
         "rollback",
         "reconcile",
@@ -6249,6 +6738,17 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
             assert isinstance(receiver, ast.Attribute)
             assert receiver.attr in collection_fields[owner]
             assert isinstance(receiver.value, ast.Name) and receiver.value.id == "self"
+            continue
+        if node.func.attr == "rollback":
+            assert enclosing_class_name(node) == "CandidateCoordinator"
+            assert enclosing_function_node(node) is class_method(
+                "CandidateCoordinator",
+                "publish_review",
+            )
+            assert isinstance(receiver, ast.Name)
+            assert receiver.id == "CandidateCoordinator"
+            assert len(node.args) == 1
+            assert isinstance(node.args[0], ast.Name) and node.args[0].id == "self"
             continue
         assert node.func.attr.startswith("_") and not node.func.attr.startswith("__")
         assert enclosing_class_name(node) in {"SessionSlot", "CandidateCoordinator"}

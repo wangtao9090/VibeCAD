@@ -16,11 +16,14 @@ from pathlib import Path
 
 import pytest
 
+import vibecad.workflow.state as state_module
 import vibecad.workflow.store as store_module
 from vibecad.workflow.contracts import (
     AcceptanceSpec,
+    ErrorCategory,
     ModelCommand,
     ModelProgram,
+    StepError,
     ValueSource,
 )
 from vibecad.workflow.lease import (
@@ -32,6 +35,7 @@ from vibecad.workflow.lease import (
 )
 from vibecad.workflow.state import (
     ReasoningOwner,
+    ReviewPolicy,
     TaskEvent,
     TaskRun,
     new_task_run,
@@ -75,6 +79,7 @@ def _task(task_id: str = TASK_ID) -> TaskRun:
         project_id=PROJECT_ID,
         base_revision=BASE_REVISION,
         reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
     )
 
 
@@ -122,6 +127,7 @@ def _task_subclass() -> TaskRunSubclass:
         project_id=task.project_id,
         base_revision=task.base_revision,
         reasoning_owner=task.reasoning_owner,
+        review_policy=task.review_policy,
         status=task.status,
     )
 
@@ -2045,7 +2051,7 @@ def test_two_processes_create_one_record(store_root: Path, lease_root: Path, tmp
 import sys, time
 from pathlib import Path
 from vibecad.workflow.lease import LeaseRootTrust, ResourceLeaseManager
-from vibecad.workflow.state import ReasoningOwner, new_task_run
+from vibecad.workflow.state import ReasoningOwner, ReviewPolicy, new_task_run
 from vibecad.workflow.store import TaskRunStore, TaskStoreError, TaskStoreRootTrust
 root, locks, gate = map(Path, sys.argv[1:])
 while not gate.exists():
@@ -2057,6 +2063,7 @@ task = new_task_run(
     project_id='project_0123456789abcdef0123456789abcdef',
     base_revision='revision_0123456789abcdef0123456789abcdef',
     reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+    review_policy=ReviewPolicy.AUTO_COMMIT,
 )
 try:
     store.create(task)
@@ -2096,7 +2103,7 @@ def test_two_processes_compare_and_set_have_one_winner(
 import sys, time
 from pathlib import Path
 from vibecad.workflow.lease import LeaseRootTrust, ResourceLeaseManager
-from vibecad.workflow.state import ReasoningOwner, new_task_run
+from vibecad.workflow.state import ReasoningOwner, ReviewPolicy, new_task_run
 from vibecad.workflow.store import TaskRunStore, TaskStoreError, TaskStoreRootTrust
 root, locks, gate = map(Path, sys.argv[1:])
 while not gate.exists():
@@ -2108,6 +2115,7 @@ task = new_task_run(
     project_id='project_0123456789abcdef0123456789abcdef',
     base_revision='revision_0123456789abcdef0123456789abcdef',
     reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+    review_policy=ReviewPolicy.AUTO_COMMIT,
 )
 try:
     store.compare_and_set(task.id, 0, task)
@@ -2146,6 +2154,190 @@ def test_record_paths_are_hashes_and_task_text_never_selects_paths(
     assert names == [_record_name()]
     assert TASK_ID not in names[0]
     assert "/" not in names[0]
+
+
+# S3-5 durable-review persistence REDs.  The helper resolves new state symbols
+# lazily so their absence fails a focused assertion instead of test collection.
+REVIEW_REVISION = "revision_11111111111111111111111111111111"
+REVIEW_DRAFT_ID = "draft_11111111111111111111111111111111"
+REVIEW_VERIFICATION_ID = "verification_0123456789abcdef0123456789abcdef"
+REVIEW_BASE_GENERATION = 7
+REVIEW_BASE_MANIFEST = "c" * 64
+REVIEW_MANIFEST = "a" * 64
+REVIEW_OBSERVATION = "b" * 64
+
+
+def _durable_review_task(*, accepting: bool = False) -> TaskRun:
+    review_policy = getattr(state_module, "ReviewPolicy", None)
+    review_draft = getattr(state_module, "ReviewDraft", None)
+    assert review_policy is not None, "S3-5 ReviewPolicy is missing"
+    assert review_draft is not None, "S3-5 ReviewDraft is missing"
+    task = state_module.new_task_run(
+        task_id=TASK_ID,
+        project_id=PROJECT_ID,
+        base_revision=BASE_REVISION,
+        reasoning_owner=state_module.ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=review_policy.REQUIRE_REVIEW,
+    )
+    task = state_module.transition_task(task, state_module.TaskEvent.REQUEST_PLAN)
+    program = ModelProgram(
+        task_id=TASK_ID,
+        base_revision=BASE_REVISION,
+        operations=(),
+        acceptance=AcceptanceSpec(id="acceptance-1", criteria=()),
+    )
+    task = state_module.transition_task(
+        task,
+        state_module.TaskEvent.SUBMIT_PROGRAM,
+        program=program,
+    )
+    task = state_module.transition_task(task, state_module.TaskEvent.START_VALIDATION)
+    task = state_module.transition_task(
+        task,
+        state_module.TaskEvent.VALIDATE_PROGRAM,
+        candidate_revision=REVIEW_REVISION,
+    )
+    task = state_module.transition_task(task, state_module.TaskEvent.COMPLETE_EXECUTION)
+    report = state_module.VerificationReport(
+        id=REVIEW_VERIFICATION_ID,
+        acceptance_id="acceptance-1",
+        candidate_revision=REVIEW_REVISION,
+        manifest_sha256=REVIEW_MANIFEST,
+        observation_digest=REVIEW_OBSERVATION,
+        passed=True,
+        verdicts=(
+            state_module.CriterionVerdict(
+                criterion_id="review-store",
+                required=True,
+                outcome=state_module.CriterionOutcome.PASS,
+                message="Durable review candidate passed",
+            ),
+        ),
+    )
+    draft = review_draft(
+        id=REVIEW_DRAFT_ID,
+        task_id=TASK_ID,
+        project_id=PROJECT_ID,
+        base_revision=BASE_REVISION,
+        base_generation=REVIEW_BASE_GENERATION,
+        base_manifest_sha256=REVIEW_BASE_MANIFEST,
+        revision_id=REVIEW_REVISION,
+        manifest_sha256=REVIEW_MANIFEST,
+        verification_id=REVIEW_VERIFICATION_ID,
+        acceptance_id="acceptance-1",
+        observation_digest=REVIEW_OBSERVATION,
+    )
+    task = state_module.transition_task(
+        task,
+        state_module.TaskEvent.PREPARE_REVIEW,
+        verification=report,
+        draft=draft,
+    )
+    task = state_module.transition_task(task, state_module.TaskEvent.PUBLISH_DRAFT)
+    if accepting:
+        task = state_module.transition_task(task, state_module.TaskEvent.ACCEPT_DRAFT)
+    return task
+
+
+def _reopened_store(store_root: Path, lease_root: Path) -> TaskRunStore:
+    manager = ResourceLeaseManager(lease_root, trust=LeaseRootTrust.TRUSTED_LOCAL)
+    return TaskRunStore(
+        store_root,
+        manager,
+        trust=TaskStoreRootTrust.TRUSTED_LOCAL,
+    )
+
+
+def test_awaiting_review_and_rejected_decision_round_trip_across_store_restart(
+    store: TaskRunStore,
+    store_root: Path,
+    lease_root: Path,
+):
+    awaiting = _durable_review_task()
+    assert awaiting.status.value == "awaiting_user_review"
+    assert store.create(awaiting) == StoredTaskRun(generation=0, task_run=awaiting)
+
+    restarted = _reopened_store(store_root, lease_root)
+    loaded = restarted.load(TASK_ID)
+    assert loaded == StoredTaskRun(generation=0, task_run=awaiting)
+    assert loaded.task_run.draft.id == REVIEW_DRAFT_ID
+    assert loaded.task_run.review_policy.value == "require_review"
+
+    rejected = state_module.transition_task(
+        loaded.task_run,
+        state_module.TaskEvent.REJECT_DRAFT,
+    )
+    updated = restarted.compare_and_set(TASK_ID, loaded.generation, rejected)
+    assert updated == StoredTaskRun(generation=1, task_run=rejected)
+    assert updated.task_run.status.value == "rejected"
+    assert updated.task_run.last_error is None
+    assert updated.task_run.committed_revision is None
+    assert _reopened_store(store_root, lease_root).load(TASK_ID) == updated
+
+
+@pytest.mark.parametrize("missing", ["review_policy", "draft"])
+def test_persisted_review_record_requires_exact_policy_and_draft_fields(
+    store: TaskRunStore,
+    store_root: Path,
+    missing: str,
+):
+    task_mapping = _durable_review_task().to_mapping()
+    del task_mapping[missing]
+    body = {
+        "generation": 0,
+        "schema_version": 1,
+        "task_run": task_mapping,
+    }
+    _write_record(store_root, _record_from_body(body))
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.load(TASK_ID)
+    _assert_error(caught, TaskStoreErrorCode.CORRUPT_RECORD)
+
+
+@pytest.mark.parametrize(
+    "attention_event",
+    [state_module.TaskEvent.REQUIRE_RECOVERY, state_module.TaskEvent.REQUIRE_CLEANUP],
+)
+def test_review_attention_history_survives_restart_and_recovers_by_generation_cas(
+    store: TaskRunStore,
+    store_root: Path,
+    lease_root: Path,
+    attention_event,
+):
+    accepting = _durable_review_task(accepting=True)
+    error = StepError(
+        category=ErrorCategory.RUNTIME,
+        code="review_transaction_uncertain",
+        message="Review transaction needs reconciliation",
+        retryable=False,
+        needs_input=False,
+        related_objects=(),
+        diagnostic_artifacts=(),
+    )
+    attention = state_module.transition_task(
+        accepting,
+        attention_event,
+        error=error,
+    )
+    store.create(attention)
+
+    restarted = _reopened_store(store_root, lease_root)
+    loaded = restarted.load(TASK_ID)
+    assert loaded.task_run.status in {
+        state_module.TaskStatus.RECOVERY_REQUIRED,
+        state_module.TaskStatus.CLEANUP_REQUIRED,
+    }
+    restored = state_module.transition_task(
+        loaded.task_run,
+        state_module.TaskEvent.CONFIRM_DRAFT_UNCOMMITTED,
+    )
+    updated = restarted.compare_and_set(TASK_ID, loaded.generation, restored)
+    assert updated.generation == 1
+    assert updated.task_run.status is state_module.TaskStatus.AWAITING_USER_REVIEW
+    assert updated.task_run.draft.id == REVIEW_DRAFT_ID
+    assert updated.task_run.last_error is None
+    assert _reopened_store(store_root, lease_root).load(TASK_ID) == updated
 
 
 def test_error_shape_and_committed_generation_are_exact():

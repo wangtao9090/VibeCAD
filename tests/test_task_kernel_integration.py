@@ -68,14 +68,16 @@ from vibecad.workflow.contracts import (
     ValueSource,
 )
 from vibecad.workflow.lease import LeaseRootTrust, ResourceLeaseManager
-from vibecad.workflow.service import TaskService
-from vibecad.workflow.state import ReasoningOwner
+from vibecad.workflow.service import TaskService, TaskServiceError, TaskServiceErrorCode
+from vibecad.workflow.state import ReasoningOwner, ReviewPolicy
 from vibecad.workflow.store import TaskRunStore, TaskStoreRootTrust
 
 CASE = __CASE__
 ROOT = Path(__WORK_ROOT__)
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
 TASK_ID = "task_0123456789abcdef0123456789abcdef"
+REVIEW_ACCEPT_TASK_ID = "task_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+REVIEW_STALE_TASK_ID = "task_cccccccccccccccccccccccccccccccc"
 SEED_OBJECT_ID = "object_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 SEED_FEATURE_ID = "feature_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -212,7 +214,7 @@ def seed_identity(object_type: str = "Part::Box") -> EntityIdentity:
     )
 
 
-def program(base_revision: str) -> ModelProgram:
+def program(base_revision: str, *, task_id: str = TASK_ID) -> ModelProgram:
     if CASE == "partial_cylinder_rotation":
         selector = seed_identity("Part::Cylinder").to_selector(
             project_id=PROJECT_ID,
@@ -220,7 +222,7 @@ def program(base_revision: str) -> ModelProgram:
             entity_kind=EntityKind.OBJECT,
         ).to_mapping()
         return ModelProgram(
-            task_id=TASK_ID,
+            task_id=task_id,
             base_revision=base_revision,
             operations=(
                 command(
@@ -245,7 +247,7 @@ def program(base_revision: str) -> ModelProgram:
             entity_kind=EntityKind.OBJECT,
         ).to_mapping()
         return ModelProgram(
-            task_id=TASK_ID,
+            task_id=task_id,
             base_revision=base_revision,
             operations=(
                 command(
@@ -281,7 +283,7 @@ def program(base_revision: str) -> ModelProgram:
         else SIX_OPERATION_VOLUME
     )
     return ModelProgram(
-        task_id=TASK_ID,
+        task_id=task_id,
         base_revision=base_revision,
         operations=(
             command(
@@ -423,6 +425,156 @@ revision_store = LocalRevisionStore(
 task_store = TaskRunStore(tasks_root, manager, trust=TaskStoreRootTrust.TRUSTED_LOCAL)
 executor = InProcessCadExecutor(store=revision_store)
 
+
+def review_composition(head):
+    base_ref = revision_store.load_revision(PROJECT_ID, head.revision_id)
+    if base_ref.model is None:
+        baseline = executor.create_empty(revision_id=head.revision_id)
+    else:
+        baseline = executor.load_fcstd(
+            revision_store.revision_model_path(PROJECT_ID, head.revision_id)
+        )
+    binding = SessionBinding(
+        project_id=PROJECT_ID,
+        revision_id=head.revision_id,
+        session=baseline,
+    )
+    review_slot = SessionSlot(binding)
+    review_coordinator = CandidateCoordinator(
+        store=revision_store,
+        snapshot_port=executor,
+        session_slot=review_slot,
+    )
+    review_service = TaskService(
+        task_store=task_store,
+        revision_store=revision_store,
+        lease_manager=manager,
+        coordinator=review_coordinator,
+        executor=executor,
+    )
+    return baseline, review_slot, review_service
+
+
+def review_task_summary(stored):
+    task = stored.task_run
+    return {
+        "id": task.id,
+        "generation": stored.generation,
+        "status": task.status.value,
+        "review_policy": task.review_policy.value,
+        "candidate_revision": task.candidate_revision,
+        "committed_revision": task.committed_revision,
+        "draft": None if task.draft is None else task.draft.to_mapping(),
+        "transitions": [record.event.value for record in task.transitions],
+    }
+
+
+if CASE in {"review_restart_prepare", "review_restart_decide"}:
+    review_baseline = None
+    review_slot = None
+    review_payload = {}
+    try:
+        if CASE == "review_restart_prepare":
+            with manager.acquire_project_write(PROJECT_ID) as lease:
+                review_base_head = revision_store.initialize_empty_project(PROJECT_ID, lease)
+            review_baseline, review_slot, review_service = review_composition(review_base_head)
+            prepared_tasks = []
+            for review_task_id in (REVIEW_ACCEPT_TASK_ID, REVIEW_STALE_TASK_ID):
+                created = review_service.create_task(
+                    task_id=review_task_id,
+                    project_id=PROJECT_ID,
+                    reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+                    review_policy=ReviewPolicy.REQUIRE_REVIEW,
+                )
+                awaiting = review_service.submit_model_program(
+                    task_id=review_task_id,
+                    expected_generation=created.generation,
+                    program=program(
+                        review_base_head.revision_id,
+                        task_id=review_task_id,
+                    ),
+                )
+                durable_awaiting = review_service.get_task(task_id=review_task_id)
+                if durable_awaiting != awaiting or awaiting.task_run.draft is None:
+                    raise AssertionError("review draft was not durably published")
+                prepared_tasks.append(review_task_summary(awaiting))
+            review_payload = {
+                "case": CASE,
+                "pid": os.getpid(),
+                "base_head": review_base_head.to_mapping(),
+                "final_head": revision_store.load_head(PROJECT_ID).to_mapping(),
+                "tasks": prepared_tasks,
+                "task_record_count": len(tuple(tasks_root.glob("*.json"))),
+            }
+        else:
+            review_base_head = revision_store.load_head(PROJECT_ID)
+            review_baseline, review_slot, review_service = review_composition(review_base_head)
+            accept_before = review_service.get_task(task_id=REVIEW_ACCEPT_TASK_ID)
+            stale_before = review_service.get_task(task_id=REVIEW_STALE_TASK_ID)
+            accept_draft = accept_before.task_run.draft
+            stale_draft = stale_before.task_run.draft
+            if accept_draft is None or stale_draft is None:
+                raise AssertionError("durable review draft is missing after restart")
+
+            accepted = review_service.accept_draft(
+                task_id=REVIEW_ACCEPT_TASK_ID,
+                draft_id=accept_draft.id,
+                expected_generation=accept_before.generation,
+            )
+            head_after_accept = revision_store.load_head(PROJECT_ID)
+
+            stale_error = None
+            try:
+                review_service.accept_draft(
+                    task_id=REVIEW_STALE_TASK_ID,
+                    draft_id=stale_draft.id,
+                    expected_generation=stale_before.generation,
+                )
+            except TaskServiceError as error:
+                stale_error = error.code.value
+            if stale_error != TaskServiceErrorCode.CONFLICT.value:
+                raise AssertionError("stale draft acceptance did not return conflict")
+            stale_after_conflict = review_service.get_task(task_id=REVIEW_STALE_TASK_ID)
+            head_after_conflict = revision_store.load_head(PROJECT_ID)
+
+            rejected = review_service.reject_draft(
+                task_id=REVIEW_STALE_TASK_ID,
+                draft_id=stale_draft.id,
+                expected_generation=stale_before.generation,
+            )
+            durable_accepted = review_service.get_task(task_id=REVIEW_ACCEPT_TASK_ID)
+            durable_rejected = review_service.get_task(task_id=REVIEW_STALE_TASK_ID)
+            review_payload = {
+                "case": CASE,
+                "pid": os.getpid(),
+                "base_head": review_base_head.to_mapping(),
+                "accept_before": review_task_summary(accept_before),
+                "stale_before": review_task_summary(stale_before),
+                "accepted": review_task_summary(accepted),
+                "durable_accepted": review_task_summary(durable_accepted),
+                "head_after_accept": head_after_accept.to_mapping(),
+                "stale_error": stale_error,
+                "stale_after_conflict": review_task_summary(stale_after_conflict),
+                "head_after_conflict": head_after_conflict.to_mapping(),
+                "rejected": review_task_summary(rejected),
+                "durable_rejected": review_task_summary(durable_rejected),
+                "final_head": revision_store.load_head(PROJECT_ID).to_mapping(),
+                "task_record_count": len(tuple(tasks_root.glob("*.json"))),
+            }
+    finally:
+        review_current = None
+        if review_slot is not None:
+            try:
+                review_current = review_slot.current().session
+            except Exception:
+                review_current = None
+        close_best_effort(review_current)
+        if review_baseline is not None and review_current is not review_baseline:
+            close_best_effort(review_baseline)
+    print("TK9_RESULT=" + json.dumps(review_payload, ensure_ascii=False, sort_keys=True))
+    raise SystemExit(0)
+
+
 seed_session = None
 baseline_session = None
 probe_session = None
@@ -504,6 +656,7 @@ try:
         task_id=TASK_ID,
         project_id=PROJECT_ID,
         reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
     )
     terminal = service.submit_model_program(
         task_id=TASK_ID,
@@ -1072,6 +1225,45 @@ def _run_case(
     return payload
 
 
+def _run_review_restart_case(
+    existing_freecad_python: str,
+    tmp_path: Path,
+) -> dict[str, dict[str, object]]:
+    source = Path(__file__).resolve().parent.parent / "src"
+    work_root = tmp_path / "review-restart"
+    work_root.mkdir(mode=0o700)
+    work_root.chmod(0o700)
+
+    def run_phase(case: str) -> dict[str, object]:
+        code = (
+            _CHILD.replace("__SOURCE__", repr(str(source)))
+            .replace("__WORK_ROOT__", repr(str(work_root)))
+            .replace("__CASE__", repr(case))
+        )
+        process = subprocess.run(
+            [existing_freecad_python, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=240,
+            check=False,
+        )
+        assert process.returncode == 0, process.stderr + "\n" + process.stdout
+        lines = [
+            line
+            for line in process.stdout.splitlines()
+            if line.startswith("TK9_RESULT=")
+        ]
+        assert len(lines) == 1, process.stdout
+        payload = json.loads(lines[0].removeprefix("TK9_RESULT="))
+        assert payload["case"] == case
+        return payload
+
+    prepared = run_phase("review_restart_prepare")
+    decided = run_phase("review_restart_decide")
+    assert prepared["pid"] != decided["pid"]
+    return {"prepared": prepared, "decided": decided}
+
+
 def _run_selector_preservation_case(
     existing_freecad_python: str,
     tmp_path: Path,
@@ -1267,6 +1459,66 @@ def test_real_task_kernel_bootstraps_empty_project_and_resolves_result_ref(
     _assert_six_operation_geometry(payload["step_reload_geometry"])
     assert payload["transitions"][-1] == "commit"
     _assert_layout(payload, journal_state="committed", manifest_count=2)
+
+
+@pytest.mark.slow
+def test_real_review_drafts_survive_restart_and_serialize_same_base_decisions(
+    existing_freecad_python: str,
+    tmp_path: Path,
+) -> None:
+    result = _run_review_restart_case(existing_freecad_python, tmp_path)
+    prepared = result["prepared"]
+    decided = result["decided"]
+    prepared_tasks = prepared["tasks"]
+    assert len(prepared_tasks) == 2
+    accept_before, stale_before = prepared_tasks
+    base_head = prepared["base_head"]
+
+    assert prepared["final_head"] == base_head
+    assert prepared["task_record_count"] == 2
+    assert {item["status"] for item in prepared_tasks} == {"awaiting_user_review"}
+    assert {item["review_policy"] for item in prepared_tasks} == {"require_review"}
+    assert accept_before["draft"]["id"] != stale_before["draft"]["id"]
+    assert accept_before["candidate_revision"] != stale_before["candidate_revision"]
+    for item in prepared_tasks:
+        draft = item["draft"]
+        assert draft["task_id"] == item["id"]
+        assert draft["revision_id"] == item["candidate_revision"]
+        assert draft["base_revision"] == base_head["revision_id"]
+        assert draft["base_generation"] == base_head["generation"]
+        assert draft["base_manifest_sha256"] == base_head["manifest_sha256"]
+        assert item["committed_revision"] is None
+        assert item["transitions"][-2:] == ["prepare_review", "publish_draft"]
+
+    assert decided["base_head"] == base_head
+    assert decided["accept_before"] == accept_before
+    assert decided["stale_before"] == stale_before
+    accepted = decided["accepted"]
+    assert decided["durable_accepted"] == accepted
+    assert accepted["status"] == "succeeded"
+    assert accepted["draft"] == accept_before["draft"]
+    assert accepted["committed_revision"] == accept_before["draft"]["revision_id"]
+    assert accepted["generation"] == accept_before["generation"] + 2
+    assert accepted["transitions"][-2:] == ["accept_draft", "commit"]
+
+    committed_head = decided["head_after_accept"]
+    assert committed_head["project_id"] == base_head["project_id"]
+    assert committed_head["generation"] == base_head["generation"] + 1
+    assert committed_head["revision_id"] == accept_before["draft"]["revision_id"]
+    assert committed_head["manifest_sha256"] == accept_before["draft"]["manifest_sha256"]
+
+    assert decided["stale_error"] == "conflict"
+    assert decided["stale_after_conflict"] == stale_before
+    assert decided["head_after_conflict"] == committed_head
+    rejected = decided["rejected"]
+    assert decided["durable_rejected"] == rejected
+    assert rejected["status"] == "rejected"
+    assert rejected["draft"] == stale_before["draft"]
+    assert rejected["committed_revision"] is None
+    assert rejected["generation"] == stale_before["generation"] + 1
+    assert rejected["transitions"][-1] == "reject_draft"
+    assert decided["final_head"] == committed_head
+    assert decided["task_record_count"] == 2
 
 
 @pytest.mark.slow

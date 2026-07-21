@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
 
@@ -27,6 +28,7 @@ from vibecad.workflow.state import (
     CriterionVerdict,
     NextAction,
     ReasoningOwner,
+    ReviewPolicy,
     TaskArtifactRef,
     TaskEvent,
     TaskRun,
@@ -98,6 +100,7 @@ def _task() -> TaskRun:
         project_id=PROJECT_ID,
         base_revision=BASE_REVISION,
         reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
     )
 
 
@@ -290,6 +293,7 @@ def test_canonical_identifiers_and_sequence_integrity_are_enforced():
             project_id=PROJECT_ID,
             base_revision=BASE_REVISION,
             reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+            review_policy=ReviewPolicy.AUTO_COMMIT,
         )
     assert caught.value.code is TaskStateErrorCode.INVALID_IDENTIFIER
 
@@ -861,6 +865,10 @@ def _matrix_task(status: TaskStatus) -> TaskRun:
         TaskEvent.REJECT_PROGRAM,
         error=_error(needs_input=True),
     )
+    preparing_review = _to_preparing_review()
+    awaiting_review = transition_task(preparing_review, TaskEvent.PUBLISH_DRAFT)
+    accepting_draft = transition_task(awaiting_review, TaskEvent.ACCEPT_DRAFT)
+    rejected = transition_task(awaiting_review, TaskEvent.REJECT_DRAFT)
     cases = {
         TaskStatus.CREATED: _task(),
         TaskStatus.NEEDS_PLAN: needs_plan,
@@ -869,6 +877,9 @@ def _matrix_task(status: TaskStatus) -> TaskRun:
         TaskStatus.EXECUTING: executing,
         TaskStatus.VERIFYING: verifying,
         TaskStatus.COMMITTING: committing,
+        TaskStatus.PREPARING_REVIEW: preparing_review,
+        TaskStatus.AWAITING_USER_REVIEW: awaiting_review,
+        TaskStatus.ACCEPTING_DRAFT: accepting_draft,
         TaskStatus.ROLLING_BACK: rolling_back,
         TaskStatus.NEEDS_INPUT: needs_input,
         TaskStatus.RECOVERY_REQUIRED: transition_task(
@@ -887,6 +898,7 @@ def _matrix_task(status: TaskStatus) -> TaskRun:
             committed_revision=COMMITTED_REVISION,
         ),
         TaskStatus.FAILED: transition_task(rolling_back, TaskEvent.COMPLETE_ROLLBACK),
+        TaskStatus.REJECTED: rejected,
     }
     return cases[status]
 
@@ -911,6 +923,16 @@ LEGAL_EDGES = {
     (TaskStatus.COMMITTING, TaskEvent.COMMIT): TaskStatus.SUCCEEDED,
     (TaskStatus.COMMITTING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.COMMITTING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
+    (TaskStatus.PREPARING_REVIEW, TaskEvent.PUBLISH_DRAFT): TaskStatus.AWAITING_USER_REVIEW,
+    (TaskStatus.PREPARING_REVIEW, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
+    (TaskStatus.PREPARING_REVIEW, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
+    (TaskStatus.AWAITING_USER_REVIEW, TaskEvent.ACCEPT_DRAFT): TaskStatus.ACCEPTING_DRAFT,
+    (TaskStatus.AWAITING_USER_REVIEW, TaskEvent.REJECT_DRAFT): TaskStatus.REJECTED,
+    (TaskStatus.ACCEPTING_DRAFT, TaskEvent.COMMIT): TaskStatus.SUCCEEDED,
+    (TaskStatus.ACCEPTING_DRAFT, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
+    (TaskStatus.ACCEPTING_DRAFT, TaskEvent.ABORT_ACCEPT): TaskStatus.AWAITING_USER_REVIEW,
+    (TaskStatus.ACCEPTING_DRAFT, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
+    (TaskStatus.ACCEPTING_DRAFT, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.ROLLING_BACK, TaskEvent.COMPLETE_ROLLBACK): TaskStatus.FAILED,
     (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
@@ -956,7 +978,7 @@ def test_full_status_event_matrix_has_exact_target_and_rejection_precedence(stat
 
     with pytest.raises(TaskStateError) as caught:
         transition_task(task, event, **_edge_payload(event))
-    if status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED}:
+    if status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.REJECTED}:
         assert caught.value.code is TaskStateErrorCode.TERMINAL_STATE
         assert caught.value.path == "/status"
     else:
@@ -1921,6 +1943,7 @@ def test_authoritative_budget_constants_and_direct_exact_collections_are_accepte
         project_id=executing.project_id,
         base_revision=executing.base_revision,
         reasoning_owner=executing.reasoning_owner,
+        review_policy=executing.review_policy,
         status=executing.status,
         program=executing.program,
         candidate_revision=executing.candidate_revision,
@@ -1936,6 +1959,7 @@ def test_authoritative_budget_constants_and_direct_exact_collections_are_accepte
         project_id=verifying.project_id,
         base_revision=verifying.base_revision,
         reasoning_owner=verifying.reasoning_owner,
+        review_policy=verifying.review_policy,
         status=verifying.status,
         program=verifying.program,
         candidate_revision=verifying.candidate_revision,
@@ -1950,6 +1974,7 @@ def test_authoritative_budget_constants_and_direct_exact_collections_are_accepte
         project_id=executing.project_id,
         base_revision=executing.base_revision,
         reasoning_owner=executing.reasoning_owner,
+        review_policy=executing.review_policy,
         status=executing.status,
         program=executing.program,
         candidate_revision=executing.candidate_revision,
@@ -1972,6 +1997,7 @@ def test_exact_128_transition_history_is_legal_and_directly_reconstructible():
         project_id=task.project_id,
         base_revision=task.base_revision,
         reasoning_owner=task.reasoning_owner,
+        review_policy=task.review_policy,
         status=task.status,
         program=task.program,
         candidate_revision=None,
@@ -2065,6 +2091,7 @@ def test_hostile_subclasses_are_rejected_before_direct_or_nested_iteration():
             "project_id": base.project_id,
             "base_revision": base.base_revision,
             "reasoning_owner": base.reasoning_owner,
+            "review_policy": base.review_policy,
             "status": base.status,
             "program": base.program,
             "candidate_revision": base.candidate_revision,
@@ -2406,6 +2433,8 @@ def test_state_public_exports_are_exact_and_deferred_intent_is_absent():
         "CriterionVerdict",
         "NextAction",
         "ReasoningOwner",
+        "ReviewDraft",
+        "ReviewPolicy",
         "TaskArtifactRef",
         "TaskEvent",
         "TaskRun",
@@ -2605,6 +2634,7 @@ def test_direct_builtin_lists_are_defensively_copied_before_caller_mutation():
         project_id=verifying.project_id,
         base_revision=verifying.base_revision,
         reasoning_owner=verifying.reasoning_owner,
+        review_policy=verifying.review_policy,
         status=verifying.status,
         program=verifying.program,
         candidate_revision=verifying.candidate_revision,
@@ -2645,6 +2675,7 @@ def test_hostile_direct_and_nested_containers_reject_before_iteration():
         "project_id": executing.project_id,
         "base_revision": executing.base_revision,
         "reasoning_owner": executing.reasoning_owner,
+        "review_policy": executing.review_policy,
         "status": executing.status,
         "program": executing.program,
         "candidate_revision": executing.candidate_revision,
@@ -3461,6 +3492,7 @@ def test_enum_class_proxy_is_rejected_before_native_operations(target, enum_type
                 project_id=PROJECT_ID,
                 base_revision=BASE_REVISION,
                 reasoning_owner=proxy,
+                review_policy=ReviewPolicy.AUTO_COMMIT,
             )
         else:
             CriterionVerdict(
@@ -3487,3 +3519,449 @@ def test_public_error_rejects_code_class_proxy_before_value_access():
 
     with pytest.raises(TypeError, match="code must be a TaskStateErrorCode"):
         TaskStateError(CodeClassProxy(), "", "Proxy codes are rejected")
+
+
+# S3-5 durable review contract REDs.  These intentionally exercise the public
+# state surface through ``state_module`` so an absent symbol is an assertion
+# failure in the focused test, rather than a collection-time import failure.
+DRAFT_ID = "draft_11111111111111111111111111111111"
+OTHER_DRAFT_ID = "draft_22222222222222222222222222222222"
+OTHER_TASK_ID = "task_22222222222222222222222222222222"
+OTHER_PROJECT_ID = "project_22222222222222222222222222222222"
+BASE_GENERATION = 7
+BASE_MANIFEST_SHA256 = "c" * 64
+
+
+def _review_types():
+    review_policy = getattr(state_module, "ReviewPolicy", None)
+    review_draft = getattr(state_module, "ReviewDraft", None)
+    assert review_policy is not None, "S3-5 ReviewPolicy is missing"
+    assert review_draft is not None, "S3-5 ReviewDraft is missing"
+    return review_policy, review_draft
+
+
+def _review_event(name: str):
+    event = getattr(TaskEvent, name, None)
+    assert event is not None, f"S3-5 TaskEvent.{name} is missing"
+    return event
+
+
+def _review_draft(**changes):
+    _, review_draft = _review_types()
+    values = {
+        "id": DRAFT_ID,
+        "task_id": TASK_ID,
+        "project_id": PROJECT_ID,
+        "base_revision": BASE_REVISION,
+        "base_generation": BASE_GENERATION,
+        "base_manifest_sha256": BASE_MANIFEST_SHA256,
+        "revision_id": CANDIDATE_REVISION,
+        "manifest_sha256": "a" * 64,
+        "verification_id": "verification_0123456789abcdef0123456789abcdef",
+        "acceptance_id": "acceptance-1",
+        "observation_digest": "b" * 64,
+    }
+    values.update(changes)
+    return review_draft(**values)
+
+
+def _policy_task(policy_name: str):
+    review_policy, _ = _review_types()
+    return new_task_run(
+        task_id=TASK_ID,
+        project_id=PROJECT_ID,
+        base_revision=BASE_REVISION,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=review_policy(policy_name),
+    )
+
+
+def _policy_to_verifying(policy_name: str):
+    task = transition_task(_policy_task(policy_name), TaskEvent.REQUEST_PLAN)
+    task = transition_task(task, TaskEvent.SUBMIT_PROGRAM, program=_program())
+    task = transition_task(task, TaskEvent.START_VALIDATION)
+    task = transition_task(
+        task,
+        TaskEvent.VALIDATE_PROGRAM,
+        candidate_revision=CANDIDATE_REVISION,
+    )
+    return transition_task(task, TaskEvent.COMPLETE_EXECUTION)
+
+
+def _to_preparing_review():
+    return transition_task(
+        _policy_to_verifying("require_review"),
+        _review_event("PREPARE_REVIEW"),
+        verification=_report(passed=True),
+        draft=_review_draft(),
+    )
+
+
+def _to_awaiting_review():
+    return transition_task(_to_preparing_review(), _review_event("PUBLISH_DRAFT"))
+
+
+def test_review_policy_is_closed_and_required_without_a_hidden_default():
+    review_policy = getattr(state_module, "ReviewPolicy", None)
+    assert review_policy is not None, "S3-5 ReviewPolicy is missing"
+    assert {item.value for item in review_policy} == {"auto_commit", "require_review"}
+
+    parameters = inspect.signature(new_task_run).parameters
+    assert tuple(parameters) == (
+        "task_id",
+        "project_id",
+        "base_revision",
+        "reasoning_owner",
+        "review_policy",
+    )
+    assert parameters["review_policy"].default is inspect.Parameter.empty
+    with pytest.raises(TypeError):
+        new_task_run(
+            task_id=TASK_ID,
+            project_id=PROJECT_ID,
+            base_revision=BASE_REVISION,
+            reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        )
+    with pytest.raises(TaskStateError) as caught:
+        new_task_run(
+            task_id=TASK_ID,
+            project_id=PROJECT_ID,
+            base_revision=BASE_REVISION,
+            reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+            review_policy="auto_commit",
+        )
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVALID_TYPE,
+        "/review_policy",
+    )
+
+
+def test_review_draft_has_exact_path_free_frozen_schema_and_round_trips():
+    _, review_draft = _review_types()
+    draft = _review_draft()
+    expected = {
+        "schema_version": 1,
+        "id": DRAFT_ID,
+        "task_id": TASK_ID,
+        "project_id": PROJECT_ID,
+        "base_revision": BASE_REVISION,
+        "base_generation": BASE_GENERATION,
+        "base_manifest_sha256": BASE_MANIFEST_SHA256,
+        "revision_id": CANDIDATE_REVISION,
+        "manifest_sha256": "a" * 64,
+        "verification_id": "verification_0123456789abcdef0123456789abcdef",
+        "acceptance_id": "acceptance-1",
+        "observation_digest": "b" * 64,
+    }
+
+    assert draft.to_mapping() == expected
+    assert review_draft.from_mapping(deepcopy(expected)) == draft
+    assert not ({"path", "receipt", "lease", "session", "handle"} & set(expected))
+    with pytest.raises(FrozenInstanceError):
+        draft.id = OTHER_DRAFT_ID
+
+
+def test_review_draft_id_is_derived_one_to_one_from_revision_suffix():
+    _, review_draft = _review_types()
+    malformed = _review_draft().to_mapping()
+    malformed["id"] = OTHER_DRAFT_ID
+    with pytest.raises(TaskStateError) as caught:
+        review_draft.from_mapping(malformed)
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/id",
+    )
+
+
+def test_review_status_event_and_next_action_enums_are_exact():
+    assert {item.value for item in TaskStatus} == {
+        "created",
+        "needs_plan",
+        "program_ready",
+        "validating_program",
+        "executing",
+        "verifying",
+        "committing",
+        "preparing_review",
+        "awaiting_user_review",
+        "accepting_draft",
+        "rolling_back",
+        "needs_input",
+        "recovery_required",
+        "cleanup_required",
+        "succeeded",
+        "failed",
+        "rejected",
+    }
+    assert {item.value for item in TaskEvent} == {
+        "request_plan",
+        "submit_program",
+        "start_validation",
+        "validate_program",
+        "reject_program",
+        "complete_execution",
+        "fail_execution",
+        "pass_verification",
+        "prepare_review",
+        "publish_draft",
+        "accept_draft",
+        "reject_draft",
+        "abort_accept",
+        "confirm_draft_uncommitted",
+        "fail_verification",
+        "commit",
+        "complete_rollback",
+        "request_input",
+        "require_recovery",
+        "require_cleanup",
+        "confirm_committed",
+        "confirm_uncommitted",
+        "confirm_pre_candidate",
+    }
+    assert {item.value for item in NextAction} == {
+        "request_plan",
+        "submit_program",
+        "validate_program",
+        "provide_input",
+        "reconcile",
+        "cleanup",
+        "review_draft",
+        "wait",
+        "none",
+    }
+    expected = {
+        "preparing_review": "reconcile",
+        "awaiting_user_review": "review_draft",
+        "accepting_draft": "reconcile",
+        "rejected": "none",
+    }
+    for status, action in expected.items():
+        assert next_action_for(TaskStatus(status)) is NextAction(action)
+
+
+def test_policy_gates_auto_commit_and_review_transition_paths():
+    auto_verifying = _policy_to_verifying("auto_commit")
+    committing = transition_task(
+        auto_verifying,
+        TaskEvent.PASS_VERIFICATION,
+        verification=_report(passed=True),
+    )
+    assert committing.status is TaskStatus.COMMITTING
+    assert committing.draft is None
+
+    with pytest.raises(TaskStateError) as caught:
+        transition_task(
+            auto_verifying,
+            _review_event("PREPARE_REVIEW"),
+            verification=_report(passed=True),
+            draft=_review_draft(),
+        )
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVALID_TRANSITION,
+        "/event",
+    )
+
+    review_verifying = _policy_to_verifying("require_review")
+    with pytest.raises(TaskStateError) as caught:
+        transition_task(
+            review_verifying,
+            TaskEvent.PASS_VERIFICATION,
+            verification=_report(passed=True),
+        )
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVALID_TRANSITION,
+        "/event",
+    )
+
+    preparing = transition_task(
+        review_verifying,
+        _review_event("PREPARE_REVIEW"),
+        verification=_report(passed=True),
+        draft=_review_draft(),
+    )
+    assert preparing.status.value == "preparing_review"
+    assert preparing.draft == _review_draft()
+    awaiting = transition_task(preparing, _review_event("PUBLISH_DRAFT"))
+    assert awaiting.status.value == "awaiting_user_review"
+    assert awaiting.next_action.value == "review_draft"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "path"),
+    [
+        ("task_id", OTHER_TASK_ID, "/draft/task_id"),
+        ("project_id", OTHER_PROJECT_ID, "/draft/project_id"),
+        ("base_revision", OTHER_REVISION, "/draft/base_revision"),
+        ("manifest_sha256", "d" * 64, "/draft/manifest_sha256"),
+        (
+            "verification_id",
+            "verification_22222222222222222222222222222222",
+            "/draft/verification_id",
+        ),
+        ("acceptance_id", "other-acceptance", "/draft/acceptance_id"),
+        ("observation_digest", "d" * 64, "/draft/observation_digest"),
+    ],
+)
+def test_prepare_review_binds_draft_to_task_program_and_passing_report(field, value, path):
+    with pytest.raises(TaskStateError) as caught:
+        transition_task(
+            _policy_to_verifying("require_review"),
+            _review_event("PREPARE_REVIEW"),
+            verification=_report(passed=True),
+            draft=_review_draft(**{field: value}),
+        )
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        path,
+    )
+
+
+def test_review_history_and_policy_cannot_be_forged_during_round_trip():
+    awaiting = _to_awaiting_review()
+    raw = awaiting.to_mapping()
+    raw["review_policy"] = "auto_commit"
+    with pytest.raises(TaskStateError) as caught:
+        TaskRun.from_mapping(raw)
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/review_policy",
+    )
+
+    raw = awaiting.to_mapping()
+    raw["draft"] = None
+    with pytest.raises(TaskStateError) as caught:
+        TaskRun.from_mapping(raw)
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/draft",
+    )
+
+    raw = awaiting.to_mapping()
+    raw["draft"]["verification_id"] = (
+        "verification_22222222222222222222222222222222"
+    )
+    with pytest.raises(TaskStateError) as caught:
+        TaskRun.from_mapping(raw)
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/draft/verification_id",
+    )
+
+
+def test_reject_is_a_normal_terminal_decision_that_preserves_review_evidence():
+    awaiting = _to_awaiting_review()
+    rejected = transition_task(awaiting, _review_event("REJECT_DRAFT"))
+
+    assert rejected.status.value == "rejected"
+    assert rejected.next_action is NextAction.NONE
+    assert rejected.draft == awaiting.draft
+    assert rejected.verification_reports == awaiting.verification_reports
+    assert rejected.committed_revision is None
+    assert rejected.last_error is None
+    assert TaskRun.from_mapping(rejected.to_mapping()) == rejected
+    with pytest.raises(TaskStateError) as caught:
+        transition_task(rejected, TaskEvent.REQUEST_PLAN)
+    assert caught.value.code is TaskStateErrorCode.TERMINAL_STATE
+
+
+def test_accept_abort_and_reviewed_success_preserve_the_immutable_draft():
+    awaiting = _to_awaiting_review()
+    accepting = transition_task(awaiting, _review_event("ACCEPT_DRAFT"))
+    assert accepting.status.value == "accepting_draft"
+    assert accepting.next_action is NextAction.RECONCILE
+
+    aborted = transition_task(accepting, _review_event("ABORT_ACCEPT"))
+    assert aborted.status.value == "awaiting_user_review"
+    assert aborted.draft == awaiting.draft
+    assert aborted.last_error is None
+
+    accepting = transition_task(aborted, _review_event("ACCEPT_DRAFT"))
+    succeeded = transition_task(
+        accepting,
+        TaskEvent.COMMIT,
+        committed_revision=CANDIDATE_REVISION,
+    )
+    assert succeeded.status is TaskStatus.SUCCEEDED
+    assert succeeded.committed_revision == succeeded.draft.revision_id
+    assert succeeded.draft == awaiting.draft
+    assert TaskRun.from_mapping(succeeded.to_mapping()) == succeeded
+
+
+def test_reviewed_success_cannot_bypass_explicit_acceptance_provenance():
+    recovery = transition_task(
+        _to_preparing_review(),
+        TaskEvent.REQUIRE_RECOVERY,
+        error=_error(),
+    )
+    with pytest.raises(TaskStateError) as caught:
+        transition_task(
+            recovery,
+            TaskEvent.CONFIRM_COMMITTED,
+            committed_revision=CANDIDATE_REVISION,
+        )
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/transitions",
+    )
+
+    forged = recovery.to_mapping()
+    forged["status"] = TaskStatus.SUCCEEDED.value
+    forged["committed_revision"] = CANDIDATE_REVISION
+    forged["last_error"] = None
+    forged["transitions"].append(
+        {
+            "schema_version": 1,
+            "sequence": len(forged["transitions"]) + 1,
+            "event": TaskEvent.CONFIRM_COMMITTED.value,
+            "from_status": TaskStatus.RECOVERY_REQUIRED.value,
+            "to_status": TaskStatus.SUCCEEDED.value,
+        }
+    )
+    with pytest.raises(TaskStateError) as caught:
+        TaskRun.from_mapping(forged)
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/transitions",
+    )
+
+
+@pytest.mark.parametrize("attention_event", [TaskEvent.REQUIRE_RECOVERY, TaskEvent.REQUIRE_CLEANUP])
+@pytest.mark.parametrize("origin", ["preparing", "accepting"])
+def test_review_attention_can_only_confirm_exact_draft_uncommitted_back_to_awaiting(
+    origin, attention_event
+):
+    task = _to_preparing_review()
+    if origin == "accepting":
+        task = transition_task(task, _review_event("PUBLISH_DRAFT"))
+        task = transition_task(task, _review_event("ACCEPT_DRAFT"))
+    attention = transition_task(task, attention_event, error=_error())
+    assert attention.last_error == _error()
+
+    restored = transition_task(
+        attention,
+        _review_event("CONFIRM_DRAFT_UNCOMMITTED"),
+    )
+    assert restored.status.value == "awaiting_user_review"
+    assert restored.draft == _review_draft()
+    assert restored.last_error is None
+    assert restored.next_action.value == "review_draft"
+    assert TaskRun.from_mapping(restored.to_mapping()) == restored
+
+    ordinary_attention = transition_task(
+        transition_task(
+            _policy_to_verifying("auto_commit"),
+            TaskEvent.PASS_VERIFICATION,
+            verification=_report(passed=True),
+        ),
+        attention_event,
+        error=_error(),
+    )
+    with pytest.raises(TaskStateError) as caught:
+        transition_task(
+            ordinary_attention,
+            _review_event("CONFIRM_DRAFT_UNCOMMITTED"),
+        )
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVALID_TRANSITION,
+        "/event",
+    )

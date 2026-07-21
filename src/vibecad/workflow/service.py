@@ -16,13 +16,23 @@ from vibecad.execution.candidate import (
     CandidateCoordinator,
     CandidateError,
     CandidateErrorCode,
+    CandidateReconcileResult,
     CandidateReconcileStatus,
+    CandidateRollbackResult,
     CandidateRollbackStatus,
     SessionBinding,
 )
 from vibecad.execution.executor import CandidateEvidence, InProcessCadExecutor
 from vibecad.execution.results import NormalizedToolOutcome
-from vibecad.execution.revisions import LocalRevisionStore, ProjectHead, RevisionRef
+from vibecad.execution.revisions import (
+    CommitJournal,
+    CommitJournalState,
+    LocalRevisionStore,
+    ProjectHead,
+    ReconciliationResult,
+    ReconciliationStatus,
+    RevisionRef,
+)
 from vibecad.validation import (
     CompiledAcceptance,
     VerificationResult,
@@ -33,6 +43,8 @@ from vibecad.workflow.contracts import ErrorCategory, ModelProgram, StepError
 from vibecad.workflow.lease import LeaseError, ResourceLeaseManager
 from vibecad.workflow.state import (
     ReasoningOwner,
+    ReviewDraft,
+    ReviewPolicy,
     TaskEvent,
     TaskRun,
     TaskStateError,
@@ -177,6 +189,15 @@ _RECOVERY_ERROR = StepError(
     related_objects=(),
     diagnostic_artifacts=(),
 )
+_REVIEW_INTEGRITY_ERROR = StepError(
+    category=ErrorCategory.POLICY,
+    code="draft_integrity_failed",
+    message="The durable draft no longer matches its verified evidence.",
+    retryable=False,
+    needs_input=False,
+    related_objects=(),
+    diagnostic_artifacts=(),
+)
 
 
 def _raise(code: TaskServiceErrorCode) -> None:
@@ -255,8 +276,11 @@ class TaskService:
         task_id: str,
         project_id: str,
         reasoning_owner: ReasoningOwner,
+        review_policy: ReviewPolicy,
     ) -> StoredTaskRun:
         if type(reasoning_owner) is not ReasoningOwner:
+            _raise(TaskServiceErrorCode.INVALID_INPUT)
+        if type(review_policy) is not ReviewPolicy:
             _raise(TaskServiceErrorCode.INVALID_INPUT)
         if reasoning_owner is not ReasoningOwner.EXTERNAL_PLAN:
             _raise(TaskServiceErrorCode.UNSUPPORTED_REASONING_OWNER)
@@ -276,6 +300,7 @@ class TaskService:
                 project_id=project_id,
                 base_revision=head.revision_id,
                 reasoning_owner=reasoning_owner,
+                review_policy=review_policy,
             )
             task = transition_task(task, TaskEvent.REQUEST_PLAN)
             stored = self._task_store.create(task)
@@ -312,6 +337,102 @@ class TaskService:
 
     def get_task(self, *, task_id: str) -> StoredTaskRun:
         return self._load(task_id)
+
+    def accept_draft(
+        self,
+        *,
+        task_id: str,
+        draft_id: str,
+        expected_generation: int,
+    ) -> StoredTaskRun:
+        expected = _expected_generation(expected_generation)
+        stored = self._load(task_id)
+        task = stored.task_run
+        draft = task.draft
+        if type(draft) is not ReviewDraft:
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        if type(draft_id) is not str or draft.id != draft_id:
+            _raise(TaskServiceErrorCode.CONFLICT)
+        if task.status is TaskStatus.SUCCEEDED:
+            if (
+                task.review_policy is ReviewPolicy.REQUIRE_REVIEW
+                and task.committed_revision == draft.revision_id
+            ):
+                return stored
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        if task.status is TaskStatus.REJECTED:
+            _raise(TaskServiceErrorCode.CONFLICT)
+        if task.status is TaskStatus.ACCEPTING_DRAFT:
+            reconciled = self.reconcile_task(
+                task_id=task_id,
+                expected_generation=stored.generation,
+            )
+            if reconciled.task_run.status is TaskStatus.SUCCEEDED:
+                return reconciled
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        if task.status is not TaskStatus.AWAITING_USER_REVIEW:
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        if stored.generation != expected:
+            _raise(TaskServiceErrorCode.CONFLICT)
+
+        lease = self._acquire(task.project_id)
+        result: StoredTaskRun | None = None
+        caught: TaskServiceError | None = None
+        try:
+            try:
+                head = self._revision_store.load_head(task.project_id)
+                expected_head = self._draft_head(draft)
+                if type(head) is not ProjectHead or head != expected_head:
+                    _raise(TaskServiceErrorCode.CONFLICT)
+                accepting = self._cas(
+                    stored,
+                    transition_task(task, TaskEvent.ACCEPT_DRAFT),
+                )
+                result = self._accept_with_lease(accepting, expected_head, lease)
+            except TaskServiceError as error:
+                caught = error
+            except Exception:
+                caught = TaskServiceError(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        finally:
+            release_failed = self._release(lease)
+        if release_failed:
+            _raise(TaskServiceErrorCode.LEASE_UNAVAILABLE)
+        if caught is not None:
+            raise caught from None
+        if result is None or result.task_run.status is not TaskStatus.SUCCEEDED:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        return result
+
+    def reject_draft(
+        self,
+        *,
+        task_id: str,
+        draft_id: str,
+        expected_generation: int,
+    ) -> StoredTaskRun:
+        expected = _expected_generation(expected_generation)
+        stored = self._load(task_id)
+        task = stored.task_run
+        draft = task.draft
+        if type(draft) is not ReviewDraft:
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        if type(draft_id) is not str or draft.id != draft_id:
+            _raise(TaskServiceErrorCode.CONFLICT)
+        if task.status is TaskStatus.REJECTED:
+            return stored
+        if task.status in {TaskStatus.ACCEPTING_DRAFT, TaskStatus.SUCCEEDED}:
+            _raise(TaskServiceErrorCode.CONFLICT)
+        if task.status is not TaskStatus.AWAITING_USER_REVIEW:
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        if stored.generation != expected:
+            _raise(TaskServiceErrorCode.CONFLICT)
+        try:
+            return self._cas(
+                stored,
+                transition_task(task, TaskEvent.REJECT_DRAFT),
+            )
+        except TaskStateError:
+            _raise(TaskServiceErrorCode.INVALID_STATE)
 
     def submit_model_program(
         self,
@@ -418,6 +539,8 @@ class TaskService:
             TaskStatus.EXECUTING,
             TaskStatus.VERIFYING,
             TaskStatus.COMMITTING,
+            TaskStatus.PREPARING_REVIEW,
+            TaskStatus.ACCEPTING_DRAFT,
             TaskStatus.ROLLING_BACK,
             TaskStatus.RECOVERY_REQUIRED,
             TaskStatus.CLEANUP_REQUIRED,
@@ -426,6 +549,7 @@ class TaskService:
         lease = self._acquire(stored.task_run.project_id)
         result: object | None = None
         caught: TaskServiceError | None = None
+        post_release_event: TaskEvent | None = None
         try:
             try:
                 if stored.task_run.status in {
@@ -442,7 +566,14 @@ class TaskService:
                     project_id=stored.task_run.project_id,
                     lease=lease,
                 )
-                stored = self._apply_reconcile(stored, result)
+                if self._has_review_origin(stored.task_run):
+                    stored, post_release_event = self._apply_review_reconcile(
+                        stored,
+                        result,
+                        lease,
+                    )
+                else:
+                    stored = self._apply_reconcile(stored, result)
             except TaskServiceError as error:
                 caught = error
             except Exception:
@@ -454,7 +585,243 @@ class TaskService:
         if caught is not None:
             raise caught from None
         assert result is not None
+        if post_release_event is not None:
+            try:
+                stored = self._cas(
+                    stored,
+                    transition_task(stored.task_run, post_release_event),
+                )
+            except (TaskServiceError, TaskStateError):
+                _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
         return stored
+
+    @staticmethod
+    def _has_review_origin(task: TaskRun) -> bool:
+        return type(task.draft) is ReviewDraft and any(
+            record.event is TaskEvent.PREPARE_REVIEW for record in task.transitions
+        )
+
+    @staticmethod
+    def _accepted_review_origin(task: TaskRun) -> bool:
+        return any(record.event is TaskEvent.ACCEPT_DRAFT for record in task.transitions)
+
+    def _apply_review_reconcile(
+        self,
+        stored: StoredTaskRun,
+        result: object,
+        lease: object,
+    ) -> tuple[StoredTaskRun, TaskEvent | None]:
+        task = stored.task_run
+        draft = task.draft
+        if type(draft) is not ReviewDraft:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        attention = _attention_event(result)
+        if attention is not None:
+            if (
+                task.status is TaskStatus.RECOVERY_REQUIRED
+                and attention is TaskEvent.REQUIRE_RECOVERY
+            ):
+                return (stored, None)
+            if (
+                task.status is TaskStatus.CLEANUP_REQUIRED
+                and attention is TaskEvent.REQUIRE_CLEANUP
+            ):
+                return (stored, None)
+            return (self._published_attention(stored, attention), None)
+        try:
+            durable_head = self._revision_store.load_head(task.project_id)
+        except Exception:
+            durable_head = None
+        if type(result) is not CandidateReconcileResult:
+            if task.status is TaskStatus.RECOVERY_REQUIRED:
+                return (stored, None)
+            return (
+                self._published_attention(stored, TaskEvent.REQUIRE_RECOVERY),
+                None,
+            )
+        head = getattr(result, "head", None)
+        live_binding = getattr(result, "live_binding", None)
+        status = getattr(result, "status", None)
+        stable_status = status in {
+            CandidateReconcileStatus.CLEAN,
+            CandidateReconcileStatus.COMMITTED,
+            CandidateReconcileStatus.NOT_COMMITTED,
+        }
+        if not (
+            stable_status
+            and type(head) is ProjectHead
+            and type(durable_head) is ProjectHead
+            and head == durable_head
+            and type(live_binding) is SessionBinding
+            and live_binding.project_id == task.project_id
+            and live_binding.revision_id == durable_head.revision_id
+        ):
+            if task.status is TaskStatus.RECOVERY_REQUIRED:
+                return (stored, None)
+            return (
+                self._published_attention(stored, TaskEvent.REQUIRE_RECOVERY),
+                None,
+            )
+        base_head = self._draft_head(draft)
+        if durable_head != base_head and self._accepted_review_origin(task):
+            return (self._apply_reconcile(stored, result), None)
+        if durable_head != base_head:
+            if task.status is TaskStatus.RECOVERY_REQUIRED:
+                return (stored, None)
+            return (
+                self._published_attention(stored, TaskEvent.REQUIRE_RECOVERY),
+                None,
+            )
+        if not self._draft_is_intact(task, draft):
+            if task.status is TaskStatus.RECOVERY_REQUIRED:
+                return (stored, None)
+            return (
+                self._review_attention(
+                    stored,
+                    TaskEvent.REQUIRE_RECOVERY,
+                    integrity=True,
+                ),
+                None,
+            )
+        if task.status is TaskStatus.PREPARING_REVIEW:
+            if not self._review_journal_is_terminal_uncommitted(
+                task,
+                draft,
+                result,
+                durable_head,
+            ):
+                return (
+                    self._published_attention(stored, TaskEvent.REQUIRE_RECOVERY),
+                    None,
+                )
+            return (stored, TaskEvent.PUBLISH_DRAFT)
+        if task.status is TaskStatus.ACCEPTING_DRAFT:
+            if not self._review_base_transaction_is_terminal(
+                task,
+                result,
+                durable_head,
+            ):
+                return (
+                    self._published_attention(stored, TaskEvent.REQUIRE_RECOVERY),
+                    None,
+                )
+            return (self._accept_with_lease(stored, base_head, lease), None)
+        if task.status in {TaskStatus.RECOVERY_REQUIRED, TaskStatus.CLEANUP_REQUIRED}:
+            if not self._review_base_has_terminal_uncommitted(
+                task,
+                result,
+                durable_head,
+            ):
+                if task.status is TaskStatus.RECOVERY_REQUIRED:
+                    return (stored, None)
+                return (
+                    self._published_attention(stored, TaskEvent.REQUIRE_RECOVERY),
+                    None,
+                )
+            return (stored, TaskEvent.CONFIRM_DRAFT_UNCOMMITTED)
+        return (
+            self._published_attention(stored, TaskEvent.REQUIRE_RECOVERY),
+            None,
+        )
+
+    @staticmethod
+    def _review_journal_is_terminal_uncommitted(
+        task: TaskRun,
+        draft: ReviewDraft,
+        result: CandidateReconcileResult,
+        durable_head: ProjectHead,
+    ) -> bool:
+        reconciliation = result.reconciliation
+        journal = reconciliation.journal if type(reconciliation) is ReconciliationResult else None
+        return (
+            TaskService._review_base_has_terminal_uncommitted(
+                task,
+                result,
+                durable_head,
+            )
+            and type(journal) is CommitJournal
+            and journal.candidate_revision == draft.revision_id
+            and journal.manifest_sha256 == draft.manifest_sha256
+        )
+
+    @staticmethod
+    def _review_base_has_terminal_uncommitted(
+        task: TaskRun,
+        result: CandidateReconcileResult,
+        durable_head: ProjectHead,
+    ) -> bool:
+        reconciliation = result.reconciliation
+        journal = reconciliation.journal if type(reconciliation) is ReconciliationResult else None
+        return (
+            result.status is CandidateReconcileStatus.NOT_COMMITTED
+            and result.head == durable_head
+            and result.head_committed is False
+            and result.slot_promoted is False
+            and result.cleanup_required is False
+            and result.recovery_required is False
+            and result.cleanup_binding is None
+            and type(result.live_binding) is SessionBinding
+            and result.live_binding.project_id == task.project_id
+            and result.live_binding.revision_id == durable_head.revision_id
+            and type(reconciliation) is ReconciliationResult
+            and reconciliation.project_id == task.project_id
+            and reconciliation.status is ReconciliationStatus.NOT_COMMITTED
+            and reconciliation.head == durable_head
+            and type(journal) is CommitJournal
+            and journal.project_id == task.project_id
+            and journal.expected_head == durable_head
+            and journal.state is CommitJournalState.NOT_COMMITTED
+        )
+
+    @staticmethod
+    def _review_base_transaction_is_terminal(
+        task: TaskRun,
+        result: CandidateReconcileResult,
+        durable_head: ProjectHead,
+    ) -> bool:
+        reconciliation = result.reconciliation
+        if not (
+            type(reconciliation) is ReconciliationResult
+            and reconciliation.project_id == task.project_id
+            and reconciliation.head == durable_head
+        ):
+            return False
+        journal = reconciliation.journal
+        if result.status is CandidateReconcileStatus.CLEAN:
+            return (
+                reconciliation.status is ReconciliationStatus.CLEAN
+                and journal is None
+                and result.head_committed is True
+                and result.slot_promoted is True
+            )
+        if type(journal) is not CommitJournal:
+            return False
+        if not (
+            journal.project_id == task.project_id
+            and journal.state in {
+                CommitJournalState.NOT_COMMITTED,
+                CommitJournalState.COMMITTED,
+            }
+        ):
+            return False
+        if result.status is CandidateReconcileStatus.NOT_COMMITTED:
+            return (
+                reconciliation.status is ReconciliationStatus.NOT_COMMITTED
+                and journal.state is CommitJournalState.NOT_COMMITTED
+                and journal.expected_head == durable_head
+                and result.head_committed is False
+                and result.slot_promoted is False
+            )
+        if result.status is CandidateReconcileStatus.COMMITTED:
+            return (
+                reconciliation.status is ReconciliationStatus.COMMITTED
+                and journal.state is CommitJournalState.COMMITTED
+                and journal.candidate_revision == durable_head.revision_id
+                and journal.manifest_sha256 == durable_head.manifest_sha256
+                and result.head_committed is True
+                and result.slot_promoted is True
+            )
+        return False
 
     def _load(self, task_id: str) -> StoredTaskRun:
         stored: StoredTaskRun | None = None
@@ -578,7 +945,241 @@ class TaskService:
         if caught is not None:
             raise caught from None
         assert result is not None
+        if result.task_run.status is TaskStatus.PREPARING_REVIEW:
+            try:
+                return self._cas(
+                    result,
+                    transition_task(result.task_run, TaskEvent.PUBLISH_DRAFT),
+                )
+            except TaskStateError:
+                _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
         return result
+
+    @staticmethod
+    def _draft_head(draft: ReviewDraft) -> ProjectHead:
+        if type(draft) is not ReviewDraft:
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        try:
+            return ProjectHead(
+                project_id=draft.project_id,
+                generation=draft.base_generation,
+                revision_id=draft.base_revision,
+                manifest_sha256=draft.base_manifest_sha256,
+            )
+        except Exception:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+
+    @staticmethod
+    def _draft_report(task: TaskRun, draft: ReviewDraft) -> object:
+        reports = tuple(
+            report
+            for report in task.verification_reports
+            if report.id == draft.verification_id
+        )
+        if len(reports) != 1:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        report = reports[0]
+        if not (
+            report.passed
+            and report.acceptance_id == draft.acceptance_id
+            and report.candidate_revision == draft.revision_id
+            and report.manifest_sha256 == draft.manifest_sha256
+            and report.observation_digest == draft.observation_digest
+        ):
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        return report
+
+    def _draft_is_intact(self, task: TaskRun, draft: ReviewDraft) -> bool:
+        try:
+            self._draft_report(task, draft)
+            revision = self._revision_store.load_revision(
+                task.project_id,
+                draft.revision_id,
+            )
+        except Exception:
+            return False
+        if not (
+            type(revision) is RevisionRef
+            and revision.project_id == task.project_id
+            and revision.id == draft.revision_id
+            and revision.base_revision == draft.base_revision
+            and revision.manifest_sha256 == draft.manifest_sha256
+            and revision.model is not None
+            and type(revision.artifacts) is tuple
+        ):
+            return False
+        revision_artifacts = (revision.model,) + revision.artifacts
+        if len(revision_artifacts) != len(task.artifacts):
+            return False
+        return all(
+            task_artifact.candidate_revision == draft.revision_id
+            and task_artifact.id == revision_artifact.id
+            and task_artifact.name == revision_artifact.name
+            and task_artifact.format == revision_artifact.format
+            and task_artifact.sha256 == revision_artifact.sha256
+            and task_artifact.size_bytes == revision_artifact.size_bytes
+            for task_artifact, revision_artifact in zip(
+                task.artifacts,
+                revision_artifacts,
+                strict=True,
+            )
+        )
+
+    def _review_is_durably_detached(
+        self,
+        task: TaskRun,
+        draft: ReviewDraft,
+        published: object,
+    ) -> bool:
+        """Require one exact, terminal, read-backed detach fact before review."""
+
+        if type(published) is not CandidateRollbackResult:
+            return False
+        reconciliation = published.reconciliation
+        journal = (
+            reconciliation.journal
+            if type(reconciliation) is ReconciliationResult
+            else None
+        )
+        try:
+            durable_head = self._revision_store.load_head(task.project_id)
+        except Exception:
+            return False
+        return (
+            published.status is CandidateRollbackStatus.NOT_COMMITTED
+            and published.head == self._draft_head(draft)
+            and published.head == durable_head
+            and published.head_committed is False
+            and published.slot_promoted is False
+            and published.cleanup_required is False
+            and published.recovery_required is False
+            and published.cleanup_binding is None
+            and type(published.live_binding) is SessionBinding
+            and published.live_binding.project_id == task.project_id
+            and published.live_binding.revision_id == draft.base_revision
+            and type(reconciliation) is ReconciliationResult
+            and reconciliation.project_id == task.project_id
+            and reconciliation.status is ReconciliationStatus.NOT_COMMITTED
+            and reconciliation.head == durable_head
+            and journal is not None
+            and journal.project_id == task.project_id
+            and journal.expected_head == durable_head
+            and journal.candidate_revision == draft.revision_id
+            and journal.manifest_sha256 == draft.manifest_sha256
+            and journal.state is CommitJournalState.NOT_COMMITTED
+            and self._draft_is_intact(task, draft)
+        )
+
+    def _review_attention(
+        self,
+        stored: StoredTaskRun,
+        event: TaskEvent,
+        *,
+        integrity: bool = False,
+    ) -> StoredTaskRun:
+        error = _REVIEW_INTEGRITY_ERROR if integrity else _attention_error(event)
+        try:
+            return self._cas(
+                stored,
+                transition_task(stored.task_run, event, error=error),
+            )
+        except (TaskServiceError, TaskStateError):
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+
+    def _accept_with_lease(
+        self,
+        accepting: StoredTaskRun,
+        expected_head: ProjectHead,
+        lease: object,
+    ) -> StoredTaskRun:
+        task = accepting.task_run
+        draft = task.draft
+        if (
+            task.status is not TaskStatus.ACCEPTING_DRAFT
+            or type(draft) is not ReviewDraft
+            or task.program is None
+        ):
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        expected_report = self._draft_report(task, draft)
+        try:
+            revision = self._revision_store.load_revision(task.project_id, draft.revision_id)
+        except Exception:
+            return self._review_attention(
+                accepting,
+                TaskEvent.REQUIRE_RECOVERY,
+                integrity=True,
+            )
+        if not (
+            type(revision) is RevisionRef
+            and revision.project_id == task.project_id
+            and revision.id == draft.revision_id
+            and revision.base_revision == draft.base_revision
+            and revision.manifest_sha256 == draft.manifest_sha256
+        ):
+            return self._review_attention(
+                accepting,
+                TaskEvent.REQUIRE_RECOVERY,
+                integrity=True,
+            )
+
+        review_candidate: object | None = None
+        prepared = False
+        try:
+            review_candidate = self._coordinator.reopen_review(
+                project_id=task.project_id,
+                base_head=expected_head,
+                revision=revision,
+                lease=lease,
+            )
+            evidence = self._executor.collect_evidence(candidate=review_candidate)
+            if type(evidence) is not CandidateEvidence or evidence.artifacts != task.artifacts:
+                raise ValueError
+            compiled = compile_acceptance_spec(task.program.acceptance)
+            verification = verify_acceptance(
+                compiled,
+                evidence.snapshot,
+                candidate_revision=revision.id,
+                manifest_sha256=revision.manifest_sha256,
+            )
+            if (
+                type(verification) is not VerificationResult
+                or not verification.report.passed
+                or verification.report != expected_report
+                or verification.receipt is None
+            ):
+                raise ValueError
+            review_candidate = self._coordinator.prepare_review(
+                candidate=review_candidate,
+                lease=lease,
+            )
+            if getattr(review_candidate, "revision", None) != revision:
+                raise ValueError
+            prepared = True
+            result = self._coordinator.commit(
+                candidate=review_candidate,
+                receipt=verification.receipt,
+                compiled=compiled,
+                snapshot=evidence.snapshot,
+                lease=lease,
+            )
+        except Exception:
+            if not prepared:
+                if review_candidate is not None:
+                    try:
+                        self._coordinator.discard_review(
+                            candidate=review_candidate,
+                            lease=lease,
+                        )
+                    except Exception as error:
+                        event = _attention_event(error) or TaskEvent.REQUIRE_RECOVERY
+                        return self._review_attention(accepting, event, integrity=True)
+                return self._review_attention(
+                    accepting,
+                    TaskEvent.REQUIRE_RECOVERY,
+                    integrity=True,
+                )
+            return self._post_receipt_attention(accepting)
+        return self._finish_commit(accepting, review_candidate, result)
 
     def _run_with_lease(
         self,
@@ -719,6 +1320,59 @@ class TaskService:
                 _VERIFICATION_FAILURE,
                 _VERIFICATION_FAILURE,
             )
+
+        if current.task_run.review_policy is ReviewPolicy.REQUIRE_REVIEW:
+            revision = current_candidate.revision
+            draft = ReviewDraft(
+                id=f"draft_{revision.id.removeprefix('revision_')}",
+                task_id=current.task_run.id,
+                project_id=current.task_run.project_id,
+                base_revision=head.revision_id,
+                base_generation=head.generation,
+                base_manifest_sha256=head.manifest_sha256,
+                revision_id=revision.id,
+                manifest_sha256=revision.manifest_sha256,
+                verification_id=verification.report.id,
+                acceptance_id=verification.report.acceptance_id,
+                observation_digest=verification.report.observation_digest,
+            )
+            try:
+                preparing = self._cas(
+                    current,
+                    transition_task(
+                        current.task_run,
+                        TaskEvent.PREPARE_REVIEW,
+                        verification=verification.report,
+                        draft=draft,
+                    ),
+                )
+            except (TaskServiceError, TaskStateError) as error:
+                return self._fail_published(
+                    current,
+                    current_candidate,
+                    lease,
+                    _VERIFICATION_FAILURE,
+                    error,
+                )
+            try:
+                published = self._coordinator.publish_review(
+                    candidate=current_candidate,
+                    receipt=verification.receipt,
+                    compiled=compiled,
+                    snapshot=evidence.snapshot,
+                    lease=lease,
+                )
+            except Exception as error:
+                event = _attention_event(error) or TaskEvent.REQUIRE_RECOVERY
+                return self._review_attention(preparing, event)
+            if not self._review_is_durably_detached(
+                preparing.task_run,
+                draft,
+                published,
+            ):
+                event = _attention_event(published) or TaskEvent.REQUIRE_RECOVERY
+                return self._review_attention(preparing, event)
+            return preparing
 
         try:
             committing = self._cas(

@@ -48,6 +48,7 @@ _IDENTIFIER_RE = {
     "task": re.compile(r"^task_[0-9a-f]{32}$"),
     "project": re.compile(r"^project_[0-9a-f]{32}$"),
     "revision": re.compile(r"^revision_[0-9a-f]{32}$"),
+    "draft": re.compile(r"^draft_[0-9a-f]{32}$"),
     "artifact": re.compile(r"^artifact_[0-9a-f]{32}$"),
     "verification": re.compile(r"^verification_[0-9a-f]{32}$"),
 }
@@ -113,6 +114,13 @@ class ReasoningOwner(StrEnum):
     BYOK = "byok"
 
 
+class ReviewPolicy(StrEnum):
+    """Explicit policy controlling whether a verified candidate may auto-commit."""
+
+    AUTO_COMMIT = "auto_commit"
+    REQUIRE_REVIEW = "require_review"
+
+
 class TaskStatus(StrEnum):
     """Durable task lifecycle states for the deterministic kernel."""
 
@@ -123,12 +131,16 @@ class TaskStatus(StrEnum):
     EXECUTING = "executing"
     VERIFYING = "verifying"
     COMMITTING = "committing"
+    PREPARING_REVIEW = "preparing_review"
+    AWAITING_USER_REVIEW = "awaiting_user_review"
+    ACCEPTING_DRAFT = "accepting_draft"
     ROLLING_BACK = "rolling_back"
     NEEDS_INPUT = "needs_input"
     RECOVERY_REQUIRED = "recovery_required"
     CLEANUP_REQUIRED = "cleanup_required"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    REJECTED = "rejected"
 
 
 class TaskEvent(StrEnum):
@@ -142,6 +154,12 @@ class TaskEvent(StrEnum):
     COMPLETE_EXECUTION = "complete_execution"
     FAIL_EXECUTION = "fail_execution"
     PASS_VERIFICATION = "pass_verification"
+    PREPARE_REVIEW = "prepare_review"
+    PUBLISH_DRAFT = "publish_draft"
+    ACCEPT_DRAFT = "accept_draft"
+    REJECT_DRAFT = "reject_draft"
+    ABORT_ACCEPT = "abort_accept"
+    CONFIRM_DRAFT_UNCOMMITTED = "confirm_draft_uncommitted"
     FAIL_VERIFICATION = "fail_verification"
     COMMIT = "commit"
     COMPLETE_ROLLBACK = "complete_rollback"
@@ -162,6 +180,7 @@ class NextAction(StrEnum):
     PROVIDE_INPUT = "provide_input"
     RECONCILE = "reconcile"
     CLEANUP = "cleanup"
+    REVIEW_DRAFT = "review_draft"
     WAIT = "wait"
     NONE = "none"
 
@@ -174,13 +193,36 @@ class CriterionOutcome(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
-_TERMINAL_STATUSES = frozenset({TaskStatus.SUCCEEDED, TaskStatus.FAILED})
+_TERMINAL_STATUSES = frozenset(
+    {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.REJECTED}
+)
 _CANDIDATE_ACTIVE_STATUSES = frozenset(
     {
         TaskStatus.EXECUTING,
         TaskStatus.VERIFYING,
         TaskStatus.COMMITTING,
+        TaskStatus.PREPARING_REVIEW,
+        TaskStatus.AWAITING_USER_REVIEW,
+        TaskStatus.ACCEPTING_DRAFT,
         TaskStatus.ROLLING_BACK,
+    }
+)
+_REVIEW_STATUSES = frozenset(
+    {
+        TaskStatus.PREPARING_REVIEW,
+        TaskStatus.AWAITING_USER_REVIEW,
+        TaskStatus.ACCEPTING_DRAFT,
+        TaskStatus.REJECTED,
+    }
+)
+_REVIEW_EVENTS = frozenset(
+    {
+        TaskEvent.PREPARE_REVIEW,
+        TaskEvent.PUBLISH_DRAFT,
+        TaskEvent.ACCEPT_DRAFT,
+        TaskEvent.REJECT_DRAFT,
+        TaskEvent.ABORT_ACCEPT,
+        TaskEvent.CONFIRM_DRAFT_UNCOMMITTED,
     }
 )
 _TRANSITIONS: dict[tuple[TaskStatus, TaskEvent], TaskStatus] = {
@@ -197,21 +239,40 @@ _TRANSITIONS: dict[tuple[TaskStatus, TaskEvent], TaskStatus] = {
     (TaskStatus.EXECUTING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.EXECUTING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.VERIFYING, TaskEvent.PASS_VERIFICATION): TaskStatus.COMMITTING,
+    (TaskStatus.VERIFYING, TaskEvent.PREPARE_REVIEW): TaskStatus.PREPARING_REVIEW,
     (TaskStatus.VERIFYING, TaskEvent.FAIL_VERIFICATION): TaskStatus.ROLLING_BACK,
     (TaskStatus.VERIFYING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.VERIFYING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.COMMITTING, TaskEvent.COMMIT): TaskStatus.SUCCEEDED,
     (TaskStatus.COMMITTING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.COMMITTING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
+    (TaskStatus.PREPARING_REVIEW, TaskEvent.PUBLISH_DRAFT): TaskStatus.AWAITING_USER_REVIEW,
+    (TaskStatus.PREPARING_REVIEW, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
+    (TaskStatus.PREPARING_REVIEW, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
+    (TaskStatus.AWAITING_USER_REVIEW, TaskEvent.ACCEPT_DRAFT): TaskStatus.ACCEPTING_DRAFT,
+    (TaskStatus.AWAITING_USER_REVIEW, TaskEvent.REJECT_DRAFT): TaskStatus.REJECTED,
+    (TaskStatus.ACCEPTING_DRAFT, TaskEvent.COMMIT): TaskStatus.SUCCEEDED,
+    (TaskStatus.ACCEPTING_DRAFT, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
+    (TaskStatus.ACCEPTING_DRAFT, TaskEvent.ABORT_ACCEPT): TaskStatus.AWAITING_USER_REVIEW,
+    (TaskStatus.ACCEPTING_DRAFT, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
+    (TaskStatus.ACCEPTING_DRAFT, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.ROLLING_BACK, TaskEvent.COMPLETE_ROLLBACK): TaskStatus.FAILED,
     (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.RECOVERY_REQUIRED, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
     (TaskStatus.RECOVERY_REQUIRED, TaskEvent.CONFIRM_UNCOMMITTED): TaskStatus.ROLLING_BACK,
+    (
+        TaskStatus.RECOVERY_REQUIRED,
+        TaskEvent.CONFIRM_DRAFT_UNCOMMITTED,
+    ): TaskStatus.AWAITING_USER_REVIEW,
     (TaskStatus.RECOVERY_REQUIRED, TaskEvent.CONFIRM_PRE_CANDIDATE): TaskStatus.PROGRAM_READY,
     (TaskStatus.CLEANUP_REQUIRED, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
     (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_UNCOMMITTED): TaskStatus.ROLLING_BACK,
+    (
+        TaskStatus.CLEANUP_REQUIRED,
+        TaskEvent.CONFIRM_DRAFT_UNCOMMITTED,
+    ): TaskStatus.AWAITING_USER_REVIEW,
     (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_PRE_CANDIDATE): TaskStatus.PROGRAM_READY,
 }
 
@@ -903,6 +964,125 @@ class VerificationReport:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ReviewDraft:
+    """Path-free durable identity for one immutable verified draft revision."""
+
+    id: str
+    task_id: str
+    project_id: str
+    base_revision: str
+    base_generation: int
+    base_manifest_sha256: str
+    revision_id: str
+    manifest_sha256: str
+    verification_id: str
+    acceptance_id: str
+    observation_digest: str
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "schema_version", _schema_version(self.schema_version))
+        object.__setattr__(self, "id", _identifier(self.id, "draft", "/id"))
+        object.__setattr__(self, "task_id", _identifier(self.task_id, "task", "/task_id"))
+        object.__setattr__(
+            self,
+            "project_id",
+            _identifier(self.project_id, "project", "/project_id"),
+        )
+        object.__setattr__(
+            self,
+            "base_revision",
+            _identifier(self.base_revision, "revision", "/base_revision"),
+        )
+        object.__setattr__(
+            self,
+            "base_generation",
+            _integer(self.base_generation, "/base_generation"),
+        )
+        object.__setattr__(
+            self,
+            "base_manifest_sha256",
+            _digest(self.base_manifest_sha256, "/base_manifest_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "revision_id",
+            _identifier(self.revision_id, "revision", "/revision_id"),
+        )
+        object.__setattr__(
+            self,
+            "manifest_sha256",
+            _digest(self.manifest_sha256, "/manifest_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "verification_id",
+            _identifier(self.verification_id, "verification", "/verification_id"),
+        )
+        object.__setattr__(self, "acceptance_id", _text(self.acceptance_id, "/acceptance_id"))
+        object.__setattr__(
+            self,
+            "observation_digest",
+            _digest(self.observation_digest, "/observation_digest"),
+        )
+        expected_id = f"draft_{self.revision_id.removeprefix('revision_')}"
+        if self.id != expected_id:
+            raise _failure(
+                TaskStateErrorCode.INVARIANT_VIOLATION,
+                "/id",
+                "draft identifier must derive from revision identifier",
+            )
+
+    def to_mapping(self) -> dict[str, int | str]:
+        return {
+            "schema_version": self.schema_version,
+            "id": self.id,
+            "task_id": self.task_id,
+            "project_id": self.project_id,
+            "base_revision": self.base_revision,
+            "base_generation": self.base_generation,
+            "base_manifest_sha256": self.base_manifest_sha256,
+            "revision_id": self.revision_id,
+            "manifest_sha256": self.manifest_sha256,
+            "verification_id": self.verification_id,
+            "acceptance_id": self.acceptance_id,
+            "observation_digest": self.observation_digest,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        fields = {
+            "schema_version",
+            "id",
+            "task_id",
+            "project_id",
+            "base_revision",
+            "base_generation",
+            "base_manifest_sha256",
+            "revision_id",
+            "manifest_sha256",
+            "verification_id",
+            "acceptance_id",
+            "observation_digest",
+        }
+        data = _mapping(value, "", allowed=fields, required=fields)
+        return cls(
+            schema_version=data["schema_version"],
+            id=data["id"],
+            task_id=data["task_id"],
+            project_id=data["project_id"],
+            base_revision=data["base_revision"],
+            base_generation=data["base_generation"],
+            base_manifest_sha256=data["base_manifest_sha256"],
+            revision_id=data["revision_id"],
+            manifest_sha256=data["manifest_sha256"],
+            verification_id=data["verification_id"],
+            acceptance_id=data["acceptance_id"],
+            observation_digest=data["observation_digest"],
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class TaskTransitionRecord:
     """Monotonic audit record for one legal state transition."""
 
@@ -987,10 +1167,12 @@ class TaskRun:
     project_id: str
     base_revision: str
     reasoning_owner: ReasoningOwner
+    review_policy: ReviewPolicy
     status: TaskStatus
     program: ModelProgram | None = None
     candidate_revision: str | None = None
     committed_revision: str | None = None
+    draft: ReviewDraft | None = None
     steps: tuple[TaskStepRecord, ...] = ()
     verification_reports: tuple[VerificationReport, ...] = ()
     artifacts: tuple[TaskArtifactRef, ...] = ()
@@ -1010,6 +1192,12 @@ class TaskRun:
         object.__setattr__(
             self, "reasoning_owner", _enum(self.reasoning_owner, ReasoningOwner, "/reasoning_owner")
         )
+        if type(self.review_policy) is not ReviewPolicy:
+            raise _failure(
+                TaskStateErrorCode.INVALID_TYPE,
+                "/review_policy",
+                "expected ReviewPolicy",
+            )
         object.__setattr__(self, "status", _enum(self.status, TaskStatus, "/status"))
         if self.program is not None and type(self.program) is not ModelProgram:
             raise _failure(
@@ -1038,6 +1226,12 @@ class TaskRun:
             "committed_revision",
             _identifier(self.committed_revision, "revision", "/committed_revision", optional=True),
         )
+        if self.draft is not None and type(self.draft) is not ReviewDraft:
+            raise _failure(
+                TaskStateErrorCode.INVALID_TYPE,
+                "/draft",
+                "expected ReviewDraft or null",
+            )
         steps = _tuple_of(self.steps, TaskStepRecord, "/steps", MAX_STEP_RECORDS)
         reports = _tuple_of(
             self.verification_reports,
@@ -1071,6 +1265,7 @@ class TaskRun:
         candidate_required = self.status in _CANDIDATE_ACTIVE_STATUSES | {
             TaskStatus.SUCCEEDED,
             TaskStatus.FAILED,
+            TaskStatus.REJECTED,
         } or (
             candidate_created
             and self.status in {TaskStatus.RECOVERY_REQUIRED, TaskStatus.CLEANUP_REQUIRED}
@@ -1087,6 +1282,109 @@ class TaskRun:
                 "/candidate_revision",
                 "candidate revision must match transition provenance",
             )
+        transition_events = tuple(record.event for record in self.transitions)
+        review_started = TaskEvent.PREPARE_REVIEW in transition_events
+        if self.review_policy is ReviewPolicy.AUTO_COMMIT:
+            if self.draft is not None or any(
+                event in _REVIEW_EVENTS for event in transition_events
+            ) or self.status in _REVIEW_STATUSES:
+                raise _failure(
+                    TaskStateErrorCode.INVARIANT_VIOLATION,
+                    "/review_policy",
+                    "auto-commit task cannot contain review state",
+                )
+        else:
+            if TaskEvent.PASS_VERIFICATION in transition_events or any(
+                record.to_status is TaskStatus.COMMITTING for record in self.transitions
+            ):
+                raise _failure(
+                    TaskStateErrorCode.INVARIANT_VIOLATION,
+                    "/review_policy",
+                    "review task cannot use auto-commit transitions",
+                )
+            if review_started != (self.draft is not None):
+                raise _failure(
+                    TaskStateErrorCode.INVARIANT_VIOLATION,
+                    "/draft",
+                    "draft presence must match review provenance",
+                )
+        if self.status in _REVIEW_STATUSES and not review_started:
+            raise _failure(
+                TaskStateErrorCode.INVARIANT_VIOLATION,
+                "/draft",
+                "review status requires draft provenance",
+            )
+        if self.draft is not None:
+            draft_bindings = (
+                (self.draft.task_id, self.id, "/draft/task_id"),
+                (self.draft.project_id, self.project_id, "/draft/project_id"),
+                (self.draft.base_revision, self.base_revision, "/draft/base_revision"),
+                (
+                    self.draft.revision_id,
+                    self.candidate_revision,
+                    "/draft/revision_id",
+                ),
+            )
+            for actual, expected, path in draft_bindings:
+                if actual != expected:
+                    raise _failure(
+                        TaskStateErrorCode.INVARIANT_VIOLATION,
+                        path,
+                        "draft identity does not bind owning task",
+                    )
+            matching_reports = tuple(
+                report
+                for report in self.verification_reports
+                if report.id == self.draft.verification_id
+            )
+            if len(matching_reports) != 1:
+                raise _failure(
+                    TaskStateErrorCode.INVARIANT_VIOLATION,
+                    "/draft/verification_id",
+                    "draft must bind one persisted verification report",
+                )
+            report = matching_reports[0]
+            if not report.passed:
+                raise _failure(
+                    TaskStateErrorCode.INVARIANT_VIOLATION,
+                    "/draft/verification_id",
+                    "draft verification report must pass",
+                )
+            report_bindings = (
+                (
+                    self.draft.manifest_sha256,
+                    report.manifest_sha256,
+                    "/draft/manifest_sha256",
+                ),
+                (
+                    self.draft.acceptance_id,
+                    report.acceptance_id,
+                    "/draft/acceptance_id",
+                ),
+                (
+                    self.draft.observation_digest,
+                    report.observation_digest,
+                    "/draft/observation_digest",
+                ),
+                (
+                    self.draft.revision_id,
+                    report.candidate_revision,
+                    "/draft/revision_id",
+                ),
+            )
+            for actual, expected, path in report_bindings:
+                if actual != expected:
+                    raise _failure(
+                        TaskStateErrorCode.INVARIANT_VIOLATION,
+                        path,
+                        "draft does not bind its passing report",
+                    )
+            if self.program is None or self.draft.acceptance_id != self.program.acceptance.id:
+                raise _failure(
+                    TaskStateErrorCode.INVARIANT_VIOLATION,
+                    "/draft/acceptance_id",
+                    "draft must bind submitted acceptance",
+                )
         if self.status in {TaskStatus.CREATED, TaskStatus.NEEDS_PLAN} and self.program is not None:
             raise _failure(
                 TaskStateErrorCode.INVARIANT_VIOLATION,
@@ -1109,6 +1407,7 @@ class TaskRun:
             | {
                 TaskStatus.SUCCEEDED,
                 TaskStatus.FAILED,
+                TaskStatus.REJECTED,
                 TaskStatus.RECOVERY_REQUIRED,
                 TaskStatus.CLEANUP_REQUIRED,
             }
@@ -1141,17 +1440,39 @@ class TaskRun:
                     "/verification_reports",
                     "succeeded task requires passing candidate verification",
                 )
+            if self.review_policy is ReviewPolicy.REQUIRE_REVIEW:
+                if self.draft is None or self.committed_revision != self.draft.revision_id:
+                    raise _failure(
+                        TaskStateErrorCode.INVARIANT_VIOLATION,
+                        "/committed_revision",
+                        "reviewed success must commit its exact draft",
+                    )
+                if TaskEvent.ACCEPT_DRAFT not in transition_events:
+                    raise _failure(
+                        TaskStateErrorCode.INVARIANT_VIOLATION,
+                        "/transitions",
+                        "reviewed success requires explicit acceptance provenance",
+                    )
         elif self.committed_revision is not None:
             raise _failure(
                 TaskStateErrorCode.INVARIANT_VIOLATION,
                 "/committed_revision",
                 "only succeeded task may contain committed revision",
             )
+        if self.status is TaskStatus.REJECTED:
+            if self.review_policy is not ReviewPolicy.REQUIRE_REVIEW or self.draft is None:
+                raise _failure(
+                    TaskStateErrorCode.INVARIANT_VIOLATION,
+                    "/draft",
+                    "rejected task requires durable review evidence",
+                )
         last_transition = self.transitions[-1] if self.transitions else None
         reconciled_success = (
             self.status is TaskStatus.SUCCEEDED
             and last_transition is not None
             and last_transition.event is TaskEvent.CONFIRM_COMMITTED
+            and last_transition.from_status
+            in {TaskStatus.RECOVERY_REQUIRED, TaskStatus.CLEANUP_REQUIRED}
         )
         error_required = (
             self.status
@@ -1272,10 +1593,12 @@ class TaskRun:
             "project_id": self.project_id,
             "base_revision": self.base_revision,
             "reasoning_owner": self.reasoning_owner.value,
+            "review_policy": self.review_policy.value,
             "status": self.status.value,
             "program": None if self.program is None else self.program.to_mapping(),
             "candidate_revision": self.candidate_revision,
             "committed_revision": self.committed_revision,
+            "draft": None if self.draft is None else self.draft.to_mapping(),
             "steps": [item.to_mapping() for item in self.steps],
             "verification_reports": [item.to_mapping() for item in self.verification_reports],
             "artifacts": [item.to_mapping() for item in self.artifacts],
@@ -1291,10 +1614,12 @@ class TaskRun:
             "project_id",
             "base_revision",
             "reasoning_owner",
+            "review_policy",
             "status",
             "program",
             "candidate_revision",
             "committed_revision",
+            "draft",
             "steps",
             "verification_reports",
             "artifacts",
@@ -1303,6 +1628,7 @@ class TaskRun:
         }
         data = _mapping(value, "", allowed=fields, required=fields)
         program_raw = data["program"]
+        draft_raw = data["draft"]
         error_raw = data["last_error"]
         raw_steps = _bounded_sequence(data["steps"], "/steps", MAX_STEP_RECORDS)
         raw_reports = _bounded_sequence(
@@ -1313,6 +1639,7 @@ class TaskRun:
             data["transitions"], "/transitions", MAX_TRANSITION_RECORDS
         )
         program = _parse_nested(program_raw, ModelProgram.from_mapping, "/program", optional=True)
+        draft = _parse_nested(draft_raw, ReviewDraft.from_mapping, "/draft", optional=True)
         steps = tuple(
             _parse_nested(
                 item, TaskStepRecord.from_mapping, join_json_pointer("/steps", str(index))
@@ -1348,10 +1675,12 @@ class TaskRun:
             project_id=data["project_id"],
             base_revision=data["base_revision"],
             reasoning_owner=data["reasoning_owner"],
+            review_policy=_enum(data["review_policy"], ReviewPolicy, "/review_policy"),
             status=data["status"],
             program=program,
             candidate_revision=data["candidate_revision"],
             committed_revision=data["committed_revision"],
+            draft=draft,
             steps=steps,
             verification_reports=reports,
             artifacts=artifacts,
@@ -1390,6 +1719,7 @@ def _sequences(values: list[int], path: str) -> None:
 def _transition_history(records: tuple[TaskTransitionRecord, ...], status: TaskStatus) -> None:
     current = TaskStatus.CREATED
     candidate_published = False
+    review_started = False
     for record in records:
         if record.from_status is not current:
             raise _failure(
@@ -1418,8 +1748,22 @@ def _transition_history(records: tuple[TaskTransitionRecord, ...], status: TaskS
                 "/transitions",
                 "candidate confirmation lacks candidate provenance",
             )
+        if record.event is TaskEvent.CONFIRM_DRAFT_UNCOMMITTED and not review_started:
+            raise _failure(
+                TaskStateErrorCode.INVARIANT_VIOLATION,
+                "/transitions",
+                "draft confirmation lacks review provenance",
+            )
+        if record.event is TaskEvent.CONFIRM_UNCOMMITTED and review_started:
+            raise _failure(
+                TaskStateErrorCode.INVARIANT_VIOLATION,
+                "/transitions",
+                "review recovery requires draft confirmation",
+            )
         if record.event is TaskEvent.VALIDATE_PROGRAM:
             candidate_published = True
+        if record.event is TaskEvent.PREPARE_REVIEW:
+            review_started = True
         current = record.to_status
     if current is not status:
         raise _failure(
@@ -1430,7 +1774,12 @@ def _transition_history(records: tuple[TaskTransitionRecord, ...], status: TaskS
 
 
 def new_task_run(
-    *, task_id: str, project_id: str, base_revision: str, reasoning_owner: ReasoningOwner
+    *,
+    task_id: str,
+    project_id: str,
+    base_revision: str,
+    reasoning_owner: ReasoningOwner,
+    review_policy: ReviewPolicy,
 ) -> TaskRun:
     """Create a new immutable task at the durable ``created`` state."""
 
@@ -1439,6 +1788,7 @@ def new_task_run(
         project_id=project_id,
         base_revision=base_revision,
         reasoning_owner=reasoning_owner,
+        review_policy=review_policy,
         status=TaskStatus.CREATED,
     )
 
@@ -1452,6 +1802,7 @@ def transition_task(
     committed_revision: str | None = None,
     error: StepError | None = None,
     verification: VerificationReport | None = None,
+    draft: ReviewDraft | None = None,
 ) -> TaskRun:
     """Apply one legal event without mutating the prior task record."""
 
@@ -1470,19 +1821,45 @@ def transition_task(
             "/event",
             "event is not allowed from current status",
         )
+    if event is TaskEvent.PASS_VERIFICATION and task.review_policy is not ReviewPolicy.AUTO_COMMIT:
+        raise _failure(
+            TaskStateErrorCode.INVALID_TRANSITION,
+            "/event",
+            "review policy forbids auto-commit verification",
+        )
+    if event in _REVIEW_EVENTS and task.review_policy is not ReviewPolicy.REQUIRE_REVIEW:
+        raise _failure(
+            TaskStateErrorCode.INVALID_TRANSITION,
+            "/event",
+            "review event requires explicit review policy",
+        )
     if event is TaskEvent.CONFIRM_PRE_CANDIDATE and task.candidate_revision is not None:
         raise _failure(
             TaskStateErrorCode.INVALID_TRANSITION,
             "/event",
             "pre-candidate confirmation requires no published candidate",
         )
-    if event in {TaskEvent.CONFIRM_COMMITTED, TaskEvent.CONFIRM_UNCOMMITTED} and (
-        task.candidate_revision is None
-    ):
+    if event in {
+        TaskEvent.CONFIRM_COMMITTED,
+        TaskEvent.CONFIRM_UNCOMMITTED,
+        TaskEvent.CONFIRM_DRAFT_UNCOMMITTED,
+    } and task.candidate_revision is None:
         raise _failure(
             TaskStateErrorCode.INVALID_TRANSITION,
             "/event",
             "candidate confirmation requires a published candidate",
+        )
+    if event is TaskEvent.CONFIRM_DRAFT_UNCOMMITTED and task.draft is None:
+        raise _failure(
+            TaskStateErrorCode.INVALID_TRANSITION,
+            "/event",
+            "draft confirmation requires review provenance",
+        )
+    if event is TaskEvent.CONFIRM_UNCOMMITTED and task.draft is not None:
+        raise _failure(
+            TaskStateErrorCode.INVALID_TRANSITION,
+            "/event",
+            "review recovery requires draft confirmation",
         )
     if event is TaskEvent.SUBMIT_PROGRAM:
         if type(program) is not ModelProgram:
@@ -1541,18 +1918,19 @@ def transition_task(
         raise _failure(
             TaskStateErrorCode.INVALID_VALUE, "/error", "error is only accepted on failure events"
         )
-    if event is TaskEvent.PASS_VERIFICATION:
+    verification_events = {TaskEvent.PASS_VERIFICATION, TaskEvent.PREPARE_REVIEW}
+    if event in verification_events:
         if type(verification) is not VerificationReport:
             raise _failure(
                 TaskStateErrorCode.INVALID_TYPE,
                 "/verification",
-                "pass_verification requires VerificationReport",
+                "verification event requires VerificationReport",
             )
         if not verification.passed:
             raise _failure(
                 TaskStateErrorCode.INVARIANT_VIOLATION,
                 "/verification/passed",
-                "pass_verification requires a passing report",
+                "verification event requires a passing report",
             )
         if verification.candidate_revision != task.candidate_revision:
             raise _failure(
@@ -1570,7 +1948,20 @@ def transition_task(
         raise _failure(
             TaskStateErrorCode.INVALID_VALUE,
             "/verification",
-            "verification is only accepted on pass_verification",
+            "verification is only accepted on a verification event",
+        )
+    if event is TaskEvent.PREPARE_REVIEW:
+        if type(draft) is not ReviewDraft:
+            raise _failure(
+                TaskStateErrorCode.INVALID_TYPE,
+                "/draft",
+                "prepare_review requires ReviewDraft",
+            )
+    elif draft is not None:
+        raise _failure(
+            TaskStateErrorCode.INVALID_VALUE,
+            "/draft",
+            "draft is only accepted on prepare_review",
         )
     if event in {TaskEvent.COMMIT, TaskEvent.CONFIRM_COMMITTED}:
         committed_revision = _identifier(committed_revision, "revision", "/committed_revision")
@@ -1614,10 +2005,17 @@ def transition_task(
         committed_revision=committed_revision
         if event in {TaskEvent.COMMIT, TaskEvent.CONFIRM_COMMITTED}
         else task.committed_revision,
+        draft=draft if event is TaskEvent.PREPARE_REVIEW else task.draft,
         verification_reports=reports,
         last_error=(
             None
-            if event in {TaskEvent.SUBMIT_PROGRAM, TaskEvent.CONFIRM_PRE_CANDIDATE}
+            if event
+            in {
+                TaskEvent.SUBMIT_PROGRAM,
+                TaskEvent.CONFIRM_PRE_CANDIDATE,
+                TaskEvent.CONFIRM_DRAFT_UNCOMMITTED,
+                TaskEvent.ABORT_ACCEPT,
+            }
             else error
             if event in failure_events
             else task.last_error
@@ -1745,12 +2143,16 @@ def next_action_for(status: TaskStatus) -> NextAction:
         TaskStatus.EXECUTING: NextAction.WAIT,
         TaskStatus.VERIFYING: NextAction.WAIT,
         TaskStatus.COMMITTING: NextAction.WAIT,
+        TaskStatus.PREPARING_REVIEW: NextAction.RECONCILE,
+        TaskStatus.AWAITING_USER_REVIEW: NextAction.REVIEW_DRAFT,
+        TaskStatus.ACCEPTING_DRAFT: NextAction.RECONCILE,
         TaskStatus.ROLLING_BACK: NextAction.WAIT,
         TaskStatus.NEEDS_INPUT: NextAction.PROVIDE_INPUT,
         TaskStatus.RECOVERY_REQUIRED: NextAction.RECONCILE,
         TaskStatus.CLEANUP_REQUIRED: NextAction.CLEANUP,
         TaskStatus.SUCCEEDED: NextAction.NONE,
         TaskStatus.FAILED: NextAction.NONE,
+        TaskStatus.REJECTED: NextAction.NONE,
     }
     return mapping[status]
 
@@ -1766,6 +2168,8 @@ __all__ = [
     "CriterionVerdict",
     "NextAction",
     "ReasoningOwner",
+    "ReviewDraft",
+    "ReviewPolicy",
     "TaskArtifactRef",
     "TaskEvent",
     "TaskRun",

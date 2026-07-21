@@ -30,7 +30,7 @@ from vibecad.workflow.errors import (
     ContractValidationError,
     join_json_pointer,
 )
-from vibecad.workflow.state import ReasoningOwner, TaskStatus
+from vibecad.workflow.state import ReasoningOwner, ReviewPolicy, TaskStatus
 from vibecad.workflow.store import StoredTaskRun
 
 _MAX_SMALL_REQUEST_BYTES = 4_096
@@ -44,6 +44,7 @@ _MAX_PUBLIC_ERROR_PATH_BYTES = 256
 _MAX_OUTER_JSON_NODES = 8_192
 _TASK_ID = re.compile(r"^task_[0-9a-f]{32}$")
 _PROJECT_ID = re.compile(r"^project_[0-9a-f]{32}$")
+_DRAFT_ID = re.compile(r"^draft_[0-9a-f]{32}$")
 
 
 class TaskApiErrorCode(StrEnum):
@@ -129,7 +130,12 @@ class TaskServicePort(Protocol):
     """Transport-neutral subset of the deterministic task service."""
 
     def create_task(
-        self, *, task_id: str, project_id: str, reasoning_owner: ReasoningOwner
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        reasoning_owner: ReasoningOwner,
+        review_policy: ReviewPolicy,
     ) -> StoredTaskRun | TaskServicePortFailure: ...
 
     def get_task(self, *, task_id: str) -> StoredTaskRun | TaskServicePortFailure: ...
@@ -144,6 +150,14 @@ class TaskServicePort(Protocol):
 
     def reconcile_task(
         self, *, task_id: str, expected_generation: int
+    ) -> StoredTaskRun | TaskServicePortFailure: ...
+
+    def accept_draft(
+        self, *, task_id: str, draft_id: str, expected_generation: int
+    ) -> StoredTaskRun | TaskServicePortFailure: ...
+
+    def reject_draft(
+        self, *, task_id: str, draft_id: str, expected_generation: int
     ) -> StoredTaskRun | TaskServicePortFailure: ...
 
 
@@ -348,6 +362,15 @@ def _generation(value: object) -> int:
     if value < 0 or value > MAX_SAFE_JSON_INTEGER:
         _raise(TaskApiErrorCode.INVALID_VALUE, "/expected_generation")
     return value
+
+
+def _review_policy(value: object) -> ReviewPolicy:
+    if type(value) is not str:
+        _raise(TaskApiErrorCode.INVALID_TYPE, "/review_policy")
+    try:
+        return ReviewPolicy(value)
+    except ValueError:
+        _raise(TaskApiErrorCode.INVALID_VALUE, "/review_policy")
 
 
 def _json_depth_within_budget(raw: str) -> bool:
@@ -623,9 +646,10 @@ class TaskApi:
         def action() -> dict[str, object]:
             data = _validate_request(
                 request,
-                required=frozenset({"schema_version", "project_id"}),
+                required=frozenset({"schema_version", "project_id", "review_policy"}),
             )
             project_id = _identifier(data["project_id"], "/project_id", _PROJECT_ID)
+            review_policy = _review_policy(data["review_policy"])
             generated = self._invoke_untrusted(self._task_id_factory)
             if type(generated) is not str or _TASK_ID.fullmatch(generated) is None:
                 _raise(TaskApiErrorCode.INTERNAL_ERROR)
@@ -635,6 +659,7 @@ class TaskApi:
                         task_id=generated,
                         project_id=project_id,
                         reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+                        review_policy=review_policy,
                     )
                 ),
                 task_id=generated,
@@ -644,10 +669,70 @@ class TaskApi:
                 stored.generation == 0
                 and task.project_id == project_id
                 and task.reasoning_owner is ReasoningOwner.EXTERNAL_PLAN
+                and task.review_policy is review_policy
                 and task.status is TaskStatus.NEEDS_PLAN
             ):
                 _raise(TaskApiErrorCode.INTERNAL_ERROR)
             return self._task_result(stored, task_id=generated)
+
+        return self._guard(action)
+
+    def accept_draft(self, request: object) -> dict[str, object]:
+        return self._review_decision(request, accept=True)
+
+    def reject_draft(self, request: object) -> dict[str, object]:
+        return self._review_decision(request, accept=False)
+
+    def _review_decision(self, request: object, *, accept: bool) -> dict[str, object]:
+        def action() -> dict[str, object]:
+            data = _validate_request(
+                request,
+                required=frozenset(
+                    {"schema_version", "task_id", "draft_id", "expected_generation"}
+                ),
+            )
+            task_id = _identifier(data["task_id"], "/task_id", _TASK_ID)
+            draft_id = _identifier(data["draft_id"], "/draft_id", _DRAFT_ID)
+            expected_generation = _generation(data["expected_generation"])
+            if accept:
+                port_value = self._invoke_untrusted(
+                    lambda: self._port.accept_draft(
+                        task_id=task_id,
+                        draft_id=draft_id,
+                        expected_generation=expected_generation,
+                    )
+                )
+            else:
+                port_value = self._invoke_untrusted(
+                    lambda: self._port.reject_draft(
+                        task_id=task_id,
+                        draft_id=draft_id,
+                        expected_generation=expected_generation,
+                    )
+                )
+            stored = self._port_result(
+                port_value,
+                task_id=task_id,
+            )
+            task = stored.task_run
+            draft = task.draft
+            if not (
+                task.review_policy is ReviewPolicy.REQUIRE_REVIEW
+                and draft is not None
+                and draft.id == draft_id
+            ):
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            if accept:
+                if not (
+                    task.status is TaskStatus.SUCCEEDED
+                    and task.committed_revision == draft.revision_id
+                ):
+                    _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            elif not (
+                task.status is TaskStatus.REJECTED and task.committed_revision is None
+            ):
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            return self._task_result(stored, task_id=task_id)
 
         return self._guard(action)
 
@@ -732,6 +817,8 @@ class TaskApi:
                 TaskStatus.VERIFYING,
                 TaskStatus.COMMITTING,
                 TaskStatus.ROLLING_BACK,
+                TaskStatus.PREPARING_REVIEW,
+                TaskStatus.ACCEPTING_DRAFT,
                 TaskStatus.RECOVERY_REQUIRED,
                 TaskStatus.CLEANUP_REQUIRED,
             }:
@@ -744,9 +831,14 @@ class TaskApi:
                     ),
                     task_id=task_id,
                 )
-            elif status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED}:
+            elif status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.REJECTED}:
                 pass
-            elif status in {TaskStatus.CREATED, TaskStatus.NEEDS_PLAN, TaskStatus.NEEDS_INPUT}:
+            elif status in {
+                TaskStatus.CREATED,
+                TaskStatus.NEEDS_PLAN,
+                TaskStatus.NEEDS_INPUT,
+                TaskStatus.AWAITING_USER_REVIEW,
+            }:
                 _raise(TaskApiErrorCode.INVALID_STATE)
             else:
                 _raise(TaskApiErrorCode.INTERNAL_ERROR)
