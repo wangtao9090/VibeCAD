@@ -3,6 +3,7 @@
 - Campaign: vibecad-agent-stage3
 - Revision: S3-R3
 - Control addendum: S3-R3.1
+- Active control addendum: S3-R3.2
 - Status: executing
 - Prepared: 2026-07-20
 - Repository anchor: codex/task-kernel-phase2@ca8ca57ebb8d91eaab4220fd7f3beb05f64c7fb4
@@ -49,6 +50,36 @@ blocking command。禁止 detached process、重复启动和 marker polling。
 S3-R3.1 只追加更严格的 capability evidence、per-commit gate、allowlist、ledger 和
 recovery 控制，不改变 S3-R3 产品决策、实现范围或外部权限，因此不扩大 S3-A01，也不
 重开产品批准 gate。S3-R3.1 提交后成为 task packet 的稳定控制锚点。
+
+### S3-R3.2 — dependency-order correction after S3-3
+
+S3-3 的真实实现和两路只读架构复审证明，原 S3-4 把 direct MCP generation 放在
+Application API、durable review、project bootstrap 和 verified artifact delivery 之前，形成了
+依赖倒置：direct adapter 无法在这些依赖不存在时满足 S3-D03 的 task/draft/verdict/artifact
+等价契约。S3-R3.2 只修复 S3-4 至 S3-8 的拓扑顺序，不改变 S3-D01 至 S3-D08、八个生产
+语义提交预算、产品结果、信任边界或外部权限，因此不需要新的产品级批准。
+
+替换顺序固定为：bounded Application/Task API contracts → durable draft/review → isolated
+AgentApplication/runtime/bootstrap → verified artifact + MCP/direct manifest cutover → skill/E2E。
+尚无 domain service 的 project/review/artifact 接口不得在 S3-4 伪装成可调用 placeholder；它们
+只共享统一 envelope 规则，并在各自依赖完成后公开。Direct public MCP 固定从 S3-4 后移到
+S3-7；AR-1 固定在 S3-7 后、S3-8 文档冻结前执行。
+
+下表是 S3-R3.2 的 active future execution partition；第 5 节原 S3-4 至 S3-8 表格和对应小节
+作为 S3-A01 绑定历史原样保留，但其未来执行顺序与 scope 由本表显式 supersede。S3-1 至
+S3-3 的完成事实不受影响：
+
+| ID | Active prewritten English commit | Active semantic scope | Active gate |
+|---|---|---|---|
+| S3-4 | `feat(application): add bounded task API contracts` | 统一 envelope、strict ingress、Task adapter、registry capability projection；无 MCP/runtime/FreeCAD | task API、budget/error/import、capability determinism |
+| S3-5 | `feat(workflow): add durable draft review` | 原 immutable draft、review policy、Accept/Reject、lease/CAS/restart scope | 原 workflow/candidate/restart matrix |
+| S3-6 | `feat(application): compose isolated task project runtime` | AgentApplication、CadExecutionPort、revision-zero/import bootstrap、lazy per-project runtime、durable data root、uninstall-preserves-data、managed checkout/IPC G0 | application/lazy-import/restart/isolation/runtime-data/capability |
+| S3-7 | `feat(mcp): publish verified agent CAD surface` | verified artifact materialization first；stable controls + registry direct tools + atomic manifest/legacy-public cutover；S3-6 runtime-data cumulative regression | export/path/server/manifest/equivalence + uninstall regression |
+| S3-8 | `feat(agent): package skill and complete stage 3 acceptance` | 原 skill、docs、version/distribution、真实 E2E scope；AR-1 先行 | full/package/managed/conformance |
+
+Active S3-6 的 data-root isolation 与 `uninstall_runtime` preserves data 是 bootstrap 的前置交付，
+不能等到 S3-7 才实现；原 S3-7 小节中的同名 bullet 在 active partition 中只作为累计回归门。
+Active AR-1 也由原 S3-5 后的位置改为 S3-7 完成后执行；原小节位置仅保留历史。
 
 S3-R3 完整取代从未执行的 S3-R2。S3-R2 中以下假设已经废止，不能再作为批准或
 实施依据：
@@ -459,6 +490,8 @@ Stage 3 的全局机械 allowlist 为以下 repository-relative 路径；每个 
   现有 registry/program/adapter/executor 测试会按预先定义的新契约更新。
 - 原 31 个 public server endpoint 在 S3-4 前仍是当前 0.4.0 事实；迁移时 endpoint
   行为可以改变，但其有价值的 CAD handler 不机械删除。
+- S3-R3.2 active correction: 上一句的未来 cutover stage superseded 为 S3-7；原句只作为
+  S3-A01-bound history 保留。
 - Task Kernel、revision store、candidate、verifier 和现有 runtime installer 的未触及
   行为必须保持回归通过。
 - S3-1 至 S3-3 会改变内部 ModelProgram schema/allowlist；当前没有实际用户，因此不
@@ -1069,6 +1102,181 @@ Evidence chain:
    no active test process; rerun the focused gate plus managed G3 before any S3-4 mutation; if the
    semantic commit is absent, use Packet S3-3A and this evidence record rather than replaying earlier
    stages。
+
+### S3-S06-C1 — active future-stage correction
+
+S3-R3.2 supersedes only the future-stage references in S3-3A/S3-S05/S3-S06: bounded Task API contracts
+start in S3-4, while direct public MCP/manifest cutover starts in S3-7 after draft, runtime/bootstrap and
+verified artifact dependencies exist. Historical packet/snapshot wording above remains unchanged evidence.
+
+## 8.7 Packet S3-4A — bounded Task API contracts
+
+### 1. Authorization
+
+- Approval ID: S3-A01；artifact revision: S3-R3 / S3-R3.1 / S3-R3.2；bound decisions:
+  S3-D01 through S3-D08；starting anchor: `479d182` on `codex/agent-stage3`。
+- 本 packet 继承 system、developer、user、directory-scoped instruction、当前 permission model /
+  sandbox 与本文件 allowlist；它不能扩大权限或把依赖顺序纠正解释成新产品 scope。
+- 只执行 S3-4：transport-neutral public envelope、strict bounded request/ModelProgram JSON ingress、
+  executable conforming TaskServicePort adapter 和 immutable registry capability projection。它不获得
+  MCP/server/manifest、filesystem/runtime/FreeCAD、project bootstrap、draft/review、artifact
+  materialization、direct CAD tool、push、PR、release 或外部花费权限。
+- 两个未参与写入的只读架构复审一致确认 S3-R3.2 与本边界不改变产品定位，当前没有用户
+  产品级决策阻塞。调研对 decoded mapping 与 inner `program_json` 的边界有分歧；controller
+  选择 bounded JSON string，因为 transport decoder 会丢失 duplicate-key 事实，而 S3-7 MCP
+  必须能够在构造 ModelProgram 前拒绝它。
+
+### 2. Workspace anchor and mechanical allowlist
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`；branch:
+  `codex/agent-stage3`；anchor: `479d182`；issue-time worktree only contains this S3-R3.2 documentation
+  correction。
+- 未观察到 repository-local `AGENTS.md` 或 `CLAUDE.md`；当前 host permission model 与 sandbox
+  始终继续生效。
+- S3-R3.2 control commit 允许且只允许修改：
+  - `docs/orchestrated/vibecad-agent-stage3.md`
+  - `docs/AGENT_ARCHITECTURE.md`
+- S3-4 semantic implementation 允许且只允许修改：
+  - `src/vibecad/application/__init__.py`（new）
+  - `src/vibecad/application/task_api.py`（new）
+  - `tests/test_task_api.py`（new）
+  - `docs/orchestrated/vibecad-agent-stage3.md`
+- 不修改 workflow service/state/program/store、registry metadata、server、manifest 或 legacy Session。
+  需要写出清单立即 breaker，不自行扩大范围。
+
+### 3. Context and exact public contract
+
+Application adapter 使用 injected internal `TaskServicePort`。Port 的方法返回 exact
+`StoredTaskRun | TaskServicePortFailure`，其中 failure code 与内部 TaskService error taxonomy
+一一对应；任意 raise 都视为 unexpected internal error。S3-4 只对 conforming injected port 可执行，
+不 import concrete TaskService/executor/engine/runtime/server/MCP/FreeCAD；S3-6 负责把 concrete
+TaskService exception/result 显式桥接为该 neutral port contract。第一版可执行方法精确为：
+
+| Method | Exact request | Fixed behavior |
+|---|---|---|
+| `create_task` | schema version + project_id | API 生成 `task_<32hex>`；固定 external_plan；一次 create，碰撞 conflict、零 retry |
+| `get_task` | schema version + task_id | 只读 StoredTaskRun；不初始化 CAD |
+| `submit_model_program` | schema version + task_id + expected_generation + `program_json` | bounded duplicate-aware decode → ModelProgram → 单次 service submit |
+| `resume_task` | schema version + task_id + expected_generation | PROGRAM_READY→continue；active/recovery/cleanup→reconcile；terminal→幂等 read；CREATED/needs plan/input→invalid_state |
+| `get_capabilities` | schema version only | 从 registry 排序投影 schema/profile/risk/budget/result/preservation；不声称 runtime 可用 |
+
+每个方法只接收 exact built-in JSON-compatible request mapping；拒绝 unknown/missing field、custom
+Mapping/container subclass、tuple/bytes、cycle/alias、非法 Unicode、非有限数和 unsafe integer。
+`program_json` 是 UTF-8 字符串，raw budget 精确 512 KiB，decode 前检查最大 depth 64；decode
+使用 duplicate-key hook、finite/length-bounded number hooks，随后检查最大 8192 nodes、64 KiB
+string 和 256-byte key，再调用 `ModelProgram.from_mapping()`。create/get/resume/capabilities 的完整
+canonical request 最大 4096 bytes。Submit 将不含 `program_json` 的 metadata canonical mapping
+限制为 4096 bytes、raw `program_json` 限制为 524288 UTF-8 bytes，并把两者逻辑总和限制为
+528384 bytes；三个边界都做 N/N+1 测试。TaskService 仍在 S3-6 bridge 后复核 canonical
+ModelProgram 最大 524288 bytes。
+
+Response 始终是 exact four-field envelope：
+
+```json
+{"schema_version":1,"ok":true,"result":{},"error":null}
+```
+
+或：
+
+```json
+{"schema_version":1,"ok":false,"result":null,"error":{"schema_version":1,"code":"invalid_input","path":"/program_json","message":"The request is invalid."}}
+```
+
+Task result 精确包含 `generation`、`TaskRun.next_action.value` 和 `task_run.to_mapping()`。
+Public routing 固定为：`submit_program|provide_input` → `submit_model_program`；
+`validate_program|reconcile|cleanup` → `resume_task`；`wait` → `get_task`；`none` → stop；
+`request_plan` 对成功 create 结果不可达。所有 public errors 使用 bounded canonical path 和按 code
+固定的 message。Closed code set 精确为 `missing_field`、`unknown_field`、`unsupported_version`、
+`invalid_type`、`invalid_value`、`budget_exceeded`、`invalid_input`、
+`unsupported_reasoning_owner`、`invalid_state`、`not_found`、`conflict`、`store_failure`、
+`lease_unavailable`、`recovery_required`、`internal_error`。Outer/JSON decode error path 固定从
+`/program_json` 开始，ModelProgram nested path 重定位到 `/program_json...`；port service/internal
+error path 固定 `""`。TaskServicePortFailure 全量显式映射，unexpected exception 或非 exact
+StoredTaskRun 只返回 `internal_error`，不得向外抛出或反射原异常、路径、request value。
+`resume_task` 先按 generation 读 durable state，再只分派一次；它不规划、不 repair、不做语义 retry。
+
+Capability result exact keys 为 `registry_schema_version` 和 `operations`。Operations 按 operation
+name 排序；target/argument fields、result slots 和 preservation fields 都按 public name 排序。
+每个 operation 只包含 public field name/value shape/required/enum/unit/ref shape、risk、evidence、
+execution profile、FreeCAD version range、GUI main-thread flag、exact resource-budget mapping、
+direct_exposed、public result slot 和 preservation fields；明确排除 `handler_name`、
+`handler_parameter`、`result_field`、callable、source/import path、installed runtime claim。
+
+### 4. Steps and objective gates
+
+1. 写三个 genuine RED wave：
+   - `find_spec("vibecad.application.task_api")` 当前为 none；
+   - skeleton 后 exact five-method request/envelope、API-owned ID/external_plan、StoredTaskRun 映射和
+     resume 13-state dispatch（CREATED included）和尚未冻结的 next_action routing 不存在；
+   - duplicate key、depth/nodes/UTF-8/NaN/unsafe integer/size、nested program error path、port failure
+     redaction、malformed return/import guard 和 registry capability projection 尚不存在。
+   setup/import/syntax failure 不计 RED；每个 wave 必须由 assertion 命中上述缺失能力。
+2. 实现最小 application package/task_api module 和 focused tests。不得加入 FastMCP decorator、
+   filesystem store、runtime factory、project/review/artifact placeholder、direct-operation compiler、
+   arbitrary Python 或 retry loop。
+3. Focused GREEN：`PYTHONPATH=src uv run pytest -q tests/test_task_api.py tests/test_task_service.py
+   tests/test_task_state.py tests/test_task_store.py tests/test_model_program.py
+   tests/test_execution_registry.py`。Anchor baseline excluding the new file: `893 passed in 3.39s`。
+4. Import/capability gate：fresh subprocess import 后不得出现 server/runtime/engine/MCP/FreeCAD
+   modules；capability serialization 必须 deterministic、round-trip JSON-compatible、精确六 operation
+   且无 forbidden implementation field。
+5. Cumulative gate：full pytest、full Ruff、`git diff --check`、pycompile；复跑 managed FreeCAD G3
+   证明纯 adapter 未破坏现有 8-case gate；至少一位未参与写入 agent 做 final read-only diff review。
+
+### 5. Execution discipline and circuit breakers
+
+- Capability profile 继承 CP-S3-20260720：approval `native-plan`；delegation `spawn-send-wait`；
+  persistence `repo-artifact`；process `native-session-poll`；adapter `Codex`；model tier
+  `standard` for implementation and independent read-only review；host choice is inherited with no
+  override，不降低 gate。
+- `live capability declarations`：update_plan、spawn_agent/send_message/followup_task/wait_agent、
+  apply_patch、exec_command/write_stdin 均由当前 declarations 提供。
+- `observable behavior`：本 campaign 已观察到 native plan update、spawn/send/wait completion、
+  apply_patch、named-file local commit，以及 exec 返回 cell/session 后由原 wait/poll 完成；未把仓库
+  内容当作 host capability evidence。
+- `environment identity`：Codex Desktop controller `/root`；workspace
+  `/Users/wangtao/Documents/DevProject/vibecad`。
+- `public configuration`：filesystem unrestricted、approval policy never；这些只约束当前执行，
+  不证明用户批准，也不扩大外部 authority。
+- 同一生产文件同一时刻只由 controller 写；sub-agent 只做独立分析/review。长进程一旦返回
+  session_id，只轮询原 session。Control docs 必须先独立 review、named-file commit；implementation
+  从该 clean anchor 开始。
+- Unexpected RED、out-of-allowlist write、public raw Name/Label、service exception reflection、模型控制
+  task id、resume retry、capability 泄露 handler/import/runtime availability、MCP/FreeCAD import 或需要
+  改变 S3-D01..D08 都立即 breaker。
+
+### 6. Delivery boundary
+
+- Control commit：`docs(orchestration): issue S3-4 bounded task API packet`。
+- 预写本地语义 commit：`feat(application): add bounded task API contracts`。
+- 只做 named-file staging、本地 commits、ledger 和 recovery snapshot；push 固定
+  `not authorized` / S3-RES-01；不创建 PR 或 release。
+- S3-4 完成仍不表示用户已看到 task MCP：project bootstrap 尚未组合，direct/stable MCP 与 verified
+  artifact delivery 固定属于 S3-7。
+
+### 7. Final report contract
+
+完成时追加 actual file list、RED/GREEN/full/Ruff/import/managed numbers、independent review、commit
+hash/push state、residual disposition 与四节 recovery snapshot。工作树必须 clean；S3-4 只能关闭
+public contract residual，不得虚假关闭 runtime、draft、artifact、MCP 或 second-host residual。
+
+| Entry | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| S3-E07 / 2026-07-21T06:03:51Z | S3-A01；S3-R3.2 two-way read-only dependency/API review PASS；S3-4A issued | 479d182 / not authorized | clean S3-3 anchor；focused contract baseline 893 passed；dependency order and executable boundary converged | S3-RES-01, S3-RES-03..06, S3-RES-08..09 | S3-S07 | packet-issued |
+
+### Recovery snapshot S3-S07
+
+1. **Completed:** S3-3 semantic commit `479d182`；S3-R3.2 dependency correction and Packet S3-4A
+   prepared from two independent read-only reviews；baseline 893 passed；push not authorized。
+2. **Next:** independently review and commit the two control docs；from that clean anchor write the three
+   exact RED waves；implement only bounded Task API/capability contracts；run focused/full/import/managed
+   gates and final review；then local semantic commit。
+3. **Approved decisions:** S3-D01..D08 under S3-A01；S3-R3.2 is a topology correction, not a new
+   product decision；direct MCP starts in S3-7；project/draft/runtime/artifact remain later packets；no
+   repeated user approval is required。
+4. **Recovery:** verify branch `codex/agent-stage3`、HEAD `479d182` or the subsequent S3-4 control
+   commit、the exact allowlists and no active test process；if control commit exists, never replay S3-3；
+   if semantic commit exists, use its completion evidence rather than rerunning implementation from packet。
 
 ## 9. 用户决策与持续执行规则
 
