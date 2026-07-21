@@ -1665,6 +1665,413 @@ profile and external-publication stages; S3-5 does not claim any of those delive
    `feat(workflow): add durable draft review`、a clean worktree and S3-E10 evidence; do not replay S3-5.
    Continue by auditing S3-6 dependencies and issuing its independently reviewed docs-only control packet。
 
+## 8.9 Packet S3-6A — isolated AgentApplication/runtime/bootstrap and Workbench G0
+
+### 1. Authorization and converged dependency audit
+
+- Approval ID: S3-A01；artifact revision: S3-R3 / S3-R3.1 / S3-R3.2；bound decisions:
+  S3-D01 through S3-D08；starting anchor: `4c7347a` on `codex/agent-stage3`。
+- 本 packet 只执行 active S3-6：runtime/data split、bounded legacy-runtime adoption、revision-zero
+  and normalized FCStd bootstrap、store-only task catalog、lazy per-project `AgentApplication`、nominal
+  trusted `CadExecutionPort`、same-process global CAD gate、bounded managed checkout and non-runnable IPC
+  G0 contract。它不获得 public MCP/server registration、manifest cutover、verified external artifact
+  delivery、runnable daemon/socket/pipe、authentication、Workbench UI、selection/highlight、checkout
+  publish/manual revise、arbitrary Python、push、PR、release 或外部花费权限。
+- 三路独立只读审计从 Application composition、runtime/data/uninstall 和 IPC/Workbench seam 方向一致
+  确认现有 Task/Revision/Candidate/Verifier 可复用，但五个边界必须先关闭：一个
+  `CandidateCoordinator/SessionSlot` 只能绑定一个 project；当前 `TaskService` 尚无 concrete public-port
+  bridge；`import_trusted_fcstd` 在语义验证前会发布 HEAD；project lease 不会串行不同 project 的
+  same-process FreeCAD；当前 uninstall 会删除整个 `VIBECAD_HOME`。这些是 S3-D01、D04、D06、D08
+  与 active S3-6 的直接工程后果，不改变产品定位或公共信任边界。
+- 当前可用 FreeCAD 位于 legacy prefix
+  `/Users/wangtao/Library/Application Support/VibeCAD/mamba/envs/vibecad`。Conda/FreeCAD 脚本包含
+  absolute prefix，严禁 rename/move。S3-6 只允许精确验证后原位复用；新安装进入新 runtime root，
+  不下载第二套已存在且健康的 FreeCAD。
+
+### 2. Workspace anchor and mechanical allowlist
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`；branch:
+  `codex/agent-stage3`；anchor `4c7347a`；issue-time worktree clean。Anchor full gate is
+  `2855 passed, 90 deselected`；managed FreeCAD is `8 passed`。
+- S3-6 control commit 只允许修改本文件。S3-6 semantic implementation 只允许修改或新增：
+  - `src/vibecad/runtime/paths.py`
+  - `src/vibecad/runtime/installer.py`
+  - `src/vibecad/runtime/status.py`
+  - `src/vibecad/runtime/uninstall.py`
+  - `src/vibecad/server.py`，仅同步既有 uninstall preview 的 preserve-data 事实
+  - `src/vibecad/workflow/catalog.py`（new）
+  - `src/vibecad/workflow/service.py`
+  - `src/vibecad/workflow/program.py`
+  - `src/vibecad/execution/adapter.py`
+  - `src/vibecad/execution/candidate.py`
+  - `src/vibecad/execution/executor.py`
+  - `src/vibecad/execution/revisions.py`，仅增加 evidence-bound revision-zero import primitive
+  - `src/vibecad/application/__init__.py`
+  - `src/vibecad/application/task_api.py`，仅增加 closed `resource_exhausted` port/API failure
+  - `src/vibecad/application/data.py`（new）
+  - `src/vibecad/application/project.py`（new）
+  - `src/vibecad/application/agent.py`（new）
+  - `src/vibecad/interaction/__init__.py`（new）
+  - `src/vibecad/interaction/cad.py`（new）
+  - `src/vibecad/interaction/storage.py`（new）
+  - `src/vibecad/interaction/checkouts.py`（new）
+  - `src/vibecad/interaction/protocol.py`（new）
+  - `tests/test_paths.py`
+  - `tests/test_installer.py`
+  - `tests/test_status.py`
+  - `tests/test_uninstall.py`
+  - `tests/test_launcher_uninstall_integration.py`
+  - `tests/test_server_round11.py`
+  - `tests/test_runtime_purity.py`
+  - `tests/test_task_catalog.py`（new）
+  - `tests/test_task_service.py`
+  - `tests/test_model_program.py`
+  - `tests/test_execution_adapter.py`
+  - `tests/test_program_executor.py`
+  - `tests/test_candidate_revision.py`
+  - `tests/test_revision_store.py`
+  - `tests/test_agent_application.py`（new）
+  - `tests/test_task_api.py`
+  - `tests/test_project_bootstrap.py`（new）
+  - `tests/test_cad_execution_port.py`（new）
+  - `tests/test_interaction_protocol.py`（new）
+  - `tests/test_managed_checkout.py`（new）
+  - `tests/test_task_kernel_integration.py`
+  - `docs/orchestrated/vibecad-agent-stage3.md`
+- 不修改 `manifest.json`、MCP registration、launcher/supervisor lifecycle、legacy CAD tool public surface、
+  Revision/Task durable schemas、selector level、acceptance/verifier semantics 或 G1 code。RevisionStore
+  只允许把现有 private project-initialization primitive 收紧为 mandatory sha256/size evidence-bound copy；
+  不新增 public import authority，也不改变 revision record/HEAD schema。
+
+### 3. Runtime/data and legacy-adoption contract
+
+Fixed layout：
+
+```text
+VIBECAD_HOME/
+├── runtime/                       # replaceable/uninstallable
+│   ├── bin/micromamba
+│   ├── mamba/envs/vibecad
+│   ├── status.json
+│   ├── install.log
+│   ├── .install.lock
+│   └── external-runtime.json      # optional receipt; never written into override env
+├── data/                          # durable; runtime actions are zero-write here
+│   ├── locks/
+│   ├── tasks/
+│   ├── projects/
+│   ├── bootstrap/
+│   └── checkouts/
+├── .uninstall_requested          # outside runtime so partial cleanup can retry
+└── views/                         # legacy user output preserved in S3-6
+```
+
+`runtime_root()`、`data_root()`、`lease_root()`、`task_store_root()`、`revision_store_root()`、
+`bootstrap_root()` and `checkout_root()` are fixed children of the existing `vibecad_home()`；S3-6 does
+not add a second environment-controlled data deletion boundary。Final store roots must be absolute、current
+uid、0700、non-symlink and opened no-follow；records/FCStd are 0600 ordinary single-link files。Existing
+unsafe roots are rejected, never silently chmod-repaired。
+
+New managed installs use `runtime/mamba/envs/vibecad`。If new runtime is absent and exact legacy
+`home/mamba/envs/vibecad` exists, the installer may adopt it in place only when all of these hold：canonical
+prefix is the fixed non-symlink child of a safe root；the in-env receipt is canonical JSON with
+`runtime_kind:managed`、matching Python/FreeCAD pins and a bounded VibeCAD version；and subprocess verification
+matches that receipt。Exact healthy is reused；same owned engine with only server version stale may receive
+pip-only sync。A legacy tree with missing/malformed/unowned receipt is preserved untouched while a new runtime
+is created；an invalid legacy tree may be removed only when the valid managed receipt plus safe root identity
+prove ownership。Path/name、`VibeCAD` basename、`mamba/` presence、status/log/lock alone never prove ownership。
+No legacy environment is moved or renamed。
+
+The installed legacy prefix named in §1 currently carries a valid `runtime_kind:external` receipt。That exact
+case is selected as read-only external reuse when the new runtime and explicit override are absent：subprocess
+verification must pass，then `runtime/external-runtime.json` binds its canonical prefix/device/inode and exact
+engine/server evidence。It is never pip-synced、deleted or rewritten。If it becomes unhealthy it is preserved
+and a new managed runtime may be installed。A test targets the actual canonical legacy-prefix contract with an
+external-kind receipt and makes every download/create/pip command fail if called，proving selection without a
+second engine install。
+
+Explicit `VIBECAD_FREECAD_ENV` is external and is never deleted or rewritten。After exact subprocess
+verification, its receipt is atomically stored at `runtime/external-runtime.json` and binds the canonical
+override prefix、prefix device/inode、Python version、FreeCAD version and VibeCAD server version。Status accepts
+it only while all identity fields still match。Install/status/uninstall tests hash and stat the entire override
+tree before/after and require identical entries、inodes and bytes；the external receipt is the only permitted
+write and remains below replaceable `runtime/`。
+
+Direct、pending and preview uninstall operate on fixed runtime targets only：new `runtime/` unconditionally
+after root-safety checks；legacy env/micromamba only with the exact managed-receipt + safe-root ownership proof
+above；legacy status/log/lock only when their own bounded record or exact fixed-file identity proves they were
+managed。Unowned/ambiguous legacy and every unknown file are preserved and reported, never guessed away。They
+preserve `data/` and `views/` byte for byte；marker clears only when every authorized runtime target is gone，
+while preserved ambiguous legacy is not treated as an authorized target。Symlink、parent replacement、
+runtime/data alias or partial authorized removal fails closed/retries。Preview reports authorized runtime
+size/path、preserved ambiguous paths and `data_preserved:true` without counting data bytes。Installer repair、
+status、swap and uninstall cause zero writes below `data/` except Application initialization explicitly creating
+the fixed data layout。
+
+### 4. Store-only catalog, bootstrap and AgentApplication contract
+
+`TaskCatalogService` is the sole no-CAD implementation of `create_task`、`get_task` and `reject_draft`，
+extracted from the current TaskService behavior rather than copied. `TaskService` delegates those methods and
+retains the CAD lifecycle methods。Create atomically reads and validates the full current `ProjectHead` and
+persists only its immutable `revision_id` as the existing TaskRun `base_revision`；it does not claim that the
+Task durable schema stores generation/manifest。Every CAD execution later rereads the full HEAD under its own
+write lease and first validates it against the runtime's exact full baseline；method-specific lineage rules then
+apply。Only new-candidate submit/continue require `HEAD.revision_id == Task.base_revision`；initial Accept requires
+the exact draft base HEAD；reconcile and ACCEPTING_DRAFT response-loss replay retain the existing durable
+journal/revision-ancestry rules and must not require current HEAD to equal the older Task base。Reject remains one
+TaskRun generation CAS with no project lease、RevisionStore mutation or CAD load。A concrete bridge maps only
+closed Catalog/TaskService errors into S3-4 `TaskServicePortFailure`; unknown exceptions remain fixed
+`internal_error` at TaskApi。
+
+`AgentApplication` implements the exact seven-method `TaskServicePort` and owns one shared trusted
+`ResourceLeaseManager`、`TaskRunStore`、`LocalRevisionStore` and one process-wide CAD gate。Its constructor,
+capability read、task get/create/reject and empty-project bootstrap do not import FreeCAD or create a Session。
+`submit/continue/reconcile/accept` first load durable TaskRun to derive project_id, never trust a caller-supplied
+route, then enter the global gate and resolve a lazy project runtime：
+
+```text
+project_id -> full durable ProjectHead
+           + isolated baseline SessionBinding/SessionSlot
+           + project-only CandidateCoordinator
+           + TaskService using the same exact CadExecutionPort
+```
+
+Every project has distinct Session/Slot/Coordinator。`MAX_PROJECT_RUNTIMES = 4`；a deterministic LRU may evict
+only an idle、clean runtime after closing it，and request 5 with four non-evictable runtimes returns fixed
+`resource_exhausted` without opening another document。S3-6 adds exactly that value to the closed
+`TaskServicePortErrorCode`/`TaskApiErrorCode` mapping with a fixed non-reflective message；no other TaskApi shape
+changes。N=4/N+1=5 tests are mandatory。
+
+The non-reentrant lease ordering is frozen and never nests：process-wide CAD gate → acquire a short project
+lease → reread full HEAD and build/refresh a provisional runtime bound to that exact triple → release → invoke
+its TaskService → TaskService reacquires its own project lease and, before any CAD handler、candidate directory
+or journal side effect, rereads the full HEAD and compares exact generation/revision/manifest to the provisional
+runtime head。It then applies the method-specific base/ancestry rules above，so accepted-draft/descendant
+reconciliation remains recoverable。A different-process commit in the release/reacquire gap therefore returns
+the existing pre-candidate conflict before a fresh candidate，or enters the existing journal/ancestry recovery
+for an already-published transaction；it never runs against the stale Session。Application evicts the stale
+provisional runtime before the next call and explicitly closes any baseline Session already opened during
+provisional build。No code path calls TaskService while Application still owns the short lease，and no
+"seamless refresh" is claimed。Tests force a full-HEAD advance in that exact gap for both a fresh candidate and
+ACCEPTING_DRAFT response-loss replay，proving no CAD **handler**、candidate、journal、revision or HEAD mutation，
+proving stale baseline close/eviction，and proving correct committed-lineage recovery after rebuild。The test
+does not falsely claim that provisional Session load/create never occurred。
+
+Application captures creator pid、serializes all same-process CAD calls across projects、closes owned sessions
+best effort without changing HEAD and rejects fork-inherited process capabilities。No module-global
+AgentApplication or Session is created。S3-6 only claims macOS AgentApplication execution；on Windows/Linux the
+application capability is statically `unsupported_platform` and construction fails before creating data or CAD
+state until S3-RES-02 closes。Pure protocol/value modules remain importable there。
+
+Project bootstrap has two distinct typed entry points and server-generated `project_<32hex>` ids：
+
+1. empty: acquire project lease → `initialize_empty_project` → exact generation-zero HEAD、base null、model
+   null；durability uncertainty succeeds only after exact readback；no FreeCAD import；
+2. FCStd import: no-follow bounded copy of external ordinary single-link source into private
+   `data/bootstrap` → load/recompute through trusted CadExecutionPort → reject empty/unsupported/malformed/
+   partial/duplicate identities → preserve complete valid identities and attach imported object/feature UUIDs
+   only to otherwise-untagged `Part::Box`/`Part::Cylinder` → checkpoint normalized internal FCStd → reload and
+   validate exact identities/geometry → bind staged sha256/size → call an evidence-required RevisionStore
+   import primitive with that exact pair。The store reopens no-follow、copies into a private temporary project
+   while hashing/counting the copied bytes、checks source before/after identity and requires copied sha256/size
+   to equal the supplied evidence before the project rename/HEAD publication。A swap or mutation after semantic
+   validation therefore fails without a visible project；byte-identical replacement is harmless。Only then may
+   generation-zero publication occur → exact readback → close and remove staging。
+
+Any failure before the atomic project rename leaves no visible project/HEAD and closes or records only private
+staging cleanup。After generation-zero publication, exact HEAD/revision/model readback makes the bootstrap a
+semantic success that is never rolled back：a later Session-close or staging-delete failure returns
+`cleanup_required:true` with the successful project descriptor and leaves a bounded durable cleanup record under
+`data/bootstrap` for idempotent retry。Response-loss success is accepted only when generation-zero
+revision/model digest/size exactly match the bootstrap evidence。A RED replaces staging after CadExecutionPort
+validation but before the store copy and must observe no project directory/HEAD；separate crash tests after
+publication prove retained success plus cleanup convergence。S3-6 import is not public MCP ingress and does not
+claim arbitrary legacy FreeCAD normalization。
+
+### 5. CadExecutionPort, budgets, checkout and IPC G0
+
+`CadExecutionPort` is a nominal trusted local Python capability, not a wire/duck-typed model input。It extends
+the existing four-method `CadSnapshotPort` with fixed profile/capability、import validation、program validation、
+execution、STEP export and sealed evidence collection。`CandidateEvidence` moves to this neutral contract and
+is re-exported for compatibility。Application alone chooses the implementation；TaskService and
+CandidateCoordinator prove they share the exact same port instance。Current `InProcessCadExecutor` reports only
+headless verified；offscreen_gui and interactive_gui are planned/unavailable；no silent profile downgrade。
+
+`BoundCommand` and adapter snapshots must retain exact `resource_budget`、minimum/maximum FreeCAD version and
+`requires_gui_main_thread` metadata from the authentic registry。Before a handler, the port rejects unsupported
+profile/version/thread and budgets exceeding the named admission ceiling：
+`MAX_ADMITTED_RUNTIME_MS = 30_000`、`MAX_ADMITTED_CREATED_OBJECTS = 1`、
+`MAX_ADMITTED_RESULT_BYTES = 262_144`。N and N+1 metadata tests exist for every ceiling。After each synchronous
+handler it measures monotonic elapsed milliseconds、created-object delta and canonical normalized-result UTF-8
+bytes before the next command/checkpoint/commit；the authentic command budget still applies when lower than the
+ceiling。Any excess fails and rolls back the candidate。Elapsed enforcement is explicitly post-return：
+same-process FreeCAD cannot safely interrupt a stuck C++ call, so S3-RES-05 crash/hang containment remains open。
+Passing this closes S3-RES-08；S3-RES-09 remains open for real GUI E2E。
+
+Managed checkout is a durable state machine under `data/checkouts` with
+`MAX_CHECKOUT_FILE_BYTES = 536_870_912`、`MAX_CHECKOUT_TOTAL_BYTES = 2_147_483_648` and
+`MAX_OPEN_CHECKOUTS = 8`。There is no automatic OPEN TTL：budget pressure returns fixed
+`resource_exhausted` and never evicts user edits。Only unpublished temp/orphan entries older than
+`ABANDONED_TEMP_TTL_SECONDS = 86_400` may be cleaned on restart；CLOSED tombstones are retained for
+`CLOSED_TOMBSTONE_TTL_SECONDS = 2_592_000`；`MAX_CHECKOUT_TEMP_ENTRIES = 8` and
+`MAX_CLOSED_TOMBSTONES = 1_024` bound them separately from OPEN entries。Total bytes include every OPEN/temp
+model below the store；admission reserves the incoming copy before writing。N/N+1 file、total、OPEN、temp and
+tombstone tests are mandatory。
+
+One fixed non-reentrant `CheckoutMutationLock` at `data/locks/checkout-store.lock` combines an in-process mutex
+with an OS-released cross-process exclusive lock and the same no-follow/root-identity checks as other stores。
+It covers expired-record cleanup、open-key lookup、source resolution、all count/byte checks and reservations、
+file/metadata publication、get-vs-close record reads、CLOSED tombstone publication and checkout deletion。
+Every new OPEN reserves one future tombstone slot by requiring
+`closed_tombstones + open_checkouts < MAX_CLOSED_TOMBSTONES` after expired cleanup；capacity may reject a new
+open but can never prevent an existing OPEN from closing。Two-process same-key and different-key N/N+1 tests
+prove single descriptor publication and no count/byte over-admission；process death releases only the lock，not
+durable OPEN authority。
+
+G0 source is an exact full committed HEAD or exact TaskRun generation + review draft binding。Caller supplies
+`checkout_open_<32hex>` as a non-path idempotency key but no filesystem path；checkout id remains server-minted
+`checkout_<32hex>`。The OPEN record separately binds canonical request intent and exact resolved source。Open
+always looks up the key first：same key + byte-equivalent canonical intent replays the persisted descriptor
+without resolving current HEAD again，even if HEAD advanced after the lost response，but it must run the exact
+same current checkout metadata/confinement/no-follow/ordinary-file/link-count/size/rehash validation as Get
+before returning any descriptor or trusted local path。A safe atomic edit therefore replays an updated
+`dirty:true` descriptor；symlink/hardlink/escape/tamper returns `integrity_failure`。Same key + different intent
+is conflict。A new key resolves and binds current exact source。Open copies the immutable
+revision model through no-follow ordinary-file checks into a new 0700 checkout/0600 `model.FCStd`, fsyncs file
+and directory、atomically publishes metadata，then reopens/rehashes and proves a different inode/single link。
+Descriptor binds checkout/project/revision/manifest/model digest/full source identity and
+`authoritative:false`。OPEN survives process restart unchanged。Get revalidates confinement and metadata；a
+normal FreeCAD atomic replacement by a new ordinary 0600 single-link file inside the same checkout is accepted
+as `dirty:true` after rehash，whereas symlink、hardlink、non-ordinary、oversize or escaped paths are
+`integrity_failure`。Close first durably publishes a source-bound CLOSED tombstone and then deletes only that
+checkout directory；retry during the tombstone retention window is terminal-idempotent and cannot recreate it。
+Crash tests cover copy、file fsync、metadata publish、directory fsync、close tombstone and deletion。Editing or
+closing checkout never changes TaskRun/journal/revision/HEAD；S3-6 has no publish path and never reuses a draft
+verdict。Replay tests include same key after safe edit、symlink and hardlink replacement as well as HEAD advance。
+
+IPC G0 implements only a strict raw-byte codec/value contract；there is no dispatcher、listener、socket/pipe or
+authenticated transport。All five future method names are reserved and schema-tested：`initialize`、
+`application.call`、`checkout.open`、`checkout.get`、`checkout.close`。Every actual G0 wire dispatch returns
+fixed `unavailable` without calling Application or returning a filesystem path；in-process AgentApplication may
+return a confined local path in its trusted Python checkout descriptor, but the wire projection never contains
+`local_path`。This keeps path delivery and peer authorization a G1 decision。
+
+The raw request is one BOM-free UTF-8 JSON object with exact outer keys
+`protocol,version,request_id,method,params`；`protocol` is `vibecad.local`，`version` has exact keys
+`major:1,minor:0` and `request_id` is `request_<32hex>`。Success has exact outer keys
+`protocol,version,request_id,result,error` with object result and null error；failure has the same keys with null
+result and exact error keys `code,message`。Exactly one JSON value is allowed；duplicate keys、trailing bytes、
+NaN/Infinity、non-safe integers and unknown fields fail before method decode。Fixed codec budgets are
+`MAX_PROTOCOL_REQUEST_BYTES = 589_824`、`MAX_PROTOCOL_RESPONSE_BYTES = 1_048_576`、
+`MAX_PROTOCOL_DEPTH = 72`、`MAX_PROTOCOL_NODES = 10_240`、
+`MAX_PROTOCOL_STRING_BYTES = 524_288`、`MAX_PROTOCOL_KEY_BYTES = 256` and safe integers
+`[-(2**53-1), 2**53-1]`；each has exact N/N+1 and multibyte UTF-8 tests。
+
+Method params/results are frozen as follows；every mapping rejects omitted/extra fields：
+
+| Method | Exact params | Exact result |
+|---|---|---|
+| `initialize` | `client_name,client_version` bounded printable strings | `kernel_id,session_id,protocol_version,capabilities` |
+| `application.call` | `kernel_id,session_id,operation,request`；operation is exactly `create_task,get_task,submit_model_program,resume_task,accept_draft,reject_draft,get_capabilities` | `response` containing the unchanged TaskApi `schema_version,ok,result,error` envelope |
+| `checkout.open` | `kernel_id,session_id,open_key,source`；source is exact `kind:head,project_id` or `kind:draft,task_id,draft_id,expected_generation` | path-free checkout descriptor |
+| `checkout.get` | `kernel_id,session_id,checkout_id` | path-free checkout descriptor |
+| `checkout.close` | `kernel_id,session_id,checkout_id` | path-free CLOSED descriptor |
+
+`client_name` is 1..64 UTF-8 bytes and `client_version` is 1..32，both printable single-line ASCII。The
+path-free checkout descriptor has exact keys
+`checkout_id,open_key,state,authoritative,dirty,source,initial_model_sha256,current_model_sha256,current_size_bytes`。
+Its exact resolved `source` keys are
+`kind,project_id,revision_id,manifest_sha256,model_sha256,size_bytes,task_id,draft_id,task_generation`；the last
+three are null for committed HEAD and exact durable values for draft。`state` is `open|closed`，
+`authoritative` is always false，and a CLOSED descriptor preserves the last hashes/size from its tombstone。
+
+`kernel_<32hex>` and `session_<32hex>` are server-minted non-authoritative correlation values only，not channel
+binding、authentication or capability。The initialize capability mapping is exact booleans
+`application_dispatch:false,checkout_dispatch:false,authenticated_transport:false,local_path_delivery:false`。
+The closed protocol error codes are `malformed_message,unsupported_version,unknown_method,budget_exceeded,
+invalid_request,unavailable,internal_error` with fixed non-reflective messages；no exception text/path is copied。
+FCStd bytes and Python/process capabilities never enter JSON。Unix socket vs Windows named pipe、peer
+credential/ACL/bootstrap secret、daemon discovery and Qt dispatch remain G1 decisions；no JSON `auth_token`
+field is frozen。
+
+### 6. Genuine RED, recovery matrix and objective gates
+
+Genuine RED waves must independently hit the missing contracts, never setup/import/syntax failures：
+
+1. runtime/data paths + owned healthy legacy adoption + unowned legacy/external-override preservation +
+   direct/pending uninstall byte/inode preservation；
+2. store-only catalog and real AgentApplication seven-method bridge while FreeCAD modules are unavailable；
+3. empty/import bootstrap, invalid/TOCTOU source, identity normalization and durability readback；
+4. CadExecutionPort exact nominal surface, authentic metadata retention, version/thread/admission/post-return
+   budgets and honest static profiles；
+5. two-project lazy isolation、full-HEAD refresh、global CAD concurrency maximum one、cache bound and shutdown；
+6. managed revision/draft checkout copy/replay/restart/confinement/no-link/tamper/edit/source immutability；
+7. exact IPC roundtrip/version/budget/session/replay contracts with no server/socket/FreeCAD import。
+
+Recovery requirements：
+
+| Observation | Required convergence |
+|---|---|
+| runtime uninstall interrupted | marker retained；retry only fixed runtime targets；data unchanged |
+| owned managed or exact healthy external-kind legacy, new runtime absent | reuse in place；external-kind is read-only；no rename/pip/delete/second engine install |
+| empty/import publication durability uncertain | exact generation-zero HEAD/revision/digest readback；prepublish fixed failure or postpublish success + cleanup_required |
+| bootstrap staging swaps after validation | store sha256/size mismatch；no project directory/HEAD；session/staging cleaned or safely recoverable |
+| cached runtime HEAD differs in generation/revision/manifest | short lease rebuild；never reuse stale baseline；drain/close/rebuild or recovery failure |
+| HEAD advances after refresh lease release | no CAD handler/candidate/durable mutation；close stale provisional Session；evict/rebuild；preserve committed ancestry recovery |
+| Application restart with task/draft | rebuild from stores and exact HEAD；no in-memory authority required |
+| checkout open response loss + HEAD advance | key-first canonical-intent replay returns original descriptor without re-resolve；different intent conflicts |
+| two processes open/close concurrently | one fixed store lock；same key has one descriptor；capacity/tombstone reservation never over-admits or blocks existing close |
+| restart/budget with OPEN checkout | preserve OPEN edits；only stale unpublished temp cleanup；return resource exhaustion rather than eviction |
+| checkout edited/tampered | source remains immutable；get marks dirty or integrity failure；never commit |
+| external override install/status/uninstall | external tree entries/inodes/bytes unchanged；only runtime receipt changes |
+| CAD call overlaps another project | process gate keeps maximum active FreeCAD call count at one |
+
+Focused gate includes all changed/new test files plus cumulative task API/service/program/adapter/candidate suites。
+Managed FreeCAD must prove empty revision-zero commit、normalized Box/Cylinder import commit、two-project
+isolation、draft checkout edit with source/HEAD unchanged、Application close/new-process Accept and exact legacy
+runtime reuse without installer invocation。Then run full pytest、full Ruff、`git diff --check`、pycompile、fresh
+Application capability/get/reject forbidden-module gates、runtime uninstall data-tree digest gate and at least
+two independent final read-only reviews。
+
+### 7. Delivery boundary and breakers
+
+- Control commit: `docs(orchestration): issue S3-6 isolated application packet`。Prewritten local semantic
+  commit: `feat(application): compose isolated task project runtime`。Only named-file staging/local commits are
+  authorized；push remains `not authorized` / S3-RES-01。
+- Immediate breakers：data deletion/write by runtime maintenance；second FreeCAD download despite an exact
+  owned healthy legacy prefix；moving legacy env、deleting ambiguous legacy or writing external override；project
+  visible before semantic import + store digest validation；nested/reentrant project lease；one global
+  SessionSlot across projects；Reject/get/capability loading FreeCAD；missing global CAD gate；path supplied by
+  checkout caller or emitted by wire codec；evicting OPEN checkout；checkout/revision hardlink；serialized
+  lease/candidate/Session/receipt；checkout mutation without the fixed cross-process lock or future tombstone
+  reservation；runtime/cache/protocol budgets without the frozen constants；claiming hard
+  timeout、runnable IPC、authentication、interactive profile or public MCP；out-of-allowlist write；need to alter
+  S3-D01..D08。
+- Ordinary implementation/test defects, schema naming corrections and control-record review findings are
+  closed autonomously inside this packet。Completion appends exact files、RED/GREEN/full/managed/import/runtime
+  evidence、two reviews、residual disposition and S3-S12 recovery snapshot。
+
+| Entry | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| S3-E11 / 2026-07-21T08:50:39Z | S3-A01；three-way S3-6 dependency audit + two independent final packet reviews PASS | 4c7347a / not authorized | clean S3-5 anchor；full 2855/90；managed 8；G0 one-file allowlist + diff check PASS；reviews closed secure-import TOCTOU、lease lineage、runtime ownership、checkout/IPC/budget findings with no remaining Critical/Important | S3-RES-01..06, S3-RES-08..09；S3-6 implementation pending | S3-S11 | control-ready |
+
+### Recovery snapshot S3-S11
+
+1. **Completed:** S3-5 semantic commit `4c7347a`；S3-6 three-way read-only audit converged on runtime/data
+   preservation、store-only task control、secure normalized bootstrap、per-project runtimes、global CAD gate、
+   trusted port、managed checkout and non-runnable IPC G0；two independent final packet reviews PASS after all
+   Critical/Important findings were closed；worktree before this packet was clean。
+2. **Next:** commit this docs-only control packet；write the seven genuine RED waves inside the exact allowlist；
+   implement runtime/data safety first, then catalog/
+   Application/bootstrap/port/checkout/protocol；run focused/full/managed gates and two final reviews。
+3. **Approved decisions:** S3-D01 through S3-D08 under S3-A01；S3-6 engineering consequences require no
+   repeated product approval；public MCP、manifest、external artifact delivery、G1 daemon/auth/Workbench、
+   checkout publish、push/PR/release remain outside。
+4. **Recovery:** verify branch `codex/agent-stage3`、HEAD `4c7347a` or the subsequent docs-only S3-6 control
+   commit、only this document modified and no active tests；never move the installed legacy conda env；never
+   initialize data under a deletable runtime target；if S3-6 semantic commit exists, use S3-S12 instead of
+   replaying RED。
+
 ## 9. 用户决策与持续执行规则
 
 本修订依据已经明确的用户方向：
