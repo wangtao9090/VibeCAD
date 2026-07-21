@@ -2051,6 +2051,21 @@ two independent final read-only reviews。
   closed autonomously inside this packet。Completion appends exact files、RED/GREEN/full/managed/import/runtime
   evidence、two reviews、residual disposition and S3-S12 recovery snapshot。
 
+#### S3-6C1 test-only control correction
+
+The first complete S3-6 gate exposed two stale assertions in `tests/test_supervisor.py` that still require
+removing the whole `VIBECAD_HOME`.  That expectation predates the approved runtime/data split and conflicts
+with this packet's immediate breaker against deleting ambiguous legacy content.  The semantic allowlist is
+therefore corrected to include `tests/test_supervisor.py`, strictly limited to setup, names/comments and
+assertions in `test_pending_uninstall_runs_before_respawn` and
+`test_spawn_real_cmd_uninstall_marker_falls_back_to_bootstrap`.
+
+Those two cases must prove that the pending marker is consumed, every owned fixed runtime target is removed,
+the next supervisor generation safely selects bootstrap Python, and ambiguous `mamba/` or malformed legacy
+`status.json` bytes remain unchanged.  This correction does not authorize changes to
+`src/vibecad/supervisor.py`, supervisor lifecycle, uninstall production semantics or any other test.  It is a
+mechanical stale-test correction under the packet's autonomous defect rule, not a change to S3-D01..D08.
+
 | Entry | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | S3-E11 / 2026-07-21T08:50:39Z | S3-A01；three-way S3-6 dependency audit + two independent final packet reviews PASS | 4c7347a / not authorized | clean S3-5 anchor；full 2855/90；managed 8；G0 one-file allowlist + diff check PASS；reviews closed secure-import TOCTOU、lease lineage、runtime ownership、checkout/IPC/budget findings with no remaining Critical/Important | S3-RES-01..06, S3-RES-08..09；S3-6 implementation pending | S3-S11 | control-ready |
