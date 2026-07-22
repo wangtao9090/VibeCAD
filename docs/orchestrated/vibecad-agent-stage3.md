@@ -3559,6 +3559,7 @@ for the user。
 | S3-E14 / 2026-07-21T16:36:41Z | S3-A01；post-control independent transport cross-check found and then re-reviewed the sole Important capacity contradiction | ec485ca / not authorized | handshake replay now has a separate exact two-frame / 4,194,304-byte budget and leaves all eight active request/id slots available；focused rereview PASS with no remaining Critical/Important | unchanged；S3-7 implementation pending | S3-S13 + this append-only correction | control-ready |
 | S3-E15 / 2026-07-22T03:57:30Z | S3-A01；worker、receipt and package independent reviews Critical/Important/Minor `0/0/0` after closure；two final settled-diff reviews pending | precommit `19ae74f`；exact semantic subject pending / push not authorized | epoch-3 installed exact；managed Agent matrix PASS；fresh MCPB PASS；3827/95 full gate；package/MCPB hashes in R3.23；engine/legacy exact | S3-RES-01..06, S3-RES-09, S3-RES-11..16 unchanged | S3-S14-precommit | semantic-ready |
 | S3-E16 / 2026-07-22T04:08:41Z | S3-A01；R3.24 final-review documentation findings closed；final reviews rebinding corrected archives | precommit `19ae74f`；exact semantic subject pending / push not authorized | R3.25 wheel/sdist/MCPB exact corrected README；ninth fresh MCPB PASS；3827/95 unchanged；engine/legacy exact | unchanged | S3-S14-precommit.1 | final-review |
+| S3-E17 / 2026-07-22T04:13:53Z | S3-A01；architecture、delivery and adversarial final reviews each PASS with Critical/Important/Minor `0/0/0` on the settled R3.25 state | `b822fc5914fabe3d7ee4924dfcdce14e08f04ba7` / push not authorized | exact 58/58 named allowlist；3827 passed/95 deselected；managed Agent 1/10.29s；fresh MCPB 1/9.82s；Ruff/format/lock/diff PASS；R3.25 package hashes exact | S3-RES-01..06, S3-RES-09, S3-RES-11..16 unchanged；S3-7 closed | S3-S14 | completed |
 
 ### Recovery snapshot S3-S13
 
@@ -3605,6 +3606,28 @@ for the user。
    `3966f966aac57344126e5b78ebb8e7337fc7e669e20576b72263529b57f4e6dc`；if the semantic subject exists，do not
    repeat runtime sync or real MCPB effects。Resolve the semantic hash from Git，then append the final S3-S14
    review/hash record in a docs-only completion commit。
+
+### Recovery snapshot S3-S14
+
+1. **Completed:** S3-7 is committed locally as
+   `b822fc5914fabe3d7ee4924dfcdce14e08f04ba7` (`feat(mcp): publish verified agent CAD surface`) with exactly
+   58 named allowlist entries。Managed epoch 3、the 20-tool Agent-first public surface、verified FCStd/STEP
+   delivery、3827/95 full regression and the R3.25 wheel/sdist/MCPB evidence are settled；three independent final
+   reviews report Critical/Important/Minor `0/0/0`。
+2. **Next:** commit only this completion-ledger update with subject
+   `docs(orchestration): record S3-7 semantic completion`，then begin AR-1 from the clean S3-7 semantic anchor。
+   AR-1 must reconcile the architecture documents and freeze the S3-8 skill/version/real-E2E packet before any
+   P0-B、G1、P1 or P2 implementation。
+3. **Authority:** S3-A01/S3-D01..D08 and the user's standing continuous-execution direction authorize the local
+   completion record、AR-1 read-only/product-architecture review and preparation of the S3-8 control packet。
+   Push/PR/release/marketplace、external model/API spend、data deletion and later-stage implementation remain
+   unauthorized until their applicable boundary is reached。
+4. **Recovery:** verify branch `codex/agent-stage3` contains semantic commit
+   `b822fc5914fabe3d7ee4924dfcdce14e08f04ba7` and this docs-only completion subject；the worktree must be clean and
+   no server/test process active。Do not rerun epoch migration or the R3.25 package effects merely to resume。
+   Reuse the recorded wheel `19050242ee44b06c47c2a675ae5fb65439b0fe1887c38b10f34e13562103b551`、
+   sdist `2fb3592d14b3d280ab6b50674013eb24be8d33185104a4de98bf17e5059a8555` and MCPB
+   `3966f966aac57344126e5b78ebb8e7337fc7e669e20576b72263529b57f4e6dc` as S3-7 evidence，and continue at AR-1。
 
 ## 9. 用户决策与持续执行规则
 
