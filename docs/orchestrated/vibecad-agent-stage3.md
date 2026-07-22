@@ -3954,6 +3954,25 @@ generation 0。Push、PR、tag、release、marketplace 与外部模型/API spend
    repeated package/runtime effect。If the semantic subject exists，do not reinstall or rebuild merely to recover；
    append the exact completion hash only after a clean named-file audit。
 
+| Ledger ID / time | Authority / review | Commit / push | Verification | Residuals | Snapshot | State |
+|---|---|---|---|---|---|---|
+| S3-E20 / 2026-07-22T10:09:58Z | S3-A01；S3-D09；semantic and delivery final reviews `0/0/0` | `3b8008560b1865bae6210ecd2e3fe5e2f915f5ee` / push not authorized | exact 35 named files；3877/95 full；managed 2；packed MCPB 1；fresh artifacts and installed runtime match S3-E19 | S3-RES-01..06, S3-RES-09, S3-RES-11..16 remain；real host not verified；Twine offline residual | S3-S16 | completed |
+
+### Recovery snapshot S3-S16
+
+1. **Completed:** local semantic commit `3b8008560b1865bae6210ecd2e3fe5e2f915f5ee`
+   (`feat(agent): package skill and complete stage 3 acceptance`) contains the exact 35-file S3-8/S3-D09 scope。
+   VibeCAD 0.5.0 is protocol/package host-ready with all final identities、tests、package hashes、runtime preservation
+   and `0/0/0` reviews recorded in S3-E19/S3-E20。
+2. **Next:** commit only this append-only completion record as
+   `docs(orchestration): record S3-8 completion`。The next implementation packet is P0-B core；do not replay S3-8
+   package/runtime effects and do not claim real-host verification。
+3. **Authority:** the local completion-record commit is authorized by S3-A01/S3-D09。Push、PR、tag、release、
+   marketplace and actual external Claude/Codex model calls remain unauthorized。
+4. **Recovery:** verify both the semantic subject/hash above and the subsequent docs-only completion subject。A clean
+   tree after those two commits means S3-8 is closed；resume from P0-B core planning and S3-RES-03/05/13..16，not
+   from any S3-8 RED/build/install step。
+
 ## 9. 用户决策与持续执行规则
 
 本修订依据已经明确的用户方向：
