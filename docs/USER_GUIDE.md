@@ -1,5 +1,10 @@
 # VibeCAD 用户手册
 
+> **Legacy 文档，当前不可作为产品说明。** 本文仍描述 S3-7 前的 31-tool Session 工作流，包含当前
+> Agent-first 公共面已经不再提供的打孔、圆角、装配、自动回图和任意路径导出示例。S3-8 将以
+> 20-tool 项目/任务/review/artifact 工作流完整重写；在此之前请以 [`README.md`](../README.md)、
+> [`ARCHITECTURE.md`](ARCHITECTURE.md) 和运行时 `get_capabilities` 为准。
+
 > 用聊天的方式画 3D 零件——不用学 CAD 软件，说中文就行。
 
 本手册面向**完全不懂 CAD、也不熟悉命令行**的朋友。每一步都给出可以直接复制粘贴的命令、可以照着念的话术。读完第一、二、三章（约 10 分钟）你就能开始画图了。

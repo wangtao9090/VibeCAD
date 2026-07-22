@@ -1,5 +1,10 @@
 # VibeCAD 验收测试方案
 
+> **Legacy 验收清单，禁止用于当前放行。** 本文冻结的是旧 31-tool Session 产品，和 S3-7 后的
+> Agent-first `Project → Task → ModelProgram/direct → Draft/Accept/Reject → Artifact resource` 公共面不
+> 一致。S3-8 会重写为 0.5.0 的宿主、恢复和 FCStd/STEP 验收；当前自动化事实见
+> [`orchestrated/vibecad-agent-stage3.md`](orchestrated/vibecad-agent-stage3.md)。
+
 > 版本：0.4.0。对应实现状态：自动安装 + 零重连换芯 + 装配 DSL + FCStd 项目保存/打开 + 布尔运算 + 删除/撤销/重做 + 测量，共 31 个 MCP 工具。
 > 配套阅读：[`README.md`](../README.md) 工具表、[`docs/USER_GUIDE.md`](USER_GUIDE.md) 用户手册。
 

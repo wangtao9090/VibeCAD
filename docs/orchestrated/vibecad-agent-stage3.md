@@ -214,10 +214,10 @@ Workbench 不保存 Claude/Codex token，不复制任务状态机，也不拥有
 - 将 GUI selection 转换为 SelectorV1；
 - 在独立 Preview Document 中展示 draft；
 - 显示 verifier 证据；
-- Accept、Reject、Revise；
-- 把手工修改封装为 checkpoint，再交给 Kernel 验证和发布。
+- Accept、Reject；G1 的“要求修改”只返回宿主创建新 Task；
+- G2 才把手工修改封装为新 candidate checkpoint，再交给 Kernel 验证和发布。
 
-Stage 3 只交付 CadExecutionPort、review/checkout 语义和 IPC protocol contract。
+Stage 3 只交付 CadExecutionPort、review/checkout 语义和 versioned IPC codec seam。
 Python Workbench、Qt Dock、可运行的 local Kernel daemon、认证本地 IPC、GUI
 main-thread adapter 和可视 diff 属于 G1/G2。
 
@@ -503,14 +503,14 @@ Stage 3 的全局机械 allowlist 为以下 repository-relative 路径；每个 
 |---|---|---|---|---|
 | S3-RES-01 | 远端 push 未由 S3-A01 授权；本地提交尚无远端恢复副本 | user/controller | defer | 用户明确授权 push |
 | S3-RES-02 | Windows/Linux task store、安装与真实 FreeCAD matrix 未完成 | platform stage | defer | 对应平台 G3 matrix 通过 |
-| S3-RES-03 | G1 Workbench、daemon 和认证 IPC 未实现 | G1 | planned | G1 产品范围批准并通过 GUI E2E |
+| S3-RES-03 | runnable daemon、认证 IPC/file broker 和 G1 Workbench 未实现 | P0-B core / G1 | planned | P0-B backend gates + G1 GUI E2E |
 | S3-RES-04 | face/edge SelectorV1 Level B 未实现 | P1 | planned | 歧义、高亮、recompute/reload matrix 通过 |
-| S3-RES-05 | same-process FreeCAD 尚无独立 crash containment | P3 | defer | independent Worker 和 crash recovery gate 通过 |
-| S3-RES-06 | 第二个兼容 MCP 宿主的授权与可用性未在本阶段证明 | release acceptance | defer | 同一 canonical program 的跨宿主 conformance 通过 |
-| S3-RES-07 | S3-1 ResultRef 只在单次 program run 内稳定，尚不能引用已有 FCStd 对象 | S3-2 | planned | SelectorV1 Level A、重算与重载门禁通过 |
-| S3-RES-08 | resource budget、FreeCAD version range 与 GUI main-thread 仍是声明性 metadata | S3-6 | planned | CadExecutionPort 在 handler 前强制预算、版本与线程约束 |
+| S3-RES-05 | same-process FreeCAD 尚无独立 crash containment | P0-B core / P3 | planned | P0-B 最小可杀进程 gate；P3 independent Worker/queue 完整关闭 |
+| S3-RES-06 | 第二个兼容 MCP 宿主的授权与可用性未在本阶段证明 | host verification / GA | defer；阻断 host-verified 宣称，不阻断 0.5.0 local beta | 同一 canonical program 的跨宿主 conformance 通过 |
+| S3-RES-07 | ResultRef 与已有对象稳定引用曾是缺口 | S3-2 | closed | SelectorV1 Level A、重算与重载门禁已通过 |
+| S3-RES-08 | resource budget、FreeCAD version range 与 GUI main-thread 曾只有声明性 metadata | S3-6 | closed | CadExecutionPort handler 前准入与真实 profile gates 已通过 |
 | S3-RES-09 | offscreen/interactive profile 已有封闭枚举，但当前真实 executor 只证明 headless | G0/G1 | planned | capability discovery 与对应 GUI worker/Workbench E2E 通过 |
-| S3-RES-10 | 已有对象的 SelectorV1 已稳定，但默认 mutator 的 `SelectorV1 | ResultRef` target union 与同一 program 的 create→modify 中间态 preservation 尚未绑定 | S3-3 | planned | 六个首批 operation、固定 handler binding 与 command-level preservation gate 通过 |
+| S3-RES-10 | `SelectorV1 | ResultRef` target union 与 create→modify preservation 曾未绑定 | S3-3 | closed | 六个首批 operation、固定 handler binding 与 command-level preservation gates 已通过 |
 
 ## 8.3 Append-only execution ledger
 
@@ -3560,6 +3560,7 @@ for the user。
 | S3-E15 / 2026-07-22T03:57:30Z | S3-A01；worker、receipt and package independent reviews Critical/Important/Minor `0/0/0` after closure；two final settled-diff reviews pending | precommit `19ae74f`；exact semantic subject pending / push not authorized | epoch-3 installed exact；managed Agent matrix PASS；fresh MCPB PASS；3827/95 full gate；package/MCPB hashes in R3.23；engine/legacy exact | S3-RES-01..06, S3-RES-09, S3-RES-11..16 unchanged | S3-S14-precommit | semantic-ready |
 | S3-E16 / 2026-07-22T04:08:41Z | S3-A01；R3.24 final-review documentation findings closed；final reviews rebinding corrected archives | precommit `19ae74f`；exact semantic subject pending / push not authorized | R3.25 wheel/sdist/MCPB exact corrected README；ninth fresh MCPB PASS；3827/95 unchanged；engine/legacy exact | unchanged | S3-S14-precommit.1 | final-review |
 | S3-E17 / 2026-07-22T04:13:53Z | S3-A01；architecture、delivery and adversarial final reviews each PASS with Critical/Important/Minor `0/0/0` on the settled R3.25 state | `b822fc5914fabe3d7ee4924dfcdce14e08f04ba7` / push not authorized | exact 58/58 named allowlist；3827 passed/95 deselected；managed Agent 1/10.29s；fresh MCPB 1/9.82s；Ruff/format/lock/diff PASS；R3.25 package hashes exact | S3-RES-01..06, S3-RES-09, S3-RES-11..16 unchanged；S3-7 closed | S3-S14 | completed |
+| S3-E18 / 2026-07-22T06:03:56Z | S3-A01；AR-1 source/runtime audit plus architecture、delivery and adversarial exact-diff reviews all PASS after every finding closed | AR-1 docs commit containing S3-S15 / push not authorized | clean `9992061` anchor；exact seven docs；20 tools/0 descriptions/349,732-byte discovery reproduced；host-ready、FCStd import、skill/recovery/release and P0-B/G1 boundaries reconciled；diff check PASS；reviews `0/0/0` | S3-RES-01..06, S3-RES-09, S3-RES-11..16；S3-8 implementation pending | S3-S15 | packet-issued |
 
 ### Recovery snapshot S3-S13
 
@@ -3628,6 +3629,252 @@ for the user。
    Reuse the recorded wheel `19050242ee44b06c47c2a675ae5fb65439b0fe1887c38b10f34e13562103b551`、
    sdist `2fb3592d14b3d280ab6b50674013eb24be8d33185104a4de98bf17e5059a8555` and MCPB
    `3966f966aac57344126e5b78ebb8e7337fc7e669e20576b72263529b57f4e6dc` as S3-7 evidence，and continue at AR-1。
+
+### S3-R3.26 — AR-1 conclusion and active S3-8 correction
+
+AR-1 ran from clean S3-7 completion anchor
+`9992061ee9fdce1f7efdccf4f1f19909ca5f5924` with three independent read-only audits plus controller source/
+runtime introspection。It found no need to change the approved expert-Agent positioning、BYO host-model boundary、
+single Task Kernel、controlled ModelProgram path or Workbench-as-non-authority rule。Ordinary architecture、
+discovery and staging corrections therefore remain autonomous under S3-A01 and the user's standing continuous-
+execution direction。
+
+The settled current-state answers are：
+
+1. the public surface has exact 20 tools，but only six are registry-derived direct CAD operations；the other
+   fourteen are five service/runtime/capability controls plus nine project/task/review/artifact facades；
+2. every direct operation is a real thin adapter：it validates task generation/state/selectors，constructs one
+   `ModelCommand`/`ModelProgram` and only enters `TaskApi.submit_model_program`；no legacy public Session writer
+   exists；
+3. durable review is sufficient for immutable draft preview、fresh revalidation and Accept/Reject authority，but
+   the current IPC codec is only a G0 seam。It intentionally delivers no local path and cannot yet serve an
+   independent Workbench；
+4. Selector/observation/verifier meet object/feature P0-A requirements，not face/edge、semantic diff、Sketcher or
+   PartDesign acceptance；
+5. the correct order is S3-8 → P0-B core → G1 MVP，with P0-B hardening allowed in parallel but closed before
+   P1/G2；P2 remains later。
+
+AR-1 also found two reproducible release blockers and one additive host-delivery gap that the earlier S3-8 scope
+did not state explicitly：
+
+- the exact S3-7 `tools/list` has 20 tools but zero nonblank tool descriptions and serializes to 349,732 bytes；
+  omitting its repeated advertised output schemas yields 15,356 bytes。The server must retain strict internal
+  output validation while publishing concise descriptions/input/annotations under a hard 64-KiB discovery gate；
+- the public projection does not reject a direct operation named `ping` or `create_task`。A forged registry
+  therefore produces duplicate discovery names while server route maps disagree。S3-8 must reserve the stable
+  namespace、reject collisions before schema/dispatch and prove unique names；
+- successful artifact export currently returns resource URIs only inside text/structured content。S3-8 must add
+  standard typed `ResourceLink` content for the exact two verified artifacts and keep `resources/read` as the only
+  binary authority。It must not introduce arbitrary copy-out paths。
+
+These are host-readiness/distribution corrections discovered at the planned AR-1 boundary，not a new product
+direction。Because production public-surface bytes change，S3-8 freezes product version `0.5.0`、private server
+epoch 4 and a new public-surface digest。MCP remains 1.27.2 and FreeCAD remains 1.1.0。The target version was
+already fixed by S3-R3；AR-1 does not reopen it。
+
+The host-neutral skill is a separately installable host instruction artifact。Its canonical source directory is
+`skills/vibecad-agent/`；source/sdist/MCPB and the standalone skill archive carry the same tree，while the Python
+wheel/managed runtime deliberately remain server-only。No package silently activates it。S3-8 must document and
+test the current Codex installer path (`$CODEX_HOME/skills/vibecad-agent`，default
+`$HOME/.codex/skills/vibecad-agent`) plus the published Codex user/repo authoring paths
+(`$HOME/.agents/skills/vibecad-agent` / `.agents/skills/vibecad-agent`) and Claude Code user/repo paths
+(`$HOME/.claude/skills/vibecad-agent` / `.claude/skills/vibecad-agent`) separately，including tree/archive hash and
+restart/reload discovery semantics。Launching Claude/Codex model calls would consume user-owned external model
+resources and is not authorized by S3-A01；raw/typed MCP conformance and current-controller skill-following can
+complete locally，so S3-8 may claim protocol/package `host-ready` but not `host-verified`。An actual second-host run
+remains S3-RES-06 until separately authorized。
+
+#### Packet S3-8A — host usability、skill and Stage 3 acceptance
+
+##### 1. Authorization and anchor
+
+- Authorization remains S3-A01/S3-D01..D08 plus the user's standing direction to continue without internal
+  approval stops。AR-1 requires no product decision。
+- Starting branch/anchor：`codex/agent-stage3` at
+  `9992061ee9fdce1f7efdccf4f1f19909ca5f5924` plus the reviewed AR-1 docs-only control commit created from this
+  packet。
+- Local RED/GREEN、managed-runtime package sync、fresh package/E2E、read-only reviews and exact named commits are
+  authorized。Push、PR、tag、release、marketplace、external model/API spend and user-data deletion remain not
+  authorized。
+
+##### 2. Exact mechanical allowlist
+
+S3-8 may modify only：
+
+- `.mcpbignore`；
+- `.github/workflows/release.yml`；
+- `README.md`；
+- `docs/ARCHITECTURE.md`；
+- `docs/AGENT_ARCHITECTURE.md`；
+- `docs/PRODUCT_CAPABILITY_ROADMAP.md`；
+- `docs/USER_GUIDE.md`；
+- `docs/ACCEPTANCE_TESTS.md`；
+- `docs/orchestrated/vibecad-agent-stage3.md`；
+- `skills/vibecad-agent/`（new host-neutral skill package）；
+- `manifest.json`；
+- `pyproject.toml`；
+- `uv.lock`；
+- `src/vibecad/__init__.py`；
+- `src/vibecad/execution/registry.py`；
+- `src/vibecad/application/public_surface.py`；
+- `src/vibecad/server.py`；
+- `src/vibecad/runtime/spec.py`；
+- `src/vibecad/runtime/status.py`；
+- `tests/test_agent_skill.py`（new）；
+- `tests/test_execution_registry.py`；
+- `tests/test_server_agent_surface.py`；
+- `tests/test_mcpb_manifest.py`；
+- `tests/test_status.py`；
+- `tests/test_installer.py`；
+- `tests/test_supervisor.py`；
+- `tests/test_runtime_integration.py`；
+- `tests/test_task_kernel_integration.py`。
+
+Any needed production file outside this list、public operation beyond the existing six、runnable daemon/Workbench、
+face/edge selector、arbitrary code、Sampling/BYOK backend or external host execution is a breaker and requires a
+new scope review。
+
+##### 3. Frozen product and discovery contract
+
+- Public business names remain exact 14 stable + 6 direct = 20。Stable names form a reserved namespace；the
+  registry/public projection must fail closed on any collision or duplicate before schema generation、dispatch or
+  effect。
+- Every public tool has one bounded single-line host-readable description。Direct descriptions are carried by
+  immutable operation metadata，with a deterministic safe fallback for non-public fixtures；hostile subclasses or
+  invalid text fail closed。`manifest.json` tool names and descriptions must exactly equal the corresponding
+  `PublicToolSpec` projection；the manifest is not an independently edited description authority。
+- Server-side output validators remain exact and unchanged in authority。MCP `tools/list` publishes name、
+  description、input schema and annotations，but does not repeat the enormous optional output schema。The measured
+  object is the complete single-line JSON-RPC 2.0 `tools/list` response frame for fixed request id `1`，serialized
+  with sorted keys、compact separators、no ASCII escaping and its terminating LF；it must be at most 65,536 UTF-8
+  bytes。Tool results still return validated `structuredContent` and canonical JSON text。
+- A successful `export_task_artifacts` CallToolResult contains the canonical text/structured envelope followed by
+  exactly two typed ResourceLinks whose URI、name and size equal the validated FCStd/STEP result。MIME is derived
+  only from the closed validated format mapping `fcstd → application/vnd.freecad.fcstd` and
+  `step → model/step`；the structured result intentionally has no separate MIME field。Failure results and other
+  tools never fabricate links；`resources/read` remains bounded binary authority。
+- `get_capabilities` remains the machine-readable operation truth。The skill must call it first and must not infer
+  CAD capability from tool count、legacy docs or model knowledge。
+- Version becomes exact `0.5.0` in source、pyproject、manifest and package metadata。Private server epoch becomes
+  4 because server/public metadata changes；MCP 1.27.2、Python 3.12 and FreeCAD 1.1.0 remain pinned。The runtime
+  public-surface digest binds descriptions、input/output enforcement schemas and annotations even though the host
+  discovery projection omits optional output schema。
+
+##### 4. Skill and documentation contract
+
+The skill must be host-neutral and must teach only the public contract：
+
+1. initialize/poll runtime、then call `get_capabilities`；
+2. create empty projects or import only the supported non-empty Box/Cylinder-only FCStd envelope with retained
+   idempotency keys；any other FCStd object type is rejected and general controlled import belongs to P1；
+3. create a task with explicit `auto_commit | require_review`；
+4. choose one direct operation for a single-step task or ModelProgram for a multi-step candidate；
+5. construct AcceptanceSpec、ResultRef and revision-bound SelectorV1 without guessing labels；
+6. carry exact generation/next-action/task/draft IDs and use the frozen recovery table below；
+7. never blindly retry unknown-outcome `create_task`，never call legacy 31-tool names and never fall back to
+   arbitrary Python/FreeCAD code；
+8. export only eligible committed/draft artifacts，follow ResourceLinks and verify returned hash/format；
+9. state that the host owns model/token usage and that Sampling、BYOK backend、Workbench、face/edge、STL import、
+   photo reconstruction and simulation are unavailable；
+10. distinguish a skill file included in a package from actual host installation/activation。
+
+The skill's recovery table is executable public behavior，not prose advice：
+
+| returned `next_action` | required host action |
+|---|---|
+| `request_plan` | unreachable from the current public `create_task` contract；call `get_task` once，then stop and report an internal-state mismatch if it remains |
+| `submit_program` / `provide_input` | build a corrected bounded program and call one direct tool or `submit_model_program` with the returned generation |
+| `validate_program` / `reconcile` / `cleanup` | call `resume_task` once with the returned generation；on conflict, `get_task` and re-evaluate |
+| `wait` | `get_task` without a tight loop；if the persisted state remains resumable after interruption, call `resume_task` once |
+| `review_draft` | present the exact draft/verdict to the user，then call only `accept_draft` or `reject_draft` with current IDs/generation |
+| `none` | stop mutation；export only succeeded/eligible state，otherwise report failed/rejected evidence |
+
+Whenever a task id is known after an unknown response or conflict，the first recovery action is `get_task` and the
+returned generation/status/next-action replaces local memory。An unknown-outcome `create_task` has no task id and
+cannot be recovered in S3-8；the skill must stop、report the bounded orphan risk and never retry。P0-B closes this
+with request-key/list/recover。The table and every example must be machine-checked against the actual enums and
+public schemas。
+
+The supported skill distribution matrix is also frozen：canonical source、sdist、MCPB and standalone
+`vibecad-agent-skill-0.5.0.zip` contain byte-identical relative skill files；wheel and installed Python contain none。
+The archive expands to one top-level `vibecad-agent/` directory that can be copied into the documented Codex or
+Claude Code user/project skill directory。Presence inside MCPB is archival only and never means activation。
+
+README、architecture、user guide and acceptance tests must use the same 20-tool/state/profile truth。Legacy
+31-tool scenarios must be removed rather than hidden below a current header。G1 wording is exact preview/verdict/
+Accept-Reject/object-feature selection；the present IPC is a seam，not a frozen runnable protocol。
+
+##### 5. Genuine RED/GREEN and objective gates
+
+Required genuine RED waves：
+
+1. reserved stable/direct collision and duplicate-name projection currently succeed when they must fail；
+2. tools have no descriptions、tools/list exceeds 64 KiB and export has no ResourceLinks；
+3. the host-neutral skill/package contract and 0.5.0/epoch-4 identity do not exist；
+4. current user/acceptance documents still assert legacy tool paths。
+
+GREEN and final gates：
+
+- focused registry/public/server/status/skill/manifest tests；exact tool uniqueness、description、manifest parity、
+  fixed-frame discovery bytes、internal output validation、closed MIME mapping and ResourceLink negatives；
+- skill examples parsed/validated against the actual public schemas and prohibited-name/capability claims scanned；
+- full non-slow pytest、full Ruff、changed-Python format、pycompile、offline lock and `git diff --check`；
+- clean wheel/sdist/MCPB/standalone-skill builds from fresh output roots；archive path/link/RECORD audit；the frozen
+  per-channel skill inclusion/exclusion matrix and deterministic skill tree/archive hashes exact；tests/docs/cache/
+  runtime excluded except the intentional skill；checkout/wheel/sdist/MCPB/installed Python bytes exact；
+- one normal installer sync to epoch 4/0.5.0 using the existing managed FreeCAD engine；pre/post engine、legacy
+  external and durable data snapshots exact；no engine rebuild or data deletion；
+- real managed-FreeCAD Agent matrix plus a fresh packed-MCPB session covering capabilities、empty and supported
+  Box/Cylinder-only import、unsupported/mixed FCStd rejection、direct auto-commit、multi-step ModelProgram、restart
+  review Accept/Reject、stale generation/base、ResourceLink/read、malformed/oversize/unknown legacy/no-secret and
+  uninstall-preserves-data；
+- at least two independent settled-diff reviews with all Critical/Important closed。Actual Claude/Codex external
+  model calls remain S3-RES-06 unless separately authorized；their absence must be stated，not simulated。
+- `.github/workflows/release.yml` must run frozen Ruff/non-slow/package gates plus the Darwin managed-runtime Agent
+  matrix before either PyPI publish or GitHub Release，publish only the already gated archives，attach the standalone
+  skill archive，and retain manual environment/tag authorization。No tag or release is performed in S3-8。
+
+##### 6. Commit and recovery boundary
+
+- AR-1 docs-only control subject：`docs(architecture): reconcile Agent-first baseline`。
+- S3-8 semantic subject remains：`feat(agent): package skill and complete stage 3 acceptance`。
+- Stage only exact named files；never broad stage。S3-8 completion appends exact RED/GREEN/full/real/package counts、
+  version/epoch/surface and archive hashes、engine/data preservation、review closure、semantic hash、push state and a
+  four-part recovery snapshot。
+- If the process resumes after the AR-1 control commit，verify clean branch/HEAD and start at genuine RED。If the
+  S3-8 semantic subject already exists，do not repeat runtime/package effects；read its final completion evidence。
+
+##### 7. Later-stage disposition
+
+- P0-B core：project/task/revision discovery、task request-key/list/recover/cancel/events、compare/revert/diff、
+  complete artifact manifest、authenticated daemon、secure checkout grant/broker、checkout source liveness/
+  revocation and minimum killable FreeCAD isolation。
+- G1 MVP：Workbench Dock、HEAD/draft preview、verdict、stale/revoked rejection、Accept/Reject and object/feature
+  selection；no dirty publish、face/edge or second writer。
+- P0-B hardening：retention/GC、runner generation migration、observability and recovery closure；it may overlap G1
+  UI but must finish before P1 delivery。
+- P1/G2：Selector Level B、semantic diff、Sketcher/PartDesign、controlled import/STL and interactive refinement。
+- P2：assembly、BOM、TechDraw and release package。Photo/video reconstruction and simulation remain later external
+  providers。
+
+### Recovery snapshot S3-S15
+
+1. **Completed:** AR-1 reviewed clean S3-7 completion anchor
+   `9992061ee9fdce1f7efdccf4f1f19909ca5f5924` and found no product-boundary change。The current seven-doc diff
+   reconciles the implemented 20-tool/single-Kernel architecture、Box/Cylinder-only FCStd import、protocol/package
+   host-ready claim、P0-B-core-before-G1 ordering and Packet S3-8A。Architecture、delivery and adversarial reviews
+   each report Critical/Important/Minor `0/0/0`；`git diff --check` passes。
+2. **Next:** create the local exact-seven-file commit with subject
+   `docs(architecture): reconcile Agent-first baseline`，verify a clean worktree，then read the skill-creator
+   instructions and start S3-8 genuine RED for namespace collision、descriptions/discovery frame、ResourceLinks、
+   skill/distribution、0.5.0/epoch-4 and legacy-document removal。Do not start P0-B/G1/P1。
+3. **Authority:** S3-A01/S3-D01..D08 and the user's standing continuous-execution direction authorize this local
+   docs control commit and Packet S3-8A implementation/review/gates。Push、PR、tag、release、marketplace、actual
+   external Claude/Codex model spend and user-data deletion remain unauthorized。
+4. **Recovery:** on resume，verify branch `codex/agent-stage3` and resolve the exact AR-1 subject。If it exists and
+   the tree is clean，continue at S3-8 RED without repeating AR-1 or the epoch-3/package effects。If it does not
+   exist，require exactly the seven named docs above、clean diff check and three settled `0/0/0` reviews before
+   creating it。The first S3-8 effect is test-only RED；runtime sync remains forbidden until GREEN/package gates。
 
 ## 9. 用户决策与持续执行规则
 
