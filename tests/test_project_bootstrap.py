@@ -3285,7 +3285,7 @@ def test_durable_post_cad_record_failure_never_executes_cad_twice(
 @pytest.mark.parametrize(
     ("executor_code", "service_code"),
     [
-        (ExecutorErrorCode.INVALID_INPUT, ProjectServicePortErrorCode.INTERNAL_ERROR),
+        (ExecutorErrorCode.INVALID_INPUT, ProjectServicePortErrorCode.INVALID_INPUT),
         (ExecutorErrorCode.INVALID_CANDIDATE, ProjectServicePortErrorCode.INTERNAL_ERROR),
         (ExecutorErrorCode.INVALID_LEASE, ProjectServicePortErrorCode.INTERNAL_ERROR),
         (ExecutorErrorCode.CAD_FAILURE, ProjectServicePortErrorCode.CAD_FAILURE),
@@ -3299,8 +3299,9 @@ def test_durable_initial_validation_maps_exact_executor_failures(
     service_code: ProjectServicePortErrorCode,
 ) -> None:
     port = _ValidationFailurePort(executor_code)
+    data_root = _data_root(tmp_path)
     app = AgentApplication.open(
-        data_root=_data_root(tmp_path),
+        data_root=data_root,
         cad_port_factory=lambda **_kwargs: port,
     )
     service = _durable_service(app)
@@ -3313,13 +3314,19 @@ def test_durable_initial_validation_maps_exact_executor_failures(
 
     _assert_port_failure(failed, service_code)
     assert len(port.paths) == 1
+    if executor_code is ExecutorErrorCode.INVALID_INPUT:
+        record = _durable_record(data_root)
+        assert record["phase"] == "REJECTED"
+        assert record["failure_code"] == "invalid_input"
+        assert record["stage"] is None
+        assert record["work"] is None
     app.close()
 
 
 @pytest.mark.parametrize(
     ("executor_code", "service_code"),
     [
-        (ExecutorErrorCode.INVALID_INPUT, ProjectServicePortErrorCode.INTERNAL_ERROR),
+        (ExecutorErrorCode.INVALID_INPUT, ProjectServicePortErrorCode.INVALID_INPUT),
         (ExecutorErrorCode.INVALID_CANDIDATE, ProjectServicePortErrorCode.INTERNAL_ERROR),
         (ExecutorErrorCode.INVALID_LEASE, ProjectServicePortErrorCode.INTERNAL_ERROR),
         (ExecutorErrorCode.CAD_FAILURE, ProjectServicePortErrorCode.CAD_FAILURE),
@@ -3366,6 +3373,12 @@ def test_durable_revalidation_maps_exact_executor_failures(
     _assert_port_failure(replayed, service_code)
     assert len(port.paths) == 1
     assert len(port.revalidation_paths) == 1
+    if executor_code is ExecutorErrorCode.INVALID_INPUT:
+        record = _durable_record(data_root)
+        assert record["phase"] == "REJECTED"
+        assert record["failure_code"] == "invalid_input"
+        assert record["stage"] is None
+        assert record["work"] is None
     app.close()
 
 

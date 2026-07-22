@@ -1341,3 +1341,169 @@ def test_revalidate_normalized_import_maps_cad_faults_and_closes_exactly_once(
     assert caught.value.code is ExecutorErrorCode.CAD_FAILURE
     assert session.close_calls == 1
     assert artifact.read_bytes() == raw
+
+
+@pytest.mark.parametrize(
+    ("object_types", "expected_code"),
+    [
+        ((), ExecutorErrorCode.INVALID_INPUT),
+        (("Part::Sphere",), ExecutorErrorCode.INVALID_INPUT),
+        (("Part::Box", "Part::Sphere"), ExecutorErrorCode.INVALID_INPUT),
+        (("Part::Box",), ExecutorErrorCode.CAD_FAILURE),
+        (("Part::Box", "Part::Cylinder"), ExecutorErrorCode.CAD_FAILURE),
+    ],
+)
+def test_revalidate_normalized_import_distinguishes_envelope_rejection_from_crash_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    object_types: tuple[str, ...],
+    expected_code: ExecutorErrorCode,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    artifact = Path("normalized.FCStd")
+    _fcstd(artifact)
+
+    class Object:
+        def __init__(self, object_type: str) -> None:
+            self.TypeId = object_type
+
+    class Document:
+        Objects = tuple(Object(object_type) for object_type in object_types)
+
+        def recompute(self) -> None:
+            return None
+
+    class Session:
+        doc = Document()
+        close_calls = 0
+
+        def load_document(self, path: Path) -> object:
+            assert path == artifact
+            return self.doc
+
+        def close_document(self) -> None:
+            self.close_calls += 1
+
+    session = Session()
+    monkeypatch.setattr(executor_module, "_Session", lambda: session)
+    monkeypatch.setattr(
+        executor_module,
+        "_validated_import_observations",
+        lambda _session: (_ for _ in ()).throw(ExecutorError(ExecutorErrorCode.INVALID_INPUT)),
+    )
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).revalidate_normalized_import(artifact)
+
+    assert caught.value.code is expected_code
+    assert session.close_calls == 1
+
+
+@pytest.mark.parametrize("fault", ("objects", "type_id"))
+def test_revalidate_normalized_import_maps_envelope_inspection_faults_to_cad_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    class FatalCadFault(BaseException):
+        pass
+
+    monkeypatch.chdir(tmp_path)
+    artifact = Path("normalized.FCStd")
+    _fcstd(artifact)
+    raw = artifact.read_bytes()
+
+    class Object:
+        @property
+        def TypeId(self) -> str:
+            if fault == "type_id":
+                raise FatalCadFault
+            return "Part::Box"
+
+    class Document:
+        @property
+        def Objects(self) -> tuple[Object, ...]:
+            if fault == "objects":
+                raise FatalCadFault
+            return (Object(),)
+
+        def recompute(self) -> None:
+            return None
+
+    class Session:
+        doc = Document()
+        close_calls = 0
+
+        def load_document(self, path: Path) -> object:
+            assert path == artifact
+            return self.doc
+
+        def close_document(self) -> None:
+            self.close_calls += 1
+
+    session = Session()
+    monkeypatch.setattr(executor_module, "_Session", lambda: session)
+    monkeypatch.setattr(
+        executor_module,
+        "_validated_import_observations",
+        lambda _session: (_ for _ in ()).throw(ExecutorError(ExecutorErrorCode.INVALID_INPUT)),
+    )
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).revalidate_normalized_import(artifact)
+
+    assert caught.value.code is ExecutorErrorCode.CAD_FAILURE
+    assert session.close_calls == 1
+    assert artifact.read_bytes() == raw
+
+
+@pytest.mark.parametrize(
+    "object_types",
+    ((), ("Part::Sphere",), ("Part::Box", "Part::Sphere")),
+)
+def test_revalidate_normalized_import_close_fault_overrides_invalid_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    object_types: tuple[str, ...],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    artifact = Path("normalized.FCStd")
+    _fcstd(artifact)
+    raw = artifact.read_bytes()
+
+    class Object:
+        def __init__(self, object_type: str) -> None:
+            self.TypeId = object_type
+
+    class Document:
+        Objects = tuple(Object(object_type) for object_type in object_types)
+
+        def recompute(self) -> None:
+            return None
+
+    class Session:
+        doc = Document()
+        close_calls = 0
+
+        def load_document(self, path: Path) -> object:
+            assert path == artifact
+            return self.doc
+
+        def close_document(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("private close fault")
+
+    session = Session()
+    monkeypatch.setattr(executor_module, "_Session", lambda: session)
+    monkeypatch.setattr(
+        executor_module,
+        "_validated_import_observations",
+        lambda _session: (_ for _ in ()).throw(ExecutorError(ExecutorErrorCode.INVALID_INPUT)),
+    )
+
+    with pytest.raises(ExecutorError) as caught:
+        InProcessCadExecutor(store=_store()).revalidate_normalized_import(artifact)
+
+    assert caught.value.code is ExecutorErrorCode.CAD_FAILURE
+    assert session.close_calls == 1
+    assert artifact.read_bytes() == raw

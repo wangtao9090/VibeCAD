@@ -3876,6 +3876,84 @@ GREEN and final gates：
    exist，require exactly the seven named docs above、clean diff check and three settled `0/0/0` reviews before
    creating it。The first S3-8 effect is test-only RED；runtime sync remains forbidden until GREEN/package gates。
 
+### S3-R3.27 — S3-8 corrective scope and settled acceptance
+
+#### S3-D09 — review/E2E closure scope correction
+
+S3-8 的 genuine real-E2E 与独立审查发现，Packet S3-8A 的初始 mechanical allowlist 漏列了若干只能在
+原所有权层关闭的问题。根据 S3-A01、S3-R3.26 对 ordinary correctness/recovery correction 的授权，以及
+用户“没有产品级决策时不要停”的持续指令，下列 named-file 扩展在语义提交前明确纳入 S3-8：
+
+| Added file | Narrow reason |
+|---|---|
+| `PRIVACY.md` | 把包级隐私真源同步到 0.5.0、FCStd/STEP opaque Resource URI 与非 BYOK 事实 |
+| `src/vibecad/application/project_create.py` | 将真实 unsupported import 的 exact `INVALID_INPUT` 持久化为可清理的 `REJECTED`，而不是 `internal_error` |
+| `src/vibecad/execution/executor.py` | 在 crash-window read-only revalidation 中区分 unsupported envelope 与 CAD/identity/close fault |
+| `tests/test_cad_execution_port.py` | 固定 empty/unsupported/mixed、identity interruption、Objects/TypeId fault 与 close-fault precedence |
+| `tests/test_project_bootstrap.py` | 固定 initial/replay `INVALID_INPUT` 的 durable rejection、cleanup 与错误映射 |
+| `tests/test_release_workflow.py` | 移除 publisher rebuild 旧假设并门禁 gated-artifact-only 发布拓扑 |
+| `tests/test_server_round10.py` | 移除 discovery 必须广播 optional output schema 的旧断言 |
+| `tests/test_task_store.py` | 使既有并发门禁承认 inode-swap/lock-entry 发布窗口的 fail-closed 瞬态，同时保留完整 generation 与单一发布断言 |
+
+该扩展不新增公共 operation、错误码、第二写入权威、任意代码路径、Workbench、Sampling/BYOK 或外部
+host execution；它只关闭已批准 20-tool/Task Kernel/FCStd import/release gate 的真实红项。`tests/test_task_store.py`
+不改变生产 store：成功读取仍只能是完整 generation 0/1，双进程 create 仍恰好一个成功且最终记录为
+generation 0。Push、PR、tag、release、marketplace 与外部模型/API spend 仍不在授权内。
+
+#### S3-8 settled evidence before semantic commit
+
+- Genuine RED：registry collision/description wave `24 failed, 1 passed`；server discovery/ResourceLink wave
+  `5 failed, 2 passed`；skill contract `9 failed`；status identity `2 failed`。真实 packed/managed E2E 又暴露
+  unsupported import 被映射 `internal_error`；独立语义/交付审查随后暴露 stale docs、Objects/TypeId fault
+  misclassification 与 close-fault precedence。所有红项均有针对性 GREEN。
+- Final identity：VibeCAD `0.5.0`、MCP `1.27.2`、FreeCAD `1.1.0`、private server epoch `4`；public-surface
+  digest `84b6abe8c1b496153ed2be083e1ea3186f642c47d9dfa9c2f90f66e92e6139f9`。
+- Discovery：exact 20 unique described tools；fixed frame `16,640` bytes，SHA256
+  `a1591b7d187d5bff272a68a30b16f8ddd07bc4ea560226ec92d396ab9ccccca6`；optional output schema omitted only
+  from discovery while internal validators remain authoritative。
+- Skill：official quick validation PASS；contract `9/9`；`SKILL.md` 5,625 bytes / SHA256
+  `67edc8cea848320ee4b3ed013d783f5e2909f0e5d05867cfbf9fbee16fb9940b`；`agents/openai.yaml` 206 bytes /
+  SHA256 `9ba10225b8357635d83d04943c1ae1fdfd734965e281c128b4f2333046162050`。
+- Final local gates：full non-slow `3,877 passed, 95 deselected` with one existing macOS fork deprecation
+  warning；executor/project focused `210 passed`；TaskStore `215 passed` plus target repetitions；full Ruff、
+  changed-Python format、compileall、offline lock、version guard and diff check PASS。
+- Real gates：current managed Agent-first matrix plus Task Kernel candidate `2 passed in 15.27s`；latest fresh
+  unpacked MCPB stdio Agent-first acceptance `1 passed in 7.73s`；release contract `27 passed in 1.77s`。
+- Final fresh artifacts：MCPB 552,258 bytes /
+  `a6eae39e4bb2775357e6c2ca386bd5638c1532f4370aad049a54be3a7311d18a`；wheel 448,855 bytes /
+  `71ba0cb9f0c340b42640a3a4105ceee67fafc290e2697d15b08a2af55d8e6243`；sdist 504,255 bytes /
+  `76dc0b39dd53e0da523bf9f9fb3baa37fd1f295af6ebd757cb8d147c7f3cf51d`；standalone skill 2,784 bytes /
+  `4bc381102e7a7a479123aab3609cccaa787453919162a5902d2c181b4ed0ba51`。
+- Package audit：73 Python files checkout/fresh-source/wheel/sdist/MCPB/install byte-exact；wheel RECORD 78/78；
+  two skill files source/sdist/MCPB/standalone byte-exact；wheel/install exclude skill；MCPB excludes tests/docs/
+  `.git`/`.venv`；all archive path/link/duplicate/CRC gates PASS。
+- Managed runtime：final wheel installed at the existing managed prefix；installed executor SHA256
+  `556d2284db5c16949f5d8abb552f82e1de3e2121baa81b6a7d888e406abdafec` equals checkout。FreeCAD core files、
+  env/legacy identities and the complete durable data snapshot are byte-exact before/after；runtime remains current，
+  and a real FreeCAD 2×3×4 Box recomputes to volume 24。
+- Honest residuals：actual Claude/Codex host activation/model calls remain S3-RES-06；offline cache lacks
+  Twine 6.1.0，so `twine check` was not replayed，while METADATA/PKG-INFO/RECORD/archive structure passed independent
+  audit。No push、PR、tag、release or marketplace action occurred。
+
+| Ledger ID / time | Authority / review | Commit / push | Verification | Residuals | Snapshot | State |
+|---|---|---|---|---|---|---|
+| S3-E19 / 2026-07-22T09:49:14Z | S3-A01；S3-D09 corrective scope；semantic and delivery final reviews both `0/0/0` | semantic commit containing S3-S16-precommit / push not authorized | RED waves closed；3877/95 full；managed 2；packed MCPB 1；fresh package audit and installed-runtime byte parity PASS | S3-RES-01..06, S3-RES-09, S3-RES-11..16；Twine offline residual；real host remains unverified | S3-S16-precommit | semantic-ready |
+
+### Recovery snapshot S3-S16-precommit
+
+1. **Completed:** S3-8 production、skill、docs、release workflow、real FreeCAD、fresh packed MCPB、package parity
+   and final managed-server sync are settled at the identities and counts above。Semantic and delivery reviews are
+   both `0/0/0` on S3-D09 and the settled diff。
+2. **Next:** stage only the named S3-8/S3-D09 files，create local
+   `feat(agent): package skill and complete stage 3 acceptance`，then append its exact hash in a docs-only completion
+   record。Do not push or start P0-B inside the S3-8 commit。
+3. **Authority:** S3-A01/S3-D01..D09 and the standing continuous-execution direction authorize these local
+   corrections、gates、reviews and commits。External delivery/model spend remains unauthorized。
+4. **Recovery:** verify branch `codex/agent-stage3`、HEAD `cc885c52ac14fcb62051f0cce5eb42d4d1567423` or the
+   subsequent exact S3-8 semantic subject，compare README/executor/package input hashes and read S3-E19 before any
+   repeated package/runtime effect。If the semantic subject exists，do not reinstall or rebuild merely to recover；
+   append the exact completion hash only after a clean named-file audit。
+
 ## 9. 用户决策与持续执行规则
 
 本修订依据已经明确的用户方向：

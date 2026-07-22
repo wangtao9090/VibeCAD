@@ -56,8 +56,8 @@ def test_live_sdk_projection_matches_independent_frozen_digest_and_has_no_extras
     projection = [
         {
             "name": tool.name,
+            "description": tool.description,
             "inputSchema": tool.inputSchema,
-            "outputSchema": tool.outputSchema,
             "annotations": {
                 "readOnlyHint": tool.annotations.readOnlyHint,
                 "destructiveHint": tool.annotations.destructiveHint,
@@ -76,11 +76,12 @@ def test_live_sdk_projection_matches_independent_frozen_digest_and_has_no_extras
     ).encode("utf-8")
 
     assert hashlib.sha256(raw).hexdigest() == (
-        "081b4175baa8081550cf617f694dfd46f0a711f726bba2db00b66e94252a7a75"
+        "f22eeaab870a4310c1389fdefed2f9b484add19c5edab2d735f5799fa9243f3e"
     )
     for tool in tools:
         assert tool.title is None
-        assert tool.description is None
+        assert isinstance(tool.description, str) and tool.description.strip()
+        assert tool.outputSchema is None
         assert tool.icons is None
         assert tool.meta is None
         assert tool.execution is None

@@ -14,42 +14,277 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: tag/version consistency guard
-        # 不安装项目：纯 stdlib 静态读取四处版本，任一错位都在发布产物产生前拦截。
+        # Do not install the project: this stdlib-only guard rejects identity drift first.
         run: python3 .github/scripts/check_release_versions.py "$GITHUB_REF_NAME"
 
-  pypi:
+  quality:
     needs: version-guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - name: frozen Ruff gate
+        run: uv run --frozen ruff check .
+      - name: full non-slow test gate
+        run: uv run --frozen pytest -q -m "not slow"
+
+  managed-agent:
+    needs: version-guard
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: public-agent-matrix
+            test-target: tests/test_task_kernel_integration.py::test_real_agent_first_public_matrix_and_cross_process_review
+            expose-runtime-override: false
+          - scenario: task-kernel-candidate
+            test-target: tests/test_task_kernel_integration.py::test_real_task_kernel_commits_verified_candidate
+            expose-runtime-override: false
+    env:
+      VIBECAD_HOME: ${{ runner.temp }}/vibecad-release-runtime
+      VIBECAD_PIP_SPEC: ${{ github.workspace }}
+      VIBECAD_RUN_INTEGRATION: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - name: install and verify the current managed FreeCAD runtime
+        run: >-
+          uv run --frozen python -c
+          "from vibecad.runtime.installer import RuntimeInstaller;
+          RuntimeInstaller().install()"
+      - name: bind the test to the installed managed runtime
+        run: |
+          managed_python="$(uv run --frozen python -c \
+            'from vibecad.runtime.paths import env_python_for, env_prefix; print(env_python_for(env_prefix()).resolve())')"
+          echo "VIBECAD_MANAGED_FREECAD_PYTHON=$managed_python" >> "$GITHUB_ENV"
+          if [[ "${{ matrix.expose-runtime-override }}" == "true" ]]; then
+            echo "VIBECAD_FREECAD_ENV=$(dirname "$(dirname "$managed_python")")" >> "$GITHUB_ENV"
+          fi
+      - name: Darwin slow Agent gate (${{ matrix.scenario }})
+        run: uv run --frozen pytest -m slow -v -s "${{ matrix.test-target }}"
+
+  package-gate:
+    needs: [version-guard, quality, managed-agent]
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_DIST: ${{ runner.temp }}/release-dist
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - name: build wheel and sdist from the guarded tag
+        run: |
+          test ! -e "$RELEASE_DIST"
+          mkdir -p "$RELEASE_DIST"
+          uv sync --frozen
+          uv build --no-build-isolation --out-dir "$RELEASE_DIST"
+          rm -f "$RELEASE_DIST/.gitignore"
+          uvx --from twine==6.1.0 twine check "$RELEASE_DIST"/*.whl "$RELEASE_DIST"/*.tar.gz
+      - name: validate and pack MCPB
+        run: |
+          npx -y @anthropic-ai/mcpb@2.1.2 validate manifest.json
+          npx -y @anthropic-ai/mcpb@2.1.2 pack . "$RELEASE_DIST/VibeCAD.mcpb"
+      - name: build deterministic standalone Agent skill archive
+        run: |
+          python3 - <<'PY'
+          import os
+          import stat
+          import zipfile
+          from pathlib import Path
+
+          source = Path("skills/vibecad-agent")
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          output = Path(os.environ["RELEASE_DIST"]) / f"vibecad-agent-skill-{version}.zip"
+          files = sorted(path for path in source.rglob("*") if path.is_file())
+          if not files or any(path.is_symlink() for path in source.rglob("*")):
+              raise SystemExit("skill source must be a non-empty real-file tree")
+          with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+              for path in files:
+                  relative = path.relative_to(source).as_posix()
+                  info = zipfile.ZipInfo(f"vibecad-agent/{relative}", (1980, 1, 1, 0, 0, 0))
+                  info.create_system = 3
+                  info.external_attr = (stat.S_IFREG | 0o644) << 16
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  archive.writestr(info, path.read_bytes(), compresslevel=9)
+          PY
+      - name: audit package paths, wheel RECORD, and skill byte parity
+        run: |
+          python3 - <<'PY'
+          import base64
+          import csv
+          import hashlib
+          import io
+          import os
+          import stat
+          import tarfile
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          dist = Path(os.environ["RELEASE_DIST"])
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          wheel, = dist.glob("*.whl")
+          sdist, = dist.glob("*.tar.gz")
+          mcpb = dist / "VibeCAD.mcpb"
+          standalone = dist / f"vibecad-agent-skill-{version}.zip"
+          expected_outputs = {wheel, sdist, mcpb, standalone}
+          if set(dist.iterdir()) != expected_outputs:
+              raise SystemExit("release output contains an unexpected artifact")
+          if f"-{version}-" not in wheel.name or sdist.name != f"vibecad-{version}.tar.gz":
+              raise SystemExit("built Python artifact version does not match the guarded tag")
+
+          skill_root = Path("skills/vibecad-agent")
+          source_skill = {
+              path.relative_to(skill_root).as_posix(): path.read_bytes()
+              for path in sorted(skill_root.rglob("*"))
+              if path.is_file() and not path.is_symlink()
+          }
+          if not source_skill:
+              raise SystemExit("canonical skill tree is empty")
+
+          def safe_name(name: str) -> PurePosixPath:
+              path = PurePosixPath(name)
+              raw_parts = name.rstrip("/").split("/")
+              if (
+                  not name
+                  or "\\" in name
+                  or path.is_absolute()
+                  or any(part in {"", ".", ".."} for part in raw_parts)
+                  or ":" in raw_parts[0]
+              ):
+                  raise SystemExit(f"unsafe archive path: {name!r}")
+              return path
+
+          def zip_files(path: Path) -> dict[str, bytes]:
+              files = {}
+              with zipfile.ZipFile(path) as archive:
+                  for info in archive.infolist():
+                      safe_name(info.filename)
+                      mode = info.external_attr >> 16
+                      if stat.S_IFMT(mode) == stat.S_IFLNK:
+                          raise SystemExit(f"archive link is forbidden: {info.filename}")
+                      if not info.is_dir():
+                          if info.filename in files:
+                              raise SystemExit(f"duplicate archive path: {info.filename}")
+                          files[info.filename] = archive.read(info)
+              return files
+
+          wheel_files = zip_files(wheel)
+          if any("vibecad-agent" in safe_name(name).parts for name in wheel_files):
+              raise SystemExit("Python wheel must not contain the host skill")
+          records = [name for name in wheel_files if name.endswith(".dist-info/RECORD")]
+          if len(records) != 1:
+              raise SystemExit("wheel must contain exactly one RECORD")
+          rows = list(csv.reader(io.StringIO(wheel_files[records[0]].decode("utf-8"))))
+          if {row[0] for row in rows} != set(wheel_files):
+              raise SystemExit("wheel RECORD path set is incomplete")
+          for name, encoded_hash, size in rows:
+              if name == records[0]:
+                  if encoded_hash or size:
+                      raise SystemExit("wheel RECORD self-entry must be unhashed")
+                  continue
+              digest = base64.urlsafe_b64encode(hashlib.sha256(wheel_files[name]).digest()).rstrip(b"=").decode()
+              if encoded_hash != f"sha256={digest}" or size != str(len(wheel_files[name])):
+                  raise SystemExit(f"wheel RECORD mismatch: {name}")
+
+          with tarfile.open(sdist, "r:gz") as archive:
+              members = archive.getmembers()
+              member_names = [member.name for member in members]
+              if len(member_names) != len(set(member_names)):
+                  raise SystemExit("sdist contains duplicate paths")
+              for member in members:
+                  safe_name(member.name)
+                  if not (member.isfile() or member.isdir()):
+                      raise SystemExit(f"sdist link/device is forbidden: {member.name}")
+              roots = {safe_name(member.name).parts[0] for member in members}
+              if len(roots) != 1:
+                  raise SystemExit("sdist must have exactly one top-level directory")
+              root, = roots
+              sdist_skill = {}
+              prefix = f"{root}/skills/vibecad-agent/"
+              for member in members:
+                  if member.isfile() and member.name.startswith(prefix):
+                      stream = archive.extractfile(member)
+                      if stream is None:
+                          raise SystemExit(f"cannot read sdist member: {member.name}")
+                      sdist_skill[member.name.removeprefix(prefix)] = stream.read()
+
+          mcpb_files = zip_files(mcpb)
+          mcpb_skill = {
+              name.removeprefix("skills/vibecad-agent/"): content
+              for name, content in mcpb_files.items()
+              if name.startswith("skills/vibecad-agent/")
+          }
+          standalone_files = zip_files(standalone)
+          if any(not name.startswith("vibecad-agent/") for name in standalone_files):
+              raise SystemExit("standalone archive must expand below vibecad-agent/")
+          standalone_skill = {
+              name.removeprefix("vibecad-agent/"): content
+              for name, content in standalone_files.items()
+          }
+          if not (source_skill == sdist_skill == mcpb_skill == standalone_skill):
+              raise SystemExit("skill files are not byte-identical across release channels")
+          PY
+      - name: upload gated Python distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: |
+            ${{ runner.temp }}/release-dist/*.whl
+            ${{ runner.temp }}/release-dist/*.tar.gz
+          if-no-files-found: error
+      - name: upload gated GitHub Release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-release-assets
+          path: |
+            ${{ runner.temp }}/release-dist/VibeCAD.mcpb
+            ${{ runner.temp }}/release-dist/vibecad-agent-skill-*.zip
+          if-no-files-found: error
+
+  pypi:
+    needs: package-gate
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-      - run: uv build
+      - name: download gated Python distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
   mcpb:
-    needs: version-guard
+    needs: package-gate
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # 创建 GitHub Release
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: download gated GitHub Release assets
+        uses: actions/download-artifact@v4
         with:
-          persist-credentials: false
-      - run: npx -y @anthropic-ai/mcpb@2.1.2 validate manifest.json
-      - run: npx -y @anthropic-ai/mcpb@2.1.2 pack . VibeCAD.mcpb
-      - name: create GitHub Release with .mcpb asset
+          name: github-release-assets
+          path: release-assets
+      - name: create GitHub Release with MCPB and standalone skill assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # gh 不从 tag 名推断预发布——rc/alpha/beta 显式 --prerelease，
-          # 否则会顶掉 releases/latest（手册主链路就指它）。
-          EXTRA=""
+          # gh does not infer prereleases from the tag; keep rc/alpha/beta explicit.
+          extra=()
           case "$GITHUB_REF_NAME" in
-            *rc*|*a[0-9]*|*b[0-9]*) EXTRA="--prerelease" ;;
+            *rc*|*a[0-9]*|*b[0-9]*) extra+=(--prerelease) ;;
           esac
-          gh release create "${GITHUB_REF_NAME}" VibeCAD.mcpb \
-            --title "VibeCAD ${GITHUB_REF_NAME}" \
-            --generate-notes $EXTRA
+          gh release create "$GITHUB_REF_NAME" \
+            release-assets/VibeCAD.mcpb \
+            "release-assets/vibecad-agent-skill-${GITHUB_REF_NAME#v}.zip" \
+            --title "VibeCAD $GITHUB_REF_NAME" \
+            --generate-notes "${extra[@]}"

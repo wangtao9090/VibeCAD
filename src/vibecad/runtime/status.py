@@ -64,6 +64,7 @@ _SERVER_SNIPPET = (
     "_surface_projection = [\n"
     "    {\n"
     "        'name': _item.name,\n"
+    "        'description': _item.description,\n"
     "        'inputSchema': _surface_thaw(_item.input_schema),\n"
     "        'outputSchema': _surface_thaw(_item.output_schema),\n"
     "        'annotations': {\n"

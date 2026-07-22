@@ -1779,21 +1779,42 @@ class InProcessCadExecutor(CadExecutionPort):
         except BaseException:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
 
-        cad_failed = False
+        cad_failure: ExecutorError | None = None
         try:
             try:
                 session.load_document(path)
                 session.doc.recompute()
                 _validated_import_observations(session)
+            except ExecutorError as error:
+                # A read-only recovery probe may expose two distinct states through
+                # INVALID_INPUT: an unsupported source envelope, or an interrupted
+                # identity-normalization pass over otherwise supported primitives.
+                # Only the former is a terminal caller error.  The latter remains a
+                # CAD/recovery failure so a crash cannot be mislabeled as bad input.
+                code = ExecutorErrorCode.CAD_FAILURE
+                if type(error) is ExecutorError and error.code is ExecutorErrorCode.INVALID_INPUT:
+                    unsupported_envelope = False
+                    try:
+                        objects = tuple(session.doc.Objects)
+                        unsupported_envelope = not objects or any(
+                            not _supported_import_object_type(obj) for obj in objects
+                        )
+                    except BaseException:
+                        # Failure to inspect the envelope is an internal CAD fault,
+                        # not evidence that the caller supplied unsupported input.
+                        unsupported_envelope = False
+                    if unsupported_envelope:
+                        code = ExecutorErrorCode.INVALID_INPUT
+                cad_failure = _fixed_error(code)
             except BaseException:
-                cad_failed = True
+                cad_failure = _fixed_error(ExecutorErrorCode.CAD_FAILURE)
         finally:
             try:
                 session.close_document()
             except BaseException:
-                cad_failed = True
-        if cad_failed:
-            raise _fixed_error(ExecutorErrorCode.CAD_FAILURE)
+                cad_failure = _fixed_error(ExecutorErrorCode.CAD_FAILURE)
+        if cad_failure is not None:
+            raise cad_failure
 
         try:
             after_identity = _stat_identity(os.lstat(path))

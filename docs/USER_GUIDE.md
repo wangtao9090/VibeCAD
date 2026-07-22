@@ -1,421 +1,239 @@
-# VibeCAD 用户手册
+# VibeCAD 0.5.0 Beta 用户手册
 
-> **Legacy 文档，当前不可作为产品说明。** 本文仍描述 S3-7 前的 31-tool Session 工作流，包含当前
-> Agent-first 公共面已经不再提供的打孔、圆角、装配、自动回图和任意路径导出示例。S3-8 将以
-> 20-tool 项目/任务/review/artifact 工作流完整重写；在此之前请以 [`README.md`](../README.md)、
-> [`ARCHITECTURE.md`](ARCHITECTURE.md) 和运行时 `get_capabilities` 为准。
+VibeCAD 是由 Claude、Codex 等宿主 Agent 调用的 FreeCAD 专家 Agent。你描述设计目标，宿主负责理解
+与规划，VibeCAD 负责把受支持的 CAD 操作放进可恢复、可审核、可验证的项目流程，并交付 FCStd 与
+STEP 资源。
 
-> 用聊天的方式画 3D 零件——不用学 CAD 软件，说中文就行。
+当前版本适合验证 Agent-first 主链和完成长方体、圆柱体的创建、检查、参数修改、移动与旋转。它
+还不是完整的机械 CAD 工作台，不能把任意照片、网格或复杂模型自动还原成参数化草图。
 
-本手册面向**完全不懂 CAD、也不熟悉命令行**的朋友。每一步都给出可以直接复制粘贴的命令、可以照着念的话术。读完第一、二、三章（约 10 分钟）你就能开始画图了。
+## 1. 使用前先理解三个角色
 
-**目录**
+- **你**决定设计目标、尺寸、哪些事实必须保持，以及是否接受草案。
+- **宿主 Agent**使用你的模型订阅或 API 配额，调用 VibeCAD 的公开工具并管理任务上下文。
+- **VibeCAD**拥有 CAD 执行权：它在隔离副本中调用 FreeCAD，验证候选结果，记录 revision/draft，
+  再发布或拒绝。
 
-1. [这是什么](#一这是什么)
-2. [安装前提](#二安装前提)
-3. [安装 VibeCAD（双击即装）](#三安装-vibecad双击即装)
-4. [第一次使用](#四第一次使用)
-5. [场景手册](#五场景手册)
-6. [卸载](#六卸载)
-7. [故障排查](#七故障排查)
-8. [附录 A：其他 MCP 客户端接入（Claude Code / Cursor 等）](#附录-a其他-mcp-客户端接入claude-code--cursor-等)
+VibeCAD 不出售模型 token，也不会从 MCPB 中获得 Claude/Codex 的订阅额度。模型消耗由宿主账户
+负责。
 
----
+## 2. 当前能做什么
 
-## 一、这是什么
+公开面固定为 20 个工具：
 
-VibeCAD 是一个"会画三维图的 AI 助手插件"。装好之后，你在 Claude 的聊天窗口里用一句大白话描述想要的东西——比如"画一个 60×40×10 的底板，正中间打一个 8 毫米的孔"——AI 就会替你把三维模型建出来，而且**每做一步都回给你一张工程图**，让你亲眼确认做对了没有，不满意接着用嘴改。
+| 类别 | 工具 |
+|---|---|
+| 运行时 | `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime` |
+| 能力发现 | `get_capabilities` |
+| 项目 | `create_project`, `get_project` |
+| 任务 | `create_task`, `get_task`, `submit_model_program`, `resume_task` |
+| 审核 | `accept_draft`, `reject_draft` |
+| 交付 | `export_task_artifacts` |
+| 单步 CAD | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
 
-它背后用的是免费开源的专业 CAD 软件 FreeCAD，但你完全不需要安装它、不需要打开它、更不需要学会它——所有专业操作都由 AI 代劳。它特别适合一年只设计几次东西的普通人：打印一个收纳盒、给设备配一块安装板、修一个坏掉的塑料件。
+工具名称不是能力说明书。宿主每次开始工作都应调用 `get_capabilities`，以返回的 operation、输入
+schema、execution profile、预算和版本范围为准。
 
-**它能做什么：**
+当前项目来源只有两种：
 
-- **画基础零件**：长方体、圆柱体，尺寸随口说（单位毫米）
-- **打孔**：在你指定的面上打孔，还能一次打一排或一圈（孔阵列）
-- **改尺寸**：说"长度改成 80"，模型和图上的标注当场更新
-- **挖槽、圆角、倒角**：常见的细节加工都有
-- **合并或取交集**：对两个同零件实体做布尔并集/交集，断开多实体会被拒绝
-- **多零件装配**：新建第二个零件，"把盖板贴到底板上"，零件相撞时会自动拦下来
-- **撤销、重做和安全删除**：改错了可以逐步撤回；删除有依赖的对象时会先阻止误删
-- **保存和重新打开项目**：存为 FreeCAD `.FCStd` 参数化项目，之后恢复零件、位姿和当前结果
-- **精确测量**：查体积/面积/包围盒、最短距离、平面夹角，或选两个平行面量厚度
-- **导出制造文件**：STL（给 3D 打印切片软件）、STEP（给 CNC 加工厂）、glTF（三维预览）
+- `empty`：创建带 revision zero 的空项目；
+- `import_fcstd`：导入一个非空 FCStd，且文件中每个对象都必须是 `Part::Box` 或
+  `Part::Cylinder`。
 
-下面是一个双零件装配的实际出图效果——每次你说完一句话，就会收到一张这样的图：
+空 FCStd、混合对象或任何其他对象类型会被拒绝。当前不支持通用 FCStd、STEP 或 STL import。
 
-<!-- screenshot: 控制者请将 R8 装配黑盒验证图存入 docs/images/assembly-example.png -->
-![装配工程图示例：三个黑白线框视图带尺寸标注 + 一个彩色立体图，两个零件分别着色](images/assembly-example.png)
+## 3. 安装 MCP 服务
 
----
+当前 MCPB 产品声明仅覆盖 macOS（Darwin）。拿到 `VibeCAD.mcpb` 后，在支持 MCPB 的宿主中安装并
+启用它，然后重启或重新加载宿主连接。不同宿主的安装入口可能不同，以宿主当前界面为准。
 
-## 二、安装前提
+第一次启动时，扩展会准备隔离 Python 环境，并按需下载约 2–3 GB 的 FreeCAD 运行时。可以让宿主
+调用 `get_runtime_status` 查看阶段；需要显式启动或重试时调用 `ensure_runtime`。运行时 ready 后，
+`ping` 应返回当前 VibeCAD 版本。
 
-你**不需要**预先装任何命令行工具（不用装 uv、不用装 Python）。只要满足两个条件：
+macOS 默认数据根通常位于：
 
-- **Claude Desktop（含 Cowork 模式）最新版**——VibeCAD 以"桌面扩展（Extension）"的形式一键安装，旧版本可能没有扩展安装界面，请先把 Claude Desktop 更新到最新版。
-- **至少 5GB 空闲磁盘空间**——安装扩展后第一次使用时，会自动下载约 2-3GB 的建模引擎。
-
-安装扩展时，Claude Desktop 会自动准备好运行 VibeCAD 所需的 Python 环境（在扩展专属的隔离环境里），你完全不用操心这些底层细节。
-
-### 关于首次下载的预期
-
-**双击装好扩展、开始第一次对话，建模引擎就已经在后台自动下载了**——你不用说任何指令去触发它。引擎约 **2-3GB**，视网速需要几分钟到十几分钟。**这只发生一次**——之后每次使用都是秒开。下载过程中你可以随时问 AI"装到哪了"，也可以正常聊别的、过一会儿再回来看。装好后引擎会自动接管，不需要重启对话、不需要手动做任何操作。
-
----
-
-## 三、安装 VibeCAD（双击即装）
-
-VibeCAD 打包成一个**桌面扩展安装包** `VibeCAD.mcpb`，下载下来双击就能装进 Claude Desktop，不用碰终端、不用编辑任何配置文件。
-
-### 第 1 步：下载安装包
-
-去发布页下载最新的 `VibeCAD.mcpb`：
-
-> **下载地址**：<https://github.com/wangtao9090/VibeCAD/releases/latest>
-
-在页面下方的 **Assets（资源）** 列表里找到 `VibeCAD.mcpb`，点它下载到本地（一般会落到"下载"文件夹）。
-
-<!-- screenshot: Release 页 Assets 列表中 VibeCAD.mcpb 下载入口 -->
-
-### 第 2 步：双击安装
-
-**双击下载好的 `VibeCAD.mcpb` 文件**——Claude Desktop 会自动弹出一个安装窗口，显示 VibeCAD 的名称、图标和说明，点窗口里的**安装（Install）**按钮即可。
-
-<!-- screenshot: 双击 .mcpb 后 Claude Desktop 弹出的扩展安装确认窗口 -->
-
-> **如果双击没反应**（系统没把 `.mcpb` 关联到 Claude Desktop），改用手动安装：
-> 打开 Claude Desktop → **设置（Settings）→ 扩展（Extensions）→ Advanced settings（高级设置）→ Install Extension…（安装扩展）**，在文件选择框里选中刚下载的 `VibeCAD.mcpb`，确认安装。
-
-安装时 Claude Desktop 会在后台自动准备运行 VibeCAD 所需的 Python 环境（在扩展专属的隔离环境里完成），稍等片刻即可，全程无需你操作。**这一步只是装 VibeCAD 本身**——真正的建模引擎（约 2-3GB）会在你第一次开口说话时自动开始下载，见下一步。
-
-### 第 3 步：验证
-
-安装完成后，**完全退出并重启 Claude Desktop**（或新开一个对话）。然后问 AI：
-
-> "你能看到 VibeCAD 的 CAD 工具吗？"
-
-AI 回答能看到一组 CAD 工具（ping、ensure_runtime、add_box……），就装好了。你也可以在**设置（Settings）→ 扩展（Extensions）**里看到 VibeCAD 已列出且处于启用状态。
-
-<!-- screenshot: 设置→扩展列表中 VibeCAD 已启用的状态 -->
-
----
-
-## 四、第一次使用
-
-装好扩展后，**引擎已经在后台自动下载**（见上一章），你不需要额外说话去"启动安装"。照下面走：
-
-**如果你不确定装好了没：** 直接问 AI：
-
-> "装到哪一步了？"
-
-还没好的话，AI 会告诉你当前进度（百分比 + 阶段说明，比如"正在创建环境，45%"）；已经好了会直接告诉你可以开始画图了。
-
-**装好后直接开始建模，不用重启对话、不用做任何"重新连接"的操作。** 说：
-
-> "画一个 60×40×10 的底板"
-
-如果引擎还没装完，AI 会告诉你还差多少、大约还要等多久；如果刚装完，AI 会在**同一次对话**里自动切换到建模引擎并把这个零件画出来——这一步全自动，你感觉不到任何切换，不需要退出重进。
-
-**你会看到**：一张四格拼图——三格是黑白工程图（正视、右视、俯视，线框轮廓上标着 60、40、10 的尺寸），一格是彩色立体图。从现在起，**你每说一句建模指令，都会自动收到一张这样的图**，看图说话即可。
-
-> **想在 Cowork 里再看一眼图？** 每次出图都会同时存一份文件到你电脑上，AI 的回复里会带着这个文件路径（`view_file`）。你可以直接让 AI"把刚才那张图打开给我看"，或者自己去这个路径找。
->
-> 之后每次使用：引擎只装一次，以后打开 Cowork 直接说"画一个……"就行，不用再想安装的事。
-
-> **模型要跨对话保留，记得保存项目。** 自动落盘的 `view_file` 只是 PNG 图片，不是可继续编辑的 CAD 项目。请说"把项目保存到……"生成 `.FCStd`。未保存修改存在时，新建或打开另一个项目默认会被拒绝，防止意外丢稿。
-
----
-
-## 五、场景手册
-
-以下场景都接在"已经画了一个底板"之后。每个场景给出：你说的话（可照念）、会看到什么、小贴士。
-
-开始前先记住五件事：
-
-- **单位都是毫米**。说"60×40×10"就是长 60 毫米、宽 40 毫米、高 10 毫米，不用带单位。
-- **每说一句就看一眼图**。回图的四个格子里，三格黑白线框是工程图（虚线表示被挡住的轮廓，`⌀8` 表示直径 8 毫米的圆孔），一格彩色是立体效果。对一下图上的数字是不是你要的。
-- **说错了可以撤销**。说"撤销上一步"或"重做刚才那步"即可；失败的操作本身不会在零件上留下半成品。重新打开 `.FCStd` 后 undo/redo 历史会从零开始。
-- **被拒绝是好事**。遇到现实中做不出来的操作（孔打到零件外面、两个零件穿模），AI 会大声拒绝并讲明原因，零件保持原样。换个说法或改个数字再来即可。
-- **可继续编辑的是 `.FCStd`，不是预览图或制造文件**。STL/STEP/glTF 用于制造或展示；想下次接着改，请另存 VibeCAD 项目。
-
-### 场景 1：在指定的面上打孔
-
-零件有六个面，AI 看不见你的鼠标，所以先要一张"面编号图"，之后用字母指面。
-
-你说：
-
-> "给我看看每个面的编号"
-
-**会看到**：一张彩色立体图，每个可见面上贴着 A、B、C……字母标签，旁边带尺寸线；AI 同时用文字逐一说明每个面是哪个（如"A：顶面，60×40"）。背面看不见的面 AI 会告诉你换个说法指代。
-
-然后你说：
-
-> "在 F 面正中打一个 8mm 的孔"
-
-**会看到**：一张四格工程图：三个视图带尺寸标注 + 一个彩色立体图，孔的位置和直径 ⌀8 都标在图上——俯视图里圆孔带红色点划中心线，旁边是孔到边的定位尺寸。
-
-**小贴士**：不说深度就默认打穿；想打盲孔就说"打 5mm 深"。其实直接说"在顶面正中打个 8 毫米的孔"通常也行——AI 会自己对照编号图。
-
-### 场景 2：改尺寸
-
-你说：
-
-> "长度改成 80"
-
-**会看到**：一张新的工程图，原来标 60 的地方现在标 80，孔的位置等特征自动跟着重新计算，不用你重画。
-
-**小贴士**：AI 随时知道当前零件有哪些可改的参数，"孔改大到 10 毫米"这种也是一句话的事。如果某个修改会把零件改坏（比如孔跑出零件边界），AI 会**拒绝并说明原因**，零件保持原样不受损——这是保护机制，不是故障。
-
-### 场景 3：孔阵列
-
-你说：
-
-> "在顶面打 4 个 5mm 的孔，排成一排，间距 15"
-
-**会看到**：俯视图上四个等距的圆孔排成一条线，标着 ⌀5 和相邻孔间 15 的间距尺寸链。
-
-**小贴士**：也支持打一圈："沿半径 12 的圆均匀打 6 个孔"。阵列是"全有或全无"——只要有一个孔放不下，整组都不会打，不会给你留下打了一半的零件。
-
-### 场景 4：挖槽
-
-你说：
-
-> "在顶面挖一个 20×8 的槽，深 5"
-
-**会看到**：俯视图上多出一个 20×8 的矩形轮廓，立体图上能看到顶面凹下去的方槽。
-
-**小贴士**：想要两端圆弧的腰形滑槽，就说"挖一个跑道形的槽"；反过来想"凸起一块"而不是挖掉，把"挖"换成"凸起 / 垫高"即可。打穿底或者越出边界的槽会被拒绝。
-
-### 场景 5：圆角
-
-和面一样，边也要先看编号图。你说：
-
-> "给我看看边的编号"
-
-**会看到**：一张立体图，每条棱边标着 E1、E2……（背面看不到的边用虚线画出并在表里注明），附一张文字对照表。
-
-然后你说：
-
-> "E3 这条边倒 3mm 圆角"
-
-**会看到**：立体图上那条直棱变成了圆弧过渡面，工程图同步更新。
-
-**小贴士**：一次倒多条："E1 到 E4 都倒 2mm"。想要斜切面（而非圆弧）就说"倒角"。注意：零件形状变了之后，旧编号可能对不上原来的边，AI 会提示"标签已过期，请重新标注"——重新要一张编号图就好，这是防止改错位置的保护机制。
-
-### 场景 6：装配两个零件
-
-你说：
-
-> "新建一个零件叫盖板，画一个 60×40×5 的板"
-
-**会看到**：工程图里出现了第二个零件；之前的底板原封不动。
-
-然后你说：
-
-> "把盖板的底面贴到底板的顶面"
-
-**会看到**：一张装配工程图——立体图里两个零件**分别着色**、面贴面合在一起，被遮住的轮廓用虚线表示。
-
-**小贴士**：要留缝就说"留 0.5mm 间隙"。如果摆放位置会让两个零件互相穿透，AI 会**拒绝并报告重叠了多少毫米**——现实中装不进去的东西它不让你装，调整位置或尺寸再试。
-
-### 场景 7：导出 3D 打印文件
-
-你说：
-
-> "导出 STL 给 3D 打印"
-
-**会看到**：AI 回复文件已保存，并给出完整路径（例如 `.../export/Part1.stl`）。把这个文件拖进你的切片软件（如 Bambu Studio、Cura）就能打印。
-
-**小贴士**：送 CNC 加工厂要 STEP 格式，说"导出 STEP"；两样都要就说"STEP 和 STL 都导出"。装配体可以"按零件分开导出"，每个零件一个文件。
-
-### 场景 8：保存项目，下次接着改
-
-你说：
-
-> "把当前项目保存到桌面的 vibecad_projects 文件夹，文件名叫底板.FCStd"
-
-**会看到**：AI 返回完整路径和文件大小。这个文件保留 FreeCAD 参数化对象、多零件容器和位姿，也保留 VibeCAD 的活动零件和每零件当前结果。之后说"打开刚才的底板.FCStd"就能继续建模。
-
-**安全默认值**：当前模型有未保存修改时，AI 不应直接新建或打开别的项目，而应先让你保存。只有你明确说"不保存，丢弃当前修改"时，才能使用 `discard_unsaved=true`。
-
-**小贴士**：项目里不保存旧的 A/B/C 面标签、E1/E2 边标签或 undo/redo 历史。重新打开后若要指面/边，先让 AI 重新出一张标注图。
-
-### 场景 9：撤销、重做和删除对象
-
-你说：
-
-> "撤销刚才那步"
-
-**会看到**：最近一个成功的 FreeCAD 事务被撤回，图和当前结果跟着恢复。再说"重做"会重新应用它。
-
-删除时可以说：
-
-> "删除 Cylinder"
-
-如果 Cylinder 已被 Cut/Fuse/Common 等下游特征依赖，AI 会默认拒绝并列出依赖者。只有你明确确认连依赖链一起删除时，才应使用 `cascade=true`。级联删除后仍可在当前进程中立即 `undo`。
-
-### 场景 10：精确测量距离、角度和厚度
-
-直接说"汇总一下当前零件的测量"，AI 会返回体积、总面积、总边长、包围盒、质心和面/边/实体数。单位固定为 mm、mm² 和 mm³。
-
-距离可在两个对象、两个已标注面或两条已标注边之间测最短值。角度和厚度只接受平面标签：
-
-> "先给我面标注，再量 A 面和 F 面的厚度"
-
-`thickness` 必须明确指定两个平行平面；不平行、相交或重合都会响亮拒绝。VibeCAD 不会在复杂薄壁模型上自动猜你想量哪层材料。
-
-### 场景 11：布尔并集与交集
-
-在同一零件里创建两个相交实体后，可以说"把 Box 和 Cylinder 合并成一个实体"（并集），或"只保留它们交叠的部分"（交集）。并集如果仍然是两块断开实体，交集如果没有正体积重叠，都会被拒绝并回滚。布尔运算不跨装配零件偷做局部运算。
-
----
-
-## 六、卸载
-
-VibeCAD 装了两样东西：**扩展本体**（很小）和**建模引擎**（约 2-3GB，按需下载）。不想用了，有三种途径清理，日常场景用前两种就够。
-
-### 途径一：设置里移除扩展（最简单，推荐）
-
-打开 Claude Desktop → **设置（Settings）→ 扩展（Extensions）**，找到 VibeCAD，点 **Remove（移除）**。
-
-**这一步只移除扩展本体。** 建模引擎默认位于扩展目录外的 `VIBECAD_HOME`，不会被 Claude Desktop 的 Remove 自动删除。如果目标是彻底释放 2–3GB 空间，请先用途径二的两段式卸载清理引擎，再移除扩展。
-
-### 途径二：对话里让 AI 卸载引擎（用于清空重装、排查损坏，不是"彻底不要了"）
-
-在对话里说：
-
-> "把 CAD 引擎卸载了"
-
-AI 会调用 `uninstall_runtime`，**分两步确认**，不会一上来就删：
-
-1. **第一次**：只是预览，告诉你将要删除的目录路径和大小（一般 2-3GB），不会真的删除。
-2. 你确认要删之后，AI 会**再调一次**才真正执行删除。
-
-删除会在**当前对话里自动完成**（不需要你手动重启对话）。
-
-> **重要**：Claude Desktop 扩展装的 VibeCAD 默认会"自动准备引擎"（就是第二章说的开箱即用）。这意味着这条途径删完之后，只要 VibeCAD 还在你的扩展列表里、对话还在继续，它**几乎会立刻自动重新开始下载**——这不是 bug，是"自动安装"这个设定本身决定的。所以途径二更适合**引擎疑似损坏、想清空重装一遍**的场景，而不是"我想彻底不占用这 2-3GB 空间"。真要腾空间、彻底不用了，请先用途径二删除引擎，再立刻用途径一移除或禁用扩展，避免它重新下载。
-
-### 途径三：命令行救援（扩展打不开、或想彻底手动清理时）
-
-如果连 Claude Desktop 都打不开，或者你是通过 `uvx vibecad` 方式安装的（附录 A），可以直接在终端跑：
-
-```bash
-uvx vibecad --uninstall
+```text
+~/Library/Application Support/VibeCAD/
 ```
 
-会先询问一次"确认删除吗？[y/N]"，输入 `y` 确认。如果是写脚本或不想每次手动确认，加 `--yes` 跳过询问直接执行：
+其中 runtime 与 data 分开。卸载受管引擎时先调用 `uninstall_runtime(confirm=false)` 查看范围，再
+由你确认后调用 `uninstall_runtime(confirm=true)`；项目、revision、draft 与 artifact 数据必须保留。
 
-```bash
-uvx vibecad --uninstall --yes
-```
+## 4. 单独安装 Agent Skill
 
-这条命令删除的同样只是建模引擎的数据目录，不涉及 Claude Desktop 扩展本身的安装状态。
+MCPB 内带有 Skill 的归档副本，但安装 MCPB **不等于激活 Skill**。把仓库中的
+`skills/vibecad-agent/` 或独立资产 `vibecad-agent-skill-0.5.0.zip` 解压得到的同名目录，整体复制
+或链接到一个宿主发现路径：
 
-### 关于升级：不用担心引擎被清掉
-
-以后出新版本，你重新下载新的 `VibeCAD.mcpb` 双击安装覆盖旧版。引导层会核对运行时里的版本凭据：凭据缺失或损坏时先精确探测现有环境；**只要 Python/FreeCAD 版本仍与当前要求一致，就只轻量升级 VibeCAD server，不重新下载 2–3GB 引擎**。只有引擎版本不兼容或环境已损坏时才会重建。
-
----
-
-## 七、故障排查
-
-| 现象 | 原因 | 解决 |
+| 宿主 | 用户级 | 项目级 |
 |---|---|---|
-| 首次下载中途断网/关机，重试时 AI 说"安装已在进行中"却始终没有进展 | 上次中断留下了一个"安装锁"文件，挡住了新的安装 | 手动删除锁文件，再问 AI"装到哪一步了"触发重试。锁文件位置——macOS：`~/Library/Application Support/VibeCAD/.install.lock`（在 Finder 按 `Command+Shift+G`，粘贴路径前往）；Windows：在资源管理器地址栏粘贴 `%LOCALAPPDATA%\VibeCAD`，删除其中的 `.install.lock` |
-| AI 说"标签已过期，请重新标注" | **不是故障**：零件形状变了之后，旧的 A/F/E3 编号可能已经对不上原来的面或边；为防止改错位置，AI 拒绝沿用旧编号 | 说"重新给我看面（边）的编号"，照新图指即可 |
-| 新建或打开项目时 AI 说"当前项目有未保存修改" | **不是故障**：这是防丢稿保护 | 要保留就先说"保存项目"；确定不要时明说"丢弃未保存修改后继续" |
-| 装配时 AI 拒绝操作，并报"干涉 / 重叠 x mm" | **不是故障**：按这个摆法两个零件会互相穿透，现实中装不进去，所以被保护机制拦下 | 调整位置、改小尺寸或留间隙后再试；如果是刻意的紧配合（硬压进去），明说"我知道会重叠，按压配处理" |
-| Windows 防火墙或杀毒软件弹窗询问 | 首次运行要下载引擎、启动本地程序，触发了安全提示 | 选择"允许"。VibeCAD 的 CAD 后端和项目文件在本机运行、存储；工具请求和结果会交给你选择的 MCP 客户端，其模型供应商如何处理内容取决于客户端配置和供应商条款。运行时组件从官方源下载，代码开源可查 |
-| 出图里中文文字显示成方块（多见于 Windows） | 系统缺少中文绘图字体 | 只影响个别文字显示，尺寸数字和建模功能完全正常，可忽略 |
-| 试了各种办法都不行，想彻底重来 | 引擎文件可能已损坏 | 参考本章「卸载」的途径二清空重装，或途径三命令行 `--uninstall` 后重新对话触发下载（会重新下载 2-3GB） |
-| 双击 `VibeCAD.mcpb` 没弹出安装窗口 | 多半是 Claude Desktop 版本过旧，没有扩展安装功能 | 把 Claude Desktop 更新到最新版后重试；仍不行就用手动安装路径：设置（Settings）→ 扩展（Extensions）→ Advanced settings → Install Extension…，选中下载的 `VibeCAD.mcpb` |
-| 想升级 VibeCAD 到新版本 | Claude Desktop 的扩展暂无自动更新，需手动重装一遍 | 去发布页 <https://github.com/wangtao9090/VibeCAD/releases/latest> 下载新版 `VibeCAD.mcpb`，重新双击安装一遍即可（会覆盖旧版本）。Python/FreeCAD pin 仍兼容且环境健康时只轻量同步 server；引擎版本不兼容或环境损坏时会重建并重新下载 2–3GB |
-| 想找扩展的安装位置或日志排查问题 | —— | macOS 扩展安装/日志目录：`~/Library/Application Support/Claude/Claude Extensions/local.mcpb.wang-tao.vibecad/`（在 Finder 按 `Command+Shift+G` 粘贴前往）。Windows 路径见后续验证补充 |
+| Codex 当前测试安装路径 | `$CODEX_HOME/skills/vibecad-agent`，默认 `$HOME/.codex/skills/vibecad-agent` | — |
+| Codex 已发布发现路径 | `$HOME/.agents/skills/vibecad-agent` | `.agents/skills/vibecad-agent` |
+| Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
 
-> **报告问题时**：附上安装日志能大大加快定位——日志文件在数据目录下的 `install.log`（macOS：`~/Library/Application Support/VibeCAD/install.log`；Windows：`%LOCALAPPDATA%\VibeCAD\install.log`），连同"你说的话、AI 的回复、你期待的结果"一起发给我们。
+复制后重启或重新加载宿主，让它重新发现 Skill。Python wheel 与受管 runtime 只提供服务端，不包含
+Skill，也不会替宿主修改 Skill 目录。
 
----
+当前本地证据证明协议、包和 Skill 结构 `host-ready`；尚未调用第二个 Claude/Codex 外部模型执行
+真实跨宿主验收，因此不要把当前状态描述成 `host-verified`。
 
-## 附录 A：其他 MCP 客户端接入（Claude Code / Cursor 等）
+## 5. 第一次设计：创建一个可审核盒子
 
-> 本附录面向**高级用户**。如果你用的是 Claude Desktop / Cowork，请用第三章的"双击即装"方式，不必读本附录。只有当你要把 VibeCAD 接入 **Claude Code、Cursor 或其他支持 stdio MCP 的客户端**时，才需要下面这套"装 uv + 写配置"的手动方式。
+在安装 MCP 服务和 Skill 后，可以向宿主表达：
 
-这些客户端不识别 `.mcpb` 扩展包，需要你预先装一个小工具 **uv**（一个帮你自动下载并运行程序的小帮手），再把 VibeCAD 作为 stdio 连接器写进客户端配置。
+> 用 VibeCAD 新建一个空项目，创建 60 × 40 × 10 mm 的长方体。我要先看验证结论再决定是否接受；
+> 成功后交付 FCStd 和 STEP。
 
-### A.1 装好 uv
+宿主应完成以下流程：
 
-请确保电脑至少有 **5GB 空闲磁盘空间**——首次使用时需要下载约 2-3GB 的建模引擎。
-
-> **和 Claude Desktop 扩展的一点区别**：这条手动接入路径**不会自动开始下载引擎**——接好之后，请先对 AI 说一句"帮我准备好 CAD 环境"（触发 `ensure_runtime`），它才会开始后台下载；之后可以问"装到哪了"（`get_runtime_status`，带百分比）查看进度。装好后同一个对话里直接继续建模即可，不需要重启客户端。
-
-**macOS**
-
-1. 打开"终端"：按 `Command + 空格` 调出聚焦搜索，输入"终端"（或 Terminal），回车。
-2. 把下面整行复制粘贴进去，回车，等它跑完：
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+```text
+get_runtime_status / ensure_runtime（仅在需要时）
+  → get_capabilities
+  → create_project(kind=empty，保留 create_key)
+  → create_task(review_policy=require_review)
+  → get_task
+  → create_box（含 AcceptanceSpec）
+  → get_task 并展示 draft/verdict/evidence
+  → accept_draft 或 reject_draft
+  → export_task_artifacts
+  → 对两个 ResourceLink 调 resources/read
 ```
 
-3. **关掉终端窗口，重新打开一个**，输入下面这行验证（uvx 是 uv 自带的命令）：
+你需要关注的不是“FreeCAD 命令执行成功”，而是证据是否满足设计意图，例如：
 
-```bash
-uvx --version
-```
+- 长、宽、高分别为 60、40、10 mm；
+- bounding box 与尺寸一致；
+- solid 数量和 shape validity 符合预期；
+- 体积为 24,000 mm³（允许 AcceptanceSpec 中明确的数值容差）；
+- 重新加载 FCStd 后事实保持一致。
 
-显示出版本号（如 `uvx 0.7.x`）就成功了。
+如果选择 Reject，项目 HEAD 不变；如果选择 Accept，Kernel 会重新取得 lease、复核 draft 的 base
+revision 与当前 HEAD，并在没有 stale-base conflict 时发布。
 
-**Windows**
+## 6. 自动提交与人工审核
 
-1. 点开始菜单，输入 "PowerShell"，打开 Windows PowerShell。
-2. 把下面整行复制粘贴进去，回车，等它跑完：
+创建任务时必须显式选择：
 
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
+- `auto_commit`：候选验证通过且 HEAD 未漂移后直接成为新 revision；
+- `require_review`：候选被封存为不可变 draft，展示 verdict/evidence，等待你明确 Accept 或 Reject。
 
-3. **关掉 PowerShell 窗口，重新打开一个**，输入下面这行验证：
+尺寸变更、结构变化或来源不确定时建议使用 `require_review`。重复、低风险且验收条件已经稳定的单步
+操作可以使用 `auto_commit`。
 
-```powershell
-uvx --version
-```
+审核时必须核对当前 `task_id`、`draft_id`、`generation`、base revision、verdict 与 evidence。不要根据
+一段自然语言总结接受草案，也不要接受旧对话中记住的 draft id。
 
-显示出版本号就成功了。
+## 7. direct operation 与 ModelProgram 怎么选
 
-### A.2 Claude Code（命令行工具）
+以下场景优先 direct operation：
 
-在终端里粘贴一行即可：
+- 创建一个盒子或圆柱；
+- 检查当前任务绑定的模型事实；
+- 对一个由稳定 SelectorV1 指定的对象改尺寸、移动或旋转。
 
-```bash
-claude mcp add --transport stdio vibecad -- uvx vibecad
-```
+多步骤、步骤间需要 ResultRef、或希望把整个候选一次性验收时，使用
+`submit_model_program`。ModelProgram 是受限 JSON 合同，不是 Python 代码。
 
-### A.3 通过配置文件接入（Cursor 等支持 stdio MCP 的客户端）
+两种方式共享同一个 Task Kernel：direct operation 也会构造 ModelCommand/ModelProgram，进入同一
+候选 checkout、验证、draft 与 commit 流程。宿主不得把 direct operation 变成原地修改文件的旁路。
 
-各客户端的配置文件位置不同，但条目格式通用。**关键：图形界面应用找不到终端里的命令，`command` 必须写 uvx 的完整路径，不能只写 `uvx`。**
+## 8. 修改已有对象时的规则
 
-**第 1 步：查出 uvx 的完整路径**：
+不要猜 FreeCAD 标签、对象下标、面号或边号。先用 `inspect_model` 或任务证据拿到 revision-bound
+SelectorV1，再把完整选择器传给：
 
-- macOS 终端里运行 `which uvx`，通常得到 `/Users/你的用户名/.local/bin/uvx`
-- Windows PowerShell 里运行 `(Get-Command uvx).Source`，通常得到 `C:\Users\你的用户名\.local\bin\uvx.exe`
+- `modify_parameter`：当前可改 `length`、`width`、`height` 或 `radius`；
+- `move_part`：设置对象位置；
+- `rotate_part`：绕 x/y/z 轴旋转非零角度。
 
-**第 2 步：在客户端的 MCP 配置里加入下面这段**（如已有 `"mcpServers"` 段，只追加 `vibecad` 这一项，别动其他部分）：
+SelectorV1 绑定 project/revision、持久 object/feature id、对象类型、semantic role、provenance 与
+expected cardinality。revision 已变化时必须重新获取选择器，不能沿用旧值。当前只支持 object/feature
+级选择；不支持 face/edge 选择。
 
-```json
-{
-  "mcpServers": {
-    "vibecad": {
-      "command": "/Users/你的用户名/.local/bin/uvx",
-      "args": ["vibecad"]
-    }
-  }
-}
-```
+修改请求还应显式说明 preservation 条件，例如移动时保持尺寸、体积、solid count 与 valid shape，
+改长度时保持未要求变化的宽、高和对象身份。AcceptanceSpec 是可执行验收合同，不能省略成“看起来
+差不多”。
 
-（`command` 换成第 1 步查到的你自己的完整路径；Windows 注意把 `\` 写成 `\\`，如 `"C:\\Users\\你\\.local\\bin\\uvx.exe"`。）
+## 9. 持久任务的恢复规则
 
-**第 3 步：完全退出并重启客户端**，新开一个对话，问 AI"你能看到 VibeCAD 的 CAD 工具吗？"，AI 能列出一组 CAD 工具即接好。
+每次写操作都必须使用服务端刚返回的 `expected_generation`。遇到冲突、超时或中断时，如果已经知道
+`task_id`，第一步调用 `get_task`，并用返回的 status/generation/next_action 替换本地记忆。
 
----
+| `next_action` | 宿主动作 |
+|---|---|
+| `request_plan` | 当前公开 `create_task` 不应返回它；调用 `get_task` 一次，若仍存在则停止并报告内部状态不一致。 |
+| `submit_program` / `provide_input` | 用返回的 generation 调一个匹配的 direct operation，或调用 `submit_model_program` 提交修正后的受限程序。 |
+| `validate_program` / `reconcile` / `cleanup` | 用返回的 generation 调用一次 `resume_task`；冲突后回到 `get_task` 重新判断。 |
+| `wait` | 不紧密轮询；先 `get_task`，中断后若持久状态仍可恢复，最多调用一次 `resume_task`。 |
+| `review_draft` | 展示精确 draft/verdict/evidence，只允许用当前 id 与 generation 调 `accept_draft` 或 `reject_draft`。 |
+| `none` | 停止修改；只有成功且符合资格的状态才能导出，否则报告失败或拒绝证据。 |
 
-*祝你画图愉快。想到什么就说什么——说错了也没关系，AI 拒绝得越响亮，你的零件就越安全。*
+`create_task` 当前没有 request key。如果调用结果未知且没有拿到 task id，必须停止、报告可能存在孤儿
+任务，绝不能重试创建。若拿到了 task id，则用 `get_task` 恢复，而不是重放写操作。
+
+## 10. 获取 FCStd 与 STEP
+
+只有成功且符合导出资格的 committed revision 或 draft 才能调用 `export_task_artifacts`。调用时保留
+唯一 `export_key`，并传入当前 task generation、revision id 和适用的 draft id。
+
+成功结果必须包含两个有类型的 `ResourceLink`：
+
+| 格式 | MIME | 读取方式 |
+|---|---|---|
+| FCStd | `application/vnd.freecad.fcstd` | 对返回 URI 调 `resources/read` |
+| STEP | `model/step` | 对返回 URI 调 `resources/read` |
+
+读取后核对 URI 对应的 format、name、size 和 SHA-256，再把资源交给用户。失败结果或其他工具不应
+产生 ResourceLink。VibeCAD 不提供任意路径 copy-out；也不要让 Agent 浏览、公开或读取无关文件。
+FCStd 导入时只能使用用户明确授权给 `create_project` 的源文件。
+
+## 11. 当前明确不支持的能力
+
+0.5.0 Beta 不支持：
+
+- STEP/STL import、STL 到 STEP、照片/视频重建和 2D 草图识别；
+- 通用 FCStd、Sketcher、PartDesign、孔、圆角、倒角、布尔、装配、BOM 与 TechDraw；
+- Workbench UI、可视 preview 或 face/edge 交互选择；
+- simulation、碰撞求解或制造工艺验证；
+- MCP Sampling（`mcp_sampling`）或 VibeCAD 自营 BYOK 模型后端；
+- 模型生成并执行任意 Python/FreeCAD code。
+
+需要这些能力时，宿主应如实报告当前不可用，或在得到明确授权后调用单独的外部引擎；不能伪装成
+VibeCAD 已完成。
+
+## 12. 故障排查
+
+### 看不到工具
+
+确认 MCPB 已启用并重新加载宿主。然后检查 `ping`。如果只能看到服务端而宿主不会遵循流程，再检查
+Skill 是否复制到了正确目录；MCPB 安装不会自动激活 Skill。
+
+### 工具可见但 CAD 不能执行
+
+调用 `get_runtime_status`，记录 phase、percent 和 error。需要时调用 `ensure_runtime`。磁盘不足、网络
+无法访问依赖源或安装被中断都可能让 runtime 未达到 ready。
+
+### 请求提示 generation conflict
+
+停止当前写操作，调用 `get_task`，使用服务端返回的新 generation 与 next_action 重新路由。不要只改
+generation 后重放旧请求，因为 base revision、draft 或任务状态也可能已经变化。
+
+### 导出没有资源链接
+
+确认任务已成功、revision/draft 符合导出资格、generation 最新，并检查结构化错误。失败调用不应
+返回 ResourceLink；不要改用本地任意路径导出。
+
+### 导入 FCStd 被拒绝
+
+确认文件非空，且所有对象都精确属于 `Part::Box` 或 `Part::Cylinder`。当前拒绝其他对象属于产品
+边界，不是让模型尝试任意 FreeCAD Python 的理由。
+
+## 13. 当前交互边界
+
+当前执行 profile 只验证 headless。G1 将在 P0-B core 的认证 daemon、IPC 与 file broker 之上增加
+FreeCAD Workbench 的 preview、verdict、Accept/Reject 和 object/feature selection。当前 IPC 仅是
+codec seam，不是可供插件连接的可运行协议。
+
+当前外部 Claude/Codex 模型调用尚未纳入本地放行证据。要做宿主实测，必须单独授权相应模型/token
+消耗，并记录所用宿主版本、Skill hash、20-tool discovery 与完整任务结果。

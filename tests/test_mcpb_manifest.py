@@ -44,13 +44,14 @@ def test_version_synced_three_ways():
 
 
 def test_manifest_tools_match_server_registry():
-    """manifest 必须与独立冻结合同和 registry 投影同序。"""
+    """manifest 必须与独立冻结合同和 registry 投影同序同描述。"""
     from vibecad.application.public_surface import public_tool_specs
 
-    declared = tuple(entry["name"] for entry in _manifest()["tools"])
-    projected = tuple(spec.name for spec in public_tool_specs())
-    assert declared == EXPECTED_PUBLIC_TOOLS
-    assert projected == EXPECTED_PUBLIC_TOOLS
+    declared = tuple((entry["name"], entry["description"]) for entry in _manifest()["tools"])
+    projected = tuple((spec.name, spec.description) for spec in public_tool_specs())
+    assert tuple(name for name, _description in declared) == EXPECTED_PUBLIC_TOOLS
+    assert tuple(name for name, _description in projected) == EXPECTED_PUBLIC_TOOLS
+    assert declared == projected
 
 
 def test_manifest_tool_entries_are_unique_and_described():
@@ -172,8 +173,10 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
     normalized_readme = " ".join(readme.split())
     for required in (
         "当前 Agent-first 工作流",
-        "用户自带宿主模型",
-        "当前只能从空项目或一个 FCStd 文件开始",
+        "用户自己的宿主模型",
+        "FCStd 导入必须非空",
+        "`Part::Box`",
+        "`Part::Cylinder`",
         "create_project",
         "submit_model_program",
         "accept_draft",
@@ -197,6 +200,12 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
         assert removed_endpoint not in normalized_readme
 
     roadmap = (ROOT / "docs/PRODUCT_CAPABILITY_ROADMAP.md").read_text(encoding="utf-8")
-    assert "S3-7/P0-A" in roadmap
-    assert "任务级公共 MCP、持久化 draft/review" in roadmap
-    assert "任务级公共 MCP、宿主\n> skill 和 FreeCAD 交互插件尚未交付" not in roadmap
+    normalized_roadmap = " ".join(roadmap.replace("\n> ", " ").split())
+    for required in (
+        "S3-8/P0-A",
+        "20-tool 公共 MCP、durable review",
+        "host-neutral skill",
+        "下一 active delivery packet 是 P0-B core",
+    ):
+        assert required in normalized_roadmap
+    assert "宿主 skill 和 FreeCAD 交互插件尚未交付" not in normalized_roadmap

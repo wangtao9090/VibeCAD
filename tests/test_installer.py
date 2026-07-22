@@ -491,7 +491,7 @@ def test_previous_positive_epoch_runs_one_pip_sync_without_replacing_managed_pre
     assert observed_receipts == [old_receipt, old_receipt]
     current_receipt = inst.status.read_runtime_receipt()
     assert current_receipt == spec.expected_receipt()
-    assert current_receipt["server_package_epoch"] == 3
+    assert current_receipt["server_package_epoch"] == 4
 
 
 @pytest.mark.parametrize("failure_at", ("pip", "verify"))

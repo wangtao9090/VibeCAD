@@ -3115,6 +3115,8 @@ class DurableProjectService:
         except RevisionStoreError as error:
             raise _ServiceError(self._map_revision_error(error)) from None
         except ExecutorError as error:
+            if type(error) is ExecutorError and error.code is ExecutorErrorCode.INVALID_INPUT:
+                return self._reject_invalid(record)
             raise _ServiceError(self._map_executor_error(error)) from None
         except ValueError as error:
             if type(error) is not ValueError:
@@ -3176,6 +3178,8 @@ class DurableProjectService:
         except RevisionStoreError as error:
             raise _ServiceError(self._map_revision_error(error)) from None
         except ExecutorError as error:
+            if type(error) is ExecutorError and error.code is ExecutorErrorCode.INVALID_INPUT:
+                return self._reject_invalid(record)
             raise _ServiceError(self._map_executor_error(error)) from None
         except ValueError as error:
             if type(error) is not ValueError:
@@ -3294,6 +3298,8 @@ class DurableProjectService:
     def _map_executor_error(error: ExecutorError) -> ProjectServicePortErrorCode:
         if type(error) is not ExecutorError or type(error.code) is not ExecutorErrorCode:
             return ProjectServicePortErrorCode.INTERNAL_ERROR
+        if error.code is ExecutorErrorCode.INVALID_INPUT:
+            return ProjectServicePortErrorCode.INVALID_INPUT
         if error.code is ExecutorErrorCode.CAD_FAILURE:
             return ProjectServicePortErrorCode.CAD_FAILURE
         if error.code in {

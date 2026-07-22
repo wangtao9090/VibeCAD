@@ -119,6 +119,7 @@ def _canonical_public_surface_sha256() -> str:
     projection = [
         {
             "name": item.name,
+            "description": item.description,
             "inputSchema": thaw(item.input_schema),
             "outputSchema": thaw(item.output_schema),
             "annotations": {
@@ -149,7 +150,8 @@ def test_expected_receipts_bind_private_package_epoch_sdk_and_public_surface():
         "public_surface_sha256": spec.PUBLIC_SURFACE_SHA256,
     }
 
-    assert type(spec.SERVER_PACKAGE_EPOCH) is int and spec.SERVER_PACKAGE_EPOCH == 3
+    assert spec.VIBECAD_VERSION == "0.5.0"
+    assert type(spec.SERVER_PACKAGE_EPOCH) is int and spec.SERVER_PACKAGE_EPOCH == 4
     assert spec.MCP_VERSION == "1.27.2"
     assert spec.PUBLIC_SURFACE_SHA256 == _canonical_public_surface_sha256()
     assert spec.expected_receipt() == {
@@ -835,6 +837,7 @@ def test_verify_snippet_independently_checks_epoch_sdk_and_recomputed_surface():
         for name in (
             "inputSchema",
             "outputSchema",
+            "description",
             "readOnlyHint",
             "destructiveHint",
             "idempotentHint",

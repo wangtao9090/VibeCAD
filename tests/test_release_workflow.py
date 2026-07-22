@@ -17,9 +17,7 @@ def _write_version_fixture(root: Path, version: str = "0.4.0") -> None:
     (root / "pyproject.toml").write_text(
         f'[project]\nname = "vibecad"\nversion = "{version}"\n', encoding="utf-8"
     )
-    (root / "manifest.json").write_text(
-        json.dumps({"version": version}), encoding="utf-8"
-    )
+    (root / "manifest.json").write_text(json.dumps({"version": version}), encoding="utf-8")
     (root / "src" / "vibecad" / "__init__.py").write_text(
         f'__version__ = "{version}"\n', encoding="utf-8"
     )
@@ -68,20 +66,25 @@ def test_release_version_guard_rejects_each_mismatch(
             json.dumps({"version": replacement}), encoding="utf-8"
         )
     else:
-        (tmp_path / "src" / "vibecad" / "__init__.py").write_text(
-            replacement, encoding="utf-8"
-        )
+        (tmp_path / "src" / "vibecad" / "__init__.py").write_text(replacement, encoding="utf-8")
 
     result = _run_guard(tmp_path, tag)
     assert result.returncode == 1
     assert expected_name in result.stderr
 
 
-def test_release_workflow_gates_both_artifacts_with_stdlib_script():
+def test_release_workflow_gates_publishers_with_version_quality_managed_and_package_jobs():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert 'python3 .github/scripts/check_release_versions.py "$GITHUB_REF_NAME"' in workflow
-    assert re.search(r"(?m)^  pypi:\n    needs: version-guard$", workflow)
-    assert re.search(r"(?m)^  mcpb:\n    needs: version-guard$", workflow)
+    assert re.search(r"(?m)^  quality:\n    needs: version-guard$", workflow)
+    assert re.search(r"(?m)^  managed-agent:\n    needs: version-guard$", workflow)
+    assert re.search(
+        r"(?m)^  package-gate:\n"
+        r"    needs: \[version-guard, quality, managed-agent\]$",
+        workflow,
+    )
+    assert re.search(r"(?m)^  pypi:\n    needs: package-gate$", workflow)
+    assert re.search(r"(?m)^  mcpb:\n    needs: package-gate$", workflow)
 
 
 def test_release_workflow_uses_explicit_least_privilege_permissions():
@@ -101,11 +104,17 @@ def test_release_workflow_uses_explicit_least_privilege_permissions():
         flags=re.DOTALL,
     )
     assert re.search(
-        r"(?m)^  mcpb:.*?^      - uses: actions/checkout@v4\n"
+        r"(?m)^  package-gate:.*?^      - uses: actions/checkout@v4\n"
         r"        with:\n          persist-credentials: false$",
         workflow,
         flags=re.DOTALL,
     )
+    pypi = re.search(r"(?ms)^  pypi:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)", workflow)
+    mcpb = re.search(r"(?ms)^  mcpb:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)", workflow)
+    assert pypi is not None and mcpb is not None
+    for publisher in (pypi.group("body"), mcpb.group("body")):
+        assert "actions/download-artifact@v4" in publisher
+        assert "actions/checkout@v4" not in publisher
 
 
 def test_current_repository_versions_pass_release_guard():

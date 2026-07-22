@@ -10,6 +10,7 @@ from collections.abc import Iterator, Mapping
 import pytest
 
 import vibecad.execution.registry as registry_module
+from vibecad.application.public_surface import public_tool_specs
 from vibecad.execution.registry import (
     DEFAULT_OPERATION_REGISTRY,
     ExecutionProfile,
@@ -23,6 +24,36 @@ from vibecad.execution.registry import (
     RiskClass,
     ValueShape,
 )
+
+_STABLE_PUBLIC_TOOL_NAMES = (
+    "ping",
+    "get_runtime_status",
+    "ensure_runtime",
+    "uninstall_runtime",
+    "get_capabilities",
+    "create_project",
+    "get_project",
+    "create_task",
+    "get_task",
+    "submit_model_program",
+    "resume_task",
+    "accept_draft",
+    "reject_draft",
+    "export_task_artifacts",
+)
+
+_DEFAULT_DIRECT_DESCRIPTIONS = {
+    "create_box": "向任务提交一个长方体直接操作",
+    "create_cylinder": "向任务提交一个圆柱体直接操作",
+    "inspect_model": "检查指定任务版本的模型事实",
+    "modify_parameter": "按显式验收条件修改选定对象参数",
+    "move_part": "按显式验收条件移动选定对象",
+    "rotate_part": "按显式验收条件旋转选定对象",
+}
+
+
+class _DescriptionSubclass(str):
+    pass
 
 
 class _HostileIterable:
@@ -89,6 +120,91 @@ def test_default_registry_exposes_exact_first_wave_six_operations():
         metadata.handler_name == operation
         for operation, metadata in DEFAULT_OPERATION_REGISTRY.operations.items()
     )
+
+
+@pytest.mark.parametrize("stable_name", _STABLE_PUBLIC_TOOL_NAMES)
+def test_direct_operation_cannot_collide_with_stable_public_namespace(stable_name):
+    collision = dataclasses.replace(
+        DEFAULT_OPERATION_REGISTRY.lookup("create_box"),
+        operation=stable_name,
+    )
+
+    with pytest.raises(TypeError) as caught:
+        public_tool_specs(OperationRegistry((collision,)))
+
+    assert str(caught.value) == "registry public metadata is invalid"
+
+
+def test_default_direct_descriptions_are_exact_and_projected_unchanged():
+    metadata_descriptions = {
+        name: DEFAULT_OPERATION_REGISTRY.lookup(name).description
+        for name in DEFAULT_OPERATION_REGISTRY
+    }
+    projected_descriptions = {
+        spec.name: spec.description
+        for spec in public_tool_specs()
+        if spec.name in _DEFAULT_DIRECT_DESCRIPTIONS
+    }
+
+    assert metadata_descriptions == _DEFAULT_DIRECT_DESCRIPTIONS
+    assert projected_descriptions == _DEFAULT_DIRECT_DESCRIPTIONS
+
+
+def test_every_public_description_is_exact_bounded_printable_single_line_text():
+    specs = public_tool_specs()
+
+    assert all(type(spec.description) is str for spec in specs)
+    assert all(spec.description.strip() for spec in specs)
+    assert all(spec.description.isprintable() for spec in specs)
+    assert all(len(spec.description.splitlines()) == 1 for spec in specs)
+    assert all(len(spec.description.encode("utf-8")) <= 256 for spec in specs)
+
+
+def test_custom_direct_fixture_gets_a_deterministic_safe_description_fallback():
+    custom = dataclasses.replace(_operation(), direct_exposed=True)
+    first = public_tool_specs(OperationRegistry((custom,)))[-1].description
+    second = public_tool_specs(OperationRegistry((custom,)))[-1].description
+
+    assert first == second
+    assert type(first) is str
+    assert first.strip() == first
+    assert first.isprintable()
+    assert len(first.splitlines()) == 1
+    assert len(first.encode("utf-8")) <= 256
+    assert custom.operation in first
+
+
+@pytest.mark.parametrize(
+    "description",
+    (
+        "",
+        "   ",
+        "forged\nsecond line",
+        "forged\tdescription",
+        "x" * 257,
+        "界" * 86,
+        _DescriptionSubclass("seemingly safe"),
+    ),
+)
+def test_explicit_direct_description_rejects_invalid_or_subclass_text(description):
+    with pytest.raises(RegistryError) as caught:
+        OperationMetadata(
+            operation="create_sphere",
+            handler_name="add_sphere",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            direct_exposed=True,
+            description=description,
+        )
+
+    assert caught.value.code is RegistryErrorCode.INVALID_METADATA
+
+
+def test_public_tool_names_are_unique_across_stable_and_direct_surfaces():
+    names = tuple(spec.name for spec in public_tool_specs())
+
+    assert names[: len(_STABLE_PUBLIC_TOOL_NAMES)] == _STABLE_PUBLIC_TOOL_NAMES
+    assert len(names) == len(set(names)) == 20
 
 
 def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contracts():
@@ -314,10 +430,7 @@ def test_default_registry_has_exact_field_shapes_and_bindings():
     assert _fields(modify_parameter.target_fields) == (
         ("object", "target", ValueShape.ENTITY_TARGET, True),
     )
-    assert (
-        modify_parameter.target_fields[0].referenced_value_shape
-        is ValueShape.OBJECT_ID
-    )
+    assert modify_parameter.target_fields[0].referenced_value_shape is ValueShape.OBJECT_ID
     assert _fields(modify_parameter.argument_fields) == (
         ("parameter", "parameter", ValueShape.ENUM, True),
         ("value_mm", "value", ValueShape.POSITIVE_NUMBER, True),
@@ -834,6 +947,7 @@ def test_registry_contains_metadata_only_not_execution_hooks():
         "requires_gui_main_thread",
         "resource_budget",
         "direct_exposed",
+        "description",
         "result_slots",
         "preservation_fields",
     }

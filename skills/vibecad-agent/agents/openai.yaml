@@ -1,0 +1,4 @@
+interface:
+  display_name: "VibeCAD Agent"
+  short_description: "Build verified FreeCAD tasks through VibeCAD"
+  default_prompt: "Use $vibecad-agent to plan and execute a verified CAD change with VibeCAD."

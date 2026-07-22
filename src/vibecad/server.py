@@ -160,8 +160,8 @@ _SPEC_BY_NAME = {item.name: item for item in _PUBLIC_SPECS}
 _PUBLIC_TOOLS = tuple(
     types.Tool(
         name=item.name,
+        description=item.description,
         inputSchema=_thaw_json(item.input_schema),
-        outputSchema=_thaw_json(item.output_schema),
         annotations=types.ToolAnnotations(
             readOnlyHint=item.annotations.read_only,
             destructiveHint=item.annotations.destructive,
@@ -801,6 +801,67 @@ def _mcp_error(error: tuple[int, str]) -> McpError:
     return McpError(types.ErrorData(code=code, message=message))
 
 
+def _export_resource_links(envelope: dict[str, object]) -> list[types.ResourceLink]:
+    result = envelope.get("result")
+    if type(result) is not dict:
+        raise TypeError("export result is invalid")
+    materialization_id = result.get("materialization_id")
+    artifacts = result.get("artifacts")
+    if type(materialization_id) is not str or type(artifacts) is not list or len(artifacts) != 2:
+        raise TypeError("export artifacts are invalid")
+    expected = (
+        ("model.FCStd", "fcstd", "application/vnd.freecad.fcstd"),
+        ("model.step", "step", "model/step"),
+    )
+    fields = {
+        "schema_version",
+        "id",
+        "name",
+        "format",
+        "sha256",
+        "size_bytes",
+        "resource_uri",
+    }
+    links: list[types.ResourceLink] = []
+    seen_uris: set[str] = set()
+    for artifact, (expected_name, expected_format, mime_type) in zip(
+        artifacts, expected, strict=True
+    ):
+        if type(artifact) is not dict or set(artifact) != fields:
+            raise TypeError("export artifact is invalid")
+        artifact_id = artifact["id"]
+        name = artifact["name"]
+        artifact_format = artifact["format"]
+        size_bytes = artifact["size_bytes"]
+        resource_uri = artifact["resource_uri"]
+        if (
+            artifact["schema_version"] != _SCHEMA_VERSION
+            or type(artifact_id) is not str
+            or type(name) is not str
+            or name != expected_name
+            or type(artifact_format) is not str
+            or artifact_format != expected_format
+            or type(size_bytes) is not int
+            or size_bytes <= 0
+            or type(resource_uri) is not str
+            or resource_uri != f"vibecad://artifact/{materialization_id}/{artifact_id}"
+            or _RESOURCE_URI.fullmatch(resource_uri) is None
+            or resource_uri in seen_uris
+        ):
+            raise ValueError("export artifact is invalid")
+        seen_uris.add(resource_uri)
+        links.append(
+            types.ResourceLink(
+                type="resource_link",
+                name=name,
+                uri=resource_uri,
+                mimeType=mime_type,
+                size=size_bytes,
+            )
+        )
+    return links
+
+
 def _call_result(name: str, envelope: object) -> types.CallToolResult:
     try:
         if (
@@ -814,12 +875,17 @@ def _call_result(name: str, envelope: object) -> types.CallToolResult:
         ):
             raise _mcp_error(_TOOL_INTERNAL_ERROR)
         text = _canonical_json(envelope)
+        content: list[types.TextContent | types.ResourceLink] = [
+            types.TextContent(type="text", text=text)
+        ]
+        if name == "export_task_artifacts" and envelope["ok"] is True:
+            content.extend(_export_resource_links(envelope))
     except McpError:
         raise
     except BaseException:
         raise _mcp_error(_TOOL_INTERNAL_ERROR) from None
     return types.CallToolResult(
-        content=[types.TextContent(type="text", text=text)],
+        content=content,
         structuredContent=envelope,
         isError=envelope["ok"] is not True,
     )

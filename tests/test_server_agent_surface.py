@@ -1001,8 +1001,10 @@ def test_low_level_tools_list_is_exact_sdk_projection_of_public_specs() -> None:
     assert [tool.name for tool in result.tools] == [spec.name for spec in specs]
     for tool, spec in zip(result.tools, specs, strict=True):
         assert type(tool) is types.Tool
+        assert tool.description == spec.description
         assert tool.inputSchema == server._thaw_json(spec.input_schema)
-        assert tool.outputSchema == server._thaw_json(spec.output_schema)
+        assert tool.outputSchema is None
+        assert server._OUTPUT_SCHEMAS[tool.name] == server._validation_schema(spec.output_schema)
         assert type(tool.annotations) is types.ToolAnnotations
         assert (
             tool.annotations.readOnlyHint,
@@ -1015,6 +1017,57 @@ def test_low_level_tools_list_is_exact_sdk_projection_of_public_specs() -> None:
             spec.annotations.idempotent,
             spec.annotations.open_world,
         )
+
+
+def test_every_discovered_tool_has_a_nonempty_single_line_description() -> None:
+    result = anyio.run(_server_module()._handle_list_tools)
+
+    assert len(result.tools) == 20
+    for tool in result.tools:
+        assert type(tool.description) is str, tool.name
+        assert tool.description == tool.description.strip(), tool.name
+        assert tool.description, tool.name
+        assert "\n" not in tool.description and "\r" not in tool.description, tool.name
+
+
+def test_owned_tools_list_fixed_frame_fits_the_discovery_budget() -> None:
+    from vibecad import mcp_transport
+
+    server = _server_module()
+    descriptor = mcp_transport.prevalidate_client_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+    )
+
+    response = server._owned_dispatch_descriptor(descriptor)
+    assert response is not None
+    frame = mcp_transport.OwnedStdioRunner._encoded_response(response)
+    assert frame == (
+        json.dumps(
+            response,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    assert response["id"] == 1
+    assert len(frame) <= 65_536
+
+
+def test_discovery_omits_optional_output_schema_from_every_tool() -> None:
+    from vibecad import mcp_transport
+
+    server = _server_module()
+    descriptor = mcp_transport.prevalidate_client_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+    )
+
+    response = server._owned_dispatch_descriptor(descriptor)
+    assert response is not None
+    tools = response["result"]["tools"]
+    assert len(tools) == 20
+    assert all("outputSchema" not in tool for tool in tools)
 
 
 def test_owned_dispatch_manually_initializes_and_uses_typed_sdk_handlers() -> None:
@@ -1626,6 +1679,160 @@ def test_call_result_has_exact_structured_and_canonical_text_envelope() -> None:
             ),
         )
     ]
+
+
+def test_internal_output_validation_remains_when_discovery_omits_output_schema(
+    monkeypatch,
+) -> None:
+    from mcp.shared.exceptions import McpError
+
+    server = _server_module()
+    monkeypatch.setattr(
+        server,
+        "ping",
+        lambda: {"schema_version": 1, "service": "vibecad"},
+    )
+
+    with pytest.raises(McpError) as caught:
+        anyio.run(server._handle_call_tool, "ping", {})
+
+    assert (caught.value.error.code, caught.value.error.message) == (
+        -32603,
+        "Tool request could not be completed.",
+    )
+
+
+def _successful_export_envelope() -> dict[str, object]:
+    materialization_id = "materialization_" + "a" * 64
+    model_id = "artifact_" + "b" * 32
+    step_id = "artifact_" + "c" * 32
+    artifacts = [
+        {
+            "schema_version": 1,
+            "id": model_id,
+            "name": "model.FCStd",
+            "format": "fcstd",
+            "sha256": "d" * 64,
+            "size_bytes": 1_024,
+            "resource_uri": f"vibecad://artifact/{materialization_id}/{model_id}",
+        },
+        {
+            "schema_version": 1,
+            "id": step_id,
+            "name": "model.step",
+            "format": "step",
+            "sha256": "e" * 64,
+            "size_bytes": 2_048,
+            "resource_uri": f"vibecad://artifact/{materialization_id}/{step_id}",
+        },
+    ]
+    return {
+        "schema_version": 1,
+        "ok": True,
+        "result": {
+            "schema_version": 1,
+            "export_key": "export_0123456789abcdef0123456789abcdef",
+            "materialization_id": materialization_id,
+            "source_kind": "committed",
+            "task_id": TASK_ID,
+            "task_generation": 0,
+            "project_id": PROJECT_ID,
+            "revision_id": BASE_REVISION,
+            "manifest_sha256": "f" * 64,
+            "authoritative": False,
+            "artifacts": artifacts,
+        },
+        "error": None,
+    }
+
+
+def _export_arguments() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "export_key": "export_0123456789abcdef0123456789abcdef",
+        "task_id": TASK_ID,
+        "expected_generation": 0,
+        "revision_id": BASE_REVISION,
+        "draft_id": None,
+    }
+
+
+def test_successful_export_returns_text_and_exact_typed_resource_links(monkeypatch) -> None:
+    from mcp import types
+
+    server = _server_module()
+    envelope = _successful_export_envelope()
+    calls: list[dict[str, object]] = []
+
+    class ExportApplication:
+        def export_task_artifacts_request(self, arguments):
+            calls.append(arguments)
+            return envelope
+
+    class ReadySlot:
+        def get(self):
+            return ExportApplication()
+
+    monkeypatch.setattr(server, "_application_slot", ReadySlot())
+    monkeypatch.setattr(server, "_application_runtime_guard", lambda: None)
+
+    result = anyio.run(server._handle_call_tool, "export_task_artifacts", _export_arguments())
+
+    assert result.isError is False
+    assert calls == [_export_arguments()]
+    assert len(result.content) == 3
+    assert type(result.content[0]) is types.TextContent
+    assert result.content[0].text == json.dumps(
+        envelope,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    links = result.content[1:]
+    assert all(type(item) is types.ResourceLink for item in links)
+    artifacts = envelope["result"]["artifacts"]
+    assert [item.model_dump(by_alias=True, exclude_none=True, mode="json") for item in links] == [
+        {
+            "name": artifacts[0]["name"],
+            "uri": artifacts[0]["resource_uri"],
+            "mimeType": "application/vnd.freecad.fcstd",
+            "size": artifacts[0]["size_bytes"],
+            "type": "resource_link",
+        },
+        {
+            "name": artifacts[1]["name"],
+            "uri": artifacts[1]["resource_uri"],
+            "mimeType": "model/step",
+            "size": artifacts[1]["size_bytes"],
+            "type": "resource_link",
+        },
+    ]
+
+
+def test_resource_links_never_appear_on_failed_export_or_other_tools(monkeypatch) -> None:
+    from mcp import types
+
+    server = _server_module()
+
+    class FailingApplication:
+        def export_task_artifacts_request(self, _arguments):
+            return _internal_envelope()
+
+    class ReadySlot:
+        def get(self):
+            return FailingApplication()
+
+    monkeypatch.setattr(server, "_application_slot", ReadySlot())
+    monkeypatch.setattr(server, "_application_runtime_guard", lambda: None)
+
+    failed = anyio.run(server._handle_call_tool, "export_task_artifacts", _export_arguments())
+    other = anyio.run(server._handle_call_tool, "ping", {})
+
+    assert failed.isError is True
+    assert [type(item) for item in failed.content] == [types.TextContent]
+    assert other.isError is False
+    assert [type(item) for item in other.content] == [types.TextContent]
 
 
 def test_unknown_and_invalid_tools_are_fixed_and_never_open_application(monkeypatch) -> None:

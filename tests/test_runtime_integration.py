@@ -57,8 +57,8 @@ def _expected_tool_projection() -> list[dict[str, object]]:
     return [
         {
             "name": item.name,
+            "description": item.description,
             "inputSchema": _thaw_json(item.input_schema),
-            "outputSchema": _thaw_json(item.output_schema),
             "annotations": {
                 "readOnlyHint": item.annotations.read_only,
                 "destructiveHint": item.annotations.destructive,
@@ -94,7 +94,7 @@ def _assert_fresh_unpacked_package(unpacked: Path) -> None:
         "pyproject.toml",
         "uv.lock",
     }
-    assert {path.name for path in unpacked.iterdir()} == {*fixed_files, "src"}
+    assert {path.name for path in unpacked.iterdir()} == {*fixed_files, "skills", "src"}
     source_root = unpacked / "src"
     package_root = source_root / "vibecad"
     assert source_root.is_dir() and not source_root.is_symlink()
@@ -119,6 +119,23 @@ def _assert_fresh_unpacked_package(unpacked: Path) -> None:
         assert path.is_file() and path.suffix == ".py"
         packaged_source[path.relative_to(package_root).as_posix()] = _sha256_path(path)
     assert packaged_source == checked_in_source
+
+    checked_in_skill_root = repository / "skills" / "vibecad-agent"
+    packaged_skill_root = unpacked / "skills" / "vibecad-agent"
+    assert packaged_skill_root.is_dir() and not packaged_skill_root.is_symlink()
+    checked_in_skill = {
+        path.relative_to(checked_in_skill_root).as_posix(): _sha256_path(path)
+        for path in checked_in_skill_root.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+    packaged_skill: dict[str, str] = {}
+    for path in packaged_skill_root.rglob("*"):
+        assert not path.is_symlink()
+        if path.is_dir():
+            continue
+        assert path.is_file()
+        packaged_skill[path.relative_to(packaged_skill_root).as_posix()] = _sha256_path(path)
+    assert packaged_skill == checked_in_skill
     assert not (unpacked / ".venv").exists(), "acceptance requires a newly unpacked package"
 
 
@@ -707,7 +724,7 @@ def test_unpacked_mcpb_agent_first_stdio_acceptance(tmp_path):
     assert not installed_file.is_relative_to(unpacked / "src")
     assert identity_payload["mcp"] == "1.27.2"
     assert identity_payload["vibecad"] == manifest["version"]
-    assert identity_payload["epoch"] == spec.SERVER_PACKAGE_EPOCH == 3
+    assert identity_payload["epoch"] == spec.SERVER_PACKAGE_EPOCH == 4
     assert canary not in identity.stderr
 
     # Enable root DEBUG without putting either the checkout or the unpacked
@@ -755,13 +772,38 @@ def test_unpacked_mcpb_agent_first_stdio_acceptance(tmp_path):
         }
         _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
 
-        tools_response = _rpc(proc, 1, "tools/list", timeout=60.0)
+        _send(proc, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+        tools_frame = _read_line(proc, 60.0)
+        assert tools_frame.endswith(b"\n")
+        assert len(tools_frame) <= 65_536
+        tools_response = json.loads(tools_frame)
+        assert tools_frame == (
+            json.dumps(
+                tools_response,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
         listed_tools = tools_response["result"]["tools"]
         expected_tools = _expected_tool_projection()
+        assert tools_response["id"] == 1
+        assert len(listed_tools) == 20
         assert [item["name"] for item in listed_tools] == [
             item["name"] for item in manifest["tools"]
         ]
         assert listed_tools == expected_tools
+        assert all(
+            type(item["description"]) is str
+            and item["description"]
+            and item["description"] == item["description"].strip()
+            and "\n" not in item["description"]
+            and "\r" not in item["description"]
+            for item in listed_tools
+        )
+        assert all("outputSchema" not in item for item in listed_tools)
         assert _rpc(proc, 2, "resources/list")["result"]["resources"] == []
         templates = _rpc(proc, 3, "resources/templates/list")["result"]["resourceTemplates"]
         assert len(templates) == 1
@@ -863,48 +905,78 @@ def test_unpacked_mcpb_agent_first_stdio_acceptance(tmp_path):
             separators=(",", ":"),
             sort_keys=True,
         )
-        terminal = _successful_public_result(
-            _call_tool_with_arguments(
-                proc,
-                6,
-                "create_box",
-                {
-                    "schema_version": 1,
-                    "task_id": task_id,
-                    "expected_generation": task["generation"],
-                    "target": {},
-                    "arguments": {
-                        "length_mm": 10,
-                        "width_mm": 20,
-                        "height_mm": 30,
-                        "position_mm": [0, 0, 0],
-                    },
-                    "preserve": [],
-                    "acceptance_json": acceptance,
+        terminal_response = _call_tool_with_arguments(
+            proc,
+            6,
+            "create_box",
+            {
+                "schema_version": 1,
+                "task_id": task_id,
+                "expected_generation": task["generation"],
+                "target": {},
+                "arguments": {
+                    "length_mm": 10,
+                    "width_mm": 20,
+                    "height_mm": 30,
+                    "position_mm": [0, 0, 0],
                 },
-                timeout=300.0,
-            )
+                "preserve": [],
+                "acceptance_json": acceptance,
+            },
+            timeout=300.0,
         )
+        terminal = _successful_public_result(terminal_response)
+        assert [item["type"] for item in terminal_response["result"]["content"]] == ["text"]
         assert terminal["task_run"]["status"] == "succeeded"
         committed_revision = terminal["task_run"]["committed_revision"]
-        exported = _successful_public_result(
-            _call_tool_with_arguments(
-                proc,
-                7,
-                "export_task_artifacts",
-                {
-                    "schema_version": 1,
-                    "export_key": f"export_{nonce}",
-                    "task_id": task_id,
-                    "expected_generation": terminal["generation"],
-                    "revision_id": committed_revision,
-                    "draft_id": None,
-                },
-                timeout=300.0,
-            )
+        export_response = _call_tool_with_arguments(
+            proc,
+            7,
+            "export_task_artifacts",
+            {
+                "schema_version": 1,
+                "export_key": f"export_{nonce}",
+                "task_id": task_id,
+                "expected_generation": terminal["generation"],
+                "revision_id": committed_revision,
+                "draft_id": None,
+            },
+            timeout=300.0,
         )
+        exported = _successful_public_result(export_response)
         assert exported["source_kind"] == "committed"
         assert [item["format"] for item in exported["artifacts"]] == ["fcstd", "step"]
+        export_wire = export_response["result"]
+        assert export_wire["content"][0] == {
+            "type": "text",
+            "text": json.dumps(
+                export_wire["structuredContent"],
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        }
+        assert export_wire["content"][1:] == [
+            {
+                "type": "resource_link",
+                "name": exported["artifacts"][0]["name"],
+                "uri": exported["artifacts"][0]["resource_uri"],
+                "mimeType": "application/vnd.freecad.fcstd",
+                "size": exported["artifacts"][0]["size_bytes"],
+            },
+            {
+                "type": "resource_link",
+                "name": exported["artifacts"][1]["name"],
+                "uri": exported["artifacts"][1]["resource_uri"],
+                "mimeType": "model/step",
+                "size": exported["artifacts"][1]["size_bytes"],
+            },
+        ]
+        expected_mime_types = {
+            "fcstd": "application/vnd.freecad.fcstd",
+            "step": "model/step",
+        }
         for offset, artifact in enumerate(exported["artifacts"], start=8):
             resource = _rpc(
                 proc,
@@ -916,9 +988,29 @@ def test_unpacked_mcpb_agent_first_stdio_acceptance(tmp_path):
             assert len(resource) == 1
             content = resource[0]
             assert content["uri"] == artifact["resource_uri"]
+            assert content["mimeType"] == expected_mime_types[artifact["format"]]
             raw = base64.b64decode(content["blob"], validate=True)
             assert len(raw) == artifact["size_bytes"]
             assert hashlib.sha256(raw).hexdigest() == artifact["sha256"]
+
+        failed_export = _call_tool_with_arguments(
+            proc,
+            10,
+            "export_task_artifacts",
+            {
+                "schema_version": 1,
+                "export_key": f"export_failed_{nonce}",
+                "task_id": task_id,
+                "expected_generation": terminal["generation"] + 1,
+                "revision_id": committed_revision,
+                "draft_id": None,
+            },
+            timeout=180.0,
+        )
+        failed_export_result = failed_export["result"]
+        assert failed_export_result["isError"] is True
+        assert failed_export_result["structuredContent"]["ok"] is False
+        assert [item["type"] for item in failed_export_result["content"]] == ["text"]
 
         # Real DEBUG-mode negative traffic must remain fixed and path/input free.
         # Keep every request on the live packed stdio path: protocol framing,
@@ -975,6 +1067,14 @@ def test_unpacked_mcpb_agent_first_stdio_acceptance(tmp_path):
                 "code": -32602,
                 "message": "Artifact resource identifier is invalid.",
             },
+        }
+
+        removed_legacy_tool = _call_tool_with_arguments(proc, 24, "add_box", {})
+        negative_responses.append(removed_legacy_tool)
+        assert removed_legacy_tool == {
+            "jsonrpc": "2.0",
+            "id": 24,
+            "error": {"code": -32602, "message": "Tool name is not available."},
         }
         assert canary not in json.dumps(
             negative_responses,

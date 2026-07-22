@@ -1,336 +1,361 @@
-# VibeCAD 验收测试方案
+# VibeCAD 0.5.0 Beta 验收测试
 
-> **Legacy 验收清单，禁止用于当前放行。** 本文冻结的是旧 31-tool Session 产品，和 S3-7 后的
-> Agent-first `Project → Task → ModelProgram/direct → Draft/Accept/Reject → Artifact resource` 公共面不
-> 一致。S3-8 会重写为 0.5.0 的宿主、恢复和 FCStd/STEP 验收；当前自动化事实见
-> [`orchestrated/vibecad-agent-stage3.md`](orchestrated/vibecad-agent-stage3.md)。
+本清单验证当前 Agent-first 产品：持久化 Project/Task/Revision/Draft/Artifact、20 个公开工具、direct
+operation 与 ModelProgram 的统一 Task Kernel，以及可验证的 FCStd/STEP 资源交付。
 
-> 版本：0.4.0。对应实现状态：自动安装 + 零重连换芯 + 装配 DSL + FCStd 项目保存/打开 + 布尔运算 + 删除/撤销/重做 + 测量，共 31 个 MCP 工具。
-> 配套阅读：[`README.md`](../README.md) 工具表、[`docs/USER_GUIDE.md`](USER_GUIDE.md) 用户手册。
+放行结论必须区分：
 
-## 使用说明
+- **protocol/package host-ready**：本地 raw/typed MCP、Skill 包、受管 FreeCAD 与打包后会话全部通过；
+- **host-verified**：真实 Claude/Codex 等第二宿主使用外部模型执行同一任务并通过。
 
-- **怎么跑**：建议按 A1 → A18 顺序执行（场景间有剧本依赖，见「剧本分组」）。每完成一条，在总表「通过」列打勾 ☑。
-- **可中断续跑**：A1–A3（环境三条）只需跑一次；A4 起每组场景开头都会新建或重新打开文档，从任一组的第一条（A4 / A7 / A8 / A9 / A15 / A16）都能重新接上，不必从头再来；A17 需要旧版健康运行时，可单独安排；A18（卸载）建议放在其余场景全部跑完后再做，因为会清空运行时。
-- **失败怎么办**：先看该场景细则里的「若失败」行；**失败时务必截图**（保留 AI 的原始回复与图），按 B 部分末尾的「问题上报模板」记录，然后继续跑下一条——一条失败不阻塞其余场景。
-- **判定口径**：细则中「图上看到」的内容与尺寸数字是**硬标准**（必须满足）；「AI 会说」的体积等数字是**软标准**（AI 可换说法，数值对上即可，±1 mm³ 内舍入差异不计）。AI 话术不必逐字匹配，把事实正确传达给你即为通过。
+0.5.0 Beta 的当前放行范围是前者。未授权外部模型/API 消耗，因此不能把本清单的本地模拟、测试
+double 或当前控制器执行写成 host-verified 证据。
 
----
+## 1. 冻结产品口径
 
-## A 部分：Claude Cowork 对话验收（18 场景）
+### 1.1 公开工具
 
-### 剧本分组
+运行时 `tools/list` 与 MCPB manifest 必须同序公开以下 20 个唯一名称：
 
-| 分组 | 场景 | 工作文档 | 说明 |
-|---|---|---|---|
-| 环境 | A1–A3 | 无 | 握手 → 自动安装 → 零重连冒烟，只需跑一次 |
-| 单零件基础 | A4–A6 | Demo1 | 盒子 → 打孔 → 改尺寸，连续剧本 |
-| 阵列 | A7 | Demo2 | 独立新文档（避免与 A5 的孔重叠触发"全有全无"拒绝） |
-| 挖槽 | A8 | Demo3 | 独立新文档（避免槽撞上 A7 的阵列孔） |
-| 装配 | A9–A12 | Demo4 | 装配 → 干涉保护 → 导出 → 错误恢复，连续剧本 |
-| 项目与编辑 | A13–A14 | Demo4 | FCStd 保存/打开与未保存保护 → 撤销/重做/依赖删除 |
-| 布尔运算 | A15 | Demo5 | fuse/common + 显式结果根 |
-| 测量 | A16 | Demo6 | summary/distance/angle/thickness 四种模式 |
-| 版本升级 | A17 | 无 | 旧健康 FreeCAD 运行时仅同步 pip server，不重下引擎 |
-| 卸载 | A18 | 无 | 两段式确认删引擎 + CLI 救援命令，放最后跑（会清空运行时） |
+| 类别 | 工具 |
+|---|---|
+| 运行时 | `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime` |
+| 能力 | `get_capabilities` |
+| 项目 | `create_project`, `get_project` |
+| 任务 | `create_task`, `get_task`, `submit_model_program`, `resume_task` |
+| 审核 | `accept_draft`, `reject_draft` |
+| 交付 | `export_task_artifacts` |
+| direct CAD | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
 
-### 验收总表
+每个工具必须有非空、单行、有界说明，严格输入 schema 和 annotations。MCP discovery 不重复可选
+output schema，但服务端内部必须继续使用完整冻结 output schema 验证每次结果。
 
-| 编号 | 场景 | 你说的话（可照念） | 预期结果（详见细则） | 通过 |
-|---|---|---|---|---|
-| A1 | 安装与握手 | （双击安装 `VibeCAD.mcpb` 后，**不额外说任何安装指令**）"先 ping 一下 VibeCAD，告诉我现在有哪些 CAD 工具可用。" | 设置→扩展可见 VibeCAD 且已启用；ping 回 `vibecad ok (v0.4.0)`；新对话能列出 31 个工具 | ☐ |
-| A2 | 自动安装中 | （紧接 A1，全程**不说"帮我准备好 CAD 环境"等安装指令**）"进度怎么样？" | AI 回自动安装**已经在后台进行中**（首次对话即自动触发，无需手动调用 `ensure_runtime`），阶段递进、带百分比，约 5–20 分钟 | ☐ |
-| A3 | 零重连冒烟 | 等 A2 到 `ready`（可持续追问"好了吗"），装好后**同一个对话里直接**说："做个冒烟测试。" | **不提示重连、不需要新开对话或重启客户端**，当场自动切换到建模引擎并返回冒烟结果：体积 1000、包围盒 [10,10,10] | ☐ |
-| A4 | 第一个盒子 | （零重连换芯后**不重启对话**）"新建文档 Demo1，画一个 60×40×10 的底板。" | 自动回工程图拼图，图上可读 60、40、10 三个尺寸数字；回复中带 `view_file` 本地路径，让 AI 打开该文件应能在 Cowork 中看到同一张图 | ☐ |
-| A5 | 标注指代打孔 | "在底板顶面正中打一个直径 8 的通孔。" | 图上 ⌀8 + 中心线，定位尺寸居中（30 和 20） | ☐ |
-| A6 | 改尺寸 | "把底板长度改成 80。" | 图上长度数字 60 当场变 80，孔不丢 | ☐ |
-| A7 | 线性阵列 4 孔 | "重新开个文档 Demo2，画一块 80×40×10 的板，在顶面沿长边方向打一排 4 个直径 6 的通孔，间距 15，整排居中。" | 俯视一排 4 个 ⌀6 孔，孔心等距 15，整排居中 | ☐ |
-| A8 | slot 挖槽 | "再开个文档 Demo3，画一块 40×30×12 的块，在顶面正中挖一条 20×8 的槽，深 5。" | 俯视跑道形轮廓居中，深 5 | ☐ |
-| A9 | 装配 | 分三句（见细则）：建底板 → 新建零件盖板 → "把盖板的底面贴到底板的顶面上。" | iso 格两零件分色，front 总高 16，干涉清单为空 | ☐ |
-| A10 | 干涉保护 | "把盖板往下压 2 毫米。" | 响亮拒绝：报底板↔盖板重叠约 4800 mm³，操作已撤销 | ☐ |
-| A11 | 导出 | "把这个装配导出 STEP 和 STL，存到桌面的 vibecad_out 文件夹；STEP 再按零件拆分各导一份。" | 落盘 Demo4.step / Demo4.stl / Demo4_盖板.step 等，大小非 0 | ☐ |
-| A12 | 错误恢复 | 分三句（见细则）：打孔成功 → "在这个孔的内壁上再打一个 2 毫米的小孔。" → 改孔径成功 | 第二句被响亮拒绝（只能在平面上打孔），对话可继续 | ☐ |
-| A13 | FCStd 保存与打开 | "把当前项目保存成 Demo4.FCStd" → 制造未保存修改 → 尝试新建/打开 → 明确确认丢弃后打开 | 文件非空；默认拒绝丢弃未保存更改；显式确认后恢复保存时的几何、零件、放置、活动零件和结果根；标签与撤销历史不跨文件恢复 | ☐ |
-| A14 | 撤销、重做与删除 | 改一次尺寸并撤销/重做；尝试删除有依赖的对象；确认级联删除后再撤销 | undo/redo 几何与结果根同步；默认删除拒绝并列出依赖；`cascade=true` 才级联；撤销可恢复 | ☐ |
-| A15 | 布尔 fuse/common | 新建两个相交盒子，先求并集，撤销后再求交集 | 并集体积 6000 mm³、交集体积 2000 mm³；`Fuse` / `Common` 成为显式结果根，输入对象不误算为顶层结果 | ☐ |
-| A16 | 四类测量 | 对 60×40×10 盒子依次做 summary、两面的 distance、相邻面的 angle、平行面的 thickness | summary 数值正确；距离/厚度 10 mm；夹角 90°；厚度只接受显式选择的平行平面标签 | ☐ |
-| A17 | 原地升级运行时 | 在健康的旧版 FreeCAD env 上安装 0.4.0 包并观察状态与日志 | 只经历 `installing_pip → verifying → ready`，不重建/重下 2–3GB FreeCAD；JSON receipt 与 server 均升级到 0.4.0 | ☐ |
-| A18 | 卸载 | 对话里说"把 CAD 引擎卸载了"（预览）→ 确认 → 观察目录；另跑一次命令行 `uvx vibecad --uninstall --yes` | 第一次调用只预览路径与大小、不删除；确认后**当场自动完成删除**（无需手动重启），运行时目录消失；CLI 命令同样能清空目录且退出码为 0 | ☐ |
+### 1.2 一个写入权威
 
-### 场景细则
-
-#### A1 安装与握手
-
-- **前置**：从发布页 <https://github.com/wangtao9090/VibeCAD/releases/latest> 下载 `VibeCAD.mcpb`，**双击安装**（弹出安装窗口后点安装；双击无反应则走设置→扩展→Advanced settings→Install Extension… 手动选文件，详见用户手册第三章），完成后重启 Claude Desktop / Cowork。
-- **你说**：**不要**先说"帮我准备好 CAD 环境"之类的安装指令，直接说："先 ping 一下 VibeCAD，告诉我现在有哪些 CAD 工具可用。"
-- **预期**：
-  - **设置（Settings）→ 扩展（Extensions）** 列表中可见 **VibeCAD**，且处于**已启用**状态；
-  - `ping` 返回 **`vibecad ok (v0.4.0)`**；
-  - 新对话中 AI 列出的工具应包含 `ensure_runtime`、`get_runtime_status`、`smoke_cad`、`add_box`、`set_active_part`、`save_project`、`open_project`、`delete_object`、`undo`、`redo`、`boolean_fuse`、`boolean_common`、`measure`、`export_part`、`uninstall_runtime` 等，全量 **31 个**。
-- **若失败**：
-  - 先看**设置→扩展**里 VibeCAD 是否在列、是否启用——不在列说明安装包没装上（双击无反应改走手动安装路径），灰着没启用就点开启用；
-  - 安装窗口始终不弹出，多半是 Claude Desktop 版本过旧，更新到最新版后重装；
-  - 列表里有但工具看不到，查扩展日志定位——macOS 扩展安装/日志目录：`~/Library/Application Support/Claude/Claude Extensions/local.mcpb.wang-tao.vibecad/`（Windows 路径见后续验证补充），把相关报错片段连同截图一起记录上报。
-
-#### A2 自动安装中
-
-- **前置**：紧接 A1，**全程不要主动说"帮我准备好 CAD 环境"或调用 `ensure_runtime`**——本场景验证的正是"不用手动触发也会自动装"。
-- **你说**："进度怎么样？"
-- **预期**：
-  - AI 查 `get_runtime_status`，回你安装**已经在后台自动进行中**（manifest 里 `VIBECAD_AUTO_INSTALL=1` 使 server 启动即自动开始安装，全程无需任何一方调用 `ensure_runtime`）；
-  - 阶段依次递进：`downloading_micromamba → creating_env → installing_pip → verifying → ready`，并向你播报百分比；
-  - 全程约 **5–20 分钟**（视网速），期间对话不卡死，可正常聊别的，随时追问进度都行。
-- **若失败**：若 `get_runtime_status` 显示 `phase=not_started`（安装根本没自动开始）——多半是这次运行的不是 .mcpb 扩展包（比如手动 uvx 场景，那种默认不自动装，需要手动 `ensure_runtime`，属预期而非 bug，见附录 A）；网络不通（GitHub / conda-forge）、磁盘不足 5GB、或上次安装中断留下陈旧锁——收集 `phase`/`error` 字段与 `<VIBECAD_HOME>/status.json` 内容、磁盘剩余空间；陈旧锁可删 `<VIBECAD_HOME>/.install.lock` 后重试。
-
-#### A3 零重连冒烟
-
-- **你说**：（等 A2 到 `ready` 后，**同一个对话里直接说，不新开对话、不重启客户端**）"做个冒烟测试。"
-- **预期**：
-  - **不会**提示"请重连"或"需要重启"——服务端在运行时就绪的瞬间已经自己完成了解释器切换（监督进程"换芯"），这一切发生在幕后，你感觉不到任何中断；
-  - `smoke_cad` 直接返回 `ok: true`、**体积 1000**、**包围盒 [10, 10, 10]**（进程内造了 10×10×10 方块并导出 STEP）。
-- **若失败**：若 AI 回复里出现"请重连/重启 vibecad MCP 连接"字样，属已知回退分支（多见于非标准运行方式，如裸 `python -m vibecad.server` 直跑、或运行时装了一半就被换了 Python），按提示重连一次仍能继续；标准 .mcpb 安装路径下不应触发此分支，若触发请连同 `get_runtime_status` 全字段与 AI 回复原文一并上报。
-
-#### A4 第一个盒子
-
-- **你说**：（**不重启对话、不做任何"重连"操作**，直接在 A3 的同一个对话里继续）"新建文档 Demo1，画一个 60×40×10 的底板。"
-- **预期**：
-  - **无需你索要，自动回一张 2×2 工程图拼图**：front / right / top 三格工程图（可见轮廓实线）+ iso 立体格（面片渲染 + 尺寸线）；
-  - 图上可读到 **60、40、10 三个尺寸数字**；
-  - AI 汇报体积 **24000 mm³**，并知道可改参数（Box 的 length / width / height，来自返回的 `parts` 清单）；
-  - 返回结果里带 **`view_file`**（本地 PNG 绝对路径，每步自动落盘）——让 AI"把这张图打开给我看"，应能在 Cowork 里看到与内联返回一致的工程图。
-- **若失败**：运行时未就绪（回到 A2/A3）；若操作成功但带 `render_error` 字段（建模成功、附图失败不连坐）——记录 AI 回复全文与 `render_error` 内容，这是降级不是建模失败；`view_file` 打不开则检查路径是否存在、`view_file_error` 字段是否有落盘失败原因。
-
-#### A5 标注指代打孔
-
-- **你说**："在底板顶面正中打一个直径 8 的通孔。"
-- **预期**：
-  - AI 通常先出**面标注图**（可见面贴 A/B/C… 字母标签 + 标签表）确认"顶面"是哪个标签，再调 `add_hole`；
-  - 新工程图俯视格出现圆孔：**⌀8 标注 + 红色点划中心线**，定位尺寸**居中**（孔心到两边 **30** 和 **20**）；front / right 格中孔为**虚线**（通孔贯穿）；
-  - 体积降为约 **23497 mm³**（24000 − π·4²·10 ≈ 502.7）。
-- **若失败**：「标签已过期，请重新标注」是指纹保护不是故障——让 AI 重新出标注图再试；AI 选错面则收集标注图、标签表和它实际传的 `face` 参数。
-
-#### A6 改尺寸
-
-- **你说**："把底板长度改成 80。"
-- **预期**：
-  - AI 调 `modify_part("Box", "length", 80)`，FreeCAD 依赖链自动重算；
-  - **图上长度尺寸数字 60 当场变成 80**，孔等特征不丢；
-  - 孔的定位尺寸 30 保持不变（孔位置是绝对坐标，板加长后孔不再居中——属预期，AI 可主动说明）；
-  - 体积约 **31497 mm³**。
-- **若失败**：参数名不在 `parts` 清单，或危险修改被几何守卫响亮拒绝并回滚（属正常保护）——收集 AI 回复原文（含拒绝理由）与上一步返回的 `parts` 字段。
-
-#### A7 线性阵列 4 孔
-
-- **你说**："重新开个文档 Demo2，画一块 80×40×10 的板，在顶面沿长边方向打一排 4 个直径 6 的通孔，间距 15，整排居中。"
-- **预期**：
-  - 工程图俯视格出现**一排 4 个 ⌀6 圆孔**，各带中心线，**孔心间距等距 15**（定位尺寸链可读），整排关于板中心对称（孔心 x ≈ 17.5 / 32.5 / 47.5 / 62.5）；
-  - 阵列是**全有全无**：要么 4 孔全部成功，要么整体拒绝回滚，不会出现"打了一半"的残局；
-  - 体积约 **30869 mm³**（32000 − 4×π·3²·10）。
-- **若失败**：阵列越界或孔间重叠被拒（报错含"孔可能与零件边缘相交成开口缺口、孔间重叠…"），AI 应自行调整偏移重试——收集它实际传的 `offset`/`pattern` 参数与拒绝报错原文。
-
-#### A8 slot 挖槽
-
-- **你说**："再开个文档 Demo3，画一块 40×30×12 的块，在顶面正中挖一条 20×8 的槽，深 5。"
-- **预期**：
-  - 工程图**俯视格出现跑道形轮廓**（两端半圆的长槽）居中；front / right 格可见深 5 的凹槽虚线；
-  - 体积从 14400 减少约 **1051 mm³**——slot 的 `length` 定义为两端半圆的**圆心距**（外形总长 = 20+8 = 28）；若 AI 按"外形总长 20"理解去建槽，则减少约 731 mm³。**两者都几何正确，以「跑道形轮廓 + 深 5」为硬标准**，体积为软标准。
-- **若失败**：slot 尺寸语义分歧导致越界，或 pocket 打穿被体积双边核算拒绝——收集 AI 实际传的 `profile`/`height` 参数与拒绝报错原文。
-
-#### A9 装配
-
-- **你说**（分三句）：
-  1. "开个新文档 Demo4，画一个 60×40×10 的底板。"
-  2. "新建一个零件叫盖板，在里面画一块 60×40×6 的板。"
-  3. "把盖板的底面贴到底板的顶面上。"
-- **预期**：
-  - 第 2 句 `new_part` 后，文档中已有几何自动归入隐式零件 **Part1**（底板），盖板成为活动零件；
-  - 第 3 句 AI 对两个零件分别出面标注图后调 `align_parts`；成功后工程图 **iso 格两零件分色**显示；
-  - front 视图**总高 16**（10+6），两零件上下相接、无缝隙；
-  - AI 汇报**干涉清单为空**（面接触不算干涉）。
-- **若失败**：贴面前未对两零件分别标注、跨零件面标签解析失败——收集两零件各自的标注图与标签表、`align_parts` 实际参数与报错原文。
-
-#### A10 干涉保护
-
-- **你说**："把盖板往下压 2 毫米。"
-- **预期**：
-  - **操作被响亮拒绝**：AI 告知发生装配干涉，**底板↔盖板重叠约 4800 mm³**（60×40×2；报错原文形如 `装配干涉…底板↔盖板(4800.000mm³)——零件重叠，请调整位置或使用 allow_interference=True 放行`）；
-  - **操作已回滚**——盖板位置不变（可让 AI 重渲一张图确认 front 总高仍为 16）；
-  - AI **不会**静默放行，也**不应**未经你同意擅自加 `allow_interference=True` 重试。
-- **若失败**：**若操作被放行（没报干涉）= 严重 bug，立即上报**；若干涉量明显不是 4800±1，记录数值——收集 AI 回复全文、干涉报错原文、随后重渲的工程图。
-
-#### A11 导出
-
-- **你说**："把这个装配导出 STEP 和 STL，存到桌面的 vibecad_out 文件夹；STEP 再按零件拆分各导一份。"
-- **预期**：
-  - AI 返回**落盘文件路径**：整体 `Demo4.step` 与 `Demo4.stl`；按零件拆分得 `Demo4_盖板.step` 与 `Demo4_Part1.step`（底板未单独命名时零件名为 Part1）；
-  - 到文件夹里确认文件**存在且大小非 0**（导出有后置断言，空文件会被报错而非静默）。
-- **若失败**：目标目录无写权限、路径写法问题（Windows 注意盘符与反斜杠）、中文文件名在个别文件系统异常——收集 `export_part` 返回的路径字段、目标文件夹截图、操作系统与文件系统类型。
-
-#### A12 错误恢复
-
-- **你说**（分三句）：
-  1. "在盖板顶面正中打一个直径 5 的孔。"（应成功）
-  2. "在这个孔的内壁上再打一个 2 毫米的小孔。"
-  3. "好吧，那把刚才的孔改成直径 6。"
-- **预期**：
-  - 第 2 句被**响亮拒绝**：孔壁是圆柱面，报错原文含"**只能在平面上打孔**"（或 AI 直接解释孔壁是曲面、无法作为打孔基准而不调用工具）；**绝不会**静默把孔打在别的面上；
-  - 第 3 句正常成功：`modify_part` 把孔改成 ⌀6，**图上 ⌀5 变 ⌀6**——证明**拒绝之后对话与模型状态完好，可继续工作**。
-- **若失败**：**若第二句没被拒绝、孔被打在了某个平面上 = 严重 bug，立即上报**；第三句失败则核对参数名——收集三句各自的 AI 回复全文与图。
-
-#### A13 FCStd 保存、未保存保护与打开
-
-- **前置**：紧接 A12；Demo4 中已有底板、盖板和孔，且当前文档有尚未保存的修改。准备一个你有写权限的绝对路径，例如 macOS 的 `~/Desktop/vibecad_out/Demo4.FCStd` 或 Windows 的 `C:\Users\<用户名>\Desktop\vibecad_out\Demo4.FCStd`。
-- **你说**（分四步）：
-  1. "把当前项目保存成桌面 vibecad_out 目录里的 Demo4.FCStd。"
-  2. "把盖板厚度改成 8，然后另开一个新文档 Temp。"
-  3. "那就直接重新打开刚才保存的 Demo4.FCStd。"
-  4. "我确认丢弃当前未保存的修改，打开 Demo4.FCStd。"
-- **预期**：
-  - 第 1 步 `save_project` 成功，返回规范化的 `.FCStd` 路径；文件存在且大小非 0。保存内容包含当前活动零件和显式结果根；
-  - 第 2 步的尺寸修改成功，但紧接着不带 `discard_unsaved=true` 的 `new_document` **必须拒绝**，明确提示当前文档有未保存更改；Demo4 保持打开且厚度仍为 8；
-  - 第 3 步不带 `discard_unsaved=true` 的 `open_project` 同样**必须拒绝**，不得暗中覆盖当前文档；
-  - 第 4 步只有在 AI 明确传入 `discard_unsaved=true` 后才打开成功。几何、参数依赖、零件结构、零件放置、活动零件和显式结果根恢复为第 1 步保存时的状态，因此盖板厚度回到保存时的 6；
-  - 面/边标签不会随 FCStd 恢复，打开后若要继续按标签操作必须重新标注；`undo_count=0`、`redo_count=0`，因为撤销历史不写入 FCStd。
-- **若失败**：保存后文件为空、默认新建/打开没有拒绝未保存更改、打开后根对象/零件放置丢失，均为阻断性问题；收集四步完整返回、目标文件路径与大小、打开前后的 `describe_part`/对象清单。不要把“标签和撤销历史未恢复”误报为缺陷，它们不在 FCStd 项目契约内。
-
-#### A14 撤销、重做与依赖安全删除
-
-- **前置**：紧接 A13，当前为刚打开的 Demo4，撤销/重做栈均为空。先让 AI 查看对象清单，记下盖板最终结果对象以及它依赖的源对象名称；实际自动名可能因 FreeCAD 分配而不同，不要硬猜 `Box`/`Box001`。
-- **你说**（分五步）：
-  1. "把盖板厚度改成 8。"
-  2. "撤销刚才的修改。"
-  3. "重做刚才的修改。"
-  4. "删除盖板结果所依赖的那个源对象。"
-  5. "我确认级联删除它和所有依赖对象；然后撤销这次删除。"
-- **预期**：
-  - 第 1 步厚度变为 8；第 2 步 `undo` 后回到 6；第 3 步 `redo` 后又变为 8，图、体积、显式结果根与几何状态同步，不出现“图变了但对象树没变”的分裂状态；
-  - 第 4 步未带 `cascade=true`，`delete_object` **必须拒绝**，并列出至少一个直接或传递依赖对象；任何对象都不应被删；
-  - 第 5 步只在明确确认后使用 `cascade=true`，一次事务删除目标及其依赖闭包，不留下悬空对象；随后 `undo` 一次应恢复整组对象、依赖关系和删除前的显式结果根；
-  - 在空撤销栈/重做栈上额外调用时，应结构化返回“没有可撤销/重做的事务”，而不是崩溃。
-- **若失败**：默认删除静默级联、只删源对象却留下断链、undo/redo 后结果根指向已删除对象，均为严重状态一致性问题；收集每步对象清单、`roots`、`undo_count`、`redo_count` 和报错原文。
-
-#### A15 布尔并集、交集与显式结果根
-
-- **前置**：A14 结束后当前文档仍有未保存更改。明确允许丢弃，调用 `new_document("Demo5", discard_unsaved=true)`；不要把默认保护绕过当作隐含行为。
-- **你说**（按顺序）：
-  1. "新建 Demo5；画一个 20×20×10 的盒子放在 [0,0,0]，再画一个同尺寸盒子放在 [10,0,0]。"
-  2. "把这两个盒子做布尔并集。"
-  3. "撤销并集，再把同样两个盒子做布尔交集。"
-- **预期**：
-  - 两个原盒子各为 4000 mm³，重叠区为 10×20×10 = **2000 mm³**；
-  - `boolean_fuse` 成功后返回对象 `Fuse`（若已有同名对象可带数字后缀），体积 **6000 mm³**、单一 solid；`result_roots` 把 Fuse 作为该零件的顶层结果，不把两个输入对象重复计为装配输出；
-  - `undo` 后两个输入对象重新可用，并恢复并集前的显式结果根；`boolean_common` 成功后返回 `Common`（同样允许数字后缀），体积 **2000 mm³**、单一 solid，并成为新的显式结果根；
-  - 可选反例：对两个完全分离的盒子做 `boolean_fuse`，应因结果不是单一 solid 而响亮拒绝并回滚。
-- **若失败**：体积不符、输出包含多个 solid 却仍成功、输入和结果同时作为根导致导出/测量重复计量，均需上报；附对象清单、`result_roots`、返回体积和工程图。
-
-#### A16 summary / distance / angle / thickness 测量
-
-- **前置**：明确丢弃 Demo5 的未保存更改，新建 Demo6，画一个 **60×40×10** 的盒子。先渲染面标注图；下面的“顶面/底面/侧面”必须使用本次标签表实际返回的字母，不能沿用旧图标签或凭空猜测。
-- **你说**（分四步）：
-  1. "给当前结果做 summary 测量。"
-  2. "测量刚才标注图中顶面和底面之间的 distance。"
-  3. "测量顶面和一个相邻侧面的 angle。"
-  4. "把顶面和底面作为我明确选择的两个平行平面，测量 thickness。"
-- **预期**：
-  - `summary` 返回体积 **24000 mm³**、表面积 **6800 mm²**、包围盒尺寸 **[60,40,10]**、质心和拓扑计数；
-  - `distance(entity="face")` 对顶/底两面返回 **10 mm**；
-  - `angle(entity="face")` 对相邻平面返回夹角 **90°**；
-  - `thickness(entity="face")` 对明确选中的平行顶/底面返回 **10 mm**；它不得自动猜“材料厚度”，也不得在未显式给出两个面标签时自行挑面；
-  - 额外负例：用相邻而非平行的两个面做 thickness，应响亮拒绝；使用过期标签也应要求重新标注。
-- **若失败**：距离受零件全局放置影响错误、angle/thickness 接受曲面或 thickness 自动猜面、只返回图片不返回单位化数值，均需记录。附面标签表和四次结构化返回。
-
-#### A17 旧健康运行时原地升级
-
-- **说明**：这是独立升级场景，需要事先保留一份 **0.3.0 server + FreeCAD 1.1.0 + Python 3.12** 的健康托管运行时；没有该前置时可记为“未执行”，不能用全新安装代替。先备份 `<VIBECAD_HOME>/mamba/envs/vibecad/.vibecad_ready` 与 `install.log` 便于比对。
-- **操作**：在旧运行时仍健康的机器上安装/启动 0.4.0 候选包，持续查询 `get_runtime_status`，完成后再 ping、列工具并跑 `smoke_cad`。
-- **预期**：
-  - 运行时复用原 FreeCAD env，只进入 `installing_pip → verifying → ready`（并发进程拿锁后二检时也可能直接看到 `ready`）；**不应**进入 `downloading_micromamba` 或用于重建引擎的 `creating_env`，不应再次下载 2–3GB FreeCAD；
-  - 日志包含“同步 server 到 VibeCAD v0.4.0（复用现有 FreeCAD）”语义，原 env 路径保持不变；
-  - `.vibecad_ready` 从旧纯文本哨兵或旧版本 receipt 更新为版本化 JSON，至少包含 `schema=1`、`runtime_kind="managed"`、`vibecad_version="0.4.0"`、`python_pin="python=3.12"`、`freecad_pin="freecad=1.1.0"`；
-  - ping 返回 0.4.0，工具总数为 **31**，新增的 `save_project` 与 `measure` 可调用，smoke 仍通过；
-  - 若 pip server 同步失败，旧 receipt 不应被冒充改写为 0.4.0，状态应失败并给出 `install.log` 线索。
-- **若失败**：健康 env 被无条件整目录重建、receipt 已写 0.4.0 但实际导入仍是旧 server、升级后 supervisor 交棒到旧工具表，都属于发布阻断问题；附升级前后 receipt、状态序列与安装日志。
-
-#### A18 卸载
-
-- **说明**：本场景建议放在其余场景全部跑完后再做——会清空建模引擎，之后如果扩展仍处于自动安装模式（.mcpb 默认如此），下次对话又会自动重新下载，因此不要在验收过程中途插入本场景。分两小节：先验对话内两段式，再验命令行救援。
-
-**A18-1：对话内两段式**
-
-- **你说**：（第一次）"把 CAD 引擎卸载了。"
-- **预期**：
-  - AI 调 `uninstall_runtime`（不带 confirm 或 `confirm=false`），返回**仅预览**：将删除的目录路径（`VIBECAD_HOME`，如 macOS `~/Library/Application Support/VibeCAD`）与大小（`size_mb`，一般 2000–3000）；**此时目录还在，未被删除**——去 Finder/资源管理器确认目录仍存在。
-- **你说**：（确认）"确认删除。"
-- **预期**：
-  - AI 再调一次 `uninstall_runtime(confirm=true)`，返回 `marked: true` 且说明"即将自动重启完成清理"；
-  - **不需要你手动做任何重启操作**——server 在幕后自退并由监督进程重新拉起，新进程启动早期执行真正的删除；
-  - 稍等几秒后去 Finder/资源管理器确认：**运行时目录已经不存在**（或目录仅剩空壳）；
-  - 如果这台机器的扩展是自动安装模式，紧接着**同一个对话**里再问一次"CAD 环境好了吗"，应看到又自动开始重新下载——这是预期行为（见用户手册「卸载」章节说明），不是删除失败。
-- **若失败**：预览阶段就把目录删了 = 严重 bug，立即上报；确认后长时间（数分钟）目录仍未消失——收集两次调用的完整返回、`<VIBECAD_HOME>` 目录当前内容截图。
-
-**A18-2：命令行救援**
-
-- **前置**：终端可运行 `uvx`（见用户手册附录 A）。若上一步已经重新触发了自动下载，先等它跑一会儿或直接用当前状态均可，此场景与运行时是否 ready 无关。
-- **命令**：
-  ```bash
-  uvx vibecad --uninstall --yes
-  ```
-- **预期**：
-  - 命令直接执行、不等待任何交互输入（`--yes` 跳过确认）；
-  - 终端打印一行 JSON，含 `"ok": true` 与释放空间提示（如"已删除 …（释放约 2.5 GB）"）；
-  - 命令退出码为 **0**；执行后 `<VIBECAD_HOME>` 目录不存在。
-  - 额外验证（可选）：不带 `--yes` 直接跑 `uvx vibecad --uninstall`，应看到"将删除 …确认？[y/N]"提示，输入 `n` 或直接回车应打印"已取消"且不删除任何文件。
-- **若失败**：退出码非 0 但输出显示 `"ok": true` = 不一致，立即上报；目录未清空但退出码为 0 同样上报——收集完整终端输出、`<VIBECAD_HOME>` 目录内容、操作系统与文件系统类型（Windows 常见是文件被占用锁住）。
-
----
-
-## B 部分：Windows 手动验证附录
-
-CI 已在 windows-latest 上跑自动化集成，本附录用**真实用户机器**做独立佐证。
-只需跑 **A2 / A3 / A4 / A5 / A9 / A11** 六条核心场景（新增 A3：Windows 上的自退换芯路径与 macOS 实现不同，值得单独确认一遍零重连是否成立）。
-
-### 环境要求
-
-- Windows 10 / 11，x64
-- 磁盘剩余空间 ≥ 5GB（FreeCAD 运行时约 2-3GB + 临时文件）
-- 网络可访问 GitHub 与 conda-forge（公司网/代理环境请先确认连通）
-- Claude Desktop（含 Cowork 模式）**最新版**已安装并登录
-
-### 验证步骤（四步）
-
-1. **下载并双击安装**——从发布页 <https://github.com/wangtao9090/VibeCAD/releases/latest> 的 Assets 列表下载 `VibeCAD.mcpb`，**双击安装**：Claude Desktop 弹出安装窗口后点安装。双击无反应则手动安装：设置（Settings）→ 扩展（Extensions）→ Advanced settings → Install Extension…，选中下载的 `VibeCAD.mcpb`。安装时宿主会自动准备隔离的 Python 环境，无需预装 uv/Python。
-
-2. **确认安装**——打开**设置（Settings）→ 扩展（Extensions）**，确认列表中出现 **VibeCAD** 且处于**已启用**状态（安装窗口不弹出多半是 Claude Desktop 版本过旧，更新后重装）。顺带记录该机器上的扩展安装/日志目录路径，回填用户手册（Windows 路径待补）。
-
-3. **重启确认握手**——完全退出并重启 Claude Desktop / Cowork，新开对话，按 A1 原话 ping 一次，确认能列出 31 个工具（即 A1 的判定标准）。
-
-4. **跑六条核心场景**——按 A 部分原话依次执行 **A2 → A3 → A4 → A5 → A9 → A11**，逐条勾选。注意：
-   - A2 在 Windows 上是自动安装链路的首要验证点（micromamba.exe 下载解压、FreeCAD DLL 加载），且要确认**全程没有手动说过"帮我准备好 CAD 环境"**——这条最关键；
-   - A3 验证零重连换芯在 Windows 上是否成立：运行时就绪后同一个对话直接冒烟测试，**不应**提示重连或需要重启客户端；
-   - A11 的导出路径用 Windows 写法，例如说："存到 `C:\Users\<你的用户名>\Desktop\vibecad_out`"。
-
-### 已知预期差异（不算失败）
-
-- **CJK 字体缺失**：headless 环境下 matplotlib 若找不到中文字体，工程图中的**中文文字（视图标题等）可能显示为方块（豆腐块）**；尺寸数字、⌀ 符号、A/B/C 面标签均为 ASCII 不受影响。**几何与功能完全正常，不算失败**，但请在记录中注明出现与否。
-- 首次 A2 的 2-3GB 下载时长受网速影响大；超过 20 分钟先看 `status.json` 的 `percent` 是否仍在前进——缓慢前进不算失败。
-- 杀毒软件 / Windows Defender / 防火墙可能对 `micromamba.exe` 或网络访问弹窗——选择放行；若被静默拦截，表现为 A2 卡死且 `status.json` 报下载错误。
-- 中文零件名导出（如 `Demo4_盖板.step`）依赖文件系统编码，NTFS 下应正常；若文件名乱码请截图上报（功能仍以文件内容有效为准）。
-
-### 问题上报模板
-
-发现问题时按以下格式逐条记录（一条问题一份）：
+direct operation 必须编译为 ModelCommand/ModelProgram 并调用同一个 Task API。任何写操作都必须经历：
 
 ```text
-【场景号】A_
-【我说的原话】（照抄你输入的那句话）
-【实际看到】（AI 回复原文摘录 + 截图；有图必附图）
-【期待看到】（照抄验收清单"预期结果"中对不上的那部分）
-【日志】（见下方"日志怎么取"）
-【环境】Windows 版本 / Cowork 版本 / 网络环境（直连或代理）
+immutable base revision
+  → project lease
+  → isolated candidate checkout
+  → FreeCAD execution
+  → observations + deterministic verification
+  → auto_commit 或 durable review
+  → commit / reject / rollback / recovery
 ```
 
-**日志怎么取**：
+不得存在 public direct handler 原地改写用户文件、绕过 revision/verifier 或另建状态机。
 
-- **server 日志**：vibecad 以 stdio 模式运行，自身日志走 **stderr**，由 MCP 客户端收集——Cowork 侧的 MCP 日志位置**以客户端日志面板（或其官方文档指引）为准**，请从中复制 vibecad 相关片段。
-- **运行时安装状态**：`%LOCALAPPDATA%\VibeCAD\status.json`（含 `phase` / `percent` / `error`），直接附文件内容。设置过 `VIBECAD_HOME` 环境变量的，以该目录为准。
-- **安装锁**：若怀疑安装卡死，附 `%LOCALAPPDATA%\VibeCAD\.install.lock` 是否存在及其修改时间。
+### 1.3 当前支持边界
+
+- 项目可以是 `empty`，或导入非空、对象全为 `Part::Box` / `Part::Cylinder` 的
+  `import_fcstd` envelope；
+- 当前只验证 headless execution profile；
+- 成功交付只有 FCStd 与 STEP；
+- 当前不支持通用 FCStd、STEP/STL import、任意 Python/FreeCAD code、Workbench、face/edge selector、
+  photo/video reconstruction 或 simulation。
+
+## 2. 放行总表
+
+| ID | Gate | 通过标准 | 结果 |
+|---|---|---|---|
+| G01 | 版本与协议身份 | source/pyproject/manifest/package = 0.5.0；server epoch = 4；MCP/FreeCAD/Python pin 不漂移 | ☐ |
+| G02 | 公开面 | 精确 20 个唯一工具；说明与 manifest 完全一致；固定 discovery frame ≤ 65,536 bytes | ☐ |
+| G03 | 内部校验 | discovery 不发 output schema，但正常与异常 CallToolResult 仍受冻结 output validator 约束 | ☐ |
+| G04 | 命名空间 | direct 与稳定名称碰撞、direct 重名都在 schema/dispatch/effect 前 fail closed | ☐ |
+| G05 | Skill | canonical Skill 通过校验；示例、恢复表和限制与 live schema 一致 | ☐ |
+| G06 | 分发 | sdist/MCPB/Skill zip 含同一 Skill tree；wheel/installed Python 不含 Skill | ☐ |
+| G07 | 普通测试 | 全量 non-slow pytest、Ruff、changed-Python format/pycompile、offline lock、diff check 通过 | ☐ |
+| G08 | 受管 FreeCAD | Darwin slow matrix 通过；安装只同步 0.5.0/epoch 4，不重建现有引擎 | ☐ |
+| G09 | Agent E2E | empty/import、direct/program、review/restart/conflict、artifact/resource 与负例通过 | ☐ |
+| G10 | 数据保护 | runtime uninstall 不删除 durable data；执行和导出不污染源文件或暴露任意路径 | ☐ |
+| G11 | 打包后会话 | 从全新解包 MCPB 启动并复跑 discovery、真实 CAD 与资源读取 | ☐ |
+| G12 | 独立审查 | 至少两路 settled-diff review；所有 Critical/Important 关闭 | ☐ |
+
+## 3. 自动化与打包 Gate
+
+### G01：身份一致性
+
+检查：
+
+1. `src/vibecad/__init__.py`、`pyproject.toml`、`manifest.json`、wheel/sdist metadata 都是 `0.5.0`；
+2. runtime receipt、status 与 server handshake 使用同一 VibeCAD 版本；
+3. private server epoch 为 4，public-surface digest 绑定 description、input/output enforcement schema 与
+   annotations；
+4. MCP 保持 1.27.2、Python 保持 3.12、FreeCAD 保持 1.1.0；
+5. `uv lock --offline` 不产生非预期差异。
+
+任何一个身份不一致都阻断放行。
+
+### G02：20-tool discovery
+
+对固定 JSON-RPC request id `1` 获取完整 `tools/list`，用 sorted keys、compact separators、
+`ensure_ascii=false` 序列化，并计入末尾 LF。预期：
+
+- 名称与 §1.1 精确同序，唯一且无额外工具；
+- 每项 description 非空、单行、可打印且在长度预算内；
+- 每项包含 input schema 和 annotations；
+- discovery 项不包含 optional output schema；
+- 完整 UTF-8 frame 不超过 65,536 bytes；
+- `manifest.json` 的 `(name, description)` 与 PublicToolSpec 逐项完全一致。
+
+再注入一个 direct operation，分别尝试命名为稳定控制名和已有 direct 名。两次都必须在 public
+projection 阶段以固定内部错误拒绝，不能产生重复 discovery、路由歧义或任何副作用。
+
+### G03：服务端结果校验
+
+即使 discovery 省略 output schema，也必须验证：
+
+- 正常结果同时返回 canonical JSON text 与完全匹配的 `structuredContent`；
+- handler 返回缺字段、额外字段、错误类型或超预算结果时，服务端返回固定 internal error；
+- 失败 envelope 同样经过 schema 校验；
+- 直接工具与稳定 facade 走同一结果封装边界。
+
+### G04：Skill 与分发矩阵
+
+canonical source 是 `skills/vibecad-agent/`。执行 Skill validator，并检查：
+
+- frontmatter 只有 `name` 与 `description`，`agents/openai.yaml` 可解析；
+- 正文列出精确 20 个工具，先 `get_capabilities`，包含 project/task/review/artifact 流程；
+- direct/ModelProgram、SelectorV1、AcceptanceSpec、ResultRef、generation 与恢复表和实际 schema 一致；
+- 明确禁止未知结果下重试 `create_task`、已退役 endpoint、任意 code 与未支持能力；
+- 安装路径覆盖 Codex 当前测试路径、Codex 已发布 user/repo 路径和 Claude Code user/repo 路径；
+- MCPB 内存在 Skill 不被描述成已经 activation，文档要求 restart/reload。
+
+从干净输出目录分别构建 wheel、sdist、MCPB 与 `vibecad-agent-skill-0.5.0.zip`。预期矩阵：
+
+| 渠道 | 包含 Skill | 规则 |
+|---|---:|---|
+| repository source | 是 | canonical tree |
+| sdist | 是 | relative files 与 source byte-identical |
+| MCPB | 是 | 归档用途，不自动 activation |
+| standalone Skill zip | 是 | 唯一顶层目录为 `vibecad-agent/` |
+| wheel | 否 | server-only |
+| installed Python | 否 | server-only |
+
+记录每棵 Skill tree 与 standalone zip 的 SHA-256。检查 archive path、symlink、RECORD，确保测试、docs、
+cache、runtime 和非预期文件没有混入；MCPB 中 README 和 Skill 是明确例外。
+
+### G05：Release workflow
+
+发布工作流必须在 PyPI publish 与 GitHub Release 之前完成：
+
+1. Ruff 与 non-slow pytest；
+2. wheel/sdist/MCPB/Skill zip 构建和包审计；
+3. macOS managed-runtime Agent slow matrix；
+4. 上传一次已经过 gate 的 archive。
+
+publisher 只能下载并发布已 gate 的 archive，不得重建。GitHub Release 同时附上 `VibeCAD.mcpb` 与
+`vibecad-agent-skill-0.5.0.zip`，且仍需要明确的 environment/tag 授权。本验收不执行 tag 或发布。
+
+## 4. 真实受管 FreeCAD Agent Matrix
+
+以下场景使用真实受管 FreeCAD，不得用 fake engine 代替。除明确要求 restart 的场景，每条都记录
+project id、base/head revision、task id、generation、next_action、draft id、verdict id、artifact id 与
+关键 hash。
+
+### E01：能力发现与空项目
+
+1. runtime ready 后调用 `get_capabilities(schema_version=1)`；
+2. 验证精确六个 public direct operation，profile 为当前支持的 headless，FreeCAD/version/budget 与
+   registry 一致；
+3. 用新 `create_key` 调 `create_project(kind=empty)`；
+4. 用同一 create key 重放一次，必须幂等返回同一项目；
+5. `get_project` 返回 revision zero，源项目不被就地修改。
+
+失败标准：根据工具数猜 operation、同一 create key 生成两个项目、revision zero 缺失或项目数据只在
+进程内存在。
+
+### E02：direct + auto_commit
+
+1. 在 E01 项目上创建 `review_policy=auto_commit` 的任务；
+2. `get_task` 后，用返回 generation 调 `create_box` 创建 60 × 40 × 10 mm 盒子；
+3. AcceptanceSpec 至少验证 dimensions、bbox、volume、solid count、valid shape 与 reload；
+4. 任务成功后 `get_project` 的 HEAD 指向新 revision；
+5. `inspect_model` 返回 revision-bound object/feature facts。
+
+预期体积 24,000 mm³、bbox 60 × 40 × 10 mm、一个有效 solid。任何“调用成功但验收失败仍提交”均为
+阻断缺陷。
+
+### E03：多步骤 ModelProgram
+
+从独立 base 创建任务，用 `submit_model_program` 提交至少两个受支持命令，并通过 ResultRef 在后续
+命令中引用前序结果，不猜 FreeCAD label。预期：
+
+- program schema、命令数、JSON bytes、operation budget 均被执行前校验；
+- 任一步失败时整个候选不发布，不留下半成品；
+- 所有 AcceptanceSpec 通过后才按 review policy 进入 commit 或 draft；
+- sealed observations、step records 和最终 revision 在重启后可读取。
+
+### E04：direct 与 ModelProgram 等价
+
+从内容相同的两个 base revision 构造相同 operation 序列：一边使用逐步 direct operation，一边提交
+一个 ModelProgram，并使用相同 AcceptanceSpec 与 commit policy。比较：
+
+- 最终几何 facts、参数、placement、bbox、volume、solid count、validity；
+- verifier outcome 与 artifact 内容；
+- task/draft/verdict/artifact envelope 的语义字段。
+
+除明确的 task/revision/id、时间和 policy 差异外，结果必须等价。若 direct 绕过 program validator、
+candidate 或 verifier，立即阻断。
+
+### E05：require_review、Reject 与 Accept
+
+#### Reject 分支
+
+1. 创建 `require_review` 任务并生成验证通过的 draft；
+2. 确认项目 lease 已释放、HEAD 未变化；
+3. 重启 server，`get_task` 仍返回同一 immutable draft/verdict；
+4. 用当前 id/generation 调 `reject_draft`；
+5. 确认 task/draft 记录为 rejected，HEAD 仍未变化。
+
+#### Accept 分支
+
+1. 创建另一个 `require_review` 任务并生成 draft；
+2. 重启后展示 exact draft/verdict/evidence；
+3. 用当前 id/generation 调 `accept_draft`；
+4. Kernel 重新取得 lease、重新验证，并用 base revision 对 HEAD 做 CAS；
+5. Accept 成功后 HEAD 指向 draft revision，任务进入成功终态。
+
+Accept/Reject 用错 draft id、task id 或 generation 必须 fail closed。
+
+### E06：stale generation 与 stale base
+
+- 用旧 generation 调任一写操作：返回 conflict，不产生新 candidate 或副作用；随后 `get_task` 获取
+  最新 generation/next_action；
+- 先创建 draft，再用另一任务推进同一项目 HEAD；接受旧 draft 时返回 stale-base conflict，不发布
+  旧 draft；
+- 重启后重复检查，冲突事实必须持久化且 HEAD 唯一。
+
+### E07：受支持 FCStd import
+
+准备三类真实 FCStd：
+
+1. 非空且所有对象均为 `Part::Box` / `Part::Cylinder`；
+2. 可由 FreeCAD 正常打开、但不含任何对象的空 FCStd 文档；
+3. 至少包含一个其他类型，或与 Box/Cylinder 混合。
+
+仅第 1 类可以 `create_project(kind=import_fcstd)` 成功，并生成可 reload 的 revision zero；随后
+`inspect_model`、参数修改、移动/旋转与导出可正常工作。第 2、3 类必须在导入边界被固定
+`invalid_input` 错误拒绝，不创建可见项目、不修改源 FCStd，也不尝试任意 Python/FreeCAD code。
+
+### E08：FCStd/STEP ResourceLink
+
+对 E02 committed revision 和一个符合资格的 draft 分别调用 `export_task_artifacts`。每个成功结果都
+必须在 canonical text/structured envelope 后恰好追加两个 ResourceLink：
+
+| format | MIME | 断言 |
+|---|---|---|
+| `fcstd` | `application/vnd.freecad.fcstd` | URI/name/size 与 validated result 完全一致 |
+| `step` | `model/step` | URI/name/size 与 validated result 完全一致 |
+
+对每个 URI 调 `resources/read`，核对 format、byte size 与 SHA-256，并真实 reload FCStd、解析 STEP。
+同一 `export_key` 重放必须幂等；同一历史 committed revision 在项目 HEAD 前进后仍可读取。
+
+负例：
+
+- failed/ineligible task、错误 draft/revision、stale generation 不返回 ResourceLink；
+- `ping`、`get_task` 与 direct operation 等其他工具不返回 ResourceLink；
+- 伪造 artifact id、URI traversal、未知 format、超大读取或任意本地路径都被拒绝；
+- structured result 声称的 format、URI、name 或 size 不匹配时，服务端固定 internal error，不能制造链接。
+
+### E09：任务恢复表
+
+为所有实际 `next_action` 分支做状态注入或真实中断：
+
+| 返回值 | 唯一允许动作 |
+|---|---|
+| `request_plan` | `get_task` 一次；若仍存在，停止并报告内部状态不一致。 |
+| `submit_program` / `provide_input` | 当前 generation 下调用匹配 direct operation，或提交修正的 `submit_model_program`。 |
+| `validate_program` / `reconcile` / `cleanup` | 当前 generation 下调用一次 `resume_task`；冲突后 `get_task`。 |
+| `wait` | 非紧密 `get_task`；持久状态仍可恢复时，最多一次 `resume_task`。 |
+| `review_draft` | 展示 exact draft/verdict，只调用当前 `accept_draft` 或 `reject_draft`。 |
+| `none` | 停止修改；只在成功且 eligible 时导出。 |
+
+已知 task id 的未知响应或 conflict，第一恢复动作必须是 `get_task`。专门模拟
+`create_task` unknown-outcome 且没有 task id：宿主必须停止、报告 bounded orphan risk、绝不重试。
+
+### E10：输入、预算与安全负例
+
+逐项验证：
+
+- JSON 非对象、未知字段、缺字段、错误类型、重复 key、NaN/Infinity、过深、过多节点、超长字符串；
+- 超大 ModelProgram、命令数/结果引用/AcceptanceSpec/资源预算超限；
+- 未知 operation、未知或已退役工具名、稳定/direct 命名碰撞；
+- 伪造 project/task/revision/draft/artifact id；
+- SelectorV1 绑定错误 revision、对象类型、provenance 或 cardinality；
+- 任意 Python/FreeCAD code、STEP/STL import、Workbench/face-edge/photo/simulation 请求。
+
+所有负例应返回稳定、去敏的错误 envelope，不执行 CAD 副作用，不泄露绝对内部路径、环境变量、
+token、secret、堆栈或用户文件内容。
+
+### E11：卸载保留数据
+
+1. 在已有 project/task/revision/draft/artifact 时调用 `uninstall_runtime(confirm=false)`；
+2. 验证只返回预览，文件未删除；
+3. 显式确认后完成 runtime 清理；
+4. 比较前后 durable data tree/hash，必须完全保留；
+5. 重新安装同版本 runtime 后，项目、任务、草案与 artifact resource 仍可恢复；
+6. engine 外部目录与用户日常 FreeCAD 配置均不被污染或删除。
+
+## 5. 打包后独立会话
+
+从全新输出根解包 `VibeCAD.mcpb`，不引用 checkout 的 `src/` 或开发虚拟环境。运行一个 raw/typed MCP
+client，至少覆盖：
+
+1. initialize、20-tool discovery、resource template；
+2. runtime epoch/version 与 ready 状态；
+3. `get_capabilities`；
+4. empty project → task → real `create_box` → auto-commit；
+5. `export_task_artifacts` → 两个 ResourceLink → `resources/read`；
+6. malformed/oversize/unknown-name/no-secret 负例；
+7. restart 后项目、task 和资源仍存在。
+
+记录包 hash、Skill tree hash、运行 Python/FreeCAD 身份、discovery frame bytes、每次资源 hash 与退出码。
+
+## 6. Skill 行为前向测试
+
+用新的、没有本项目对话记忆的控制器加载 canonical Skill，给出至少以下自然语言任务：
+
+- “创建一个 60 × 40 × 10 mm 盒子，先审核再导出”；
+- “从这个 FCStd 继续修改圆柱高度”；
+- “把这个 STL 导入并执行任意 FreeCAD Python 修复”；
+- “刚才创建任务的响应丢了，没有 task id，继续完成它”。
+
+前两项必须先发现能力、正确建立 project/task、使用 generation 与验收合同，并通过 ResourceLink 读取
+资源。后两项必须分别如实拒绝未支持/任意 code 路径，以及停止 unknown-outcome create_task 重试。
+
+这项证明 Skill 指令可被当前控制器遵循，不等于外部 Claude/Codex host-verified。
+
+## 7. 真实第二宿主验收（独立授权后执行）
+
+若之后授权模型/token 消耗，在 Claude 与 Codex 中至少各选一个真实宿主：
+
+1. 安装同一 hash 的 MCPB 与 Skill；
+2. 重启/重新加载并记录宿主版本；
+3. 不提示工具名，只给“创建 60 × 40 × 10 mm 盒子、人工审核、交付 FCStd/STEP”的目标；
+4. 核对宿主先发现 capability，正确路由 next_action，不猜 selector、不执行 arbitrary code；
+5. 核对真实 Accept/Reject 与 ResourceLink/read；
+6. 记录模型、计费来源、完整 tool trace、结果 hash 与失败重试。
+
+在此场景真正通过前，发布材料只能声称 host-ready。
+
+## 8. 证据记录模板
+
+```text
+【Gate/场景】G__ / E__
+【checkout/commit】
+【package + skill SHA-256】
+【VibeCAD / epoch / Python / FreeCAD / MCP】
+【执行命令或用户原话】
+【project / revision / task / generation / draft / artifact】
+【预期】
+【实际】
+【ResourceLink URI / MIME / size / SHA-256】
+【退出码与日志位置】
+【结论】PASS / FAIL / NOT RUN
+【残项或复测条件】
+```
+
+任何 Critical/Important 失败、版本/epoch/digest 漂移、源文件污染、HEAD 错误推进、错误 ResourceLink、
+任意代码执行或数据丢失都阻断放行。外部宿主未执行应记录为未授权残项，不能伪造 PASS。

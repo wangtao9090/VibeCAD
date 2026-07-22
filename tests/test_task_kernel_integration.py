@@ -1860,6 +1860,7 @@ import FreeCAD
 import Part
 
 from vibecad.application.agent import AgentApplication
+from vibecad.execution.executor import ExecutorError, InProcessCadExecutor
 from vibecad.workflow.contracts import (
     AcceptanceCriterion,
     AcceptanceKind,
@@ -1891,6 +1892,38 @@ def digest_bytes(value: bytes) -> str:
 
 def digest_path(path: Path) -> str:
     return digest_bytes(path.read_bytes())
+
+
+def committed_storage_snapshot() -> dict[str, tuple[int, str]]:
+    # Exclude durable request/cleanup receipts and their zero-byte tombstones
+    # while binding every authoritative user-model file.  A non-empty
+    # quarantine still indicates incomplete cleanup and must fail the gate.
+    roots = (
+        DATA / "projects",
+        DATA / "tasks",
+        DATA / "checkouts",
+        DATA / "artifacts",
+        DATA / "bootstrap" / "staging",
+        DATA / "bootstrap" / "work",
+        DATA / "bootstrap" / "normalized",
+    )
+    observed = {}
+    for root in roots:
+        for path in root.rglob("*"):
+            if path.is_symlink():
+                raise AssertionError("committed storage contains a symlink")
+            if path.is_file():
+                if path.name.startswith(".quarantine-receipt."):
+                    continue
+                if path.name.startswith(".quarantine."):
+                    if path.stat().st_size != 0:
+                        raise AssertionError("project cleanup left a non-empty quarantine")
+                    continue
+                observed[path.relative_to(DATA).as_posix()] = (
+                    path.stat().st_size,
+                    digest_path(path),
+                )
+    return observed
 
 
 def require(envelope: dict[str, object]) -> dict[str, object]:
@@ -2180,6 +2213,51 @@ def make_import_source() -> Path:
     return source
 
 
+def make_rejected_import_source(label: str, *, mixed: bool) -> Path:
+    source = ROOT / f"{label}.FCStd"
+    document = FreeCAD.newDocument(f"RejectedImport{label}")
+    try:
+        if mixed:
+            box = document.addObject("Part::Box", "SupportedBox")
+            box.Length = 3
+            box.Width = 4
+            box.Height = 5
+        sphere = document.addObject("Part::Sphere", "UnsupportedSphere")
+        sphere.Radius = 2
+        document.recompute()
+        document.saveAs(str(source))
+    finally:
+        FreeCAD.closeDocument(document.Name)
+    source.chmod(0o600)
+    return source
+
+
+def revalidate_rejected_import_sources(
+    app: AgentApplication,
+    sources: dict[str, Path],
+) -> dict[str, object]:
+    before = {kind: digest_path(source) for kind, source in sources.items()}
+    executor = InProcessCadExecutor(store=app._revision_store)
+    codes = {}
+    previous_cwd = Path.cwd()
+    try:
+        os.chdir(ROOT)
+        for kind, source in sources.items():
+            try:
+                executor.revalidate_normalized_import(Path(source.name))
+            except ExecutorError as error:
+                codes[kind] = error.code.value
+            else:
+                codes[kind] = None
+    finally:
+        os.chdir(previous_cwd)
+    return {
+        "codes": codes,
+        "sources_unchanged": before
+        == {kind: digest_path(source) for kind, source in sources.items()},
+    }
+
+
 app = AgentApplication.open(data_root=DATA)
 payload = {}
 try:
@@ -2204,6 +2282,46 @@ try:
         )
         if source_before != digest_path(source):
             raise AssertionError("public import changed its source")
+
+        _import_base, _import_request, import_inspection = direct(
+            app,
+            imported["project_id"],
+            "inspect_model",
+        )
+        supported_import_value = import_inspection["task_run"]["steps"][0]["result"][
+            "value"
+        ]
+
+        unsupported_source = make_rejected_import_source("unsupported-only", mixed=False)
+        mixed_source = make_rejected_import_source("mixed-supported-unsupported", mixed=True)
+        rejected_sources = {
+            "unsupported": unsupported_source,
+            "mixed": mixed_source,
+        }
+        rejected_source_before = {
+            "unsupported": digest_path(unsupported_source),
+            "mixed": digest_path(mixed_source),
+        }
+        real_revalidation = revalidate_rejected_import_sources(app, rejected_sources)
+        committed_before_rejections = committed_storage_snapshot()
+        unsupported_rejection = app.create_project_request(
+            {
+                "schema_version": 1,
+                "create_key": "project_create_00000000000000000000000000000004",
+                "kind": "import_fcstd",
+                "source_path": str(unsupported_source),
+            }
+        )
+        committed_between_rejections = committed_storage_snapshot()
+        mixed_rejection = app.create_project_request(
+            {
+                "schema_version": 1,
+                "create_key": "project_create_00000000000000000000000000000005",
+                "kind": "import_fcstd",
+                "source_path": str(mixed_source),
+            }
+        )
+        committed_after_rejections = committed_storage_snapshot()
 
         project_id = empty["project_id"]
         direct_records = []
@@ -2363,6 +2481,23 @@ try:
                 "imported": imported,
                 "imported_current": imported_current,
                 "import_source_unchanged": source_before == digest_path(source),
+                "supported_import": {
+                    "task_status": import_inspection["task_run"]["status"],
+                    "entities": supported_import_value["entities"],
+                },
+                "rejected_imports": {
+                    "unsupported": unsupported_rejection,
+                    "mixed": mixed_rejection,
+                    "real_revalidation": real_revalidation,
+                    "sources_unchanged": rejected_source_before
+                    == {
+                        "unsupported": digest_path(unsupported_source),
+                        "mixed": digest_path(mixed_source),
+                    },
+                    "committed_storage_unchanged": committed_before_rejections
+                    == committed_between_rejections
+                    == committed_after_rejections,
+                },
             },
             "direct": {
                 "operations": [record[0] for record in direct_records],
@@ -2756,10 +2891,10 @@ def _assert_two_managed_entities(payload: dict[str, object]) -> None:
 
 @pytest.mark.slow
 def test_real_task_kernel_commits_verified_candidate(
-    existing_freecad_python: str,
+    current_managed_freecad_python: str,
     tmp_path: Path,
 ) -> None:
-    payload = _run_case(existing_freecad_python, tmp_path, "success")
+    payload = _run_case(current_managed_freecad_python, tmp_path, "success")
     assert payload["status"] == "succeeded"
     assert payload["candidate_revision"] == payload["committed_revision"]
     assert payload["candidate_revision"] == payload["final_head"]["revision_id"]
@@ -3194,6 +3329,34 @@ def test_real_agent_first_public_matrix_and_cross_process_review(
     assert projects["imported"]["generation_zero"]["revision"]["model"]["format"] == "fcstd"
     assert projects["imported_current"]["project_id"] == projects["imported"]["project_id"]
     assert projects["import_source_unchanged"] is True
+    supported_import = projects["supported_import"]
+    assert supported_import["task_status"] == "succeeded"
+    assert len(supported_import["entities"]) == 2
+    assert {item["object_type"] for item in supported_import["entities"]} == {
+        "Part::Box",
+        "Part::Cylinder",
+    }
+    assert {item["provenance"]["source"] for item in supported_import["entities"]} == {"imported"}
+
+    rejected_imports = projects["rejected_imports"]
+    for kind in ("unsupported", "mixed"):
+        assert rejected_imports[kind] == {
+            "schema_version": 1,
+            "ok": False,
+            "result": None,
+            "error": {
+                "schema_version": 1,
+                "code": "invalid_input",
+                "path": "",
+                "message": "The project request is invalid.",
+            },
+        }
+    assert rejected_imports["sources_unchanged"] is True
+    assert rejected_imports["committed_storage_unchanged"] is True
+    assert rejected_imports["real_revalidation"] == {
+        "codes": {"unsupported": "invalid_input", "mixed": "invalid_input"},
+        "sources_unchanged": True,
+    }
 
     direct = prepared["direct"]
     assert direct["operations"] == [

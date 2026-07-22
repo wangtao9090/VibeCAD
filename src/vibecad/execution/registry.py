@@ -24,6 +24,7 @@ _OBJECT_ID = re.compile(r"^object_[0-9a-f]{32}$")
 _MAX_NAME_LENGTH = 64
 _MAX_VALUE_TEXT_LENGTH = 256
 _MAX_ERROR_MESSAGE_LENGTH = 256
+_MAX_DESCRIPTION_BYTES = 256
 _INVALID_ERROR_MESSAGE = "message must be bounded printable single-line text"
 _UNSAFE_NAME_TOKENS = frozenset(
     {
@@ -186,17 +187,15 @@ def _matches_value_shape(
     if shape is ValueShape.POSITIVE_NUMBER:
         return _is_finite_number(value, positive=True)
     if shape is ValueShape.ANGLE_DEGREES:
-        return (
-            _is_finite_number(value, positive=False)
-            and value != 0
-            and -360 < value < 360
-        )
+        return _is_finite_number(value, positive=False) and value != 0 and -360 < value < 360
     if shape is ValueShape.ENUM:
         return type(value) is str and value in enum_values
     if shape in {ValueShape.VECTOR2, ValueShape.VECTOR3}:
         expected = 2 if shape is ValueShape.VECTOR2 else 3
-        return type(value) is tuple and len(value) == expected and all(
-            _is_finite_number(component, positive=False) for component in value
+        return (
+            type(value) is tuple
+            and len(value) == expected
+            and all(_is_finite_number(component, positive=False) for component in value)
         )
     if shape is ValueShape.QUANTITY:
         snapshot = _snapshot_strict_mapping(value)
@@ -410,6 +409,34 @@ def _validate_name(
     return value
 
 
+def _freeze_operation_description(value: object, *, operation: str) -> str:
+    if value is None:
+        value = f"Execute the {operation} CAD operation."
+    if not (
+        type(value) is str
+        and bool(value)
+        and value == value.strip()
+        and value.isprintable()
+        and len(value.splitlines()) == 1
+    ):
+        raise RegistryError(
+            RegistryErrorCode.INVALID_METADATA,
+            "description must be bounded printable single-line text",
+            operation=operation,
+        )
+    try:
+        within_budget = len(value.encode("utf-8")) <= _MAX_DESCRIPTION_BYTES
+    except UnicodeError:
+        within_budget = False
+    if not within_budget:
+        raise RegistryError(
+            RegistryErrorCode.INVALID_METADATA,
+            "description must be bounded printable single-line text",
+            operation=operation,
+        )
+    return value
+
+
 def _freeze_choices(
     values: Iterable[str],
     *,
@@ -607,6 +634,7 @@ class OperationMetadata:
     requires_gui_main_thread: bool = False
     resource_budget: ResourceBudget = ResourceBudget()
     direct_exposed: bool = False
+    description: str | None = None
     result_slots: tuple[ResultSlotMetadata, ...] = ()
     preservation_fields: tuple[str, ...] = ()
 
@@ -675,6 +703,7 @@ class OperationMetadata:
                 "direct_exposed must be a boolean",
                 operation=operation,
             )
+        description = _freeze_operation_description(self.description, operation=operation)
         slots = self._freeze_result_slots(self.result_slots, operation=operation)
         preservation_fields = self._freeze_preservation_fields(
             self.preservation_fields,
@@ -683,6 +712,7 @@ class OperationMetadata:
         object.__setattr__(self, "execution_profiles", profiles)
         object.__setattr__(self, "minimum_freecad_version", minimum)
         object.__setattr__(self, "maximum_freecad_version_exclusive", maximum)
+        object.__setattr__(self, "description", description)
         object.__setattr__(self, "result_slots", slots)
         object.__setattr__(self, "preservation_fields", preservation_fields)
 
@@ -805,10 +835,7 @@ class OperationMetadata:
                 f"{label} must be a major/minor pair",
                 operation=operation,
             ) from exc
-        if (
-            len(frozen) != 2
-            or not all(type(item) is int and 0 <= item <= 999 for item in frozen)
-        ):
+        if len(frozen) != 2 or not all(type(item) is int and 0 <= item <= 999 for item in frozen):
             raise RegistryError(
                 RegistryErrorCode.INVALID_METADATA,
                 f"{label} must be a bounded major/minor pair",
@@ -862,10 +889,7 @@ class OperationMetadata:
                 "preservation_fields must be a collection of field names",
                 operation=operation,
             ) from exc
-        if (
-            not all(_is_bounded_name(item) for item in frozen)
-            or len(set(frozen)) != len(frozen)
-        ):
+        if not all(_is_bounded_name(item) for item in frozen) or len(set(frozen)) != len(frozen):
             raise RegistryError(
                 RegistryErrorCode.INVALID_METADATA,
                 "preservation_fields must contain unique bounded field names",
@@ -973,6 +997,7 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                 max_result_bytes=65_536,
             ),
             direct_exposed=True,
+            description="向任务提交一个长方体直接操作",
             result_slots=(
                 ResultSlotMetadata(
                     "object",
@@ -1004,6 +1029,7 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                 max_result_bytes=65_536,
             ),
             direct_exposed=True,
+            description="向任务提交一个圆柱体直接操作",
             result_slots=(
                 ResultSlotMetadata(
                     "object",
@@ -1040,6 +1066,7 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                 max_result_bytes=65_536,
             ),
             direct_exposed=True,
+            description="按显式验收条件修改选定对象参数",
             preservation_fields=_ENTITY_PRESERVATION_FIELDS,
         ),
         OperationMetadata(
@@ -1055,15 +1082,14 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                     referenced_value_shape=ValueShape.OBJECT_ID,
                 ),
             ),
-            argument_fields=(
-                FieldMetadata("position_mm", "position", ValueShape.VECTOR3),
-            ),
+            argument_fields=(FieldMetadata("position_mm", "position", ValueShape.VECTOR3),),
             resource_budget=ResourceBudget(
                 max_runtime_ms=30_000,
                 max_created_objects=0,
                 max_result_bytes=65_536,
             ),
             direct_exposed=True,
+            description="按显式验收条件移动选定对象",
             preservation_fields=_ENTITY_PRESERVATION_FIELDS,
         ),
         OperationMetadata(
@@ -1094,6 +1120,7 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                 max_result_bytes=65_536,
             ),
             direct_exposed=True,
+            description="按显式验收条件旋转选定对象",
             preservation_fields=_ENTITY_PRESERVATION_FIELDS,
         ),
         OperationMetadata(
@@ -1107,6 +1134,7 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                 max_result_bytes=262_144,
             ),
             direct_exposed=True,
+            description="检查指定任务版本的模型事实",
         ),
     )
 )

@@ -712,6 +712,7 @@ class _PublicOperationSnapshot:
     requires_gui_main_thread: bool
     resource_budget: tuple[int, int, int]
     direct_exposed: bool
+    description: str
     result_slots: tuple[_PublicResultSlotSnapshot, ...]
     preservation_fields: tuple[str, ...]
 
@@ -794,6 +795,7 @@ def _snapshot_public_operation(
     requires_gui = metadata.requires_gui_main_thread
     resource_budget = metadata.resource_budget
     direct_exposed = metadata.direct_exposed
+    description = metadata.description
     result_slots = metadata.result_slots
     preservation_fields = metadata.preservation_fields
 
@@ -804,6 +806,8 @@ def _snapshot_public_operation(
         or type(evidence_required) is not bool
         or type(requires_gui) is not bool
         or type(direct_exposed) is not bool
+        or not _safe_text(description)
+        or description != description.strip()
         or type(target_fields) is not tuple
         or not all(type(field) is FieldMetadata for field in target_fields)
         or type(argument_fields) is not tuple
@@ -842,6 +846,7 @@ def _snapshot_public_operation(
         requires_gui_main_thread=requires_gui,
         resource_budget=(max_runtime_ms, max_created_objects, max_result_bytes),
         direct_exposed=direct_exposed,
+        description=description,
         result_slots=tuple(_snapshot_public_slot(slot) for slot in result_slots),
         preservation_fields=_exact_string_tuple(preservation_fields),
     )
@@ -901,6 +906,7 @@ def _materialize_public_operation(
             max_result_bytes=snapshot.resource_budget[2],
         ),
         direct_exposed=snapshot.direct_exposed,
+        description=snapshot.description,
         result_slots=result_slots,
         preservation_fields=snapshot.preservation_fields,
     )
@@ -928,6 +934,11 @@ def _snapshot_public_registry(registry: OperationRegistry) -> OperationRegistry:
     try:
         snapshots = tuple(_snapshot_public_operation(key, metadata) for key, metadata in entries)
         if any(snapshot.key != snapshot.operation for snapshot in snapshots):
+            _reject_public_registry()
+        if any(
+            snapshot.direct_exposed and snapshot.operation in _STABLE_TOOL_NAMES
+            for snapshot in snapshots
+        ):
             _reject_public_registry()
         return OperationRegistry(_materialize_public_operation(snapshot) for snapshot in snapshots)
     except TypeError as error:
@@ -1099,6 +1110,25 @@ _STABLE_TOOL_NAMES = (
     "export_task_artifacts",
 )
 
+_STABLE_TOOL_DESCRIPTIONS = MappingProxyType(
+    {
+        "ping": "检查 VibeCAD Agent 服务是否可达",
+        "get_runtime_status": "查询受管 FreeCAD 运行时的状态和兼容性",
+        "ensure_runtime": "安装、升级或验证受管 FreeCAD 运行时",
+        "uninstall_runtime": "预览或确认清理受管 CAD 运行时，保留项目数据",
+        "get_capabilities": "返回当前可执行操作的冻结能力元数据",
+        "create_project": "创建空项目或导入仅含长方体和圆柱体的 FCStd 作为第零代",
+        "get_project": "读取持久化项目的当前版本",
+        "create_task": "在指定项目版本上创建可验收任务",
+        "get_task": "读取任务的持久化状态与证据",
+        "submit_model_program": "提交受约束的 ModelProgram 并生成候选版本",
+        "resume_task": "按当前持久化代数恢复可继续任务",
+        "accept_draft": "验证并接受指定草案版本",
+        "reject_draft": "拒绝指定草案并保留审核记录",
+        "export_task_artifacts": "生成可验证的 FCStd 和 STEP 交付资源",
+    }
+)
+
 
 def _deep_freeze(value: object) -> object:
     if type(value) in {str, int, float, bool, type(None)}:
@@ -1139,6 +1169,7 @@ class PublicToolSpec:
     """One immutable public tool projection independent of MCP SDK objects."""
 
     name: str
+    description: str
     input_schema: Mapping[str, object]
     output_schema: Mapping[str, object]
     annotations: ToolAnnotations
@@ -1146,6 +1177,8 @@ class PublicToolSpec:
     def __post_init__(self) -> None:
         if type(self.name) is not str or _PUBLIC_NAME.fullmatch(self.name) is None:
             raise ValueError("public tool name is invalid")
+        if not _safe_text(self.description) or self.description != self.description.strip():
+            raise ValueError("public tool description is invalid")
         if type(self.annotations) is not ToolAnnotations:
             raise TypeError("annotations must be exact ToolAnnotations")
         input_schema = _deep_freeze(self.input_schema)
@@ -2122,20 +2155,26 @@ def public_tool_specs(
     """Build one fresh deterministic, registry-derived public tool projection."""
 
     snapshot = _snapshot_public_registry(registry)
+    direct_names = _direct_names_from_snapshot(snapshot)
+    public_names = (*_STABLE_TOOL_NAMES, *direct_names)
+    if len(public_names) != len(set(public_names)):
+        _reject_public_registry()
     specs = [
         PublicToolSpec(
             name=name,
+            description=_STABLE_TOOL_DESCRIPTIONS[name],
             input_schema=_stable_input_schema(name),
             output_schema=_envelope_schema(_stable_result_schema(name)),
             annotations=_stable_annotations(name),
         )
         for name in _STABLE_TOOL_NAMES
     ]
-    for name in _direct_names_from_snapshot(snapshot):
+    for name in direct_names:
         metadata = snapshot.operations[name]
         specs.append(
             PublicToolSpec(
                 name=name,
+                description=metadata.description,
                 input_schema=_direct_input_schema(metadata),
                 output_schema=_envelope_schema(_task_result_schema()),
                 annotations=_direct_annotations(metadata),
