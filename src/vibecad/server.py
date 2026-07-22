@@ -1,1145 +1,1200 @@
-"""VibeCAD MCP server（FastMCP, stdio）。握手必须秒回：模块级不 import FreeCAD、不下载。"""
+"""Atomic Agent MCP surface over the pinned low-level SDK server.
+
+Discovery is deliberately inert.  The concrete application composition root is
+imported and opened only after a domain request passes both public-schema
+validation and the managed-runtime guard.
+"""
 
 from __future__ import annotations
 
+import atexit
+import importlib
 import json
+import logging
+import math
 import os
+import re
 import sys
 import threading
-from pathlib import Path
-from typing import Any
+from collections.abc import Callable, Mapping
 
-from mcp.server.fastmcp import FastMCP, Image
-from mcp.types import ToolAnnotations
+import anyio
+from jsonschema import Draft202012Validator
+from mcp import types
+from mcp.server.fastmcp import FastMCP
+from mcp.shared.exceptions import McpError
+from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 
-from vibecad import __version__
-from vibecad.engine.session import Session
-from vibecad.feedback import annotate as _annotate
-from vibecad.feedback import multiview as _multiview
-from vibecad.feedback import persist as _persist
-from vibecad.feedback import render as _render
-from vibecad.feedback import text as _feedback_text
-from vibecad.freecad_env import (
-    prepare_freecad_import as _prepare_freecad_import,
-)
-from vibecad.freecad_env import (
-    silence_fd1 as _silence_fd1,
-)
+from vibecad import __version__, mcp_transport
+from vibecad import freecad_env as _freecad_env
+from vibecad.application.public_surface import public_tool_specs
 from vibecad.runtime import paths, status
 from vibecad.runtime import uninstall as _uninstall
 from vibecad.runtime.installer import RuntimeInstaller
-from vibecad.supervisor import SWAP_EXIT, runtime_swappable  # 单向依赖；换芯判据唯一真源（C1）
-from vibecad.tools import assembly as _assembly
-from vibecad.tools import export as _export
-from vibecad.tools import features as _features
-from vibecad.tools import measure as _measure
-from vibecad.tools import modeling as _modeling
-from vibecad.tools import modify as _modify
-from vibecad.tools import project as _project
-from vibecad.tools import sketch as _sketch
-from vibecad.tools import transform as _transform
+from vibecad.supervisor import runtime_swappable
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # m10：杜绝隐式拉起 GUI
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+_prepare_freecad_import = _freecad_env.prepare_freecad_import
+_silence_fd1 = _freecad_env.silence_fd1
+
+_SCHEMA_VERSION = 1
+_TOOL_REQUEST_INVALID = (-32602, "Tool request is invalid.")
+_TOOL_NAME_UNAVAILABLE = (-32602, "Tool name is not available.")
+_TOOL_INTERNAL_ERROR = (-32603, "Tool request could not be completed.")
+_RESOURCE_INVALID_IDENTIFIER = (-32602, "Artifact resource identifier is invalid.")
+_RESOURCE_UNAVAILABLE = (-32002, "Artifact resource is unavailable.")
+_RESOURCE_READ_LIMIT = (-32001, "Artifact resource exceeds the read limit.")
+_RESOURCE_RUNTIME_UNAVAILABLE = (-32004, "The managed CAD runtime is not active.")
+_RESOURCE_INTERNAL_ERROR = (-32603, "Artifact resource could not be read.")
+
+_ERROR_MESSAGES = {
+    "missing_field": "A required request field is missing.",
+    "unknown_field": "The request contains an unknown field.",
+    "unsupported_version": "The request schema version is not supported.",
+    "invalid_type": "A request value has an invalid type.",
+    "invalid_value": "A request value is invalid.",
+    "budget_exceeded": "The request exceeds a resource budget.",
+    "runtime_failure": "The runtime operation failed.",
+    "store_failure": "The runtime state operation failed.",
+    "recovery_required": "The runtime operation requires recovery.",
+    "runtime_unavailable": "The managed CAD runtime is not active.",
+    "internal_error": "The request could not be completed.",
+}
+
+_RESOURCE_TEMPLATE = "vibecad://artifact/{materialization_id}/{artifact_id}"
+_RESOURCE_URI = re.compile(
+    r"^vibecad://artifact/materialization_[0-9a-f]{64}/artifact_[0-9a-f]{32}$",
+    re.ASCII,
+)
+_VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$", re.ASCII)
+_MAX_JSON_DEPTH = 64
+_MAX_JSON_NODES = 65_536
+_MAX_JSON_KEY_BYTES = 256
+_MAX_JSON_STRING_BYTES = 1_048_576
+_MAX_TOOL_ARGUMENT_BYTES = 2_097_152
+_MAX_TOOL_RESULT_BYTES = 100_663_296
+_MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
+
+
+class _DiscardOnlyHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        del record
+
+
+class _SdkPathFilter(logging.Filter):
+    _vibecad_sdk_path_filter = True
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            path = os.path.normcase(os.path.realpath(record.pathname))
+            components = path.replace("\\", "/").split("/")
+        except BaseException:
+            return False
+        return "mcp" not in components
+
+
+def _silence_sdk_namespace() -> None:
+    logger = logging.getLogger("mcp")
+    logger.handlers[:] = [_DiscardOnlyHandler()]
+    logger.propagate = False
+    logger.disabled = False
+    for name, child in logging.root.manager.loggerDict.items():
+        if name.startswith("mcp.") and isinstance(child, logging.Logger):
+            child.handlers.clear()
+            child.propagate = True
+            child.disabled = True
+    root = logging.getLogger()
+    path_filter = next(
+        (item for item in root.filters if getattr(item, "_vibecad_sdk_path_filter", False) is True),
+        None,
+    )
+    if path_filter is None:
+        path_filter = _SdkPathFilter()
+        root.addFilter(path_filter)
+    for handler in root.handlers:
+        if not any(
+            getattr(item, "_vibecad_sdk_path_filter", False) is True for item in handler.filters
+        ):
+            handler.addFilter(path_filter)
+
 
 mcp = FastMCP("vibecad")
-mcp._mcp_server.version = __version__  # FastMCP 不透传 version；勿用构造参数（1.27.2 TypeError）
-_installer = RuntimeInstaller()  # 进度由 installer 落 status.json，server 读盘
-_session = Session()  # 跨 MCP 调用维持同一活动文档（单零件先行）；构造不 import FreeCAD
-_install_thread: threading.Thread | None = None
+mcp._mcp_server.version = __version__
+_silence_sdk_namespace()
 
-# Round 11 换芯自退：运行时装好后 server 主动退出，由监督进程重启进 conda 解释器。
-# Q2 已锁 C 分支（宿主对意外退出不自动重启，见计划 Spike 结果节）：supervisor 见
-# SWAP_EXIT=75（顶部 import）即换芯重启子进程并重放握手；真退出/崩溃用其他码原样透传给宿主。
-_swap_timer: threading.Timer | None = None
+
+def _thaw_json(value: object) -> object:
+    """Recursively copy frozen public metadata into SDK-serializable JSON values."""
+
+    if value is None or type(value) in {str, int, float, bool}:
+        return value
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if type(value) in {tuple, list}:
+        return [_thaw_json(item) for item in value]
+    raise TypeError("public metadata contains a non-JSON value")
+
+
+def _validation_schema(value: object) -> object:
+    """Copy a public schema while making anchored Python regexes truly terminal."""
+
+    thawed = _thaw_json(value)
+
+    def harden(current: object) -> object:
+        if type(current) is list:
+            return [harden(item) for item in current]
+        if type(current) is dict:
+            result = {key: harden(item) for key, item in current.items()}
+            pattern = result.get("pattern")
+            if type(pattern) is str and pattern.startswith("^") and pattern.endswith("$"):
+                result["pattern"] = pattern[:-1] + r"\Z"
+            return result
+        return current
+
+    return harden(thawed)
+
+
+_PUBLIC_SPECS = public_tool_specs()
+_SPEC_BY_NAME = {item.name: item for item in _PUBLIC_SPECS}
+_PUBLIC_TOOLS = tuple(
+    types.Tool(
+        name=item.name,
+        inputSchema=_thaw_json(item.input_schema),
+        outputSchema=_thaw_json(item.output_schema),
+        annotations=types.ToolAnnotations(
+            readOnlyHint=item.annotations.read_only,
+            destructiveHint=item.annotations.destructive,
+            idempotentHint=item.annotations.idempotent,
+            openWorldHint=item.annotations.open_world,
+        ),
+    )
+    for item in _PUBLIC_SPECS
+)
+_INPUT_SCHEMAS = {item.name: _validation_schema(item.input_schema) for item in _PUBLIC_SPECS}
+_OUTPUT_SCHEMAS = {item.name: _validation_schema(item.output_schema) for item in _PUBLIC_SPECS}
+_INPUT_VALIDATORS = {name: Draft202012Validator(schema) for name, schema in _INPUT_SCHEMAS.items()}
+_OUTPUT_VALIDATORS = {
+    name: Draft202012Validator(schema) for name, schema in _OUTPUT_SCHEMAS.items()
+}
+
+_STABLE_DOMAIN_FACADES = {
+    "create_project": "create_project_request",
+    "get_project": "get_project_request",
+    "create_task": "create_task_request",
+    "get_task": "get_task_request",
+    "submit_model_program": "submit_model_program_request",
+    "resume_task": "resume_task_request",
+    "accept_draft": "accept_draft_request",
+    "reject_draft": "reject_draft_request",
+    "export_task_artifacts": "export_task_artifacts_request",
+}
+_CONTROL_NAMES = frozenset(
+    {
+        "ping",
+        "get_runtime_status",
+        "ensure_runtime",
+        "uninstall_runtime",
+        "get_capabilities",
+    }
+)
+_DIRECT_NAMES = frozenset(_SPEC_BY_NAME) - _CONTROL_NAMES - frozenset(_STABLE_DOMAIN_FACADES)
+
+_APPLICATION_METHODS = (
+    "close",
+    "create_project_request",
+    "get_project_request",
+    "create_task_request",
+    "get_task_request",
+    "submit_model_program_request",
+    "resume_task_request",
+    "accept_draft_request",
+    "reject_draft_request",
+    "export_task_artifacts_request",
+    "invoke_direct_operation_request",
+    "read_artifact_resource",
+)
+
+
+class _ApplicationSlot:
+    """One PID-bound, single-flight application composition slot."""
+
+    def __init__(self, opener: Callable[[], object]) -> None:
+        if not callable(opener):
+            raise TypeError("application opener must be callable")
+        self._opener = opener
+        self._condition = threading.Condition()
+        self._pid = os.getpid()
+        self._state = "UNOPENED"
+        self._application: object | None = None
+        self._generation = 0
+        self._failed_generation = -1
+        self._clean_close = True
+
+    @property
+    def state(self) -> str:
+        if os.getpid() != self._pid:
+            return "CLOSED"
+        with self._condition:
+            return self._state
+
+    def _check_pid(self) -> None:
+        if os.getpid() != self._pid:
+            raise RuntimeError("application slot is unavailable in this process")
+
+    @staticmethod
+    def _close_candidate(candidate: object) -> bool:
+        try:
+            close = getattr(candidate, "close", None)
+            if not callable(close):
+                return False
+            close()
+        except BaseException:
+            return False
+        return True
+
+    @staticmethod
+    def _valid(candidate: object) -> bool:
+        return all(callable(getattr(candidate, name, None)) for name in _APPLICATION_METHODS)
+
+    def get(self) -> object:
+        self._check_pid()
+        waited_for: int | None = None
+        with self._condition:
+            while True:
+                self._check_pid()
+                if self._state == "READY":
+                    assert self._application is not None
+                    return self._application
+                if self._state in {"CLOSING", "CLOSED"}:
+                    raise RuntimeError("application slot is closed")
+                if self._state == "OPENING":
+                    if waited_for is None:
+                        waited_for = self._generation
+                    self._condition.wait()
+                    if self._failed_generation == waited_for:
+                        raise RuntimeError("application open failed")
+                    continue
+                self._state = "OPENING"
+                self._generation += 1
+                generation = self._generation
+                break
+
+        candidate: object | None = None
+        cleanup_failed = False
+        try:
+            candidate = self._opener()
+            try:
+                valid = self._valid(candidate)
+            except BaseException:
+                cleanup_failed = candidate is not None and not self._close_candidate(candidate)
+                raise RuntimeError("application open failed") from None
+            if not valid:
+                if candidate is not None:
+                    cleanup_failed = not self._close_candidate(candidate)
+                raise RuntimeError("application open failed")
+        except BaseException:
+            with self._condition:
+                if self._state == "OPENING" and self._generation == generation:
+                    self._failed_generation = generation
+                    if cleanup_failed:
+                        self._clean_close = False
+                        self._state = "CLOSED"
+                    else:
+                        self._state = "UNOPENED"
+                    self._condition.notify_all()
+            raise RuntimeError("application open failed") from None
+
+        with self._condition:
+            if self._state != "OPENING" or self._generation != generation:
+                self._close_candidate(candidate)
+                raise RuntimeError("application slot is closed")
+            self._application = candidate
+            self._state = "READY"
+            self._condition.notify_all()
+            return candidate
+
+    def close(self) -> bool:
+        self._check_pid()
+        with self._condition:
+            while self._state == "OPENING":
+                self._condition.wait()
+            if self._state == "CLOSED":
+                return self._clean_close
+            if self._state == "CLOSING":
+                while self._state == "CLOSING":
+                    self._condition.wait()
+                return self._state == "CLOSED" and self._clean_close
+            candidate = self._application
+            self._application = None
+            self._state = "CLOSING"
+            self._condition.notify_all()
+
+        closed = candidate is None or self._close_candidate(candidate)
+        with self._condition:
+            self._clean_close = self._clean_close and closed
+            self._state = "CLOSED"
+            self._condition.notify_all()
+        return closed
+
+
+_application_effect_entered = threading.Event()
+_runtime_transition_lock = threading.Lock()
+
+
+def _open_agent_application() -> object:
+    if not _enter_application_effect():
+        raise RuntimeError("application admission is closed")
+    from vibecad.application.agent import AgentApplication
+
+    return AgentApplication.open(data_root=paths.data_root())
+
+
+def _initialize_application_process_runtime() -> None:
+    """Initialize main-thread-only application policy before owned workers exist."""
+
+    from vibecad.execution.revisions import _initialize_candidate_file_limit_runtime
+
+    _initialize_candidate_file_limit_runtime()
+
+
+_application_slot = _ApplicationSlot(_open_agent_application)
+
+
+def _close_application_at_exit() -> None:
+    try:
+        _application_slot.close()
+    except BaseException:
+        pass
+
+
+atexit.register(_close_application_at_exit)
+
+_installer = RuntimeInstaller()
+_install_thread: threading.Thread | None = None
+_install_lock = threading.Lock()
+_active_owned_runner: mcp_transport.OwnedStdioRunner | None = None
+_active_owned_runner_lock = threading.Lock()
 
 
 def _in_conda_runtime() -> bool:
-    """当前进程是否就是 conda 运行时 python（决定能否进程内 import FreeCAD）。"""
     try:
         return os.path.realpath(sys.executable) == os.path.realpath(paths.active_runtime_python())
     except OSError:
         return False
 
 
-def _schedule_swap(delay: float = 1.0) -> None:
-    """运行时就绪但本进程仍是引导解释器 → 延迟自退换芯（延迟给当前响应 flush 留时间）。
-    幂等：已安排则不叠加。仅经 _try_schedule_swap 调用（判据 + 监督检查的唯一入口）。
-    C 分支：监督进程见 SWAP_EXIT 即换 conda python 重启子进程并重放握手。
-
-    I5 竞态说明：Timer 到点的 os._exit(SWAP_EXIT) 与进程真崩溃存在竞态——真崩溃恰
-    在此刻可能被 75 掩盖成一次「换芯」。有意接受不加同步：概率极低，且反复形态会被
-    supervisor 的换芯循环护栏拦住并响亮退出。"""
-    global _swap_timer
-    if _swap_timer is not None:
-        return
-    _swap_timer = threading.Timer(delay, os._exit, args=(SWAP_EXIT,))
-    _swap_timer.daemon = True
-    _swap_timer.start()
-
-
 def _supervised() -> bool:
-    """本进程是否由监督进程拉起（I4，见 supervisor._spawn 的 env 注入）。裸 server
-    （直接 python -m vibecad.server）自杀后无人重启 = 服务凭空消失，绝不自杀。"""
     return os.environ.get("VIBECAD_SUPERVISED") == "1"
 
 
-def _try_schedule_swap() -> bool:
-    """换芯触发点唯一入口：可换芯则安排自退并返回 True；False = 调用方给诚实回退
-    （needs_reconnect / 提示重连文案）。判据两条，缺一不可：
-    ① runtime_swappable()（C1）——与 supervisor._server_cmd 同一真源；哨兵在而
-      conda python 缺失时若照旧自杀，supervisor 只会落回 bootstrap 再自杀，无限循环；
-    ② _supervised()（I4）——裸 server 自杀无人重启。"""
-    if not (runtime_swappable() and _supervised()):
+def _try_schedule_swap(*, uninstall: bool = False) -> bool:
+    if not _supervised() or (not uninstall and not runtime_swappable()):
         return False
-    _schedule_swap()
-    return True
+    with _runtime_transition_lock:
+        if not uninstall and _application_effect_entered.is_set():
+            return False
+        runner = _active_owned_runner
+        if runner is not None:
+            return runner.request_uninstall_exit() if uninstall else runner.request_swap()
+        return False
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
-def ping() -> str:
-    """连通性自检。"""
-    return f"vibecad ok (v{__version__})"
+def _enter_application_effect() -> bool:
+    """Linearize application entry against a normal runtime-ready swap."""
 
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=False,
-    )
-)
-def get_runtime_status() -> dict[str, Any]:
-    """查询 FreeCAD 运行时安装进度（跨进程读 status.json）。"""
-    d = status.read_status().to_dict()
-    compatible = status.runtime_ready()
-    recovery = status.RecoveryKind.READY if compatible else status.runtime_recovery_kind()
-    # receipt 可能恰在两次廉价读取之间原子升级；采用较新的 READY 结果，避免瞬时误报修复。
-    compatible = compatible or recovery is status.RecoveryKind.READY
-    receipt = status.read_runtime_receipt() or {}
-    d["runtime_compatible"] = compatible
-    d["runtime_action"] = recovery.value
-    d["installed_version"] = receipt.get("vibecad_version")
-    d["required_version"] = __version__
-    if d["phase"] == status.Phase.READY.value and not compatible:
-        if recovery is status.RecoveryKind.UPGRADE_REQUIRED:
-            d["phase"] = recovery.value
-            d["message"] = (
-                f"FreeCAD 引擎可复用，但 server 需要同步到 VibeCAD v{__version__}；"
-                "调用 ensure_runtime 开始轻量同步（不会重新下载 FreeCAD）"
-            )
-        else:
-            d["phase"] = status.RecoveryKind.REPAIR_REQUIRED.value
-            d["message"] = (
-                "运行时凭据或环境不完整，需要修复；调用 ensure_runtime 后会先尝试复用，"
-                "若引擎不健康则重建 FreeCAD（约 2-3GB）"
-            )
-    d["needs_reconnect"] = False  # Round 11：自退换芯后客户端零感知（字段保留做兼容）
-    if compatible and not _in_conda_runtime() and not _try_schedule_swap():
-        # 不能自动换芯（裸 server 无人重启 / conda python 缺失）：诚实告知需重连（I4/C1）
-        d["needs_reconnect"] = True
-    return d
-
-
-def _spawn_install() -> None:
-    global _install_thread
-    if _install_thread and _install_thread.is_alive():
-        return
-    _install_thread = threading.Thread(target=_safe_install, name="vibecad-install", daemon=True)
-    _install_thread.start()
+    with _runtime_transition_lock:
+        runner = _active_owned_runner
+        if runner is not None and not runner.lifecycle.application_may_enter:
+            return False
+        _application_effect_entered.set()
+        return True
 
 
 def _safe_install() -> None:
     try:
         _installer.install()
-    except Exception:  # noqa: BLE001 - 失败态已落 status.json
-        pass
-    else:
-        # 安装成功即安排自退换芯——用户全程不开口也自动获得 CAD 能力（Round 11）。
-        # 不可换芯时此处无对话通道，留给 get_runtime_status/_runtime_guard 诚实反馈。
+    except Exception:
+        return
+    if not _in_conda_runtime():
+        _try_schedule_swap()
+
+
+def _spawn_install() -> None:
+    global _install_thread
+    with _install_lock:
+        if _install_thread is not None and _install_thread.is_alive():
+            return
+        worker = threading.Thread(
+            target=_safe_install,
+            name="vibecad-install",
+            daemon=True,
+        )
+        _install_thread = worker
+        worker.start()
+
+
+def ping() -> dict[str, object]:
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "service": "vibecad",
+        "version": __version__,
+    }
+
+
+def _runtime_status_message(
+    phase: status.Phase,
+    recovery: status.RecoveryKind,
+) -> str:
+    if recovery is status.RecoveryKind.UPGRADE_REQUIRED:
+        return "The CAD engine is reusable, but the server package requires an update."
+    if recovery is status.RecoveryKind.REPAIR_REQUIRED and phase is status.Phase.READY:
+        return "The managed CAD runtime requires repair."
+    return {
+        status.Phase.NOT_STARTED: "The managed CAD runtime is not installed.",
+        status.Phase.DOWNLOADING_MICROMAMBA: "The runtime installer is downloading its bootstrap.",
+        status.Phase.CREATING_ENV: "The runtime installer is creating the CAD environment.",
+        status.Phase.INSTALLING_PIP: "The runtime installer is synchronizing the server package.",
+        status.Phase.VERIFYING: "The runtime installer is verifying the CAD environment.",
+        status.Phase.READY: "The managed CAD runtime is ready.",
+        status.Phase.FAILED: "The managed CAD runtime installation failed.",
+    }[phase]
+
+
+def get_runtime_status() -> dict[str, object]:
+    current = status.read_status()
+    phase = current.phase if type(current.phase) is status.Phase else status.Phase.NOT_STARTED
+    percent = current.percent
+    if type(percent) not in {int, float} or type(percent) is bool or not math.isfinite(percent):
+        percent = 0.0
+    percent = min(100.0, max(0.0, float(percent)))
+    compatible = status.runtime_ready()
+    recovery = status.RecoveryKind.READY if compatible else status.runtime_recovery_kind()
+    receipt = status.read_runtime_receipt()
+    installed = receipt.get("vibecad_version") if type(receipt) is dict else None
+    if type(installed) is not str or _VERSION.fullmatch(installed) is None:
+        installed = None
+    needs_reconnect = False
+    if compatible and not _in_conda_runtime():
+        needs_reconnect = not _try_schedule_swap()
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "phase": phase.value,
+        "percent": percent,
+        "message": _runtime_status_message(phase, recovery),
+        "error": ("Runtime installation failed." if phase is status.Phase.FAILED else None),
+        "runtime_compatible": compatible,
+        "runtime_action": recovery.value,
+        "installed_version": installed,
+        "required_version": __version__,
+        "needs_reconnect": needs_reconnect,
+    }
+
+
+def _ensure_runtime_impl() -> dict[str, object]:
+    if _installer.is_ready():
         if not _in_conda_runtime():
             _try_schedule_swap()
-
-
-def _ensure_runtime_impl() -> dict[str, Any]:
-    if _installer.is_ready():
-        msg = "FreeCAD 运行时已就绪"
-        if not _in_conda_runtime():
-            if _try_schedule_swap():  # Round 11：自退换芯替代手动重连
-                msg += "；正在自动切换到运行时解释器，数秒后即可直接使用 CAD 能力"
-            else:  # I4/C1 回退：不能自杀时诚实提示重连
-                msg += "；需重启/重连 vibecad MCP 连接后方可使用 CAD 能力"
-        return {"status": "ready", "message": msg}
-    if _install_thread and _install_thread.is_alive():
-        return {"status": "in_progress", "message": "安装进行中，请轮询 get_runtime_status"}
+        return {"status": "ready", "message": "The managed CAD runtime is ready."}
+    with _install_lock:
+        active = _install_thread is not None and _install_thread.is_alive()
+    if active:
+        return {
+            "status": "in_progress",
+            "message": "The managed CAD runtime installation is in progress.",
+        }
     _spawn_install()
     return {
         "status": "started",
-        "message": "已开始后台安装 FreeCAD 运行时（约 2-3GB），请轮询 get_runtime_status",
+        "message": "The managed CAD runtime installation has started.",
     }
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=True,
-    )
-)
-def ensure_runtime() -> dict[str, Any]:
-    """确保 FreeCAD 运行时就绪：未就绪则后台开始安装并立即返回，用 get_runtime_status 轮询。"""
-    return _ensure_runtime_impl()
+def _estimated_uninstall_bytes(preview: object) -> int:
+    if type(preview) is not dict:
+        return 0
+    size = preview.get("size_mb")
+    if type(size) not in {int, float} or type(size) is bool or not math.isfinite(size):
+        return 0
+    return min(_MAX_SAFE_JSON_INTEGER, max(0, int(float(size) * 1_000_000)))
 
 
-def _build_box_and_export() -> dict[str, Any]:
-    import tempfile
-
-    _prepare_freecad_import()
-    out = os.path.join(tempfile.gettempdir(), "vibecad_smoke.step")
-    with _silence_fd1():
-        import FreeCAD  # noqa: PLC0415 - 懒加载：仅 conda runtime 进程内 import
-        import Part  # noqa: PLC0415
-
-        box = Part.makeBox(10, 10, 10)
-        box.exportStep(out)
-        bb = box.BoundBox
-        result = {
-            "ok": True,
-            "volume": box.Volume,
-            "bbox": [bb.XLength, bb.YLength, bb.ZLength],
-            "step": out,
-            "freecad_version": list(FreeCAD.Version()),
-        }
-    return result
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=True,
-        openWorldHint=False,
-    )
-)
-def smoke_cad() -> dict[str, Any]:
-    """地基验证：进程内造 10×10×10 Box，导出 STEP，返回体积/包围盒/路径。"""
-    # Round 11：复用 _runtime_guard（换芯触发逻辑单点收敛，不再各写一份"请重连"文案）
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    return _build_box_and_export()
-
-
-def _runtime_guard() -> dict[str, Any] | None:
-    if not _installer.is_ready():
-        st = status.read_status()
-        if st.phase == status.Phase.FAILED:
-            return {
-                "ok": False,
-                "phase": st.phase.value,
-                "message": f"CAD 引擎安装失败：{st.error or st.message}；"
-                "可调用 ensure_runtime 重试",
-            }
-        if st.phase == status.Phase.NOT_STARTED:
-            return {
-                "ok": False,
-                "phase": st.phase.value,
-                "message": "CAD 引擎未安装：调用 ensure_runtime 开始（约 2-3GB，仅一次）",
-            }
-        if st.phase == status.Phase.READY:
-            recovery = status.runtime_recovery_kind()
-            if recovery is status.RecoveryKind.UPGRADE_REQUIRED:
-                return {
-                    "ok": False,
-                    "phase": recovery.value,
-                    "message": f"CAD 引擎可复用，但 server 需要同步到 VibeCAD "
-                    f"v{__version__}；调用 ensure_runtime 开始轻量同步"
-                    "（不会重新下载 FreeCAD）",
-                }
-            return {
-                "ok": False,
-                "phase": status.RecoveryKind.REPAIR_REQUIRED.value,
-                "message": "CAD 运行时凭据或环境不完整；调用 ensure_runtime 修复。"
-                "若现有引擎不健康，将重建 FreeCAD（约 2-3GB）",
-            }
+def uninstall_runtime(confirm: bool = False) -> dict[str, object]:
+    preview = _uninstall.preview_uninstall()
+    if type(preview) is not dict or preview.get("ok") is not True:
+        raise RuntimeError("runtime uninstall preview failed")
+    estimated = _estimated_uninstall_bytes(preview)
+    if not confirm:
         return {
-            "ok": False,
-            "phase": st.phase.value,
-            "percent": st.percent,
-            "message": f"正在准备 CAD 引擎：{st.message or st.phase.value}"
-            f"（{st.percent:.0f}%）。就绪后自动接管，无需任何手动操作，"
-            "可用 get_runtime_status 看进度",
+            "schema_version": _SCHEMA_VERSION,
+            "status": "preview",
+            "confirm_required": True,
+            "estimated_size_bytes": estimated,
+            "data_preserved": True,
+            "message": "Confirm to remove only the managed CAD runtime; durable data is preserved.",
         }
-    if not _in_conda_runtime():
-        if _try_schedule_swap():  # Round 11：自退换芯替代手动重连
-            _msg = "运行时已就绪，正在自动切换到运行时解释器（数秒内完成），请稍后重试本操作"
-        else:  # I4/C1 回退：裸 server / 运行时不完整时不自杀，诚实提示重连
-            _msg = "运行时已就绪，但本进程无法自动切换解释器；请重启/重连 vibecad MCP 连接后重试"
-        return {"ok": False, "message": _msg}
+    requested = _uninstall.request_uninstall()
+    if type(requested) is not dict or requested.get("ok") is not True:
+        raise RuntimeError("runtime uninstall request failed")
+    marked = requested.get("marked") is True
+    already_clean = requested.get("already_clean") is True
+    if not marked and not already_clean:
+        raise RuntimeError("runtime uninstall response is invalid")
+    runner = _active_owned_runner
+    if runner is None:
+        if not _application_slot.close():
+            raise RuntimeError("application close failed")
+        if marked:
+            _try_schedule_swap(uninstall=True)
+    elif marked and not _try_schedule_swap(uninstall=True):
+        # The marker is durable at this point.  Keeping this process alive and
+        # returning recovery_required is safer than closing the application or
+        # claiming a swap which the owned transport cannot perform.
+        runner.request_uninstall_recovery()
+        raise RuntimeError("runtime uninstall requires recovery")
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "status": "marked" if marked else "already_clean",
+        "confirm_required": False,
+        "estimated_size_bytes": estimated,
+        "data_preserved": True,
+        "message": (
+            "The managed CAD runtime is marked for removal; durable data is preserved."
+            if marked
+            else "No managed CAD runtime remains; durable data is preserved."
+        ),
+    }
+
+
+def _failure(code: str, path: str = "") -> dict[str, object]:
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "ok": False,
+        "result": None,
+        "error": {
+            "schema_version": _SCHEMA_VERSION,
+            "code": code,
+            "path": path,
+            "message": _ERROR_MESSAGES[code],
+        },
+    }
+
+
+def _success(result: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "ok": True,
+        "result": result,
+        "error": None,
+    }
+
+
+def _runtime_unavailable() -> dict[str, object]:
+    return _failure("runtime_unavailable")
+
+
+def _application_runtime_guard() -> dict[str, object] | None:
+    try:
+        ready = _installer.is_ready()
+        active = ready and _in_conda_runtime()
+        if not active:
+            if ready:
+                _try_schedule_swap()
+            return _runtime_unavailable()
+    except BaseException:
+        return _runtime_unavailable()
     return None
 
 
-def _build_part_map() -> dict[str, Any] | None:
-    """装配模式构造 {零件名: 全局 shape}（容器位姿已应用，与 get_assembly_shape
-    的 compound 同坐标系），用于渲染分色与标签表"（零件：X）"归属后缀；
-    单零件模式返回 None。调用方需置于 _silence_fd1() 内（transformed 走 OCCT）。
-    空零件跳过——必须与 get_assembly_shape 的跳过规则一致（compound 拼接序）。"""
-    if not _session._parts:
+def _runtime_guard() -> dict[str, object] | None:
+    """Compatibility seam for tests; public calls use the exact envelope guard."""
+
+    guarded = _application_runtime_guard()
+    if guarded is None:
         return None
     return {
-        name: _session.get_result_shape(name).transformed(info["container"].Placement.toMatrix())
-        for name, info in _session._parts.items()
-        if info["objects"]
+        "ok": False,
+        "phase": status.read_status().phase.value,
+        "message": _ERROR_MESSAGES["runtime_unavailable"],
     }
 
 
-def _store_labels(faces_reg: dict, edges_reg: dict, shown: set) -> None:
-    """标签快照入库：单零件模式写单命名空间（R7 原行为）。
-
-    装配模式（终审 I-1 死锁修复）：把全 compound 注册表写入**每个零件**的命名
-    空间——指纹是全局坐标，resolve 时 _match_shape(part) 用各零件自己的全局
-    shape 匹配，天然只命中本零件的面（跨零件标签的指纹在该零件面集中命中 0
-    → 照旧响亮失败），不会串扰。此前只写活动零件命名空间：非活动零件被移动后
-    其快照永久过期，而重标注永远只刷活动零件——"请重新标注"提示成了死循环
-    （server 无 set_active_part 工具）。"""
-    if _session._parts:
-        for pname in _session._parts:
-            _session.set_labels(faces_reg, edges_reg, shown=shown, part=pname)
-    else:
-        _session.set_labels(faces_reg, edges_reg, shown=shown)
-
-
-def _edges_of_global_index(ef_idx: int, part_map: dict[str, Any] | None) -> int:
-    """resolve_face 返回的是零件**局部**面索引；annotate 消费的是装配 compound
-    的**全局**面索引（终审 C-C：错位导致画错零件的边+表注堂而皇之错）。
-    装配模式把局部索引平移：全局 = 活动零件之前各零件（part_map 迭代序 =
-    compound 拼接序）的面数之和 + 局部索引。单零件模式（part_map None）原样。"""
-    if part_map is None:
-        return ef_idx
-    offset = 0
-    for name, p_shape in part_map.items():
-        if name == _session.active_part:
-            return offset + ef_idx
-        offset += len(p_shape.Faces)
-    # 活动零件不在 part_map（空零件等异常态）——静默用错索引画错图违反纪律
-    raise RuntimeError(
-        f"活动零件 {_session.active_part!r} 不在装配渲染序列中——无法定位 edges_of 面"
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
     )
 
 
-def _attach_view(result: dict[str, Any], tool: str = "step") -> Any:
-    """成功结果附三视图拼图 + 当场刷新标签表；附图失败不连坐（保留操作成功 +
-    render_error + 退回 labels_stale 提示）——绝不因附图失败把成功操作报成失败，
-    也绝不静默吞掉渲染错误。
-
-    Round 8：改用 get_assembly_shape()（单零件模式等价）；装配模式传入 part_map 给
-    render_multiview 用于 iso 格分色和标签表零件归属后缀。
-    """
-    if not isinstance(result, dict) or not result.get("ok"):
-        return result
+def _json_budget_failure(
+    value: object,
+    *,
+    maximum_bytes: int = _MAX_TOOL_ARGUMENT_BYTES,
+) -> str | None:
+    nodes = 0
+    seen: set[int] = set()
+    stack: list[tuple[object, int]] = [(value, 0)]
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_JSON_NODES or depth > _MAX_JSON_DEPTH:
+            return "budget_exceeded"
+        if current is None or type(current) is bool:
+            continue
+        if type(current) is int:
+            if abs(current) > _MAX_SAFE_JSON_INTEGER:
+                return "invalid_value"
+            continue
+        if type(current) is float:
+            if not math.isfinite(current):
+                return "invalid_value"
+            continue
+        if type(current) is str:
+            try:
+                if len(current.encode("utf-8")) > _MAX_JSON_STRING_BYTES:
+                    return "budget_exceeded"
+            except UnicodeError:
+                return "invalid_value"
+            continue
+        if type(current) not in {dict, list}:
+            return "invalid_type"
+        identity = id(current)
+        if identity in seen:
+            return "invalid_value"
+        seen.add(identity)
+        if type(current) is dict:
+            for key, item in current.items():
+                if type(key) is not str:
+                    return "invalid_type"
+                try:
+                    if len(key.encode("utf-8")) > _MAX_JSON_KEY_BYTES:
+                        return "budget_exceeded"
+                except UnicodeError:
+                    return "invalid_value"
+                stack.append((item, depth + 1))
+        else:
+            stack.extend((item, depth + 1) for item in current)
     try:
-        with _silence_fd1():
-            shape = _session.get_assembly_shape()
-            png, table, faces_reg, edges_reg = _multiview.render_multiview(
-                shape, part_map=_build_part_map()
+        if len(_canonical_json(value).encode("utf-8")) > maximum_bytes:
+            return "budget_exceeded"
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        return "invalid_value"
+    return None
+
+
+def _schema_utf8_budget_path(
+    value: object,
+    schema: object,
+    path: tuple[object, ...] = (),
+) -> tuple[object, ...] | None:
+    if type(schema) is not dict:
+        return None
+    alternatives = schema.get("anyOf")
+    if type(alternatives) is list:
+        for alternative in alternatives:
+            if type(alternative) is not dict:
+                continue
+            expected = alternative.get("type")
+            if (
+                (expected == "null" and value is None)
+                or (expected == "string" and type(value) is str)
+                or (expected == "object" and type(value) is dict)
+                or (expected == "array" and type(value) is list)
+            ):
+                return _schema_utf8_budget_path(value, alternative, path)
+        return None
+    if type(value) is str:
+        maximum = schema.get("maxLength")
+        if type(maximum) is int:
+            try:
+                if len(value.encode("utf-8")) > maximum:
+                    return path
+            except UnicodeError:
+                return path
+        return None
+    if type(value) is dict:
+        properties = schema.get("properties")
+        if type(properties) is not dict:
+            return None
+        for key, item in value.items():
+            selected = properties.get(key)
+            if selected is None:
+                continue
+            failed = _schema_utf8_budget_path(item, selected, (*path, key))
+            if failed is not None:
+                return failed
+        return None
+    if type(value) is list:
+        items = schema.get("items")
+        for index, item in enumerate(value):
+            failed = _schema_utf8_budget_path(item, items, (*path, index))
+            if failed is not None:
+                return failed
+    return None
+
+
+def _pointer(parts: tuple[object, ...], final: str | None = None) -> str:
+    tokens: list[str] = []
+    for item in parts:
+        if type(item) is int:
+            tokens.append(str(item))
+        elif type(item) is str and _VERSION.fullmatch(item) is not None:
+            tokens.append(item)
+        elif type(item) is str and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", item):
+            tokens.append(item)
+        else:
+            tokens.append("_unknown")
+            break
+    if final is not None:
+        tokens.append(final)
+    path = "".join("/" + token.replace("~", "~0").replace("/", "~1") for token in tokens)
+    try:
+        return path if len(path.encode("utf-8")) <= 256 else "/_truncated"
+    except UnicodeError:
+        return "/_truncated"
+
+
+def _schema_failure(name: str, arguments: dict[str, object]) -> dict[str, object] | None:
+    budget = _json_budget_failure(arguments)
+    if budget is not None:
+        return _failure(budget)
+    errors = list(_INPUT_VALIDATORS[name].iter_errors(arguments))
+    if not errors:
+        utf8_failure = _schema_utf8_budget_path(arguments, _INPUT_SCHEMAS[name])
+        if utf8_failure is None:
+            return None
+        return _failure("budget_exceeded", _pointer(utf8_failure))
+    priority = {
+        "required": 0,
+        "additionalProperties": 1,
+        "type": 2,
+        "maxLength": 3,
+        "maxItems": 3,
+        "maxProperties": 3,
+    }
+    error = min(
+        errors,
+        key=lambda item: (priority.get(item.validator, 4), tuple(map(str, item.absolute_path))),
+    )
+    parts = tuple(error.absolute_path)
+    if error.validator == "required":
+        required = tuple(error.validator_value)
+        instance = error.instance if type(error.instance) is dict else {}
+        missing = next((field for field in required if field not in instance), None)
+        return _failure("missing_field", _pointer(parts, missing))
+    if error.validator == "additionalProperties":
+        return _failure("unknown_field", _pointer(parts, "_unknown"))
+    if error.validator == "type":
+        return _failure("invalid_type", _pointer(parts))
+    if error.validator in {"maxLength", "maxItems", "maxProperties"}:
+        return _failure("budget_exceeded", _pointer(parts))
+    if error.validator == "const" and parts == ("schema_version",):
+        return _failure("unsupported_version", "/schema_version")
+    return _failure("invalid_value", _pointer(parts))
+
+
+def _mcp_error(error: tuple[int, str]) -> McpError:
+    code, message = error
+    return McpError(types.ErrorData(code=code, message=message))
+
+
+def _call_result(name: str, envelope: object) -> types.CallToolResult:
+    try:
+        if (
+            type(envelope) is not dict
+            or _json_budget_failure(
+                envelope,
+                maximum_bytes=_MAX_TOOL_RESULT_BYTES,
             )
-        _store_labels(faces_reg, edges_reg, shown=set(table.keys()))
-        result.pop("labels_stale", None)
-        result.pop("hint", None)
-        try:
-            with _silence_fd1():
-                result["parts"] = _modify.list_parameters(_session.doc, session=_session)
-        except Exception:  # noqa: BLE001 - 参数清单失败不应丢弃已成功的渲染：
-            # labels/Image 已就绪，parts 只是辅助清单，兜底空 dict 而非把整个
-            # 附图降级到 render_error 路径（消除"渲染成功却报渲染失败"的语义矛盾）
-            result["parts"] = {}
-        try:
-            doc_name = getattr(_session.doc, "Name", "untitled")
-            result["view_file"] = _persist.save_view(png, doc_name, tool)
-        except Exception as exc:  # noqa: BLE001 - 落盘失败不连坐（与 render_error 同理）
-            result["view_file_error"] = f"图已生成但落盘失败：{exc}"
-        result["labels"] = table
-        # 顺序 [dict, Image] 是有意为之（与 render_part 的 [Image, str] 相反）：
-        # 建模返回以结构化结果为主、图为附件；render_part 以图为主。勿"对齐"。
-        return [result, Image(data=png, format="png")]
-    except Exception as exc:  # noqa: BLE001 - 事务已提交，纯展示阶段刻意宽抓：
-        # 此处任何异常（实测 TechDraw 的 TypeError、潜在 ImportError/IndexError）
-        # 穿透都会把已成功的操作谎报成 isError，诱发 AI 客户端重试叠出重复对象。
-        # 宽抓不违反"绝不静默"——失败本身响亮（render_error 带类型名+文本）。
-        # 项目其他处（操作路径/只读 render_part 路径）维持窄抓纪律，此处是唯一例外。
-        # setdefault：tools 层带了 labels_stale/hint 就尊重其语义，只兜底补缺
-        # （modeling 的"_labels 非空才带 stale"、fillet/chamfer 的 edges hint 不被架空）。
-        result.setdefault("labels_stale", True)
-        result.setdefault("hint", "几何已变更，调用 render_part(annotate='faces') 查看最新标注")
-        result["render_error"] = f"自动渲染失败（{type(exc).__name__}）：{exc}"
-        return result
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=False,
-        openWorldHint=False,
+            is not None
+            or not _OUTPUT_VALIDATORS[name].is_valid(envelope)
+        ):
+            raise _mcp_error(_TOOL_INTERNAL_ERROR)
+        text = _canonical_json(envelope)
+    except McpError:
+        raise
+    except BaseException:
+        raise _mcp_error(_TOOL_INTERNAL_ERROR) from None
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=text)],
+        structuredContent=envelope,
+        isError=envelope["ok"] is not True,
     )
-)
-def new_document(name: str, discard_unsaved: bool = False) -> dict[str, Any]:
-    """新建 CAD 文档。当前项目未保存时默认拒绝；明确 discard_unsaved=true 才替换。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
+
+
+def _control_envelope(name: str, arguments: dict[str, object]) -> dict[str, object]:
     try:
-        return _modeling.new_document(_session, name, discard_unsaved=discard_unsaved)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"新建文档失败：{exc}"}
+        if name == "ping":
+            return _success(ping())
+        if name == "get_runtime_status":
+            return _success(get_runtime_status())
+        if name == "ensure_runtime":
+            result = _ensure_runtime_impl()
+            return _success({"schema_version": _SCHEMA_VERSION, **result})
+        if name == "uninstall_runtime":
+            return _success(uninstall_runtime(confirm=arguments["confirm"]))
+        if name == "get_capabilities":
+            from vibecad.application.task_api import TaskApi
+
+            return TaskApi(port=object()).get_capabilities(arguments)
+    except (OSError, RuntimeError, ValueError):
+        return _failure("recovery_required" if name == "uninstall_runtime" else "runtime_failure")
+    except BaseException:
+        return _failure("internal_error")
+    raise _mcp_error(_TOOL_INTERNAL_ERROR)
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=True,
-        openWorldHint=False,
+async def _handle_list_tools() -> types.ListToolsResult:
+    return types.ListToolsResult(tools=list(_PUBLIC_TOOLS))
+
+
+async def _handle_list_resources() -> types.ListResourcesResult:
+    return types.ListResourcesResult(resources=[])
+
+
+async def _handle_list_resource_templates() -> types.ListResourceTemplatesResult:
+    return types.ListResourceTemplatesResult(
+        resourceTemplates=[types.ResourceTemplate(name="artifact", uriTemplate=_RESOURCE_TEMPLATE)]
     )
-)
-def save_project(path: str, overwrite: bool = True) -> dict[str, Any]:
-    """保存完整参数化项目为 .FCStd；默认覆盖同名文件，overwrite=false 可禁止覆盖。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
+
+
+async def _handle_call_tool(
+    name: object,
+    arguments: object,
+) -> types.CallToolResult:
+    if type(name) is not str:
+        raise _mcp_error(_TOOL_REQUEST_INVALID)
+    if name not in _SPEC_BY_NAME:
+        raise _mcp_error(_TOOL_NAME_UNAVAILABLE)
+    if arguments is None:
+        arguments = {}
+    if type(arguments) is not dict:
+        raise _mcp_error(_TOOL_REQUEST_INVALID)
+    invalid = _schema_failure(name, arguments)
+    if invalid is not None:
+        return _call_result(name, invalid)
+    if name in _CONTROL_NAMES:
+        return _call_result(name, _control_envelope(name, arguments))
+
+    guarded = _application_runtime_guard()
+    if guarded is not None:
+        return _call_result(name, guarded)
+    if not _enter_application_effect():
+        return _call_result(name, _runtime_unavailable())
     try:
-        return _project.save_project(_session, path, overwrite=overwrite)
-    except (OSError, RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"保存项目失败：{exc}"}
+        application = _application_slot.get()
+        if name in _STABLE_DOMAIN_FACADES:
+            facade = getattr(application, _STABLE_DOMAIN_FACADES[name])
+            envelope = facade(arguments)
+        elif name in _DIRECT_NAMES:
+            envelope = application.invoke_direct_operation_request(name, arguments)
+        else:
+            raise RuntimeError("unreachable public tool")
+    except McpError:
+        raise
+    except BaseException:
+        raise _mcp_error(_TOOL_INTERNAL_ERROR) from None
+    return _call_result(name, envelope)
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def open_project(path: str, discard_unsaved: bool = False) -> Any:
-    """打开 .FCStd 项目并恢复活动零件/结果根；未保存修改默认受保护。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
+async def _handle_read_resource(uri: object) -> types.ReadResourceResult:
+    if type(uri) is not str or _RESOURCE_URI.fullmatch(uri) is None:
+        raise _mcp_error(_RESOURCE_INVALID_IDENTIFIER)
+    guarded = _application_runtime_guard()
+    if guarded is not None:
+        raise _mcp_error(_RESOURCE_RUNTIME_UNAVAILABLE)
+    if not _enter_application_effect():
+        raise _mcp_error(_RESOURCE_RUNTIME_UNAVAILABLE)
     try:
-        result = _project.open_project(_session, path, discard_unsaved=discard_unsaved)
-    except (OSError, RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"打开项目失败：{exc}"}
-    return _attach_view(result, tool="open_project") if result["has_result"] else result
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def delete_object(name: str, cascade: bool = False) -> Any:
-    """删除对象。若有下游依赖默认拒绝；cascade=true 时按依赖顺序级联删除。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
+        artifact_module = importlib.import_module("vibecad.application.artifacts")
+        ArtifactResourceError = artifact_module.ArtifactResourceError
+        ArtifactResourceErrorCode = artifact_module.ArtifactResourceErrorCode
+        if not (
+            isinstance(ArtifactResourceError, type)
+            and issubclass(ArtifactResourceError, BaseException)
+        ):
+            raise TypeError("invalid artifact resource error type")
+    except BaseException:
+        raise _mcp_error(_RESOURCE_INTERNAL_ERROR) from None
     try:
-        result = _project.delete_object(_session, name, cascade=cascade)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"删除失败：{exc}"}
-    return _attach_view(result, tool="delete_object") if result["has_result"] else result
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def undo() -> Any:
-    """撤销当前文档最近一个 VibeCAD/FreeCAD 事务；打开项目后历史从零开始。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
+        application = _application_slot.get()
+        content = application.read_artifact_resource(uri)
+    except ArtifactResourceError as error:
+        mapped = {
+            ArtifactResourceErrorCode.INVALID_IDENTIFIER: _RESOURCE_INVALID_IDENTIFIER,
+            ArtifactResourceErrorCode.UNAVAILABLE: _RESOURCE_UNAVAILABLE,
+            ArtifactResourceErrorCode.READ_LIMIT: _RESOURCE_READ_LIMIT,
+            ArtifactResourceErrorCode.RUNTIME_UNAVAILABLE: _RESOURCE_RUNTIME_UNAVAILABLE,
+            ArtifactResourceErrorCode.INTERNAL_ERROR: _RESOURCE_INTERNAL_ERROR,
+        }.get(error.code, _RESOURCE_INTERNAL_ERROR)
+        raise _mcp_error(mapped) from None
+    except McpError:
+        raise
+    except BaseException:
+        raise _mcp_error(_RESOURCE_INTERNAL_ERROR) from None
     try:
-        result = _project.undo(_session)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"撤销操作异常：{exc}"}
-    return _attach_view(result, tool="undo") if result["has_result"] else result
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def redo() -> Any:
-    """重做当前文档最近一个已撤销事务。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _project.redo(_session)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"重做操作异常：{exc}"}
-    return _attach_view(result, tool="redo") if result["has_result"] else result
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def add_box(length: float, width: float, height: float, position: list[float] | None = None) -> Any:
-    """添加参数化长方体（mm）；position=[x,y,z] 放置位置（默认原点）。成功后自动附三视图拼图。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _modeling.add_box(
-            _session,
-            length,
-            width,
-            height,
-            position=tuple(position) if position is not None else (0.0, 0.0, 0.0),
-        )
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"创建失败：{exc}"}
-    return _attach_view(result, tool="add_box")
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def add_cylinder(
-    radius: float, height: float, position: list[float] | None = None, axis: str = "z"
-) -> Any:
-    """添加参数化圆柱（mm）；position=[x,y,z] 放置位置，axis=x|y|z 圆柱轴向（默认 z）。
-    成功后自动附三视图拼图。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _modeling.add_cylinder(
-            _session,
-            radius,
-            height,
-            position=tuple(position) if position is not None else (0.0, 0.0, 0.0),
-            axis=axis,
-        )
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"创建失败：{exc}"}
-    return _attach_view(result, tool="add_cylinder")
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def boolean_cut(base_name: str, tool_name: str) -> Any:
-    """布尔差集：从 base 减去 tool，返回结果对象名与体积。成功后自动附三视图拼图。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _modeling.boolean_cut(_session, base_name, tool_name)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"布尔运算失败：{exc}"}
-    return _attach_view(result, tool="boolean_cut")
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def boolean_fuse(base_name: str, tool_name: str) -> Any:
-    """布尔并集：合并同一零件内两个相交/相接 solid；断开多实体会被拒绝。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _modeling.boolean_fuse(_session, base_name, tool_name)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"布尔并集失败：{exc}"}
-    return _attach_view(result, tool="boolean_fuse")
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def boolean_common(base_name: str, tool_name: str) -> Any:
-    """布尔交集：保留同一零件内两个 solid 的实体交叠部分。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _modeling.boolean_common(_session, base_name, tool_name)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"布尔交集失败：{exc}"}
-    return _attach_view(result, tool="boolean_common")
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=True,
-        openWorldHint=False,
-    )
-)
-def export_part(output_dir: str, fmt: str = "both", split: bool = False) -> dict[str, Any]:
-    """导出当前结果为 STEP/STL/glTF（fmt: step|stl|gltf|both|all）到 output_dir。
-    split=True：装配模式时 per-part 导出 STEP（<doc>_<零件名>.step），每文件独立验证。
-    单零件模式下 split 被忽略（行为与旧版完全一致）。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        return _export.export_part(_session, output_dir, fmt=fmt, split=split)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"导出失败：{exc}"}
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
-def describe_part() -> dict[str, Any]:
-    """返回当前结果零件的文本诊断（体积/包围盒/质心/实体数/有效性）。
-    装配模式：返回 per-part 摘要 + assembly_bbox + interference 清单。
-    单零件模式：原格式不变（体积/包围盒/质心/实体数/有效性）。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        with _silence_fd1():
-            # Round 8：装配模式分流（_parts 非空用 describe_assembly，否则原格式）
-            if _session._parts:
-                return _feedback_text.describe_assembly(_session)
-            return _feedback_text.describe_shape(_session.get_result_shape())
-    except (RuntimeError, ValueError) as exc:
-        # 终审 M-2：无文档/全空装配等态此前异常穿透成 isError——结构化失败
-        return {"ok": False, "message": f"描述失败：{exc}"}
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False))
-def measure(
-    kind: str = "summary",
-    first: str | None = None,
-    second: str | None = None,
-    entity: str = "object",
-    part_a: str | None = None,
-    part_b: str | None = None,
-) -> dict[str, Any]:
-    """几何测量（mm）：kind=summary|distance|angle|thickness。
-    summary 可省略 first 测当前结果；distance 可测两个 object/face/edge；
-    angle/thickness 要求 entity='face'，first/second 是最近标注图中的平面标签。
-    thickness 只量明确指定的两个平行面，不自动猜测材料厚度。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        with _silence_fd1():
-            return _measure.measure(
-                _session,
-                kind=kind,
-                first=first,
-                second=second,
-                entity=entity,
-                part_a=part_a,
-                part_b=part_b,
-            )
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"测量失败：{exc}"}
-
-
-def _maybe_save(png: bytes, save_to: str | None) -> dict[str, str]:
-    """render_part 的显式另存：失败不连坐（save_error 字段，渲染结果照常返回）。"""
-    if not save_to:
-        return {}
-    try:
-        p = Path(save_to).expanduser()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(png)
-        return {"saved": str(p)}
-    except OSError as exc:
-        return {"save_error": f"保存失败：{exc}"}
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=True,
-        openWorldHint=False,
-    )
-)
-def render_part(
-    view: str = "iso",
-    annotate: str | None = None,
-    edges_of: str | None = None,
-    save_to: str | None = None,
-) -> Any:
-    """渲染当前零件 PNG（view: iso|front|top|right|back|multi）。
-    annotate='faces'：面标注图+标签表+尺寸线（之后可用面标签如 'A' 调 add_hole）；
-    annotate='edges'：边标注图（edges_of='A' 只画 A 面的边；
-    之后可调 fillet_edges/chamfer_edges）。
-    view='multi'：2×2 三视图+标注 iso 拼图（已含标注，不可与 annotate/edges_of 组合）。
-    save_to=绝对路径：另存渲染 PNG 到该文件。每步建模返回的 view_file 是自动落盘路径——
-    客户端不显示内嵌图时（如 Cowork），可直接用系统命令打开该文件给用户看图。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    if edges_of is not None and annotate != "edges":
-        _msg = (
-            "edges_of 仅在 annotate='edges' 时有效"
-            "——要看某面的边，请 render_part(annotate='edges', edges_of='A')"
-        )
-        return {"ok": False, "message": _msg}
-    if view == "multi":
-        if annotate is not None or edges_of is not None:
-            return {
-                "ok": False,
-                "message": "view='multi' 已含标注 iso 格，不能与 annotate/edges_of 组合",
-            }
-        try:
-            with _silence_fd1():
-                # Round 8：改用装配 shape；装配模式传入 part_map 用于分色和归属标注
-                shape = _session.get_assembly_shape()
-                png, table, faces_reg, edges_reg = _multiview.render_multiview(
-                    shape, part_map=_build_part_map()
+        if not (
+            type(getattr(content, "uri", None)) is str
+            and _RESOURCE_URI.fullmatch(content.uri) is not None
+            and content.uri == uri
+            and type(getattr(content, "blob", None)) is str
+            and type(getattr(content, "mime_type", None)) is str
+            and content.mime_type in {"application/vnd.freecad.fcstd", "model/step"}
+        ):
+            raise _mcp_error(_RESOURCE_INTERNAL_ERROR)
+        return types.ReadResourceResult(
+            contents=[
+                types.BlobResourceContents(
+                    uri=content.uri,
+                    blob=content.blob,
+                    mimeType=content.mime_type,
                 )
-            _store_labels(faces_reg, edges_reg, shown=set(table.keys()))
-            return [
-                Image(data=png, format="png"),
-                json.dumps(
-                    {"ok": True, "labels": table, **_maybe_save(png, save_to)}, ensure_ascii=False
-                ),
             ]
-        except Exception as exc:  # noqa: BLE001 - 与 _attach_view 同理：同一条
-            # render_multiview 渲染链含 TechDraw/matplotlib 深栈（实测有 TypeError），
-            # 窄抓会让同一失败在 attach 路径被结构化、在 multi 路径穿透成 isError。
-            # 宽抓后一律转结构化 {ok:False}——失败本身响亮（带类型名+文本），不静默。
-            return {"ok": False, "message": f"渲染失败（{type(exc).__name__}）：{exc}"}
-    try:
-        with _silence_fd1():
-            # Round 8：改用装配 shape（单零件模式等价）；装配模式 part_map
-            # 同样接入 annotate 路径（分色 + 标签表零件归属后缀）
-            shape = _session.get_assembly_shape()
-            part_map = _build_part_map()
-            # is not None（非 falsy）：空串必须进 resolve_face 撞出"未知面标签 ''"响亮失败
-            ef_idx = _session.resolve_face(edges_of) if edges_of is not None else None
-            if ef_idx is not None:
-                # 终审 C-C：局部面索引 → compound 全局面索引（装配模式平移）
-                ef_idx = _edges_of_global_index(ef_idx, part_map)
-        if annotate is None:
-            png = _render.render_png(shape, view=view)
-            extra = _maybe_save(png, save_to)
-            if extra:
-                return [
-                    Image(data=png, format="png"),
-                    json.dumps({"ok": True, **extra}, ensure_ascii=False),
-                ]
-            return Image(data=png, format="png")
-        png, table, faces_reg, edges_reg = _annotate.render_annotated(
-            shape, mode=annotate, edges_of=ef_idx, view=view, part_map=part_map
         )
-        # shown=本次表里实际展示的键：未展示过的标签不可被指认（防 AI 编造盲选）
-        _store_labels(faces_reg, edges_reg, shown=set(table.keys()))
-        return [
-            Image(data=png, format="png"),
-            json.dumps(
-                {"ok": True, "labels": table, **_maybe_save(png, save_to)}, ensure_ascii=False
+    except McpError:
+        raise
+    except BaseException:
+        raise _mcp_error(_RESOURCE_INTERNAL_ERROR) from None
+
+
+async def _sdk_list_tools(_request: types.ListToolsRequest) -> types.ServerResult:
+    return types.ServerResult(await _handle_list_tools())
+
+
+async def _sdk_call_tool(request: types.CallToolRequest) -> types.ServerResult:
+    return types.ServerResult(
+        await _handle_call_tool(request.params.name, request.params.arguments)
+    )
+
+
+async def _sdk_list_resources(_request: types.ListResourcesRequest) -> types.ServerResult:
+    return types.ServerResult(await _handle_list_resources())
+
+
+async def _sdk_list_resource_templates(
+    _request: types.ListResourceTemplatesRequest,
+) -> types.ServerResult:
+    return types.ServerResult(await _handle_list_resource_templates())
+
+
+async def _sdk_read_resource(request: types.ReadResourceRequest) -> types.ServerResult:
+    return types.ServerResult(await _handle_read_resource(str(request.params.uri)))
+
+
+_sdk = mcp._mcp_server
+_sdk.request_handlers[types.ListToolsRequest] = _sdk_list_tools
+_sdk.request_handlers[types.CallToolRequest] = _sdk_call_tool
+_sdk.request_handlers[types.ListResourcesRequest] = _sdk_list_resources
+_sdk.request_handlers[types.ListResourceTemplatesRequest] = _sdk_list_resource_templates
+_sdk.request_handlers[types.ReadResourceRequest] = _sdk_read_resource
+
+
+def _model_json(value: object) -> dict[str, object]:
+    dumped = value.model_dump(  # type: ignore[union-attr]
+        by_alias=True,
+        exclude_none=True,
+        mode="json",
+    )
+    if type(dumped) is not dict:
+        raise TypeError("SDK result is invalid")
+    return dumped
+
+
+def _rpc_sdk_result(
+    request_id: int | str,
+    result: types.ServerResult,
+) -> dict[str, object]:
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": _model_json(result.root),
+    }
+
+
+def _manual_initialize(request: types.InitializeRequest) -> types.ServerResult:
+    options = _sdk.create_initialization_options()
+    capabilities = options.capabilities.model_copy(
+        update={
+            "completions": None,
+            "logging": None,
+            "prompts": None,
+            "tasks": None,
+        }
+    )
+    requested = request.params.protocolVersion
+    protocol_version = (
+        requested if requested in SUPPORTED_PROTOCOL_VERSIONS else types.LATEST_PROTOCOL_VERSION
+    )
+    return types.ServerResult(
+        types.InitializeResult(
+            protocolVersion=protocol_version,
+            capabilities=capabilities,
+            serverInfo=types.Implementation(
+                name=options.server_name,
+                version=options.server_version,
+                websiteUrl=options.website_url,
+                icons=options.icons,
             ),
-        ]
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"渲染失败：{exc}"}
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def add_hole(
-    face: str,
-    diameter: float,
-    depth: float | None = None,
-    offset: list[float] | None = None,
-    pattern: dict | None = None,
-    counterbore_diameter: float | None = None,
-    counterbore_depth: float | None = None,
-) -> Any:
-    """在指定面打圆孔（face=面标签，来自 render_part(annotate='faces')）。
-    depth 省略=通孔；offset=[u,v] 面内毫米偏移（原点=面外边界包络中点，矩形面即
-    几何中心，不随已打的孔漂移；省略=原点处）。
-    pattern={"type":"linear","count":4,"spacing":10} 或 {"type":"circular","count":6,"radius":18}
-    实现线性/圆形阵列；省略=单孔（向后兼容）。
-    counterbore_diameter+counterbore_depth 成对提供=沉头孔（孔口同轴切大径浅圆柱，
-    "安装孔+沉头槽"一步完成；要求大径>diameter、沉头深<盲孔 depth；阵列时每孔都带沉头）。
-    成功后自动附三视图拼图。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _features.add_hole(
-            _session,
-            face,
-            diameter,
-            depth,
-            tuple(offset) if offset is not None else (0.0, 0.0),
-            pattern=pattern,
-            counterbore_diameter=counterbore_diameter,
-            counterbore_depth=counterbore_depth,
+            instructions=options.instructions,
         )
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"打孔失败：{exc}"}
-    return _attach_view(result, tool="add_hole")
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
     )
-)
-def fillet_edges(edges: list[str], radius: float) -> Any:
-    """对边标签列表做圆角（标签来自 render_part(annotate='edges')）。成功后自动附三视图拼图。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
+
+
+def _owned_dispatch_descriptor(
+    descriptor: mcp_transport.ClientMessageDescriptor,
+) -> dict[str, object] | None:
+    """Typed SDK dispatch after the owned lexical and structural boundary."""
+
+    if not isinstance(descriptor, mcp_transport.ClientMessageDescriptor):
+        raise TypeError("owned descriptor is invalid")
+    if descriptor.is_notification:
+        typed: dict[str, object] = {"method": descriptor.method}
+        if descriptor.params:
+            typed["params"] = dict(descriptor.params)
+        types.ClientNotification.model_validate(typed)
+        return None
+    request_id = descriptor.request_id
+    if request_id is None:
+        raise TypeError("owned request id is missing")
     try:
-        result = _features.fillet_edges(_session, edges, radius)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"圆角失败：{exc}"}
-    return _attach_view(result, tool="fillet_edges")
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def chamfer_edges(edges: list[str], size: float) -> Any:
-    """对边标签列表做倒角（标签来自 render_part(annotate='edges')）。成功后自动附三视图拼图。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _features.chamfer_edges(_session, edges, size)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"倒角失败：{exc}"}
-    return _attach_view(result, tool="chamfer_edges")
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def modify_part(name: str, parameter: str, value: float) -> Any:
-    """修改参数化对象的参数（如 name='Box', parameter='length', value=45）——
-    依赖链（布尔/孔/圆角）自动重算。可改对象与参数见每步返回的 parts 字段。
-    成功后自动附三视图拼图（工程图尺寸当场更新）。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _modify.modify_part(_session, name, parameter, value)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"参数修改失败：{exc}"}
-    return _attach_view(result, tool="modify_part")
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def move_part(name: str, position: list[float]) -> Any:
-    """把图元移动到绝对位置 [x, y, z]（mm）——依赖链自动重算，成功后自动附三视图。
-    可移动对象见 parts 字段（布尔/圆角结果跟随其图元，不可直接移动）。
-    对象名来自 parts 字段（如 'Box'、'Cylinder'、'HoleTool'）。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _transform.move_part(_session, name, tuple(position) if position else position)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"移动失败：{exc}"}
-    return _attach_view(result, tool="move_part")
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def rotate_part(name: str, axis: str = "z", angle: float = 90.0) -> Any:
-    """绕全局轴旋转图元（以对象包围盒中心为旋转中心，角度制）——依赖链自动重算，成功后自动附三视图。
-    可旋转对象见 parts 字段（布尔/圆角结果跟随其图元，不可直接旋转）。
-    axis=x|y|z（全局轴方向）；angle 范围 (-360, 360) 非零，正值逆时针（右手定则）。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _transform.rotate_part(_session, name, axis=axis, angle=angle)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"旋转失败：{exc}"}
-    return _attach_view(result, tool="rotate_part")
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def extrude_profile(
-    profile: dict,
-    height: float,
-    face: str | None = None,
-    offset: list[float] | None = None,
-    operation: str = "pad",
-) -> Any:
-    """拉伸 profile 轮廓（pad 加料 / pocket 减料），成功后自动附三视图。
-    profile 示例：{"type":"rect","length":20,"width":10}、{"type":"circle","radius":5}、
-    {"type":"slot","length":20,"width":8}、{"type":"polygon","points":[[0,0],[10,0],[0,8]]}。
-    face=面标签（来自标注图，见 render_part(annotate='faces') 返回的标签表）；省略=全局 XY 平面。
-    offset=[u,v] 面内毫米偏移轮廓中心（原点=面外边界包络中点，矩形面即几何中心，
-    不随已打的孔漂移）；height=拉伸高度（mm）；operation=pad|pocket。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _sketch.extrude_profile(
-            _session,
-            profile,
-            height,
-            face=face,
-            offset=tuple(offset) if offset is not None else (0.0, 0.0),
-            operation=operation,
+        typed_request = types.ClientRequest.model_validate(
+            {
+                "method": descriptor.method,
+                "params": dict(descriptor.params),
+            }
+        ).root
+        if isinstance(typed_request, types.InitializeRequest):
+            result = _manual_initialize(typed_request)
+        else:
+            handler = _sdk.request_handlers.get(type(typed_request))
+            if handler is None:
+                raise RuntimeError("owned SDK handler is unavailable")
+            result = anyio.run(handler, typed_request)
+            if not isinstance(result, types.ServerResult):
+                raise TypeError("owned SDK result is invalid")
+        return _rpc_sdk_result(request_id, result)
+    except McpError as error:
+        pair = (error.error.code, error.error.message)
+        allowed = (
+            {_TOOL_REQUEST_INVALID, _TOOL_NAME_UNAVAILABLE, _TOOL_INTERNAL_ERROR}
+            if descriptor.method == "tools/call"
+            else {
+                _RESOURCE_INVALID_IDENTIFIER,
+                _RESOURCE_UNAVAILABLE,
+                _RESOURCE_READ_LIMIT,
+                _RESOURCE_RUNTIME_UNAVAILABLE,
+                _RESOURCE_INTERNAL_ERROR,
+            }
+            if descriptor.method == "resources/read"
+            else set()
         )
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"拉伸失败：{exc}"}
-    return _attach_view(result, tool="extrude_profile")
-
-
-# ---------------------------------------------------------------------------
-# Round 8：装配工具（18→21）
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def new_part(name: str) -> Any:
-    """创建命名零件并将其设为活动零件（开始多零件装配模式）。
-    首次调用时，文档中已有几何对象会自动归入隐式零件 "Part1"。
-    成功后自动附三视图拼图（含多零件分色）。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _session.new_part(name)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"新建零件失败：{exc}"}
-    result["ok"] = True
-    return _attach_view(result, tool="new_part")
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def set_active_part(name: str) -> Any:
-    """切换活动零件——后续建模/特征/标注工具默认作用于该零件
-    （在非活动零件上继续加工的恢复路径）。成功后自动附三视图拼图。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        _session.set_active_part(name)
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"切换零件失败：{exc}"}
-    return _attach_view({"ok": True, "active_part": name}, tool="set_active_part")
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def place_part(
-    part: str,
-    position: list[float] | None = None,
-    rotation_axis: str | None = None,
-    angle: float | None = None,
-) -> Any:
-    """设置零件绝对位置 and/or 叠加旋转（装配位姿）。
-    position=[x,y,z]：零件原点移到绝对坐标（mm）。
-    rotation_axis=x|y|z + angle：绕零件包围盒中心旋转（角度制，(-360,360) 内非零）。
-    至少提供 position 或 rotation_axis+angle 之一。成功后自动附三视图拼图。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
-    try:
-        result = _assembly.place_part(
-            _session, part, position=position, rotation_axis=rotation_axis, angle=angle
+        if pair not in allowed:
+            return _owned_failure_response(descriptor)
+        return mcp_transport.rpc_error_response(
+            mcp_transport.FixedRpcError(*pair),
+            request_id=request_id,
         )
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"零件位置设置失败：{exc}"}
-    return _attach_view(result, tool="place_part")
+    except BaseException:
+        return _owned_failure_response(descriptor)
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False,
-    )
-)
-def align_parts(
-    moving_part: str,
-    moving_face: str,
-    target_part: str,
-    target_face: str,
-    offset: list[float] | None = None,
-    gap: float = 0.0,
-    allow_interference: bool = False,
-) -> Any:
-    """面贴面对齐：moving_part 的 moving_face 贴向 target_part 的 target_face。
-    面标签来自 render_part(annotate='faces') 的标签表（每零件需分别标注）。
-    offset=[u,v]：面内毫米偏移（默认 [0,0]=两面基准点对齐；基准=面外边界包络
-    中点，矩形面即几何中心，不随已打的孔漂移）。
-    gap：贴合间隙（mm，0=接触，正值=间隙，负值=叠入）。
-    allow_interference=True：允许干涉放行（默认 False=检测到干涉则拒绝）。
-    成功后自动附三视图拼图。"""
-    guard = _runtime_guard()
-    if guard:
-        return guard
+def _owned_failure_response(
+    descriptor: mcp_transport.ClientMessageDescriptor,
+) -> dict[str, object] | None:
+    request_id = descriptor.request_id
+    if request_id is None:
+        return None
+    if descriptor.method == "tools/call":
+        error = mcp_transport.INTERNAL_ERROR
+    elif descriptor.method == "resources/read":
+        error = mcp_transport.FixedRpcError(*_RESOURCE_INTERNAL_ERROR)
+    else:
+        error = mcp_transport.GENERIC_INTERNAL_ERROR
+    return mcp_transport.rpc_error_response(error, request_id=request_id)
+
+
+def _uninstall_recovery_response(
+    request_id: int | str | None,
+) -> dict[str, object]:
+    if request_id is None:
+        return mcp_transport.rpc_error_response(mcp_transport.INTERNAL_ERROR)
     try:
-        result = _assembly.align_parts(
-            _session,
-            moving_part,
-            moving_face,
-            target_part,
-            target_face,
-            offset=tuple(offset) if offset is not None else (0.0, 0.0),
-            gap=gap,
-            allow_interference=allow_interference,
+        result = types.ServerResult(
+            _call_result("uninstall_runtime", _failure("recovery_required"))
         )
-    except (RuntimeError, ValueError) as exc:
-        return {"ok": False, "message": f"装配对齐失败：{exc}"}
-    return _attach_view(result, tool="align_parts")
+        return _rpc_sdk_result(request_id, result)
+    except BaseException:
+        return mcp_transport.rpc_error_response(
+            mcp_transport.INTERNAL_ERROR,
+            request_id=request_id,
+        )
 
 
-# ---------------------------------------------------------------------------
-# Round 11：卸载（两段式确认 + 自退换芯执行删除）
-# ---------------------------------------------------------------------------
+def _read_stdio_chunk(maximum: int) -> bytes:
+    if type(maximum) is not int or maximum < 1 or maximum > mcp_transport.READ_CHUNK_BYTES:
+        raise ValueError("stdio read size is invalid")
+    stream = sys.stdin.buffer
+    reader = getattr(stream, "read1", None)
+    if not callable(reader):
+        reader = getattr(stream, "read", None)
+    if not callable(reader):
+        raise OSError("stdio input is unavailable")
+    chunk = reader(maximum)
+    if type(chunk) is not bytes:
+        raise OSError("stdio input is invalid")
+    return chunk
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=True,
-        openWorldHint=False,
+def _write_stdio_frame(frame: bytes) -> None:
+    if (
+        type(frame) is not bytes
+        or not frame.endswith(b"\n")
+        or len(frame) > mcp_transport.MAX_RESPONSE_FRAME_BYTES + 1
+    ):
+        raise OSError("stdio response is invalid")
+    stream = sys.stdout.buffer
+    if stream.write(frame) != len(frame):
+        raise OSError("stdio response write is incomplete")
+    stream.flush()
+
+
+def _run_owned_stdio(*, auto_install: bool = False) -> None:
+    global _active_owned_runner
+    _initialize_application_process_runtime()
+    lifecycle = mcp_transport.ProcessLifecycle()
+    runner = mcp_transport.OwnedStdioRunner(
+        dispatch=_owned_dispatch_descriptor,
+        lifecycle=lifecycle,
+        close_application=_application_slot.close,
+        uninstall_recovery_response=_uninstall_recovery_response,
+        exit_process=os._exit,
+        failure_response=_owned_failure_response,
     )
-)
-def uninstall_runtime(confirm: bool = False) -> dict[str, Any]:
-    """卸载 CAD 引擎（删除全部已下载的运行时，约 2-3GB；扩展本体请在客户端设置里移除）。
-    不带 confirm：仅预览将删除的路径与大小；confirm=true：执行删除。"""
-    if not confirm:
-        info = _uninstall.preview_uninstall()
-        if info.get("ok"):
-            info["message"] = (
-                "将只删除以上运行时目标，项目与草图数据会保留；"
-                "确认请再次调用 uninstall_runtime(confirm=true)"
-            )
-        return info
-    info = _uninstall.request_uninstall()
-    if info.get("marked"):
-        if _try_schedule_swap():
-            info["message"] = (
-                "已计划删除：server 即将自动重启完成清理。"
-                "扩展本体如需移除，请在客户端设置（Extensions）里 Remove。"
-            )
-        else:  # I4/C1 回退：裸 server 不能自杀，删除要等下次启动早期执行
-            info["message"] = (
-                "已计划删除：请重启 server 后生效（下次启动时自动完成清理）。"
-                "扩展本体如需移除，请在客户端设置（Extensions）里 Remove。"
-            )
-    return info
-
-
-def main() -> None:
-    if _auto_install_enabled():
-        _spawn_install()
-    mcp.run()
+    with _active_owned_runner_lock:
+        if _active_owned_runner is not None:
+            raise RuntimeError("owned stdio runner is already active")
+        _active_owned_runner = runner
+    try:
+        runner.run(
+            read_chunk=_read_stdio_chunk,
+            write_frame=_write_stdio_frame,
+            before_read=_spawn_install if auto_install else None,
+        )
+    finally:
+        with _active_owned_runner_lock:
+            if _active_owned_runner is runner:
+                _active_owned_runner = None
 
 
 def _auto_install_enabled() -> bool:
-    return os.environ.get("VIBECAD_AUTO_INSTALL", "") not in ("", "0", "false", "False")
+    return os.environ.get("VIBECAD_AUTO_INSTALL", "") not in {"", "0", "false", "False"}
+
+
+def main() -> None:
+    _run_owned_stdio(auto_install=_auto_install_enabled())
 
 
 if __name__ == "__main__":

@@ -10,6 +10,27 @@ from pathlib import Path
 
 import pytest
 
+from vibecad.runtime import status as runtime_status
+
+
+def _freecad_child_environment(
+    python: str,
+    *,
+    source: Path | None = None,
+) -> dict[str, str]:
+    """Build every real FreeCAD child environment through the runtime seam."""
+
+    prefix = Path(python).parent.parent.resolve()
+    environment = runtime_status.freecad_process_environment(os.environ)
+    python_paths = [str(prefix / "lib")]
+    if source is not None:
+        python_paths.append(str(source))
+    inherited = environment.get("PYTHONPATH")
+    if inherited:
+        python_paths.append(inherited)
+    environment["PYTHONPATH"] = os.pathsep.join(python_paths)
+    return environment
+
 
 @pytest.fixture(scope="session")
 def existing_freecad_python() -> str:
@@ -27,6 +48,34 @@ def existing_freecad_python() -> str:
         pytest.fail("VIBECAD_FREECAD_ENV does not contain bin/python")
     if not sentinel.is_file():
         pytest.fail("VIBECAD_FREECAD_ENV does not contain the ready sentinel")
+    return str(python)
+
+
+@pytest.fixture(scope="session")
+def current_managed_freecad_python() -> str:
+    """Require the already-installed, current managed generation; never repair it."""
+
+    if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
+        pytest.skip("set VIBECAD_RUN_INTEGRATION=1 to run the Agent-first real gate")
+
+    from vibecad.runtime import paths, spec
+
+    if paths.user_override_env() is not None:
+        pytest.fail("Agent-first acceptance requires the current managed runtime, not an override")
+    prefix = paths.env_prefix().expanduser().resolve(strict=False)
+    selected = paths.active_runtime_prefix().expanduser().resolve(strict=False)
+    requested = os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON")
+    python = paths.env_python_for(prefix)
+    if requested and Path(requested).expanduser().resolve(strict=False) != python.resolve(
+        strict=False
+    ):
+        pytest.fail("VIBECAD_MANAGED_FREECAD_PYTHON is not the selected managed generation")
+    if selected != prefix or not python.is_file():
+        pytest.fail("install the current managed runtime before running Agent-first acceptance")
+    if runtime_status.read_prefix_receipt(prefix) != spec.expected_receipt():
+        pytest.fail("the selected managed runtime receipt is not current")
+    if not runtime_status.runtime_ready() or not runtime_status.verify_runtime(python):
+        pytest.fail("the selected managed runtime failed the exact current-runtime probe")
     return str(python)
 
 
@@ -50,6 +99,7 @@ from vibecad.execution.revisions import (
     RevisionStoreError,
     RevisionStoreErrorCode,
     RevisionStoreRootTrust,
+    _initialize_candidate_file_limit_runtime,
 )
 from vibecad.execution.selectors import (
     EntityIdentity,
@@ -412,6 +462,7 @@ def close_best_effort(session: object | None) -> None:
         pass
 
 
+_initialize_candidate_file_limit_runtime()
 secure_dir(ROOT)
 locks_root = secure_dir(ROOT / "locks")
 revisions_root = secure_dir(ROOT / "revisions")
@@ -868,6 +919,7 @@ from vibecad.execution.executor import InProcessCadExecutor
 from vibecad.execution.revisions import (
     LocalRevisionStore,
     RevisionStoreRootTrust,
+    _initialize_candidate_file_limit_runtime,
 )
 from vibecad.execution.selectors import (
     EntityIdentity,
@@ -950,6 +1002,7 @@ def identified_objects(session: object) -> tuple[object, ...]:
     )
 
 
+_initialize_candidate_file_limit_runtime()
 secure_dir(ROOT)
 locks_root = secure_dir(ROOT / "locks")
 revisions_root = secure_dir(ROOT / "revisions")
@@ -1214,8 +1267,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, __SOURCE__)
-os.environ.pop("VIBECAD_FREECAD_ENV", None)
 os.environ.pop("VIBECAD_HOME", None)
+os.environ["VIBECAD_FREECAD_ENV"] = __EXPECTED_PREFIX__
 
 from vibecad.application.agent import AgentApplication
 from vibecad.execution.executor import InProcessCadExecutor
@@ -1459,6 +1512,8 @@ runtime_facts = {
         legacy_prefix.resolve()
     ),
     "external_receipt": runtime_status.legacy_external_receipt(legacy_prefix),
+    "receipt_state": runtime_status.runtime_receipt_state().value,
+    "runtime_ready": runtime_status.runtime_ready(),
 }
 
 app = None
@@ -1672,12 +1727,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, __SOURCE__)
-os.environ.pop("VIBECAD_FREECAD_ENV", None)
 os.environ.pop("VIBECAD_HOME", None)
+os.environ["VIBECAD_FREECAD_ENV"] = __EXPECTED_PREFIX__
 
 from vibecad.runtime import installer as installer_module
-from vibecad.runtime import micromamba, paths, spec, status
-from vibecad.runtime.installer import RuntimeInstaller
+from vibecad.runtime import micromamba, paths, status
+from vibecad.runtime.installer import InstallError, RuntimeInstaller
 
 EXPECTED_PREFIX = Path(__EXPECTED_PREFIX__)
 
@@ -1711,6 +1766,8 @@ before = {
     "freecadcmd": signature(freecadcmd),
 }
 receipt_before = paths.external_runtime_receipt().is_file()
+receipt_raw_before = paths.external_runtime_receipt().read_text(encoding="utf-8")
+current_prefix_before = os.path.lexists(paths.env_prefix())
 blocked_commands = []
 verify_calls = []
 
@@ -1738,7 +1795,12 @@ RuntimeInstaller._install_server_package = forbidden("pip")
 RuntimeInstaller._remove_managed_env = forbidden("delete")
 
 probe_ready = status.verify_runtime(paths.env_python_for(legacy))
-RuntimeInstaller().install()
+try:
+    RuntimeInstaller().install()
+except InstallError:
+    install_failed_closed = True
+else:
+    raise AssertionError("pre-epoch external runtime was incorrectly accepted")
 
 receipt_path = paths.external_runtime_receipt()
 raw = receipt_path.read_text(encoding="utf-8")
@@ -1757,21 +1819,642 @@ payload = {
     "receipt_path": str(receipt_path),
     "receipt_canonical": raw == json.dumps(receipt, sort_keys=True),
     "receipt": receipt,
-    "receipt_validated": status._validated_external_binding() == receipt,
-    "expected_receipt": {
-        **spec.expected_receipt(external=True),
-        "prefix": str(legacy),
-        "prefix_device": prefix_info.st_dev,
-        "prefix_inode": prefix_info.st_ino,
-        "python_version": ".".join(map(str, spec.PYTHON_VERSION)),
-        "freecad_version": ".".join(map(str, spec.FREECAD_VERSION)),
-    },
+    "receipt_validated": status._validated_external_binding() is not None,
+    "receipt_state": status.runtime_receipt_state().value,
+    "runtime_ready": status.runtime_ready(),
+    "install_failed_closed": install_failed_closed,
     "probe_ready": probe_ready,
     "verify_calls": verify_calls,
     "blocked_commands": blocked_commands,
     "external_runtime_unchanged": before == after,
+    "external_receipt_unchanged": receipt_raw_before == raw,
+    "current_prefix_unchanged": current_prefix_before == os.path.lexists(paths.env_prefix()),
+    "old_receipt_missing_identity": all(
+        key not in receipt
+        for key in ("server_package_epoch", "mcp_version", "public_surface_sha256")
+    ),
+    "prefix_identity_still_matches": (
+        receipt.get("prefix") == str(legacy)
+        and receipt.get("prefix_device") == prefix_info.st_dev
+        and receipt.get("prefix_inode") == prefix_info.st_ino
+    ),
 }
 print("S3_RUNTIME_ADOPTION_RESULT=" + json.dumps(payload, sort_keys=True))
+"""
+
+
+_AGENT_FIRST_CHILD = r"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import math
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, __SOURCE__)
+
+import FreeCAD
+import Part
+
+from vibecad.application.agent import AgentApplication
+from vibecad.workflow.contracts import (
+    AcceptanceCriterion,
+    AcceptanceKind,
+    AcceptanceSpec,
+    ModelCommand,
+    ModelProgram,
+    ValueSource,
+)
+
+ROOT = Path(__WORK_ROOT__)
+PHASE = __PHASE__
+STATE = json.loads(__STATE__)
+DATA = ROOT / "data"
+
+
+def canonical(value: object) -> str:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def digest_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def digest_path(path: Path) -> str:
+    return digest_bytes(path.read_bytes())
+
+
+def require(envelope: dict[str, object]) -> dict[str, object]:
+    if not envelope.get("ok"):
+        raise AssertionError("public request failed: " + canonical(envelope))
+    result = envelope.get("result")
+    if type(result) is not dict:
+        raise AssertionError("public result is not an object")
+    return result
+
+
+def acceptance(*, expected_volume: float | None = None) -> AcceptanceSpec:
+    criteria = [
+        AcceptanceCriterion(
+            id="valid-shape",
+            kind=AcceptanceKind.TOPOLOGY,
+            check="valid_shape",
+            target="body",
+            expected=True,
+        )
+    ]
+    if expected_volume is not None:
+        criteria.append(
+            AcceptanceCriterion(
+                id="expected-volume",
+                kind=AcceptanceKind.GEOMETRY,
+                check="volume",
+                target="body",
+                expected=expected_volume,
+                tolerance=1e-7,
+                parameters={"unit": "mm^3"},
+            )
+        )
+    return AcceptanceSpec(id="agent-first-real", criteria=tuple(criteria))
+
+
+ACCEPTANCE_JSON = canonical(acceptance().to_mapping())
+
+
+def create_project(app: AgentApplication, key: str, kind: str, source: Path | None = None):
+    request = {"schema_version": 1, "create_key": key, "kind": kind}
+    if source is not None:
+        request["source_path"] = str(source)
+    return require(app.create_project_request(request))
+
+
+def current(app: AgentApplication, project_id: str) -> dict[str, object]:
+    return require(
+        app.get_project_request({"schema_version": 1, "project_id": project_id})
+    )["current"]["head"]
+
+
+def create_task(app: AgentApplication, project_id: str, policy: str) -> dict[str, object]:
+    return require(
+        app.create_task_request(
+            {
+                "schema_version": 1,
+                "project_id": project_id,
+                "review_policy": policy,
+            }
+        )
+    )
+
+
+def selector(project_id: str, revision_id: str, observation: dict[str, object]):
+    return {
+        "schema_version": 1,
+        "project_id": project_id,
+        "revision_id": revision_id,
+        "entity_kind": "object",
+        "object_id": observation["object_id"],
+        "feature_id": None,
+        "object_type": observation["object_type"],
+        "semantic_role": observation["semantic_role"],
+        "provenance": observation["provenance"],
+        "expected_cardinality": 1,
+    }
+
+
+def direct(
+    app: AgentApplication,
+    project_id: str,
+    operation: str,
+    *,
+    target: dict[str, object] | None = None,
+    arguments: dict[str, object] | None = None,
+    preserve: list[str] | None = None,
+    policy: str = "auto_commit",
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    created = create_task(app, project_id, policy)
+    task = created["task_run"]
+    base_head = current(app, project_id)
+    if task["base_revision"] != base_head["revision_id"]:
+        raise AssertionError("task did not bind the coherent public HEAD")
+    request = {
+        "schema_version": 1,
+        "task_id": task["id"],
+        "expected_generation": created["generation"],
+        "target": {} if target is None else target,
+        "arguments": {} if arguments is None else arguments,
+        "preserve": [] if preserve is None else preserve,
+        "acceptance_json": ACCEPTANCE_JSON,
+    }
+    terminal = require(app.invoke_direct_operation_request(operation, request))
+    return base_head, request, terminal
+
+
+def command(
+    command_id: str,
+    operation: str,
+    *,
+    target: dict[str, object] | None = None,
+    arguments: dict[str, object] | None = None,
+    preserve: tuple[str, ...] = (),
+    depends_on: tuple[str, ...] = (),
+) -> ModelCommand:
+    return ModelCommand(
+        id=command_id,
+        op=operation,
+        target={} if target is None else target,
+        args={} if arguments is None else arguments,
+        preserve=preserve,
+        source=ValueSource.MODEL,
+        depends_on=depends_on,
+    )
+
+
+def six_operation_program(task_id: str, revision_id: str) -> ModelProgram:
+    return ModelProgram(
+        task_id=task_id,
+        base_revision=revision_id,
+        operations=(
+            command(
+                "box",
+                "create_box",
+                arguments={
+                    "length_mm": 10,
+                    "width_mm": 20,
+                    "height_mm": 30,
+                    "position_mm": (0, 0, 0),
+                },
+            ),
+            command(
+                "cylinder",
+                "create_cylinder",
+                arguments={
+                    "radius_mm": 2,
+                    "height_mm": 5,
+                    "position_mm": (30, 0, 0),
+                    "axis": "z",
+                },
+            ),
+            command(
+                "modify",
+                "modify_parameter",
+                target={"object": {"command_id": "box", "slot": "object"}},
+                arguments={"parameter": "length", "value_mm": 12},
+                depends_on=("box",),
+            ),
+            command(
+                "move",
+                "move_part",
+                target={"object": {"command_id": "cylinder", "slot": "object"}},
+                arguments={"position_mm": (40, 5, 0)},
+                depends_on=("cylinder",),
+            ),
+            command(
+                "rotate",
+                "rotate_part",
+                target={"object": {"command_id": "box", "slot": "object"}},
+                arguments={"axis": "z", "angle_deg": 90},
+                depends_on=("modify",),
+            ),
+            command("inspect", "inspect_model", depends_on=("move", "rotate")),
+        ),
+        acceptance=acceptance(
+            expected_volume=12.0 * 20.0 * 30.0 + math.pi * 2.0**2 * 5.0
+        ),
+    )
+
+
+def submit_program(
+    app: AgentApplication,
+    project_id: str,
+    program_factory,
+    *,
+    policy: str = "auto_commit",
+) -> tuple[dict[str, object], dict[str, object]]:
+    created = create_task(app, project_id, policy)
+    task = created["task_run"]
+    program = program_factory(task["id"], task["base_revision"])
+    terminal = require(
+        app.submit_model_program_request(
+            {
+                "schema_version": 1,
+                "task_id": task["id"],
+                "expected_generation": created["generation"],
+                "program_json": canonical(program.to_mapping()),
+            }
+        )
+    )
+    return created, terminal
+
+
+def geometry_from_shape(shape: object) -> dict[str, object]:
+    return {
+        "volume": float(shape.Volume),
+        "bbox": [
+            float(shape.BoundBox.XLength),
+            float(shape.BoundBox.YLength),
+            float(shape.BoundBox.ZLength),
+        ],
+        "valid": bool(shape.isValid()),
+        "solids": len(shape.Solids),
+    }
+
+
+def fcstd_geometry(path: Path) -> dict[str, object]:
+    document = FreeCAD.openDocument(str(path))
+    try:
+        shapes = [
+            obj.Shape
+            for obj in document.Objects
+            if hasattr(obj, "Shape") and not obj.Shape.isNull()
+        ]
+        if not shapes:
+            raise AssertionError("FCStd resource has no shape")
+        shape = shapes[0] if len(shapes) == 1 else Part.makeCompound(shapes)
+        return geometry_from_shape(shape)
+    finally:
+        FreeCAD.closeDocument(document.Name)
+
+
+def verify_delivery(
+    app: AgentApplication,
+    result: dict[str, object],
+    label: str,
+) -> dict[str, object]:
+    observed = []
+    geometries = {}
+    for artifact in result["artifacts"]:
+        content = app.read_artifact_resource(artifact["resource_uri"])
+        raw = base64.b64decode(content.blob, validate=True)
+        if len(raw) != artifact["size_bytes"] or digest_bytes(raw) != artifact["sha256"]:
+            raise AssertionError("resource bytes do not match the public artifact reference")
+        destination = ROOT / f"{label}-{artifact['name']}"
+        destination.write_bytes(raw)
+        destination.chmod(0o600)
+        if artifact["format"] == "fcstd":
+            geometries["fcstd"] = fcstd_geometry(destination)
+        elif artifact["format"] == "step":
+            geometries["step"] = geometry_from_shape(Part.read(str(destination)))
+        observed.append(
+            {
+                "uri": content.uri,
+                "mime_type": content.mime_type,
+                "format": artifact["format"],
+                "size": len(raw),
+                "sha256": digest_bytes(raw),
+                "base64_roundtrip": base64.b64encode(raw).decode("ascii") == content.blob,
+            }
+        )
+    if set(geometries) != {"fcstd", "step"}:
+        raise AssertionError("delivery did not contain FCStd and STEP")
+    if abs(geometries["fcstd"]["volume"] - geometries["step"]["volume"]) > 1e-6:
+        raise AssertionError("FCStd and STEP reloads disagree")
+    return {"resources": observed, "geometries": geometries}
+
+
+def make_import_source() -> Path:
+    source = ROOT / "public-import.FCStd"
+    document = FreeCAD.newDocument("AgentFirstImportSource")
+    try:
+        box = document.addObject("Part::Box", "ImportedBox")
+        box.Length = 8
+        box.Width = 7
+        box.Height = 6
+        cylinder = document.addObject("Part::Cylinder", "ImportedCylinder")
+        cylinder.Radius = 2
+        cylinder.Height = 5
+        cylinder.Placement.Base = FreeCAD.Vector(20, 0, 0)
+        document.recompute()
+        document.saveAs(str(source))
+    finally:
+        FreeCAD.closeDocument(document.Name)
+    source.chmod(0o600)
+    return source
+
+
+app = AgentApplication.open(data_root=DATA)
+payload = {}
+try:
+    if PHASE == "prepare":
+        source = make_import_source()
+        source_before = digest_path(source)
+        empty = create_project(
+            app,
+            "project_create_00000000000000000000000000000001",
+            "empty",
+        )
+        imported = create_project(
+            app,
+            "project_create_00000000000000000000000000000002",
+            "import_fcstd",
+            source,
+        )
+        imported_current = require(
+            app.get_project_request(
+                {"schema_version": 1, "project_id": imported["project_id"]}
+            )
+        )
+        if source_before != digest_path(source):
+            raise AssertionError("public import changed its source")
+
+        project_id = empty["project_id"]
+        direct_records = []
+
+        base, request, box_task = direct(
+            app,
+            project_id,
+            "create_box",
+            arguments={
+                "length_mm": 10,
+                "width_mm": 20,
+                "height_mm": 30,
+                "position_mm": [0, 0, 0],
+            },
+        )
+        box_after = box_task["task_run"]["steps"][0]["result"]["value"]["after"]
+        direct_records.append(("create_box", base, request, box_task))
+
+        base, request, cylinder_task = direct(
+            app,
+            project_id,
+            "create_cylinder",
+            arguments={
+                "radius_mm": 2,
+                "height_mm": 5,
+                "position_mm": [30, 0, 0],
+                "axis": "z",
+            },
+        )
+        cylinder_after = cylinder_task["task_run"]["steps"][0]["result"]["value"]["after"]
+        direct_records.append(("create_cylinder", base, request, cylinder_task))
+
+        box_selector = selector(project_id, current(app, project_id)["revision_id"], box_after)
+        base, request, modify_task = direct(
+            app,
+            project_id,
+            "modify_parameter",
+            target={"object": box_selector},
+            arguments={"parameter": "length", "value_mm": 12},
+        )
+        box_after = modify_task["task_run"]["steps"][0]["result"]["value"]["after"]
+        direct_records.append(("modify_parameter", base, request, modify_task))
+
+        cylinder_selector = selector(
+            project_id,
+            current(app, project_id)["revision_id"],
+            cylinder_after,
+        )
+        base, request, move_task = direct(
+            app,
+            project_id,
+            "move_part",
+            target={"object": cylinder_selector},
+            arguments={"position_mm": [40, 5, 0]},
+        )
+        cylinder_after = move_task["task_run"]["steps"][0]["result"]["value"]["after"]
+        direct_records.append(("move_part", base, request, move_task))
+
+        box_selector = selector(project_id, current(app, project_id)["revision_id"], box_after)
+        base, request, rotate_task = direct(
+            app,
+            project_id,
+            "rotate_part",
+            target={"object": box_selector},
+            arguments={"axis": "z", "angle_deg": 90},
+        )
+        box_after = rotate_task["task_run"]["steps"][0]["result"]["value"]["after"]
+        direct_records.append(("rotate_part", base, request, rotate_task))
+
+        base, request, inspect_task = direct(app, project_id, "inspect_model")
+        direct_records.append(("inspect_model", base, request, inspect_task))
+        direct_shape = inspect_task["task_run"]["steps"][0]["result"]["value"]["shape"]
+
+        model_project = create_project(
+            app,
+            "project_create_00000000000000000000000000000003",
+            "empty",
+        )
+        _model_created, model_task = submit_program(
+            app,
+            model_project["project_id"],
+            six_operation_program,
+        )
+        model_shape = model_task["task_run"]["steps"][-1]["result"]["value"]["shape"]
+
+        committed_export = require(
+            app.export_task_artifacts_request(
+                {
+                    "schema_version": 1,
+                    "export_key": "export_00000000000000000000000000000001",
+                    "task_id": inspect_task["task_run"]["id"],
+                    "expected_generation": inspect_task["generation"],
+                    "revision_id": inspect_task["task_run"]["committed_revision"],
+                    "draft_id": None,
+                }
+            )
+        )
+        committed_delivery = verify_delivery(app, committed_export, "committed")
+
+        failure_head_before = current(app, project_id)
+        failure_selector = selector(project_id, failure_head_before["revision_id"], box_after)
+        _failure_base, _failure_request, failed_task = direct(
+            app,
+            project_id,
+            "modify_parameter",
+            target={"object": failure_selector},
+            arguments={"parameter": "length", "value_mm": 13},
+            preserve=["length"],
+        )
+        failure_head_after = current(app, project_id)
+
+        draft_base, _, accept_draft_task = direct(
+            app,
+            project_id,
+            "create_box",
+            arguments={
+                "length_mm": 3,
+                "width_mm": 4,
+                "height_mm": 5,
+                "position_mm": [60, 0, 0],
+            },
+            policy="require_review",
+        )
+        _, _, reject_draft_task = direct(
+            app,
+            project_id,
+            "create_box",
+            arguments={
+                "length_mm": 4,
+                "width_mm": 5,
+                "height_mm": 6,
+                "position_mm": [80, 0, 0],
+            },
+            policy="require_review",
+        )
+        accept_draft = accept_draft_task["task_run"]["draft"]
+        reject_draft = reject_draft_task["task_run"]["draft"]
+        draft_export = require(
+            app.export_task_artifacts_request(
+                {
+                    "schema_version": 1,
+                    "export_key": "export_00000000000000000000000000000002",
+                    "task_id": accept_draft_task["task_run"]["id"],
+                    "expected_generation": accept_draft_task["generation"],
+                    "revision_id": accept_draft["revision_id"],
+                    "draft_id": accept_draft["id"],
+                }
+            )
+        )
+        draft_delivery = verify_delivery(app, draft_export, "draft")
+
+        payload = {
+            "phase": PHASE,
+            "pid": os.getpid(),
+            "projects": {
+                "empty": empty,
+                "imported": imported,
+                "imported_current": imported_current,
+                "import_source_unchanged": source_before == digest_path(source),
+            },
+            "direct": {
+                "operations": [record[0] for record in direct_records],
+                "base_generations": [record[1]["generation"] for record in direct_records],
+                "base_revisions": [record[1]["revision_id"] for record in direct_records],
+                "statuses": [record[3]["task_run"]["status"] for record in direct_records],
+                "selector_requests": [
+                    record[2]["target"]["object"]
+                    for record in direct_records
+                    if record[2]["target"]
+                ],
+                "shape": direct_shape,
+                "final_task": inspect_task,
+            },
+            "model_program": {
+                "status": model_task["task_run"]["status"],
+                "operations": [
+                    item["op"] for item in model_task["task_run"]["program"]["operations"]
+                ],
+                "shape": model_shape,
+            },
+            "committed_export": committed_export,
+            "committed_delivery": committed_delivery,
+            "draft_export": draft_export,
+            "draft_delivery": draft_delivery,
+            "failure": {
+                "status": failed_task["task_run"]["status"],
+                "committed_revision": failed_task["task_run"]["committed_revision"],
+                "step_oks": [
+                    item["result"]["ok"] for item in failed_task["task_run"]["steps"]
+                ],
+                "head_before": failure_head_before,
+                "head_after": failure_head_after,
+            },
+            "restart": {
+                "project_id": project_id,
+                "base_head": draft_base,
+                "accept": {
+                    "task_id": accept_draft_task["task_run"]["id"],
+                    "generation": accept_draft_task["generation"],
+                    "draft_id": accept_draft["id"],
+                    "revision_id": accept_draft["revision_id"],
+                },
+                "reject": {
+                    "task_id": reject_draft_task["task_run"]["id"],
+                    "generation": reject_draft_task["generation"],
+                    "draft_id": reject_draft["id"],
+                    "revision_id": reject_draft["revision_id"],
+                },
+            },
+        }
+    elif PHASE == "decide":
+        before = current(app, STATE["project_id"])
+        accept_state = STATE["accept"]
+        reject_state = STATE["reject"]
+        accepted = require(
+            app.accept_draft_request(
+                {
+                    "schema_version": 1,
+                    "task_id": accept_state["task_id"],
+                    "draft_id": accept_state["draft_id"],
+                    "expected_generation": accept_state["generation"],
+                }
+            )
+        )
+        head_after_accept = current(app, STATE["project_id"])
+        rejected = require(
+            app.reject_draft_request(
+                {
+                    "schema_version": 1,
+                    "task_id": reject_state["task_id"],
+                    "draft_id": reject_state["draft_id"],
+                    "expected_generation": reject_state["generation"],
+                }
+            )
+        )
+        head_after_reject = current(app, STATE["project_id"])
+        payload = {
+            "phase": PHASE,
+            "pid": os.getpid(),
+            "before": before,
+            "accepted": accepted,
+            "head_after_accept": head_after_accept,
+            "rejected": rejected,
+            "head_after_reject": head_after_reject,
+        }
+    else:
+        raise AssertionError("unknown Agent-first phase")
+finally:
+    app.close()
+
+print("S3_AGENT_FIRST_RESULT=" + canonical(payload))
 """
 
 
@@ -1795,6 +2478,7 @@ def _run_case(
         text=True,
         timeout=240,
         check=False,
+        env=_freecad_child_environment(existing_freecad_python, source=source),
     )
     assert process.returncode == 0, process.stderr
     lines = [line for line in process.stdout.splitlines() if line.startswith("TK9_RESULT=")]
@@ -1828,6 +2512,7 @@ def _run_review_restart_case(
             text=True,
             timeout=240,
             check=False,
+            env=_freecad_child_environment(existing_freecad_python, source=source),
         )
         assert process.returncode == 0, process.stderr + "\n" + process.stdout
         lines = [line for line in process.stdout.splitlines() if line.startswith("TK9_RESULT=")]
@@ -1859,6 +2544,7 @@ def _run_selector_preservation_case(
         text=True,
         timeout=240,
         check=False,
+        env=_freecad_child_environment(existing_freecad_python, source=source),
     )
     assert process.returncode == 0, process.stderr + "\n" + process.stdout
     lines = [line for line in process.stdout.splitlines() if line.startswith("S3_SELECTOR_RESULT=")]
@@ -1875,9 +2561,7 @@ def _run_application_restart_case(
     work_root = tmp_path / "agent-application"
     work_root.mkdir(mode=0o700)
     work_root.chmod(0o700)
-    environment = os.environ.copy()
-    environment["FREECAD_USER_HOME"] = str(Path.home())
-    environment["PYTHONPATH"] = os.pathsep.join((str(prefix / "lib"), str(source)))
+    environment = _freecad_child_environment(existing_freecad_python, source=source)
     environment.pop("VIBECAD_HOME", None)
 
     def run_phase(
@@ -1919,9 +2603,7 @@ def _run_application_restart_case(
 def _run_legacy_runtime_adoption(existing_freecad_python: str) -> dict[str, object]:
     source = Path(__file__).resolve().parent.parent / "src"
     prefix = Path(existing_freecad_python).parent.parent.resolve()
-    environment = os.environ.copy()
-    environment["FREECAD_USER_HOME"] = str(Path.home())
-    environment["PYTHONPATH"] = os.pathsep.join((str(prefix / "lib"), str(source)))
+    environment = _freecad_child_environment(existing_freecad_python, source=source)
     environment.pop("VIBECAD_HOME", None)
     code = _RUNTIME_ADOPTION_CHILD.replace("__SOURCE__", repr(str(source))).replace(
         "__EXPECTED_PREFIX__", repr(str(prefix))
@@ -1942,6 +2624,54 @@ def _run_legacy_runtime_adoption(existing_freecad_python: str) -> dict[str, obje
     ]
     assert len(lines) == 1, process.stdout
     return json.loads(lines[0].removeprefix("S3_RUNTIME_ADOPTION_RESULT="))
+
+
+def _run_agent_first_acceptance(
+    current_managed_freecad_python: str,
+    tmp_path: Path,
+) -> dict[str, dict[str, object]]:
+    source = Path(__file__).resolve().parent.parent / "src"
+    work_root = tmp_path / "agent-first-acceptance"
+    work_root.mkdir(mode=0o700)
+    work_root.chmod(0o700)
+    environment = _freecad_child_environment(
+        current_managed_freecad_python,
+        source=source,
+    )
+
+    def run_phase(
+        phase: str,
+        state: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        code = (
+            _AGENT_FIRST_CHILD.replace("__SOURCE__", repr(str(source)))
+            .replace("__WORK_ROOT__", repr(str(work_root)))
+            .replace("__PHASE__", repr(phase))
+            .replace("__STATE__", repr(json.dumps(state or {}, sort_keys=True)))
+        )
+        process = subprocess.run(
+            [current_managed_freecad_python, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=900,
+            check=False,
+            env=environment,
+        )
+        assert process.returncode == 0, process.stderr + "\n" + process.stdout
+        lines = [
+            line
+            for line in process.stdout.splitlines()
+            if line.startswith("S3_AGENT_FIRST_RESULT=")
+        ]
+        assert len(lines) == 1, process.stdout
+        result = json.loads(lines[0].removeprefix("S3_AGENT_FIRST_RESULT="))
+        assert result["phase"] == phase
+        return result
+
+    prepared = run_phase("prepare")
+    decided = run_phase("decide", prepared["restart"])
+    assert prepared["pid"] != decided["pid"]
+    return {"prepared": prepared, "decided": decided}
 
 
 def _assert_rollback(payload: dict[str, object]) -> None:
@@ -2355,7 +3085,7 @@ def test_real_selector_preservation_is_reload_bound_and_failure_isolated(
 
 
 @pytest.mark.slow
-def test_real_external_legacy_runtime_is_identity_bound_without_engine_install(
+def test_real_pre_epoch_external_legacy_fails_closed_without_mutation(
     existing_freecad_python: str,
 ) -> None:
     payload = _run_legacy_runtime_adoption(existing_freecad_python)
@@ -2363,15 +3093,20 @@ def test_real_external_legacy_runtime_is_identity_bound_without_engine_install(
     assert payload["active_prefix"] == payload["expected_prefix"]
     assert payload["receipt_path"].endswith("/runtime/external-runtime.json")
     assert payload["receipt_canonical"] is True
-    assert payload["receipt"] == payload["expected_receipt"]
-    assert payload["receipt_validated"] is True
-    assert payload["probe_ready"] is True
+    assert payload["receipt_validated"] is False
+    assert payload["receipt_state"] == "incompatible"
+    assert payload["runtime_ready"] is False
+    assert payload["install_failed_closed"] is True
+    assert payload["probe_ready"] is False
     assert payload["external_runtime_unchanged"] is True
+    assert payload["external_receipt_unchanged"] is True
+    assert payload["current_prefix_unchanged"] is True
+    assert payload["old_receipt_missing_identity"] is True
+    assert payload["prefix_identity_still_matches"] is True
     assert payload["blocked_commands"] == []
     expected_python = str(Path(existing_freecad_python).parent.parent / "bin" / "python")
-    assert payload["verify_calls"][0] == expected_python
-    if payload["receipt_before"] is False:
-        assert payload["verify_calls"] == [expected_python, expected_python]
+    assert payload["receipt_before"] is True
+    assert payload["verify_calls"] == [expected_python]
 
 
 @pytest.mark.slow
@@ -2388,11 +3123,9 @@ def test_real_agent_application_bootstrap_isolation_checkout_and_restart_accept(
         assert runtime["legacy_prefix"] == runtime["expected_prefix"]
         assert runtime["active_prefix"] == runtime["expected_prefix"]
         assert runtime["interpreter_under_prefix"] is True
-        assert runtime["external_receipt"] == {
-            "runtime_kind": "external",
-            "schema": 1,
-            "vibecad_version": "0.4.0",
-        }
+        assert runtime["external_receipt"] is None
+        assert runtime["receipt_state"] == "incompatible"
+        assert runtime["runtime_ready"] is False
         assert phase["installer_calls"] == []
         assert phase["legacy_runtime_unchanged"] is True
         assert phase["application_closed"] is True
@@ -2441,3 +3174,105 @@ def test_real_agent_application_bootstrap_isolation_checkout_and_restart_accept(
     assert accepted["final_head"]["revision_id"] == restart["draft_revision"]
     assert [item["object_type"] for item in accepted["entities"]] == ["Part::Box"]
     assert accepted["entities"][0]["volume"] == pytest.approx(6000.0)
+
+
+@pytest.mark.slow
+def test_real_agent_first_public_matrix_and_cross_process_review(
+    current_managed_freecad_python: str,
+    tmp_path: Path,
+) -> None:
+    """S3-7 acceptance: public Agent requests, artifacts, rollback, and restart review."""
+
+    result = _run_agent_first_acceptance(current_managed_freecad_python, tmp_path)
+    prepared = result["prepared"]
+    decided = result["decided"]
+
+    projects = prepared["projects"]
+    assert projects["empty"]["kind"] == "empty"
+    assert projects["empty"]["generation_zero"]["revision"]["model"] is None
+    assert projects["imported"]["kind"] == "import_fcstd"
+    assert projects["imported"]["generation_zero"]["revision"]["model"]["format"] == "fcstd"
+    assert projects["imported_current"]["project_id"] == projects["imported"]["project_id"]
+    assert projects["import_source_unchanged"] is True
+
+    direct = prepared["direct"]
+    assert direct["operations"] == [
+        "create_box",
+        "create_cylinder",
+        "modify_parameter",
+        "move_part",
+        "rotate_part",
+        "inspect_model",
+    ]
+    assert direct["statuses"] == ["succeeded"] * 6
+    assert direct["base_generations"] == list(range(6))
+    selectors = direct["selector_requests"]
+    assert len(selectors) == 3
+    assert [item["revision_id"] for item in selectors] == direct["base_revisions"][2:5]
+    assert all(
+        set(item)
+        == {
+            "schema_version",
+            "project_id",
+            "revision_id",
+            "entity_kind",
+            "object_id",
+            "feature_id",
+            "object_type",
+            "semantic_role",
+            "provenance",
+            "expected_cardinality",
+        }
+        and item["entity_kind"] == "object"
+        and item["feature_id"] is None
+        and item["expected_cardinality"] == 1
+        for item in selectors
+    )
+
+    model = prepared["model_program"]
+    assert model["status"] == "succeeded"
+    assert model["operations"] == [
+        "create_box",
+        "create_cylinder",
+        "modify_parameter",
+        "move_part",
+        "rotate_part",
+        "inspect_model",
+    ]
+    for key in ("volume_mm3", "area_mm2", "bbox_mm", "center_of_mass_mm"):
+        assert model["shape"][key] == pytest.approx(direct["shape"][key])
+    assert model["shape"]["valid_shape"] is direct["shape"]["valid_shape"] is True
+    assert model["shape"]["solid_count"] == direct["shape"]["solid_count"] == 2
+
+    for source_kind in ("committed", "draft"):
+        exported = prepared[f"{source_kind}_export"]
+        delivery = prepared[f"{source_kind}_delivery"]
+        assert exported["source_kind"] == source_kind
+        assert exported["authoritative"] is False
+        assert [item["format"] for item in exported["artifacts"]] == ["fcstd", "step"]
+        assert [item["format"] for item in delivery["resources"]] == ["fcstd", "step"]
+        for reference, observed in zip(exported["artifacts"], delivery["resources"], strict=True):
+            assert observed["uri"] == reference["resource_uri"]
+            assert observed["size"] == reference["size_bytes"]
+            assert observed["sha256"] == reference["sha256"]
+            assert observed["base64_roundtrip"] is True
+        reloaded = delivery["geometries"]
+        assert reloaded["fcstd"]["valid"] is reloaded["step"]["valid"] is True
+        assert reloaded["fcstd"]["volume"] == pytest.approx(reloaded["step"]["volume"])
+
+    failure = prepared["failure"]
+    assert failure["status"] == "failed"
+    assert failure["committed_revision"] is None
+    assert failure["step_oks"] == [False]
+    assert failure["head_after"] == failure["head_before"]
+
+    restart = prepared["restart"]
+    assert decided["before"] == restart["base_head"]
+    accepted = decided["accepted"]
+    assert accepted["task_run"]["status"] == "succeeded"
+    assert accepted["task_run"]["committed_revision"] == restart["accept"]["revision_id"]
+    assert decided["head_after_accept"]["revision_id"] == restart["accept"]["revision_id"]
+    rejected = decided["rejected"]
+    assert rejected["task_run"]["status"] == "rejected"
+    assert rejected["task_run"]["committed_revision"] is None
+    assert decided["head_after_reject"] == decided["head_after_accept"]

@@ -6,6 +6,7 @@ import inspect
 import os
 import threading
 from collections import OrderedDict
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -97,6 +98,17 @@ BASE_MANIFEST = "a" * 64
 CANDIDATE_MANIFEST = "b" * 64
 MODEL_HASH = "c" * 64
 STEP_HASH = "d" * 64
+
+
+@pytest.fixture(autouse=True)
+def _neutral_candidate_file_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep service orchestration fakes independent from process RLIMIT state."""
+
+    monkeypatch.setattr(
+        service_module,
+        "_candidate_file_limit",
+        lambda _store: nullcontext(),
+    )
 
 
 def _error(
@@ -283,6 +295,7 @@ class _MemoryTaskStore(TaskRunStore):
         self.log = log
         self._lease_manager = lease_manager
         self.load_error: Exception | None = None
+        self.create_error: Exception | None = None
         self.create_uncertain = False
         self.persist_create_uncertain = True
         self.fail_status: TaskStatus | None = None
@@ -304,6 +317,8 @@ class _MemoryTaskStore(TaskRunStore):
 
     def create(self, task_run: object) -> StoredTaskRun:
         self.log.append("task.create")
+        if self.create_error is not None:
+            raise self.create_error
         if task_run.id in self.records:  # type: ignore[union-attr]
             raise TaskStoreError(TaskStoreErrorCode.ALREADY_EXISTS)
         stored = StoredTaskRun(generation=0, task_run=task_run)  # type: ignore[arg-type]
@@ -412,6 +427,7 @@ class _Coordinator(CandidateCoordinator):
         self._store = revisions
         self._snapshot_port = executor
         self.begin_error: CandidateError | None = None
+        self.reservation_error: CandidateError | None = None
         self.failure_stage: str | None = None
         self.terminal_failure_stage: str | None = None
         self.terminal_error: CandidateError | None = None
@@ -425,6 +441,8 @@ class _Coordinator(CandidateCoordinator):
         self.commit_calls = 0
         self.rollback_calls = 0
         self.rollback_invocations = 0
+        self.cancel_reservation_calls = 0
+        self.cancel_reservation_status = CandidateRollbackStatus.NOT_COMMITTED
         self.publish_review_calls = 0
         self.reopen_review_calls = 0
         self.prepare_review_calls = 0
@@ -460,6 +478,60 @@ class _Coordinator(CandidateCoordinator):
                 session=object(),
             ),
             stage="active",
+        )
+
+    def reserve_candidate(
+        self,
+        *,
+        project_id: str,
+        expected_head: ProjectHead,
+        reservation_key: str,
+        lease: object,
+    ) -> str:
+        del lease
+        self.log.append("candidate.reserve")
+        assert project_id == PROJECT_ID
+        assert expected_head == self.revisions.head
+        assert reservation_key == TASK_ID
+        if self.reservation_error is not None:
+            raise self.reservation_error
+        return CANDIDATE_REVISION
+
+    def begin_reserved(
+        self,
+        *,
+        project_id: str,
+        expected_head: ProjectHead,
+        revision_id: str,
+        reservation_key: str,
+        lease: object,
+    ) -> object:
+        assert revision_id == CANDIDATE_REVISION
+        assert reservation_key == TASK_ID
+        return self.begin(project_id=project_id, expected_head=expected_head, lease=lease)
+
+    def cancel_reservation(
+        self,
+        *,
+        project_id: str,
+        expected_head: ProjectHead,
+        revision_id: str,
+        reservation_key: str,
+        lease: object,
+    ) -> object:
+        del lease
+        self.log.append("candidate.cancel_reservation")
+        self.cancel_reservation_calls += 1
+        assert project_id == PROJECT_ID
+        assert expected_head == self.revisions.head
+        assert revision_id == CANDIDATE_REVISION
+        assert reservation_key == TASK_ID
+        status = self.cancel_reservation_status
+        return SimpleNamespace(
+            status=status,
+            head=(expected_head if status is CandidateRollbackStatus.NOT_COMMITTED else None),
+            cleanup_required=status is CandidateRollbackStatus.CLEANUP_REQUIRED,
+            recovery_required=status is CandidateRollbackStatus.RECOVERY_REQUIRED,
         )
 
     def checkpoint(self, *, candidate: object, lease: object) -> object:
@@ -885,6 +957,7 @@ def test_public_contract_and_fixed_errors() -> None:
         "conflict",
         "store_failure",
         "lease_unavailable",
+        "resource_exhausted",
         "recovery_required",
     }
     for code in TaskServiceErrorCode:
@@ -941,6 +1014,19 @@ def test_create_task_binds_current_head_and_requests_external_plan() -> None:
     assert stored.task_run.base_revision == BASE_REVISION
     assert stored.task_run.reasoning_owner is ReasoningOwner.EXTERNAL_PLAN
     assert rig.log == ["revision.head", "task.create"]
+
+
+def test_task_store_capacity_maps_exactly_through_catalog_and_service() -> None:
+    rig = _Rig()
+    rig.tasks.create_error = TaskStoreError(TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.create()
+
+    assert caught.value.code is TaskServiceErrorCode.RESOURCE_EXHAUSTED
+    assert caught.value.__context__ is None
+    assert caught.value.__cause__ is None
+    assert TASK_ID not in rig.tasks.records
 
 
 def test_create_durability_uncertain_accepts_only_exact_generation_zero_readback() -> None:
@@ -1166,6 +1252,90 @@ def test_lease_contention_and_runtime_head_drift_leave_task_unchanged() -> None:
         assert rig.service.runtime_stale is (mode == "head")
 
 
+def test_candidate_capacity_failure_precedes_task_transitions_and_cad_effects() -> None:
+    rig = _Rig()
+    created = rig.create()
+    rig.coordinator.reservation_error = CandidateError(CandidateErrorCode.RESOURCE_EXHAUSTED)
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.submit_model_program(
+            task_id=TASK_ID,
+            expected_generation=created.generation,
+            program=_program(),
+        )
+
+    assert caught.value.code is TaskServiceErrorCode.RESOURCE_EXHAUSTED
+    assert rig.tasks.records[TASK_ID] == created
+    assert not any(item.startswith("task.cas:") for item in rig.log)
+    assert "executor.execute" not in rig.log
+    assert rig.log.index("lease.acquire") < rig.log.index("candidate.reserve")
+    assert rig.log.index("candidate.reserve") < rig.log.index("lease.release")
+
+
+def test_task_cas_capacity_after_reservation_cleans_and_preserves_exact_error() -> None:
+    rig = _Rig()
+    created = rig.create()
+    rig.tasks.fail_status = TaskStatus.PROGRAM_READY
+    rig.tasks.fail_code = TaskStoreErrorCode.RESOURCE_EXHAUSTED
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.submit_model_program(
+            task_id=TASK_ID,
+            expected_generation=created.generation,
+            program=_program(),
+        )
+
+    assert caught.value.code is TaskServiceErrorCode.RESOURCE_EXHAUSTED
+    assert rig.tasks.records[TASK_ID] == created
+    assert rig.coordinator.cancel_reservation_calls == 1
+    assert "candidate.begin" not in rig.log
+    assert rig.log.index("candidate.reserve") < rig.log.index("candidate.cancel_reservation")
+    assert rig.log.index("candidate.cancel_reservation") < rig.log.index("lease.release")
+
+
+def test_stale_task_base_cleans_unused_reservation_before_needs_input() -> None:
+    rig = _Rig()
+    created = rig.create()
+    rig.revisions.head = ProjectHead(
+        project_id=PROJECT_ID,
+        generation=2,
+        revision_id=DESCENDANT_REVISION,
+        manifest_sha256="e" * 64,
+    )
+    rig.refresh_runtime()
+
+    stored = rig.service.submit_model_program(
+        task_id=TASK_ID,
+        expected_generation=created.generation,
+        program=_program(),
+    )
+
+    assert stored.task_run.status is TaskStatus.NEEDS_INPUT
+    assert stored.task_run.candidate_revision is None
+    assert rig.coordinator.cancel_reservation_calls == 1
+    assert "candidate.begin" not in rig.log
+
+
+def test_uncertain_reservation_cleanup_masks_cas_capacity_as_recovery_required() -> None:
+    rig = _Rig()
+    created = rig.create()
+    rig.tasks.fail_status = TaskStatus.PROGRAM_READY
+    rig.tasks.fail_code = TaskStoreErrorCode.RESOURCE_EXHAUSTED
+    rig.coordinator.cancel_reservation_status = CandidateRollbackStatus.RECOVERY_REQUIRED
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.submit_model_program(
+            task_id=TASK_ID,
+            expected_generation=created.generation,
+            program=_program(),
+        )
+
+    assert caught.value.code is TaskServiceErrorCode.RECOVERY_REQUIRED
+    assert rig.tasks.records[TASK_ID] == created
+    assert rig.coordinator.cancel_reservation_calls == 1
+    assert "candidate.begin" not in rig.log
+
+
 def test_execution_failure_rolls_back_after_durable_rolling_back() -> None:
     rig = _Rig()
     rig.executor.outcomes = _failed_outcomes()
@@ -1226,6 +1396,64 @@ def test_post_publication_failures_rollback_without_reflecting_secret(stage: str
     assert rig.coordinator.rollback_calls == 1
     assert rig.coordinator.commit_calls == 0
     assert "secret" not in stored.task_run.last_error.message
+
+
+def test_step_export_runs_inside_the_candidate_file_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = _Rig()
+
+    class RecordingLimit:
+        def __enter__(self):
+            rig.log.append("file_limit.enter")
+            return self
+
+        def __exit__(self, *_args):
+            rig.log.append("file_limit.exit")
+            return False
+
+    monkeypatch.setattr(
+        service_module,
+        "_candidate_file_limit",
+        lambda store: RecordingLimit() if store is rig.revisions else None,
+    )
+
+    stored = rig.run()
+
+    assert stored.task_run.status is TaskStatus.SUCCEEDED
+    assert rig.log.index("candidate.checkpoint") < rig.log.index("file_limit.enter")
+    assert rig.log.index("file_limit.enter") < rig.log.index("executor.export")
+    assert rig.log.index("executor.export") < rig.log.index("file_limit.exit")
+    assert rig.log.index("file_limit.exit") < rig.log.index("candidate.seal")
+
+
+def test_file_limit_restore_failure_forces_recovery_after_clean_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = _Rig()
+
+    class RestoreFailure:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            raise CandidateError(
+                CandidateErrorCode.RECOVERY_REQUIRED,
+                recovery_required=True,
+            )
+
+    monkeypatch.setattr(
+        service_module,
+        "_candidate_file_limit",
+        lambda store: RestoreFailure() if store is rig.revisions else None,
+    )
+
+    stored = rig.run()
+
+    assert stored.task_run.status is TaskStatus.RECOVERY_REQUIRED
+    assert rig.log.count("executor.export") == 1
+    assert rig.coordinator.rollback_calls == 1
+    assert rig.coordinator.commit_calls == 0
 
 
 @pytest.mark.parametrize("stage", ["checkpoint", "seal"])
@@ -2121,7 +2349,13 @@ def test_application_accepting_gap_evicts_then_recovers_descendant_without_recom
         return runtime
 
     app = object.__new__(AgentApplication)
+    app._artifact_authority = SimpleNamespace(  # noqa: SLF001
+        acquire_export_gate=lambda *, task_id: nullcontext()
+    )
+    app._artifact_store = None  # noqa: SLF001
     app._cad_gate = threading.Lock()  # noqa: SLF001
+    app._close_lock = threading.Lock()  # noqa: SLF001
+    app._component_lock = threading.Lock()  # noqa: SLF001
     app._catalog = SimpleNamespace(  # noqa: SLF001
         get_task=lambda *, task_id: rig.tasks.load(task_id)
     )

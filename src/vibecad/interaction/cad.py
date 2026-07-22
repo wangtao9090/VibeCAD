@@ -78,6 +78,24 @@ class ValidatedImportEvidence:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ValidatedMaterializationEvidence:
+    """Read-only byte evidence for one complete FCStd/STEP delivery pair."""
+
+    fcstd_sha256: str
+    fcstd_size_bytes: int
+    step_sha256: str
+    step_size_bytes: int
+
+    def __post_init__(self) -> None:
+        for digest in (self.fcstd_sha256, self.step_sha256):
+            if type(digest) is not str or _SHA256_PATTERN.fullmatch(digest) is None:
+                raise ValueError("artifact digest must be a lowercase SHA-256 value")
+        for size in (self.fcstd_size_bytes, self.step_size_bytes):
+            if type(size) is not int or size <= 0:
+                raise ValueError("artifact size must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class CandidateEvidence:
     """Trusted sealed observations and path-free durable artifact references."""
 
@@ -115,6 +133,19 @@ class CadExecutionPort(CadSnapshotPort):
     def validate_import(self, path: Path) -> ValidatedImportEvidence:
         raise NotImplementedError("validate_import is not implemented")
 
+    def revalidate_normalized_import(self, path: Path) -> ValidatedImportEvidence:
+        """Revalidate one normalized private FCStd without modifying it."""
+
+        raise NotImplementedError("revalidate_normalized_import is not implemented")
+
+    def validate_materialization(
+        self,
+        *,
+        fcstd: Path,
+        step: Path,
+    ) -> ValidatedMaterializationEvidence:
+        raise NotImplementedError("validate_materialization is not implemented")
+
     def validate_program(self, program: ModelProgram) -> ValidatedProgram:
         raise NotImplementedError("validate_program is not implemented")
 
@@ -145,6 +176,7 @@ __all__ = (
     "CadCapabilityStatus",
     "CadProfileCapability",
     "ValidatedImportEvidence",
+    "ValidatedMaterializationEvidence",
     "CandidateEvidence",
     "CadExecutionPort",
 )

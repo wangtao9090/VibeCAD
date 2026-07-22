@@ -21,12 +21,13 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 
 import pytest
 
-from vibecad import supervisor
+from vibecad import mcp_transport, supervisor
 from vibecad.runtime.status import _pid_alive
 
 FAKE_SERVER = str(Path(__file__).resolve().parent / "fake_server.py")
@@ -81,21 +82,57 @@ def _send(proc: subprocess.Popen, obj: dict) -> None:
     proc.stdin.flush()
 
 
-def _rpc(proc: subprocess.Popen, id_: int, method: str) -> dict:
-    _send(proc, {"jsonrpc": "2.0", "id": id_, "method": method})
+def _handshake(proc: subprocess.Popen) -> dict:
+    _send(
+        proc,
+        {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "blackbox-test", "version": "1"},
+            },
+        },
+    )
+    response = json.loads(_readline(proc))
+    _send(
+        proc,
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        },
+    )
+    return response
+
+
+def _rpc(
+    proc: subprocess.Popen,
+    id_: int,
+    method: str,
+    params: dict | None = None,
+) -> dict:
+    request = {"jsonrpc": "2.0", "id": id_, "method": method}
+    if params is not None:
+        request["params"] = params
+    _send(proc, request)
     return json.loads(_readline(proc))
 
 
 def test_passthrough_and_swap(sup_factory):
     """透传 + 换芯 gen=1→2 + 握手重放响应被丢弃 + 换芯后请求零感知成功 + 正常退出 0。"""
-    sup = sup_factory()
-    _send(sup, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}})
-    assert json.loads(_readline(sup))["result"]["gen"] == 1
-    _send(sup, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+    sup = sup_factory({"VIBECAD_FAKE_SWAP_TOOL": "get_runtime_status"})
+    assert _handshake(sup)["result"]["serverInfo"]["version"] == "1"
 
-    assert _rpc(sup, 1, "tools/call")["result"]["gen"] == 1  # 换芯前
-    _send(sup, {"jsonrpc": "2.0", "method": "swap"})  # 触发 exit(75)
-    resp = _rpc(sup, 2, "tools/call")
+    assert _rpc(sup, 1, "ping")["result"]["gen"] == 1  # 换芯前
+    resp = _rpc(
+        sup,
+        2,
+        "tools/call",
+        {"name": "get_runtime_status", "arguments": {}},
+    )
     # 客户端从未见到第二份 initialize 响应（重放响应被监督进程丢弃）——
     # rpc(2) 直接读到 id=2 的响应即证明
     assert resp["id"] == 2
@@ -108,8 +145,7 @@ def test_stdin_eof_clean_exit_no_orphan(sup_factory, tmp_path):
     """要点①：宿主关闭（stdin EOF）→ supervisor 连同子进程干净退出，绝不留孤儿。"""
     pid_file = tmp_path / "fake.pid"
     sup = sup_factory({"VIBECAD_FAKE_PID_FILE": str(pid_file)})
-    _send(sup, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}})
-    _readline(sup)  # 同步点：子进程已起且已落 PID
+    _handshake(sup)  # 同步点：子进程已起且已落 PID
     child_pid = int(pid_file.read_text())
     assert _pid_alive(child_pid)
 
@@ -120,10 +156,9 @@ def test_stdin_eof_clean_exit_no_orphan(sup_factory, tmp_path):
 
 def test_real_crash_code_passthrough(sup_factory):
     """真崩溃（非 SWAP_EXIT）：退出码原样透传，不掩盖、不重启。"""
-    sup = sup_factory()
-    _send(sup, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}})
-    _readline(sup)
-    _send(sup, {"jsonrpc": "2.0", "method": "crash"})  # fake server exit(3)
+    sup = sup_factory({"VIBECAD_FAKE_CRASH_METHOD": "ping"})
+    _handshake(sup)
+    _send(sup, {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}})
     assert sup.wait(timeout=15) == 3
 
 
@@ -136,14 +171,18 @@ def test_pending_uninstall_runs_before_respawn(sup_factory, tmp_path):
     (home / "runtime" / "owned.bin").write_bytes(b"runtime")
     (home / "mamba").mkdir(parents=True)  # 只有路径名不能证明 legacy 所有权
     (home / "status.json").write_text("{}")
-    sup = sup_factory()
-    _send(sup, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}})
-    _readline(sup)
+    sup = sup_factory({"VIBECAD_FAKE_SWAP_TOOL": "get_runtime_status"})
+    _handshake(sup)
     assert home.exists()  # 启动清理不背锅：此时尚无标记
 
     (home / ".uninstall_requested").touch()  # 模拟运行中 request_uninstall 落标记
-    _send(sup, {"jsonrpc": "2.0", "method": "swap"})
-    assert _rpc(sup, 1, "ping")["result"]["gen"] == 2  # 同步点：重启已完成
+    response = _rpc(
+        sup,
+        1,
+        "tools/call",
+        {"name": "get_runtime_status", "arguments": {}},
+    )
+    assert response["result"]["gen"] == 2  # 同步点：重启已完成
     assert not (home / "runtime").exists()  # spawn 前已删掉可证明归属的运行时
     assert not (home / ".uninstall_requested").exists()
     assert (home / "mamba").is_dir()
@@ -169,17 +208,59 @@ def test_swap_handshake_hang_exits_nonzero_no_orphan(sup_factory, tmp_path):
     sup = sup_factory(
         {
             "VIBECAD_FAKE_HANG": "1",
+            "VIBECAD_FAKE_SWAP_TOOL": "get_runtime_status",
             "VIBECAD_FAKE_PID_FILE": str(pid_file),
             "VIBECAD_TEST_HANDSHAKE_TIMEOUT": "3",  # 调小 deadline：黑盒不等 30s
         }
     )
-    _send(sup, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}})
-    assert json.loads(_readline(sup))["result"]["gen"] == 1
-    _send(sup, {"jsonrpc": "2.0", "method": "swap"})
+    assert _handshake(sup)["result"]["serverInfo"]["version"] == "1"
+    _send(
+        sup,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "get_runtime_status", "arguments": {}},
+        },
+    )
 
     assert sup.wait(timeout=15) == 1  # 换芯失败：非零码响亮退出
     assert int((tmp_path / "gen").read_text()) == 2  # 新子进程确实起过（挂死的是它）
     assert not _pid_alive(int(pid_file.read_text()))  # 挂死子进程已被强杀，无孤儿
+
+
+def test_unsafe_pending_request_gets_unknown_outcome_and_is_not_replayed(
+    sup_factory,
+    tmp_path,
+):
+    """响应前换芯的非幂等 create_task 只执行一次，返回固定 unknown outcome。"""
+    tool_log = tmp_path / "tools.log"
+    sup = sup_factory(
+        {
+            "VIBECAD_FAKE_SWAP_TOOL": "create_task",
+            "VIBECAD_FAKE_TOOL_LOG": str(tool_log),
+        }
+    )
+    _handshake(sup)
+    response = _rpc(
+        sup,
+        7,
+        "tools/call",
+        {"name": "create_task", "arguments": {}},
+    )
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "error": {
+            "code": -32003,
+            "message": "Tool outcome is unknown; inspect durable state before retry.",
+        },
+    }
+    assert _rpc(sup, 8, "ping")["result"]["gen"] == 2
+    assert tool_log.read_text(encoding="utf-8").splitlines() == ["1:create_task"]
+
+    sup.stdin.close()
+    assert sup.wait(timeout=15) == 0
 
 
 # --- 单元：runtime_swappable 换芯判据（C1 单一真源） ---
@@ -250,7 +331,7 @@ def test_server_cmd_ready_uses_conda_python(monkeypatch, tmp_path):
     py.write_text("")
     monkeypatch.setattr(paths, "active_runtime_python", lambda: py)
     monkeypatch.setattr(status, "runtime_ready", lambda: True)
-    assert supervisor._server_cmd() == [str(py), "-m", "vibecad.server"]
+    assert supervisor._server_cmd() == [str(py), "-B", "-m", "vibecad.server"]
 
 
 def test_server_cmd_not_ready_bootstraps(monkeypatch, tmp_path):
@@ -297,7 +378,16 @@ def test_spawn_injects_supervised_env(monkeypatch):
     """I4：supervisor 拉起的子进程带 VIBECAD_SUPERVISED=1——server 据此判断
     「自杀后有人重启」；裸 server 无此标记则回退提示重连、绝不自杀。"""
     captured: dict = {}
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
     monkeypatch.setattr(supervisor.uninstall, "perform_pending_uninstall", lambda: True)
+    monkeypatch.setattr(
+        supervisor,
+        "_server_selection",
+        lambda *, allow_runtime=True: supervisor._ServerSelection(
+            (sys.executable, "-m", "vibecad.server"),
+            uses_runtime=False,
+        ),
+    )
     monkeypatch.setattr(
         supervisor.subprocess,
         "Popen",
@@ -305,6 +395,120 @@ def test_spawn_injects_supervised_env(monkeypatch):
     )
     assert supervisor.Supervisor()._spawn() == "proc"
     assert captured["env"]["VIBECAD_SUPERVISED"] == "1"
+    assert "PYTHONDONTWRITEBYTECODE" not in captured["env"]
+
+
+def test_spawn_runtime_env_seam_receives_exact_base_after_selection(monkeypatch):
+    """managed/external runtime 子进程才经私有 FreeCAD 目录 seam，且顺序固定。"""
+    from vibecad.runtime import status
+
+    order: list[str] = []
+    captured: dict[str, object] = {}
+    selection = supervisor._ServerSelection(
+        ("runtime-python", "-B", "-m", "vibecad.server"),
+        uses_runtime=True,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "run_pending_uninstall",
+        lambda: order.append("uninstall") or True,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_server_selection",
+        lambda *, allow_runtime=True: (
+            order.append("select") or captured.update(allow_runtime=allow_runtime) or selection
+        ),
+    )
+
+    def _runtime_environment(base):
+        order.append("environment")
+        captured["base"] = base
+        return {**base, "FREECAD_USER_HOME": "/private/runtime/freecad-user/home"}
+
+    monkeypatch.setattr(status, "freecad_process_environment", _runtime_environment)
+    monkeypatch.setattr(
+        supervisor.subprocess,
+        "Popen",
+        lambda command, **kwargs: (
+            order.append("spawn") or captured.update(command=command, kwargs=kwargs) or "proc"
+        ),
+    )
+
+    assert supervisor.Supervisor()._spawn() == "proc"
+    expected_base = {
+        **os.environ,
+        "VIBECAD_SUPERVISED": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    assert order == ["uninstall", "select", "environment", "spawn"]
+    assert captured["allow_runtime"] is True
+    assert captured["base"] == expected_base
+    assert captured["command"] == list(selection.command)
+    assert captured["kwargs"]["env"] == {
+        **expected_base,
+        "FREECAD_USER_HOME": "/private/runtime/freecad-user/home",
+    }
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="test uses a POSIX executable symlink")
+def test_external_runtime_spawn_does_not_mutate_prefix_or_create_pycache(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Runtime env injection protects even imports from an external prefix."""
+
+    from vibecad.runtime import status
+
+    prefix = tmp_path / "external"
+    runtime_python = prefix / "bin" / "python"
+    site_packages = prefix / "site-packages"
+    runtime_python.parent.mkdir(parents=True)
+    site_packages.mkdir()
+    runtime_python.symlink_to(sys.executable)
+    (site_packages / "external_probe.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    def _snapshot() -> dict[str, tuple[str, bytes | str | None]]:
+        snapshot: dict[str, tuple[str, bytes | str | None]] = {}
+        for path in prefix.rglob("*"):
+            relative = path.relative_to(prefix).as_posix()
+            if path.is_symlink():
+                snapshot[relative] = ("symlink", os.readlink(path))
+            elif path.is_dir():
+                snapshot[relative] = ("directory", None)
+            else:
+                snapshot[relative] = ("file", path.read_bytes())
+        return snapshot
+
+    before = _snapshot()
+    code = "import sys; sys.path.insert(0, sys.argv[1]); import external_probe"
+    selection = supervisor._ServerSelection(
+        (str(runtime_python), "-c", code, str(site_packages)),
+        uses_runtime=True,
+    )
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    monkeypatch.setattr(supervisor, "run_pending_uninstall", lambda: True)
+    monkeypatch.setattr(
+        supervisor,
+        "_server_selection",
+        lambda *, allow_runtime=True: selection,
+    )
+    captured: dict[str, str] = {}
+
+    def _environment(base):
+        captured.update(base)
+        return dict(base)
+
+    monkeypatch.setattr(status, "freecad_process_environment", _environment)
+
+    child = supervisor.Supervisor()._spawn()
+    child.stdin.close()
+    assert child.wait(timeout=10) == 0
+    child.stdout.close()
+
+    assert captured["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert _snapshot() == before
+    assert not any(path.name == "__pycache__" for path in prefix.rglob("*"))
 
 
 def test_run_pending_uninstall_warns_when_marker_left(monkeypatch, tmp_path, capsys):
@@ -316,7 +520,7 @@ def test_run_pending_uninstall_warns_when_marker_left(monkeypatch, tmp_path, cap
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     monkeypatch.setattr(supervisor.uninstall, "perform_pending_uninstall", lambda: False)
 
-    supervisor.run_pending_uninstall()
+    assert supervisor.run_pending_uninstall() is False
 
     err = capsys.readouterr().err
     assert "卸载未完成" in err and str(home) in err
@@ -327,9 +531,94 @@ def test_run_pending_uninstall_quiet_when_no_marker(monkeypatch, tmp_path, capsy
     monkeypatch.setenv("VIBECAD_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(supervisor.uninstall, "perform_pending_uninstall", lambda: False)
 
-    supervisor.run_pending_uninstall()
+    assert supervisor.run_pending_uninstall() is True
 
     assert capsys.readouterr().err == ""
+
+
+def test_spawn_partial_uninstall_forces_bootstrap_without_runtime_seam(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A retained marker forbids selecting or recreating a residual runtime."""
+
+    from vibecad.runtime import paths, status
+
+    home = tmp_path / "home"
+    monkeypatch.delenv("VIBECAD_FREECAD_ENV", raising=False)
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    monkeypatch.setenv("VIBECAD_AUTO_INSTALL", "1")
+    runtime_python = paths.active_runtime_python()
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.touch()
+    status.write_runtime_receipt()
+    marker = home / ".uninstall_requested"
+    marker.touch()
+    monkeypatch.setattr(supervisor.uninstall, "perform_pending_uninstall", lambda: False)
+    seam_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        status,
+        "freecad_process_environment",
+        lambda base: seam_calls.append(base) or base,
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        supervisor.subprocess,
+        "Popen",
+        lambda command, **kwargs: captured.update(command=command, kwargs=kwargs) or "proc",
+    )
+
+    assert supervisor.Supervisor()._spawn() == "proc"
+
+    assert captured["command"] == [sys.executable, "-m", "vibecad.server"]
+    assert captured["kwargs"]["env"]["VIBECAD_AUTO_INSTALL"] == "0"
+    assert seam_calls == []
+    assert marker.exists()
+    assert not (home / "runtime" / "freecad-user").exists()
+
+
+def test_successful_pending_uninstall_suppresses_auto_install_for_later_generations(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A confirmed uninstall must not be undone by the replacement bootstrap."""
+
+    home = tmp_path / "home"
+    home.mkdir()
+    marker = home / ".uninstall_requested"
+    marker.touch()
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    monkeypatch.setenv("VIBECAD_AUTO_INSTALL", "1")
+    environments: list[dict[str, str]] = []
+
+    def _converge() -> bool:
+        marker.unlink(missing_ok=True)
+        return True
+
+    monkeypatch.setattr(supervisor, "run_pending_uninstall", _converge)
+    monkeypatch.setattr(
+        supervisor,
+        "_server_selection",
+        lambda *, allow_runtime=True: supervisor._ServerSelection(
+            (sys.executable, "-m", "vibecad.server"),
+            uses_runtime=False,
+        ),
+    )
+    monkeypatch.setattr(
+        supervisor.subprocess,
+        "Popen",
+        lambda _command, **kwargs: environments.append(kwargs["env"]) or "proc",
+    )
+
+    sup = supervisor.Supervisor()
+    assert sup._spawn() == "proc"
+    assert not marker.exists()
+    assert environments[-1]["VIBECAD_AUTO_INSTALL"] == "0"
+
+    # The marker is now gone, but this supervisor still belongs to the same
+    # confirmed-uninstall session and every later generation must stay inert.
+    assert sup._spawn() == "proc"
+    assert environments[-1]["VIBECAD_AUTO_INSTALL"] == "0"
 
 
 def test_spawn_real_cmd_uninstall_marker_falls_back_to_bootstrap(monkeypatch, tmp_path):
@@ -349,6 +638,12 @@ def test_spawn_real_cmd_uninstall_marker_falls_back_to_bootstrap(monkeypatch, tm
     (home / "status.json").write_text("{}")  # 强哨兵：护栏认定是我们的目录
     (home / ".uninstall_requested").touch()  # 待删标记
     captured: dict = {}
+    seam_calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        status,
+        "freecad_process_environment",
+        lambda base: seam_calls.append(base) or base,
+    )
     monkeypatch.setattr(
         supervisor.subprocess,
         "Popen",
@@ -359,6 +654,7 @@ def test_spawn_real_cmd_uninstall_marker_falls_back_to_bootstrap(monkeypatch, tm
 
     assert home.exists()
     assert not (home / "runtime").exists()  # 待删标记已兑现，授权运行时消失
+    assert seam_calls == []  # bootstrap 不得重建刚被卸载的 runtime/freecad-user
     assert not (home / ".uninstall_requested").exists()
     assert (home / "status.json").read_text() == "{}"
     assert captured["cmd"][0] == sys.executable  # 落回 bootstrap（无自杀循环隐患）
@@ -396,6 +692,32 @@ def test_spawn_real_cmd_old_server_receipt_bootstraps(monkeypatch, tmp_path):
     py.parent.mkdir(parents=True)
     py.touch()
     receipt = {**spec.expected_receipt(), "vibecad_version": "0.3.0"}
+    paths.ready_sentinel().write_text(json.dumps(receipt), encoding="utf-8")
+    captured: dict = {}
+    monkeypatch.setattr(
+        supervisor.subprocess,
+        "Popen",
+        lambda cmd, **kw: captured.update(cmd=cmd) or "proc",
+    )
+
+    supervisor.Supervisor()._spawn()
+
+    assert captured["cmd"] == [sys.executable, "-m", "vibecad.server"]
+
+
+def test_spawn_real_cmd_previous_positive_epoch_receipt_bootstraps(monkeypatch, tmp_path):
+    """入口遇到上一私有 epoch receipt 时留在 bootstrap，等待原位 server 同步。"""
+    from vibecad.runtime import paths, spec
+
+    monkeypatch.delenv("VIBECAD_FREECAD_ENV", raising=False)
+    monkeypatch.setenv("VIBECAD_HOME", str(tmp_path / "home"))
+    py = paths.active_runtime_python()
+    py.parent.mkdir(parents=True)
+    py.touch()
+    receipt = {
+        **spec.expected_receipt(),
+        "server_package_epoch": spec.SERVER_PACKAGE_EPOCH - 1,
+    }
     paths.ready_sentinel().write_text(json.dumps(receipt), encoding="utf-8")
     captured: dict = {}
     monkeypatch.setattr(
@@ -508,8 +830,7 @@ def test_replay_handshake_timeout_kills_hung_child(monkeypatch, capsys):
     绝不让宿主全部请求无限挂死。"""
     monkeypatch.setattr(supervisor, "_HANDSHAKE_TIMEOUT_SECONDS", 0.2)
     sup = supervisor.Supervisor()
-    sup._handshake = [b'{"jsonrpc":"2.0","id":0,"method":"initialize"}\n']
-    sup._init_id = 0
+    assert sup._protocol.accept(_initialize_payload(0)).kind is supervisor._ClientActionKind.FORWARD
     r, w = os.pipe()  # stdout 永不给数据：模拟挂死
     hung_stdout = os.fdopen(r, "rb")
     killed: list[int] = []
@@ -541,82 +862,550 @@ def test_replay_handshake_survives_instantly_dead_child():
     """骨架修正：新子进程秒死（写端 BrokenPipe + stdout 秒 EOF）时握手重放不得抛
     异常，且按「握手已结束」返回 True——真退出码由 run() 主循环如实拿到并透传。"""
     sup = supervisor.Supervisor()
-    sup._handshake = [
-        b'{"jsonrpc":"2.0","id":0,"method":"initialize"}\n',
-        b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n',
-    ]
-    sup._init_id = 0
+    assert sup._protocol.accept(_initialize_payload(0)).kind is supervisor._ClientActionKind.FORWARD
     child = types.SimpleNamespace(stdin=_DeadPipe(), stdout=io.BytesIO(b""), poll=lambda: 1)
     assert sup._replay_handshake(child) is True
 
 
+def test_replay_handshake_rejects_malformed_initialize_response(monkeypatch):
+    sup = supervisor.Supervisor()
+    assert sup._protocol.accept(_initialize_payload(0)).kind is supervisor._ClientActionKind.FORWARD
+    killed: list[int] = []
+    malformed = _payload(
+        {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {},
+            "error": {"code": -32603, "message": "must-not-pass"},
+        }
+    )
+    output = io.BytesIO()
+    monkeypatch.setattr(supervisor.sys, "stdout", types.SimpleNamespace(buffer=output))
+    child = types.SimpleNamespace(
+        stdin=_FakePipe(),
+        stdout=io.BytesIO(malformed + b"\n"),
+        kill=lambda: killed.append(1),
+        poll=lambda: None,
+    )
+
+    assert sup._replay_handshake(child) is False
+    assert killed == [1]
+    assert output.getvalue() == b""
+
+
+def test_replay_handshake_initialize_error_never_advances_to_initialized() -> None:
+    sup = supervisor.Supervisor()
+    assert sup._protocol.accept(_initialize_payload(0)).kind is supervisor._ClientActionKind.FORWARD
+    prepared = sup._protocol.prepare_response(_initialize_response_payload(0))
+    sup._protocol.acknowledge_response(prepared)
+    assert sup._protocol.accept(_initialized_payload()).kind is supervisor._ClientActionKind.FORWARD
+    killed: list[int] = []
+    child_stdin = _FakePipe()
+    child = types.SimpleNamespace(
+        stdin=child_stdin,
+        stdout=io.BytesIO(
+            _payload(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "error": {"code": -32603, "message": "initialize failed"},
+                }
+            )
+            + b"\n"
+        ),
+        kill=lambda: killed.append(1),
+        poll=lambda: None,
+    )
+
+    assert sup._replay_handshake(child) is False
+    assert killed == [1]
+    assert _initialized_payload() + b"\n" not in child_stdin.getvalue()
+
+
+def test_replay_handshake_live_child_stdout_eof_is_failure() -> None:
+    sup = supervisor.Supervisor()
+    assert sup._protocol.accept(_initialize_payload(0)).kind is supervisor._ClientActionKind.FORWARD
+    killed: list[int] = []
+    child = types.SimpleNamespace(
+        stdin=_FakePipe(),
+        stdout=io.BytesIO(b""),
+        kill=lambda: killed.append(1),
+        poll=lambda: None,
+    )
+
+    assert sup._replay_handshake(child) is False
+    assert killed == [1]
+
+
+def test_first_generation_initialize_has_one_absolute_deadline(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(supervisor, "_HANDSHAKE_TIMEOUT_SECONDS", 0.05)
+    read_fd, write_fd = os.pipe()
+    stdin_read, stdin_write = os.pipe()
+    stdin_file = os.fdopen(stdin_read, "rb", buffering=0)
+    monkeypatch.setattr(supervisor.sys, "stdin", types.SimpleNamespace(buffer=stdin_file))
+    initialized_written = threading.Event()
+    dead = threading.Event()
+
+    class _ObservedInput(_FakePipe):
+        def write(self, data: bytes) -> int:
+            initialized_written.set()
+            return super().write(data)
+
+    class _HungInitialChild:
+        def __init__(self) -> None:
+            self.stdin = _ObservedInput()
+            self.stdout = os.fdopen(read_fd, "rb", buffering=0)
+
+        def kill(self) -> None:
+            if not dead.is_set():
+                dead.set()
+                with contextlib.suppress(OSError):
+                    os.close(write_fd)
+
+        def wait(self) -> int:
+            assert dead.wait(timeout=2), "initial handshake was not terminated"
+            return -9
+
+        def poll(self) -> int | None:
+            return -9 if dead.is_set() else None
+
+    child = _HungInitialChild()
+    sup = supervisor.Supervisor()
+    monkeypatch.setattr(sup, "_spawn", lambda: child)
+    os.write(stdin_write, _initialize_payload(0) + b"\n")
+    result: list[int] = []
+    runner = threading.Thread(target=lambda: result.append(sup.run()), daemon=True)
+    runner.start()
+    try:
+        assert initialized_written.wait(timeout=1)
+        runner.join(timeout=0.5)
+        assert not runner.is_alive(), "first-generation initialize exceeded its deadline"
+        assert result == [1]
+        assert dead.is_set()
+        assert "握手超时" in capsys.readouterr().err
+    finally:
+        child.kill()
+        with contextlib.suppress(OSError):
+            os.close(stdin_write)
+        runner.join(timeout=2)
+        stdin_file.close()
+        child.stdout.close()
+
+
+def test_exited_child_with_inherited_stdout_writer_cannot_block_join(
+    unclosed_stdin,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(supervisor, "_CHILD_STDOUT_DRAIN_SECONDS", 0.05, raising=False)
+    read_fd, inherited_write_fd = os.pipe()
+    child = types.SimpleNamespace(
+        stdin=_FakePipe(),
+        stdout=os.fdopen(read_fd, "rb", buffering=0),
+        wait=lambda: 0,
+        poll=lambda: 0,
+        kill=lambda: None,
+    )
+    sup = supervisor.Supervisor()
+    monkeypatch.setattr(sup, "_spawn", lambda: child)
+    result: list[int] = []
+    runner = threading.Thread(target=lambda: result.append(sup.run()), daemon=True)
+    runner.start()
+    try:
+        runner.join(timeout=0.5)
+        assert not runner.is_alive(), "descendant-held stdout kept pump.join unbounded"
+        assert result == [1]
+        assert "stdout" in capsys.readouterr().err
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(inherited_write_fd)
+        runner.join(timeout=2)
+        child.stdout.close()
+
+
+def test_replay_handshake_deadline_includes_blocked_child_stdin(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(supervisor, "_HANDSHAKE_TIMEOUT_SECONDS", 0.05)
+    sup = supervisor.Supervisor()
+    assert sup._protocol.accept(_initialize_payload(0)).kind is supervisor._ClientActionKind.FORWARD
+    killed: list[int] = []
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(write_fd, False)
+    try:
+        while True:
+            os.write(write_fd, b"x" * 65_536)
+    except BlockingIOError:
+        pass
+    os.set_blocking(write_fd, True)
+    blocked_stdin = os.fdopen(write_fd, "wb", buffering=0)
+    child = types.SimpleNamespace(
+        stdin=blocked_stdin,
+        stdout=io.BytesIO(b""),
+        kill=lambda: killed.append(1),
+        poll=lambda: None,
+    )
+
+    try:
+        started = time.monotonic()
+        assert sup._replay_handshake(child) is False
+        elapsed = time.monotonic() - started
+
+        assert killed == [1]
+        assert elapsed < 0.5
+        assert "child stdin write timed out" in capsys.readouterr().err
+    finally:
+        blocked_stdin.close()
+        os.close(read_fd)
+
+
+def test_normal_ingress_full_production_pipe_has_deadline_and_releases_generation_lock(
+    monkeypatch,
+    capsys,
+) -> None:
+    """A full production child pipe cannot block swap/generation ownership forever."""
+
+    monkeypatch.setattr(
+        supervisor,
+        "_INGRESS_WRITE_TIMEOUT_SECONDS",
+        0.2,
+        raising=False,
+    )
+    sup = supervisor.Supervisor()
+    sup._protocol, _, _ = _ready_protocol()
+    secret = "normal-ingress-private-secret"
+    request = _payload(
+        {
+            "jsonrpc": "2.0",
+            "id": 73,
+            "method": "tools/call",
+            "params": {"name": "ping", "arguments": {"note": secret}},
+        }
+    )
+    stdin_file = _fake_stdin(monkeypatch, request + b"\n")
+
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(write_fd, False)
+    try:
+        while True:
+            os.write(write_fd, b"x" * 65_536)
+    except BlockingIOError:
+        pass
+    os.set_blocking(write_fd, True)
+    blocked_stdin = os.fdopen(write_fd, "wb", buffering=0)
+    killed = threading.Event()
+    child = types.SimpleNamespace(
+        stdin=blocked_stdin,
+        stdout=io.BytesIO(b""),
+        kill=killed.set,
+        poll=lambda: -9 if killed.is_set() else None,
+    )
+    sup._child = child
+    monkeypatch.setattr(sup, "_reap_after_grace", lambda _child: None)
+
+    client = threading.Thread(
+        target=sup._pump_client_lines,
+        name=secret,
+    )
+    client.start()
+    deadline = time.monotonic() + 1.0
+    while sup._protocol.pending_count == 0 and time.monotonic() < deadline:
+        time.sleep(0.001)
+
+    lock_acquired = sup._child_lock.acquire(timeout=0.05)
+    if lock_acquired:
+        sup._child_lock.release()
+    try:
+        client.join(timeout=0.5)
+        assert lock_acquired, "normal ingress held generation lock across pipe write"
+        assert not client.is_alive(), "normal ingress exceeded its absolute write deadline"
+        assert killed.is_set()
+        assert sup._protocol_failed.is_set()
+        rendered = capsys.readouterr().err
+        assert "child stdin write timed out" in rendered
+        assert secret not in rendered
+    finally:
+        if client.is_alive():
+            os.read(read_fd, 1_048_576)
+            client.join(timeout=2)
+        if not blocked_stdin.closed:
+            blocked_stdin.close()
+        os.close(read_fd)
+        stdin_file.close()
+
+
+def test_normal_ingress_stale_generation_failure_does_not_kill_replacement(
+    monkeypatch,
+) -> None:
+    """A retired generation's write result cannot poison its replacement."""
+
+    sup = supervisor.Supervisor()
+    sup._protocol, _, _ = _ready_protocol()
+    request = _payload({"jsonrpc": "2.0", "id": 74, "method": "ping", "params": {}})
+    stdin_file = _fake_stdin(monkeypatch, request + b"\n")
+    old_kills: list[int] = []
+    new_kills: list[int] = []
+    old = types.SimpleNamespace(
+        stdin=_FakePipe(),
+        stdout=io.BytesIO(b""),
+        kill=lambda: old_kills.append(1),
+        poll=lambda: None,
+    )
+    new = types.SimpleNamespace(
+        stdin=_FakePipe(),
+        stdout=io.BytesIO(b""),
+        kill=lambda: new_kills.append(1),
+        poll=lambda: None,
+    )
+    sup._child = old
+    sup._child_generation = 4
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _retired_write(child, payload, *, deadline):
+        assert child is old
+        assert payload == request
+        assert deadline > time.monotonic()
+        entered.set()
+        assert release.wait(timeout=2)
+        return supervisor._ChildWriteResult.FAILED
+
+    monkeypatch.setattr(sup, "_write_child_payload_until", _retired_write)
+    monkeypatch.setattr(sup, "_reap_after_grace", lambda _child: None)
+    client = threading.Thread(target=sup._pump_client_lines)
+    client.start()
+    assert entered.wait(timeout=2)
+    with sup._child_lock:
+        sup._child = new
+        sup._child_generation = 5
+    release.set()
+    client.join(timeout=2)
+
+    assert not client.is_alive()
+    assert old_kills == []
+    assert new_kills == []
+    assert not sup._protocol_failed.is_set()
+    assert sup._protocol.pending_count == 1
+    stdin_file.close()
+
+
 def test_child_pump_crash_kills_child_and_exits_nonzero(unclosed_stdin, monkeypatch, capsys):
     """C3①：child→client 泵崩溃 → 不再是「子进程 stdout 无人读、pipe 写满全宿主
-    冻结」——kill 子进程、run() 以非零码退出、stderr 有 traceback。"""
+    冻结」——kill 子进程、run() 以非零码退出、stderr 只有固定故障文本。"""
     sup = supervisor.Supervisor()
+    secret = "child-pump-private-secret"
 
     def _boom(ch):
-        raise RuntimeError("child pump exploded")
+        raise RuntimeError(secret)
 
     monkeypatch.setattr(sup, "_pump_child_lines", _boom)
     monkeypatch.setattr(sup, "_spawn", lambda: _KillableChild())
 
     assert sup.run() == 1
     err = capsys.readouterr().err
-    assert "child pump exploded" in err and "RuntimeError" in err
+    assert "child→client pump_failed" in err
+    assert secret not in err
+    assert "RuntimeError" not in err
 
 
 def test_client_pump_crash_kills_child_and_exits_nonzero(unclosed_stdin, monkeypatch, capsys):
     """C3①：client→child 泵（daemon）崩溃 → EOF 收尾链路失效也不留孤儿对——
     兜底 kill 子进程 + run() 非零码退出。"""
     sup = supervisor.Supervisor()
+    secret = "client-pump-private-secret"
 
     def _boom():
-        raise RuntimeError("client pump exploded")
+        raise RuntimeError(secret)
 
     monkeypatch.setattr(sup, "_pump_client_lines", _boom)
     monkeypatch.setattr(sup, "_spawn", lambda: _KillableChild())
 
     assert sup.run() == 1
-    assert "client pump exploded" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "client→child pump_failed" in err
+    assert secret not in err
+    assert "RuntimeError" not in err
 
 
-def test_client_to_child_forwards_unbookable_ids(monkeypatch):
-    """C3②：非 JSON、非对象、以及 **JSON-RPC 非法 id（数组，不可哈希）** 行都只
-    跳过记账，透传不中断、线程不崩（原用例未覆盖非法 id——修 L117 TypeError 入口）。"""
-    lines = (
-        b"[1,2,3]\n"
-        b"not-json\n"
-        b'{"jsonrpc":"2.0","id":[1,2],"method":"tools/call"}\n'  # 非法 id：数组
-        b'{"jsonrpc":"2.0","id":null,"method":"x"}\n'  # null id：不记账
-        b'{"jsonrpc":"2.0","id":7,"method":"tools/call"}\n'
+def test_live_child_stdout_eof_is_fixed_transport_failure(
+    unclosed_stdin,
+    monkeypatch,
+    capsys,
+) -> None:
+    """A child that closes stdout but stays alive is killed instead of hanging run()."""
+
+    monkeypatch.setattr(
+        supervisor,
+        "_CHILD_STDOUT_EOF_GRACE_SECONDS",
+        0.05,
+        raising=False,
     )
-    _fake_stdin(monkeypatch, lines)
+    code = "import os, time\nos.close(1)\ntime.sleep(30)\n"
+    child = subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    sup = supervisor.Supervisor()
+    monkeypatch.setattr(sup, "_spawn", lambda: child)
+    result: dict[str, int] = {}
+    runner = threading.Thread(target=lambda: result.setdefault("code", sup.run()))
+    runner.start()
+    runner.join(timeout=1)
+    try:
+        assert not runner.is_alive(), "live stdout EOF left run() blocked in child.wait()"
+        assert result == {"code": 1}
+        assert child.poll() is not None
+        rendered = capsys.readouterr().err
+        assert "child→client pump_failed" in rendered
+        assert "Traceback" not in rendered
+    finally:
+        if child.poll() is None:
+            child.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            child.wait(timeout=2)
+        runner.join(timeout=2)
+
+
+def test_stdout_eof_during_normal_exit_is_not_transport_failure(
+    unclosed_stdin,
+    monkeypatch,
+    capsys,
+) -> None:
+    """A short close-to-exit race stays a normal child exit, not a false failure."""
+
+    monkeypatch.setattr(
+        supervisor,
+        "_CHILD_STDOUT_EOF_GRACE_SECONDS",
+        0.2,
+        raising=False,
+    )
+    code = "import os, time\nos.close(1)\ntime.sleep(0.02)\n"
+    child = subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    sup = supervisor.Supervisor()
+    monkeypatch.setattr(sup, "_spawn", lambda: child)
+
+    assert sup.run() == 0
+    assert not sup._pump_failed.is_set()
+    assert "pump_failed" not in capsys.readouterr().err
+
+
+def test_swap_replay_write_has_bounded_deadline(
+    unclosed_stdin,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(supervisor, "_HANDSHAKE_TIMEOUT_SECONDS", 0.05)
+    sup = supervisor.Supervisor(idempotent_tools=frozenset({"safe_tool"}))
+    state, _, _ = _ready_protocol(idempotent_tools=frozenset({"safe_tool"}))
+    sup._protocol = state
+    replay = _payload(
+        {
+            "jsonrpc": "2.0",
+            "id": 88,
+            "method": "tools/call",
+            "params": {"name": "safe_tool", "arguments": {}},
+        }
+    )
+    assert sup._protocol.accept(replay).kind is supervisor._ClientActionKind.FORWARD
+
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(write_fd, False)
+    try:
+        while True:
+            os.write(write_fd, b"x" * 65_536)
+    except BlockingIOError:
+        pass
+    os.set_blocking(write_fd, True)
+    blocked_stdin = os.fdopen(write_fd, "wb", buffering=0)
+    killed = threading.Event()
+
+    class _BlockedGeneration:
+        stdin = blocked_stdin
+        stdout = io.BytesIO(b"")
+
+        @staticmethod
+        def kill() -> None:
+            killed.set()
+
+        @staticmethod
+        def poll():
+            return -9 if killed.is_set() else None
+
+        @staticmethod
+        def wait(timeout=None):
+            if timeout is not None:
+                assert killed.wait(timeout=timeout)
+                return -9
+            assert killed.wait(timeout=5)
+            return -9
+
+    new = _BlockedGeneration()
+    children = [_SwapChild(), new]
+    monkeypatch.setattr(sup, "_spawn", lambda: children.pop(0))
+    monkeypatch.setattr(sup, "_replay_handshake", lambda _child: True)
+
+    try:
+        started = time.monotonic()
+        assert sup.run() == 1
+        assert time.monotonic() - started < 0.5
+        assert killed.is_set()
+        assert "child stdin write timed out" in capsys.readouterr().err
+    finally:
+        blocked_stdin.close()
+        os.close(read_fd)
+
+
+def test_client_to_child_rejects_invalid_frame_without_forward_or_secret(monkeypatch):
+    """严格入口用固定 parse error 关闭；原始帧既不透传也不进日志/响应。"""
+    secret = b"invalid-private-frame-secret"
+    stdin_file = _fake_stdin(monkeypatch, secret + b"\n")
+    out = io.BytesIO()
+    monkeypatch.setattr(supervisor.sys, "stdout", types.SimpleNamespace(buffer=out))
     sup = supervisor.Supervisor()
     child = types.SimpleNamespace(stdin=_FakePipe(), stdout=io.BytesIO(b""), poll=lambda: 0)
     sup._child = child
+    monkeypatch.setattr(sup, "_reap_after_grace", lambda _child: None)
     sup._client_to_child()
 
-    assert child.stdin.closed_value == lines  # 全部原样透传 + EOF 后关闭子进程 stdin
+    assert child.stdin.closed_value == b""
+    assert json.loads(out.getvalue()) == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32700, "message": "Parse error"},
+    }
+    assert secret not in out.getvalue()
     assert sup._client_eof.is_set()
-    assert list(sup._pending) == [7]  # 只有合法可哈希 id 进记账
+    assert sup._protocol_failed.is_set()
+    assert sup._protocol.pending_count == 0
+    stdin_file.close()
 
 
-def test_child_to_client_survives_unbookable_response_id(monkeypatch):
-    """C3②：响应行 id 为数组（不可哈希）→ 销账降级跳过、照常透传，泵不崩
-    （修 L150 _pending.pop TypeError 入口）。"""
+def test_child_to_client_rejects_invalid_response_id_without_forward_or_secret(
+    monkeypatch,
+    capsys,
+):
+    """非法 child response id 触发固定 pump failure，不透传原始响应。"""
     out = io.BytesIO()
     monkeypatch.setattr(supervisor.sys, "stdout", types.SimpleNamespace(buffer=out))
-    lines = b'{"jsonrpc":"2.0","id":[1,2],"result":{}}\n{"jsonrpc":"2.0","id":7,"result":{}}\n'
+    secret = "child-response-private-secret"
+    line = _payload({"jsonrpc": "2.0", "id": [1, 2], "result": {"secret": secret}}) + b"\n"
     sup = supervisor.Supervisor()
-    sup._pending[7] = b"x"
-    child = types.SimpleNamespace(stdout=io.BytesIO(lines))
+    child = types.SimpleNamespace(stdout=io.BytesIO(line))
 
     sup._child_to_client(child)
 
-    assert out.getvalue() == lines  # 两行原样透传
-    assert sup._pending == {}  # 合法 id 正常销账
-    assert not sup._pump_failed.is_set()  # 泵没有崩
+    assert out.getvalue() == b""
+    assert sup._pump_failed.is_set()
+    err = capsys.readouterr().err
+    assert "child→client pump_failed" in err
+    assert secret not in err
+    assert "ResponseProtocolError" not in err
 
 
 def test_eof_during_swap_reaps_new_child(unclosed_stdin, monkeypatch):
@@ -671,3 +1460,760 @@ def test_reap_after_grace_escalates_to_kill(monkeypatch):
             proc.kill()
             proc.wait()
         proc.stdout.close()
+
+
+# --- S3-7：有界 supervisor 协议状态机 ---
+
+
+def _payload(message: dict[str, object]) -> bytes:
+    return json.dumps(
+        message,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _initialize_payload(request_id: int | str = "initialize") -> bytes:
+    return _payload(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "supervisor-test", "version": "1"},
+            },
+        }
+    )
+
+
+def _initialize_response_payload(request_id: int | str = "initialize") -> bytes:
+    return _payload(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "serverInfo": {"name": "supervisor-test", "version": "1"},
+            },
+        }
+    )
+
+
+def _initialized_payload() -> bytes:
+    return _payload(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        }
+    )
+
+
+def _ready_protocol(
+    *,
+    idempotent_tools: frozenset[str] = frozenset({"safe_tool"}),
+):
+    state = supervisor._SupervisorProtocolState(
+        idempotent_tools=idempotent_tools,
+    )
+    initialize = _initialize_payload()
+    initialized = _initialized_payload()
+    assert state.accept(initialize).kind is supervisor._ClientActionKind.FORWARD
+    prepared = state.prepare_response(_initialize_response_payload())
+    state.acknowledge_response(prepared)
+    assert state.accept(initialized).kind is supervisor._ClientActionKind.FORWARD
+    return state, initialize, initialized
+
+
+def test_protocol_accepts_exact_handshake_once_outside_pending_budget() -> None:
+    out_of_order = supervisor._SupervisorProtocolState(
+        idempotent_tools=frozenset(),
+    )
+    rejected = out_of_order.accept(_initialized_payload())
+    assert rejected.kind is supervisor._ClientActionKind.REJECT
+    assert rejected.close is True
+    assert out_of_order.handshake_frame_count == 0
+
+    state, initialize, initialized = _ready_protocol()
+    assert state.handshake_complete is True
+    assert state.handshake_frame_count == 2
+    assert state.handshake_retained_bytes == len(initialize) + len(initialized)
+    assert state.handshake_retained_bytes <= 2 * mcp_transport.MAX_REQUEST_FRAME_BYTES
+    assert state.pending_count == 0
+
+    duplicate = state.accept(_initialize_payload("duplicate"))
+    assert duplicate.kind is supervisor._ClientActionKind.REJECT
+    assert duplicate.response == {
+        "jsonrpc": "2.0",
+        "id": "duplicate",
+        "error": {"code": -32600, "message": "Invalid Request"},
+    }
+    assert state.handshake_frame_count == 2
+
+    third = state.accept(_initialized_payload())
+    assert third.kind is supervisor._ClientActionKind.REJECT
+    assert third.close is True
+    assert state.handshake_frame_count == 2
+
+
+def test_protocol_requires_flushed_initialize_response_before_initialized_or_work() -> None:
+    state = supervisor._SupervisorProtocolState(idempotent_tools=frozenset())
+    assert state.accept(_initialize_payload(70)).kind is supervisor._ClientActionKind.FORWARD
+
+    premature_initialized = state.accept(_initialized_payload())
+    assert premature_initialized.kind is supervisor._ClientActionKind.REJECT
+    assert premature_initialized.close is True
+    assert state.handshake_complete is False
+    assert state.handshake_frame_count == 1
+
+    premature_work = state.accept(
+        _payload({"jsonrpc": "2.0", "id": 71, "method": "tools/list", "params": {}})
+    )
+    assert premature_work.kind is supervisor._ClientActionKind.REJECT
+    assert premature_work.close is True
+    assert state.pending_count == 0
+
+    prepared = state.prepare_response(_initialize_response_payload(70))
+    assert state.accept(_initialized_payload()).kind is supervisor._ClientActionKind.REJECT
+    state.acknowledge_response(prepared)
+    assert state.accept(_initialized_payload()).kind is supervisor._ClientActionKind.FORWARD
+    assert state.handshake_complete is True
+
+
+def test_initialize_flush_and_ack_are_atomic_against_initialized_accept(monkeypatch) -> None:
+    sup = supervisor.Supervisor()
+    assert (
+        sup._protocol.accept(_initialize_payload(72)).kind is supervisor._ClientActionKind.FORWARD
+    )
+    flushed = threading.Event()
+    release_flush = threading.Event()
+
+    def _blocked_completed_flush(_payload: bytes) -> bool:
+        flushed.set()
+        assert release_flush.wait(timeout=5)
+        return True
+
+    monkeypatch.setattr(sup, "_write_client_payload", _blocked_completed_flush)
+    child = types.SimpleNamespace(
+        stdout=io.BytesIO(
+            _payload(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 72,
+                    "result": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "serverInfo": {"name": "fake", "version": "1"},
+                    },
+                }
+            )
+            + b"\n"
+        )
+    )
+    pump = threading.Thread(target=sup._pump_child_lines, args=(child,))
+    pump.start()
+    assert flushed.wait(timeout=5)
+
+    accepted: list[supervisor._ClientAction] = []
+
+    def _accept_initialized() -> None:
+        with sup._state_lock:
+            accepted.append(sup._protocol.accept(_initialized_payload()))
+
+    client = threading.Thread(target=_accept_initialized)
+    client.start()
+    client.join(timeout=0.1)
+    assert client.is_alive(), "initialized overtook initialize flush acknowledgement"
+
+    release_flush.set()
+    pump.join(timeout=5)
+    client.join(timeout=5)
+    assert not pump.is_alive()
+    assert not client.is_alive()
+    assert accepted[0].kind is supervisor._ClientActionKind.FORWARD
+    assert sup._protocol.handshake_complete is True
+
+
+def test_supervisor_stdin_framing_accepts_exact_n_and_rejects_n_plus_one(
+    monkeypatch,
+) -> None:
+    class _RawStdin:
+        @staticmethod
+        def fileno() -> int:
+            return 123
+
+    monkeypatch.setattr(
+        supervisor.sys,
+        "stdin",
+        types.SimpleNamespace(buffer=_RawStdin()),
+    )
+
+    def _read_events(raw: bytes):
+        offset = 0
+        requested: list[int] = []
+
+        def _read(fd: int, size: int) -> bytes:
+            nonlocal offset
+            assert fd == 123
+            requested.append(size)
+            chunk = raw[offset : offset + size]
+            offset += len(chunk)
+            return chunk
+
+        monkeypatch.setattr(supervisor.os, "read", _read)
+        return list(supervisor._stdin_frames()), requested
+
+    initialize = _initialize_payload()
+    exact = initialize + b" " * (mcp_transport.MAX_REQUEST_FRAME_BYTES - len(initialize))
+    exact_events, exact_reads = _read_events(exact + b"\n")
+    assert exact_events == [mcp_transport.RequestFrame(exact)]
+    assert all(size == mcp_transport.READ_CHUNK_BYTES for size in exact_reads)
+
+    state = supervisor._SupervisorProtocolState(idempotent_tools=frozenset())
+    assert state.accept(exact).kind is supervisor._ClientActionKind.FORWARD
+    prepared = state.prepare_response(_initialize_response_payload())
+    state.acknowledge_response(prepared)
+    initialized = _initialized_payload()
+    initialized_exact = initialized + b" " * (
+        mcp_transport.MAX_REQUEST_FRAME_BYTES - len(initialized)
+    )
+    assert state.accept(initialized_exact).kind is supervisor._ClientActionKind.FORWARD
+    assert state.handshake_retained_bytes == 4_194_304
+
+    secret = b"oversize-request-private-secret"
+    over = secret + b"x" * (mcp_transport.MAX_REQUEST_FRAME_BYTES + 1 - len(secret))
+    over_events, over_reads = _read_events(over + b"\n")
+    assert over_events == [
+        mcp_transport.FrameFailure(
+            {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": "Parse error"},
+            }
+        )
+    ]
+    assert secret not in repr(over_events).encode()
+    assert all(size == mcp_transport.READ_CHUNK_BYTES for size in over_reads)
+
+
+def test_protocol_bounds_pending_ids_and_keeps_one_control_lane() -> None:
+    state, _, _ = _ready_protocol()
+    admitted: list[bytes] = []
+    for request_id in range(mcp_transport.MAX_IN_FLIGHT):
+        payload = _payload(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "ping",
+                "params": {},
+            }
+        )
+        admitted.append(payload)
+        assert state.accept(payload).kind is supervisor._ClientActionKind.FORWARD
+    assert state.pending_count == mcp_transport.MAX_IN_FLIGHT
+
+    duplicate = state.accept(admitted[0])
+    assert duplicate.kind is supervisor._ClientActionKind.RESPOND
+    assert duplicate.response == {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "error": {"code": -32600, "message": "Invalid Request"},
+    }
+
+    ninth = state.accept(
+        _payload(
+            {
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "ping",
+                "params": {},
+            }
+        )
+    )
+    assert ninth.kind is supervisor._ClientActionKind.RESPOND
+    assert ninth.response == {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "error": {"code": -32005, "message": "Server is busy."},
+    }
+
+    cancellation = _payload(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 0, "reason": "do not retain this reason"},
+        }
+    )
+    retained_before_cancel = state.pending_retained_bytes
+    assert state.accept(cancellation).kind is supervisor._ClientActionKind.FORWARD
+    assert state.pending_count == mcp_transport.MAX_IN_FLIGHT
+    assert state.pending_retained_bytes == retained_before_cancel
+    assert state.is_cancel_requested(0) is True
+    assert b"do not retain this reason" not in repr(state._pending).encode()
+
+    duplicate_handshake = state.accept(_initialized_payload())
+    assert duplicate_handshake.kind is supervisor._ClientActionKind.REJECT
+    assert duplicate_handshake.close is True
+    assert state.pending_count == mcp_transport.MAX_IN_FLIGHT
+
+
+def test_swap_plan_replays_only_frozen_safe_set_and_fails_unknown_outcome() -> None:
+    state, _, _ = _ready_protocol(idempotent_tools=frozenset({"safe_tool"}))
+    artifact_uri = "vibecad://artifact/materialization_" + "a" * 64 + "/artifact_" + "b" * 32
+    requests = (
+        {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        {"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "resources/templates/list",
+            "params": {},
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "resources/read",
+            "params": {"uri": artifact_uri},
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {"name": "safe_tool", "arguments": {}},
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"name": "create_task", "arguments": {}},
+        },
+    )
+    payloads = tuple(_payload(item) for item in requests)
+    for payload in payloads:
+        assert state.accept(payload).kind is supervisor._ClientActionKind.FORWARD
+    cancellation = _payload(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 6},
+        }
+    )
+    assert state.accept(cancellation).kind is supervisor._ClientActionKind.FORWARD
+
+    plan = state.plan_swap()
+    assert plan.replay_payloads == payloads[:-1]
+    assert tuple(json.loads(item) for item in plan.cancellation_payloads) == (
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 6},
+        },
+    )
+    assert b"reason" not in b"".join(plan.cancellation_payloads)
+    assert len(plan.unknown_outcomes) == 1
+    unknown = plan.unknown_outcomes[0]
+    assert unknown.request_id == 7
+    assert unknown.payload == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "error": {
+            "code": -32003,
+            "message": "Tool outcome is unknown; inspect durable state before retry.",
+        },
+    }
+    assert payloads[-1] not in plan.replay_payloads
+    assert state.pending_count == len(payloads)
+    state.acknowledge(unknown.request_id)
+    assert state.pending_count == len(payloads) - 1
+
+
+def test_cancel_tombstone_survives_until_final_response_write_ack() -> None:
+    state, _, _ = _ready_protocol()
+    request = _payload(
+        {
+            "jsonrpc": "2.0",
+            "id": "same",
+            "method": "tools/call",
+            "params": {"name": "safe_tool", "arguments": {}},
+        }
+    )
+    cancellation = _payload(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": "same"},
+        }
+    )
+    assert state.accept(request).kind is supervisor._ClientActionKind.FORWARD
+    assert state.accept(cancellation).kind is supervisor._ClientActionKind.FORWARD
+    assert state.accept(request).response == {
+        "jsonrpc": "2.0",
+        "id": "same",
+        "error": {"code": -32600, "message": "Invalid Request"},
+    }
+
+    child_response = _payload(
+        {"jsonrpc": "2.0", "id": "same", "result": {"private": "must-not-pass"}}
+    )
+    prepared = state.prepare_response(child_response)
+    assert json.loads(prepared.payload) == {
+        "jsonrpc": "2.0",
+        "id": "same",
+        "error": {"code": -32800, "message": "Request cancelled"},
+    }
+    assert state.pending_count == 1
+    state.acknowledge_response(prepared)
+    assert state.pending_count == 0
+    assert state.accept(request).kind is supervisor._ClientActionKind.FORWARD
+
+
+def test_cancel_after_response_prepare_is_dropped_until_ack_barrier() -> None:
+    state, _, _ = _ready_protocol()
+    request = _payload(
+        {
+            "jsonrpc": "2.0",
+            "id": 91,
+            "method": "tools/call",
+            "params": {"name": "safe_tool", "arguments": {}},
+        }
+    )
+    cancellation = _payload(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 91, "reason": "late-private-reason"},
+        }
+    )
+    assert state.accept(request).kind is supervisor._ClientActionKind.FORWARD
+    prepared = state.prepare_response(
+        _payload({"jsonrpc": "2.0", "id": 91, "result": {"ok": True}})
+    )
+
+    late = state.accept(cancellation)
+    assert late.kind is supervisor._ClientActionKind.DROP
+    assert prepared.forward is True
+    assert json.loads(prepared.payload)["result"] == {"ok": True}
+    assert state.pending_count == 1
+    assert b"late-private-reason" not in repr(state._pending).encode()
+
+    state.acknowledge_response(prepared)
+    assert state.pending_count == 0
+
+
+def test_response_shape_id_membership_and_terminal_ack_are_strict() -> None:
+    state = supervisor._SupervisorProtocolState(idempotent_tools=frozenset({"safe_tool"}))
+    assert state.accept(_initialize_payload()).kind is supervisor._ClientActionKind.FORWARD
+    same_as_initialize = _payload(
+        {"jsonrpc": "2.0", "id": "initialize", "method": "ping", "params": {}}
+    )
+    duplicate_active_initialize = state.accept(same_as_initialize)
+    assert duplicate_active_initialize.kind is supervisor._ClientActionKind.REJECT
+    assert duplicate_active_initialize.close is True
+    assert duplicate_active_initialize.response == {
+        "jsonrpc": "2.0",
+        "id": "initialize",
+        "error": {"code": -32600, "message": "Invalid Request"},
+    }
+
+    initialize_response = _initialize_response_payload()
+    prepared_initialize = state.prepare_response(initialize_response)
+    assert prepared_initialize.initialize_response is True
+    state.acknowledge_response(prepared_initialize)
+    assert state.accept(_initialized_payload()).kind is supervisor._ClientActionKind.FORWARD
+    assert state.accept(same_as_initialize).kind is supervisor._ClientActionKind.FORWARD
+
+    terminal = _payload({"jsonrpc": "2.0", "id": "initialize", "result": {"ok": True}})
+    prepared_terminal = state.prepare_response(terminal)
+    state.acknowledge_response(prepared_terminal)
+
+    for invalid in (
+        terminal,
+        _payload({"jsonrpc": "2.0", "id": "unknown", "result": {}}),
+        _payload(
+            {
+                "jsonrpc": "2.0",
+                "id": "unknown",
+                "result": {},
+                "error": {"code": -32603, "message": "invalid"},
+            }
+        ),
+        _payload(
+            {
+                "jsonrpc": "2.0",
+                "id": "unknown",
+                "error": {"code": "not-an-integer", "message": "invalid"},
+            }
+        ),
+    ):
+        with pytest.raises(supervisor._ResponseProtocolError):
+            state.prepare_response(invalid)
+
+    notification = _payload(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": {"progress": 1},
+        }
+    )
+    assert state.prepare_response(notification) == supervisor._PreparedResponse(
+        notification,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_response",
+    (
+        {"jsonrpc": "2.0", "id": "initialize", "error": {"code": -32603, "message": "failed"}},
+        {"jsonrpc": "2.0", "id": "initialize", "result": {}},
+    ),
+)
+def test_first_initialize_requires_exact_success_before_initialized(
+    invalid_response: dict[str, object],
+) -> None:
+    state = supervisor._SupervisorProtocolState(idempotent_tools=frozenset())
+    assert state.accept(_initialize_payload()).kind is supervisor._ClientActionKind.FORWARD
+
+    with pytest.raises(supervisor._ResponseProtocolError):
+        state.prepare_response(_payload(invalid_response))
+
+    rejected = state.accept(_initialized_payload())
+    assert rejected.kind is supervisor._ClientActionKind.REJECT
+    assert rejected.close is True
+    assert state.handshake_complete is False
+
+
+def test_default_replay_tool_set_matches_public_idempotence_contract() -> None:
+    from vibecad.application.public_surface import public_tool_specs
+
+    expected = frozenset(spec.name for spec in public_tool_specs() if spec.annotations.idempotent)
+    assert supervisor._DEFAULT_IDEMPOTENT_TOOLS == expected
+    assert "create_task" not in supervisor._DEFAULT_IDEMPOTENT_TOOLS
+
+
+def test_response_reader_caps_before_decode_and_reads_in_bounded_chunks() -> None:
+    class _Chunked:
+        def __init__(self, raw: bytes) -> None:
+            self.raw = raw
+            self.offset = 0
+            self.requested: list[int] = []
+
+        def read1(self, size: int) -> bytes:
+            self.requested.append(size)
+            chunk = self.raw[self.offset : self.offset + min(size, 3)]
+            self.offset += len(chunk)
+            return chunk
+
+    exact_stream = _Chunked(b"12345678\nnext\n")
+    exact = supervisor._BoundedResponseReader(limit=8, chunk_bytes=4)
+    assert exact.read_frame(exact_stream) == b"12345678"
+    assert exact.read_frame(exact_stream) == b"next"
+    assert all(size <= 4 for size in exact_stream.requested)
+
+    over_stream = _Chunked(b"123456789\n")
+    over = supervisor._BoundedResponseReader(limit=8, chunk_bytes=4)
+    with pytest.raises(supervisor._ResponseProtocolError):
+        over.read_frame(over_stream)
+
+
+def test_pump_panic_never_logs_exception_or_frame_text(capsys) -> None:
+    secret = "supervisor-private-frame-secret"
+    sup = supervisor.Supervisor()
+    try:
+        raise RuntimeError(secret)
+    except RuntimeError:
+        sup._pump_panic("child→client")
+
+    rendered = capsys.readouterr().err
+    assert "child→client" in rendered
+    assert secret not in rendered
+    assert "RuntimeError" not in rendered
+
+
+def test_child_response_ack_does_not_wait_for_blocked_child_stdin(
+    monkeypatch,
+) -> None:
+    sup = supervisor.Supervisor(idempotent_tools=frozenset({"safe_tool"}))
+    state, _, _ = _ready_protocol(idempotent_tools=frozenset({"safe_tool"}))
+    sup._protocol = state
+    request = _payload(
+        {
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "tools/call",
+            "params": {"name": "safe_tool", "arguments": {}},
+        }
+    )
+    assert sup._protocol.accept(request).kind is supervisor._ClientActionKind.FORWARD
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _BlockingInput:
+        closed = False
+
+        def write(self, data: bytes) -> int:
+            entered.set()
+            assert release.wait(timeout=5)
+            return len(data)
+
+        def flush(self) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+    cancellation = _payload(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 31},
+        }
+    )
+    stdin_file = _fake_stdin(monkeypatch, cancellation + b"\n")
+    output = io.BytesIO()
+    monkeypatch.setattr(supervisor.sys, "stdout", types.SimpleNamespace(buffer=output))
+    child = types.SimpleNamespace(
+        stdin=_BlockingInput(),
+        stdout=io.BytesIO(_payload({"jsonrpc": "2.0", "id": 31, "result": {"ok": True}}) + b"\n"),
+        poll=lambda: None,
+    )
+    sup._child = child
+    monkeypatch.setattr(sup, "_reap_after_grace", lambda _child: None)
+
+    client = threading.Thread(target=sup._pump_client_lines)
+    client.start()
+    assert entered.wait(timeout=5)
+    response = threading.Thread(target=sup._pump_child_lines, args=(child,))
+    response.start()
+    response.join(timeout=2)
+    try:
+        assert not response.is_alive(), "response pump waited on blocked child stdin"
+        assert sup._protocol.pending_count == 0
+        assert json.loads(output.getvalue()) == {
+            "jsonrpc": "2.0",
+            "id": 31,
+            "error": {"code": -32800, "message": "Request cancelled"},
+        }
+    finally:
+        release.set()
+        client.join(timeout=5)
+        stdin_file.close()
+
+
+def test_swap_starts_new_response_pump_before_replay_writes(
+    unclosed_stdin,
+    monkeypatch,
+) -> None:
+    sup = supervisor.Supervisor()
+    initialize = _initialize_payload(0)
+    initialized = _initialized_payload()
+    request = _payload({"jsonrpc": "2.0", "id": 5, "method": "ping", "params": {}})
+    assert sup._protocol.accept(initialize).kind is supervisor._ClientActionKind.FORWARD
+    prepared = sup._protocol.prepare_response(_initialize_response_payload(0))
+    sup._protocol.acknowledge_response(prepared)
+    assert sup._protocol.accept(initialized).kind is supervisor._ClientActionKind.FORWARD
+    assert sup._protocol.accept(request).kind is supervisor._ClientActionKind.FORWARD
+    sup._init_id = 0
+
+    pump_started = threading.Event()
+
+    class _ReplayInput(_FakePipe):
+        def write(self, data: bytes) -> int:
+            if data == request:
+                assert pump_started.wait(timeout=2), "replay write preceded response pump"
+            return super().write(data)
+
+    class _NewChild:
+        def __init__(self) -> None:
+            self.stdin = _ReplayInput()
+            self.stdout = io.BytesIO(
+                _payload(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 0,
+                        "result": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {},
+                            "serverInfo": {"name": "fake", "version": "2"},
+                        },
+                    }
+                )
+                + b"\n"
+            )
+
+        @staticmethod
+        def wait() -> int:
+            return 0
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+    first = _SwapChild()
+    second = _NewChild()
+    children = [first, second]
+    monkeypatch.setattr(sup, "_spawn", lambda: children.pop(0))
+    original_child_to_client = sup._child_to_client
+
+    def _recording_pump(child) -> None:
+        if child is second:
+            pump_started.set()
+        original_child_to_client(child)
+
+    monkeypatch.setattr(sup, "_child_to_client", _recording_pump)
+
+    assert sup.run() == 0
+    assert pump_started.is_set()
+    assert request + b"\n" in second.stdin.getvalue()
+
+
+def test_disconnected_client_drops_response_then_releases_pending(monkeypatch) -> None:
+    sup = supervisor.Supervisor(idempotent_tools=frozenset({"safe_tool"}))
+    state, _, _ = _ready_protocol(idempotent_tools=frozenset({"safe_tool"}))
+    sup._protocol = state
+    request = _payload(
+        {
+            "jsonrpc": "2.0",
+            "id": 44,
+            "method": "tools/call",
+            "params": {"name": "safe_tool", "arguments": {}},
+        }
+    )
+    assert sup._protocol.accept(request).kind is supervisor._ClientActionKind.FORWARD
+
+    class _Disconnected:
+        def write(self, _data: bytes) -> int:
+            raise BrokenPipeError
+
+        def flush(self) -> None:
+            raise AssertionError("flush must not follow failed write")
+
+    monkeypatch.setattr(
+        supervisor.sys,
+        "stdout",
+        types.SimpleNamespace(buffer=_Disconnected()),
+    )
+    child = types.SimpleNamespace(
+        stdout=io.BytesIO(_payload({"jsonrpc": "2.0", "id": 44, "result": {"ok": True}}) + b"\n")
+    )
+
+    sup._pump_child_lines(child)
+
+    assert sup._client_disconnected.is_set()
+    assert sup._protocol.pending_count == 0
+
+
+def test_child_pump_releases_reader_state_for_finished_generation() -> None:
+    sup = supervisor.Supervisor()
+    child = types.SimpleNamespace(stdout=io.BytesIO(b""), poll=lambda: 0)
+
+    sup._child_to_client(child)
+
+    assert id(child) not in sup._response_readers

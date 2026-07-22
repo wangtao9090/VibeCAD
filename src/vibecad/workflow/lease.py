@@ -388,11 +388,15 @@ def _entry_path_state(filename: str, root_fd: int):
 
 def _preopen_entry_identity(filename: str, root_fd: int):
     first = _entry_path_state(filename, root_fd)
-    second = _entry_path_state(filename, root_fd)
-    if (first is None) != (second is None):
-        raise LeaseError(LeaseErrorCode.UNSAFE_LOCK_ENTRY)
+    # A different legitimate process may atomically create the same fixed lock
+    # entry after our missing probe.  In that case the descriptor/path identity
+    # checks after open are the authority; sampling the pathname a second time
+    # here would misclassify the benign first-creator race as an unsafe swap.
     if first is None:
         return None
+    second = _entry_path_state(filename, root_fd)
+    if second is None:
+        raise LeaseError(LeaseErrorCode.UNSAFE_LOCK_ENTRY)
     first_identity = (first.st_dev, first.st_ino)
     second_identity = (second.st_dev, second.st_ino)
     if first_identity != second_identity:

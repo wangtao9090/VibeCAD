@@ -1428,6 +1428,39 @@ def test_simultaneous_first_acquisitions_have_one_atomic_winner(monkeypatch, lea
 
 
 @POSIX_ONLY
+def test_other_process_may_publish_safe_first_lock_between_missing_probe_and_open(
+    monkeypatch,
+    lease_root: Path,
+):
+    original = lease_module._entry_path_state
+    published = False
+
+    def publish_after_missing(filename: str, root_fd: int):
+        nonlocal published
+        value = original(filename, root_fd)
+        if value is None and not published:
+            published = True
+            flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+            fd = os.open(filename, flags, 0o600, dir_fd=root_fd)
+            try:
+                os.fchmod(fd, 0o600)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.fsync(root_fd)
+        return value
+
+    monkeypatch.setattr(lease_module, "_entry_path_state", publish_after_missing)
+    manager = _manager(lease_root)
+
+    lease = manager.acquire(RESOURCE_ID)
+
+    assert published is True
+    assert _lock_path(lease_root, RESOURCE_ID).is_file()
+    lease.release(owner_token=lease.owner_token)
+
+
+@POSIX_ONLY
 def test_same_manager_reentrant_acquisition_is_contended(lease_root: Path):
     manager = _manager(lease_root)
     lease = manager.acquire(RESOURCE_ID)

@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from vibecad.execution.revisions import (
     LocalRevisionStore,
     RevisionStoreRootTrust,
@@ -19,7 +21,12 @@ from vibecad.workflow.catalog import (
 )
 from vibecad.workflow.lease import LeaseRootTrust, ResourceLeaseManager
 from vibecad.workflow.state import ReasoningOwner, ReviewPolicy, TaskStatus
-from vibecad.workflow.store import TaskRunStore, TaskStoreRootTrust
+from vibecad.workflow.store import (
+    TaskRunStore,
+    TaskStoreError,
+    TaskStoreErrorCode,
+    TaskStoreRootTrust,
+)
 
 TASK_ID = "task_0123456789abcdef0123456789abcdef"
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
@@ -72,6 +79,50 @@ def test_catalog_errors_are_closed_and_path_free():
         assert error.code is code
         assert error.to_mapping()["code"] == code.value
         assert "path" not in json.dumps(error.to_mapping())
+
+
+def test_catalog_preserves_task_store_capacity_for_create_and_cas(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _leases, tasks, revisions, _head = _stores(tmp_path)
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+    stored = catalog.create_task(
+        task_id=TASK_ID,
+        project_id=PROJECT_ID,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+
+    def exhausted(*_args, **_kwargs):
+        raise TaskStoreError(TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+
+    monkeypatch.setattr(TaskRunStore, "compare_and_set", exhausted)
+    with pytest.raises(TaskCatalogError) as caught:
+        catalog.compare_and_set(stored, stored.task_run)
+    assert caught.value.code is TaskCatalogErrorCode.RESOURCE_EXHAUSTED
+
+    other_root = tmp_path / "second"
+    other_root.mkdir(mode=0o700)
+    other_leases = ResourceLeaseManager(
+        tmp_path / "locks",
+        trust=LeaseRootTrust.TRUSTED_LOCAL,
+    )
+    other_tasks = TaskRunStore(
+        other_root,
+        other_leases,
+        trust=TaskStoreRootTrust.TRUSTED_LOCAL,
+    )
+    other_catalog = TaskCatalogService(task_store=other_tasks, revision_store=revisions)
+    monkeypatch.setattr(TaskRunStore, "create", exhausted)
+    with pytest.raises(TaskCatalogError) as caught:
+        other_catalog.create_task(
+            task_id="task_11111111111111111111111111111111",
+            project_id=PROJECT_ID,
+            reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+            review_policy=ReviewPolicy.AUTO_COMMIT,
+        )
+    assert caught.value.code is TaskCatalogErrorCode.RESOURCE_EXHAUSTED
 
 
 def test_fresh_catalog_import_and_create_do_not_load_cad_modules():

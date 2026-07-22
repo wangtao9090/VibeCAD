@@ -31,6 +31,9 @@ from vibecad.execution.revisions import (
     ReconciliationResult,
     ReconciliationStatus,
     RevisionRef,
+    RevisionStoreError,
+    RevisionStoreErrorCode,
+    _candidate_file_limit,
 )
 from vibecad.interaction.cad import CadExecutionPort, CandidateEvidence
 from vibecad.validation import (
@@ -92,6 +95,7 @@ class TaskServiceErrorCode(StrEnum):
     CONFLICT = "conflict"
     STORE_FAILURE = "store_failure"
     LEASE_UNAVAILABLE = "lease_unavailable"
+    RESOURCE_EXHAUSTED = "resource_exhausted"
     RECOVERY_REQUIRED = "recovery_required"
 
 
@@ -105,6 +109,7 @@ _ERROR_MESSAGES = {
     TaskServiceErrorCode.CONFLICT: "The task record changed concurrently.",
     TaskServiceErrorCode.STORE_FAILURE: "The task record operation failed.",
     TaskServiceErrorCode.LEASE_UNAVAILABLE: "The project write lease is unavailable.",
+    TaskServiceErrorCode.RESOURCE_EXHAUSTED: "The application resource capacity is exhausted.",
     TaskServiceErrorCode.RECOVERY_REQUIRED: "The task requires explicit reconciliation.",
 }
 
@@ -217,6 +222,7 @@ _CATALOG_ERROR_MAP = {
     TaskCatalogErrorCode.NOT_FOUND: TaskServiceErrorCode.NOT_FOUND,
     TaskCatalogErrorCode.CONFLICT: TaskServiceErrorCode.CONFLICT,
     TaskCatalogErrorCode.STORE_FAILURE: TaskServiceErrorCode.STORE_FAILURE,
+    TaskCatalogErrorCode.RESOURCE_EXHAUSTED: TaskServiceErrorCode.RESOURCE_EXHAUSTED,
 }
 
 
@@ -241,6 +247,12 @@ def _attention_event(value: object) -> TaskEvent | None:
         if value.recovery_required or value.code is CandidateErrorCode.RECOVERY_REQUIRED:
             return TaskEvent.REQUIRE_RECOVERY
         if value.cleanup_required or value.code is CandidateErrorCode.CLEANUP_REQUIRED:
+            return TaskEvent.REQUIRE_CLEANUP
+        return None
+    if isinstance(value, RevisionStoreError):
+        if value.code is RevisionStoreErrorCode.RECOVERY_REQUIRED:
+            return TaskEvent.REQUIRE_RECOVERY
+        if value.code is RevisionStoreErrorCode.CLEANUP_REQUIRED:
             return TaskEvent.REQUIRE_CLEANUP
         return None
     if bool(getattr(value, "recovery_required", False)):
@@ -852,6 +864,63 @@ class TaskService:
         except TaskStateError:
             _raise(TaskServiceErrorCode.INVALID_STATE)
 
+    def _reserve_candidate(
+        self,
+        *,
+        project_id: str,
+        expected_head: ProjectHead,
+        reservation_key: str,
+        lease: object,
+    ) -> str:
+        try:
+            revision_id = self._coordinator.reserve_candidate(
+                project_id=project_id,
+                expected_head=expected_head,
+                reservation_key=reservation_key,
+                lease=lease,
+            )
+        except CandidateError as error:
+            if error.code is CandidateErrorCode.RESOURCE_EXHAUSTED:
+                _raise(TaskServiceErrorCode.RESOURCE_EXHAUSTED)
+            if error.code is CandidateErrorCode.CONFLICT:
+                _raise(TaskServiceErrorCode.CONFLICT)
+            if error.code is CandidateErrorCode.INVALID_LEASE:
+                _raise(TaskServiceErrorCode.LEASE_UNAVAILABLE)
+            if _attention_event(error) is not None:
+                _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+            _raise(TaskServiceErrorCode.STORE_FAILURE)
+        except Exception:
+            _raise(TaskServiceErrorCode.STORE_FAILURE)
+        if type(revision_id) is not str:
+            _raise(TaskServiceErrorCode.STORE_FAILURE)
+        return revision_id
+
+    def _cancel_unused_reservation(
+        self,
+        *,
+        project_id: str,
+        expected_head: ProjectHead,
+        revision_id: str,
+        reservation_key: str,
+        lease: object,
+    ) -> bool:
+        try:
+            result = self._coordinator.cancel_reservation(
+                project_id=project_id,
+                expected_head=expected_head,
+                revision_id=revision_id,
+                reservation_key=reservation_key,
+                lease=lease,
+            )
+        except Exception:
+            return False
+        return bool(
+            getattr(result, "status", None) is CandidateRollbackStatus.NOT_COMMITTED
+            and getattr(result, "head", None) == expected_head
+            and getattr(result, "cleanup_required", None) is False
+            and getattr(result, "recovery_required", None) is False
+        )
+
     def _continue_preflighted(
         self,
         stored: StoredTaskRun,
@@ -868,22 +937,48 @@ class TaskService:
         try:
             try:
                 head = self._guard_runtime_head(project_id)
-                current = stored
-                if submitted is not None:
-                    current = self._cas(stored, submitted)
-                validating = self._cas(
-                    current,
-                    transition_task(current.task_run, TaskEvent.START_VALIDATION),
+                reservation_key = stored.task_run.id
+                revision_id = self._reserve_candidate(
+                    project_id=project_id,
+                    expected_head=head,
+                    reservation_key=reservation_key,
+                    lease=lease,
                 )
-                result = self._run_with_lease(
-                    validating,
-                    compiled,
-                    validated,
-                    lease,
-                    head,
-                )
+                try:
+                    current = stored
+                    if submitted is not None:
+                        current = self._cas(stored, submitted)
+                    validating = self._cas(
+                        current,
+                        transition_task(current.task_run, TaskEvent.START_VALIDATION),
+                    )
+                except (TaskServiceError, TaskStateError) as error:
+                    clean = self._cancel_unused_reservation(
+                        project_id=project_id,
+                        expected_head=head,
+                        revision_id=revision_id,
+                        reservation_key=reservation_key,
+                        lease=lease,
+                    )
+                    if not clean:
+                        caught = TaskServiceError(TaskServiceErrorCode.RECOVERY_REQUIRED)
+                    elif isinstance(error, TaskServiceError):
+                        caught = error
+                    else:
+                        caught = TaskServiceError(TaskServiceErrorCode.INVALID_STATE)
+                else:
+                    result = self._run_with_lease(
+                        validating,
+                        compiled,
+                        validated,
+                        lease,
+                        head,
+                        revision_id=revision_id,
+                        reservation_key=reservation_key,
+                    )
             except TaskServiceError as error:
-                caught = error
+                if caught is None:
+                    caught = error
             except TaskStateError:
                 caught = TaskServiceError(TaskServiceErrorCode.INVALID_STATE)
         finally:
@@ -1130,15 +1225,28 @@ class TaskService:
         validated: object,
         lease: object,
         head: ProjectHead,
+        *,
+        revision_id: str,
+        reservation_key: str,
     ) -> StoredTaskRun:
         task = validating.task_run
         if head.revision_id != task.base_revision:
+            if not self._cancel_unused_reservation(
+                project_id=task.project_id,
+                expected_head=head,
+                revision_id=revision_id,
+                reservation_key=reservation_key,
+                lease=lease,
+            ):
+                _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
             return self._reject_pre_candidate(validating, _PRE_CANDIDATE_CONFLICT)
 
         try:
-            active = self._coordinator.begin(
+            active = self._coordinator.begin_reserved(
                 project_id=task.project_id,
                 expected_head=head,
+                revision_id=revision_id,
+                reservation_key=reservation_key,
                 lease=lease,
             )
         except CandidateError as error:
@@ -1147,6 +1255,8 @@ class TaskService:
                 return self._persist_attention(validating, event)
             if error.code is CandidateErrorCode.CONFLICT:
                 return self._reject_pre_candidate(validating, _PRE_CANDIDATE_CONFLICT)
+            if error.code is CandidateErrorCode.RESOURCE_EXHAUSTED:
+                _raise(TaskServiceErrorCode.RESOURCE_EXHAUSTED)
             return self._reject_pre_candidate(validating, _BEGIN_FAILURE)
         except Exception:
             return self._reject_pre_candidate(validating, _BEGIN_FAILURE)
@@ -1197,7 +1307,8 @@ class TaskService:
                 candidate=current_candidate,
                 lease=lease,
             )
-            self._executor.export_step(candidate=current_candidate, lease=lease)
+            with _candidate_file_limit(self._revision_store):
+                self._executor.export_step(candidate=current_candidate, lease=lease)
             current_candidate = self._coordinator.seal(
                 candidate=current_candidate,
                 lease=lease,
@@ -1451,6 +1562,7 @@ class TaskService:
 
         rollback_event: TaskEvent | None = None
         rollback_clean = False
+        cause_event = _attention_event(cause)
         try:
             rollback = self._coordinator.rollback(candidate=candidate, lease=lease)
             rollback_event = _attention_event(rollback)
@@ -1467,7 +1579,7 @@ class TaskService:
         except Exception:
             rollback_event = TaskEvent.REQUIRE_RECOVERY
 
-        if rollback_clean:
+        if rollback_clean and cause_event is None:
             try:
                 return self._cas(
                     current,
@@ -1477,7 +1589,7 @@ class TaskService:
                 _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
         return self._published_attention(
             current,
-            rollback_event or TaskEvent.REQUIRE_RECOVERY,
+            cause_event or rollback_event or TaskEvent.REQUIRE_RECOVERY,
         )
 
     def _published_attention(

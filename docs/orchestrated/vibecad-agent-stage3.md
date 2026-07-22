@@ -2248,6 +2248,8 @@ preserve-data change; it is recorded rather than presented as additional server 
 - The S3-7 control commit may modify only this file。The S3-7 semantic implementation may modify or add only:
   - `pyproject.toml`
   - `uv.lock`
+  - `README.md`
+  - `docs/PRODUCT_CAPABILITY_ROADMAP.md`
   - `src/vibecad/application/__init__.py`
   - `src/vibecad/application/data.py`
   - `src/vibecad/application/project.py`
@@ -2263,11 +2265,13 @@ preserve-data change; it is recorded rather than presented as additional server 
   - `src/vibecad/interaction/cad.py`
   - `src/vibecad/interaction/storage.py`
   - `src/vibecad/mcp_transport.py`（new）
+  - `src/vibecad/runtime/installer.py`
   - `src/vibecad/runtime/spec.py`
   - `src/vibecad/runtime/status.py`
   - `src/vibecad/supervisor.py`
   - `src/vibecad/workflow/store.py`
   - `src/vibecad/workflow/catalog.py`
+  - `src/vibecad/workflow/lease.py`
   - `src/vibecad/workflow/service.py`
   - `src/vibecad/server.py`
   - `.mcpbignore`
@@ -2280,11 +2284,13 @@ preserve-data change; it is recorded rather than presented as additional server 
   - `tests/test_revision_store.py`
   - `tests/test_candidate_revision.py`
   - `tests/test_cad_execution_port.py`
+  - `tests/test_program_executor.py`
   - `tests/test_agent_application.py`
   - `tests/test_task_api.py`
   - `tests/test_task_store.py`
   - `tests/test_task_catalog.py`
   - `tests/test_task_service.py`
+  - `tests/test_workflow_lease.py`
   - `tests/test_task_kernel_integration.py`
   - `tests/test_mcpb_manifest.py`
   - `tests/test_server_tools.py`
@@ -2300,6 +2306,7 @@ preserve-data change; it is recorded rather than presented as additional server 
   - `tests/test_status.py`
   - `tests/test_installer.py`
   - `tests/test_supervisor.py`
+  - `tests/fake_server.py`
   - `tests/test_uninstall.py`
   - `tests/test_release_workflow.py`
   - `docs/orchestrated/vibecad-agent-stage3.md`
@@ -2307,6 +2314,35 @@ preserve-data change; it is recorded rather than presented as additional server 
   behavior is confirmed in its existing module tests。Low-level `workflow/state`、registry
   metadata、engine/tools/feedback、runtime installer and G0 protocol semantics are outside this packet；a
   genuine RED proving an unavoidable domain gap triggers the breaker rather than an opportunistic edit。
+
+S3-R3.3 internal correctness correction：the cumulative S3-7 regression and a deterministic two-process
+barrier proved that two legitimate first openers of one fixed lease entry can both observe the entry missing，
+after which the second opener misclassifies the first opener's atomic creation as `unsafe_lock_entry`。This
+breaks the already-approved fixed catalog/per-key/slot concurrency semantics in TaskRun and durable project
+creation；it does not add a product capability or widen a trust boundary。Therefore the semantic allowlist adds
+only `workflow/lease.py` and its existing focused test file for the minimum create-race correction。All existing
+replacement、link、mode、owner and process-isolation tests remain mandatory；no other lease behavior changes。
+
+S3-R3.5 internal correctness correction：the supervisor's strict MCP handshake and replay gate cannot be
+exercised by the pre-S3-7 ad-hoc `swap`/`crash` messages because those messages are not valid MCP requests and
+therefore must now be rejected before child dispatch。This is a test-fixture gap rather than a production or
+product-scope change。The semantic allowlist consequently adds only `tests/fake_server.py`，whose replacement
+controls use valid `initialize` and `tools/call` frames and record whether a non-replayable tool crossed a
+generation boundary。All production supervisor and public-surface bounds remain unchanged。
+
+S3-R3.6 internal correctness correction：MCPB packages `README.md` because the frozen local wheel build uses it
+as project metadata，but the pre-cutover README still advertises removed legacy endpoints and unverified GUI、
+assembly、render and multi-platform behavior。Changing only `manifest.json` would therefore ship a mixed public
+surface inside one archive。The semantic allowlist adds `README.md` solely to describe the same 20-tool Darwin
+Agent contract、BYO host-model boundary and G1/P1/P2 roadmap；the manifest test adds negative assertions for
+removed endpoint names。No implementation capability or release claim is added。
+
+S3-R3.7 internal correctness correction：the linked product roadmap still labeled task-level MCP and durable
+draft/review as unimplemented S3-entry gaps。After the atomic S3-7 cutover this would contradict both the package
+README and live surface even though G1/P1/P2 remain future work。The semantic allowlist adds only
+`docs/PRODUCT_CAPABILITY_ROADMAP.md` to timestamp and label the S3-7/P0-A implementation state and preserve those
+four items as historical Stage-3-entry rationale；a package-doc test freezes the current/future distinction。
+No roadmap scope or phase ordering changes。
 
 ### 3. Exact public surface and one-writer cutover
 
@@ -2521,11 +2557,13 @@ verified FCStd/STEP resources。It must not claim hole、fillet、render/three-v
 Workbench、Windows or any removed legacy endpoint；negative package tests freeze those exclusions。The manifest
 declares only `darwin`, the sole platform with real AgentApplication/managed-FreeCAD evidence。
 
-Dependency closure is package evidence, not an ambient cache assumption。The semantic change pins
+Dependency-version closure is packaged lock evidence, not an ambient installed-environment assumption。The
+MCPB intentionally does not vendor third-party wheel bytes；a first launch therefore needs network access to the
+locked indexes，while a warm uv artifact cache may satisfy the same hashes without network。The semantic change pins
 `mcp==1.27.2` in `pyproject.toml`, regenerates `uv.lock` offline, removes that lock from `.mcpbignore`, changes
 the manifest launch to frozen mode and requires the unpacked MCPB to contain the byte-identical regenerated
 lock。The exact manifest argv is
-`["run","--frozen","--no-dev","--directory","${__dirname}","mcpb_entry.py"]`。An unpacked-directory
+`["run","--frozen","--no-dev","--no-editable","--no-build-isolation","--directory","${__dirname}","mcpb_entry.py"]`。An unpacked-directory
 gate runs with `--frozen`, asserts the live SDK version before initialize/tools and resource checks, and fails
 on any lock/hash/version drift。Because public version remains 0.4.0 until S3-8, `runtime.spec` also increments a
 private integer `SERVER_PACKAGE_EPOCH`。Every managed and external receipt/binding has exact
@@ -2539,6 +2577,434 @@ return explicit repair—never stale-swap。Post-swap gates cover both the real 
 host's old external-legacy shape, prove current installed identity from `active_runtime_python`, exercise the
 low-level surface and do not mask it with repository `PYTHONPATH`。S3-8 later performs the public version bump。
 A future SDK/epoch/surface change needs its own lock update and compatibility evidence。
+
+S3-R3.4 internal correctness correction：a real frozen launch under CPython 3.13.14 proved that its patched
+`site` skips Hatchling's hidden `_editable_impl_vibecad.pth`，so the prior exact argv could resolve every locked
+dependency and still fail at `mcpb_entry.py` with `ModuleNotFoundError: vibecad`。The manifest therefore adds
+uv's `--no-editable` flag：the same locked source is installed as a normal wheel，the child imports the packaged
+bytes without `PYTHONPATH`，and the managed-runtime identity check remains authoritative。A second clean-environment
+gate then proved that normal wheel installation otherwise creates an isolated build environment and can require
+an untracked network fetch of Hatchling。The package consequently freezes `hatchling==1.28.0` in the ordinary
+environment and adds `--no-build-isolation`，so both application and build dependency identities come from the
+packaged lock rather than an independent build resolver；artifact bytes still arrive through uv's normal locked
+cache/network path。This changes neither the public surface nor any product/trust boundary；the manifest test
+freezes the corrected argv and the final unpacked-package gate must launch it in a newly created environment。
+
+S3-R3.8 test-contract correction：the real host's external legacy receipt predates the S3-7 package epoch，MCP
+pin and public-surface fingerprint。It is therefore incompatible by construction and must fail closed；the old
+integration assertion that silently adopted it as current is no longer valid。The deterministic legacy gate
+selects that exact prefix through an explicit override，requires status and installer rejection，and proves no
+install、pip、delete or external-tree/binding mutation occurred。A separate destructive-capable migration gate is
+disabled unless all of `VIBECAD_RUN_INTEGRATION=1`、the exact
+`VIBECAD_RUN_FRESH_MIGRATION=install-current-managed-preserve-external` confirmation、a separately repeated
+`VIBECAD_FRESH_MIGRATION_HOME` equal to `VIBECAD_HOME`、the reviewed checkout as `VIBECAD_PIP_SPEC`、no
+override and an initially absent current prefix are present。It may then create only the fresh owned current
+runtime，requires the exact epoch/MCP/surface identity there，and proves the old external tree、binding and data
+tree unchanged。The controller executes that one gate only after final review。
+
+S3-R3.9 internal correctness correction：the first real fresh-current migration reached the already validated
+micromamba binary but micromamba rejected the per-attempt executable name `.vibecad-runner-*` as
+`unknown MAMBA_EXE`；its executable basename must be exactly `mamba` or `micromamba`。The secure correction keeps
+one fixed `.vibecad-runner` directory at mode `0700` under the pinned managed `env.parent` and stages the
+checksum-bound file inside it with the exact basename `micromamba`，so execution remains relative to the pinned
+env fd as `../.vibecad-runner/micromamba`。Both directory and file are checked for device、inode、owner、mode and
+link-count validity before and after command dispatch；the source copy remains descriptor-pinned and SHA-256
+bound。A complete crash remnant with that exact digest is safely adopted and reused；a partial/mismatched file or
+any extra entry fails closed without deletion。
+
+An adversarial cleanup review then rejected deleting a per-attempt directory：POSIX has no portable
+identity-bound `rmdir` by an already-open directory fd，so a check followed by `rmdir(name)` retains a same-UID
+replacement window。The fixed private directory therefore persists and cleanup unlinks only the exact validated
+`micromamba` identity through its held directory fd；a replacement file or directory is never name-deleted。
+Normal success and copy、digest or command failure leave the fixed directory empty。A process death or cleanup
+syscall failure can leave at most its one fixed-name file；an exact file self-recovers on the next serialized
+attempt，while an untrusted remnant blocks without creating another。The residual same-UID mutation window at
+command path resolution remains the already-recorded S3-RES-11 local-host trust boundary and is detected by the
+before/after identity gates；no broader-user or remote actor gains write access。This correction changes no public
+tool、product capability or runtime ownership boundary，and the failed real prefix is outside this subtask's
+mutation authority。
+
+S3-R3.10 review correction：the first independent review of S3-R3.9 proved that validating the fixed runner
+inode and then calling `unlink(name, dir_fd=...)` still has a same-UID check→unlink replacement window。The
+reviewer deterministically replaced the validated name at the unlink seam；the replacement was deleted while the
+original inode survived。That contradicts the claimed identity-bound cleanup and is an unexpected G1 red。The
+minimum correction makes the checksum-bound fixed runner a persistent private runtime dependency instead of
+attempting an unlink that POSIX cannot bind to an open file identity。Every later use must still validate the
+private directory、the sole `micromamba` entry、owner、mode、link count、device/inode and SHA-256 before and after
+dispatch；a mismatched or extra entry remains fail closed and untouched。Copy or validation failure may leave at
+most the same fixed entry and must report failure rather than delete an unproven name。This removes the cleanup
+TOCTOU without changing the already-recorded S3-RES-11 same-UID command-path trust boundary。
+
+The exact semantic allowlist above adds only `src/vibecad/runtime/installer.py` for S3-R3.9/S3-R3.10；
+`tests/test_installer.py` and this artifact were already named。This supersedes the earlier blanket statement that
+all runtime-installer semantics were outside S3-7 only for the exact micromamba runner basename、staging and
+validation path。Authorization remains S3-A01 plus the user's standing words “好你自我持续推进 不需要我做产品级
+决策的时候就不要停” and “继续执行”：this is an internal correctness/recovery correction inside the unchanged
+managed-runtime ownership and product boundary，not a new product decision。No other installer behavior、external
+runtime mutation、data deletion、push、release or external spend is authorized。
+
+S3-R3.11 real-CAD contract correction：the old external FreeCAD 1.1 regression lane exposed two independent
+integration defects after the quota/journal implementation landed。First，the low-level `_CHILD` and
+`_SELECTOR_PRESERVATION_CHILD` fixtures compose `LocalRevisionStore`/`CandidateCoordinator` directly but never
+initialize the process-wide candidate file-limit signal policy；they therefore reject candidate begin before CAD
+and report `needs_input/candidate_begin_failed`。The production `AgentApplication.open()` already initializes this
+policy，so only those direct-composition fixtures add the explicit main-thread initialization。
+
+Second，RevisionStore now reserves quota and namespace authority by creating exact owner-only zero-byte
+`model.FCStd` and `model.step` placeholders，while the unchanged `InProcessCadExecutor.export_step()` rejects any
+existing STEP target。A traced real run completed all six CAD operations and the FCStd checkpoint before rejecting
+that valid reserved placeholder as `artifact_failure`；the same contradiction prevents AgentApplication review
+draft publication。The minimum production correction accepts only the store-authorized exact empty ordinary
+placeholder（regular file、current owner、mode `0600`、link count one、size zero），records its stable identity，lets
+FreeCAD write that fixed target，then requires the same device/inode/owner/mode/link identity、bounded nonzero
+size and valid STEP envelope before proceeding。A nonempty file、link、wrong owner/mode/count or identity drift
+still fails closed；no unbounded temporary namespace or quota formula changes。Focused tests belong only in the
+already-allowed `tests/test_cad_execution_port.py` and the direct fixtures in the already-allowed
+`tests/test_task_kernel_integration.py`。The diagnostic compatibility probe made no repository change and proved
+direct six-operation commit、Selector success/failure isolation and AgentApplication cross-process draft accept
+all pass after these two exact corrections；the old external tree and receipt remained unchanged。This is an
+internal contract repair under S3-A01 and the same standing user authorization，not a product-boundary change。
+
+S3-R3.12 independent-review correction：the first read-only review of S3-R3.11 proved that
+`InProcessCadExecutor.export_step()` still treated a missing reserved `model.step` as an acceptable legacy
+case，letting FreeCAD create a new inode instead of proving that the RevisionStore-reserved placeholder exists。
+That bypasses the frozen namespace/inode authority even though every present-placeholder check passes，so the
+S3-R3.11 acceptance gate remains closed。The minimum correction maps `FileNotFoundError` to the same fixed
+`ARTIFACT_FAILURE` before any shape access or CAD write，adds a focused missing-placeholder negative test，and
+updates the pre-quota controlled-export unit fixture to create the exact owner-only empty placeholder now
+required by the production contract。The semantic allowlist therefore adds only
+`tests/test_program_executor.py`；`src/vibecad/execution/executor.py`、`tests/test_cad_execution_port.py` and
+`tests/test_task_kernel_integration.py` were already named。This supersedes the old unit-test oracle only for
+placeholder preparation and does not change the successful export behavior，public surface，quota formula or
+rollback boundary。Authorization remains S3-A01 plus the user's standing words “好你自我持续推进 不需要我做产品级
+决策的时候就不要停” and “继续执行”：this is a review-proven internal correctness fix，not a product-level
+decision。No runtime install/delete，external tree mutation，push，release or external spend is delegated by
+this correction。
+
+S3-R3.13 pre-final concurrency correction：an independent settled-diff audit proved that the frozen §4.3
+linearization contract was implemented on only one side。`ArtifactMaterializationService` holds the bounded
+`artifact-export:<task_id>` gate through final eligibility reload and `PUBLISHED` readback，but
+`AgentApplication.accept_draft()` and `reject_draft()` currently enter their TaskRun transition without the
+same gate。Accept or Reject can therefore win after export's final draft reload but before publication，allowing
+delivery of a draft whose authority already changed。Sequential and real-CAD happy-path gates cannot expose
+this race，so final S3-7 acceptance remains closed despite those gates passing。
+
+The minimum correction makes both AgentApplication review transitions acquire the existing
+`LocalArtifactAuthority.acquire_export_gate(task_id=...)` capability before any catalog/CAD/project lease or
+TaskRun CAS，hold it through the complete transition and result，then release it。Reject must remain no-CAD and
+must not initialize the artifact store/materializer or CAD validation port merely to obtain the lightweight
+authority capability。Gate contention is a fixed `LEASE_UNAVAILABLE` port failure before mutation；pre-entry
+task/store/integrity/recovery failures map only to the existing closed task-port taxonomy；a release failure
+after the body may have committed and therefore returns `RECOVERY_REQUIRED` rather than claiming a definite
+non-effect。No new lock order is allowed：task artifact gate → process CAD gate → project/store locks。A genuine
+deterministic RED must pause export after its final eligibility reload and prove both Accept and Reject cannot
+cross the shared gate；after publication，the review transition may proceed and the already-published immutable
+response remains replayable。Focused tests may change only the already-allowed
+`tests/test_agent_application.py` and/or `tests/test_artifact_materialization.py`，with
+`tests/test_task_kernel_integration.py` used only if a cross-process fixture is necessary。Production changes
+are limited to the already-allowed `src/vibecad/application/agent.py`；the artifact gate implementation、TaskRun
+state machine、public schemas and materialization protocol do not change。Authorization remains S3-A01 plus the
+user's standing continuous-execution direction；this closes a review-proven internal atomicity defect and is
+not a product-level decision。No runtime install/delete，external mutation，push，release or spend is delegated。
+
+The cumulative task-service gate may additionally update only the already-allowed
+`tests/test_task_service.py::test_application_accepting_gap_evicts_then_recovers_descendant_without_recommit`。
+That pre-S3-7 synthetic fixture constructs `AgentApplication` with `object.__new__` and fake non-store
+dependencies，so it must inject one explicit gate-capable authority returning a no-op context solely to retain
+the test's later runtime-gap oracle。Production may not recognize that invalid composition or bypass the shared
+gate；no other task-service expectation changes。
+
+S3-R3.14 final managed-package identity correction：the fresh current-managed runtime was installed with
+private `SERVER_PACKAGE_EPOCH == 1` before the late S3-R3.12/R3.13 source corrections。The current receipt and
+installed package still satisfy version `0.4.0`、epoch 1、MCP 1.27.2 and the unchanged public-surface digest，
+so `runtime_ready()` remains true even though the installed internal executor bytes are older than the settled
+checkout。The supervisor deliberately starts `active_runtime_python -m vibecad.server` and therefore would run
+that stale package；a checkout-PYTHONPATH real test or unpacked identity probe alone cannot prove the final
+runtime child。This is the exact same-version server-package replacement case for which §4.2 introduced the
+private epoch，and final S3-7 acceptance remains closed until it is advanced and synchronized。
+
+After every source correction is frozen and independently review-PASS，advance only the private
+`SERVER_PACKAGE_EPOCH` monotonically from 1 to 2；the public package/manifest version remains 0.4.0 and the
+public-surface digest remains unchanged。Update the exact epoch assertions/receipt fixtures only in the
+already-allowed `tests/test_status.py` and，if a genuine RED requires it，`tests/test_installer.py` or
+`tests/test_supervisor.py`；production change is limited to the already-allowed
+`src/vibecad/runtime/spec.py`。Then run the normal managed `RuntimeInstaller.install()` once with the reviewed
+checkout as `VIBECAD_PIP_SPEC` and no override。It must classify the existing epoch-1 generation as a server
+mismatch，take the existing pip-only sync path，preserve the current prefix inode and FreeCAD engine，write the
+epoch-2 managed receipt only after exact verification，and never rebuild or delete the engine。Manual pip、
+receipt-only rewriting or a second environment is forbidden。Post-sync evidence must come from the active
+runtime Python with no checkout `PYTHONPATH` and prove epoch 2、MCP 1.27.2、surface digest、FreeCAD 1.1.0 and
+the final corrected package behavior/bytes；the 44,109-byte legacy external/binding/data baseline must remain
+exactly unchanged。Only then may the final current-managed and fresh-unpacked MCPB E2E gates run。Authorization
+is S3-A01、the previously approved real managed migration and the user's standing continuous-execution
+direction；this is a bounded upgrade of the owned managed server package，not a public version/product decision。
+No external runtime mutation、engine reinstall/delete、user-data deletion、push、release or spend is authorized。
+Any pre-existing `dist/` wheel or sdist is stale pre-freeze evidence and is forbidden as an install/package
+source；the final build uses a new output directory and proves the wheel's epoch and packaged Python bytes
+against the frozen checkout before packing MCPB。
+
+S3-R3.15 managed-sync execution correction：the first controller invocation of the approved normal installer
+added `PIP_NO_INDEX=1` and `PIP_NO_BUILD_ISOLATION=1` to keep the source sync offline。Pip 26.1.2 treats the
+negative option's environment value inversely：a read-only parser probe observed `1/true -> build isolation`
+and `0/false -> no build isolation`。The invocation therefore entered an isolated build environment and failed
+before building or installing VibeCAD because no index could supply `hatchling==1.28.0`。It emitted only
+`INSTALLING_PIP -> FAILED`；after termination the exact epoch-1 receipt (477-byte identity record)、the complete
+45,772-byte current engine snapshot、the 44,109-byte legacy/binding/data snapshot and the installed epoch-1
+`executor.py` digest all remained byte-for-byte unchanged，with no server/FreeCAD process left running。This is
+a controller environment-flag error，not a product/source defect；manual pip、receipt rewriting and engine
+replacement remain forbidden。
+
+The failed attempt is retained as gate-red evidence and cannot count as the required sync。One recovery
+invocation of the same normal `RuntimeInstaller.install()` is permitted only from those reverified unchanged
+snapshots，with the same frozen checkout `VIBECAD_PIP_SPEC`、no override、`PIP_NO_INDEX=1` and the corrected
+`PIP_NO_BUILD_ISOLATION=0`。The already-installed exact `hatchling==1.28.0` must make that invocation take the
+same one-command pip-only path；any create/remove、second failure or snapshot mismatch is a circuit breaker。
+This append-only recovery branch is an internal gate correction under S3-A01 and the user's standing continuous
+execution direction；it changes no product decision、source bytes、public version、external authority or engine
+scope。The final ledger must preserve both the failed invocation and the effective recovery evidence。
+
+S3-R3.16 MCPB acceptance-environment correction：the first unpacked stdio invocation used a server-only
+`VIBECAD_HOME` below `/tmp/vibecad-s3-7-final.*`。That path has the world-writable `/private/tmp` ancestor and
+is intentionally outside the runtime's trusted-directory contract；the background external-runtime validation
+therefore failed closed before creating the server home or receipt。The packaged process still proved initialize、
+the exact 20-tool projection and resource template，then returned the fixed `runtime_unavailable` envelope for
+the first application call；its 780-byte DEBUG stderr contained neither the submitted canary nor exception/path
+text。This is rejected as acceptance evidence because the injected home was not a valid contract environment；
+it is not evidence of an engine、server or package defect。
+
+Recovery must unpack the same checksummed MCPB into a second fresh directory，repeat the pre-uv lock/source/
+allowlist proof，and give only the packaged child a new home below macOS's user-private `$TMPDIR` with verified
+owner-only ancestry while binding `VIBECAD_FREECAD_ENV` to the unchanged current managed prefix。The pytest
+parent retains the default epoch-2 managed home and no override。If that valid environment still races or
+returns `runtime_unavailable`，it becomes a genuine packaged auto-install/swap gate red and must be closed with
+a focused test/source correction before any further package or full-suite gate；otherwise only the exact
+`1 passed` result counts。The first unpack and stderr remain preserved。This append-only environment correction
+is covered by S3-A01 and changes no product contract or external authority。
+
+S3-R3.16a evidence correction：the `/tmp` rejection above is caused specifically by the macOS
+`/tmp -> private/tmp` symlink component。The pinned directory traversal opens every component with
+`O_NOFOLLOW|O_DIRECTORY` and therefore rejects the alias before creating `server-home`；the trusted-directory
+contract separately permits the fixed root/current-user-owned sticky ancestor and the earlier
+“world-writable ancestor” explanation is not the operative cause。The recovery's absolute no-symlink
+`$TMPDIR` path remains correct。
+
+S3-R3.17 packaged auto-install/swap acceptance correction：a second fresh unpack with byte-exact lock/source
+and a real owner-0700 no-symlink `$TMPDIR` home reproduced `runtime_unavailable` at the immediate first
+`create_project` call。No child home existed when pytest killed the process，proving the call raced the
+background installer before it could publish the external receipt and request the transparent supervisor
+swap。This is expected product fail-closed behavior during an asynchronous bootstrap window，but the acceptance
+harness incorrectly assumed readiness was synchronous。The genuine RED is retained。
+
+The smallest correction is test-only in the already-allowed `tests/test_runtime_integration.py`：retry exactly
+the same `create_project` arguments and durable `create_key` under a 300-second bound，accept only the complete
+fixed `runtime_unavailable` envelope before success，and use unique JSON-RPC ids。The public contract marks this
+key-replayed operation idempotent，so supervisor replay or a lost response cannot create a second project；any
+other error fails immediately。Production guard、auto-install、swap and package bytes remain unchanged。GREEN
+requires a third fresh unpack of the same MCPB、a new owner-private child home、exact `1 passed` and final
+receipt/runtime/legacy snapshot checks。This closes an acceptance-timing defect，not a product decision。
+
+S3-R3.18 MCPB acceptance review correction：the nominal third child root still used `$TMPDIR`'s textual
+`/var/folders/...` form；on macOS `/var -> private/var` is another symlink component，so it did not satisfy
+S3-R3.16a's no-alias precondition。The preserved run made 1,017 sequential exact-key attempts (JSON-RPC ids
+1000..2016)，received only the exact fixed `runtime_unavailable` envelope and failed after 305.41 seconds；no
+child home or receipt was created and no application effect occurred。
+
+An independent read-only review then found three Important false-green/bound issues in the test-only R3.17
+change。They are closed before another real run as follows：
+
+1. `VIBECAD_MCPB_EXTRA_ENV_JSON` is mandatory and has exactly the child `VIBECAD_HOME` and
+   `VIBECAD_FREECAD_ENV` keys；the home must be nonexistent、canonical/no-symlink、below resolved `$TMPDIR`
+   through owner-private directories，and the override must be the canonical current managed prefix。The final
+   external receipt must exactly bind that prefix and epoch-2 identity。
+2. Before uv creates `.venv`，the unpacked fixed top-level files and every `src/vibecad` Python name/hash must
+   equal the frozen checkout；the installed identity probe also requires private epoch 2，not only public 0.4.0、
+   MCP 1.27.2 and an in-bundle site-packages path。
+3. The 300-second retry deadline is hard：each RPC receives only `min(60s, remaining)` and the final sleep is
+   capped by remaining time。The high retry-id range is disjoint from all later fixed ids。
+
+The same production MCPB remains byte-frozen because these corrections touch only the excluded integration
+test and this ledger。GREEN now requires a fourth fresh unpack，a child root passed in its resolved
+`/private/var/...` form，the exact test as `1 passed`，and independent re-review。No product/source-package
+change or user decision is required。
+
+S3-R3.19 swap-latch response correction：the fourth fresh/canonical-home run proved the external receipt was
+published with epoch 2 and exact current-prefix device/inode，then failed after 50.11 seconds because one retry
+during the owned child lifecycle's `SWAP_PENDING` window returned a JSON-RPC response without `result`。The
+fixed transport contract routes a request that cannot be admitted in that latch state to exactly
+`-32005 / Server is busy.` before allocating application work；stderr independently showed the second server
+initialization，confirming the transparent swap occurred。This response is therefore a safe zero-effect
+transient distinct from a server envelope。
+
+The bounded test may retry only either the complete fixed `runtime_unavailable` envelope or the exact JSON-RPC
+`{"code":-32005,"message":"Server is busy."}` for its current request id。Any unknown-outcome、other RPC
+error or malformed response fails immediately。The same arguments/create key and disjoint unique ids remain
+mandatory。A fifth fresh canonical unpack/home run and independent re-review are required；production/package
+bytes remain unchanged。
+
+S3-R3.20 owned-worker process-runtime correction：the fifth fresh/canonical-home run did not return the exact
+busy transient described above。After the external epoch-2 receipt was durable and the swapped server had
+initialized，its first application request returned exactly JSON-RPC `-32603 / Tool request could not be
+completed.` in 7.28 seconds。The same create-key record was already PUBLISHED with generation-zero revision and
+HEAD，so this is neither a zero-effect transient nor safe retry evidence；the harness correctly keeps every
+generic/internal `-32603` as a hard failure。
+
+Read-only source audit and an isolated thread reproduction found the deterministic cause：
+`OwnedStdioRunner` dispatches the first domain request on a worker；the lazy `_ApplicationSlot.get()` opens
+`AgentApplication` there；`AgentApplication.open()` calls `_initialize_candidate_file_limit_runtime()`，whose
+process signal policy must be initialized from the Python main thread and intentionally fails on a worker。
+Direct main-thread application/handler calls therefore passed while real stdio failed。A genuine focused RED
+now drives one first application call through a real owned worker after resetting the process runtime and
+observes `_initialized_pid is None` / outer internal error (`1 failed in 1.45s`)；a second RED requires any
+initializer failure to occur before workers or input reading begin。
+
+The minimum production correction is limited to the already-allowed `src/vibecad/server.py`：a lazy server-only
+helper imports and invokes the existing candidate-file runtime initializer as the first operation of
+`_run_owned_stdio()`，before constructing or publishing `OwnedStdioRunner`。It does not run at module import、
+open data/CAD、weaken the runtime guard or remove `AgentApplication.open()`'s idempotent invariant check；an
+initialization failure starts no worker and reads no client bytes。Focused GREEN must prove the application
+opener still runs on a worker only after the main-thread process initialization，and import/discovery/control
+paths remain inert。The independent acceptance review's two Minor hardening findings are also closed test-only：
+the unpacked `src` and `src/vibecad` roots must be real non-symlink directories，and the final child home must
+retain current UID plus no group/other permission bits。
+
+Because this correction changes production package bytes after the epoch-2 managed sync，advance only the
+private `SERVER_PACKAGE_EPOCH` from 2 to 3 after focused review-PASS，rebuild wheel/sdist/MCPB from a new output
+root，and repeat the normal pip-only managed sync。The existing managed-prefix inode、FreeCAD engine snapshot、
+legacy external/binding/data baseline and user data must remain exact；the public version、surface digest and MCP
+version remain unchanged。Final evidence must come from installed epoch 3 with no checkout `PYTHONPATH` and a
+sixth fresh canonical unpack/home run completing exactly `1 passed`。This bounded internal correctness repair
+is authorized by S3-A01 and the user's standing continuous-execution direction；it changes no product boundary
+and authorizes no push、release、external spend or data deletion。
+
+S3-R3.20a evidence correction：R3.20 incorrectly attributed the child home's PUBLISHED
+`project_create_ffff...` receipt to the failed E2E request。Filesystem identity and timestamp review proves that
+record was created roughly 58 seconds later by the controller's explicit main-thread diagnostic and used a
+different key from the E2E random nonce。The E2E `-32603` occurred before `ApplicationDataLayout.open()` and
+therefore created no project/data record；only the failing child process's in-memory application-entry event was
+set。The internal error remains a hard failure because it is deterministic broken product behavior and the
+generic code does not guarantee zero effect in other failure locations，not because this particular request
+published an effect。All root cause、minimum fix、epoch-3 and fresh-package requirements in R3.20 remain
+unchanged。
+
+S3-R3.21 worker-runtime GREEN and epoch-3 cut：the three focused regressions now pass in 1.56 seconds，including
+the real subprocess/owned-worker lazy `AgentApplication` open and the initializer-failure zero-input boundary；
+the cumulative server、owned transport and RevisionStore gate passes 465 tests in 11.88 seconds。Import/discovery
+purity、Ruff and diff checks pass。One independent review found only a subprocess-isolation Minor；the test now
+forces auto-install off、disables bytecode writes and bounds both response reads to five seconds，then the same
+three tests pass。A second read-only review reports Critical/Important/Minor `0/0/0` and authorizes the private
+epoch transition。
+
+The checkout therefore advances `SERVER_PACKAGE_EPOCH` exactly 2 → 3 and updates only exact current/previous
+epoch assertions；the public 0.4.0 version、MCP 1.27.2 and public-surface digest are unchanged。The pre-sync
+epoch-2 managed receipt must now classify as `SERVER_MISMATCH / UPGRADE_REQUIRED` and cannot be final evidence。
+No package build、runtime sync or external tree mutation has yet occurred at this ledger point；those remain the
+next bounded gates from R3.20。
+
+S3-R3.21a in-memory evidence clarification：the failed epoch-2 worker request changed no persistent data or
+external effect，but R3.20a's word “only” was too narrow。In addition to setting the process-local
+application-entry event，`_ApplicationSlot` incremented its in-memory generation/failed-generation counters and
+returned to `UNOPENED` after the opener failure。This does not change the no-persistent-effect finding or make a
+generic `-32603` retry-safe。The second independent settled-diff review otherwise reports Critical/Important
+`0/0`，with only this Minor wording correction；its focused import-purity/main-to-worker/failure-before-input/
+real-worker checks and static gates pass，and epoch 3 may proceed。
+
+S3-R3.22 external-receipt oracle correction：the sixth fresh epoch-3 MCPB run completed transparent swap、the
+20-tool/resource projection、empty project、task、real FreeCAD box、auto-commit、FCStd/STEP materialization、both
+resource reads and all DEBUG negative/canary checks，then failed only its final byte-level external-receipt
+assertion (`1 failed in 10.39s`)。The actual owner-0600 single-link receipt had the exact epoch-3、MCP、surface、
+managed-prefix device/inode and Python/FreeCAD values，but was 412-byte sorted JSON with the production
+serializer's default `": "` / `", "` whitespace；the test alone expected compact separators。
+
+This is a test-oracle defect。`status._canonical_json()` and both managed/external durable receipt writers have
+always used `json.dumps(..., sort_keys=True)`；existing receipt fixtures and the preserved epoch-2/legacy
+baselines use the same bytes，while readers bind exact typed fields rather than a new compact format。Changing
+production would create an unnecessary receipt-byte migration after a completely valid epoch-3 package sync。
+The minimum correction removes only the test's compact `separators` argument and retains exact sorted-byte
+equality、all fields and file identity/mode gates。No production/package byte changes，so epoch remains 3 and the
+checksummed MCPB remains valid。GREEN requires a seventh fresh unpack and fresh canonical child home completing
+exactly `1 passed`，followed by independent review；the sixth child's successful durable artifacts remain
+isolated in its authorized temporary test home。
+
+S3-R3.22a serializer-default review correction：after removing compact separators，the seventh fresh
+unpack/home completed the entire MCPB gate as exactly `1 passed in 6.74s`，and both managed-engine/legacy
+snapshots remained exact with the default data root absent。Independent review confirms Critical/Important
+`0/0` and the test-oracle diagnosis，but found one portability Minor：the assertion still passed
+`ensure_ascii=False` while production `_canonical_json()` uses the default `ensure_ascii=True`。The current
+ASCII managed prefix masks that byte difference；a future verified Unicode external prefix would make the test
+reject production's actual canonical bytes。The exact oracle therefore removes that argument too and uses only
+`json.dumps(expected_external_receipt, sort_keys=True)`。This remains test-only；epoch 3、installed package and
+MCPB bytes do not change。An eighth fresh unpack/home reruns the settled assertion before final acceptance。
+
+S3-R3.23 epoch-3 and final-gate evidence：before sync，the checkout reported epoch 3 while the exact managed
+receipt/installed package remained epoch 2 and classified `SERVER_MISMATCH / UPGRADE_REQUIRED / ready=false`；
+the managed prefix device/inode stayed `16777221/14014428`。The 45,772-byte engine snapshot and 44,109-byte
+legacy external/binding/data snapshot exactly matched their pre-migration baselines，and the default data root
+was absent。One normal `RuntimeInstaller.install()` with the reviewed checkout、no override、offline pip and
+correct no-build-isolation semantics took only the existing-engine pip-sync path；its install log records the
+same wheel digest below，then status became READY and the canonical managed receipt became epoch 3。No create、
+remove、engine rebuild or external-tree write occurred；both snapshots remain byte-exact after sync and every
+real MCPB run。
+
+The fresh offline package root produced wheel
+`32a90786b4a44d04916e20fa37d6cb89f8b3a92c4dc3691b9bc18468a694c31d` and sdist
+`fe7b204b48a7e9572022b861990055e3a37f12d3b2b54851076803f0876098c5`。Checkout、wheel、sdist and installed
+site-packages contain the same 73 Python files with aggregate manifest
+`fc7061857e70d921fb3d7a6fea3cfd415505708a26849fda15955c7cd793e8c4`；active installed identity is VibeCAD
+0.4.0、epoch 3、MCP 1.27.2、FreeCAD 1.1.0 and contains the owned-worker initializer。The independent package
+audit reports Critical/Important/Minor `0/0/0`，including wheel RECORD/CRC/path safety and valid safe sdist。
+The two post-build sdist differences are only this append-only ledger and the excluded R3.22 integration-test
+oracle；they are non-deployable evidence drift，not a recursive requirement that a build contain its own later
+hash record。A public sdist release remains out of scope and would be rebuilt from its final tag。
+
+MCPB 2.1.2 validate/pack/unpack produced 81 files、546,682 bytes and SHA-256
+`bbb1f5dd792ab9e4bc200c3699a4054a3fd6e4868023265830c0836951aead62`；all fixed files、lock
+`aa8fb8d9292e8501670baa97d7cf9d83d18c9c7b8e1ec5b55d125efb12472930` and 73 Python bytes equal checkout，
+with no tests/docs/runtime/cache payload。The settled eighth fresh unpack/home completes exactly
+`1 passed in 7.82s` through installed epoch identity、swap、20-tool/resource discovery、project/task、real box、
+auto-commit、FCStd/STEP export/read and DEBUG negative secrecy。The separate managed Agent-first matrix passes
+`1 in 10.29s`。Final non-slow regression is `3827 passed, 95 deselected` in 66.88 seconds；full Ruff、51 changed
+Python format checks、offline lock check、MCPB validation and diff check all pass。Final settled-diff reviews are
+the only remaining pre-commit gate。
+
+S3-R3.24 final-review documentation correction：the architecture review found one README wording Minor：
+`auto_commit` publishes HEAD automatically after verified success，while only `require_review` waits for explicit
+Accept；Reject leaves HEAD unchanged。The adversarial review found one contract-description Minor：resource
+authority does not avoid every materialized catalog allocation。Its first `_scan_locked()` phase materializes a
+hard-bounded inventory of at most 4096 strict request records and fixed-count size/identity maps to prove store
+integrity/quota，returns only scalar inventory and releases those temporary objects；the subsequent authority
+scan reads one request record at a time and retains only the matching PUBLISHED binding。The documentation now
+states that actual two-phase bound instead of the stronger false claim。Both are documentation-only closures；
+public schemas、resource behavior、epoch/package/MCPB bytes and passing test evidence do not change。Because the
+settled diff changed，all final reviews must bind this corrected state before staging。
+
+S3-R3.24a package-evidence correction：R3.24's “package/MCPB bytes do not change” statement is false。README is
+an MCPB fixed file and project-description input for wheel/sdist metadata；the corrected auto-commit text makes
+the R3.23 archives stale even though all 73 Python bytes、runtime behavior and private epoch remain unchanged。
+Final acceptance therefore rebuilds wheel/sdist and MCPB from this corrected checkout in a new output root，
+revalidates fixed README/lock/73-Python parity and reruns the exact real unpacked MCPB test with another fresh
+canonical child home。No managed runtime sync or epoch 4 is needed because installed production Python is still
+byte-exact epoch 3；the superseding archive hashes and final review binding are recorded after that run。
+
+S3-R3.25 corrected-README package GREEN：the new post-R3.24 output root rebuilds wheel
+`19050242ee44b06c47c2a675ae5fb65439b0fe1887c38b10f34e13562103b551` and sdist
+`2fb3592d14b3d280ab6b50674013eb24be8d33185104a4de98bf17e5059a8555`。Wheel metadata contains the exact
+corrected README；selected sdist README、ledger-at-build、integration test and lock equal checkout。Both archives
+still contain the same 73 Python files and aggregate
+`fc7061857e70d921fb3d7a6fea3cfd415505708a26849fda15955c7cd793e8c4` with epoch 3。The superseding MCPB is
+81 files、546,713 bytes、SHA-256
+`3966f966aac57344126e5b78ebb8e7337fc7e669e20576b72263529b57f4e6dc`；all eight fixed files including README、
+lock `aa8fb8d9292e8501670baa97d7cf9d83d18c9c7b8e1ec5b55d125efb12472930` and 73 Python files equal the
+corrected checkout。The ninth fresh unpack/canonical-home real gate passes exactly `1 passed in 9.82s`，and the
+45,772-byte managed-engine plus 44,109-byte legacy snapshots remain exact with default data absent。These three
+archive hashes supersede only R3.23's pre-README-correction archive hashes；its installed epoch-3 and test
+evidence remain valid。Final reviews must bind R3.25，not the superseded bundles。
+
+The unpacked-package gate likewise accepts only a fresh unpack whose `uv.lock` bytes and SHA-256 equal the
+checkout before uv creates an environment。Its real stdio session compares the complete ordered
+`tools/list` name/input/output/annotation projection，sends protocol/tool/input/resource negative canaries under
+root DEBUG logging，and proves neither responses nor stderr contain the canary。An absent unpack directory is
+only a safe local skip，never acceptance evidence；the final controller record must show that the explicitly
+selected unpacked-package test itself completed as exactly `1 passed`，not merely that pytest exited zero。
 
 ### 4. Frozen application contracts
 
@@ -2935,16 +3401,19 @@ ASCII bytes with scheme/host `vibecad://artifact/`, `materialization_<64 lowerca
 `artifact_<32 lowercase hex>` path segments and no query、fragment、percent encoding or alternate form。Before
 payload allocation, under the bounded artifact catalog lock, the handler must prove at least one exact
 checksummed `PUBLISHED` export request binds that materialization descriptor/manifest/artifact tuple；a plausible
-directory or manifest alone is never authority。The bounded 4096-record proof scans one strict ≤64-KiB record at
-a time with no materialized catalog/list allocation。It then descriptor-opens and revalidates manifest、descriptor、
-artifact id/hash/size/inode/root and streams/hashes one no-follow fd with before/after identity。Guessed URIs for
+directory or manifest alone is never authority。The bounded proof first performs the hard-bounded integrity/quota
+inventory，which may materialize at most 4096 strict ≤64-KiB request records and fixed-count size/identity maps
+before returning only scalar counts；those temporary objects are released before a second authority scan reads
+one record at a time and retains only the matching PUBLISHED binding。It then descriptor-opens and revalidates
+manifest、descriptor、artifact id/hash/size/inode/root and streams/hashes one no-follow fd with before/after
+identity。Guessed URIs for
 RESERVED/STAGING/MATERIALIZED/CLEANUP_REQUIRED/REJECTED or orphan directories return the fixed unavailable error
 and zero bytes。
 
 Raw content is at most 67,108,864 bytes and base64 text at most 89,478,488 bytes。The owned handler performs one
 bounded read/hash and explicit base64 construction into `BlobResourceContents`；including raw、encoded bytes、
 ASCII string、serialized message and 32 MiB bounded overhead, incremental peak allocation is at most
-402,653,184 bytes。
+402,653,184 bytes。The preceding bounded inventory and payload-allocation phases do not overlap。
 N/N+1 size and peak gates run against the real locked SDK；larger verified artifacts stay materialized but are
 not read through MCP。Streaming/local broker delivery remains S3-RES-13。
 
@@ -3066,6 +3535,7 @@ Residual additions：
 | S3-RES-13 | MCP 1.27.2 BlobResourceContents buffers a complete base64 payload；Stage 3 owns and bounds that path at 64 MiB, so larger verified materializations cannot be delivered through this call | G1/P1；close with authenticated streaming/local broker or bounded chunk protocol plus cross-host E2E |
 | S3-RES-14 | `create_task` still owns a random id without a caller request key；response loss can orphan a pre-CAD task, though it cannot duplicate CAD effects | P0-B；close with durable task-request catalog or list/recover tasks and exact replay tests |
 | S3-RES-15 | TaskRun records/temps、project-create receipts、immutable RevisionStore payloads/reservations and artifact request/materialization records have finite hard quotas but no automatic retention/GC in Stage 3；valid use can exhaust them | P0-B；close all four stores with policy-governed list/archive/delete/GC that preserves HEAD、draft、replay and ancestry authority and passes crash/restart audit |
+| S3-RES-16 | The persistent checksum-bound `.vibecad-runner/micromamba` intentionally fails closed when a later validated source digest differs；today recovery is an explicit runtime uninstall/reinstall rather than an in-place runner generation migration | P0-B runtime maintenance；close with a digest-versioned private runner generation or an identity-bound upgrade transaction plus interruption/replacement/uninstall gates |
 
 Ordinary schema naming、test migration、fault-injection defects and review findings are closed autonomously
 inside this packet。Only a breaker that changes product position、public trust boundary or approved scope waits
@@ -3087,6 +3557,8 @@ for the user。
 |---|---|---|---|---|---|---|
 | S3-E13 / 2026-07-21T16:32:00Z | S3-A01；four read-only dependency audits；independent architecture and adversarial final reviews PASS after every Critical/Important was closed | 505a224 / not authorized | corrected focused baseline 487 passed, 10 deselected；exact allowlist；packet diff-check PASS；no production mutation | S3-RES-01..06, S3-RES-09, S3-RES-11..15；S3-7 implementation pending | S3-S13 | control-ready |
 | S3-E14 / 2026-07-21T16:36:41Z | S3-A01；post-control independent transport cross-check found and then re-reviewed the sole Important capacity contradiction | ec485ca / not authorized | handshake replay now has a separate exact two-frame / 4,194,304-byte budget and leaves all eight active request/id slots available；focused rereview PASS with no remaining Critical/Important | unchanged；S3-7 implementation pending | S3-S13 + this append-only correction | control-ready |
+| S3-E15 / 2026-07-22T03:57:30Z | S3-A01；worker、receipt and package independent reviews Critical/Important/Minor `0/0/0` after closure；two final settled-diff reviews pending | precommit `19ae74f`；exact semantic subject pending / push not authorized | epoch-3 installed exact；managed Agent matrix PASS；fresh MCPB PASS；3827/95 full gate；package/MCPB hashes in R3.23；engine/legacy exact | S3-RES-01..06, S3-RES-09, S3-RES-11..16 unchanged | S3-S14-precommit | semantic-ready |
+| S3-E16 / 2026-07-22T04:08:41Z | S3-A01；R3.24 final-review documentation findings closed；final reviews rebinding corrected archives | precommit `19ae74f`；exact semantic subject pending / push not authorized | R3.25 wheel/sdist/MCPB exact corrected README；ninth fresh MCPB PASS；3827/95 unchanged；engine/legacy exact | unchanged | S3-S14-precommit.1 | final-review |
 
 ### Recovery snapshot S3-S13
 
@@ -3099,6 +3571,40 @@ for the user。
 4. **Recovery:** verify branch `codex/agent-stage3`、find the exact control-commit subject、confirm no active test
    process and inspect the §2 semantic allowlist；if S3-7 semantic commit exists, use S3-S14 instead of replaying
    this control step。
+
+### Recovery snapshot S3-S14-precommit
+
+1. **Status:** the complete S3-7 implementation is settled in the exact §2 allowlist；managed epoch 3、real
+   Agent-first and fresh MCPB gates are PASS，and no server/test process remains。The semantic commit does not yet
+   exist；precommit HEAD is `19ae74f`。
+2. **Next:** run two independent read-only final reviews against this exact diff/evidence，close every finding，
+   stage only the named allowlist and create the local semantic commit with subject
+   `feat(mcp): publish verified agent CAD surface`。Do not push。
+3. **Authority:** S3-A01/S3-D01..D08 and the user's standing continuous-execution direction authorize these local
+   gates、review、correction and named-file commits；push/PR/release/marketplace/external spend/data deletion remain
+   unauthorized。
+4. **Recovery:** verify branch、HEAD、clean process table、epoch-3 current receipt and the three R3.23 hashes；if
+   the semantic subject exists，do not repeat runtime sync or real MCPB effects。Resolve the semantic hash from
+   Git，then append the final S3-S14 review/hash record in a docs-only completion commit。
+
+### Recovery snapshot S3-S14-precommit.1
+
+1. **Status:** the complete S3-7 implementation remains settled in the exact §2 allowlist；the corrected README
+   and resource description are included in the R3.25 wheel、sdist and MCPB，the ninth fresh MCPB gate is PASS，
+   and managed epoch 3 plus the 3827/95 full gate remain valid。The semantic commit does not yet exist；precommit
+   HEAD is `19ae74f`。
+2. **Next:** finish at least two independent read-only reviews bound to this exact R3.25 diff and archive set，
+   close every finding，then stage only the 58 named allowlist entries and create the local semantic commit with
+   subject `feat(mcp): publish verified agent CAD surface`。Do not push。
+3. **Authority:** S3-A01/S3-D01..D08 and the user's standing continuous-execution direction authorize these local
+   gates、review、correction and named-file commits；push/PR/release/marketplace/external spend/data deletion remain
+   unauthorized。
+4. **Recovery:** verify branch、HEAD、clean process table、epoch-3 current receipt and R3.25 wheel
+   `19050242ee44b06c47c2a675ae5fb65439b0fe1887c38b10f34e13562103b551`、sdist
+   `2fb3592d14b3d280ab6b50674013eb24be8d33185104a4de98bf17e5059a8555` and MCPB
+   `3966f966aac57344126e5b78ebb8e7337fc7e669e20576b72263529b57f4e6dc`；if the semantic subject exists，do not
+   repeat runtime sync or real MCPB effects。Resolve the semantic hash from Git，then append the final S3-S14
+   review/hash record in a docs-only completion commit。
 
 ## 9. 用户决策与持续执行规则
 

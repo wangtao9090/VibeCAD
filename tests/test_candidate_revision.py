@@ -69,6 +69,8 @@ from vibecad.workflow.lease import (
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
 OTHER_PROJECT_ID = "project_11111111111111111111111111111111"
 OTHER_REVISION = "revision_11111111111111111111111111111111"
+TASK_ID = "task_0123456789abcdef0123456789abcdef"
+OTHER_TASK_ID = "task_11111111111111111111111111111111"
 MANIFEST = "a" * 64
 
 EXPECTED_EXECUTION_EXPORTS = [
@@ -125,6 +127,7 @@ EXPECTED_ERROR_CODES = {
     "ALREADY_TERMINAL": "already_terminal",
     "RECEIPT_REJECTED": "receipt_rejected",
     "CAD_FAILURE": "cad_failure",
+    "RESOURCE_EXHAUSTED": "resource_exhausted",
     "STORE_FAILURE": "store_failure",
     "CONFLICT": "conflict",
     "CLEANUP_REQUIRED": "cleanup_required",
@@ -346,6 +349,7 @@ def _secure_root(path: Path) -> Path:
 
 @contextmanager
 def _rig(tmp_path: Path, *, imported: bool = False, suffix: str = "main"):
+    revisions_module._initialize_candidate_file_limit_runtime()
     root = tmp_path / suffix
     locks_root = _secure_root(root / "locks")
     revisions_root = _secure_root(root / "revisions")
@@ -409,6 +413,491 @@ def _begin(rig: Rig) -> ActiveCandidate:
         expected_head=rig.head,
         lease=rig.lease,
     )
+
+
+def test_pre_cas_reservation_is_replay_safe_and_enters_cad_only_when_activated(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="reservation-replay") as rig:
+        revision_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+        assert rig.port.calls == []
+        assert (
+            rig.coordinator.reserve_candidate(
+                project_id=PROJECT_ID,
+                expected_head=rig.head,
+                reservation_key=TASK_ID,
+                lease=rig.lease,
+            )
+            == revision_id
+        )
+        with pytest.raises(CandidateError) as captured:
+            rig.coordinator.reserve_candidate(
+                project_id=PROJECT_ID,
+                expected_head=rig.head,
+                reservation_key=OTHER_TASK_ID,
+                lease=rig.lease,
+            )
+        _assert_candidate_error(captured, CandidateErrorCode.CONFLICT)
+        active = rig.coordinator.begin_reserved(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            revision_id=revision_id,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+        assert type(active) is ActiveCandidate
+        assert active.binding.revision_id == revision_id
+        assert [call[0] for call in rig.port.calls] == ["create_empty"]
+
+
+def test_pre_cas_reservation_capacity_error_is_exact_and_has_zero_cad_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _rig(tmp_path, suffix="reservation-capacity") as rig:
+        current = sum(
+            path.stat(follow_symlinks=False).st_size
+            for path in rig.store._root.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        )
+        monkeypatch.setattr(
+            revisions_module,
+            "_MAX_STORE_BYTES",
+            current + 2_151_677_952 - 1,
+            raising=False,
+        )
+        with pytest.raises(CandidateError) as captured:
+            rig.coordinator.reserve_candidate(
+                project_id=PROJECT_ID,
+                expected_head=rig.head,
+                reservation_key=TASK_ID,
+                lease=rig.lease,
+            )
+        _assert_candidate_error(captured, CandidateErrorCode.RESOURCE_EXHAUSTED)
+        assert rig.port.calls == []
+
+
+def test_cancel_pre_cas_reservation_returns_deterministic_cleanup_evidence(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="reservation-cancel") as rig:
+        revision_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+        result = rig.coordinator.cancel_reservation(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            revision_id=revision_id,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+        assert type(result) is CandidateRollbackResult
+        assert result.status is CandidateRollbackStatus.NOT_COMMITTED
+        assert result.cleanup_required is False
+        assert result.recovery_required is False
+        assert result.head == rig.head
+        assert result.reconciliation is not None
+        assert result.reconciliation.status is ReconciliationStatus.NOT_COMMITTED
+        assert rig.port.calls == []
+
+
+def test_reserved_candidate_activation_does_not_repeat_capacity_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _rig(tmp_path, suffix="reservation-post-cas-capacity") as rig:
+        revision_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+        with monkeypatch.context() as capacity:
+            for name in (
+                "_MAX_STORE_BYTES",
+                "_MAX_PROJECTS",
+                "_MAX_REVISIONS",
+                "_MAX_CANDIDATES_AND_RESERVATIONS",
+                "_MAX_ORDINARY_FILES",
+            ):
+                capacity.setattr(revisions_module, name, 0, raising=False)
+            active = rig.coordinator.begin_reserved(
+                project_id=PROJECT_ID,
+                expected_head=rig.head,
+                revision_id=revision_id,
+                reservation_key=TASK_ID,
+                lease=rig.lease,
+            )
+            assert active.binding.revision_id == revision_id
+            assert [call[0] for call in rig.port.calls] == ["create_empty"]
+        rolled_back = rig.coordinator.rollback(candidate=active, lease=rig.lease)
+        assert rolled_back.status is CandidateRollbackStatus.NOT_COMMITTED
+        assert [call[0] for call in rig.port.calls] == ["create_empty", "close"]
+        assert tuple(rig.store._root.rglob("reservation.json")) == ()
+
+
+def test_staging_journal_replay_advances_a_crashed_reserved_record_to_staged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _rig(tmp_path, suffix="reservation-phase-replay") as rig:
+        original_phase = revisions_module._set_reservation_phase
+        failed = False
+
+        def fail_first_staged_phase(*args, **kwargs):
+            nonlocal failed
+            if not failed and args[6] == "staged":
+                failed = True
+                return (None, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+            return original_phase(*args, **kwargs)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(revisions_module, "_set_reservation_phase", fail_first_staged_phase)
+            with pytest.raises(CandidateError) as first:
+                rig.coordinator.reserve_candidate(
+                    project_id=PROJECT_ID,
+                    expected_head=rig.head,
+                    reservation_key=TASK_ID,
+                    lease=rig.lease,
+                )
+        _assert_candidate_error(first, CandidateErrorCode.RECOVERY_REQUIRED)
+        journal = rig.store._root.rglob("journal.json")
+        assert len(tuple(journal)) == 1
+        revision_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+        active = rig.coordinator.begin_reserved(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            revision_id=revision_id,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+        assert active.binding.revision_id == revision_id
+        rolled_back = rig.coordinator.rollback(candidate=active, lease=rig.lease)
+        assert rolled_back.status is CandidateRollbackStatus.NOT_COMMITTED
+
+
+def test_new_session_is_closed_when_file_limit_restore_fails_after_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _rig(tmp_path, suffix="file-limit-create-session-cleanup") as rig:
+        revision_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+        runtime = revisions_module._CandidateFileLimitRuntime
+        monkeypatch.setattr(runtime, "_initialized_pid", revisions_module.os.getpid())
+        monkeypatch.setattr(runtime, "_poisoned_pid", None)
+        monkeypatch.setattr(
+            revisions_module.signal,
+            "getsignal",
+            lambda _signal_number: revisions_module.signal.SIG_IGN,
+        )
+        monkeypatch.setattr(
+            revisions_module.resource,
+            "getrlimit",
+            lambda _resource_number: (
+                revisions_module.resource.RLIM_INFINITY,
+                revisions_module.resource.RLIM_INFINITY,
+            ),
+        )
+        calls = 0
+
+        def fail_restore(_resource_number, _value):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected restore failure")
+
+        monkeypatch.setattr(revisions_module.resource, "setrlimit", fail_restore)
+        with pytest.raises(CandidateError) as captured:
+            rig.coordinator.begin_reserved(
+                project_id=PROJECT_ID,
+                expected_head=rig.head,
+                revision_id=revision_id,
+                reservation_key=TASK_ID,
+                lease=rig.lease,
+            )
+        error = _assert_candidate_error(captured, CandidateErrorCode.RECOVERY_REQUIRED)
+        assert error.recovery_required is True
+        created = rig.port.created[-1]
+        assert created.closed is True
+        assert rig.port.close_count(created) == 1
+
+
+def test_reservation_is_charged_across_store_restart_replays_and_releases_exactly(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="reservation-restart") as rig:
+        revision_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+        reservation_records = tuple(rig.store._root.rglob("reservation.json"))
+        assert len(reservation_records) == 1
+        fresh_store = LocalRevisionStore(
+            rig.store._root,
+            rig.manager,
+            trust=RevisionStoreRootTrust.TRUSTED_LOCAL,
+        )
+        fresh = CandidateCoordinator(
+            store=fresh_store,
+            snapshot_port=rig.port,
+            session_slot=rig.slot,
+        )
+        assert (
+            fresh.reserve_candidate(
+                project_id=PROJECT_ID,
+                expected_head=rig.head,
+                reservation_key=TASK_ID,
+                lease=rig.lease,
+            )
+            == revision_id
+        )
+        assert tuple(rig.store._root.rglob("reservation.json")) == reservation_records
+        cancelled = fresh.cancel_reservation(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            revision_id=revision_id,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+        assert cancelled.status is CandidateRollbackStatus.NOT_COMMITTED
+        assert tuple(rig.store._root.rglob("reservation.json")) == ()
+        replacement_id = fresh.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=OTHER_TASK_ID,
+            lease=rig.lease,
+        )
+        assert replacement_id != revision_id
+        fresh.cancel_reservation(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            revision_id=replacement_id,
+            reservation_key=OTHER_TASK_ID,
+            lease=rig.lease,
+        )
+
+
+def test_begin_reserved_load_failure_cleans_reservation_before_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _rig(tmp_path, suffix="reservation-prelineage-load") as rig:
+        revision_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+        original = LocalRevisionStore.load_revision
+
+        def fail_baseline(store, project_id, loaded_revision_id):
+            if store is rig.store and loaded_revision_id == rig.head.revision_id:
+                raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
+            return original(store, project_id, loaded_revision_id)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(LocalRevisionStore, "load_revision", fail_baseline)
+            with pytest.raises(CandidateError) as captured:
+                rig.coordinator.begin_reserved(
+                    project_id=PROJECT_ID,
+                    expected_head=rig.head,
+                    revision_id=revision_id,
+                    reservation_key=TASK_ID,
+                    lease=rig.lease,
+                )
+        _assert_candidate_error(captured, CandidateErrorCode.STORE_FAILURE)
+        assert tuple(rig.store._root.rglob("reservation.json")) == ()
+        assert not any(path.is_dir() for path in rig.store._root.rglob("candidates/*"))
+        retry_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+        rig.coordinator.cancel_reservation(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            revision_id=retry_id,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+
+
+def test_begin_reserved_baseline_drift_cleans_reservation_before_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _rig(tmp_path, suffix="reservation-prelineage-drift") as rig:
+        revision_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=TASK_ID,
+            lease=rig.lease,
+        )
+        wrong = SessionBinding(
+            project_id=PROJECT_ID,
+            revision_id=OTHER_REVISION,
+            session=FakeSession("wrong-baseline", b"wrong"),
+        )
+        original = SessionSlot.current
+
+        def drifted(slot):
+            if slot is rig.slot:
+                return wrong
+            return original(slot)
+
+        with monkeypatch.context() as drift:
+            drift.setattr(SessionSlot, "current", drifted)
+            with pytest.raises(CandidateError) as captured:
+                rig.coordinator.begin_reserved(
+                    project_id=PROJECT_ID,
+                    expected_head=rig.head,
+                    revision_id=revision_id,
+                    reservation_key=TASK_ID,
+                    lease=rig.lease,
+                )
+        _assert_candidate_error(captured, CandidateErrorCode.CONFLICT)
+        assert tuple(rig.store._root.rglob("reservation.json")) == ()
+        assert not any(path.is_dir() for path in rig.store._root.rglob("candidates/*"))
+        assert rig.port.calls == []
+
+
+def test_file_limit_restore_failure_remains_candidate_recovery_required(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _rig(tmp_path, suffix="file-limit-restore") as rig:
+        active = _begin(rig)
+        runtime = revisions_module._CandidateFileLimitRuntime
+        monkeypatch.setattr(runtime, "_initialized_pid", revisions_module.os.getpid())
+        monkeypatch.setattr(runtime, "_poisoned_pid", None)
+        monkeypatch.setattr(
+            revisions_module.signal,
+            "getsignal",
+            lambda _signal_number: revisions_module.signal.SIG_IGN,
+        )
+        monkeypatch.setattr(
+            revisions_module.resource,
+            "getrlimit",
+            lambda _resource_number: (
+                revisions_module.resource.RLIM_INFINITY,
+                revisions_module.resource.RLIM_INFINITY,
+            ),
+        )
+        calls = 0
+
+        def fail_restore(_resource_number, _value):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected restore failure")
+
+        monkeypatch.setattr(revisions_module.resource, "setrlimit", fail_restore)
+        with pytest.raises(CandidateError) as captured:
+            rig.coordinator.checkpoint(candidate=active, lease=rig.lease)
+        error = _assert_candidate_error(captured, CandidateErrorCode.RECOVERY_REQUIRED)
+        assert error.recovery_required is True
+        assert rig.store.load_head(PROJECT_ID) == rig.head
+        assert tuple(rig.store._root.rglob("reservation.json")) == ()
+
+
+def test_new_session_is_closed_when_file_limit_restore_fails_after_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _rig(tmp_path, suffix="file-limit-load-session-cleanup") as rig:
+        active = _begin(rig)
+        runtime = revisions_module._CandidateFileLimitRuntime
+        monkeypatch.setattr(runtime, "_initialized_pid", revisions_module.os.getpid())
+        monkeypatch.setattr(runtime, "_poisoned_pid", None)
+        monkeypatch.setattr(
+            revisions_module.signal,
+            "getsignal",
+            lambda _signal_number: revisions_module.signal.SIG_IGN,
+        )
+        monkeypatch.setattr(
+            revisions_module.resource,
+            "getrlimit",
+            lambda _resource_number: (
+                revisions_module.resource.RLIM_INFINITY,
+                revisions_module.resource.RLIM_INFINITY,
+            ),
+        )
+        calls = 0
+
+        def fail_load_restore(_resource_number, _value):
+            nonlocal calls
+            calls += 1
+            if calls == 4:
+                raise OSError("injected load restore failure")
+
+        monkeypatch.setattr(revisions_module.resource, "setrlimit", fail_load_restore)
+        with pytest.raises(CandidateError) as captured:
+            rig.coordinator.checkpoint(candidate=active, lease=rig.lease)
+        error = _assert_candidate_error(captured, CandidateErrorCode.RECOVERY_REQUIRED)
+        assert error.recovery_required is True
+        loaded = rig.port.created[-1]
+        assert loaded.name.startswith("load:")
+        assert loaded.closed is True
+        assert rig.port.close_count(loaded) == 1
+
+
+def test_writer_of_536870913_bytes_has_zero_revision_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _rig(tmp_path, suffix="file-limit-exact-writer") as rig:
+        active = _begin(rig)
+        before_manifests = tuple(
+            sorted(
+                str(path.relative_to(rig.store._root))
+                for path in rig.store._root.rglob("manifest.json")
+            )
+        )
+
+        def write_one_past(_port, _session, path):
+            with path.open("wb") as stream:
+                stream.seek(536_870_912)
+                stream.write(b"x")
+                stream.flush()
+
+        monkeypatch.setattr(FakeCadSnapshotPort, "checkpoint_fcstd", write_one_past)
+        with pytest.raises(CandidateError) as captured:
+            rig.coordinator.checkpoint(candidate=active, lease=rig.lease)
+        error = _assert_candidate_error(captured, CandidateErrorCode.CAD_FAILURE)
+        assert error.head_committed is False
+        assert error.cleanup_required is False
+        assert error.recovery_required is False
+        assert rig.store.load_head(PROJECT_ID) == rig.head
+        after_manifests = tuple(
+            sorted(
+                str(path.relative_to(rig.store._root))
+                for path in rig.store._root.rglob("manifest.json")
+            )
+        )
+        assert after_manifests == before_manifests
+        assert tuple(rig.store._root.rglob("reservation.json")) == ()
+        assert not any(path.is_dir() for path in rig.store._root.rglob("candidates/*"))
 
 
 def _checkpoint(rig: Rig, active: ActiveCandidate) -> CheckpointedCandidate:
@@ -629,6 +1118,29 @@ def test_public_surface_signatures_and_closed_enums() -> None:
     }
     expected_methods = {
         "begin": ("self", "project_id", "expected_head", "lease"),
+        "reserve_candidate": (
+            "self",
+            "project_id",
+            "expected_head",
+            "reservation_key",
+            "lease",
+        ),
+        "begin_reserved": (
+            "self",
+            "project_id",
+            "expected_head",
+            "revision_id",
+            "reservation_key",
+            "lease",
+        ),
+        "cancel_reservation": (
+            "self",
+            "project_id",
+            "expected_head",
+            "revision_id",
+            "reservation_key",
+            "lease",
+        ),
         "checkpoint": ("self", "candidate", "lease"),
         "seal": ("self", "candidate", "lease"),
         "reopen_review": ("self", "project_id", "base_head", "revision", "lease"),
@@ -654,6 +1166,29 @@ def test_public_surface_signatures_and_closed_enums() -> None:
             "expected_head": ProjectHead,
             "lease": ProjectWriteLease,
             "return": ActiveCandidate,
+        },
+        "reserve_candidate": {
+            "project_id": str,
+            "expected_head": ProjectHead,
+            "reservation_key": str,
+            "lease": ProjectWriteLease,
+            "return": str,
+        },
+        "begin_reserved": {
+            "project_id": str,
+            "expected_head": ProjectHead,
+            "revision_id": str,
+            "reservation_key": str,
+            "lease": ProjectWriteLease,
+            "return": ActiveCandidate,
+        },
+        "cancel_reservation": {
+            "project_id": str,
+            "expected_head": ProjectHead,
+            "revision_id": str,
+            "reservation_key": str,
+            "lease": ProjectWriteLease,
+            "return": CandidateRollbackResult,
         },
         "checkpoint": {
             "candidate": ActiveCandidate,
@@ -1427,13 +1962,13 @@ def test_begin_revision_uncertainty_reconciles_once_and_reports_durable_outcome(
     expected_code: CandidateErrorCode,
 ) -> None:
     with _rig(tmp_path, suffix=f"begin-revision-uncertain-{outcome}") as rig:
-        original_begin = LocalRevisionStore.begin_revision
+        original_begin = candidate_module._reserve_candidate_revision
         original_reconcile = LocalRevisionStore.reconcile
         reconcile_calls = 0
         rollback_calls = 0
 
-        def begin_then_raise(self, project_id, expected_head, lease):
-            original_begin(self, project_id, expected_head, lease)
+        def begin_then_raise(store, project_id, expected_head, reservation_key, lease):
+            original_begin(store, project_id, expected_head, reservation_key, lease)
             raise RevisionStoreError(
                 RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
                 head_committed=False,
@@ -1455,7 +1990,7 @@ def test_begin_revision_uncertainty_reconciles_once_and_reports_durable_outcome(
             rollback_calls += 1
             raise AssertionError("unknown revision id must reconcile, not roll back")
 
-        monkeypatch.setattr(LocalRevisionStore, "begin_revision", begin_then_raise)
+        monkeypatch.setattr(candidate_module, "_reserve_candidate_revision", begin_then_raise)
         monkeypatch.setattr(LocalRevisionStore, "reconcile", scripted_reconcile)
         monkeypatch.setattr(LocalRevisionStore, "rollback_revision", forbidden_rollback)
         with pytest.raises(CandidateError) as caught:
@@ -6345,14 +6880,21 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
             "aiohttp",
             "httpx",
             "importlib",
-            "os",
             "requests",
             "socket",
             "subprocess",
             "urllib",
         }
     )
-    allowed_plain_imports = {"re", "threading", "weakref"}
+    allowed_plain_imports = {
+        "os",
+        "re",
+        "resource",
+        "secrets",
+        "signal",
+        "threading",
+        "weakref",
+    }
     assert len(set(plain_imports)) == len(plain_imports)
     plain_import_modules = [module for module, _alias in plain_imports]
     assert len(plain_import_modules) == len(set(plain_import_modules))
@@ -6375,6 +6917,9 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
             "RevisionRef",
             "RevisionStoreError",
             "RevisionStoreErrorCode",
+            "_candidate_file_limit",
+            "_reserve_candidate_revision",
+            "_validate_candidate_reservation",
         },
         "vibecad.validation": {
             "CompiledAcceptance",
@@ -6393,12 +6938,17 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         assert level == 0
         assert module in allowed_from_imports
         assert name in allowed_from_imports[module]
-        assert name != "*" and not name.startswith("_")
+        private_revision_boundary = module == "vibecad.execution.revisions" and name in {
+            "_candidate_file_limit",
+            "_reserve_candidate_revision",
+            "_validate_candidate_reservation",
+        }
+        assert name != "*" and (not name.startswith("_") or private_revision_boundary)
         if module == "__future__":
             assert alias is None
         else:
             assert alias is not None and alias.startswith("_") and not alias.startswith("__")
-            assert alias != name
+            assert alias != name or private_revision_boundary
     assert len(set(from_imports)) == len(from_imports)
     imported_from_pairs = [(module, name) for module, name, _alias, _level in from_imports]
     assert len(imported_from_pairs) == len(set(imported_from_pairs))
@@ -6439,6 +6989,7 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         "isinstance",
         "len",
         "list",
+        "min",
         "object",
         "range",
         "set",
@@ -6601,6 +7152,8 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
                     assert statement.name in {
                         "__copy__",
                         "__deepcopy__",
+                        "__enter__",
+                        "__exit__",
                         "__init__",
                         "__post_init__",
                         "__reduce__",
@@ -6609,6 +7162,7 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
                     if statement.name == "__init__":
                         assert class_node.name in {
                             "CandidateError",
+                            "_CandidateFileLimit",
                             "SessionSlot",
                             "CandidateCoordinator",
                         }
@@ -6659,8 +7213,12 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         assert all(immutable_literal(default) for default in defaults)
 
     allowed_module_attributes = {
+        "os": {"getpid"},
         "re": {"fullmatch"},
-        "threading": {"RLock", "get_ident"},
+        "resource": {"RLIMIT_FSIZE", "RLIM_INFINITY", "getrlimit", "setrlimit"},
+        "secrets": {"token_hex"},
+        "signal": {"SIGXFSZ", "SIG_IGN", "getsignal", "signal"},
+        "threading": {"RLock", "current_thread", "get_ident", "main_thread"},
         "weakref": {"WeakSet"},
     }
     for node in ast.walk(tree):
@@ -6695,9 +7253,13 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
+            if isinstance(node.value, ast.Name) and node.value.id == "_CandidateFileLimitRuntime":
+                assert node.attr in {"_initialized_pid", "_poisoned_pid"}
+                continue
             assert isinstance(node.value, ast.Name) and node.value.id == "self"
             owner = enclosing_class_name(node)
             assert owner in {
+                "_CandidateFileLimit",
                 "CandidateError",
                 "SessionSlot",
                 "CandidateCoordinator",
@@ -6843,6 +7405,9 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         assert_method_uses_one_lock("SessionSlot", locked_method, slot_lock_field)
     for locked_method in (
         "begin",
+        "reserve_candidate",
+        "begin_reserved",
+        "cancel_reservation",
         "checkpoint",
         "seal",
         "reopen_review",
@@ -6981,6 +7546,9 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
     trusted_callable_imports = {
         ("collections", "OrderedDict"),
         ("dataclasses", "dataclass"),
+        ("vibecad.execution.revisions", "_candidate_file_limit"),
+        ("vibecad.execution.revisions", "_reserve_candidate_revision"),
+        ("vibecad.execution.revisions", "_validate_candidate_reservation"),
         ("vibecad.validation", "consume_verification_receipt"),
     }
     trusted_import_calls = {
@@ -7011,6 +7579,9 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
     }
     coordinator_public_methods = (
         "begin",
+        "reserve_candidate",
+        "begin_reserved",
+        "cancel_reservation",
         "checkpoint",
         "seal",
         "reopen_review",
@@ -7021,6 +7592,10 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         "rollback",
         "reconcile",
     )
+    coordinator_session_helpers = {
+        "_create_empty_session",
+        "_load_fcstd_session",
+    }
     for method_name in coordinator_public_methods:
         method = class_method("CandidateCoordinator", method_name)
         parameter_names = {argument.arg for argument in method.args.args + method.args.kwonlyargs}
@@ -7094,6 +7669,16 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         return result
 
     def trusted_load_path(node: ast.AST, function_node: ast.FunctionDef) -> bool:
+        if (
+            function_node
+            is class_method(
+                "CandidateCoordinator",
+                "_load_fcstd_session",
+            )
+            and isinstance(node, ast.Name)
+            and node.id == "path"
+        ):
+            return True
         if direct_store_path_call(node):
             return True
         if isinstance(node, ast.Name):
@@ -7157,10 +7742,18 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
                 assert binding_argument.value.id == "candidate"
                 path_argument = call_argument(node, 1, "path")
                 assert trusted_load_path(path_argument, function_node)
+            elif node.func.attr == "create_empty":
+                function_node = enclosing_function_node(node)
+                assert function_node is class_method(
+                    "CandidateCoordinator",
+                    "_create_empty_session",
+                )
             elif node.func.attr == "load_fcstd":
                 function_node = enclosing_function_node(node)
-                assert function_node is not None
-                assert function_node.name in coordinator_public_methods
+                assert function_node is class_method(
+                    "CandidateCoordinator",
+                    "_load_fcstd_session",
+                )
                 assert len(node.args) + len(node.keywords) == 1
                 path_argument = call_argument(node, 0, "path")
                 assert trusted_load_path(path_argument, function_node)
@@ -7182,6 +7775,29 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
             assert receiver.id == "CandidateCoordinator"
             assert len(node.args) == 1
             assert isinstance(node.args[0], ast.Name) and node.args[0].id == "self"
+            continue
+        if enclosing_class_name(node) == "_CandidateFileLimit" and node.func.attr in {
+            "acquire",
+            "release",
+        }:
+            assert isinstance(receiver, (ast.Attribute, ast.Name))
+            continue
+        if node.func.attr in {"begin_reserved", "reserve_candidate"}:
+            assert enclosing_function_node(node) is class_method(
+                "CandidateCoordinator",
+                "begin",
+            )
+            assert isinstance(receiver, ast.Name) and receiver.id == "self"
+            continue
+        if node.func.attr in coordinator_session_helpers:
+            function_node = enclosing_function_node(node)
+            assert function_node is not None
+            assert function_node.name in coordinator_public_methods
+            assert isinstance(receiver, ast.Name) and receiver.id == "self"
+            if node.func.attr == "_load_fcstd_session":
+                assert len(node.args) + len(node.keywords) == 1
+                path_argument = call_argument(node, 0, "path")
+                assert trusted_load_path(path_argument, function_node)
             continue
         assert node.func.attr.startswith("_") and not node.func.attr.startswith("__")
         assert enclosing_class_name(node) in {"SessionSlot", "CandidateCoordinator"}
@@ -7272,7 +7888,10 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         elif isinstance(node, ast.Set):
             assert all(not expression_mentions_session(value) for value in node.elts)
         elif isinstance(node, ast.Return):
-            assert not expression_mentions_session(node.value)
+            if expression_mentions_session(node.value):
+                function_node = enclosing_function_node(node)
+                assert function_node is not None
+                assert function_node.name in coordinator_session_helpers
 
     def safe_session_truth_test(node: ast.AST) -> bool:
         if not expression_mentions_session(node):

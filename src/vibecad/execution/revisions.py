@@ -6,14 +6,23 @@ import hashlib
 import json
 import os
 import re
+import resource
 import secrets
+import signal
 import stat
+import threading
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER
-from vibecad.workflow.lease import ProjectWriteLease, ResourceLeaseManager
+from vibecad.workflow.lease import (
+    LeaseError,
+    LeaseErrorCode,
+    ProjectWriteLease,
+    ResourceLeaseManager,
+)
 
 __all__ = (
     "CommitJournal",
@@ -23,7 +32,9 @@ __all__ = (
     "ReconciliationResult",
     "ReconciliationStatus",
     "RevisionArtifactRef",
+    "RevisionCopyCursor",
     "RevisionRef",
+    "RevisionSourceBinding",
     "RevisionStoreError",
     "RevisionStoreErrorCode",
     "RevisionStoreRootTrust",
@@ -38,6 +49,14 @@ _MAX_JSON_NODES = 4096
 _MAX_JSON_STRING_BYTES = 4096
 _MAX_FILE_BYTES = 536870912
 _MAX_REVISION_BYTES = 1073741824
+_MAX_STORE_BYTES = 17179869184
+_MAX_PROJECTS = 4096
+_MAX_REVISIONS = 8192
+_MAX_CANDIDATES_AND_RESERVATIONS = 1024
+_MAX_ORDINARY_FILES = 65536
+_MAX_CANDIDATE_FILE_BYTES = 536870912
+_GENERATION_ZERO_RESERVATION_BYTES = 1074790400
+_CANDIDATE_RESERVATION_BYTES = 2151677952
 _COPY_CHUNK_BYTES = 65536
 _MAX_RECORD_OPEN_ATTEMPTS = 3
 
@@ -47,6 +66,14 @@ _CANDIDATE_PATH_DOMAIN = b"vibecad-revision-candidate-path-v1\0"
 _MANIFEST_CHECKSUM_DOMAIN = b"vibecad-revision-manifest-v1\0"
 _HEAD_CHECKSUM_DOMAIN = b"vibecad-project-head-v1\0"
 _JOURNAL_CHECKSUM_DOMAIN = b"vibecad-commit-journal-v1\0"
+_RESERVATION_CHECKSUM_DOMAIN = b"vibecad-revision-reservation-v1\0"
+_RESERVATION_KEY_DOMAIN = b"vibecad-revision-reservation-key-v1\0"
+_QUOTA_RESOURCE_ID = "vibecad-revision-quota-v1"
+_QUOTA_DIRECTORY = ".revision-quota"
+_RESERVATIONS_DIRECTORY = "reservations"
+_RESERVATION_RECORD = "reservation.json"
+_QUOTA_OWNER_CONFLICT = ("conflicting_reservation_owner",)
+_CAD_FILE_LIMIT_RESOURCE = "vibecad-candidate-file-limit-v1"
 
 _PROJECT_PATTERN = r"project_[0-9a-f]{32}"
 _REVISION_PATTERN = r"revision_[0-9a-f]{32}"
@@ -54,6 +81,7 @@ _ARTIFACT_PATTERN = r"artifact_[0-9a-f]{32}"
 _TRANSACTION_PATTERN = r"transaction_[0-9a-f]{32}"
 _DIGEST_PATTERN = r"[0-9a-f]{64}"
 _ARTIFACT_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}"
+_SOURCE_NAME_PATTERN = r"[A-Za-z0-9._-]{1,255}"
 
 
 class RevisionStoreRootTrust(StrEnum):
@@ -83,6 +111,7 @@ class RevisionStoreErrorCode(StrEnum):
     CORRUPT_RECORD = "corrupt_record"
     CORRUPT_CONTENT = "corrupt_content"
     BUDGET_EXCEEDED = "budget_exceeded"
+    RESOURCE_EXHAUSTED = "resource_exhausted"
     UNSAFE_STORE = "unsafe_store"
     INVALID_LEASE = "invalid_lease"
     IO_ERROR = "io_error"
@@ -108,6 +137,187 @@ class RevisionStoreError(ValueError):
         if code is RevisionStoreErrorCode.DURABILITY_UNCERTAIN:
             self.head_committed = head_committed
         self.args = (message,)
+
+
+def _install_candidate_file_signal_policy():
+    try:
+        current = signal.getsignal(signal.SIGXFSZ)
+        if current is not signal.SIG_IGN:
+            if threading.current_thread() is not threading.main_thread():
+                return False
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        return signal.getsignal(signal.SIGXFSZ) is signal.SIG_IGN
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+class _CandidateFileLimitRuntime:
+    __slots__ = ()
+
+    _initialized_pid = None
+    _poisoned_pid = None
+    _gate = None
+
+
+def _initialize_candidate_file_limit_runtime():
+    pid = os.getpid()
+    if _CandidateFileLimitRuntime._poisoned_pid == pid:
+        raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    if _CandidateFileLimitRuntime._initialized_pid == pid:
+        return
+    if threading.current_thread() is not threading.main_thread():
+        raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
+    if not _install_candidate_file_signal_policy():
+        raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
+    _CandidateFileLimitRuntime._gate = threading.RLock()
+    _CandidateFileLimitRuntime._initialized_pid = pid
+
+
+class _CandidateFileLimit:
+    __slots__ = ("_active", "_gate", "_previous", "_store")
+
+    def __init__(self, store):
+        self._store = store
+        self._gate = None
+        self._previous = None
+        self._active = False
+
+    def __enter__(self):
+        pid = os.getpid()
+        if _CandidateFileLimitRuntime._poisoned_pid == pid:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        if _CandidateFileLimitRuntime._initialized_pid != pid:
+            raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
+        if not _install_candidate_file_signal_policy():
+            raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
+        if os.getpid() != self._store._pid:
+            raise RevisionStoreError(RevisionStoreErrorCode.INVALID_LEASE)
+        gate = _CandidateFileLimitRuntime._gate
+        failure_code = None
+        acquired = False
+        try:
+            if gate is None or not gate.acquire(timeout=5.0):
+                raise RuntimeError("candidate file limit gate unavailable")
+            acquired = True
+            if _CandidateFileLimitRuntime._poisoned_pid == pid:
+                raise RuntimeError("candidate file limit runtime is poisoned")
+            previous = resource.getrlimit(resource.RLIMIT_FSIZE)
+            previous_soft = previous[0]
+            hard = previous[1]
+            effective = _MAX_CANDIDATE_FILE_BYTES
+            if previous_soft != resource.RLIM_INFINITY:
+                effective = min(previous_soft, _MAX_CANDIDATE_FILE_BYTES)
+            if hard != resource.RLIM_INFINITY and effective > hard:
+                raise ValueError("invalid file-size limit")
+            resource.setrlimit(resource.RLIMIT_FSIZE, (effective, hard))
+        except (OSError, RuntimeError, ValueError):
+            release_failed = False
+            if acquired:
+                try:
+                    gate.release()
+                except RuntimeError:
+                    release_failed = True
+            if release_failed:
+                _CandidateFileLimitRuntime._poisoned_pid = pid
+                failure_code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+            elif _CandidateFileLimitRuntime._poisoned_pid == pid:
+                failure_code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+            else:
+                failure_code = RevisionStoreErrorCode.IO_ERROR
+        if failure_code is not None:
+            raise RevisionStoreError(failure_code)
+        self._gate = gate
+        self._previous = previous
+        self._active = True
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        failed = False
+        try:
+            if self._active and self._previous is not None:
+                resource.setrlimit(resource.RLIMIT_FSIZE, self._previous)
+        except (OSError, ValueError):
+            failed = True
+        if failed:
+            _CandidateFileLimitRuntime._poisoned_pid = os.getpid()
+        try:
+            if self._gate is not None:
+                self._gate.release()
+        except RuntimeError:
+            failed = True
+            _CandidateFileLimitRuntime._poisoned_pid = os.getpid()
+        self._active = False
+        if failed:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        return False
+
+
+def _candidate_file_limit(store):
+    return _CandidateFileLimit(store)
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RevisionCopyCursor:
+    """Exact verified destination prefix for one revision artifact."""
+
+    name: str
+    size_bytes: int
+    sha256: str
+
+    def __post_init__(self):
+        if type(self.name) is not str:
+            raise TypeError("cursor name must be an exact string")
+        if type(self.size_bytes) is not int:
+            raise TypeError("cursor size must be an exact integer")
+        if type(self.sha256) is not str:
+            raise TypeError("cursor digest must be an exact string")
+        if (
+            re.fullmatch(_ARTIFACT_NAME_PATTERN, self.name) is None
+            or self.size_bytes < 0
+            or self.size_bytes > _MAX_FILE_BYTES
+            or re.fullmatch(_DIGEST_PATTERN, self.sha256) is None
+        ):
+            raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RevisionSourceBinding:
+    """Exact descriptor-relative identity for one trusted import source."""
+
+    dev: int
+    ino: int
+    mode: int
+    uid: int
+    nlink: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+    def __post_init__(self):
+        if (
+            type(self.dev) is not int
+            or type(self.ino) is not int
+            or type(self.mode) is not int
+            or type(self.uid) is not int
+            or type(self.nlink) is not int
+            or type(self.size) is not int
+            or type(self.mtime_ns) is not int
+            or type(self.ctime_ns) is not int
+        ):
+            raise TypeError("source binding fields must be exact integers")
+        if (
+            self.dev < 0
+            or self.ino < 0
+            or self.mode < 0
+            or not stat.S_ISREG(self.mode)
+            or stat.S_IMODE(self.mode) != 384
+            or self.uid != os.geteuid()
+            or self.nlink != 1
+            or self.size <= 0
+            or self.mtime_ns < 0
+            or self.ctime_ns < 0
+        ):
+            raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -237,6 +447,8 @@ def _error_message(code):
         return "The revision content is corrupt."
     if code is RevisionStoreErrorCode.BUDGET_EXCEEDED:
         return "The revision storage budget was exceeded."
+    if code is RevisionStoreErrorCode.RESOURCE_EXHAUSTED:
+        return "Revision storage capacity is exhausted."
     if code is RevisionStoreErrorCode.UNSAFE_STORE:
         return "The revision store is unsafe."
     if code is RevisionStoreErrorCode.INVALID_LEASE:
@@ -970,6 +1182,10 @@ def _create_flags():
     return os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
+def _write_flags():
+    return os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
 def _replace_create_flags():
     return os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -1136,62 +1352,74 @@ def _open_safe_directory(parent_fd, name, root_device, missing_code):
         return (None, missing_code)
     if not _safe_directory_stat(before[0], root_device):
         return (None, RevisionStoreErrorCode.UNSAFE_STORE)
-    failed = False
     directory_fd = None
+    handed_off = False
     try:
-        directory_fd = os.open(name, _root_flags(), dir_fd=parent_fd)
-    except OSError:
-        failed = True
-    if failed or directory_fd is None:
-        return (None, RevisionStoreErrorCode.UNSAFE_STORE)
-    stat_failed = False
-    opened_stat = None
-    try:
-        opened_stat = os.fstat(directory_fd)
-    except OSError:
-        stat_failed = True
-    if stat_failed or opened_stat is None:
-        _close_fd(directory_fd)
-        return (None, RevisionStoreErrorCode.UNSAFE_STORE)
-    if not _safe_directory_stat(opened_stat, root_device):
-        _close_fd(directory_fd)
-        return (None, RevisionStoreErrorCode.UNSAFE_STORE)
-    if opened_stat.st_dev != before[0].st_dev or opened_stat.st_ino != before[0].st_ino:
-        _close_fd(directory_fd)
-        return (None, RevisionStoreErrorCode.UNSAFE_STORE)
-    return (directory_fd, None)
+        try:
+            directory_fd = os.open(name, _root_flags(), dir_fd=parent_fd)
+        except OSError:
+            return (None, RevisionStoreErrorCode.UNSAFE_STORE)
+        opened_stat = None
+        try:
+            opened_stat = os.fstat(directory_fd)
+        except OSError:
+            return (None, RevisionStoreErrorCode.UNSAFE_STORE)
+        if opened_stat is None:
+            return (None, RevisionStoreErrorCode.UNSAFE_STORE)
+        if not _safe_directory_stat(opened_stat, root_device):
+            return (None, RevisionStoreErrorCode.UNSAFE_STORE)
+        if opened_stat.st_dev != before[0].st_dev or opened_stat.st_ino != before[0].st_ino:
+            return (None, RevisionStoreErrorCode.UNSAFE_STORE)
+        handed_off = True
+        return (directory_fd, None)
+    finally:
+        if directory_fd is not None and not handed_off:
+            _close_fd(directory_fd)
 
 
 def _open_project(root_fd, root_device, project_id):
-    project_open = _open_safe_directory(
-        root_fd,
-        _project_key(project_id),
-        root_device,
-        RevisionStoreErrorCode.NOT_FOUND,
-    )
-    if project_open[1] is not None:
-        return (None, None, None, project_open[1])
-    project_fd = project_open[0]
-    revisions_open = _open_safe_directory(
-        project_fd,
-        "revisions",
-        root_device,
-        RevisionStoreErrorCode.UNSAFE_STORE,
-    )
-    if revisions_open[1] is not None:
-        _close_fd(project_fd)
-        return (None, None, None, revisions_open[1])
-    candidates_open = _open_safe_directory(
-        project_fd,
-        "candidates",
-        root_device,
-        RevisionStoreErrorCode.UNSAFE_STORE,
-    )
-    if candidates_open[1] is not None:
-        _close_fd(revisions_open[0])
-        _close_fd(project_fd)
-        return (None, None, None, candidates_open[1])
-    return (project_fd, revisions_open[0], candidates_open[0], None)
+    project_fd = None
+    revisions_fd = None
+    candidates_fd = None
+    handed_off = False
+    try:
+        project_open = _open_safe_directory(
+            root_fd,
+            _project_key(project_id),
+            root_device,
+            RevisionStoreErrorCode.NOT_FOUND,
+        )
+        if project_open[1] is not None:
+            return (None, None, None, project_open[1])
+        project_fd = project_open[0]
+        revisions_open = _open_safe_directory(
+            project_fd,
+            "revisions",
+            root_device,
+            RevisionStoreErrorCode.UNSAFE_STORE,
+        )
+        if revisions_open[1] is not None:
+            return (None, None, None, revisions_open[1])
+        revisions_fd = revisions_open[0]
+        candidates_open = _open_safe_directory(
+            project_fd,
+            "candidates",
+            root_device,
+            RevisionStoreErrorCode.UNSAFE_STORE,
+        )
+        if candidates_open[1] is not None:
+            return (None, None, None, candidates_open[1])
+        candidates_fd = candidates_open[0]
+        handed_off = True
+        return (project_fd, revisions_fd, candidates_fd, None)
+    finally:
+        if not handed_off:
+            if candidates_fd is not None:
+                _close_fd(candidates_fd)
+            if revisions_fd is not None:
+                _close_fd(revisions_fd)
+            if project_fd is not None:
+                _close_fd(project_fd)
 
 
 def _open_checked_file(parent_fd, name, root_device, maximum, missing_code, replaceable):
@@ -1225,36 +1453,41 @@ def _open_checked_file(parent_fd, name, root_device, maximum, missing_code, repl
             if replaceable:
                 continue
             return (None, None, RevisionStoreErrorCode.IO_ERROR)
-        opened_stat = None
-        stat_failed = False
+        handed_off = False
         try:
-            opened_stat = os.fstat(file_fd)
-        except OSError:
-            stat_failed = True
-        if stat_failed or opened_stat is None:
-            _close_fd(file_fd)
-            return (None, None, RevisionStoreErrorCode.IO_ERROR)
-        replaceable_unlinked = False
-        if replaceable:
-            replaceable_unlinked = _safe_unlinked_replaceable_stat(
-                opened_stat,
-                root_device,
-            )
-        if replaceable_unlinked:
+            opened_stat = None
+            try:
+                opened_stat = os.fstat(file_fd)
+            except OSError:
+                return (None, None, RevisionStoreErrorCode.IO_ERROR)
+            if opened_stat is None:
+                return (None, None, RevisionStoreErrorCode.IO_ERROR)
+            replaceable_unlinked = False
+            if replaceable:
+                replaceable_unlinked = _safe_unlinked_replaceable_stat(
+                    opened_stat,
+                    root_device,
+                )
+            if replaceable_unlinked:
+                close_failed = _close_fd(file_fd)
+                file_fd = None
+                if close_failed:
+                    return (None, None, RevisionStoreErrorCode.IO_ERROR)
+                continue
+            if not _safe_immutable_stat(opened_stat, root_device):
+                return (None, None, RevisionStoreErrorCode.UNSAFE_STORE)
+            if opened_stat.st_dev == before[0].st_dev and opened_stat.st_ino == before[0].st_ino:
+                handed_off = True
+                return (file_fd, opened_stat, None)
             close_failed = _close_fd(file_fd)
+            file_fd = None
             if close_failed:
                 return (None, None, RevisionStoreErrorCode.IO_ERROR)
-            continue
-        if not _safe_immutable_stat(opened_stat, root_device):
-            _close_fd(file_fd)
-            return (None, None, RevisionStoreErrorCode.UNSAFE_STORE)
-        if opened_stat.st_dev == before[0].st_dev and opened_stat.st_ino == before[0].st_ino:
-            return (file_fd, opened_stat, None)
-        close_failed = _close_fd(file_fd)
-        if close_failed:
-            return (None, None, RevisionStoreErrorCode.IO_ERROR)
-        if not replaceable:
-            return (None, None, RevisionStoreErrorCode.UNSAFE_STORE)
+            if not replaceable:
+                return (None, None, RevisionStoreErrorCode.UNSAFE_STORE)
+        finally:
+            if file_fd is not None and not handed_off:
+                _close_fd(file_fd)
     return (None, None, RevisionStoreErrorCode.IO_ERROR)
 
 
@@ -1275,28 +1508,31 @@ def _read_bounded_file(parent_fd, name, root_device, maximum, missing_code):
     remaining = opened_stat.st_size
     raw = b""
     read_failed = False
-    while remaining > 0 and not read_failed:
-        chunk = None
-        try:
-            chunk = os.read(file_fd, _COPY_CHUNK_BYTES)
-        except OSError:
-            read_failed = True
-        if not read_failed:
-            chunk_size = _byte_count(chunk, _COPY_CHUNK_BYTES)
-            if chunk_size < 0:
-                read_failed = True
-            if chunk_size == 0 or chunk_size > remaining:
-                read_failed = True
-            else:
-                raw = raw + chunk
-                remaining -= chunk_size
     after_stat = None
     stat_failed = False
+    close_failed = False
     try:
-        after_stat = os.fstat(file_fd)
-    except OSError:
-        stat_failed = True
-    close_failed = _close_fd(file_fd)
+        while remaining > 0 and not read_failed:
+            chunk = None
+            try:
+                chunk = os.read(file_fd, _COPY_CHUNK_BYTES)
+            except OSError:
+                read_failed = True
+            if not read_failed:
+                chunk_size = _byte_count(chunk, _COPY_CHUNK_BYTES)
+                if chunk_size < 0:
+                    read_failed = True
+                if chunk_size == 0 or chunk_size > remaining:
+                    read_failed = True
+                else:
+                    raw = raw + chunk
+                    remaining -= chunk_size
+        try:
+            after_stat = os.fstat(file_fd)
+        except OSError:
+            stat_failed = True
+    finally:
+        close_failed = _close_fd(file_fd)
     if read_failed or stat_failed or after_stat is None or close_failed:
         return (None, RevisionStoreErrorCode.IO_ERROR)
     replaceable_unlinked = False
@@ -1351,11 +1587,14 @@ def _write_all(file_fd, raw):
     return True
 
 
-def _create_durable_file(parent_fd, name, raw):
+def _create_durable_file(parent_fd, name, raw, precreated=False):
     failed = False
     file_fd = None
     try:
-        file_fd = os.open(name, _create_flags(), 384, dir_fd=parent_fd)
+        flags = _create_flags()
+        if precreated:
+            flags = _write_flags()
+        file_fd = os.open(name, flags, 384, dir_fd=parent_fd)
     except OSError:
         failed = True
     if failed or file_fd is None:
@@ -1370,6 +1609,21 @@ def _create_durable_file(parent_fd, name, raw):
             sync_failed = True
     close_failed = _close_fd(file_fd)
     if not write_ok or sync_failed or close_failed:
+        return RevisionStoreErrorCode.IO_ERROR
+    return None
+
+
+def _create_empty_file(parent_fd, name):
+    file_fd = None
+    try:
+        file_fd = os.open(name, _create_flags(), 384, dir_fd=parent_fd)
+        os.fchmod(file_fd, 384)
+        os.fsync(file_fd)
+    except OSError:
+        if file_fd is not None:
+            _close_fd(file_fd)
+        return RevisionStoreErrorCode.IO_ERROR
+    if _close_fd(file_fd):
         return RevisionStoreErrorCode.IO_ERROR
     return None
 
@@ -1821,6 +2075,163 @@ def _load_journal_fd(project_fd, root_device):
     return _journal_from_record(parsed[0])
 
 
+def _safe_source_parent_stat(parent_stat):
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        return False
+    if parent_stat.st_uid != os.geteuid():
+        return False
+    if stat.S_IMODE(parent_stat.st_mode) != 448:
+        return False
+    return True
+
+
+def _same_source_parent(left, right):
+    if left.st_dev != right.st_dev or left.st_ino != right.st_ino:
+        return False
+    if left.st_mode != right.st_mode or left.st_uid != right.st_uid:
+        return False
+    return True
+
+
+def _safe_external_source_stat(source_stat):
+    if not stat.S_ISREG(source_stat.st_mode):
+        return False
+    if source_stat.st_uid != os.geteuid():
+        return False
+    if stat.S_IMODE(source_stat.st_mode) != 384:
+        return False
+    if source_stat.st_nlink != 1:
+        return False
+    if source_stat.st_size <= 0 or source_stat.st_size > _MAX_FILE_BYTES:
+        return False
+    return True
+
+
+def _source_matches_binding(source_stat, expected_binding):
+    if source_stat.st_dev != expected_binding.dev:
+        return False
+    if source_stat.st_ino != expected_binding.ino:
+        return False
+    if source_stat.st_mode != expected_binding.mode:
+        return False
+    if source_stat.st_uid != expected_binding.uid:
+        return False
+    if source_stat.st_nlink != expected_binding.nlink:
+        return False
+    if source_stat.st_size != expected_binding.size:
+        return False
+    if source_stat.st_mtime_ns != expected_binding.mtime_ns:
+        return False
+    if source_stat.st_ctime_ns != expected_binding.ctime_ns:
+        return False
+    return True
+
+
+def _source_parent_after_code(parent_fd, expected_parent):
+    current = None
+    try:
+        current = os.fstat(parent_fd)
+    except OSError:
+        return RevisionStoreErrorCode.IO_ERROR
+    if not _safe_source_parent_stat(current):
+        return RevisionStoreErrorCode.UNSAFE_STORE
+    if not _same_source_parent(current, expected_parent):
+        return RevisionStoreErrorCode.UNSAFE_STORE
+    return None
+
+
+def _open_external_source_at(source_parent_fd, source_name, expected_binding):
+    if type(source_parent_fd) is not int or source_parent_fd < 0:
+        return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT, None)
+    if (
+        type(source_name) is not str
+        or source_name in {".", ".."}
+        or re.fullmatch(_SOURCE_NAME_PATTERN, source_name) is None
+    ):
+        return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT, None)
+    if type(expected_binding) is not RevisionSourceBinding:
+        return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT, None)
+    parent_before = None
+    try:
+        parent_before = os.fstat(source_parent_fd)
+    except OSError:
+        return (None, None, None, None, RevisionStoreErrorCode.UNSAFE_STORE, None)
+    if not _safe_source_parent_stat(parent_before):
+        return (None, None, None, None, RevisionStoreErrorCode.UNSAFE_STORE, None)
+    parent_fd = None
+    source_fd = None
+    source_stat = None
+    code = None
+    try:
+        parent_fd = os.dup(source_parent_fd)
+    except OSError:
+        code = RevisionStoreErrorCode.IO_ERROR
+    duplicated_parent = None
+    inheritable = True
+    if code is None:
+        try:
+            duplicated_parent = os.fstat(parent_fd)
+            inheritable = os.get_inheritable(parent_fd)
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+    if code is None and (
+        inheritable
+        or duplicated_parent is None
+        or not _safe_source_parent_stat(duplicated_parent)
+        or not _same_source_parent(duplicated_parent, parent_before)
+    ):
+        code = RevisionStoreErrorCode.UNSAFE_STORE
+    before = None
+    if code is None:
+        before = _entry_stat(parent_fd, source_name)
+        if before[2] is not None:
+            code = before[2]
+        elif not before[1]:
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+        elif not _safe_external_source_stat(before[0]):
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+        elif not _source_matches_binding(before[0], expected_binding):
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if code is None:
+        try:
+            source_fd = os.open(source_name, _read_flags(), dir_fd=parent_fd)
+        except OSError:
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if code is None:
+        try:
+            source_stat = os.fstat(source_fd)
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+    if code is None and (
+        source_stat is None
+        or not _safe_external_source_stat(source_stat)
+        or not _source_matches_binding(source_stat, expected_binding)
+    ):
+        code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if code is None:
+        after_open = _entry_stat(parent_fd, source_name)
+        if after_open[2] is not None:
+            code = after_open[2]
+        elif not after_open[1]:
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+        elif not _safe_external_source_stat(after_open[0]):
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+        elif not _source_matches_binding(after_open[0], expected_binding):
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if code is None:
+        code = _source_parent_after_code(parent_fd, parent_before)
+    if code is not None:
+        close_failed = False
+        if source_fd is not None:
+            close_failed = _close_fd(source_fd) or close_failed
+        if parent_fd is not None:
+            close_failed = _close_fd(parent_fd) or close_failed
+        if close_failed:
+            code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        return (None, None, None, None, code, None)
+    return (parent_fd, source_fd, source_stat, source_name, None, parent_before)
+
+
 def _open_external_source(source):
     coerced = _coerce_path(source)
     if coerced[1] is not None:
@@ -1941,11 +2352,22 @@ def _open_candidate_source(candidate_fd, root_device, filename):
     return (source_fd, opened_stat, None)
 
 
-def _copy_open_file(source_parent_fd, source_fd, source_stat, source_name, target_fd, target_name):
+def _copy_open_file(
+    source_parent_fd,
+    source_fd,
+    source_stat,
+    source_name,
+    target_fd,
+    target_name,
+    precreated=False,
+):
     destination_fd = None
     open_failed = False
     try:
-        destination_fd = os.open(target_name, _create_flags(), 384, dir_fd=target_fd)
+        flags = _create_flags()
+        if precreated:
+            flags = _write_flags()
+        destination_fd = os.open(target_name, flags, 384, dir_fd=target_fd)
     except OSError:
         open_failed = True
     if open_failed or destination_fd is None:
@@ -1993,6 +2415,18 @@ def _copy_open_file(source_parent_fd, source_fd, source_stat, source_name, targe
     elif after_fd_stat.st_dev != source_stat.st_dev or after_fd_stat.st_ino != source_stat.st_ino:
         mutated = True
     elif after_entry[0].st_dev != source_stat.st_dev or after_entry[0].st_ino != source_stat.st_ino:
+        mutated = True
+    elif after_fd_stat.st_mode != source_stat.st_mode:
+        mutated = True
+    elif after_entry[0].st_mode != source_stat.st_mode:
+        mutated = True
+    elif after_fd_stat.st_uid != source_stat.st_uid:
+        mutated = True
+    elif after_entry[0].st_uid != source_stat.st_uid:
+        mutated = True
+    elif after_fd_stat.st_nlink != source_stat.st_nlink:
+        mutated = True
+    elif after_entry[0].st_nlink != source_stat.st_nlink:
         mutated = True
     elif (
         after_fd_stat.st_size != source_stat.st_size
@@ -2045,8 +2479,7 @@ def _cleanup_initial(root_fd, temp_name, revision_name):
     except OSError:
         failed = True
     if failed or project_fd is None:
-        _best_rmdir(root_fd, temp_name)
-        return
+        return _best_rmdir(root_fd, temp_name)
     revisions_fd = None
     candidates_fd = None
     try:
@@ -2064,18 +2497,23 @@ def _cleanup_initial(root_fd, temp_name, revision_name):
         except OSError:
             pass
         if revision_fd is not None:
-            _best_unlink(revision_fd, "model.FCStd")
-            _best_unlink(revision_fd, "manifest.json")
-            _close_fd(revision_fd)
-            _best_rmdir(revisions_fd, revision_name)
-        _close_fd(revisions_fd)
-        _best_rmdir(project_fd, "revisions")
+            failed = _best_unlink(revision_fd, "model.FCStd") or failed
+            failed = _best_unlink(revision_fd, "manifest.json") or failed
+            failed = _close_fd(revision_fd) or failed
+            failed = _best_rmdir(revisions_fd, revision_name) or failed
+        failed = _close_fd(revisions_fd) or failed
+        failed = _best_rmdir(project_fd, "revisions") or failed
     if candidates_fd is not None:
-        _close_fd(candidates_fd)
-        _best_rmdir(project_fd, "candidates")
-    _best_unlink(project_fd, "HEAD.json")
-    _close_fd(project_fd)
-    _best_rmdir(root_fd, temp_name)
+        failed = _close_fd(candidates_fd) or failed
+        failed = _best_rmdir(project_fd, "candidates") or failed
+    failed = _best_unlink(project_fd, "HEAD.json") or failed
+    failed = _close_fd(project_fd) or failed
+    failed = _best_rmdir(root_fd, temp_name) or failed
+    try:
+        os.fsync(root_fd)
+    except OSError:
+        failed = True
+    return failed
 
 
 def _require_mutation(store, project_id, lease):
@@ -2099,6 +2537,1704 @@ def _open_store_root(store):
     return _open_root(store._parts, store._identity)
 
 
+def _reservation_key_digest(value):
+    if type(value) is not str or re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value) is None:
+        return (None, RevisionStoreErrorCode.INVALID_INPUT)
+    encoded = bytes(value, "utf-8")
+    return (hashlib.sha256(_RESERVATION_KEY_DOMAIN + encoded).hexdigest(), None)
+
+
+def _reservation_body(
+    kind,
+    project_id,
+    expected_head,
+    revision_id,
+    key_sha256,
+    ceiling_files,
+    state,
+    project_temp,
+    revision_temp,
+):
+    head_value = None
+    if expected_head is not None:
+        head_value = _head_mapping(expected_head)
+    ceiling = _CANDIDATE_RESERVATION_BYTES
+    if kind == "generation_zero":
+        ceiling = _GENERATION_ZERO_RESERVATION_BYTES
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "kind": kind,
+        "project_id": project_id,
+        "expected_head": head_value,
+        "revision_id": revision_id,
+        "key_sha256": key_sha256,
+        "ceiling_bytes": ceiling,
+        "ceiling_files": ceiling_files,
+        "state": state,
+        "project_temp": project_temp,
+        "revision_temp": revision_temp,
+    }
+
+
+def _parse_reservation_body(body):
+    expected = (
+        "schema_version",
+        "kind",
+        "project_id",
+        "expected_head",
+        "revision_id",
+        "key_sha256",
+        "ceiling_bytes",
+        "ceiling_files",
+        "state",
+        "project_temp",
+        "revision_temp",
+    )
+    if not _mapping_has_exact(body, expected):
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    if body["schema_version"] != _SCHEMA_VERSION:
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    kind = body["kind"]
+    if kind != "generation_zero" and kind != "candidate":
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    if _identifier_code(body["project_id"], _PROJECT_PATTERN) is not None:
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    if _identifier_code(body["revision_id"], _REVISION_PATTERN) is not None:
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    if _digest_code(body["key_sha256"]) is not None:
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    expected_head = None
+    if body["expected_head"] is not None:
+        try:
+            expected_head = _head_from_mapping(body["expected_head"])
+        except RevisionStoreError:
+            return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    ceiling = body["ceiling_bytes"]
+    ceiling_files = body["ceiling_files"]
+    if kind == "generation_zero":
+        if (
+            expected_head is not None
+            or ceiling != _GENERATION_ZERO_RESERVATION_BYTES
+            or ceiling_files not in {4, 5}
+        ):
+            return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    elif (
+        expected_head is None
+        or expected_head.project_id != body["project_id"]
+        or ceiling != _CANDIDATE_RESERVATION_BYTES
+        or ceiling_files != 8
+    ):
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    if body["state"] not in {"reserved", "staged", "publishing", "published"}:
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    for temp_value in (body["project_temp"], body["revision_temp"]):
+        if temp_value is not None:
+            if type(temp_value) is not str:
+                return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+            if re.fullmatch(r"\.(?:project|revision)\.[0-9a-f]{32}\.tmp", temp_value) is None:
+                return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    if kind == "generation_zero":
+        if body["project_temp"] is None or body["revision_temp"] is not None:
+            return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    else:
+        if body["project_temp"] is not None:
+            return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+        if body["state"] == "publishing" and body["revision_temp"] is None:
+            return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+        if body["state"] != "publishing" and body["revision_temp"] is not None:
+            return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    parsed = dict(body)
+    parsed["expected_head"] = expected_head
+    return (parsed, None)
+
+
+def _quota_entry_allowed(relative, name, is_directory):
+    depth = len(relative)
+    if depth == 0:
+        if is_directory and name == _QUOTA_DIRECTORY:
+            return True
+        if is_directory and re.fullmatch(r"[0-9a-f]{64}", name) is not None:
+            return True
+        return bool(
+            is_directory and re.fullmatch(r"\.project\.[0-9a-f]{32}\.tmp", name) is not None
+        )
+    if relative == (_QUOTA_DIRECTORY,):
+        return is_directory and name == _RESERVATIONS_DIRECTORY
+    if relative == (_QUOTA_DIRECTORY, _RESERVATIONS_DIRECTORY):
+        return is_directory and re.fullmatch(r"[0-9a-f]{64}", name) is not None
+    if len(relative) == 3 and relative[:2] == (
+        _QUOTA_DIRECTORY,
+        _RESERVATIONS_DIRECTORY,
+    ):
+        if is_directory:
+            return False
+        if name == _RESERVATION_RECORD:
+            return True
+        return re.fullmatch(r"\.reservation\.json\.[0-9a-f]{32}\.tmp", name) is not None
+    top = relative[0]
+    project_like = re.fullmatch(r"[0-9a-f]{64}", top) is not None
+    project_temp = re.fullmatch(r"\.project\.[0-9a-f]{32}\.tmp", top) is not None
+    if not project_like and not project_temp:
+        return False
+    if depth == 1:
+        if is_directory:
+            return name == "revisions" or name == "candidates"
+        if name == "HEAD.json" or name == "journal.json":
+            return True
+        return re.fullmatch(r"\.(?:HEAD|journal)\.json\.[0-9a-f]{32}\.tmp", name) is not None
+    if depth == 2 and relative[1] == "revisions":
+        if not is_directory:
+            return False
+        if re.fullmatch(r"[0-9a-f]{64}", name) is not None:
+            return True
+        return re.fullmatch(r"\.revision\.[0-9a-f]{32}\.tmp", name) is not None
+    if depth == 2 and relative[1] == "candidates":
+        return is_directory and re.fullmatch(r"[0-9a-f]{64}", name) is not None
+    if depth == 3 and relative[1] == "revisions":
+        return not is_directory and name in {"model.FCStd", "model.step", "manifest.json"}
+    if depth == 3 and relative[1] == "candidates":
+        return not is_directory and name in {"model.FCStd", "model.step"}
+    return False
+
+
+def _quota_path_owner(relative, prefix_owner, journal_owner):
+    owner = None
+    for prefix, revision_id in prefix_owner.items():
+        if relative[: len(prefix)] == prefix:
+            if owner is not None and owner != revision_id:
+                return _QUOTA_OWNER_CONFLICT
+            owner = revision_id
+    if len(relative) == 2 and relative[0] in journal_owner:
+        name = relative[1]
+        if (
+            name == "journal.json"
+            or re.fullmatch(
+                r"\.journal\.json\.[0-9a-f]{32}\.tmp",
+                name,
+            )
+            is not None
+        ):
+            journal_revision = journal_owner[relative[0]]
+            if owner is not None and owner != journal_revision:
+                return _QUOTA_OWNER_CONFLICT
+            owner = journal_revision
+    return owner
+
+
+def _quota_temporary_path(relative):
+    if not relative:
+        return False
+    name = relative[-1]
+    if re.fullmatch(r"\.(?:project|revision)\.[0-9a-f]{32}\.tmp", name) is not None:
+        return True
+    return (
+        re.fullmatch(
+            r"\.(?:reservation|HEAD|journal)\.json\.[0-9a-f]{32}\.tmp",
+            name,
+        )
+        is not None
+    )
+
+
+def _scan_quota_tree(
+    directory_fd,
+    root_device,
+    relative,
+    snapshot,
+):
+    if len(relative) > 4:
+        return RevisionStoreErrorCode.UNSAFE_STORE
+    iterator = None
+    code = None
+    try:
+        try:
+            iterator = os.scandir(directory_fd)
+            for entry in iterator:
+                name = entry.name
+                if type(name) is not str or name == "." or name == "..":
+                    code = RevisionStoreErrorCode.UNSAFE_STORE
+                    break
+                child_relative = relative + (name,)
+                entry_stat = entry.stat(follow_symlinks=False)
+                is_directory = stat.S_ISDIR(entry_stat.st_mode)
+                is_file = stat.S_ISREG(entry_stat.st_mode)
+                if not is_directory and not is_file:
+                    code = RevisionStoreErrorCode.UNSAFE_STORE
+                    break
+                if entry_stat.st_uid != os.geteuid() or entry_stat.st_dev != root_device:
+                    code = RevisionStoreErrorCode.UNSAFE_STORE
+                    break
+                if is_directory and stat.S_IMODE(entry_stat.st_mode) != 448:
+                    code = RevisionStoreErrorCode.UNSAFE_STORE
+                    break
+                if not _quota_entry_allowed(relative, name, is_directory):
+                    code = RevisionStoreErrorCode.UNSAFE_STORE
+                    break
+                if is_file:
+                    candidate_file = len(relative) == 3 and relative[1] == "candidates"
+                    if entry_stat.st_nlink != 1:
+                        code = RevisionStoreErrorCode.UNSAFE_STORE
+                        break
+                    if candidate_file:
+                        if stat.S_IMODE(entry_stat.st_mode) & 18:
+                            code = RevisionStoreErrorCode.UNSAFE_STORE
+                            break
+                    elif stat.S_IMODE(entry_stat.st_mode) != 384:
+                        code = RevisionStoreErrorCode.UNSAFE_STORE
+                        break
+                    if entry_stat.st_size < 0:
+                        code = RevisionStoreErrorCode.UNSAFE_STORE
+                        break
+                    snapshot["bytes"] += entry_stat.st_size
+                    snapshot["files"] += 1
+                    snapshot["file_sizes"][child_relative] = entry_stat.st_size
+                    if _quota_temporary_path(child_relative):
+                        snapshot["temporary_entries"][child_relative] = True
+                    if snapshot["files"] > _MAX_ORDINARY_FILES:
+                        snapshot["over_limit"] = True
+                else:
+                    category = None
+                    if len(relative) == 0 and (
+                        re.fullmatch(r"[0-9a-f]{64}", name) is not None
+                        or re.fullmatch(r"\.project\.[0-9a-f]{32}\.tmp", name) is not None
+                    ):
+                        category = "projects"
+                        snapshot["projects"] += 1
+                    if len(relative) == 2 and relative[1] == "revisions":
+                        if (
+                            re.fullmatch(r"[0-9a-f]{64}", name) is not None
+                            or re.fullmatch(r"\.revision\.[0-9a-f]{32}\.tmp", name) is not None
+                        ):
+                            category = "revisions"
+                            snapshot["revisions"] += 1
+                    if (
+                        len(relative) == 2
+                        and relative[1] == "candidates"
+                        and re.fullmatch(r"[0-9a-f]{64}", name) is not None
+                    ) or relative == (_QUOTA_DIRECTORY, _RESERVATIONS_DIRECTORY):
+                        category = "candidate_reservations"
+                        snapshot["candidate_reservations"] += 1
+                    if category is not None:
+                        snapshot["directory_categories"][child_relative] = category
+                    if _quota_temporary_path(child_relative):
+                        snapshot["temporary_entries"][child_relative] = True
+                    child_fd = None
+                    close_failed = False
+                    try:
+                        child_fd = os.open(name, _root_flags(), dir_fd=directory_fd)
+                        child_code = _scan_quota_tree(
+                            child_fd,
+                            root_device,
+                            child_relative,
+                            snapshot,
+                        )
+                    except OSError:
+                        child_code = RevisionStoreErrorCode.UNSAFE_STORE
+                    finally:
+                        if child_fd is not None:
+                            close_failed = _close_fd(child_fd)
+                    if child_code is not None:
+                        code = child_code
+                        break
+                    if close_failed:
+                        code = RevisionStoreErrorCode.IO_ERROR
+                        break
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+    finally:
+        if iterator is not None:
+            try:
+                iterator.close()
+            except OSError:
+                if code is None:
+                    code = RevisionStoreErrorCode.IO_ERROR
+    if code is not None:
+        return code
+    if snapshot["bytes"] > _MAX_STORE_BYTES:
+        snapshot["over_limit"] = True
+    if snapshot["projects"] > _MAX_PROJECTS:
+        snapshot["over_limit"] = True
+    if snapshot["revisions"] > _MAX_REVISIONS:
+        snapshot["over_limit"] = True
+    if snapshot["candidate_reservations"] > _MAX_CANDIDATES_AND_RESERVATIONS:
+        snapshot["over_limit"] = True
+    return None
+
+
+def _open_quota_directories(root_fd, root_device, create):
+    quota_fd = None
+    reservations_fd = None
+    handed_off = False
+    try:
+        quota_stat = _entry_stat(root_fd, _QUOTA_DIRECTORY)
+        if quota_stat[2] is not None:
+            return (None, None, quota_stat[2])
+        if not quota_stat[1]:
+            if not create:
+                return (None, None, None)
+            try:
+                os.mkdir(_QUOTA_DIRECTORY, 448, dir_fd=root_fd)
+                os.fsync(root_fd)
+            except OSError:
+                return (None, None, RevisionStoreErrorCode.IO_ERROR)
+        quota_open = _open_safe_directory(
+            root_fd,
+            _QUOTA_DIRECTORY,
+            root_device,
+            RevisionStoreErrorCode.UNSAFE_STORE,
+        )
+        if quota_open[1] is not None:
+            return (None, None, quota_open[1])
+        quota_fd = quota_open[0]
+        reservations_stat = _entry_stat(quota_fd, _RESERVATIONS_DIRECTORY)
+        if reservations_stat[2] is not None:
+            return (None, None, reservations_stat[2])
+        if not reservations_stat[1]:
+            if not create:
+                return (None, None, RevisionStoreErrorCode.UNSAFE_STORE)
+            try:
+                os.mkdir(_RESERVATIONS_DIRECTORY, 448, dir_fd=quota_fd)
+                os.fsync(quota_fd)
+            except OSError:
+                return (None, None, RevisionStoreErrorCode.IO_ERROR)
+        reservations_open = _open_safe_directory(
+            quota_fd,
+            _RESERVATIONS_DIRECTORY,
+            root_device,
+            RevisionStoreErrorCode.UNSAFE_STORE,
+        )
+        if reservations_open[1] is not None:
+            return (None, None, reservations_open[1])
+        reservations_fd = reservations_open[0]
+        handed_off = True
+        return (quota_fd, reservations_fd, None)
+    finally:
+        if not handed_off:
+            if reservations_fd is not None:
+                _close_fd(reservations_fd)
+            if quota_fd is not None:
+                _close_fd(quota_fd)
+
+
+def _load_reservations(root_fd, root_device):
+    opened = _open_quota_directories(root_fd, root_device, False)
+    if opened[2] is not None:
+        return (None, opened[2])
+    if opened[0] is None:
+        return ((), None)
+    quota_fd = opened[0]
+    reservations_fd = opened[1]
+    values = ()
+    iterator = None
+    code = None
+    close_failed = False
+    try:
+        try:
+            iterator = os.scandir(reservations_fd)
+            for entry in iterator:
+                name = entry.name
+                entry_stat = entry.stat(follow_symlinks=False)
+                if (
+                    type(name) is not str
+                    or re.fullmatch(r"[0-9a-f]{64}", name) is None
+                    or not _safe_directory_stat(entry_stat, root_device)
+                ):
+                    code = RevisionStoreErrorCode.UNSAFE_STORE
+                    break
+                reservation_open = _open_safe_directory(
+                    reservations_fd,
+                    name,
+                    root_device,
+                    RevisionStoreErrorCode.CORRUPT_RECORD,
+                )
+                if reservation_open[1] is not None:
+                    code = reservation_open[1]
+                    break
+                reservation_close_failed = False
+                try:
+                    raw = _read_bounded_file(
+                        reservation_open[0],
+                        _RESERVATION_RECORD,
+                        root_device,
+                        _MAX_JOURNAL_BYTES,
+                        RevisionStoreErrorCode.CORRUPT_RECORD,
+                    )
+                    if raw[1] is None:
+                        parsed_record = _parse_checked_record(
+                            raw[0],
+                            _RESERVATION_CHECKSUM_DOMAIN,
+                            _MAX_JOURNAL_BYTES,
+                        )
+                        if parsed_record[1] is None:
+                            parsed = _parse_reservation_body(parsed_record[0])
+                            if parsed[1] is None:
+                                if _revision_key(parsed[0]["revision_id"]) != name:
+                                    code = RevisionStoreErrorCode.CORRUPT_RECORD
+                                else:
+                                    values = values + (parsed[0],)
+                            else:
+                                code = parsed[1]
+                        else:
+                            code = parsed_record[1]
+                    else:
+                        code = raw[1]
+                finally:
+                    reservation_close_failed = _close_fd(reservation_open[0])
+                if code is not None or reservation_close_failed:
+                    if code is None:
+                        code = RevisionStoreErrorCode.IO_ERROR
+                    break
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+    finally:
+        try:
+            if iterator is not None:
+                try:
+                    iterator.close()
+                except OSError:
+                    if code is None:
+                        code = RevisionStoreErrorCode.IO_ERROR
+        finally:
+            close_failed = _close_two(reservations_fd, quota_fd)
+    if code is not None:
+        return (None, code)
+    if close_failed:
+        return (None, RevisionStoreErrorCode.IO_ERROR)
+    return (values, None)
+
+
+def _reservation_prefixes(reservation):
+    revision_key = _revision_key(reservation["revision_id"])
+    prefixes = ((_QUOTA_DIRECTORY, _RESERVATIONS_DIRECTORY, revision_key),)
+    if reservation["kind"] == "generation_zero":
+        prefixes = prefixes + ((reservation["project_temp"],),)
+        if reservation["state"] in {"publishing", "published"}:
+            prefixes = prefixes + ((_project_key(reservation["project_id"]),),)
+    else:
+        project_key = _project_key(reservation["project_id"])
+        prefixes = prefixes + (
+            (project_key, "candidates", _candidate_key(reservation["revision_id"])),
+        )
+        if reservation["revision_temp"] is not None:
+            prefixes = prefixes + ((project_key, "revisions", reservation["revision_temp"]),)
+        if reservation["state"] in {"publishing", "published"}:
+            prefixes = prefixes + ((project_key, "revisions", revision_key),)
+    return prefixes
+
+
+def _quota_snapshot(root_fd, root_device, reservations):
+    prefix_owner = {}
+    journal_owner = {}
+    for reservation in reservations:
+        revision_id = reservation["revision_id"]
+        for prefix in _reservation_prefixes(reservation):
+            if prefix in prefix_owner:
+                return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+            prefix_owner[prefix] = revision_id
+        if reservation["kind"] == "candidate":
+            project_key = _project_key(reservation["project_id"])
+            if project_key in journal_owner:
+                return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+            journal_owner[project_key] = revision_id
+    snapshot = {
+        "bytes": 0,
+        "files": 0,
+        "projects": 0,
+        "revisions": 0,
+        "candidate_reservations": 0,
+        "file_sizes": {},
+        "directory_categories": {},
+        "temporary_entries": {},
+        "over_limit": False,
+    }
+    code = _scan_quota_tree(
+        root_fd,
+        root_device,
+        (),
+        snapshot,
+    )
+    if code is not None:
+        return (None, code)
+    observed_bytes = {}
+    observed_files = {}
+    observed_directories = {}
+    for relative, size in snapshot["file_sizes"].items():
+        owner = _quota_path_owner(relative, prefix_owner, journal_owner)
+        if owner == _QUOTA_OWNER_CONFLICT:
+            return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+        if owner is not None:
+            observed_bytes[owner] = observed_bytes.get(owner, 0) + size
+            observed_files[owner] = observed_files.get(owner, 0) + 1
+    for relative, category in snapshot["directory_categories"].items():
+        owner = _quota_path_owner(relative, prefix_owner, journal_owner)
+        if owner == _QUOTA_OWNER_CONFLICT:
+            return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+        if owner is not None:
+            owned = observed_directories.get(owner)
+            if owned is None:
+                owned = {
+                    "projects": 0,
+                    "revisions": 0,
+                    "candidate_reservations": 0,
+                }
+                observed_directories[owner] = owned
+            owned[category] += 1
+    observed_temporary_entries = {}
+    unowned_temporary_entries = 0
+    for relative in snapshot["temporary_entries"]:
+        owner = _quota_path_owner(relative, prefix_owner, journal_owner)
+        if owner == _QUOTA_OWNER_CONFLICT:
+            return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+        if owner is None:
+            unowned_temporary_entries += 1
+        else:
+            observed_temporary_entries[owner] = observed_temporary_entries.get(owner, 0) + 1
+    snapshot["observed_bytes"] = observed_bytes
+    snapshot["observed_files"] = observed_files
+    snapshot["observed_directories"] = observed_directories
+    snapshot["observed_temporary_entries"] = observed_temporary_entries
+    snapshot["unowned_temporary_entries"] = unowned_temporary_entries
+    return (snapshot, None)
+
+
+def _acquire_quota_lease(store):
+    attempt = 0
+    while attempt < 250:
+        attempt += 1
+        try:
+            return (store._lease_manager.acquire(_QUOTA_RESOURCE_ID), None)
+        except LeaseError as error:
+            if error.code is not LeaseErrorCode.CONTENDED:
+                return (None, RevisionStoreErrorCode.IO_ERROR)
+        time.sleep(0.001)
+    return (None, RevisionStoreErrorCode.IO_ERROR)
+
+
+def _release_quota_lease(quota_lease):
+    try:
+        quota_lease.release(owner_token=quota_lease.owner_token)
+    except LeaseError:
+        return RevisionStoreErrorCode.IO_ERROR
+    return None
+
+
+def _quota_create_initial_namespace(
+    store,
+    root_fd,
+    temp_name,
+    revision_name,
+    with_model,
+):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return quota[1]
+    quota_lease = quota[0]
+    project_fd = None
+    revisions_fd = None
+    candidates_fd = None
+    revision_fd = None
+    code = None
+    close_failed = False
+    release_code = None
+    try:
+        try:
+            os.mkdir(temp_name, 448, dir_fd=root_fd)
+            project_fd = os.open(temp_name, _root_flags(), dir_fd=root_fd)
+            os.mkdir("revisions", 448, dir_fd=project_fd)
+            os.mkdir("candidates", 448, dir_fd=project_fd)
+            revisions_fd = os.open("revisions", _root_flags(), dir_fd=project_fd)
+            candidates_fd = os.open("candidates", _root_flags(), dir_fd=project_fd)
+            os.mkdir(revision_name, 448, dir_fd=revisions_fd)
+            revision_fd = os.open(revision_name, _root_flags(), dir_fd=revisions_fd)
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+        if code is None and with_model:
+            code = _create_empty_file(revision_fd, "model.FCStd")
+        if code is None:
+            code = _create_empty_file(revision_fd, "manifest.json")
+        if code is None:
+            code = _create_empty_file(project_fd, "HEAD.json")
+        if code is None:
+            try:
+                os.fsync(revision_fd)
+                os.fsync(revisions_fd)
+                os.fsync(candidates_fd)
+                os.fsync(project_fd)
+                os.fsync(root_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.IO_ERROR
+    finally:
+        if revision_fd is not None:
+            close_failed = _close_fd(revision_fd) or close_failed
+        if candidates_fd is not None:
+            close_failed = _close_fd(candidates_fd) or close_failed
+        if revisions_fd is not None:
+            close_failed = _close_fd(revisions_fd) or close_failed
+        if project_fd is not None:
+            close_failed = _close_fd(project_fd) or close_failed
+        release_code = _release_quota_lease(quota_lease)
+    if code is None and close_failed:
+        code = RevisionStoreErrorCode.IO_ERROR
+    if release_code is not None:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return code
+
+
+def _quota_create_candidate_namespace(store, candidates_fd, candidate_name):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return quota[1]
+    quota_lease = quota[0]
+    candidate_fd = None
+    code = None
+    close_failed = False
+    release_code = None
+    try:
+        try:
+            os.mkdir(candidate_name, 448, dir_fd=candidates_fd)
+            candidate_fd = os.open(candidate_name, _root_flags(), dir_fd=candidates_fd)
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+        if code is None:
+            code = _create_empty_file(candidate_fd, "model.FCStd")
+        if code is None:
+            code = _create_empty_file(candidate_fd, "model.step")
+        if code is None:
+            try:
+                os.fsync(candidate_fd)
+                os.fsync(candidates_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.IO_ERROR
+    finally:
+        if candidate_fd is not None:
+            close_failed = _close_fd(candidate_fd)
+        release_code = _release_quota_lease(quota_lease)
+    if close_failed and code is None:
+        code = RevisionStoreErrorCode.IO_ERROR
+    if release_code is not None:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return code
+
+
+def _quota_create_revision_namespace(store, revisions_fd, temp_name):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return quota[1]
+    quota_lease = quota[0]
+    revision_fd = None
+    code = None
+    close_failed = False
+    release_code = None
+    try:
+        try:
+            os.mkdir(temp_name, 448, dir_fd=revisions_fd)
+            revision_fd = os.open(temp_name, _root_flags(), dir_fd=revisions_fd)
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+        if code is None:
+            code = _create_empty_file(revision_fd, "model.FCStd")
+        if code is None:
+            code = _create_empty_file(revision_fd, "model.step")
+        if code is None:
+            code = _create_empty_file(revision_fd, "manifest.json")
+        if code is None:
+            try:
+                os.fsync(revision_fd)
+                os.fsync(revisions_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.IO_ERROR
+    finally:
+        if revision_fd is not None:
+            close_failed = _close_fd(revision_fd)
+        release_code = _release_quota_lease(quota_lease)
+    if close_failed and code is None:
+        code = RevisionStoreErrorCode.IO_ERROR
+    if release_code is not None:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return code
+
+
+def _quota_replace_record(store, parent_fd, filename, raw, token, uncertainty):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return quota[1]
+    code = None
+    release_code = None
+    try:
+        code = _replace_durable_record(parent_fd, filename, raw, token, uncertainty)
+    finally:
+        release_code = _release_quota_lease(quota[0])
+    if release_code is not None:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return code
+
+
+def _quota_unlink_file(store, parent_fd, name):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return True
+    failed = False
+    release_code = None
+    try:
+        failed = _best_unlink(parent_fd, name)
+        if not failed:
+            try:
+                os.fsync(parent_fd)
+            except OSError:
+                failed = True
+    finally:
+        release_code = _release_quota_lease(quota[0])
+    return failed or release_code is not None
+
+
+def _quota_rename_directory(
+    store,
+    parent_fd,
+    source_name,
+    target_name,
+    uncertainty,
+):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return (quota[1], False)
+    code = None
+    renamed = False
+    release_code = None
+    try:
+        try:
+            os.rename(source_name, target_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            renamed = True
+            os.fsync(parent_fd)
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+            if renamed:
+                code = uncertainty
+    finally:
+        release_code = _release_quota_lease(quota[0])
+    if release_code is not None:
+        code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return (code, renamed)
+
+
+def _quota_cleanup_initial(store, root_fd, temp_name, revision_name):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return True
+    failed = False
+    release_code = None
+    try:
+        failed = _cleanup_initial(root_fd, temp_name, revision_name)
+    finally:
+        release_code = _release_quota_lease(quota[0])
+    return failed or release_code is not None
+
+
+def _quota_cleanup_candidate(store, candidates_fd, candidate_name, root_device):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return True
+    failed = False
+    release_code = None
+    try:
+        failed = _cleanup_candidate_dir(candidates_fd, candidate_name, root_device)
+    finally:
+        release_code = _release_quota_lease(quota[0])
+    return failed or release_code is not None
+
+
+def _quota_cleanup_revision(store, revisions_fd, temp_name):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return True
+    failed = False
+    release_code = None
+    try:
+        failed = _cleanup_revision_temp(revisions_fd, temp_name)
+    finally:
+        release_code = _release_quota_lease(quota[0])
+    return failed or release_code is not None
+
+
+def _reservation_admission_code(snapshot, reservations, kind, new_files):
+    if snapshot["over_limit"]:
+        return RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+    unreserved_bytes = snapshot["bytes"]
+    active_ceilings = 0
+    unreserved_files = snapshot["files"]
+    future_files = 0
+    unreserved_projects = snapshot["projects"]
+    active_projects = 0
+    unreserved_revisions = snapshot["revisions"]
+    active_revisions = 0
+    unreserved_candidate_dirs = snapshot["candidate_reservations"]
+    active_candidate_dirs = 0
+    for reservation in reservations:
+        revision_id = reservation["revision_id"]
+        observed_bytes = snapshot["observed_bytes"].get(revision_id, 0)
+        observed_files = snapshot["observed_files"].get(revision_id, 0)
+        if observed_bytes > reservation["ceiling_bytes"]:
+            return RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+        if observed_files > reservation["ceiling_files"]:
+            return RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+        unreserved_bytes -= observed_bytes
+        active_ceilings += reservation["ceiling_bytes"]
+        unreserved_files -= observed_files
+        observed_directories = snapshot["observed_directories"].get(revision_id, {})
+        unreserved_projects -= observed_directories.get("projects", 0)
+        unreserved_revisions -= observed_directories.get("revisions", 0)
+        unreserved_candidate_dirs -= observed_directories.get(
+            "candidate_reservations",
+            0,
+        )
+        maximum_files = reservation["ceiling_files"]
+        if reservation["kind"] == "generation_zero":
+            active_projects += 1
+            active_candidate_dirs += 1
+        else:
+            active_candidate_dirs += 2
+        active_revisions += 1
+        future_files += maximum_files
+    new_ceiling = 0
+    new_candidate_dirs = 0
+    new_projects = 0
+    new_revisions = 0
+    if kind == "generation_zero":
+        new_ceiling = _GENERATION_ZERO_RESERVATION_BYTES
+        new_candidate_dirs = 1
+        new_projects = 1
+        new_revisions = 1
+    elif kind == "candidate":
+        new_ceiling = _CANDIDATE_RESERVATION_BYTES
+        new_candidate_dirs = 2
+        new_revisions = 1
+    if unreserved_bytes + active_ceilings + new_ceiling > _MAX_STORE_BYTES:
+        return RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+    if unreserved_projects + active_projects + new_projects > _MAX_PROJECTS:
+        return RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+    if unreserved_revisions + active_revisions + new_revisions > _MAX_REVISIONS:
+        return RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+    if (
+        unreserved_candidate_dirs + active_candidate_dirs + new_candidate_dirs
+        > _MAX_CANDIDATES_AND_RESERVATIONS
+    ):
+        return RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+    if unreserved_files + future_files + new_files > _MAX_ORDINARY_FILES:
+        return RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+    return None
+
+
+def _reservation_release_code(snapshot, reservations, reservation):
+    code = _reservation_admission_code(snapshot, reservations, None, 0)
+    if code is not None:
+        return code
+    revision_id = reservation["revision_id"]
+    if snapshot["unowned_temporary_entries"] != 0:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    if snapshot["observed_temporary_entries"].get(revision_id, 0) != 0:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    owned = snapshot["observed_directories"].get(revision_id, {})
+    if owned.get("candidate_reservations", 0) != 1:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    if reservation["kind"] == "generation_zero":
+        if reservation["state"] == "published":
+            if owned.get("projects", 0) != 1 or owned.get("revisions", 0) != 1:
+                return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        elif owned.get("projects", 0) != 0 or owned.get("revisions", 0) != 0:
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    elif reservation["state"] == "published":
+        if owned.get("revisions", 0) != 1:
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    elif reservation["state"] == "publishing":
+        if owned.get("revisions", 0) not in {0, 1}:
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    elif owned.get("revisions", 0) != 0:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return None
+
+
+def _create_reservation_record(root_fd, root_device, reservation):
+    quota_fd = None
+    reservations_fd = None
+    reservation_fd = None
+    reservation_name = None
+    code = None
+    cleanup_failed = False
+    close_failed = False
+    try:
+        opened = _open_quota_directories(root_fd, root_device, True)
+        code = opened[2]
+        if code is None:
+            quota_fd = opened[0]
+            reservations_fd = opened[1]
+            reservation_name = _revision_key(reservation["revision_id"])
+        if code is None:
+            try:
+                os.mkdir(reservation_name, 448, dir_fd=reservations_fd)
+                os.fsync(reservations_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.IO_ERROR
+        if code is None:
+            reservation_open = _open_safe_directory(
+                reservations_fd,
+                reservation_name,
+                root_device,
+                RevisionStoreErrorCode.IO_ERROR,
+            )
+            code = reservation_open[1]
+            reservation_fd = reservation_open[0]
+        if code is None:
+            raw = _checked_record_bytes(reservation, _RESERVATION_CHECKSUM_DOMAIN)
+            code = _create_durable_file(reservation_fd, _RESERVATION_RECORD, raw)
+        if code is None:
+            try:
+                os.fsync(reservation_fd)
+                os.fsync(reservations_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.IO_ERROR
+        if code is not None and reservation_fd is not None:
+            cleanup_failed = _best_unlink(
+                reservation_fd,
+                _RESERVATION_RECORD,
+            )
+            try:
+                os.fsync(reservation_fd)
+            except OSError:
+                cleanup_failed = True
+        if reservation_fd is not None:
+            close_failed = _close_fd(reservation_fd)
+            reservation_fd = None
+        if code is not None and reservations_fd is not None and reservation_name is not None:
+            cleanup_failed = _best_rmdir(reservations_fd, reservation_name) or cleanup_failed
+            try:
+                os.fsync(reservations_fd)
+            except OSError:
+                cleanup_failed = True
+    finally:
+        if reservation_fd is not None:
+            close_failed = _close_fd(reservation_fd) or close_failed
+        if reservations_fd is not None:
+            close_failed = _close_fd(reservations_fd) or close_failed
+        if quota_fd is not None:
+            close_failed = _close_fd(quota_fd) or close_failed
+    if code is not None and cleanup_failed:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    if code is None and close_failed:
+        code = RevisionStoreErrorCode.IO_ERROR
+    return code
+
+
+def _reserve_quota(
+    store,
+    kind,
+    project_id,
+    expected_head,
+    revision_id,
+    reservation_key,
+    project_temp,
+    ceiling_files,
+):
+    key_result = _reservation_key_digest(reservation_key)
+    if key_result[1] is not None:
+        return (None, False, key_result[1])
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return (None, False, quota[1])
+    quota_lease = quota[0]
+    root_fd = None
+    root_device = None
+    code = None
+    reservations = None
+    existing = None
+    close_failed = False
+    release_code = None
+    try:
+        root_open = _open_store_root(store)
+        code = root_open[2]
+        if code is None:
+            root_fd = root_open[0]
+            root_device = root_open[1].st_dev
+            reservations_result = _load_reservations(root_fd, root_device)
+            code = reservations_result[1]
+            reservations = reservations_result[0]
+        if code is None:
+            for reservation in reservations:
+                if reservation["project_id"] == project_id:
+                    if (
+                        reservation["kind"] == kind
+                        and reservation["key_sha256"] == key_result[0]
+                        and reservation["expected_head"] == expected_head
+                        and reservation["ceiling_files"] == ceiling_files
+                    ):
+                        existing = reservation
+                    else:
+                        code = RevisionStoreErrorCode.CONFLICT
+                    break
+        if code is None and existing is None:
+            snapshot_result = _quota_snapshot(
+                root_fd,
+                root_device,
+                reservations,
+            )
+            code = snapshot_result[1]
+            if code is None:
+                code = _reservation_admission_code(
+                    snapshot_result[0],
+                    reservations,
+                    kind,
+                    ceiling_files,
+                )
+        if code is None and existing is None:
+            reservation = _reservation_body(
+                kind,
+                project_id,
+                expected_head,
+                revision_id,
+                key_result[0],
+                ceiling_files,
+                "reserved",
+                project_temp,
+                None,
+            )
+            code = _create_reservation_record(
+                root_fd,
+                root_device,
+                reservation,
+            )
+            if code is None:
+                existing = reservation
+    finally:
+        if root_fd is not None:
+            close_failed = _close_fd(root_fd)
+        release_code = _release_quota_lease(quota_lease)
+    if code is None and (close_failed or release_code is not None):
+        code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    if code is not None:
+        return (None, False, code)
+    return (existing, existing["revision_id"] != revision_id, None)
+
+
+def _read_reservation_for_update(root_fd, root_device, revision_id):
+    quota_fd = None
+    reservations_fd = None
+    reservation_fd = None
+    handed_off = False
+    try:
+        opened = _open_quota_directories(root_fd, root_device, False)
+        if opened[2] is not None or opened[0] is None:
+            code = opened[2]
+            if code is None:
+                code = RevisionStoreErrorCode.NOT_FOUND
+            return (None, None, None, code)
+        quota_fd = opened[0]
+        reservations_fd = opened[1]
+        reservation_open = _open_safe_directory(
+            reservations_fd,
+            _revision_key(revision_id),
+            root_device,
+            RevisionStoreErrorCode.NOT_FOUND,
+        )
+        if reservation_open[1] is not None:
+            return (None, None, None, reservation_open[1])
+        reservation_fd = reservation_open[0]
+        raw = _read_bounded_file(
+            reservation_fd,
+            _RESERVATION_RECORD,
+            root_device,
+            _MAX_JOURNAL_BYTES,
+            RevisionStoreErrorCode.RECOVERY_REQUIRED,
+        )
+        parsed = None
+        code = raw[1]
+        if code is None:
+            checked = _parse_checked_record(
+                raw[0],
+                _RESERVATION_CHECKSUM_DOMAIN,
+                _MAX_JOURNAL_BYTES,
+            )
+            code = checked[1]
+            if code is None:
+                parsed_result = _parse_reservation_body(checked[0])
+                parsed = parsed_result[0]
+                code = parsed_result[1]
+        if code is None and parsed["revision_id"] != revision_id:
+            code = RevisionStoreErrorCode.CORRUPT_RECORD
+        if code is not None:
+            return (None, None, None, code)
+        handed_off = True
+        return (
+            parsed,
+            (quota_fd, reservations_fd, reservation_fd),
+            raw[0],
+            None,
+        )
+    finally:
+        if not handed_off:
+            if reservation_fd is not None:
+                _close_fd(reservation_fd)
+            if reservations_fd is not None:
+                _close_fd(reservations_fd)
+            if quota_fd is not None:
+                _close_fd(quota_fd)
+
+
+def _reservation_binding_code(
+    reservation,
+    kind,
+    project_id,
+    expected_head,
+    reservation_key,
+):
+    key_result = _reservation_key_digest(reservation_key)
+    if key_result[1] is not None:
+        return key_result[1]
+    if (
+        reservation["kind"] != kind
+        or reservation["project_id"] != project_id
+        or reservation["expected_head"] != expected_head
+        or reservation["key_sha256"] != key_result[0]
+    ):
+        return RevisionStoreErrorCode.CONFLICT
+    return None
+
+
+def _replace_reservation(store, revision_id, transform):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return (None, quota[1])
+    quota_lease = quota[0]
+    root_fd = None
+    root_device = None
+    opened = None
+    code = None
+    replacement = None
+    replacement_body = None
+    close_failed = False
+    release_code = None
+    try:
+        root_open = _open_store_root(store)
+        code = root_open[2]
+        if code is None:
+            root_fd = root_open[0]
+            root_device = root_open[1].st_dev
+            opened = _read_reservation_for_update(
+                root_fd,
+                root_device,
+                revision_id,
+            )
+            code = opened[3]
+        if code is None:
+            replacement_body = transform(opened[0])
+            parsed = _parse_reservation_body(replacement_body)
+            if parsed[1] is not None:
+                code = RevisionStoreErrorCode.INVALID_INPUT
+            else:
+                replacement = parsed[0]
+        if code is None:
+            raw = _checked_record_bytes(replacement_body, _RESERVATION_CHECKSUM_DOMAIN)
+            code = _replace_durable_record(
+                opened[1][2],
+                _RESERVATION_RECORD,
+                raw,
+                secrets.token_hex(16),
+                RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+            )
+    finally:
+        if opened is not None and opened[1] is not None:
+            close_failed = _close_fd(opened[1][2])
+            close_failed = _close_two(opened[1][1], opened[1][0]) or close_failed
+        if root_fd is not None:
+            close_failed = _close_fd(root_fd) or close_failed
+        release_code = _release_quota_lease(quota_lease)
+    if code is RevisionStoreErrorCode.DURABILITY_UNCERTAIN:
+        code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    if code is None and (close_failed or release_code is not None):
+        code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return (replacement, code)
+
+
+def _set_reservation_phase(
+    store,
+    revision_id,
+    kind,
+    project_id,
+    expected_head,
+    reservation_key,
+    state,
+    revision_temp,
+):
+    def transform(current):
+        binding_code = _reservation_binding_code(
+            current,
+            kind,
+            project_id,
+            expected_head,
+            reservation_key,
+        )
+        if binding_code is not None:
+            raise RevisionStoreError(binding_code)
+        return _reservation_body(
+            current["kind"],
+            current["project_id"],
+            current["expected_head"],
+            current["revision_id"],
+            current["key_sha256"],
+            current["ceiling_files"],
+            state,
+            current["project_temp"],
+            revision_temp,
+        )
+
+    try:
+        return _replace_reservation(store, revision_id, transform)
+    except RevisionStoreError as error:
+        return (None, error.code)
+
+
+def _release_reservation(
+    store,
+    revision_id,
+    kind,
+    project_id,
+    expected_head,
+    reservation_key,
+):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return quota[1]
+    quota_lease = quota[0]
+    root_fd = None
+    root_device = None
+    quota_fd = None
+    reservations_fd = None
+    reservation_fd = None
+    reservation = None
+    code = None
+    close_failed = False
+    release_code = None
+    try:
+        root_open = _open_store_root(store)
+        code = root_open[2]
+        if code is None:
+            root_fd = root_open[0]
+            root_device = root_open[1].st_dev
+            opened = _read_reservation_for_update(
+                root_fd,
+                root_device,
+                revision_id,
+            )
+            code = opened[3]
+            reservation = opened[0]
+            if opened[1] is not None:
+                quota_fd = opened[1][0]
+                reservations_fd = opened[1][1]
+                reservation_fd = opened[1][2]
+        if code is None:
+            code = _reservation_binding_code(
+                reservation,
+                kind,
+                project_id,
+                expected_head,
+                reservation_key,
+            )
+        if code is None:
+            reservations_result = _load_reservations(root_fd, root_device)
+            code = reservations_result[1]
+            if code is None:
+                snapshot_result = _quota_snapshot(
+                    root_fd,
+                    root_device,
+                    reservations_result[0],
+                )
+                code = snapshot_result[1]
+                if code is None:
+                    code = _reservation_release_code(
+                        snapshot_result[0],
+                        reservations_result[0],
+                        reservation,
+                    )
+        if code is None:
+            try:
+                os.unlink(_RESERVATION_RECORD, dir_fd=reservation_fd)
+                os.fsync(reservation_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        if reservation_fd is not None:
+            close_failed = _close_fd(reservation_fd) or close_failed
+            reservation_fd = None
+        if code is None:
+            try:
+                os.rmdir(_revision_key(revision_id), dir_fd=reservations_fd)
+                os.fsync(reservations_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    finally:
+        if reservation_fd is not None:
+            close_failed = _close_fd(reservation_fd) or close_failed
+        if reservations_fd is not None:
+            close_failed = _close_fd(reservations_fd) or close_failed
+        if quota_fd is not None:
+            close_failed = _close_fd(quota_fd) or close_failed
+        if root_fd is not None:
+            close_failed = _close_fd(root_fd) or close_failed
+        release_code = _release_quota_lease(quota_lease)
+    if code is None and (close_failed or release_code is not None):
+        code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return code
+
+
+def _reservation_value(
+    store,
+    revision_id,
+    kind,
+    project_id,
+    expected_head,
+    reservation_key,
+):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return (None, quota[1])
+    quota_lease = quota[0]
+    root_fd = None
+    opened = None
+    reservation = None
+    code = None
+    close_failed = False
+    release_code = None
+    try:
+        root_open = _open_store_root(store)
+        code = root_open[2]
+        if code is None:
+            root_fd = root_open[0]
+            opened = _read_reservation_for_update(
+                root_fd,
+                root_open[1].st_dev,
+                revision_id,
+            )
+            code = opened[3]
+            reservation = opened[0]
+        if code is None:
+            code = _reservation_binding_code(
+                reservation,
+                kind,
+                project_id,
+                expected_head,
+                reservation_key,
+            )
+    finally:
+        if opened is not None and opened[1] is not None:
+            close_failed = _close_fd(opened[1][2])
+            close_failed = _close_two(opened[1][1], opened[1][0]) or close_failed
+        if root_fd is not None:
+            close_failed = _close_fd(root_fd) or close_failed
+        release_code = _release_quota_lease(quota_lease)
+    if code is None and (close_failed or release_code is not None):
+        code = RevisionStoreErrorCode.IO_ERROR
+    return (reservation, code)
+
+
+def _release_reservation_by_record(store, project_id, revision_id):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return quota[1]
+    quota_lease = quota[0]
+    root_fd = None
+    root_device = None
+    quota_fd = None
+    reservations_fd = None
+    reservation_fd = None
+    reservation = None
+    code = None
+    close_failed = False
+    release_code = None
+    try:
+        root_open = _open_store_root(store)
+        code = root_open[2]
+        if code is None:
+            root_fd = root_open[0]
+            root_device = root_open[1].st_dev
+            opened = _read_reservation_for_update(
+                root_fd,
+                root_device,
+                revision_id,
+            )
+            code = opened[3]
+            reservation = opened[0]
+            if opened[1] is not None:
+                quota_fd = opened[1][0]
+                reservations_fd = opened[1][1]
+                reservation_fd = opened[1][2]
+        if code is None and reservation["project_id"] != project_id:
+            code = RevisionStoreErrorCode.CONFLICT
+        if code is None:
+            reservations_result = _load_reservations(root_fd, root_device)
+            code = reservations_result[1]
+            if code is None:
+                snapshot_result = _quota_snapshot(
+                    root_fd,
+                    root_device,
+                    reservations_result[0],
+                )
+                code = snapshot_result[1]
+                if code is None:
+                    code = _reservation_release_code(
+                        snapshot_result[0],
+                        reservations_result[0],
+                        reservation,
+                    )
+        if code is None:
+            try:
+                os.unlink(_RESERVATION_RECORD, dir_fd=reservation_fd)
+                os.fsync(reservation_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        if reservation_fd is not None:
+            close_failed = _close_fd(reservation_fd) or close_failed
+            reservation_fd = None
+        if code is None:
+            try:
+                os.rmdir(_revision_key(revision_id), dir_fd=reservations_fd)
+                os.fsync(reservations_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    finally:
+        if reservation_fd is not None:
+            close_failed = _close_fd(reservation_fd) or close_failed
+        if reservations_fd is not None:
+            close_failed = _close_fd(reservations_fd) or close_failed
+        if quota_fd is not None:
+            close_failed = _close_fd(quota_fd) or close_failed
+        if root_fd is not None:
+            close_failed = _close_fd(root_fd) or close_failed
+        release_code = _release_quota_lease(quota_lease)
+    if code is None and (close_failed or release_code is not None):
+        code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return code
+
+
+def _reservation_by_record(store, project_id, revision_id):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return (None, quota[1])
+    quota_lease = quota[0]
+    root_fd = None
+    opened = None
+    reservation = None
+    code = None
+    close_failed = False
+    release_code = None
+    try:
+        root_open = _open_store_root(store)
+        code = root_open[2]
+        if code is None:
+            root_fd = root_open[0]
+            opened = _read_reservation_for_update(
+                root_fd,
+                root_open[1].st_dev,
+                revision_id,
+            )
+            code = opened[3]
+            reservation = opened[0]
+        if code is None and reservation["project_id"] != project_id:
+            code = RevisionStoreErrorCode.CONFLICT
+    finally:
+        if opened is not None and opened[1] is not None:
+            close_failed = _close_fd(opened[1][2])
+            close_failed = _close_two(opened[1][1], opened[1][0]) or close_failed
+        if root_fd is not None:
+            close_failed = _close_fd(root_fd) or close_failed
+        release_code = _release_quota_lease(quota_lease)
+    if code is None and (close_failed or release_code is not None):
+        code = RevisionStoreErrorCode.IO_ERROR
+    return (reservation, code)
+
+
+def _set_reservation_phase_by_record(
+    store,
+    project_id,
+    revision_id,
+    state,
+    revision_temp,
+):
+    def transform(current):
+        if current["project_id"] != project_id or current["revision_id"] != revision_id:
+            raise RevisionStoreError(RevisionStoreErrorCode.CONFLICT)
+        return _reservation_body(
+            current["kind"],
+            current["project_id"],
+            current["expected_head"],
+            current["revision_id"],
+            current["key_sha256"],
+            current["ceiling_files"],
+            state,
+            current["project_temp"],
+            revision_temp,
+        )
+
+    try:
+        return _replace_reservation(store, revision_id, transform)
+    except RevisionStoreError as error:
+        return (None, error.code)
+
+
+def _validate_candidate_reservation(
+    store,
+    project_id,
+    expected_head,
+    revision_id,
+    reservation_key,
+    lease,
+):
+    mutation_code = _require_mutation(store, project_id, lease)
+    if mutation_code is not None:
+        return mutation_code
+    reservation = _reservation_value(
+        store,
+        revision_id,
+        "candidate",
+        project_id,
+        expected_head,
+        reservation_key,
+    )
+    if reservation[1] is not None:
+        return reservation[1]
+    if reservation[0]["state"] != "staged":
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    authority = _candidate_authority(store, project_id, revision_id, lease)
+    if authority[2] is not None:
+        return authority[2]
+    close_failed = _close_project_fds(authority[1])
+    close_failed = _close_fd(authority[0][0]) or close_failed
+    if close_failed:
+        return RevisionStoreErrorCode.IO_ERROR
+    return None
+
+
+def _converge_generation_zero_publication(
+    store,
+    root_fd,
+    root_device,
+    project_id,
+    expected_sha256,
+    expected_size,
+    reservation_key,
+    ceiling_files,
+):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return quota[1]
+    quota_lease = quota[0]
+    code = None
+    reservation = None
+    key_result = _reservation_key_digest(reservation_key)
+    project_open = None
+    head = None
+    revision = None
+    close_failed = False
+    release_code = None
+    try:
+        reservations_result = _load_reservations(root_fd, root_device)
+        code = reservations_result[1]
+        if code is None:
+            for candidate in reservations_result[0]:
+                if candidate["project_id"] == project_id:
+                    reservation = candidate
+        if code is None and reservation is None:
+            code = RevisionStoreErrorCode.ALREADY_EXISTS
+        if code is None:
+            if (
+                reservation["kind"] != "generation_zero"
+                or reservation["expected_head"] is not None
+                or reservation["key_sha256"] != key_result[0]
+                or reservation["ceiling_files"] != ceiling_files
+                or reservation["state"] not in {"publishing", "published"}
+            ):
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        if code is None:
+            temporary = _entry_stat(root_fd, reservation["project_temp"])
+            if temporary[2] is not None or temporary[1]:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        if code is None:
+            project_open = _open_project(root_fd, root_device, project_id)
+            if project_open[3] is not None:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        if code is None:
+            head_result = _load_head_fd(
+                project_open[0],
+                project_open[1],
+                root_device,
+                project_id,
+            )
+            if head_result[1] is not None:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+            else:
+                head = head_result[0]
+        if code is None:
+            revision_result = _load_revision_fd(
+                project_open[1],
+                root_device,
+                project_id,
+                reservation["revision_id"],
+            )
+            if revision_result[1] is not None:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+            else:
+                revision = revision_result[0]
+        if code is None:
+            if (
+                head.generation != 0
+                or head.revision_id != reservation["revision_id"]
+                or revision.id != reservation["revision_id"]
+                or revision.base_revision is not None
+                or head.manifest_sha256 != revision.manifest_sha256
+                or revision.artifacts != ()
+            ):
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        if code is None and expected_sha256 is None:
+            if revision.model is not None:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        if code is None and expected_sha256 is not None:
+            if (
+                revision.model is None
+                or revision.model.name != "model.FCStd"
+                or revision.model.format != "fcstd"
+                or revision.model.sha256 != expected_sha256
+                or revision.model.size_bytes != expected_size
+            ):
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    finally:
+        if project_open is not None:
+            close_failed = _close_project_fds(project_open)
+        release_code = _release_quota_lease(quota_lease)
+    if code is None and (close_failed or release_code is not None):
+        code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    if code is not None:
+        return code
+    if reservation["state"] == "publishing":
+        phase = _set_reservation_phase(
+            store,
+            reservation["revision_id"],
+            "generation_zero",
+            project_id,
+            None,
+            reservation_key,
+            "published",
+            None,
+        )
+        if phase[1] is not None:
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    released = _release_reservation(
+        store,
+        reservation["revision_id"],
+        "generation_zero",
+        project_id,
+        None,
+        reservation_key,
+    )
+    if released is not None:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return RevisionStoreErrorCode.ALREADY_EXISTS
+
+
 def _initialize_project(
     store,
     project_id,
@@ -2106,12 +4242,15 @@ def _initialize_project(
     expected_sha256,
     expected_size,
     lease,
+    source_at=None,
 ):
     mutation_code = _require_mutation(store, project_id, lease)
     if mutation_code is not None:
         raise RevisionStoreError(mutation_code)
     source_open = None
-    if source is not None:
+    if source is not None and source_at is not None:
+        raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+    if source is not None or source_at is not None:
         if (
             type(expected_sha256) is not str
             or re.fullmatch(_DIGEST_PATTERN, expected_sha256) is None
@@ -2121,54 +4260,149 @@ def _initialize_project(
             raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
         if expected_size > _MAX_FILE_BYTES:
             raise RevisionStoreError(RevisionStoreErrorCode.BUDGET_EXCEEDED)
-        source_open = _open_external_source(source)
+        if source_at is None:
+            source_open = _open_external_source(source)
+        else:
+            if type(source_at) is not tuple or len(source_at) != 3:
+                raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+            if type(source_at[2]) is not RevisionSourceBinding:
+                raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+            source_open = _open_external_source_at(
+                source_at[0],
+                source_at[1],
+                source_at[2],
+            )
         if source_open[4] is not None:
             raise RevisionStoreError(source_open[4])
     elif expected_sha256 is not None or expected_size is not None:
         raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
     root_open = _open_store_root(store)
     if root_open[2] is not None:
+        source_close_failed = False
         if source_open is not None:
-            _close_fd(source_open[1])
-            _close_fd(source_open[0])
+            source_close_failed = _close_two(source_open[1], source_open[0])
+        if source_close_failed:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
         raise RevisionStoreError(root_open[2])
     root_fd = root_open[0]
     final_name = _project_key(project_id)
     existing = _entry_stat(root_fd, final_name)
     if existing[2] is not None:
+        source_close_failed = False
         if source_open is not None:
-            _close_fd(source_open[1])
-            _close_fd(source_open[0])
+            source_close_failed = _close_two(source_open[1], source_open[0])
         _close_fd(root_fd)
+        if source_close_failed:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
         raise RevisionStoreError(existing[2])
     if existing[1]:
-        if source_open is not None:
-            _close_fd(source_open[1])
-            _close_fd(source_open[0])
-        _close_fd(root_fd)
+        convergence = RevisionStoreErrorCode.UNSAFE_STORE
         if _safe_directory_stat(existing[0], root_open[1].st_dev):
-            raise RevisionStoreError(RevisionStoreErrorCode.ALREADY_EXISTS)
-        raise RevisionStoreError(RevisionStoreErrorCode.UNSAFE_STORE)
+            convergence = _converge_generation_zero_publication(
+                store,
+                root_fd,
+                root_open[1].st_dev,
+                project_id,
+                expected_sha256,
+                expected_size,
+                "generation-zero:" + project_id,
+                5 if source_open is not None else 4,
+            )
+        source_close_failed = False
+        if source_open is not None:
+            source_close_failed = _close_two(source_open[1], source_open[0])
+        _close_fd(root_fd)
+        if source_close_failed:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        raise RevisionStoreError(convergence)
     revision_id = _new_revision_id()
     if _identifier_code(revision_id, _REVISION_PATTERN) is not None:
+        source_close_failed = False
         if source_open is not None:
-            _close_fd(source_open[1])
-            _close_fd(source_open[0])
+            source_close_failed = _close_two(source_open[1], source_open[0])
         _close_fd(root_fd)
+        if source_close_failed:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
         raise RevisionStoreError(RevisionStoreErrorCode.INVALID_IDENTIFIER)
     revision_name = _revision_key(revision_id)
     temp_name = ".project." + secrets.token_hex(16) + ".tmp"
-    creation_failed = False
+    reservation_key = "generation-zero:" + project_id
+    reservation_returned = False
     try:
-        os.mkdir(temp_name, 448, dir_fd=root_fd)
-    except OSError:
-        creation_failed = True
-    if creation_failed:
+        reserved = _reserve_quota(
+            store,
+            "generation_zero",
+            project_id,
+            None,
+            revision_id,
+            reservation_key,
+            temp_name,
+            5 if source_open is not None else 4,
+        )
+        reservation_returned = True
+    finally:
+        if not reservation_returned:
+            source_close_failed = False
+            if source_open is not None:
+                source_close_failed = _close_two(source_open[1], source_open[0])
+            _close_fd(root_fd)
+            if source_close_failed:
+                raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    if reserved[2] is not None:
+        source_close_failed = False
         if source_open is not None:
-            _close_fd(source_open[1])
-            _close_fd(source_open[0])
+            source_close_failed = _close_two(source_open[1], source_open[0])
         _close_fd(root_fd)
-        raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
+        if source_close_failed:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        raise RevisionStoreError(reserved[2])
+    reservation = reserved[0]
+    revision_id = reservation["revision_id"]
+    revision_name = _revision_key(revision_id)
+    temp_name = reservation["project_temp"]
+    if reserved[1]:
+        if reservation["state"] == "published":
+            source_close_failed = False
+            if source_open is not None:
+                source_close_failed = _close_two(source_open[1], source_open[0])
+            _close_fd(root_fd)
+            if source_close_failed:
+                raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        if _quota_cleanup_initial(store, root_fd, temp_name, revision_name):
+            source_close_failed = False
+            if source_open is not None:
+                source_close_failed = _close_two(source_open[1], source_open[0])
+            _close_fd(root_fd)
+            if source_close_failed:
+                raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    creation_code = _quota_create_initial_namespace(
+        store,
+        root_fd,
+        temp_name,
+        revision_name,
+        source_open is not None,
+    )
+    if creation_code is not None:
+        source_close_failed = False
+        if source_open is not None:
+            source_close_failed = _close_two(source_open[1], source_open[0])
+        cleanup_failed = _quota_cleanup_initial(store, root_fd, temp_name, revision_name)
+        release_code = None
+        if not cleanup_failed:
+            release_code = _release_reservation(
+                store,
+                revision_id,
+                "generation_zero",
+                project_id,
+                None,
+                reservation_key,
+            )
+        _close_fd(root_fd)
+        if source_close_failed or cleanup_failed or release_code is not None:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        raise RevisionStoreError(creation_code)
     project_fd = None
     revisions_fd = None
     candidates_fd = None
@@ -2176,11 +4410,8 @@ def _initialize_project(
     code = None
     try:
         project_fd = os.open(temp_name, _root_flags(), dir_fd=root_fd)
-        os.mkdir("revisions", 448, dir_fd=project_fd)
-        os.mkdir("candidates", 448, dir_fd=project_fd)
         revisions_fd = os.open("revisions", _root_flags(), dir_fd=project_fd)
         candidates_fd = os.open("candidates", _root_flags(), dir_fd=project_fd)
-        os.mkdir(revision_name, 448, dir_fd=revisions_fd)
         revision_fd = os.open(revision_name, _root_flags(), dir_fd=revisions_fd)
     except OSError:
         code = RevisionStoreErrorCode.IO_ERROR
@@ -2193,6 +4424,7 @@ def _initialize_project(
             source_open[3],
             revision_fd,
             "model.FCStd",
+            True,
         )
         if copied[2] is not None:
             code = copied[2]
@@ -2206,15 +4438,18 @@ def _initialize_project(
                 sha256=copied[0],
                 size_bytes=copied[1],
             )
+    if source_at is not None and source_open is not None:
+        parent_code = _source_parent_after_code(source_open[0], source_open[5])
+        if parent_code is not None and code is None:
+            code = parent_code
     if source_open is not None:
         if _close_two(source_open[1], source_open[0]):
-            if code is None:
-                code = RevisionStoreErrorCode.IO_ERROR
+            code = RevisionStoreErrorCode.RECOVERY_REQUIRED
     artifacts = ()
     if code is None:
         manifest_body = _manifest_body(project_id, revision_id, None, model, artifacts)
         manifest_raw = _checked_record_bytes(manifest_body, _MANIFEST_CHECKSUM_DOMAIN)
-        code = _create_durable_file(revision_fd, "manifest.json", manifest_raw)
+        code = _create_durable_file(revision_fd, "manifest.json", manifest_raw, True)
     if code is None:
         manifest_digest = hashlib.sha256(manifest_raw).hexdigest()
         head = ProjectHead(
@@ -2224,7 +4459,7 @@ def _initialize_project(
             manifest_sha256=manifest_digest,
         )
         head_raw = _checked_record_bytes(_head_mapping(head), _HEAD_CHECKSUM_DOMAIN)
-        code = _create_durable_file(project_fd, "HEAD.json", head_raw)
+        code = _create_durable_file(project_fd, "HEAD.json", head_raw, True)
     if code is None:
         sync_failed = False
         try:
@@ -2248,25 +4483,86 @@ def _initialize_project(
     if close_failed and code is None:
         code = RevisionStoreErrorCode.IO_ERROR
     if code is not None:
-        _cleanup_initial(root_fd, temp_name, revision_name)
+        cleanup_failed = _quota_cleanup_initial(store, root_fd, temp_name, revision_name)
+        release_code = None
+        if not cleanup_failed:
+            release_code = _release_reservation(
+                store,
+                revision_id,
+                "generation_zero",
+                project_id,
+                None,
+                reservation_key,
+            )
         _close_fd(root_fd)
+        if cleanup_failed or release_code is not None:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
         raise RevisionStoreError(code)
-    rename_failed = False
-    try:
-        os.rename(temp_name, final_name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
-    except OSError:
-        rename_failed = True
-    if rename_failed:
-        _cleanup_initial(root_fd, temp_name, revision_name)
+    publishing = _set_reservation_phase(
+        store,
+        revision_id,
+        "generation_zero",
+        project_id,
+        None,
+        reservation_key,
+        "publishing",
+        None,
+    )
+    if publishing[1] is not None:
         _close_fd(root_fd)
-        raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
-    sync_failed = False
-    try:
-        os.fsync(root_fd)
-    except OSError:
-        sync_failed = True
+        raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    renamed = _quota_rename_directory(
+        store,
+        root_fd,
+        temp_name,
+        final_name,
+        RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+    )
+    rename_code = renamed[0]
+    if rename_code is not None and renamed[1]:
+        _close_fd(root_fd)
+        raise RevisionStoreError(
+            RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+            head_committed=True,
+        )
+    if rename_code is not None:
+        cleanup_failed = _quota_cleanup_initial(store, root_fd, temp_name, revision_name)
+        release_code = None
+        if not cleanup_failed:
+            release_code = _release_reservation(
+                store,
+                revision_id,
+                "generation_zero",
+                project_id,
+                None,
+                reservation_key,
+            )
+        _close_fd(root_fd)
+        if cleanup_failed or release_code is not None:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        raise RevisionStoreError(rename_code)
+    phase_result = _set_reservation_phase(
+        store,
+        revision_id,
+        "generation_zero",
+        project_id,
+        None,
+        reservation_key,
+        "published",
+        None,
+    )
+    release_code = None
+    if phase_result[1] is None:
+        release_code = _release_reservation(
+            store,
+            revision_id,
+            "generation_zero",
+            project_id,
+            None,
+            reservation_key,
+        )
     root_close_failed = _close_fd(root_fd)
-    if sync_failed or root_close_failed:
+    if phase_result[1] is not None or release_code is not None or root_close_failed:
         raise RevisionStoreError(
             RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
             head_committed=True,
@@ -2334,7 +4630,7 @@ def _cleanup_candidate_dir(candidates_fd, candidate_name, root_device):
     return failed or sync_failed
 
 
-def _begin_revision(store, project_id, expected_head, lease):
+def _reserve_candidate_revision(store, project_id, expected_head, reservation_key, lease):
     mutation_code = _require_mutation(store, project_id, lease)
     if mutation_code is not None:
         raise RevisionStoreError(mutation_code)
@@ -2365,6 +4661,52 @@ def _begin_revision(store, project_id, expected_head, lease):
         raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
     journal = journal_result[0]
     if journal is not None:
+        if journal.state is CommitJournalState.STAGING:
+            reservation = _reservation_value(
+                store,
+                journal.candidate_revision,
+                "candidate",
+                project_id,
+                expected_head,
+                reservation_key,
+            )
+            if reservation[1] is None and reservation[0]["state"] in {
+                "reserved",
+                "staged",
+            }:
+                candidate_open = _open_safe_directory(
+                    candidates_fd,
+                    _candidate_key(journal.candidate_revision),
+                    root_open[1].st_dev,
+                    RevisionStoreErrorCode.RECOVERY_REQUIRED,
+                )
+                if candidate_open[1] is None:
+                    phase_code = None
+                    if reservation[0]["state"] == "reserved":
+                        phase = _set_reservation_phase(
+                            store,
+                            journal.candidate_revision,
+                            "candidate",
+                            project_id,
+                            expected_head,
+                            reservation_key,
+                            "staged",
+                            None,
+                        )
+                        phase_code = phase[1]
+                    candidate_close_failed = _close_fd(candidate_open[0])
+                    close_failed = _close_project_fds(project_open)
+                    close_failed = _close_fd(root_open[0]) or close_failed
+                    if phase_code is not None:
+                        raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+                    if candidate_close_failed or close_failed:
+                        raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
+                    return journal.candidate_revision
+            _close_project_fds(project_open)
+            _close_fd(root_open[0])
+            if reservation[1] is RevisionStoreErrorCode.CONFLICT:
+                raise RevisionStoreError(RevisionStoreErrorCode.CONFLICT)
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
         if not _terminal_journal_matches(head, journal):
             _close_project_fds(project_open)
             _close_fd(root_open[0])
@@ -2387,14 +4729,8 @@ def _begin_revision(store, project_id, expected_head, lease):
                 _close_project_fds(project_open)
                 _close_fd(root_open[0])
                 raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
-        unlink_failed = _best_unlink(project_fd, "journal.json")
-        sync_failed = False
-        if not unlink_failed:
-            try:
-                os.fsync(project_fd)
-            except OSError:
-                sync_failed = True
-        if unlink_failed or sync_failed:
+        unlink_failed = _quota_unlink_file(store, project_fd, "journal.json")
+        if unlink_failed:
             _close_project_fds(project_open)
             _close_fd(root_open[0])
             raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
@@ -2409,15 +4745,64 @@ def _begin_revision(store, project_id, expected_head, lease):
         _close_fd(root_open[0])
         raise RevisionStoreError(RevisionStoreErrorCode.INVALID_IDENTIFIER)
     candidate_name = _candidate_key(revision_id)
-    mkdir_failed = False
+    reservation_returned = False
     try:
-        os.mkdir(candidate_name, 448, dir_fd=candidates_fd)
-    except OSError:
-        mkdir_failed = True
-    if mkdir_failed:
+        reserved = _reserve_quota(
+            store,
+            "candidate",
+            project_id,
+            expected_head,
+            revision_id,
+            reservation_key,
+            None,
+            8,
+        )
+        reservation_returned = True
+    finally:
+        if not reservation_returned:
+            _close_project_fds(project_open)
+            _close_fd(root_open[0])
+    if reserved[2] is not None:
         _close_project_fds(project_open)
         _close_fd(root_open[0])
-        raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
+        raise RevisionStoreError(reserved[2])
+    revision_id = reserved[0]["revision_id"]
+    candidate_name = _candidate_key(revision_id)
+    if reserved[1]:
+        if reserved[0]["state"] == "published":
+            _close_project_fds(project_open)
+            _close_fd(root_open[0])
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        if _quota_cleanup_candidate(
+            store,
+            candidates_fd,
+            candidate_name,
+            root_open[1].st_dev,
+        ):
+            _close_project_fds(project_open)
+            _close_fd(root_open[0])
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    namespace_code = _quota_create_candidate_namespace(store, candidates_fd, candidate_name)
+    if namespace_code is not None:
+        cleanup_failed = _quota_cleanup_candidate(
+            store,
+            candidates_fd,
+            candidate_name,
+            root_open[1].st_dev,
+        )
+        release_code = _release_reservation(
+            store,
+            revision_id,
+            "candidate",
+            project_id,
+            expected_head,
+            reservation_key,
+        )
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        if cleanup_failed or release_code is not None:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        raise RevisionStoreError(namespace_code)
     candidate_open = _open_safe_directory(
         candidates_fd,
         candidate_name,
@@ -2465,6 +4850,7 @@ def _begin_revision(store, project_id, expected_head, lease):
                     "model.FCStd",
                     candidate_fd,
                     "model.FCStd",
+                    True,
                 )
                 code = copied_base[2]
                 if _close_fd(base_model_open[0]) and code is None:
@@ -2498,27 +4884,71 @@ def _begin_revision(store, project_id, expected_head, lease):
             state=CommitJournalState.STAGING,
         )
         journal_raw = _checked_record_bytes(_journal_mapping(staging), _JOURNAL_CHECKSUM_DOMAIN)
-        code = _replace_durable_record(
+        code = _quota_replace_record(
+            store,
             project_fd,
             "journal.json",
             journal_raw,
             secrets.token_hex(16),
             RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
         )
+    cleanup_failed = False
+    release_code = None
     if code is not None and staging is None:
-        _cleanup_candidate_dir(candidates_fd, candidate_name, root_open[1].st_dev)
+        cleanup_failed = _quota_cleanup_candidate(
+            store,
+            candidates_fd,
+            candidate_name,
+            root_open[1].st_dev,
+        )
+        if not cleanup_failed:
+            release_code = _release_reservation(
+                store,
+                revision_id,
+                "candidate",
+                project_id,
+                expected_head,
+                reservation_key,
+            )
+    phase_code = None
+    if code is None:
+        phase_result = _set_reservation_phase(
+            store,
+            revision_id,
+            "candidate",
+            project_id,
+            expected_head,
+            reservation_key,
+            "staged",
+            None,
+        )
+        phase_code = phase_result[1]
     close_failed = _close_project_fds(project_open)
     close_failed = _close_fd(root_open[0]) or close_failed
     if code is RevisionStoreErrorCode.DURABILITY_UNCERTAIN:
         raise RevisionStoreError(code, head_committed=False)
     if code is not None:
+        if cleanup_failed or release_code is not None:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
         raise RevisionStoreError(code)
+    if phase_code is not None:
+        raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
     if close_failed:
         raise RevisionStoreError(
             RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
             head_committed=False,
         )
     return revision_id
+
+
+def _begin_revision(store, project_id, expected_head, lease):
+    return _reserve_candidate_revision(
+        store,
+        project_id,
+        expected_head,
+        "legacy:" + secrets.token_hex(16),
+        lease,
+    )
 
 
 def _prepare_revision(
@@ -2646,7 +5076,8 @@ def _prepare_revision(
         _journal_mapping(prepared),
         _JOURNAL_CHECKSUM_DOMAIN,
     )
-    code = _replace_durable_record(
+    code = _quota_replace_record(
+        store,
         project_fd,
         "journal.json",
         prepared_raw,
@@ -2790,6 +5221,22 @@ class LocalRevisionStore:
     def commit_revision(self, project_id, expected_head, revision_id, lease):
         return _commit_revision(self, project_id, expected_head, revision_id, lease)
 
+    def copy_revision_artifacts_at(
+        self,
+        *,
+        expected_revision: RevisionRef,
+        destination_directory_fd: int,
+        cursors: tuple[RevisionCopyCursor, ...],
+        chunk_bytes: int,
+    ) -> None:
+        return _copy_revision_artifacts_at(
+            self,
+            expected_revision,
+            destination_directory_fd,
+            cursors,
+            chunk_bytes,
+        )
+
     def import_trusted_fcstd(
         self,
         project_id,
@@ -2805,6 +5252,27 @@ class LocalRevisionStore:
             expected_sha256,
             expected_size,
             lease,
+        )
+
+    def import_trusted_fcstd_at(
+        self,
+        project_id,
+        *,
+        source_parent_fd,
+        source_name,
+        expected_binding,
+        expected_sha256,
+        expected_size,
+        lease,
+    ):
+        return _initialize_project(
+            self,
+            project_id,
+            None,
+            expected_sha256,
+            expected_size,
+            lease,
+            (source_parent_fd, source_name, expected_binding),
         )
 
     def initialize_empty_project(self, project_id, lease):
@@ -2904,6 +5372,755 @@ def _load_revision(store, project_id, revision_id):
     return result[0]
 
 
+def _same_copy_file_stat(left, right):
+    if left.st_dev != right.st_dev or left.st_ino != right.st_ino:
+        return False
+    if left.st_mode != right.st_mode or left.st_uid != right.st_uid:
+        return False
+    if left.st_nlink != right.st_nlink or left.st_size != right.st_size:
+        return False
+    if left.st_mtime_ns != right.st_mtime_ns:
+        return False
+    if left.st_ctime_ns != right.st_ctime_ns:
+        return False
+    return True
+
+
+def _pinned_file_entry_code(parent_fd, name, expected_stat, missing_code):
+    entry = _entry_stat(parent_fd, name)
+    if entry[2] is not None:
+        return entry[2]
+    if not entry[1]:
+        return missing_code
+    if not _same_copy_file_stat(entry[0], expected_stat):
+        return RevisionStoreErrorCode.CORRUPT_CONTENT
+    return None
+
+
+def _read_pinned_record(parent_fd, name, file_fd, opened_stat, maximum, chunk_bytes):
+    if opened_stat.st_size <= 0 or opened_stat.st_size > maximum:
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    failed = False
+    try:
+        os.lseek(file_fd, 0, os.SEEK_SET)
+    except OSError:
+        failed = True
+    remaining = opened_stat.st_size
+    raw = b""
+    while remaining > 0 and not failed:
+        chunk = None
+        try:
+            chunk = os.read(file_fd, min(chunk_bytes, remaining))
+        except OSError:
+            failed = True
+        if not failed:
+            chunk_size = _byte_count(chunk, min(chunk_bytes, remaining))
+            if chunk_size <= 0 or chunk_size > remaining:
+                failed = True
+            else:
+                raw = raw + chunk
+                remaining -= chunk_size
+    after_stat = None
+    if not failed:
+        try:
+            after_stat = os.fstat(file_fd)
+            os.lseek(file_fd, 0, os.SEEK_SET)
+        except OSError:
+            failed = True
+    if failed or after_stat is None:
+        return (None, RevisionStoreErrorCode.IO_ERROR)
+    if not _same_copy_file_stat(after_stat, opened_stat):
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    entry_code = _pinned_file_entry_code(
+        parent_fd,
+        name,
+        opened_stat,
+        RevisionStoreErrorCode.CORRUPT_RECORD,
+    )
+    if entry_code is not None:
+        if entry_code is RevisionStoreErrorCode.CORRUPT_CONTENT:
+            entry_code = RevisionStoreErrorCode.CORRUPT_RECORD
+        return (None, entry_code)
+    return (raw, None)
+
+
+def _hash_pinned_file(
+    parent_fd,
+    name,
+    file_fd,
+    opened_stat,
+    expected_size,
+    expected_sha256,
+    chunk_bytes,
+):
+    if opened_stat.st_size != expected_size:
+        return RevisionStoreErrorCode.CORRUPT_CONTENT
+    failed = False
+    try:
+        os.lseek(file_fd, 0, os.SEEK_SET)
+    except OSError:
+        failed = True
+    remaining = expected_size
+    pinned_file_hash_state = hashlib.sha256()
+    while remaining > 0 and not failed:
+        maximum = min(chunk_bytes, remaining)
+        chunk = None
+        try:
+            chunk = os.read(file_fd, maximum)
+        except OSError:
+            failed = True
+        if not failed:
+            chunk_size = _byte_count(chunk, maximum)
+            if chunk_size <= 0 or chunk_size > remaining:
+                failed = True
+            else:
+                pinned_file_hash_state.update(chunk)
+                remaining -= chunk_size
+    after_stat = None
+    if not failed:
+        try:
+            after_stat = os.fstat(file_fd)
+            os.lseek(file_fd, 0, os.SEEK_SET)
+        except OSError:
+            failed = True
+    if failed or after_stat is None:
+        return RevisionStoreErrorCode.IO_ERROR
+    if not _same_copy_file_stat(after_stat, opened_stat):
+        return RevisionStoreErrorCode.CORRUPT_CONTENT
+    entry_code = _pinned_file_entry_code(
+        parent_fd,
+        name,
+        opened_stat,
+        RevisionStoreErrorCode.CORRUPT_CONTENT,
+    )
+    if entry_code is not None:
+        return entry_code
+    if pinned_file_hash_state.hexdigest() != expected_sha256:
+        return RevisionStoreErrorCode.CORRUPT_CONTENT
+    return None
+
+
+def _hash_pinned_prefix(file_fd, opened_stat, prefix_size, chunk_bytes):
+    if prefix_size < 0 or prefix_size > opened_stat.st_size:
+        return (None, RevisionStoreErrorCode.INVALID_INPUT)
+    failed = False
+    try:
+        os.lseek(file_fd, 0, os.SEEK_SET)
+    except OSError:
+        failed = True
+    remaining = prefix_size
+    pinned_prefix_hash_state = hashlib.sha256()
+    while remaining > 0 and not failed:
+        maximum = min(chunk_bytes, remaining)
+        chunk = None
+        try:
+            chunk = os.read(file_fd, maximum)
+        except OSError:
+            failed = True
+        if not failed:
+            chunk_size = _byte_count(chunk, maximum)
+            if chunk_size <= 0 or chunk_size > remaining:
+                failed = True
+            else:
+                pinned_prefix_hash_state.update(chunk)
+                remaining -= chunk_size
+    after_stat = None
+    if not failed:
+        try:
+            after_stat = os.fstat(file_fd)
+            os.lseek(file_fd, 0, os.SEEK_SET)
+        except OSError:
+            failed = True
+    if failed or after_stat is None:
+        return (None, RevisionStoreErrorCode.IO_ERROR)
+    if not _same_copy_file_stat(after_stat, opened_stat):
+        return (None, RevisionStoreErrorCode.CORRUPT_CONTENT)
+    return (pinned_prefix_hash_state.hexdigest(), None)
+
+
+def _copy_request_parts(expected_revision, destination_directory_fd, cursors, chunk_bytes):
+    if type(expected_revision) is not RevisionRef:
+        return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+    if type(destination_directory_fd) is not int or destination_directory_fd < 0:
+        return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+    if type(cursors) is not type(()):
+        return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+    if type(chunk_bytes) is not int or chunk_bytes <= 0 or chunk_bytes > _COPY_CHUNK_BYTES:
+        return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+    if expected_revision.base_revision is None or expected_revision.model is None:
+        return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+    artifacts = expected_revision.artifacts
+    if type(artifacts) is not type(()) or len(artifacts) != 1:
+        return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+    model = expected_revision.model
+    step = artifacts[0]
+    if (
+        type(step) is not RevisionArtifactRef
+        or model.name != "model.FCStd"
+        or model.format != "fcstd"
+        or step.name != "model.step"
+        or step.format != "step"
+    ):
+        return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+    cursor_count = len(cursors)
+    if cursor_count > 2:
+        return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+    for cursor in cursors:
+        if type(cursor) is not RevisionCopyCursor:
+            return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+    if cursor_count >= 1 and cursors[0].name != model.name:
+        return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+    if cursor_count == 2 and cursors[1].name != step.name:
+        return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+    model_cursor = None
+    step_cursor = None
+    if cursor_count >= 1:
+        model_cursor = cursors[0]
+        if model_cursor.size_bytes > model.size_bytes:
+            return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+        if model_cursor.size_bytes == model.size_bytes and model_cursor.sha256 != model.sha256:
+            return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+    if cursor_count == 2:
+        step_cursor = cursors[1]
+        if model_cursor.size_bytes != model.size_bytes:
+            return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+        if step_cursor.size_bytes > step.size_bytes:
+            return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+        if step_cursor.size_bytes == step.size_bytes and step_cursor.sha256 != step.sha256:
+            return (None, None, None, None, RevisionStoreErrorCode.INVALID_INPUT)
+    return (model, step, model_cursor, step_cursor, None)
+
+
+def _copy_destination_names(directory_fd):
+    iterator = None
+    names = ()
+    code = None
+    entry_count = 0
+    try:
+        try:
+            iterator = os.scandir(directory_fd)
+            for entry in iterator:
+                entry_count += 1
+                if entry_count > 2:
+                    code = RevisionStoreErrorCode.CORRUPT_CONTENT
+                    break
+                name = entry.name
+                if type(name) is not str or name not in {"model.FCStd", "model.step"}:
+                    code = RevisionStoreErrorCode.CORRUPT_CONTENT
+                    break
+                names = names + (name,)
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+    finally:
+        if iterator is not None:
+            try:
+                iterator.close()
+            except OSError:
+                if code is None:
+                    code = RevisionStoreErrorCode.IO_ERROR
+    return (names, code)
+
+
+def _destination_write_flags():
+    return os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+
+
+def _destination_create_flags():
+    return os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+
+
+def _open_destination_cursor(directory_fd, root_device, cursor, chunk_bytes):
+    before = _entry_stat(directory_fd, cursor.name)
+    if before[2] is not None:
+        return (None, None, before[2])
+    if not before[1]:
+        return (None, None, RevisionStoreErrorCode.CORRUPT_CONTENT)
+    if not _safe_immutable_stat(before[0], root_device) or before[0].st_size != cursor.size_bytes:
+        return (None, None, RevisionStoreErrorCode.CORRUPT_CONTENT)
+    file_fd = None
+    try:
+        file_fd = os.open(
+            cursor.name,
+            _destination_write_flags(),
+            dir_fd=directory_fd,
+        )
+    except OSError:
+        return (None, None, RevisionStoreErrorCode.CORRUPT_CONTENT)
+    opened_stat = None
+    try:
+        opened_stat = os.fstat(file_fd)
+    except OSError:
+        if _close_fd(file_fd):
+            return (None, None, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        return (None, None, RevisionStoreErrorCode.IO_ERROR)
+    if not _safe_immutable_stat(opened_stat, root_device) or not _same_copy_file_stat(
+        opened_stat, before[0]
+    ):
+        if _close_fd(file_fd):
+            return (None, None, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        return (None, None, RevisionStoreErrorCode.CORRUPT_CONTENT)
+    code = _hash_pinned_file(
+        directory_fd,
+        cursor.name,
+        file_fd,
+        opened_stat,
+        cursor.size_bytes,
+        cursor.sha256,
+        chunk_bytes,
+    )
+    if code is not None:
+        if _close_fd(file_fd):
+            code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        return (None, None, code)
+    return (file_fd, opened_stat, None)
+
+
+def _create_destination_file(directory_fd, root_device, name):
+    file_fd = None
+    try:
+        file_fd = os.open(name, _destination_create_flags(), 384, dir_fd=directory_fd)
+    except OSError:
+        return (None, None, RevisionStoreErrorCode.IO_ERROR)
+    opened_stat = None
+    code = None
+    try:
+        os.fchmod(file_fd, 384)
+        opened_stat = os.fstat(file_fd)
+        if not _safe_immutable_stat(opened_stat, root_device) or opened_stat.st_size != 0:
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+        if code is None:
+            os.fsync(file_fd)
+            os.fsync(directory_fd)
+    except OSError:
+        code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    if code is not None:
+        if _close_fd(file_fd):
+            code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        return (None, None, code)
+    return (file_fd, opened_stat, None)
+
+
+def _copy_file_suffix(source_fd, destination_fd, offset, total_size, chunk_bytes):
+    try:
+        os.lseek(source_fd, offset, os.SEEK_SET)
+        os.lseek(destination_fd, offset, os.SEEK_SET)
+    except OSError:
+        return RevisionStoreErrorCode.IO_ERROR
+    remaining = total_size - offset
+    while remaining > 0:
+        maximum = min(chunk_bytes, remaining)
+        chunk = None
+        try:
+            chunk = os.read(source_fd, maximum)
+        except OSError:
+            return RevisionStoreErrorCode.IO_ERROR
+        chunk_size = _byte_count(chunk, maximum)
+        if chunk_size <= 0 or chunk_size > remaining:
+            return RevisionStoreErrorCode.CORRUPT_CONTENT
+        if not _write_all(destination_fd, chunk):
+            return RevisionStoreErrorCode.IO_ERROR
+        remaining -= chunk_size
+    return None
+
+
+def _sync_destination_file(directory_fd, file_fd):
+    try:
+        os.fchmod(file_fd, 384)
+        os.fsync(file_fd)
+        os.fsync(directory_fd)
+    except OSError:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return None
+
+
+def _copy_revision_artifacts_at(
+    store,
+    expected_revision,
+    destination_directory_fd,
+    cursors,
+    chunk_bytes,
+):
+    request = _copy_request_parts(
+        expected_revision,
+        destination_directory_fd,
+        cursors,
+        chunk_bytes,
+    )
+    if request[4] is not None:
+        raise RevisionStoreError(request[4])
+    model = request[0]
+    step = request[1]
+    model_cursor = request[2]
+    step_cursor = request[3]
+    root_open = None
+    project_open = None
+    revision_fd = None
+    manifest_fd = None
+    manifest_stat = None
+    manifest_raw = None
+    model_fd = None
+    model_stat = None
+    step_fd = None
+    step_stat = None
+    destination_fd = None
+    destination_stat = None
+    destination_model_fd = None
+    destination_step_fd = None
+    code = None
+    borrowed_destination_stat = None
+    try:
+        borrowed_destination_stat = os.fstat(destination_directory_fd)
+    except OSError:
+        code = RevisionStoreErrorCode.UNSAFE_STORE
+    if code is None and (
+        borrowed_destination_stat is None or not _safe_source_parent_stat(borrowed_destination_stat)
+    ):
+        code = RevisionStoreErrorCode.UNSAFE_STORE
+    if code is None:
+        try:
+            destination_fd = os.dup(destination_directory_fd)
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+    destination_inheritable = True
+    if code is None:
+        try:
+            destination_stat = os.fstat(destination_fd)
+            destination_inheritable = os.get_inheritable(destination_fd)
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+    if code is None and (
+        destination_inheritable
+        or destination_stat is None
+        or not _safe_source_parent_stat(destination_stat)
+        or not _same_source_parent(destination_stat, borrowed_destination_stat)
+    ):
+        code = RevisionStoreErrorCode.UNSAFE_STORE
+    if code is None:
+        root_open = _open_store_root(store)
+        if root_open[2] is not None:
+            code = root_open[2]
+    if code is None:
+        project_open = _open_project(
+            root_open[0],
+            root_open[1].st_dev,
+            expected_revision.project_id,
+        )
+        if project_open[3] is not None:
+            code = project_open[3]
+    revision_name = _revision_key(expected_revision.id)
+    revision_stat = None
+    if code is None:
+        revision_open = _open_safe_directory(
+            project_open[1],
+            revision_name,
+            root_open[1].st_dev,
+            RevisionStoreErrorCode.NOT_FOUND,
+        )
+        revision_fd = revision_open[0]
+        code = revision_open[1]
+    if code is None:
+        try:
+            revision_stat = os.fstat(revision_fd)
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+    if code is None:
+        manifest_open = _open_checked_file(
+            revision_fd,
+            "manifest.json",
+            root_open[1].st_dev,
+            _MAX_MANIFEST_BYTES,
+            RevisionStoreErrorCode.CORRUPT_RECORD,
+            False,
+        )
+        manifest_fd = manifest_open[0]
+        manifest_stat = manifest_open[1]
+        code = manifest_open[2]
+    if code is None:
+        manifest_read = _read_pinned_record(
+            revision_fd,
+            "manifest.json",
+            manifest_fd,
+            manifest_stat,
+            _MAX_MANIFEST_BYTES,
+            chunk_bytes,
+        )
+        manifest_raw = manifest_read[0]
+        code = manifest_read[1]
+    if code is None:
+        parsed = _parse_checked_record(
+            manifest_raw,
+            _MANIFEST_CHECKSUM_DOMAIN,
+            _MAX_MANIFEST_BYTES,
+        )
+        if parsed[1] is not None:
+            code = parsed[1]
+        else:
+            revision_result = _revision_from_manifest(parsed[0], manifest_raw)
+            if revision_result[1] is not None:
+                code = revision_result[1]
+            elif revision_result[0] != expected_revision:
+                code = RevisionStoreErrorCode.CONFLICT
+    if code is None:
+        model_open = _open_checked_file(
+            revision_fd,
+            model.name,
+            root_open[1].st_dev,
+            _MAX_FILE_BYTES,
+            RevisionStoreErrorCode.CORRUPT_CONTENT,
+            False,
+        )
+        model_fd = model_open[0]
+        model_stat = model_open[1]
+        code = model_open[2]
+    if code is None:
+        step_open = _open_checked_file(
+            revision_fd,
+            step.name,
+            root_open[1].st_dev,
+            _MAX_FILE_BYTES,
+            RevisionStoreErrorCode.CORRUPT_CONTENT,
+            False,
+        )
+        step_fd = step_open[0]
+        step_stat = step_open[1]
+        code = step_open[2]
+    if code is None:
+        code = _hash_pinned_file(
+            revision_fd,
+            model.name,
+            model_fd,
+            model_stat,
+            model.size_bytes,
+            model.sha256,
+            chunk_bytes,
+        )
+    if code is None:
+        code = _hash_pinned_file(
+            revision_fd,
+            step.name,
+            step_fd,
+            step_stat,
+            step.size_bytes,
+            step.sha256,
+            chunk_bytes,
+        )
+    if code is None and model_cursor is not None:
+        prefix = _hash_pinned_prefix(
+            model_fd,
+            model_stat,
+            model_cursor.size_bytes,
+            chunk_bytes,
+        )
+        if prefix[1] is not None:
+            code = prefix[1]
+        elif prefix[0] != model_cursor.sha256:
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if code is None and step_cursor is not None:
+        prefix = _hash_pinned_prefix(
+            step_fd,
+            step_stat,
+            step_cursor.size_bytes,
+            chunk_bytes,
+        )
+        if prefix[1] is not None:
+            code = prefix[1]
+        elif prefix[0] != step_cursor.sha256:
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    destination_names = None
+    if code is None:
+        names_result = _copy_destination_names(destination_fd)
+        destination_names = names_result[0]
+        code = names_result[1]
+    if code is None:
+        if len(cursors) == 0 and destination_names != ():
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+        elif len(cursors) == 1 and destination_names != (model.name,):
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+        elif len(cursors) == 2 and (
+            len(destination_names) != 2
+            or model.name not in destination_names
+            or step.name not in destination_names
+        ):
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if code is None and model_cursor is not None:
+        opened_destination = _open_destination_cursor(
+            destination_fd,
+            destination_stat.st_dev,
+            model_cursor,
+            chunk_bytes,
+        )
+        destination_model_fd = opened_destination[0]
+        code = opened_destination[2]
+    if code is None and step_cursor is not None:
+        opened_destination = _open_destination_cursor(
+            destination_fd,
+            destination_stat.st_dev,
+            step_cursor,
+            chunk_bytes,
+        )
+        destination_step_fd = opened_destination[0]
+        code = opened_destination[2]
+    if code is None and destination_model_fd is None:
+        created = _create_destination_file(
+            destination_fd,
+            destination_stat.st_dev,
+            model.name,
+        )
+        destination_model_fd = created[0]
+        code = created[2]
+    model_offset = 0 if model_cursor is None else model_cursor.size_bytes
+    if code is None and model_offset < model.size_bytes:
+        code = _copy_file_suffix(
+            model_fd,
+            destination_model_fd,
+            model_offset,
+            model.size_bytes,
+            chunk_bytes,
+        )
+        if code is None:
+            current_model_stat = None
+            try:
+                current_model_stat = os.fstat(destination_model_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.IO_ERROR
+            if code is None and not _safe_immutable_stat(
+                current_model_stat,
+                destination_stat.st_dev,
+            ):
+                code = RevisionStoreErrorCode.CORRUPT_CONTENT
+            if code is None:
+                code = _hash_pinned_file(
+                    destination_fd,
+                    model.name,
+                    destination_model_fd,
+                    current_model_stat,
+                    model.size_bytes,
+                    model.sha256,
+                    chunk_bytes,
+                )
+        sync_code = _sync_destination_file(destination_fd, destination_model_fd)
+        if sync_code is not None:
+            code = sync_code
+    if code is None and destination_step_fd is None:
+        created = _create_destination_file(
+            destination_fd,
+            destination_stat.st_dev,
+            step.name,
+        )
+        destination_step_fd = created[0]
+        code = created[2]
+    step_offset = 0 if step_cursor is None else step_cursor.size_bytes
+    if code is None and step_offset < step.size_bytes:
+        code = _copy_file_suffix(
+            step_fd,
+            destination_step_fd,
+            step_offset,
+            step.size_bytes,
+            chunk_bytes,
+        )
+        if code is None:
+            current_step_stat = None
+            try:
+                current_step_stat = os.fstat(destination_step_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.IO_ERROR
+            if code is None and not _safe_immutable_stat(
+                current_step_stat,
+                destination_stat.st_dev,
+            ):
+                code = RevisionStoreErrorCode.CORRUPT_CONTENT
+            if code is None:
+                code = _hash_pinned_file(
+                    destination_fd,
+                    step.name,
+                    destination_step_fd,
+                    current_step_stat,
+                    step.size_bytes,
+                    step.sha256,
+                    chunk_bytes,
+                )
+        sync_code = _sync_destination_file(destination_fd, destination_step_fd)
+        if sync_code is not None:
+            code = sync_code
+    if code is None:
+        final_manifest = _read_pinned_record(
+            revision_fd,
+            "manifest.json",
+            manifest_fd,
+            manifest_stat,
+            _MAX_MANIFEST_BYTES,
+            chunk_bytes,
+        )
+        if final_manifest[1] is not None:
+            code = final_manifest[1]
+        elif final_manifest[0] != manifest_raw:
+            code = RevisionStoreErrorCode.CORRUPT_RECORD
+    if code is None:
+        code = _hash_pinned_file(
+            revision_fd,
+            model.name,
+            model_fd,
+            model_stat,
+            model.size_bytes,
+            model.sha256,
+            chunk_bytes,
+        )
+    if code is None:
+        code = _hash_pinned_file(
+            revision_fd,
+            step.name,
+            step_fd,
+            step_stat,
+            step.size_bytes,
+            step.sha256,
+            chunk_bytes,
+        )
+    if code is None:
+        revision_after = None
+        try:
+            revision_after = os.fstat(revision_fd)
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+        if code is None and not _same_source_parent(revision_after, revision_stat):
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if code is None:
+        revision_entry = _entry_stat(project_open[1], revision_name)
+        if revision_entry[2] is not None:
+            code = revision_entry[2]
+        elif not revision_entry[1]:
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+        elif not _safe_directory_stat(revision_entry[0], root_open[1].st_dev):
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+        elif not _same_source_parent(revision_entry[0], revision_stat):
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if code is None:
+        code = _source_parent_after_code(destination_fd, destination_stat)
+    close_failed = False
+    if destination_step_fd is not None:
+        close_failed = _close_fd(destination_step_fd) or close_failed
+    if destination_model_fd is not None:
+        close_failed = _close_fd(destination_model_fd) or close_failed
+    if destination_fd is not None:
+        close_failed = _close_fd(destination_fd) or close_failed
+    if step_fd is not None:
+        close_failed = _close_fd(step_fd) or close_failed
+    if model_fd is not None:
+        close_failed = _close_fd(model_fd) or close_failed
+    if manifest_fd is not None:
+        close_failed = _close_fd(manifest_fd) or close_failed
+    if revision_fd is not None:
+        close_failed = _close_fd(revision_fd) or close_failed
+    if project_open is not None:
+        close_failed = _close_project_fds(project_open) or close_failed
+    if root_open is not None and root_open[0] is not None:
+        close_failed = _close_fd(root_open[0]) or close_failed
+    if close_failed:
+        code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    if code is not None:
+        raise RevisionStoreError(code)
+    return None
+
+
 def _revision_model_path(store, project_id, revision_id):
     revision = _load_revision(store, project_id, revision_id)
     if revision.model is None:
@@ -2948,13 +6165,22 @@ def _cleanup_revision_temp(revisions_fd, temp_name):
     except OSError:
         failed = True
     if failed or revision_fd is None:
-        _best_rmdir(revisions_fd, temp_name)
-        return
-    _best_unlink(revision_fd, "model.FCStd")
-    _best_unlink(revision_fd, "model.step")
-    _best_unlink(revision_fd, "manifest.json")
-    _close_fd(revision_fd)
-    _best_rmdir(revisions_fd, temp_name)
+        entry = _entry_stat(revisions_fd, temp_name)
+        if entry[2] is not None:
+            return True
+        if not entry[1]:
+            return False
+        return _best_rmdir(revisions_fd, temp_name)
+    failed = _best_unlink(revision_fd, "model.FCStd") or failed
+    failed = _best_unlink(revision_fd, "model.step") or failed
+    failed = _best_unlink(revision_fd, "manifest.json") or failed
+    failed = _close_fd(revision_fd) or failed
+    failed = _best_rmdir(revisions_fd, temp_name) or failed
+    try:
+        os.fsync(revisions_fd)
+    except OSError:
+        failed = True
+    return failed
 
 
 def _seal_revision(store, project_id, revision_id, lease):
@@ -2972,6 +6198,37 @@ def _seal_revision(store, project_id, revision_id, lease):
         _close_fd(root_open[0])
         raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
     journal = journal_result[0]
+    reservation = _reservation_by_record(store, project_id, revision_id)
+    reservation_code = reservation[1]
+    if reservation_code is None:
+        if (
+            reservation[0]["kind"] != "candidate"
+            or reservation[0]["expected_head"] != journal.expected_head
+        ):
+            reservation_code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    if reservation_code is None and reservation[0]["state"] == "publishing":
+        bound_temp = reservation[0]["revision_temp"]
+        bound_entry = _entry_stat(revisions_fd, bound_temp)
+        final_entry = _entry_stat(revisions_fd, _revision_key(revision_id))
+        if bound_entry[2] is not None or final_entry[2] is not None or final_entry[1]:
+            reservation_code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        elif bound_entry[1] and _quota_cleanup_revision(store, revisions_fd, bound_temp):
+            reservation_code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        if reservation_code is None:
+            restaged = _set_reservation_phase_by_record(
+                store,
+                project_id,
+                revision_id,
+                "staged",
+                None,
+            )
+            reservation_code = restaged[1]
+    elif reservation_code is None and reservation[0]["state"] != "staged":
+        reservation_code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    if reservation_code is not None:
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
     candidate_name = _candidate_key(revision_id)
     candidate_open = _open_safe_directory(
         candidates_fd,
@@ -3021,18 +6278,28 @@ def _seal_revision(store, project_id, revision_id, lease):
         _close_fd(root_open[0])
         raise RevisionStoreError(RevisionStoreErrorCode.CONFLICT)
     temp_name = ".revision." + secrets.token_hex(16) + ".tmp"
-    mkdir_failed = False
-    try:
-        os.mkdir(temp_name, 448, dir_fd=revisions_fd)
-    except OSError:
-        mkdir_failed = True
-    if mkdir_failed:
+    phase_result = _set_reservation_phase_by_record(
+        store,
+        project_id,
+        revision_id,
+        "publishing",
+        temp_name,
+    )
+    if phase_result[1] is not None:
         _close_fd(model_source[0])
         _close_fd(step_source[0])
         _close_fd(candidate_fd)
         _close_project_fds(project_open)
         _close_fd(root_open[0])
-        raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
+        raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    namespace_code = _quota_create_revision_namespace(store, revisions_fd, temp_name)
+    if namespace_code is not None:
+        _close_fd(model_source[0])
+        _close_fd(step_source[0])
+        _close_fd(candidate_fd)
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        raise RevisionStoreError(namespace_code)
     revision_open = _open_safe_directory(
         revisions_fd,
         temp_name,
@@ -3051,6 +6318,7 @@ def _seal_revision(store, project_id, revision_id, lease):
             "model.FCStd",
             revision_fd,
             "model.FCStd",
+            True,
         )
         code = copied_model[2]
     if _close_fd(model_source[0]) and code is None:
@@ -3063,6 +6331,7 @@ def _seal_revision(store, project_id, revision_id, lease):
             "model.step",
             revision_fd,
             "model.step",
+            True,
         )
         code = copied_step[2]
     if _close_fd(step_source[0]) and code is None:
@@ -3102,7 +6371,7 @@ def _seal_revision(store, project_id, revision_id, lease):
             (step,),
         )
         manifest_raw = _checked_record_bytes(manifest_body, _MANIFEST_CHECKSUM_DOMAIN)
-        code = _create_durable_file(revision_fd, "manifest.json", manifest_raw)
+        code = _create_durable_file(revision_fd, "manifest.json", manifest_raw, True)
     if code is None:
         sync_failed = False
         try:
@@ -3115,23 +6384,15 @@ def _seal_revision(store, project_id, revision_id, lease):
         code = RevisionStoreErrorCode.IO_ERROR
     published = False
     if code is None:
-        rename_failed = False
-        try:
-            os.rename(temp_name, final_name, src_dir_fd=revisions_fd, dst_dir_fd=revisions_fd)
-        except OSError:
-            rename_failed = True
-        if rename_failed:
-            code = RevisionStoreErrorCode.IO_ERROR
-        else:
-            published = True
-    if code is None:
-        sync_failed = False
-        try:
-            os.fsync(revisions_fd)
-        except OSError:
-            sync_failed = True
-        if sync_failed:
-            code = RevisionStoreErrorCode.DURABILITY_UNCERTAIN
+        renamed = _quota_rename_directory(
+            store,
+            revisions_fd,
+            temp_name,
+            final_name,
+            RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+        )
+        code = renamed[0]
+        published = renamed[1]
     sealed = None
     if published:
         manifest_digest = hashlib.sha256(manifest_raw).hexdigest()
@@ -3143,6 +6404,15 @@ def _seal_revision(store, project_id, revision_id, lease):
             model=model,
             artifacts=(step,),
         )
+    if code is None:
+        readback = _load_revision_fd(
+            revisions_fd,
+            root_open[1].st_dev,
+            project_id,
+            revision_id,
+        )
+        if readback[1] is not None or readback[0] != sealed:
+            code = RevisionStoreErrorCode.RECOVERY_REQUIRED
     if code is None:
         prepared = CommitJournal(
             id=journal.id,
@@ -3156,7 +6426,8 @@ def _seal_revision(store, project_id, revision_id, lease):
             _journal_mapping(prepared),
             _JOURNAL_CHECKSUM_DOMAIN,
         )
-        code = _replace_durable_record(
+        code = _quota_replace_record(
+            store,
             project_fd,
             "journal.json",
             prepared_raw,
@@ -3166,19 +6437,38 @@ def _seal_revision(store, project_id, revision_id, lease):
     candidate_close_failed = _close_fd(candidate_fd)
     cleanup_failed = False
     if code is None:
-        cleanup_failed = _cleanup_candidate_dir(
+        cleanup_failed = _quota_cleanup_candidate(
+            store,
             candidates_fd,
             candidate_name,
             root_open[1].st_dev,
         )
+    reservation_code = None
+    if code is None and not cleanup_failed:
+        phase_result = _set_reservation_phase_by_record(
+            store,
+            project_id,
+            revision_id,
+            "published",
+            None,
+        )
+        reservation_code = phase_result[1]
+        if reservation_code is None:
+            reservation_code = _release_reservation_by_record(
+                store,
+                project_id,
+                revision_id,
+            )
     if not published:
-        _cleanup_revision_temp(revisions_fd, temp_name)
+        _quota_cleanup_revision(store, revisions_fd, temp_name)
     close_failed = _close_project_fds(project_open)
     close_failed = _close_fd(root_open[0]) or close_failed
     if code is RevisionStoreErrorCode.DURABILITY_UNCERTAIN:
         raise RevisionStoreError(code, head_committed=False)
     if code is not None:
         raise RevisionStoreError(code)
+    if reservation_code is not None:
+        raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
     if candidate_close_failed or cleanup_failed:
         raise RevisionStoreError(RevisionStoreErrorCode.CLEANUP_REQUIRED)
     if close_failed:
@@ -3210,6 +6500,21 @@ def _replace_head_record(project_fd, raw, token):
     if sync_failed:
         return (RevisionStoreErrorCode.DURABILITY_UNCERTAIN, True)
     return (None, True)
+
+
+def _quota_replace_head_record(store, project_fd, raw, token):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return (quota[1], False)
+    replaced = None
+    release_code = None
+    try:
+        replaced = _replace_head_record(project_fd, raw, token)
+    finally:
+        release_code = _release_quota_lease(quota[0])
+    if release_code is not None:
+        return (RevisionStoreErrorCode.RECOVERY_REQUIRED, replaced[1])
+    return replaced
 
 
 def _commit_revision(store, project_id, expected_head, revision_id, lease):
@@ -3280,7 +6585,12 @@ def _commit_revision(store, project_id, expected_head, revision_id, lease):
         manifest_sha256=sealed.manifest_sha256,
     )
     head_raw = _checked_record_bytes(_head_mapping(new_head), _HEAD_CHECKSUM_DOMAIN)
-    replaced = _replace_head_record(project_open[0], head_raw, secrets.token_hex(16))
+    replaced = _quota_replace_head_record(
+        store,
+        project_open[0],
+        head_raw,
+        secrets.token_hex(16),
+    )
     if replaced[0] is not None:
         _close_project_fds(project_open)
         _close_fd(root_open[0])
@@ -3302,7 +6612,8 @@ def _commit_revision(store, project_id, expected_head, revision_id, lease):
         _journal_mapping(committed),
         _JOURNAL_CHECKSUM_DOMAIN,
     )
-    journal_code = _replace_durable_record(
+    journal_code = _quota_replace_record(
+        store,
         project_open[0],
         "journal.json",
         committed_raw,
@@ -3333,9 +6644,10 @@ def _terminal_journal(journal, state):
     )
 
 
-def _persist_journal(project_fd, journal):
+def _persist_journal(store, project_fd, journal):
     raw = _checked_record_bytes(_journal_mapping(journal), _JOURNAL_CHECKSUM_DOMAIN)
-    return _replace_durable_record(
+    return _quota_replace_record(
+        store,
         project_fd,
         "journal.json",
         raw,
@@ -3422,7 +6734,7 @@ def _reconcile(store, project_id, lease):
         if code is None:
             if journal.state is not CommitJournalState.NOT_COMMITTED:
                 result_journal = _terminal_journal(journal, CommitJournalState.NOT_COMMITTED)
-                journal_code = _persist_journal(project_open[0], result_journal)
+                journal_code = _persist_journal(store, project_open[0], result_journal)
                 if journal_code is not None:
                     code = RevisionStoreErrorCode.RECOVERY_REQUIRED
             if code is None:
@@ -3447,7 +6759,7 @@ def _reconcile(store, project_id, lease):
                 code = RevisionStoreErrorCode.RECOVERY_REQUIRED
             elif journal.state is CommitJournalState.PREPARED:
                 result_journal = _terminal_journal(journal, CommitJournalState.COMMITTED)
-                journal_code = _persist_journal(project_open[0], result_journal)
+                journal_code = _persist_journal(store, project_open[0], result_journal)
                 if journal_code is not None:
                     code = RevisionStoreErrorCode.RECOVERY_REQUIRED
             if code is None:
@@ -3457,11 +6769,36 @@ def _reconcile(store, project_id, lease):
     else:
         code = RevisionStoreErrorCode.RECOVERY_REQUIRED
     if cleanup and code is None:
-        cleanup_failed = _cleanup_candidate_dir(
+        cleanup_failed = _quota_cleanup_candidate(
+            store,
             project_open[2],
             _candidate_key(journal.candidate_revision),
             root_open[1].st_dev,
         )
+        reservation = _reservation_by_record(
+            store,
+            project_id,
+            journal.candidate_revision,
+        )
+        if reservation[1] is None:
+            if reservation[0]["revision_temp"] is not None:
+                cleanup_failed = (
+                    _quota_cleanup_revision(
+                        store,
+                        project_open[1],
+                        reservation[0]["revision_temp"],
+                    )
+                    or cleanup_failed
+                )
+        elif reservation[1] is not RevisionStoreErrorCode.NOT_FOUND:
+            cleanup_failed = True
+        if not cleanup_failed and reservation[1] is None:
+            reservation_code = _release_reservation_by_record(
+                store,
+                project_id,
+                journal.candidate_revision,
+            )
+            cleanup_failed = reservation_code is not None
         if cleanup_failed:
             result_status = ReconciliationStatus.CLEANUP_REQUIRED
     close_failed = _close_project_fds(project_open)

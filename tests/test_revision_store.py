@@ -24,7 +24,9 @@ from vibecad.execution.revisions import (
     ReconciliationResult,
     ReconciliationStatus,
     RevisionArtifactRef,
+    RevisionCopyCursor,
     RevisionRef,
+    RevisionSourceBinding,
     RevisionStoreError,
     RevisionStoreErrorCode,
     RevisionStoreRootTrust,
@@ -104,6 +106,7 @@ CANDIDATE_PATH_DOMAIN = b"vibecad-revision-candidate-path-v1\0"
 MANIFEST_CHECKSUM_DOMAIN = b"vibecad-revision-manifest-v1\0"
 HEAD_CHECKSUM_DOMAIN = b"vibecad-project-head-v1\0"
 JOURNAL_CHECKSUM_DOMAIN = b"vibecad-commit-journal-v1\0"
+RESERVATION_CHECKSUM_DOMAIN = b"vibecad-revision-reservation-v1\0"
 
 EXPECTED_EXECUTION_EXPORTS = [
     "DEFAULT_OPERATION_REGISTRY",
@@ -138,7 +141,9 @@ EXPECTED_REVISION_EXPORTS = (
     "ReconciliationResult",
     "ReconciliationStatus",
     "RevisionArtifactRef",
+    "RevisionCopyCursor",
     "RevisionRef",
+    "RevisionSourceBinding",
     "RevisionStoreError",
     "RevisionStoreErrorCode",
     "RevisionStoreRootTrust",
@@ -148,10 +153,27 @@ EXPECTED_STORE_METHODS = {
     "candidate_artifact_path": ("self", "project_id", "revision_id", "format", "lease"),
     "candidate_model_path": ("self", "project_id", "revision_id", "lease"),
     "commit_revision": ("self", "project_id", "expected_head", "revision_id", "lease"),
+    "copy_revision_artifacts_at": (
+        "self",
+        "expected_revision",
+        "destination_directory_fd",
+        "cursors",
+        "chunk_bytes",
+    ),
     "import_trusted_fcstd": (
         "self",
         "project_id",
         "source",
+        "expected_sha256",
+        "expected_size",
+        "lease",
+    ),
+    "import_trusted_fcstd_at": (
+        "self",
+        "project_id",
+        "source_parent_fd",
+        "source_name",
+        "expected_binding",
         "expected_sha256",
         "expected_size",
         "lease",
@@ -206,6 +228,11 @@ EXPECTED_VALUE_FIELDS = {
         "sha256",
         "size_bytes",
     ),
+    "RevisionCopyCursor": (
+        "name",
+        "size_bytes",
+        "sha256",
+    ),
     "RevisionRef": (
         "schema_version",
         "id",
@@ -214,6 +241,16 @@ EXPECTED_VALUE_FIELDS = {
         "manifest_sha256",
         "model",
         "artifacts",
+    ),
+    "RevisionSourceBinding": (
+        "dev",
+        "ino",
+        "mode",
+        "uid",
+        "nlink",
+        "size",
+        "mtime_ns",
+        "ctime_ns",
     ),
 }
 EXPECTED_ENUM_MEMBERS = {
@@ -238,6 +275,7 @@ EXPECTED_ENUM_MEMBERS = {
         "CORRUPT_RECORD": "corrupt_record",
         "CORRUPT_CONTENT": "corrupt_content",
         "BUDGET_EXCEEDED": "budget_exceeded",
+        "RESOURCE_EXHAUSTED": "resource_exhausted",
         "UNSAFE_STORE": "unsafe_store",
         "INVALID_LEASE": "invalid_lease",
         "IO_ERROR": "io_error",
@@ -508,6 +546,45 @@ def _import_trusted(
     )
 
 
+def _source_binding(source: Path) -> RevisionSourceBinding:
+    value = source.stat(follow_symlinks=False)
+    return RevisionSourceBinding(
+        dev=value.st_dev,
+        ino=value.st_ino,
+        mode=value.st_mode,
+        uid=value.st_uid,
+        nlink=value.st_nlink,
+        size=value.st_size,
+        mtime_ns=value.st_mtime_ns,
+        ctime_ns=value.st_ctime_ns,
+    )
+
+
+def _import_trusted_at(
+    store: LocalRevisionStore,
+    project_id: str,
+    source: Path,
+    lease: ProjectWriteLease,
+) -> ProjectHead:
+    raw = source.read_bytes()
+    parent_fd = os.open(
+        source.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        return store.import_trusted_fcstd_at(
+            project_id,
+            source_parent_fd=parent_fd,
+            source_name=source.name,
+            expected_binding=_source_binding(source),
+            expected_sha256=hashlib.sha256(raw).hexdigest(),
+            expected_size=len(raw),
+            lease=lease,
+        )
+    finally:
+        os.close(parent_fd)
+
+
 def _begin_and_fill(
     store: LocalRevisionStore,
     lease: ProjectWriteLease,
@@ -532,12 +609,1885 @@ def _all_tree_bytes(root: Path) -> dict[str, bytes]:
     return result
 
 
+def _physical_ordinary_bytes(root: Path) -> int:
+    return sum(
+        path.stat(follow_symlinks=False).st_size
+        for path in root.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+
+
+def _physical_ordinary_files(root: Path) -> int:
+    return sum(1 for path in root.rglob("*") if path.is_file() and not path.is_symlink())
+
+
+def _physical_project_directories(root: Path) -> int:
+    return sum(1 for path in root.iterdir() if path.is_dir() and path.name != ".revision-quota")
+
+
+def _physical_revision_directories(root: Path) -> int:
+    return sum(1 for path in root.rglob("*") if path.is_dir() and path.parent.name == "revisions")
+
+
+def _physical_candidate_reservation_directories(root: Path) -> int:
+    return sum(
+        1
+        for path in root.rglob("*")
+        if path.is_dir() and path.parent.name in {"candidates", "reservations"}
+    )
+
+
+def _assert_only_empty_quota_infrastructure(root: Path) -> None:
+    entries = tuple(root.iterdir())
+    assert len(entries) == 1
+    assert entries[0].name == ".revision-quota"
+    assert not any(path.is_file() for path in entries[0].rglob("*"))
+
+
+def test_generation_zero_admission_reserves_the_frozen_peak_before_creating_names(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    monkeypatch.setattr(
+        revisions_module,
+        "_MAX_STORE_BYTES",
+        1_074_790_400 - 1,
+        raising=False,
+    )
+    before = tuple(root.iterdir())
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        with pytest.raises(RevisionStoreError) as captured:
+            store.initialize_empty_project(PROJECT_ID, lease)
+    assert captured.value.code is RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+    assert tuple(root.iterdir()) == before
+
+
+def test_generation_zero_admission_accepts_the_exact_frozen_peak(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, _root = store_parts
+    monkeypatch.setattr(
+        revisions_module,
+        "_MAX_STORE_BYTES",
+        1_074_790_400,
+        raising=False,
+    )
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        head = store.initialize_empty_project(PROJECT_ID, lease)
+    assert head.project_id == PROJECT_ID
+
+
+def test_preexisting_overquota_store_remains_readable_but_all_mutation_is_rejected(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    before = _all_tree_bytes(root)
+    monkeypatch.setattr(
+        revisions_module,
+        "_MAX_STORE_BYTES",
+        _physical_ordinary_bytes(root) - 1,
+        raising=False,
+    )
+    assert store.load_head(PROJECT_ID) == head
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        with pytest.raises(RevisionStoreError) as captured:
+            store.begin_revision(PROJECT_ID, head, lease)
+    assert captured.value.code is RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+    assert _all_tree_bytes(root) == before
+
+
+def test_candidate_admission_reserves_duplication_peak_and_has_zero_effect_at_n_plus_one(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    before = _all_tree_bytes(root)
+    current = _physical_ordinary_bytes(root)
+    monkeypatch.setattr(
+        revisions_module,
+        "_MAX_STORE_BYTES",
+        current + 2_151_677_952 - 1,
+        raising=False,
+    )
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        with pytest.raises(RevisionStoreError) as captured:
+            store.begin_revision(PROJECT_ID, head, lease)
+    assert captured.value.code is RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+    assert _all_tree_bytes(root) == before
+
+
+def test_candidate_byte_admission_accepts_the_exact_frozen_peak(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    monkeypatch.setattr(
+        revisions_module,
+        "_MAX_STORE_BYTES",
+        _physical_ordinary_bytes(root) + 2_151_677_952,
+        raising=False,
+    )
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = store.begin_revision(PROJECT_ID, head, lease)
+        reconciled = store.rollback_revision(PROJECT_ID, revision_id, lease)
+    assert reconciled.status is ReconciliationStatus.NOT_COMMITTED
+
+
+@pytest.mark.parametrize(
+    ("constant", "current_counter", "claim"),
+    [
+        ("_MAX_REVISIONS", _physical_revision_directories, 1),
+        (
+            "_MAX_CANDIDATES_AND_RESERVATIONS",
+            _physical_candidate_reservation_directories,
+            2,
+        ),
+        ("_MAX_ORDINARY_FILES", _physical_ordinary_files, 8),
+    ],
+)
+@pytest.mark.parametrize("one_past", [False, True])
+def test_candidate_count_admission_has_exact_n_and_n_plus_one_boundaries(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+    constant: str,
+    current_counter,
+    claim: int,
+    one_past: bool,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    future = current_counter(root) + claim
+    monkeypatch.setattr(
+        revisions_module,
+        constant,
+        future - int(one_past),
+        raising=False,
+    )
+    before = _all_tree_bytes(root)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        if one_past:
+            with pytest.raises(RevisionStoreError) as captured:
+                store.begin_revision(PROJECT_ID, head, lease)
+            assert captured.value.code is RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+        else:
+            revision_id = store.begin_revision(PROJECT_ID, head, lease)
+            reconciled = store.rollback_revision(PROJECT_ID, revision_id, lease)
+            assert reconciled.status is ReconciliationStatus.NOT_COMMITTED
+    if one_past:
+        assert _all_tree_bytes(root) == before
+
+
+@pytest.mark.parametrize("one_past", [False, True])
+def test_project_directory_admission_has_exact_n_and_n_plus_one_boundaries(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+    one_past: bool,
+):
+    store, manager, root = store_parts
+    _initialize_empty(store, manager)
+    future = _physical_project_directories(root) + 1
+    monkeypatch.setattr(
+        revisions_module,
+        "_MAX_PROJECTS",
+        future - int(one_past),
+        raising=False,
+    )
+    before = _all_tree_bytes(root)
+    with manager.acquire_project_write(OTHER_PROJECT_ID) as lease:
+        if one_past:
+            with pytest.raises(RevisionStoreError) as captured:
+                store.initialize_empty_project(OTHER_PROJECT_ID, lease)
+            assert captured.value.code is RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+        else:
+            head = store.initialize_empty_project(OTHER_PROJECT_ID, lease)
+            assert head.project_id == OTHER_PROJECT_ID
+    if one_past:
+        assert _all_tree_bytes(root) == before
+
+
+@pytest.mark.parametrize("imported", [False, True])
+@pytest.mark.parametrize("one_past", [False, True])
+def test_generation_zero_file_admission_matches_the_actual_publication_peak(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+    imported: bool,
+    one_past: bool,
+):
+    store, manager, root = store_parts
+    source = root.parent / "source.FCStd"
+    source.write_bytes(b"trusted-import")
+    claim = 5 if imported else 4
+    monkeypatch.setattr(
+        revisions_module,
+        "_MAX_ORDINARY_FILES",
+        claim - int(one_past),
+        raising=False,
+    )
+    before = _all_tree_bytes(root)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        if one_past:
+            with pytest.raises(RevisionStoreError) as captured:
+                if imported:
+                    _import_trusted(store, PROJECT_ID, source, lease)
+                else:
+                    store.initialize_empty_project(PROJECT_ID, lease)
+            assert captured.value.code is RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+        elif imported:
+            head = _import_trusted(store, PROJECT_ID, source, lease)
+            assert head.generation == 0
+        else:
+            head = store.initialize_empty_project(PROJECT_ID, lease)
+            assert head.generation == 0
+    if one_past:
+        assert _all_tree_bytes(root) == before
+
+
+def test_generation_zero_retry_converges_a_published_reservation_before_already_exists(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    original_release = revisions_module._release_reservation
+    release_calls = 0
+
+    def fail_first_release(*args, **kwargs):
+        nonlocal release_calls
+        release_calls += 1
+        if release_calls == 1:
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        return original_release(*args, **kwargs)
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        with monkeypatch.context() as fault:
+            fault.setattr(revisions_module, "_release_reservation", fail_first_release)
+            with pytest.raises(RevisionStoreError) as uncertain:
+                store.initialize_empty_project(PROJECT_ID, lease)
+        _assert_closed_error(
+            uncertain.value,
+            RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+            head_committed=True,
+        )
+        assert len(tuple(root.rglob("reservation.json"))) == 1
+        published = store.load_head(PROJECT_ID)
+        with pytest.raises(RevisionStoreError) as repeated:
+            store.initialize_empty_project(PROJECT_ID, lease)
+        _assert_closed_error(repeated.value, RevisionStoreErrorCode.ALREADY_EXISTS)
+        assert store.load_head(PROJECT_ID) == published
+        assert tuple(root.rglob("reservation.json")) == ()
+        revision_id = store.begin_revision(PROJECT_ID, published, lease)
+        rolled_back = store.rollback_revision(PROJECT_ID, revision_id, lease)
+        assert rolled_back.status is ReconciliationStatus.NOT_COMMITTED
+
+
+def test_generation_zero_retry_keeps_reservation_when_published_authority_is_corrupt(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    original_release = revisions_module._release_reservation
+    release_calls = 0
+
+    def fail_first_release(*args, **kwargs):
+        nonlocal release_calls
+        release_calls += 1
+        if release_calls == 1:
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        return original_release(*args, **kwargs)
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        with monkeypatch.context() as fault:
+            fault.setattr(revisions_module, "_release_reservation", fail_first_release)
+            with pytest.raises(RevisionStoreError):
+                store.initialize_empty_project(PROJECT_ID, lease)
+        reservation_records = tuple(root.rglob("reservation.json"))
+        assert len(reservation_records) == 1
+        head_path = _project_dir(root) / "HEAD.json"
+        head_path.write_bytes(b"{}")
+        head_path.chmod(0o600)
+        with pytest.raises(RevisionStoreError) as repeated:
+            store.initialize_empty_project(PROJECT_ID, lease)
+        _assert_closed_error(repeated.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        assert tuple(root.rglob("reservation.json")) == reservation_records
+
+
+def test_seal_retry_removes_the_exact_bound_revision_temp_left_by_process_crash(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(store, lease, head)
+        original_copy = revisions_module._copy_open_file
+        crashed = False
+
+        def copy_then_crash(*args, **kwargs):
+            nonlocal crashed
+            copied = original_copy(*args, **kwargs)
+            if not crashed and args[5] == "model.FCStd":
+                crashed = True
+                raise SimulatedProcessCrash
+            return copied
+
+        with monkeypatch.context() as fault:
+            fault.setattr(revisions_module, "_copy_open_file", copy_then_crash)
+            with pytest.raises(SimulatedProcessCrash):
+                store.seal_revision(PROJECT_ID, revision_id, lease)
+        revision_temps = tuple(
+            path
+            for path in (_project_dir(root) / "revisions").iterdir()
+            if path.name.startswith(".revision.") and path.name.endswith(".tmp")
+        )
+        assert len(revision_temps) == 1
+        assert (revision_temps[0] / "model.FCStd").read_bytes() == b"changed-fcstd"
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+        assert sealed.id == revision_id
+        assert not any(
+            path.name.startswith(".revision.") and path.name.endswith(".tmp")
+            for path in (_project_dir(root) / "revisions").iterdir()
+        )
+
+
+def test_unknown_root_entry_fails_closed_for_mutation_without_breaking_reads(
+    store_parts,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    unknown = root / "unexpected-entry"
+    unknown.write_bytes(b"count-me")
+    unknown.chmod(0o600)
+    before = _all_tree_bytes(root)
+    assert store.load_head(PROJECT_ID) == head
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        with pytest.raises(RevisionStoreError) as captured:
+            store.begin_revision(PROJECT_ID, head, lease)
+    assert captured.value.code is RevisionStoreErrorCode.UNSAFE_STORE
+    assert _all_tree_bytes(root) == before
+
+
+@pytest.mark.parametrize("target_call", [1, 2], ids=["reservations", "quota-tree"])
+@pytest.mark.parametrize("phase", ["creation", "iteration", "close"])
+def test_quota_scandir_oserror_closes_every_fd_and_releases_the_exact_lease(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+    target_call: int,
+    phase: str,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    before = _all_tree_bytes(root)
+    original_open = revisions_module.os.open
+    original_scandir = revisions_module.os.scandir
+    original_acquire = revisions_module._acquire_quota_lease
+    opened_fds: set[int] = set()
+    acquired = []
+    scandir_calls = 0
+
+    class FaultingScandir:
+        def __init__(self, iterator) -> None:
+            self.iterator = iterator
+            self.iteration_faulted = False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if phase == "iteration" and not self.iteration_faulted:
+                self.iteration_faulted = True
+                raise OSError("injected scandir iteration fault")
+            return next(self.iterator)
+
+        def close(self) -> None:
+            self.iterator.close()
+            if phase == "close":
+                raise OSError("injected scandir close fault")
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            fd = original_open(path, flags, mode)
+        else:
+            fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        opened_fds.add(fd)
+        return fd
+
+    def tracked_acquire(target_store):
+        result = original_acquire(target_store)
+        if result[0] is not None:
+            acquired.append(result[0])
+        return result
+
+    def faulting_scandir(fd):
+        nonlocal scandir_calls
+        scandir_calls += 1
+        if scandir_calls != target_call:
+            return original_scandir(fd)
+        if phase == "creation":
+            raise OSError("injected scandir creation fault")
+        return FaultingScandir(original_scandir(fd))
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        with monkeypatch.context() as fault:
+            fault.setattr(revisions_module.os, "open", tracked_open)
+            fault.setattr(revisions_module.os, "scandir", faulting_scandir)
+            fault.setattr(revisions_module, "_acquire_quota_lease", tracked_acquire)
+            with pytest.raises(RevisionStoreError) as captured:
+                store.begin_revision(PROJECT_ID, head, lease)
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.IO_ERROR)
+        assert len(acquired) == 1
+        assert acquired[0].released
+        for fd in opened_fds:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+        assert _all_tree_bytes(root) == before
+        revision_id = store.begin_revision(PROJECT_ID, head, lease)
+        rolled_back = store.rollback_revision(PROJECT_ID, revision_id, lease)
+        assert rolled_back.status is ReconciliationStatus.NOT_COMMITTED
+
+
+@pytest.mark.parametrize(
+    ("phase", "fault"),
+    [
+        ("creation", "base"),
+        ("iteration", "keyboard"),
+        ("close", "system"),
+    ],
+)
+def test_public_begin_scandir_baseexception_closes_outer_fds_and_allows_retry(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    fault: str,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    before = _all_tree_bytes(root)
+    original_open = revisions_module.os.open
+    original_close = revisions_module.os.close
+    original_scandir = revisions_module.os.scandir
+    original_acquire = revisions_module._acquire_quota_lease
+    open_counts: dict[int, int] = {}
+    close_counts: dict[int, int] = {}
+    acquired = []
+
+    class InjectedBaseException(BaseException):
+        pass
+
+    exception_type = InjectedBaseException
+    if fault == "keyboard":
+        exception_type = KeyboardInterrupt
+    elif fault == "system":
+        exception_type = SystemExit
+
+    class FaultingScandir:
+        def __init__(self, iterator) -> None:
+            self.iterator = iterator
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if phase == "iteration":
+                raise exception_type()
+            return next(self.iterator)
+
+        def close(self) -> None:
+            self.iterator.close()
+            if phase == "close":
+                raise exception_type()
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            fd = original_open(path, flags, mode)
+        else:
+            fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        open_counts[fd] = open_counts.get(fd, 0) + 1
+        return fd
+
+    def tracked_close(fd):
+        close_counts[fd] = close_counts.get(fd, 0) + 1
+        return original_close(fd)
+
+    def tracked_acquire(target_store):
+        result = original_acquire(target_store)
+        if result[0] is not None:
+            acquired.append(result[0])
+        return result
+
+    def faulting_scandir(fd):
+        if phase == "creation":
+            raise exception_type()
+        return FaultingScandir(original_scandir(fd))
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        with monkeypatch.context() as injected:
+            injected.setattr(revisions_module.os, "open", tracked_open)
+            injected.setattr(revisions_module.os, "close", tracked_close)
+            injected.setattr(revisions_module.os, "scandir", faulting_scandir)
+            injected.setattr(revisions_module, "_acquire_quota_lease", tracked_acquire)
+            with pytest.raises(exception_type):
+                store.begin_revision(PROJECT_ID, head, lease)
+        assert len(acquired) == 1
+        assert acquired[0].released
+        assert close_counts == open_counts
+        for fd in open_counts:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+        assert _all_tree_bytes(root) == before
+        revision_id = store.begin_revision(PROJECT_ID, head, lease)
+        rolled_back = store.rollback_revision(PROJECT_ID, revision_id, lease)
+        assert rolled_back.status is ReconciliationStatus.NOT_COMMITTED
+
+
+@pytest.mark.parametrize("operation", ["empty", "import"])
+@pytest.mark.parametrize(
+    ("phase", "fault"),
+    [
+        ("creation", "base"),
+        ("iteration", "keyboard"),
+        ("close", "system"),
+    ],
+)
+def test_public_initialize_scandir_baseexception_closes_outer_fds_and_allows_retry(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    phase: str,
+    fault: str,
+):
+    store, manager, root = store_parts
+    _initialize_empty(store, manager, OTHER_PROJECT_ID)
+    source = root.parent / "trusted-source.FCStd"
+    source_raw = b"trusted-import"
+    source.write_bytes(source_raw)
+    before = _all_tree_bytes(root)
+    original_open = revisions_module.os.open
+    original_close = revisions_module.os.close
+    original_scandir = revisions_module.os.scandir
+    original_acquire = revisions_module._acquire_quota_lease
+    open_counts: dict[int, int] = {}
+    close_counts: dict[int, int] = {}
+    acquired = []
+    scandir_calls = 0
+    target_call = 1
+    if (operation == "empty" and phase == "iteration") or (
+        operation == "import" and phase != "iteration"
+    ):
+        target_call = 2
+
+    class InjectedBaseException(BaseException):
+        pass
+
+    exception_type = InjectedBaseException
+    if fault == "keyboard":
+        exception_type = KeyboardInterrupt
+    elif fault == "system":
+        exception_type = SystemExit
+
+    class FaultingScandir:
+        def __init__(self, iterator) -> None:
+            self.iterator = iterator
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if phase == "iteration":
+                raise exception_type()
+            return next(self.iterator)
+
+        def close(self) -> None:
+            self.iterator.close()
+            if phase == "close":
+                raise exception_type()
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            fd = original_open(path, flags, mode)
+        else:
+            fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        open_counts[fd] = open_counts.get(fd, 0) + 1
+        return fd
+
+    def tracked_close(fd):
+        close_counts[fd] = close_counts.get(fd, 0) + 1
+        return original_close(fd)
+
+    def tracked_acquire(target_store):
+        result = original_acquire(target_store)
+        if result[0] is not None:
+            acquired.append(result[0])
+        return result
+
+    def faulting_scandir(fd):
+        nonlocal scandir_calls
+        scandir_calls += 1
+        if scandir_calls != target_call:
+            return original_scandir(fd)
+        if phase == "creation":
+            raise exception_type()
+        return FaultingScandir(original_scandir(fd))
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        with monkeypatch.context() as injected:
+            injected.setattr(revisions_module.os, "open", tracked_open)
+            injected.setattr(revisions_module.os, "close", tracked_close)
+            injected.setattr(revisions_module.os, "scandir", faulting_scandir)
+            injected.setattr(revisions_module, "_acquire_quota_lease", tracked_acquire)
+            with pytest.raises(exception_type):
+                if operation == "empty":
+                    store.initialize_empty_project(PROJECT_ID, lease)
+                else:
+                    store.import_trusted_fcstd(
+                        PROJECT_ID,
+                        source,
+                        hashlib.sha256(source_raw).hexdigest(),
+                        len(source_raw),
+                        lease,
+                    )
+        assert len(acquired) == 1
+        assert acquired[0].released
+        assert close_counts == open_counts
+        for fd in open_counts:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+        assert _all_tree_bytes(root) == before
+        if operation == "empty":
+            head = store.initialize_empty_project(PROJECT_ID, lease)
+        else:
+            head = store.import_trusted_fcstd(
+                PROJECT_ID,
+                source,
+                hashlib.sha256(source_raw).hexdigest(),
+                len(source_raw),
+                lease,
+            )
+        assert head.project_id == PROJECT_ID
+
+
+def test_reservation_transform_revision_error_releases_quota_and_all_owned_fds(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, _root = store_parts
+    head = _initialize_empty(store, manager)
+    original_open = revisions_module.os.open
+    original_acquire = revisions_module._acquire_quota_lease
+    opened_fds: set[int] = set()
+    acquired = []
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            fd = original_open(path, flags, mode)
+        else:
+            fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        opened_fds.add(fd)
+        return fd
+
+    def tracked_acquire(target_store):
+        result = original_acquire(target_store)
+        if result[0] is not None:
+            acquired.append(result[0])
+        return result
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = store.begin_revision(PROJECT_ID, head, lease)
+        with monkeypatch.context() as fault:
+            fault.setattr(revisions_module.os, "open", tracked_open)
+            fault.setattr(revisions_module, "_acquire_quota_lease", tracked_acquire)
+            result = revisions_module._set_reservation_phase_by_record(
+                store,
+                OTHER_PROJECT_ID,
+                revision_id,
+                "staged",
+                None,
+            )
+        assert result == (None, RevisionStoreErrorCode.CONFLICT)
+        assert len(acquired) == 1
+        assert acquired[0].released
+        for fd in opened_fds:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+        rolled_back = store.rollback_revision(PROJECT_ID, revision_id, lease)
+        assert rolled_back.status is ReconciliationStatus.NOT_COMMITTED
+
+
+@pytest.mark.parametrize("fault", ["base", "keyboard", "system"])
+def test_reservation_transform_baseexception_propagates_after_exact_cleanup_and_retry(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+):
+    store, manager, _root = store_parts
+    head = _initialize_empty(store, manager)
+    original_open = revisions_module.os.open
+    original_acquire = revisions_module._acquire_quota_lease
+    opened_fds: set[int] = set()
+    acquired = []
+
+    class InjectedBaseException(BaseException):
+        pass
+
+    exception_type = InjectedBaseException
+    if fault == "keyboard":
+        exception_type = KeyboardInterrupt
+    elif fault == "system":
+        exception_type = SystemExit
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            fd = original_open(path, flags, mode)
+        else:
+            fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        opened_fds.add(fd)
+        return fd
+
+    def tracked_acquire(target_store):
+        result = original_acquire(target_store)
+        if result[0] is not None:
+            acquired.append(result[0])
+        return result
+
+    def explode(_current):
+        raise exception_type()
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = store.begin_revision(PROJECT_ID, head, lease)
+        with monkeypatch.context() as injected:
+            injected.setattr(revisions_module.os, "open", tracked_open)
+            injected.setattr(revisions_module, "_acquire_quota_lease", tracked_acquire)
+            with pytest.raises(exception_type):
+                revisions_module._replace_reservation(store, revision_id, explode)
+        assert len(acquired) == 1
+        assert acquired[0].released
+        for fd in opened_fds:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+        replacement = revisions_module._set_reservation_phase_by_record(
+            store,
+            PROJECT_ID,
+            revision_id,
+            "staged",
+            None,
+        )
+        assert replacement[1] is None
+        rolled_back = store.rollback_revision(PROJECT_ID, revision_id, lease)
+        assert rolled_back.status is ReconciliationStatus.NOT_COMMITTED
+
+
+def test_overlapping_published_generation_zero_and_staged_candidate_fail_closed_globally(
+    store_parts,
+):
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    other_head = _initialize_empty(store, manager, OTHER_PROJECT_ID)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        store.begin_revision(PROJECT_ID, head, lease)
+    reservation_root = root / ".revision-quota" / "reservations"
+    reservation_directory = reservation_root / _path_key(
+        REVISION_PATH_DOMAIN,
+        head.revision_id,
+    )
+    reservation_directory.mkdir(mode=0o700)
+    os.chmod(reservation_directory, 0o700)
+    _write_checked_record(
+        reservation_directory / "reservation.json",
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "generation_zero",
+            "project_id": PROJECT_ID,
+            "expected_head": None,
+            "revision_id": head.revision_id,
+            "key_sha256": "f" * 64,
+            "ceiling_bytes": 1_074_790_400,
+            "ceiling_files": 4,
+            "state": "published",
+            "project_temp": ".project." + "f" * 32 + ".tmp",
+            "revision_temp": None,
+        },
+        RESERVATION_CHECKSUM_DOMAIN,
+    )
+    before_files = _all_tree_bytes(root)
+    before_entries = tuple(sorted(str(path.relative_to(root)) for path in root.rglob("*")))
+    with manager.acquire_project_write(OTHER_PROJECT_ID) as other_lease:
+        with pytest.raises(RevisionStoreError) as captured:
+            store.begin_revision(OTHER_PROJECT_ID, other_head, other_lease)
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.CORRUPT_RECORD)
+    assert _all_tree_bytes(root) == before_files
+    assert tuple(sorted(str(path.relative_to(root)) for path in root.rglob("*"))) == before_entries
+
+
+@pytest.mark.parametrize(
+    ("previous", "effective"),
+    [
+        (
+            (
+                revisions_module.resource.RLIM_INFINITY,
+                revisions_module.resource.RLIM_INFINITY,
+            ),
+            (536_870_912, revisions_module.resource.RLIM_INFINITY),
+        ),
+        ((1_234, 9_999), (1_234, 9_999)),
+        ((900_000_000, 1_000_000_000), (536_870_912, 1_000_000_000)),
+    ],
+)
+def test_candidate_file_limit_uses_minimum_soft_and_restores_the_exact_tuple(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+    previous: tuple[int, int],
+    effective: tuple[int, int],
+):
+    store, _manager, _root = store_parts
+    runtime = revisions_module._CandidateFileLimitRuntime
+    monkeypatch.setattr(runtime, "_initialized_pid", None)
+    monkeypatch.setattr(runtime, "_poisoned_pid", None)
+    monkeypatch.setattr(
+        revisions_module.signal,
+        "getsignal",
+        lambda _signal_number: revisions_module.signal.SIG_IGN,
+    )
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        revisions_module.resource,
+        "getrlimit",
+        lambda _resource_number: previous,
+    )
+    monkeypatch.setattr(
+        revisions_module.resource,
+        "setrlimit",
+        lambda _resource_number, value: calls.append(value),
+    )
+    revisions_module._initialize_candidate_file_limit_runtime()
+    with revisions_module._candidate_file_limit(store):
+        pass
+    assert calls == [effective, previous]
+
+
+def test_candidate_file_limit_requires_first_main_init_then_is_idempotent_in_four_workers(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, _manager, _root = store_parts
+    runtime = revisions_module._CandidateFileLimitRuntime
+    monkeypatch.setattr(runtime, "_initialized_pid", None)
+    monkeypatch.setattr(runtime, "_poisoned_pid", None)
+    monkeypatch.setattr(
+        revisions_module.signal,
+        "getsignal",
+        lambda _signal_number: revisions_module.signal.SIG_IGN,
+    )
+    resource_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        revisions_module.resource,
+        "getrlimit",
+        lambda _resource_number: (-1, -1),
+    )
+    monkeypatch.setattr(
+        revisions_module.resource,
+        "setrlimit",
+        lambda _resource_number, value: resource_calls.append(value),
+    )
+    first_errors: list[RevisionStoreError] = []
+
+    def first_worker() -> None:
+        try:
+            revisions_module._initialize_candidate_file_limit_runtime()
+        except RevisionStoreError as error:
+            first_errors.append(error)
+
+    first = threading.Thread(target=first_worker)
+    first.start()
+    first.join(timeout=5)
+    assert not first.is_alive()
+    assert [error.code for error in first_errors] == [RevisionStoreErrorCode.IO_ERROR]
+    assert resource_calls == []
+
+    revisions_module._initialize_candidate_file_limit_runtime()
+    worker_errors: list[RevisionStoreError] = []
+    completed: list[int] = []
+    first_entered = threading.Event()
+    release_first = threading.Event()
+
+    def initialized_worker(index: int) -> None:
+        try:
+            revisions_module._initialize_candidate_file_limit_runtime()
+            with revisions_module._candidate_file_limit(store):
+                completed.append(index)
+                if index == 0:
+                    first_entered.set()
+                    assert release_first.wait(timeout=5)
+        except RevisionStoreError as error:
+            worker_errors.append(error)
+
+    workers = [threading.Thread(target=initialized_worker, args=(index,)) for index in range(4)]
+    workers[0].start()
+    assert first_entered.wait(timeout=5)
+    for worker in workers[1:]:
+        worker.start()
+    release_first.set()
+    for worker in workers:
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+    assert worker_errors == []
+    assert sorted(completed) == [0, 1, 2, 3]
+    assert len(resource_calls) == 8
+
+
+def test_candidate_file_limit_is_one_process_global_gate_across_distinct_stores(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, _manager, root = store_parts
+    other_locks = root.parent / "other-locks"
+    other_locks.mkdir(mode=0o700)
+    other_manager = ResourceLeaseManager(
+        other_locks,
+        trust=LeaseRootTrust.TRUSTED_LOCAL,
+    )
+    other_store = LocalRevisionStore(
+        root,
+        other_manager,
+        trust=RevisionStoreRootTrust.TRUSTED_LOCAL,
+    )
+    runtime = revisions_module._CandidateFileLimitRuntime
+    monkeypatch.setattr(runtime, "_initialized_pid", None)
+    monkeypatch.setattr(runtime, "_poisoned_pid", None)
+    monkeypatch.setattr(
+        revisions_module.signal,
+        "getsignal",
+        lambda _signal_number: revisions_module.signal.SIG_IGN,
+    )
+    monkeypatch.setattr(
+        revisions_module.resource,
+        "getrlimit",
+        lambda _resource_number: (-1, -1),
+    )
+    monkeypatch.setattr(
+        revisions_module.resource,
+        "setrlimit",
+        lambda _resource_number, _value: None,
+    )
+    revisions_module._initialize_candidate_file_limit_runtime()
+    first_entered = threading.Event()
+    second_started = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+    errors: list[RevisionStoreError] = []
+
+    def first_worker() -> None:
+        try:
+            with revisions_module._candidate_file_limit(store):
+                first_entered.set()
+                assert release_first.wait(timeout=5)
+        except RevisionStoreError as error:
+            errors.append(error)
+
+    def second_worker() -> None:
+        second_started.set()
+        try:
+            with revisions_module._candidate_file_limit(other_store):
+                second_entered.set()
+        except RevisionStoreError as error:
+            errors.append(error)
+
+    first = threading.Thread(target=first_worker)
+    second = threading.Thread(target=second_worker)
+    first.start()
+    assert first_entered.wait(timeout=5)
+    second.start()
+    assert second_started.wait(timeout=5)
+    assert not second_entered.wait(timeout=0.1)
+    release_first.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert second_entered.is_set()
+    assert errors == []
+
+
+def test_candidate_file_limit_poison_is_visible_before_the_process_gate_unlocks(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, _manager, _root = store_parts
+    runtime = revisions_module._CandidateFileLimitRuntime
+    pid = os.getpid()
+    monkeypatch.setattr(runtime, "_initialized_pid", pid)
+    monkeypatch.setattr(runtime, "_poisoned_pid", None)
+    monkeypatch.setattr(
+        revisions_module.signal,
+        "getsignal",
+        lambda _signal_number: revisions_module.signal.SIG_IGN,
+    )
+    monkeypatch.setattr(
+        revisions_module.resource,
+        "getrlimit",
+        lambda _resource_number: (-1, -1),
+    )
+    calls = 0
+
+    def fail_restore(_resource_number, _value):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected restore failure")
+
+    class ObservedGate:
+        def acquire(self, *, timeout):
+            assert timeout > 0
+            return True
+
+        def release(self):
+            assert runtime._poisoned_pid == pid
+
+    monkeypatch.setattr(runtime, "_gate", ObservedGate(), raising=False)
+    monkeypatch.setattr(revisions_module.resource, "setrlimit", fail_restore)
+    with pytest.raises(RevisionStoreError) as captured:
+        with revisions_module._candidate_file_limit(store):
+            pass
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+
+
+def test_candidate_file_limit_restore_failure_poison_is_sticky_in_the_same_process(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, _manager, _root = store_parts
+    runtime = revisions_module._CandidateFileLimitRuntime
+    monkeypatch.setattr(runtime, "_initialized_pid", None)
+    monkeypatch.setattr(runtime, "_poisoned_pid", None)
+    monkeypatch.setattr(
+        revisions_module.signal,
+        "getsignal",
+        lambda _signal_number: revisions_module.signal.SIG_IGN,
+    )
+    monkeypatch.setattr(
+        revisions_module.resource,
+        "getrlimit",
+        lambda _resource_number: (-1, -1),
+    )
+    calls = 0
+
+    def fail_restore(_resource_number, _value):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected restore failure")
+
+    monkeypatch.setattr(revisions_module.resource, "setrlimit", fail_restore)
+    revisions_module._initialize_candidate_file_limit_runtime()
+    with pytest.raises(RevisionStoreError) as captured:
+        with revisions_module._candidate_file_limit(store):
+            pass
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    assert runtime._poisoned_pid == os.getpid()
+    with pytest.raises(RevisionStoreError) as repeated:
+        revisions_module._candidate_file_limit(store).__enter__()
+    _assert_closed_error(repeated.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    with pytest.raises(RevisionStoreError) as reinitialize:
+        revisions_module._initialize_candidate_file_limit_runtime()
+    _assert_closed_error(reinitialize.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+
+
+def test_candidate_file_limit_failed_gate_release_poison_is_recovery_required(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, _manager, _root = store_parts
+    runtime = revisions_module._CandidateFileLimitRuntime
+    monkeypatch.setattr(runtime, "_initialized_pid", None)
+    monkeypatch.setattr(runtime, "_poisoned_pid", None)
+    monkeypatch.setattr(
+        revisions_module.signal,
+        "getsignal",
+        lambda _signal_number: revisions_module.signal.SIG_IGN,
+    )
+
+    class FailingGate:
+        def acquire(self, *, timeout):
+            assert timeout > 0
+            return True
+
+        def release(self):
+            raise RuntimeError("injected process gate release failure")
+
+    monkeypatch.setattr(
+        revisions_module.resource,
+        "getrlimit",
+        lambda _resource_number: (_ for _ in ()).throw(OSError("injected setup failure")),
+    )
+    revisions_module._initialize_candidate_file_limit_runtime()
+    monkeypatch.setattr(runtime, "_gate", FailingGate(), raising=False)
+    with pytest.raises(RevisionStoreError) as captured:
+        revisions_module._candidate_file_limit(store).__enter__()
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    assert runtime._poisoned_pid == os.getpid()
+
+
 def test_public_surface_is_direct_module_only_and_exact():
     assert revisions_module.__all__ == EXPECTED_REVISION_EXPORTS
     assert execution_package.__all__ == EXPECTED_EXECUTION_EXPORTS
     for name in EXPECTED_REVISION_EXPORTS:
         assert getattr(revisions_module, name) is globals()[name]
         assert name not in execution_package.__all__
+
+
+def test_descriptor_native_import_public_seam_is_exact():
+    binding_type = getattr(revisions_module, "RevisionSourceBinding", None)
+
+    assert binding_type is not None
+    assert tuple(item.name for item in fields(binding_type)) == (
+        "dev",
+        "ino",
+        "mode",
+        "uid",
+        "nlink",
+        "size",
+        "mtime_ns",
+        "ctime_ns",
+    )
+    assert tuple(inspect.signature(LocalRevisionStore.import_trusted_fcstd_at).parameters) == (
+        "self",
+        "project_id",
+        "source_parent_fd",
+        "source_name",
+        "expected_binding",
+        "expected_sha256",
+        "expected_size",
+        "lease",
+    )
+    binding = RevisionSourceBinding(
+        dev=1,
+        ino=2,
+        mode=stat.S_IFREG | 0o600,
+        uid=os.geteuid(),
+        nlink=1,
+        size=3,
+        mtime_ns=4,
+        ctime_ns=5,
+    )
+    with pytest.raises((FrozenInstanceError, AttributeError)):
+        binding.size = 4
+    assert "__dict__" not in dir(binding)
+
+
+def test_descriptor_native_revision_copy_public_seam_is_exact():
+    cursor_type = getattr(revisions_module, "RevisionCopyCursor", None)
+    method = getattr(LocalRevisionStore, "copy_revision_artifacts_at", None)
+
+    assert cursor_type is not None
+    assert tuple(item.name for item in fields(cursor_type)) == (
+        "name",
+        "size_bytes",
+        "sha256",
+    )
+    assert method is not None
+    signature = inspect.signature(method)
+    assert tuple(signature.parameters) == (
+        "self",
+        "expected_revision",
+        "destination_directory_fd",
+        "cursors",
+        "chunk_bytes",
+    )
+    assert signature.parameters["expected_revision"].annotation in {
+        RevisionRef,
+        "RevisionRef",
+    }
+    assert signature.return_annotation in {None, "None"}
+    cursor = RevisionCopyCursor(
+        name="model.FCStd",
+        size_bytes=0,
+        sha256=hashlib.sha256(b"").hexdigest(),
+    )
+    with pytest.raises((FrozenInstanceError, AttributeError)):
+        cursor.size_bytes = 1
+    assert "__dict__" not in dir(cursor)
+
+
+def test_revision_copy_cursor_rejects_nonexact_or_unsafe_values():
+    digest = hashlib.sha256(b"").hexdigest()
+    type_cases = (
+        {"name": True, "size_bytes": 0, "sha256": digest},
+        {"name": "model.FCStd", "size_bytes": True, "sha256": digest},
+        {"name": "model.FCStd", "size_bytes": 0, "sha256": True},
+    )
+    for arguments in type_cases:
+        with pytest.raises(TypeError):
+            RevisionCopyCursor(**arguments)
+    value_cases = (
+        {"name": "../model.FCStd", "size_bytes": 0, "sha256": digest},
+        {"name": "model.FCStd", "size_bytes": -1, "sha256": digest},
+        {
+            "name": "model.FCStd",
+            "size_bytes": revisions_module._MAX_FILE_BYTES + 1,
+            "sha256": digest,
+        },
+        {"name": "model.FCStd", "size_bytes": 0, "sha256": "F" * 64},
+    )
+    for arguments in value_cases:
+        with pytest.raises(RevisionStoreError) as captured:
+            RevisionCopyCursor(**arguments)
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.INVALID_INPUT)
+
+
+def test_copy_revision_artifacts_at_rejects_hostile_arguments_before_io(
+    store_parts,
+    tmp_path: Path,
+):
+    store, manager, _root = store_parts
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(store, lease, head)
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+    destination = tmp_path / "delivery"
+    destination.mkdir(mode=0o700)
+    destination_fd = os.open(
+        destination,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    hostile_revision = ExplosiveInput()
+    hostile_cursor = ExplosiveInput()
+    cases = (
+        {"expected_revision": hostile_revision},
+        {"destination_directory_fd": True},
+        {"cursors": []},
+        {"cursors": (hostile_cursor,)},
+        {"chunk_bytes": True},
+        {"chunk_bytes": 0},
+        {"chunk_bytes": revisions_module._COPY_CHUNK_BYTES + 1},
+    )
+    before = _all_tree_bytes(destination)
+    try:
+        for changes in cases:
+            arguments = {
+                "expected_revision": sealed,
+                "destination_directory_fd": destination_fd,
+                "cursors": (),
+                "chunk_bytes": 17,
+            }
+            arguments.update(changes)
+            with pytest.raises(RevisionStoreError) as captured:
+                store.copy_revision_artifacts_at(**arguments)
+            _assert_closed_error(captured.value, RevisionStoreErrorCode.INVALID_INPUT)
+    finally:
+        os.close(destination_fd)
+    assert hostile_revision.protocol_calls == []
+    assert hostile_cursor.protocol_calls == []
+    assert _all_tree_bytes(destination) == before
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_copy_revision_artifacts_at_copies_sealed_draft_and_committed_without_paths(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    committed: bool,
+):
+    store, manager, _root = store_parts
+    model_raw = b"sealed model bytes"
+    step_raw = b"ISO-10303-21;sealed step;ENDSEC;"
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(
+            store,
+            lease,
+            head,
+            model=model_raw,
+            step=step_raw,
+        )
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+        if committed:
+            store.commit_revision(PROJECT_ID, head, revision_id, lease)
+    destination = tmp_path / "delivery"
+    destination.mkdir(mode=0o700)
+    destination_fd = os.open(
+        destination,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+
+    def forbidden_path(*_args, **_kwargs):
+        raise AssertionError("descriptor copy must not use revision path getters")
+
+    try:
+        monkeypatch.setattr(LocalRevisionStore, "revision_model_path", forbidden_path)
+        monkeypatch.setattr(LocalRevisionStore, "revision_artifact_path", forbidden_path)
+        result = store.copy_revision_artifacts_at(
+            expected_revision=sealed,
+            destination_directory_fd=destination_fd,
+            cursors=(),
+            chunk_bytes=17,
+        )
+        assert os.fstat(destination_fd).st_ino == destination.stat().st_ino
+    finally:
+        os.close(destination_fd)
+    assert result is None
+    assert (destination / "model.FCStd").read_bytes() == model_raw
+    assert (destination / "model.step").read_bytes() == step_raw
+    assert stat.S_IMODE((destination / "model.FCStd").stat().st_mode) == 0o600
+    assert stat.S_IMODE((destination / "model.step").stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    "resume_state",
+    ["zero_model", "partial_model", "partial_step", "complete"],
+)
+def test_copy_revision_artifacts_at_resumes_exact_prefixes_without_truncation(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resume_state: str,
+):
+    store, manager, _root = store_parts
+    model_raw = b"model-" * 20
+    step_raw = b"step-" * 25
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(
+            store,
+            lease,
+            head,
+            model=model_raw,
+            step=step_raw,
+        )
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+    destination = tmp_path / "delivery"
+    destination.mkdir(mode=0o700)
+    cursors: tuple[RevisionCopyCursor, ...]
+    if resume_state == "zero_model":
+        model_prefix = b""
+        (destination / "model.FCStd").write_bytes(model_prefix)
+        cursors = (
+            RevisionCopyCursor(
+                name="model.FCStd",
+                size_bytes=0,
+                sha256=hashlib.sha256(model_prefix).hexdigest(),
+            ),
+        )
+    elif resume_state == "partial_model":
+        model_prefix = model_raw[:37]
+        (destination / "model.FCStd").write_bytes(model_prefix)
+        cursors = (
+            RevisionCopyCursor(
+                name="model.FCStd",
+                size_bytes=len(model_prefix),
+                sha256=hashlib.sha256(model_prefix).hexdigest(),
+            ),
+        )
+    else:
+        (destination / "model.FCStd").write_bytes(model_raw)
+        model_cursor = RevisionCopyCursor(
+            name="model.FCStd",
+            size_bytes=len(model_raw),
+            sha256=hashlib.sha256(model_raw).hexdigest(),
+        )
+        if resume_state == "partial_step":
+            step_prefix = step_raw[:31]
+        else:
+            step_prefix = step_raw
+        (destination / "model.step").write_bytes(step_prefix)
+        cursors = (
+            model_cursor,
+            RevisionCopyCursor(
+                name="model.step",
+                size_bytes=len(step_prefix),
+                sha256=hashlib.sha256(step_prefix).hexdigest(),
+            ),
+        )
+    for materialized in destination.iterdir():
+        materialized.chmod(0o600)
+    destination_fd = os.open(
+        destination,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    original_write = revisions_module.os.write
+    write_sizes: list[int] = []
+
+    def tracked_write(fd, raw):
+        write_sizes.append(len(raw))
+        return original_write(fd, raw)
+
+    try:
+        monkeypatch.setattr(revisions_module.os, "write", tracked_write)
+        store.copy_revision_artifacts_at(
+            expected_revision=sealed,
+            destination_directory_fd=destination_fd,
+            cursors=cursors,
+            chunk_bytes=19,
+        )
+    finally:
+        os.close(destination_fd)
+    assert (destination / "model.FCStd").read_bytes() == model_raw
+    assert (destination / "model.step").read_bytes() == step_raw
+    if resume_state == "complete":
+        assert write_sizes == []
+    else:
+        assert write_sizes
+        assert max(write_sizes) <= 19
+
+
+@pytest.mark.parametrize(
+    "invalid_case",
+    [
+        "duplicate",
+        "unknown",
+        "wrong_order",
+        "oversize",
+        "complete_hash",
+        "step_before_model_complete",
+    ],
+)
+def test_copy_revision_artifacts_at_rejects_invalid_cursor_shapes_without_mutation(
+    store_parts,
+    tmp_path: Path,
+    invalid_case: str,
+):
+    store, manager, _root = store_parts
+    model_raw = b"model source"
+    step_raw = b"step source"
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(
+            store,
+            lease,
+            head,
+            model=model_raw,
+            step=step_raw,
+        )
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+    model_full = RevisionCopyCursor(
+        name="model.FCStd",
+        size_bytes=len(model_raw),
+        sha256=hashlib.sha256(model_raw).hexdigest(),
+    )
+    model_partial = RevisionCopyCursor(
+        name="model.FCStd",
+        size_bytes=3,
+        sha256=hashlib.sha256(model_raw[:3]).hexdigest(),
+    )
+    step_partial = RevisionCopyCursor(
+        name="model.step",
+        size_bytes=3,
+        sha256=hashlib.sha256(step_raw[:3]).hexdigest(),
+    )
+    if invalid_case == "duplicate":
+        cursors = (model_full, model_full)
+    elif invalid_case == "unknown":
+        cursors = (
+            RevisionCopyCursor(
+                name="other.step",
+                size_bytes=0,
+                sha256=hashlib.sha256(b"").hexdigest(),
+            ),
+        )
+    elif invalid_case == "wrong_order":
+        cursors = (step_partial,)
+    elif invalid_case == "oversize":
+        cursors = (
+            RevisionCopyCursor(
+                name="model.FCStd",
+                size_bytes=len(model_raw) + 1,
+                sha256=hashlib.sha256(model_raw + b"x").hexdigest(),
+            ),
+        )
+    elif invalid_case == "complete_hash":
+        cursors = (replace(model_full, sha256="f" * 64),)
+    else:
+        cursors = (model_partial, step_partial)
+    destination = tmp_path / "delivery"
+    destination.mkdir(mode=0o700)
+    before = _all_tree_bytes(destination)
+    destination_fd = os.open(
+        destination,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        with pytest.raises(RevisionStoreError) as captured:
+            store.copy_revision_artifacts_at(
+                expected_revision=sealed,
+                destination_directory_fd=destination_fd,
+                cursors=cursors,
+                chunk_bytes=17,
+            )
+    finally:
+        os.close(destination_fd)
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.INVALID_INPUT)
+    assert _all_tree_bytes(destination) == before
+
+
+@pytest.mark.parametrize("forgery", ["source_prefix", "destination_prefix", "extra_name"])
+def test_copy_revision_artifacts_at_rejects_forged_cursor_state_without_mutation(
+    store_parts,
+    tmp_path: Path,
+    forgery: str,
+):
+    store, manager, _root = store_parts
+    model_raw = b"authoritative model prefix and suffix"
+    step_raw = b"authoritative step"
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(
+            store,
+            lease,
+            head,
+            model=model_raw,
+            step=step_raw,
+        )
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+    destination = tmp_path / "delivery"
+    destination.mkdir(mode=0o700)
+    prefix = model_raw[:12]
+    destination_prefix = prefix
+    cursor_digest = hashlib.sha256(prefix).hexdigest()
+    if forgery == "source_prefix":
+        cursor_digest = "f" * 64
+    elif forgery == "destination_prefix":
+        destination_prefix = b"x" * len(prefix)
+    (destination / "model.FCStd").write_bytes(destination_prefix)
+    (destination / "model.FCStd").chmod(0o600)
+    if forgery == "extra_name":
+        (destination / "unexpected").write_bytes(b"unexpected")
+        (destination / "unexpected").chmod(0o600)
+    before = _all_tree_bytes(destination)
+    cursor = RevisionCopyCursor(
+        name="model.FCStd",
+        size_bytes=len(prefix),
+        sha256=cursor_digest,
+    )
+    destination_fd = os.open(
+        destination,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        with pytest.raises(RevisionStoreError) as captured:
+            store.copy_revision_artifacts_at(
+                expected_revision=sealed,
+                destination_directory_fd=destination_fd,
+                cursors=(cursor,),
+                chunk_bytes=11,
+            )
+    finally:
+        os.close(destination_fd)
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.CORRUPT_CONTENT)
+    assert _all_tree_bytes(destination) == before
+
+
+def test_copy_revision_artifacts_at_resumes_after_model_before_step_failure(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    model_raw = b"durable model before step"
+    step_raw = b"step follows model"
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(
+            store,
+            lease,
+            head,
+            model=model_raw,
+            step=step_raw,
+        )
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+    destination = tmp_path / "delivery"
+    destination.mkdir(mode=0o700)
+    destination_fd = os.open(
+        destination,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    original_open = revisions_module.os.open
+    failed = False
+
+    def fail_step_creation(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal failed
+        if path == "model.step" and flags & os.O_CREAT and not failed:
+            failed = True
+            raise OSError("injected failure after durable model")
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(revisions_module.os, "open", fail_step_creation)
+            with pytest.raises(RevisionStoreError) as captured:
+                store.copy_revision_artifacts_at(
+                    expected_revision=sealed,
+                    destination_directory_fd=destination_fd,
+                    cursors=(),
+                    chunk_bytes=7,
+                )
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.IO_ERROR)
+        assert failed
+        assert (destination / "model.FCStd").read_bytes() == model_raw
+        assert not (destination / "model.step").exists()
+        model_cursor = RevisionCopyCursor(
+            name="model.FCStd",
+            size_bytes=len(model_raw),
+            sha256=hashlib.sha256(model_raw).hexdigest(),
+        )
+        restarted = LocalRevisionStore(
+            root,
+            manager,
+            trust=RevisionStoreRootTrust.TRUSTED_LOCAL,
+        )
+        restarted.copy_revision_artifacts_at(
+            expected_revision=sealed,
+            destination_directory_fd=destination_fd,
+            cursors=(model_cursor,),
+            chunk_bytes=7,
+        )
+    finally:
+        os.close(destination_fd)
+    assert (destination / "model.FCStd").read_bytes() == model_raw
+    assert (destination / "model.step").read_bytes() == step_raw
+
+
+def test_copy_revision_artifacts_at_resumes_after_mid_step_write_failure(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    model_raw = b"model is completed first"
+    step_raw = b"step-data-" * 8
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(
+            store,
+            lease,
+            head,
+            model=model_raw,
+            step=step_raw,
+        )
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+    destination = tmp_path / "delivery"
+    destination.mkdir(mode=0o700)
+    destination_fd = os.open(
+        destination,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    original_open = revisions_module.os.open
+    original_write = revisions_module.os.write
+    step_fd = None
+    step_writes = 0
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal step_fd
+        if dir_fd is None:
+            fd = original_open(path, flags, mode)
+        else:
+            fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        if path == "model.step" and flags & os.O_CREAT:
+            step_fd = fd
+        return fd
+
+    def fail_second_step_write(fd, raw):
+        nonlocal step_writes
+        if fd == step_fd:
+            step_writes += 1
+            if step_writes == 2:
+                raise OSError("injected mid-step write failure")
+        return original_write(fd, raw)
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(revisions_module.os, "open", tracked_open)
+            fault.setattr(revisions_module.os, "write", fail_second_step_write)
+            with pytest.raises(RevisionStoreError) as captured:
+                store.copy_revision_artifacts_at(
+                    expected_revision=sealed,
+                    destination_directory_fd=destination_fd,
+                    cursors=(),
+                    chunk_bytes=9,
+                )
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.IO_ERROR)
+        assert step_writes == 2
+        model_prefix = (destination / "model.FCStd").read_bytes()
+        step_prefix = (destination / "model.step").read_bytes()
+        assert model_prefix == model_raw
+        assert step_prefix == step_raw[:9]
+        restarted = LocalRevisionStore(
+            root,
+            manager,
+            trust=RevisionStoreRootTrust.TRUSTED_LOCAL,
+        )
+        restarted.copy_revision_artifacts_at(
+            expected_revision=sealed,
+            destination_directory_fd=destination_fd,
+            cursors=(
+                RevisionCopyCursor(
+                    name="model.FCStd",
+                    size_bytes=len(model_prefix),
+                    sha256=hashlib.sha256(model_prefix).hexdigest(),
+                ),
+                RevisionCopyCursor(
+                    name="model.step",
+                    size_bytes=len(step_prefix),
+                    sha256=hashlib.sha256(step_prefix).hexdigest(),
+                ),
+            ),
+            chunk_bytes=9,
+        )
+    finally:
+        os.close(destination_fd)
+    assert (destination / "model.FCStd").read_bytes() == model_raw
+    assert (destination / "model.step").read_bytes() == step_raw
+
+
+@pytest.mark.parametrize(
+    "destination_shape",
+    ["missing", "symlink", "hardlink", "directory", "wrong_mode"],
+)
+def test_copy_revision_artifacts_at_rejects_unsafe_destination_cursor_files(
+    store_parts,
+    tmp_path: Path,
+    destination_shape: str,
+):
+    store, manager, _root = store_parts
+    model_raw = b"authoritative model"
+    step_raw = b"authoritative step"
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(
+            store,
+            lease,
+            head,
+            model=model_raw,
+            step=step_raw,
+        )
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+    destination = tmp_path / "delivery"
+    destination.mkdir(mode=0o700)
+    model_path = destination / "model.FCStd"
+    external = tmp_path / "external.FCStd"
+    external.write_bytes(model_raw)
+    external.chmod(0o600)
+    if destination_shape == "symlink":
+        model_path.symlink_to(external)
+    elif destination_shape == "hardlink":
+        os.link(external, model_path)
+    elif destination_shape == "directory":
+        model_path.mkdir(mode=0o700)
+    elif destination_shape == "wrong_mode":
+        model_path.write_bytes(model_raw)
+        model_path.chmod(0o644)
+    before = _all_tree_bytes(destination)
+    cursor = RevisionCopyCursor(
+        name="model.FCStd",
+        size_bytes=len(model_raw),
+        sha256=hashlib.sha256(model_raw).hexdigest(),
+    )
+    destination_fd = os.open(
+        destination,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        with pytest.raises(RevisionStoreError) as captured:
+            store.copy_revision_artifacts_at(
+                expected_revision=sealed,
+                destination_directory_fd=destination_fd,
+                cursors=(cursor,),
+                chunk_bytes=13,
+            )
+    finally:
+        os.close(destination_fd)
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.CORRUPT_CONTENT)
+    assert _all_tree_bytes(destination) == before
+    assert external.read_bytes() == model_raw
+
+
+@pytest.mark.parametrize("directory_kind", ["closed", "file", "non_private"])
+def test_copy_revision_artifacts_at_rejects_unsafe_destination_directories(
+    store_parts,
+    tmp_path: Path,
+    directory_kind: str,
+):
+    store, manager, _root = store_parts
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(store, lease, head)
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+    destination = tmp_path / "delivery"
+    destination.mkdir(mode=0o700)
+    if directory_kind == "file":
+        target = tmp_path / "not-a-directory"
+        target.write_bytes(b"not a directory")
+        target.chmod(0o600)
+        destination_fd = os.open(target, os.O_RDONLY | os.O_CLOEXEC)
+    else:
+        if directory_kind == "non_private":
+            destination.chmod(0o755)
+        destination_fd = os.open(
+            destination,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    if directory_kind == "closed":
+        os.close(destination_fd)
+    try:
+        with pytest.raises(RevisionStoreError) as captured:
+            store.copy_revision_artifacts_at(
+                expected_revision=sealed,
+                destination_directory_fd=destination_fd,
+                cursors=(),
+                chunk_bytes=13,
+            )
+    finally:
+        if directory_kind != "closed":
+            os.close(destination_fd)
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.UNSAFE_STORE)
+
+
+def test_copy_revision_artifacts_at_stays_on_renamed_destination_descriptor(
+    store_parts,
+    tmp_path: Path,
+):
+    store, manager, _root = store_parts
+    model_raw = b"pinned destination model"
+    step_raw = b"pinned destination step"
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(
+            store,
+            lease,
+            head,
+            model=model_raw,
+            step=step_raw,
+        )
+        sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
+    destination = tmp_path / "delivery"
+    destination.mkdir(mode=0o700)
+    destination_fd = os.open(
+        destination,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    moved = tmp_path / "moved-delivery"
+    destination.rename(moved)
+    destination.mkdir(mode=0o700)
+    try:
+        store.copy_revision_artifacts_at(
+            expected_revision=sealed,
+            destination_directory_fd=destination_fd,
+            cursors=(),
+            chunk_bytes=13,
+        )
+        assert os.fstat(destination_fd).st_ino == moved.stat().st_ino
+    finally:
+        os.close(destination_fd)
+    assert (moved / "model.FCStd").read_bytes() == model_raw
+    assert (moved / "model.step").read_bytes() == step_raw
+    assert tuple(destination.iterdir()) == ()
 
 
 def test_local_revision_store_method_surface_and_signatures_are_exact():
@@ -553,16 +2503,42 @@ def test_local_revision_store_method_surface_and_signatures_are_exact():
     for name, expected_parameters in EXPECTED_STORE_METHODS.items():
         signature = inspect.signature(getattr(LocalRevisionStore, name))
         assert tuple(signature.parameters) == expected_parameters
-        assert all(
-            parameter.kind
-            in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
-            for parameter in signature.parameters.values()
-        )
+        if name == "copy_revision_artifacts_at":
+            assert tuple(parameter.kind for parameter in signature.parameters.values()) == (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        elif name == "import_trusted_fcstd_at":
+            assert tuple(parameter.kind for parameter in signature.parameters.values()) == (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        else:
+            assert all(
+                parameter.kind
+                in {
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                }
+                for parameter in signature.parameters.values()
+            )
         assert all(
             parameter.default is inspect.Parameter.empty
             for parameter in signature.parameters.values()
         )
-        assert signature.return_annotation is inspect.Signature.empty
+        if name == "copy_revision_artifacts_at":
+            assert signature.return_annotation in {None, "None"}
+        else:
+            assert signature.return_annotation is inspect.Signature.empty
 
 
 def test_public_value_types_are_frozen_slotted_keyword_only_and_exact():
@@ -912,6 +2888,7 @@ def test_error_codes_messages_and_uncertainty_metadata_are_closed_and_redacted()
         "corrupt_record",
         "corrupt_content",
         "budget_exceeded",
+        "resource_exhausted",
         "unsafe_store",
         "invalid_lease",
         "io_error",
@@ -1334,7 +3311,7 @@ def test_begin_seal_commit_and_readback_complete_lifecycle(store_parts, tmp_path
         candidate_step = store.candidate_artifact_path(PROJECT_ID, revision_id, "step", lease)
         assert candidate_model.read_bytes() == b"base-fcstd"
         assert candidate_step.name == "model.step"
-        assert not candidate_step.exists()
+        assert candidate_step.read_bytes() == b""
         candidate_model.write_bytes(b"changed-fcstd")
         candidate_step.write_bytes(b"ISO-10303-21;STEP;ENDSEC;")
 
@@ -1377,8 +3354,8 @@ def test_begin_from_empty_uses_controlled_missing_model_path(store_parts):
         revision_id = store.begin_revision(PROJECT_ID, base_head, lease)
         model_path = store.candidate_model_path(PROJECT_ID, revision_id, lease)
         step_path = store.candidate_artifact_path(PROJECT_ID, revision_id, "step", lease)
-        assert not model_path.exists()
-        assert not step_path.exists()
+        assert model_path.read_bytes() == b""
+        assert step_path.read_bytes() == b""
         model_path.write_bytes(b"first model")
         step_path.write_bytes(b"first step")
         sealed = store.seal_revision(PROJECT_ID, revision_id, lease)
@@ -2089,6 +4066,757 @@ def test_import_opens_regular_source_nofollow_cloexec_nonblocking_and_read_only(
     assert not flags & (os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_RDWR)
 
 
+def test_import_at_matches_path_import_keeps_borrowed_fd_and_opens_source_once(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, _root = store_parts
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "descriptor-source.FCStd"
+    source.write_bytes(b"trusted descriptor model")
+    source.chmod(0o600)
+    raw = source.read_bytes()
+    binding = _source_binding(source)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        path_head = store.import_trusted_fcstd(
+            PROJECT_ID,
+            source,
+            hashlib.sha256(raw).hexdigest(),
+            len(raw),
+            lease,
+        )
+    path_revision = store.load_revision(PROJECT_ID, path_head.revision_id)
+    parent_fd = os.open(
+        source_parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    original_open = revisions_module.os.open
+    observed: list[tuple[object, int, int | None]] = []
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        if str(path).endswith(source.name):
+            observed.append((path, flags, dir_fd))
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    try:
+        with manager.acquire_project_write(OTHER_PROJECT_ID) as lease:
+            monkeypatch.setattr(revisions_module.os, "open", tracked_open)
+            monkeypatch.setattr(
+                revisions_module,
+                "_open_external_source",
+                lambda _source: (_ for _ in ()).throw(
+                    AssertionError("descriptor import must not use the path opener")
+                ),
+            )
+            at_head = store.import_trusted_fcstd_at(
+                OTHER_PROJECT_ID,
+                source_parent_fd=parent_fd,
+                source_name=source.name,
+                expected_binding=binding,
+                expected_sha256=hashlib.sha256(raw).hexdigest(),
+                expected_size=len(raw),
+                lease=lease,
+            )
+        assert os.fstat(parent_fd).st_ino == source_parent.stat().st_ino
+    finally:
+        os.close(parent_fd)
+    at_revision = store.load_revision(OTHER_PROJECT_ID, at_head.revision_id)
+    assert path_revision.model is not None
+    assert at_revision.model is not None
+    assert (
+        at_revision.model.name,
+        at_revision.model.format,
+        at_revision.model.sha256,
+        at_revision.model.size_bytes,
+    ) == (
+        path_revision.model.name,
+        path_revision.model.format,
+        path_revision.model.sha256,
+        path_revision.model.size_bytes,
+    )
+    assert len(observed) == 1
+    opened_name, flags, opened_dir_fd = observed[0]
+    assert opened_name == source.name
+    assert opened_dir_fd is not None
+    assert flags & os.O_NOFOLLOW
+    assert flags & os.O_CLOEXEC
+    assert flags & os.O_NONBLOCK
+    assert not flags & (os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_RDWR)
+
+
+def test_import_at_stays_on_pinned_parent_after_path_rename_and_replacement(
+    store_parts,
+    tmp_path: Path,
+):
+    store, manager, root = store_parts
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / ".normalized.0123456789abcdef0123456789abcdef.FCStd"
+    original_raw = b"descriptor-pinned original"
+    source.write_bytes(original_raw)
+    source.chmod(0o600)
+    binding = _source_binding(source)
+    parent_fd = os.open(
+        source_parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    moved_parent = tmp_path / "moved-source-parent"
+    source_parent.rename(moved_parent)
+    source_parent.mkdir(mode=0o700)
+    replacement = source_parent / source.name
+    replacement.write_bytes(b"replacement must remain untouched")
+    replacement.chmod(0o600)
+    try:
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            head = store.import_trusted_fcstd_at(
+                PROJECT_ID,
+                source_parent_fd=parent_fd,
+                source_name=source.name,
+                expected_binding=binding,
+                expected_sha256=hashlib.sha256(original_raw).hexdigest(),
+                expected_size=len(original_raw),
+                lease=lease,
+            )
+    finally:
+        os.close(parent_fd)
+    assert store.revision_model_path(PROJECT_ID, head.revision_id).read_bytes() == original_raw
+    assert replacement.read_bytes() == b"replacement must remain untouched"
+    assert (moved_parent / source.name).read_bytes() == original_raw
+    assert _project_dir(root).is_dir()
+
+
+@pytest.mark.parametrize("parent_kind", ["closed", "file", "non_private"])
+def test_import_at_rejects_invalid_borrowed_parent_descriptors(
+    store_parts,
+    tmp_path: Path,
+    parent_kind: str,
+):
+    store, manager, _root = store_parts
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "source.FCStd"
+    raw = b"trusted model"
+    source.write_bytes(raw)
+    source.chmod(0o600)
+    binding = _source_binding(source)
+    if parent_kind == "file":
+        parent_fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
+    else:
+        if parent_kind == "non_private":
+            source_parent.chmod(0o755)
+        parent_fd = os.open(
+            source_parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    if parent_kind == "closed":
+        os.close(parent_fd)
+    try:
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            with pytest.raises(RevisionStoreError) as captured:
+                store.import_trusted_fcstd_at(
+                    PROJECT_ID,
+                    source_parent_fd=parent_fd,
+                    source_name=source.name,
+                    expected_binding=binding,
+                    expected_sha256=hashlib.sha256(raw).hexdigest(),
+                    expected_size=len(raw),
+                    lease=lease,
+                )
+    finally:
+        if parent_kind != "closed":
+            os.close(parent_fd)
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.UNSAFE_STORE)
+
+
+@pytest.mark.parametrize(
+    "replacement_kind",
+    ["missing", "symlink", "hardlink", "fifo", "directory", "wrong_mode"],
+)
+def test_import_at_rejects_nonregular_or_untrusted_source_entries(
+    store_parts,
+    tmp_path: Path,
+    replacement_kind: str,
+):
+    store, manager, _root = store_parts
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "source.FCStd"
+    raw = b"trusted model"
+    source.write_bytes(raw)
+    source.chmod(0o600)
+    binding = _source_binding(source)
+    source.unlink()
+    if replacement_kind == "symlink":
+        target = tmp_path / "target.FCStd"
+        target.write_bytes(raw)
+        target.chmod(0o600)
+        source.symlink_to(target)
+    elif replacement_kind == "hardlink":
+        target = tmp_path / "target.FCStd"
+        target.write_bytes(raw)
+        target.chmod(0o600)
+        os.link(target, source)
+    elif replacement_kind == "fifo":
+        os.mkfifo(source)
+    elif replacement_kind == "directory":
+        source.mkdir(mode=0o700)
+    elif replacement_kind == "wrong_mode":
+        source.write_bytes(raw)
+        source.chmod(0o644)
+    parent_fd = os.open(
+        source_parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            with pytest.raises(RevisionStoreError) as captured:
+                store.import_trusted_fcstd_at(
+                    PROJECT_ID,
+                    source_parent_fd=parent_fd,
+                    source_name=source.name,
+                    expected_binding=binding,
+                    expected_sha256=hashlib.sha256(raw).hexdigest(),
+                    expected_size=len(raw),
+                    lease=lease,
+                )
+    finally:
+        os.close(parent_fd)
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.CORRUPT_CONTENT)
+
+
+def test_import_at_rejects_nonexact_inputs_without_implicit_protocols(
+    store_parts,
+    tmp_path: Path,
+):
+    store, manager, root = store_parts
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "source.FCStd"
+    raw = b"trusted model"
+    source.write_bytes(raw)
+    source.chmod(0o600)
+    binding = _source_binding(source)
+    parent_fd = os.open(
+        source_parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    hostile_name = ExplosiveInput()
+    hostile_binding = ExplosiveInput()
+    cases = (
+        ({"source_parent_fd": True}, RevisionStoreErrorCode.INVALID_INPUT),
+        ({"source_name": hostile_name}, RevisionStoreErrorCode.INVALID_INPUT),
+        ({"source_name": "../source.FCStd"}, RevisionStoreErrorCode.INVALID_INPUT),
+        ({"source_name": "/source.FCStd"}, RevisionStoreErrorCode.INVALID_INPUT),
+        ({"source_name": "."}, RevisionStoreErrorCode.INVALID_INPUT),
+        ({"source_name": ".."}, RevisionStoreErrorCode.INVALID_INPUT),
+        ({"expected_binding": hostile_binding}, RevisionStoreErrorCode.INVALID_INPUT),
+        ({"expected_sha256": True}, RevisionStoreErrorCode.INVALID_INPUT),
+        ({"expected_sha256": "A" * 64}, RevisionStoreErrorCode.INVALID_INPUT),
+        ({"expected_size": True}, RevisionStoreErrorCode.INVALID_INPUT),
+        ({"expected_size": 0}, RevisionStoreErrorCode.INVALID_INPUT),
+        (
+            {"expected_size": revisions_module._MAX_FILE_BYTES + 1},
+            RevisionStoreErrorCode.BUDGET_EXCEEDED,
+        ),
+    )
+    before = _all_tree_bytes(root)
+    try:
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            for changes, expected_code in cases:
+                arguments = {
+                    "source_parent_fd": parent_fd,
+                    "source_name": source.name,
+                    "expected_binding": binding,
+                    "expected_sha256": hashlib.sha256(raw).hexdigest(),
+                    "expected_size": len(raw),
+                    "lease": lease,
+                }
+                arguments.update(changes)
+                with pytest.raises(RevisionStoreError) as captured:
+                    store.import_trusted_fcstd_at(PROJECT_ID, **arguments)
+                _assert_closed_error(captured.value, expected_code)
+    finally:
+        os.close(parent_fd)
+    assert hostile_name.protocol_calls == []
+    assert hostile_binding.protocol_calls == []
+    assert _all_tree_bytes(root) == before
+
+
+def test_revision_source_binding_rejects_nonexact_field_types():
+    valid = {
+        "dev": 1,
+        "ino": 2,
+        "mode": stat.S_IFREG | 0o600,
+        "uid": os.geteuid(),
+        "nlink": 1,
+        "size": 3,
+        "mtime_ns": 4,
+        "ctime_ns": 5,
+    }
+    for field in tuple(valid):
+        invalid = dict(valid)
+        invalid[field] = True
+        with pytest.raises(TypeError):
+            RevisionSourceBinding(**invalid)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("dev", -1),
+        ("ino", -1),
+        ("mode", -1),
+        ("mode", stat.S_IFDIR | 0o700),
+        ("mode", stat.S_IFREG | 0o644),
+        ("uid", -1),
+        ("uid", os.geteuid() + 1),
+        ("nlink", -1),
+        ("nlink", 0),
+        ("nlink", 2),
+        ("size", -1),
+        ("size", 0),
+        ("mtime_ns", -1),
+        ("ctime_ns", -1),
+    ],
+)
+def test_revision_source_binding_rejects_untrusted_values_without_store_effect(
+    store_parts,
+    field: str,
+    value: int,
+):
+    _store, _manager, root = store_parts
+    valid = {
+        "dev": 1,
+        "ino": 2,
+        "mode": stat.S_IFREG | 0o600,
+        "uid": os.geteuid(),
+        "nlink": 1,
+        "size": 3,
+        "mtime_ns": 4,
+        "ctime_ns": 5,
+    }
+    invalid = dict(valid)
+    invalid[field] = value
+    before = _all_tree_bytes(root)
+
+    with pytest.raises(RevisionStoreError) as captured:
+        RevisionSourceBinding(**invalid)
+
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.INVALID_INPUT)
+    assert _all_tree_bytes(root) == before
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["dev", "ino", "size", "mtime_ns", "ctime_ns"],
+)
+def test_import_at_rejects_each_expected_binding_field_mismatch(
+    store_parts,
+    tmp_path: Path,
+    field: str,
+):
+    store, manager, _root = store_parts
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "source.FCStd"
+    raw = b"trusted model"
+    source.write_bytes(raw)
+    source.chmod(0o600)
+    binding = _source_binding(source)
+    mismatched = replace(binding, **{field: getattr(binding, field) + 1})
+    parent_fd = os.open(
+        source_parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            with pytest.raises(RevisionStoreError) as captured:
+                store.import_trusted_fcstd_at(
+                    PROJECT_ID,
+                    source_parent_fd=parent_fd,
+                    source_name=source.name,
+                    expected_binding=mismatched,
+                    expected_sha256=hashlib.sha256(raw).hexdigest(),
+                    expected_size=len(raw),
+                    lease=lease,
+                )
+    finally:
+        os.close(parent_fd)
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.CORRUPT_CONTENT)
+
+
+def test_import_at_detects_same_byte_inode_swap_between_stat_and_open(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, _root = store_parts
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "source.FCStd"
+    replacement = source_parent / "replacement.FCStd"
+    raw = b"same bytes do not preserve identity"
+    source.write_bytes(raw)
+    source.chmod(0o600)
+    replacement.write_bytes(raw)
+    replacement.chmod(0o600)
+    binding = _source_binding(source)
+    parent_fd = os.open(
+        source_parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    original_open = revisions_module.os.open
+    swapped = False
+
+    def swap_before_source_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if path == source.name and dir_fd is not None and not swapped:
+            swapped = True
+            replacement.replace(source)
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    try:
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            monkeypatch.setattr(revisions_module.os, "open", swap_before_source_open)
+            with pytest.raises(RevisionStoreError) as captured:
+                store.import_trusted_fcstd_at(
+                    PROJECT_ID,
+                    source_parent_fd=parent_fd,
+                    source_name=source.name,
+                    expected_binding=binding,
+                    expected_sha256=hashlib.sha256(raw).hexdigest(),
+                    expected_size=len(raw),
+                    lease=lease,
+                )
+    finally:
+        os.close(parent_fd)
+    assert swapped
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.CORRUPT_CONTENT)
+
+
+def test_import_at_detects_source_mutation_during_copy(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, _root = store_parts
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "source.FCStd"
+    raw = b"a" * (revisions_module._COPY_CHUNK_BYTES * 2)
+    source.write_bytes(raw)
+    source.chmod(0o600)
+    binding = _source_binding(source)
+    parent_fd = os.open(
+        source_parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    original_open = revisions_module.os.open
+    original_read = revisions_module.os.read
+    source_fd = None
+    changed = False
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal source_fd
+        if dir_fd is None:
+            fd = original_open(path, flags, mode)
+        else:
+            fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        if path == source.name:
+            source_fd = fd
+        return fd
+
+    def mutating_read(fd, count):
+        nonlocal changed
+        chunk = original_read(fd, count)
+        if fd == source_fd and chunk and not changed:
+            changed = True
+            source.write_bytes(b"b" * len(raw))
+        return chunk
+
+    try:
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            monkeypatch.setattr(revisions_module.os, "open", tracked_open)
+            monkeypatch.setattr(revisions_module.os, "read", mutating_read)
+            with pytest.raises(RevisionStoreError) as captured:
+                store.import_trusted_fcstd_at(
+                    PROJECT_ID,
+                    source_parent_fd=parent_fd,
+                    source_name=source.name,
+                    expected_binding=binding,
+                    expected_sha256=hashlib.sha256(raw).hexdigest(),
+                    expected_size=len(raw),
+                    lease=lease,
+                )
+    finally:
+        os.close(parent_fd)
+    assert changed
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.CORRUPT_CONTENT)
+
+
+def test_import_at_detects_name_swap_at_post_copy_entry_check(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, _root = store_parts
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "source.FCStd"
+    replacement = source_parent / "replacement.FCStd"
+    raw = b"same bytes do not preserve final identity"
+    source.write_bytes(raw)
+    source.chmod(0o600)
+    replacement.write_bytes(raw)
+    replacement.chmod(0o600)
+    binding = _source_binding(source)
+    parent_fd = os.open(
+        source_parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    original_stat = revisions_module.os.stat
+    source_stats = 0
+    swapped = False
+
+    def swap_at_final_stat(path, *args, **kwargs):
+        nonlocal source_stats, swapped
+        if path == source.name and kwargs.get("dir_fd") is not None:
+            source_stats += 1
+            if source_stats == 3:
+                replacement.replace(source)
+                swapped = True
+        return original_stat(path, *args, **kwargs)
+
+    try:
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            monkeypatch.setattr(revisions_module.os, "stat", swap_at_final_stat)
+            with pytest.raises(RevisionStoreError) as captured:
+                store.import_trusted_fcstd_at(
+                    PROJECT_ID,
+                    source_parent_fd=parent_fd,
+                    source_name=source.name,
+                    expected_binding=binding,
+                    expected_sha256=hashlib.sha256(raw).hexdigest(),
+                    expected_size=len(raw),
+                    lease=lease,
+                )
+    finally:
+        os.close(parent_fd)
+    assert swapped
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.CORRUPT_CONTENT)
+
+
+def test_import_at_detects_parent_trust_change_after_copy(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, _root = store_parts
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "source.FCStd"
+    raw = b"trusted model"
+    source.write_bytes(raw)
+    source.chmod(0o600)
+    binding = _source_binding(source)
+    parent_fd = os.open(
+        source_parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    original_copy = revisions_module._copy_open_file
+    changed = False
+
+    def change_parent_after_copy(*args, **kwargs):
+        nonlocal changed
+        result = original_copy(*args, **kwargs)
+        source_parent.chmod(0o755)
+        changed = True
+        return result
+
+    try:
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            monkeypatch.setattr(
+                revisions_module,
+                "_copy_open_file",
+                change_parent_after_copy,
+            )
+            with pytest.raises(RevisionStoreError) as captured:
+                store.import_trusted_fcstd_at(
+                    PROJECT_ID,
+                    source_parent_fd=parent_fd,
+                    source_name=source.name,
+                    expected_binding=binding,
+                    expected_sha256=hashlib.sha256(raw).hexdigest(),
+                    expected_size=len(raw),
+                    lease=lease,
+                )
+    finally:
+        source_parent.chmod(0o700)
+        os.close(parent_fd)
+    assert changed
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.UNSAFE_STORE)
+
+
+@pytest.mark.parametrize("admission_failure", [False, True])
+def test_import_at_source_and_owned_parent_close_faults_are_single_attempts(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    admission_failure: bool,
+):
+    store, manager, _root = store_parts
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "source.FCStd"
+    raw = b"trusted model"
+    source.write_bytes(raw)
+    source.chmod(0o600)
+    binding = _source_binding(source)
+    borrowed_fd = os.open(
+        source_parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    original_dup = revisions_module.os.dup
+    original_open = revisions_module.os.open
+    original_close = revisions_module.os.close
+    owned_parent_fd = None
+    source_fd = None
+    attempted = {"parent": 0, "source": 0}
+    active: set[int] = set()
+
+    def tracked_dup(fd):
+        nonlocal owned_parent_fd
+        owned_parent_fd = original_dup(fd)
+        active.add(owned_parent_fd)
+        return owned_parent_fd
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal source_fd
+        if dir_fd is None:
+            fd = original_open(path, flags, mode)
+        else:
+            fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        if path == source.name:
+            source_fd = fd
+            active.add(fd)
+        return fd
+
+    def fail_owned_source_closes(fd):
+        role = None
+        if fd in active and fd == source_fd:
+            role = "source"
+        elif fd in active and fd == owned_parent_fd:
+            role = "parent"
+        result = original_close(fd)
+        if role is not None:
+            active.remove(fd)
+            attempted[role] += 1
+            raise OSError("injected descriptor import close fault")
+        return result
+
+    try:
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            if admission_failure:
+                monkeypatch.setattr(
+                    revisions_module,
+                    "_MAX_ORDINARY_FILES",
+                    4,
+                    raising=False,
+                )
+            monkeypatch.setattr(revisions_module.os, "dup", tracked_dup)
+            monkeypatch.setattr(revisions_module.os, "open", tracked_open)
+            monkeypatch.setattr(revisions_module.os, "close", fail_owned_source_closes)
+            with pytest.raises(RevisionStoreError) as captured:
+                store.import_trusted_fcstd_at(
+                    PROJECT_ID,
+                    source_parent_fd=borrowed_fd,
+                    source_name=source.name,
+                    expected_binding=binding,
+                    expected_sha256=hashlib.sha256(raw).hexdigest(),
+                    expected_size=len(raw),
+                    lease=lease,
+                )
+        assert os.fstat(borrowed_fd).st_ino == source_parent.stat().st_ino
+    finally:
+        original_close(borrowed_fd)
+        for leaked_fd in tuple(active):
+            try:
+                original_close(leaked_fd)
+            except OSError:
+                pass
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    assert source_fd is not None
+    assert owned_parent_fd is not None
+    assert attempted == {"parent": 1, "source": 1}
+    assert active == set()
+
+
+def test_import_at_generation_zero_admission_reuses_existing_quota_transaction(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "source.FCStd"
+    source.write_bytes(b"trusted model")
+    source.chmod(0o600)
+    monkeypatch.setattr(revisions_module, "_MAX_ORDINARY_FILES", 4, raising=False)
+    before = _all_tree_bytes(root)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        with pytest.raises(RevisionStoreError) as captured:
+            _import_trusted_at(store, PROJECT_ID, source, lease)
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.RESOURCE_EXHAUSTED)
+    assert _all_tree_bytes(root) == before
+
+
+def test_import_at_generation_zero_postpublication_retry_converges(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    source_parent = tmp_path / "source-parent"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "source.FCStd"
+    source.write_bytes(b"trusted model")
+    source.chmod(0o600)
+    original_release = revisions_module._release_reservation
+    release_calls = 0
+
+    def fail_first_release(*args, **kwargs):
+        nonlocal release_calls
+        release_calls += 1
+        if release_calls == 1:
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        return original_release(*args, **kwargs)
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        with monkeypatch.context() as fault:
+            fault.setattr(revisions_module, "_release_reservation", fail_first_release)
+            with pytest.raises(RevisionStoreError) as uncertain:
+                _import_trusted_at(store, PROJECT_ID, source, lease)
+        _assert_closed_error(
+            uncertain.value,
+            RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+            head_committed=True,
+        )
+        published = store.load_head(PROJECT_ID)
+        assert len(tuple(root.rglob("reservation.json"))) == 1
+        with pytest.raises(RevisionStoreError) as repeated:
+            _import_trusted_at(store, PROJECT_ID, source, lease)
+        _assert_closed_error(repeated.value, RevisionStoreErrorCode.ALREADY_EXISTS)
+    assert store.load_head(PROJECT_ID) == published
+    assert tuple(root.rglob("reservation.json")) == ()
+
+
 def test_imported_model_is_fsynced_before_atomic_project_publication(
     store_parts, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2162,7 +4890,7 @@ def test_imported_model_fsync_failure_prevents_project_publication(
             _import_trusted(store, PROJECT_ID, source, lease)
     _assert_closed_error(captured.value, RevisionStoreErrorCode.IO_ERROR)
     assert failed
-    assert tuple(root.iterdir()) == ()
+    _assert_only_empty_quota_infrastructure(root)
 
 
 def test_import_size_budget_is_checked_before_project_publication(
@@ -2227,7 +4955,7 @@ def test_import_requires_exact_prevalidated_digest_and_size_before_publication(
             )
 
     assert captured.value.code is RevisionStoreErrorCode.CORRUPT_CONTENT
-    assert tuple(root.iterdir()) == ()
+    _assert_only_empty_quota_infrastructure(root)
 
 
 def test_copy_reads_are_bounded_to_the_frozen_chunk_and_exact_size_boundary_passes(
@@ -2562,6 +5290,8 @@ def test_candidate_directory_symlink_and_journal_symlink_fail_closed(store_parts
     with manager.acquire_project_write(PROJECT_ID) as lease:
         revision_id = store.begin_revision(PROJECT_ID, head, lease)
         candidate = _candidate_dir(root, revision_id)
+        (candidate / "model.FCStd").unlink()
+        (candidate / "model.step").unlink()
         candidate.rmdir()
         outside = tmp_path / "outside-candidate"
         outside.mkdir()
@@ -2670,7 +5400,7 @@ def test_partial_writes_are_completed_and_zero_write_fails_without_publication(
         with pytest.raises(RevisionStoreError) as captured:
             other_store.initialize_empty_project(OTHER_PROJECT_ID, lease)
     _assert_closed_error(captured.value, RevisionStoreErrorCode.IO_ERROR)
-    assert tuple(other_root.iterdir()) == ()
+    _assert_only_empty_quota_infrastructure(other_root)
 
 
 def test_created_entries_use_exclusive_nofollow_cloexec_dirfd_and_private_modes(
@@ -2679,12 +5409,12 @@ def test_created_entries_use_exclusive_nofollow_cloexec_dirfd_and_private_modes(
     store, manager, _root = store_parts
     original_open = revisions_module.os.open
     original_mkdir = revisions_module.os.mkdir
-    created_files: list[tuple[int, int, int | None]] = []
+    created_files: list[tuple[str, int, int, int | None]] = []
     created_dirs: list[tuple[int, int | None]] = []
 
     def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
         if flags & os.O_CREAT:
-            created_files.append((flags, mode, dir_fd))
+            created_files.append((str(path), flags, mode, dir_fd))
         if dir_fd is None:
             return original_open(path, flags, mode)
         return original_open(path, flags, mode, dir_fd=dir_fd)
@@ -2700,8 +5430,9 @@ def test_created_entries_use_exclusive_nofollow_cloexec_dirfd_and_private_modes(
         monkeypatch.setattr(revisions_module.os, "mkdir", tracked_mkdir)
         store.initialize_empty_project(PROJECT_ID, lease)
     assert created_files
-    for flags, mode, dir_fd in created_files:
-        assert flags & os.O_EXCL
+    for path, flags, mode, dir_fd in created_files:
+        if not path.endswith(".lock"):
+            assert flags & os.O_EXCL
         assert flags & os.O_NOFOLLOW
         assert flags & os.O_CLOEXEC
         assert mode == 0o600
@@ -2941,9 +5672,27 @@ def test_full_lifecycle_fsyncs_each_file_before_publish_and_each_containing_dire
     )
     project_publish = events.index(("rename", _project_dir(root).name))
     assert ("fsync", root.name) in events[project_publish + 1 :]
-    if any(event[0] == "rmdir" for event in events):
-        last_rmdir = max(index for index, event in enumerate(events) if event[0] == "rmdir")
-        assert ("fsync", "candidates") in events[last_rmdir + 1 :]
+    candidate_rmdir = next(
+        (
+            index
+            for index, event in enumerate(events)
+            if event == ("rmdir", _candidate_dir(root, revision_id).name)
+        ),
+        None,
+    )
+    if candidate_rmdir is not None:
+        assert ("fsync", "candidates") in events[candidate_rmdir + 1 :]
+    reservation_rmdir = next(
+        (
+            index
+            for index, event in enumerate(events)
+            if event == ("rmdir", _path_key(REVISION_PATH_DOMAIN, revision_id))
+            and index != candidate_rmdir
+        ),
+        None,
+    )
+    if reservation_rmdir is not None:
+        assert ("fsync", "reservations") in events[reservation_rmdir + 1 :]
 
 
 @pytest.mark.parametrize(
@@ -3716,7 +6465,7 @@ def test_import_attempts_source_and_parent_close_after_first_close_fault(
         monkeypatch.setattr(revisions_module.os, "close", fail_source_closes)
         with pytest.raises(RevisionStoreError) as captured:
             _import_trusted(store, PROJECT_ID, source, lease)
-    _assert_closed_error(captured.value, RevisionStoreErrorCode.IO_ERROR)
+    _assert_closed_error(captured.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
     assert source_fd is not None and source_parent_fd is not None
     assert source_fd in attempted
     assert source_parent_fd in attempted
@@ -4208,6 +6957,90 @@ def test_different_projects_can_begin_independently_under_distinct_live_leases(s
                 second_lease.release(owner_token=second_lease.owner_token)
 
 
+def test_cross_project_quota_scan_waits_for_candidate_name_cleanup_to_finish(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    first_head = _initialize_empty(store, manager)
+    second_head = _initialize_empty(store, manager, OTHER_PROJECT_ID)
+    first_lease = manager.acquire_project_write(PROJECT_ID)
+    second_lease = manager.acquire_project_write(OTHER_PROJECT_ID)
+    first_revision = store.begin_revision(PROJECT_ID, first_head, first_lease)
+    candidate_name = _candidate_dir(root, first_revision).name
+    original_rmdir = revisions_module.os.rmdir
+    original_snapshot = revisions_module._quota_snapshot
+    cleanup_entered = threading.Event()
+    release_cleanup = threading.Event()
+    second_started = threading.Event()
+    scan_entered = threading.Event()
+    errors: list[BaseException] = []
+    second_revision: list[str] = []
+    blocked_once = False
+
+    def blocked_candidate_rmdir(path, *args, **kwargs):
+        nonlocal blocked_once
+        if path == candidate_name and not blocked_once:
+            blocked_once = True
+            cleanup_entered.set()
+            assert release_cleanup.wait(timeout=5)
+        return original_rmdir(path, *args, **kwargs)
+
+    def tracked_snapshot(*args, **kwargs):
+        scan_entered.set()
+        return original_snapshot(*args, **kwargs)
+
+    def rollback_first() -> None:
+        try:
+            result = store.rollback_revision(PROJECT_ID, first_revision, first_lease)
+            assert result.status is ReconciliationStatus.NOT_COMMITTED
+        except BaseException as error:
+            errors.append(error)
+
+    def begin_second() -> None:
+        second_started.set()
+        try:
+            second_revision.append(
+                store.begin_revision(OTHER_PROJECT_ID, second_head, second_lease)
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(revisions_module.os, "rmdir", blocked_candidate_rmdir)
+    monkeypatch.setattr(revisions_module, "_quota_snapshot", tracked_snapshot)
+    first = threading.Thread(target=rollback_first)
+    second = threading.Thread(target=begin_second)
+    try:
+        first.start()
+        assert cleanup_entered.wait(timeout=5)
+        second.start()
+        assert second_started.wait(timeout=5)
+        assert not scan_entered.wait(timeout=0.05)
+        release_cleanup.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert errors == []
+        assert scan_entered.is_set()
+        assert len(second_revision) == 1
+        rolled_back = store.rollback_revision(
+            OTHER_PROJECT_ID,
+            second_revision[0],
+            second_lease,
+        )
+        assert rolled_back.status is ReconciliationStatus.NOT_COMMITTED
+    finally:
+        release_cleanup.set()
+        first.join(timeout=5)
+        if second.ident is not None:
+            second.join(timeout=5)
+        if not first_lease.released:
+            first_lease.release(owner_token=first_lease.owner_token)
+        if not second_lease.released:
+            second_lease.release(owner_token=second_lease.owner_token)
+
+
 def test_record_size_depth_node_and_string_budgets_are_enforced(store_parts, monkeypatch):
     store, manager, root = store_parts
     _initialize_empty(store, manager)
@@ -4296,18 +7129,21 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
     allowed_os_calls = {
         "close",
+        "dup",
         "fchmod",
         "fstat",
         "fsync",
         "get_inheritable",
         "geteuid",
         "getpid",
+        "lseek",
         "mkdir",
         "open",
         "read",
         "rename",
         "replace",
         "rmdir",
+        "scandir",
         "stat",
         "unlink",
         "write",
@@ -4323,6 +7159,7 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "O_RDWR",
         "O_TRUNC",
         "O_WRONLY",
+        "SEEK_SET",
     }
     allowed_module_symbols = {
         "__future__": {"annotations"},
@@ -4333,10 +7170,19 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "os": allowed_os_attributes,
         "pathlib": {"Path"},
         "re": {"fullmatch"},
+        "resource": {"RLIMIT_FSIZE", "RLIM_INFINITY", "getrlimit", "setrlimit"},
         "secrets": {"token_hex"},
+        "signal": {"SIGXFSZ", "SIG_IGN", "getsignal", "signal"},
         "stat": {"S_IMODE", "S_ISDIR", "S_ISREG"},
+        "threading": {"RLock", "current_thread", "main_thread"},
+        "time": {"sleep"},
         "vibecad.workflow.errors": {"MAX_SAFE_JSON_INTEGER"},
-        "vibecad.workflow.lease": {"ProjectWriteLease", "ResourceLeaseManager"},
+        "vibecad.workflow.lease": {
+            "LeaseError",
+            "LeaseErrorCode",
+            "ProjectWriteLease",
+            "ResourceLeaseManager",
+        },
     }
     allowed_module_calls = {
         "__future__": set(),
@@ -4347,15 +7193,24 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "os": allowed_os_calls,
         "pathlib": {"Path"},
         "re": {"fullmatch"},
+        "resource": {"getrlimit", "setrlimit"},
         "secrets": {"token_hex"},
+        "signal": {"getsignal", "signal"},
         "stat": {"S_IMODE", "S_ISDIR", "S_ISREG"},
+        "threading": {"RLock", "current_thread", "main_thread"},
+        "time": {"sleep"},
         "vibecad.workflow.errors": set(),
         "vibecad.workflow.lease": set(),
     }
     allowed_builtin_calls = {
+        "RuntimeError",
         "TypeError",
         "ValueError",
+        "bool",
         "bytes",
+        "dict",
+        "len",
+        "min",
         "str",
         "type",
     }
@@ -4363,13 +7218,18 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "OSError",
         "UnicodeDecodeError",
         "dict",
-        "len",
         "list",
         "staticmethod",
         "tuple",
     }
     allowed_non_module_attribute_calls = {
+        "acquire",
+        "close",
+        "get",
         "hexdigest",
+        "items",
+        "release",
+        "stat",
         "update",
     }
     local_callables = {
@@ -4377,6 +7237,7 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     }
+    allowed_nested_callables = {"transform"}
     imports: set[str] = set()
     module_names: dict[str, str] = {}
     imported_names: dict[str, tuple[str, str]] = {}
@@ -4460,7 +7321,19 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
 
     def is_approved_handler_type(node: ast.AST) -> bool:
         if isinstance(node, ast.Name):
-            if node.id in {"OSError", "UnicodeDecodeError"}:
+            if node.id in {
+                "OSError",
+                "RuntimeError",
+                "UnicodeDecodeError",
+                "ValueError",
+            }:
+                return True
+            if imported_names.get(node.id) == (
+                "vibecad.workflow.lease",
+                "LeaseError",
+            ):
+                return True
+            if node.id == "RevisionStoreError":
                 return True
             return imported_names.get(node.id) == ("json", "JSONDecodeError")
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
@@ -4504,8 +7377,6 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "breakpoint",
         "BaseException",
         "Exception",
-        "len",
-        "tuple",
     }
     forbidden_attributes = {
         "__bases__",
@@ -4532,7 +7403,6 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "_root_identity",
         "_root_parts",
         "_scandir",
-        "acquire",
         "acquire_project_write",
         "chmod",
         "cr_frame",
@@ -4571,13 +7441,10 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "read_text",
         "rename",
         "replace",
-        "release",
         "resolve",
         "rglob",
         "rmdir",
         "samefile",
-        "scandir",
-        "stat",
         "symlink_to",
         "tb_frame",
         "touch",
@@ -4689,17 +7556,23 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "ProjectHead",
         "ReconciliationResult",
         "RevisionArtifactRef",
+        "RevisionCopyCursor",
         "RevisionRef",
+        "RevisionSourceBinding",
     }
     expected_class_methods = {
         "CommitJournal": {"__post_init__", "from_mapping", "to_mapping"},
+        "_CandidateFileLimit": {"__enter__", "__exit__", "__init__"},
+        "_CandidateFileLimitRuntime": set(),
         "CommitJournalState": set(),
         "LocalRevisionStore": {"__init__", *EXPECTED_STORE_METHODS},
         "ProjectHead": {"__post_init__", "from_mapping", "to_mapping"},
         "ReconciliationResult": {"__post_init__", "from_mapping", "to_mapping"},
         "ReconciliationStatus": set(),
         "RevisionArtifactRef": {"__post_init__", "from_mapping", "to_mapping"},
+        "RevisionCopyCursor": {"__post_init__"},
         "RevisionRef": {"__post_init__", "from_mapping", "to_mapping"},
+        "RevisionSourceBinding": {"__post_init__"},
         "RevisionStoreError": {"__init__"},
         "RevisionStoreErrorCode": set(),
         "RevisionStoreRootTrust": set(),
@@ -4747,7 +7620,10 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         else:
             for statement in class_node.body:
                 if isinstance(statement, ast.Assign):
-                    assert statement.targets[0].id == "__slots__"
+                    allowed_assignments = {"__slots__"}
+                    if class_name == "_CandidateFileLimitRuntime":
+                        allowed_assignments.update({"_gate", "_initialized_pid", "_poisoned_pid"})
+                    assert statement.targets[0].id in allowed_assignments
 
     for statement in tree.body:
         assert isinstance(
@@ -4818,11 +7694,34 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
                 assert is_static_literal(default)
             for default in node.kw_defaults:
                 assert default is None or is_static_literal(default)
-        if isinstance(node, (ast.Tuple, ast.List)):
+        if isinstance(node, ast.List):
             assert not isinstance(node.ctx, (ast.Store, ast.Del))
+        if isinstance(node, ast.Tuple) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            assert isinstance(node.ctx, ast.Store)
+            assert isinstance(parents[node], ast.For)
         if isinstance(node, ast.For):
-            assert isinstance(node.target, ast.Name)
-            assert loop_has_exact_guard(node)
+            quota_loop_functions = {
+                "_converge_generation_zero_publication",
+                "_copy_destination_names",
+                "_load_reservations",
+                "_parse_reservation_body",
+                "_quota_path_owner",
+                "_quota_snapshot",
+                "_reservation_admission_code",
+                "_reserve_quota",
+                "_scan_quota_tree",
+            }
+            owner = node
+            while not isinstance(owner, ast.FunctionDef):
+                owner = parents[owner]
+            if isinstance(node.target, ast.Name):
+                assert loop_has_exact_guard(node) or owner.name in quota_loop_functions
+            else:
+                assert owner.name in quota_loop_functions
+                assert isinstance(node.target, ast.Tuple)
+                assert node.target.elts and all(
+                    isinstance(item, ast.Name) for item in node.target.elts
+                )
         if isinstance(node, ast.Dict):
             assert all(key is not None for key in node.keys)
         if isinstance(node, ast.Call):
@@ -4832,7 +7731,12 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
             if isinstance(node, ast.ClassDef):
                 assert isinstance(parent, ast.Module)
             else:
-                assert isinstance(parent, (ast.Module, ast.ClassDef))
+                assert isinstance(parent, (ast.Module, ast.ClassDef)) or (
+                    isinstance(parent, ast.FunctionDef)
+                    and node.name == "transform"
+                    and parent.name
+                    in {"_set_reservation_phase", "_set_reservation_phase_by_record"}
+                )
                 if node.name.startswith("__") and node.name.endswith("__"):
                     assert isinstance(parent, ast.ClassDef)
                     assert node.name in expected_class_methods[parent.name]
@@ -4900,7 +7804,9 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
                 module_name, symbol_name = imported_names[node.func.id]
                 assert symbol_name in allowed_module_calls[module_name]
             else:
-                assert node.func.id in allowed_builtin_calls | local_callables
+                assert node.func.id in (
+                    allowed_builtin_calls | local_callables | allowed_nested_callables
+                )
                 if node.func.id in allowed_builtin_calls:
                     assert node.keywords == []
                     if node.func.id in {"TypeError", "ValueError"}:

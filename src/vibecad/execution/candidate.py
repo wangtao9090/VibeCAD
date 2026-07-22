@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re as _re
+import secrets as _secrets
 import threading as _threading
 import weakref as _weakref
 from collections import OrderedDict as _OrderedDict
@@ -17,6 +18,11 @@ from vibecad.execution.revisions import ReconciliationStatus as _ReconciliationS
 from vibecad.execution.revisions import RevisionRef as _RevisionRef
 from vibecad.execution.revisions import RevisionStoreError as _RevisionStoreError
 from vibecad.execution.revisions import RevisionStoreErrorCode as _RevisionStoreErrorCode
+from vibecad.execution.revisions import _candidate_file_limit as _candidate_file_limit
+from vibecad.execution.revisions import _reserve_candidate_revision as _reserve_candidate_revision
+from vibecad.execution.revisions import (
+    _validate_candidate_reservation as _validate_candidate_reservation,
+)
 from vibecad.validation import CompiledAcceptance as _CompiledAcceptance
 from vibecad.validation import ObservationSnapshot as _ObservationSnapshot
 from vibecad.validation import ValidationError as _ValidationError
@@ -61,6 +67,7 @@ class CandidateErrorCode(_StrEnum):
     ALREADY_TERMINAL = "already_terminal"
     RECEIPT_REJECTED = "receipt_rejected"
     CAD_FAILURE = "cad_failure"
+    RESOURCE_EXHAUSTED = "resource_exhausted"
     STORE_FAILURE = "store_failure"
     CONFLICT = "conflict"
     CLEANUP_REQUIRED = "cleanup_required"
@@ -110,6 +117,8 @@ def _error_message(code):
         return "The verification receipt was rejected."
     if code is CandidateErrorCode.CAD_FAILURE:
         return "The CAD candidate operation failed."
+    if code is CandidateErrorCode.RESOURCE_EXHAUSTED:
+        return "Candidate storage capacity is exhausted."
     if code is CandidateErrorCode.STORE_FAILURE:
         return "The candidate revision operation failed."
     if code is CandidateErrorCode.CONFLICT:
@@ -672,6 +681,38 @@ class CandidateCoordinator:
         self._close_failed = False
         self._runtime_closed = False
 
+    def _create_empty_session(self, revision_id):
+        with self._lock:
+            session = None
+            try:
+                with _candidate_file_limit(self._store):
+                    session = self._snapshot_port.create_empty(revision_id=revision_id)
+            except BaseException:
+                if session is not None:
+                    try:
+                        self._snapshot_port.close(session)
+                    except BaseException as cleanup_error:
+                        if not isinstance(cleanup_error, Exception):
+                            raise
+                raise
+            return session
+
+    def _load_fcstd_session(self, path):
+        with self._lock:
+            session = None
+            try:
+                with _candidate_file_limit(self._store):
+                    session = self._snapshot_port.load_fcstd(path)
+            except BaseException:
+                if session is not None:
+                    try:
+                        self._snapshot_port.close(session)
+                    except BaseException as cleanup_error:
+                        if not isinstance(cleanup_error, Exception):
+                            raise
+                raise
+            return session
+
     def _close_runtime(self, *, project_id: str) -> bool:
         """Close an idle project baseline without discarding recovery authority."""
 
@@ -908,12 +949,18 @@ class CandidateCoordinator:
                     failed = True
             return failed
 
-    def _abort(self, token, lease, code, cleanup_required=False):
+    def _abort(
+        self,
+        token,
+        lease,
+        code,
+        cleanup_required=False,
+        recovery_required=False,
+    ):
         with self._lock:
             head = self._heads.get(token)
             path_record = self._paths.get(token)
             reconciliation = None
-            recovery_required = False
             if head is not None and path_record is not None:
                 try:
                     reconciliation = self._store.rollback_revision(
@@ -992,6 +1039,31 @@ class CandidateCoordinator:
                     cleanup_required=True,
                 )
             return CandidateError(CandidateErrorCode.STORE_FAILURE)
+
+    def _cancel_prelineage(self, project_id, revision_id, lease, code):
+        with self._lock:
+            try:
+                reconciliation = self._store.rollback_revision(
+                    project_id,
+                    revision_id,
+                    lease,
+                )
+            except Exception:
+                return CandidateError(
+                    CandidateErrorCode.RECOVERY_REQUIRED,
+                    recovery_required=True,
+                )
+            if reconciliation.status is _ReconciliationStatus.CLEANUP_REQUIRED:
+                return CandidateError(
+                    CandidateErrorCode.CLEANUP_REQUIRED,
+                    cleanup_required=True,
+                )
+            if reconciliation.status is _ReconciliationStatus.COMMITTED:
+                return CandidateError(
+                    CandidateErrorCode.RECOVERY_REQUIRED,
+                    recovery_required=True,
+                )
+            return CandidateError(code)
 
     def _retain(self, project_id, binding):
         with self._lock:
@@ -1206,8 +1278,41 @@ class CandidateCoordinator:
         lease: _ProjectWriteLease,
     ) -> ActiveCandidate:
         with self._lock:
+            reservation_key = "legacy:" + _secrets.token_hex(16)
+            revision_id = self.reserve_candidate(
+                project_id=project_id,
+                expected_head=expected_head,
+                reservation_key=reservation_key,
+                lease=lease,
+            )
+            return self.begin_reserved(
+                project_id=project_id,
+                expected_head=expected_head,
+                revision_id=revision_id,
+                reservation_key=reservation_key,
+                lease=lease,
+            )
+
+    def reserve_candidate(
+        self,
+        *,
+        project_id: str,
+        expected_head: _ProjectHead,
+        reservation_key: str,
+        lease: _ProjectWriteLease,
+    ) -> str:
+        with self._lock:
             _require_project(project_id)
             if type(expected_head) is not _ProjectHead or expected_head.project_id != project_id:
+                raise CandidateError(CandidateErrorCode.INVALID_INPUT)
+            if (
+                type(reservation_key) is not str
+                or _re.fullmatch(
+                    r"[A-Za-z0-9._:-]{1,128}",
+                    reservation_key,
+                )
+                is None
+            ):
                 raise CandidateError(CandidateErrorCode.INVALID_INPUT)
             if not self._store_lease_is_valid(project_id, lease):
                 raise CandidateError(CandidateErrorCode.INVALID_LEASE)
@@ -1228,19 +1333,121 @@ class CandidateCoordinator:
             ):
                 raise CandidateError(CandidateErrorCode.CONFLICT)
             try:
-                base_revision = self._store.load_revision(project_id, expected_head.revision_id)
-            except Exception:
-                raise CandidateError(CandidateErrorCode.STORE_FAILURE) from None
-            try:
-                revision_id = self._store.begin_revision(project_id, expected_head, lease)
+                revision_id = _reserve_candidate_revision(
+                    self._store,
+                    project_id,
+                    expected_head,
+                    reservation_key,
+                    lease,
+                )
             except _RevisionStoreError as error:
                 if error.code is _RevisionStoreErrorCode.INVALID_LEASE:
                     raise CandidateError(CandidateErrorCode.INVALID_LEASE) from None
                 if error.code is _RevisionStoreErrorCode.CONFLICT:
                     raise CandidateError(CandidateErrorCode.CONFLICT) from None
-                raise self._begin_reconcile_error(project_id, lease) from None
+                if error.code is _RevisionStoreErrorCode.RESOURCE_EXHAUSTED:
+                    raise CandidateError(CandidateErrorCode.RESOURCE_EXHAUSTED) from None
+                if error.code is _RevisionStoreErrorCode.DURABILITY_UNCERTAIN:
+                    raise self._begin_reconcile_error(project_id, lease) from None
+                if error.code in {
+                    _RevisionStoreErrorCode.RECOVERY_REQUIRED,
+                    _RevisionStoreErrorCode.CLEANUP_REQUIRED,
+                }:
+                    raise CandidateError(
+                        CandidateErrorCode.RECOVERY_REQUIRED,
+                        recovery_required=True,
+                    ) from None
+                raise CandidateError(CandidateErrorCode.STORE_FAILURE) from None
             except Exception:
-                raise self._begin_reconcile_error(project_id, lease) from None
+                raise CandidateError(CandidateErrorCode.STORE_FAILURE) from None
+            return revision_id
+
+    def begin_reserved(
+        self,
+        *,
+        project_id: str,
+        expected_head: _ProjectHead,
+        revision_id: str,
+        reservation_key: str,
+        lease: _ProjectWriteLease,
+    ) -> ActiveCandidate:
+        with self._lock:
+            _require_project(project_id)
+            _require_revision(revision_id)
+            if type(expected_head) is not _ProjectHead or expected_head.project_id != project_id:
+                raise CandidateError(CandidateErrorCode.INVALID_INPUT)
+            if (
+                type(reservation_key) is not str
+                or _re.fullmatch(
+                    r"[A-Za-z0-9._:-]{1,128}",
+                    reservation_key,
+                )
+                is None
+            ):
+                raise CandidateError(CandidateErrorCode.INVALID_INPUT)
+            if not self._store_lease_is_valid(project_id, lease):
+                raise CandidateError(CandidateErrorCode.INVALID_LEASE)
+            self._require_session_creation_allowed()
+            reservation_code = _validate_candidate_reservation(
+                self._store,
+                project_id,
+                expected_head,
+                revision_id,
+                reservation_key,
+                lease,
+            )
+            if reservation_code is not None:
+                if reservation_code is _RevisionStoreErrorCode.INVALID_LEASE:
+                    raise CandidateError(CandidateErrorCode.INVALID_LEASE)
+                if reservation_code is _RevisionStoreErrorCode.CONFLICT:
+                    raise CandidateError(CandidateErrorCode.CONFLICT)
+                if reservation_code is _RevisionStoreErrorCode.RESOURCE_EXHAUSTED:
+                    raise CandidateError(CandidateErrorCode.RESOURCE_EXHAUSTED)
+                if reservation_code is _RevisionStoreErrorCode.RECOVERY_REQUIRED:
+                    raise CandidateError(
+                        CandidateErrorCode.RECOVERY_REQUIRED,
+                        recovery_required=True,
+                    )
+                raise CandidateError(CandidateErrorCode.STORE_FAILURE)
+            try:
+                durable_head = self._store.load_head(project_id)
+                base_revision = self._store.load_revision(
+                    project_id,
+                    expected_head.revision_id,
+                )
+            except Exception:
+                raise self._cancel_prelineage(
+                    project_id,
+                    revision_id,
+                    lease,
+                    CandidateErrorCode.STORE_FAILURE,
+                ) from None
+            if durable_head != expected_head:
+                raise self._cancel_prelineage(
+                    project_id,
+                    revision_id,
+                    lease,
+                    CandidateErrorCode.CONFLICT,
+                )
+            try:
+                baseline = self._session_slot.current()
+            except Exception:
+                raise self._cancel_prelineage(
+                    project_id,
+                    revision_id,
+                    lease,
+                    CandidateErrorCode.CONFLICT,
+                ) from None
+            if (
+                baseline.project_id != project_id
+                or baseline.revision_id != expected_head.revision_id
+            ):
+                raise self._cancel_prelineage(
+                    project_id,
+                    revision_id,
+                    lease,
+                    CandidateErrorCode.CONFLICT,
+                )
             try:
                 model_path = self._store.candidate_model_path(
                     project_id,
@@ -1265,17 +1472,25 @@ class CandidateCoordinator:
             )
             try:
                 if base_revision.model is None:
-                    binding = SessionBinding(
-                        project_id=project_id,
-                        revision_id=revision_id,
-                        session=self._snapshot_port.create_empty(revision_id=revision_id),
-                    )
+                    session = self._create_empty_session(revision_id)
                 else:
-                    binding = SessionBinding(
-                        project_id=project_id,
-                        revision_id=revision_id,
-                        session=self._snapshot_port.load_fcstd(model_path),
-                    )
+                    session = self._load_fcstd_session(model_path)
+                binding = SessionBinding(
+                    project_id=project_id,
+                    revision_id=revision_id,
+                    session=session,
+                )
+            except _RevisionStoreError as error:
+                if error.code is _RevisionStoreErrorCode.RECOVERY_REQUIRED:
+                    raise self._abort(
+                        token,
+                        lease,
+                        CandidateErrorCode.RECOVERY_REQUIRED,
+                        recovery_required=True,
+                    ) from None
+                if error.code is _RevisionStoreErrorCode.INVALID_LEASE:
+                    raise self._abort(token, lease, CandidateErrorCode.INVALID_LEASE) from None
+                raise self._abort(token, lease, CandidateErrorCode.CAD_FAILURE) from None
             except Exception:
                 raise self._abort(token, lease, CandidateErrorCode.CAD_FAILURE) from None
             if binding.session is baseline.session:
@@ -1290,6 +1505,98 @@ class CandidateCoordinator:
             self._issue(token, "active", active, binding)
             return active
 
+    def cancel_reservation(
+        self,
+        *,
+        project_id: str,
+        expected_head: _ProjectHead,
+        revision_id: str,
+        reservation_key: str,
+        lease: _ProjectWriteLease,
+    ) -> CandidateRollbackResult:
+        with self._lock:
+            _require_project(project_id)
+            _require_revision(revision_id)
+            if type(expected_head) is not _ProjectHead or expected_head.project_id != project_id:
+                raise CandidateError(CandidateErrorCode.INVALID_INPUT)
+            if (
+                type(reservation_key) is not str
+                or _re.fullmatch(
+                    r"[A-Za-z0-9._:-]{1,128}",
+                    reservation_key,
+                )
+                is None
+            ):
+                raise CandidateError(CandidateErrorCode.INVALID_INPUT)
+            if not self._store_lease_is_valid(project_id, lease):
+                raise CandidateError(CandidateErrorCode.INVALID_LEASE)
+            reservation_code = _validate_candidate_reservation(
+                self._store,
+                project_id,
+                expected_head,
+                revision_id,
+                reservation_key,
+                lease,
+            )
+            if reservation_code is not None:
+                if reservation_code is _RevisionStoreErrorCode.CONFLICT:
+                    raise CandidateError(CandidateErrorCode.CONFLICT)
+                if reservation_code is _RevisionStoreErrorCode.INVALID_LEASE:
+                    raise CandidateError(CandidateErrorCode.INVALID_LEASE)
+                return CandidateRollbackResult(
+                    status=CandidateRollbackStatus.RECOVERY_REQUIRED,
+                    head=None,
+                    live_binding=None,
+                    reconciliation=None,
+                    head_committed=False,
+                    slot_promoted=None,
+                    cleanup_required=False,
+                    recovery_required=True,
+                    cleanup_binding=None,
+                )
+            try:
+                baseline = self._session_slot.current()
+            except Exception:
+                raise CandidateError(CandidateErrorCode.CONFLICT) from None
+            if (
+                baseline.project_id != project_id
+                or baseline.revision_id != expected_head.revision_id
+            ):
+                raise CandidateError(CandidateErrorCode.CONFLICT)
+            try:
+                reconciliation = self._store.rollback_revision(
+                    project_id,
+                    revision_id,
+                    lease,
+                )
+            except Exception:
+                return CandidateRollbackResult(
+                    status=CandidateRollbackStatus.RECOVERY_REQUIRED,
+                    head=None,
+                    live_binding=None,
+                    reconciliation=None,
+                    head_committed=False,
+                    slot_promoted=None,
+                    cleanup_required=False,
+                    recovery_required=True,
+                    cleanup_binding=None,
+                )
+            cleanup_required = reconciliation.status is _ReconciliationStatus.CLEANUP_REQUIRED
+            status = CandidateRollbackStatus.NOT_COMMITTED
+            if cleanup_required:
+                status = CandidateRollbackStatus.CLEANUP_REQUIRED
+            return CandidateRollbackResult(
+                status=status,
+                head=reconciliation.head,
+                live_binding=baseline,
+                reconciliation=reconciliation,
+                head_committed=False,
+                slot_promoted=False,
+                cleanup_required=cleanup_required,
+                recovery_required=False,
+                cleanup_binding=None,
+            )
+
     def checkpoint(
         self,
         *,
@@ -1303,18 +1610,42 @@ class CandidateCoordinator:
             self._check_preconditions(token, lease)
             self._require_session_creation_allowed()
             try:
-                self._snapshot_port.checkpoint_fcstd(
-                    candidate.binding.session,
-                    candidate.model_path,
-                )
+                with _candidate_file_limit(self._store):
+                    self._snapshot_port.checkpoint_fcstd(
+                        candidate.binding.session,
+                        candidate.model_path,
+                    )
+            except _RevisionStoreError as error:
+                if error.code is _RevisionStoreErrorCode.RECOVERY_REQUIRED:
+                    raise self._abort(
+                        token,
+                        lease,
+                        CandidateErrorCode.RECOVERY_REQUIRED,
+                        recovery_required=True,
+                    ) from None
+                if error.code is _RevisionStoreErrorCode.INVALID_LEASE:
+                    raise self._abort(token, lease, CandidateErrorCode.INVALID_LEASE) from None
+                raise self._abort(token, lease, CandidateErrorCode.CAD_FAILURE) from None
             except Exception:
                 raise self._abort(token, lease, CandidateErrorCode.CAD_FAILURE) from None
             try:
+                session = self._load_fcstd_session(candidate.model_path)
                 replacement = SessionBinding(
                     project_id=candidate.project_id,
                     revision_id=candidate.binding.revision_id,
-                    session=self._snapshot_port.load_fcstd(candidate.model_path),
+                    session=session,
                 )
+            except _RevisionStoreError as error:
+                if error.code is _RevisionStoreErrorCode.RECOVERY_REQUIRED:
+                    raise self._abort(
+                        token,
+                        lease,
+                        CandidateErrorCode.RECOVERY_REQUIRED,
+                        recovery_required=True,
+                    ) from None
+                if error.code is _RevisionStoreErrorCode.INVALID_LEASE:
+                    raise self._abort(token, lease, CandidateErrorCode.INVALID_LEASE) from None
+                raise self._abort(token, lease, CandidateErrorCode.CAD_FAILURE) from None
             except Exception:
                 raise self._abort(token, lease, CandidateErrorCode.CAD_FAILURE) from None
             if self._aliases_owned(token, replacement):
@@ -1355,6 +1686,15 @@ class CandidateCoordinator:
                     candidate.binding.revision_id,
                     lease,
                 )
+            except _RevisionStoreError as error:
+                code = CandidateErrorCode.STORE_FAILURE
+                if error.code is _RevisionStoreErrorCode.RESOURCE_EXHAUSTED:
+                    code = CandidateErrorCode.RESOURCE_EXHAUSTED
+                elif error.code is _RevisionStoreErrorCode.INVALID_LEASE:
+                    code = CandidateErrorCode.INVALID_LEASE
+                elif error.code is _RevisionStoreErrorCode.CONFLICT:
+                    code = CandidateErrorCode.CONFLICT
+                raise self._abort(token, lease, code) from None
             except Exception:
                 raise self._abort(token, lease, CandidateErrorCode.STORE_FAILURE) from None
             try:
@@ -1362,11 +1702,23 @@ class CandidateCoordinator:
                     candidate.project_id,
                     revision.id,
                 )
+                session = self._load_fcstd_session(immutable_path)
                 replacement = SessionBinding(
                     project_id=candidate.project_id,
                     revision_id=revision.id,
-                    session=self._snapshot_port.load_fcstd(immutable_path),
+                    session=session,
                 )
+            except _RevisionStoreError as error:
+                if error.code is _RevisionStoreErrorCode.RECOVERY_REQUIRED:
+                    raise self._abort(
+                        token,
+                        lease,
+                        CandidateErrorCode.RECOVERY_REQUIRED,
+                        recovery_required=True,
+                    ) from None
+                if error.code is _RevisionStoreErrorCode.INVALID_LEASE:
+                    raise self._abort(token, lease, CandidateErrorCode.INVALID_LEASE) from None
+                raise self._abort(token, lease, CandidateErrorCode.CAD_FAILURE) from None
             except Exception:
                 raise self._abort(token, lease, CandidateErrorCode.CAD_FAILURE) from None
             if self._aliases_owned(token, replacement):
@@ -1438,11 +1790,22 @@ class CandidateCoordinator:
                 (immutable_path, immutable_path),
             )
             try:
+                session = self._load_fcstd_session(immutable_path)
                 binding = SessionBinding(
                     project_id=project_id,
                     revision_id=revision.id,
-                    session=self._snapshot_port.load_fcstd(immutable_path),
+                    session=session,
                 )
+            except _RevisionStoreError as error:
+                self._fail(token)
+                if error.code is _RevisionStoreErrorCode.RECOVERY_REQUIRED:
+                    raise CandidateError(
+                        CandidateErrorCode.RECOVERY_REQUIRED,
+                        recovery_required=True,
+                    ) from None
+                if error.code is _RevisionStoreErrorCode.INVALID_LEASE:
+                    raise CandidateError(CandidateErrorCode.INVALID_LEASE) from None
+                raise CandidateError(CandidateErrorCode.CAD_FAILURE) from None
             except Exception:
                 self._fail(token)
                 raise CandidateError(CandidateErrorCode.CAD_FAILURE) from None
@@ -2164,10 +2527,11 @@ class CandidateCoordinator:
                     project_id,
                     reconciliation.head.revision_id,
                 )
+                session = self._load_fcstd_session(immutable_path)
                 replacement = SessionBinding(
                     project_id=project_id,
                     revision_id=reconciliation.head.revision_id,
-                    session=self._snapshot_port.load_fcstd(immutable_path),
+                    session=session,
                 )
             except Exception:
                 self._load_failures.add(failure_key)

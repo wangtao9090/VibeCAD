@@ -56,6 +56,7 @@ BASE_REVISION = "revision_0123456789abcdef0123456789abcdef"
 KEY_DOMAIN = b"vibecad-task-store-key-v1\0"
 CHECKSUM_DOMAIN = b"vibecad-stored-task-run-v1\0"
 MAX_RECORD_BYTES = 2 * 1024 * 1024
+MUTATION_JOURNAL_NAME = ".mutation.json"
 
 
 class IdString(str):
@@ -279,7 +280,929 @@ def test_error_codes_are_exact_and_complete():
         "lock_unavailable",
         "io_error",
         "durability_uncertain",
+        "resource_exhausted",
     }
+
+
+def test_physical_store_limits_are_exact() -> None:
+    assert store_module._MAX_TASK_RECORDS == 1024
+    assert store_module._MAX_RECORD_BYTES == 2 * 1024 * 1024
+    assert store_module._MAX_TASK_STORE_BYTES == 2_147_483_648
+    assert store_module._MAX_JOURNAL_BYTES == 64 * 1024
+
+
+def test_forged_loads_do_not_create_caller_derived_lock_entries(
+    store: TaskRunStore,
+    lease_root: Path,
+) -> None:
+    before = sorted(
+        (entry.name, entry.stat().st_ino, entry.stat().st_size) for entry in lease_root.iterdir()
+    )
+    for index in range(10_000):
+        task_id = f"task_{index:032x}"
+        with pytest.raises(TaskStoreError) as caught:
+            store.load(task_id)
+        _assert_error(caught, TaskStoreErrorCode.NOT_FOUND)
+    after = sorted(
+        (entry.name, entry.stat().st_ino, entry.stat().st_size) for entry in lease_root.iterdir()
+    )
+    assert after == before
+
+
+def test_record_count_n_plus_one_is_rejected_before_a_task_lock_is_created(
+    store: TaskRunStore,
+    store_root: Path,
+    lease_root: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(store_module, "_MAX_TASK_RECORDS", 1, raising=False)
+    store.create(_task())
+    before_records = sorted((entry.name, entry.stat().st_ino) for entry in store_root.iterdir())
+    before_locks = sorted((entry.name, entry.stat().st_ino) for entry in lease_root.iterdir())
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.create(_task(OTHER_TASK_ID))
+
+    _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    assert (
+        sorted((entry.name, entry.stat().st_ino) for entry in store_root.iterdir())
+        == before_records
+    )
+    assert (
+        sorted((entry.name, entry.stat().st_ino) for entry in lease_root.iterdir()) == before_locks
+    )
+
+
+def test_replacement_physical_peak_n_plus_one_preserves_the_existing_record(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    store.create(_task())
+    record = store_root / _record_name()
+    before = (record.stat().st_ino, record.read_bytes())
+    replacement = _record_bytes(_task(), generation=1)
+    monkeypatch.setattr(
+        store_module,
+        "_MAX_TASK_STORE_BYTES",
+        record.stat().st_size + len(replacement) - 1,
+        raising=False,
+    )
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.compare_and_set(TASK_ID, 0, _task())
+
+    _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    assert (record.stat().st_ino, record.read_bytes()) == before
+    assert [entry.name for entry in store_root.iterdir()] == [_record_name()]
+
+
+def test_create_physical_peak_exact_equality_and_n_plus_one_include_journal_and_temp(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    token = "c" * 32
+    task = _task()
+    raw = store_module._encode_record(task, 0)
+    target = _record_name()
+    temp_name = f".{target}.{token}.tmp"
+    new_sha256 = hashlib.sha256(raw).hexdigest()
+    reserved = store_module._journal_line(
+        store_module._journal_body(
+            state="RESERVED",
+            task_id=TASK_ID,
+            target=target,
+            old_sha256=None,
+            new_sha256=new_sha256,
+            new_size=len(raw),
+            temp_name=temp_name,
+        )
+    )
+    staged = TaskRunStore._staged_bound_line(
+        task_id=TASK_ID,
+        target=target,
+        old_sha256=None,
+        new_sha256=new_sha256,
+        new_size=len(raw),
+        temp_name=temp_name,
+    )
+    exact_peak = len(reserved) + len(staged) + len(raw)
+
+    roots = [tmp_path / name for name in ("equal-locks", "equal-store", "over-locks", "over-store")]
+    for root in roots:
+        root.mkdir(mode=0o700)
+    equal = TaskRunStore(
+        roots[1],
+        ResourceLeaseManager(roots[0], trust=LeaseRootTrust.TRUSTED_LOCAL),
+        trust=TaskStoreRootTrust.TRUSTED_LOCAL,
+    )
+    over = TaskRunStore(
+        roots[3],
+        ResourceLeaseManager(roots[2], trust=LeaseRootTrust.TRUSTED_LOCAL),
+        trust=TaskStoreRootTrust.TRUSTED_LOCAL,
+    )
+    real_token_hex = store_module.secrets.token_hex
+    monkeypatch.setattr(
+        store_module.secrets,
+        "token_hex",
+        lambda size: token if size == 16 else real_token_hex(size),
+    )
+    monkeypatch.setattr(store_module, "_MAX_TASK_STORE_BYTES", exact_peak)
+    assert equal.create(task) == StoredTaskRun(generation=0, task_run=task)
+
+    monkeypatch.setattr(store_module, "_MAX_TASK_STORE_BYTES", exact_peak - 1)
+    before = sorted(entry.name for entry in roots[2].iterdir())
+    with pytest.raises(TaskStoreError) as caught:
+        over.create(task)
+    _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    assert list(roots[3].iterdir()) == []
+    assert sorted(entry.name for entry in roots[2].iterdir()) == before
+
+
+def test_ten_thousand_over_capacity_creates_do_not_grow_store_or_lock_tree(
+    store: TaskRunStore,
+    store_root: Path,
+    lease_root: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(store_module, "_MAX_TASK_RECORDS", 0)
+    before_locks = sorted(
+        (entry.name, entry.stat().st_ino, entry.stat().st_size) for entry in lease_root.iterdir()
+    )
+    for index in range(10_000):
+        task_id = f"task_{index:032x}"
+        with pytest.raises(TaskStoreError) as caught:
+            store.create(_task(task_id))
+        _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    assert list(store_root.iterdir()) == []
+    assert (
+        sorted(
+            (entry.name, entry.stat().st_ino, entry.stat().st_size)
+            for entry in lease_root.iterdir()
+        )
+        == before_locks
+    )
+
+
+@pytest.mark.parametrize("kind", ["oversize", "corrupt", "hash_mismatch"])
+def test_mutation_scan_rejects_oversize_corrupt_or_hash_mismatched_records(
+    store: TaskRunStore,
+    store_root: Path,
+    lease_root: Path,
+    kind: str,
+) -> None:
+    if kind == "oversize":
+        raw = b"x" * (MAX_RECORD_BYTES + 1)
+    elif kind == "corrupt":
+        raw = b"{}"
+    else:
+        raw = _record_bytes(_task(OTHER_TASK_ID))
+    path = _write_record(store_root, raw, TASK_ID)
+    before = (
+        path.stat().st_ino,
+        path.stat().st_size,
+        sorted((entry.name, entry.stat().st_ino) for entry in lease_root.iterdir()),
+    )
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.create(_task(OTHER_TASK_ID))
+
+    _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    assert (
+        path.stat().st_ino,
+        path.stat().st_size,
+        sorted((entry.name, entry.stat().st_ino) for entry in lease_root.iterdir()),
+    ) == before
+
+
+def test_staged_journal_recovers_one_crash_remnant_without_a_second_temp(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    real_replace = store_module.os.replace
+    crashed = False
+
+    def crash_before_publish(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        nonlocal crashed
+        if not crashed and os.fsdecode(os.fspath(src)).endswith(".tmp"):
+            crashed = True
+            raise SimulatedProcessCrash
+        return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module.os, "replace", crash_before_publish)
+        with pytest.raises(SimulatedProcessCrash):
+            store.create(_task())
+
+    names = sorted(entry.name for entry in store_root.iterdir())
+    assert MUTATION_JOURNAL_NAME in names
+    assert len([name for name in names if name.endswith(".tmp")]) == 1
+    journal_lines = (store_root / MUTATION_JOURNAL_NAME).read_text(encoding="utf-8").splitlines()
+    assert json.loads(journal_lines[-1])["body"]["state"] == "STAGED"
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.create(_task())
+    _assert_error(caught, TaskStoreErrorCode.ALREADY_EXISTS)
+    assert store.load(TASK_ID) == StoredTaskRun(generation=0, task_run=_task())
+    assert sorted(entry.name for entry in store_root.iterdir()) == [_record_name()]
+
+
+def test_reserved_journal_recovers_a_crash_before_temp_creation(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    real_open = store_module.os.open
+    crashed = False
+
+    def crash_on_first_temp(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal crashed
+        if not crashed and os.fsdecode(os.fspath(path)).endswith(".tmp"):
+            crashed = True
+            raise SimulatedProcessCrash
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    with monkeypatch.context() as patch:
+        _patch_dir_fd_callable(patch, "open", crash_on_first_temp)
+        with pytest.raises(SimulatedProcessCrash):
+            store.create(_task())
+
+    names = sorted(entry.name for entry in store_root.iterdir())
+    assert names == [MUTATION_JOURNAL_NAME]
+    journal_lines = (store_root / MUTATION_JOURNAL_NAME).read_text(encoding="utf-8").splitlines()
+    assert json.loads(journal_lines[-1])["body"]["state"] == "RESERVED"
+
+    assert store.create(_task()) == StoredTaskRun(generation=0, task_run=_task())
+    assert sorted(entry.name for entry in store_root.iterdir()) == [_record_name()]
+
+
+def test_partial_reserved_journal_write_crash_is_preserved_fail_closed(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    real_open = store_module.os.open
+    real_close = store_module.os.close
+    real_write = store_module.os.write
+    journal_fds: set[int] = set()
+    journal_write_calls = 0
+
+    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if os.fsdecode(os.fspath(path)) == MUTATION_JOURNAL_NAME and flags & os.O_CREAT:
+            journal_fds.add(fd)
+        return fd
+
+    def partial_then_crash(fd: int, data) -> int:
+        nonlocal journal_write_calls
+        if fd not in journal_fds:
+            return real_write(fd, data)
+        journal_write_calls += 1
+        if journal_write_calls == 1:
+            return real_write(fd, bytes(data[:17]))
+        raise SimulatedProcessCrash
+
+    with monkeypatch.context() as patch:
+        _patch_dir_fd_callable(patch, "open", recording_open)
+        patch.setattr(store_module.os, "write", partial_then_crash)
+        with pytest.raises(SimulatedProcessCrash):
+            store.create(_task())
+
+    for fd in journal_fds:
+        try:
+            real_close(fd)
+        except OSError:
+            pass
+    assert journal_write_calls == 2
+    journal = store_root / MUTATION_JOURNAL_NAME
+    assert 0 < journal.stat().st_size < len(_record_bytes(_task()))
+    before = (journal.stat().st_ino, journal.read_bytes())
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.create(_task())
+    _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    assert (journal.stat().st_ino, journal.read_bytes()) == before
+
+
+def test_reserved_journal_fsync_crash_restarts_from_the_durable_line(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    real_open = store_module.os.open
+    real_close = store_module.os.close
+    real_fsync = store_module.os.fsync
+    journal_fds: set[int] = set()
+    crashed = False
+
+    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if os.fsdecode(os.fspath(path)) == MUTATION_JOURNAL_NAME and flags & os.O_CREAT:
+            journal_fds.add(fd)
+        return fd
+
+    def crash_after_journal_fsync(fd: int) -> None:
+        nonlocal crashed
+        real_fsync(fd)
+        if fd in journal_fds and not crashed:
+            crashed = True
+            raise SimulatedProcessCrash
+
+    with monkeypatch.context() as patch:
+        _patch_dir_fd_callable(patch, "open", recording_open)
+        patch.setattr(store_module.os, "fsync", crash_after_journal_fsync)
+        with pytest.raises(SimulatedProcessCrash):
+            store.create(_task())
+
+    for fd in journal_fds:
+        try:
+            real_close(fd)
+        except OSError:
+            pass
+    assert crashed
+    assert sorted(entry.name for entry in store_root.iterdir()) == [MUTATION_JOURNAL_NAME]
+    journal_lines = (store_root / MUTATION_JOURNAL_NAME).read_text(encoding="utf-8").splitlines()
+    assert json.loads(journal_lines[-1])["body"]["state"] == "RESERVED"
+
+    assert store.create(_task()) == StoredTaskRun(generation=0, task_run=_task())
+    assert sorted(entry.name for entry in store_root.iterdir()) == [_record_name()]
+
+
+def test_partial_temp_write_crash_is_preserved_and_restart_fails_closed(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    real_open = store_module.os.open
+    real_write = store_module.os.write
+    temp_fds: set[int] = set()
+    temp_write_calls = 0
+
+    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if os.fsdecode(os.fspath(path)).endswith(".tmp") and flags & os.O_CREAT:
+            temp_fds.add(fd)
+        return fd
+
+    def partial_then_crash(fd: int, data) -> int:
+        nonlocal temp_write_calls
+        if fd not in temp_fds:
+            return real_write(fd, data)
+        temp_write_calls += 1
+        if temp_write_calls == 1:
+            return real_write(fd, bytes(data[:7]))
+        raise SimulatedProcessCrash
+
+    with monkeypatch.context() as patch:
+        _patch_dir_fd_callable(patch, "open", recording_open)
+        patch.setattr(store_module.os, "write", partial_then_crash)
+        with pytest.raises(SimulatedProcessCrash):
+            store.create(_task())
+
+    assert temp_write_calls == 2
+    before = {
+        entry.name: (entry.stat().st_ino, entry.read_bytes()) for entry in store_root.iterdir()
+    }
+    assert MUTATION_JOURNAL_NAME in before
+    assert len([name for name in before if name.endswith(".tmp")]) == 1
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.create(_task())
+    _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    assert {
+        entry.name: (entry.stat().st_ino, entry.read_bytes()) for entry in store_root.iterdir()
+    } == before
+
+
+def test_temp_file_fsync_crash_rolls_forward_on_restart(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    real_open = store_module.os.open
+    real_fsync = store_module.os.fsync
+    temp_fds: set[int] = set()
+    crashed = False
+
+    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if os.fsdecode(os.fspath(path)).endswith(".tmp") and flags & os.O_CREAT:
+            temp_fds.add(fd)
+        return fd
+
+    def crash_after_temp_fsync(fd: int) -> None:
+        nonlocal crashed
+        if fd in temp_fds and not crashed:
+            crashed = True
+            raise SimulatedProcessCrash
+        real_fsync(fd)
+
+    with monkeypatch.context() as patch:
+        _patch_dir_fd_callable(patch, "open", recording_open)
+        patch.setattr(store_module.os, "fsync", crash_after_temp_fsync)
+        with pytest.raises(SimulatedProcessCrash):
+            store.create(_task())
+
+    assert crashed
+    names = sorted(entry.name for entry in store_root.iterdir())
+    assert MUTATION_JOURNAL_NAME in names
+    assert len([name for name in names if name.endswith(".tmp")]) == 1
+    before = {
+        entry.name: (entry.stat().st_ino, entry.read_bytes()) for entry in store_root.iterdir()
+    }
+
+    def fail_recovery_temp_fsync(fd: int) -> None:
+        result = os.fstat(fd)
+        if stat.S_ISREG(result.st_mode) and result.st_size == len(_record_bytes(_task())):
+            raise OSError("recovery temp fsync sentinel")
+        real_fsync(fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module.os, "fsync", fail_recovery_temp_fsync)
+        with pytest.raises(TaskStoreError) as caught:
+            store.create(_task())
+    _assert_error(caught, TaskStoreErrorCode.IO_ERROR)
+    assert {
+        entry.name: (entry.stat().st_ino, entry.read_bytes()) for entry in store_root.iterdir()
+    } == before
+
+    recovery_regular_fsync_sizes: list[int] = []
+
+    def recording_recovery_fsync(fd: int) -> None:
+        result = os.fstat(fd)
+        if stat.S_ISREG(result.st_mode):
+            recovery_regular_fsync_sizes.append(result.st_size)
+        real_fsync(fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module.os, "fsync", recording_recovery_fsync)
+        with pytest.raises(TaskStoreError) as caught:
+            store.create(_task())
+    _assert_error(caught, TaskStoreErrorCode.ALREADY_EXISTS)
+    assert len(_record_bytes(_task())) in recovery_regular_fsync_sizes
+    assert store.load(TASK_ID) == StoredTaskRun(generation=0, task_run=_task())
+    assert sorted(entry.name for entry in store_root.iterdir()) == [_record_name()]
+
+
+def test_staged_journal_fsync_crash_rolls_forward_on_restart(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    real_open = store_module.os.open
+    real_close = store_module.os.close
+    real_fsync = store_module.os.fsync
+    staged_journal_fds: set[int] = set()
+    crashed = False
+
+    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if os.fsdecode(os.fspath(path)) == MUTATION_JOURNAL_NAME and flags & os.O_APPEND:
+            staged_journal_fds.add(fd)
+        return fd
+
+    def crash_after_staged_journal_fsync(fd: int) -> None:
+        nonlocal crashed
+        real_fsync(fd)
+        if fd in staged_journal_fds and not crashed:
+            crashed = True
+            raise SimulatedProcessCrash
+
+    with monkeypatch.context() as patch:
+        _patch_dir_fd_callable(patch, "open", recording_open)
+        patch.setattr(store_module.os, "fsync", crash_after_staged_journal_fsync)
+        with pytest.raises(SimulatedProcessCrash):
+            store.create(_task())
+
+    for fd in staged_journal_fds:
+        try:
+            real_close(fd)
+        except OSError:
+            pass
+    assert crashed
+    journal_lines = (store_root / MUTATION_JOURNAL_NAME).read_text(encoding="utf-8").splitlines()
+    assert json.loads(journal_lines[-1])["body"]["state"] == "STAGED"
+    assert len([entry for entry in store_root.iterdir() if entry.name.endswith(".tmp")]) == 1
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.create(_task())
+    _assert_error(caught, TaskStoreErrorCode.ALREADY_EXISTS)
+    assert store.load(TASK_ID) == StoredTaskRun(generation=0, task_run=_task())
+    assert sorted(entry.name for entry in store_root.iterdir()) == [_record_name()]
+
+
+def test_partial_staged_journal_write_crash_is_reconstructed_on_restart(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    real_open = store_module.os.open
+    real_close = store_module.os.close
+    real_write = store_module.os.write
+    staged_journal_fds: set[int] = set()
+    staged_write_calls = 0
+
+    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if os.fsdecode(os.fspath(path)) == MUTATION_JOURNAL_NAME and flags & os.O_APPEND:
+            staged_journal_fds.add(fd)
+        return fd
+
+    def partial_then_crash(fd: int, data) -> int:
+        nonlocal staged_write_calls
+        if fd not in staged_journal_fds:
+            return real_write(fd, data)
+        staged_write_calls += 1
+        if staged_write_calls == 1:
+            return real_write(fd, bytes(data[:17]))
+        raise SimulatedProcessCrash
+
+    with monkeypatch.context() as patch:
+        _patch_dir_fd_callable(patch, "open", recording_open)
+        patch.setattr(store_module.os, "write", partial_then_crash)
+        with pytest.raises(SimulatedProcessCrash):
+            store.create(_task())
+
+    for fd in staged_journal_fds:
+        try:
+            real_close(fd)
+        except OSError:
+            pass
+    assert staged_write_calls == 2
+    journal = store_root / MUTATION_JOURNAL_NAME
+    raw = journal.read_bytes()
+    assert raw.count(b"\n") == 1
+    assert raw.split(b"\n", 1)[1] == b'{"body":{"new_sha'
+    assert len([entry for entry in store_root.iterdir() if entry.name.endswith(".tmp")]) == 1
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.create(_task())
+    _assert_error(caught, TaskStoreErrorCode.ALREADY_EXISTS)
+    assert store.load(TASK_ID) == StoredTaskRun(generation=0, task_run=_task())
+    assert sorted(entry.name for entry in store_root.iterdir()) == [_record_name()]
+
+
+def test_post_replace_readback_crash_reconciles_on_restart(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    real_read_record = store_module._read_record
+    crashed = False
+
+    def crash_on_readback(root_fd: int, root_stat, filename: str, task_id: str):
+        nonlocal crashed
+        if (
+            not crashed
+            and (store_root / _record_name()).exists()
+            and (store_root / MUTATION_JOURNAL_NAME).exists()
+            and not any(entry.name.endswith(".tmp") for entry in store_root.iterdir())
+        ):
+            crashed = True
+            raise SimulatedProcessCrash
+        return real_read_record(root_fd, root_stat, filename, task_id)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "_read_record", crash_on_readback)
+        with pytest.raises(SimulatedProcessCrash):
+            store.create(_task())
+
+    assert crashed
+    assert (store_root / _record_name()).read_bytes() == _record_bytes(_task())
+    assert (store_root / MUTATION_JOURNAL_NAME).exists()
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.create(_task())
+    _assert_error(caught, TaskStoreErrorCode.ALREADY_EXISTS)
+    assert store.load(TASK_ID) == StoredTaskRun(generation=0, task_run=_task())
+    assert sorted(entry.name for entry in store_root.iterdir()) == [_record_name()]
+
+
+def test_post_replace_directory_fsync_crash_reconciles_on_restart(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    real_fsync = store_module.os.fsync
+    store_identity = (store_root.stat().st_dev, store_root.stat().st_ino)
+    directory_calls = 0
+
+    def crash_after_publish_directory_fsync(fd: int) -> None:
+        nonlocal directory_calls
+        result = os.fstat(fd)
+        is_store_directory = (
+            stat.S_ISDIR(result.st_mode)
+            and (
+                result.st_dev,
+                result.st_ino,
+            )
+            == store_identity
+        )
+        real_fsync(fd)
+        if is_store_directory:
+            directory_calls += 1
+            if directory_calls == 2:
+                raise SimulatedProcessCrash
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module.os, "fsync", crash_after_publish_directory_fsync)
+        with pytest.raises(SimulatedProcessCrash):
+            store.create(_task())
+
+    assert directory_calls == 2
+    assert (store_root / _record_name()).read_bytes() == _record_bytes(_task())
+    assert (store_root / MUTATION_JOURNAL_NAME).exists()
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.create(_task())
+    _assert_error(caught, TaskStoreErrorCode.ALREADY_EXISTS)
+    assert store.load(TASK_ID) == StoredTaskRun(generation=0, task_run=_task())
+    assert sorted(entry.name for entry in store_root.iterdir()) == [_record_name()]
+
+
+@pytest.mark.parametrize("with_valid_temp", [False, True], ids=("reserved", "staged"))
+def test_arbitrary_partial_journal_tail_is_never_truncated_or_recovered(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+    with_valid_temp: bool,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    if with_valid_temp:
+        real_replace = store_module.os.replace
+        crashed = False
+
+        def crash_before_publish(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+            nonlocal crashed
+            if not crashed and os.fsdecode(os.fspath(src)).endswith(".tmp"):
+                crashed = True
+                raise SimulatedProcessCrash
+            return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store_module.os, "replace", crash_before_publish)
+            with pytest.raises(SimulatedProcessCrash):
+                store.create(_task())
+    else:
+        real_open = store_module.os.open
+        crashed = False
+
+        def crash_before_temp(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal crashed
+            if not crashed and os.fsdecode(os.fspath(path)).endswith(".tmp"):
+                crashed = True
+                raise SimulatedProcessCrash
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with monkeypatch.context() as patch:
+            _patch_dir_fd_callable(patch, "open", crash_before_temp)
+            with pytest.raises(SimulatedProcessCrash):
+                store.create(_task())
+
+    journal = store_root / MUTATION_JOURNAL_NAME
+    raw = journal.read_bytes()
+    reserved_end = raw.index(b"\n") + 1
+    journal.write_bytes(raw[:reserved_end] + b"arbitrary-tail")
+    journal.chmod(0o600)
+    before = {
+        entry.name: (entry.stat().st_ino, entry.read_bytes()) for entry in store_root.iterdir()
+    }
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.create(_task())
+
+    _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    assert {
+        entry.name: (entry.stat().st_ino, entry.read_bytes()) for entry in store_root.iterdir()
+    } == before
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ("corrupt_journal", "oversize_journal", "orphan_temp", "two_temps", "extra_file"),
+)
+def test_corrupt_journal_and_extra_remnant_matrix_is_preserved_fail_closed(
+    store: TaskRunStore,
+    store_root: Path,
+    kind: str,
+) -> None:
+    target = _record_name()
+    if kind == "corrupt_journal":
+        entries = {MUTATION_JOURNAL_NAME: b"{}"}
+    elif kind == "oversize_journal":
+        entries = {MUTATION_JOURNAL_NAME: b"x" * (64 * 1024 + 1)}
+    elif kind == "orphan_temp":
+        entries = {f".{target}.{'a' * 32}.tmp": b"orphan"}
+    elif kind == "two_temps":
+        entries = {
+            MUTATION_JOURNAL_NAME: b"{}",
+            f".{target}.{'a' * 32}.tmp": b"one",
+            f".{target}.{'b' * 32}.tmp": b"two",
+        }
+    else:
+        entries = {"unexpected-entry": b"extra"}
+    for name, raw in entries.items():
+        path = store_root / name
+        path.write_bytes(raw)
+        path.chmod(0o600)
+    before = {
+        entry.name: (entry.stat().st_ino, entry.read_bytes()) for entry in store_root.iterdir()
+    }
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.create(_task())
+
+    _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    assert {
+        entry.name: (entry.stat().st_ino, entry.read_bytes()) for entry in store_root.iterdir()
+    } == before
+
+
+def test_failed_cleanup_with_roll_forward_authority_is_durability_uncertain(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    real_unlink = store_module.os.unlink
+
+    def fail_publish(*_args, **_kwargs):
+        raise OSError("pre-publish replace sentinel")
+
+    def fail_temp_cleanup(path, *, dir_fd=None):
+        if os.fsdecode(os.fspath(path)).endswith(".tmp"):
+            raise OSError("temp cleanup sentinel")
+        return real_unlink(path, dir_fd=dir_fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module.os, "replace", fail_publish)
+        _patch_dir_fd_callable(patch, "unlink", fail_temp_cleanup)
+        with pytest.raises(TaskStoreError) as caught:
+            store.create(_task())
+    error = _assert_error(caught, TaskStoreErrorCode.DURABILITY_UNCERTAIN)
+    assert error.committed_generation == 0
+    assert not (store_root / _record_name()).exists()
+    assert (store_root / MUTATION_JOURNAL_NAME).exists()
+    assert len([entry for entry in store_root.iterdir() if entry.name.endswith(".tmp")]) == 1
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.create(_task())
+    _assert_error(caught, TaskStoreErrorCode.ALREADY_EXISTS)
+    assert store.load(TASK_ID) == StoredTaskRun(generation=0, task_run=_task())
+    assert sorted(entry.name for entry in store_root.iterdir()) == [_record_name()]
+
+
+def test_normal_publish_rechecks_temp_identity_after_latest_record_read(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    original_require = TaskRunStore._require_expected
+    calls = 0
+    moved = store_root / "publication-identity-moved"
+
+    def swap_before_publication(current, expected_generation):
+        nonlocal calls
+        original_require(current, expected_generation)
+        calls += 1
+        if calls == 3:
+            temp = next(entry for entry in store_root.iterdir() if entry.name.endswith(".tmp"))
+            temp.rename(moved)
+            temp.write_bytes(_record_bytes(_task(), generation=1))
+            temp.chmod(0o600)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            TaskRunStore,
+            "_require_expected",
+            staticmethod(swap_before_publication),
+        )
+        with pytest.raises(TaskStoreError) as caught:
+            store.create(_task())
+
+    _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    assert calls == 3
+    assert not (store_root / _record_name()).exists()
+    assert moved.read_bytes() == _record_bytes(_task())
+    replacement = next(entry for entry in store_root.iterdir() if entry.name.endswith(".tmp"))
+    assert replacement.read_bytes() == _record_bytes(_task(), generation=1)
+
+
+@pytest.mark.parametrize("replacement_generation", [0, 1], ids=("same-bytes", "different-bytes"))
+def test_first_temp_evidence_must_match_the_exclusive_create_identity(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+    replacement_generation: int,
+) -> None:
+    original_evidence = store_module._temp_evidence
+    evidence_calls = 0
+    moved = store_root / "exclusive-temp-moved"
+
+    def swap_before_first_evidence(*args, **kwargs):
+        nonlocal evidence_calls
+        evidence_calls += 1
+        if evidence_calls == 1:
+            temp = store_root / kwargs["name"]
+            temp.rename(moved)
+            temp.write_bytes(_record_bytes(_task(), generation=replacement_generation))
+            temp.chmod(0o600)
+        return original_evidence(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "_temp_evidence", swap_before_first_evidence)
+        with pytest.raises(TaskStoreError) as caught:
+            store.create(_task())
+
+    _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    assert evidence_calls == 1
+    assert not (store_root / _record_name()).exists()
+    assert moved.read_bytes() == _record_bytes(_task())
+    replacement = next(entry for entry in store_root.iterdir() if entry.name.endswith(".tmp"))
+    assert replacement.read_bytes() == _record_bytes(_task(), generation=replacement_generation)
+    assert (store_root / MUTATION_JOURNAL_NAME).exists()
+
+
+def test_recovery_publish_rechecks_temp_identity_immediately_before_replace(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    real_replace = store_module.os.replace
+    crashed = False
+
+    def crash_before_publish(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        nonlocal crashed
+        if not crashed and os.fsdecode(os.fspath(src)).endswith(".tmp"):
+            crashed = True
+            raise SimulatedProcessCrash
+        return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module.os, "replace", crash_before_publish)
+        with pytest.raises(SimulatedProcessCrash):
+            store.create(_task())
+
+    original_evidence = store_module._temp_evidence
+    evidence_calls = 0
+    moved = store_root / "recovery-identity-moved"
+
+    def swap_on_publication_recheck(*args, **kwargs):
+        nonlocal evidence_calls
+        evidence_calls += 1
+        if evidence_calls == 2:
+            temp = next(entry for entry in store_root.iterdir() if entry.name.endswith(".tmp"))
+            temp.rename(moved)
+            temp.write_bytes(_record_bytes(_task(), generation=1))
+            temp.chmod(0o600)
+        return original_evidence(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "_temp_evidence", swap_on_publication_recheck)
+        with pytest.raises(TaskStoreError) as caught:
+            store.create(_task())
+
+    _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    assert evidence_calls == 2
+    assert not (store_root / _record_name()).exists()
+    assert moved.read_bytes() == _record_bytes(_task())
+    replacement = next(entry for entry in store_root.iterdir() if entry.name.endswith(".tmp"))
+    assert replacement.read_bytes() == _record_bytes(_task(), generation=1)
 
 
 def test_create_load_and_compare_and_set_round_trip(store: TaskRunStore, store_root: Path):
@@ -1212,7 +2135,7 @@ def test_cleanup_failure_does_not_replace_primary_error(
     error = _assert_error(caught, TaskStoreErrorCode.IO_ERROR)
     assert "cleanup unlink sentinel" not in str(error)
     assert not (store_root / _record_name()).exists()
-    assert any(path.name.endswith(".tmp") for path in store_root.iterdir())
+    assert [path.name for path in store_root.iterdir()] == [MUTATION_JOURNAL_NAME]
 
 
 def test_precommit_primary_error_is_not_changed_by_release_failure(
@@ -1245,7 +2168,13 @@ def test_all_operations_use_one_canonical_lease_key(store: TaskRunStore, monkeyp
     store.create(_task())
     store.load(TASK_ID)
     store.compare_and_set(TASK_ID, 0, _task())
-    assert resources == [f"task-store:{TASK_ID}"] * 3
+    assert resources == [
+        "task-store:catalog",
+        f"task-store:{TASK_ID}",
+        f"task-store:{TASK_ID}",
+        "task-store:catalog",
+        f"task-store:{TASK_ID}",
+    ]
 
 
 def test_lease_acquisition_failure_precedes_store_mutation(
@@ -1270,7 +2199,7 @@ def test_temp_open_is_same_directory_exclusive_private_and_noninheritable(
     def recording_open(path, flags, mode=0o777, *, dir_fd=None):
         fd = real_open(path, flags, mode, dir_fd=dir_fd)
         text = os.fsdecode(os.fspath(path))
-        if text.endswith(".tmp"):
+        if text.endswith(".tmp") and flags & os.O_CREAT:
             observed.append((text, flags, mode, dir_fd, os.get_inheritable(fd)))
         return fd
 
@@ -1296,7 +2225,7 @@ def test_precommit_cleanup_preserves_foreign_temp(
     monkeypatch.setattr(store_module.os, "write", lambda _fd, _data: 0)
     with pytest.raises(TaskStoreError) as caught:
         store.create(_task())
-    _assert_error(caught, TaskStoreErrorCode.IO_ERROR)
+    _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
     assert foreign.read_bytes() == b"foreign-sentinel"
     assert [item.name for item in store_root.iterdir()] == [foreign.name]
 
@@ -1311,7 +2240,7 @@ def test_temp_name_collision_is_not_overwritten_or_deleted(
     temp.chmod(0o600)
     with pytest.raises(TaskStoreError) as caught:
         store.create(_task())
-    _assert_error(caught, TaskStoreErrorCode.IO_ERROR)
+    _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
     assert temp.read_bytes() == b"foreign-collision"
     assert not (store_root / _record_name()).exists()
 
@@ -1322,12 +2251,20 @@ def test_cleanup_does_not_unlink_replacement_at_owned_temp_name(
     token = "b" * 32
     temp = store_root / f".{_record_name()}.{token}.tmp"
     moved = store_root / "owned-temp-moved-aside"
+    real_open = store_module.os.open
     real_write = store_module.os.write
+    temp_fds: set[int] = set()
     injected = False
+
+    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if os.fsdecode(os.fspath(path)).endswith(".tmp") and flags & os.O_CREAT:
+            temp_fds.add(fd)
+        return fd
 
     def replace_temp_then_fail(fd: int, data) -> int:
         nonlocal injected
-        if not injected:
+        if fd in temp_fds and not injected:
             injected = True
             temp.rename(moved)
             temp.write_bytes(b"foreign-replacement")
@@ -1336,6 +2273,7 @@ def test_cleanup_does_not_unlink_replacement_at_owned_temp_name(
         return real_write(fd, data)
 
     monkeypatch.setattr(store_module.secrets, "token_hex", lambda _size: token)
+    _patch_dir_fd_callable(monkeypatch, "open", recording_open)
     monkeypatch.setattr(store_module.os, "write", replace_temp_then_fail)
     with pytest.raises(TaskStoreError) as caught:
         store.create(_task())
@@ -1587,7 +2525,13 @@ def test_temp_probe_failures_close_fds_cleanup_when_identified_and_release_lease
     assert not (store_root / _record_name()).exists()
     residue = [path for path in store_root.iterdir() if path.name.endswith(".tmp")]
     assert len(residue) == (1 if probe == "fstat" else 0)
-    assert store.create(_task()) == StoredTaskRun(generation=0, task_run=_task())
+    if probe == "fstat":
+        assert (store_root / MUTATION_JOURNAL_NAME).exists()
+        with pytest.raises(TaskStoreError) as caught:
+            store.create(_task())
+        _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    else:
+        assert store.create(_task()) == StoredTaskRun(generation=0, task_run=_task())
 
 
 def test_mutation_initial_record_failure_closes_owned_fds_and_releases_lease(
@@ -1614,7 +2558,7 @@ def test_mutation_initial_record_failure_closes_owned_fds_and_releases_lease(
         _patch_dir_fd_callable(patch, "open", recording_open)
         with pytest.raises(TaskStoreError) as caught:
             store.compare_and_set(TASK_ID, 0, _task())
-        _assert_error(caught, TaskStoreErrorCode.CORRUPT_RECORD)
+        _assert_error(caught, TaskStoreErrorCode.RESOURCE_EXHAUSTED)
     assert owned_fds
     for fd in owned_fds:
         with pytest.raises(OSError):
@@ -1696,7 +2640,7 @@ def test_cleanup_stat_failure_preserves_primary_closes_root_and_releases_lease(
             store.create(_task())
         _assert_error(caught, TaskStoreErrorCode.IO_ERROR)
     assert not (store_root / _record_name()).exists()
-    assert len([path for path in store_root.iterdir() if path.name.endswith(".tmp")]) == 1
+    assert len([path for path in store_root.iterdir() if path.name.endswith(".tmp")]) == 0
     assert store.create(_task()) == StoredTaskRun(generation=0, task_run=_task())
 
 
@@ -1732,6 +2676,8 @@ def test_unverified_platform_and_missing_no_follow_capability_fail_closed(
         "write",
         "read",
         "fsync",
+        "ftruncate",
+        "scandir",
         "replace",
         "unlink",
         "close",
@@ -1766,6 +2712,8 @@ def test_each_missing_storage_capability_fails_before_lease_or_storage(
         ("O_EXCL", True),
         ("O_CLOEXEC", object()),
         ("write", None),
+        ("ftruncate", None),
+        ("scandir", None),
         ("replace", "not-callable"),
         ("supports_dir_fd", ()),
         ("supports_follow_symlinks", frozenset()),
@@ -1851,16 +2799,23 @@ def test_directory_fsync_failure_reports_committed_generation(
     store: TaskRunStore, store_root: Path, monkeypatch
 ):
     real_fsync = store_module.os.fsync
-    regular_seen = False
+    store_identity = (store_root.stat().st_dev, store_root.stat().st_ino)
+    directory_calls = 0
 
     def fail_directory_fsync(fd: int) -> None:
-        nonlocal regular_seen
+        nonlocal directory_calls
         mode = os.fstat(fd).st_mode
-        if stat.S_ISREG(mode):
-            regular_seen = True
-            real_fsync(fd)
-            return
-        if regular_seen and stat.S_ISDIR(mode):
+        is_store_directory = (
+            stat.S_ISDIR(mode)
+            and (
+                os.fstat(fd).st_dev,
+                os.fstat(fd).st_ino,
+            )
+            == store_identity
+        )
+        if is_store_directory:
+            directory_calls += 1
+        if directory_calls == 2 and is_store_directory:
             raise OSError("directory fsync failure")
         real_fsync(fd)
 
@@ -1890,19 +2845,30 @@ def test_release_failure_after_replace_reports_durability_uncertain(
     assert store.load(TASK_ID) == StoredTaskRun(generation=0, task_run=_task())
 
 
-def test_cas_directory_fsync_failure_reports_new_generation(store: TaskRunStore, monkeypatch):
+def test_cas_directory_fsync_failure_reports_new_generation(
+    store: TaskRunStore,
+    store_root: Path,
+    monkeypatch,
+):
     store.create(_task())
     real_fsync = store_module.os.fsync
-    regular_seen = False
+    store_identity = (store_root.stat().st_dev, store_root.stat().st_ino)
+    directory_calls = 0
 
     def fail_directory_fsync(fd: int) -> None:
-        nonlocal regular_seen
+        nonlocal directory_calls
         mode = os.fstat(fd).st_mode
-        if stat.S_ISREG(mode):
-            regular_seen = True
-            real_fsync(fd)
-            return
-        if regular_seen and stat.S_ISDIR(mode):
+        is_store_directory = (
+            stat.S_ISDIR(mode)
+            and (
+                os.fstat(fd).st_dev,
+                os.fstat(fd).st_ino,
+            )
+            == store_identity
+        )
+        if is_store_directory:
+            directory_calls += 1
+        if directory_calls == 2 and is_store_directory:
             raise OSError("CAS directory fsync failure")
         real_fsync(fd)
 
@@ -2091,6 +3057,145 @@ except TaskStoreError as exc:
         outputs.append(stdout.strip())
     assert outputs.count("ok") == 1
     assert set(outputs) <= {"ok", "already_exists", "lock_unavailable"}
+
+
+@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="POSIX store only")
+def test_cross_process_record_n_plus_one_never_creates_task_locks(
+    store: TaskRunStore,
+    store_root: Path,
+    lease_root: Path,
+    tmp_path: Path,
+) -> None:
+    store.create(_task())
+    before_locks = sorted(
+        (entry.name, entry.stat().st_ino, entry.stat().st_size) for entry in lease_root.iterdir()
+    )
+    gate = tmp_path / "capacity-gate"
+    script = """
+import sys, time
+from pathlib import Path
+import vibecad.workflow.store as store_module
+from vibecad.workflow.lease import LeaseRootTrust, ResourceLeaseManager
+from vibecad.workflow.state import ReasoningOwner, ReviewPolicy, new_task_run
+from vibecad.workflow.store import TaskRunStore, TaskStoreError, TaskStoreRootTrust
+root, locks, gate = map(Path, sys.argv[1:4])
+task_id = sys.argv[4]
+while not gate.exists():
+    time.sleep(0.001)
+store_module._MAX_TASK_RECORDS = 1
+manager = ResourceLeaseManager(locks, trust=LeaseRootTrust.TRUSTED_LOCAL)
+store = TaskRunStore(root, manager, trust=TaskStoreRootTrust.TRUSTED_LOCAL)
+task = new_task_run(
+    task_id=task_id,
+    project_id='project_0123456789abcdef0123456789abcdef',
+    base_revision='revision_0123456789abcdef0123456789abcdef',
+    reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+    review_policy=ReviewPolicy.AUTO_COMMIT,
+)
+for _attempt in range(100):
+    try:
+        store.create(task)
+        print('unexpected-success')
+        break
+    except TaskStoreError as exc:
+        if exc.code.value == 'lock_unavailable':
+            time.sleep(0.001)
+            continue
+        print(exc.code.value)
+        break
+else:
+    print('retry-exhausted')
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    ids = (
+        "task_11111111111111111111111111111111",
+        "task_22222222222222222222222222222222",
+    )
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(store_root), str(lease_root), str(gate), task_id],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        for task_id in ids
+    ]
+    gate.write_text("go", encoding="utf-8")
+    outputs = []
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, stderr
+        outputs.append(stdout.strip())
+    assert outputs == ["resource_exhausted", "resource_exhausted"]
+    assert [entry.name for entry in store_root.iterdir()] == [_record_name()]
+    assert (
+        sorted(
+            (entry.name, entry.stat().st_ino, entry.stat().st_size)
+            for entry in lease_root.iterdir()
+        )
+        == before_locks
+    )
+
+
+@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="POSIX store only")
+def test_constructor_accepts_a_safely_contended_fixed_catalog_entry(
+    store_root: Path,
+    lease_root: Path,
+) -> None:
+    manager = ResourceLeaseManager(lease_root, trust=LeaseRootTrust.TRUSTED_LOCAL)
+    held = manager.acquire("task-store:catalog")
+    script = """
+import sys
+from pathlib import Path
+from vibecad.workflow.lease import LeaseRootTrust, ResourceLeaseManager
+from vibecad.workflow.store import TaskRunStore, TaskStoreRootTrust
+root, locks = map(Path, sys.argv[1:])
+manager = ResourceLeaseManager(locks, trust=LeaseRootTrust.TRUSTED_LOCAL)
+TaskRunStore(root, manager, trust=TaskStoreRootTrust.TRUSTED_LOCAL)
+print('ok')
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(store_root), str(lease_root)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+    finally:
+        held.release(owner_token=held.owner_token)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "ok"
+
+
+def test_catalog_then_task_contention_is_bounded_and_releases_catalog(
+    store: TaskRunStore,
+    lease_root: Path,
+) -> None:
+    store.create(_task())
+    manager = ResourceLeaseManager(lease_root, trust=LeaseRootTrust.TRUSTED_LOCAL)
+    held = manager.acquire(f"task-store:{TASK_ID}")
+    result: list[TaskStoreErrorCode] = []
+
+    def contend() -> None:
+        try:
+            store.compare_and_set(TASK_ID, 0, _task())
+        except TaskStoreError as exc:
+            result.append(exc.code)
+
+    thread = threading.Thread(target=contend)
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert result == [TaskStoreErrorCode.LOCK_UNAVAILABLE]
+    created = store.create(_task(OTHER_TASK_ID))
+    assert created.task_run.id == OTHER_TASK_ID
+    held.release(owner_token=held.owner_token)
 
 
 @pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="POSIX store only")
@@ -2432,7 +3537,7 @@ def test_source_uses_only_closed_storage_and_import_surfaces():
         else:
             name = "indirect-call"
             indirect_calls.append(node.lineno)
-        if name == "replace" and direct_os_call:
+        if name in {"replace", "scandir"} and direct_os_call:
             pass
         elif name in forbidden_calls and not (name == "open" and direct_os_call):
             unsafe_calls.append((name, node.lineno))
@@ -2457,11 +3562,13 @@ def test_source_uses_only_closed_storage_and_import_surfaces():
         "close",
         "fstat",
         "fsync",
+        "ftruncate",
         "geteuid",
         "get_inheritable",
         "open",
         "read",
         "replace",
+        "scandir",
         "stat",
         "supports_dir_fd",
         "supports_follow_symlinks",

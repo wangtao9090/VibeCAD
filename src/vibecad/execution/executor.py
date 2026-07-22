@@ -61,6 +61,7 @@ from vibecad.interaction.cad import (
     CadProfileCapability,
     CandidateEvidence,
     ValidatedImportEvidence,
+    ValidatedMaterializationEvidence,
 )
 from vibecad.tools.modeling import add_box as _add_box
 from vibecad.tools.modeling import add_cylinder as _add_cylinder
@@ -195,6 +196,54 @@ def _ordinary_owned_file(value: os.stat_result) -> bool:
         return value.st_uid == os.geteuid()
     except AttributeError:
         return True
+
+
+def _step_placeholder_identity(value: os.stat_result) -> tuple[int, ...] | None:
+    """Return the fixed identity of one store-reserved STEP placeholder."""
+
+    if (
+        not stat.S_ISREG(value.st_mode)
+        or stat.S_IMODE(value.st_mode) != 0o600
+        or value.st_nlink != 1
+        or value.st_size != 0
+    ):
+        return None
+    try:
+        owner = value.st_uid
+        current_owner = os.geteuid()
+    except AttributeError:
+        return None
+    if owner != current_owner:
+        return None
+    return (
+        value.st_dev,
+        value.st_ino,
+        owner,
+        value.st_mode,
+        value.st_nlink,
+    )
+
+
+def _step_output_matches_placeholder(
+    value: os.stat_result,
+    placeholder_identity: tuple[int, ...],
+) -> bool:
+    try:
+        owner = value.st_uid
+    except AttributeError:
+        return False
+    return (
+        stat.S_ISREG(value.st_mode)
+        and 0 < value.st_size <= _MAX_ARTIFACT_BYTES
+        and (
+            value.st_dev,
+            value.st_ino,
+            owner,
+            value.st_mode,
+            value.st_nlink,
+        )
+        == placeholder_identity
+    )
 
 
 def _safe_zip_names(archive: zipfile.ZipFile) -> tuple[zipfile.ZipInfo, ...]:
@@ -1701,6 +1750,137 @@ class InProcessCadExecutor(CadExecutionPort):
             size_bytes=artifact.size_bytes,
         )
 
+    def revalidate_normalized_import(self, path: Path) -> ValidatedImportEvidence:
+        """Read-only revalidation of one descriptor-pinned normalized import.
+
+        The caller supplies only a fixed relative basename while holding its
+        parent directory capability.  This boundary never repairs identities or
+        invokes any persistence API: it hashes the artifact around one CAD
+        load/recompute/observation cycle and rejects all intervening drift.
+        """
+
+        if (
+            type(path) is not type(Path())
+            or path.is_absolute()
+            or len(path.parts) != 1
+            or path.name != path.parts[0]
+            or path.suffix != ".FCStd"
+        ):
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+
+        try:
+            before_identity = _stat_identity(os.lstat(path))
+            before = _read_artifact(path, "fcstd")
+        except BaseException:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+
+        try:
+            session = _Session()
+        except BaseException:
+            raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+
+        cad_failed = False
+        try:
+            try:
+                session.load_document(path)
+                session.doc.recompute()
+                _validated_import_observations(session)
+            except BaseException:
+                cad_failed = True
+        finally:
+            try:
+                session.close_document()
+            except BaseException:
+                cad_failed = True
+        if cad_failed:
+            raise _fixed_error(ExecutorErrorCode.CAD_FAILURE)
+
+        try:
+            after_identity = _stat_identity(os.lstat(path))
+        except BaseException:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        if after_identity != before_identity:
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        try:
+            after = _read_artifact(path, "fcstd")
+        except BaseException:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        if after != before:
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        return ValidatedImportEvidence(
+            sha256=after.sha256,
+            size_bytes=after.size_bytes,
+        )
+
+    def validate_materialization(
+        self,
+        *,
+        fcstd: Path,
+        step: Path,
+    ) -> ValidatedMaterializationEvidence:
+        """Reload and validate one immutable delivery pair without modifying it."""
+
+        if (
+            not isinstance(fcstd, Path)
+            or not isinstance(step, Path)
+            or fcstd.name != "model.FCStd"
+            or step.name != "model.step"
+            or fcstd.parent != step.parent
+        ):
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+        try:
+            fcstd_identity = _stat_identity(os.lstat(fcstd))
+            step_identity = _stat_identity(os.lstat(step))
+            fcstd_before = _read_artifact(fcstd, "fcstd")
+            step_before = _read_artifact(step, "step")
+        except _ArtifactReadFailure:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        except OSError:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+
+        session = self.load_fcstd(fcstd)
+        failed: ExecutorError | None = None
+        try:
+            try:
+                session.doc.recompute()
+                _shape_observation(session)
+                _entity_observations(session)
+            except Exception:
+                raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+        except ExecutorError as error:
+            failed = error
+        finally:
+            try:
+                self.close(session)
+            except ExecutorError as close_error:
+                if failed is None:
+                    failed = close_error
+        if failed is not None:
+            raise failed
+
+        try:
+            identity_changed = (
+                _stat_identity(os.lstat(fcstd)) != fcstd_identity
+                or _stat_identity(os.lstat(step)) != step_identity
+            )
+        except OSError:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        if identity_changed:
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        try:
+            fcstd_after = _read_artifact(fcstd, "fcstd")
+            step_after = _read_artifact(step, "step")
+        except _ArtifactReadFailure:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        if fcstd_after != fcstd_before or step_after != step_before:
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        return ValidatedMaterializationEvidence(
+            fcstd_sha256=fcstd_after.sha256,
+            fcstd_size_bytes=fcstd_after.size_bytes,
+            step_sha256=step_after.sha256,
+            step_size_bytes=step_after.size_bytes,
+        )
+
     def create_empty(self, *, revision_id: str) -> object:
         """Create an isolated Session and trusted revision-owned document."""
 
@@ -1943,12 +2123,13 @@ class InProcessCadExecutor(CadExecutionPort):
         ):
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
         try:
-            os.lstat(trusted_path)
+            existing = os.lstat(trusted_path)
         except FileNotFoundError:
-            pass
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
         except OSError:
             raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
-        else:
+        placeholder_identity = _step_placeholder_identity(existing)
+        if placeholder_identity is None:
             raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
         try:
             parent = os.lstat(trusted_path.parent)
@@ -1962,12 +2143,22 @@ class InProcessCadExecutor(CadExecutionPort):
         try:
             with _silence_fd1():
                 shape.exportStep(str(trusted_path))
+            after_export = os.lstat(trusted_path)
+            if not _step_output_matches_placeholder(
+                after_export,
+                placeholder_identity,
+            ):
+                raise _ArtifactReadFailure
             _read_artifact(trusted_path, "step")
+            after_read = os.lstat(trusted_path)
+            if not _step_output_matches_placeholder(
+                after_read,
+                placeholder_identity,
+            ):
+                raise _ArtifactReadFailure
         except _ArtifactReadFailure:
-            _remove_failed_artifact(trusted_path)
             raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
         except Exception:
-            _remove_failed_artifact(trusted_path)
             raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
 
     def collect_evidence(self, *, candidate: SealedCandidate) -> CandidateEvidence:

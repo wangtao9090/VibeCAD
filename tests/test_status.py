@@ -1,5 +1,7 @@
+import hashlib
 import json
 import os
+import stat
 import sys
 import threading
 from pathlib import Path
@@ -100,6 +102,68 @@ def _managed_paths(monkeypatch, tmp_path):
     return status.paths.ready_sentinel(), python
 
 
+def _canonical_public_surface_sha256() -> str:
+    from collections.abc import Mapping
+
+    from vibecad.application.public_surface import public_tool_specs
+
+    def thaw(value):
+        if value is None or type(value) in {str, int, float, bool}:
+            return value
+        if type(value) in {tuple, list}:
+            return [thaw(item) for item in value]
+        if isinstance(value, Mapping):
+            return {key: thaw(value[key]) for key in sorted(value)}
+        raise TypeError(f"unsupported public surface value: {type(value)!r}")
+
+    projection = [
+        {
+            "name": item.name,
+            "inputSchema": thaw(item.input_schema),
+            "outputSchema": thaw(item.output_schema),
+            "annotations": {
+                "readOnlyHint": item.annotations.read_only,
+                "destructiveHint": item.annotations.destructive,
+                "idempotentHint": item.annotations.idempotent,
+                "openWorldHint": item.annotations.open_world,
+            },
+        }
+        for item in public_tool_specs()
+    ]
+    raw = json.dumps(
+        projection,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def test_expected_receipts_bind_private_package_epoch_sdk_and_public_surface():
+    common = {
+        "schema": spec.RECEIPT_SCHEMA,
+        "vibecad_version": spec.VIBECAD_VERSION,
+        "server_package_epoch": spec.SERVER_PACKAGE_EPOCH,
+        "mcp_version": "1.27.2",
+        "public_surface_sha256": spec.PUBLIC_SURFACE_SHA256,
+    }
+
+    assert type(spec.SERVER_PACKAGE_EPOCH) is int and spec.SERVER_PACKAGE_EPOCH == 3
+    assert spec.MCP_VERSION == "1.27.2"
+    assert spec.PUBLIC_SURFACE_SHA256 == _canonical_public_surface_sha256()
+    assert spec.expected_receipt() == {
+        **common,
+        "runtime_kind": spec.MANAGED_KIND,
+        "python_pin": spec.PYTHON_PIN,
+        "freecad_pin": spec.FREECAD_PIN,
+    }
+    assert spec.expected_receipt(external=True) == {
+        **common,
+        "runtime_kind": spec.EXTERNAL_KIND,
+    }
+
+
 def test_runtime_ready_requires_current_json_receipt_and_python(monkeypatch, tmp_path):
     sentinel, python = _managed_paths(monkeypatch, tmp_path)
     assert status.runtime_ready() is False
@@ -129,6 +193,98 @@ def test_server_version_mismatch_is_not_ready(monkeypatch, tmp_path):
     sentinel.write_text(json.dumps(receipt), encoding="utf-8")
     assert status.runtime_receipt_state() is status.ReceiptState.SERVER_MISMATCH
     assert status.runtime_ready() is False
+
+
+def test_same_version_pre_epoch_managed_receipt_requires_pip_only_server_sync(
+    monkeypatch,
+    tmp_path,
+):
+    sentinel, _ = _managed_paths(monkeypatch, tmp_path)
+    old_receipt = {
+        "schema": spec.RECEIPT_SCHEMA,
+        "runtime_kind": spec.MANAGED_KIND,
+        "vibecad_version": spec.VIBECAD_VERSION,
+        "python_pin": spec.PYTHON_PIN,
+        "freecad_pin": spec.FREECAD_PIN,
+    }
+    sentinel.write_text(json.dumps(old_receipt, sort_keys=True), encoding="utf-8")
+
+    assert status.runtime_receipt_state() is status.ReceiptState.SERVER_MISMATCH
+    assert status.runtime_recovery_kind() is status.RecoveryKind.UPGRADE_REQUIRED
+    assert status.runtime_ready() is False
+
+
+def test_same_version_previous_positive_epoch_requires_pip_only_server_sync(
+    monkeypatch,
+    tmp_path,
+):
+    sentinel, _ = _managed_paths(monkeypatch, tmp_path)
+    old_receipt = {
+        **spec.expected_receipt(),
+        "server_package_epoch": spec.SERVER_PACKAGE_EPOCH - 1,
+    }
+    sentinel.write_text(json.dumps(old_receipt, sort_keys=True), encoding="utf-8")
+
+    assert status.runtime_receipt_state() is status.ReceiptState.SERVER_MISMATCH
+    assert status.runtime_recovery_kind() is status.RecoveryKind.UPGRADE_REQUIRED
+    assert status.runtime_ready() is False
+
+
+@pytest.mark.parametrize("field", ("schema", "server_package_epoch"))
+def test_managed_receipt_rejects_boolean_for_integer_identity(
+    monkeypatch,
+    tmp_path,
+    field,
+):
+    sentinel, _ = _managed_paths(monkeypatch, tmp_path)
+    receipt = spec.expected_receipt()
+    receipt[field] = True
+    sentinel.write_text(json.dumps(receipt, sort_keys=True), encoding="utf-8")
+
+    assert status.runtime_receipt_state() is status.ReceiptState.INCOMPATIBLE
+    assert status.runtime_recovery_kind() is status.RecoveryKind.REPAIR_REQUIRED
+    assert status.runtime_ready() is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("server_package_epoch", spec.SERVER_PACKAGE_EPOCH + 1),
+        ("mcp_version", "1.28.0"),
+        ("public_surface_sha256", "b" * 64),
+    ),
+)
+def test_well_formed_managed_server_identity_drift_requires_pip_only_sync(
+    monkeypatch,
+    tmp_path,
+    field,
+    value,
+):
+    sentinel, _ = _managed_paths(monkeypatch, tmp_path)
+    receipt = spec.expected_receipt()
+    receipt[field] = value
+    sentinel.write_text(json.dumps(receipt, sort_keys=True), encoding="utf-8")
+
+    assert status.runtime_receipt_state() is status.ReceiptState.SERVER_MISMATCH
+    assert status.runtime_recovery_kind() is status.RecoveryKind.UPGRADE_REQUIRED
+
+
+def test_fixed_legacy_managed_ownership_accepts_well_formed_future_server_identity(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "home"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    legacy = status.paths.legacy_env_prefix()
+    legacy.mkdir(parents=True)
+    receipt = spec.expected_receipt()
+    receipt["server_package_epoch"] += 1
+    (legacy / ".vibecad_ready").write_text(
+        json.dumps(receipt, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    assert status.managed_legacy_receipt(legacy) == receipt
 
 
 def test_corrupt_or_engine_mismatch_receipt_is_incompatible(monkeypatch, tmp_path):
@@ -334,7 +490,292 @@ def test_probe_is_isolated_and_never_writes_external_bytecode(
     assert status._probe(Path(sys.executable), "import external_runtime_probe") is False
 
 
+_FREECAD_PROCESS_ENV_KEYS = frozenset(
+    {"FREECAD_USER_HOME", "FREECAD_USER_DATA", "FREECAD_USER_TEMP"}
+)
+
+
+def _expected_freecad_process_environment(home: Path) -> dict[str, str]:
+    root = home / "runtime" / "freecad-user"
+    return {
+        "FREECAD_USER_HOME": str(root / "home"),
+        "FREECAD_USER_DATA": str(root / "data"),
+        "FREECAD_USER_TEMP": str(root / "temp"),
+    }
+
+
+def test_freecad_process_environment_is_private_replaceable_and_exact(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "VibeCAD"
+    legacy = home / "mamba" / "envs" / "vibecad"
+    legacy.mkdir(parents=True)
+    legacy_marker = legacy / "engine.bin"
+    legacy_marker.write_bytes(b"external-engine")
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    base = {
+        "KEEP": "yes",
+        "FREECAD_USER_HOME": "attacker-home",
+        "FREECAD_USER_DATA": "attacker-data",
+        "FREECAD_USER_TEMP": "attacker-temp",
+    }
+    base_before = dict(base)
+    process_before = {key: os.environ.get(key) for key in _FREECAD_PROCESS_ENV_KEYS}
+    expected = _expected_freecad_process_environment(home)
+
+    environment = status.freecad_process_environment(base)
+
+    assert base == base_before
+    assert environment == {"KEEP": "yes", **expected}
+    assert status.freecad_process_environment() == expected
+    assert {key: os.environ.get(key) for key in _FREECAD_PROCESS_ENV_KEYS} == process_before
+    assert legacy_marker.read_bytes() == b"external-engine"
+    assert not (home / "data").exists()
+    for directory in [home / "runtime" / "freecad-user", *map(Path, expected.values())]:
+        info = directory.lstat()
+        assert stat.S_ISDIR(info.st_mode)
+        assert stat.S_IMODE(info.st_mode) & 0o077 == 0
+
+
+def test_freecad_process_environment_rejects_alias_without_touching_target(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "VibeCAD"
+    runtime = home / "runtime"
+    runtime.mkdir(parents=True, mode=0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (runtime / "freecad-user").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+
+    with pytest.raises(ValueError, match="FreeCAD process directory is unavailable"):
+        status.freecad_process_environment()
+
+    assert tuple(outside.iterdir()) == ()
+
+
+@pytest.mark.parametrize("external_at", ["home", "runtime"])
+def test_freecad_process_environment_rejects_external_runtime_overlap_before_write(
+    monkeypatch,
+    tmp_path,
+    external_at,
+):
+    home = tmp_path / "VibeCAD"
+    external = home if external_at == "home" else home / "runtime"
+    external.mkdir(parents=True, mode=0o700)
+    marker = external / "external-engine.bin"
+    marker.write_bytes(b"external-engine")
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    monkeypatch.setenv("VIBECAD_FREECAD_ENV", str(external))
+
+    with pytest.raises(ValueError, match="FreeCAD process directory is unavailable"):
+        status.freecad_process_environment()
+
+    assert marker.read_bytes() == b"external-engine"
+    assert not (home / "runtime" / "freecad-user").exists()
+
+
+def test_freecad_process_environment_rejects_bound_external_overlap_before_write(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "VibeCAD"
+    runtime = home / "runtime"
+    runtime.mkdir(parents=True, mode=0o700)
+    info = home.stat()
+    receipt = runtime / "external-runtime.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "prefix": str(home),
+                "prefix_device": info.st_dev,
+                "prefix_inode": info.st_ino,
+            }
+        ),
+        encoding="utf-8",
+    )
+    receipt.chmod(0o600)
+    before = receipt.read_bytes()
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    monkeypatch.delenv("VIBECAD_FREECAD_ENV", raising=False)
+
+    with pytest.raises(ValueError, match="FreeCAD process directory is unavailable"):
+        status.freecad_process_environment()
+
+    assert receipt.read_bytes() == before
+    assert not (runtime / "freecad-user").exists()
+
+
+def test_freecad_process_environment_rejects_attacker_writable_ancestor(
+    monkeypatch,
+    tmp_path,
+):
+    public_parent = tmp_path / "public"
+    public_parent.mkdir(mode=0o700)
+    public_parent.chmod(0o777)
+    home = public_parent / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+
+    with pytest.raises(ValueError, match="FreeCAD process directory is unavailable"):
+        status.freecad_process_environment()
+
+    assert not (home / "runtime" / "freecad-user").exists()
+
+
+def test_freecad_windows_fallback_does_not_apply_posix_mode_bits(
+    monkeypatch,
+    tmp_path,
+):
+    directory = tmp_path / "private"
+    directory.mkdir(mode=0o700)
+    monkeypatch.setattr(status.sys, "platform", "win32")
+    monkeypatch.setattr(status.stat, "S_IMODE", lambda _mode: 0o777)
+
+    assert status._fallback_private_directory(directory) == directory
+
+
+def test_freecad_process_environment_detects_runtime_root_replacement(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "VibeCAD"
+    runtime = home / "runtime"
+    runtime.mkdir(parents=True, mode=0o700)
+    data = home / "data"
+    data.mkdir()
+    durable = data / "HEAD"
+    durable.write_bytes(b"durable")
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    original = status._ensure_private_child_directory
+    swapped = False
+
+    def ensure_then_swap(parent, name):
+        nonlocal swapped
+        pinned = original(parent, name)
+        if name == "freecad-user" and not swapped:
+            swapped = True
+            runtime.rename(home / "detached-runtime")
+            runtime.symlink_to(data, target_is_directory=True)
+        return pinned
+
+    monkeypatch.setattr(status, "_ensure_private_child_directory", ensure_then_swap)
+
+    with pytest.raises(ValueError, match="FreeCAD process directory is unavailable"):
+        status.freecad_process_environment()
+
+    assert durable.read_bytes() == b"durable"
+    assert tuple(path.name for path in data.iterdir()) == ("HEAD",)
+
+
+def test_freecad_process_environment_rejects_wrong_owner(monkeypatch, tmp_path):
+    home = tmp_path / "VibeCAD"
+    (home / "runtime").mkdir(parents=True, mode=0o700)
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    current_uid = os.geteuid()
+    monkeypatch.setattr(status.os, "geteuid", lambda: current_uid + 1)
+
+    with pytest.raises(ValueError, match="FreeCAD process directory is unavailable"):
+        status.freecad_process_environment()
+
+    assert not (home / "runtime" / "freecad-user").exists()
+
+
+def test_freecad_process_environment_creation_failure_does_not_reflect_path(
+    monkeypatch,
+    tmp_path,
+):
+    secret = "must-not-reflect-this-path"
+    home = tmp_path / secret
+    (home / "runtime").mkdir(parents=True, mode=0o700)
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    original_mkdir = status.os.mkdir
+
+    def deny_freecad_directory(path, mode=0o777, *, dir_fd=None):
+        if path == "freecad-user":
+            raise PermissionError(f"denied {home}")
+        return original_mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(status.os, "mkdir", deny_freecad_directory)
+    monkeypatch.setattr(status, "_secure_dir_fd_available", lambda: True)
+
+    with pytest.raises(ValueError) as caught:
+        status.freecad_process_environment({"FREECAD_USER_HOME": "also-must-not-be-reflected"})
+
+    assert str(caught.value) == "FreeCAD process directory is unavailable"
+    assert secret not in str(caught.value)
+    assert "also-must-not-be-reflected" not in str(caught.value)
+
+
+def test_probe_supplies_freecad_environment_when_passwd_lookup_is_unavailable(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    for key in _FREECAD_PROCESS_ENV_KEYS:
+        monkeypatch.setenv(key, f"poison-{key}")
+    expected = _expected_freecad_process_environment(home)
+    captured = {}
+
+    class P:
+        returncode = 0
+
+    def child_with_no_passwd(_command, **kwargs):
+        captured.update(kwargs["env"])
+        # Model the FreeCAD failure observed on a host where getpwuid_r cannot
+        # resolve the launching UID: only explicit existing custom directories
+        # let the child initialize.
+        if {key: kwargs["env"].get(key) for key in expected} != expected:
+            return type("Failed", (), {"returncode": 1})()
+        return P()
+
+    monkeypatch.setattr(status.subprocess, "run", child_with_no_passwd)
+
+    assert status._probe(Path(sys.executable), "pass") is True
+    assert {key: captured[key] for key in expected} == expected
+    assert captured["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
+@pytest.mark.parametrize("generation", [False, True])
+def test_probe_fails_closed_when_freecad_environment_is_unavailable(
+    monkeypatch,
+    tmp_path,
+    generation,
+):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+
+    def unavailable(_base=None):
+        raise ValueError("FreeCAD process directory is unavailable")
+
+    monkeypatch.setattr(status, "freecad_process_environment", unavailable, raising=False)
+    monkeypatch.setattr(
+        status.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("probe must not spawn without a safe environment"),
+    )
+    monkeypatch.setattr(
+        status,
+        "_spawn_probe_process",
+        lambda *args, **kwargs: pytest.fail("generation probe must not spawn unsafely"),
+    )
+
+    if generation:
+        prefix = tmp_path / "external"
+        python = status.paths.env_python_for(prefix)
+        python.parent.mkdir(parents=True)
+        python.write_bytes(b"python")
+        evidence = status.capture_runtime_generation_evidence(prefix)
+        assert status.verify_runtime_generation(evidence) is False
+    else:
+        assert status._probe(Path(sys.executable), "pass") is False
+
+
 def test_generation_probe_spawn_uses_clean_helper_without_preexec(monkeypatch, tmp_path):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
     prefix = tmp_path / "external"
     python = status.paths.env_python_for(prefix)
     python.parent.mkdir(parents=True)
@@ -361,6 +802,9 @@ def test_generation_probe_spawn_uses_clean_helper_without_preexec(monkeypatch, t
     assert command[4] == status._FD_EXEC_HELPER
     assert command[5] == str(options["pass_fds"][0])
     assert command[6:] == [f"./{python.name}", "-I", "-B", "-c", status._VERIFY_SNIPPET]
+    assert {
+        key: options["env"][key] for key in _FREECAD_PROCESS_ENV_KEYS
+    } == _expected_freecad_process_environment(home)
 
 
 def test_health_snippet_has_win_dll_prep():
@@ -373,6 +817,59 @@ def test_verify_snippet_requires_exact_vibecad_version():
     assert spec.VIBECAD_VERSION in status._VERIFY_SNIPPET
     assert "raise RuntimeError" in status._VERIFY_SNIPPET
     assert "assert vibecad.__version__" not in status._VERIFY_SNIPPET
+
+
+def test_verify_snippet_independently_checks_epoch_sdk_and_recomputed_surface():
+    snippet = status._VERIFY_SNIPPET
+
+    assert "SERVER_PACKAGE_EPOCH" in snippet
+    assert repr(spec.SERVER_PACKAGE_EPOCH) in snippet
+    assert "import mcp" in snippet
+    assert "metadata.version" in snippet
+    assert repr(spec.MCP_VERSION) in snippet
+    assert "public_tool_specs" in snippet
+    assert "hashlib.sha256" in snippet
+    assert repr(spec.PUBLIC_SURFACE_SHA256) in snippet
+    assert all(
+        name in snippet
+        for name in (
+            "inputSchema",
+            "outputSchema",
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+        )
+    )
+
+
+def test_server_verify_snippet_recomputes_the_live_public_surface():
+    scope = {}
+
+    exec(status._SERVER_SNIPPET, scope)
+
+    assert scope["_surface_digest"] == spec.PUBLIC_SURFACE_SHA256
+    assert scope["_surface_digest"] == _canonical_public_surface_sha256()
+
+
+@pytest.mark.parametrize("drift", ("epoch", "mcp", "surface"))
+def test_server_verify_snippet_rejects_each_independent_identity_drift(
+    monkeypatch,
+    drift,
+):
+    if drift == "epoch":
+        monkeypatch.setattr(spec, "SERVER_PACKAGE_EPOCH", spec.SERVER_PACKAGE_EPOCH + 1)
+    elif drift == "mcp":
+        import importlib.metadata
+
+        monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.0.0")
+    else:
+        from vibecad.application import public_surface
+
+        monkeypatch.setattr(public_surface, "public_tool_specs", lambda: ())
+
+    with pytest.raises(RuntimeError):
+        exec(status._SERVER_SNIPPET, {})
 
 
 def test_engine_and_verify_snippets_enforce_exact_pins_without_assert():
@@ -450,6 +947,14 @@ def test_external_receipt_binds_prefix_identity_and_never_writes_override(monkey
     assert status.paths.ready_sentinel() == home / "runtime" / "external-runtime.json"
     assert not (override / ".vibecad_ready").exists()
     assert status.paths.external_runtime_receipt().stat().st_mode & 0o777 == 0o600
+    bound = json.loads(status.paths.external_runtime_receipt().read_text(encoding="utf-8"))
+    assert set(bound) == set(spec.expected_receipt(external=True)) | {
+        "prefix",
+        "prefix_device",
+        "prefix_inode",
+        "python_version",
+        "freecad_version",
+    }
     assert before == (override.stat().st_ino, python.stat().st_ino, payload.read_bytes())
 
     parked = tmp_path / "parked"
@@ -458,6 +963,59 @@ def test_external_receipt_binds_prefix_identity_and_never_writes_override(monkey
     status.paths.env_python_for(override).parent.mkdir(parents=True)
     status.paths.env_python_for(override).touch()
     assert status.runtime_ready() is False
+
+
+def test_pre_epoch_external_binding_is_incompatible_and_never_rewritten(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "home"
+    override = tmp_path / "external"
+    python = status.paths.env_python_for(override)
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    monkeypatch.setenv("VIBECAD_FREECAD_ENV", str(override))
+    status.write_external_runtime_receipt(override)
+    target = status.paths.external_runtime_receipt()
+    assert status.runtime_receipt_state() is status.ReceiptState.CURRENT
+    old_binding = json.loads(target.read_text(encoding="utf-8"))
+    old_binding.pop("server_package_epoch", None)
+    old_binding.pop("mcp_version", None)
+    old_binding.pop("public_surface_sha256", None)
+    original = json.dumps(old_binding, sort_keys=True)
+    target.write_text(original, encoding="utf-8")
+
+    assert status.runtime_receipt_state() is status.ReceiptState.INCOMPATIBLE
+    assert status.runtime_recovery_kind() is status.RecoveryKind.REPAIR_REQUIRED
+    assert status.read_runtime_receipt() is None
+    assert target.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("field", ("schema", "server_package_epoch"))
+def test_external_binding_rejects_boolean_for_integer_identity(
+    monkeypatch,
+    tmp_path,
+    field,
+):
+    home = tmp_path / "home"
+    override = tmp_path / "external"
+    python = status.paths.env_python_for(override)
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    monkeypatch.setenv("VIBECAD_FREECAD_ENV", str(override))
+    status.write_external_runtime_receipt(override)
+    target = status.paths.external_runtime_receipt()
+    receipt = json.loads(target.read_text(encoding="utf-8"))
+    receipt[field] = True
+    malformed = json.dumps(receipt, sort_keys=True)
+    target.write_text(malformed, encoding="utf-8")
+
+    assert status.runtime_receipt_state() is status.ReceiptState.INCOMPATIBLE
+    assert status.runtime_recovery_kind() is status.RecoveryKind.REPAIR_REQUIRED
+    assert status.read_runtime_receipt() is None
+    assert target.read_text(encoding="utf-8") == malformed
 
 
 def test_external_receipt_is_never_read_through_a_runtime_data_alias(

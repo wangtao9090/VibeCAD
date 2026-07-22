@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -45,21 +46,72 @@ _ENGINE_SNIPPET = (
     + f"if tuple(map(int, FreeCAD.Version()[:3])) != {spec.FREECAD_VERSION!r}:\n"
     + "    raise RuntimeError('managed runtime FreeCAD version mismatch')\n"
 )
-# 更严就绪校验：精确引擎 + vibecad.server（连带 mcp）+ server 版本。
-_VERIFY_SNIPPET = (
-    _ENGINE_SNIPPET
-    + "import vibecad, vibecad.server\n"
-    + f"if vibecad.__version__ != {spec.VIBECAD_VERSION!r}:\n"
-    + "    raise RuntimeError('vibecad runtime version mismatch: ' + vibecad.__version__)\n"
+# 更严就绪校验：精确引擎、server package epoch、MCP SDK 与完整公共 surface。
+_SERVER_SNIPPET = (
+    "import hashlib, importlib.metadata as _metadata, json\n"
+    "import mcp, vibecad, vibecad.server\n"
+    "from collections.abc import Mapping as _SurfaceMapping\n"
+    "from vibecad.application.public_surface import public_tool_specs as _public_tool_specs\n"
+    "from vibecad.runtime import spec as _installed_runtime_spec\n"
+    "def _surface_thaw(_value):\n"
+    "    if _value is None or type(_value) in {str, int, float, bool}:\n"
+    "        return _value\n"
+    "    if type(_value) in {tuple, list}:\n"
+    "        return [_surface_thaw(_item) for _item in _value]\n"
+    "    if isinstance(_value, _SurfaceMapping):\n"
+    "        return {_key: _surface_thaw(_value[_key]) for _key in sorted(_value)}\n"
+    "    raise RuntimeError('unsupported public surface value')\n"
+    "_surface_projection = [\n"
+    "    {\n"
+    "        'name': _item.name,\n"
+    "        'inputSchema': _surface_thaw(_item.input_schema),\n"
+    "        'outputSchema': _surface_thaw(_item.output_schema),\n"
+    "        'annotations': {\n"
+    "            'readOnlyHint': _item.annotations.read_only,\n"
+    "            'destructiveHint': _item.annotations.destructive,\n"
+    "            'idempotentHint': _item.annotations.idempotent,\n"
+    "            'openWorldHint': _item.annotations.open_world,\n"
+    "        },\n"
+    "    }\n"
+    "    for _item in _public_tool_specs()\n"
+    "]\n"
+    "_surface_raw = json.dumps(\n"
+    "    _surface_projection, ensure_ascii=False, allow_nan=False,\n"
+    "    separators=(',', ':'), sort_keys=True,\n"
+    ").encode('utf-8')\n"
+    "_surface_digest = hashlib.sha256(_surface_raw).hexdigest()\n"
+    f"if vibecad.__version__ != {spec.VIBECAD_VERSION!r}:\n"
+    "    raise RuntimeError('vibecad runtime version mismatch: ' + vibecad.__version__)\n"
+    f"if _installed_runtime_spec.SERVER_PACKAGE_EPOCH != {spec.SERVER_PACKAGE_EPOCH!r}:\n"
+    "    raise RuntimeError('vibecad server package epoch mismatch')\n"
+    f"if _metadata.version('mcp') != {spec.MCP_VERSION!r}:\n"
+    "    raise RuntimeError('mcp SDK version mismatch')\n"
+    f"if _surface_digest != {spec.PUBLIC_SURFACE_SHA256!r}:\n"
+    "    raise RuntimeError('vibecad public surface mismatch')\n"
 )
+_VERIFY_SNIPPET = _ENGINE_SNIPPET + _SERVER_SNIPPET
 _STALE_SECONDS = 3600
 _MAX_RECEIPT_BYTES = 4096
 _MAX_LOG_APPEND_BYTES = 64 * 1024
 _BOUNDED_VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_PRE_EPOCH_MANAGED_RECEIPT_KEYS = frozenset(
+    {
+        "schema",
+        "runtime_kind",
+        "vibecad_version",
+        "python_pin",
+        "freecad_pin",
+    }
+)
+_CURRENT_MANAGED_RECEIPT_KEYS = frozenset(spec.expected_receipt())
 _EXTERNAL_RECEIPT_KEYS = {
     "schema",
     "runtime_kind",
     "vibecad_version",
+    "server_package_epoch",
+    "mcp_version",
+    "public_surface_sha256",
     "prefix",
     "prefix_device",
     "prefix_inode",
@@ -535,6 +587,20 @@ def _canonical_json(value: dict) -> str:
     return json.dumps(value, sort_keys=True)
 
 
+def _has_exact_scalar_fields(
+    receipt: object,
+    expected: Mapping[str, int | str],
+) -> bool:
+    """Match JSON receipt scalars without Python's bool/int coercion."""
+
+    return type(receipt) is dict and all(
+        key in receipt
+        and type(receipt[key]) is type(expected_value)
+        and receipt[key] == expected_value
+        for key, expected_value in expected.items()
+    )
+
+
 def _decode_canonical_receipt(path: Path, *, parent_fd: int | None = None) -> dict | None:
     raw = _read_bounded_text(path, parent_fd=parent_fd)
     if raw is None:
@@ -792,6 +858,196 @@ def _ensure_runtime_write_root() -> Path:
     return paths.runtime_root()
 
 
+def _ensure_private_child_directory(
+    parent: _PinnedDirectory,
+    name: str,
+) -> _PinnedDirectory:
+    """Create/open one owned private child relative to a live pinned parent."""
+
+    if (
+        type(parent) is not _PinnedDirectory
+        or not name
+        or name in {".", ".."}
+        or Path(name).name != name
+    ):
+        raise ValueError("FreeCAD process directory is unavailable")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        parent.validate()
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent.fd)
+        except FileExistsError:
+            pass
+        fd = os.open(name, flags, dir_fd=parent.fd)
+        opened = os.fstat(fd)
+        entry = os.stat(name, dir_fd=parent.fd, follow_symlinks=False)
+        getuid = getattr(os, "geteuid", None)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(entry.st_mode)
+            or (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino)
+            or stat.S_IMODE(opened.st_mode) & 0o077
+            or (hasattr(opened, "st_uid") and getuid is not None and opened.st_uid != getuid())
+        ):
+            raise ValueError("FreeCAD process directory is unavailable")
+        pinned = _PinnedDirectory(
+            (fd,),
+            (
+                *parent.bindings,
+                (parent.fd, name, (opened.st_dev, opened.st_ino)),
+            ),
+        )
+        fd = -1
+        pinned.validate()
+        parent.validate()
+        return pinned
+    except (OSError, ValueError):
+        raise ValueError("FreeCAD process directory is unavailable") from None
+    finally:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def _fallback_private_directory(path: Path) -> Path:
+    """Best-effort compatibility check for one private FreeCAD directory.
+
+    Windows ``st_mode`` does not describe the directory DACL, so that platform
+    retains the fallback's alias/ownership checks and its existing S3-RES-02
+    limitation instead of rejecting every normal directory as POSIX ``0777``.
+    """
+
+    try:
+        directory = _fallback_directory(path, create_missing=True)
+        info = directory.lstat()
+        getuid = getattr(os, "geteuid", None)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or (sys.platform != "win32" and stat.S_IMODE(info.st_mode) & 0o077)
+            or (hasattr(info, "st_uid") and getuid is not None and info.st_uid != getuid())
+        ):
+            raise ValueError("FreeCAD process directory is unavailable")
+        return directory
+    except (OSError, ValueError):
+        raise ValueError("FreeCAD process directory is unavailable") from None
+
+
+def _reject_selected_external_runtime_overlap(runtime: Path) -> None:
+    """Reject an external prefix that could contain the private process tree."""
+
+    selected = paths.user_override_env()
+    if selected is None:
+        bound = paths.bound_external_prefix()
+        if bound is not None and paths.active_runtime_prefix() == bound:
+            selected = bound
+    if selected is None:
+        return
+    external = selected.expanduser().resolve(strict=False)
+    resolved_runtime = runtime.expanduser().resolve(strict=False)
+    if (
+        external == resolved_runtime
+        or external.is_relative_to(resolved_runtime)
+        or resolved_runtime.is_relative_to(external)
+    ):
+        raise ValueError("FreeCAD process directory is unavailable")
+
+
+def _validate_private_process_ancestors(pinned: _PinnedDirectory) -> None:
+    """Reject a path component another local account could rename after validation.
+
+    A root-owned or current-user-owned sticky ancestor (for example ``/tmp``)
+    keeps its child entries protected.  The final runtime directory is stricter:
+    it must be current-user owned and not group/world writable.  Replacement by
+    another process under the same UID remains the explicit local-host boundary.
+    """
+
+    if type(pinned) is not _PinnedDirectory or not pinned.fds:
+        raise ValueError("FreeCAD process directory is unavailable")
+    getuid = getattr(os, "geteuid", None)
+    current_uid = getuid() if getuid is not None else None
+    final_index = len(pinned.fds) - 1
+    for index, fd in enumerate(pinned.fds):
+        info = os.fstat(fd)
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError("FreeCAD process directory is unavailable")
+        writable_by_others = bool(stat.S_IMODE(info.st_mode) & 0o022)
+        if not writable_by_others:
+            continue
+        owner = getattr(info, "st_uid", None)
+        protected_sticky_ancestor = (
+            index != final_index and bool(info.st_mode & stat.S_ISVTX) and owner in {0, current_uid}
+        )
+        if not protected_sticky_ancestor:
+            raise ValueError("FreeCAD process directory is unavailable")
+    final = os.fstat(pinned.fd)
+    if current_uid is not None and hasattr(final, "st_uid") and final.st_uid != current_uid:
+        raise ValueError("FreeCAD process directory is unavailable")
+    pinned.validate()
+
+
+def freecad_process_environment(
+    base: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return a copied process environment with private FreeCAD directories.
+
+    FreeCAD on POSIX resolves the account home through ``getpwuid_r`` unless all
+    three custom locations already exist.  Some sandboxed agent hosts cannot
+    resolve that account record.  Keep the workaround inside the replaceable
+    runtime generation: never write the selected FreeCAD prefix, legacy trees,
+    or durable project data, and never mutate ``os.environ``.
+    """
+
+    if base is None:
+        environment: dict[str, str] = {}
+    else:
+        if not isinstance(base, Mapping):
+            raise TypeError("base environment must be a string mapping")
+        environment = dict(base)
+        if any(
+            type(key) is not str or type(value) is not str for key, value in environment.items()
+        ):
+            raise TypeError("base environment must be a string mapping")
+
+    runtime = paths.runtime_root()
+    container_path = runtime / "freecad-user"
+    directory_names = {
+        "FREECAD_USER_HOME": "home",
+        "FREECAD_USER_DATA": "data",
+        "FREECAD_USER_TEMP": "temp",
+    }
+    try:
+        _reject_selected_external_runtime_overlap(runtime)
+        with _pinned_runtime_write_root() as runtime_pinned:
+            if runtime_pinned is None:
+                _fallback_private_directory(container_path)
+                for name in directory_names.values():
+                    _fallback_private_directory(container_path / name)
+            else:
+                _validate_private_process_ancestors(runtime_pinned)
+                container = _ensure_private_child_directory(runtime_pinned, "freecad-user")
+                try:
+                    for name in directory_names.values():
+                        child = _ensure_private_child_directory(container, name)
+                        try:
+                            child.validate()
+                        finally:
+                            child.close()
+                    container.validate()
+                    _validate_private_process_ancestors(runtime_pinned)
+                    runtime_pinned.validate()
+                finally:
+                    container.close()
+    except (OSError, ValueError):
+        raise ValueError("FreeCAD process directory is unavailable") from None
+
+    environment.update(
+        {variable: str(container_path / name) for variable, name in directory_names.items()}
+    )
+    return environment
+
+
 def _ensure_maintenance_write_root() -> Path:
     """Create only the stable home container used by runtime maintenance locking."""
     home = paths.vibecad_home().expanduser()
@@ -900,29 +1156,51 @@ def _fixed_legacy_prefix_is_safe(prefix: Path) -> bool:
         return False
 
 
+def _managed_receipt_has_compatible_engine(receipt: object) -> bool:
+    """Recognize exact known managed shapes whose engine binding remains compatible."""
+
+    if type(receipt) is not dict:
+        return False
+    keys = frozenset(receipt)
+    if keys not in {_PRE_EPOCH_MANAGED_RECEIPT_KEYS, _CURRENT_MANAGED_RECEIPT_KEYS}:
+        return False
+    version = receipt.get("vibecad_version")
+    if (
+        type(receipt.get("schema")) is not int
+        or receipt.get("schema") != spec.RECEIPT_SCHEMA
+        or type(receipt.get("runtime_kind")) is not str
+        or receipt.get("runtime_kind") != spec.MANAGED_KIND
+        or type(receipt.get("python_pin")) is not str
+        or receipt.get("python_pin") != spec.PYTHON_PIN
+        or type(receipt.get("freecad_pin")) is not str
+        or receipt.get("freecad_pin") != spec.FREECAD_PIN
+        or type(version) is not str
+        or _BOUNDED_VERSION.fullmatch(version) is None
+    ):
+        return False
+    if keys == _PRE_EPOCH_MANAGED_RECEIPT_KEYS:
+        return True
+    epoch = receipt.get("server_package_epoch")
+    mcp_version = receipt.get("mcp_version")
+    surface = receipt.get("public_surface_sha256")
+    return (
+        type(epoch) is int
+        and 0 < epoch <= 2_147_483_647
+        and type(mcp_version) is str
+        and _BOUNDED_VERSION.fullmatch(mcp_version) is not None
+        and type(surface) is str
+        and _SHA256.fullmatch(surface) is not None
+    )
+
+
 def managed_legacy_receipt(prefix: Path) -> dict | None:
     """Return the bounded ownership proof accepted for a legacy managed env."""
     if not _fixed_legacy_prefix_is_safe(prefix):
         return None
     receipt = read_prefix_receipt(prefix)
-    if receipt is None or set(receipt) != {
-        "schema",
-        "runtime_kind",
-        "vibecad_version",
-        "python_pin",
-        "freecad_pin",
-    }:
+    if not _managed_receipt_has_compatible_engine(receipt):
         return None
-    version = receipt.get("vibecad_version")
-    if (
-        receipt.get("schema") != spec.RECEIPT_SCHEMA
-        or receipt.get("runtime_kind") != spec.MANAGED_KIND
-        or receipt.get("python_pin") != spec.PYTHON_PIN
-        or receipt.get("freecad_pin") != spec.FREECAD_PIN
-        or not isinstance(version, str)
-        or _BOUNDED_VERSION.fullmatch(version) is None
-    ):
-        return None
+    assert type(receipt) is dict
     return receipt
 
 
@@ -930,7 +1208,14 @@ def legacy_external_receipt(prefix: Path) -> dict | None:
     if not _fixed_legacy_prefix_is_safe(prefix):
         return None
     receipt = read_prefix_receipt(prefix)
-    return receipt if receipt == spec.expected_receipt(external=True) else None
+    expected = spec.expected_receipt(external=True)
+    return (
+        receipt
+        if type(receipt) is dict
+        and set(receipt) == set(expected)
+        and _has_exact_scalar_fields(receipt, expected)
+        else None
+    )
 
 
 def _read_external_receipt_from_fixed_runtime() -> dict | None:
@@ -966,14 +1251,19 @@ def _validated_external_binding() -> dict | None:
     if receipt is None or set(receipt) != _EXTERNAL_RECEIPT_KEYS:
         return None
     expected = spec.expected_receipt(external=True)
-    if any(receipt.get(key) != value for key, value in expected.items()):
+    if not _has_exact_scalar_fields(receipt, expected):
         return None
-    if receipt.get("python_version") != ".".join(map(str, spec.PYTHON_VERSION)) or receipt.get(
-        "freecad_version"
-    ) != ".".join(map(str, spec.FREECAD_VERSION)):
+    python_version = ".".join(map(str, spec.PYTHON_VERSION))
+    freecad_version = ".".join(map(str, spec.FREECAD_VERSION))
+    if (
+        type(receipt.get("python_version")) is not str
+        or receipt.get("python_version") != python_version
+        or type(receipt.get("freecad_version")) is not str
+        or receipt.get("freecad_version") != freecad_version
+    ):
         return None
     raw_prefix = receipt.get("prefix")
-    if not isinstance(raw_prefix, str):
+    if type(raw_prefix) is not str:
         return None
     try:
         prefix, info = _safe_prefix_identity(Path(raw_prefix))
@@ -981,7 +1271,9 @@ def _validated_external_binding() -> dict | None:
         return None
     if (
         str(prefix) != raw_prefix
+        or type(receipt.get("prefix_device")) is not int
         or info.st_dev != receipt.get("prefix_device")
+        or type(receipt.get("prefix_inode")) is not int
         or info.st_ino != receipt.get("prefix_inode")
         or not paths.env_python_for(prefix).is_file()
     ):
@@ -1033,16 +1325,10 @@ def runtime_receipt_state() -> ReceiptState:
     if not isinstance(receipt, dict):
         return ReceiptState.INCOMPATIBLE
 
-    expected = spec.expected_receipt(
-        external=paths.ready_sentinel() == paths.external_runtime_receipt()
-    )
-    if receipt == expected:
+    expected = spec.expected_receipt()
+    if set(receipt) == set(expected) and _has_exact_scalar_fields(receipt, expected):
         return ReceiptState.CURRENT
-    without_version = {k: v for k, v in expected.items() if k != "vibecad_version"}
-    actual_without_version = {k: v for k, v in receipt.items() if k != "vibecad_version"}
-    if actual_without_version == without_version and isinstance(
-        receipt.get("vibecad_version"), str
-    ):
+    if _managed_receipt_has_compatible_engine(receipt):
         return ReceiptState.SERVER_MISMATCH
     return ReceiptState.INCOMPATIBLE
 
@@ -1209,7 +1495,7 @@ def _probe(python: Path | None, snippet: str) -> bool:
     if not Path(py).exists():
         return False
     try:
-        environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        environment = freecad_process_environment({**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
         result = subprocess.run(
             [str(py), "-I", "-B", "-c", snippet],
             capture_output=True,
@@ -1217,7 +1503,7 @@ def _probe(python: Path | None, snippet: str) -> bool:
             env=environment,
         )
         return result.returncode == 0
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError):
         return False
 
 
@@ -1276,7 +1562,7 @@ def _probe_runtime_generation(
             else _open_relative_pinned_directory(prefix_pinned, tuple(parent_parts))
         )
         python_parent.validate()
-        environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        environment = freecad_process_environment({**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
         parent_fd = python_parent.fd
         launcher = os.fspath(sys.executable)
         if not launcher or not os.path.isabs(launcher):
@@ -1304,7 +1590,7 @@ def _probe_runtime_generation(
             prefix_pinned,
         )
         return result.returncode == 0
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, TypeError, ValueError, subprocess.SubprocessError):
         return False
     finally:
         if python_parent is not None and python_parent is not prefix_pinned:

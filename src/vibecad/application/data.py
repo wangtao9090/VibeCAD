@@ -174,6 +174,58 @@ class ApplicationDataLayout:
     projects: Path
     bootstrap: Path
     checkouts: Path
+    artifacts: Path
+    _identities: tuple[tuple[int, int], ...]
+
+    def identity_for(self, path: object) -> tuple[int, int]:
+        """Return the directory identity captured by the descriptor-backed opener."""
+
+        if type(path) is not type(Path("/")):
+            raise ApplicationDataError(ApplicationDataErrorCode.INVALID_ROOT)
+        paths = (
+            self.root,
+            self.locks,
+            self.tasks,
+            self.projects,
+            self.bootstrap,
+            self.checkouts,
+            self.artifacts,
+        )
+        if (
+            type(self._identities) is not tuple
+            or len(self._identities) != len(paths)
+            or any(
+                type(identity) is not tuple
+                or len(identity) != 2
+                or not all(type(item) is int for item in identity)
+                for identity in self._identities
+            )
+        ):
+            raise ApplicationDataError(ApplicationDataErrorCode.UNSAFE_ROOT)
+        for index, candidate in enumerate(paths):
+            if path == candidate:
+                return self._identities[index]
+        raise ApplicationDataError(ApplicationDataErrorCode.INVALID_ROOT)
+
+    def require_current(self, path: object) -> None:
+        """Fail unless a fixed layout path still names its captured directory."""
+
+        expected = self.identity_for(path)
+        descriptor = None
+        try:
+            descriptor, value = _open_absolute_directory(
+                path,
+                create=False,
+                final_private=True,
+            )
+            if (value.st_dev, value.st_ino) != expected:
+                raise ApplicationDataError(ApplicationDataErrorCode.UNSAFE_ROOT)
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    raise ApplicationDataError(ApplicationDataErrorCode.IO_ERROR) from None
 
     @classmethod
     def open(cls, root: object) -> ApplicationDataLayout:
@@ -192,12 +244,15 @@ class ApplicationDataLayout:
             "projects",
             "bootstrap",
             "checkouts",
+            "artifacts",
         )
         child_fds = []
+        child_identities: list[tuple[int, int]] = []
         try:
             for name in names:
-                child_fd, _ = _open_private_child(root_fd, root_stat, name)
+                child_fd, child_stat = _open_private_child(root_fd, root_stat, name)
                 child_fds.append(child_fd)
+                child_identities.append((child_stat.st_dev, child_stat.st_ino))
             os.fsync(root_fd)
             check_fd, check_stat = _open_absolute_directory(
                 data_root,
@@ -227,4 +282,5 @@ class ApplicationDataLayout:
             except OSError:
                 pass
         children = tuple(data_root / name for name in names)
-        return cls(data_root, *children)
+        identities = ((root_stat.st_dev, root_stat.st_ino), *child_identities)
+        return cls(data_root, *children, identities)

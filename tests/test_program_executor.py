@@ -1722,6 +1722,8 @@ def test_controlled_step_export_uses_only_store_derived_exact_path(
 ) -> None:
     shape = _FakeShape()
     candidate = _checkpointed(_FakeSession(shape), tmp_path)
+    candidate.step_path.touch(mode=0o600)
+    candidate.step_path.chmod(0o600)
 
     def candidate_artifact_path(
         self: LocalRevisionStore,
@@ -1873,6 +1875,8 @@ def test_step_export_failure_is_redacted_and_not_retried(
 ) -> None:
     shape = _FakeShape(export_error=RuntimeError("secret-export-path"))
     candidate = _checkpointed(_FakeSession(shape), tmp_path)
+    candidate.step_path.touch(mode=0o600)
+    candidate.step_path.chmod(0o600)
     monkeypatch.setattr(
         LocalRevisionStore,
         "candidate_artifact_path",

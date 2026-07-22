@@ -38,6 +38,7 @@ class TaskCatalogErrorCode(StrEnum):
     INVALID_STATE = "invalid_state"
     NOT_FOUND = "not_found"
     CONFLICT = "conflict"
+    RESOURCE_EXHAUSTED = "resource_exhausted"
     STORE_FAILURE = "store_failure"
 
 
@@ -49,6 +50,7 @@ _ERROR_MESSAGES = {
     TaskCatalogErrorCode.INVALID_STATE: "The task is not ready for this operation.",
     TaskCatalogErrorCode.NOT_FOUND: "The task record was not found.",
     TaskCatalogErrorCode.CONFLICT: "The task record changed concurrently.",
+    TaskCatalogErrorCode.RESOURCE_EXHAUSTED: "The task store capacity is exhausted.",
     TaskCatalogErrorCode.STORE_FAILURE: "The task record operation failed.",
 }
 
@@ -141,6 +143,8 @@ class TaskCatalogService:
                 failure = TaskCatalogErrorCode.CONFLICT
             elif error.code is TaskStoreErrorCode.INVALID_ID:
                 failure = TaskCatalogErrorCode.INVALID_INPUT
+            elif error.code is TaskStoreErrorCode.RESOURCE_EXHAUSTED:
+                failure = TaskCatalogErrorCode.RESOURCE_EXHAUSTED
             else:
                 failure = TaskCatalogErrorCode.STORE_FAILURE
         except TaskStateError:
@@ -210,6 +214,8 @@ class TaskCatalogService:
                 failure = TaskCatalogErrorCode.NOT_FOUND
             elif error.code is TaskStoreErrorCode.INVALID_ID:
                 failure = TaskCatalogErrorCode.INVALID_INPUT
+            elif error.code is TaskStoreErrorCode.RESOURCE_EXHAUSTED:
+                failure = TaskCatalogErrorCode.RESOURCE_EXHAUSTED
             else:
                 failure = TaskCatalogErrorCode.STORE_FAILURE
         except Exception:
@@ -245,6 +251,8 @@ class TaskCatalogService:
                 uncertain_generation = getattr(error, "committed_generation", None)
             elif error.code is TaskStoreErrorCode.CONFLICT:
                 failure = TaskCatalogErrorCode.CONFLICT
+            elif error.code is TaskStoreErrorCode.RESOURCE_EXHAUSTED:
+                failure = TaskCatalogErrorCode.RESOURCE_EXHAUSTED
             else:
                 failure = TaskCatalogErrorCode.STORE_FAILURE
         except Exception:

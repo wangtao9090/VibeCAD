@@ -104,6 +104,22 @@ def _install_capability_runner(monkeypatch, payload: bytes) -> None:
     monkeypatch.setattr(inst, "_download_micromamba_to_fd", download_to_fd)
 
 
+def _private_runner_directory(env: Path) -> Path:
+    return env.parent / inst._RUNNER_DIRECTORY_NAME
+
+
+def _assert_persistent_private_runner(env: Path, payload: bytes) -> Path:
+    directory = _private_runner_directory(env)
+    assert directory.is_dir()
+    assert stat.S_IMODE(directory.lstat().st_mode) == 0o700
+    runner = directory / inst._RUNNER_EXECUTABLE_NAME
+    assert list(directory.iterdir()) == [runner]
+    assert runner.read_bytes() == payload
+    assert stat.S_IMODE(runner.lstat().st_mode) == 0o700
+    assert runner.lstat().st_nlink == 1
+    return runner
+
+
 def test_install_happy_path(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
     monkeypatch.setattr(inst.RuntimeInstaller, "is_ready", lambda self: False)  # 不短路
@@ -123,8 +139,41 @@ def test_install_happy_path(monkeypatch, tmp_path):
     assert "create" in create and "python=3.12" in create and "freecad=1.1.0" in create
     assert inst.status.read_runtime_receipt() == spec.expected_receipt()
     assert "--upgrade" in ran[1]
-    assert ran[1][0].startswith("../.vibecad-runner-") and ran[1][1] == "run"
+    assert Path(ran[1][0]).name == "micromamba" and ran[1][1] == "run"
+    assert Path(ran[1][0]).parent.name == inst._RUNNER_DIRECTORY_NAME
     assert ran[1][2:6] == ["-r", "../..", "-p", "./"]
+
+
+def test_installer_verification_fails_closed_without_freecad_process_directory(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    prefix = inst.paths.env_prefix()
+    python = inst.paths.env_python_for(prefix)
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    legacy = inst.paths.legacy_env_prefix()
+    legacy.mkdir(parents=True)
+    legacy_marker = legacy / "engine.bin"
+    legacy_marker.write_bytes(b"external-engine")
+
+    calls = []
+
+    def unavailable(base=None):
+        calls.append(base)
+        raise ValueError("FreeCAD process directory is unavailable")
+
+    monkeypatch.setattr(inst.status, "freecad_process_environment", unavailable, raising=False)
+    monkeypatch.setattr(inst.status, "verify_runtime_generation", _REAL_VERIFY_GENERATION)
+
+    with pytest.raises(inst.InstallError, match="verification stopped"):
+        inst.RuntimeInstaller()._verify_generation_or_raise(prefix, "verification stopped")
+
+    assert len(calls) == 1 and calls[0]["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert not (prefix / ".vibecad_ready").exists()
+    assert legacy_marker.read_bytes() == b"external-engine"
 
 
 def test_is_ready_uses_sentinel(monkeypatch, tmp_path):
@@ -352,7 +401,8 @@ def test_legacy_or_old_version_reuses_healthy_env_for_pip_only(monkeypatch, tmp_
     inst.RuntimeInstaller().install()
 
     assert len(ran) == 1
-    assert ran[0][0].startswith("../.vibecad-runner-")
+    assert Path(ran[0][0]).name == "micromamba"
+    assert Path(ran[0][0]).parent.name == inst._RUNNER_DIRECTORY_NAME
     assert ran[0][1:6] == [
         "run",
         "-r",
@@ -365,6 +415,124 @@ def test_legacy_or_old_version_reuses_healthy_env_for_pip_only(monkeypatch, tmp_
     assert ensured == []
     assert inst.paths.micromamba_path().read_bytes() == _FAKE_MICROMAMBA
     assert inst.status.read_runtime_receipt() == spec.expected_receipt()
+
+
+def test_same_version_pre_epoch_receipt_runs_pip_only_and_reissues_current_receipt(
+    monkeypatch,
+    tmp_path,
+):
+    old_receipt = {
+        "schema": spec.RECEIPT_SCHEMA,
+        "runtime_kind": spec.MANAGED_KIND,
+        "vibecad_version": spec.VIBECAD_VERSION,
+        "python_pin": spec.PYTHON_PIN,
+        "freecad_pin": spec.FREECAD_PIN,
+    }
+    python, _ = _prepare_managed_env(monkeypatch, tmp_path, old_receipt)
+    monkeypatch.setattr(inst.status, "engine_compatible", lambda candidate: candidate == python)
+    verified = iter((False, True))
+    monkeypatch.setattr(inst.status, "verify_runtime", lambda candidate: next(verified))
+    monkeypatch.setattr(
+        inst.micromamba,
+        "ensure_micromamba",
+        _materialize_micromamba,
+    )
+    ran = []
+    monkeypatch.setattr(inst, "_run", lambda command, **kwargs: ran.append(command))
+
+    inst.RuntimeInstaller().install()
+
+    assert len(ran) == 1
+    assert ran[0][6:10] == ["python", "-m", "pip", "install"]
+    assert "create" not in ran[0]
+    assert inst.status.read_runtime_receipt() == spec.expected_receipt()
+
+
+def test_previous_positive_epoch_runs_one_pip_sync_without_replacing_managed_prefix(
+    monkeypatch,
+    tmp_path,
+):
+    old_receipt = {
+        **spec.expected_receipt(),
+        "server_package_epoch": spec.SERVER_PACKAGE_EPOCH - 1,
+    }
+    python, sentinel = _prepare_managed_env(monkeypatch, tmp_path, old_receipt)
+    prefix = inst.paths.env_prefix()
+    before = prefix.lstat()
+    monkeypatch.setattr(
+        inst.RuntimeInstaller,
+        "_remove_managed_env",
+        lambda *args, **kwargs: pytest.fail("previous epoch must not replace the managed prefix"),
+    )
+    monkeypatch.setattr(inst.status, "engine_compatible", lambda candidate: candidate == python)
+    observed_receipts = []
+
+    def verify(candidate):
+        assert candidate == python
+        observed_receipts.append(json.loads(sentinel.read_text(encoding="utf-8")))
+        return len(observed_receipts) == 2
+
+    monkeypatch.setattr(inst.status, "verify_runtime", verify)
+    ran = []
+
+    def run(command, **kwargs):
+        assert json.loads(sentinel.read_text(encoding="utf-8")) == old_receipt
+        ran.append(command)
+
+    monkeypatch.setattr(inst, "_run", run)
+
+    inst.RuntimeInstaller().install()
+
+    after = prefix.lstat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert len(ran) == 1
+    assert ran[0][6:10] == ["python", "-m", "pip", "install"]
+    assert "create" not in ran[0]
+    assert observed_receipts == [old_receipt, old_receipt]
+    current_receipt = inst.status.read_runtime_receipt()
+    assert current_receipt == spec.expected_receipt()
+    assert current_receipt["server_package_epoch"] == 3
+
+
+@pytest.mark.parametrize("failure_at", ("pip", "verify"))
+def test_previous_positive_epoch_sync_failure_keeps_old_receipt_and_prefix(
+    monkeypatch,
+    tmp_path,
+    failure_at,
+):
+    old_receipt = {
+        **spec.expected_receipt(),
+        "server_package_epoch": spec.SERVER_PACKAGE_EPOCH - 1,
+    }
+    python, sentinel = _prepare_managed_env(monkeypatch, tmp_path, old_receipt)
+    prefix = inst.paths.env_prefix()
+    before = prefix.lstat()
+    monkeypatch.setattr(
+        inst.RuntimeInstaller,
+        "_remove_managed_env",
+        lambda *args, **kwargs: pytest.fail("failed sync must not replace the managed prefix"),
+    )
+    monkeypatch.setattr(inst.status, "engine_compatible", lambda candidate: candidate == python)
+    monkeypatch.setattr(inst.status, "verify_runtime", lambda candidate: False)
+    ran = []
+
+    def run(command, **kwargs):
+        assert json.loads(sentinel.read_text(encoding="utf-8")) == old_receipt
+        ran.append(command)
+        if failure_at == "pip":
+            raise RuntimeError("simulated pip failure")
+
+    monkeypatch.setattr(inst, "_run", run)
+
+    with pytest.raises(inst.InstallError):
+        inst.RuntimeInstaller().install()
+
+    after = prefix.lstat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert len(ran) == 1
+    assert ran[0][6:10] == ["python", "-m", "pip", "install"]
+    assert "create" not in ran[0]
+    assert json.loads(sentinel.read_text(encoding="utf-8")) == old_receipt
 
 
 def test_legacy_receipt_migrates_without_pip_when_package_is_already_exact(monkeypatch, tmp_path):
@@ -638,6 +806,408 @@ def test_staged_validated_runner_ignores_source_binary_replacement(monkeypatch, 
 
     assert safe_marker.read_bytes() == b"safe"
     assert not evil_marker.exists()
+
+
+def test_persistent_runner_preserves_basename_and_validates_private_directory(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    payload = b"#!/bin/sh\nexit 0\n"
+    _install_capability_runner(monkeypatch, payload)
+    installer = inst.RuntimeInstaller()
+    installer._ensure_current_layout()
+    micromamba_path = installer._ensure_micromamba(inst.paths.micromamba_path())
+    env = inst.paths.env_prefix()
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_bytes(b"python")
+    env_info = env.lstat()
+    commands = []
+
+    def inspect_runner(command, **_kwargs):
+        commands.append(command)
+        assert Path(command[0]).name == "micromamba"
+        assert Path(command[0]).parent.name == inst._RUNNER_DIRECTORY_NAME
+        runner = env / command[0]
+        runner_info = runner.lstat()
+        directory_info = runner.parent.lstat()
+        assert stat.S_ISREG(runner_info.st_mode) and runner_info.st_nlink == 1
+        assert stat.S_ISDIR(directory_info.st_mode) and directory_info.st_nlink > 0
+        assert stat.S_IMODE(runner_info.st_mode) == 0o700
+        assert stat.S_IMODE(directory_info.st_mode) == 0o700
+        if hasattr(inst.os, "geteuid"):
+            assert runner_info.st_uid == inst.os.geteuid()
+            assert directory_info.st_uid == inst.os.geteuid()
+
+    monkeypatch.setattr(inst, "_run", inspect_runner)
+
+    installer._install_server_package(
+        micromamba_path,
+        inst.paths.mamba_root_prefix(),
+        env,
+        expected_env_identity=(env_info.st_dev, env_info.st_ino),
+    )
+
+    assert len(commands) == 1
+    _assert_persistent_private_runner(env, payload)
+
+
+def test_staged_runner_real_exec_observes_exact_micromamba_basename(monkeypatch, tmp_path):
+    home = tmp_path / "VibeCAD"
+    marker = tmp_path / "runner-basename.txt"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    monkeypatch.setenv("VIBECAD_TEST_MARKER", str(marker))
+    payload = b'#!/bin/sh\nprintf "%s" "${0##*/}" > "$VIBECAD_TEST_MARKER"\nexit 0\n'
+    _install_capability_runner(monkeypatch, payload)
+    installer = inst.RuntimeInstaller()
+    installer._ensure_current_layout()
+    micromamba_path = installer._ensure_micromamba(inst.paths.micromamba_path())
+    env = inst.paths.env_prefix()
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_bytes(b"python")
+    env_info = env.lstat()
+
+    installer._install_server_package(
+        micromamba_path,
+        inst.paths.mamba_root_prefix(),
+        env,
+        expected_env_identity=(env_info.st_dev, env_info.st_ino),
+    )
+
+    assert marker.read_text(encoding="utf-8") == "micromamba"
+    _assert_persistent_private_runner(env, payload)
+
+
+@pytest.mark.parametrize("fault", ("copy", "stored_bytes", "digest", "command"))
+def test_persistent_runner_operational_failure_is_fixed_and_bounded(
+    monkeypatch,
+    tmp_path,
+    fault,
+):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    payload = b"#!/bin/sh\nexit 0\n"
+    _install_capability_runner(monkeypatch, payload)
+    installer = inst.RuntimeInstaller()
+    installer._ensure_current_layout()
+    micromamba_path = installer._ensure_micromamba(inst.paths.micromamba_path())
+    env = inst.paths.env_prefix()
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_bytes(b"python")
+    env_info = env.lstat()
+
+    if fault == "copy":
+        monkeypatch.setattr(
+            inst,
+            "_runner_write",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("copy fault")),
+        )
+        expected_error = inst.InstallError
+    elif fault == "stored_bytes":
+        real_runner_write = inst._runner_write
+        monkeypatch.setattr(
+            inst,
+            "_runner_write",
+            lambda file_descriptor, data: real_runner_write(
+                file_descriptor,
+                b"x" * len(data),
+            ),
+        )
+        expected_error = inst.InstallError
+    elif fault == "digest":
+        installer._micromamba_digests[micromamba_path] = "0" * 64
+        expected_error = inst.InstallError
+    else:
+        monkeypatch.setattr(
+            inst,
+            "_run",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("command fault")),
+        )
+        expected_error = RuntimeError
+
+    with pytest.raises(expected_error):
+        installer._install_server_package(
+            micromamba_path,
+            inst.paths.mamba_root_prefix(),
+            env,
+            expected_env_identity=(env_info.st_dev, env_info.st_ino),
+        )
+
+    runner = _private_runner_directory(env) / inst._RUNNER_EXECUTABLE_NAME
+    expected_payload = {
+        "copy": b"",
+        "stored_bytes": b"x" * len(payload),
+        "digest": payload,
+        "command": payload,
+    }[fault]
+    assert runner.read_bytes() == expected_payload
+    assert stat.S_IMODE(runner.lstat().st_mode) == 0o700
+    before = _tree_fingerprint(_private_runner_directory(env))
+
+    if fault == "command":
+        monkeypatch.setattr(inst, "_run", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            inst,
+            "_runner_write",
+            lambda *_args, **_kwargs: pytest.fail("exact persistent runner must be reused"),
+        )
+        installer._install_server_package(
+            micromamba_path,
+            inst.paths.mamba_root_prefix(),
+            env,
+            expected_env_identity=(env_info.st_dev, env_info.st_ino),
+        )
+    else:
+        with pytest.raises(inst.InstallError, match="does not match"):
+            installer._install_server_package(
+                micromamba_path,
+                inst.paths.mamba_root_prefix(),
+                env,
+                expected_env_identity=(env_info.st_dev, env_info.st_ino),
+            )
+
+    assert _tree_fingerprint(_private_runner_directory(env)) == before
+
+
+def test_staged_runner_never_unlinks_replacement_file(monkeypatch, tmp_path):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    payload = b"#!/bin/sh\nexit 0\n"
+    _install_capability_runner(monkeypatch, payload)
+    installer = inst.RuntimeInstaller()
+    installer._ensure_current_layout()
+    micromamba_path = installer._ensure_micromamba(inst.paths.micromamba_path())
+    env = inst.paths.env_prefix()
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_bytes(b"python")
+    env_info = env.lstat()
+    replacement_payload = b"replacement must survive"
+    replacement_path = None
+
+    def replace_staged_file(command, **_kwargs):
+        nonlocal replacement_path
+        runner = env / command[0]
+        runner.rename(runner.with_name("original-micromamba"))
+        runner.write_bytes(replacement_payload)
+        runner.chmod(0o700)
+        replacement_path = runner
+
+    monkeypatch.setattr(inst, "_run", replace_staged_file)
+
+    with pytest.raises(inst.InstallError, match="identity changed"):
+        installer._install_server_package(
+            micromamba_path,
+            inst.paths.mamba_root_prefix(),
+            env,
+            expected_env_identity=(env_info.st_dev, env_info.st_ino),
+        )
+
+    assert replacement_path is not None
+    assert replacement_path.read_bytes() == replacement_payload
+    assert (replacement_path.parent / "original-micromamba").read_bytes() == payload
+
+
+def test_persistent_runner_post_command_sha_rejects_same_inode_mutation(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    payload = b"#!/bin/sh\nexit 0\n"
+    mutated_payload = b"same inode, changed bytes"
+    _install_capability_runner(monkeypatch, payload)
+    installer = inst.RuntimeInstaller()
+    installer._ensure_current_layout()
+    micromamba_path = installer._ensure_micromamba(inst.paths.micromamba_path())
+    env = inst.paths.env_prefix()
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_bytes(b"python")
+    env_info = env.lstat()
+    original_identity = None
+
+    def mutate_staged_file(command, **_kwargs):
+        nonlocal original_identity
+        runner = env / command[0]
+        info = runner.lstat()
+        original_identity = info.st_dev, info.st_ino
+        runner.write_bytes(mutated_payload)
+        assert (runner.lstat().st_dev, runner.lstat().st_ino) == original_identity
+
+    monkeypatch.setattr(inst, "_run", mutate_staged_file)
+
+    with pytest.raises(inst.InstallError, match="identity changed"):
+        installer._install_server_package(
+            micromamba_path,
+            inst.paths.mamba_root_prefix(),
+            env,
+            expected_env_identity=(env_info.st_dev, env_info.st_ino),
+        )
+
+    runner = _private_runner_directory(env) / inst._RUNNER_EXECUTABLE_NAME
+    assert (runner.lstat().st_dev, runner.lstat().st_ino) == original_identity
+    assert runner.read_bytes() == mutated_payload
+
+
+def test_staged_runner_directory_replacement_is_not_removed(monkeypatch, tmp_path):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    payload = b"#!/bin/sh\nexit 0\n"
+    _install_capability_runner(monkeypatch, payload)
+    installer = inst.RuntimeInstaller()
+    installer._ensure_current_layout()
+    micromamba_path = installer._ensure_micromamba(inst.paths.micromamba_path())
+    env = inst.paths.env_prefix()
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_bytes(b"python")
+    env_info = env.lstat()
+    runner_directory = _private_runner_directory(env)
+    detached_directory = env.parent / ".vibecad-runner-detached"
+    replacement_payload = b"replacement directory must survive"
+
+    def replace_runner_directory(_command, **_kwargs):
+        runner_directory.rename(detached_directory)
+        runner_directory.mkdir(mode=0o700)
+        replacement = runner_directory / "micromamba"
+        replacement.write_bytes(replacement_payload)
+        replacement.chmod(0o700)
+
+    monkeypatch.setattr(inst, "_run", replace_runner_directory)
+
+    with pytest.raises(inst.InstallError, match="identity changed"):
+        installer._install_server_package(
+            micromamba_path,
+            inst.paths.mamba_root_prefix(),
+            env,
+            expected_env_identity=(env_info.st_dev, env_info.st_ino),
+        )
+
+    assert (runner_directory / "micromamba").read_bytes() == replacement_payload
+    assert (detached_directory / "micromamba").read_bytes() == payload
+
+
+def test_persistent_runner_never_reaches_name_unlink_replacement_seam(monkeypatch, tmp_path):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    payload = b"#!/bin/sh\nexit 0\n"
+    replacement_payload = b"replacement must never be name-unlinked"
+    _install_capability_runner(monkeypatch, payload)
+    installer = inst.RuntimeInstaller()
+    installer._ensure_current_layout()
+    micromamba_path = installer._ensure_micromamba(inst.paths.micromamba_path())
+    env = inst.paths.env_prefix()
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_bytes(b"python")
+    env_info = env.lstat()
+    runner = _private_runner_directory(env) / inst._RUNNER_EXECUTABLE_NAME
+    detached_original = tmp_path / "validated-runner-original"
+    replacement_deleted = []
+    real_unlink = inst._runner_unlink
+    monkeypatch.setattr(inst, "_run", lambda *_args, **_kwargs: None)
+
+    def replace_verified_inode_then_unlink(path, *args, **kwargs):
+        assert path == inst._RUNNER_EXECUTABLE_NAME
+        runner.replace(detached_original)
+        runner.write_bytes(replacement_payload)
+        runner.chmod(0o700)
+        real_unlink(path, *args, **kwargs)
+        replacement_deleted.append(not runner.exists())
+
+    monkeypatch.setattr(inst, "_runner_unlink", replace_verified_inode_then_unlink)
+
+    installer._install_server_package(
+        micromamba_path,
+        inst.paths.mamba_root_prefix(),
+        env,
+        expected_env_identity=(env_info.st_dev, env_info.st_ino),
+    )
+
+    assert replacement_deleted == []
+    assert runner.read_bytes() == payload
+    assert not detached_original.exists()
+
+
+def test_persistent_exact_runner_is_reused_without_copy_or_unlink(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    payload = b"#!/bin/sh\nexit 0\n"
+    _install_capability_runner(monkeypatch, payload)
+    installer = inst.RuntimeInstaller()
+    installer._ensure_current_layout()
+    micromamba_path = installer._ensure_micromamba(inst.paths.micromamba_path())
+    env = inst.paths.env_prefix()
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_bytes(b"python")
+    env_info = env.lstat()
+    commands = []
+    monkeypatch.setattr(inst, "_run", lambda command, **_kwargs: commands.append(command))
+    installer._install_server_package(
+        micromamba_path,
+        inst.paths.mamba_root_prefix(),
+        env,
+        expected_env_identity=(env_info.st_dev, env_info.st_ino),
+    )
+    runner = _assert_persistent_private_runner(env, payload)
+    first_identity = runner.lstat().st_dev, runner.lstat().st_ino
+    monkeypatch.setattr(
+        inst,
+        "_runner_write",
+        lambda *_args, **_kwargs: pytest.fail("exact persistent runner must be reused, not copied"),
+    )
+    monkeypatch.setattr(
+        inst,
+        "_runner_unlink",
+        lambda *_args, **_kwargs: pytest.fail("persistent runner must never be unlinked"),
+    )
+    installer._install_server_package(
+        micromamba_path,
+        inst.paths.mamba_root_prefix(),
+        env,
+        expected_env_identity=(env_info.st_dev, env_info.st_ino),
+    )
+
+    assert len(commands) == 2
+    assert (runner.lstat().st_dev, runner.lstat().st_ino) == first_identity
+    _assert_persistent_private_runner(env, payload)
+
+
+@pytest.mark.parametrize("remnant", ("mismatch", "extra"))
+def test_staged_runner_refuses_untrusted_fixed_directory_remnant(
+    monkeypatch,
+    tmp_path,
+    remnant,
+):
+    home = tmp_path / "VibeCAD"
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    payload = b"#!/bin/sh\nexit 0\n"
+    _install_capability_runner(monkeypatch, payload)
+    installer = inst.RuntimeInstaller()
+    installer._ensure_current_layout()
+    micromamba_path = installer._ensure_micromamba(inst.paths.micromamba_path())
+    env = inst.paths.env_prefix()
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_bytes(b"python")
+    env_info = env.lstat()
+    runner_directory = _private_runner_directory(env)
+    runner_directory.mkdir(mode=0o700)
+    entry = runner_directory / ("micromamba" if remnant == "mismatch" else "unexpected")
+    entry.write_bytes(b"untrusted remnant")
+    entry.chmod(0o700)
+    before = _tree_fingerprint(runner_directory)
+    expected_message = "does not match" if remnant == "mismatch" else "extra entries"
+
+    with pytest.raises(inst.InstallError, match=expected_message):
+        installer._install_server_package(
+            micromamba_path,
+            inst.paths.mamba_root_prefix(),
+            env,
+            expected_env_identity=(env_info.st_dev, env_info.st_ino),
+        )
+
+    assert _tree_fingerprint(runner_directory) == before
 
 
 def test_importable_but_wrong_version_engine_is_rebuilt_not_reused(monkeypatch, tmp_path):
@@ -993,7 +1563,12 @@ def test_exact_legacy_external_runtime_is_reused_read_only_without_second_instal
     assert receipt["runtime_kind"] == spec.EXTERNAL_KIND
 
 
-def test_unowned_legacy_is_preserved_while_new_runtime_is_created(monkeypatch, tmp_path):
+@pytest.mark.parametrize("receipt_kind", ("unknown", "pre_epoch_external"))
+def test_unowned_legacy_is_preserved_while_new_runtime_is_created(
+    monkeypatch,
+    tmp_path,
+    receipt_kind,
+):
     home = tmp_path / "VibeCAD"
     monkeypatch.setenv("VIBECAD_HOME", str(home))
     monkeypatch.delenv("VIBECAD_FREECAD_ENV", raising=False)
@@ -1001,7 +1576,16 @@ def test_unowned_legacy_is_preserved_while_new_runtime_is_created(monkeypatch, t
     legacy_python = inst.paths.env_python_for(legacy)
     legacy_python.parent.mkdir(parents=True)
     legacy_python.write_bytes(b"unknown python")
-    (legacy / ".vibecad_ready").write_text("{not-owned", encoding="utf-8")
+    if receipt_kind == "unknown":
+        receipt = "{not-owned"
+    else:
+        old_external = {
+            "schema": spec.RECEIPT_SCHEMA,
+            "runtime_kind": spec.EXTERNAL_KIND,
+            "vibecad_version": spec.VIBECAD_VERSION,
+        }
+        receipt = json.dumps(old_external, sort_keys=True)
+    (legacy / ".vibecad_ready").write_text(receipt, encoding="utf-8")
     before = _tree_fingerprint(legacy)
     calls = []
     monkeypatch.setattr(inst.RuntimeInstaller, "is_ready", lambda self: False)
@@ -1140,7 +1724,8 @@ def test_stale_owned_legacy_uses_legacy_micromamba_for_pip_only(monkeypatch, tmp
     assert ensured == []
     assert inst.paths.legacy_micromamba_path().read_bytes() == _FAKE_MICROMAMBA
     assert len(calls) == 1
-    assert calls[0][0].startswith("../.vibecad-runner-")
+    assert Path(calls[0][0]).name == "micromamba"
+    assert Path(calls[0][0]).parent.name == inst._RUNNER_DIRECTORY_NAME
     assert calls[0][1:6] == [
         "run",
         "-r",

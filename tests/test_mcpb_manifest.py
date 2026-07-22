@@ -1,9 +1,33 @@
-"""mcpb manifest 守卫：版本三处同步、工具表与 server 注册一致、uv 配置、内容物排除。快测。"""
+"""MCPB 守卫：冻结依赖、Agent-first 公开面与诚实的平台声明。"""
+
 import json
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+EXPECTED_PUBLIC_TOOLS = (
+    "ping",
+    "get_runtime_status",
+    "ensure_runtime",
+    "uninstall_runtime",
+    "get_capabilities",
+    "create_project",
+    "get_project",
+    "create_task",
+    "get_task",
+    "submit_model_program",
+    "resume_task",
+    "accept_draft",
+    "reject_draft",
+    "export_task_artifacts",
+    "create_box",
+    "create_cylinder",
+    "inspect_model",
+    "modify_parameter",
+    "move_part",
+    "rotate_part",
+)
 
 
 def _manifest() -> dict:
@@ -20,20 +44,23 @@ def test_version_synced_three_ways():
 
 
 def test_manifest_tools_match_server_registry():
-    """manifest.tools 必须与 server 注册的工具完全一致（防加工具忘更新 manifest）。"""
-    import vibecad.server as server
-    registered = {t.name for t in server.mcp._tool_manager.list_tools()}
-    declared = {t["name"] for t in _manifest()["tools"]}
-    assert declared == registered, (
-        f"manifest 缺 {registered - declared}，多 {declared - registered}")
+    """manifest 必须与独立冻结合同和 registry 投影同序。"""
+    from vibecad.application.public_surface import public_tool_specs
+
+    declared = tuple(entry["name"] for entry in _manifest()["tools"])
+    projected = tuple(spec.name for spec in public_tool_specs())
+    assert declared == EXPECTED_PUBLIC_TOOLS
+    assert projected == EXPECTED_PUBLIC_TOOLS
 
 
 def test_manifest_tool_entries_are_unique_and_described():
     entries = _manifest()["tools"]
     names = [entry["name"] for entry in entries]
     assert len(names) == len(set(names))
-    assert all(isinstance(entry.get("description"), str) and entry["description"].strip()
-               for entry in entries)
+    assert all(
+        isinstance(entry.get("description"), str) and entry["description"].strip()
+        for entry in entries
+    )
 
 
 def test_manifest_uv_type_entry_and_mcp_config():
@@ -41,9 +68,18 @@ def test_manifest_uv_type_entry_and_mcp_config():
     assert m["server"]["type"] == "uv"
     assert (ROOT / m["server"]["entry_point"]).exists()
     assert m["server"]["mcp_config"]["command"] == "uv"  # CLI 2.1.2 必填（审查实锤）
-    assert m["server"]["entry_point"] in " ".join(m["server"]["mcp_config"]["args"])
-    assert "user_config" not in m          # 设计：零配置表单
-    assert (ROOT / m["icon"]).exists()     # 安装弹窗/扩展列表展示
+    assert m["server"]["mcp_config"]["args"] == [
+        "run",
+        "--frozen",
+        "--no-dev",
+        "--no-editable",
+        "--no-build-isolation",
+        "--directory",
+        "${__dirname}",
+        "mcpb_entry.py",
+    ]
+    assert "user_config" not in m  # 设计：零配置表单
+    assert (ROOT / m["icon"]).exists()  # 安装弹窗/扩展列表展示
 
 
 def test_manifest_env_auto_install_only():
@@ -55,14 +91,6 @@ def test_manifest_env_auto_install_only():
     assert env == {"VIBECAD_AUTO_INSTALL": "1"}
 
 
-def test_manifest_uninstall_runtime_destructive_hint():
-    """uninstall_runtime 必须显式标注 destructiveHint=True（目录上架审查关注卸载）。"""
-    import vibecad.server as server
-
-    tools = {t.name: t for t in server.mcp._tool_manager.list_tools()}
-    assert tools["uninstall_runtime"].annotations.destructiveHint is True
-
-
 def test_manifest_long_description_describes_two_step_uninstall():
     """运行时位于扩展目录外，描述必须给出准确的两步卸载流程。"""
     description = _manifest()["long_description"]
@@ -72,8 +100,103 @@ def test_manifest_long_description_describes_two_step_uninstall():
     assert "移除扩展即可连引擎一起删除" not in description
 
 
+def test_manifest_claims_only_verified_agent_surface_on_darwin():
+    manifest = _manifest()
+    claims = f"{manifest['description']}\n{manifest['long_description']}"
+    assert manifest["compatibility"]["platforms"] == ["darwin"]
+    for required in (
+        "持久化项目",
+        "ModelProgram",
+        "FCStd",
+        "STEP",
+        "create_box",
+        "rotate_part",
+    ):
+        assert required in claims
+    for unsupported in (
+        "打孔",
+        "圆角",
+        "三视图",
+        "装配",
+        "干涉",
+        "STL",
+        "Workbench",
+        "Windows",
+    ):
+        assert unsupported not in claims
+
+
+def test_mcp_dependency_and_lock_are_exact_and_packaged():
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        pyproject = tomllib.load(handle)
+    project = pyproject["project"]
+    assert "mcp==1.27.2" in project["dependencies"]
+    assert "hatchling==1.28.0" in project["dependencies"]
+    assert pyproject["build-system"] == {
+        "requires": ["hatchling==1.28.0"],
+        "build-backend": "hatchling.build",
+    }
+
+    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    assert 'name = "mcp"\nversion = "1.27.2"' in lock
+    assert '{ name = "mcp", specifier = "==1.27.2" }' in lock
+    assert 'name = "hatchling"\nversion = "1.28.0"' in lock
+    assert '{ name = "hatchling", specifier = "==1.28.0" }' in lock
+
+    ignored = {
+        line.strip()
+        for line in (ROOT / ".mcpbignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert "uv.lock" not in ignored
+
+
 def test_mcpbignore_excludes_heavy_dirs():
     ignore = (ROOT / ".mcpbignore").read_text(encoding="utf-8")
-    for pattern in (".venv", ".claude", "__pycache__", ".pytest_cache",
-                    "tests/", "docs/", ".github/", ".vibecad", "dist/"):
+    for pattern in (
+        ".venv",
+        ".claude",
+        "__pycache__",
+        ".pytest_cache",
+        "tests/",
+        "docs/",
+        ".github/",
+        ".vibecad",
+        "dist/",
+    ):
         assert pattern in ignore, f".mcpbignore 缺 {pattern}"
+
+
+def test_packaged_readme_describes_only_the_agent_first_surface():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    normalized_readme = " ".join(readme.split())
+    for required in (
+        "当前 Agent-first 工作流",
+        "用户自带宿主模型",
+        "当前只能从空项目或一个 FCStd 文件开始",
+        "create_project",
+        "submit_model_program",
+        "accept_draft",
+        "export_task_artifacts",
+        "G1",
+        "P1",
+        "P2",
+        "G1 Workbench 尚未交付",
+        "STEP/STL 导入、逆向工程和仿真 尚未接入",
+    ):
+        assert required in normalized_readme
+    for removed_endpoint in (
+        "`smoke_cad`",
+        "`new_document`",
+        "`add_hole`",
+        "`fillet_edges`",
+        "`render_part`",
+        "`new_part`",
+        "`export_part`",
+    ):
+        assert removed_endpoint not in normalized_readme
+
+    roadmap = (ROOT / "docs/PRODUCT_CAPABILITY_ROADMAP.md").read_text(encoding="utf-8")
+    assert "S3-7/P0-A" in roadmap
+    assert "任务级公共 MCP、持久化 draft/review" in roadmap
+    assert "任务级公共 MCP、宿主\n> skill 和 FreeCAD 交互插件尚未交付" not in roadmap

@@ -11,7 +11,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from vibecad.execution.revisions import ProjectHead, RevisionRef
+from vibecad.execution.revisions import (
+    ProjectHead,
+    RevisionRef,
+    RevisionSourceBinding,
+    _candidate_file_limit,
+)
 from vibecad.interaction.storage import SafeRoot, StorageFailure
 
 __all__ = ("ProjectBootstrapResult",)
@@ -644,12 +649,13 @@ def bootstrap_import_project(
             port = cad_port_factory(revision_store=revision_store)
             if not isinstance(port, CadExecutionPort):
                 raise TypeError("cad_port_factory returned an invalid port")
-            evidence = _validate_import_from_pinned_root(
-                port,
-                safe_root,
-                root_fd,
-                stage.name,
-            )
+            with _candidate_file_limit(revision_store):
+                evidence = _validate_import_from_pinned_root(
+                    port,
+                    safe_root,
+                    root_fd,
+                    stage.name,
+                )
             try:
                 _confirm_live_root(safe_root)
                 after_sha256, after_size, after_info = safe_root.hash_open_file(
@@ -674,14 +680,24 @@ def bootstrap_import_project(
                 raise _corrupt_content()
             lease = lease_manager.acquire_project_write(project_id)
             try:
-                pinned_root_path = _descriptor_root_path(safe_root, root_fd)
                 try:
-                    revision_store.import_trusted_fcstd(
+                    revision_store.import_trusted_fcstd_at(
                         project_id,
-                        pinned_root_path / stage.name,
-                        evidence.sha256,
-                        evidence.size_bytes,
-                        lease,
+                        source_parent_fd=root_fd,
+                        source_name=stage.name,
+                        expected_binding=RevisionSourceBinding(
+                            dev=after_info.st_dev,
+                            ino=after_info.st_ino,
+                            mode=after_info.st_mode,
+                            uid=after_info.st_uid,
+                            nlink=after_info.st_nlink,
+                            size=after_info.st_size,
+                            mtime_ns=after_info.st_mtime_ns,
+                            ctime_ns=after_info.st_ctime_ns,
+                        ),
+                        expected_sha256=evidence.sha256,
+                        expected_size=evidence.size_bytes,
+                        lease=lease,
                     )
                 except Exception as error:
                     from vibecad.execution.revisions import (

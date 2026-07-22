@@ -23,6 +23,12 @@ ProgressCb = Callable[[RuntimeStatus], None]
 # Test seam that does not replace ``os.rename`` globally (which would change
 # ``os.supports_dir_fd`` capability detection in :mod:`runtime.status`).
 _rename = os.rename
+_runner_write = os.write
+# Regression seam: persistent runner semantics must never call name-based unlink.
+_runner_unlink = os.unlink
+
+_RUNNER_DIRECTORY_NAME = ".vibecad-runner"
+_RUNNER_EXECUTABLE_NAME = "micromamba"
 
 _FD_EXEC_HELPER = (
     "import os,sys\n"
@@ -293,6 +299,50 @@ def _open_regular_entry(parent: Path, name: str, pinned) -> tuple[int, os.stat_r
         if file_descriptor >= 0:
             os.close(file_descriptor)
         raise
+
+
+_PrivateRunnerIdentity = tuple[int, int, int | None, int, int]
+
+
+def _private_runner_identity(
+    info: os.stat_result,
+    *,
+    directory: bool,
+) -> _PrivateRunnerIdentity:
+    """Validate and snapshot one private runner entry without following aliases."""
+
+    uid = getattr(os, "geteuid", lambda: None)()
+    owned = not hasattr(info, "st_uid") or uid is None or info.st_uid == uid
+    expected_type = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    valid_links = info.st_nlink > 0 if directory else info.st_nlink == 1
+    if not expected_type or not owned or stat.S_IMODE(info.st_mode) != 0o700 or not valid_links:
+        kind = "directory" if directory else "file"
+        raise InstallError(f"private micromamba runner {kind} is unsafe")
+    return (
+        info.st_dev,
+        info.st_ino,
+        getattr(info, "st_uid", None),
+        info.st_mode,
+        info.st_nlink,
+    )
+
+
+def _matches_private_runner_identity(
+    info: os.stat_result,
+    expected: _PrivateRunnerIdentity,
+    *,
+    directory: bool,
+) -> bool:
+    try:
+        actual = _private_runner_identity(info, directory=directory)
+        if directory:
+            # Directory link counts legitimately vary when the staged file is
+            # created/removed (and differ across APFS/ext4). Validate both as
+            # positive, but bind the stable device/inode/owner/mode fields.
+            return actual[:4] == expected[:4]
+        return actual == expected
+    except InstallError:
+        return False
 
 
 def _empty_directory_fd(directory_fd: int) -> None:
@@ -689,76 +739,274 @@ class RuntimeInstaller:
         source: Path,
         target_parent: Path,
         target_parent_pin,
-    ) -> tuple[str, tuple[int, int]]:
-        """Copy one checksum-bound runner into the already-pinned command parent."""
+    ) -> tuple[
+        str,
+        int,
+        _PrivateRunnerIdentity,
+        _PrivateRunnerIdentity,
+    ]:
+        """Copy or recover one checksum-bound runner in a fixed private directory."""
 
         expected_digest = self._micromamba_digests.get(source)
         if expected_digest is None:
             raise InstallError("micromamba generation has no validated digest")
-        runner_name = f".vibecad-runner-{os.getpid()}-{secrets.token_hex(8)}"
+        directory_name = _RUNNER_DIRECTORY_NAME
+        runner_name = _RUNNER_EXECUTABLE_NAME
         source_fd = -1
+        directory_fd = -1
         runner_fd = -1
+        directory_identity: _PrivateRunnerIdentity | None = None
+        runner_identity: _PrivateRunnerIdentity | None = None
         completed = False
         try:
-            with _owned_directory(source.parent, create_missing=False) as source_parent_pin:
-                source_fd, source_info = _open_regular_entry(
-                    source.parent,
-                    source.name,
-                    source_parent_pin,
+            target_parent_pin.validate()
+            try:
+                os.mkdir(directory_name, 0o700, dir_fd=target_parent_pin.fd)
+            except FileExistsError:
+                pass
+            created_directory = os.stat(
+                directory_name,
+                dir_fd=target_parent_pin.fd,
+                follow_symlinks=False,
+            )
+            directory_identity = _private_runner_identity(
+                created_directory,
+                directory=True,
+            )
+            directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            directory_flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            directory_fd = os.open(
+                directory_name,
+                directory_flags,
+                dir_fd=target_parent_pin.fd,
+            )
+            opened_directory = os.fstat(directory_fd)
+            if not _matches_private_runner_identity(
+                opened_directory,
+                directory_identity,
+                directory=True,
+            ):
+                raise InstallError("private micromamba runner directory identity changed")
+            target_parent_pin.validate()
+
+            entries = os.listdir(directory_fd)
+            if entries == [runner_name]:
+                flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                expected_runner = os.stat(
+                    runner_name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
                 )
-                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+                runner_identity = _private_runner_identity(
+                    expected_runner,
+                    directory=False,
+                )
+                runner_fd = os.open(runner_name, flags, dir_fd=directory_fd)
+                opened_runner = os.fstat(runner_fd)
+                live_runner = os.stat(
+                    runner_name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    not _matches_private_runner_identity(
+                        opened_runner,
+                        runner_identity,
+                        directory=False,
+                    )
+                    or not _matches_private_runner_identity(
+                        live_runner,
+                        runner_identity,
+                        directory=False,
+                    )
+                    or _sha256_fd(runner_fd) != expected_digest
+                ):
+                    raise InstallError(
+                        "stale private micromamba runner does not match validated source"
+                    )
+            elif entries:
+                raise InstallError("private micromamba runner directory contains extra entries")
+            else:
+                flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
                 flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
                 runner_fd = os.open(
                     runner_name,
                     flags,
                     0o700,
-                    dir_fd=target_parent_pin.fd,
+                    dir_fd=directory_fd,
                 )
-                digest = hashlib.sha256()
-                while chunk := os.read(source_fd, 1 << 20):
-                    digest.update(chunk)
-                    offset = 0
-                    while offset < len(chunk):
-                        written = os.write(runner_fd, chunk[offset:])
-                        if written <= 0:
-                            raise OSError("micromamba runner copy made no progress")
-                        offset += written
-                if digest.hexdigest() != expected_digest:
-                    raise InstallError("validated micromamba generation identity changed")
-                os.fchmod(runner_fd, 0o700)
-                os.fsync(runner_fd)
-                source_after = os.fstat(source_fd)
-                if (source_after.st_dev, source_after.st_ino) != (
-                    source_info.st_dev,
-                    source_info.st_ino,
-                ):
-                    raise InstallError("validated micromamba generation identity changed")
-                if source_parent_pin is not None:
-                    source_parent_pin.validate()
+                runner_identity = _private_runner_identity(
+                    os.fstat(runner_fd),
+                    directory=False,
+                )
+                with _owned_directory(source.parent, create_missing=False) as source_parent_pin:
+                    source_fd, source_info = _open_regular_entry(
+                        source.parent,
+                        source.name,
+                        source_parent_pin,
+                    )
+                    digest = hashlib.sha256()
+                    while chunk := os.read(source_fd, 1 << 20):
+                        digest.update(chunk)
+                        offset = 0
+                        while offset < len(chunk):
+                            written = _runner_write(runner_fd, chunk[offset:])
+                            if written <= 0:
+                                raise OSError("micromamba runner copy made no progress")
+                            offset += written
+                    os.fchmod(runner_fd, 0o700)
+                    os.fsync(runner_fd)
+                    if (
+                        digest.hexdigest() != expected_digest
+                        or _sha256_fd(runner_fd) != expected_digest
+                    ):
+                        raise InstallError("validated micromamba generation identity changed")
+                    source_after = os.fstat(source_fd)
+                    if (source_after.st_dev, source_after.st_ino) != (
+                        source_info.st_dev,
+                        source_info.st_ino,
+                    ):
+                        raise InstallError("validated micromamba generation identity changed")
+                    if source_parent_pin is not None:
+                        source_parent_pin.validate()
             runner = os.fstat(runner_fd)
             live = os.stat(
                 runner_name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            if not _matches_private_runner_identity(
+                runner,
+                runner_identity,
+                directory=False,
+            ) or not _matches_private_runner_identity(
+                live,
+                runner_identity,
+                directory=False,
+            ):
+                raise InstallError("private micromamba runner identity changed")
+            opened_directory = os.fstat(directory_fd)
+            live_directory = os.stat(
+                directory_name,
                 dir_fd=target_parent_pin.fd,
                 follow_symlinks=False,
             )
             if (
-                not stat.S_ISREG(runner.st_mode)
-                or runner.st_nlink != 1
-                or (runner.st_dev, runner.st_ino) != (live.st_dev, live.st_ino)
+                not _matches_private_runner_identity(
+                    opened_directory,
+                    directory_identity,
+                    directory=True,
+                )
+                or not _matches_private_runner_identity(
+                    live_directory,
+                    directory_identity,
+                    directory=True,
+                )
+                or os.listdir(directory_fd) != [runner_name]
             ):
-                raise InstallError("private micromamba runner identity changed")
+                raise InstallError("private micromamba runner directory identity changed")
             target_parent_pin.validate()
             self._validate_runtime_generation()
             completed = True
-            return runner_name, (runner.st_dev, runner.st_ino)
+            return directory_name, directory_fd, directory_identity, runner_identity
         finally:
             if runner_fd >= 0:
                 os.close(runner_fd)
             if source_fd >= 0:
                 os.close(source_fd)
-            if not completed:
-                with contextlib.suppress(OSError):
-                    os.unlink(runner_name, dir_fd=target_parent_pin.fd)
+            if not completed and directory_fd >= 0:
+                os.close(directory_fd)
+
+    def _validate_staged_micromamba_runner(
+        self,
+        target_parent_pin,
+        directory_name: str,
+        directory_fd: int,
+        directory_identity: _PrivateRunnerIdentity,
+        runner_identity: _PrivateRunnerIdentity,
+        expected_digest: str,
+    ) -> None:
+        """Revalidate exact directory, executable identity and bytes around spawn."""
+
+        target_parent_pin.validate()
+        opened_directory = os.fstat(directory_fd)
+        live_directory = os.stat(
+            directory_name,
+            dir_fd=target_parent_pin.fd,
+            follow_symlinks=False,
+        )
+        live_runner = os.stat(
+            "micromamba",
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        runner_fd = -1
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            runner_fd = os.open(
+                _RUNNER_EXECUTABLE_NAME,
+                flags,
+                dir_fd=directory_fd,
+            )
+            opened_runner = os.fstat(runner_fd)
+            actual_digest = _sha256_fd(runner_fd)
+            opened_directory_after = os.fstat(directory_fd)
+            live_directory_after = os.stat(
+                directory_name,
+                dir_fd=target_parent_pin.fd,
+                follow_symlinks=False,
+            )
+            live_runner_after = os.stat(
+                _RUNNER_EXECUTABLE_NAME,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            if (
+                not _matches_private_runner_identity(
+                    opened_directory,
+                    directory_identity,
+                    directory=True,
+                )
+                or not _matches_private_runner_identity(
+                    live_directory,
+                    directory_identity,
+                    directory=True,
+                )
+                or not _matches_private_runner_identity(
+                    live_runner,
+                    runner_identity,
+                    directory=False,
+                )
+                or not _matches_private_runner_identity(
+                    opened_runner,
+                    runner_identity,
+                    directory=False,
+                )
+                or not _matches_private_runner_identity(
+                    opened_directory_after,
+                    directory_identity,
+                    directory=True,
+                )
+                or not _matches_private_runner_identity(
+                    live_directory_after,
+                    directory_identity,
+                    directory=True,
+                )
+                or not _matches_private_runner_identity(
+                    live_runner_after,
+                    runner_identity,
+                    directory=False,
+                )
+                or os.listdir(directory_fd) != [_RUNNER_EXECUTABLE_NAME]
+                or actual_digest != expected_digest
+            ):
+                raise InstallError("private micromamba runner identity changed")
+            target_parent_pin.validate()
+        finally:
+            if runner_fd >= 0:
+                os.close(runner_fd)
 
     def _run_micromamba_command(
         self,
@@ -799,17 +1047,31 @@ class RuntimeInstaller:
                 env_info = os.fstat(env_pin.fd)
                 if (env_info.st_dev, env_info.st_ino) != expected_env_identity:
                     raise InstallError("managed env generation identity changed")
-                runner_name, runner_identity = self._stage_micromamba_runner(
+                (
+                    runner_directory_name,
+                    runner_directory_fd,
+                    runner_directory_identity,
+                    runner_identity,
+                ) = self._stage_micromamba_runner(
                     micromamba_path,
                     env.parent,
                     env_parent_pin,
                 )
+                runner_digest = self._micromamba_digests[micromamba_path]
                 try:
                     env_parent_pin.validate()
                     env_pin.validate()
+                    self._validate_staged_micromamba_runner(
+                        env_parent_pin,
+                        runner_directory_name,
+                        runner_directory_fd,
+                        runner_directory_identity,
+                        runner_identity,
+                        runner_digest,
+                    )
                     _run(
                         [
-                            f"../{runner_name}",
+                            f"../{runner_directory_name}/micromamba",
                             arguments[0],
                             "-r",
                             "../..",
@@ -820,20 +1082,21 @@ class RuntimeInstaller:
                         cwd_fd=env_pin.fd,
                         generation_guard=self._validate_runtime_generation,
                     )
+                    self._validate_staged_micromamba_runner(
+                        env_parent_pin,
+                        runner_directory_name,
+                        runner_directory_fd,
+                        runner_directory_identity,
+                        runner_identity,
+                        runner_digest,
+                    )
                     env_parent_pin.validate()
                     env_pin.validate()
                     final = os.fstat(env_pin.fd)
                     if (final.st_dev, final.st_ino) != expected_env_identity:
                         raise InstallError("managed env generation identity changed")
                 finally:
-                    with contextlib.suppress(OSError):
-                        live_runner = os.stat(
-                            runner_name,
-                            dir_fd=env_parent_pin.fd,
-                            follow_symlinks=False,
-                        )
-                        if (live_runner.st_dev, live_runner.st_ino) == runner_identity:
-                            os.unlink(runner_name, dir_fd=env_parent_pin.fd)
+                    os.close(runner_directory_fd)
 
     def _install_server_package(
         self,

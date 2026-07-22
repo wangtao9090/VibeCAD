@@ -1,11 +1,12 @@
 # VibeCAD 产品能力与企业化路线
 
-> 状态：Research baseline，供整体架构复审和后续 Stage 计划使用
+> 状态：S3-7/P0-A implementation baseline，供 AR-1 整体架构复审和后续 Stage 计划使用
 >
-> 日期：2026-07-20
+> 日期：2026-07-21
 >
-> 当前基线：VibeCAD 0.4.0，Task Kernel TK1–TK9 已完成；任务级公共 MCP、宿主
-> skill 和 FreeCAD 交互插件尚未交付
+> 当前基线：VibeCAD 0.4.0，Task Kernel TK1–TK9 与 S3-7/P0-A 实现已进入验收；
+> 任务级公共 MCP、持久化 draft/review、首批六操作和 FCStd/STEP artifact 已实现于当前
+> worktree，尚未发布；宿主 skill、P0-B 和 FreeCAD 交互插件尚未交付
 
 ## 1. 结论
 
@@ -45,9 +46,9 @@ Revision 和恢复机制的写路径。
 因此，成熟后的公共工具数量仍可能在 25–40 个之间，内部 operation 可以达到
 60–100 项。数量可以变化，但每个修改能力必须只有一个权威执行路径。
 
-### 2.2 当前最先要补的不是新几何命令
+### 2.2 Stage 3 启动时最先补的不是新几何命令
 
-现有 ModelProgram 和 Task Kernel 有四个基础阻塞：
+以下四项是 Stage 3 启动时的基础阻塞，也是 P0-A 的设计依据：
 
 1. **命令结果引用**：`depends_on` 只排序，后续命令不能可靠引用前一步创建的实体；
 2. **参数类型系统**：当前只有 string、positive number、boolean、vector3，无法表达
@@ -58,9 +59,13 @@ Revision 和恢复机制的写路径。
    valid shape、solid count 和基础 artifact 属性，不能证明孔、圆角、保留区域、
    装配间隙或语义 STEP 一致性。
 
-此外，交互产品还需要第五项基础能力：**持久化 draft/review revision**。当前
-`submit_model_program` 会在一次同步事务中直接验证并推进 HEAD，不支持用户长时间
-查看候选后再接受或拒绝。
+此外，交互产品还需要第五项基础能力：**持久化 draft/review revision**。S3-7/P0-A 已把
+`submit_model_program` 改为生成可恢复候选，并通过 `accept_draft` / `reject_draft` 显式决策；
+首批六操作的 result handle、SelectorV1 Level A、细粒度 observation/verifier 也已进入公共路径。
+上述四项在更广的 PartDesign、mapped subobject、复杂特征和装配范围仍需 P1/P2 继续扩展。
+
+当前近期缺口已经转为 P0-B 的任务 list/cancel、revision list/compare/revert、完整 artifact
+manifest 和 retention/GC，以及 G1 的 daemon、认证 IPC 和 Workbench candidate review。
 
 ## 3. 目标架构：一个内核、两个 FreeCAD 执行端
 
