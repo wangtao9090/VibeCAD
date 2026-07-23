@@ -229,11 +229,11 @@ def test_swap_handshake_hang_exits_nonzero_no_orphan(sup_factory, tmp_path):
     assert not _pid_alive(int(pid_file.read_text()))  # 挂死子进程已被强杀，无孤儿
 
 
-def test_unsafe_pending_request_gets_unknown_outcome_and_is_not_replayed(
+def test_default_keyed_create_task_is_replayed_after_response_loss(
     sup_factory,
     tmp_path,
 ):
-    """响应前换芯的非幂等 create_task 只执行一次，返回固定 unknown outcome。"""
+    """响应前换芯后，幂等 create_task 以原 payload 重放并拿到新代响应。"""
     tool_log = tmp_path / "tools.log"
     sup = sup_factory(
         {
@@ -248,6 +248,37 @@ def test_unsafe_pending_request_gets_unknown_outcome_and_is_not_replayed(
         "tools/call",
         {"name": "create_task", "arguments": {}},
     )
+    assert response["id"] == 7
+    assert response["result"]["gen"] == 2
+    assert response["result"]["tool"] == "create_task"
+    assert _rpc(sup, 8, "ping")["result"]["gen"] == 2
+    assert tool_log.read_text(encoding="utf-8").splitlines() == [
+        "1:create_task",
+        "2:create_task",
+    ]
+
+    sup.stdin.close()
+    assert sup.wait(timeout=15) == 0
+
+
+def test_unsafe_pending_request_gets_unknown_outcome_and_is_not_replayed(
+    sup_factory,
+    tmp_path,
+):
+    tool_log = tmp_path / "tools.log"
+    sup = sup_factory(
+        {
+            "VIBECAD_FAKE_SWAP_TOOL": "unsafe_tool",
+            "VIBECAD_FAKE_TOOL_LOG": str(tool_log),
+        }
+    )
+    _handshake(sup)
+    response = _rpc(
+        sup,
+        7,
+        "tools/call",
+        {"name": "unsafe_tool", "arguments": {}},
+    )
     assert response == {
         "jsonrpc": "2.0",
         "id": 7,
@@ -257,7 +288,7 @@ def test_unsafe_pending_request_gets_unknown_outcome_and_is_not_replayed(
         },
     }
     assert _rpc(sup, 8, "ping")["result"]["gen"] == 2
-    assert tool_log.read_text(encoding="utf-8").splitlines() == ["1:create_task"]
+    assert tool_log.read_text(encoding="utf-8").splitlines() == ["1:unsafe_tool"]
 
     sup.stdin.close()
     assert sup.wait(timeout=15) == 0
@@ -1791,7 +1822,7 @@ def test_swap_plan_replays_only_frozen_safe_set_and_fails_unknown_outcome() -> N
             "jsonrpc": "2.0",
             "id": 7,
             "method": "tools/call",
-            "params": {"name": "create_task", "arguments": {}},
+            "params": {"name": "unsafe_tool", "arguments": {}},
         },
     )
     payloads = tuple(_payload(item) for item in requests)
@@ -1994,7 +2025,7 @@ def test_default_replay_tool_set_matches_public_idempotence_contract() -> None:
 
     expected = frozenset(spec.name for spec in public_tool_specs() if spec.annotations.idempotent)
     assert supervisor._DEFAULT_IDEMPOTENT_TOOLS == expected
-    assert "create_task" not in supervisor._DEFAULT_IDEMPOTENT_TOOLS
+    assert "create_task" in supervisor._DEFAULT_IDEMPOTENT_TOOLS
 
 
 def test_response_reader_caps_before_decode_and_reads_in_bounded_chunks() -> None:

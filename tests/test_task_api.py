@@ -42,6 +42,10 @@ OTHER_TASK_ID = "task_11111111111111111111111111111111"
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
 BASE_REVISION = "revision_0123456789abcdef0123456789abcdef"
 CANDIDATE_REVISION = "revision_11111111111111111111111111111111"
+CREATE_KEY = "task_create_0123456789abcdef0123456789abcdef"
+KEYED_TASK_ID = "task_e9f9dc52c8f75cd72feddee2648564b8"
+CREATION_DIGEST = "e9f9dc52c8f75cd72feddee2648564b8b4bf0b07836368165d3a0c1fedeee1ef"
+COLLISION_DIGEST = CREATION_DIGEST[:32] + "f" * 32
 DRAFT_ID = "draft_11111111111111111111111111111111"
 OTHER_CANDIDATE_REVISION = "revision_22222222222222222222222222222222"
 OTHER_DRAFT_ID = "draft_22222222222222222222222222222222"
@@ -128,6 +132,91 @@ def _created(
         reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
         review_policy=review_policy,
     )
+
+
+def _keyed_created(
+    *,
+    project_id: str = PROJECT_ID,
+    review_policy: ReviewPolicy = ReviewPolicy.AUTO_COMMIT,
+) -> TaskRun:
+    return new_task_run(
+        task_id=KEYED_TASK_ID,
+        project_id=project_id,
+        base_revision=BASE_REVISION,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=review_policy,
+        creation_digest=CREATION_DIGEST,
+    )
+
+
+def _keyed_needs_plan(
+    *,
+    project_id: str = PROJECT_ID,
+    review_policy: ReviewPolicy = ReviewPolicy.AUTO_COMMIT,
+) -> TaskRun:
+    return transition_task(
+        _keyed_created(project_id=project_id, review_policy=review_policy),
+        TaskEvent.REQUEST_PLAN,
+    )
+
+
+def _create_request(
+    *,
+    create_key: object = CREATE_KEY,
+    project_id: object = PROJECT_ID,
+    review_policy: object = "auto_commit",
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "create_key": create_key,
+        "project_id": project_id,
+        "review_policy": review_policy,
+    }
+
+
+def test_create_key_derives_identity_and_accepts_a_progressed_replay_snapshot():
+    replay = transition_task(
+        new_task_run(
+            task_id=KEYED_TASK_ID,
+            project_id=PROJECT_ID,
+            base_revision=BASE_REVISION,
+            reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+            review_policy=ReviewPolicy.AUTO_COMMIT,
+            creation_digest=CREATION_DIGEST,
+        ),
+        TaskEvent.REQUEST_PLAN,
+    )
+    replay = transition_task(
+        replay,
+        TaskEvent.SUBMIT_PROGRAM,
+        program=_program(task_id=KEYED_TASK_ID),
+    )
+    port = _FakePort(StoredTaskRun(generation=3, task_run=replay))
+
+    response = TaskApi(port=port).create_task(
+        {
+            "schema_version": 1,
+            "create_key": CREATE_KEY,
+            "project_id": PROJECT_ID,
+            "review_policy": "auto_commit",
+        }
+    )
+
+    result = _assert_success(response)
+    assert result["generation"] == 3
+    assert result["task_run"]["id"] == KEYED_TASK_ID
+    assert result["task_run"]["creation_digest"] == CREATION_DIGEST
+    assert port.calls == [
+        (
+            "create_task",
+            {
+                "create_key": CREATE_KEY,
+                "project_id": PROJECT_ID,
+                "reasoning_owner": ReasoningOwner.EXTERNAL_PLAN,
+                "review_policy": ReviewPolicy.AUTO_COMMIT,
+            },
+        )
+    ]
 
 
 def _review_draft(*, candidate_revision: str = CANDIDATE_REVISION) -> ReviewDraft:
@@ -401,7 +490,7 @@ def test_public_surface_error_taxonomies_and_method_signatures_are_closed():
     }
     assert tuple(inspect.signature(TaskServicePort.create_task).parameters) == (
         "self",
-        "task_id",
+        "create_key",
         "project_id",
         "reasoning_owner",
         "review_policy",
@@ -420,31 +509,18 @@ def test_port_failure_requires_an_exact_closed_code():
         TaskServicePortFailure(code="invalid_input")  # type: ignore[arg-type]
 
 
-def test_create_owns_the_task_id_external_plan_and_exact_result_envelope():
-    port = _FakePort(_stored())
-    calls = 0
+def test_create_derives_the_task_id_external_plan_and_exact_result_envelope():
+    port = _FakePort(StoredTaskRun(generation=0, task_run=_keyed_needs_plan()))
 
-    def id_factory() -> str:
-        nonlocal calls
-        calls += 1
-        return TASK_ID
-
-    response = TaskApi(port=port, task_id_factory=id_factory).create_task(
-        {
-            "schema_version": 1,
-            "project_id": PROJECT_ID,
-            "review_policy": "auto_commit",
-        }
-    )
+    response = TaskApi(port=port).create_task(_create_request())
 
     result = _assert_success(response)
     auto_commit = ReviewPolicy.AUTO_COMMIT
-    assert calls == 1
     assert port.calls == [
         (
             "create_task",
             {
-                "task_id": TASK_ID,
+                "create_key": CREATE_KEY,
                 "project_id": PROJECT_ID,
                 "reasoning_owner": ReasoningOwner.EXTERNAL_PLAN,
                 "review_policy": auto_commit,
@@ -455,21 +531,22 @@ def test_create_owns_the_task_id_external_plan_and_exact_result_envelope():
     assert result == {
         "generation": 0,
         "next_action": "submit_program",
-        "task_run": _task_at(TaskStatus.NEEDS_PLAN).to_mapping(),
+        "task_run": _keyed_needs_plan().to_mapping(),
     }
 
 
-def test_create_requires_an_explicit_review_policy_before_allocating_an_id():
-    port = _FakePort(_stored())
-    generated: list[str] = []
+def test_create_requires_an_explicit_review_policy_before_calling_the_port():
+    port = _FakePort(StoredTaskRun(generation=0, task_run=_keyed_needs_plan()))
 
-    response = TaskApi(
-        port=port,
-        task_id_factory=lambda: generated.append(TASK_ID) or TASK_ID,
-    ).create_task({"schema_version": 1, "project_id": PROJECT_ID})
+    response = TaskApi(port=port).create_task(
+        {
+            "schema_version": 1,
+            "create_key": CREATE_KEY,
+            "project_id": PROJECT_ID,
+        }
+    )
 
     _assert_error(response, "missing_field", "/review_policy")
-    assert generated == []
     assert port.calls == []
 
 
@@ -484,15 +561,9 @@ def test_create_requires_an_explicit_review_policy_before_allocating_an_id():
     ],
 )
 def test_create_review_policy_ingress_is_exact(value, code):
-    port = _FakePort(_stored())
+    port = _FakePort(StoredTaskRun(generation=0, task_run=_keyed_needs_plan()))
 
-    response = TaskApi(port=port).create_task(
-        {
-            "schema_version": 1,
-            "project_id": PROJECT_ID,
-            "review_policy": value,
-        }
-    )
+    response = TaskApi(port=port).create_task(_create_request(review_policy=value))
 
     _assert_error(response, code, "/review_policy")
     assert port.calls == []
@@ -500,19 +571,10 @@ def test_create_review_policy_ingress_is_exact(value, code):
 
 def test_create_require_review_passes_the_exact_enum_and_requires_matching_result():
     require_review = ReviewPolicy.REQUIRE_REVIEW
-    needs_plan = transition_task(
-        _created(review_policy=require_review),
-        TaskEvent.REQUEST_PLAN,
-    )
+    needs_plan = _keyed_needs_plan(review_policy=require_review)
     port = _FakePort(StoredTaskRun(generation=0, task_run=needs_plan))
 
-    response = TaskApi(port=port, task_id_factory=lambda: TASK_ID).create_task(
-        {
-            "schema_version": 1,
-            "project_id": PROJECT_ID,
-            "review_policy": "require_review",
-        }
-    )
+    response = TaskApi(port=port).create_task(_create_request(review_policy="require_review"))
 
     result = _assert_success(response)
     assert result["task_run"]["review_policy"] == "require_review"
@@ -520,7 +582,7 @@ def test_create_require_review_passes_the_exact_enum_and_requires_matching_resul
         (
             "create_task",
             {
-                "task_id": TASK_ID,
+                "create_key": CREATE_KEY,
                 "project_id": PROJECT_ID,
                 "reasoning_owner": ReasoningOwner.EXTERNAL_PLAN,
                 "review_policy": require_review,
@@ -531,86 +593,66 @@ def test_create_require_review_passes_the_exact_enum_and_requires_matching_resul
 
 def test_create_mismatched_review_policy_port_result_is_internal():
     auto_commit = ReviewPolicy.AUTO_COMMIT
-    needs_plan = transition_task(
-        _created(review_policy=auto_commit),
-        TaskEvent.REQUEST_PLAN,
-    )
+    needs_plan = _keyed_needs_plan(review_policy=auto_commit)
     port = _FakePort(StoredTaskRun(generation=0, task_run=needs_plan))
 
-    response = TaskApi(port=port, task_id_factory=lambda: TASK_ID).create_task(
-        {
-            "schema_version": 1,
-            "project_id": PROJECT_ID,
-            "review_policy": "require_review",
-        }
-    )
+    response = TaskApi(port=port).create_task(_create_request(review_policy="require_review"))
 
     _assert_error(response, "internal_error", "")
     assert [name for name, _ in port.calls] == ["create_task"]
 
 
-def test_create_collision_calls_the_id_source_and_port_exactly_once():
+def test_create_collision_calls_the_port_exactly_once():
     failure = TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT)
     port = _FakePort(failure)
-    generated: list[str] = []
 
-    response = TaskApi(
-        port=port,
-        task_id_factory=lambda: generated.append(TASK_ID) or TASK_ID,
-    ).create_task(
-        {
-            "schema_version": 1,
-            "project_id": PROJECT_ID,
-            "review_policy": "auto_commit",
-        }
-    )
+    response = TaskApi(port=port).create_task(_create_request())
 
     _assert_error(response, "conflict", "")
-    assert generated == [TASK_ID]
     assert [name for name, _ in port.calls] == ["create_task"]
 
 
-@pytest.mark.parametrize("generated", ["TASK_" + "A" * 32, "task_short", 7, None])
-def test_invalid_generated_id_is_internal_and_never_reaches_the_port(generated):
-    port = _FakePort(_stored())
-    api = TaskApi(port=port, task_id_factory=lambda: generated)
+@pytest.mark.parametrize(
+    ("create_key", "code"),
+    [
+        ("TASK_CREATE_" + "A" * 32, "invalid_value"),
+        ("task_create_short", "invalid_value"),
+        (7, "invalid_type"),
+        (None, "invalid_type"),
+    ],
+)
+def test_invalid_create_key_never_reaches_the_port(create_key, code):
+    port = _FakePort(StoredTaskRun(generation=0, task_run=_keyed_needs_plan()))
 
-    response = api.create_task(
-        {
-            "schema_version": 1,
-            "project_id": PROJECT_ID,
-            "review_policy": "auto_commit",
-        }
-    )
+    response = TaskApi(port=port).create_task(_create_request(create_key=create_key))
 
-    _assert_error(response, "internal_error", "")
+    _assert_error(response, code, "/create_key")
     assert port.calls == []
 
 
-def test_id_factory_raise_is_redacted_and_not_retried():
-    port = _FakePort(_stored())
-    calls = 0
-
-    def fail():
-        nonlocal calls
-        calls += 1
-        raise RuntimeError("/private/path secret")
-
-    response = TaskApi(port=port, task_id_factory=fail).create_task(
-        {
-            "schema_version": 1,
-            "project_id": PROJECT_ID,
-            "review_policy": "auto_commit",
-        }
+def test_invalid_create_key_precedes_other_invalid_create_intent_fields():
+    response = TaskApi(port=object()).create_task(
+        _create_request(
+            create_key="bad",
+            project_id="bad",
+            review_policy="bad",
+        )
     )
 
+    _assert_error(response, "invalid_value", "/create_key")
+
+
+def test_create_port_raise_is_redacted_and_not_retried():
+    port = _FakePort(RuntimeError("/private/path secret"))
+
+    response = TaskApi(port=port).create_task(_create_request())
+
     _assert_error(response, "internal_error", "")
-    assert calls == 1
     assert "private" not in json.dumps(response)
-    assert port.calls == []
+    assert [name for name, _ in port.calls] == ["create_task"]
 
 
-def test_internal_failure_type_raised_by_factory_or_port_is_never_trusted():
+def test_internal_failure_type_raised_by_a_port_is_never_trusted():
     injected = task_api_module._ApiFailure(  # type: ignore[attr-defined]
         TaskApiErrorCode.INVALID_INPUT,
         "/secret/private/path",
@@ -618,21 +660,12 @@ def test_internal_failure_type_raised_by_factory_or_port_is_never_trusted():
     port = _FakePort(injected)
 
     port_response = TaskApi(port=port).get_task({"schema_version": 1, "task_id": TASK_ID})
-    factory_response = TaskApi(
-        port=_FakePort(_stored()),
-        task_id_factory=lambda: (_ for _ in ()).throw(injected),
-    ).create_task(
-        {
-            "schema_version": 1,
-            "project_id": PROJECT_ID,
-            "review_policy": "auto_commit",
-        }
-    )
+    create_response = TaskApi(port=_FakePort(injected)).create_task(_create_request())
 
     _assert_error(port_response, "internal_error", "")
-    _assert_error(factory_response, "internal_error", "")
+    _assert_error(create_response, "internal_error", "")
     assert "/secret" not in json.dumps(port_response)
-    assert "/secret" not in json.dumps(factory_response)
+    assert "/secret" not in json.dumps(create_response)
 
 
 def test_review_port_attribute_lookup_cannot_inject_an_api_failure():
@@ -1030,26 +1063,28 @@ def test_forged_exact_port_failure_with_a_public_code_is_internal():
     _assert_error(response, "internal_error", "")
 
 
-def test_create_rejects_a_created_or_wrong_project_port_result_as_internal():
+def test_create_rejects_a_created_wrong_project_or_wrong_digest_port_result_as_internal():
+    collision = transition_task(
+        new_task_run(
+            task_id=KEYED_TASK_ID,
+            project_id=PROJECT_ID,
+            base_revision=BASE_REVISION,
+            reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+            review_policy=ReviewPolicy.AUTO_COMMIT,
+            creation_digest=COLLISION_DIGEST,
+        ),
+        TaskEvent.REQUEST_PLAN,
+    )
     values = [
-        StoredTaskRun(generation=0, task_run=_task_at(TaskStatus.CREATED)),
+        StoredTaskRun(generation=0, task_run=_keyed_created()),
         StoredTaskRun(
             generation=0,
-            task_run=transition_task(
-                _created(project_id="project_11111111111111111111111111111111"),
-                TaskEvent.REQUEST_PLAN,
-            ),
+            task_run=_keyed_needs_plan(project_id="project_11111111111111111111111111111111"),
         ),
-        StoredTaskRun(generation=1, task_run=_task_at(TaskStatus.NEEDS_PLAN)),
+        StoredTaskRun(generation=1, task_run=collision),
     ]
     for value in values:
-        response = TaskApi(port=_FakePort(value), task_id_factory=lambda: TASK_ID).create_task(
-            {
-                "schema_version": 1,
-                "project_id": PROJECT_ID,
-                "review_policy": "auto_commit",
-            }
-        )
+        response = TaskApi(port=_FakePort(value)).create_task(_create_request())
         _assert_error(response, "internal_error", "")
 
 
@@ -1071,7 +1106,7 @@ def test_dict_subclass_is_rejected_before_overridden_iteration():
 @pytest.mark.parametrize(
     ("method", "payload", "path"),
     [
-        ("create_task", {"schema_version": 1}, "/project_id"),
+        ("create_task", {"schema_version": 1}, "/create_key"),
         ("get_task", {"schema_version": 1}, "/task_id"),
         (
             "resume_task",
@@ -1120,7 +1155,12 @@ def test_unsafe_schema_version_is_invalid_value_before_version_dispatch():
     [
         (
             "create_task",
-            {"schema_version": 1, "project_id": 1, "review_policy": "auto_commit"},
+            {
+                "schema_version": 1,
+                "create_key": CREATE_KEY,
+                "project_id": 1,
+                "review_policy": "auto_commit",
+            },
             "invalid_type",
             "/project_id",
         ),
@@ -1128,6 +1168,7 @@ def test_unsafe_schema_version_is_invalid_value_before_version_dispatch():
             "create_task",
             {
                 "schema_version": 1,
+                "create_key": CREATE_KEY,
                 "project_id": "PROJECT_" + "A" * 32,
                 "review_policy": "auto_commit",
             },
@@ -1167,9 +1208,7 @@ def test_identifier_and_generation_fields_are_exact(method, payload, code, path)
 @pytest.mark.parametrize("value", [(1,), b"bytes", {1}, object(), float("nan"), float("inf")])
 def test_hostile_outer_values_fail_closed_without_calling_the_port(value):
     port = _FakePort(_stored())
-    response = TaskApi(port=port).create_task(
-        {"schema_version": 1, "project_id": value, "review_policy": "auto_commit"}
-    )
+    response = TaskApi(port=port).create_task(_create_request(project_id=value))
     assert response["ok"] is False
     assert response["error"]["code"] in {"invalid_type", "invalid_value"}
     assert port.calls == []
@@ -1195,7 +1234,12 @@ def test_outer_cycle_alias_and_invalid_unicode_fail_closed():
     [
         (
             "create_task",
-            {"schema_version": 1, "project_id": "", "review_policy": "auto_commit"},
+            {
+                "schema_version": 1,
+                "create_key": CREATE_KEY,
+                "project_id": "",
+                "review_policy": "auto_commit",
+            },
             "project_id",
         ),
         ("get_task", {"schema_version": 1, "task_id": ""}, "task_id"),
@@ -1325,6 +1369,7 @@ def test_huge_outer_and_program_strings_fail_before_utf8_encoding(monkeypatch):
     outer = TaskApi(port=object()).create_task(
         {
             "schema_version": 1,
+            "create_key": CREATE_KEY,
             "project_id": "x" * 4_097,
             "review_policy": "auto_commit",
         }

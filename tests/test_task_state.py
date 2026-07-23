@@ -42,15 +42,18 @@ from vibecad.workflow.state import (
     append_verification,
     new_task_run,
     next_action_for,
+    task_creation_identity,
     transition_task,
 )
 
 TASK_ID = "task_0123456789abcdef0123456789abcdef"
+KEYED_TASK_ID = "task_e9f9dc52c8f75cd72feddee2648564b8"
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
 BASE_REVISION = "revision_0123456789abcdef0123456789abcdef"
 CANDIDATE_REVISION = "revision_11111111111111111111111111111111"
 COMMITTED_REVISION = CANDIDATE_REVISION
 OTHER_REVISION = "revision_22222222222222222222222222222222"
+CREATION_DIGEST = "e9f9dc52c8f75cd72feddee2648564b8b4bf0b07836368165d3a0c1fedeee1ef"
 
 
 def _error(*, needs_input: bool = False) -> StepError:
@@ -101,6 +104,50 @@ def _task() -> TaskRun:
         base_revision=BASE_REVISION,
         reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
         review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+
+
+def test_task_creation_digest_is_durable_while_legacy_records_remain_readable():
+    keyed = new_task_run(
+        task_id=KEYED_TASK_ID,
+        project_id=PROJECT_ID,
+        base_revision=BASE_REVISION,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+        creation_digest=CREATION_DIGEST,
+    )
+
+    assert keyed.creation_digest == CREATION_DIGEST
+    assert keyed.to_mapping()["creation_digest"] == CREATION_DIGEST
+    assert TaskRun.from_mapping(keyed.to_mapping()) == keyed
+
+    legacy = _task().to_mapping()
+    legacy.pop("creation_digest", None)
+    restored = TaskRun.from_mapping(legacy)
+    assert restored.creation_digest is None
+    assert restored.to_mapping()["creation_digest"] is None
+    assert TaskRun.from_mapping(_task().to_mapping()) == _task()
+
+
+def test_task_creation_identity_is_frozen_and_digest_must_bind_the_task_id():
+    assert task_creation_identity("task_create_0123456789abcdef0123456789abcdef") == (
+        KEYED_TASK_ID,
+        CREATION_DIGEST,
+    )
+
+    with pytest.raises(TaskStateError) as caught:
+        new_task_run(
+            task_id=TASK_ID,
+            project_id=PROJECT_ID,
+            base_revision=BASE_REVISION,
+            reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+            review_policy=ReviewPolicy.AUTO_COMMIT,
+            creation_digest=CREATION_DIGEST,
+        )
+
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/creation_digest",
     )
 
 
@@ -3613,6 +3660,7 @@ def test_review_policy_is_closed_and_required_without_a_hidden_default():
         "base_revision",
         "reasoning_owner",
         "review_policy",
+        "creation_digest",
     )
     assert parameters["review_policy"].default is inspect.Parameter.empty
     with pytest.raises(TypeError):
@@ -3837,9 +3885,7 @@ def test_review_history_and_policy_cannot_be_forged_during_round_trip():
     )
 
     raw = awaiting.to_mapping()
-    raw["draft"]["verification_id"] = (
-        "verification_22222222222222222222222222222222"
-    )
+    raw["draft"]["verification_id"] = "verification_22222222222222222222222222222222"
     with pytest.raises(TaskStateError) as caught:
         TaskRun.from_mapping(raw)
     assert (caught.value.code, caught.value.path) == (

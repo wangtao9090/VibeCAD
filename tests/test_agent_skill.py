@@ -275,9 +275,13 @@ def test_skill_has_the_exact_executable_next_action_table():
     unknown = _paragraph_with(body, "create_task", "unknown")
     normalized = _normalized(unknown)
     assert "task id" in normalized or "task_id" in normalized
-    assert re.search(r"stop|停止", unknown, re.IGNORECASE)
-    assert re.search(r"report|报告", unknown, re.IGNORECASE)
-    assert re.search(r"never.{0,24}retry|不得.{0,24}重试|不能.{0,24}重试", unknown, re.IGNORECASE)
+    assert "same retained create key" in normalized
+    assert re.search(r"\bretry\b|重试", unknown, re.IGNORECASE)
+    assert re.search(
+        r"never.{0,32}replacement key|不得.{0,32}新(?:的)? key|不能.{0,32}新(?:的)? key",
+        unknown,
+        re.IGNORECASE,
+    )
 
 
 def test_skill_teaches_resource_links_and_fail_closed_product_limits():

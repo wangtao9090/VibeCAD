@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from enum import StrEnum
 
 from vibecad.execution.revisions import LocalRevisionStore, ProjectHead
@@ -14,6 +15,7 @@ from vibecad.workflow.state import (
     TaskStateError,
     TaskStatus,
     new_task_run,
+    task_creation_identity,
     transition_task,
 )
 from vibecad.workflow.store import (
@@ -53,6 +55,38 @@ _ERROR_MESSAGES = {
     TaskCatalogErrorCode.RESOURCE_EXHAUSTED: "The task store capacity is exhausted.",
     TaskCatalogErrorCode.STORE_FAILURE: "The task record operation failed.",
 }
+_REPLAY_WAIT_SECONDS = 1.0
+_REPLAY_RETRY_LIMIT = 512
+_REPLAY_DEADLINE_GRACE_RETRY_LIMIT = 32
+_REPLAY_LOAD_DELAY_SECONDS = 0.002
+_REPLAY_DEADLINE_GRACE_DELAY_CAP_SECONDS = 0.05
+
+
+class _ReplayRetryBudget:
+    __slots__ = ("_deadline", "_deadline_grace_remaining", "_retries_remaining")
+
+    def __init__(self) -> None:
+        self._deadline = time.monotonic() + _REPLAY_WAIT_SECONDS
+        self._retries_remaining = _REPLAY_RETRY_LIMIT
+        self._deadline_grace_remaining = _REPLAY_DEADLINE_GRACE_RETRY_LIMIT
+
+    def wait_for_retry(self) -> bool:
+        if time.monotonic() < self._deadline:
+            if self._retries_remaining <= 0:
+                return False
+            self._retries_remaining -= 1
+            delay = _REPLAY_LOAD_DELAY_SECONDS
+        else:
+            if self._deadline_grace_remaining <= 0:
+                return False
+            attempt = _REPLAY_DEADLINE_GRACE_RETRY_LIMIT - self._deadline_grace_remaining
+            self._deadline_grace_remaining -= 1
+            delay = min(
+                _REPLAY_LOAD_DELAY_SECONDS * (2**attempt),
+                _REPLAY_DEADLINE_GRACE_DELAY_CAP_SECONDS,
+            )
+        time.sleep(delay)
+        return True
 
 
 class TaskCatalogError(ValueError):
@@ -107,15 +141,32 @@ class TaskCatalogService:
     def create_task(
         self,
         *,
-        task_id: str,
         project_id: str,
         reasoning_owner: ReasoningOwner,
         review_policy: ReviewPolicy,
+        task_id: str | None = None,
+        create_key: str | None = None,
     ) -> StoredTaskRun:
         if type(reasoning_owner) is not ReasoningOwner or type(review_policy) is not ReviewPolicy:
             _raise(TaskCatalogErrorCode.INVALID_INPUT)
         if reasoning_owner is not ReasoningOwner.EXTERNAL_PLAN:
             _raise(TaskCatalogErrorCode.UNSUPPORTED_REASONING_OWNER)
+        if create_key is not None:
+            if task_id is not None:
+                _raise(TaskCatalogErrorCode.INVALID_INPUT)
+            try:
+                task_id, creation_digest = task_creation_identity(create_key)
+            except TaskStateError:
+                _raise(TaskCatalogErrorCode.INVALID_INPUT)
+            return self._create_keyed(
+                task_id=task_id,
+                creation_digest=creation_digest,
+                project_id=project_id,
+                reasoning_owner=reasoning_owner,
+                review_policy=review_policy,
+            )
+        if task_id is None:
+            _raise(TaskCatalogErrorCode.INVALID_INPUT)
         task: TaskRun | None = None
         stored: StoredTaskRun | None = None
         failure: TaskCatalogErrorCode | None = None
@@ -141,10 +192,10 @@ class TaskCatalogService:
                 uncertain_generation = getattr(error, "committed_generation", None)
             elif error.code is TaskStoreErrorCode.ALREADY_EXISTS:
                 failure = TaskCatalogErrorCode.CONFLICT
-            elif error.code is TaskStoreErrorCode.INVALID_ID:
-                failure = TaskCatalogErrorCode.INVALID_INPUT
             elif error.code is TaskStoreErrorCode.RESOURCE_EXHAUSTED:
                 failure = TaskCatalogErrorCode.RESOURCE_EXHAUSTED
+            elif error.code is TaskStoreErrorCode.INVALID_ID:
+                failure = TaskCatalogErrorCode.INVALID_INPUT
             else:
                 failure = TaskCatalogErrorCode.STORE_FAILURE
         except TaskStateError:
@@ -168,6 +219,160 @@ class TaskCatalogService:
             _raise(failure)
         if type(stored) is not StoredTaskRun:
             _raise(TaskCatalogErrorCode.STORE_FAILURE)
+        return stored
+
+    def _create_keyed(
+        self,
+        *,
+        task_id: str,
+        creation_digest: str,
+        project_id: str,
+        reasoning_owner: ReasoningOwner,
+        review_policy: ReviewPolicy,
+    ) -> StoredTaskRun:
+        retry_budget = _ReplayRetryBudget()
+        while True:
+            try:
+                existing = self._task_store.load(task_id)
+            except TaskStoreError as error:
+                if error.code is TaskStoreErrorCode.NOT_FOUND:
+                    existing = None
+                elif error.code is TaskStoreErrorCode.LOCK_UNAVAILABLE:
+                    if not retry_budget.wait_for_retry():
+                        _raise(TaskCatalogErrorCode.STORE_FAILURE)
+                    continue
+                elif error.code is TaskStoreErrorCode.INVALID_ID:
+                    _raise(TaskCatalogErrorCode.INVALID_INPUT)
+                elif error.code is TaskStoreErrorCode.RESOURCE_EXHAUSTED:
+                    _raise(TaskCatalogErrorCode.RESOURCE_EXHAUSTED)
+                else:
+                    _raise(TaskCatalogErrorCode.STORE_FAILURE)
+            except Exception:
+                _raise(TaskCatalogErrorCode.STORE_FAILURE)
+            if existing is not None:
+                return self._replay_or_conflict(
+                    existing,
+                    creation_digest=creation_digest,
+                    project_id=project_id,
+                    reasoning_owner=reasoning_owner,
+                    review_policy=review_policy,
+                )
+
+            try:
+                head = self._revision_store.load_head(project_id)
+                if type(head) is not ProjectHead or head.project_id != project_id:
+                    _raise(TaskCatalogErrorCode.STORE_FAILURE)
+                task = transition_task(
+                    new_task_run(
+                        task_id=task_id,
+                        project_id=project_id,
+                        base_revision=head.revision_id,
+                        reasoning_owner=reasoning_owner,
+                        review_policy=review_policy,
+                        creation_digest=creation_digest,
+                    ),
+                    TaskEvent.REQUEST_PLAN,
+                )
+            except TaskCatalogError:
+                raise
+            except TaskStateError:
+                _raise(TaskCatalogErrorCode.INVALID_INPUT)
+            except Exception:
+                _raise(TaskCatalogErrorCode.STORE_FAILURE)
+
+            try:
+                return self._task_store.create(task)
+            except TaskStoreError as error:
+                if error.code is TaskStoreErrorCode.DURABILITY_UNCERTAIN:
+                    readback = self._load_replay_candidate(
+                        task_id,
+                        await_publication=True,
+                        retry_budget=retry_budget,
+                    )
+                    if readback is None:
+                        _raise(TaskCatalogErrorCode.STORE_FAILURE)
+                    return self._replay_or_conflict(
+                        readback,
+                        creation_digest=creation_digest,
+                        project_id=project_id,
+                        reasoning_owner=reasoning_owner,
+                        review_policy=review_policy,
+                    )
+                if error.code is TaskStoreErrorCode.ALREADY_EXISTS:
+                    readback = self._load_replay_candidate(
+                        task_id,
+                        await_publication=True,
+                        retry_budget=retry_budget,
+                    )
+                    if readback is None:
+                        _raise(TaskCatalogErrorCode.STORE_FAILURE)
+                    return self._replay_or_conflict(
+                        readback,
+                        creation_digest=creation_digest,
+                        project_id=project_id,
+                        reasoning_owner=reasoning_owner,
+                        review_policy=review_policy,
+                    )
+                if error.code is TaskStoreErrorCode.LOCK_UNAVAILABLE:
+                    if not retry_budget.wait_for_retry():
+                        _raise(TaskCatalogErrorCode.STORE_FAILURE)
+                    continue
+                if error.code is TaskStoreErrorCode.INVALID_ID:
+                    _raise(TaskCatalogErrorCode.INVALID_INPUT)
+                if error.code is TaskStoreErrorCode.RESOURCE_EXHAUSTED:
+                    _raise(TaskCatalogErrorCode.RESOURCE_EXHAUSTED)
+                _raise(TaskCatalogErrorCode.STORE_FAILURE)
+            except Exception:
+                _raise(TaskCatalogErrorCode.STORE_FAILURE)
+
+    def _load_replay_candidate(
+        self,
+        task_id: str,
+        *,
+        await_publication: bool,
+        retry_budget: _ReplayRetryBudget | None = None,
+    ) -> StoredTaskRun | None:
+        if retry_budget is None:
+            retry_budget = _ReplayRetryBudget()
+        while True:
+            try:
+                return self._task_store.load(task_id)
+            except TaskStoreError as error:
+                retryable = error.code in {
+                    TaskStoreErrorCode.LOCK_UNAVAILABLE,
+                    TaskStoreErrorCode.RESOURCE_EXHAUSTED,
+                } or (await_publication and error.code is TaskStoreErrorCode.NOT_FOUND)
+                if retryable:
+                    if not retry_budget.wait_for_retry():
+                        return None
+                    continue
+                if error.code is TaskStoreErrorCode.NOT_FOUND and not await_publication:
+                    return None
+                if error.code is TaskStoreErrorCode.INVALID_ID:
+                    _raise(TaskCatalogErrorCode.INVALID_INPUT)
+                if error.code is TaskStoreErrorCode.RESOURCE_EXHAUSTED:
+                    _raise(TaskCatalogErrorCode.RESOURCE_EXHAUSTED)
+                _raise(TaskCatalogErrorCode.STORE_FAILURE)
+            except Exception:
+                _raise(TaskCatalogErrorCode.STORE_FAILURE)
+
+    @staticmethod
+    def _replay_or_conflict(
+        stored: StoredTaskRun,
+        *,
+        creation_digest: str,
+        project_id: str,
+        reasoning_owner: ReasoningOwner,
+        review_policy: ReviewPolicy,
+    ) -> StoredTaskRun:
+        task = stored.task_run
+        if (
+            task.creation_digest != creation_digest
+            or task.project_id != project_id
+            or task.reasoning_owner is not reasoning_owner
+            or task.review_policy is not review_policy
+        ):
+            _raise(TaskCatalogErrorCode.CONFLICT)
         return stored
 
     def get_task(self, *, task_id: str) -> StoredTaskRun:

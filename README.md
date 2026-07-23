@@ -70,8 +70,9 @@ Task Kernel 为每次写操作提供以下保证：
 - `require_review` 产生持久化 draft，Accept 才发布，Reject 不改变 HEAD；
 - 交付物在导出和读取时再次校验状态、来源、哈希与大小。
 
-如果 `create_task` 的响应结果未知且没有拿到 task id，当前版本必须停止并报告，不能盲目重试；P0-B
-会用 request key、查询与恢复能力关闭这个缺口。
+调用 `create_task` 前必须生成并持久保留一个 `task_create_` request key。若响应结果未知，
+使用完全相同的 key、项目与审核策略重放 `create_task`；Task Kernel 会返回同一个任务的当前
+generation，不会产生第二个任务。
 
 ## 安装：MCP 服务与 Agent Skill 是两件事
 

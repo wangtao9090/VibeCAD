@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import math
 import re
-import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -30,7 +29,12 @@ from vibecad.workflow.errors import (
     ContractValidationError,
     join_json_pointer,
 )
-from vibecad.workflow.state import ReasoningOwner, ReviewPolicy, TaskStatus
+from vibecad.workflow.state import (
+    ReasoningOwner,
+    ReviewPolicy,
+    TaskStatus,
+    task_creation_identity,
+)
 from vibecad.workflow.store import StoredTaskRun
 
 _MAX_SMALL_REQUEST_BYTES = 4_096
@@ -43,6 +47,7 @@ _MAX_PROGRAM_JSON_KEY_BYTES = 256
 _MAX_PUBLIC_ERROR_PATH_BYTES = 256
 _MAX_OUTER_JSON_NODES = 8_192
 _TASK_ID = re.compile(r"^task_[0-9a-f]{32}$")
+_TASK_CREATE_KEY = re.compile(r"^task_create_[0-9a-f]{32}$")
 _PROJECT_ID = re.compile(r"^project_[0-9a-f]{32}$")
 _DRAFT_ID = re.compile(r"^draft_[0-9a-f]{32}$")
 
@@ -136,7 +141,7 @@ class TaskServicePort(Protocol):
     def create_task(
         self,
         *,
-        task_id: str,
+        create_key: str,
         project_id: str,
         reasoning_owner: ReasoningOwner,
         review_policy: ReviewPolicy,
@@ -184,10 +189,6 @@ class _JsonIngressFailure(Exception):
 
 def _raise(code: TaskApiErrorCode, path: str = "") -> None:
     raise _ApiFailure(code, path)
-
-
-def _new_task_id() -> str:
-    return f"task_{secrets.token_hex(16)}"
 
 
 def _bounded_pointer(parent: str, token: str) -> str:
@@ -585,22 +586,18 @@ def _failure(error: _ApiFailure) -> dict[str, object]:
 class TaskApi:
     """Strict public adapter over an injected deterministic task-service port."""
 
-    __slots__ = ("_port", "_registry", "_task_id_factory")
+    __slots__ = ("_port", "_registry")
 
     def __init__(
         self,
         *,
         port: TaskServicePort,
         registry: OperationRegistry = DEFAULT_OPERATION_REGISTRY,
-        task_id_factory: Callable[[], str] = _new_task_id,
     ) -> None:
         if type(registry) is not OperationRegistry:
             raise TypeError("registry must be an exact OperationRegistry")
-        if not callable(task_id_factory):
-            raise TypeError("task_id_factory must be callable")
         self._port = port
         self._registry = registry
-        self._task_id_factory = task_id_factory
 
     @staticmethod
     def _guard(action: Callable[[], dict[str, object]]) -> dict[str, object]:
@@ -646,17 +643,16 @@ class TaskApi:
         def action() -> dict[str, object]:
             data = _validate_request(
                 request,
-                required=frozenset({"schema_version", "project_id", "review_policy"}),
+                required=frozenset({"schema_version", "create_key", "project_id", "review_policy"}),
             )
+            create_key = _identifier(data["create_key"], "/create_key", _TASK_CREATE_KEY)
             project_id = _identifier(data["project_id"], "/project_id", _PROJECT_ID)
             review_policy = _review_policy(data["review_policy"])
-            generated = self._invoke_untrusted(self._task_id_factory)
-            if type(generated) is not str or _TASK_ID.fullmatch(generated) is None:
-                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            generated, creation_digest = task_creation_identity(create_key)
             stored = self._port_result(
                 self._invoke_untrusted(
                     lambda: self._port.create_task(
-                        task_id=generated,
+                        create_key=create_key,
                         project_id=project_id,
                         reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
                         review_policy=review_policy,
@@ -666,11 +662,11 @@ class TaskApi:
             )
             task = stored.task_run
             if not (
-                stored.generation == 0
-                and task.project_id == project_id
+                task.project_id == project_id
                 and task.reasoning_owner is ReasoningOwner.EXTERNAL_PLAN
                 and task.review_policy is review_policy
-                and task.status is TaskStatus.NEEDS_PLAN
+                and task.creation_digest == creation_digest
+                and task.status is not TaskStatus.CREATED
             ):
                 _raise(TaskApiErrorCode.INTERNAL_ERROR)
             return self._task_result(stored, task_id=generated)

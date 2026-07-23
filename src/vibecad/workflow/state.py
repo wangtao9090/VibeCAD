@@ -7,6 +7,7 @@ model, filesystem, or network integration.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -44,6 +45,8 @@ _MAX_ERROR_PATH_LENGTH = 256
 _MAX_RENDERED_ERROR_LENGTH = 512
 _TRUNCATED_POINTER_TOKEN = "__truncated__"
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_TASK_CREATE_KEY_RE = re.compile(r"^task_create_[0-9a-f]{32}$")
+_TASK_CREATE_ID_DOMAIN = b"vibecad-task-create-v1\0"
 _IDENTIFIER_RE = {
     "task": re.compile(r"^task_[0-9a-f]{32}$"),
     "project": re.compile(r"^project_[0-9a-f]{32}$"),
@@ -193,9 +196,7 @@ class CriterionOutcome(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
-_TERMINAL_STATUSES = frozenset(
-    {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.REJECTED}
-)
+_TERMINAL_STATUSES = frozenset({TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.REJECTED})
 _CANDIDATE_ACTIVE_STATUSES = frozenset(
     {
         TaskStatus.EXECUTING,
@@ -367,6 +368,21 @@ def _digest(value: object, path: str) -> str:
     if not _DIGEST_RE.fullmatch(text):
         raise _failure(TaskStateErrorCode.INVALID_VALUE, path, "expected lowercase SHA-256 digest")
     return text
+
+
+def task_creation_identity(create_key: object) -> tuple[str, str]:
+    """Derive the frozen task identifier and complete replay digest for a create key."""
+
+    text = _text(create_key, "/create_key")
+    assert text is not None
+    if _TASK_CREATE_KEY_RE.fullmatch(text) is None:
+        raise _failure(
+            TaskStateErrorCode.INVALID_VALUE,
+            "/create_key",
+            "expected canonical task creation key",
+        )
+    digest = hashlib.sha256(_TASK_CREATE_ID_DOMAIN + text.encode("utf-8")).hexdigest()
+    return f"task_{digest[:32]}", digest
 
 
 def _integer(value: object, path: str, *, minimum: int = 0) -> int:
@@ -1169,6 +1185,7 @@ class TaskRun:
     reasoning_owner: ReasoningOwner
     review_policy: ReviewPolicy
     status: TaskStatus
+    creation_digest: str | None = None
     program: ModelProgram | None = None
     candidate_revision: str | None = None
     committed_revision: str | None = None
@@ -1199,6 +1216,18 @@ class TaskRun:
                 "expected ReviewPolicy",
             )
         object.__setattr__(self, "status", _enum(self.status, TaskStatus, "/status"))
+        if self.creation_digest is not None:
+            object.__setattr__(
+                self,
+                "creation_digest",
+                _digest(self.creation_digest, "/creation_digest"),
+            )
+            if self.id != f"task_{self.creation_digest[:32]}":
+                raise _failure(
+                    TaskStateErrorCode.INVARIANT_VIOLATION,
+                    "/creation_digest",
+                    "creation digest must bind task id",
+                )
         if self.program is not None and type(self.program) is not ModelProgram:
             raise _failure(
                 TaskStateErrorCode.INVALID_TYPE, "/program", "expected ModelProgram or null"
@@ -1285,9 +1314,11 @@ class TaskRun:
         transition_events = tuple(record.event for record in self.transitions)
         review_started = TaskEvent.PREPARE_REVIEW in transition_events
         if self.review_policy is ReviewPolicy.AUTO_COMMIT:
-            if self.draft is not None or any(
-                event in _REVIEW_EVENTS for event in transition_events
-            ) or self.status in _REVIEW_STATUSES:
+            if (
+                self.draft is not None
+                or any(event in _REVIEW_EVENTS for event in transition_events)
+                or self.status in _REVIEW_STATUSES
+            ):
                 raise _failure(
                     TaskStateErrorCode.INVARIANT_VIOLATION,
                     "/review_policy",
@@ -1595,6 +1626,7 @@ class TaskRun:
             "reasoning_owner": self.reasoning_owner.value,
             "review_policy": self.review_policy.value,
             "status": self.status.value,
+            "creation_digest": self.creation_digest,
             "program": None if self.program is None else self.program.to_mapping(),
             "candidate_revision": self.candidate_revision,
             "committed_revision": self.committed_revision,
@@ -1616,6 +1648,7 @@ class TaskRun:
             "reasoning_owner",
             "review_policy",
             "status",
+            "creation_digest",
             "program",
             "candidate_revision",
             "committed_revision",
@@ -1626,7 +1659,12 @@ class TaskRun:
             "last_error",
             "transitions",
         }
-        data = _mapping(value, "", allowed=fields, required=fields)
+        data = _mapping(
+            value,
+            "",
+            allowed=fields,
+            required=fields - {"creation_digest"},
+        )
         program_raw = data["program"]
         draft_raw = data["draft"]
         error_raw = data["last_error"]
@@ -1677,6 +1715,7 @@ class TaskRun:
             reasoning_owner=data["reasoning_owner"],
             review_policy=_enum(data["review_policy"], ReviewPolicy, "/review_policy"),
             status=data["status"],
+            creation_digest=data.get("creation_digest"),
             program=program,
             candidate_revision=data["candidate_revision"],
             committed_revision=data["committed_revision"],
@@ -1780,6 +1819,7 @@ def new_task_run(
     base_revision: str,
     reasoning_owner: ReasoningOwner,
     review_policy: ReviewPolicy,
+    creation_digest: str | None = None,
 ) -> TaskRun:
     """Create a new immutable task at the durable ``created`` state."""
 
@@ -1790,6 +1830,7 @@ def new_task_run(
         reasoning_owner=reasoning_owner,
         review_policy=review_policy,
         status=TaskStatus.CREATED,
+        creation_digest=creation_digest,
     )
 
 
@@ -1839,11 +1880,15 @@ def transition_task(
             "/event",
             "pre-candidate confirmation requires no published candidate",
         )
-    if event in {
-        TaskEvent.CONFIRM_COMMITTED,
-        TaskEvent.CONFIRM_UNCOMMITTED,
-        TaskEvent.CONFIRM_DRAFT_UNCOMMITTED,
-    } and task.candidate_revision is None:
+    if (
+        event
+        in {
+            TaskEvent.CONFIRM_COMMITTED,
+            TaskEvent.CONFIRM_UNCOMMITTED,
+            TaskEvent.CONFIRM_DRAFT_UNCOMMITTED,
+        }
+        and task.candidate_revision is None
+    ):
         raise _failure(
             TaskStateErrorCode.INVALID_TRANSITION,
             "/event",

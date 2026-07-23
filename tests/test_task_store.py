@@ -11,7 +11,7 @@ import stat
 import subprocess
 import sys
 import threading
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
@@ -50,9 +50,12 @@ from vibecad.workflow.store import (
 )
 
 TASK_ID = "task_0123456789abcdef0123456789abcdef"
+KEYED_TASK_ID = "task_e9f9dc52c8f75cd72feddee2648564b8"
 OTHER_TASK_ID = "task_11111111111111111111111111111111"
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
 BASE_REVISION = "revision_0123456789abcdef0123456789abcdef"
+CREATION_DIGEST = "e9f9dc52c8f75cd72feddee2648564b8b4bf0b07836368165d3a0c1fedeee1ef"
+COLLISION_DIGEST = CREATION_DIGEST[:32] + "f" * 32
 KEY_DOMAIN = b"vibecad-task-store-key-v1\0"
 CHECKSUM_DOMAIN = b"vibecad-stored-task-run-v1\0"
 MAX_RECORD_BYTES = 2 * 1024 * 1024
@@ -82,6 +85,78 @@ def _task(task_id: str = TASK_ID) -> TaskRun:
         reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
         review_policy=ReviewPolicy.AUTO_COMMIT,
     )
+
+
+def test_store_restart_preserves_the_complete_task_creation_digest(
+    store: TaskRunStore,
+    store_root: Path,
+    lease_root: Path,
+):
+    keyed = new_task_run(
+        task_id=KEYED_TASK_ID,
+        project_id=PROJECT_ID,
+        base_revision=BASE_REVISION,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+        creation_digest=CREATION_DIGEST,
+    )
+
+    created = store.create(keyed)
+    restarted = _reopened_store(store_root, lease_root)
+
+    assert restarted.load(KEYED_TASK_ID) == created
+    assert restarted.load(KEYED_TASK_ID).task_run.creation_digest == CREATION_DIGEST
+
+
+def test_checksum_valid_legacy_record_without_creation_digest_is_normalized_after_verify(
+    store: TaskRunStore,
+    store_root: Path,
+):
+    mapping = _task().to_mapping()
+    mapping.pop("creation_digest")
+    body = {
+        "generation": 0,
+        "schema_version": 1,
+        "task_run": mapping,
+    }
+    _write_record(store_root, _record_from_body(body))
+
+    loaded = store.load(TASK_ID)
+
+    assert loaded == StoredTaskRun(generation=0, task_run=_task())
+    assert loaded.task_run.creation_digest is None
+    advanced = store.compare_and_set(TASK_ID, loaded.generation, loaded.task_run)
+    assert advanced.generation == 1
+    assert advanced.task_run.creation_digest is None
+
+
+@pytest.mark.parametrize("mutation", ["keyed_to_legacy", "legacy_to_keyed", "digest_to_digest"])
+def test_compare_and_set_cannot_change_the_task_creation_digest(
+    store: TaskRunStore,
+    mutation: str,
+):
+    keyed = new_task_run(
+        task_id=KEYED_TASK_ID,
+        project_id=PROJECT_ID,
+        base_revision=BASE_REVISION,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+        creation_digest=CREATION_DIGEST,
+    )
+    legacy = replace(keyed, creation_digest=None)
+    collision = replace(keyed, creation_digest=COLLISION_DIGEST)
+    current, replacement = {
+        "keyed_to_legacy": (keyed, legacy),
+        "legacy_to_keyed": (legacy, keyed),
+        "digest_to_digest": (keyed, collision),
+    }[mutation]
+    created = store.create(current)
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.compare_and_set(KEYED_TASK_ID, created.generation, replacement)
+
+    assert caught.value.code is TaskStoreErrorCode.CONFLICT
+    assert store.load(KEYED_TASK_ID) == created
 
 
 def _task_with_unicode(text: str) -> TaskRun:

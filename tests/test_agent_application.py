@@ -69,6 +69,10 @@ def _task_id(index: int) -> str:
     return f"task_{index:032x}"
 
 
+def _task_create_key(index: int) -> str:
+    return f"task_create_{index:032x}"
+
+
 def _tree_digest(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*")):
@@ -464,6 +468,7 @@ def test_empty_bootstrap_and_task_control_never_create_a_cad_runtime(tmp_path: P
     created = api.create_task(
         {
             "schema_version": 1,
+            "create_key": _task_create_key(1),
             "project_id": project.head.project_id,
             "review_policy": "auto_commit",
         }
@@ -474,6 +479,29 @@ def test_empty_bootstrap_and_task_control_never_create_a_cad_runtime(tmp_path: P
     assert loaded == created
     assert calls == []
     app.close()
+
+
+def test_task_create_request_replays_the_same_task_after_application_restart(tmp_path: Path):
+    data_root = _data_root(tmp_path)
+    first_app = AgentApplication.open(data_root=data_root)
+    project = first_app.bootstrap_empty()
+    request = {
+        "schema_version": 1,
+        "create_key": _task_create_key(5),
+        "project_id": project.head.project_id,
+        "review_policy": "require_review",
+    }
+    first = first_app.create_task_request(request)
+    first_app.close()
+
+    restarted = AgentApplication.open(data_root=data_root)
+    replayed = restarted.create_task_request(request)
+
+    assert first["ok"] is True
+    assert replayed == first
+    assert replayed["result"]["task_run"]["creation_digest"] is not None
+    assert len(tuple(restarted._layout.tasks.glob("*.json"))) == 1  # noqa: SLF001
+    restarted.close()
 
 
 def test_application_preserves_catalog_capacity_as_public_port_failure(
@@ -515,6 +543,7 @@ app = AgentApplication.open(
 project = app.bootstrap_empty()
 response = app.create_task_request({{
     'schema_version': 1,
+    'create_key': 'task_create_' + '2' * 32,
     'project_id': project.head.project_id,
     'review_policy': 'auto_commit'
 }})
@@ -734,6 +763,7 @@ def test_lazy_application_composes_exact_private_adapters_and_shared_authority(
     task = app.create_task_request(
         {
             "schema_version": 1,
+            "create_key": _task_create_key(3),
             "project_id": project["result"]["project_id"],
             "review_policy": "auto_commit",
         }
@@ -818,6 +848,7 @@ def test_retained_private_adapters_cannot_bypass_application_close(tmp_path: Pat
     task = app.create_task_request(
         {
             "schema_version": 1,
+            "create_key": _task_create_key(4),
             "project_id": project_id,
             "review_policy": "auto_commit",
         }

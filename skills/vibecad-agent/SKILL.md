@@ -33,7 +33,7 @@ get_runtime_status
   -> resources/read for each returned resource URI
 ```
 
-Before a mutating call, read the current task when state may have advanced. After a mutating call, use the returned state and generation; do not replay merely because a response is slow. Accept only the named draft based on its evidence, or reject it with an explicit reason.
+Before `create_task`, generate and retain one fresh key matching `task_create_[0-9a-f]{32}`. Before another mutating call, read the current task when state may have advanced. After a mutating call, use the returned state and generation; do not replay merely because a response is slow. Accept only the named draft based on its evidence, or reject it with an explicit reason.
 
 `create_project` supports `empty` or `import_fcstd`; the verified `import_fcstd` envelope accepts only a nonempty FCStd whose objects are all `Part::Box` or `Part::Cylinder`, and must reject every unsupported or mixed object type.
 
@@ -51,7 +51,7 @@ Before a mutating call, read the current task when state may have advanced. Afte
 | `wait` | Poll with `get_task`; if the persisted state is resumable, call `resume_task` at most once for that observed generation. |
 | `none` | Stop mutation and report the terminal or non-actionable state. |
 
-If the outcome of `create_task` is unknown and no task id or task_id was received, stop and report the bounded orphan risk; never retry that creation call. A later recovery API may make the orphan discoverable, but this skill must not invent an id.
+If the outcome of `create_task` is unknown and no task id or task_id was received, retry `create_task` with the exact same retained create key, project id, and review policy. The replay returns the same task's current generation; never generate a replacement key for recovery.
 
 ## Artifact delivery
 

@@ -877,6 +877,7 @@ def test_unpacked_mcpb_agent_first_stdio_acceptance(tmp_path):
                 "create_task",
                 {
                     "schema_version": 1,
+                    "create_key": f"task_create_{secrets.token_hex(16)}",
                     "project_id": project_id,
                     "review_policy": "auto_commit",
                 },

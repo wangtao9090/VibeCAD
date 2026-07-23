@@ -503,7 +503,7 @@ def test_public_annotations_match_the_independent_product_contract():
         "get_capabilities": (True, False, True, False),
         "create_project": (False, False, True, True),
         "get_project": (False, False, True, False),
-        "create_task": (False, False, False, False),
+        "create_task": (False, False, True, False),
         "get_task": (False, False, True, False),
         "submit_model_program": (False, True, True, False),
         "resume_task": (False, True, True, False),
@@ -540,7 +540,7 @@ def test_every_public_schema_is_closed_complete_and_specialized():
         "get_capabilities": ("schema_version",),
         "create_project": ("schema_version", "create_key", "kind"),
         "get_project": ("schema_version", "project_id"),
-        "create_task": ("schema_version", "project_id", "review_policy"),
+        "create_task": ("schema_version", "create_key", "project_id", "review_policy"),
         "get_task": ("schema_version", "task_id"),
         "submit_model_program": (
             "schema_version",
@@ -1916,7 +1916,12 @@ def _model_program_for_server_surface() -> dict[str, object]:
         (
             "create_task",
             "create_task_request",
-            {"schema_version": 1, "project_id": PROJECT_ID, "review_policy": "auto_commit"},
+            {
+                "schema_version": 1,
+                "create_key": "task_create_0123456789abcdef0123456789abcdef",
+                "project_id": PROJECT_ID,
+                "review_policy": "auto_commit",
+            },
         ),
         ("get_task", "get_task_request", {"schema_version": 1, "task_id": TASK_ID}),
         (

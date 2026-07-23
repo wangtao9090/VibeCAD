@@ -1087,6 +1087,7 @@ _ARTIFACT_PATTERN = r"^artifact_[0-9a-f]{32}$"
 _VERIFICATION_PATTERN = r"^verification_[0-9a-f]{32}$"
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
 _CREATE_KEY_PATTERN = r"^project_create_[0-9a-f]{32}$"
+_TASK_CREATE_KEY_PATTERN = r"^task_create_[0-9a-f]{32}$"
 _EXPORT_KEY_PATTERN = r"^export_[0-9a-f]{32}$"
 _MATERIALIZATION_PATTERN = r"^materialization_[0-9a-f]{64}$"
 _FEATURE_PATTERN = r"^feature_[0-9a-f]{32}$"
@@ -1961,6 +1962,7 @@ def _task_run_schema() -> dict[str, object]:
                 "type": "string",
                 "enum": tuple(item.value for item in TaskStatus),
             },
+            "creation_digest": _nullable(_id_schema(_DIGEST_PATTERN)),
             "program": _nullable(_model_program_schema()),
             "candidate_revision": _nullable(_id_schema(_REVISION_PATTERN)),
             "committed_revision": _nullable(_id_schema(_REVISION_PATTERN)),
@@ -2038,6 +2040,7 @@ def _stable_input_schema(name: str) -> dict[str, object]:
         return _closed_schema(
             {
                 "schema_version": _version_schema(),
+                "create_key": _id_schema(_TASK_CREATE_KEY_PATTERN),
                 "project_id": _id_schema(_PROJECT_PATTERN),
                 "review_policy": {
                     "type": "string",
@@ -2130,7 +2133,7 @@ def _stable_annotations(name: str) -> ToolAnnotations:
         "get_capabilities": (True, False, True, False),
         "create_project": (False, False, True, True),
         "get_project": (False, False, True, False),
-        "create_task": (False, False, False, False),
+        "create_task": (False, False, True, False),
         "get_task": (False, False, True, False),
         "submit_model_program": (False, True, True, False),
         "resume_task": (False, True, True, False),

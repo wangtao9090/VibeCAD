@@ -86,6 +86,7 @@ import hashlib
 import json
 import math
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -1981,6 +1982,7 @@ def create_task(app: AgentApplication, project_id: str, policy: str) -> dict[str
         app.create_task_request(
             {
                 "schema_version": 1,
+                "create_key": f"task_create_{secrets.token_hex(16)}",
                 "project_id": project_id,
                 "review_policy": policy,
             }

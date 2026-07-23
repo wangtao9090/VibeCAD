@@ -339,6 +339,9 @@ def _decode_record(raw: bytes, selected_task_id: str) -> StoredTaskRun:
     expected = hashlib.sha256(_CHECKSUM_DOMAIN + _canonical_json(body)).hexdigest()
     if not secrets.compare_digest(checksum, expected):
         raise TaskStoreError(TaskStoreErrorCode.CORRUPT_RECORD)
+    normalized_task_mapping = task_mapping
+    if "creation_digest" not in task_mapping:
+        normalized_task_mapping = {**task_mapping, "creation_digest": None}
     task_failed = False
     task_run = None
     try:
@@ -347,7 +350,7 @@ def _decode_record(raw: bytes, selected_task_id: str) -> StoredTaskRun:
         task_failed = True
     if task_failed or type(task_run) is not TaskRun:
         raise TaskStoreError(TaskStoreErrorCode.CORRUPT_RECORD)
-    if task_run.to_mapping() != task_mapping or task_run.id != selected_task_id:
+    if task_run.to_mapping() != normalized_task_mapping or task_run.id != selected_task_id:
         raise TaskStoreError(TaskStoreErrorCode.CORRUPT_RECORD)
     return StoredTaskRun(generation=generation, task_run=task_run)
 
@@ -1835,6 +1838,11 @@ class TaskRunStore:
                 filename = _record_name(task_id)
                 current = _read_record(root_fd, root_stat, filename, task_id)
                 self._require_expected(current, expected_generation)
+                if (
+                    current is not None
+                    and current.task_run.creation_digest != task_run.creation_digest
+                ):
+                    raise TaskStoreError(TaskStoreErrorCode.CONFLICT)
                 old_sha256, _old_size = _record_sha256(current)
                 new_sha256 = hashlib.sha256(raw).hexdigest()
                 staged_bound = self._staged_bound_line(

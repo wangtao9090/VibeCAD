@@ -79,6 +79,7 @@ _DEFAULT_IDEMPOTENT_TOOLS = frozenset(
         "get_capabilities",
         "create_project",
         "get_project",
+        "create_task",
         "get_task",
         "submit_model_program",
         "resume_task",

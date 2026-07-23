@@ -560,6 +560,15 @@ P0B-GIT and exact artifact/ledger readback. The slow gate runs only after its
 tests exist and the managed FreeCAD environment identity has been recorded;
 setup failure is not a passing RED.
 
+P0B-GATE-CORR-01 / 2026-07-23T03:31Z: the first C01 gate invocation without
+`PYTHONPATH` collected with four `ModuleNotFoundError` errors because this
+Python 3.13.14 environment skips Hatch's hidden editable `.pth`. This is the
+already documented repository toolchain behavior, not a semantic RED. For
+P0B-C01 through C14 and P0B-SLOW, the exact executable gate is the command
+printed above with `PYTHONPATH=src` prepended. Ruff, diff and Git gates are
+unchanged. The invalid collection run is preserved in P0B-E03 and must never be
+counted as RED or GREEN.
+
 ## 9. Residuals
 
 | ID | Evidence / impact | Owner and disposition | Observable closure condition |
@@ -620,6 +629,8 @@ remain residual and unauthorized.
 | P0B-E00 / 2026-07-22 | draft P0B-R1; no implementation approval | not-created / not-pushed | three independent read-only audits; anchor/status/allowlist inspection; no source edit | P0B-RES-01..12 | P0B-S00 | draft |
 | P0B-E01 / 2026-07-23T03:27:51Z | P0B-D01..D22 plus D08A/D17A at P0B-R1; P0B-A01 | not-created / not-pushed | five pre-approval findings closed; final independent review `0/0/0`; approved digest recorded | P0B-RES-01..12; OE-DEV-01 | P0B-S01 | approved |
 | P0B-E02 / 2026-07-23T03:29:39Z | P0B-D22-R1 at P0B-R1.1; P0B-A02 | `6eb209d` plus this authority commit / push pending | exact branch/HEAD/status verified before amendment | P0B-RES-12 narrowed to PR/tag/release; OE-DEV-01 pending first equality | P0B-S02 | authorized-push |
+| P0B-E03 / 2026-07-23T03:31Z | P0B-R1.1; C01 gate setup correction under P0B-D21 | not-created / `a7e6881` already pushed and equal | raw C01 command: exit 2, four collection errors from skipped hidden `.pth`; corrected `PYTHONPATH=src` 5-test semantic RED: exit 1, 5 intended failures | known Python 3.13 editable-path residual; no product-scope change | P0B-S03 | superseded-gate |
+| P0B-E04 / 2026-07-23T04:23:04Z | P0B-C01 under P0B-R1.1/A01/A02; P0B-D21 allowlist repair | this C01 commit / non-force push required | semantic RED 5/5; focused `1025 passed`; affected integration `229 passed, 19 deselected`; full `3902 passed, 95 deselected`; same-key stress `200/200 + 100/100`; Ruff/diff clean; independent review `0/0/0` | Python 3.13 explicit `PYTHONPATH=src` remains; one existing macOS fork deprecation warning; no product residual | P0B-S04 | accepted-green |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -721,3 +732,80 @@ remain residual and unauthorized.
   then verify `HEAD == @{upstream}` after every accepted commit.
 - All previous allowlists, gates, circuit breakers and residual boundaries
   remain unchanged. No PR/tag/release/marketplace action is authorized.
+
+## 15. Recovery Snapshot P0B-S03
+
+### 1. Completed milestones
+
+- P0B-R1.1 authority commit `a7e6881` is pushed and exactly equals
+  `origin/codex/agent-stage3`.
+- C01's unprefixed pytest command was rejected as an environment/setup red;
+  corrected explicit-checkout import produced a genuine five-failure RED.
+
+### 2. Next steps
+
+1. Continue C01 only with `PYTHONPATH=src` prepended to pytest commands.
+2. Implement replay-safe task creation, run the corrected focused/integrated
+   gates and assign a distinct review.
+3. Append C01 evidence, commit named files, push and verify remote equality.
+
+### 3. Approved decisions
+
+- P0B-A01/A02 and P0B-D01..D22 plus D08A/D17A/D22-R1 remain active.
+- P0B-GATE-CORR-01 corrects only the observed checkout import route under
+  P0B-D21; it does not change product behavior or weaken a gate.
+
+### 4. Execution discipline
+
+- Treat the four collection errors as setup evidence only and the five intended
+  failures as the sole C01 RED.
+- C01's allowlist is expanded within the approved stage to
+  `src/vibecad/workflow/store.py` and directly affected public-contract tests;
+  no other product scope changes.
+
+## 16. Recovery Snapshot P0B-S04
+
+### 1. Completed milestones
+
+- C01 makes public `create_task` require a retained
+  `task_create_[0-9a-f]{32}` key. The domain-separated SHA-256 binds a stable
+  task id while the full digest and immutable intent distinguish a truncated
+  prefix collision.
+- Same-key response loss, restart, current-generation replay, HEAD advance,
+  legacy occupants, cross-thread/process races, uncertain durability and
+  scheduler oversleep are covered. Legacy schema-v1 records without
+  `creation_digest` remain checksum-valid and CAS-compatible; the digest is
+  immutable once present.
+- Public tool count remains 20. The public schema, idempotence annotation,
+  Supervisor replay set, Agent Skill, acceptance guide and runtime receipt
+  digest now agree. No FreeCAD/CAD execution path was added.
+- Controller gates are green: focused `1025 passed`; affected integration
+  `229 passed, 19 deselected`; full non-slow `3902 passed, 95 deselected`.
+  Same-key stress passed `200/200` and a final `100/100`; review is `0/0/0`.
+
+### 2. Next steps
+
+1. Commit the exact C01 allowlist as
+   `feat(tasks): make task creation replay-safe`.
+2. Non-force push `codex/agent-stage3`, then verify exact
+   `HEAD == @{upstream}`.
+3. Rebind the prepared C02 packet to that accepted remote anchor and begin
+   bounded task discovery/events without repeating P0B-A01 or P0B-A02.
+
+### 3. Approved decisions
+
+- P0B-A01/A02 and P0B-D01..D22 plus D08A/D17A/D22-R1 remain active.
+- P0B-D21 covers the in-scope concurrency repair and the directly affected
+  runtime public-surface receipt anchor; no scope, authority or delivery
+  boundary changed.
+
+### 4. Execution discipline
+
+- The retry controller is bounded by a one-second regular window, 512 regular
+  attempts and 32 deadline-grace attempts with a 50 ms delay cap. One budget is
+  shared through create, `ALREADY_EXISTS` and uncertain-durability readback.
+- Preserve P0B-GATE-CORR-01: pytest uses explicit `PYTHONPATH=src`; the hidden
+  editable `.pth` collection behavior is environment evidence, not product
+  RED.
+- PR, tag, release, marketplace publication, force-push and external spend
+  remain unauthorized.

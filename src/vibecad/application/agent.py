@@ -683,18 +683,20 @@ class AgentApplication:
     def create_task(
         self,
         *,
-        task_id: str,
         project_id: str,
         reasoning_owner: ReasoningOwner,
         review_policy: ReviewPolicy,
+        task_id: str | None = None,
+        create_key: str | None = None,
     ) -> StoredTaskRun | TaskServicePortFailure:
         self._ensure_live()
         try:
             return self._catalog.create_task(
-                task_id=task_id,
                 project_id=project_id,
                 reasoning_owner=reasoning_owner,
                 review_policy=review_policy,
+                task_id=task_id,
+                create_key=create_key,
             )
         except TaskCatalogError as error:
             return self._catalog_failure(error)
