@@ -21,7 +21,7 @@ OCCT 的事实独立验收，并原子提交或安全保留审核草案。
 
 | 能力层 | S3-8 本地实现状态 | 当前能否通过公共 MCP 调用 |
 |---|---|---|
-| 运行时/能力/项目/任务/审核/交付 | 14 个稳定工具已实现 | 能 |
+| 运行时/能力/项目/任务/审核/交付 | 20 个稳定工具已实现 | 能 |
 | Registry 直接 CAD | 六个 object-level 工具已实现 | 能 |
 | 多步 ModelProgram | versioned schema、ResultRef、Selector、Acceptance 已实现 | 能 |
 | Durable review | require-review、跨重启 Accept/Reject、stale-base CAS 已实现 | 能 |
@@ -128,8 +128,8 @@ Accept 不是“信任旧 verdict 后直接改指针”。它会重开 immutable
 - 两者都产生 TaskRun、candidate/draft、verification report、revision 和 artifact；
 - 工具数量不是能力目标。稳定控制面保持小而稳定，CAD operation 可按准入门逐批扩展。
 
-当前 24 个公开工具中，只有 6 个是 direct CAD 工具；其余是 5 个 service/runtime/capability 控制工具
-和 13 个 project/revision/task/review/artifact facade。不能把“24 个公开工具”误写为“24 个 CAD command”。
+当前 26 个公开工具中，只有 6 个是 direct CAD 工具；其余是 5 个 service/runtime/capability 控制工具
+和 15 个 project/revision/task/review/artifact facade。不能把“26 个公开工具”误写为“26 个 CAD command”。
 
 每个新增 operation 必须同时具备：
 
@@ -187,6 +187,12 @@ negotiation、明确用户授权、预算、超时和 depth=1。`byok` 未来使
 `list_revisions` 是严格只读的 committed-history 投影：只返回当前 HEAD ancestry，按 canonical
 revision id 排序，调用方沿 `head`/`base_revision` 恢复时间链；draft、candidate、abandoned revision
 被排除。cursor stale/conflict 时从第一页重启。这两条路径不触发 CAD/runtime，也不取得 project lease。
+
+`compare_revisions` 在同一 committed ancestry 内重新校验两个 revision 的真实 FCStd/STEP payload，
+只承诺谱系、manifest、文件 presence/hash/size 与 artifact descriptor 差异；它不推断 BRep、实体、
+参数或设计意图差异。`get_artifact_manifest` 只读绑定 task generation、revision/draft、verification
+与 observation；只有已经完整校验并 PUBLISHED 的 delivery 才返回 ResourceLink，否则明确
+`materialized=false`，且不触发 CAD、复制、物化或 cleanup。
 
 S3-8 canonical skill 已要求宿主按服务端 `next_action` 行动：`submit_program` / `provide_input` 提交新
 program，`validate_program` / `reconcile` / `cleanup` 调 `resume_task`，`wait` 先刷新后至多恢复一次，

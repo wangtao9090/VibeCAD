@@ -183,6 +183,7 @@ _STABLE_DOMAIN_FACADES = {
     "get_project": "get_project_request",
     "list_projects": "list_projects_request",
     "list_revisions": "list_revisions_request",
+    "compare_revisions": "compare_revisions_request",
     "create_task": "create_task_request",
     "list_tasks": "list_tasks_request",
     "get_task": "get_task_request",
@@ -191,6 +192,7 @@ _STABLE_DOMAIN_FACADES = {
     "resume_task": "resume_task_request",
     "accept_draft": "accept_draft_request",
     "reject_draft": "reject_draft_request",
+    "get_artifact_manifest": "get_artifact_manifest_request",
     "export_task_artifacts": "export_task_artifacts_request",
 }
 _CONTROL_NAMES = frozenset(
@@ -210,6 +212,7 @@ _APPLICATION_METHODS = (
     "get_project_request",
     "list_projects_request",
     "list_revisions_request",
+    "compare_revisions_request",
     "create_task_request",
     "list_tasks_request",
     "get_task_request",
@@ -218,6 +221,7 @@ _APPLICATION_METHODS = (
     "resume_task_request",
     "accept_draft_request",
     "reject_draft_request",
+    "get_artifact_manifest_request",
     "export_task_artifacts_request",
     "invoke_direct_operation_request",
     "read_artifact_resource",
@@ -887,6 +891,12 @@ def _call_result(name: str, envelope: object) -> types.CallToolResult:
             types.TextContent(type="text", text=text)
         ]
         if name == "export_task_artifacts" and envelope["ok"] is True:
+            content.extend(_export_resource_links(envelope))
+        if (
+            name == "get_artifact_manifest"
+            and envelope["ok"] is True
+            and envelope["result"]["materialized"] is True
+        ):
             content.extend(_export_resource_links(envelope))
     except McpError:
         raise

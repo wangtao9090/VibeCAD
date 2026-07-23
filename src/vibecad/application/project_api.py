@@ -194,6 +194,14 @@ class ProjectServicePort(Protocol):
         self, *, project_id: str, limit: int, cursor: str | None
     ) -> dict[str, object] | ProjectServicePortFailure: ...
 
+    def compare_revisions(
+        self,
+        *,
+        project_id: str,
+        from_revision: str,
+        to_revision: str,
+    ) -> dict[str, object] | ProjectServicePortFailure: ...
+
 
 class _ApiFailure(Exception):
     __slots__ = ("code", "path")
@@ -597,6 +605,244 @@ def _snapshot_projection(head: ProjectHead, revision: RevisionRef) -> dict[str, 
     }
 
 
+def _comparison_artifact_slot(
+    revision: RevisionRef,
+    *,
+    name: str,
+    format: str,
+) -> RevisionArtifactRef | None:
+    if (name, format) == ("model.FCStd", "fcstd"):
+        return revision.model
+    if (name, format) == ("model.step", "step"):
+        return None if not revision.artifacts else revision.artifacts[0]
+    _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+
+
+def _comparison_artifact_endpoint(
+    value: object,
+    *,
+    expected: RevisionArtifactRef | None,
+) -> dict[str, object] | None:
+    if expected is None:
+        if value is not None:
+            _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+        return None
+    if not _artifact_is_valid(value):
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    projected = _artifact_projection(value)
+    if projected != _artifact_projection(expected):
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    return projected
+
+
+def _comparison_projection(
+    result: dict[str, object],
+    *,
+    project_id: str,
+    from_revision: str,
+    to_revision: str,
+) -> dict[str, object]:
+    if set(result) != {
+        "project_id",
+        "head",
+        "from_revision",
+        "to_revision",
+        "ancestry",
+        "base_change",
+        "revision_manifest",
+        "artifact_changes",
+        "semantic_diff",
+    }:
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    if type(result["project_id"]) is not str or result["project_id"] != project_id:
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+
+    head = result["head"]
+    left = result["from_revision"]
+    right = result["to_revision"]
+    if not (
+        _head_is_valid(head)
+        and head.project_id == project_id
+        and _revision_is_valid(left)
+        and left.id == from_revision
+        and left.project_id == project_id
+        and _revision_is_valid(right)
+        and right.id == to_revision
+        and right.project_id == project_id
+    ):
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    if from_revision == to_revision and _revision_projection(left) != _revision_projection(right):
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    for revision in (left, right):
+        if head.revision_id == revision.id and (
+            head.manifest_sha256 != revision.manifest_sha256
+            or (head.generation == 0) != (revision.base_revision is None)
+        ):
+            _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    if head.generation == 0 and (
+        from_revision != head.revision_id or to_revision != head.revision_id
+    ):
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+
+    ancestry = result["ancestry"]
+    if type(ancestry) is not dict or set(ancestry) != {"verified", "relation"}:
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    verified = ancestry["verified"]
+    relation = ancestry["relation"]
+    if not (
+        type(verified) is bool
+        and verified is True
+        and type(relation) is str
+        and relation
+        in {
+            "same",
+            "from_ancestor_of_to",
+            "to_ancestor_of_from",
+        }
+        and (relation == "same") == (from_revision == to_revision)
+    ):
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+
+    base_change = result["base_change"]
+    if type(base_change) is not dict or set(base_change) != {
+        "changed",
+        "from_base",
+        "to_base",
+    }:
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    base_changed = base_change["changed"]
+    from_base = base_change["from_base"]
+    to_base = base_change["to_base"]
+    if not (
+        type(base_changed) is bool
+        and base_changed == (left.base_revision != right.base_revision)
+        and (from_base is None or _valid_exact_string(from_base, _REVISION_ID))
+        and (to_base is None or _valid_exact_string(to_base, _REVISION_ID))
+        and from_base == left.base_revision
+        and to_base == right.base_revision
+    ):
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+
+    revision_manifest = result["revision_manifest"]
+    if type(revision_manifest) is not dict or set(revision_manifest) != {
+        "changed",
+        "from_sha256",
+        "to_sha256",
+    }:
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    manifest_changed = revision_manifest["changed"]
+    from_sha256 = revision_manifest["from_sha256"]
+    to_sha256 = revision_manifest["to_sha256"]
+    if not (
+        type(manifest_changed) is bool
+        and manifest_changed == (left.manifest_sha256 != right.manifest_sha256)
+        and _valid_exact_string(from_sha256, _DIGEST)
+        and _valid_exact_string(to_sha256, _DIGEST)
+        and from_sha256 == left.manifest_sha256
+        and to_sha256 == right.manifest_sha256
+    ):
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+
+    artifact_changes = result["artifact_changes"]
+    if type(artifact_changes) is not list or len(artifact_changes) != 2:
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    projected_changes: list[dict[str, object]] = []
+    for value, (name, format) in zip(
+        artifact_changes,
+        (("model.FCStd", "fcstd"), ("model.step", "step")),
+        strict=True,
+    ):
+        if type(value) is not dict or set(value) != {
+            "name",
+            "format",
+            "change",
+            "from",
+            "to",
+        }:
+            _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+        change = value["change"]
+        if not (
+            type(value["name"]) is str
+            and value["name"] == name
+            and type(value["format"]) is str
+            and value["format"] == format
+            and type(change) is str
+            and change in {"unchanged", "added", "removed", "modified"}
+        ):
+            _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+        before = _comparison_artifact_endpoint(
+            value["from"],
+            expected=_comparison_artifact_slot(left, name=name, format=format),
+        )
+        after = _comparison_artifact_endpoint(
+            value["to"],
+            expected=_comparison_artifact_slot(right, name=name, format=format),
+        )
+        if before is None and after is None:
+            expected_change = "unchanged"
+        elif before is None:
+            expected_change = "added"
+        elif after is None:
+            expected_change = "removed"
+        elif before == after:
+            expected_change = "unchanged"
+        else:
+            expected_change = "modified"
+        if change != expected_change:
+            _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+        projected_changes.append(
+            {
+                "name": name,
+                "format": format,
+                "change": change,
+                "from": before,
+                "to": after,
+            }
+        )
+
+    semantic_diff = result["semantic_diff"]
+    if type(semantic_diff) is not dict or set(semantic_diff) != {"status", "scopes"}:
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    status = semantic_diff["status"]
+    scopes = semantic_diff["scopes"]
+    if not (
+        type(status) is str
+        and status == "unsupported"
+        and type(scopes) is list
+        and len(scopes) == 3
+        and all(type(value) is str for value in scopes)
+        and scopes == ["geometry", "entity", "parameter"]
+    ):
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "project_id": project_id,
+        "head": _head_projection(head),
+        "from_revision": _revision_projection(left),
+        "to_revision": _revision_projection(right),
+        "ancestry": {
+            "verified": True,
+            "relation": relation,
+        },
+        "base_change": {
+            "changed": base_changed,
+            "from_base": from_base,
+            "to_base": to_base,
+        },
+        "revision_manifest": {
+            "changed": manifest_changed,
+            "from_sha256": from_sha256,
+            "to_sha256": to_sha256,
+        },
+        "artifact_changes": projected_changes,
+        "semantic_diff": {
+            "status": "unsupported",
+            "scopes": ["geometry", "entity", "parameter"],
+        },
+    }
+
+
 def _success(result: dict[str, object]) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -861,5 +1107,55 @@ class ProjectApi:
                 "revisions": revisions,
                 "next_cursor": next_cursor,
             }
+
+        return self._guard(action)
+
+    def compare_revisions(self, request: object) -> dict[str, object]:
+        def action() -> dict[str, object]:
+            data = _validate_request(
+                request,
+                required=frozenset(
+                    {
+                        "schema_version",
+                        "project_id",
+                        "from_revision",
+                        "to_revision",
+                    }
+                ),
+                allowed=frozenset(
+                    {
+                        "schema_version",
+                        "project_id",
+                        "from_revision",
+                        "to_revision",
+                    }
+                ),
+            )
+            project_id = _identifier(data["project_id"], "/project_id", _PROJECT_ID)
+            from_revision = _identifier(
+                data["from_revision"],
+                "/from_revision",
+                _REVISION_ID,
+            )
+            to_revision = _identifier(
+                data["to_revision"],
+                "/to_revision",
+                _REVISION_ID,
+            )
+            result = self._mapping_port_result(
+                self._invoke_untrusted(
+                    lambda: self._port.compare_revisions(
+                        project_id=project_id,
+                        from_revision=from_revision,
+                        to_revision=to_revision,
+                    )
+                )
+            )
+            return _comparison_projection(
+                result,
+                project_id=project_id,
+                from_revision=from_revision,
+                to_revision=to_revision,
+            )
 
         return self._guard(action)

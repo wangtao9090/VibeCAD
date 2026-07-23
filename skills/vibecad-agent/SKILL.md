@@ -5,13 +5,13 @@ description: Use VibeCAD's Agent-first MCP surface to create, inspect, modify, r
 
 # VibeCAD Agent
 
-Use the current 24-tool Agent-first surface. Treat VibeCAD's persisted project, task, revision, draft, evidence, and artifact records as authoritative. Never infer success from prose alone.
+Use the current 26-tool Agent-first surface. Treat VibeCAD's persisted project, task, revision, draft, evidence, and artifact records as authoritative. Never infer success from prose alone.
 
 ## Public tools
 
 Runtime and capability tools: `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime`, `get_capabilities`.
 
-Project and task control tools: `create_project`, `get_project`, `list_projects`, `list_revisions`, `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `accept_draft`, `reject_draft`, `export_task_artifacts`.
+Project and task control tools: `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `accept_draft`, `reject_draft`, `get_artifact_manifest`, `export_task_artifacts`.
 
 Direct CAD tools: `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part`.
 
@@ -29,7 +29,8 @@ get_runtime_status
   -> create_task
   -> get_task
   -> route the persisted next_action until review or terminal state
-  -> export_task_artifacts
+  -> get_artifact_manifest
+  -> export_task_artifacts only when no verified delivery is materialized
   -> resources/read for each returned resource URI
 ```
 
@@ -38,6 +39,8 @@ Before `create_task`, generate and retain one fresh key matching `task_create_[0
 Use `list_tasks` only to recover an existing task when its id is unknown: page through bounded summaries, choose the intended task, then call `get_task`. If a snapshot cursor returns `conflict`, discard it and restart from the first page. Use `get_task_events` only to audit the ordered persisted `TaskRun.transitions`; it is not a timestamped log. If its cursor becomes stale, restart that task's event pagination from the first page.
 
 Use `list_projects` only when the project id is unknown, then call `get_project` for the authoritative current HEAD. Use `list_revisions` only for the committed ancestry of that current HEAD. Its page is sorted by canonical revision id, not time; reconstruct lineage from the returned `head` and each `base_revision`. Drafts, candidates, and abandoned revisions are excluded. On either cursor `conflict`, discard it and restart from page one. These read-only discovery calls do not run CAD, construct a runtime, or acquire a project write lease.
+
+Use `compare_revisions` only for two revisions in that current committed ancestry. It verifies lineage plus revision-manifest and FCStd/STEP presence, identifiers, hashes, and sizes. Its `semantic_diff.status` is always `unsupported`: file differences are not proof of a geometry, entity, parameter, or design-intent difference.
 
 `create_project` supports `empty` or `import_fcstd`; the verified `import_fcstd` envelope accepts only a nonempty FCStd whose objects are all `Part::Box` or `Part::Cylinder`, and must reject every unsupported or mixed object type.
 
@@ -59,11 +62,11 @@ If the outcome of `create_task` is unknown and no task id or task_id was receive
 
 ## Artifact delivery
 
-After successful `export_task_artifacts`, consume the returned typed `ResourceLink` entries and call `resources/read` for their URIs. Verify format, byte size, and hash or sha256 evidence before handing off the FCStd and STEP files.
+Call `get_artifact_manifest` first with the exact task generation, revision, and nullable draft binding. If it returns `materialized=true`, consume its typed `ResourceLink` entries and call `resources/read` for their URIs. If it returns `materialized=false`, call `export_task_artifacts` once with a retained export key, then consume its returned `ResourceLink` entries through `resources/read`. The manifest query is read-only: never expect it to create, copy, validate, or repair a delivery. Verify format, byte size, and SHA-256 evidence before handing off the FCStd and STEP files.
 
 Never request, expose, or read an arbitrary filesystem path. Artifact access must use the verified resource URI returned by VibeCAD.
 
-Never call a legacy 31-tool surface or reconstruct retired tool names. Use only the live 24-tool surface above.
+Never call a legacy 31-tool surface or reconstruct retired tool names. Use only the live 26-tool surface above.
 
 Never generate or execute arbitrary Python/FreeCAD code. FreeCAD is the bounded geometry engine behind VibeCAD, not an authorization to run model-generated code.
 

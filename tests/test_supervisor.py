@@ -2029,8 +2029,10 @@ def test_default_replay_tool_set_matches_public_idempotence_contract() -> None:
     assert {
         "list_projects",
         "list_revisions",
+        "compare_revisions",
         "list_tasks",
         "get_task_events",
+        "get_artifact_manifest",
     } <= supervisor._DEFAULT_IDEMPOTENT_TOOLS
 
 

@@ -30,6 +30,7 @@ PUBLIC_TOOL_NAMES = (
     "get_project",
     "list_projects",
     "list_revisions",
+    "compare_revisions",
     "create_task",
     "list_tasks",
     "get_task",
@@ -38,6 +39,7 @@ PUBLIC_TOOL_NAMES = (
     "resume_task",
     "accept_draft",
     "reject_draft",
+    "get_artifact_manifest",
     "export_task_artifacts",
     "create_box",
     "create_cylinder",
@@ -203,12 +205,12 @@ def test_skill_has_canonical_files_and_minimal_trigger_frontmatter():
     assert "$vibecad-agent" in interface["default_prompt"]
 
 
-def test_skill_teaches_the_exact_twenty_four_tool_agent_first_flow():
+def test_skill_teaches_the_exact_twenty_six_tool_agent_first_flow():
     _metadata, body = _skill_parts()
     code_tokens = _inline_code(body)
     assert set(PUBLIC_TOOL_NAMES) <= code_tokens
     assert LEGACY_TOOL_NAMES.isdisjoint(code_tokens)
-    assert re.search(r"\b24(?:-tool| tools?)\b|24\s*个", body, re.IGNORECASE)
+    assert re.search(r"\b26(?:-tool| tools?)\b|26\s*个", body, re.IGNORECASE)
 
     essential_order = (
         "get_capabilities",
@@ -293,7 +295,7 @@ def test_skill_teaches_resource_links_and_fail_closed_product_limits():
     resource = _paragraph_with(body, "ResourceLink", "resources/read")
     resource_normalized = _normalized(resource)
     assert "export_task_artifacts" in resource_normalized
-    assert "hash" in resource_normalized or "sha256" in resource_normalized
+    assert any(token in resource_normalized for token in ("hash", "sha256", "sha-256"))
 
     path_rule = next(
         (
@@ -324,6 +326,39 @@ def test_skill_teaches_resource_links_and_fail_closed_product_limits():
         "simulation",
     ):
         assert claim in normalized
+
+
+def test_skill_teaches_honest_revision_compare_and_read_only_manifest_routing():
+    _metadata, body = _skill_parts()
+
+    comparison = _paragraph_with(body, "compare_revisions", "ancestry")
+    comparison_normalized = _normalized(comparison)
+    assert "hash" in comparison_normalized or "sha256" in comparison_normalized
+    assert "size" in comparison_normalized
+    assert re.search(
+        r"unsupported|不支持|不可用",
+        comparison,
+        re.IGNORECASE,
+    )
+    assert any(
+        scope in comparison_normalized
+        for scope in ("geometry", "entity", "parameter", "几何", "实体", "参数")
+    )
+
+    manifest = _paragraph_with(
+        body,
+        "get_artifact_manifest",
+        "export_task_artifacts",
+        "materialized",
+    )
+    manifest_normalized = _normalized(manifest)
+    assert "materialized" in manifest_normalized
+    assert "resources/read" in manifest_normalized
+    assert re.search(
+        r"only|仅|才",
+        manifest,
+        re.IGNORECASE,
+    )
 
 
 def test_skill_documents_host_installation_without_claiming_automatic_activation():

@@ -81,6 +81,7 @@ _PROJECT_ID = re.compile(r"^project_[0-9a-f]{32}$")
 _REVISION_ID = re.compile(r"^revision_[0-9a-f]{32}$")
 _DRAFT_ID = re.compile(r"^draft_[0-9a-f]{32}$")
 _ARTIFACT_ID = re.compile(r"^artifact_[0-9a-f]{32}$")
+_VERIFICATION_ID = re.compile(r"^verification_[0-9a-f]{32}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _REQUEST_NAME = re.compile(r"^[0-9a-f]{64}\.json$")
 _REQUEST_TEMP_NAME = re.compile(r"^\.[0-9a-f]{64}\.json\.[0-9a-f]{32}\.tmp$")
@@ -324,6 +325,32 @@ class ArtifactExportRequest:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ArtifactManifestRequest:
+    """Strict, path-free intent for observing one verified artifact manifest."""
+
+    task_id: str
+    expected_generation: int
+    revision_id: str
+    draft_id: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.task_id) is not str or _TASK_ID.fullmatch(self.task_id) is None:
+            raise ValueError("invalid task id")
+        if (
+            type(self.expected_generation) is not int
+            or self.expected_generation < 0
+            or self.expected_generation > MAX_SAFE_JSON_INTEGER
+        ):
+            raise ValueError("invalid expected generation")
+        if type(self.revision_id) is not str or _REVISION_ID.fullmatch(self.revision_id) is None:
+            raise ValueError("invalid revision id")
+        if self.draft_id is not None and (
+            type(self.draft_id) is not str or _DRAFT_ID.fullmatch(self.draft_id) is None
+        ):
+            raise ValueError("invalid draft id")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ArtifactEligibility:
     """One exact immutable task/revision authority snapshot."""
 
@@ -438,6 +465,12 @@ class ArtifactServicePort(Protocol):
         *,
         request: ArtifactExportRequest,
     ) -> ArtifactExportResult | ArtifactServicePortFailure: ...
+
+    def get_artifact_manifest(
+        self,
+        *,
+        request: ArtifactManifestRequest,
+    ) -> dict[str, object] | ArtifactServicePortFailure: ...
 
 
 class ArtifactAuthorityPort(Protocol):
@@ -712,17 +745,13 @@ def _valid_result(value: object, request: ArtifactExportRequest) -> bool:
     )
 
 
-def _validate_api_request(value: object) -> ArtifactExportRequest:
+def _validate_api_mapping(
+    value: object,
+    *,
+    required: frozenset[str],
+) -> dict[str, object]:
     if type(value) is not dict:
         _api_raise(ArtifactApiErrorCode.INVALID_TYPE)
-    required = {
-        "schema_version",
-        "export_key",
-        "task_id",
-        "expected_generation",
-        "revision_id",
-        "draft_id",
-    }
     keys = tuple(value)
     for key in keys:
         if type(key) is not str:
@@ -785,35 +814,234 @@ def _validate_api_request(value: object) -> ArtifactExportRequest:
         _api_raise(ArtifactApiErrorCode.INVALID_TYPE, "/schema_version")
     if version != SCHEMA_VERSION:
         _api_raise(ArtifactApiErrorCode.UNSUPPORTED_VERSION, "/schema_version")
+    return value
+
+
+def _validate_api_request(value: object) -> ArtifactExportRequest:
+    data = _validate_api_mapping(
+        value,
+        required=frozenset(
+            {
+                "schema_version",
+                "export_key",
+                "task_id",
+                "expected_generation",
+                "revision_id",
+                "draft_id",
+            }
+        ),
+    )
     fields = (
         ("export_key", _EXPORT_KEY),
         ("task_id", _TASK_ID),
         ("revision_id", _REVISION_ID),
     )
     for name, pattern in fields:
-        item = value[name]
+        item = data[name]
         if type(item) is not str:
             _api_raise(ArtifactApiErrorCode.INVALID_TYPE, f"/{name}")
         if pattern.fullmatch(item) is None:
             _api_raise(ArtifactApiErrorCode.INVALID_VALUE, f"/{name}")
-    generation = value["expected_generation"]
+    generation = data["expected_generation"]
     if type(generation) is not int:
         _api_raise(ArtifactApiErrorCode.INVALID_TYPE, "/expected_generation")
     if generation < 0 or generation > MAX_SAFE_JSON_INTEGER:
         _api_raise(ArtifactApiErrorCode.INVALID_VALUE, "/expected_generation")
-    draft = value["draft_id"]
+    draft = data["draft_id"]
     if draft is not None:
         if type(draft) is not str:
             _api_raise(ArtifactApiErrorCode.INVALID_TYPE, "/draft_id")
         if _DRAFT_ID.fullmatch(draft) is None:
             _api_raise(ArtifactApiErrorCode.INVALID_VALUE, "/draft_id")
     return ArtifactExportRequest(
-        export_key=value["export_key"],
-        task_id=value["task_id"],
+        export_key=data["export_key"],
+        task_id=data["task_id"],
         expected_generation=generation,
-        revision_id=value["revision_id"],
+        revision_id=data["revision_id"],
         draft_id=draft,
     )
+
+
+def _validate_manifest_api_request(value: object) -> ArtifactManifestRequest:
+    data = _validate_api_mapping(
+        value,
+        required=frozenset(
+            {
+                "schema_version",
+                "task_id",
+                "expected_generation",
+                "revision_id",
+                "draft_id",
+            }
+        ),
+    )
+    for name, pattern in (("task_id", _TASK_ID), ("revision_id", _REVISION_ID)):
+        item = data[name]
+        if type(item) is not str:
+            _api_raise(ArtifactApiErrorCode.INVALID_TYPE, f"/{name}")
+        if pattern.fullmatch(item) is None:
+            _api_raise(ArtifactApiErrorCode.INVALID_VALUE, f"/{name}")
+    generation = data["expected_generation"]
+    if type(generation) is not int:
+        _api_raise(ArtifactApiErrorCode.INVALID_TYPE, "/expected_generation")
+    if generation < 0 or generation > MAX_SAFE_JSON_INTEGER:
+        _api_raise(ArtifactApiErrorCode.INVALID_VALUE, "/expected_generation")
+    draft = data["draft_id"]
+    if draft is not None:
+        if type(draft) is not str:
+            _api_raise(ArtifactApiErrorCode.INVALID_TYPE, "/draft_id")
+        if _DRAFT_ID.fullmatch(draft) is None:
+            _api_raise(ArtifactApiErrorCode.INVALID_VALUE, "/draft_id")
+    return ArtifactManifestRequest(
+        task_id=data["task_id"],
+        expected_generation=generation,
+        revision_id=data["revision_id"],
+        draft_id=draft,
+    )
+
+
+def _valid_manifest_artifact(
+    value: object,
+    *,
+    index: int,
+    materialized: bool,
+    materialization_id: str | None,
+) -> bool:
+    if type(value) is not dict or set(value) != {
+        "schema_version",
+        "id",
+        "name",
+        "format",
+        "sha256",
+        "size_bytes",
+        "resource_uri",
+    }:
+        return False
+    expected_name, expected_format = (
+        ("model.FCStd", "fcstd") if index == 0 else ("model.step", "step")
+    )
+    resource_uri = value["resource_uri"]
+    if materialized:
+        if (
+            type(resource_uri) is not str
+            or type(materialization_id) is not str
+            or resource_uri
+            != _resource_uri(
+                materialization_id,
+                value["id"] if type(value["id"]) is str else "",
+            )
+        ):
+            return False
+    elif resource_uri is not None:
+        return False
+    return (
+        type(value["schema_version"]) is int
+        and value["schema_version"] == SCHEMA_VERSION
+        and type(value["id"]) is str
+        and _ARTIFACT_ID.fullmatch(value["id"]) is not None
+        and type(value["name"]) is str
+        and value["name"] == expected_name
+        and type(value["format"]) is str
+        and value["format"] == expected_format
+        and type(value["sha256"]) is str
+        and _DIGEST.fullmatch(value["sha256"]) is not None
+        and type(value["size_bytes"]) is int
+        and 0 < value["size_bytes"] <= MAX_ARTIFACT_SOURCE_BYTES
+    )
+
+
+def _valid_manifest_result(value: object, request: ArtifactManifestRequest) -> bool:
+    if type(value) is not dict or set(value) != {
+        "source_kind",
+        "task_id",
+        "task_generation",
+        "project_id",
+        "revision_id",
+        "draft_id",
+        "manifest_sha256",
+        "verification_id",
+        "acceptance_id",
+        "verification_digest",
+        "observation_digest",
+        "materialized",
+        "materialization_id",
+        "delivery_manifest_sha256",
+        "artifacts",
+    }:
+        return False
+    source_kind = value["source_kind"]
+    materialized = value["materialized"]
+    materialization_id = value["materialization_id"]
+    delivery_digest = value["delivery_manifest_sha256"]
+    acceptance_id = value["acceptance_id"]
+    artifacts = value["artifacts"]
+    if not (
+        source_kind in {ArtifactSourceKind.COMMITTED.value, ArtifactSourceKind.DRAFT.value}
+        and type(value["task_id"]) is str
+        and _TASK_ID.fullmatch(value["task_id"]) is not None
+        and value["task_id"] == request.task_id
+        and type(value["task_generation"]) is int
+        and value["task_generation"] == request.expected_generation
+        and type(value["project_id"]) is str
+        and _PROJECT_ID.fullmatch(value["project_id"]) is not None
+        and type(value["revision_id"]) is str
+        and _REVISION_ID.fullmatch(value["revision_id"]) is not None
+        and value["revision_id"] == request.revision_id
+        and (
+            value["draft_id"] is None
+            or (
+                type(value["draft_id"]) is str
+                and _DRAFT_ID.fullmatch(value["draft_id"]) is not None
+            )
+        )
+        and value["draft_id"] == request.draft_id
+        and (source_kind == ArtifactSourceKind.DRAFT.value) == (request.draft_id is not None)
+        and type(value["manifest_sha256"]) is str
+        and _DIGEST.fullmatch(value["manifest_sha256"]) is not None
+        and type(value["verification_id"]) is str
+        and _VERIFICATION_ID.fullmatch(value["verification_id"]) is not None
+        and type(acceptance_id) is str
+        and 0 < len(acceptance_id) <= 256
+        and bool(acceptance_id.strip())
+        and acceptance_id.isprintable()
+        and len(acceptance_id.splitlines()) == 1
+        and type(value["verification_digest"]) is str
+        and _DIGEST.fullmatch(value["verification_digest"]) is not None
+        and type(value["observation_digest"]) is str
+        and _DIGEST.fullmatch(value["observation_digest"]) is not None
+        and type(materialized) is bool
+        and type(artifacts) is list
+        and len(artifacts) == 2
+    ):
+        return False
+    if materialized:
+        if not (
+            type(materialization_id) is str
+            and _MATERIALIZATION_NAME.fullmatch(materialization_id) is not None
+            and type(delivery_digest) is str
+            and _DIGEST.fullmatch(delivery_digest) is not None
+        ):
+            return False
+    elif materialization_id is not None or delivery_digest is not None:
+        return False
+    if not all(
+        _valid_manifest_artifact(
+            item,
+            index=index,
+            materialized=materialized,
+            materialization_id=materialization_id,
+        )
+        for index, item in enumerate(artifacts)
+    ):
+        return False
+    return (
+        artifacts[0]["id"] != artifacts[1]["id"]
+        and artifacts[0]["size_bytes"] + artifacts[1]["size_bytes"] <= MAX_ARTIFACT_PAIR_BYTES
+    )
+
+
+def _manifest_result_projection(value: dict[str, object]) -> dict[str, object]:
+    return {"schema_version": SCHEMA_VERSION, **value}
 
 
 class ArtifactApi:
@@ -841,6 +1069,50 @@ class ArtifactApi:
                 "schema_version": SCHEMA_VERSION,
                 "ok": True,
                 "result": _result_projection(value),
+                "error": None,
+            }
+        except _ApiFailure as error:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "ok": False,
+                "result": None,
+                "error": {
+                    "schema_version": SCHEMA_VERSION,
+                    "code": error.code.value,
+                    "path": error.path,
+                    "message": _API_MESSAGES[error.code],
+                },
+            }
+        except Exception:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "ok": False,
+                "result": None,
+                "error": {
+                    "schema_version": SCHEMA_VERSION,
+                    "code": ArtifactApiErrorCode.INTERNAL_ERROR.value,
+                    "path": "",
+                    "message": _API_MESSAGES[ArtifactApiErrorCode.INTERNAL_ERROR],
+                },
+            }
+
+    def get_artifact_manifest(self, request: object) -> dict[str, object]:
+        try:
+            parsed = _validate_manifest_api_request(request)
+            try:
+                value = self._port.get_artifact_manifest(request=parsed)
+            except Exception:
+                _api_raise(ArtifactApiErrorCode.INTERNAL_ERROR)
+            if type(value) is ArtifactServicePortFailure:
+                if type(value.code) is not ArtifactServiceErrorCode:
+                    _api_raise(ArtifactApiErrorCode.INTERNAL_ERROR)
+                _api_raise(ArtifactApiErrorCode(value.code.value))
+            if not _valid_manifest_result(value, parsed):
+                _api_raise(ArtifactApiErrorCode.INTERNAL_ERROR)
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "result": _manifest_result_projection(value),
                 "error": None,
             }
         except _ApiFailure as error:

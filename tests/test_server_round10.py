@@ -27,6 +27,7 @@ def test_tool_annotation_safety_mapping_is_independent_and_exact() -> None:
         "get_project": (False, False, True, False),
         "list_projects": (True, False, True, False),
         "list_revisions": (True, False, True, False),
+        "compare_revisions": (True, False, True, False),
         "create_task": (False, False, True, False),
         "list_tasks": (True, False, True, False),
         "get_task": (False, False, True, False),
@@ -35,6 +36,7 @@ def test_tool_annotation_safety_mapping_is_independent_and_exact() -> None:
         "resume_task": (False, True, True, False),
         "accept_draft": (False, True, True, False),
         "reject_draft": (False, True, True, False),
+        "get_artifact_manifest": (True, False, True, False),
         "export_task_artifacts": (False, False, True, False),
         "create_box": (False, False, True, False),
         "create_cylinder": (False, False, True, False),
@@ -79,10 +81,10 @@ def test_live_sdk_projection_matches_independent_frozen_digest_and_has_no_extras
         sort_keys=True,
     ).encode("utf-8")
 
-    assert len(raw) == 18_850
+    assert len(raw) == 20_201
     assert len(raw) <= 32_768
     assert hashlib.sha256(raw).hexdigest() == (
-        "fd22c7e9040e8eea54e165b4f955b7415fe716905b134ee51586c43017491b7f"
+        "85914806958d15d0a7d5874566936e098729db406ad2002f9903b834904ca58c"
     )
     for tool in tools:
         assert tool.title is None

@@ -633,6 +633,7 @@ remain residual and unauthorized.
 | P0B-E04 / 2026-07-23T04:23:04Z | P0B-C01 under P0B-R1.1/A01/A02; P0B-D21 allowlist repair | this C01 commit / non-force push required | semantic RED 5/5; focused `1025 passed`; affected integration `229 passed, 19 deselected`; full `3902 passed, 95 deselected`; same-key stress `200/200 + 100/100`; Ruff/diff clean; independent review `0/0/0` | Python 3.13 explicit `PYTHONPATH=src` remains; one existing macOS fork deprecation warning; no product residual | P0B-S04 | accepted-green |
 | P0B-E05 / 2026-07-23T04:57:13Z | P0B-C02 under P0B-R1.1/A01/A02; P0B-D21 direct-impact allowlist repairs | this C02 commit / non-force push required | semantic RED `3 failed` then `5 failed`; focused `1157 passed`; affected integration `224 passed, 8 deselected`; full non-slow `3954 passed, 95 deselected`; 22-tool discovery frame `17,785` bytes; Ruff/format/diff/fsck clean; store and cursor/public reviews both `0/0/0` | Python 3.13 explicit `PYTHONPATH=src` remains; one existing macOS fork deprecation warning; no product residual | P0B-S05 | accepted-green |
 | P0B-E06 / 2026-07-23T06:02:10Z | P0B-C03 under P0B-R1.1/A01/A02; P0B-D21 direct-impact and gate-baseline repairs | this C03 commit / non-force push required | API RED `69 failed`; Agent RED `9 failed`; surface RED `14 failed`; core RED plus two review-driven directory-stability/index RED cycles; focused `503 passed`; affected integration `440 passed, 8 deselected`; full non-slow `4074 passed, 95 deselected`; 24-tool frame `18,895` bytes; Ruff/diff/fsck and changed-file format clean; API, public and final core reviews `0/0/0` | explicit `PYTHONPATH=src`; one existing macOS fork warning; full-tree format baseline still names 52 unchanged files, while all 20 changed/new Python files pass; C04 retains CAD payload hashing | P0B-S06 | accepted-green |
+| P0B-E07 / 2026-07-23T06:54:17Z | P0B-C04 under P0B-R1.1/A01/A02; P0B-D08/D08A/D21 | this C04 commit / non-force push required | comparison collection RED on missing module and public Agent RED `-32603`; focused `484 passed`; affected integration `614 passed, 8 deselected`; full non-slow `4177 passed, 95 deselected`; 26-tool SDK projection `20,201` bytes / SHA-256 `85914806958d15d0a7d5874566936e098729db406ad2002f9903b834904ca58c`; complete frame `20,246` bytes; public receipt `351d7de2676d6299b0ad906155e47525e59152549e3d82499fa4d05f11aacb5d`; Ruff/diff/fsck and 21-file format clean; storage and final integration reviews `0/0`, API audit `37 passed` | semantic geometry/entity/parameter diff remains explicitly unsupported; no CAD/runtime/materialization on read paths; one existing macOS fork warning; full-tree format baseline remains unrelated | P0B-S07 | accepted-green |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -931,6 +932,73 @@ remain residual and unauthorized.
   streaming FCStd/STEP bytes. C04 owns tamper and missing-artifact hashing.
 - Both list facades avoid `DurableProjectService`, project-write leases, CAD
   runtime construction and FreeCAD imports.
+- Preserve P0B-GATE-CORR-01/02 and continue exact `PYTHONPATH=src` plus
+  changed-file format gates. PR, tag, release, marketplace publication,
+  force-push and external spend remain unauthorized.
+
+## 19. Recovery Snapshot P0B-S07
+
+### 1. Completed milestones
+
+- C04 adds public `compare_revisions` and `get_artifact_manifest`; runtime,
+  MCPB manifest, Skill and current product documentation now agree on an exact
+  26-tool surface: 20 stable lifecycle/service tools and 6 registry-derived
+  direct CAD tools.
+- Revision comparison accepts only two revisions in the validated ancestry of
+  the same current committed HEAD. It reports direction, base and manifest
+  changes plus fixed FCStd/STEP added/removed/modified/unchanged states. It
+  hashes the sealed payload bytes and rejects missing or tampered artifacts,
+  while geometry/entity/parameter semantic diff is explicitly `unsupported`.
+- Artifact manifest observation binds exact task generation,
+  committed-or-draft revision, verification report, acceptance id,
+  observation digest and the fixed FCStd/STEP pair. A virgin catalog returns
+  `materialized=false` without constructing `ArtifactStore`, export service,
+  authority, CAD validation port or runtime and without changing the artifact
+  tree.
+- Only a fully validated existing `PUBLISHED` delivery exposes its two
+  canonical resource URIs and delivery-manifest digest. Request digest,
+  response binding, directory identity, content hashes, global byte capacity
+  and reservation accounting are revalidated read-only; no export,
+  materialization, cleanup or repair is triggered by observation.
+- The canonical public-surface receipt is
+  `351d7de2676d6299b0ad906155e47525e59152549e3d82499fa4d05f11aacb5d`.
+  The fixed 26-tool SDK projection is 20,201 bytes with SHA-256
+  `85914806958d15d0a7d5874566936e098729db406ad2002f9903b834904ca58c`;
+  its complete JSON-RPC frame is 20,246 bytes, below the 32,768-byte budget.
+- Controller gates are green: focused `484 passed`; affected integration
+  `614 passed, 8 deselected`; full non-slow
+  `4177 passed, 95 deselected`. Ruff, changed/new-file format, diff and fsck
+  checks pass. Artifact storage and final integration reviews returned
+  `Critical 0 / Important 0`; the independent public API audit passed 37
+  tests, and a 64-call concurrency probe preserved the lazy no-write boundary.
+
+### 2. Next steps
+
+1. Commit the exact C04 allowlist as
+   `feat(artifacts): expose revision comparison and manifests`.
+2. Non-force push `codex/agent-stage3`, then verify exact
+   `HEAD == @{upstream}` and remote-ref equality.
+3. Rebind C05 to the accepted remote anchor and implement durable cancellation
+   contracts without repeating P0B-A01 or P0B-A02.
+
+### 3. Approved decisions
+
+- P0B-A01/A02 and P0B-D01..D22 plus D08A/D17A/D22-R1 remain active.
+- P0B-D21 covers the directly affected runtime receipt, server/supervisor
+  projections, current product-truth documents, strict artifact-manifest API
+  and the read-only catalog integrity repairs found in review. No product
+  scope, authority or delivery boundary changed.
+- `get_artifact_manifest` is observation, not a lightweight alias for export.
+  A caller explicitly invokes `export_task_artifacts` only when delivery
+  resources are required and the manifest reports `materialized=false`.
+
+### 4. Execution discipline
+
+- Comparison remains committed-history metadata plus sealed payload integrity;
+  it must not claim geometric, entity or parameter-level meaning.
+- Manifest queries never acquire a CAD runtime or project-write lease and
+  never create, clean or repair artifact-catalog entries. Integrity,
+  concurrency or capacity ambiguity fails closed.
 - Preserve P0B-GATE-CORR-01/02 and continue exact `PYTHONPATH=src` plus
   changed-file format gates. PR, tag, release, marketplace publication,
   force-push and external spend remain unauthorized.

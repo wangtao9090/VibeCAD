@@ -98,6 +98,52 @@ def _current() -> tuple[ProjectHead, RevisionRef]:
     return head, revision
 
 
+def _compare_result() -> dict[str, object]:
+    zero_head, zero = _generation_zero()
+    head, current = _current()
+    assert zero_head.revision_id == zero.id
+    return {
+        "project_id": PROJECT_ID,
+        "head": head,
+        "from_revision": zero,
+        "to_revision": current,
+        "ancestry": {
+            "verified": True,
+            "relation": "from_ancestor_of_to",
+        },
+        "base_change": {
+            "changed": True,
+            "from_base": None,
+            "to_base": REVISION_ZERO,
+        },
+        "revision_manifest": {
+            "changed": True,
+            "from_sha256": DIGEST_ZERO,
+            "to_sha256": DIGEST_ONE,
+        },
+        "artifact_changes": [
+            {
+                "name": "model.FCStd",
+                "format": "fcstd",
+                "change": "added",
+                "from": None,
+                "to": current.model,
+            },
+            {
+                "name": "model.step",
+                "format": "step",
+                "change": "added",
+                "from": None,
+                "to": current.artifacts[0],
+            },
+        ],
+        "semantic_diff": {
+            "status": "unsupported",
+            "scopes": ["geometry", "entity", "parameter"],
+        },
+    }
+
+
 def _create_result(
     *,
     kind: ProjectKind = ProjectKind.EMPTY,
@@ -159,6 +205,7 @@ class RecordingPort:
             ],
             "next_cursor": None,
         }
+        self.compare_result: object = _compare_result()
         self.error: BaseException | None = None
 
     def create_project(self, **kwargs):
@@ -184,6 +231,12 @@ class RecordingPort:
         if self.error is not None:
             raise self.error
         return self.revisions_result
+
+    def compare_revisions(self, **kwargs):
+        self.calls.append(("compare_revisions", kwargs))
+        if self.error is not None:
+            raise self.error
+        return self.compare_result
 
 
 def _error(response: dict[str, object], code: ProjectApiErrorCode, path: str = "") -> None:
@@ -262,7 +315,13 @@ def test_public_api_taxonomies_and_exact_signatures_are_frozen() -> None:
     init = inspect.signature(ProjectApi.__init__).parameters
     assert tuple(init) == ("self", "port")
     assert init["port"].kind is inspect.Parameter.KEYWORD_ONLY
-    for name in ("create_project", "get_project", "list_projects", "list_revisions"):
+    for name in (
+        "create_project",
+        "get_project",
+        "list_projects",
+        "list_revisions",
+        "compare_revisions",
+    ):
         parameters = inspect.signature(getattr(ProjectApi, name)).parameters
         assert tuple(parameters) == ("self", "request")
     port = project_api_module.ProjectServicePort
@@ -276,6 +335,12 @@ def test_public_api_taxonomies_and_exact_signatures_are_frozen() -> None:
         "project_id",
         "limit",
         "cursor",
+    )
+    assert tuple(inspect.signature(port.compare_revisions).parameters) == (
+        "self",
+        "project_id",
+        "from_revision",
+        "to_revision",
     )
 
 
@@ -501,6 +566,332 @@ def test_list_revisions_forwards_page_and_projects_exact_public_history() -> Non
         },
         "error": None,
     }
+
+
+def test_compare_revisions_forwards_exact_ids_and_projects_complete_result() -> None:
+    port = RecordingPort()
+
+    response = ProjectApi(port=port).compare_revisions(
+        {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "from_revision": REVISION_ZERO,
+            "to_revision": REVISION_ONE,
+        }
+    )
+
+    assert port.calls == [
+        (
+            "compare_revisions",
+            {
+                "project_id": PROJECT_ID,
+                "from_revision": REVISION_ZERO,
+                "to_revision": REVISION_ONE,
+            },
+        )
+    ]
+    assert response == {
+        "schema_version": 1,
+        "ok": True,
+        "result": {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "head": {
+                "schema_version": 1,
+                "project_id": PROJECT_ID,
+                "generation": 1,
+                "revision_id": REVISION_ONE,
+                "manifest_sha256": DIGEST_ONE,
+            },
+            "from_revision": {
+                "schema_version": 1,
+                "id": REVISION_ZERO,
+                "project_id": PROJECT_ID,
+                "base_revision": None,
+                "manifest_sha256": DIGEST_ZERO,
+                "model": None,
+                "artifacts": [],
+            },
+            "to_revision": {
+                "schema_version": 1,
+                "id": REVISION_ONE,
+                "project_id": PROJECT_ID,
+                "base_revision": REVISION_ZERO,
+                "manifest_sha256": DIGEST_ONE,
+                "model": {
+                    "schema_version": 1,
+                    "id": MODEL_ID,
+                    "name": "model.FCStd",
+                    "format": "fcstd",
+                    "sha256": DIGEST_ZERO,
+                    "size_bytes": 123,
+                },
+                "artifacts": [
+                    {
+                        "schema_version": 1,
+                        "id": STEP_ID,
+                        "name": "model.step",
+                        "format": "step",
+                        "sha256": DIGEST_ONE,
+                        "size_bytes": 456,
+                    }
+                ],
+            },
+            "ancestry": {
+                "verified": True,
+                "relation": "from_ancestor_of_to",
+            },
+            "base_change": {
+                "changed": True,
+                "from_base": None,
+                "to_base": REVISION_ZERO,
+            },
+            "revision_manifest": {
+                "changed": True,
+                "from_sha256": DIGEST_ZERO,
+                "to_sha256": DIGEST_ONE,
+            },
+            "artifact_changes": [
+                {
+                    "name": "model.FCStd",
+                    "format": "fcstd",
+                    "change": "added",
+                    "from": None,
+                    "to": {
+                        "schema_version": 1,
+                        "id": MODEL_ID,
+                        "name": "model.FCStd",
+                        "format": "fcstd",
+                        "sha256": DIGEST_ZERO,
+                        "size_bytes": 123,
+                    },
+                },
+                {
+                    "name": "model.step",
+                    "format": "step",
+                    "change": "added",
+                    "from": None,
+                    "to": {
+                        "schema_version": 1,
+                        "id": STEP_ID,
+                        "name": "model.step",
+                        "format": "step",
+                        "sha256": DIGEST_ONE,
+                        "size_bytes": 456,
+                    },
+                },
+            ],
+            "semantic_diff": {
+                "status": "unsupported",
+                "scopes": ["geometry", "entity", "parameter"],
+            },
+        },
+        "error": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("payload", "code", "path"),
+    [
+        (
+            {
+                "schema_version": 1,
+                "project_id": PROJECT_ID,
+                "to_revision": REVISION_ONE,
+            },
+            ProjectApiErrorCode.MISSING_FIELD,
+            "/from_revision",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "project_id": PROJECT_ID,
+                "from_revision": REVISION_ZERO,
+                "to_revision": REVISION_ONE,
+                "extra": None,
+            },
+            ProjectApiErrorCode.UNKNOWN_FIELD,
+            "/extra",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "project_id": PROJECT_ID,
+                "from_revision": StringSubclass(REVISION_ZERO),
+                "to_revision": REVISION_ONE,
+            },
+            ProjectApiErrorCode.INVALID_TYPE,
+            "/from_revision",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "project_id": PROJECT_ID,
+                "from_revision": REVISION_ZERO,
+                "to_revision": "revision_BAD",
+            },
+            ProjectApiErrorCode.INVALID_VALUE,
+            "/to_revision",
+        ),
+    ],
+)
+def test_compare_request_schema_is_exact_and_noncoercing(payload, code, path) -> None:
+    port = RecordingPort()
+
+    response = ProjectApi(port=port).compare_revisions(payload)
+
+    _error(response, code, path)
+    assert port.calls == []
+
+
+@pytest.mark.parametrize("port_code", list(ProjectServicePortErrorCode))
+def test_compare_maps_every_neutral_port_failure_exactly(port_code) -> None:
+    port = RecordingPort()
+    port.compare_result = ProjectServicePortFailure(code=port_code)
+
+    response = ProjectApi(port=port).compare_revisions(
+        {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "from_revision": REVISION_ZERO,
+            "to_revision": REVISION_ONE,
+        }
+    )
+
+    _error(response, ProjectApiErrorCode(port_code.value))
+    assert port.calls == [
+        (
+            "compare_revisions",
+            {
+                "project_id": PROJECT_ID,
+                "from_revision": REVISION_ZERO,
+                "to_revision": REVISION_ONE,
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "extra_top_level",
+        "wrong_head_project",
+        "wrong_from_revision",
+        "unverified_ancestry",
+        "incoherent_relation",
+        "incoherent_base_change",
+        "incoherent_manifest_change",
+        "reordered_artifacts",
+        "incoherent_artifact_change",
+        "mismatched_artifact_ref",
+        "claimed_semantic_support",
+        "nonlist_semantic_scopes",
+    ),
+)
+def test_compare_rejects_every_malformed_port_result_component(mutation: str) -> None:
+    port = RecordingPort()
+    result = _compare_result()
+    if mutation == "extra_top_level":
+        result["extra"] = None
+    elif mutation == "wrong_head_project":
+        result["head"] = replace(result["head"], project_id=OTHER_PROJECT_ID)
+    elif mutation == "wrong_from_revision":
+        result["from_revision"] = replace(
+            result["from_revision"],
+            id="revision_" + "2" * 32,
+        )
+    elif mutation == "unverified_ancestry":
+        result["ancestry"]["verified"] = False
+    elif mutation == "incoherent_relation":
+        result["ancestry"]["relation"] = "same"
+    elif mutation == "incoherent_base_change":
+        result["base_change"]["changed"] = False
+    elif mutation == "incoherent_manifest_change":
+        result["revision_manifest"]["changed"] = False
+    elif mutation == "reordered_artifacts":
+        result["artifact_changes"].reverse()
+    elif mutation == "incoherent_artifact_change":
+        result["artifact_changes"][0]["change"] = "unchanged"
+    elif mutation == "mismatched_artifact_ref":
+        result["artifact_changes"][0]["to"] = _step()
+    elif mutation == "claimed_semantic_support":
+        result["semantic_diff"]["status"] = "supported"
+    else:
+        result["semantic_diff"]["scopes"] = ("geometry", "entity", "parameter")
+    port.compare_result = result
+
+    response = ProjectApi(port=port).compare_revisions(
+        {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "from_revision": REVISION_ZERO,
+            "to_revision": REVISION_ONE,
+        }
+    )
+
+    _error(response, ProjectApiErrorCode.INTERNAL_ERROR)
+    assert len(port.calls) == 1
+
+
+def test_compare_same_revision_requires_and_projects_a_coherent_same_result() -> None:
+    port = RecordingPort()
+    head, current = _current()
+    model = current.model
+    step = current.artifacts[0]
+    port.compare_result = {
+        "project_id": PROJECT_ID,
+        "head": head,
+        "from_revision": current,
+        "to_revision": current,
+        "ancestry": {"verified": True, "relation": "same"},
+        "base_change": {
+            "changed": False,
+            "from_base": REVISION_ZERO,
+            "to_base": REVISION_ZERO,
+        },
+        "revision_manifest": {
+            "changed": False,
+            "from_sha256": DIGEST_ONE,
+            "to_sha256": DIGEST_ONE,
+        },
+        "artifact_changes": [
+            {
+                "name": "model.FCStd",
+                "format": "fcstd",
+                "change": "unchanged",
+                "from": model,
+                "to": model,
+            },
+            {
+                "name": "model.step",
+                "format": "step",
+                "change": "unchanged",
+                "from": step,
+                "to": step,
+            },
+        ],
+        "semantic_diff": {
+            "status": "unsupported",
+            "scopes": ["geometry", "entity", "parameter"],
+        },
+    }
+
+    response = ProjectApi(port=port).compare_revisions(
+        {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "from_revision": REVISION_ONE,
+            "to_revision": REVISION_ONE,
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["result"]["ancestry"] == {
+        "verified": True,
+        "relation": "same",
+    }
+    assert response["result"]["artifact_changes"][0]["change"] == "unchanged"
+    assert response["result"]["artifact_changes"][1]["change"] == "unchanged"
 
 
 @pytest.mark.parametrize(

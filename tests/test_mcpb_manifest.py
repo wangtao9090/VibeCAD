@@ -16,6 +16,7 @@ EXPECTED_PUBLIC_TOOLS = (
     "get_project",
     "list_projects",
     "list_revisions",
+    "compare_revisions",
     "create_task",
     "list_tasks",
     "get_task",
@@ -24,6 +25,7 @@ EXPECTED_PUBLIC_TOOLS = (
     "resume_task",
     "accept_draft",
     "reject_draft",
+    "get_artifact_manifest",
     "export_task_artifacts",
     "create_box",
     "create_cylinder",
@@ -56,6 +58,11 @@ def test_manifest_tools_match_server_registry():
     assert tuple(name for name, _description in declared) == EXPECTED_PUBLIC_TOOLS
     assert tuple(name for name, _description in projected) == EXPECTED_PUBLIC_TOOLS
     assert declared == projected
+    descriptions = dict(declared)
+    assert descriptions["compare_revisions"] == ("比较同一项目两个已提交版本的谱系、清单和制品差异")
+    assert descriptions["get_artifact_manifest"] == (
+        "读取任务版本的验证绑定、制品清单和现有交付资源"
+    )
 
 
 def test_manifest_tool_entries_are_unique_and_described():
@@ -207,7 +214,7 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
     normalized_roadmap = " ".join(roadmap.replace("\n> ", " ").split())
     for required in (
         "S3-8/P0-A",
-        "24-tool 公共 MCP、durable review",
+        "26-tool 公共 MCP、durable review",
         "host-neutral skill",
         "P0-B core 正在执行",
     ):

@@ -393,6 +393,21 @@ class AgentApplication:
                 api = candidate_api
             return api, service
 
+    def _artifact_api_for_manifest_request(self):
+        self._ensure_live()
+        api = self._artifact_api
+        if api is not None:
+            return api
+        with self._component_lock:
+            self._ensure_live()
+            api = self._artifact_api
+            if api is None:
+                from vibecad.application.artifacts import ArtifactApi
+
+                api = ArtifactApi(port=self)
+                self._artifact_api = api
+            return api
+
     def _artifact_bundle_for_request(self):
         self._ensure_live()
         api = self._artifact_api
@@ -548,6 +563,12 @@ class AgentApplication:
         self._ensure_live()
         return api.list_revisions(request)
 
+    def compare_revisions_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        api = self._project_api_for_request()
+        self._ensure_live()
+        return api.compare_revisions(request)
+
     def create_task_request(self, request: object) -> dict[str, object]:
         self._ensure_live()
         api = self._task_api_for_request()
@@ -617,6 +638,12 @@ class AgentApplication:
         api, _, _ = self._artifact_bundle_for_request()
         self._ensure_live()
         return api.export_task_artifacts(request)
+
+    def get_artifact_manifest_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        api = self._artifact_api_for_manifest_request()
+        self._ensure_live()
+        return api.get_artifact_manifest(request)
 
     def read_artifact_resource(self, uri: object):
         self._ensure_live()
@@ -721,24 +748,20 @@ class AgentApplication:
             ProjectServicePortErrorCode,
             ProjectServicePortFailure,
         )
-        from vibecad.application.revision_discovery import RevisionDiscoveryErrorCode
 
         mapping = {
-            RevisionDiscoveryErrorCode.INVALID_INPUT: (ProjectServicePortErrorCode.INVALID_INPUT),
-            RevisionDiscoveryErrorCode.NOT_FOUND: ProjectServicePortErrorCode.NOT_FOUND,
-            RevisionDiscoveryErrorCode.CONFLICT: ProjectServicePortErrorCode.CONFLICT,
-            RevisionDiscoveryErrorCode.RESOURCE_EXHAUSTED: (
-                ProjectServicePortErrorCode.RESOURCE_EXHAUSTED
-            ),
-            RevisionDiscoveryErrorCode.INTEGRITY_FAILURE: (
-                ProjectServicePortErrorCode.INTEGRITY_FAILURE
-            ),
-            RevisionDiscoveryErrorCode.STORE_FAILURE: (ProjectServicePortErrorCode.STORE_FAILURE),
-            RevisionDiscoveryErrorCode.RECOVERY_REQUIRED: (
-                ProjectServicePortErrorCode.RECOVERY_REQUIRED
-            ),
+            "invalid_input": ProjectServicePortErrorCode.INVALID_INPUT,
+            "not_found": ProjectServicePortErrorCode.NOT_FOUND,
+            "conflict": ProjectServicePortErrorCode.CONFLICT,
+            "resource_exhausted": (ProjectServicePortErrorCode.RESOURCE_EXHAUSTED),
+            "integrity_failure": (ProjectServicePortErrorCode.INTEGRITY_FAILURE),
+            "store_failure": ProjectServicePortErrorCode.STORE_FAILURE,
+            "recovery_required": (ProjectServicePortErrorCode.RECOVERY_REQUIRED),
         }
-        return ProjectServicePortFailure(code=mapping[error.code])
+        code = getattr(getattr(error, "code", None), "value", None)
+        return ProjectServicePortFailure(
+            code=mapping.get(code, ProjectServicePortErrorCode.INTERNAL_ERROR)
+        )
 
     def list_projects(self, *, limit: int, cursor: str | None):
         self._ensure_live()
@@ -776,6 +799,62 @@ class AgentApplication:
             )
         except RevisionDiscoveryError as error:
             return self._revision_discovery_failure(error)
+
+    def compare_revisions(
+        self,
+        *,
+        project_id: str,
+        from_revision: str,
+        to_revision: str,
+    ):
+        self._ensure_live()
+        from vibecad.application.revision_compare import (
+            RevisionCompareError,
+            RevisionCompareService,
+        )
+
+        try:
+            return RevisionCompareService(store=self._revision_store).compare_revisions(
+                project_id=project_id,
+                from_revision=from_revision,
+                to_revision=to_revision,
+            )
+        except RevisionCompareError as error:
+            return self._revision_discovery_failure(error)
+
+    def get_artifact_manifest(self, *, request: object):
+        self._ensure_live()
+        from vibecad.application.artifact_manifest import (
+            ArtifactManifestError,
+            ArtifactManifestService,
+        )
+        from vibecad.application.artifacts import (
+            ArtifactManifestRequest,
+            ArtifactServiceErrorCode,
+            ArtifactServicePortFailure,
+        )
+
+        if type(request) is not ArtifactManifestRequest:
+            return ArtifactServicePortFailure(code=ArtifactServiceErrorCode.INVALID_INPUT)
+        try:
+            service = ArtifactManifestService(
+                task_store=self._task_store,
+                revision_store=self._revision_store,
+                artifact_root=self._layout.artifacts,
+                expected_artifact_root_identity=self._layout.identity_for(self._layout.artifacts),
+            )
+            return service.get_artifact_manifest(
+                task_id=request.task_id,
+                expected_generation=request.expected_generation,
+                revision_id=request.revision_id,
+                draft_id=request.draft_id,
+            )
+        except ArtifactManifestError as error:
+            try:
+                code = ArtifactServiceErrorCode(error.code.value)
+            except (AttributeError, ValueError):
+                code = ArtifactServiceErrorCode.INTERNAL_ERROR
+            return ArtifactServicePortFailure(code=code)
 
     def export_task_artifacts(self, *, request: object):
         self._ensure_live()

@@ -1108,6 +1108,7 @@ _STABLE_TOOL_NAMES = (
     "get_project",
     "list_projects",
     "list_revisions",
+    "compare_revisions",
     "create_task",
     "list_tasks",
     "get_task",
@@ -1116,6 +1117,7 @@ _STABLE_TOOL_NAMES = (
     "resume_task",
     "accept_draft",
     "reject_draft",
+    "get_artifact_manifest",
     "export_task_artifacts",
 )
 
@@ -1130,6 +1132,7 @@ _STABLE_TOOL_DESCRIPTIONS = MappingProxyType(
         "get_project": "读取持久化项目的当前版本",
         "list_projects": "分页发现持久化项目的当前已提交版本摘要",
         "list_revisions": "分页读取指定项目当前 HEAD 的已提交祖先版本摘要",
+        "compare_revisions": "比较同一项目两个已提交版本的谱系、清单和制品差异",
         "create_task": "在指定项目版本上创建可验收任务",
         "list_tasks": "分页发现可恢复的持久化任务摘要",
         "get_task": "读取任务的持久化状态与证据",
@@ -1138,6 +1141,7 @@ _STABLE_TOOL_DESCRIPTIONS = MappingProxyType(
         "resume_task": "按当前持久化代数恢复可继续任务",
         "accept_draft": "验证并接受指定草案版本",
         "reject_draft": "拒绝指定草案并保留审核记录",
+        "get_artifact_manifest": "读取任务版本的验证绑定、制品清单和现有交付资源",
         "export_task_artifacts": "生成可验证的 FCStd 和 STEP 交付资源",
     }
 )
@@ -1731,6 +1735,79 @@ def _revision_list_result_schema() -> dict[str, object]:
     )
 
 
+def _revision_compare_result_schema() -> dict[str, object]:
+    artifact_change = _closed_schema(
+        {
+            "name": {"type": "string", "enum": ("model.FCStd", "model.step")},
+            "format": {"type": "string", "enum": ("fcstd", "step")},
+            "change": {
+                "type": "string",
+                "enum": ("unchanged", "added", "removed", "modified"),
+            },
+            "from": _nullable(_revision_artifact_schema()),
+            "to": _nullable(_revision_artifact_schema()),
+        }
+    )
+    return _closed_schema(
+        {
+            "schema_version": _version_schema(),
+            "project_id": _id_schema(_PROJECT_PATTERN),
+            "head": _project_head_schema(),
+            "from_revision": _revision_schema(),
+            "to_revision": _revision_schema(),
+            "ancestry": _closed_schema(
+                {
+                    "verified": {"type": "boolean", "const": True},
+                    "relation": {
+                        "type": "string",
+                        "enum": (
+                            "same",
+                            "from_ancestor_of_to",
+                            "to_ancestor_of_from",
+                        ),
+                    },
+                }
+            ),
+            "base_change": _closed_schema(
+                {
+                    "changed": {"type": "boolean"},
+                    "from_base": _nullable(_id_schema(_REVISION_PATTERN)),
+                    "to_base": _nullable(_id_schema(_REVISION_PATTERN)),
+                }
+            ),
+            "revision_manifest": _closed_schema(
+                {
+                    "changed": {"type": "boolean"},
+                    "from_sha256": _id_schema(_DIGEST_PATTERN),
+                    "to_sha256": _id_schema(_DIGEST_PATTERN),
+                }
+            ),
+            "artifact_changes": {
+                "type": "array",
+                "items": artifact_change,
+                "minItems": 2,
+                "maxItems": 2,
+            },
+            "semantic_diff": _closed_schema(
+                {
+                    "status": {"type": "string", "const": "unsupported"},
+                    "scopes": {
+                        "type": "array",
+                        "prefixItems": (
+                            {"type": "string", "const": "geometry"},
+                            {"type": "string", "const": "entity"},
+                            {"type": "string", "const": "parameter"},
+                        ),
+                        "items": False,
+                        "minItems": 3,
+                        "maxItems": 3,
+                    },
+                }
+            ),
+        }
+    )
+
+
 def _materialized_artifact_schema() -> dict[str, object]:
     properties = _revision_artifact_schema()["properties"].copy()
     properties["resource_uri"] = {
@@ -1762,6 +1839,44 @@ def _artifact_result_schema() -> dict[str, object]:
             "artifacts": {
                 "type": "array",
                 "items": _materialized_artifact_schema(),
+                "minItems": 2,
+                "maxItems": 2,
+            },
+        }
+    )
+
+
+def _artifact_manifest_result_schema() -> dict[str, object]:
+    properties = _revision_artifact_schema()["properties"].copy()
+    properties["resource_uri"] = _nullable(
+        {
+            "type": "string",
+            "pattern": (
+                r"^vibecad://artifact/materialization_[0-9a-f]{64}/"
+                r"artifact_[0-9a-f]{32}$"
+            ),
+        }
+    )
+    return _closed_schema(
+        {
+            "schema_version": _version_schema(),
+            "source_kind": {"type": "string", "enum": ("committed", "draft")},
+            "task_id": _id_schema(_TASK_ID.pattern),
+            "task_generation": _safe_integer_schema(minimum=0),
+            "project_id": _id_schema(_PROJECT_PATTERN),
+            "revision_id": _id_schema(_REVISION_PATTERN),
+            "draft_id": _nullable(_id_schema(_DRAFT_PATTERN)),
+            "manifest_sha256": _id_schema(_DIGEST_PATTERN),
+            "verification_id": _id_schema(_VERIFICATION_PATTERN),
+            "acceptance_id": _bounded_text_schema(),
+            "verification_digest": _id_schema(_DIGEST_PATTERN),
+            "observation_digest": _id_schema(_DIGEST_PATTERN),
+            "materialized": {"type": "boolean"},
+            "materialization_id": _nullable(_id_schema(_MATERIALIZATION_PATTERN)),
+            "delivery_manifest_sha256": _nullable(_id_schema(_DIGEST_PATTERN)),
+            "artifacts": {
+                "type": "array",
+                "items": _closed_schema(properties),
                 "minItems": 2,
                 "maxItems": 2,
             },
@@ -2173,6 +2288,15 @@ def _stable_input_schema(name: str) -> dict[str, object]:
             },
             required=("schema_version", "project_id"),
         )
+    if name == "compare_revisions":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "project_id": _id_schema(_PROJECT_PATTERN),
+                "from_revision": _id_schema(_REVISION_PATTERN),
+                "to_revision": _id_schema(_REVISION_PATTERN),
+            }
+        )
     if name == "create_task":
         return _closed_schema(
             {
@@ -2237,6 +2361,16 @@ def _stable_input_schema(name: str) -> dict[str, object]:
                 "expected_generation": _safe_integer_schema(minimum=0),
             }
         )
+    if name == "get_artifact_manifest":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "task_id": _id_schema(_TASK_ID.pattern),
+                "expected_generation": _safe_integer_schema(minimum=0),
+                "revision_id": _id_schema(_REVISION_PATTERN),
+                "draft_id": _nullable(_id_schema(_DRAFT_PATTERN)),
+            }
+        )
     if name == "export_task_artifacts":
         return _closed_schema(
             {
@@ -2270,6 +2404,8 @@ def _stable_result_schema(name: str) -> dict[str, object]:
         return _project_list_result_schema()
     if name == "list_revisions":
         return _revision_list_result_schema()
+    if name == "compare_revisions":
+        return _revision_compare_result_schema()
     if name in {
         "create_task",
         "get_task",
@@ -2283,6 +2419,8 @@ def _stable_result_schema(name: str) -> dict[str, object]:
         return _task_list_result_schema()
     if name == "get_task_events":
         return _task_events_result_schema()
+    if name == "get_artifact_manifest":
+        return _artifact_manifest_result_schema()
     if name == "export_task_artifacts":
         return _artifact_result_schema()
     raise ValueError("unknown stable tool")
@@ -2299,6 +2437,7 @@ def _stable_annotations(name: str) -> ToolAnnotations:
         "get_project": (False, False, True, False),
         "list_projects": (True, False, True, False),
         "list_revisions": (True, False, True, False),
+        "compare_revisions": (True, False, True, False),
         "create_task": (False, False, True, False),
         "list_tasks": (True, False, True, False),
         "get_task": (False, False, True, False),
@@ -2307,6 +2446,7 @@ def _stable_annotations(name: str) -> ToolAnnotations:
         "resume_task": (False, True, True, False),
         "accept_draft": (False, True, True, False),
         "reject_draft": (False, True, True, False),
+        "get_artifact_manifest": (True, False, True, False),
         "export_task_artifacts": (False, False, True, False),
     }
     try:

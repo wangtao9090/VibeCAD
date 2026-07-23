@@ -58,6 +58,7 @@ STABLE_TOOL_NAMES = (
     "get_project",
     "list_projects",
     "list_revisions",
+    "compare_revisions",
     "create_task",
     "list_tasks",
     "get_task",
@@ -66,6 +67,7 @@ STABLE_TOOL_NAMES = (
     "resume_task",
     "accept_draft",
     "reject_draft",
+    "get_artifact_manifest",
     "export_task_artifacts",
 )
 
@@ -509,6 +511,7 @@ def test_public_annotations_match_the_independent_product_contract():
         "get_project": (False, False, True, False),
         "list_projects": (True, False, True, False),
         "list_revisions": (True, False, True, False),
+        "compare_revisions": (True, False, True, False),
         "create_task": (False, False, True, False),
         "list_tasks": (True, False, True, False),
         "get_task": (False, False, True, False),
@@ -517,6 +520,7 @@ def test_public_annotations_match_the_independent_product_contract():
         "resume_task": (False, True, True, False),
         "accept_draft": (False, True, True, False),
         "reject_draft": (False, True, True, False),
+        "get_artifact_manifest": (True, False, True, False),
         "export_task_artifacts": (False, False, True, False),
         "create_box": (False, False, True, False),
         "create_cylinder": (False, False, True, False),
@@ -550,6 +554,12 @@ def test_every_public_schema_is_closed_complete_and_specialized():
         "get_project": ("schema_version", "project_id"),
         "list_projects": ("schema_version",),
         "list_revisions": ("schema_version", "project_id"),
+        "compare_revisions": (
+            "schema_version",
+            "project_id",
+            "from_revision",
+            "to_revision",
+        ),
         "create_task": ("schema_version", "create_key", "project_id", "review_policy"),
         "list_tasks": ("schema_version",),
         "get_task": ("schema_version", "task_id"),
@@ -572,6 +582,13 @@ def test_every_public_schema_is_closed_complete_and_specialized():
             "task_id",
             "draft_id",
             "expected_generation",
+        ),
+        "get_artifact_manifest": (
+            "schema_version",
+            "task_id",
+            "expected_generation",
+            "revision_id",
+            "draft_id",
         ),
         "export_task_artifacts": (
             "schema_version",
@@ -694,6 +711,115 @@ def test_project_discovery_output_schemas_are_bounded_and_exact() -> None:
         "base_revision",
         "manifest_sha256",
     )
+
+
+def test_revision_compare_and_artifact_manifest_schemas_are_closed_and_exact() -> None:
+    specs = _spec_by_name(_surface_module().public_tool_specs())
+
+    compare_input = specs["compare_revisions"].input_schema
+    assert tuple(compare_input["properties"]) == (
+        "schema_version",
+        "project_id",
+        "from_revision",
+        "to_revision",
+    )
+    compare_result = specs["compare_revisions"].output_schema["properties"]["result"]["anyOf"][0]
+    assert tuple(compare_result["properties"]) == (
+        "schema_version",
+        "project_id",
+        "head",
+        "from_revision",
+        "to_revision",
+        "ancestry",
+        "base_change",
+        "revision_manifest",
+        "artifact_changes",
+        "semantic_diff",
+    )
+    ancestry = compare_result["properties"]["ancestry"]
+    assert ancestry["additionalProperties"] is False
+    assert ancestry["required"] == ("verified", "relation")
+    assert ancestry["properties"]["verified"] == {"type": "boolean", "const": True}
+    assert ancestry["properties"]["relation"]["enum"] == (
+        "same",
+        "from_ancestor_of_to",
+        "to_ancestor_of_from",
+    )
+    artifact_changes = compare_result["properties"]["artifact_changes"]
+    assert (artifact_changes["minItems"], artifact_changes["maxItems"]) == (2, 2)
+    artifact_change = artifact_changes["items"]
+    assert artifact_change["additionalProperties"] is False
+    assert tuple(artifact_change["properties"]) == (
+        "name",
+        "format",
+        "change",
+        "from",
+        "to",
+    )
+    assert artifact_change["properties"]["change"]["enum"] == (
+        "unchanged",
+        "added",
+        "removed",
+        "modified",
+    )
+    semantic = compare_result["properties"]["semantic_diff"]
+    assert semantic["additionalProperties"] is False
+    assert semantic["properties"]["status"] == {
+        "type": "string",
+        "const": "unsupported",
+    }
+    scopes = semantic["properties"]["scopes"]
+    assert tuple(item["const"] for item in scopes["prefixItems"]) == (
+        "geometry",
+        "entity",
+        "parameter",
+    )
+    assert scopes["items"] is False
+    assert (scopes["minItems"], scopes["maxItems"]) == (3, 3)
+
+    manifest_input = specs["get_artifact_manifest"].input_schema
+    assert tuple(manifest_input["properties"]) == (
+        "schema_version",
+        "task_id",
+        "expected_generation",
+        "revision_id",
+        "draft_id",
+    )
+    manifest_result = specs["get_artifact_manifest"].output_schema["properties"]["result"]["anyOf"][
+        0
+    ]
+    assert tuple(manifest_result["properties"]) == (
+        "schema_version",
+        "source_kind",
+        "task_id",
+        "task_generation",
+        "project_id",
+        "revision_id",
+        "draft_id",
+        "manifest_sha256",
+        "verification_id",
+        "acceptance_id",
+        "verification_digest",
+        "observation_digest",
+        "materialized",
+        "materialization_id",
+        "delivery_manifest_sha256",
+        "artifacts",
+    )
+    manifest_artifacts = manifest_result["properties"]["artifacts"]
+    assert (manifest_artifacts["minItems"], manifest_artifacts["maxItems"]) == (2, 2)
+    manifest_artifact = manifest_artifacts["items"]
+    assert manifest_artifact["additionalProperties"] is False
+    assert tuple(manifest_artifact["properties"]) == (
+        "schema_version",
+        "id",
+        "name",
+        "format",
+        "sha256",
+        "size_bytes",
+        "resource_uri",
+    )
+    assert manifest_artifact["properties"]["resource_uri"]["anyOf"][1] == {"type": "null"}
 
 
 def test_direct_input_schema_is_registry_derived_and_closed():
@@ -1102,7 +1228,7 @@ def test_low_level_tools_list_is_exact_sdk_projection_of_public_specs() -> None:
 def test_every_discovered_tool_has_a_nonempty_single_line_description() -> None:
     result = anyio.run(_server_module()._handle_list_tools)
 
-    assert len(result.tools) == 24
+    assert len(result.tools) == 26
     for tool in result.tools:
         assert type(tool.description) is str, tool.name
         assert tool.description == tool.description.strip(), tool.name
@@ -1146,7 +1272,7 @@ def test_discovery_omits_optional_output_schema_from_every_tool() -> None:
     response = server._owned_dispatch_descriptor(descriptor)
     assert response is not None
     tools = response["result"]["tools"]
-    assert len(tools) == 24
+    assert len(tools) == 26
     assert all("outputSchema" not in tool for tool in tools)
 
 
@@ -1837,6 +1963,52 @@ def _export_arguments() -> dict[str, object]:
     }
 
 
+def _artifact_manifest_arguments() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "task_id": TASK_ID,
+        "expected_generation": 0,
+        "revision_id": BASE_REVISION,
+        "draft_id": None,
+    }
+
+
+def _artifact_manifest_envelope(*, materialized: bool) -> dict[str, object]:
+    export_result = _successful_export_envelope()["result"]
+    materialization_id = export_result["materialization_id"] if materialized else None
+    artifacts = []
+    for item in export_result["artifacts"]:
+        artifacts.append(
+            {
+                **item,
+                "resource_uri": item["resource_uri"] if materialized else None,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "ok": True,
+        "result": {
+            "schema_version": 1,
+            "source_kind": "committed",
+            "task_id": TASK_ID,
+            "task_generation": 0,
+            "project_id": PROJECT_ID,
+            "revision_id": BASE_REVISION,
+            "draft_id": None,
+            "manifest_sha256": "f" * 64,
+            "verification_id": "verification_" + "1" * 32,
+            "acceptance_id": "artifact-acceptance",
+            "verification_digest": "2" * 64,
+            "observation_digest": "3" * 64,
+            "materialized": materialized,
+            "materialization_id": materialization_id,
+            "delivery_manifest_sha256": "4" * 64 if materialized else None,
+            "artifacts": artifacts,
+        },
+        "error": None,
+    }
+
+
 def test_successful_export_returns_text_and_exact_typed_resource_links(monkeypatch) -> None:
     from mcp import types
 
@@ -1890,6 +2062,91 @@ def test_successful_export_returns_text_and_exact_typed_resource_links(monkeypat
     ]
 
 
+def test_materialized_manifest_returns_exact_typed_resource_links(monkeypatch) -> None:
+    from mcp import types
+
+    server = _server_module()
+    envelope = _artifact_manifest_envelope(materialized=True)
+    calls: list[dict[str, object]] = []
+
+    class ManifestApplication:
+        def get_artifact_manifest_request(self, arguments):
+            calls.append(arguments)
+            return envelope
+
+    class ReadySlot:
+        def get(self):
+            return ManifestApplication()
+
+    monkeypatch.setattr(server, "_application_slot", ReadySlot())
+    monkeypatch.setattr(server, "_application_runtime_guard", lambda: None)
+
+    result = anyio.run(
+        server._handle_call_tool,
+        "get_artifact_manifest",
+        _artifact_manifest_arguments(),
+    )
+
+    assert result.isError is False
+    assert calls == [_artifact_manifest_arguments()]
+    assert len(result.content) == 3
+    assert type(result.content[0]) is types.TextContent
+    assert result.content[0].text == json.dumps(
+        envelope,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    artifacts = envelope["result"]["artifacts"]
+    links = result.content[1:]
+    assert all(type(item) is types.ResourceLink for item in links)
+    assert [item.model_dump(by_alias=True, exclude_none=True, mode="json") for item in links] == [
+        {
+            "name": artifacts[0]["name"],
+            "uri": artifacts[0]["resource_uri"],
+            "mimeType": "application/vnd.freecad.fcstd",
+            "size": artifacts[0]["size_bytes"],
+            "type": "resource_link",
+        },
+        {
+            "name": artifacts[1]["name"],
+            "uri": artifacts[1]["resource_uri"],
+            "mimeType": "model/step",
+            "size": artifacts[1]["size_bytes"],
+            "type": "resource_link",
+        },
+    ]
+
+
+def test_unmaterialized_manifest_returns_no_resource_links(monkeypatch) -> None:
+    from mcp import types
+
+    server = _server_module()
+    envelope = _artifact_manifest_envelope(materialized=False)
+
+    class ManifestApplication:
+        def get_artifact_manifest_request(self, _arguments):
+            return envelope
+
+    class ReadySlot:
+        def get(self):
+            return ManifestApplication()
+
+    monkeypatch.setattr(server, "_application_slot", ReadySlot())
+    monkeypatch.setattr(server, "_application_runtime_guard", lambda: None)
+
+    result = anyio.run(
+        server._handle_call_tool,
+        "get_artifact_manifest",
+        _artifact_manifest_arguments(),
+    )
+
+    assert result.isError is False
+    assert [type(item) for item in result.content] == [types.TextContent]
+    assert result.structuredContent == envelope
+
+
 def test_resource_links_never_appear_on_failed_export_or_other_tools(monkeypatch) -> None:
     from mcp import types
 
@@ -1897,6 +2154,9 @@ def test_resource_links_never_appear_on_failed_export_or_other_tools(monkeypatch
 
     class FailingApplication:
         def export_task_artifacts_request(self, _arguments):
+            return _internal_envelope()
+
+        def get_artifact_manifest_request(self, _arguments):
             return _internal_envelope()
 
     class ReadySlot:
@@ -1907,10 +2167,17 @@ def test_resource_links_never_appear_on_failed_export_or_other_tools(monkeypatch
     monkeypatch.setattr(server, "_application_runtime_guard", lambda: None)
 
     failed = anyio.run(server._handle_call_tool, "export_task_artifacts", _export_arguments())
+    failed_manifest = anyio.run(
+        server._handle_call_tool,
+        "get_artifact_manifest",
+        _artifact_manifest_arguments(),
+    )
     other = anyio.run(server._handle_call_tool, "ping", {})
 
     assert failed.isError is True
     assert [type(item) for item in failed.content] == [types.TextContent]
+    assert failed_manifest.isError is True
+    assert [type(item) for item in failed_manifest.content] == [types.TextContent]
     assert other.isError is False
     assert [type(item) for item in other.content] == [types.TextContent]
 
@@ -2000,6 +2267,16 @@ def _model_program_for_server_surface() -> dict[str, object]:
             {"schema_version": 1, "project_id": PROJECT_ID},
         ),
         (
+            "compare_revisions",
+            "compare_revisions_request",
+            {
+                "schema_version": 1,
+                "project_id": PROJECT_ID,
+                "from_revision": BASE_REVISION,
+                "to_revision": OTHER_REVISION,
+            },
+        ),
+        (
             "create_task",
             "create_task_request",
             {
@@ -2049,6 +2326,17 @@ def _model_program_for_server_surface() -> dict[str, object]:
                 "task_id": TASK_ID,
                 "draft_id": "draft_0123456789abcdef0123456789abcdef",
                 "expected_generation": 0,
+            },
+        ),
+        (
+            "get_artifact_manifest",
+            "get_artifact_manifest_request",
+            {
+                "schema_version": 1,
+                "task_id": TASK_ID,
+                "expected_generation": 0,
+                "revision_id": BASE_REVISION,
+                "draft_id": None,
             },
         ),
         (
