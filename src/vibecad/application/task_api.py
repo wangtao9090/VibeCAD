@@ -30,9 +30,11 @@ from vibecad.workflow.errors import (
     join_json_pointer,
 )
 from vibecad.workflow.state import (
+    NextAction,
     ReasoningOwner,
     ReviewPolicy,
     TaskStatus,
+    TaskTransitionRecord,
     task_creation_identity,
 )
 from vibecad.workflow.store import StoredTaskRun
@@ -48,6 +50,8 @@ _MAX_PUBLIC_ERROR_PATH_BYTES = 256
 _MAX_OUTER_JSON_NODES = 8_192
 _TASK_ID = re.compile(r"^task_[0-9a-f]{32}$")
 _TASK_CREATE_KEY = re.compile(r"^task_create_[0-9a-f]{32}$")
+_TASK_LIST_CURSOR = re.compile(r"^task_list_cursor_[0-9a-f]{64}$")
+_TASK_EVENT_CURSOR = re.compile(r"^task_event_cursor_[0-9a-f]{64}$")
 _PROJECT_ID = re.compile(r"^project_[0-9a-f]{32}$")
 _DRAFT_ID = re.compile(r"^draft_[0-9a-f]{32}$")
 
@@ -148,6 +152,14 @@ class TaskServicePort(Protocol):
     ) -> StoredTaskRun | TaskServicePortFailure: ...
 
     def get_task(self, *, task_id: str) -> StoredTaskRun | TaskServicePortFailure: ...
+
+    def list_tasks(
+        self, *, limit: int, cursor: str | None
+    ) -> dict[str, object] | TaskServicePortFailure: ...
+
+    def get_task_events(
+        self, *, task_id: str, limit: int, cursor: str | None
+    ) -> dict[str, object] | TaskServicePortFailure: ...
 
     def submit_model_program(
         self, *, task_id: str, expected_generation: int, program: ModelProgram
@@ -302,6 +314,7 @@ def _validate_request(
     request: object,
     *,
     required: frozenset[str],
+    allowed: frozenset[str] | None = None,
     submit: bool = False,
 ) -> dict[str, object]:
     if type(request) is not dict:
@@ -313,7 +326,8 @@ def _validate_request(
     keys = tuple(request)
     if not all(type(key) is str for key in keys):
         _raise(TaskApiErrorCode.INVALID_TYPE)
-    unknown = sorted(set(keys) - required)
+    accepted = required if allowed is None else allowed
+    unknown = sorted(set(keys) - accepted)
     if unknown:
         _raise(TaskApiErrorCode.UNKNOWN_FIELD, _bounded_pointer("", unknown[0]))
     missing = sorted(required - set(keys))
@@ -365,6 +379,20 @@ def _generation(value: object) -> int:
     if value < 0 or value > MAX_SAFE_JSON_INTEGER:
         _raise(TaskApiErrorCode.INVALID_VALUE, "/expected_generation")
     return value
+
+
+def _page_limit(value: object) -> int:
+    if type(value) is not int:
+        _raise(TaskApiErrorCode.INVALID_TYPE, "/limit")
+    if value < 1 or value > 100:
+        _raise(TaskApiErrorCode.INVALID_VALUE, "/limit")
+    return value
+
+
+def _page_cursor(value: object, pattern: re.Pattern[str]) -> str | None:
+    if value is None:
+        return None
+    return _identifier(value, "/cursor", pattern)
 
 
 def _review_policy(value: object) -> ReviewPolicy:
@@ -639,6 +667,82 @@ class TaskApi:
             _raise(TaskApiErrorCode.INTERNAL_ERROR)
         return value
 
+    @staticmethod
+    def _mapping_port_result(value: object) -> dict[str, object]:
+        if type(value) is TaskServicePortFailure:
+            try:
+                port_code = value.code
+            except BaseException:
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            if type(port_code) is not TaskServicePortErrorCode:
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            _raise(_PORT_ERROR_MAP[port_code])
+        if type(value) is not dict:
+            _raise(TaskApiErrorCode.INTERNAL_ERROR)
+        return dict(value)
+
+    @staticmethod
+    def _validated_cursor(value: object, pattern: re.Pattern[str]) -> str | None:
+        if value is None:
+            return None
+        if type(value) is not str or pattern.fullmatch(value) is None:
+            _raise(TaskApiErrorCode.INTERNAL_ERROR)
+        return value
+
+    @staticmethod
+    def _validated_summary(value: object) -> dict[str, object]:
+        keys = {
+            "task_id",
+            "project_id",
+            "generation",
+            "base_revision",
+            "reasoning_owner",
+            "review_policy",
+            "status",
+            "next_action",
+            "candidate_revision",
+            "committed_revision",
+            "draft_id",
+        }
+        if type(value) is not dict or set(value) != keys:
+            _raise(TaskApiErrorCode.INTERNAL_ERROR)
+        if (
+            type(value["task_id"]) is not str
+            or _TASK_ID.fullmatch(value["task_id"]) is None
+            or type(value["project_id"]) is not str
+            or _PROJECT_ID.fullmatch(value["project_id"]) is None
+            or type(value["base_revision"]) is not str
+            or re.fullmatch(r"revision_[0-9a-f]{32}", value["base_revision"]) is None
+            or type(value["generation"]) is not int
+            or value["generation"] < 0
+            or value["generation"] > MAX_SAFE_JSON_INTEGER
+        ):
+            _raise(TaskApiErrorCode.INTERNAL_ERROR)
+        enum_fields = (
+            ("reasoning_owner", ReasoningOwner),
+            ("review_policy", ReviewPolicy),
+            ("status", TaskStatus),
+            ("next_action", NextAction),
+        )
+        for field, enum_type in enum_fields:
+            if type(value[field]) is not str:
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            try:
+                enum_type(value[field])
+            except (TypeError, ValueError):
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+        for field, pattern in (
+            ("candidate_revision", r"revision_[0-9a-f]{32}"),
+            ("committed_revision", r"revision_[0-9a-f]{32}"),
+            ("draft_id", r"draft_[0-9a-f]{32}"),
+        ):
+            selected = value[field]
+            if selected is not None and (
+                type(selected) is not str or re.fullmatch(pattern, selected) is None
+            ):
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+        return value
+
     def create_task(self, request: object) -> dict[str, object]:
         def action() -> dict[str, object]:
             data = _validate_request(
@@ -742,6 +846,100 @@ class TaskApi:
                 task_id=task_id,
             )
             return self._task_result(stored, task_id=task_id)
+
+        return self._guard(action)
+
+    def list_tasks(self, request: object) -> dict[str, object]:
+        def action() -> dict[str, object]:
+            data = _validate_request(
+                request,
+                required=frozenset({"schema_version"}),
+                allowed=frozenset({"schema_version", "limit", "cursor"}),
+            )
+            limit = _page_limit(data.get("limit", 50))
+            cursor = _page_cursor(data.get("cursor"), _TASK_LIST_CURSOR)
+            result = self._mapping_port_result(
+                self._invoke_untrusted(lambda: self._port.list_tasks(limit=limit, cursor=cursor))
+            )
+            if set(result) != {"tasks", "next_cursor"} or type(result["tasks"]) is not list:
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            if len(result["tasks"]) > limit:
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            tasks = [dict(self._validated_summary(item)) for item in result["tasks"]]
+            ids = [item["task_id"] for item in tasks]
+            if ids != sorted(ids) or len(ids) != len(set(ids)):
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            next_cursor = self._validated_cursor(result["next_cursor"], _TASK_LIST_CURSOR)
+            if len(tasks) < limit and next_cursor is not None:
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            return {
+                "tasks": tasks,
+                "next_cursor": next_cursor,
+            }
+
+        return self._guard(action)
+
+    def get_task_events(self, request: object) -> dict[str, object]:
+        def action() -> dict[str, object]:
+            data = _validate_request(
+                request,
+                required=frozenset({"schema_version", "task_id"}),
+                allowed=frozenset({"schema_version", "task_id", "limit", "cursor"}),
+            )
+            task_id = _identifier(data["task_id"], "/task_id", _TASK_ID)
+            limit = _page_limit(data.get("limit", 50))
+            cursor = _page_cursor(data.get("cursor"), _TASK_EVENT_CURSOR)
+            result = self._mapping_port_result(
+                self._invoke_untrusted(
+                    lambda: self._port.get_task_events(
+                        task_id=task_id,
+                        limit=limit,
+                        cursor=cursor,
+                    )
+                )
+            )
+            if set(result) != {
+                "task_id",
+                "generation",
+                "transitions",
+                "next_cursor",
+            }:
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            generation = result["generation"]
+            if (
+                type(result["task_id"]) is not str
+                or result["task_id"] != task_id
+                or type(generation) is not int
+                or generation < 0
+                or generation > MAX_SAFE_JSON_INTEGER
+                or type(result["transitions"]) is not list
+                or len(result["transitions"]) > limit
+            ):
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            transitions: list[dict[str, object]] = []
+            for value in result["transitions"]:
+                try:
+                    record = TaskTransitionRecord.from_mapping(value)
+                except BaseException:
+                    _raise(TaskApiErrorCode.INTERNAL_ERROR)
+                if record.to_mapping() != value:
+                    _raise(TaskApiErrorCode.INTERNAL_ERROR)
+                transitions.append(dict(value))
+            sequences = [item["sequence"] for item in transitions]
+            if any(
+                current != prior + 1
+                for prior, current in zip(sequences, sequences[1:], strict=False)
+            ) or (cursor is None and sequences and sequences[0] != 1):
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            next_cursor = self._validated_cursor(result["next_cursor"], _TASK_EVENT_CURSOR)
+            if len(transitions) < limit and next_cursor is not None:
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            return {
+                "task_id": task_id,
+                "generation": generation,
+                "transitions": transitions,
+                "next_cursor": next_cursor,
+            }
 
         return self._guard(action)
 

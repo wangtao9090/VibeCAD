@@ -370,6 +370,12 @@ class _FakePort:
     def get_task(self, **kwargs):
         return self._reply("get_task", kwargs)
 
+    def list_tasks(self, **kwargs):
+        return self._reply("list_tasks", kwargs)
+
+    def get_task_events(self, **kwargs):
+        return self._reply("get_task_events", kwargs)
+
     def submit_model_program(self, **kwargs):
         return self._reply("submit_model_program", kwargs)
 
@@ -464,7 +470,9 @@ def test_public_surface_error_taxonomies_and_method_signatures_are_closed():
     }
     assert api_methods == {
         "create_task",
+        "list_tasks",
         "get_task",
+        "get_task_events",
         "submit_model_program",
         "resume_task",
         "get_capabilities",
@@ -481,7 +489,9 @@ def test_public_surface_error_taxonomies_and_method_signatures_are_closed():
     }
     assert port_methods == {
         "create_task",
+        "list_tasks",
         "get_task",
+        "get_task_events",
         "submit_model_program",
         "continue_task",
         "reconcile_task",
@@ -507,6 +517,192 @@ def test_public_surface_error_taxonomies_and_method_signatures_are_closed():
 def test_port_failure_requires_an_exact_closed_code():
     with pytest.raises(TypeError):
         TaskServicePortFailure(code="invalid_input")  # type: ignore[arg-type]
+
+
+def _task_summary() -> dict[str, object]:
+    task = _keyed_needs_plan()
+    return {
+        "task_id": task.id,
+        "project_id": task.project_id,
+        "generation": 0,
+        "base_revision": task.base_revision,
+        "reasoning_owner": task.reasoning_owner.value,
+        "review_policy": task.review_policy.value,
+        "status": task.status.value,
+        "next_action": task.next_action.value,
+        "candidate_revision": None,
+        "committed_revision": None,
+        "draft_id": None,
+    }
+
+
+def test_list_tasks_defaults_limit_accepts_explicit_null_cursor_and_copies_page():
+    page = {"tasks": [_task_summary()], "next_cursor": None}
+    port = _FakePort(page)
+
+    response = TaskApi(port=port).list_tasks({"schema_version": 1, "cursor": None})
+
+    result = _assert_success(response)
+    assert result == page
+    assert port.calls == [("list_tasks", {"limit": 50, "cursor": None})]
+    assert result is not page
+    assert result["tasks"][0] is not page["tasks"][0]
+
+
+@pytest.mark.parametrize("limit", [1, 100])
+def test_task_pages_accept_exact_limit_boundaries(limit: int):
+    port = _FakePort({"tasks": [], "next_cursor": None})
+
+    response = TaskApi(port=port).list_tasks({"schema_version": 1, "limit": limit})
+
+    assert _assert_success(response)["tasks"] == []
+    assert port.calls == [("list_tasks", {"limit": limit, "cursor": None})]
+
+
+@pytest.mark.parametrize(
+    ("value", "code"),
+    [
+        (True, "invalid_type"),
+        (1.0, "invalid_type"),
+        (None, "invalid_type"),
+        (0, "invalid_value"),
+        (101, "invalid_value"),
+    ],
+)
+def test_task_page_limit_is_exact_and_bounded(value: object, code: str):
+    port = _FakePort({"tasks": [], "next_cursor": None})
+
+    response = TaskApi(port=port).list_tasks({"schema_version": 1, "limit": value})
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == code
+    assert response["error"]["path"] == "/limit"
+    assert port.calls == []
+
+
+def test_get_task_events_accepts_endpoint_cursor_and_exact_persisted_mapping():
+    task = _keyed_needs_plan()
+    transition = task.transitions[0].to_mapping()
+    cursor = "task_event_cursor_" + "1" * 64
+    port = _FakePort(
+        {
+            "task_id": task.id,
+            "generation": 0,
+            "transitions": [transition],
+            "next_cursor": cursor,
+        }
+    )
+
+    response = TaskApi(port=port).get_task_events(
+        {"schema_version": 1, "task_id": task.id, "limit": 1}
+    )
+
+    result = _assert_success(response)
+    assert result["transitions"] == [transition]
+    assert result["transitions"][0] is not transition
+    assert result["next_cursor"] == cursor
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "task_list_cursor_" + "1" * 64,
+        "task_event_cursor_" + "A" * 64,
+        "task_event_cursor_" + "1" * 63,
+        1,
+    ],
+)
+def test_get_task_events_rejects_malformed_endpoint_cursor(cursor: object):
+    port = _FakePort({})
+
+    response = TaskApi(port=port).get_task_events(
+        {"schema_version": 1, "task_id": KEYED_TASK_ID, "cursor": cursor}
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["code"] in {"invalid_type", "invalid_value"}
+    assert response["error"]["path"] == "/cursor"
+    assert port.calls == []
+
+
+def test_task_page_rejects_short_untrusted_page_with_continuation():
+    port = _FakePort(
+        {
+            "tasks": [_task_summary()],
+            "next_cursor": "task_list_cursor_" + "1" * 64,
+        }
+    )
+
+    response = TaskApi(port=port).list_tasks({"schema_version": 1, "limit": 2})
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "internal_error"
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "task_event_cursor_" + "1" * 64,
+        "task_list_cursor_" + "A" * 64,
+        "task_list_cursor_" + "1" * 63,
+        1,
+    ],
+)
+def test_list_tasks_rejects_malformed_endpoint_cursor(cursor: object):
+    port = _FakePort({})
+
+    response = TaskApi(port=port).list_tasks({"schema_version": 1, "cursor": cursor})
+
+    assert response["ok"] is False
+    assert response["error"]["code"] in {"invalid_type", "invalid_value"}
+    assert response["error"]["path"] == "/cursor"
+    assert port.calls == []
+
+
+def test_events_explicit_null_cursor_uses_default_limit():
+    task = _keyed_needs_plan()
+    port = _FakePort(
+        {
+            "task_id": task.id,
+            "generation": 0,
+            "transitions": [task.transitions[0].to_mapping()],
+            "next_cursor": None,
+        }
+    )
+
+    response = TaskApi(port=port).get_task_events(
+        {"schema_version": 1, "task_id": task.id, "cursor": None}
+    )
+
+    assert _assert_success(response)["generation"] == 0
+    assert port.calls == [
+        (
+            "get_task_events",
+            {"task_id": task.id, "limit": 50, "cursor": None},
+        )
+    ]
+
+
+@pytest.mark.parametrize("sequences", [(2,), (1, 3)])
+def test_events_reject_untrusted_non_contiguous_sequences(
+    sequences: tuple[int, ...],
+):
+    task = _keyed_needs_plan()
+    transition = task.transitions[0].to_mapping()
+    transitions = [{**transition, "sequence": sequence} for sequence in sequences]
+    port = _FakePort(
+        {
+            "task_id": task.id,
+            "generation": 0,
+            "transitions": transitions,
+            "next_cursor": None,
+        }
+    )
+
+    response = TaskApi(port=port).get_task_events({"schema_version": 1, "task_id": task.id})
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "internal_error"
 
 
 def test_create_derives_the_task_id_external_plan_and_exact_result_envelope():

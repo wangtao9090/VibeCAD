@@ -21,6 +21,7 @@ from vibecad.workflow.state import (
 from vibecad.workflow.store import (
     StoredTaskRun,
     TaskRunStore,
+    TaskSnapshotEntry,
     TaskStoreError,
     TaskStoreErrorCode,
 )
@@ -377,6 +378,28 @@ class TaskCatalogService:
 
     def get_task(self, *, task_id: str) -> StoredTaskRun:
         return self._load(task_id)
+
+    def snapshot_tasks(self) -> tuple[TaskSnapshotEntry, ...]:
+        try:
+            stored = self._task_store.snapshot()
+        except TaskStoreError as error:
+            if error.code is TaskStoreErrorCode.RESOURCE_EXHAUSTED:
+                _raise(TaskCatalogErrorCode.RESOURCE_EXHAUSTED)
+            _raise(TaskCatalogErrorCode.STORE_FAILURE)
+        except Exception:
+            _raise(TaskCatalogErrorCode.STORE_FAILURE)
+        if type(stored) is not tuple or not all(type(item) is TaskSnapshotEntry for item in stored):
+            _raise(TaskCatalogErrorCode.STORE_FAILURE)
+        return stored
+
+    def discovery_namespace(self) -> bytes:
+        try:
+            value = self._task_store.discovery_namespace()
+        except Exception:
+            _raise(TaskCatalogErrorCode.STORE_FAILURE)
+        if type(value) is not bytes or len(value) != 32:
+            _raise(TaskCatalogErrorCode.STORE_FAILURE)
+        return value
 
     def reject_draft(
         self,

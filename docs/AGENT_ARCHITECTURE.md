@@ -4,7 +4,7 @@
 >
 > 当前实现：S3-8 / P0-A 已形成未发布的 0.5.0 本地交付候选；协议与分发包 host-ready
 >
-> 发布边界：真实 Claude/Codex 主机尚未安装激活验收，当前候选也未 push、tag 或 release
+> 发布边界：真实 Claude/Codex 主机尚未安装激活验收，当前没有 tag 或 release
 >
 > 文档角色：Agent 定位、调用模式、信任边界和后续阶段的决策真源
 >
@@ -128,8 +128,8 @@ Accept 不是“信任旧 verdict 后直接改指针”。它会重开 immutable
 - 两者都产生 TaskRun、candidate/draft、verification report、revision 和 artifact；
 - 工具数量不是能力目标。稳定控制面保持小而稳定，CAD operation 可按准入门逐批扩展。
 
-当前 20 个公开工具中，只有 6 个是 direct CAD 工具；其余是 5 个 service/runtime/capability 控制工具
-和 9 个 project/task/review/artifact facade。不能把“20 个公开工具”误写为“20 个 CAD command”。
+当前 22 个公开工具中，只有 6 个是 direct CAD 工具；其余是 5 个 service/runtime/capability 控制工具
+和 11 个 project/task/review/artifact facade。不能把“22 个公开工具”误写为“22 个 CAD command”。
 
 每个新增 operation 必须同时具备：
 
@@ -180,14 +180,15 @@ negotiation、明确用户授权、预算、超时和 depth=1。`byok` 未来使
 进入 MCP 参数、TaskRun、项目、日志、artifact 或 FreeCAD process。
 
 当前没有自动 repair/replan/semantic retry。失败后由宿主读取固定错误和 evidence，决定是否创建新任务
-或提交新 program。协议重放只适用于被证明幂等的请求；尤其 `create_task` 还没有 request key，未知
-结果不能盲重试。这一缺口由 P0-B 的 task request catalog/list/recover 关闭。
+或提交新 program。`create_task` 已由 `task_create_` key 和不可变意图绑定，可在未知结果时用同一 key
+安全重放；`list_tasks` 只用于未知 task id 的恢复发现。
 
 S3-8 canonical skill 已要求宿主按服务端 `next_action` 行动：`submit_program` / `provide_input` 提交新
 program，`validate_program` / `reconcile` / `cleanup` 调 `resume_task`，`wait` 先刷新后至多恢复一次，
 `review_draft` 只允许 Accept/Reject，`none` 停止修改。`request_plan` 对当前公共 `create_task` 是不可达
 状态；若刷新后仍返回它，必须停止并报告内部状态不一致，不能提交或 resume。已知 task id 的不确定
-结果先 `get_task` 并采用服务端 generation；未知结果的 `create_task` 因没有 id 只能停止并报告当前缺口。
+结果先 `get_task` 并采用服务端 generation；未知 task id 时可分页 `list_tasks` 后再读取权威任务，
+`get_task_events` 仅审计已持久化的 transition，不是带时间戳的运行日志。
 
 ### 6.1 Skill 分发不是自动激活
 

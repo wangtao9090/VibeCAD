@@ -57,7 +57,9 @@ STABLE_TOOL_NAMES = (
     "create_project",
     "get_project",
     "create_task",
+    "list_tasks",
     "get_task",
+    "get_task_events",
     "submit_model_program",
     "resume_task",
     "accept_draft",
@@ -504,7 +506,9 @@ def test_public_annotations_match_the_independent_product_contract():
         "create_project": (False, False, True, True),
         "get_project": (False, False, True, False),
         "create_task": (False, False, True, False),
+        "list_tasks": (True, False, True, False),
         "get_task": (False, False, True, False),
+        "get_task_events": (True, False, True, False),
         "submit_model_program": (False, True, True, False),
         "resume_task": (False, True, True, False),
         "accept_draft": (False, True, True, False),
@@ -541,7 +545,9 @@ def test_every_public_schema_is_closed_complete_and_specialized():
         "create_project": ("schema_version", "create_key", "kind"),
         "get_project": ("schema_version", "project_id"),
         "create_task": ("schema_version", "create_key", "project_id", "review_policy"),
+        "list_tasks": ("schema_version",),
         "get_task": ("schema_version", "task_id"),
+        "get_task_events": ("schema_version", "task_id"),
         "submit_model_program": (
             "schema_version",
             "task_id",
@@ -591,7 +597,6 @@ def test_every_public_schema_is_closed_complete_and_specialized():
             "result",
             "error",
         }
-
     assert set(specs["ping"].output_schema["properties"]["result"]["anyOf"][0]["properties"]) == {
         "schema_version",
         "service",
@@ -614,6 +619,37 @@ def test_every_public_schema_is_closed_complete_and_specialized():
         "authoritative",
         "artifacts",
     }
+
+
+@pytest.mark.parametrize(
+    ("name", "cursor_pattern", "items_field"),
+    [
+        ("list_tasks", r"^task_list_cursor_[0-9a-f]{64}$", "tasks"),
+        ("get_task_events", r"^task_event_cursor_[0-9a-f]{64}$", "transitions"),
+    ],
+)
+def test_task_discovery_schemas_freeze_optional_bounds_and_cursor_domains(
+    name: str,
+    cursor_pattern: str,
+    items_field: str,
+):
+    spec = _spec_by_name(_surface_module().public_tool_specs())[name]
+    properties = spec.input_schema["properties"]
+    assert properties["limit"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100,
+    }
+    assert properties["cursor"]["anyOf"] == (
+        {"type": "string", "pattern": cursor_pattern},
+        {"type": "null"},
+    )
+    result_schema = spec.output_schema["properties"]["result"]["anyOf"][0]
+    assert result_schema["properties"][items_field]["maxItems"] == 100
+    assert result_schema["properties"]["next_cursor"]["anyOf"] == (
+        {"type": "string", "pattern": cursor_pattern},
+        {"type": "null"},
+    )
 
 
 def test_direct_input_schema_is_registry_derived_and_closed():
@@ -1022,7 +1058,7 @@ def test_low_level_tools_list_is_exact_sdk_projection_of_public_specs() -> None:
 def test_every_discovered_tool_has_a_nonempty_single_line_description() -> None:
     result = anyio.run(_server_module()._handle_list_tools)
 
-    assert len(result.tools) == 20
+    assert len(result.tools) == 22
     for tool in result.tools:
         assert type(tool.description) is str, tool.name
         assert tool.description == tool.description.strip(), tool.name
@@ -1052,7 +1088,7 @@ def test_owned_tools_list_fixed_frame_fits_the_discovery_budget() -> None:
         + b"\n"
     )
     assert response["id"] == 1
-    assert len(frame) <= 65_536
+    assert len(frame) <= 32_768
 
 
 def test_discovery_omits_optional_output_schema_from_every_tool() -> None:
@@ -1066,7 +1102,7 @@ def test_discovery_omits_optional_output_schema_from_every_tool() -> None:
     response = server._owned_dispatch_descriptor(descriptor)
     assert response is not None
     tools = response["result"]["tools"]
-    assert len(tools) == 20
+    assert len(tools) == 22
     assert all("outputSchema" not in tool for tool in tools)
 
 
@@ -1923,7 +1959,13 @@ def _model_program_for_server_surface() -> dict[str, object]:
                 "review_policy": "auto_commit",
             },
         ),
+        ("list_tasks", "list_tasks_request", {"schema_version": 1}),
         ("get_task", "get_task_request", {"schema_version": 1, "task_id": TASK_ID}),
+        (
+            "get_task_events",
+            "get_task_events_request",
+            {"schema_version": 1, "task_id": TASK_ID},
+        ),
         (
             "submit_model_program",
             "submit_model_program_request",

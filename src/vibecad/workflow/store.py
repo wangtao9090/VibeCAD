@@ -21,9 +21,16 @@ from vibecad.workflow.lease import (
     ResourceLease,
     ResourceLeaseManager,
 )
-from vibecad.workflow.state import TaskRun
+from vibecad.workflow.state import (
+    NextAction,
+    ReasoningOwner,
+    ReviewPolicy,
+    TaskRun,
+    TaskStatus,
+)
 
 __all__ = (
+    "TaskSnapshotEntry",
     "StoredTaskRun",
     "TaskRunStore",
     "TaskStoreError",
@@ -33,8 +40,12 @@ __all__ = (
 
 _KEY_DOMAIN = b"vibecad-task-store-key-v1\0"
 _CHECKSUM_DOMAIN = b"vibecad-stored-task-run-v1\0"
+_DISCOVERY_NAMESPACE_DOMAIN = b"vibecad-task-store-discovery-namespace-v1\0"
 _JOURNAL_CHECKSUM_DOMAIN = b"vibecad-task-store-mutation-v1\0"
 _TASK_ID_RE = re.compile(r"^task_[0-9a-f]{32}$")
+_PROJECT_ID_RE = re.compile(r"^project_[0-9a-f]{32}$")
+_REVISION_ID_RE = re.compile(r"^revision_[0-9a-f]{32}$")
+_DRAFT_ID_RE = re.compile(r"^draft_[0-9a-f]{32}$")
 _CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
 _RECORD_NAME_RE = re.compile(r"^[0-9a-f]{64}\.json$")
 _TEMP_NAME_RE = re.compile(r"^\.[0-9a-f]{64}\.json\.[0-9a-f]{32}\.tmp$")
@@ -133,6 +144,63 @@ class StoredTaskRun:
             raise ValueError("generation must be a safe nonnegative integer")
         if type(self.task_run) is not TaskRun:
             raise TypeError("task_run must be an exact TaskRun")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TaskSnapshotEntry:
+    """Bounded discovery projection plus digest of its complete validated record."""
+
+    task_id: str
+    project_id: str
+    generation: int
+    base_revision: str
+    reasoning_owner: str
+    review_policy: str
+    status: str
+    next_action: str
+    candidate_revision: str | None
+    committed_revision: str | None
+    draft_id: str | None
+    record_sha256: str
+
+    def __post_init__(self) -> None:
+        if type(self.task_id) is not str or _TASK_ID_RE.fullmatch(self.task_id) is None:
+            raise ValueError("invalid task snapshot task_id")
+        if (
+            type(self.project_id) is not str
+            or _PROJECT_ID_RE.fullmatch(self.project_id) is None
+            or type(self.base_revision) is not str
+            or _REVISION_ID_RE.fullmatch(self.base_revision) is None
+            or type(self.generation) is not int
+            or self.generation < 0
+            or self.generation > MAX_SAFE_JSON_INTEGER
+        ):
+            raise ValueError("invalid task snapshot identity")
+        enum_fields = (
+            (self.reasoning_owner, ReasoningOwner),
+            (self.review_policy, ReviewPolicy),
+            (self.status, TaskStatus),
+            (self.next_action, NextAction),
+        )
+        for value, enum_type in enum_fields:
+            if type(value) is not str:
+                raise TypeError("invalid task snapshot enum")
+            try:
+                enum_type(value)
+            except ValueError:
+                raise ValueError("invalid task snapshot enum") from None
+        for value, pattern in (
+            (self.candidate_revision, _REVISION_ID_RE),
+            (self.committed_revision, _REVISION_ID_RE),
+            (self.draft_id, _DRAFT_ID_RE),
+        ):
+            if value is not None and (type(value) is not str or pattern.fullmatch(value) is None):
+                raise ValueError("invalid task snapshot optional identity")
+        if (
+            type(self.record_sha256) is not str
+            or _CHECKSUM_RE.fullmatch(self.record_sha256) is None
+        ):
+            raise ValueError("invalid task snapshot record digest")
 
 
 class _RecordDecodeError(ValueError):
@@ -726,6 +794,96 @@ def _scan_store(root_fd: int, root_stat) -> _StoreSnapshot:
         journal_present=journal_present,
         temp_names=tuple(sorted(temp_names)),
     )
+
+
+def _snapshot_task_id(raw: bytes, filename: str) -> str:
+    try:
+        decoded = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_duplicate_checked_object,
+            parse_float=_parse_float,
+            parse_int=_parse_integer,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeError, ValueError, RecursionError):
+        raise TaskStoreError(TaskStoreErrorCode.CORRUPT_RECORD) from None
+    task_mapping = decoded.get("task_run") if type(decoded) is dict else None
+    task_id = task_mapping.get("id") if type(task_mapping) is dict else None
+    if (
+        type(task_id) is not str
+        or _TASK_ID_RE.fullmatch(task_id) is None
+        or _record_name(task_id) != filename
+    ):
+        raise TaskStoreError(TaskStoreErrorCode.CORRUPT_RECORD)
+    return task_id
+
+
+def _read_snapshot_records(root_fd: int, root_stat) -> tuple[TaskSnapshotEntry, ...]:
+    """Read one complete catalog snapshot without recovery or mutation."""
+
+    records: list[TaskSnapshotEntry] = []
+    total_bytes = 0
+    iterator = None
+    try:
+        iterator = os.scandir(root_fd)
+        with iterator:
+            for entry in iterator:
+                name = entry.name
+                if type(name) is not str:
+                    raise TaskStoreError(TaskStoreErrorCode.UNSAFE_STORE)
+                if _RECORD_NAME_RE.fullmatch(name) is None:
+                    if name == _MUTATION_JOURNAL_NAME or (
+                        _TEMP_NAME_RE.fullmatch(name) is not None
+                    ):
+                        raise TaskStoreError(TaskStoreErrorCode.CORRUPT_RECORD)
+                    raise TaskStoreError(TaskStoreErrorCode.UNSAFE_STORE)
+                result = _path_stat(root_fd, name)
+                if (
+                    result is None
+                    or not _regular_safe(result, root_stat)
+                    or type(result.st_size) is not int
+                    or result.st_size < 0
+                ):
+                    raise TaskStoreError(TaskStoreErrorCode.UNSAFE_STORE)
+                total_bytes += result.st_size
+                if result.st_size > _MAX_RECORD_BYTES:
+                    raise TaskStoreError(TaskStoreErrorCode.RECORD_TOO_LARGE)
+                if len(records) >= _MAX_TASK_RECORDS or total_bytes > _MAX_TASK_STORE_BYTES:
+                    raise TaskStoreError(TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+                raw, _record_stat = _read_named_bytes(
+                    root_fd,
+                    root_stat,
+                    name,
+                    limit=_MAX_RECORD_BYTES,
+                    too_large=TaskStoreErrorCode.RECORD_TOO_LARGE,
+                )
+                task_id = _snapshot_task_id(raw, name)
+                stored = _decode_record(raw, task_id)
+                task = stored.task_run
+                records.append(
+                    TaskSnapshotEntry(
+                        task_id=task.id,
+                        project_id=task.project_id,
+                        generation=stored.generation,
+                        base_revision=task.base_revision,
+                        reasoning_owner=task.reasoning_owner.value,
+                        review_policy=task.review_policy.value,
+                        status=task.status.value,
+                        next_action=task.next_action.value,
+                        candidate_revision=task.candidate_revision,
+                        committed_revision=task.committed_revision,
+                        draft_id=None if task.draft is None else task.draft.id,
+                        record_sha256=hashlib.sha256(raw).hexdigest(),
+                    )
+                )
+    except TaskStoreError:
+        raise
+    except OSError:
+        raise TaskStoreError(TaskStoreErrorCode.IO_ERROR) from None
+    records.sort(key=lambda item: item.task_id)
+    if len({item.task_id for item in records}) != len(records):
+        raise TaskStoreError(TaskStoreErrorCode.RESOURCE_EXHAUSTED)
+    return tuple(records)
 
 
 def _read_named_bytes(
@@ -1422,6 +1580,40 @@ class TaskRunStore:
         if stored is None:
             raise TaskStoreError(TaskStoreErrorCode.NOT_FOUND)
         return stored
+
+    def snapshot(self) -> tuple[TaskSnapshotEntry, ...]:
+        """Return a fully validated, catalog-lease-bound read-only snapshot."""
+
+        _require_storage_capabilities()
+        lease = self._acquire_catalog()
+        root_fd = -1
+        failure = None
+        records: tuple[TaskSnapshotEntry, ...] | None = None
+        try:
+            try:
+                root_fd, root_stat = _open_root(self._root_parts, self._root_identity)
+                records = _read_snapshot_records(root_fd, root_stat)
+            except TaskStoreError as error:
+                failure = error.code
+            except OSError:
+                failure = TaskStoreErrorCode.IO_ERROR
+        finally:
+            close_ok = root_fd < 0 or _close(root_fd)
+            release_ok = _release(lease)
+        if failure is not None:
+            raise TaskStoreError(failure)
+        if not close_ok or not release_ok or records is None:
+            raise TaskStoreError(TaskStoreErrorCode.IO_ERROR)
+        return records
+
+    def discovery_namespace(self) -> bytes:
+        device, inode = self._root_identity
+        return hashlib.sha256(
+            _DISCOVERY_NAMESPACE_DOMAIN
+            + str(device).encode("ascii")
+            + b":"
+            + str(inode).encode("ascii")
+        ).digest()
 
     def create(self, task_run):
         if type(task_run) is not TaskRun:

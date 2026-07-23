@@ -108,6 +108,316 @@ def test_store_restart_preserves_the_complete_task_creation_digest(
     assert restarted.load(KEYED_TASK_ID).task_run.creation_digest == CREATION_DIGEST
 
 
+def test_read_only_snapshot_is_sorted_and_restarts_without_mutating_store(
+    store: TaskRunStore,
+    store_root: Path,
+    lease_root: Path,
+):
+    second = _task(OTHER_TASK_ID)
+    first = _task(TASK_ID)
+    store.create(second)
+    store.create(first)
+    before = {path.name: (path.stat().st_mode, path.read_bytes()) for path in store_root.iterdir()}
+
+    snapshot = store.snapshot()
+    restarted = _reopened_store(store_root, lease_root)
+
+    assert tuple(item.task_id for item in snapshot) == (TASK_ID, OTHER_TASK_ID)
+    assert restarted.snapshot() == snapshot
+    assert {
+        path.name: (path.stat().st_mode, path.read_bytes()) for path in store_root.iterdir()
+    } == before
+
+
+@pytest.mark.parametrize("unexpected_name", [MUTATION_JOURNAL_NAME, "unknown-entry"])
+def test_read_only_snapshot_fails_closed_on_non_record_entries_without_mutation(
+    store: TaskRunStore,
+    store_root: Path,
+    unexpected_name: str,
+):
+    store.create(_task())
+    extra = store_root / unexpected_name
+    extra.write_bytes(b"not-a-record")
+    os.chmod(extra, 0o600)
+    before = {path.name: (path.stat().st_mode, path.read_bytes()) for path in store_root.iterdir()}
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.snapshot()
+
+    assert caught.value.code is (
+        TaskStoreErrorCode.CORRUPT_RECORD
+        if unexpected_name == MUTATION_JOURNAL_NAME
+        else TaskStoreErrorCode.UNSAFE_STORE
+    )
+    assert {
+        path.name: (path.stat().st_mode, path.read_bytes()) for path in store_root.iterdir()
+    } == before
+
+
+def test_read_only_snapshot_preserves_corrupt_record_taxonomy_and_bytes(
+    store: TaskRunStore,
+    store_root: Path,
+):
+    raw = bytearray(_record_bytes(_task()))
+    raw[-2] = ord("0") if raw[-2] != ord("0") else ord("1")
+    path = _write_record(store_root, bytes(raw))
+    before = path.read_bytes()
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.snapshot()
+
+    assert caught.value.code is TaskStoreErrorCode.CORRUPT_RECORD
+    assert path.read_bytes() == before
+
+
+def test_read_only_snapshot_rejects_filename_task_binding_without_mutation(
+    store: TaskRunStore,
+    store_root: Path,
+):
+    path = _write_record(store_root, _record_bytes(_task()), task_id=OTHER_TASK_ID)
+    before = path.read_bytes()
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.snapshot()
+
+    assert caught.value.code is TaskStoreErrorCode.CORRUPT_RECORD
+    assert path.read_bytes() == before
+
+
+def test_read_only_snapshot_catalog_contention_is_bounded_and_retryable(
+    store: TaskRunStore,
+    lease_root: Path,
+):
+    store.create(_task())
+    manager = ResourceLeaseManager(lease_root, trust=LeaseRootTrust.TRUSTED_LOCAL)
+    held = manager.acquire("task-store:catalog")
+    try:
+        with pytest.raises(TaskStoreError) as caught:
+            store.snapshot()
+        assert caught.value.code is TaskStoreErrorCode.LOCK_UNAVAILABLE
+    finally:
+        held.release(owner_token=held.owner_token)
+
+    assert tuple(item.task_id for item in store.snapshot()) == (TASK_ID,)
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "mode"])
+def test_read_only_snapshot_rejects_unsafe_canonical_record_nodes(
+    store: TaskRunStore,
+    store_root: Path,
+    kind: str,
+):
+    store.create(_task())
+    original = store_root / _record_name(TASK_ID)
+    unsafe = store_root / _record_name(OTHER_TASK_ID)
+    if kind == "symlink":
+        unsafe.symlink_to(original)
+    elif kind == "hardlink":
+        os.link(original, unsafe)
+    else:
+        original.chmod(0o640)
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.snapshot()
+
+    assert caught.value.code is TaskStoreErrorCode.UNSAFE_STORE
+
+
+@pytest.mark.parametrize("with_journal", [False, True])
+def test_read_only_snapshot_rejects_temp_residue_without_cleanup(
+    store: TaskRunStore,
+    store_root: Path,
+    with_journal: bool,
+):
+    store.create(_task())
+    temp = store_root / f".{_record_name()}.{'1' * 32}.tmp"
+    temp.write_bytes(b"residue")
+    temp.chmod(0o600)
+    if with_journal:
+        journal = store_root / MUTATION_JOURNAL_NAME
+        journal.write_bytes(b"journal-residue")
+        journal.chmod(0o600)
+    before = {
+        path.name: (
+            path.lstat().st_ino,
+            path.lstat().st_size,
+            path.lstat().st_mtime_ns,
+            path.lstat().st_mode,
+            path.read_bytes(),
+        )
+        for path in store_root.iterdir()
+    }
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.snapshot()
+
+    assert caught.value.code is TaskStoreErrorCode.CORRUPT_RECORD
+    assert {
+        path.name: (
+            path.lstat().st_ino,
+            path.lstat().st_size,
+            path.lstat().st_mtime_ns,
+            path.lstat().st_mode,
+            path.read_bytes(),
+        )
+        for path in store_root.iterdir()
+    } == before
+
+
+def test_read_only_snapshot_preserves_per_record_oversize_taxonomy(
+    store: TaskRunStore,
+    store_root: Path,
+):
+    path = store_root / _record_name()
+    path.write_bytes(b"x" * (MAX_RECORD_BYTES + 1))
+    path.chmod(0o600)
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.snapshot()
+
+    assert caught.value.code is TaskStoreErrorCode.RECORD_TOO_LARGE
+    assert path.stat().st_size == MAX_RECORD_BYTES + 1
+
+
+def test_read_only_snapshot_preserves_true_record_count_capacity_taxonomy(
+    store: TaskRunStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store.create(_task())
+    store.create(_task(OTHER_TASK_ID))
+    monkeypatch.setattr(store_module, "_MAX_TASK_RECORDS", 1)
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.snapshot()
+
+    assert caught.value.code is TaskStoreErrorCode.RESOURCE_EXHAUSTED
+
+
+def test_read_only_snapshot_scan_failure_releases_for_clean_retry(
+    store: TaskRunStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store.create(_task())
+    real_read = store_module._read_named_bytes
+
+    def fail_read(*_args, **_kwargs):
+        raise TaskStoreError(TaskStoreErrorCode.IO_ERROR)
+
+    monkeypatch.setattr(store_module, "_read_named_bytes", fail_read)
+    with pytest.raises(TaskStoreError) as caught:
+        store.snapshot()
+    assert caught.value.code is TaskStoreErrorCode.IO_ERROR
+
+    monkeypatch.setattr(store_module, "_read_named_bytes", real_read)
+    assert tuple(item.task_id for item in store.snapshot()) == (TASK_ID,)
+
+
+def test_read_only_snapshot_release_failure_reports_io_and_allows_retry(
+    store: TaskRunStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store.create(_task())
+    real_release = store_module._release
+    calls = 0
+
+    def release_once_false(lease):
+        nonlocal calls
+        calls += 1
+        released = real_release(lease)
+        return False if calls == 1 and released else released
+
+    monkeypatch.setattr(store_module, "_release", release_once_false)
+    with pytest.raises(TaskStoreError) as caught:
+        store.snapshot()
+    assert caught.value.code is TaskStoreErrorCode.IO_ERROR
+
+    assert tuple(item.task_id for item in store.snapshot()) == (TASK_ID,)
+
+
+def test_snapshot_and_create_interleaving_observes_only_complete_catalogs(
+    store: TaskRunStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store.create(_task())
+    entered = threading.Event()
+    release = threading.Event()
+    real_read = store_module._read_named_bytes
+
+    def blocked_read(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(store_module, "_read_named_bytes", blocked_read)
+    snapshots: list[tuple[str, ...]] = []
+    failures: list[TaskStoreErrorCode] = []
+
+    def scan() -> None:
+        snapshots.append(tuple(item.task_id for item in store.snapshot()))
+
+    thread = threading.Thread(target=scan)
+    thread.start()
+    assert entered.wait(timeout=5)
+    try:
+        store.create(_task(OTHER_TASK_ID))
+    except TaskStoreError as error:
+        failures.append(error.code)
+    release.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert failures == [TaskStoreErrorCode.LOCK_UNAVAILABLE]
+    assert snapshots == [(TASK_ID,)]
+
+    monkeypatch.setattr(store_module, "_read_named_bytes", real_read)
+    store.create(_task(OTHER_TASK_ID))
+    assert tuple(item.task_id for item in store.snapshot()) == (
+        TASK_ID,
+        OTHER_TASK_ID,
+    )
+
+
+@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="POSIX store only")
+def test_read_only_snapshot_independent_process_respects_catalog_contention(
+    store: TaskRunStore,
+    store_root: Path,
+    lease_root: Path,
+):
+    store.create(_task())
+    manager = ResourceLeaseManager(lease_root, trust=LeaseRootTrust.TRUSTED_LOCAL)
+    held = manager.acquire("task-store:catalog")
+    script = """
+import sys
+from pathlib import Path
+from vibecad.workflow.lease import LeaseRootTrust, ResourceLeaseManager
+from vibecad.workflow.store import (
+    TaskRunStore, TaskStoreError, TaskStoreRootTrust,
+)
+root, locks = map(Path, sys.argv[1:])
+manager = ResourceLeaseManager(locks, trust=LeaseRootTrust.TRUSTED_LOCAL)
+store = TaskRunStore(root, manager, trust=TaskStoreRootTrust.TRUSTED_LOCAL)
+try:
+    store.snapshot()
+except TaskStoreError as error:
+    print(error.code.value)
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(store_root), str(lease_root)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+    finally:
+        held.release(owner_token=held.owner_token)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "lock_unavailable"
+    assert tuple(item.task_id for item in store.snapshot()) == (TASK_ID,)
+
+
 def test_checksum_valid_legacy_record_without_creation_digest_is_normalized_after_verify(
     store: TaskRunStore,
     store_root: Path,
@@ -312,6 +622,7 @@ def store(store_root: Path, lease_root: Path) -> TaskRunStore:
 
 def test_public_api_and_exact_signatures_are_stable():
     assert store_module.__all__ == (
+        "TaskSnapshotEntry",
         "StoredTaskRun",
         "TaskRunStore",
         "TaskStoreError",
@@ -328,6 +639,8 @@ def test_public_api_and_exact_signatures_are_stable():
     expected = {
         "create": ("self", "task_run"),
         "load": ("self", "task_id"),
+        "snapshot": ("self",),
+        "discovery_namespace": ("self",),
         "compare_and_set": ("self", "task_id", "expected_generation", "task_run"),
         "validate_record": ("self", "task_run", "generation"),
     }

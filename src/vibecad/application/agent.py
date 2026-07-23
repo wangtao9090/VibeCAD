@@ -525,6 +525,18 @@ class AgentApplication:
         self._ensure_live()
         return api.create_task(request)
 
+    def list_tasks_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        api = self._task_api_for_request()
+        self._ensure_live()
+        return api.list_tasks(request)
+
+    def get_task_events_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        api = self._task_api_for_request()
+        self._ensure_live()
+        return api.get_task_events(request)
+
     def get_task_request(self, request: object) -> dict[str, object]:
         self._ensure_live()
         api = self._task_api_for_request()
@@ -707,6 +719,68 @@ class AgentApplication:
             return self._catalog.get_task(task_id=task_id)
         except TaskCatalogError as error:
             return self._catalog_failure(error)
+
+    def list_tasks(
+        self,
+        *,
+        limit: int,
+        cursor: str | None,
+    ) -> dict[str, object] | TaskServicePortFailure:
+        self._ensure_live()
+        from vibecad.application.discovery import (
+            TaskDiscoveryError,
+            TaskDiscoveryErrorCode,
+            TaskDiscoveryService,
+        )
+
+        try:
+            return TaskDiscoveryService(catalog=self._catalog).list_tasks(
+                limit=limit,
+                cursor=cursor,
+            )
+        except TaskDiscoveryError as error:
+            mapping = {
+                TaskDiscoveryErrorCode.INVALID_INPUT: TaskServicePortErrorCode.INVALID_INPUT,
+                TaskDiscoveryErrorCode.NOT_FOUND: TaskServicePortErrorCode.NOT_FOUND,
+                TaskDiscoveryErrorCode.CONFLICT: TaskServicePortErrorCode.CONFLICT,
+                TaskDiscoveryErrorCode.RESOURCE_EXHAUSTED: (
+                    TaskServicePortErrorCode.RESOURCE_EXHAUSTED
+                ),
+                TaskDiscoveryErrorCode.STORE_FAILURE: TaskServicePortErrorCode.STORE_FAILURE,
+            }
+            return TaskServicePortFailure(code=mapping[error.code])
+
+    def get_task_events(
+        self,
+        *,
+        task_id: str,
+        limit: int,
+        cursor: str | None,
+    ) -> dict[str, object] | TaskServicePortFailure:
+        self._ensure_live()
+        from vibecad.application.discovery import (
+            TaskDiscoveryError,
+            TaskDiscoveryErrorCode,
+            TaskDiscoveryService,
+        )
+
+        try:
+            return TaskDiscoveryService(catalog=self._catalog).get_task_events(
+                task_id=task_id,
+                limit=limit,
+                cursor=cursor,
+            )
+        except TaskDiscoveryError as error:
+            mapping = {
+                TaskDiscoveryErrorCode.INVALID_INPUT: TaskServicePortErrorCode.INVALID_INPUT,
+                TaskDiscoveryErrorCode.NOT_FOUND: TaskServicePortErrorCode.NOT_FOUND,
+                TaskDiscoveryErrorCode.CONFLICT: TaskServicePortErrorCode.CONFLICT,
+                TaskDiscoveryErrorCode.RESOURCE_EXHAUSTED: (
+                    TaskServicePortErrorCode.RESOURCE_EXHAUSTED
+                ),
+                TaskDiscoveryErrorCode.STORE_FAILURE: TaskServicePortErrorCode.STORE_FAILURE,
+            }
+            return TaskServicePortFailure(code=mapping[error.code])
 
     def reject_draft(
         self,

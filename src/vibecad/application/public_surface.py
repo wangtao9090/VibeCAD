@@ -1088,6 +1088,8 @@ _VERIFICATION_PATTERN = r"^verification_[0-9a-f]{32}$"
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
 _CREATE_KEY_PATTERN = r"^project_create_[0-9a-f]{32}$"
 _TASK_CREATE_KEY_PATTERN = r"^task_create_[0-9a-f]{32}$"
+_TASK_LIST_CURSOR_PATTERN = r"^task_list_cursor_[0-9a-f]{64}$"
+_TASK_EVENT_CURSOR_PATTERN = r"^task_event_cursor_[0-9a-f]{64}$"
 _EXPORT_KEY_PATTERN = r"^export_[0-9a-f]{32}$"
 _MATERIALIZATION_PATTERN = r"^materialization_[0-9a-f]{64}$"
 _FEATURE_PATTERN = r"^feature_[0-9a-f]{32}$"
@@ -1103,7 +1105,9 @@ _STABLE_TOOL_NAMES = (
     "create_project",
     "get_project",
     "create_task",
+    "list_tasks",
     "get_task",
+    "get_task_events",
     "submit_model_program",
     "resume_task",
     "accept_draft",
@@ -1121,7 +1125,9 @@ _STABLE_TOOL_DESCRIPTIONS = MappingProxyType(
         "create_project": "创建空项目或导入仅含长方体和圆柱体的 FCStd 作为第零代",
         "get_project": "读取持久化项目的当前版本",
         "create_task": "在指定项目版本上创建可验收任务",
+        "list_tasks": "分页发现可恢复的持久化任务摘要",
         "get_task": "读取任务的持久化状态与证据",
+        "get_task_events": "分页读取任务的持久化状态转换事件",
         "submit_model_program": "提交受约束的 ModelProgram 并生成候选版本",
         "resume_task": "按当前持久化代数恢复可继续任务",
         "accept_draft": "验证并接受指定草案版本",
@@ -1213,7 +1219,11 @@ def _version_schema() -> dict[str, object]:
     return {"type": "integer", "const": SCHEMA_VERSION}
 
 
-def _safe_integer_schema(*, minimum: int | None = None) -> dict[str, object]:
+def _safe_integer_schema(
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> dict[str, object]:
     schema: dict[str, object] = {
         "type": "integer",
         "minimum": -MAX_SAFE_JSON_INTEGER,
@@ -1221,6 +1231,8 @@ def _safe_integer_schema(*, minimum: int | None = None) -> dict[str, object]:
     }
     if minimum is not None:
         schema["minimum"] = minimum
+    if maximum is not None:
+        schema["maximum"] = maximum
     return schema
 
 
@@ -2005,6 +2017,64 @@ def _task_result_schema() -> dict[str, object]:
     )
 
 
+def _task_summary_schema() -> dict[str, object]:
+    return _closed_schema(
+        {
+            "task_id": _id_schema(_TASK_ID.pattern),
+            "project_id": _id_schema(_PROJECT_PATTERN),
+            "generation": _safe_integer_schema(minimum=0),
+            "base_revision": _id_schema(_REVISION_PATTERN),
+            "reasoning_owner": {
+                "type": "string",
+                "enum": tuple(item.value for item in ReasoningOwner),
+            },
+            "review_policy": {
+                "type": "string",
+                "enum": tuple(item.value for item in ReviewPolicy),
+            },
+            "status": {
+                "type": "string",
+                "enum": tuple(item.value for item in TaskStatus),
+            },
+            "next_action": {
+                "type": "string",
+                "enum": tuple(item.value for item in NextAction),
+            },
+            "candidate_revision": _nullable(_id_schema(_REVISION_PATTERN)),
+            "committed_revision": _nullable(_id_schema(_REVISION_PATTERN)),
+            "draft_id": _nullable(_id_schema(_DRAFT_PATTERN)),
+        }
+    )
+
+
+def _task_list_result_schema() -> dict[str, object]:
+    return _closed_schema(
+        {
+            "tasks": {
+                "type": "array",
+                "items": _task_summary_schema(),
+                "maxItems": 100,
+            },
+            "next_cursor": _nullable(_id_schema(_TASK_LIST_CURSOR_PATTERN)),
+        }
+    )
+
+
+def _task_events_result_schema() -> dict[str, object]:
+    return _closed_schema(
+        {
+            "task_id": _id_schema(_TASK_ID.pattern),
+            "generation": _safe_integer_schema(minimum=0),
+            "transitions": {
+                "type": "array",
+                "items": _transition_schema(),
+                "maxItems": 100,
+            },
+            "next_cursor": _nullable(_id_schema(_TASK_EVENT_CURSOR_PATTERN)),
+        }
+    )
+
+
 def _stable_input_schema(name: str) -> dict[str, object]:
     if name in {"ping", "get_runtime_status", "ensure_runtime"}:
         return _empty_input_schema()
@@ -2054,6 +2124,25 @@ def _stable_input_schema(name: str) -> dict[str, object]:
                 "schema_version": _version_schema(),
                 "task_id": _id_schema(_TASK_ID.pattern),
             }
+        )
+    if name == "list_tasks":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "limit": _safe_integer_schema(minimum=1, maximum=100),
+                "cursor": _nullable(_id_schema(_TASK_LIST_CURSOR_PATTERN)),
+            },
+            required=("schema_version",),
+        )
+    if name == "get_task_events":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "task_id": _id_schema(_TASK_ID.pattern),
+                "limit": _safe_integer_schema(minimum=1, maximum=100),
+                "cursor": _nullable(_id_schema(_TASK_EVENT_CURSOR_PATTERN)),
+            },
+            required=("schema_version", "task_id"),
         )
     if name == "submit_model_program":
         return _closed_schema(
@@ -2119,6 +2208,10 @@ def _stable_result_schema(name: str) -> dict[str, object]:
         "reject_draft",
     }:
         return _task_result_schema()
+    if name == "list_tasks":
+        return _task_list_result_schema()
+    if name == "get_task_events":
+        return _task_events_result_schema()
     if name == "export_task_artifacts":
         return _artifact_result_schema()
     raise ValueError("unknown stable tool")
@@ -2134,7 +2227,9 @@ def _stable_annotations(name: str) -> ToolAnnotations:
         "create_project": (False, False, True, True),
         "get_project": (False, False, True, False),
         "create_task": (False, False, True, False),
+        "list_tasks": (True, False, True, False),
         "get_task": (False, False, True, False),
+        "get_task_events": (True, False, True, False),
         "submit_model_program": (False, True, True, False),
         "resume_task": (False, True, True, False),
         "accept_draft": (False, True, True, False),

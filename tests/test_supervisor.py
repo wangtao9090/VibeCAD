@@ -2026,6 +2026,7 @@ def test_default_replay_tool_set_matches_public_idempotence_contract() -> None:
     expected = frozenset(spec.name for spec in public_tool_specs() if spec.annotations.idempotent)
     assert supervisor._DEFAULT_IDEMPOTENT_TOOLS == expected
     assert "create_task" in supervisor._DEFAULT_IDEMPOTENT_TOOLS
+    assert {"list_tasks", "get_task_events"} <= supervisor._DEFAULT_IDEMPOTENT_TOOLS
 
 
 def test_response_reader_caps_before_decode_and_reads_in_bounded_chunks() -> None:

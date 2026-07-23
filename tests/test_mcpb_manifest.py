@@ -15,7 +15,9 @@ EXPECTED_PUBLIC_TOOLS = (
     "create_project",
     "get_project",
     "create_task",
+    "list_tasks",
     "get_task",
+    "get_task_events",
     "submit_model_program",
     "resume_task",
     "accept_draft",
@@ -203,9 +205,9 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
     normalized_roadmap = " ".join(roadmap.replace("\n> ", " ").split())
     for required in (
         "S3-8/P0-A",
-        "20-tool 公共 MCP、durable review",
+        "22-tool 公共 MCP、durable review",
         "host-neutral skill",
-        "下一 active delivery packet 是 P0-B core",
+        "P0-B core 正在执行",
     ):
         assert required in normalized_roadmap
     assert "宿主 skill 和 FreeCAD 交互插件尚未交付" not in normalized_roadmap

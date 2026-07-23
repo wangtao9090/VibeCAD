@@ -29,7 +29,9 @@ PUBLIC_TOOL_NAMES = (
     "create_project",
     "get_project",
     "create_task",
+    "list_tasks",
     "get_task",
+    "get_task_events",
     "submit_model_program",
     "resume_task",
     "accept_draft",
@@ -199,12 +201,12 @@ def test_skill_has_canonical_files_and_minimal_trigger_frontmatter():
     assert "$vibecad-agent" in interface["default_prompt"]
 
 
-def test_skill_teaches_the_exact_twenty_tool_agent_first_flow():
+def test_skill_teaches_the_exact_twenty_two_tool_agent_first_flow():
     _metadata, body = _skill_parts()
     code_tokens = _inline_code(body)
     assert set(PUBLIC_TOOL_NAMES) <= code_tokens
     assert LEGACY_TOOL_NAMES.isdisjoint(code_tokens)
-    assert re.search(r"\b20(?:-tool| tools?)\b|20\s*个", body, re.IGNORECASE)
+    assert re.search(r"\b22(?:-tool| tools?)\b|22\s*个", body, re.IGNORECASE)
 
     essential_order = (
         "get_capabilities",

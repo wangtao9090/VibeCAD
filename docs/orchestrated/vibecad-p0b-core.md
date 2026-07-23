@@ -631,6 +631,7 @@ remain residual and unauthorized.
 | P0B-E02 / 2026-07-23T03:29:39Z | P0B-D22-R1 at P0B-R1.1; P0B-A02 | `6eb209d` plus this authority commit / push pending | exact branch/HEAD/status verified before amendment | P0B-RES-12 narrowed to PR/tag/release; OE-DEV-01 pending first equality | P0B-S02 | authorized-push |
 | P0B-E03 / 2026-07-23T03:31Z | P0B-R1.1; C01 gate setup correction under P0B-D21 | not-created / `a7e6881` already pushed and equal | raw C01 command: exit 2, four collection errors from skipped hidden `.pth`; corrected `PYTHONPATH=src` 5-test semantic RED: exit 1, 5 intended failures | known Python 3.13 editable-path residual; no product-scope change | P0B-S03 | superseded-gate |
 | P0B-E04 / 2026-07-23T04:23:04Z | P0B-C01 under P0B-R1.1/A01/A02; P0B-D21 allowlist repair | this C01 commit / non-force push required | semantic RED 5/5; focused `1025 passed`; affected integration `229 passed, 19 deselected`; full `3902 passed, 95 deselected`; same-key stress `200/200 + 100/100`; Ruff/diff clean; independent review `0/0/0` | Python 3.13 explicit `PYTHONPATH=src` remains; one existing macOS fork deprecation warning; no product residual | P0B-S04 | accepted-green |
+| P0B-E05 / 2026-07-23T04:57:13Z | P0B-C02 under P0B-R1.1/A01/A02; P0B-D21 direct-impact allowlist repairs | this C02 commit / non-force push required | semantic RED `3 failed` then `5 failed`; focused `1157 passed`; affected integration `224 passed, 8 deselected`; full non-slow `3954 passed, 95 deselected`; 22-tool discovery frame `17,785` bytes; Ruff/format/diff/fsck clean; store and cursor/public reviews both `0/0/0` | Python 3.13 explicit `PYTHONPATH=src` remains; one existing macOS fork deprecation warning; no product residual | P0B-S05 | accepted-green |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -807,5 +808,58 @@ remain residual and unauthorized.
 - Preserve P0B-GATE-CORR-01: pytest uses explicit `PYTHONPATH=src`; the hidden
   editable `.pth` collection behavior is environment evidence, not product
   RED.
+- PR, tag, release, marketplace publication, force-push and external spend
+  remain unauthorized.
+
+## 17. Recovery Snapshot P0B-S05
+
+### 1. Completed milestones
+
+- C02 adds public `list_tasks` and `get_task_events`; the runtime, manifest,
+  Skill and product documentation now agree on an exact 22-tool surface.
+- Task discovery holds the catalog lease for one complete, strictly read-only
+  fd-relative scan. Every record is validated before pagination, summaries are
+  bounded and lightweight, and journal/temp/corrupt/unsafe/capacity failures
+  reject the whole request without recovery or partial output.
+- Stateless cursors bind endpoint domain, stable store namespace, complete
+  validated snapshot or persisted transition history, and absolute offset.
+  They survive reopening the same store, reject stale/foreign snapshots, and
+  do not bind the requested page size.
+- `get_task_events` projects only authoritative `TaskRun.transitions`; no
+  timestamped log or second event store was introduced. The two Agent
+  facades do not construct a project runtime, CAD port or FreeCAD session.
+- The canonical public-surface receipt is
+  `a8b31d42abc4ece89d5f6a46a19912520c54ab64d27a5ecc53cb218e10caf5af`.
+  The fixed 22-tool discovery frame is 17,785 bytes, below the 32,768-byte
+  budget.
+- Controller gates are green: focused `1157 passed`; affected integration
+  `224 passed, 8 deselected`; full non-slow
+  `3954 passed, 95 deselected`. Store and cursor/public independent reviews
+  both returned `Critical 0 / Important 0 / Minor 0`.
+
+### 2. Next steps
+
+1. Commit the exact C02 allowlist as
+   `feat(tasks): expose bounded task discovery and events`.
+2. Non-force push `codex/agent-stage3`, then verify exact
+   `HEAD == @{upstream}` and remote ref equality.
+3. Rebind C03 to the accepted remote anchor and implement bounded project
+   discovery without repeating P0B-A01 or P0B-A02.
+
+### 3. Approved decisions
+
+- P0B-A01/A02 and P0B-D01..D22 plus D08A/D17A/D22-R1 remain active.
+- P0B-D21 covers the directly affected runtime receipt, registry uniqueness
+  test, server/supervisor projections and current product-truth documents.
+  No product scope, authority, delivery target or external action changed.
+
+### 4. Execution discipline
+
+- `list_tasks` is a recovery path for unknown task ids, not a mandatory scan
+  after successful creation. Snapshot conflict restarts from page one.
+- `get_task_events` is persisted transition audit only. Its cursor conflict
+  restarts that task's event pagination from page one.
+- Preserve P0B-GATE-CORR-01: pytest uses explicit `PYTHONPATH=src`; the hidden
+  editable `.pth` behavior is environment evidence, not product RED.
 - PR, tag, release, marketplace publication, force-push and external spend
   remain unauthorized.

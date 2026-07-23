@@ -455,9 +455,14 @@ def test_empty_bootstrap_and_task_control_never_create_a_cad_runtime(tmp_path: P
         calls.append("runtime")
         raise AssertionError("CAD runtime must stay lazy")
 
+    def forbidden_cad(*_args, **_kwargs):
+        calls.append("cad")
+        raise AssertionError("CAD port must stay lazy")
+
     app = AgentApplication.open(
         data_root=_data_root(tmp_path),
         runtime_factory=forbidden_runtime,
+        cad_port_factory=forbidden_cad,
     )
     project = app.bootstrap_empty()
     assert project.head.project_id.startswith("project_")
@@ -477,6 +482,16 @@ def test_empty_bootstrap_and_task_control_never_create_a_cad_runtime(tmp_path: P
     task_id = created["result"]["task_run"]["id"]
     loaded = api.get_task({"schema_version": 1, "task_id": task_id})
     assert loaded == created
+    listed = app.list_tasks_request({"schema_version": 1})
+    assert listed["ok"] is True
+    assert [item["task_id"] for item in listed["result"]["tasks"]] == [task_id]
+    events = app.get_task_events_request({"schema_version": 1, "task_id": task_id})
+    assert events["ok"] is True
+    assert events["result"]["generation"] == 0
+    assert [item["sequence"] for item in events["result"]["transitions"]] == [1]
+    assert app._project_api is None  # noqa: SLF001
+    assert app._project_service is None  # noqa: SLF001
+    assert app._cad_validation_port is None  # noqa: SLF001
     assert calls == []
     app.close()
 
