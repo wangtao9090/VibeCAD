@@ -765,6 +765,175 @@ def _apply_resource_budget(
     return outcome
 
 
+class _ValidatedProgramExecution:
+    """One private, strictly sequential execution cursor.
+
+    The cursor exists so an out-of-process CAD owner can expose one watchdog
+    boundary per command without changing the public all-at-once adapter
+    result.  It is deliberately private and non-serializable.
+    """
+
+    __slots__ = (
+        "_execution_profile",
+        "_next_index",
+        "_object_count",
+        "_outcomes",
+        "_plan",
+        "_result_values",
+        "_trusted_revision",
+    )
+
+    def __init__(
+        self,
+        *,
+        plan: tuple[_PlannedCommand, ...],
+        execution_profile: ExecutionProfile,
+        trusted_revision: str | None,
+        object_count: Callable[[], int] | None,
+    ) -> None:
+        self._plan = plan
+        self._execution_profile = execution_profile
+        self._trusted_revision = trusted_revision
+        self._object_count = object_count
+        self._next_index = 0
+        self._outcomes: list[NormalizedToolOutcome] = []
+        self._result_values: dict[str, Mapping[str, object]] = {}
+
+    @property
+    def done(self) -> bool:
+        return self._next_index >= len(self._plan) or (
+            bool(self._outcomes) and not self._outcomes[-1].result.ok
+        )
+
+    @property
+    def next_runtime_ms(self) -> int | None:
+        if self.done:
+            return None
+        return self._plan[self._next_index].resource_budget.max_runtime_ms
+
+    @property
+    def outcomes(self) -> tuple[NormalizedToolOutcome, ...]:
+        return tuple(self._outcomes)
+
+    def step(self) -> NormalizedToolOutcome:
+        if self.done:
+            raise _invalid_program()
+        command = self._plan[self._next_index]
+        handler_kwargs = _resolve_handler_kwargs(
+            command.handler_kwargs,
+            self._result_values,
+        )
+        objects_before = _object_count(self._object_count)
+        if objects_before is None:
+            raise _invalid_program()
+        started = _read_monotonic_ns()
+        if started is None:
+            outcome = normalize_tool_result(
+                {"ok": True},
+                operation_id=command.operation_id,
+                elapsed_ms=0,
+                revision=self._trusted_revision,
+                facts=_facts(command, self._execution_profile),
+            )
+            outcome = _budget_failure_outcome(outcome)
+        else:
+            try:
+                raw = command.handler(**handler_kwargs)
+            except BaseException as exc:
+                if not isinstance(exc, Exception):
+                    try:
+                        _read_monotonic_ns()
+                    except BaseException:
+                        pass
+                    raise exc
+                finished = _read_monotonic_ns()
+                elapsed_ms, runtime_measurement_valid = _elapsed_measurement(
+                    started,
+                    finished,
+                )
+                outcome = normalize_tool_exception(
+                    exc,
+                    operation_id=command.operation_id,
+                    elapsed_ms=elapsed_ms,
+                    revision=self._trusted_revision,
+                    facts=_facts(command, self._execution_profile),
+                )
+            else:
+                finished = _read_monotonic_ns()
+                elapsed_ms, runtime_measurement_valid = _elapsed_measurement(
+                    started,
+                    finished,
+                )
+                outcome = normalize_tool_result(
+                    raw,
+                    operation_id=command.operation_id,
+                    elapsed_ms=elapsed_ms,
+                    revision=self._trusted_revision,
+                    facts=_facts(command, self._execution_profile),
+                )
+
+            objects_after = _object_count(self._object_count)
+            measurement_budget_failed = outcome.result.ok and not runtime_measurement_valid
+            if measurement_budget_failed:
+                outcome = _budget_failure_outcome(outcome)
+
+            slots = None
+            if outcome.result.ok:
+                slots = _extract_result_slots(command, outcome)
+                if slots is None:
+                    outcome = _invalid_result_slot_outcome(outcome)
+            if outcome.result.ok and command.evidence_required:
+                outcome = _with_execution_evidence(
+                    outcome,
+                    command.operation_id,
+                )
+            if not measurement_budget_failed:
+                outcome = _apply_resource_budget(
+                    command,
+                    outcome,
+                    objects_before=objects_before,
+                    objects_after=objects_after,
+                )
+            if outcome.result.ok and slots is not None:
+                self._result_values[command.operation_id] = slots
+
+        self._outcomes.append(outcome)
+        self._next_index += 1
+        return outcome
+
+    def __reduce__(self):
+        raise TypeError("execution cursors cannot be serialized")
+
+
+def _prepare_validated_program_execution(
+    program: ValidatedProgram,
+    handlers: Mapping[str, Callable[..., object]],
+    *,
+    execution_profile: ExecutionProfile,
+    revision: str | None = None,
+    freecad_version: tuple[int, int] = (1, 1),
+    gui_main_thread: bool = False,
+    object_count: Callable[[], int] | None = None,
+) -> _ValidatedProgramExecution:
+    commands = _snapshot_program(program)
+    trusted_revision = _validated_revision(revision)
+    if object_count is not None and not callable(object_count):
+        raise _invalid_program()
+    plan = _freeze_plan(
+        commands,
+        handlers,
+        execution_profile,
+        freecad_version,
+        gui_main_thread,
+    )
+    return _ValidatedProgramExecution(
+        plan=plan,
+        execution_profile=execution_profile,
+        trusted_revision=trusted_revision,
+        object_count=object_count,
+    )
+
+
 def execute_validated_program(
     program: ValidatedProgram,
     handlers: Mapping[str, Callable[..., object]],
@@ -777,91 +946,18 @@ def execute_validated_program(
 ) -> tuple[NormalizedToolOutcome, ...]:
     """Execute a sealed program once per command through a frozen handler plan."""
 
-    commands = _snapshot_program(program)
-    trusted_revision = _validated_revision(revision)
-    if object_count is not None and not callable(object_count):
-        raise _invalid_program()
-    plan = _freeze_plan(
-        commands,
+    execution = _prepare_validated_program_execution(
+        program,
         handlers,
-        execution_profile,
-        freecad_version,
-        gui_main_thread,
+        execution_profile=execution_profile,
+        revision=revision,
+        freecad_version=freecad_version,
+        gui_main_thread=gui_main_thread,
+        object_count=object_count,
     )
-
-    outcomes: list[NormalizedToolOutcome] = []
-    result_values: dict[str, Mapping[str, object]] = {}
-    for command in plan:
-        handler_kwargs = _resolve_handler_kwargs(command.handler_kwargs, result_values)
-        objects_before = _object_count(object_count)
-        if objects_before is None:
-            raise _invalid_program()
-        started = _read_monotonic_ns()
-        if started is None:
-            outcome = normalize_tool_result(
-                {"ok": True},
-                operation_id=command.operation_id,
-                elapsed_ms=0,
-                revision=trusted_revision,
-                facts=_facts(command, execution_profile),
-            )
-            outcomes.append(_budget_failure_outcome(outcome))
-            break
-        try:
-            raw = command.handler(**handler_kwargs)
-        except BaseException as exc:
-            if not isinstance(exc, Exception):
-                try:
-                    _read_monotonic_ns()
-                except BaseException:
-                    pass
-                raise exc
-            finished = _read_monotonic_ns()
-            elapsed_ms, runtime_measurement_valid = _elapsed_measurement(started, finished)
-            outcome = normalize_tool_exception(
-                exc,
-                operation_id=command.operation_id,
-                elapsed_ms=elapsed_ms,
-                revision=trusted_revision,
-                facts=_facts(command, execution_profile),
-            )
-        else:
-            finished = _read_monotonic_ns()
-            elapsed_ms, runtime_measurement_valid = _elapsed_measurement(started, finished)
-            outcome = normalize_tool_result(
-                raw,
-                operation_id=command.operation_id,
-                elapsed_ms=elapsed_ms,
-                revision=trusted_revision,
-                facts=_facts(command, execution_profile),
-            )
-
-        objects_after = _object_count(object_count)
-        measurement_budget_failed = outcome.result.ok and not runtime_measurement_valid
-        if measurement_budget_failed:
-            outcome = _budget_failure_outcome(outcome)
-
-        slots = None
-        if outcome.result.ok:
-            slots = _extract_result_slots(command, outcome)
-            if slots is None:
-                outcome = _invalid_result_slot_outcome(outcome)
-        if outcome.result.ok and command.evidence_required:
-            outcome = _with_execution_evidence(outcome, command.operation_id)
-        if not measurement_budget_failed:
-            outcome = _apply_resource_budget(
-                command,
-                outcome,
-                objects_before=objects_before,
-                objects_after=objects_after,
-            )
-        if outcome.result.ok and slots is not None:
-            result_values[command.operation_id] = slots
-        outcomes.append(outcome)
-        if not outcome.result.ok:
-            break
-
-    return tuple(outcomes)
+    while not execution.done:
+        execution.step()
+    return execution.outcomes
 
 
 __all__ = [

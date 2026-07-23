@@ -641,6 +641,7 @@ remain residual and unauthorized.
 | P0B-E11 / 2026-07-23T11:33:13Z | P0B-C08 under P0B-R1.1/A01/A02; P0B-D15/D21/D22-R1; D21 packet-allowlist repair adds `src/vibecad/execution/revisions.py` and `tests/test_revision_store.py` for the bounded source-observation seam and its integrity/performance regressions | this C08 commit / non-force push required | semantic RED `14 failed, 36 passed`; performance RED stable live get `9 > 2` actual `_validate_revision_content` passes; review Important REDs covered empty-project first draft `NOT_FOUND` and post-hash valid-manifest replacement returning a stale observation; final focused `66 passed, 1 warning`; affected `458 passed, 1 warning`; full non-slow `4508 passed, 95 deselected, 1 warning`; changed-file Ruff/format, diff and fsck clean; persistence and semantic reviews on exact source/test diff SHA-256 `bdf51474d75f653e57e54989cc7ddb1cad1ba4846ad7ec79744b33657c74dbef` both GO with `Critical 0 / Important 0 / Minor 0` | one unchanged macOS multithreaded-fork deprecation warning; legacy schema-v1 records intentionally recover as `recovery_required`; runnable daemon remains C09 and grants remain C10 | P0B-S11 | accepted-green |
 | P0B-E12 / 2026-07-23T12:28:27Z | P0B-C09 under P0B-R1.1/A01/A02; P0B-D02/D11/D12/D18/D21/D22-R1; D21 packet-allowlist repair adds the directly required captured-layout composition seam in `src/vibecad/application/agent.py` plus its tests and continuous authority-liveness validation in `src/vibecad/workflow/lease.py` plus its tests | this C09 commit / non-force push required | daemon semantic RED `5 failed, 17 passed`; composition RED `14 failed, 65 deselected`; authority RED `11 failed, 180 deselected`; review repair cycles close authenticated-socket leakage, early accept-thread start, swallowed fatal handler exceptions and idle-timeout/handler-time ambiguity; final local-daemon `38 passed`; focused C09/affected `352 passed`; full non-slow `4561 passed, 95 deselected, 1 warning`; real macOS auth/double-start/crash-restart/root-and-entry-rebind/8-connection/blocked-shutdown tests pass; controller 50-ping median `3.042 ms`, p95 `3.498 ms`, max `3.782 ms`; full Ruff, changed-file format, diff and fsck clean; two final exact-code reviews both GO with `Critical 0 / Major 0`, 11-file content-manifest SHA-256 `ab5d2fcbb82961946fef0925fe85d209a8561ada957131d4ed9a3f3981eabdc9` | Linux/Windows remain P0B-RES-02 and malicious same-UID replacement remains P0B-RES-03; C10 still owns grants, C11 owns operation-aware Worker deadlines, C13 owns MCP/Workbench routing and P0B-RES-13 import-path resolution; one unchanged macOS multithreaded-fork warning remains | P0B-S12 | accepted-green |
 | P0B-E13 / 2026-07-23T13:25:15Z | P0B-C10 under P0B-R1.1/A01/A02; P0B-D14/D15/D21/D22-R1; D21 direct full-gate repair adds `src/vibecad/application/project_create.py` and `tests/test_project_bootstrap.py` to replace volatile ancestor timestamps with stable directory identity while preserving source/path rebinding checks | this C10 commit / non-force push required | protocol RED `9 failed, 16 passed, 43 deselected`; checkout-snapshot RED `12 failed, 66 deselected`; review repair cycles close mint-vs-close grant retention, non-exact open grant descriptors, pre-capture TTL loss and lifetime grant-ID exhaustion; deterministic baseline RED `1 failed, 148 deselected` closes unrelated ancestor-entry churn; canonical C10 `141 passed, 1 warning`; affected `308 passed, 1 warning`; project-bootstrap `149 passed` in three consecutive full-module runs; v1/MCP surface `100 passed, 55 deselected`; final full non-slow `4643 passed, 95 deselected, 1 warning`; full Ruff, exact 13-file format, diff and fsck clean; grant security/contract and baseline security/regression reviews all GO with `Critical 0 / Major 0 / Minor 0`; 13-file implementation/test content-manifest SHA-256 `8ed69c721c064007dab2c49efb236199a4d61ddcd0e63a08525415853e83a6fa` | Linux/Windows remain P0B-RES-02; post-claim malicious same-UID pathname replacement remains P0B-RES-03; import `source_path` remains P0B-RES-13; one unchanged macOS multithreaded-fork warning remains | P0B-S13 | accepted-green |
+| P0B-E14 / 2026-07-23T17:02:31Z | P0B-C11 under P0B-R1.1/A01/A02; P0B-D16/D17/D17A/D21/D22-R1 | this C11 commit / non-force push required | canonical C11 `341 passed, 1 deselected`; Worker non-slow `54 passed, 1 deselected` in three consecutive runs; real managed FreeCAD 1.1.0 `1 passed, 54 deselected`; adapter/program/static `163 passed, 1 deselected`; controller full `4698 passed, 96 deselected, 17 warnings`, independently repeated with the same counts; changed-file compile, Ruff, format and diff clean; three independent final reviews all GO with `Critical 0 / Important 0`; no residual Worker process or private Worker directory; 11-file implementation/test content-manifest SHA-256 `80006968e1611d048be5bda7f1a36c758d68a41224ad53545ac6eff729556de7` | C11 is an injectable Worker substrate only; the default `AgentApplication` path remains in-process until C12 owns injection plus durable loss/cancel/reconcile; the existing macOS Python 3.13 multithreaded-fork warning class remains outside C11 | P0B-S14 | accepted-green |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -1521,6 +1522,81 @@ remain residual and unauthorized.
   capabilities, add Task/Revision authority to the child, or expose a second
   public execution route.
 - Use the exact review hash above only for the frozen 13 implementation/test
+  files. This append-only ledger/snapshot edit necessarily changes the overall
+  commit diff without changing the reviewed code.
+- Continue with `native-plan / spawn-send-wait / repo-artifact /
+  native-session-poll`, exact named-file staging, `PYTHONPATH=src` gates,
+  immediate non-force push and three-way local/upstream/remote equality.
+  PR, tag, release, marketplace publication, force-push and external spend
+  remain unauthorized.
+
+## 26. Recovery Snapshot P0B-S14
+
+### 1. Completed milestones
+
+- C11 adds an injectable FreeCAD Worker substrate without creating another
+  public execution route. The existing executor keeps its public all-at-once
+  seam while a private incremental cursor lets the Worker execute validated
+  operations and report bounded progress.
+- A strict canonical-JSON RPC codec, opaque generation capabilities and
+  descriptor-bound candidate staging keep Task, Revision and project-path
+  authority in the parent. The child receives only the exact operation and
+  candidate-file capabilities required for one generation.
+- macOS Worker launch uses direct `posix_spawn` with a new process group,
+  close-on-exec defaults and a minimal private environment. Exact per-operation
+  deadlines terminate the entire generation rather than leaving an
+  unobservable FreeCAD descendant.
+- Cleanup responsibility exists before spawn and remains recoverable through
+  connection-close, signal, reap, process-group observation and private-home
+  failures. A generation reaches `DEAD` only after child identity is released,
+  the process group is absent, the connection is closed and the private home
+  is verified absent.
+- Candidate authority is revalidated throughout execution. Artifact size,
+  digest, identity and claim invariants fail closed across replacement,
+  mutation and cross-capability attempts.
+- Real managed FreeCAD 1.1.0 completed create/modify/checkpoint/export/reload
+  smoke coverage through the Worker. Final controller gates are canonical C11
+  `341 passed, 1 deselected`; Worker non-slow
+  `54 passed, 1 deselected` in three consecutive runs; adapter/program/static
+  `163 passed, 1 deselected`; real FreeCAD
+  `1 passed, 54 deselected`; and full
+  `4698 passed, 96 deselected, 17 warnings`. An independent full-suite repeat
+  produced the same counts.
+- Three independent exact-code reviews return GO with
+  `Critical 0 / Important 0`. Compile, changed-file Ruff and format, diff and
+  residual-process gates pass. The frozen 11-file implementation/test
+  content-manifest SHA-256 is
+  `80006968e1611d048be5bda7f1a36c758d68a41224ad53545ac6eff729556de7`.
+
+### 2. Next steps
+
+1. Commit the exact C11 allowlist as
+   `feat(worker): isolate FreeCAD in a killable generation`.
+2. Non-force push `codex/agent-stage3`, then verify exact
+   `HEAD == @{upstream}` and remote-ref equality.
+3. In C12, inject the Worker-backed `CadExecutionPort` into the default
+   application path and make Worker loss, timeout, cancellation and startup
+   reconciliation durable through Task Kernel state.
+
+### 3. Approved decisions
+
+- P0B-A01/A02 and P0B-D01..D22 plus D08A/D17A/D22-R1 remain active.
+- C11 is the process-isolation substrate, not a second execution system.
+  TaskService and RevisionStore remain the only commit authorities, and no
+  public tool or alternate client route bypasses them.
+- The same-UID Worker is a trusted child constrained by narrow capabilities;
+  C11 does not claim a hostile-process sandbox.
+- Default `AgentApplication` execution intentionally remains in-process at
+  this snapshot. C12 owns the one default-injection switch and its durable
+  recovery semantics, so C11 must not be presented as the final user path.
+
+### 4. Execution discipline
+
+- C12 may switch only the approved `CadExecutionPort` composition and add
+  durable Worker loss/cancel/reconcile handling through existing Task Kernel
+  state. It may not introduce another scheduler, revision authority, public
+  tool family or direct client-to-Worker path.
+- Use the exact review hash above only for the frozen 11 implementation/test
   files. This append-only ledger/snapshot edit necessarily changes the overall
   commit diff without changing the reviewed code.
 - Continue with `native-plan / spawn-send-wait / repo-artifact /

@@ -5548,6 +5548,170 @@ def _candidate_authority(store, project_id, revision_id, lease):
     return (root_open, project_open, None)
 
 
+def _open_worker_candidate_staging(
+    store,
+    *,
+    expected_head,
+    revision_id,
+    lease,
+):
+    """Atomically pin one live store reservation for the Worker parent proxy."""
+
+    if (
+        type(store) is not LocalRevisionStore
+        or type(expected_head) is not ProjectHead
+        or expected_head.project_id == ""
+        or _identifier_code(revision_id, _REVISION_PATTERN) is not None
+    ):
+        raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+    project_id = expected_head.project_id
+    authority = _candidate_authority(store, project_id, revision_id, lease)
+    if authority[2] is not None:
+        raise RevisionStoreError(authority[2])
+    root_open = authority[0]
+    project_open = authority[1]
+    root_device = root_open[1].st_dev
+    candidate_fd = None
+    candidates_copy = None
+    result = None
+    code = None
+    close_failed = False
+    try:
+        journal_result = _load_journal_fd(project_open[0], root_device)
+        if journal_result[1] is not None or journal_result[0] is None:
+            code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        else:
+            journal = journal_result[0]
+            if (
+                journal.state is not CommitJournalState.STAGING
+                or journal.project_id != project_id
+                or journal.expected_head != expected_head
+                or journal.candidate_revision != revision_id
+            ):
+                code = RevisionStoreErrorCode.CONFLICT
+        reservation = None
+        if code is None:
+            reservation_result = _reservation_by_record(
+                store,
+                project_id,
+                revision_id,
+            )
+            reservation = reservation_result[0]
+            code = reservation_result[1]
+        if code is None and (
+            reservation["kind"] != "candidate"
+            or reservation["project_id"] != project_id
+            or reservation["expected_head"] != expected_head
+            or reservation["revision_id"] != revision_id
+            or reservation["state"] != "staged"
+        ):
+            code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        candidate_name = _candidate_key(revision_id)
+        if code is None:
+            opened = _open_safe_directory(
+                project_open[2],
+                candidate_name,
+                root_device,
+                RevisionStoreErrorCode.NOT_FOUND,
+            )
+            candidate_fd = opened[0]
+            code = opened[1]
+        if code is None:
+            entries_result = _discovery_entries(candidate_fd)
+            entries = entries_result[0]
+            code = entries_result[1]
+        if code is None:
+            entry_count = len(entries)
+            names = ()
+            if entry_count >= 1:
+                names = names + (entries[0][0],)
+            if entry_count >= 2:
+                names = names + (entries[1][0],)
+            if entry_count >= 3:
+                names = names + (entries[2][0],)
+            if entry_count == 4:
+                names = names + (entries[3][0],)
+            if entry_count > 4 or names not in (
+                ("model.FCStd", "model.step"),
+                ("model.FCStd", "model.step", _SEED_BINDING_RECORD),
+                ("model.FCStd", "model.step", _SEED_INTENT_RECORD),
+                (
+                    "model.FCStd",
+                    "model.step",
+                    _SEED_BINDING_RECORD,
+                    _SEED_INTENT_RECORD,
+                ),
+            ):
+                code = RevisionStoreErrorCode.UNSAFE_STORE
+            if code is None and not _safe_immutable_stat(entries[0][1], root_device):
+                code = RevisionStoreErrorCode.UNSAFE_STORE
+            if code is None and not _safe_immutable_stat(entries[1][1], root_device):
+                code = RevisionStoreErrorCode.UNSAFE_STORE
+            if (
+                code is None
+                and entry_count >= 3
+                and not _safe_immutable_stat(entries[2][1], root_device)
+            ):
+                code = RevisionStoreErrorCode.UNSAFE_STORE
+            if (
+                code is None
+                and entry_count == 4
+                and not _safe_immutable_stat(entries[3][1], root_device)
+            ):
+                code = RevisionStoreErrorCode.UNSAFE_STORE
+        if code is None:
+            try:
+                candidates_copy = os.dup(project_open[2])
+                parent_stat = os.fstat(project_open[2])
+                copied_stat = os.fstat(candidates_copy)
+                directory_stat = os.fstat(candidate_fd)
+                live_stat = os.stat(
+                    candidate_name,
+                    dir_fd=candidates_copy,
+                    follow_symlinks=False,
+                )
+                inheritable = os.get_inheritable(candidates_copy) or os.get_inheritable(
+                    candidate_fd
+                )
+            except OSError:
+                code = RevisionStoreErrorCode.IO_ERROR
+            else:
+                if (
+                    inheritable
+                    or not _safe_directory_stat(copied_stat, root_device)
+                    or not _safe_directory_stat(directory_stat, root_device)
+                    or not _same_source_parent(parent_stat, copied_stat)
+                    or not _same_source_parent(directory_stat, live_stat)
+                ):
+                    code = RevisionStoreErrorCode.UNSAFE_STORE
+        if code is None:
+            result = (
+                candidates_copy,
+                candidate_fd,
+                candidate_name,
+                root_device,
+            )
+            candidates_copy = None
+            candidate_fd = None
+    finally:
+        if candidate_fd is not None:
+            close_failed = _close_fd(candidate_fd) or close_failed
+        if candidates_copy is not None:
+            close_failed = _close_fd(candidates_copy) or close_failed
+        close_failed = _close_project_fds(project_open) or close_failed
+        close_failed = _close_fd(root_open[0]) or close_failed
+    if code is None and close_failed:
+        code = RevisionStoreErrorCode.IO_ERROR
+    if code is not None:
+        if result is not None:
+            close_failed = _close_fd(result[1])
+            close_failed = _close_fd(result[0]) or close_failed
+            if close_failed:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        raise RevisionStoreError(code)
+    return result
+
+
 def _seed_reservation_key_digest(value):
     if type(value) is not str or re.fullmatch(r"revert:[0-9a-f]{64}", value) is None:
         return (None, RevisionStoreErrorCode.INVALID_INPUT)

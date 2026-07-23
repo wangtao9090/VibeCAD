@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import pickle
 import subprocess
 import sys
 from collections.abc import Iterator, Mapping
@@ -922,6 +923,51 @@ def test_typed_result_ref_resolves_normalized_slot_before_consumer_call(
             "value": 12,
         }
     ]
+
+
+def test_private_execution_cursor_preserves_result_refs_and_one_step_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: list[dict[str, object]] = []
+    _install_clock(monkeypatch, 0, 1, 2, 3, 4, 5)
+
+    execution = adapter_module._prepare_validated_program_execution(
+        _three_step_program(),
+        {
+            "create_box": lambda **kwargs: {
+                "ok": True,
+                "object_id": "object_22222222222222222222222222222222",
+            },
+            "modify_parameter": lambda **kwargs: received.append(kwargs) or {"ok": True},
+            "inspect_model": lambda: {"valid": True},
+        },
+        execution_profile=ExecutionProfile.HEADLESS,
+    )
+
+    assert execution.done is False
+    assert execution.next_runtime_ms == 30_000
+    assert execution.outcomes == ()
+    assert execution.step().result.operation_id == "box"
+    assert execution.done is False
+    assert execution.next_runtime_ms == 30_000
+    assert execution.step().result.operation_id == "modify"
+    assert execution.done is False
+    assert execution.next_runtime_ms == 10_000
+    assert execution.step().result.operation_id == "inspect"
+    assert execution.done is True
+    assert execution.next_runtime_ms is None
+    assert [item.result.ok for item in execution.outcomes] == [True, True, True]
+    assert received == [
+        {
+            "target": "object_22222222222222222222222222222222",
+            "parameter": "length",
+            "value": 12,
+        }
+    ]
+    with pytest.raises(TypeError):
+        pickle.dumps(execution)
+    with pytest.raises(AdapterError):
+        execution.step()
 
 
 @pytest.mark.parametrize(

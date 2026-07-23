@@ -29,6 +29,9 @@ from vibecad.execution.adapter import (
     AdapterError as _AdapterError,
 )
 from vibecad.execution.adapter import (
+    _prepare_validated_program_execution as _prepare_validated_program_execution,
+)
+from vibecad.execution.adapter import (
     execute_validated_program as _execute_validated_program,
 )
 from vibecad.execution.candidate import (
@@ -1652,6 +1655,61 @@ def _validated_import_observations(
     return observations
 
 
+def _export_session_step(
+    *,
+    session: object,
+    model_path: Path,
+    step_path: Path,
+) -> None:
+    """Export one session to an already reserved empty STEP placeholder."""
+
+    if (
+        session is None
+        or type(model_path) is not type(Path())
+        or type(step_path) is not type(Path())
+        or model_path.name != "model.FCStd"
+        or step_path.name != "model.step"
+        or model_path.parent != step_path.parent
+    ):
+        raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+    try:
+        existing = os.lstat(step_path)
+    except (FileNotFoundError, OSError):
+        raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+    placeholder_identity = _step_placeholder_identity(existing)
+    if placeholder_identity is None:
+        raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+    try:
+        parent = os.lstat(step_path.parent)
+        if not stat.S_ISDIR(parent.st_mode):
+            raise _ArtifactReadFailure
+        shape = _managed_assembly_shape(session)
+    except _ArtifactReadFailure:
+        raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+    except Exception:
+        raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+    try:
+        with _silence_fd1():
+            shape.exportStep(str(step_path))
+        after_export = os.lstat(step_path)
+        if not _step_output_matches_placeholder(
+            after_export,
+            placeholder_identity,
+        ):
+            raise _ArtifactReadFailure
+        _read_artifact(step_path, "step")
+        after_read = os.lstat(step_path)
+        if not _step_output_matches_placeholder(
+            after_read,
+            placeholder_identity,
+        ):
+            raise _ArtifactReadFailure
+    except _ArtifactReadFailure:
+        raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+    except Exception:
+        raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+
+
 class InProcessCadExecutor(CadExecutionPort):
     """Compose validated programs with isolated CAD candidate Sessions."""
 
@@ -1997,6 +2055,74 @@ class InProcessCadExecutor(CadExecutionPort):
     ) -> tuple[NormalizedToolOutcome, ...]:
         """Execute one authentic program using the six fixed CAD bindings."""
 
+        (
+            prepared,
+            handlers,
+            revision_id,
+            freecad_version,
+            object_count,
+        ) = self._prepare_program_invocation(
+            program=program,
+            candidate=candidate,
+        )
+        try:
+            return _execute_validated_program(
+                prepared,
+                handlers,
+                execution_profile=self.execution_profile,
+                revision=revision_id,
+                freecad_version=freecad_version,
+                gui_main_thread=False,
+                object_count=object_count,
+            )
+        except _AdapterError:
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT) from None
+
+    def _prepare_program_execution(
+        self,
+        *,
+        program: ValidatedProgram,
+        candidate: ActiveCandidate,
+    ):
+        """Build the private command cursor used by in-process and Worker CAD."""
+
+        (
+            prepared,
+            handlers,
+            revision_id,
+            freecad_version,
+            object_count,
+        ) = self._prepare_program_invocation(
+            program=program,
+            candidate=candidate,
+        )
+        try:
+            return _prepare_validated_program_execution(
+                prepared,
+                handlers,
+                execution_profile=self.execution_profile,
+                revision=revision_id,
+                freecad_version=freecad_version,
+                gui_main_thread=False,
+                object_count=object_count,
+            )
+        except _AdapterError:
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT) from None
+
+    def _prepare_program_invocation(
+        self,
+        *,
+        program: ValidatedProgram,
+        candidate: ActiveCandidate,
+    ) -> tuple[
+        ValidatedProgram,
+        dict[str, Callable[..., object]],
+        str,
+        tuple[int, int],
+        Callable[[], int],
+    ]:
+        """Resolve one authentic program to fixed executor-owned arguments."""
+
         if type(candidate) is not ActiveCandidate:
             raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
         if type(program) is not ValidatedProgram:
@@ -2089,19 +2215,14 @@ class InProcessCadExecutor(CadExecutionPort):
             raise
         except Exception:
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT) from None
-        try:
-            freecad_version = _session_freecad_version(session)
-            return _execute_validated_program(
-                program,
-                handlers,
-                execution_profile=self.execution_profile,
-                revision=candidate.binding.revision_id,
-                freecad_version=freecad_version,
-                gui_main_thread=False,
-                object_count=partial(_document_object_count, session),
-            )
-        except _AdapterError:
-            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT) from None
+        freecad_version = _session_freecad_version(session)
+        return (
+            program,
+            handlers,
+            candidate.binding.revision_id,
+            freecad_version,
+            partial(_document_object_count, session),
+        )
 
     def export_step(
         self,
@@ -2143,44 +2264,11 @@ class InProcessCadExecutor(CadExecutionPort):
             or trusted_path.parent != candidate.model_path.parent
         ):
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
-        try:
-            existing = os.lstat(trusted_path)
-        except FileNotFoundError:
-            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
-        except OSError:
-            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
-        placeholder_identity = _step_placeholder_identity(existing)
-        if placeholder_identity is None:
-            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
-        try:
-            parent = os.lstat(trusted_path.parent)
-            if not stat.S_ISDIR(parent.st_mode):
-                raise _ArtifactReadFailure
-            shape = _managed_assembly_shape(candidate.binding.session)
-        except _ArtifactReadFailure:
-            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
-        except Exception:
-            raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
-        try:
-            with _silence_fd1():
-                shape.exportStep(str(trusted_path))
-            after_export = os.lstat(trusted_path)
-            if not _step_output_matches_placeholder(
-                after_export,
-                placeholder_identity,
-            ):
-                raise _ArtifactReadFailure
-            _read_artifact(trusted_path, "step")
-            after_read = os.lstat(trusted_path)
-            if not _step_output_matches_placeholder(
-                after_read,
-                placeholder_identity,
-            ):
-                raise _ArtifactReadFailure
-        except _ArtifactReadFailure:
-            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
-        except Exception:
-            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        _export_session_step(
+            session=candidate.binding.session,
+            model_path=candidate.model_path,
+            step_path=trusted_path,
+        )
 
     def collect_evidence(self, *, candidate: SealedCandidate) -> CandidateEvidence:
         """Collect immutable artifact facts and direct sealed geometry facts."""
