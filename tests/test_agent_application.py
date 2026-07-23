@@ -556,6 +556,23 @@ app = AgentApplication.open(
     cad_port_factory=forbidden_cad_factory,
 )
 project = app.bootstrap_empty()
+projects = app.list_projects_request({{'schema_version': 1}})
+assert projects['ok'] is True
+assert [item['project_id'] for item in projects['result']['projects']] == [
+    project.head.project_id
+]
+revisions = app.list_revisions_request({{
+    'schema_version': 1,
+    'project_id': project.head.project_id,
+}})
+assert revisions['ok'] is True
+assert [item['id'] for item in revisions['result']['revisions']] == [
+    project.head.revision_id
+]
+assert app._project_api is not None
+assert app._project_service is None
+assert app._cad_validation_port is None
+assert app._runtimes == {{}}
 response = app.create_task_request({{
     'schema_version': 1,
     'create_key': 'task_create_' + '2' * 32,
@@ -849,6 +866,149 @@ def test_project_request_facade_replays_create_key_and_gets_current_snapshot(
     app.close()
 
 
+def test_project_discovery_is_lazy_and_reuses_the_api_for_later_mutation(
+    tmp_path: Path,
+) -> None:
+    runtime_calls: list[str] = []
+    cad_calls: list[str] = []
+
+    def forbidden_runtime(**_kwargs):
+        runtime_calls.append("runtime")
+        raise AssertionError("project discovery must not create a CAD runtime")
+
+    def forbidden_cad(**_kwargs):
+        cad_calls.append("cad")
+        raise AssertionError("project discovery must not create a CAD port")
+
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        runtime_factory=forbidden_runtime,
+        cad_port_factory=forbidden_cad,
+    )
+    seeded = app.bootstrap_empty()
+    project_id = seeded.head.project_id
+    assert app._project_api is None  # noqa: SLF001
+
+    projects = app.list_projects_request({"schema_version": 1})
+
+    assert projects["ok"] is True
+    assert projects["result"] == {
+        "schema_version": 1,
+        "projects": [
+            {
+                "schema_version": 1,
+                "project_id": project_id,
+                "generation": 0,
+                "revision_id": seeded.head.revision_id,
+                "manifest_sha256": seeded.head.manifest_sha256,
+            }
+        ],
+        "next_cursor": None,
+    }
+    api = app._project_api  # noqa: SLF001
+    assert api is not None
+    revisions = app.list_revisions_request(
+        {
+            "schema_version": 1,
+            "project_id": project_id,
+        }
+    )
+    assert revisions["ok"] is True
+    assert revisions["result"]["project_id"] == project_id
+    assert revisions["result"]["head"] == projects["result"]["projects"][0]
+    assert revisions["result"]["revisions"] == [
+        {
+            "schema_version": 1,
+            "id": seeded.head.revision_id,
+            "project_id": project_id,
+            "base_revision": None,
+            "manifest_sha256": seeded.head.manifest_sha256,
+        }
+    ]
+    assert app._project_api is api  # noqa: SLF001
+    assert app._project_service is None  # noqa: SLF001
+    assert app._cad_validation_port is None  # noqa: SLF001
+    assert app._runtimes == {}  # noqa: SLF001
+    assert runtime_calls == []
+    assert cad_calls == []
+
+    created = app.create_project_request(
+        {
+            "schema_version": 1,
+            "create_key": "project_create_" + "8" * 32,
+            "kind": "empty",
+        }
+    )
+    assert created["ok"] is True
+    assert app._project_api is api  # noqa: SLF001
+    assert (
+        app.get_project_request(
+            {
+                "schema_version": 1,
+                "project_id": created["result"]["project_id"],
+            }
+        )["ok"]
+        is True
+    )
+    assert app._project_service is not None  # noqa: SLF001
+    assert app._cad_validation_port is not None  # noqa: SLF001
+    assert app._runtimes == {}  # noqa: SLF001
+    assert runtime_calls == []
+    assert cad_calls == []
+    app.close()
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "INVALID_INPUT",
+        "NOT_FOUND",
+        "CONFLICT",
+        "RESOURCE_EXHAUSTED",
+        "INTEGRITY_FAILURE",
+        "STORE_FAILURE",
+        "RECOVERY_REQUIRED",
+    ),
+)
+def test_application_bridges_revision_discovery_failures(
+    name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibecad.application.revision_discovery import (
+        RevisionDiscoveryError,
+        RevisionDiscoveryErrorCode,
+        RevisionDiscoveryService,
+    )
+
+    from vibecad.application.project_api import (
+        ProjectServicePortErrorCode,
+        ProjectServicePortFailure,
+    )
+
+    code = RevisionDiscoveryErrorCode[name]
+
+    def fail(*_args, **_kwargs):
+        raise RevisionDiscoveryError(code)
+
+    monkeypatch.setattr(RevisionDiscoveryService, "list_projects", fail)
+    monkeypatch.setattr(RevisionDiscoveryService, "list_revisions", fail)
+    app = AgentApplication.open(data_root=_data_root(tmp_path))
+
+    assert app.list_projects(limit=50, cursor=None) == ProjectServicePortFailure(
+        code=ProjectServicePortErrorCode(code.value)
+    )
+    assert app.list_revisions(
+        project_id="project_" + "1" * 32,
+        limit=50,
+        cursor=None,
+    ) == ProjectServicePortFailure(code=ProjectServicePortErrorCode(code.value))
+    assert app._project_service is None  # noqa: SLF001
+    assert app._cad_validation_port is None  # noqa: SLF001
+    assert app._runtimes == {}  # noqa: SLF001
+    app.close()
+
+
 def test_retained_private_adapters_cannot_bypass_application_close(tmp_path: Path) -> None:
     app = AgentApplication.open(data_root=_data_root(tmp_path))
     project = app.create_project_request(
@@ -886,6 +1046,7 @@ def test_retained_private_adapters_cannot_bypass_application_close(tmp_path: Pat
         project_api.get_project({"schema_version": 1, "project_id": project_id})["error"]["code"]
         == "internal_error"
     )
+    assert project_api.list_projects({"schema_version": 1})["error"]["code"] == "internal_error"
     assert (
         direct_api.invoke(
             "create_box",

@@ -29,11 +29,14 @@ __all__ = (
     "CommitJournalState",
     "LocalRevisionStore",
     "ProjectHead",
+    "ProjectSnapshotEntry",
     "ReconciliationResult",
     "ReconciliationStatus",
+    "RevisionAncestrySnapshot",
     "RevisionArtifactRef",
     "RevisionCopyCursor",
     "RevisionRef",
+    "RevisionSnapshotEntry",
     "RevisionSourceBinding",
     "RevisionStoreError",
     "RevisionStoreErrorCode",
@@ -74,6 +77,8 @@ _RESERVATIONS_DIRECTORY = "reservations"
 _RESERVATION_RECORD = "reservation.json"
 _QUOTA_OWNER_CONFLICT = ("conflicting_reservation_owner",)
 _CAD_FILE_LIMIT_RESOURCE = "vibecad-candidate-file-limit-v1"
+_DISCOVERY_NAMESPACE_DOMAIN = b"vibecad-revision-discovery-namespace-v1\0"
+_DISCOVERY_PROJECT_STATE_DOMAIN = b"vibecad-revision-project-state-v1\0"
 
 _PROJECT_PATTERN = r"project_[0-9a-f]{32}"
 _REVISION_PATTERN = r"revision_[0-9a-f]{32}"
@@ -384,6 +389,97 @@ class ProjectHead:
 
     def to_mapping(self):
         return _head_mapping(self)
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ProjectSnapshotEntry:
+    """One validated project HEAD plus its complete committed-state digest."""
+
+    project_id: str
+    generation: int
+    revision_id: str
+    manifest_sha256: str
+    state_sha256: str
+
+    def __post_init__(self):
+        if (
+            type(self.project_id) is not str
+            or re.fullmatch(_PROJECT_PATTERN, self.project_id) is None
+            or type(self.generation) is not int
+            or self.generation < 0
+            or self.generation > MAX_SAFE_JSON_INTEGER
+            or type(self.revision_id) is not str
+            or re.fullmatch(_REVISION_PATTERN, self.revision_id) is None
+            or type(self.manifest_sha256) is not str
+            or re.fullmatch(_DIGEST_PATTERN, self.manifest_sha256) is None
+            or type(self.state_sha256) is not str
+            or re.fullmatch(_DIGEST_PATTERN, self.state_sha256) is None
+        ):
+            raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RevisionSnapshotEntry:
+    """Path-free metadata for one committed revision in current HEAD ancestry."""
+
+    id: str
+    project_id: str
+    base_revision: str | None
+    manifest_sha256: str
+
+    def __post_init__(self):
+        if (
+            type(self.id) is not str
+            or re.fullmatch(_REVISION_PATTERN, self.id) is None
+            or type(self.project_id) is not str
+            or re.fullmatch(_PROJECT_PATTERN, self.project_id) is None
+            or type(self.manifest_sha256) is not str
+            or re.fullmatch(_DIGEST_PATTERN, self.manifest_sha256) is None
+        ):
+            raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+        if self.base_revision is not None and (
+            type(self.base_revision) is not str
+            or re.fullmatch(_REVISION_PATTERN, self.base_revision) is None
+        ):
+            raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RevisionAncestrySnapshot:
+    """Validated current HEAD ancestry and digest of all sealed project state."""
+
+    project_id: str
+    head: ProjectHead
+    revisions: tuple[RevisionSnapshotEntry, ...]
+    state_sha256: str
+
+    def __post_init__(self):
+        revisions_value = self.revisions
+        if type(revisions_value) is not type(()):
+            raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+        if (
+            type(self.project_id) is not str
+            or re.fullmatch(_PROJECT_PATTERN, self.project_id) is None
+            or type(self.head) is not ProjectHead
+            or self.head.project_id != self.project_id
+            or type(self.state_sha256) is not str
+            or re.fullmatch(_DIGEST_PATTERN, self.state_sha256) is None
+        ):
+            raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+        previous = None
+        identifiers = {}
+        for entry in revisions_value:
+            if (
+                type(entry) is not RevisionSnapshotEntry
+                or entry.project_id != self.project_id
+                or entry.id in identifiers
+                or (previous is not None and entry.id <= previous)
+            ):
+                raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+            identifiers[entry.id] = True
+            previous = entry.id
+        if self.head.revision_id not in identifiers:
+            raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -2699,11 +2795,14 @@ def _quota_entry_allowed(relative, name, is_directory):
 
 def _quota_path_owner(relative, prefix_owner, journal_owner):
     owner = None
-    for prefix, revision_id in prefix_owner.items():
-        if relative[: len(prefix)] == prefix:
+    prefix_length = 1
+    while prefix_length <= len(relative):
+        revision_id = prefix_owner.get(relative[:prefix_length])
+        if revision_id is not None:
             if owner is not None and owner != revision_id:
                 return _QUOTA_OWNER_CONFLICT
             owner = revision_id
+        prefix_length += 1
     if len(relative) == 2 and relative[0] in journal_owner:
         name = relative[1]
         if (
@@ -2822,12 +2921,28 @@ def _scan_quota_tree(
                     close_failed = False
                     try:
                         child_fd = os.open(name, _root_flags(), dir_fd=directory_fd)
-                        child_code = _scan_quota_tree(
+                        child_code = _discovery_directory_pin_code(
+                            directory_fd,
+                            name,
                             child_fd,
+                            entry_stat,
                             root_device,
-                            child_relative,
-                            snapshot,
                         )
+                        if child_code is None:
+                            child_code = _scan_quota_tree(
+                                child_fd,
+                                root_device,
+                                child_relative,
+                                snapshot,
+                            )
+                        if child_code is None:
+                            child_code = _discovery_directory_pin_code(
+                                directory_fd,
+                                name,
+                                child_fd,
+                                entry_stat,
+                                root_device,
+                            )
                     except OSError:
                         child_code = RevisionStoreErrorCode.UNSAFE_STORE
                     finally:
@@ -2924,6 +3039,16 @@ def _load_reservations(root_fd, root_device):
         return ((), None)
     quota_fd = opened[0]
     reservations_fd = opened[1]
+    quota_initial = _discovery_directory_stat(quota_fd, root_device)
+    reservations_initial = _discovery_directory_stat(reservations_fd, root_device)
+    if quota_initial[1] is not None or reservations_initial[1] is not None:
+        close_failed = _close_two(reservations_fd, quota_fd)
+        code = quota_initial[1]
+        if code is None:
+            code = reservations_initial[1]
+        if close_failed and code is None:
+            code = RevisionStoreErrorCode.IO_ERROR
+        return (None, code)
     values = ()
     iterator = None
     code = None
@@ -2978,6 +3103,14 @@ def _load_reservations(root_fd, root_device):
                             code = parsed_record[1]
                     else:
                         code = raw[1]
+                    if code is None:
+                        code = _discovery_directory_pin_code(
+                            reservations_fd,
+                            name,
+                            reservation_open[0],
+                            entry_stat,
+                            root_device,
+                        )
                 finally:
                     reservation_close_failed = _close_fd(reservation_open[0])
                 if code is not None or reservation_close_failed:
@@ -2995,6 +3128,22 @@ def _load_reservations(root_fd, root_device):
                     if code is None:
                         code = RevisionStoreErrorCode.IO_ERROR
         finally:
+            if code is None:
+                code = _discovery_directory_pin_code(
+                    quota_fd,
+                    _RESERVATIONS_DIRECTORY,
+                    reservations_fd,
+                    reservations_initial[0],
+                    root_device,
+                )
+            if code is None:
+                code = _discovery_directory_pin_code(
+                    root_fd,
+                    _QUOTA_DIRECTORY,
+                    quota_fd,
+                    quota_initial[0],
+                    root_device,
+                )
             close_failed = _close_two(reservations_fd, quota_fd)
     if code is not None:
         return (None, code)
@@ -5156,6 +5305,988 @@ def _candidate_authority(store, project_id, revision_id, lease):
     return (root_open, project_open, None)
 
 
+def _discovery_stat_identity(value):
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _discovery_directory_stat(directory_fd, root_device):
+    try:
+        value = os.fstat(directory_fd)
+    except OSError:
+        return (None, RevisionStoreErrorCode.IO_ERROR)
+    if not _safe_directory_stat(value, root_device):
+        return (None, RevisionStoreErrorCode.UNSAFE_STORE)
+    return (value, None)
+
+
+def _discovery_directory_pin_code(
+    parent_fd,
+    name,
+    directory_fd,
+    opened_stat,
+    root_device,
+):
+    after = _discovery_directory_stat(directory_fd, root_device)
+    if after[1] is not None:
+        return after[1]
+    current = after[0]
+    opened_identity = _discovery_stat_identity(opened_stat)
+    if _discovery_stat_identity(current) != opened_identity:
+        return RevisionStoreErrorCode.UNSAFE_STORE
+    entry = _entry_stat(parent_fd, name)
+    if entry[2] is not None:
+        return entry[2]
+    if not entry[1] or not _safe_directory_stat(entry[0], root_device):
+        return RevisionStoreErrorCode.UNSAFE_STORE
+    if _discovery_stat_identity(entry[0]) != opened_identity:
+        return RevisionStoreErrorCode.UNSAFE_STORE
+    return None
+
+
+def _discovery_pair_name(value):
+    return value[0]
+
+
+def _discovery_revision_id(value):
+    return value.id
+
+
+def _discovery_project_id(value):
+    return value.project_id
+
+
+def _discovery_entries(directory_fd):
+    iterator = None
+    values = []
+    code = None
+    try:
+        try:
+            iterator = os.scandir(directory_fd)
+            for entry in iterator:
+                name = entry.name
+                if type(name) is not str or name in {".", ".."}:
+                    code = RevisionStoreErrorCode.UNSAFE_STORE
+                    break
+                try:
+                    entry_stat = entry.stat(follow_symlinks=False)
+                except OSError:
+                    code = RevisionStoreErrorCode.IO_ERROR
+                    break
+                values.append((name, entry_stat))
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+    finally:
+        if iterator is not None:
+            try:
+                iterator.close()
+            except OSError:
+                if code is None:
+                    code = RevisionStoreErrorCode.IO_ERROR
+    if code is not None:
+        return (None, code)
+    return (tuple(sorted(values, key=_discovery_pair_name)), None)
+
+
+def _discovery_record(
+    parent_fd,
+    name,
+    root_device,
+    maximum,
+    missing_code,
+    replaceable,
+):
+    opened = _open_checked_file(
+        parent_fd,
+        name,
+        root_device,
+        maximum,
+        missing_code,
+        replaceable,
+    )
+    if opened[2] is not None:
+        return (None, None, opened[2])
+    file_fd = opened[0]
+    opened_stat = opened[1]
+    raw = _read_pinned_record(
+        parent_fd,
+        name,
+        file_fd,
+        opened_stat,
+        maximum,
+        _COPY_CHUNK_BYTES,
+    )
+    close_failed = _close_fd(file_fd)
+    if raw[1] is not None:
+        return (None, None, raw[1])
+    if close_failed:
+        return (None, None, RevisionStoreErrorCode.IO_ERROR)
+    return (raw[0], opened_stat, None)
+
+
+def _discovery_content_stat(
+    parent_fd,
+    name,
+    root_device,
+    expected_size,
+):
+    opened = _open_checked_file(
+        parent_fd,
+        name,
+        root_device,
+        _MAX_FILE_BYTES,
+        RevisionStoreErrorCode.CORRUPT_CONTENT,
+        False,
+    )
+    if opened[2] is not None:
+        return (None, opened[2])
+    file_fd = opened[0]
+    before = opened[1]
+    code = None
+    after = None
+    if before.st_size != expected_size:
+        code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if code is None:
+        try:
+            after = os.fstat(file_fd)
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+    if code is None and not _same_copy_file_stat(before, after):
+        code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if code is None:
+        code = _pinned_file_entry_code(
+            parent_fd,
+            name,
+            before,
+            RevisionStoreErrorCode.CORRUPT_CONTENT,
+        )
+    close_failed = _close_fd(file_fd)
+    if code is None and close_failed:
+        code = RevisionStoreErrorCode.IO_ERROR
+    if code is not None:
+        return (None, code)
+    return (_discovery_stat_identity(before), None)
+
+
+def _discovery_manifest(
+    revisions_fd,
+    root_device,
+    project_id,
+    physical_name,
+):
+    revision_open = _open_safe_directory(
+        revisions_fd,
+        physical_name,
+        root_device,
+        RevisionStoreErrorCode.CORRUPT_RECORD,
+    )
+    if revision_open[1] is not None:
+        return (None, None, revision_open[1])
+    revision_fd = revision_open[0]
+    revision_initial = _discovery_directory_stat(revision_fd, root_device)
+    if revision_initial[1] is not None:
+        close_failed = _close_fd(revision_fd)
+        code = revision_initial[1]
+        if close_failed and code is None:
+            code = RevisionStoreErrorCode.IO_ERROR
+        return (None, None, code)
+    revision = None
+    identity = None
+    code = None
+    try:
+        entries = _discovery_entries(revision_fd)
+        code = entries[1]
+        manifest = None
+        manifest_stat = None
+        if code is None:
+            manifest = _discovery_record(
+                revision_fd,
+                "manifest.json",
+                root_device,
+                _MAX_MANIFEST_BYTES,
+                RevisionStoreErrorCode.CORRUPT_RECORD,
+                False,
+            )
+            code = manifest[2]
+            manifest_stat = manifest[1]
+        if code is None:
+            parsed = _parse_checked_record(
+                manifest[0],
+                _MANIFEST_CHECKSUM_DOMAIN,
+                _MAX_MANIFEST_BYTES,
+            )
+            code = parsed[1]
+        if code is None:
+            revision_result = _revision_from_manifest(parsed[0], manifest[0])
+            revision = revision_result[0]
+            code = revision_result[1]
+        if code is None and (
+            revision.project_id != project_id or _revision_key(revision.id) != physical_name
+        ):
+            code = RevisionStoreErrorCode.CORRUPT_RECORD
+        expected_names = ("manifest.json",)
+        references = ()
+        if code is None and revision.model is not None:
+            expected_names = expected_names + (revision.model.name,)
+            references = references + (revision.model,)
+        if code is None:
+            for artifact in revision.artifacts:
+                expected_names = expected_names + (artifact.name,)
+                references = references + (artifact,)
+        if code is None:
+            if len(entries[0]) != len(expected_names):
+                code = RevisionStoreErrorCode.CORRUPT_RECORD
+            else:
+                for item in entries[0]:
+                    if item[0] not in expected_names:
+                        code = RevisionStoreErrorCode.CORRUPT_RECORD
+                        break
+        content_identities = []
+        if code is None:
+            for reference in references:
+                content = _discovery_content_stat(
+                    revision_fd,
+                    reference.name,
+                    root_device,
+                    reference.size_bytes,
+                )
+                if content[1] is not None:
+                    code = content[1]
+                    break
+                content_identities.append((reference.name, content[0]))
+        if code is None:
+            try:
+                directory_stat = os.fstat(revision_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.IO_ERROR
+        if code is None and not _safe_directory_stat(directory_stat, root_device):
+            code = RevisionStoreErrorCode.UNSAFE_STORE
+        if code is None:
+            identity = (
+                revision.id,
+                hashlib.sha256(manifest[0]).hexdigest(),
+                _discovery_stat_identity(manifest_stat),
+                _discovery_stat_identity(directory_stat),
+                tuple(content_identities),
+            )
+    finally:
+        if code is None:
+            code = _discovery_directory_pin_code(
+                revisions_fd,
+                physical_name,
+                revision_fd,
+                revision_initial[0],
+                root_device,
+            )
+        close_failed = _close_fd(revision_fd)
+    if code is None and close_failed:
+        code = RevisionStoreErrorCode.IO_ERROR
+    if code is not None:
+        return (None, None, code)
+    return (revision, identity, None)
+
+
+def _discovery_candidate(
+    candidates_fd,
+    root_device,
+    revision_id,
+):
+    candidate_open = _open_safe_directory(
+        candidates_fd,
+        _candidate_key(revision_id),
+        root_device,
+        RevisionStoreErrorCode.RECOVERY_REQUIRED,
+    )
+    if candidate_open[1] is not None:
+        return candidate_open[1]
+    candidate_fd = candidate_open[0]
+    candidate_initial = _discovery_directory_stat(candidate_fd, root_device)
+    if candidate_initial[1] is not None:
+        close_failed = _close_fd(candidate_fd)
+        code = candidate_initial[1]
+        if close_failed and code is None:
+            code = RevisionStoreErrorCode.IO_ERROR
+        return code
+    code = None
+    try:
+        entries = _discovery_entries(candidate_fd)
+        code = entries[1]
+        if code is None:
+            if len(entries[0]) != 2:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+            else:
+                for item in entries[0]:
+                    if item[0] not in ("model.FCStd", "model.step"):
+                        code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+                        break
+        total_size = 0
+        if code is None:
+            for _name, entry_stat in entries[0]:
+                if (
+                    not _safe_candidate_stat(entry_stat, root_device)
+                    or stat.S_IMODE(entry_stat.st_mode) & 0o022
+                    or entry_stat.st_size < 0
+                    or entry_stat.st_size > _MAX_FILE_BYTES
+                ):
+                    code = RevisionStoreErrorCode.UNSAFE_STORE
+                    break
+                total_size += entry_stat.st_size
+        if code is None and total_size > _MAX_REVISION_BYTES:
+            code = RevisionStoreErrorCode.BUDGET_EXCEEDED
+    finally:
+        if code is None:
+            code = _discovery_directory_pin_code(
+                candidates_fd,
+                _candidate_key(revision_id),
+                candidate_fd,
+                candidate_initial[0],
+                root_device,
+            )
+        close_failed = _close_fd(candidate_fd)
+    if code is None and close_failed:
+        code = RevisionStoreErrorCode.IO_ERROR
+    return code
+
+
+def _discovery_depths(revisions):
+    roots = []
+    for revision_id, revision in revisions.items():
+        if revision.base_revision is None:
+            roots.append(revision_id)
+    if len(roots) != 1:
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    depths = {}
+    for revision_id in revisions:
+        trail = []
+        active = {}
+        current = revision_id
+        while current not in depths:
+            if current in active:
+                return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+            active[current] = True
+            trail.append(current)
+            revision = revisions.get(current)
+            if revision is None:
+                return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+            if revision.base_revision is None:
+                depth = 0
+                break
+            current = revision.base_revision
+        else:
+            depth = depths[current]
+        while trail:
+            item = trail.pop()
+            if revisions[item].base_revision is None:
+                depths[item] = 0
+                depth = 0
+            else:
+                depth += 1
+                depths[item] = depth
+    for revision_id in revisions:
+        if depths[revision_id] < 0:
+            return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    return (depths, None)
+
+
+def _head_matches_discovery_graph(head, revisions, depths):
+    revision = revisions.get(head.revision_id)
+    return bool(
+        revision is not None
+        and revision.manifest_sha256 == head.manifest_sha256
+        and depths.get(head.revision_id) == head.generation
+    )
+
+
+def _discovery_journal_code(
+    *,
+    project_id,
+    head,
+    journal,
+    revisions,
+    depths,
+    reservations,
+    candidate_names,
+    candidates_fd,
+    root_device,
+):
+    if journal is None:
+        if reservations or candidate_names:
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        return None
+    if journal.project_id != project_id or not _head_matches_discovery_graph(
+        journal.expected_head, revisions, depths
+    ):
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    if journal.state is CommitJournalState.STAGING:
+        if (
+            head != journal.expected_head
+            or journal.candidate_revision in revisions
+            or len(reservations) != 1
+            or candidate_names != (_candidate_key(journal.candidate_revision),)
+        ):
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        reservation = reservations[0]
+        if (
+            reservation["kind"] != "candidate"
+            or reservation["project_id"] != project_id
+            or reservation["revision_id"] != journal.candidate_revision
+            or reservation["expected_head"] != journal.expected_head
+            or reservation["state"] != "staged"
+            or reservation["project_temp"] is not None
+            or reservation["revision_temp"] is not None
+        ):
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        return _discovery_candidate(
+            candidates_fd,
+            root_device,
+            journal.candidate_revision,
+        )
+    if reservations or candidate_names:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    sealed = revisions.get(journal.candidate_revision)
+    if journal.state is CommitJournalState.PREPARED:
+        if (
+            sealed is None
+            or sealed.base_revision != journal.expected_head.revision_id
+            or sealed.manifest_sha256 != journal.manifest_sha256
+        ):
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        if head != journal.expected_head and not _new_head_matches(head, journal):
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        return None
+    if journal.state is CommitJournalState.COMMITTED:
+        if (
+            not _new_head_matches(head, journal)
+            or sealed is None
+            or sealed.base_revision != journal.expected_head.revision_id
+            or sealed.manifest_sha256 != journal.manifest_sha256
+        ):
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        return None
+    if journal.state is CommitJournalState.NOT_COMMITTED:
+        if head != journal.expected_head:
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        if sealed is None:
+            if journal.manifest_sha256 != journal.expected_head.manifest_sha256:
+                return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        elif (
+            sealed.base_revision != journal.expected_head.revision_id
+            or sealed.manifest_sha256 != journal.manifest_sha256
+        ):
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        return None
+    return RevisionStoreErrorCode.RECOVERY_REQUIRED
+
+
+def _discovery_reservation_index(reservations):
+    grouped = {}
+    for reservation in reservations:
+        project_id = reservation["project_id"]
+        values = grouped.get(project_id)
+        if values is None:
+            values = []
+            grouped[project_id] = values
+        values.append(reservation)
+    frozen = {}
+    for project_id, values in grouped.items():
+        frozen[project_id] = tuple(values)
+    return frozen
+
+
+def _discovery_reservations_for_project(index, project_id):
+    return index.get(project_id, ())
+
+
+def _discovery_project(
+    root_fd,
+    root_device,
+    physical_name,
+    reservation_index,
+):
+    project_open = _open_safe_directory(
+        root_fd,
+        physical_name,
+        root_device,
+        RevisionStoreErrorCode.CORRUPT_RECORD,
+    )
+    if project_open[1] is not None:
+        return (None, project_open[1])
+    project_fd = project_open[0]
+    project_initial = _discovery_directory_stat(project_fd, root_device)
+    if project_initial[1] is not None:
+        close_failed = _close_fd(project_fd)
+        code = project_initial[1]
+        if close_failed and code is None:
+            code = RevisionStoreErrorCode.IO_ERROR
+        return (None, code)
+    revisions_fd = None
+    candidates_fd = None
+    revisions_initial = None
+    candidates_initial = None
+    result = None
+    code = None
+    try:
+        entries = _discovery_entries(project_fd)
+        code = entries[1]
+        entry_names = ()
+        if code is None:
+            for item in entries[0]:
+                entry_names = entry_names + (item[0],)
+                if item[0] not in (
+                    "HEAD.json",
+                    "journal.json",
+                    "revisions",
+                    "candidates",
+                ):
+                    code = RevisionStoreErrorCode.UNSAFE_STORE
+                    break
+        head_record = None
+        if code is None:
+            head_record = _discovery_record(
+                project_fd,
+                "HEAD.json",
+                root_device,
+                _MAX_HEAD_BYTES,
+                RevisionStoreErrorCode.CORRUPT_RECORD,
+                True,
+            )
+            code = head_record[2]
+        if code is None:
+            parsed_head = _parse_checked_record(
+                head_record[0],
+                _HEAD_CHECKSUM_DOMAIN,
+                _MAX_HEAD_BYTES,
+            )
+            code = parsed_head[1]
+        if code is None:
+            head_result = _head_from_record(parsed_head[0])
+            head = head_result[0]
+            code = head_result[1]
+        if code is None and _project_key(head.project_id) != physical_name:
+            code = RevisionStoreErrorCode.CORRUPT_RECORD
+        journal = None
+        journal_identity = None
+        if code is None and "journal.json" in entry_names:
+            journal_record = _discovery_record(
+                project_fd,
+                "journal.json",
+                root_device,
+                _MAX_JOURNAL_BYTES,
+                RevisionStoreErrorCode.CORRUPT_RECORD,
+                True,
+            )
+            code = journal_record[2]
+            if code is None:
+                parsed_journal = _parse_checked_record(
+                    journal_record[0],
+                    _JOURNAL_CHECKSUM_DOMAIN,
+                    _MAX_JOURNAL_BYTES,
+                )
+                code = parsed_journal[1]
+            if code is None:
+                journal_result = _journal_from_record(parsed_journal[0])
+                journal = journal_result[0]
+                code = journal_result[1]
+            if code is None:
+                journal_identity = (
+                    hashlib.sha256(journal_record[0]).hexdigest(),
+                    _discovery_stat_identity(journal_record[1]),
+                )
+        expected_entries = ("HEAD.json", "revisions", "candidates")
+        if journal is not None:
+            expected_entries = expected_entries + ("journal.json",)
+        if code is None:
+            if len(entry_names) != len(expected_entries):
+                code = RevisionStoreErrorCode.CORRUPT_RECORD
+            else:
+                for name in entry_names:
+                    if name not in expected_entries:
+                        code = RevisionStoreErrorCode.CORRUPT_RECORD
+                        break
+        if code is None:
+            revisions_open = _open_safe_directory(
+                project_fd,
+                "revisions",
+                root_device,
+                RevisionStoreErrorCode.UNSAFE_STORE,
+            )
+            code = revisions_open[1]
+            revisions_fd = revisions_open[0]
+            if code is None:
+                revisions_initial = _discovery_directory_stat(
+                    revisions_fd,
+                    root_device,
+                )
+                code = revisions_initial[1]
+        if code is None:
+            candidates_open = _open_safe_directory(
+                project_fd,
+                "candidates",
+                root_device,
+                RevisionStoreErrorCode.UNSAFE_STORE,
+            )
+            code = candidates_open[1]
+            candidates_fd = candidates_open[0]
+            if code is None:
+                candidates_initial = _discovery_directory_stat(
+                    candidates_fd,
+                    root_device,
+                )
+                code = candidates_initial[1]
+        revision_entries = None
+        if code is None:
+            revision_entries = _discovery_entries(revisions_fd)
+            code = revision_entries[1]
+        revisions = {}
+        revision_identities = []
+        if code is None:
+            for name, entry_stat in revision_entries[0]:
+                if re.fullmatch(r"[0-9a-f]{64}", name) is None or not _safe_directory_stat(
+                    entry_stat, root_device
+                ):
+                    code = RevisionStoreErrorCode.UNSAFE_STORE
+                    break
+                loaded = _discovery_manifest(
+                    revisions_fd,
+                    root_device,
+                    head.project_id,
+                    name,
+                )
+                if loaded[2] is not None:
+                    code = loaded[2]
+                    break
+                if loaded[0].id in revisions:
+                    code = RevisionStoreErrorCode.CORRUPT_RECORD
+                    break
+                revisions[loaded[0].id] = loaded[0]
+                revision_identities.append(loaded[1])
+        if code is None and not revisions:
+            code = RevisionStoreErrorCode.CORRUPT_RECORD
+        depths = None
+        if code is None:
+            depth_result = _discovery_depths(revisions)
+            depths = depth_result[0]
+            code = depth_result[1]
+        if code is None and not _head_matches_discovery_graph(head, revisions, depths):
+            code = RevisionStoreErrorCode.CORRUPT_RECORD
+        candidate_entries = None
+        if code is None:
+            candidate_entries = _discovery_entries(candidates_fd)
+            code = candidate_entries[1]
+        candidate_names = []
+        if code is None:
+            for name, entry_stat in candidate_entries[0]:
+                if re.fullmatch(r"[0-9a-f]{64}", name) is None or not _safe_directory_stat(
+                    entry_stat, root_device
+                ):
+                    code = RevisionStoreErrorCode.UNSAFE_STORE
+                    break
+                candidate_names.append(name)
+        project_reservations = ()
+        if code is None:
+            project_reservations = _discovery_reservations_for_project(
+                reservation_index,
+                head.project_id,
+            )
+        if code is None:
+            code = _discovery_journal_code(
+                project_id=head.project_id,
+                head=head,
+                journal=journal,
+                revisions=revisions,
+                depths=depths,
+                reservations=project_reservations,
+                candidate_names=tuple(candidate_names),
+                candidates_fd=candidates_fd,
+                root_device=root_device,
+            )
+        ancestry = []
+        if code is None:
+            current = head.revision_id
+            seen = {}
+            while current is not None:
+                if current in seen or current not in revisions:
+                    code = RevisionStoreErrorCode.CORRUPT_RECORD
+                    break
+                seen[current] = True
+                revision = revisions[current]
+                ancestry.append(
+                    RevisionSnapshotEntry(
+                        id=revision.id,
+                        project_id=revision.project_id,
+                        base_revision=revision.base_revision,
+                        manifest_sha256=revision.manifest_sha256,
+                    )
+                )
+                current = revision.base_revision
+        if code is None and len(ancestry) != head.generation + 1:
+            code = RevisionStoreErrorCode.CORRUPT_RECORD
+        try:
+            project_stat = os.fstat(project_fd)
+        except OSError:
+            project_stat = None
+            if code is None:
+                code = RevisionStoreErrorCode.IO_ERROR
+        reservation_identities = []
+        if code is None:
+            for reservation in project_reservations:
+                reservation_body = _reservation_body(
+                    reservation["kind"],
+                    reservation["project_id"],
+                    reservation["expected_head"],
+                    reservation["revision_id"],
+                    reservation["key_sha256"],
+                    reservation["ceiling_files"],
+                    reservation["state"],
+                    reservation["project_temp"],
+                    reservation["revision_temp"],
+                )
+                reservation_identities.append(
+                    hashlib.sha256(_canonical_bytes(reservation_body)).hexdigest()
+                )
+            ordered_revision_identities = tuple(
+                sorted(revision_identities, key=_discovery_pair_name)
+            )
+            state_body = (
+                head.project_id,
+                hashlib.sha256(head_record[0]).hexdigest(),
+                _discovery_stat_identity(head_record[1]),
+                _discovery_stat_identity(project_stat),
+                journal_identity,
+                ordered_revision_identities,
+                tuple(reservation_identities),
+                tuple(candidate_names),
+            )
+            state_sha256 = hashlib.sha256(
+                _DISCOVERY_PROJECT_STATE_DOMAIN + _canonical_bytes(state_body)
+            ).hexdigest()
+            ordered = tuple(sorted(ancestry, key=_discovery_revision_id))
+            result = RevisionAncestrySnapshot(
+                project_id=head.project_id,
+                head=head,
+                revisions=ordered,
+                state_sha256=state_sha256,
+            )
+    finally:
+        close_failed = False
+        if code is None and candidates_fd is not None:
+            code = _discovery_directory_pin_code(
+                project_fd,
+                "candidates",
+                candidates_fd,
+                candidates_initial[0],
+                root_device,
+            )
+        if code is None and revisions_fd is not None:
+            code = _discovery_directory_pin_code(
+                project_fd,
+                "revisions",
+                revisions_fd,
+                revisions_initial[0],
+                root_device,
+            )
+        if code is None:
+            code = _discovery_directory_pin_code(
+                root_fd,
+                physical_name,
+                project_fd,
+                project_initial[0],
+                root_device,
+            )
+        if candidates_fd is not None:
+            close_failed = _close_fd(candidates_fd) or close_failed
+        if revisions_fd is not None:
+            close_failed = _close_fd(revisions_fd) or close_failed
+        close_failed = _close_fd(project_fd) or close_failed
+    if code is None and close_failed:
+        code = RevisionStoreErrorCode.IO_ERROR
+    if code is not None:
+        return (None, code)
+    return (result, None)
+
+
+def _discovery_quota_binding(root_fd, root_device):
+    opened = _open_quota_directories(root_fd, root_device, False)
+    if opened[2] is not None:
+        return (None, opened[2])
+    if opened[0] is None:
+        return (None, None)
+    quota_fd = opened[0]
+    reservations_fd = opened[1]
+    quota_stat = _discovery_directory_stat(quota_fd, root_device)
+    reservations_stat = _discovery_directory_stat(reservations_fd, root_device)
+    code = quota_stat[1]
+    if code is None:
+        code = reservations_stat[1]
+    if code is None:
+        code = _discovery_directory_pin_code(
+            quota_fd,
+            _RESERVATIONS_DIRECTORY,
+            reservations_fd,
+            reservations_stat[0],
+            root_device,
+        )
+    if code is None:
+        code = _discovery_directory_pin_code(
+            root_fd,
+            _QUOTA_DIRECTORY,
+            quota_fd,
+            quota_stat[0],
+            root_device,
+        )
+    close_failed = _close_two(reservations_fd, quota_fd)
+    if code is None and close_failed:
+        code = RevisionStoreErrorCode.IO_ERROR
+    if code is not None:
+        return (None, code)
+    return (
+        (
+            _discovery_stat_identity(quota_stat[0]),
+            _discovery_stat_identity(reservations_stat[0]),
+        ),
+        None,
+    )
+
+
+def _discovery_store_snapshot(store):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        raise RevisionStoreError(quota[1])
+    quota_lease = quota[0]
+    root_fd = None
+    failure = None
+    projects = None
+    ancestries = None
+    root_initial = None
+    try:
+        root_open = _open_store_root(store)
+        failure = root_open[2]
+        if failure is None:
+            root_fd = root_open[0]
+            root_device = root_open[1].st_dev
+            root_initial = root_open[1]
+        quota_binding = None
+        if failure is None:
+            quota_binding_result = _discovery_quota_binding(
+                root_fd,
+                root_device,
+            )
+            quota_binding = quota_binding_result[0]
+            failure = quota_binding_result[1]
+        reservations = None
+        if failure is None:
+            reservation_result = _load_reservations(root_fd, root_device)
+            reservations = reservation_result[0]
+            failure = reservation_result[1]
+        reservation_index = None
+        if failure is None:
+            reservation_index = _discovery_reservation_index(reservations)
+        quota_snapshot = None
+        if failure is None:
+            snapshot_result = _quota_snapshot(
+                root_fd,
+                root_device,
+                reservations,
+            )
+            quota_snapshot = snapshot_result[0]
+            failure = snapshot_result[1]
+        if failure is None and quota_snapshot["over_limit"]:
+            failure = RevisionStoreErrorCode.RESOURCE_EXHAUSTED
+        if failure is None and quota_snapshot["temporary_entries"]:
+            failure = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        root_entries = None
+        if failure is None:
+            root_entries = _discovery_entries(root_fd)
+            failure = root_entries[1]
+        physical_projects = []
+        if failure is None:
+            for name, entry_stat in root_entries[0]:
+                if name == _QUOTA_DIRECTORY:
+                    continue
+                if re.fullmatch(r"[0-9a-f]{64}", name) is None or not _safe_directory_stat(
+                    entry_stat, root_device
+                ):
+                    failure = RevisionStoreErrorCode.UNSAFE_STORE
+                    break
+                physical_projects.append(name)
+        discovered = []
+        project_ids = {}
+        if failure is None:
+            for name in physical_projects:
+                scanned = _discovery_project(
+                    root_fd,
+                    root_device,
+                    name,
+                    reservation_index,
+                )
+                if scanned[1] is not None:
+                    failure = scanned[1]
+                    break
+                if scanned[0].project_id in project_ids:
+                    failure = RevisionStoreErrorCode.CORRUPT_RECORD
+                    break
+                project_ids[scanned[0].project_id] = True
+                discovered.append(scanned[0])
+        if failure is None:
+            for reservation in reservations:
+                if (
+                    reservation["kind"] != "candidate"
+                    or reservation["project_id"] not in project_ids
+                ):
+                    failure = RevisionStoreErrorCode.RECOVERY_REQUIRED
+                    break
+        if failure is None:
+            discovered = sorted(discovered, key=_discovery_project_id)
+            project_values = []
+            ancestries = {}
+            for item in discovered:
+                project_values.append(
+                    ProjectSnapshotEntry(
+                        project_id=item.project_id,
+                        generation=item.head.generation,
+                        revision_id=item.head.revision_id,
+                        manifest_sha256=item.head.manifest_sha256,
+                        state_sha256=item.state_sha256,
+                    )
+                )
+                ancestries[item.project_id] = item
+            projects = tuple(project_values)
+        if failure is None:
+            final_quota_binding = _discovery_quota_binding(
+                root_fd,
+                root_device,
+            )
+            failure = final_quota_binding[1]
+            if failure is None and final_quota_binding[0] != quota_binding:
+                failure = RevisionStoreErrorCode.UNSAFE_STORE
+        if failure is None:
+            root_verification = _open_store_root(store)
+            failure = root_verification[2]
+            if failure is None:
+                if _discovery_stat_identity(root_verification[1]) != _discovery_stat_identity(
+                    root_initial
+                ):
+                    failure = RevisionStoreErrorCode.UNSAFE_STORE
+                if _close_fd(root_verification[0]) and failure is None:
+                    failure = RevisionStoreErrorCode.IO_ERROR
+    finally:
+        close_failed = root_fd is not None and _close_fd(root_fd)
+        release_code = _release_quota_lease(quota_lease)
+    if failure is not None:
+        raise RevisionStoreError(failure)
+    if close_failed or release_code is not None or projects is None or ancestries is None:
+        raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
+    return (projects, ancestries)
+
+
 class LocalRevisionStore:
     __slots__ = ("_identity", "_lease_manager", "_parts", "_pid", "_root")
 
@@ -5183,6 +6314,16 @@ class LocalRevisionStore:
 
     def begin_revision(self, project_id, expected_head, lease):
         return _begin_revision(self, project_id, expected_head, lease)
+
+    def discovery_namespace(self):
+        device = self._identity[0]
+        inode = self._identity[1]
+        return hashlib.sha256(
+            _DISCOVERY_NAMESPACE_DOMAIN
+            + bytes(str(device), "utf-8")
+            + b":"
+            + bytes(str(inode), "utf-8")
+        ).digest()
 
     def candidate_artifact_path(self, project_id, revision_id, format, lease):
         if type(format) is not str or format != "step":
@@ -5283,6 +6424,18 @@ class LocalRevisionStore:
 
     def load_revision(self, project_id, revision_id):
         return _load_revision(self, project_id, revision_id)
+
+    def snapshot_projects(self):
+        return _discovery_store_snapshot(self)[0]
+
+    def snapshot_revisions(self, project_id):
+        code = _identifier_code(project_id, _PROJECT_PATTERN)
+        if code is not None:
+            raise RevisionStoreError(code)
+        snapshot = _discovery_store_snapshot(self)[1].get(project_id)
+        if snapshot is None:
+            raise RevisionStoreError(RevisionStoreErrorCode.NOT_FOUND)
+        return snapshot
 
     def prepare_revision(
         self,

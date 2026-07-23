@@ -44,6 +44,8 @@ _REVISION_ID = re.compile(r"^revision_[0-9a-f]{32}$")
 _ARTIFACT_ID = re.compile(r"^artifact_[0-9a-f]{32}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _ARTIFACT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
+_PROJECT_LIST_CURSOR = re.compile(r"^project_list_cursor_[0-9a-f]{64}$")
+_REVISION_LIST_CURSOR = re.compile(r"^revision_list_cursor_[0-9a-f]{64}$")
 
 
 class ProjectKind(StrEnum):
@@ -183,6 +185,14 @@ class ProjectServicePort(Protocol):
     def get_project(
         self, *, project_id: str
     ) -> ProjectCurrentResult | ProjectServicePortFailure: ...
+
+    def list_projects(
+        self, *, limit: int, cursor: str | None
+    ) -> dict[str, object] | ProjectServicePortFailure: ...
+
+    def list_revisions(
+        self, *, project_id: str, limit: int, cursor: str | None
+    ) -> dict[str, object] | ProjectServicePortFailure: ...
 
 
 class _ApiFailure(Exception):
@@ -355,6 +365,20 @@ def _source_path(value: object) -> str:
     return value
 
 
+def _page_limit(value: object) -> int:
+    if type(value) is not int:
+        _raise(ProjectApiErrorCode.INVALID_TYPE, "/limit")
+    if value < 1 or value > 100:
+        _raise(ProjectApiErrorCode.INVALID_VALUE, "/limit")
+    return value
+
+
+def _page_cursor(value: object, pattern: re.Pattern[str]) -> str | None:
+    if value is None:
+        return None
+    return _identifier(value, "/cursor", pattern)
+
+
 def _valid_exact_string(value: object, pattern: re.Pattern[str]) -> bool:
     return type(value) is str and pattern.fullmatch(value) is not None
 
@@ -481,6 +505,91 @@ def _head_projection(value: ProjectHead) -> dict[str, object]:
     }
 
 
+def _project_summary_projection(value: object) -> dict[str, object]:
+    keys = {
+        "project_id",
+        "generation",
+        "revision_id",
+        "manifest_sha256",
+    }
+    if type(value) is not dict or set(value) != keys:
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    project_id = value["project_id"]
+    generation = value["generation"]
+    revision_id = value["revision_id"]
+    manifest_sha256 = value["manifest_sha256"]
+    if not (
+        _valid_exact_string(project_id, _PROJECT_ID)
+        and type(generation) is int
+        and 0 <= generation <= MAX_SAFE_JSON_INTEGER
+        and _valid_exact_string(revision_id, _REVISION_ID)
+        and _valid_exact_string(manifest_sha256, _DIGEST)
+    ):
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "project_id": project_id,
+        "generation": generation,
+        "revision_id": revision_id,
+        "manifest_sha256": manifest_sha256,
+    }
+
+
+def _revision_summary_projection(value: object) -> dict[str, object]:
+    keys = {
+        "id",
+        "project_id",
+        "base_revision",
+        "manifest_sha256",
+    }
+    if type(value) is not dict or set(value) != keys:
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    revision_id = value["id"]
+    project_id = value["project_id"]
+    base_revision = value["base_revision"]
+    manifest_sha256 = value["manifest_sha256"]
+    if not (
+        _valid_exact_string(revision_id, _REVISION_ID)
+        and _valid_exact_string(project_id, _PROJECT_ID)
+        and (
+            base_revision is None
+            or (_valid_exact_string(base_revision, _REVISION_ID) and base_revision != revision_id)
+        )
+        and _valid_exact_string(manifest_sha256, _DIGEST)
+    ):
+        _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "id": revision_id,
+        "project_id": project_id,
+        "base_revision": base_revision,
+        "manifest_sha256": manifest_sha256,
+    }
+
+
+def _complete_history_is_valid(
+    head: dict[str, object],
+    revisions: list[dict[str, object]],
+) -> bool:
+    generation = head["generation"]
+    if type(generation) is not int or len(revisions) != generation + 1:
+        return False
+    by_id = {value["id"]: value for value in revisions}
+    current = head["revision_id"]
+    visited: set[object] = set()
+    while current is not None:
+        if current in visited:
+            return False
+        revision = by_id.get(current)
+        if revision is None:
+            return False
+        if not visited and revision["manifest_sha256"] != head["manifest_sha256"]:
+            return False
+        visited.add(current)
+        current = revision["base_revision"]
+    return len(visited) == len(revisions)
+
+
 def _snapshot_projection(head: ProjectHead, revision: RevisionRef) -> dict[str, object]:
     return {
         "head": _head_projection(head),
@@ -542,6 +651,21 @@ class ProjectApi:
         if type(value.code) is not ProjectServicePortErrorCode:
             _raise(ProjectApiErrorCode.INTERNAL_ERROR)
         _raise(_PORT_ERROR_MAP[value.code])
+
+    @classmethod
+    def _mapping_port_result(cls, value: object) -> dict[str, object]:
+        cls._port_failure(value)
+        if type(value) is not dict:
+            _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+        return dict(value)
+
+    @staticmethod
+    def _validated_cursor(value: object, pattern: re.Pattern[str]) -> str | None:
+        if value is None:
+            return None
+        if type(value) is not str or pattern.fullmatch(value) is None:
+            _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+        return value
 
     def create_project(self, request: object) -> dict[str, object]:
         def action() -> dict[str, object]:
@@ -629,6 +753,113 @@ class ProjectApi:
                 "schema_version": SCHEMA_VERSION,
                 "project_id": value.project_id,
                 "current": _snapshot_projection(value.head, value.revision),
+            }
+
+        return self._guard(action)
+
+    def list_projects(self, request: object) -> dict[str, object]:
+        def action() -> dict[str, object]:
+            data = _validate_request(
+                request,
+                required=frozenset({"schema_version"}),
+                allowed=frozenset({"schema_version", "limit", "cursor"}),
+            )
+            limit = _page_limit(data.get("limit", 50))
+            cursor = _page_cursor(data.get("cursor"), _PROJECT_LIST_CURSOR)
+            result = self._mapping_port_result(
+                self._invoke_untrusted(lambda: self._port.list_projects(limit=limit, cursor=cursor))
+            )
+            if set(result) != {"projects", "next_cursor"}:
+                _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+            values = result["projects"]
+            if type(values) is not list or len(values) > limit:
+                _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+            projects = [_project_summary_projection(value) for value in values]
+            project_ids = [value["project_id"] for value in projects]
+            if project_ids != sorted(project_ids) or len(project_ids) != len(set(project_ids)):
+                _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+            next_cursor = self._validated_cursor(
+                result["next_cursor"],
+                _PROJECT_LIST_CURSOR,
+            )
+            if len(projects) < limit and next_cursor is not None:
+                _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "projects": projects,
+                "next_cursor": next_cursor,
+            }
+
+        return self._guard(action)
+
+    def list_revisions(self, request: object) -> dict[str, object]:
+        def action() -> dict[str, object]:
+            data = _validate_request(
+                request,
+                required=frozenset({"schema_version", "project_id"}),
+                allowed=frozenset({"schema_version", "project_id", "limit", "cursor"}),
+            )
+            project_id = _identifier(data["project_id"], "/project_id", _PROJECT_ID)
+            limit = _page_limit(data.get("limit", 50))
+            cursor = _page_cursor(data.get("cursor"), _REVISION_LIST_CURSOR)
+            result = self._mapping_port_result(
+                self._invoke_untrusted(
+                    lambda: self._port.list_revisions(
+                        project_id=project_id,
+                        limit=limit,
+                        cursor=cursor,
+                    )
+                )
+            )
+            if set(result) != {
+                "project_id",
+                "head",
+                "revisions",
+                "next_cursor",
+            }:
+                _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+            if type(result["project_id"]) is not str or result["project_id"] != project_id:
+                _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+            head = _project_summary_projection(result["head"])
+            if head["project_id"] != project_id:
+                _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+            values = result["revisions"]
+            if type(values) is not list or len(values) > limit:
+                _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+            revisions = [_revision_summary_projection(value) for value in values]
+            revision_ids = [value["id"] for value in revisions]
+            if (
+                revision_ids != sorted(revision_ids)
+                or len(revision_ids) != len(set(revision_ids))
+                or any(value["project_id"] != project_id for value in revisions)
+            ):
+                _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+            for revision in revisions:
+                if revision["id"] == head["revision_id"] and (
+                    revision["manifest_sha256"] != head["manifest_sha256"]
+                ):
+                    _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+            next_cursor = self._validated_cursor(
+                result["next_cursor"],
+                _REVISION_LIST_CURSOR,
+            )
+            if len(revisions) < limit and next_cursor is not None:
+                _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+            if (
+                cursor is None
+                and next_cursor is None
+                and not _complete_history_is_valid(
+                    head,
+                    revisions,
+                )
+            ):
+                _raise(ProjectApiErrorCode.INTERNAL_ERROR)
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "project_id": project_id,
+                "head": head,
+                "revisions": revisions,
+                "next_cursor": next_cursor,
             }
 
         return self._guard(action)

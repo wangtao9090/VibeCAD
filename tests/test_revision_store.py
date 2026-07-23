@@ -21,11 +21,14 @@ from vibecad.execution.revisions import (
     CommitJournalState,
     LocalRevisionStore,
     ProjectHead,
+    ProjectSnapshotEntry,
     ReconciliationResult,
     ReconciliationStatus,
+    RevisionAncestrySnapshot,
     RevisionArtifactRef,
     RevisionCopyCursor,
     RevisionRef,
+    RevisionSnapshotEntry,
     RevisionSourceBinding,
     RevisionStoreError,
     RevisionStoreErrorCode,
@@ -138,11 +141,14 @@ EXPECTED_REVISION_EXPORTS = (
     "CommitJournalState",
     "LocalRevisionStore",
     "ProjectHead",
+    "ProjectSnapshotEntry",
     "ReconciliationResult",
     "ReconciliationStatus",
+    "RevisionAncestrySnapshot",
     "RevisionArtifactRef",
     "RevisionCopyCursor",
     "RevisionRef",
+    "RevisionSnapshotEntry",
     "RevisionSourceBinding",
     "RevisionStoreError",
     "RevisionStoreErrorCode",
@@ -181,6 +187,9 @@ EXPECTED_STORE_METHODS = {
     "initialize_empty_project": ("self", "project_id", "lease"),
     "load_head": ("self", "project_id"),
     "load_revision": ("self", "project_id", "revision_id"),
+    "discovery_namespace": ("self",),
+    "snapshot_projects": ("self",),
+    "snapshot_revisions": ("self", "project_id"),
     "prepare_revision": (
         "self",
         "project_id",
@@ -213,6 +222,13 @@ EXPECTED_VALUE_FIELDS = {
         "revision_id",
         "manifest_sha256",
     ),
+    "ProjectSnapshotEntry": (
+        "project_id",
+        "generation",
+        "revision_id",
+        "manifest_sha256",
+        "state_sha256",
+    ),
     "ReconciliationResult": (
         "schema_version",
         "project_id",
@@ -233,6 +249,12 @@ EXPECTED_VALUE_FIELDS = {
         "size_bytes",
         "sha256",
     ),
+    "RevisionAncestrySnapshot": (
+        "project_id",
+        "head",
+        "revisions",
+        "state_sha256",
+    ),
     "RevisionRef": (
         "schema_version",
         "id",
@@ -241,6 +263,12 @@ EXPECTED_VALUE_FIELDS = {
         "manifest_sha256",
         "model",
         "artifacts",
+    ),
+    "RevisionSnapshotEntry": (
+        "id",
+        "project_id",
+        "base_revision",
+        "manifest_sha256",
     ),
     "RevisionSourceBinding": (
         "dev",
@@ -642,6 +670,30 @@ def _assert_only_empty_quota_infrastructure(root: Path) -> None:
     assert len(entries) == 1
     assert entries[0].name == ".revision-quota"
     assert not any(path.is_file() for path in entries[0].rglob("*"))
+
+
+def test_quota_owner_lookup_is_bounded_by_tree_depth_not_prefix_count():
+    class CountingPrefixes(dict):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.get_calls = 0
+
+        def get(self, key, default=None):
+            self.get_calls += 1
+            return super().get(key, default)
+
+        def items(self):
+            raise AssertionError("quota owner lookup must not scan every prefix")
+
+    prefixes = CountingPrefixes(
+        {
+            (f"{index:064x}", "candidates", f"{index + 1:064x}"): (f"revision_{index:032x}")
+            for index in range(512)
+        }
+    )
+    target = ("f" * 64, "revisions", "e" * 64, "manifest.json")
+    assert revisions_module._quota_path_owner(target, prefixes, {}) is None
+    assert prefixes.get_calls <= len(target)
 
 
 def test_generation_zero_admission_reserves_the_frozen_peak_before_creating_names(
@@ -2578,6 +2630,53 @@ def test_public_value_types_are_frozen_slotted_keyword_only_and_exact():
         assert type(value).from_mapping(value.to_mapping()) is not value
     with pytest.raises(TypeError):
         RevisionArtifactRef(ARTIFACT_STEP, "model.step", "step", DIGEST_A, 1)
+
+
+def test_discovery_snapshot_values_are_frozen_slotted_keyword_only_and_exact():
+    revision = RevisionSnapshotEntry(
+        id=REVISION_A,
+        project_id=PROJECT_ID,
+        base_revision=None,
+        manifest_sha256=DIGEST_A,
+    )
+    head = ProjectHead(
+        project_id=PROJECT_ID,
+        generation=0,
+        revision_id=REVISION_A,
+        manifest_sha256=DIGEST_A,
+    )
+    values = (
+        ProjectSnapshotEntry(
+            project_id=PROJECT_ID,
+            generation=0,
+            revision_id=REVISION_A,
+            manifest_sha256=DIGEST_A,
+            state_sha256=DIGEST_B,
+        ),
+        revision,
+        RevisionAncestrySnapshot(
+            project_id=PROJECT_ID,
+            head=head,
+            revisions=(revision,),
+            state_sha256=DIGEST_B,
+        ),
+    )
+    for value in values:
+        expected_fields = EXPECTED_VALUE_FIELDS[type(value).__name__]
+        assert tuple(field.name for field in fields(value)) == expected_fields
+        signature = inspect.signature(type(value))
+        assert tuple(signature.parameters) == expected_fields
+        assert all(
+            parameter.kind is inspect.Parameter.KEYWORD_ONLY
+            for parameter in signature.parameters.values()
+        )
+        assert all(
+            parameter.default is inspect.Parameter.empty
+            for parameter in signature.parameters.values()
+        )
+        assert "__dict__" not in dir(value)
+        with pytest.raises((FrozenInstanceError, AttributeError)):
+            value.extra = True
 
 
 def test_public_enum_members_names_and_values_are_exact_and_closed():
@@ -7211,7 +7310,9 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "dict",
         "len",
         "min",
+        "sorted",
         "str",
+        "tuple",
         "type",
     }
     protected_builtin_names = allowed_builtin_calls | {
@@ -7224,10 +7325,13 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
     }
     allowed_non_module_attribute_calls = {
         "acquire",
+        "append",
         "close",
+        "digest",
         "get",
         "hexdigest",
         "items",
+        "pop",
         "release",
         "stat",
         "update",
@@ -7554,10 +7658,13 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
     public_value_classes = {
         "CommitJournal",
         "ProjectHead",
+        "ProjectSnapshotEntry",
         "ReconciliationResult",
+        "RevisionAncestrySnapshot",
         "RevisionArtifactRef",
         "RevisionCopyCursor",
         "RevisionRef",
+        "RevisionSnapshotEntry",
         "RevisionSourceBinding",
     }
     expected_class_methods = {
@@ -7567,11 +7674,14 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "CommitJournalState": set(),
         "LocalRevisionStore": {"__init__", *EXPECTED_STORE_METHODS},
         "ProjectHead": {"__post_init__", "from_mapping", "to_mapping"},
+        "ProjectSnapshotEntry": {"__post_init__"},
         "ReconciliationResult": {"__post_init__", "from_mapping", "to_mapping"},
         "ReconciliationStatus": set(),
+        "RevisionAncestrySnapshot": {"__post_init__"},
         "RevisionArtifactRef": {"__post_init__", "from_mapping", "to_mapping"},
         "RevisionCopyCursor": {"__post_init__"},
         "RevisionRef": {"__post_init__", "from_mapping", "to_mapping"},
+        "RevisionSnapshotEntry": {"__post_init__"},
         "RevisionSourceBinding": {"__post_init__"},
         "RevisionStoreError": {"__init__"},
         "RevisionStoreErrorCode": set(),
@@ -7703,6 +7813,13 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
             quota_loop_functions = {
                 "_converge_generation_zero_publication",
                 "_copy_destination_names",
+                "_discovery_candidate",
+                "_discovery_depths",
+                "_discovery_entries",
+                "_discovery_manifest",
+                "_discovery_project",
+                "_discovery_reservation_index",
+                "_discovery_store_snapshot",
                 "_load_reservations",
                 "_parse_reservation_body",
                 "_quota_path_owner",
@@ -7808,15 +7925,33 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
                     allowed_builtin_calls | local_callables | allowed_nested_callables
                 )
                 if node.func.id in allowed_builtin_calls:
-                    assert node.keywords == []
+                    if node.func.id == "sorted":
+                        assert len(node.args) == 1
+                        assert len(node.keywords) == 1
+                        assert node.keywords[0].arg == "key"
+                        assert isinstance(node.keywords[0].value, ast.Name)
+                        assert node.keywords[0].value.id in {
+                            "_discovery_pair_name",
+                            "_discovery_project_id",
+                            "_discovery_revision_id",
+                        }
+                    else:
+                        assert node.keywords == []
                     if node.func.id in {"TypeError", "ValueError"}:
                         assert len(node.args) == 1
                         assert isinstance(node.args[0], ast.Constant)
                         assert type(node.args[0].value) is str
-                    elif node.func.id in {"bytes", "str"}:
+                    elif node.func.id == "bytes":
                         assert len(node.args) == 2
                         assert isinstance(node.args[1], ast.Constant)
                         assert node.args[1].value == "utf-8"
+                    elif node.func.id == "str":
+                        assert len(node.args) in {1, 2}
+                        if len(node.args) == 2:
+                            assert isinstance(node.args[1], ast.Constant)
+                            assert node.args[1].value == "utf-8"
+                    elif node.func.id == "tuple":
+                        assert len(node.args) == 1
                     elif node.func.id == "type":
                         assert len(node.args) == 1
         if isinstance(node, ast.Call):

@@ -31,6 +31,8 @@
     { "name": "get_capabilities", "description": "返回当前可执行操作的冻结能力元数据" },
     { "name": "create_project", "description": "创建空项目或导入仅含长方体和圆柱体的 FCStd 作为第零代" },
     { "name": "get_project", "description": "读取持久化项目的当前版本" },
+    { "name": "list_projects", "description": "分页发现持久化项目的当前已提交版本摘要" },
+    { "name": "list_revisions", "description": "分页读取指定项目当前 HEAD 的已提交祖先版本摘要" },
     { "name": "create_task", "description": "在指定项目版本上创建可验收任务" },
     { "name": "list_tasks", "description": "分页发现可恢复的持久化任务摘要" },
     { "name": "get_task", "description": "读取任务的持久化状态与证据" },

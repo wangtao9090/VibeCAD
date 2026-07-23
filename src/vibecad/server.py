@@ -181,6 +181,8 @@ _OUTPUT_VALIDATORS = {
 _STABLE_DOMAIN_FACADES = {
     "create_project": "create_project_request",
     "get_project": "get_project_request",
+    "list_projects": "list_projects_request",
+    "list_revisions": "list_revisions_request",
     "create_task": "create_task_request",
     "list_tasks": "list_tasks_request",
     "get_task": "get_task_request",
@@ -206,6 +208,8 @@ _APPLICATION_METHODS = (
     "close",
     "create_project_request",
     "get_project_request",
+    "list_projects_request",
+    "list_revisions_request",
     "create_task_request",
     "list_tasks_request",
     "get_task_request",

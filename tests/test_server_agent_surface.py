@@ -56,6 +56,8 @@ STABLE_TOOL_NAMES = (
     "get_capabilities",
     "create_project",
     "get_project",
+    "list_projects",
+    "list_revisions",
     "create_task",
     "list_tasks",
     "get_task",
@@ -505,6 +507,8 @@ def test_public_annotations_match_the_independent_product_contract():
         "get_capabilities": (True, False, True, False),
         "create_project": (False, False, True, True),
         "get_project": (False, False, True, False),
+        "list_projects": (True, False, True, False),
+        "list_revisions": (True, False, True, False),
         "create_task": (False, False, True, False),
         "list_tasks": (True, False, True, False),
         "get_task": (False, False, True, False),
@@ -544,6 +548,8 @@ def test_every_public_schema_is_closed_complete_and_specialized():
         "get_capabilities": ("schema_version",),
         "create_project": ("schema_version", "create_key", "kind"),
         "get_project": ("schema_version", "project_id"),
+        "list_projects": ("schema_version",),
+        "list_revisions": ("schema_version", "project_id"),
         "create_task": ("schema_version", "create_key", "project_id", "review_policy"),
         "list_tasks": ("schema_version",),
         "get_task": ("schema_version", "task_id"),
@@ -624,11 +630,13 @@ def test_every_public_schema_is_closed_complete_and_specialized():
 @pytest.mark.parametrize(
     ("name", "cursor_pattern", "items_field"),
     [
+        ("list_projects", r"^project_list_cursor_[0-9a-f]{64}$", "projects"),
+        ("list_revisions", r"^revision_list_cursor_[0-9a-f]{64}$", "revisions"),
         ("list_tasks", r"^task_list_cursor_[0-9a-f]{64}$", "tasks"),
         ("get_task_events", r"^task_event_cursor_[0-9a-f]{64}$", "transitions"),
     ],
 )
-def test_task_discovery_schemas_freeze_optional_bounds_and_cursor_domains(
+def test_discovery_schemas_freeze_optional_bounds_and_cursor_domains(
     name: str,
     cursor_pattern: str,
     items_field: str,
@@ -649,6 +657,42 @@ def test_task_discovery_schemas_freeze_optional_bounds_and_cursor_domains(
     assert result_schema["properties"]["next_cursor"]["anyOf"] == (
         {"type": "string", "pattern": cursor_pattern},
         {"type": "null"},
+    )
+
+
+def test_project_discovery_output_schemas_are_bounded_and_exact() -> None:
+    specs = _spec_by_name(_surface_module().public_tool_specs())
+    project_result = specs["list_projects"].output_schema["properties"]["result"]["anyOf"][0]
+    assert tuple(project_result["properties"]) == (
+        "schema_version",
+        "projects",
+        "next_cursor",
+    )
+    project_item = project_result["properties"]["projects"]["items"]
+    assert tuple(project_item["properties"]) == (
+        "schema_version",
+        "project_id",
+        "generation",
+        "revision_id",
+        "manifest_sha256",
+    )
+
+    revision_result = specs["list_revisions"].output_schema["properties"]["result"]["anyOf"][0]
+    assert tuple(revision_result["properties"]) == (
+        "schema_version",
+        "project_id",
+        "head",
+        "revisions",
+        "next_cursor",
+    )
+    assert revision_result["properties"]["head"] == project_item
+    revision_item = revision_result["properties"]["revisions"]["items"]
+    assert tuple(revision_item["properties"]) == (
+        "schema_version",
+        "id",
+        "project_id",
+        "base_revision",
+        "manifest_sha256",
     )
 
 
@@ -1058,7 +1102,7 @@ def test_low_level_tools_list_is_exact_sdk_projection_of_public_specs() -> None:
 def test_every_discovered_tool_has_a_nonempty_single_line_description() -> None:
     result = anyio.run(_server_module()._handle_list_tools)
 
-    assert len(result.tools) == 22
+    assert len(result.tools) == 24
     for tool in result.tools:
         assert type(tool.description) is str, tool.name
         assert tool.description == tool.description.strip(), tool.name
@@ -1102,7 +1146,7 @@ def test_discovery_omits_optional_output_schema_from_every_tool() -> None:
     response = server._owned_dispatch_descriptor(descriptor)
     assert response is not None
     tools = response["result"]["tools"]
-    assert len(tools) == 22
+    assert len(tools) == 24
     assert all("outputSchema" not in tool for tool in tools)
 
 
@@ -1949,6 +1993,12 @@ def _model_program_for_server_surface() -> dict[str, object]:
             },
         ),
         ("get_project", "get_project_request", {"schema_version": 1, "project_id": PROJECT_ID}),
+        ("list_projects", "list_projects_request", {"schema_version": 1}),
+        (
+            "list_revisions",
+            "list_revisions_request",
+            {"schema_version": 1, "project_id": PROJECT_ID},
+        ),
         (
             "create_task",
             "create_task_request",

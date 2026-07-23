@@ -14,6 +14,8 @@ EXPECTED_PUBLIC_TOOLS = (
     "get_capabilities",
     "create_project",
     "get_project",
+    "list_projects",
+    "list_revisions",
     "create_task",
     "list_tasks",
     "get_task",
@@ -205,7 +207,7 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
     normalized_roadmap = " ".join(roadmap.replace("\n> ", " ").split())
     for required in (
         "S3-8/P0-A",
-        "22-tool 公共 MCP、durable review",
+        "24-tool 公共 MCP、durable review",
         "host-neutral skill",
         "P0-B core 正在执行",
     ):

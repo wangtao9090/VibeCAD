@@ -632,6 +632,7 @@ remain residual and unauthorized.
 | P0B-E03 / 2026-07-23T03:31Z | P0B-R1.1; C01 gate setup correction under P0B-D21 | not-created / `a7e6881` already pushed and equal | raw C01 command: exit 2, four collection errors from skipped hidden `.pth`; corrected `PYTHONPATH=src` 5-test semantic RED: exit 1, 5 intended failures | known Python 3.13 editable-path residual; no product-scope change | P0B-S03 | superseded-gate |
 | P0B-E04 / 2026-07-23T04:23:04Z | P0B-C01 under P0B-R1.1/A01/A02; P0B-D21 allowlist repair | this C01 commit / non-force push required | semantic RED 5/5; focused `1025 passed`; affected integration `229 passed, 19 deselected`; full `3902 passed, 95 deselected`; same-key stress `200/200 + 100/100`; Ruff/diff clean; independent review `0/0/0` | Python 3.13 explicit `PYTHONPATH=src` remains; one existing macOS fork deprecation warning; no product residual | P0B-S04 | accepted-green |
 | P0B-E05 / 2026-07-23T04:57:13Z | P0B-C02 under P0B-R1.1/A01/A02; P0B-D21 direct-impact allowlist repairs | this C02 commit / non-force push required | semantic RED `3 failed` then `5 failed`; focused `1157 passed`; affected integration `224 passed, 8 deselected`; full non-slow `3954 passed, 95 deselected`; 22-tool discovery frame `17,785` bytes; Ruff/format/diff/fsck clean; store and cursor/public reviews both `0/0/0` | Python 3.13 explicit `PYTHONPATH=src` remains; one existing macOS fork deprecation warning; no product residual | P0B-S05 | accepted-green |
+| P0B-E06 / 2026-07-23T06:02:10Z | P0B-C03 under P0B-R1.1/A01/A02; P0B-D21 direct-impact and gate-baseline repairs | this C03 commit / non-force push required | API RED `69 failed`; Agent RED `9 failed`; surface RED `14 failed`; core RED plus two review-driven directory-stability/index RED cycles; focused `503 passed`; affected integration `440 passed, 8 deselected`; full non-slow `4074 passed, 95 deselected`; 24-tool frame `18,895` bytes; Ruff/diff/fsck and changed-file format clean; API, public and final core reviews `0/0/0` | explicit `PYTHONPATH=src`; one existing macOS fork warning; full-tree format baseline still names 52 unchanged files, while all 20 changed/new Python files pass; C04 retains CAD payload hashing | P0B-S06 | accepted-green |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -863,3 +864,73 @@ remain residual and unauthorized.
   editable `.pth` behavior is environment evidence, not product RED.
 - PR, tag, release, marketplace publication, force-push and external spend
   remain unauthorized.
+
+## 18. Recovery Snapshot P0B-S06
+
+### 1. Completed milestones
+
+- C03 adds public `list_projects` and `list_revisions`; runtime, manifest,
+  Skill and current product documentation now agree on an exact 24-tool
+  surface. Project discovery is a recovery path for an unknown project id,
+  while revision discovery returns only the canonical-id-sorted complete
+  ancestry of the current committed HEAD.
+- One global revision-quota lease covers each complete fd-relative read-only
+  scan. Project, revisions, candidates, sealed revision, quota, reservations
+  and store-root directory identities are pinned across the scan. Unknown
+  members, record corruption, unsafe nodes, inconsistent journals,
+  missing-base/cyclic lineage and concurrent directory membership changes
+  reject the whole request before pagination.
+- Normal `STAGING` and old-HEAD `PREPARED` drafts are validated and hidden;
+  new-HEAD `PREPARED` and terminal `COMMITTED` states follow committed HEAD;
+  terminal `NOT_COMMITTED`, sibling orphan and abandoned revisions remain
+  excluded. Candidate payload writes remain outside the committed snapshot.
+- Stateless cursors bind endpoint domain, stable store namespace, complete
+  validated state, target project where applicable and absolute offset. They
+  survive reopening the same store, allow a changed page limit and reject
+  stale, cross-store, cross-project or cross-endpoint use.
+- Quota ownership uses at most four ancestor-prefix lookups per entry and
+  reservation discovery builds one project index, avoiding
+  entry-by-reservation and project-by-reservation scans while the global lease
+  is held.
+- The canonical public-surface receipt is
+  `031149f94811b2b99f01ab52dcb8e784c12371082e525fe90189a7b1f6ed5502`.
+  The fixed 24-tool SDK projection is 18,850 bytes and its complete JSON-RPC
+  frame is 18,895 bytes, below the 32,768-byte budget.
+- Controller gates are green: focused `503 passed`; affected integration
+  `440 passed, 8 deselected`; full non-slow
+  `4074 passed, 95 deselected`. Ruff, exact changed/new-file format, diff and
+  fsck checks pass. API, public-surface and final core independent reviews all
+  returned `Critical 0 / Important 0 / Minor 0`.
+
+### 2. Next steps
+
+1. Commit the exact C03 allowlist as
+   `feat(revisions): expose project and revision discovery`.
+2. Non-force push `codex/agent-stage3`, then verify exact
+   `HEAD == @{upstream}` and remote-ref equality.
+3. Rebind C04 to the accepted remote anchor and implement revision comparison
+   plus read-only artifact manifests without repeating P0B-A01 or P0B-A02.
+
+### 3. Approved decisions
+
+- P0B-A01/A02 and P0B-D01..D22 plus D08A/D17A/D22-R1 remain active.
+- P0B-D21 covers the directly affected runtime receipt, server/supervisor
+  projections, current product-truth documents, directory-stability repair and
+  bounded quota indexing. No product scope, authority or delivery boundary
+  changed.
+- P0B-GATE-CORR-02 records that the broad Ruff format command reports 52
+  unchanged baseline files; the exact 20 changed/new Python files pass format
+  checking. Those unrelated baseline files are not rewritten into C03.
+
+### 4. Execution discipline
+
+- `list_projects` is used only when the project id is unknown; a cursor
+  conflict restarts discovery from page one.
+- `list_revisions` is committed-history metadata, not a CAD integrity scan.
+  It validates manifests, references, sizes and stable file identity without
+  streaming FCStd/STEP bytes. C04 owns tamper and missing-artifact hashing.
+- Both list facades avoid `DurableProjectService`, project-write leases, CAD
+  runtime construction and FreeCAD imports.
+- Preserve P0B-GATE-CORR-01/02 and continue exact `PYTHONPATH=src` plus
+  changed-file format gates. PR, tag, release, marketplace publication,
+  force-push and external spend remain unauthorized.

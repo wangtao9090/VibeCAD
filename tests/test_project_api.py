@@ -30,6 +30,8 @@ MODEL_ID = "artifact_0123456789abcdef0123456789abcdef"
 STEP_ID = "artifact_11111111111111111111111111111111"
 DIGEST_ZERO = "0" * 64
 DIGEST_ONE = "1" * 64
+PROJECT_CURSOR = "project_list_cursor_" + "a" * 64
+REVISION_CURSOR = "revision_list_cursor_" + "b" * 64
 
 
 class StringSubclass(str):
@@ -122,6 +124,41 @@ class RecordingPort:
             head=head,
             revision=revision,
         )
+        self.projects_result: object = {
+            "projects": [
+                {
+                    "project_id": PROJECT_ID,
+                    "generation": 1,
+                    "revision_id": REVISION_ONE,
+                    "manifest_sha256": DIGEST_ONE,
+                }
+            ],
+            "next_cursor": None,
+        }
+        self.revisions_result: object = {
+            "project_id": PROJECT_ID,
+            "head": {
+                "project_id": PROJECT_ID,
+                "generation": 1,
+                "revision_id": REVISION_ONE,
+                "manifest_sha256": DIGEST_ONE,
+            },
+            "revisions": [
+                {
+                    "id": REVISION_ZERO,
+                    "project_id": PROJECT_ID,
+                    "base_revision": None,
+                    "manifest_sha256": DIGEST_ZERO,
+                },
+                {
+                    "id": REVISION_ONE,
+                    "project_id": PROJECT_ID,
+                    "base_revision": REVISION_ZERO,
+                    "manifest_sha256": DIGEST_ONE,
+                },
+            ],
+            "next_cursor": None,
+        }
         self.error: BaseException | None = None
 
     def create_project(self, **kwargs):
@@ -135,6 +172,18 @@ class RecordingPort:
         if self.error is not None:
             raise self.error
         return self.current_result
+
+    def list_projects(self, **kwargs):
+        self.calls.append(("list_projects", kwargs))
+        if self.error is not None:
+            raise self.error
+        return self.projects_result
+
+    def list_revisions(self, **kwargs):
+        self.calls.append(("list_revisions", kwargs))
+        if self.error is not None:
+            raise self.error
+        return self.revisions_result
 
 
 def _error(response: dict[str, object], code: ProjectApiErrorCode, path: str = "") -> None:
@@ -213,9 +262,21 @@ def test_public_api_taxonomies_and_exact_signatures_are_frozen() -> None:
     init = inspect.signature(ProjectApi.__init__).parameters
     assert tuple(init) == ("self", "port")
     assert init["port"].kind is inspect.Parameter.KEYWORD_ONLY
-    for name in ("create_project", "get_project"):
+    for name in ("create_project", "get_project", "list_projects", "list_revisions"):
         parameters = inspect.signature(getattr(ProjectApi, name)).parameters
         assert tuple(parameters) == ("self", "request")
+    port = project_api_module.ProjectServicePort
+    assert tuple(inspect.signature(port.list_projects).parameters) == (
+        "self",
+        "limit",
+        "cursor",
+    )
+    assert tuple(inspect.signature(port.list_revisions).parameters) == (
+        "self",
+        "project_id",
+        "limit",
+        "cursor",
+    )
 
 
 def test_empty_create_has_exact_port_call_and_success_projection() -> None:
@@ -359,6 +420,89 @@ def test_get_project_projects_current_head_revision_and_ordered_artifacts() -> N
     }
 
 
+def test_list_projects_defaults_and_projects_exact_public_summaries() -> None:
+    port = RecordingPort()
+
+    response = ProjectApi(port=port).list_projects({"schema_version": 1})
+
+    assert port.calls == [("list_projects", {"limit": 50, "cursor": None})]
+    assert response == {
+        "schema_version": 1,
+        "ok": True,
+        "result": {
+            "schema_version": 1,
+            "projects": [
+                {
+                    "schema_version": 1,
+                    "project_id": PROJECT_ID,
+                    "generation": 1,
+                    "revision_id": REVISION_ONE,
+                    "manifest_sha256": DIGEST_ONE,
+                }
+            ],
+            "next_cursor": None,
+        },
+        "error": None,
+    }
+
+
+def test_list_revisions_forwards_page_and_projects_exact_public_history() -> None:
+    port = RecordingPort()
+
+    response = ProjectApi(port=port).list_revisions(
+        {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "limit": 2,
+            "cursor": REVISION_CURSOR,
+        }
+    )
+
+    assert port.calls == [
+        (
+            "list_revisions",
+            {
+                "project_id": PROJECT_ID,
+                "limit": 2,
+                "cursor": REVISION_CURSOR,
+            },
+        )
+    ]
+    assert response == {
+        "schema_version": 1,
+        "ok": True,
+        "result": {
+            "schema_version": 1,
+            "project_id": PROJECT_ID,
+            "head": {
+                "schema_version": 1,
+                "project_id": PROJECT_ID,
+                "generation": 1,
+                "revision_id": REVISION_ONE,
+                "manifest_sha256": DIGEST_ONE,
+            },
+            "revisions": [
+                {
+                    "schema_version": 1,
+                    "id": REVISION_ZERO,
+                    "project_id": PROJECT_ID,
+                    "base_revision": None,
+                    "manifest_sha256": DIGEST_ZERO,
+                },
+                {
+                    "schema_version": 1,
+                    "id": REVISION_ONE,
+                    "project_id": PROJECT_ID,
+                    "base_revision": REVISION_ZERO,
+                    "manifest_sha256": DIGEST_ONE,
+                },
+            ],
+            "next_cursor": None,
+        },
+        "error": None,
+    }
+
+
 @pytest.mark.parametrize(
     ("payload", "code", "path"),
     [
@@ -456,6 +600,131 @@ def test_get_schema_is_exact_and_noncoercing(payload, code, path) -> None:
     response = ProjectApi(port=port).get_project(payload)
     _error(response, code, path)
     assert port.calls == []
+
+
+@pytest.mark.parametrize("method", ("list_projects", "list_revisions"))
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    (
+        ("limit", True, ProjectApiErrorCode.INVALID_TYPE),
+        ("limit", 1.0, ProjectApiErrorCode.INVALID_TYPE),
+        ("limit", 0, ProjectApiErrorCode.INVALID_VALUE),
+        ("limit", 101, ProjectApiErrorCode.INVALID_VALUE),
+        ("cursor", StringSubclass(PROJECT_CURSOR), ProjectApiErrorCode.INVALID_TYPE),
+        ("cursor", "", ProjectApiErrorCode.INVALID_VALUE),
+        ("cursor", "project_list_cursor_" + "A" * 64, ProjectApiErrorCode.INVALID_VALUE),
+    ),
+)
+def test_list_requests_reject_nonexact_page_values_before_the_port(
+    method: str,
+    field: str,
+    value: object,
+    code: ProjectApiErrorCode,
+) -> None:
+    port = RecordingPort()
+    api = ProjectApi(port=port)
+    cursor = value
+    if method == "list_revisions" and field == "cursor" and type(value) is str:
+        cursor = value.replace("project_list_cursor_", "revision_list_cursor_")
+    request: dict[str, object] = {"schema_version": 1, field: cursor}
+    if method == "list_revisions":
+        request["project_id"] = PROJECT_ID
+
+    response = getattr(api, method)(request)
+
+    _error(response, code, f"/{field}")
+    assert port.calls == []
+
+
+@pytest.mark.parametrize(
+    ("method", "payload", "code", "path"),
+    (
+        ("list_projects", None, ProjectApiErrorCode.INVALID_TYPE, ""),
+        ("list_projects", {}, ProjectApiErrorCode.MISSING_FIELD, "/schema_version"),
+        (
+            "list_projects",
+            {"schema_version": 1, "project_id": PROJECT_ID},
+            ProjectApiErrorCode.UNKNOWN_FIELD,
+            "/project_id",
+        ),
+        (
+            "list_revisions",
+            {"schema_version": 1},
+            ProjectApiErrorCode.MISSING_FIELD,
+            "/project_id",
+        ),
+        (
+            "list_revisions",
+            {"schema_version": 1, "project_id": PROJECT_ID, "extra": 1},
+            ProjectApiErrorCode.UNKNOWN_FIELD,
+            "/extra",
+        ),
+        (
+            "list_revisions",
+            {"schema_version": 1, "project_id": "project_bad"},
+            ProjectApiErrorCode.INVALID_VALUE,
+            "/project_id",
+        ),
+        (
+            "list_projects",
+            {"schema_version": 2},
+            ProjectApiErrorCode.UNSUPPORTED_VERSION,
+            "/schema_version",
+        ),
+    ),
+)
+def test_list_request_schemas_are_exact(
+    method: str,
+    payload: object,
+    code: ProjectApiErrorCode,
+    path: str,
+) -> None:
+    port = RecordingPort()
+
+    response = getattr(ProjectApi(port=port), method)(payload)
+
+    _error(response, code, path)
+    assert port.calls == []
+
+
+def test_list_cursor_grammars_are_endpoint_specific_and_nullable() -> None:
+    port = RecordingPort()
+    api = ProjectApi(port=port)
+
+    assert api.list_projects({"schema_version": 1, "cursor": PROJECT_CURSOR})["ok"] is True
+    assert (
+        api.list_revisions(
+            {
+                "schema_version": 1,
+                "project_id": PROJECT_ID,
+                "cursor": REVISION_CURSOR,
+            }
+        )["ok"]
+        is True
+    )
+    _error(
+        api.list_projects({"schema_version": 1, "cursor": REVISION_CURSOR}),
+        ProjectApiErrorCode.INVALID_VALUE,
+        "/cursor",
+    )
+    _error(
+        api.list_revisions(
+            {
+                "schema_version": 1,
+                "project_id": PROJECT_ID,
+                "cursor": PROJECT_CURSOR,
+            }
+        ),
+        ProjectApiErrorCode.INVALID_VALUE,
+        "/cursor",
+    )
+    assert port.calls == [
+        ("list_projects", {"limit": 50, "cursor": PROJECT_CURSOR}),
+        (
+            "list_revisions",
+            {"project_id": PROJECT_ID, "limit": 50, "cursor": REVISION_CURSOR},
+        ),
+    ]
 
 
 def test_ingress_rejects_cycles_non_string_keys_and_bounds_unknown_paths() -> None:
@@ -650,6 +919,256 @@ def test_every_neutral_port_failure_maps_exactly_without_invoking_twice(port_cod
     response = ProjectApi(port=port).get_project({"schema_version": 1, "project_id": PROJECT_ID})
     _error(response, ProjectApiErrorCode(port_code.value))
     assert port.calls == [("get_project", {"project_id": PROJECT_ID})]
+
+
+@pytest.mark.parametrize("method", ("list_projects", "list_revisions"))
+@pytest.mark.parametrize("port_code", list(ProjectServicePortErrorCode))
+def test_discovery_maps_every_neutral_port_failure_exactly(
+    method: str,
+    port_code: ProjectServicePortErrorCode,
+) -> None:
+    port = RecordingPort()
+    setattr(
+        port,
+        f"{'projects' if method == 'list_projects' else 'revisions'}_result",
+        (ProjectServicePortFailure(code=port_code)),
+    )
+    request = {"schema_version": 1}
+    if method == "list_revisions":
+        request["project_id"] = PROJECT_ID
+
+    response = getattr(ProjectApi(port=port), method)(request)
+
+    _error(response, ProjectApiErrorCode(port_code.value))
+    assert len(port.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        None,
+        [],
+        DictSubclass(),
+        {"projects": [], "next_cursor": None, "extra": None},
+        {"projects": {}, "next_cursor": None},
+        {
+            "projects": [
+                {
+                    "project_id": "project_bad",
+                    "generation": 1,
+                    "revision_id": REVISION_ONE,
+                    "manifest_sha256": DIGEST_ONE,
+                }
+            ],
+            "next_cursor": None,
+        },
+        {
+            "projects": [
+                {
+                    "project_id": PROJECT_ID,
+                    "generation": True,
+                    "revision_id": REVISION_ONE,
+                    "manifest_sha256": DIGEST_ONE,
+                }
+            ],
+            "next_cursor": None,
+        },
+        {
+            "projects": [
+                {
+                    "project_id": PROJECT_ID,
+                    "generation": 1,
+                    "revision_id": REVISION_ONE,
+                    "manifest_sha256": DIGEST_ONE,
+                    "extra": None,
+                }
+            ],
+            "next_cursor": None,
+        },
+        {
+            "projects": [],
+            "next_cursor": PROJECT_CURSOR,
+        },
+        {
+            "projects": [],
+            "next_cursor": REVISION_CURSOR,
+        },
+    ),
+)
+def test_list_projects_rejects_hostile_port_shapes(value: object) -> None:
+    port = RecordingPort()
+    port.projects_result = value
+
+    response = ProjectApi(port=port).list_projects({"schema_version": 1})
+
+    _error(response, ProjectApiErrorCode.INTERNAL_ERROR)
+    assert len(port.calls) == 1
+
+
+def test_list_projects_requires_canonical_unique_order_and_page_bound() -> None:
+    port = RecordingPort()
+    first = {
+        "project_id": PROJECT_ID,
+        "generation": 1,
+        "revision_id": REVISION_ONE,
+        "manifest_sha256": DIGEST_ONE,
+    }
+    second = {
+        "project_id": OTHER_PROJECT_ID,
+        "generation": 0,
+        "revision_id": REVISION_ZERO,
+        "manifest_sha256": DIGEST_ZERO,
+    }
+    api = ProjectApi(port=port)
+    for projects in ([second, first], [first, first], [first, second]):
+        port.projects_result = {"projects": projects, "next_cursor": None}
+        response = api.list_projects({"schema_version": 1, "limit": 1})
+        _error(response, ProjectApiErrorCode.INTERNAL_ERROR)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        None,
+        [],
+        DictSubclass(),
+        {
+            "project_id": PROJECT_ID,
+            "head": {},
+            "revisions": [],
+            "next_cursor": None,
+            "extra": None,
+        },
+        {
+            "project_id": OTHER_PROJECT_ID,
+            "head": {
+                "project_id": PROJECT_ID,
+                "generation": 1,
+                "revision_id": REVISION_ONE,
+                "manifest_sha256": DIGEST_ONE,
+            },
+            "revisions": [],
+            "next_cursor": None,
+        },
+        {
+            "project_id": PROJECT_ID,
+            "head": {
+                "project_id": OTHER_PROJECT_ID,
+                "generation": 1,
+                "revision_id": REVISION_ONE,
+                "manifest_sha256": DIGEST_ONE,
+            },
+            "revisions": [],
+            "next_cursor": None,
+        },
+        {
+            "project_id": PROJECT_ID,
+            "head": {
+                "project_id": PROJECT_ID,
+                "generation": 1,
+                "revision_id": REVISION_ONE,
+                "manifest_sha256": DIGEST_ONE,
+            },
+            "revisions": [
+                {
+                    "id": REVISION_ONE,
+                    "project_id": OTHER_PROJECT_ID,
+                    "base_revision": REVISION_ZERO,
+                    "manifest_sha256": DIGEST_ONE,
+                }
+            ],
+            "next_cursor": None,
+        },
+        {
+            "project_id": PROJECT_ID,
+            "head": {
+                "project_id": PROJECT_ID,
+                "generation": 1,
+                "revision_id": REVISION_ONE,
+                "manifest_sha256": DIGEST_ONE,
+            },
+            "revisions": [
+                {
+                    "id": REVISION_ONE,
+                    "project_id": PROJECT_ID,
+                    "base_revision": REVISION_ONE,
+                    "manifest_sha256": DIGEST_ONE,
+                }
+            ],
+            "next_cursor": None,
+        },
+        {
+            "project_id": PROJECT_ID,
+            "head": {
+                "project_id": PROJECT_ID,
+                "generation": 1,
+                "revision_id": REVISION_ONE,
+                "manifest_sha256": DIGEST_ZERO,
+            },
+            "revisions": [
+                {
+                    "id": REVISION_ONE,
+                    "project_id": PROJECT_ID,
+                    "base_revision": REVISION_ZERO,
+                    "manifest_sha256": DIGEST_ONE,
+                }
+            ],
+            "next_cursor": None,
+        },
+        {
+            "project_id": PROJECT_ID,
+            "head": {
+                "project_id": PROJECT_ID,
+                "generation": 1,
+                "revision_id": REVISION_ONE,
+                "manifest_sha256": DIGEST_ONE,
+            },
+            "revisions": [],
+            "next_cursor": REVISION_CURSOR,
+        },
+        {
+            "project_id": PROJECT_ID,
+            "head": {
+                "project_id": PROJECT_ID,
+                "generation": 1,
+                "revision_id": REVISION_ONE,
+                "manifest_sha256": DIGEST_ONE,
+            },
+            "revisions": [
+                {
+                    "id": REVISION_ZERO,
+                    "project_id": PROJECT_ID,
+                    "base_revision": None,
+                    "manifest_sha256": DIGEST_ZERO,
+                }
+            ],
+            "next_cursor": None,
+        },
+    ),
+)
+def test_list_revisions_rejects_hostile_port_shapes(value: object) -> None:
+    port = RecordingPort()
+    port.revisions_result = value
+
+    response = ProjectApi(port=port).list_revisions({"schema_version": 1, "project_id": PROJECT_ID})
+
+    _error(response, ProjectApiErrorCode.INTERNAL_ERROR)
+    assert len(port.calls) == 1
+
+
+def test_list_revisions_requires_canonical_unique_order_and_page_bound() -> None:
+    port = RecordingPort()
+    root = port.revisions_result["revisions"][0]
+    child = port.revisions_result["revisions"][1]
+    api = ProjectApi(port=port)
+    for revisions in ([child, root], [root, root], [root, child]):
+        port.revisions_result = {
+            **port.revisions_result,
+            "revisions": revisions,
+            "next_cursor": None,
+        }
+        response = api.list_revisions({"schema_version": 1, "project_id": PROJECT_ID, "limit": 1})
+        _error(response, ProjectApiErrorCode.INTERNAL_ERROR)
 
 
 def test_port_exception_is_path_free_internal_error_and_called_at_most_once() -> None:

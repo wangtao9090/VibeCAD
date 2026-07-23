@@ -347,6 +347,21 @@ class AgentApplication:
                 raise TypeError("CAD factory returned an invalid execution port")
             return getattr(port, method)(*args, **kwargs)
 
+    def _project_api_for_request(self):
+        self._ensure_live()
+        api = self._project_api
+        if api is not None:
+            return api
+        with self._component_lock:
+            self._ensure_live()
+            api = self._project_api
+            if api is None:
+                from vibecad.application.project_api import ProjectApi
+
+                api = ProjectApi(port=self)
+                self._project_api = api
+            return api
+
     def _project_bundle_for_request(self):
         self._ensure_live()
         api = self._project_api
@@ -362,7 +377,7 @@ class AgentApplication:
                 from vibecad.application.project_create import DurableProjectService
 
                 self._cad_validation_port_locked()
-                service = DurableProjectService(
+                candidate_service = DurableProjectService(
                     bootstrap_root=self._layout.bootstrap,
                     data_root=self._layout.root,
                     expected_bootstrap_identity=self._layout.identity_for(self._layout.bootstrap),
@@ -371,9 +386,11 @@ class AgentApplication:
                     lease_manager=self._lease_manager,
                     cad_port_factory=self._validation_cad_factory,
                 )
-                api = ProjectApi(port=self)
-                self._project_service = service
-                self._project_api = api
+                candidate_api = api if api is not None else ProjectApi(port=self)
+                self._project_service = candidate_service
+                self._project_api = candidate_api
+                service = candidate_service
+                api = candidate_api
             return api, service
 
     def _artifact_bundle_for_request(self):
@@ -518,6 +535,18 @@ class AgentApplication:
         api, _ = self._project_bundle_for_request()
         self._ensure_live()
         return api.get_project(request)
+
+    def list_projects_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        api = self._project_api_for_request()
+        self._ensure_live()
+        return api.list_projects(request)
+
+    def list_revisions_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        api = self._project_api_for_request()
+        self._ensure_live()
+        return api.list_revisions(request)
 
     def create_task_request(self, request: object) -> dict[str, object]:
         self._ensure_live()
@@ -685,6 +714,68 @@ class AgentApplication:
         _, service = self._project_bundle_for_request()
         self._ensure_live()
         return service.get_project(project_id=project_id)
+
+    @staticmethod
+    def _revision_discovery_failure(error):
+        from vibecad.application.project_api import (
+            ProjectServicePortErrorCode,
+            ProjectServicePortFailure,
+        )
+        from vibecad.application.revision_discovery import RevisionDiscoveryErrorCode
+
+        mapping = {
+            RevisionDiscoveryErrorCode.INVALID_INPUT: (ProjectServicePortErrorCode.INVALID_INPUT),
+            RevisionDiscoveryErrorCode.NOT_FOUND: ProjectServicePortErrorCode.NOT_FOUND,
+            RevisionDiscoveryErrorCode.CONFLICT: ProjectServicePortErrorCode.CONFLICT,
+            RevisionDiscoveryErrorCode.RESOURCE_EXHAUSTED: (
+                ProjectServicePortErrorCode.RESOURCE_EXHAUSTED
+            ),
+            RevisionDiscoveryErrorCode.INTEGRITY_FAILURE: (
+                ProjectServicePortErrorCode.INTEGRITY_FAILURE
+            ),
+            RevisionDiscoveryErrorCode.STORE_FAILURE: (ProjectServicePortErrorCode.STORE_FAILURE),
+            RevisionDiscoveryErrorCode.RECOVERY_REQUIRED: (
+                ProjectServicePortErrorCode.RECOVERY_REQUIRED
+            ),
+        }
+        return ProjectServicePortFailure(code=mapping[error.code])
+
+    def list_projects(self, *, limit: int, cursor: str | None):
+        self._ensure_live()
+        from vibecad.application.revision_discovery import (
+            RevisionDiscoveryError,
+            RevisionDiscoveryService,
+        )
+
+        try:
+            return RevisionDiscoveryService(store=self._revision_store).list_projects(
+                limit=limit,
+                cursor=cursor,
+            )
+        except RevisionDiscoveryError as error:
+            return self._revision_discovery_failure(error)
+
+    def list_revisions(
+        self,
+        *,
+        project_id: str,
+        limit: int,
+        cursor: str | None,
+    ):
+        self._ensure_live()
+        from vibecad.application.revision_discovery import (
+            RevisionDiscoveryError,
+            RevisionDiscoveryService,
+        )
+
+        try:
+            return RevisionDiscoveryService(store=self._revision_store).list_revisions(
+                project_id=project_id,
+                limit=limit,
+                cursor=cursor,
+            )
+        except RevisionDiscoveryError as error:
+            return self._revision_discovery_failure(error)
 
     def export_task_artifacts(self, *, request: object):
         self._ensure_live()

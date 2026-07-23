@@ -1,14 +1,14 @@
 # VibeCAD 产品能力与企业化路线
 
 > 状态：AR-1 reviewed；S3-8/P0-A 已形成未发布的 0.5.0 本地 host-ready 交付候选；
-> P0-B core 正在执行，keyed task creation 与 task discovery/events 已实现
+> P0-B core 正在执行，keyed task creation、task discovery/events 与 project/revision discovery 已实现
 >
 > 日期：2026-07-22
 >
-> 当前基线：VibeCAD 0.5.0 / runtime epoch 4 的 Task Kernel TK1–TK9、22-tool 公共 MCP、durable
+> 当前基线：VibeCAD 0.5.0 / runtime epoch 4 的 Task Kernel TK1–TK9、24-tool 公共 MCP、durable
 > review、首批六操作、host-neutral skill 与 FCStd/STEP ResourceLink 已通过本地协议、受管 FreeCAD
-> 和 packed MCPB 门禁。`create_task` keyed replay、`list_tasks` 恢复发现和 `get_task_events`
-> transition 审计已进入当前分支候选。真实 Claude/Codex 主机尚未安装激活验收，当前没有 tag 或
+> 和 packed MCPB 门禁。`create_task` keyed replay、`list_tasks` 恢复发现、`get_task_events`
+> transition 审计，以及当前 HEAD 的 project/revision 发现已进入当前分支候选。真实 Claude/Codex 主机尚未安装激活验收，当前没有 tag 或
 > release；P0-B 其余能力和 FreeCAD Workbench 尚未交付。
 
 ## 1. 结论
@@ -63,8 +63,8 @@ Revision 和恢复机制的写路径。
 首批六操作的 result handle、SelectorV1 Level A、细粒度 observation/verifier 也已进入公共路径。
 上述四项在更广的 PartDesign、mapped subobject、复杂特征和装配范围仍需 P1/P2 继续扩展。
 
-当前近期缺口已经转为 P0-B core 的任务 list/cancel、revision list/compare/revert、完整 artifact
-manifest、daemon 和认证 IPC，P0-B hardening 的 retention/GC，以及 G1 的 Workbench candidate review。
+当前近期缺口已经转为 P0-B core 的 task cancel、revision compare/revert、完整 artifact manifest、
+daemon 和认证 IPC，P0-B hardening 的 retention/GC，以及 G1 的 Workbench candidate review。
 
 ### 2.3 AR-1 的阶段裁决
 
@@ -183,7 +183,7 @@ VibeCAD 接入的是**宿主产品表面**，不是抽象模型名称。Claude C
 |---|---|---|---|
 | 编程 Agent / 首批正式验收 | Codex 本地宿主、Claude Code | 与现有本地 MCP + Skill 架构最直接匹配 | 各完成同一 canonical task、review 和 artifact conformance |
 | 编程 Agent / 国内扩展 | Kimi Code；之后 Qwen Code、CodeBuddy/Trae | Kimi Code 已明确支持本地 `stdio` MCP、Skills 和插件；其余作为兼容扩展 | 证明 ResourceLink/resource read、长任务和 Skill 发现 |
-| 通用 Agent / 国内首批试点 | 腾讯 QClaw、WorkBuddy 个人版 | 用户形态最匹配低频个人 CAD；本地执行、Skill/MCP 能力有公开依据，但必须真机核对完整协议 | macOS 安装、22-tool discovery、resource read、审核和重启恢复全部通过 |
+| 通用 Agent / 国内首批试点 | 腾讯 QClaw、WorkBuddy 个人版 | 用户形态最匹配低频个人 CAD；本地执行、Skill/MCP 能力有公开依据，但必须真机核对完整协议 | macOS 安装、24-tool discovery、resource read、审核和重启恢复全部通过 |
 | 通用 Agent / 开放基准 | OpenClaw 原版、QwenPaw（原 CoPaw） | OpenClaw 当前具备本地 stdio/HTTP MCP、Skill 和 resource utility；QwenPaw 可本地部署且开放 MCP/Skill | 形成可重复的自动化兼容矩阵，并证明不会绕过 Task Kernel |
 | 通用 Agent / 后续观察 | AutoClaw、LinClaw、Claude Desktop 本地扩展 | 产品方向合适，但扩展版本、Skill 激活或完整 Resource 行为尚未证明 | 用户需求达到试点阈值，并完成与上层相同的宿主验收 |
 | 当前暂缓 | Kimi Claw、ArkClaw、MaxClaw、Manus、ChatGPT Work Web、Claude Cowork 远程任务 | 默认在云端运行，不能直接托管当前用户 Mac 上的 `stdio` MCP/FreeCAD | 先有经批准的本地设备桥或远程认证 MCP 路线，再重新评审 |

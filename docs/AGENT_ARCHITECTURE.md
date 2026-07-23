@@ -128,8 +128,8 @@ Accept 不是“信任旧 verdict 后直接改指针”。它会重开 immutable
 - 两者都产生 TaskRun、candidate/draft、verification report、revision 和 artifact；
 - 工具数量不是能力目标。稳定控制面保持小而稳定，CAD operation 可按准入门逐批扩展。
 
-当前 22 个公开工具中，只有 6 个是 direct CAD 工具；其余是 5 个 service/runtime/capability 控制工具
-和 11 个 project/task/review/artifact facade。不能把“22 个公开工具”误写为“22 个 CAD command”。
+当前 24 个公开工具中，只有 6 个是 direct CAD 工具；其余是 5 个 service/runtime/capability 控制工具
+和 13 个 project/revision/task/review/artifact facade。不能把“24 个公开工具”误写为“24 个 CAD command”。
 
 每个新增 operation 必须同时具备：
 
@@ -182,6 +182,11 @@ negotiation、明确用户授权、预算、超时和 depth=1。`byok` 未来使
 当前没有自动 repair/replan/semantic retry。失败后由宿主读取固定错误和 evidence，决定是否创建新任务
 或提交新 program。`create_task` 已由 `task_create_` key 和不可变意图绑定，可在未知结果时用同一 key
 安全重放；`list_tasks` 只用于未知 task id 的恢复发现。
+
+项目 id 未知时，宿主才分页调用 `list_projects` 并用 `get_project` 读取当前权威 HEAD。
+`list_revisions` 是严格只读的 committed-history 投影：只返回当前 HEAD ancestry，按 canonical
+revision id 排序，调用方沿 `head`/`base_revision` 恢复时间链；draft、candidate、abandoned revision
+被排除。cursor stale/conflict 时从第一页重启。这两条路径不触发 CAD/runtime，也不取得 project lease。
 
 S3-8 canonical skill 已要求宿主按服务端 `next_action` 行动：`submit_program` / `provide_input` 提交新
 program，`validate_program` / `reconcile` / `cleanup` 调 `resume_task`，`wait` 先刷新后至多恢复一次，

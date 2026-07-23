@@ -1088,6 +1088,8 @@ _VERIFICATION_PATTERN = r"^verification_[0-9a-f]{32}$"
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
 _CREATE_KEY_PATTERN = r"^project_create_[0-9a-f]{32}$"
 _TASK_CREATE_KEY_PATTERN = r"^task_create_[0-9a-f]{32}$"
+_PROJECT_LIST_CURSOR_PATTERN = r"^project_list_cursor_[0-9a-f]{64}$"
+_REVISION_LIST_CURSOR_PATTERN = r"^revision_list_cursor_[0-9a-f]{64}$"
 _TASK_LIST_CURSOR_PATTERN = r"^task_list_cursor_[0-9a-f]{64}$"
 _TASK_EVENT_CURSOR_PATTERN = r"^task_event_cursor_[0-9a-f]{64}$"
 _EXPORT_KEY_PATTERN = r"^export_[0-9a-f]{32}$"
@@ -1104,6 +1106,8 @@ _STABLE_TOOL_NAMES = (
     "get_capabilities",
     "create_project",
     "get_project",
+    "list_projects",
+    "list_revisions",
     "create_task",
     "list_tasks",
     "get_task",
@@ -1124,6 +1128,8 @@ _STABLE_TOOL_DESCRIPTIONS = MappingProxyType(
         "get_capabilities": "返回当前可执行操作的冻结能力元数据",
         "create_project": "创建空项目或导入仅含长方体和圆柱体的 FCStd 作为第零代",
         "get_project": "读取持久化项目的当前版本",
+        "list_projects": "分页发现持久化项目的当前已提交版本摘要",
+        "list_revisions": "分页读取指定项目当前 HEAD 的已提交祖先版本摘要",
         "create_task": "在指定项目版本上创建可验收任务",
         "list_tasks": "分页发现可恢复的持久化任务摘要",
         "get_task": "读取任务的持久化状态与证据",
@@ -1683,6 +1689,48 @@ def _project_get_result_schema() -> dict[str, object]:
     )
 
 
+def _project_list_result_schema() -> dict[str, object]:
+    return _closed_schema(
+        {
+            "schema_version": _version_schema(),
+            "projects": {
+                "type": "array",
+                "items": _project_head_schema(),
+                "maxItems": 100,
+            },
+            "next_cursor": _nullable(_id_schema(_PROJECT_LIST_CURSOR_PATTERN)),
+        }
+    )
+
+
+def _revision_summary_schema() -> dict[str, object]:
+    return _closed_schema(
+        {
+            "schema_version": _version_schema(),
+            "id": _id_schema(_REVISION_PATTERN),
+            "project_id": _id_schema(_PROJECT_PATTERN),
+            "base_revision": _nullable(_id_schema(_REVISION_PATTERN)),
+            "manifest_sha256": _id_schema(_DIGEST_PATTERN),
+        }
+    )
+
+
+def _revision_list_result_schema() -> dict[str, object]:
+    return _closed_schema(
+        {
+            "schema_version": _version_schema(),
+            "project_id": _id_schema(_PROJECT_PATTERN),
+            "head": _project_head_schema(),
+            "revisions": {
+                "type": "array",
+                "items": _revision_summary_schema(),
+                "maxItems": 100,
+            },
+            "next_cursor": _nullable(_id_schema(_REVISION_LIST_CURSOR_PATTERN)),
+        }
+    )
+
+
 def _materialized_artifact_schema() -> dict[str, object]:
     properties = _revision_artifact_schema()["properties"].copy()
     properties["resource_uri"] = {
@@ -2106,6 +2154,25 @@ def _stable_input_schema(name: str) -> dict[str, object]:
                 "project_id": _id_schema(_PROJECT_PATTERN),
             }
         )
+    if name == "list_projects":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "limit": _safe_integer_schema(minimum=1, maximum=100),
+                "cursor": _nullable(_id_schema(_PROJECT_LIST_CURSOR_PATTERN)),
+            },
+            required=("schema_version",),
+        )
+    if name == "list_revisions":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "project_id": _id_schema(_PROJECT_PATTERN),
+                "limit": _safe_integer_schema(minimum=1, maximum=100),
+                "cursor": _nullable(_id_schema(_REVISION_LIST_CURSOR_PATTERN)),
+            },
+            required=("schema_version", "project_id"),
+        )
     if name == "create_task":
         return _closed_schema(
             {
@@ -2199,6 +2266,10 @@ def _stable_result_schema(name: str) -> dict[str, object]:
         return _project_create_result_schema()
     if name == "get_project":
         return _project_get_result_schema()
+    if name == "list_projects":
+        return _project_list_result_schema()
+    if name == "list_revisions":
+        return _revision_list_result_schema()
     if name in {
         "create_task",
         "get_task",
@@ -2226,6 +2297,8 @@ def _stable_annotations(name: str) -> ToolAnnotations:
         "get_capabilities": (True, False, True, False),
         "create_project": (False, False, True, True),
         "get_project": (False, False, True, False),
+        "list_projects": (True, False, True, False),
+        "list_revisions": (True, False, True, False),
         "create_task": (False, False, True, False),
         "list_tasks": (True, False, True, False),
         "get_task": (False, False, True, False),
