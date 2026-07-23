@@ -638,6 +638,7 @@ remain residual and unauthorized.
 | P0B-E08 / 2026-07-23T07:56:06Z | P0B-C05 under P0B-R1.1/A01/A02; P0B-D10/D21 | this C05 commit / non-force push required | state RED `28 failed`; catalog RED on missing cancel API; two review-driven concurrency/store-race RED cycles; focused `1023 passed`; core with store `1267 passed`; affected public integration `452 passed, 8 deselected`; full non-slow `4385 passed, 95 deselected`; same-intent stress controller `100/100` plus independent `200/200` and `50/50`, all with 16 callers; 27-tool SDK projection `20,717` bytes / SHA-256 `57a38baa2bb79d959037d3066e68468066893b01383cfdd8f77dac447d79e9e8`; complete frame `20,762` bytes / SHA-256 `07e4b2e6be4a3582ffea27b1a194ae6081679448e0f1903b3aaf39b804c86724`; canonical public receipt `627abca4775d57a7a975f385ad95d7ca2d3eb331f2266ffbcf62498456ac2a56`; exact changed-file format/diff/offline-lock/syntax clean; public and state/store/catalog reviews `0/0` | active Worker kill/reconcile remains C12; one existing macOS fork warning; one anchor I001 is excluded only for its unchanged local-import block; full-tree format baseline remains unrelated | P0B-S08 | accepted-green |
 | P0B-E09 / 2026-07-23T09:34:39Z | P0B-C06 under P0B-R1.1/A01/A02; P0B-D09/D21 | this C06 commit / non-force push required | semantic RED and review-repair cycles covered key/intent replay, ancestry, seeded-copy binding, accept-time drift and crash recovery; canonical `466 passed`; storage/candidate `576 passed`; affected public/API integration `636 passed`; final audit `944 passed`; full non-slow `4441 passed, 95 deselected`; real FreeCAD 1.1.0 restart/accept smoke `1 passed`; 28-tool SDK projection `21,438` bytes / SHA-256 `5d7703a55dd7b20c21c487d6f4740fbfb894cf6867c840ccb30adf57de63efda`; complete frame `21,483` bytes / SHA-256 `22c903b05fc6e46868bd74380880cca5c915f312ac2ddf24f7e48896b8cdf826`; canonical public receipt `61a9f6c662ad224147aad07b0d701f82a3407d4ec0b8f15ede48dff76c4c98d3`; changed-file Ruff/format/syntax, diff and fsck clean; API, workflow, storage and final diff reviews `Critical 0 / Important 0` | the published Skill projection remains intentionally frozen at the last accepted 27-tool package until C14 refreshes all release artifacts; first two real-smoke attempts selected the wrong managed prefix and are setup evidence, while the declared legacy-compatible prefix passed; one existing macOS fork warning and one unchanged full-Ruff I001 remain | P0B-S09 | accepted-green |
 | P0B-E10 / 2026-07-23T10:17:11Z | P0B-C07 under P0B-R1.1/A01/A02; P0B-D11/D12/D13/D21 | this C07 commit / non-force push required | initial semantic RED `19 failed, 24 passed`; independent review RED `4 failed`; final focused `54 passed`; full non-slow `4474 passed, 95 deselected`; real macOS getpeereid POC repeated 32 times in project and FreeCAD Python, plus automated socketpair and bind/listen/connect/accept flows; endpoint path/root replacement and fresh/preinitialized two-process authority races fail closed; changed-file Ruff/format/syntax, diff and fsck clean; final protocol review `Critical 0 / Important 0 / Minor 0`, identity reviews `Critical 0 / Important 0` | runnable daemon, receipt/secret persistence, pre-challenge composition and production EndpointBinding remain C09; Linux/Windows remain P0B-RES-02; existing import `source_path` versus D11 is recorded as P0B-RES-13 for C10/C13; one unchanged macOS fork warning and full-Ruff baseline I001 remain | P0B-S10 | accepted-green |
+| P0B-E11 / 2026-07-23T11:33:13Z | P0B-C08 under P0B-R1.1/A01/A02; P0B-D15/D21/D22-R1; D21 packet-allowlist repair adds `src/vibecad/execution/revisions.py` and `tests/test_revision_store.py` for the bounded source-observation seam and its integrity/performance regressions | this C08 commit / non-force push required | semantic RED `14 failed, 36 passed`; performance RED stable live get `9 > 2` actual `_validate_revision_content` passes; review Important REDs covered empty-project first draft `NOT_FOUND` and post-hash valid-manifest replacement returning a stale observation; final focused `66 passed, 1 warning`; affected `458 passed, 1 warning`; full non-slow `4508 passed, 95 deselected, 1 warning`; changed-file Ruff/format, diff and fsck clean; persistence and semantic reviews on exact source/test diff SHA-256 `bdf51474d75f653e57e54989cc7ddb1cad1ba4846ad7ec79744b33657c74dbef` both GO with `Critical 0 / Important 0 / Minor 0` | one unchanged macOS multithreaded-fork deprecation warning; legacy schema-v1 records intentionally recover as `recovery_required`; runnable daemon remains C09 and grants remain C10 | P0B-S11 | accepted-green |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -1246,3 +1247,85 @@ remain residual and unauthorized.
 - Preserve P0B-GATE-CORR-01/02 and continue exact `PYTHONPATH=src` plus
   changed-file format gates. PR, tag, release, marketplace publication,
   force-push and external spend remain unauthorized.
+
+## 23. Recovery Snapshot P0B-S11
+
+### 1. Completed milestones
+
+- C08 implements the four P0B-D15 source states: unchanged authority is
+  `live`, advanced HEAD is `stale`, changed/accepted/rejected task or draft
+  authority is `revoked`, and indeterminate store truth is
+  `recovery_required`. Liveness is recomputed on get, keyed replay, restart and
+  the acceptance guard; stale, revoked and recovery-required sources cannot
+  pass the live/acceptance boundary. Historical checkout bytes remain
+  viewable and closable, but the checkout store has no publish authority and
+  TaskService remains the sole revision-commit path.
+- The existing protocol-v1 projection remains the exact nine-field mapping.
+  Local schema v2 adds only source HEAD and source liveness to that projection,
+  while durable checkout schema v2 binds the complete `ProjectHead`, including
+  generation, and complete `RevisionSourceBinding`. Legacy schema-v1 open and
+  tombstone records still decode, but lack sufficient authority evidence and
+  therefore fail closed as `recovery_required`.
+- Source observation and checkout copy are descriptor-bound and revalidate the
+  model, revision directory, revisions directory, configured project root and
+  HEAD before/after the relevant operation. Atomic source, directory, root or
+  post-hash manifest replacement therefore fails closed. The review-driven
+  empty-project repair also proves that a model-less initial HEAD can open its
+  first draft, remain live across restart and become stale after HEAD advance.
+- The genuine RED sequence was `14 failed, 36 passed`. A separate performance
+  RED measured 9 actual `_validate_revision_content` passes for a stable live
+  get against the bound of at most 2. Review then exposed two Important REDs:
+  empty-project first-draft open returned `NOT_FOUND`, and a valid-checksum
+  manifest replacement after payload hashing could return an observation for
+  stale metadata. Both defects now have passing regressions.
+- The bounded store observation validates a HEAD source once and a distinct
+  requested source twice; stable live checkout get performs exactly 2 actual
+  `_validate_revision_content` passes. The semantic reviewer independently
+  measured a live draft-backed get at 3 passes because that path validates
+  current HEAD plus the distinct draft source; this is recorded separately
+  from the stable-HEAD bound.
+- Final controller gates are green: focused checkout suite
+  `66 passed, 1 warning`; affected revision/checkout/discovery suites
+  `458 passed, 1 warning`; full non-slow suite
+  `4508 passed, 95 deselected, 1 warning`; changed-file Ruff/format, diff and
+  fsck checks pass. Persistence and semantic reviewers inspected the exact
+  source/test diff SHA-256
+  `bdf51474d75f653e57e54989cc7ddb1cad1ba4846ad7ec79744b33657c74dbef`
+  and both returned GO with `Critical 0 / Important 0 / Minor 0`.
+
+### 2. Next steps
+
+1. Commit the exact C08 allowlist as
+   `feat(interaction): enforce checkout source liveness`.
+2. Non-force push `codex/agent-stage3`, then verify exact
+   `HEAD == @{upstream}` and remote-ref equality.
+3. Rebind C09 to the accepted remote anchor and implement the authenticated,
+   single-instance local Task Kernel daemon without pulling C10 file grants
+   forward.
+
+### 3. Approved decisions
+
+- P0B-A01/A02 and P0B-D01..D22 plus D08A/D17A/D22-R1 remain active.
+- P0B-D15 is satisfied for checkout get/replay/restart and acceptance guards;
+  C10 will reuse the same live-source boundary when grant claim is introduced.
+- Under P0B-D21, the narrowed C08 packet allowlist added
+  `src/vibecad/execution/revisions.py` and
+  `tests/test_revision_store.py` solely for the read-only bounded observation
+  seam and directly affected integrity/performance tests. Both paths already
+  belong to the approved stage allowlist; this changes neither product scope
+  nor execution authority.
+
+### 4. Execution discipline
+
+- Preserve protocol-v1's exact nine-field wire mapping, schema-v2's complete
+  persisted source binding and fail-closed legacy recovery. Do not expose a
+  local path, add checkout publication, construct the daemon or implement
+  grants inside C08.
+- Use the exact source/test review hash above only for the frozen five-file
+  code packet; this append-only documentation update necessarily changes the
+  overall working-tree diff hash without changing the reviewed code.
+- Continue with `native-plan / spawn-send-wait / repo-artifact /
+  native-session-poll`, exact named-file staging, `PYTHONPATH=src` gates,
+  immediate non-force push and three-way local/upstream/remote equality.
+  PR, tag, release, marketplace publication, force-push and external spend
+  remain unauthorized.

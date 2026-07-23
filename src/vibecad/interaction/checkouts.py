@@ -10,18 +10,21 @@ import re
 import secrets
 import stat
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
 from vibecad.execution.revisions import (
     LocalRevisionStore,
+    ProjectHead,
     RevisionRef,
+    RevisionSourceBinding,
+    RevisionSourceObservation,
     RevisionStoreError,
     RevisionStoreErrorCode,
 )
 from vibecad.interaction.storage import CheckoutMutationLock, SafeRoot, StorageFailure
-from vibecad.workflow.state import ReviewDraft
+from vibecad.workflow.state import ReviewDraft, ReviewPolicy, TaskStatus
 from vibecad.workflow.store import TaskRunStore, TaskStoreError, TaskStoreErrorCode
 
 __all__ = (
@@ -35,6 +38,7 @@ __all__ = (
     "CheckoutDescriptor",
     "CheckoutError",
     "CheckoutErrorCode",
+    "CheckoutSourceLiveness",
     "CheckoutState",
     "CheckoutStoreRootTrust",
     "DraftCheckoutSource",
@@ -51,12 +55,16 @@ CLOSED_TOMBSTONE_TTL_SECONDS = 2_592_000
 MAX_CHECKOUT_TEMP_ENTRIES = 8
 MAX_CLOSED_TOMBSTONES = 1_024
 
-_SCHEMA_VERSION = 1
+_LEGACY_SCHEMA_VERSION = 1
+_OPEN_SCHEMA_VERSION = 2
+_TOMBSTONE_SCHEMA_VERSION = 2
 _MAX_SAFE_INTEGER = 2**53 - 1
 _MAX_RECORD_BYTES = 65_536
 _COPY_CHUNK_BYTES = 65_536
 _RECORD_DOMAIN = b"vibecad-managed-checkout-open-v1\0"
+_RECORD_DOMAIN_V2 = b"vibecad-managed-checkout-open-v2\0"
 _TOMBSTONE_DOMAIN = b"vibecad-managed-checkout-closed-v1\0"
+_TOMBSTONE_DOMAIN_V2 = b"vibecad-managed-checkout-closed-v2\0"
 _OPEN_KEY_RE = re.compile(r"checkout_open_[0-9a-f]{32}\Z")
 _CHECKOUT_RE = re.compile(r"checkout_[0-9a-f]{32}\Z")
 _PROJECT_RE = re.compile(r"project_[0-9a-f]{32}\Z")
@@ -78,6 +86,13 @@ class CheckoutState(StrEnum):
     CLOSED = "closed"
 
 
+class CheckoutSourceLiveness(StrEnum):
+    LIVE = "live"
+    STALE = "stale"
+    REVOKED = "revoked"
+    RECOVERY_REQUIRED = "recovery_required"
+
+
 class CheckoutErrorCode(StrEnum):
     INVALID_INPUT = "invalid_input"
     NOT_FOUND = "not_found"
@@ -89,6 +104,7 @@ class CheckoutErrorCode(StrEnum):
     DURABILITY_UNCERTAIN = "durability_uncertain"
     CLEANUP_REQUIRED = "cleanup_required"
     WRONG_PROCESS = "wrong_process"
+    RECOVERY_REQUIRED = "recovery_required"
 
 
 _MESSAGES = {
@@ -102,6 +118,7 @@ _MESSAGES = {
     CheckoutErrorCode.DURABILITY_UNCERTAIN: "Managed checkout durability is uncertain.",
     CheckoutErrorCode.CLEANUP_REQUIRED: "Managed checkout cleanup is required.",
     CheckoutErrorCode.WRONG_PROCESS: "The managed checkout belongs to another process.",
+    CheckoutErrorCode.RECOVERY_REQUIRED: "Checkout source authority requires recovery.",
 }
 
 
@@ -239,6 +256,9 @@ class CheckoutDescriptor:
     current_model_sha256: str
     current_size_bytes: int
     local_path: Path | None
+    source_head: ProjectHead | None
+    source_binding: RevisionSourceBinding | None
+    source_liveness: CheckoutSourceLiveness
     authoritative: bool = False
 
     def __post_init__(self) -> None:
@@ -247,6 +267,25 @@ class CheckoutDescriptor:
         if type(self.state) is not CheckoutState or self.authoritative is not False:
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
         if type(self.dirty) is not bool or type(self.source) is not ResolvedCheckoutSource:
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+        if type(self.source_liveness) is not CheckoutSourceLiveness:
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+        if (self.source_head is None) != (self.source_binding is None):
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+        if self.source_head is None:
+            if self.source_liveness is not CheckoutSourceLiveness.RECOVERY_REQUIRED:
+                raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+        elif (
+            type(self.source_head) is not ProjectHead
+            or type(self.source_binding) is not RevisionSourceBinding
+        ):
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+        elif self.source_head.project_id != self.source.project_id:
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+        elif self.source.kind == "head" and (
+            self.source_head.revision_id != self.source.revision_id
+            or self.source_head.manifest_sha256 != self.source.manifest_sha256
+        ):
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
         _digest(self.initial_model_sha256)
         _digest(self.current_model_sha256)
@@ -257,6 +296,7 @@ class CheckoutDescriptor:
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
 
     def to_wire_mapping(self) -> dict[str, object]:
+        """Return the frozen protocol-v1 projection."""
         return {
             "checkout_id": self.checkout_id,
             "open_key": self.open_key,
@@ -269,6 +309,13 @@ class CheckoutDescriptor:
             "current_size_bytes": self.current_size_bytes,
         }
 
+    def to_local_mapping(self) -> dict[str, object]:
+        """Return the path-free local-protocol projection used by protocol v2."""
+        return self.to_wire_mapping() | {
+            "source_head": (None if self.source_head is None else self.source_head.to_mapping()),
+            "source_liveness": self.source_liveness.value,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class _OpenRecord:
@@ -278,8 +325,9 @@ class _OpenRecord:
     source: ResolvedCheckoutSource
     initial_model_sha256: str
     directory_identity: tuple[int, int]
-    source_identity: tuple[int, int, int, int]
+    source_binding: RevisionSourceBinding | None
     created_ns: int
+    source_head: ProjectHead | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +389,48 @@ def _resolved_from_mapping(value: object) -> ResolvedCheckoutSource:
     try:
         return ResolvedCheckoutSource(**value)
     except (CheckoutError, TypeError):
+        raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
+
+
+def _head_from_mapping(value: object) -> ProjectHead:
+    if type(value) is not dict:
+        raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+    try:
+        return ProjectHead.from_mapping(value)
+    except (RevisionStoreError, TypeError, ValueError):
+        raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
+
+
+def _binding_mapping(value: RevisionSourceBinding) -> dict[str, int]:
+    if type(value) is not RevisionSourceBinding:
+        raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+    return {
+        "dev": value.dev,
+        "ino": value.ino,
+        "mode": value.mode,
+        "uid": value.uid,
+        "nlink": value.nlink,
+        "size": value.size,
+        "mtime_ns": value.mtime_ns,
+        "ctime_ns": value.ctime_ns,
+    }
+
+
+def _binding_from_mapping(value: object) -> RevisionSourceBinding:
+    if type(value) is not dict or set(value) != {
+        "dev",
+        "ino",
+        "mode",
+        "uid",
+        "nlink",
+        "size",
+        "mtime_ns",
+        "ctime_ns",
+    }:
+        raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+    try:
+        return RevisionSourceBinding(**value)
+    except (RevisionStoreError, TypeError, ValueError):
         raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
 
 
@@ -464,10 +554,10 @@ class ManagedCheckoutStore:
                         if record_intent != intent:
                             raise CheckoutError(CheckoutErrorCode.CONFLICT)
                         if closed_descriptor is not None:
-                            return closed_descriptor
+                            return self._project_liveness(closed_descriptor)
                         self._require_aggregate_budget(inventory)
                         return self._get_locked(root_fd, checkout_id)
-                    resolved, model_path = self._resolve(source)
+                    resolved, model_path, source_head, source_binding = self._resolve(source)
                     self._admit(inventory, resolved.size_bytes)
                     return self._publish_open(
                         root_fd,
@@ -475,6 +565,8 @@ class ManagedCheckoutStore:
                         intent,
                         resolved,
                         model_path,
+                        source_head,
+                        source_binding,
                     )
                 finally:
                     os.close(root_fd)
@@ -495,7 +587,7 @@ class ManagedCheckoutStore:
                     inventory = self._inventory(root_fd, cleanup=True)
                     closed = self._load_tombstone(root_fd, canonical_id, required=False)
                     if closed is not None:
-                        return closed.descriptor
+                        return self._project_liveness(closed.descriptor)
                     self._require_aggregate_budget(inventory)
                     return self._get_locked(root_fd, canonical_id)
                 finally:
@@ -517,6 +609,7 @@ class ManagedCheckoutStore:
                     self._inventory(root_fd, cleanup=True)
                     closed = self._load_tombstone(root_fd, canonical_id, required=False)
                     if closed is not None:
+                        closed_descriptor = self._project_liveness(closed.descriptor)
                         if self._entry_exists(root_fd, canonical_id):
                             try:
                                 self._delete_checkout_directory(root_fd, canonical_id)
@@ -524,9 +617,9 @@ class ManagedCheckoutStore:
                             except (CheckoutError, OSError, StorageFailure):
                                 raise CheckoutError(
                                     CheckoutErrorCode.CLEANUP_REQUIRED,
-                                    descriptor=closed.descriptor,
+                                    descriptor=closed_descriptor,
                                 ) from None
-                        return closed.descriptor
+                        return closed_descriptor
                     descriptor = self._get_locked(root_fd, canonical_id)
                     tombstone = _ClosedRecord(
                         descriptor=CheckoutDescriptor(
@@ -539,6 +632,9 @@ class ManagedCheckoutStore:
                             current_model_sha256=descriptor.current_model_sha256,
                             current_size_bytes=descriptor.current_size_bytes,
                             local_path=None,
+                            source_head=descriptor.source_head,
+                            source_binding=descriptor.source_binding,
+                            source_liveness=CheckoutSourceLiveness.RECOVERY_REQUIRED,
                         ),
                         intent=self._load_open(root_fd, canonical_id).intent,
                         closed_ns=time.time_ns(),
@@ -552,9 +648,9 @@ class ManagedCheckoutStore:
                     except (CheckoutError, OSError, StorageFailure):
                         raise CheckoutError(
                             CheckoutErrorCode.CLEANUP_REQUIRED,
-                            descriptor=tombstone.descriptor,
+                            descriptor=self._project_liveness(tombstone.descriptor),
                         ) from None
-                    return tombstone.descriptor
+                    return self._project_liveness(tombstone.descriptor)
                 finally:
                     os.close(root_fd)
         except CheckoutError:
@@ -563,6 +659,46 @@ class ManagedCheckoutStore:
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
         except OSError:
             raise CheckoutError(CheckoutErrorCode.IO_ERROR) from None
+
+    def require_live(self, checkout_id: str) -> CheckoutDescriptor:
+        """Recompute liveness and reject a closed or non-live checkout."""
+        descriptor = self.get(checkout_id)
+        if descriptor.source_liveness is CheckoutSourceLiveness.RECOVERY_REQUIRED:
+            raise CheckoutError(CheckoutErrorCode.RECOVERY_REQUIRED)
+        if (
+            descriptor.state is not CheckoutState.OPEN
+            or descriptor.source_liveness is not CheckoutSourceLiveness.LIVE
+        ):
+            raise CheckoutError(CheckoutErrorCode.CONFLICT)
+        return descriptor
+
+    def require_acceptance(
+        self,
+        checkout_id: str,
+        *,
+        task_id: str,
+        draft_id: str,
+        expected_generation: int,
+    ) -> CheckoutDescriptor:
+        """Guard a review action; TaskService remains the only commit authority."""
+        canonical_task = _identifier(task_id, _TASK_RE)
+        canonical_draft = _identifier(draft_id, _DRAFT_RE)
+        if (
+            type(expected_generation) is not int
+            or not 0 <= expected_generation <= _MAX_SAFE_INTEGER
+        ):
+            raise CheckoutError(CheckoutErrorCode.INVALID_INPUT)
+        descriptor = self.require_live(checkout_id)
+        source = descriptor.source
+        if (
+            source.kind != "draft"
+            or source.task_id != canonical_task
+            or source.draft_id != canonical_draft
+            or source.task_generation != expected_generation
+            or descriptor.dirty
+        ):
+            raise CheckoutError(CheckoutErrorCode.CONFLICT)
+        return descriptor
 
     def _inventory(self, root_fd: int, *, cleanup: bool) -> dict[str, object]:
         now_ns = time.time_ns()
@@ -597,7 +733,7 @@ class ManagedCheckoutStore:
                     except (CheckoutError, OSError, StorageFailure):
                         raise CheckoutError(
                             CheckoutErrorCode.CLEANUP_REQUIRED,
-                            descriptor=tombstone.descriptor,
+                            descriptor=self._project_liveness(tombstone.descriptor),
                         ) from None
             elif _TOMBSTONE_RE.fullmatch(name):
                 continue
@@ -684,11 +820,241 @@ class ManagedCheckoutStore:
         if incoming > MAX_CHECKOUT_FILE_BYTES or total + incoming > MAX_CHECKOUT_TOTAL_BYTES:
             raise CheckoutError(CheckoutErrorCode.RESOURCE_EXHAUSTED)
 
+    def _load_validated_head(self, project_id: str) -> ProjectHead:
+        head = self._revision_store.load_head(project_id)
+        if type(head) is not ProjectHead or head.project_id != project_id:
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+        return head
+
+    @staticmethod
+    def _head_for_draft(draft: ReviewDraft) -> ProjectHead:
+        try:
+            return ProjectHead(
+                project_id=draft.project_id,
+                generation=draft.base_generation,
+                revision_id=draft.base_revision,
+                manifest_sha256=draft.base_manifest_sha256,
+            )
+        except (RevisionStoreError, TypeError, ValueError):
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
+
+    @staticmethod
+    def _binding_from_stat(value: os.stat_result) -> RevisionSourceBinding:
+        try:
+            return RevisionSourceBinding(
+                dev=value.st_dev,
+                ino=value.st_ino,
+                mode=value.st_mode,
+                uid=value.st_uid,
+                nlink=value.st_nlink,
+                size=value.st_size,
+                mtime_ns=value.st_mtime_ns,
+                ctime_ns=value.st_ctime_ns,
+            )
+        except (RevisionStoreError, TypeError, ValueError):
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
+
+    @staticmethod
+    def _revision_matches_source(
+        revision: object,
+        source: ResolvedCheckoutSource,
+        source_head: ProjectHead,
+    ) -> bool:
+        if type(revision) is not RevisionRef or revision.model is None:
+            return False
+        if not (
+            revision.project_id == source.project_id
+            and revision.id == source.revision_id
+            and revision.manifest_sha256 == source.manifest_sha256
+            and revision.model.sha256 == source.model_sha256
+            and revision.model.size_bytes == source.size_bytes
+        ):
+            return False
+        if source.kind == "head":
+            return (
+                source_head.revision_id == source.revision_id
+                and source_head.manifest_sha256 == source.manifest_sha256
+            )
+        return revision.base_revision == source_head.revision_id
+
+    def _validate_bound_source(
+        self,
+        source: ResolvedCheckoutSource,
+        source_head: ProjectHead,
+        source_binding: RevisionSourceBinding,
+    ) -> RevisionSourceObservation:
+        observation = self._revision_store.observe_model_source(
+            source.project_id,
+            source.revision_id,
+        )
+        if (
+            type(observation) is not RevisionSourceObservation
+            or observation.model_binding != source_binding
+            or not self._revision_matches_source(
+                observation.revision,
+                source,
+                source_head,
+            )
+        ):
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+        return observation
+
+    @staticmethod
+    def _draft_observation(
+        stored: object,
+        source: ResolvedCheckoutSource,
+        source_head: ProjectHead,
+    ) -> tuple[object, ...] | CheckoutSourceLiveness:
+        try:
+            generation = stored.generation
+            task = stored.task_run
+            task_id = task.id
+            project_id = task.project_id
+            base_revision = task.base_revision
+            review_policy = task.review_policy
+            status = task.status
+            draft = task.draft
+        except (AttributeError, TypeError):
+            return CheckoutSourceLiveness.RECOVERY_REQUIRED
+        if type(generation) is not int:
+            return CheckoutSourceLiveness.RECOVERY_REQUIRED
+        if generation != source.task_generation:
+            return CheckoutSourceLiveness.REVOKED
+        if status in {TaskStatus.SUCCEEDED, TaskStatus.REJECTED}:
+            return CheckoutSourceLiveness.REVOKED
+        if type(status) is not TaskStatus or status is not TaskStatus.AWAITING_USER_REVIEW:
+            return CheckoutSourceLiveness.RECOVERY_REQUIRED
+        if review_policy is not ReviewPolicy.REQUIRE_REVIEW:
+            return CheckoutSourceLiveness.RECOVERY_REQUIRED
+        if type(draft) is not ReviewDraft:
+            return CheckoutSourceLiveness.REVOKED
+        if (
+            task_id != source.task_id
+            or draft.id != source.draft_id
+            or draft.task_id != source.task_id
+            or draft.revision_id != source.revision_id
+            or draft.manifest_sha256 != source.manifest_sha256
+        ):
+            return CheckoutSourceLiveness.REVOKED
+        if (
+            project_id != source.project_id
+            or draft.project_id != source.project_id
+            or base_revision != source_head.revision_id
+            or draft.base_revision != source_head.revision_id
+            or draft.base_generation != source_head.generation
+            or draft.base_manifest_sha256 != source_head.manifest_sha256
+        ):
+            return CheckoutSourceLiveness.RECOVERY_REQUIRED
+        return (
+            generation,
+            task_id,
+            project_id,
+            base_revision,
+            review_policy,
+            status,
+            draft,
+        )
+
+    @staticmethod
+    def _head_liveness(
+        current: ProjectHead,
+        source_head: ProjectHead,
+    ) -> CheckoutSourceLiveness:
+        if current == source_head:
+            return CheckoutSourceLiveness.LIVE
+        if (
+            current.project_id == source_head.project_id
+            and current.generation > source_head.generation
+        ):
+            return CheckoutSourceLiveness.STALE
+        return CheckoutSourceLiveness.RECOVERY_REQUIRED
+
+    def _evaluate_liveness(
+        self,
+        source: ResolvedCheckoutSource,
+        source_head: ProjectHead | None,
+        source_binding: RevisionSourceBinding | None,
+    ) -> CheckoutSourceLiveness:
+        if source_head is None or source_binding is None:
+            return CheckoutSourceLiveness.RECOVERY_REQUIRED
+        try:
+            if source.kind == "head":
+                self._validate_bound_source(source, source_head, source_binding)
+                current = self._load_validated_head(source.project_id)
+                return self._head_liveness(current, source_head)
+
+            first = self._draft_observation(
+                self._task_store.load(source.task_id),
+                source,
+                source_head,
+            )
+            if type(first) is CheckoutSourceLiveness:
+                return first
+            self._validate_bound_source(source, source_head, source_binding)
+            second = self._draft_observation(
+                self._task_store.load(source.task_id),
+                source,
+                source_head,
+            )
+            if type(second) is CheckoutSourceLiveness:
+                return second
+            current = self._load_validated_head(source.project_id)
+            final = self._draft_observation(
+                self._task_store.load(source.task_id),
+                source,
+                source_head,
+            )
+            if type(final) is CheckoutSourceLiveness:
+                return final
+            if first != second or second != final:
+                return CheckoutSourceLiveness.REVOKED
+            return self._head_liveness(current, source_head)
+        except Exception:
+            return CheckoutSourceLiveness.RECOVERY_REQUIRED
+
+    def _project_liveness(self, descriptor: CheckoutDescriptor) -> CheckoutDescriptor:
+        liveness = self._evaluate_liveness(
+            descriptor.source,
+            descriptor.source_head,
+            descriptor.source_binding,
+        )
+        return replace(descriptor, source_liveness=liveness)
+
+    @staticmethod
+    def _require_record_binding(
+        intent: dict[str, object],
+        source: ResolvedCheckoutSource,
+        source_head: ProjectHead | None,
+    ) -> None:
+        if source.kind == "head":
+            if intent != {"kind": "head", "project_id": source.project_id}:
+                raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+            if source_head is not None and (
+                source_head.project_id != source.project_id
+                or source_head.revision_id != source.revision_id
+                or source_head.manifest_sha256 != source.manifest_sha256
+            ):
+                raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+            return
+        if intent != {
+            "kind": "draft",
+            "task_id": source.task_id,
+            "draft_id": source.draft_id,
+            "expected_generation": source.task_generation,
+        }:
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+        if source_head is not None and source_head.project_id != source.project_id:
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+
     def _resolve(self, source):
         try:
             if type(source) is HeadCheckoutSource:
-                head = self._revision_store.load_head(source.project_id)
-                revision = self._revision_store.load_revision(source.project_id, head.revision_id)
+                observation = self._revision_store.observe_model_source(
+                    source.project_id,
+                    None,
+                )
+                head = observation.head
+                revision = observation.revision
                 resolved = self._resolved_revision(revision, kind="head")
                 if (
                     resolved.project_id != head.project_id
@@ -696,8 +1062,11 @@ class ManagedCheckoutStore:
                     or resolved.manifest_sha256 != head.manifest_sha256
                 ):
                     raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
-                return resolved, self._revision_store.revision_model_path(
-                    source.project_id, head.revision_id
+                return (
+                    resolved,
+                    observation.model_path,
+                    head,
+                    observation.model_binding,
                 )
             if type(source) is not DraftCheckoutSource:
                 raise CheckoutError(CheckoutErrorCode.INVALID_INPUT)
@@ -711,9 +1080,19 @@ class ManagedCheckoutStore:
                 or draft.task_id != source.task_id
                 or draft.project_id != stored.task_run.project_id
                 or draft.base_revision != stored.task_run.base_revision
+                or stored.task_run.review_policy is not ReviewPolicy.REQUIRE_REVIEW
+                or stored.task_run.status is not TaskStatus.AWAITING_USER_REVIEW
             ):
                 raise CheckoutError(CheckoutErrorCode.CONFLICT)
-            revision = self._revision_store.load_revision(draft.project_id, draft.revision_id)
+            source_head = self._head_for_draft(draft)
+            source_observation = self._revision_store.observe_model_source(
+                draft.project_id,
+                draft.revision_id,
+            )
+            current_head = source_observation.head
+            if current_head != source_head:
+                raise CheckoutError(CheckoutErrorCode.CONFLICT)
+            revision = source_observation.revision
             resolved = self._resolved_revision(
                 revision,
                 kind="draft",
@@ -728,8 +1107,25 @@ class ManagedCheckoutStore:
                 or revision.base_revision != draft.base_revision
             ):
                 raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
-            return resolved, self._revision_store.revision_model_path(
-                draft.project_id, draft.revision_id
+            observation = self._draft_observation(stored, resolved, source_head)
+            final_observation = self._draft_observation(
+                self._task_store.load(source.task_id),
+                resolved,
+                source_head,
+            )
+            final_head = self._load_validated_head(draft.project_id)
+            if (
+                type(observation) is CheckoutSourceLiveness
+                or type(final_observation) is CheckoutSourceLiveness
+                or observation != final_observation
+                or final_head != source_head
+            ):
+                raise CheckoutError(CheckoutErrorCode.CONFLICT)
+            return (
+                resolved,
+                source_observation.model_path,
+                source_head,
+                source_observation.model_binding,
             )
         except CheckoutError:
             raise
@@ -795,6 +1191,8 @@ class ManagedCheckoutStore:
         intent: dict[str, object],
         resolved: ResolvedCheckoutSource,
         model_path: Path,
+        source_head: ProjectHead,
+        expected_source_binding: RevisionSourceBinding,
     ) -> CheckoutDescriptor:
         checkout_id = _new_checkout_id()
         temp_name = f".{checkout_id}.tmp"
@@ -849,17 +1247,11 @@ class ManagedCheckoutStore:
             finally:
                 os.close(destination_fd)
             source_after = os.fstat(source_fd)
-            source_identity = (
-                source_before.st_dev,
-                source_before.st_ino,
-                source_before.st_size,
-                source_before.st_mtime_ns,
-            )
-            if source_identity != (
-                source_after.st_dev,
-                source_after.st_ino,
-                source_after.st_size,
-                source_after.st_mtime_ns,
+            source_binding = self._binding_from_stat(source_before)
+            if (
+                source_binding != expected_source_binding
+                or source_binding != self._binding_from_stat(source_after)
+                or source_binding != self._binding_from_stat(model_path.stat(follow_symlinks=False))
             ):
                 raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
             if (
@@ -877,8 +1269,9 @@ class ManagedCheckoutStore:
                 source=resolved,
                 initial_model_sha256=digest.hexdigest(),
                 directory_identity=(temp_info.st_dev, temp_info.st_ino),
-                source_identity=source_identity,
+                source_binding=source_binding,
                 created_ns=time.time_ns(),
+                source_head=source_head,
             )
             raw = self._encode_open(record)
             metadata_fd = os.open(
@@ -983,7 +1376,7 @@ class ManagedCheckoutStore:
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
         finally:
             os.close(directory_fd)
-        return CheckoutDescriptor(
+        descriptor = CheckoutDescriptor(
             checkout_id=record.checkout_id,
             open_key=record.open_key,
             state=CheckoutState.OPEN,
@@ -993,7 +1386,11 @@ class ManagedCheckoutStore:
             current_model_sha256=digest,
             current_size_bytes=size,
             local_path=self._root.path / checkout_id / "model.FCStd",
+            source_head=record.source_head,
+            source_binding=record.source_binding,
+            source_liveness=CheckoutSourceLiveness.RECOVERY_REQUIRED,
         )
+        return self._project_liveness(descriptor)
 
     def _load_open(self, root_fd: int, checkout_id: str) -> _OpenRecord:
         try:
@@ -1030,26 +1427,26 @@ class ManagedCheckoutStore:
         return record
 
     def _encode_open(self, record: _OpenRecord) -> bytes:
+        if record.source_head is None or record.source_binding is None:
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
         body = {
-            "schema_version": _SCHEMA_VERSION,
+            "schema_version": _OPEN_SCHEMA_VERSION,
             "checkout_id": record.checkout_id,
             "open_key": record.open_key,
             "intent": record.intent,
             "source": record.source.to_mapping(),
+            "source_head": record.source_head.to_mapping(),
+            "source_binding": _binding_mapping(record.source_binding),
             "initial_model_sha256": record.initial_model_sha256,
             "directory_device": record.directory_identity[0],
             "directory_inode": record.directory_identity[1],
-            "source_device": record.source_identity[0],
-            "source_inode": record.source_identity[1],
-            "source_size": record.source_identity[2],
-            "source_mtime_ns": record.source_identity[3],
             "created_ns": record.created_ns,
         }
-        return _encode_record(body, _RECORD_DOMAIN)
+        return _encode_record(body, _RECORD_DOMAIN_V2)
 
     def _decode_open(self, raw: bytes) -> _OpenRecord:
         value = _strict_json(raw)
-        expected = {
+        common = {
             "schema_version",
             "checkout_id",
             "open_key",
@@ -1058,60 +1455,85 @@ class ManagedCheckoutStore:
             "initial_model_sha256",
             "directory_device",
             "directory_inode",
+            "created_ns",
+            "checksum",
+        }
+        legacy = common | {
             "source_device",
             "source_inode",
             "source_size",
             "source_mtime_ns",
-            "created_ns",
-            "checksum",
         }
-        if set(value) != expected or value["schema_version"] != _SCHEMA_VERSION:
+        current = common | {"source_head", "source_binding"}
+        schema = value.get("schema_version")
+        if schema == _LEGACY_SCHEMA_VERSION and set(value) == legacy:
+            domain = _RECORD_DOMAIN
+        elif schema == _OPEN_SCHEMA_VERSION and set(value) == current:
+            domain = _RECORD_DOMAIN_V2
+        else:
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
         checksum = value.pop("checksum")
         if type(checksum) is not str or not secrets.compare_digest(
             checksum,
-            hashlib.sha256(_RECORD_DOMAIN + _canonical(value)).hexdigest(),
+            hashlib.sha256(domain + _canonical(value)).hexdigest(),
         ):
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
         numbers = (
             value["directory_device"],
             value["directory_inode"],
-            value["source_device"],
-            value["source_inode"],
-            value["source_size"],
-            value["source_mtime_ns"],
             value["created_ns"],
         )
+        if schema == _LEGACY_SCHEMA_VERSION:
+            numbers += (
+                value["source_device"],
+                value["source_inode"],
+                value["source_size"],
+                value["source_mtime_ns"],
+            )
         if any(type(item) is not int or item < 0 for item in numbers):
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
         try:
-            return _OpenRecord(
+            record = _OpenRecord(
                 checkout_id=_identifier(value["checkout_id"], _CHECKOUT_RE),
                 open_key=_identifier(value["open_key"], _OPEN_KEY_RE),
                 intent=_intent_from_mapping(value["intent"]),
                 source=_resolved_from_mapping(value["source"]),
                 initial_model_sha256=_digest(value["initial_model_sha256"]),
                 directory_identity=(value["directory_device"], value["directory_inode"]),
-                source_identity=(
-                    value["source_device"],
-                    value["source_inode"],
-                    value["source_size"],
-                    value["source_mtime_ns"],
+                source_binding=(
+                    None
+                    if schema == _LEGACY_SCHEMA_VERSION
+                    else _binding_from_mapping(value["source_binding"])
                 ),
                 created_ns=value["created_ns"],
+                source_head=(
+                    None
+                    if schema == _LEGACY_SCHEMA_VERSION
+                    else _head_from_mapping(value["source_head"])
+                ),
             )
         except CheckoutError:
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
+        self._require_record_binding(record.intent, record.source, record.source_head)
+        return record
 
     def _write_tombstone(self, root_fd: int, record: _ClosedRecord) -> None:
         descriptor = record.descriptor
         body = {
-            "schema_version": _SCHEMA_VERSION,
+            "schema_version": _TOMBSTONE_SCHEMA_VERSION,
             "descriptor": descriptor.to_wire_mapping(),
+            "source_head": (
+                None if descriptor.source_head is None else descriptor.source_head.to_mapping()
+            ),
+            "source_binding": (
+                None
+                if descriptor.source_binding is None
+                else _binding_mapping(descriptor.source_binding)
+            ),
             "intent": record.intent,
             "closed_ns": record.closed_ns,
         }
-        raw = _encode_record(body, _TOMBSTONE_DOMAIN)
+        raw = _encode_record(body, _TOMBSTONE_DOMAIN_V2)
         name = f"closed_{descriptor.checkout_id}.json"
         if self._entry_exists(root_fd, name):
             existing = self._load_tombstone_name(root_fd, name)
@@ -1130,7 +1552,7 @@ class ManagedCheckoutStore:
                     if readback == record:
                         raise CheckoutError(
                             CheckoutErrorCode.DURABILITY_UNCERTAIN,
-                            descriptor=record.descriptor,
+                            descriptor=self._project_liveness(record.descriptor),
                         ) from None
             raise CheckoutError(CheckoutErrorCode.IO_ERROR) from None
 
@@ -1164,14 +1586,21 @@ class ManagedCheckoutStore:
         except StorageFailure:
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
         value = _strict_json(raw)
-        if set(value) != {"schema_version", "descriptor", "intent", "closed_ns", "checksum"}:
+        legacy = {"schema_version", "descriptor", "intent", "closed_ns", "checksum"}
+        current = legacy | {"source_head", "source_binding"}
+        schema = value.get("schema_version")
+        if schema == _LEGACY_SCHEMA_VERSION and set(value) == legacy:
+            domain = _TOMBSTONE_DOMAIN
+        elif schema == _TOMBSTONE_SCHEMA_VERSION and set(value) == current:
+            domain = _TOMBSTONE_DOMAIN_V2
+        else:
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
         checksum = value.pop("checksum")
-        if value["schema_version"] != _SCHEMA_VERSION or type(checksum) is not str:
+        if type(checksum) is not str:
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
         if not secrets.compare_digest(
             checksum,
-            hashlib.sha256(_TOMBSTONE_DOMAIN + _canonical(value)).hexdigest(),
+            hashlib.sha256(domain + _canonical(value)).hexdigest(),
         ):
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
         descriptor_map = value["descriptor"]
@@ -1201,6 +1630,17 @@ class ManagedCheckoutStore:
                 current_model_sha256=_digest(descriptor_map["current_model_sha256"]),
                 current_size_bytes=_size(descriptor_map["current_size_bytes"]),
                 local_path=None,
+                source_head=(
+                    None
+                    if schema == _LEGACY_SCHEMA_VERSION or value["source_head"] is None
+                    else _head_from_mapping(value["source_head"])
+                ),
+                source_binding=(
+                    None
+                    if schema == _LEGACY_SCHEMA_VERSION or value["source_binding"] is None
+                    else _binding_from_mapping(value["source_binding"])
+                ),
+                source_liveness=CheckoutSourceLiveness.RECOVERY_REQUIRED,
             )
         except CheckoutError:
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
@@ -1209,9 +1649,11 @@ class ManagedCheckoutStore:
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
         if type(value["closed_ns"]) is not int or value["closed_ns"] < 0:
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+        intent = _intent_from_mapping(value["intent"])
+        self._require_record_binding(intent, descriptor.source, descriptor.source_head)
         return _ClosedRecord(
             descriptor,
-            _intent_from_mapping(value["intent"]),
+            intent,
             value["closed_ns"],
         )
 

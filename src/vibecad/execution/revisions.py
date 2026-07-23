@@ -38,6 +38,7 @@ __all__ = (
     "RevisionRef",
     "RevisionSnapshotEntry",
     "RevisionSourceBinding",
+    "RevisionSourceObservation",
     "RevisionStoreError",
     "RevisionStoreErrorCode",
     "RevisionStoreRootTrust",
@@ -325,6 +326,32 @@ class RevisionSourceBinding:
             or self.size <= 0
             or self.mtime_ns < 0
             or self.ctime_ns < 0
+        ):
+            raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RevisionSourceObservation:
+    """One coherent, descriptor-verified model source observation."""
+
+    head: ProjectHead
+    revision: RevisionRef
+    model_path: Path
+    model_binding: RevisionSourceBinding
+
+    def __post_init__(self):
+        if (
+            type(self.head) is not ProjectHead
+            or type(self.revision) is not RevisionRef
+            or type(self.model_path) is not type(Path("/"))
+            or type(self.model_binding) is not RevisionSourceBinding
+        ):
+            raise TypeError("source observation fields have invalid types")
+        if (
+            self.revision.model is None
+            or self.head.project_id != self.revision.project_id
+            or self.model_path.name != self.revision.model.name
+            or self.model_binding.size != self.revision.model.size_bytes
         ):
             raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
 
@@ -2005,11 +2032,82 @@ def _open_revision_directory(revisions_fd, root_device, revision_id):
     )
 
 
-def _load_revision_fd(revisions_fd, root_device, project_id, revision_id):
+def _revision_source_binding(source_stat):
+    try:
+        return (
+            RevisionSourceBinding(
+                dev=source_stat.st_dev,
+                ino=source_stat.st_ino,
+                mode=source_stat.st_mode,
+                uid=source_stat.st_uid,
+                nlink=source_stat.st_nlink,
+                size=source_stat.st_size,
+                mtime_ns=source_stat.st_mtime_ns,
+                ctime_ns=source_stat.st_ctime_ns,
+            ),
+            None,
+        )
+    except RevisionStoreError:
+        return (None, RevisionStoreErrorCode.CORRUPT_CONTENT)
+
+
+def _observe_model_binding_fd(revision_fd, root_device, model):
+    opened = _open_checked_file(
+        revision_fd,
+        model.name,
+        root_device,
+        _MAX_FILE_BYTES,
+        RevisionStoreErrorCode.CORRUPT_CONTENT,
+        False,
+    )
+    if opened[2] is not None:
+        return (None, opened[2])
+    model_fd = opened[0]
+    binding = _revision_source_binding(opened[1])
+    code = binding[1]
+    if code is None and opened[1].st_size != model.size_bytes:
+        code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    entry = None
+    if code is None:
+        entry = _entry_stat(revision_fd, model.name)
+        code = entry[2]
+        if code is None and not entry[1]:
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+        if code is None and not _source_matches_binding(entry[0], binding[0]):
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    final_stat = None
+    if code is None:
+        try:
+            final_stat = os.fstat(model_fd)
+        except OSError:
+            code = RevisionStoreErrorCode.IO_ERROR
+        if code is None and not _source_matches_binding(final_stat, binding[0]):
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if _close_fd(model_fd) and code is None:
+        code = RevisionStoreErrorCode.IO_ERROR
+    if code is not None:
+        return (None, code)
+    return binding
+
+
+def _load_revision_fd(
+    revisions_fd,
+    root_device,
+    project_id,
+    revision_id,
+    observe_model=False,
+):
     opened = _open_revision_directory(revisions_fd, root_device, revision_id)
     if opened[1] is not None:
         return (None, opened[1])
     revision_fd = opened[0]
+    revision_stat = None
+    if observe_model:
+        try:
+            revision_stat = os.fstat(revision_fd)
+        except OSError:
+            _close_fd(revision_fd)
+            return (None, RevisionStoreErrorCode.IO_ERROR)
     manifest_read = _read_bounded_file(
         revision_fd,
         "manifest.json",
@@ -2039,28 +2137,101 @@ def _load_revision_fd(revisions_fd, root_device, project_id, revision_id):
     if revision_value.project_id != project_id or revision_value.id != revision_id:
         _close_fd(revision_fd)
         return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
-    content_code = _validate_revision_content(revision_fd, root_device, revision_value)
+    source_before = (None, None)
+    if observe_model:
+        if revision_value.model is None:
+            _close_fd(revision_fd)
+            return (None, RevisionStoreErrorCode.NOT_FOUND)
+        source_before = _observe_model_binding_fd(
+            revision_fd,
+            root_device,
+            revision_value.model,
+        )
+        if source_before[1] is not None:
+            _close_fd(revision_fd)
+            return (None, source_before[1])
+    content_result = _validate_revision_content(revision_fd, root_device, revision_value)
+    content_code = content_result[0]
+    hashed_model_binding = content_result[1]
+    if content_code is None:
+        manifest_after = _read_bounded_file(
+            revision_fd,
+            "manifest.json",
+            root_device,
+            _MAX_MANIFEST_BYTES,
+            RevisionStoreErrorCode.CORRUPT_RECORD,
+        )
+        if manifest_after[1] is not None:
+            content_code = manifest_after[1]
+            if content_code is RevisionStoreErrorCode.NOT_FOUND:
+                content_code = RevisionStoreErrorCode.CORRUPT_RECORD
+        elif manifest_after[0] != manifest_read[0]:
+            content_code = RevisionStoreErrorCode.CORRUPT_RECORD
+    source_after = (None, None)
+    if content_code is None and observe_model:
+        if source_before[0] != hashed_model_binding:
+            content_code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if content_code is None and observe_model:
+        source_after = _observe_model_binding_fd(
+            revision_fd,
+            root_device,
+            revision_value.model,
+        )
+        if source_after[1] is not None:
+            content_code = source_after[1]
+        elif source_before[0] != source_after[0]:
+            content_code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if content_code is None and observe_model:
+        revision_after = None
+        try:
+            revision_after = os.fstat(revision_fd)
+        except OSError:
+            content_code = RevisionStoreErrorCode.IO_ERROR
+        if content_code is None and not _same_source_parent(revision_after, revision_stat):
+            content_code = RevisionStoreErrorCode.CORRUPT_CONTENT
+    if content_code is None and observe_model:
+        revision_entry = _entry_stat(revisions_fd, _revision_key(revision_id))
+        if revision_entry[2] is not None:
+            content_code = revision_entry[2]
+        elif not revision_entry[1]:
+            content_code = RevisionStoreErrorCode.CORRUPT_CONTENT
+        elif not _safe_directory_stat(revision_entry[0], root_device):
+            content_code = RevisionStoreErrorCode.CORRUPT_CONTENT
+        elif not _same_source_parent(revision_entry[0], revision_stat):
+            content_code = RevisionStoreErrorCode.CORRUPT_CONTENT
     close_failed = _close_fd(revision_fd)
     if content_code is not None:
         return (None, content_code)
     if close_failed:
         return (None, RevisionStoreErrorCode.IO_ERROR)
+    if observe_model:
+        return ((revision_value, source_after[0]), None)
     return (revision_value, None)
 
 
 def _validate_revision_content(revision_fd, root_device, revision_value):
+    model_binding = None
     if revision_value.model is not None:
-        model_code = _validate_content_file(revision_fd, root_device, revision_value.model)
-        if model_code is not None:
-            return model_code
+        model_result = _validate_content_file(
+            revision_fd,
+            root_device,
+            revision_value.model,
+        )
+        if model_result[0] is not None:
+            return (model_result[0], None)
+        model_binding = model_result[1]
     content_artifacts = revision_value.artifacts
     if type(content_artifacts) is not type(()):
-        return RevisionStoreErrorCode.CORRUPT_RECORD
+        return (RevisionStoreErrorCode.CORRUPT_RECORD, None)
     for content_artifact in content_artifacts:
-        artifact_code = _validate_content_file(revision_fd, root_device, content_artifact)
-        if artifact_code is not None:
-            return artifact_code
-    return None
+        artifact_result = _validate_content_file(
+            revision_fd,
+            root_device,
+            content_artifact,
+        )
+        if artifact_result[0] is not None:
+            return (artifact_result[0], None)
+    return (None, model_binding)
 
 
 def _validate_content_file(revision_fd, root_device, reference):
@@ -2073,12 +2244,16 @@ def _validate_content_file(revision_fd, root_device, reference):
         False,
     )
     if opened[2] is not None:
-        return opened[2]
+        return (opened[2], None)
     content_fd = opened[0]
     content_stat = opened[1]
     if content_stat.st_size != reference.size_bytes:
         _close_fd(content_fd)
-        return RevisionStoreErrorCode.CORRUPT_CONTENT
+        return (RevisionStoreErrorCode.CORRUPT_CONTENT, None)
+    binding = _revision_source_binding(content_stat)
+    if binding[1] is not None:
+        _close_fd(content_fd)
+        return (binding[1], None)
     remaining = content_stat.st_size
     content_hash_state = hashlib.sha256()
     read_failed = False
@@ -2103,22 +2278,16 @@ def _validate_content_file(revision_fd, root_device, reference):
         stat_failed = True
     close_failed = _close_fd(content_fd)
     if read_failed or stat_failed or after_stat is None or close_failed:
-        return RevisionStoreErrorCode.IO_ERROR
-    if after_stat.st_dev != content_stat.st_dev or after_stat.st_ino != content_stat.st_ino:
-        return RevisionStoreErrorCode.CORRUPT_CONTENT
-    if after_stat.st_size != content_stat.st_size:
-        return RevisionStoreErrorCode.CORRUPT_CONTENT
-    if after_stat.st_mtime_ns != content_stat.st_mtime_ns:
-        return RevisionStoreErrorCode.CORRUPT_CONTENT
-    if after_stat.st_ctime_ns != content_stat.st_ctime_ns:
-        return RevisionStoreErrorCode.CORRUPT_CONTENT
+        return (RevisionStoreErrorCode.IO_ERROR, None)
+    if not _source_matches_binding(after_stat, binding[0]):
+        return (RevisionStoreErrorCode.CORRUPT_CONTENT, None)
     actual_digest = content_hash_state.hexdigest()
     if actual_digest != reference.sha256:
-        return RevisionStoreErrorCode.CORRUPT_CONTENT
-    return None
+        return (RevisionStoreErrorCode.CORRUPT_CONTENT, None)
+    return (None, binding[0])
 
 
-def _load_head_fd(project_fd, revisions_fd, root_device, project_id):
+def _load_head_record_fd(project_fd, root_device, project_id):
     head_read = _read_bounded_file(
         project_fd,
         "HEAD.json",
@@ -2137,6 +2306,14 @@ def _load_head_fd(project_fd, revisions_fd, root_device, project_id):
     head_value = head_result[0]
     if head_value.project_id != project_id:
         return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    return (head_value, None)
+
+
+def _load_head_fd(project_fd, revisions_fd, root_device, project_id):
+    head_result = _load_head_record_fd(project_fd, root_device, project_id)
+    if head_result[1] is not None:
+        return head_result
+    head_value = head_result[0]
     revision_result = _load_revision_fd(
         revisions_fd,
         root_device,
@@ -4759,6 +4936,25 @@ def _load_store_project(store, project_id):
         _close_fd(root_open[0])
         return (None, None, project_open[3])
     return (root_open, project_open, None)
+
+
+def _directory_binding_code(parent_fd, name, directory_fd, root_device):
+    try:
+        opened = os.fstat(directory_fd)
+    except OSError:
+        return RevisionStoreErrorCode.IO_ERROR
+    if not _safe_directory_stat(opened, root_device):
+        return RevisionStoreErrorCode.UNSAFE_STORE
+    entry = _entry_stat(parent_fd, name)
+    if entry[2] is not None:
+        return entry[2]
+    if not entry[1]:
+        return RevisionStoreErrorCode.UNSAFE_STORE
+    if not _safe_directory_stat(entry[0], root_device):
+        return RevisionStoreErrorCode.UNSAFE_STORE
+    if not _same_source_parent(entry[0], opened):
+        return RevisionStoreErrorCode.UNSAFE_STORE
+    return None
 
 
 def _terminal_journal_matches(head, journal):
@@ -7643,6 +7839,9 @@ class LocalRevisionStore:
     def load_revision(self, project_id, revision_id):
         return _load_revision(self, project_id, revision_id)
 
+    def observe_model_source(self, project_id, revision_id):
+        return _observe_model_source(self, project_id, revision_id)
+
     def snapshot_projects(self):
         return _discovery_store_snapshot(self)[0]
 
@@ -7741,6 +7940,149 @@ def _load_revision(store, project_id, revision_id):
     if close_failed:
         raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
     return result[0]
+
+
+def _observe_model_source(store, project_id, revision_id):
+    project_code = _identifier_code(project_id, _PROJECT_PATTERN)
+    if project_code is not None:
+        raise RevisionStoreError(project_code)
+    if revision_id is not None:
+        revision_code = _identifier_code(revision_id, _REVISION_PATTERN)
+        if revision_code is not None:
+            raise RevisionStoreError(revision_code)
+    attempt = 0
+    while attempt < _MAX_RECORD_OPEN_ATTEMPTS:
+        attempt += 1
+        loaded = _load_store_project(store, project_id)
+        if loaded[2] is not None:
+            raise RevisionStoreError(loaded[2])
+        root_open = loaded[0]
+        project_open = loaded[1]
+        code = None
+        observation = None
+        retry = False
+        head_before = _load_head_record_fd(
+            project_open[0],
+            root_open[1].st_dev,
+            project_id,
+        )
+        if head_before[1] is not None:
+            code = head_before[1]
+        target_revision_id = revision_id
+        if code is None and target_revision_id is None:
+            target_revision_id = head_before[0].revision_id
+        head_revision = None
+        target_revision = None
+        target_binding = None
+        if code is None and target_revision_id == head_before[0].revision_id:
+            target_result = _load_revision_fd(
+                project_open[1],
+                root_open[1].st_dev,
+                project_id,
+                target_revision_id,
+                True,
+            )
+            if target_result[1] is not None:
+                code = target_result[1]
+            else:
+                target_revision = target_result[0][0]
+                target_binding = target_result[0][1]
+                head_revision = target_revision
+        elif code is None:
+            head_result = _load_revision_fd(
+                project_open[1],
+                root_open[1].st_dev,
+                project_id,
+                head_before[0].revision_id,
+            )
+            if head_result[1] is not None:
+                code = head_result[1]
+            else:
+                head_revision = head_result[0]
+            if code is None:
+                target_result = _load_revision_fd(
+                    project_open[1],
+                    root_open[1].st_dev,
+                    project_id,
+                    target_revision_id,
+                    True,
+                )
+                if target_result[1] is not None:
+                    code = target_result[1]
+                else:
+                    target_revision = target_result[0][0]
+                    target_binding = target_result[0][1]
+        if code is None and (
+            head_revision.manifest_sha256 != head_before[0].manifest_sha256
+            or head_revision.project_id != project_id
+            or head_revision.id != head_before[0].revision_id
+        ):
+            code = RevisionStoreErrorCode.CORRUPT_RECORD
+        head_after = (None, None)
+        if code is None:
+            head_after = _load_head_record_fd(
+                project_open[0],
+                root_open[1].st_dev,
+                project_id,
+            )
+            if head_after[1] is not None:
+                code = head_after[1]
+            elif head_after[0] != head_before[0]:
+                retry = True
+        if code is None and not retry:
+            code = _directory_binding_code(
+                root_open[0],
+                _project_key(project_id),
+                project_open[0],
+                root_open[1].st_dev,
+            )
+        if code is None and not retry:
+            code = _directory_binding_code(
+                project_open[0],
+                "revisions",
+                project_open[1],
+                root_open[1].st_dev,
+            )
+        if code is None and not retry:
+            root_verification = _open_store_root(store)
+            if root_verification[2] is not None:
+                code = root_verification[2]
+            else:
+                if not _same_source_parent(root_verification[1], root_open[1]):
+                    code = RevisionStoreErrorCode.UNSAFE_STORE
+                if _close_fd(root_verification[0]) and code is None:
+                    code = RevisionStoreErrorCode.IO_ERROR
+        if code is None and not retry:
+            model_path = (
+                store._root
+                / _project_key(project_id)
+                / "revisions"
+                / _revision_key(target_revision_id)
+                / target_revision.model.name
+            )
+            if (
+                type(head_after[0]) is not ProjectHead
+                or type(target_revision) is not RevisionRef
+                or type(target_binding) is not RevisionSourceBinding
+            ):
+                code = RevisionStoreErrorCode.CORRUPT_RECORD
+            else:
+                observation = RevisionSourceObservation(
+                    head=head_after[0],
+                    revision=target_revision,
+                    model_path=model_path,
+                    model_binding=target_binding,
+                )
+        close_failed = _close_project_fds(project_open)
+        close_failed = _close_fd(root_open[0]) or close_failed
+        if close_failed:
+            raise RevisionStoreError(RevisionStoreErrorCode.IO_ERROR)
+        if code is not None:
+            raise RevisionStoreError(code)
+        if retry:
+            continue
+        return observation
+    raise RevisionStoreError(RevisionStoreErrorCode.CONFLICT)
 
 
 def _same_copy_file_stat(left, right):

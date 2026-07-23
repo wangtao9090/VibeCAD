@@ -30,6 +30,7 @@ from vibecad.execution.revisions import (
     RevisionRef,
     RevisionSnapshotEntry,
     RevisionSourceBinding,
+    RevisionSourceObservation,
     RevisionStoreError,
     RevisionStoreErrorCode,
     RevisionStoreRootTrust,
@@ -152,6 +153,7 @@ EXPECTED_REVISION_EXPORTS = (
     "RevisionRef",
     "RevisionSnapshotEntry",
     "RevisionSourceBinding",
+    "RevisionSourceObservation",
     "RevisionStoreError",
     "RevisionStoreErrorCode",
     "RevisionStoreRootTrust",
@@ -205,6 +207,7 @@ EXPECTED_STORE_METHODS = {
     "initialize_empty_project": ("self", "project_id", "lease"),
     "load_head": ("self", "project_id"),
     "load_revision": ("self", "project_id", "revision_id"),
+    "observe_model_source": ("self", "project_id", "revision_id"),
     "discovery_namespace": ("self",),
     "snapshot_projects": ("self",),
     "snapshot_revisions": ("self", "project_id"),
@@ -297,6 +300,12 @@ EXPECTED_VALUE_FIELDS = {
         "size",
         "mtime_ns",
         "ctime_ns",
+    ),
+    "RevisionSourceObservation": (
+        "head",
+        "revision",
+        "model_path",
+        "model_binding",
     ),
 }
 EXPECTED_ENUM_MEMBERS = {
@@ -2629,6 +2638,173 @@ def test_local_revision_store_method_surface_and_signatures_are_exact():
             assert signature.return_annotation in {None, "None"}
         else:
             assert signature.return_annotation is inspect.Signature.empty
+
+
+def test_model_source_observation_validates_head_source_once(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, _root = store_parts
+    source = tmp_path / "source.FCStd"
+    source.write_bytes(b"trusted-model")
+    source.chmod(0o600)
+    head = _initialize_imported(store, manager, source)
+    expected_revision = store.load_revision(PROJECT_ID, head.revision_id)
+    expected_path = store.revision_model_path(PROJECT_ID, head.revision_id)
+    original = revisions_module._validate_revision_content
+    validated: list[str] = []
+
+    def counted(revision_fd, root_device, revision):
+        validated.append(revision.id)
+        return original(revision_fd, root_device, revision)
+
+    monkeypatch.setattr(revisions_module, "_validate_revision_content", counted)
+    observation = store.observe_model_source(PROJECT_ID, head.revision_id)
+
+    assert type(observation) is RevisionSourceObservation
+    assert observation.head == head
+    assert observation.revision == expected_revision
+    assert observation.model_path == expected_path
+    assert observation.model_binding == _source_binding(observation.model_path)
+    assert validated == [head.revision_id]
+    assert tuple(item.name for item in fields(type(observation))) == (
+        "head",
+        "revision",
+        "model_path",
+        "model_binding",
+    )
+    with pytest.raises((FrozenInstanceError, AttributeError)):
+        observation.head = head
+    assert "__dict__" not in dir(observation)
+
+
+def test_model_source_observation_validates_distinct_head_and_source_once_each(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, _root = store_parts
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(
+            store,
+            lease,
+            head,
+            model=b"draft-model",
+        )
+        revision = store.seal_revision(PROJECT_ID, revision_id, lease)
+    original = revisions_module._validate_revision_content
+    validated: list[str] = []
+
+    def counted(revision_fd, root_device, observed_revision):
+        validated.append(observed_revision.id)
+        return original(revision_fd, root_device, observed_revision)
+
+    monkeypatch.setattr(revisions_module, "_validate_revision_content", counted)
+    observation = store.observe_model_source(PROJECT_ID, revision.id)
+
+    assert observation.head == head
+    assert observation.revision == revision
+    assert validated == [head.revision_id, revision.id]
+
+
+@pytest.mark.parametrize("rebound", ("revision", "revisions", "root"))
+def test_model_source_observation_rejects_path_chain_rebinding_after_hash(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rebound: str,
+):
+    store, manager, root = store_parts
+    source = tmp_path / "source.FCStd"
+    source.write_bytes(b"trusted-model")
+    source.chmod(0o600)
+    head = _initialize_imported(store, manager, source)
+    revision_dir = _revision_dir(root, head.revision_id)
+    revisions_dir = revision_dir.parent
+    original = revisions_module._validate_revision_content
+    swapped = False
+
+    def swap_after_hash(revision_fd, root_device, revision):
+        nonlocal swapped
+        result = original(revision_fd, root_device, revision)
+        if not swapped:
+            swapped = True
+            if rebound == "revision":
+                target = revision_dir
+            elif rebound == "revisions":
+                target = revisions_dir
+            else:
+                target = root
+            moved = target.with_name(target.name + ".detached")
+            target.rename(moved)
+            target.mkdir(mode=0o700)
+            target.chmod(0o700)
+        return result
+
+    monkeypatch.setattr(revisions_module, "_validate_revision_content", swap_after_hash)
+
+    with pytest.raises(RevisionStoreError) as raised:
+        store.observe_model_source(PROJECT_ID, head.revision_id)
+
+    assert swapped is True
+    assert raised.value.code in {
+        RevisionStoreErrorCode.CORRUPT_CONTENT,
+        RevisionStoreErrorCode.UNSAFE_STORE,
+    }
+
+
+@pytest.mark.parametrize("target_kind", ("head", "distinct"))
+def test_model_source_observation_rejects_manifest_replacement_after_hash(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_kind: str,
+):
+    store, manager, root = store_parts
+    source = tmp_path / "source.FCStd"
+    source.write_bytes(b"trusted-model")
+    source.chmod(0o600)
+    head = _initialize_imported(store, manager, source)
+    target_revision_id = head.revision_id
+    if target_kind == "distinct":
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            target_revision_id = _begin_and_fill(
+                store,
+                lease,
+                head,
+                model=b"distinct-source-model",
+            )
+            store.seal_revision(PROJECT_ID, target_revision_id, lease)
+            store.rollback_revision(PROJECT_ID, target_revision_id, lease)
+    manifest_path = _revision_dir(root, target_revision_id) / "manifest.json"
+    manifest_body = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_body.pop("checksum")
+    manifest_body["model"]["id"] = "artifact_" + "f" * 32
+    replacement = tmp_path / f"{target_kind}-manifest-replacement.json"
+    _write_checked_record(
+        replacement,
+        manifest_body,
+        MANIFEST_CHECKSUM_DOMAIN,
+    )
+    original = revisions_module._validate_revision_content
+    replaced = False
+
+    def replace_after_hash(revision_fd, root_device, revision):
+        nonlocal replaced
+        result = original(revision_fd, root_device, revision)
+        if revision.id == target_revision_id and not replaced:
+            os.replace(replacement, manifest_path)
+            replaced = True
+        return result
+
+    monkeypatch.setattr(revisions_module, "_validate_revision_content", replace_after_hash)
+
+    with pytest.raises(RevisionStoreError) as raised:
+        store.observe_model_source(PROJECT_ID, target_revision_id)
+
+    assert replaced is True
+    assert raised.value.code is RevisionStoreErrorCode.CORRUPT_RECORD
 
 
 def test_public_value_types_are_frozen_slotted_keyword_only_and_exact():
@@ -8518,6 +8694,7 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "RevisionRef",
         "RevisionSnapshotEntry",
         "RevisionSourceBinding",
+        "RevisionSourceObservation",
     }
     expected_class_methods = {
         "CommitJournal": {"__post_init__", "from_mapping", "to_mapping"},
@@ -8535,6 +8712,7 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "RevisionRef": {"__post_init__", "from_mapping", "to_mapping"},
         "RevisionSnapshotEntry": {"__post_init__"},
         "RevisionSourceBinding": {"__post_init__"},
+        "RevisionSourceObservation": {"__post_init__"},
         "RevisionStoreError": {"__init__"},
         "RevisionStoreErrorCode": set(),
         "RevisionStoreRootTrust": set(),

@@ -10,9 +10,13 @@ from types import SimpleNamespace
 
 import pytest
 
+import vibecad.execution.revisions as revisions_module
 import vibecad.interaction.checkouts as checkout_module
 from vibecad.execution.revisions import (
     LocalRevisionStore,
+    ProjectHead,
+    RevisionStoreError,
+    RevisionStoreErrorCode,
     RevisionStoreRootTrust,
 )
 from vibecad.interaction.checkouts import (
@@ -23,6 +27,7 @@ from vibecad.interaction.checkouts import (
     MAX_OPEN_CHECKOUTS,
     CheckoutError,
     CheckoutErrorCode,
+    CheckoutSourceLiveness,
     CheckoutState,
     CheckoutStoreRootTrust,
     DraftCheckoutSource,
@@ -31,8 +36,13 @@ from vibecad.interaction.checkouts import (
 )
 from vibecad.interaction.storage import CheckoutMutationLock, SafeRoot, StorageFailure
 from vibecad.workflow.lease import LeaseRootTrust, ResourceLeaseManager
-from vibecad.workflow.state import ReviewDraft
-from vibecad.workflow.store import TaskRunStore, TaskStoreRootTrust
+from vibecad.workflow.state import ReviewDraft, ReviewPolicy, TaskStatus
+from vibecad.workflow.store import (
+    TaskRunStore,
+    TaskStoreError,
+    TaskStoreErrorCode,
+    TaskStoreRootTrust,
+)
 
 PROJECT_ID = "project_" + "1" * 32
 OPEN_KEY = "checkout_open_" + "2" * 32
@@ -63,6 +73,75 @@ def _store_from_base(base: Path) -> ManagedCheckoutStore:
         tasks,
         trust=CheckoutStoreRootTrust.TRUSTED_LOCAL,
     )
+
+
+def _advance_head(
+    revisions: LocalRevisionStore,
+    head: ProjectHead,
+    *,
+    payload: bytes = b"advanced model",
+) -> ProjectHead:
+    leases = revisions._lease_manager
+    with leases.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = revisions.begin_revision(PROJECT_ID, head, lease)
+        model = revisions.candidate_model_path(PROJECT_ID, revision_id, lease)
+        step = revisions.candidate_artifact_path(PROJECT_ID, revision_id, "step", lease)
+        model.write_bytes(payload)
+        step.write_bytes(b"ISO-10303-21;ENDSEC;")
+        os.chmod(model, 0o600)
+        os.chmod(step, 0o600)
+        revision = revisions.seal_revision(PROJECT_ID, revision_id, lease)
+        return revisions.commit_revision(PROJECT_ID, head, revision.id, lease)
+
+
+def _draft_source(
+    revisions: LocalRevisionStore,
+    head: ProjectHead,
+    *,
+    generation: int = 7,
+):
+    task_id = "task_" + "3" * 32
+    leases = revisions._lease_manager
+    with leases.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = revisions.begin_revision(PROJECT_ID, head, lease)
+        model = revisions.candidate_model_path(PROJECT_ID, revision_id, lease)
+        step = revisions.candidate_artifact_path(PROJECT_ID, revision_id, "step", lease)
+        model.write_bytes(b"verified draft model")
+        step.write_bytes(b"ISO-10303-21;DRAFT;ENDSEC;")
+        os.chmod(model, 0o600)
+        os.chmod(step, 0o600)
+        revision = revisions.seal_revision(PROJECT_ID, revision_id, lease)
+        revisions.rollback_revision(PROJECT_ID, revision_id, lease)
+    draft = ReviewDraft(
+        id="draft_" + revision_id.removeprefix("revision_"),
+        task_id=task_id,
+        project_id=PROJECT_ID,
+        base_revision=head.revision_id,
+        base_generation=head.generation,
+        base_manifest_sha256=head.manifest_sha256,
+        revision_id=revision_id,
+        manifest_sha256=revision.manifest_sha256,
+        verification_id="verification_" + "4" * 32,
+        acceptance_id="acceptance-review",
+        observation_digest="5" * 64,
+    )
+    stored = SimpleNamespace(
+        generation=generation,
+        task_run=SimpleNamespace(
+            id=task_id,
+            project_id=PROJECT_ID,
+            base_revision=head.revision_id,
+            review_policy=ReviewPolicy.REQUIRE_REVIEW,
+            status=TaskStatus.AWAITING_USER_REVIEW,
+            draft=draft,
+        ),
+    )
+    source = DraftCheckoutSource(
+        task_id=task_id,
+        draft_id=draft.id,
+        expected_generation=generation,
+    )
+    return source, draft, stored, revision
 
 
 def _concurrent_open_worker(
@@ -140,6 +219,33 @@ def checkout_rig(tmp_path: Path):
     return store, revisions, head, checkout_root
 
 
+@pytest.fixture
+def empty_checkout_rig(tmp_path: Path):
+    lock_root = tmp_path / "locks"
+    revision_root = tmp_path / "projects"
+    task_root = tmp_path / "tasks"
+    checkout_root = tmp_path / "checkouts"
+    for root in (lock_root, revision_root, task_root, checkout_root):
+        _mkdir(root)
+    leases = ResourceLeaseManager(lock_root, trust=LeaseRootTrust.TRUSTED_LOCAL)
+    revisions = LocalRevisionStore(
+        revision_root,
+        leases,
+        trust=RevisionStoreRootTrust.TRUSTED_LOCAL,
+    )
+    tasks = TaskRunStore(task_root, leases, trust=TaskStoreRootTrust.TRUSTED_LOCAL)
+    with leases.acquire_project_write(PROJECT_ID) as lease:
+        head = revisions.initialize_empty_project(PROJECT_ID, lease)
+    store = ManagedCheckoutStore(
+        checkout_root,
+        lock_root,
+        revisions,
+        tasks,
+        trust=CheckoutStoreRootTrust.TRUSTED_LOCAL,
+    )
+    return store, revisions, head, checkout_root
+
+
 def test_open_copies_head_to_non_authoritative_single_link(checkout_rig) -> None:
     store, revisions, head, _root = checkout_rig
 
@@ -155,7 +261,10 @@ def test_open_copies_head_to_non_authoritative_single_link(checkout_rig) -> None
     assert descriptor.local_path.read_bytes() == source.read_bytes()
     assert descriptor.local_path.stat().st_ino != source.stat().st_ino
     assert descriptor.local_path.stat().st_nlink == 1
-    assert descriptor.to_wire_mapping().keys() == {
+    assert descriptor.source_head == head
+    assert descriptor.source_liveness.value == "live"
+    wire = descriptor.to_wire_mapping()
+    assert wire.keys() == {
         "checkout_id",
         "open_key",
         "state",
@@ -166,6 +275,13 @@ def test_open_copies_head_to_non_authoritative_single_link(checkout_rig) -> None
         "current_model_sha256",
         "current_size_bytes",
     }
+    local = descriptor.to_local_mapping()
+    assert local == wire | {
+        "source_head": head.to_mapping(),
+        "source_liveness": "live",
+    }
+    assert "local_path" not in local
+    assert "source_binding" not in local
 
 
 def test_key_first_replay_keeps_original_source_and_observes_safe_edit(checkout_rig) -> None:
@@ -596,32 +712,618 @@ def test_tombstone_reservation_never_prevents_existing_close(
     assert raised.value.code is CheckoutErrorCode.RESOURCE_EXHAUSTED
 
 
-def test_key_first_replay_does_not_resolve_advanced_head(
+def test_key_first_replay_keeps_original_source_but_recomputes_advanced_head(
+    checkout_rig,
+) -> None:
+    store, revisions, original_head, _root = checkout_rig
+    first = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    advanced = _advance_head(revisions, original_head)
+    assert advanced.revision_id != original_head.revision_id
+
+    replay = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    assert replay.checkout_id == first.checkout_id
+    assert replay.source.revision_id == original_head.revision_id
+    assert replay.source_head == original_head
+    assert replay.source_liveness.value == "stale"
+    assert store.get(first.checkout_id).source_liveness.value == "stale"
+    fresh = store.open(
+        "checkout_open_" + "7" * 32,
+        HeadCheckoutSource(project_id=PROJECT_ID),
+    )
+    assert fresh.checkout_id != first.checkout_id
+    assert fresh.source_head == advanced
+    assert fresh.source.revision_id == advanced.revision_id
+    assert fresh.source_liveness.value == "live"
+
+
+def test_head_generation_advance_is_stale_even_if_revision_identity_repeats(
     checkout_rig,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, revisions, original_head, _root = checkout_rig
-    first = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
-    leases = revisions._lease_manager
-    with leases.acquire_project_write(PROJECT_ID) as lease:
-        revision_id = revisions.begin_revision(PROJECT_ID, original_head, lease)
-        model = revisions.candidate_model_path(PROJECT_ID, revision_id, lease)
-        step = revisions.candidate_artifact_path(PROJECT_ID, revision_id, "step", lease)
-        model.write_bytes(b"advanced model")
-        step.write_bytes(b"ISO-10303-21;ENDSEC;")
-        os.chmod(model, 0o600)
-        os.chmod(step, 0o600)
-        revision = revisions.seal_revision(PROJECT_ID, revision_id, lease)
-        advanced = revisions.commit_revision(PROJECT_ID, original_head, revision.id, lease)
-    assert advanced.revision_id != original_head.revision_id
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    repeated = ProjectHead(
+        project_id=PROJECT_ID,
+        generation=original_head.generation + 1,
+        revision_id=original_head.revision_id,
+        manifest_sha256=original_head.manifest_sha256,
+    )
+    monkeypatch.setattr(
+        LocalRevisionStore,
+        "load_head",
+        lambda _self, _project_id: repeated,
+    )
 
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("key replay resolved current HEAD")
+    observed = store.get(opened.checkout_id)
 
-    monkeypatch.setattr(LocalRevisionStore, "load_head", forbidden)
-    replay = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
-    assert replay.checkout_id == first.checkout_id
-    assert replay.source.revision_id == original_head.revision_id
+    assert observed.source_head == original_head
+    assert observed.source_liveness.value == "stale"
+
+
+def test_live_head_liveness_uses_a_bounded_revision_validation_budget(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, revisions, _head, _root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    original = revisions_module._validate_revision_content
+    calls = 0
+
+    def counted(revision_fd, root_device, revision):
+        nonlocal calls
+        calls += 1
+        return original(revision_fd, root_device, revision)
+
+    monkeypatch.setattr(revisions_module, "_validate_revision_content", counted)
+    observed = store.get(opened.checkout_id)
+
+    assert observed.source_liveness.value == "live"
+    assert calls == 2
+
+
+def test_source_replacement_between_observation_and_copy_cannot_rebind_checkout(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _revisions, _head, _root = checkout_rig
+    original = ManagedCheckoutStore._publish_open
+    replaced = False
+
+    def replace_before_copy(
+        self,
+        root_fd,
+        open_key,
+        intent,
+        resolved,
+        model_path,
+        source_head,
+        expected_source_binding,
+    ):
+        nonlocal replaced
+        replacement = model_path.parent / ".same-bytes-replacement.FCStd"
+        replacement.write_bytes(model_path.read_bytes())
+        replacement.chmod(0o600)
+        os.replace(replacement, model_path)
+        replaced = True
+        return original(
+            self,
+            root_fd,
+            open_key,
+            intent,
+            resolved,
+            model_path,
+            source_head,
+            expected_source_binding,
+        )
+
+    monkeypatch.setattr(ManagedCheckoutStore, "_publish_open", replace_before_copy)
+
+    with pytest.raises(CheckoutError) as raised:
+        store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+
+    assert replaced is True
+    assert raised.value.code is CheckoutErrorCode.INTEGRITY_FAILURE
+
+
+def test_closed_checkout_recomputes_liveness_after_restart(
+    checkout_rig,
+) -> None:
+    store, revisions, original_head, root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    closed = store.close(opened.checkout_id)
+    assert closed.source_liveness.value == "live"
+    _advance_head(revisions, original_head)
+    restarted = ManagedCheckoutStore(
+        root,
+        store.lock_root,
+        revisions,
+        store.task_store,
+        trust=CheckoutStoreRootTrust.TRUSTED_LOCAL,
+    )
+
+    observed = restarted.get(opened.checkout_id)
+
+    assert observed.state is CheckoutState.CLOSED
+    assert observed.source_head == original_head
+    assert observed.source_liveness.value == "stale"
+    with pytest.raises(CheckoutError) as raised:
+        restarted.require_live(opened.checkout_id)
+    assert raised.value.code is CheckoutErrorCode.CONFLICT
+
+
+@pytest.mark.parametrize(
+    "store_failure",
+    [
+        RevisionStoreError(RevisionStoreErrorCode.NOT_FOUND),
+        RevisionStoreError(RevisionStoreErrorCode.CORRUPT_RECORD),
+        OSError("unavailable"),
+    ],
+)
+def test_head_store_uncertainty_projects_recovery_without_hiding_historical_bytes(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+    store_failure: Exception,
+) -> None:
+    store, _revisions, _head, _root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    historical = opened.local_path.read_bytes()
+
+    def fail(_self, _project_id, _revision_id):
+        raise store_failure
+
+    monkeypatch.setattr(LocalRevisionStore, "observe_model_source", fail)
+    observed = store.get(opened.checkout_id)
+
+    assert observed.source_liveness.value == "recovery_required"
+    assert observed.local_path.read_bytes() == historical
+    with pytest.raises(CheckoutError) as raised:
+        store.require_live(opened.checkout_id)
+    assert raised.value.code.value == "recovery_required"
+
+
+def test_legacy_checkout_without_full_head_binding_fails_liveness_closed(
+    checkout_rig,
+) -> None:
+    store, _revisions, _head, _root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    metadata = opened.local_path.parent / "metadata.json"
+    value = checkout_module._strict_json(metadata.read_bytes())
+    value.pop("checksum")
+    value.pop("source_head")
+    binding = value.pop("source_binding")
+    value.update(
+        {
+            "source_device": binding["dev"],
+            "source_inode": binding["ino"],
+            "source_size": binding["size"],
+            "source_mtime_ns": binding["mtime_ns"],
+        }
+    )
+    value["schema_version"] = 1
+    metadata.write_bytes(
+        checkout_module._encode_record(
+            value,
+            checkout_module._RECORD_DOMAIN,
+        )
+    )
+    os.chmod(metadata, 0o600)
+
+    observed = store.get(opened.checkout_id)
+
+    assert observed.source_head is None
+    assert observed.source_liveness.value == "recovery_required"
+    closed = store.close(opened.checkout_id)
+    assert closed.state is CheckoutState.CLOSED
+    assert closed.source_liveness.value == "recovery_required"
+    assert store.get(opened.checkout_id).source_liveness.value == "recovery_required"
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    ["same_bytes", "in_place", "unlink", "symlink", "hardlink"],
+)
+def test_authoritative_source_replacement_projects_recovery_and_still_closes(
+    checkout_rig,
+    replacement: str,
+) -> None:
+    store, revisions, head, _root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    source = revisions.revision_model_path(PROJECT_ID, head.revision_id)
+    checkout_bytes = opened.local_path.read_bytes()
+    external = source.parent.parent / f"{replacement}.FCStd"
+    external.write_bytes(source.read_bytes())
+    os.chmod(external, 0o600)
+
+    if replacement == "same_bytes":
+        os.replace(external, source)
+    elif replacement == "in_place":
+        source.write_bytes(b"changed immutable source")
+        os.chmod(source, 0o600)
+    elif replacement == "unlink":
+        source.unlink()
+    elif replacement == "symlink":
+        source.unlink()
+        source.symlink_to(external)
+    else:
+        source.unlink()
+        os.link(external, source)
+
+    observed = store.get(opened.checkout_id)
+
+    assert observed.source_liveness.value == "recovery_required"
+    assert observed.local_path.read_bytes() == checkout_bytes
+    closed = store.close(opened.checkout_id)
+    assert closed.state is CheckoutState.CLOSED
+    assert closed.source_liveness.value == "recovery_required"
+
+
+def test_source_binding_uses_ctime_not_only_legacy_identity_tuple(
+    checkout_rig,
+) -> None:
+    store, _revisions, _head, _root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    metadata = opened.local_path.parent / "metadata.json"
+    value = checkout_module._strict_json(metadata.read_bytes())
+    value.pop("checksum")
+    value["source_binding"]["ctime_ns"] += 1
+    metadata.write_bytes(
+        checkout_module._encode_record(
+            value,
+            checkout_module._RECORD_DOMAIN_V2,
+        )
+    )
+    os.chmod(metadata, 0o600)
+
+    observed = store.get(opened.checkout_id)
+
+    assert observed.source_binding.ctime_ns != opened.source_binding.ctime_ns
+    assert observed.source_liveness.value == "recovery_required"
+
+
+def test_revision_directory_swap_during_validation_never_returns_live(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, revisions, head, _root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    source = revisions.revision_model_path(PROJECT_ID, head.revision_id)
+    original = revisions_module._validate_revision_content
+    moved = source.parent.with_name(source.parent.name + ".detached")
+    swapped = False
+
+    def swap_after_read(revision_fd, root_device, revision):
+        nonlocal swapped
+        result = original(revision_fd, root_device, revision)
+        if revision.id == head.revision_id and not swapped:
+            swapped = True
+            source.parent.rename(moved)
+            source.parent.mkdir(mode=0o700)
+            os.chmod(source.parent, 0o700)
+            forged = source.parent / "model.FCStd"
+            forged.write_bytes(b"invalid replacement")
+            os.chmod(forged, 0o600)
+        return result
+
+    monkeypatch.setattr(revisions_module, "_validate_revision_content", swap_after_read)
+    observed = store.get(opened.checkout_id)
+
+    assert swapped is True
+    assert observed.source_liveness.value == "recovery_required"
+
+
+def test_head_advance_during_source_validation_never_returns_live(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, revisions, head, _root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    original = ManagedCheckoutStore._validate_bound_source
+    advanced = None
+
+    def advance_after_validation(self, source, source_head, source_binding):
+        nonlocal advanced
+        result = original(self, source, source_head, source_binding)
+        if self is store and advanced is None:
+            advanced = _advance_head(revisions, head)
+        return result
+
+    monkeypatch.setattr(
+        ManagedCheckoutStore,
+        "_validate_bound_source",
+        advance_after_validation,
+    )
+    observed = store.get(opened.checkout_id)
+
+    assert advanced is not None
+    assert observed.source_liveness.value == "stale"
+
+
+def test_legacy_closed_tombstone_recomputes_as_recovery(
+    checkout_rig,
+) -> None:
+    store, _revisions, _head, root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    store.close(opened.checkout_id)
+    tombstone = root / f"closed_{opened.checkout_id}.json"
+    value = checkout_module._strict_json(tombstone.read_bytes())
+    value.pop("checksum")
+    value.pop("source_head")
+    value.pop("source_binding")
+    value["schema_version"] = 1
+    tombstone.write_bytes(
+        checkout_module._encode_record(
+            value,
+            checkout_module._TOMBSTONE_DOMAIN,
+        )
+    )
+    os.chmod(tombstone, 0o600)
+
+    observed = store.get(opened.checkout_id)
+
+    assert observed.state is CheckoutState.CLOSED
+    assert observed.source_head is None
+    assert observed.source_liveness.value == "recovery_required"
+
+
+def test_live_draft_guard_rejects_dirty_and_non_draft_checkouts(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, revisions, head, _root = checkout_rig
+    source, draft, stored, _revision = _draft_source(revisions, head)
+    monkeypatch.setattr(TaskRunStore, "load", lambda _self, _task_id: stored)
+    opened = store.open(OPEN_KEY, source)
+
+    accepted = store.require_acceptance(
+        opened.checkout_id,
+        task_id=source.task_id,
+        draft_id=source.draft_id,
+        expected_generation=source.expected_generation,
+    )
+    assert accepted.source_liveness.value == "live"
+    replacement = opened.local_path.with_suffix(".dirty")
+    replacement.write_bytes(b"manual unverified edit")
+    os.chmod(replacement, 0o600)
+    os.replace(replacement, opened.local_path)
+    with pytest.raises(CheckoutError) as dirty:
+        store.require_acceptance(
+            opened.checkout_id,
+            task_id=source.task_id,
+            draft_id=draft.id,
+            expected_generation=source.expected_generation,
+        )
+    assert dirty.value.code is CheckoutErrorCode.CONFLICT
+
+    head_checkout = store.open(
+        "checkout_open_" + "8" * 32,
+        HeadCheckoutSource(project_id=PROJECT_ID),
+    )
+    with pytest.raises(CheckoutError) as wrong_kind:
+        store.require_acceptance(
+            head_checkout.checkout_id,
+            task_id=source.task_id,
+            draft_id=draft.id,
+            expected_generation=source.expected_generation,
+        )
+    assert wrong_kind.value.code is CheckoutErrorCode.CONFLICT
+
+
+def test_empty_project_first_draft_remains_live_across_restart_then_becomes_stale(
+    empty_checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, revisions, head, root = empty_checkout_rig
+    assert revisions.load_revision(PROJECT_ID, head.revision_id).model is None
+    source, _draft, stored, _revision = _draft_source(revisions, head)
+    monkeypatch.setattr(TaskRunStore, "load", lambda _self, _task_id: stored)
+
+    opened = store.open(OPEN_KEY, source)
+
+    assert opened.source_liveness is CheckoutSourceLiveness.LIVE
+    restarted = ManagedCheckoutStore(
+        root,
+        store.lock_root,
+        revisions,
+        store.task_store,
+        trust=CheckoutStoreRootTrust.TRUSTED_LOCAL,
+    )
+    assert restarted.get(opened.checkout_id).source_liveness is CheckoutSourceLiveness.LIVE
+    _advance_head(revisions, head)
+    assert restarted.get(opened.checkout_id).source_liveness is CheckoutSourceLiveness.STALE
+
+
+@pytest.mark.parametrize("terminal", [TaskStatus.SUCCEEDED, TaskStatus.REJECTED])
+def test_draft_accept_or_reject_revokes_existing_checkout_and_blocks_guard(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: TaskStatus,
+) -> None:
+    store, revisions, head, _root = checkout_rig
+    source, draft, stored, _revision = _draft_source(revisions, head)
+    current = {"stored": stored}
+    monkeypatch.setattr(TaskRunStore, "load", lambda _self, _task_id: current["stored"])
+    opened = store.open(OPEN_KEY, source)
+    current["stored"] = SimpleNamespace(
+        generation=stored.generation + 1,
+        task_run=SimpleNamespace(
+            id=source.task_id,
+            project_id=PROJECT_ID,
+            base_revision=head.revision_id,
+            review_policy=ReviewPolicy.REQUIRE_REVIEW,
+            status=terminal,
+            draft=draft,
+        ),
+    )
+
+    observed = store.get(opened.checkout_id)
+
+    assert observed.source_liveness.value == "revoked"
+    with pytest.raises(CheckoutError) as raised:
+        store.require_acceptance(
+            opened.checkout_id,
+            task_id=source.task_id,
+            draft_id=source.draft_id,
+            expected_generation=source.expected_generation,
+        )
+    assert raised.value.code is CheckoutErrorCode.CONFLICT
+    closed = store.close(opened.checkout_id)
+    assert closed.state is CheckoutState.CLOSED
+    assert closed.source_liveness.value == "revoked"
+
+
+def test_draft_authority_change_during_source_validation_never_returns_live(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, revisions, head, _root = checkout_rig
+    source, draft, stored, _revision = _draft_source(revisions, head)
+    current = {"stored": stored}
+    monkeypatch.setattr(TaskRunStore, "load", lambda _self, _task_id: current["stored"])
+    opened = store.open(OPEN_KEY, source)
+    original = ManagedCheckoutStore._validate_bound_source
+
+    def reject_after_validation(self, resolved, source_head, source_binding):
+        result = original(self, resolved, source_head, source_binding)
+        if self is store and current["stored"] is stored:
+            current["stored"] = SimpleNamespace(
+                generation=stored.generation + 1,
+                task_run=SimpleNamespace(
+                    id=source.task_id,
+                    project_id=PROJECT_ID,
+                    base_revision=head.revision_id,
+                    review_policy=ReviewPolicy.REQUIRE_REVIEW,
+                    status=TaskStatus.REJECTED,
+                    draft=draft,
+                ),
+            )
+        return result
+
+    monkeypatch.setattr(
+        ManagedCheckoutStore,
+        "_validate_bound_source",
+        reject_after_validation,
+    )
+    observed = store.get(opened.checkout_id)
+
+    assert observed.source_liveness.value == "revoked"
+    with pytest.raises(CheckoutError) as raised:
+        store.require_acceptance(
+            opened.checkout_id,
+            task_id=source.task_id,
+            draft_id=source.draft_id,
+            expected_generation=source.expected_generation,
+        )
+    assert raised.value.code is CheckoutErrorCode.CONFLICT
+
+
+def test_draft_task_store_uncertainty_projects_recovery_and_blocks_acceptance(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, revisions, head, _root = checkout_rig
+    source, _draft, stored, _revision = _draft_source(revisions, head)
+    current = {"stored": stored}
+
+    def load(_self, _task_id):
+        value = current["stored"]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(TaskRunStore, "load", load)
+    opened = store.open(OPEN_KEY, source)
+    current["stored"] = TaskStoreError(TaskStoreErrorCode.CORRUPT_RECORD)
+
+    observed = store.get(opened.checkout_id)
+
+    assert observed.source_liveness.value == "recovery_required"
+    with pytest.raises(CheckoutError) as raised:
+        store.require_acceptance(
+            opened.checkout_id,
+            task_id=source.task_id,
+            draft_id=source.draft_id,
+            expected_generation=source.expected_generation,
+        )
+    assert raised.value.code is CheckoutErrorCode.RECOVERY_REQUIRED
+
+
+def test_draft_generation_change_cannot_revive_old_checkout(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, revisions, head, _root = checkout_rig
+    source, draft, stored, _revision = _draft_source(revisions, head)
+    current = {"stored": stored}
+    monkeypatch.setattr(TaskRunStore, "load", lambda _self, _task_id: current["stored"])
+    opened = store.open(OPEN_KEY, source)
+    current["stored"] = SimpleNamespace(
+        generation=stored.generation + 2,
+        task_run=SimpleNamespace(
+            id=source.task_id,
+            project_id=PROJECT_ID,
+            base_revision=head.revision_id,
+            review_policy=ReviewPolicy.REQUIRE_REVIEW,
+            status=TaskStatus.AWAITING_USER_REVIEW,
+            draft=draft,
+        ),
+    )
+
+    assert store.get(opened.checkout_id).source_liveness.value == "revoked"
+
+
+def test_draft_base_head_advance_is_stale_and_blocks_acceptance(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, revisions, head, _root = checkout_rig
+    source, _draft, stored, _revision = _draft_source(revisions, head)
+    monkeypatch.setattr(TaskRunStore, "load", lambda _self, _task_id: stored)
+    opened = store.open(OPEN_KEY, source)
+    _advance_head(revisions, head)
+
+    observed = store.get(opened.checkout_id)
+
+    assert observed.source_liveness.value == "stale"
+    with pytest.raises(CheckoutError) as raised:
+        store.require_acceptance(
+            opened.checkout_id,
+            task_id=source.task_id,
+            draft_id=source.draft_id,
+            expected_generation=source.expected_generation,
+        )
+    assert raised.value.code is CheckoutErrorCode.CONFLICT
+
+
+def test_non_review_authoritative_draft_cannot_open_with_current_generation(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, revisions, head, _root = checkout_rig
+    source, draft, stored, _revision = _draft_source(revisions, head)
+    rejected = SimpleNamespace(
+        generation=stored.generation + 1,
+        task_run=SimpleNamespace(
+            id=source.task_id,
+            project_id=PROJECT_ID,
+            base_revision=head.revision_id,
+            review_policy=ReviewPolicy.REQUIRE_REVIEW,
+            status=TaskStatus.REJECTED,
+            draft=draft,
+        ),
+    )
+    monkeypatch.setattr(TaskRunStore, "load", lambda _self, _task_id: rejected)
+
+    with pytest.raises(CheckoutError) as raised:
+        store.open(
+            OPEN_KEY,
+            DraftCheckoutSource(
+                task_id=source.task_id,
+                draft_id=source.draft_id,
+                expected_generation=rejected.generation,
+            ),
+        )
+
+    assert raised.value.code is CheckoutErrorCode.CONFLICT
 
 
 def test_draft_checkout_edit_and_close_never_mutate_source_or_head(
@@ -629,50 +1331,15 @@ def test_draft_checkout_edit_and_close_never_mutate_source_or_head(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, revisions, head, _root = checkout_rig
-    task_id = "task_" + "3" * 32
-    leases = revisions._lease_manager
-    with leases.acquire_project_write(PROJECT_ID) as lease:
-        revision_id = revisions.begin_revision(PROJECT_ID, head, lease)
-        model = revisions.candidate_model_path(PROJECT_ID, revision_id, lease)
-        step = revisions.candidate_artifact_path(PROJECT_ID, revision_id, "step", lease)
-        model.write_bytes(b"verified draft model")
-        step.write_bytes(b"ISO-10303-21;DRAFT;ENDSEC;")
-        os.chmod(model, 0o600)
-        os.chmod(step, 0o600)
-        revision = revisions.seal_revision(PROJECT_ID, revision_id, lease)
-        revisions.rollback_revision(PROJECT_ID, revision_id, lease)
-    draft = ReviewDraft(
-        id="draft_" + revision_id.removeprefix("revision_"),
-        task_id=task_id,
-        project_id=PROJECT_ID,
-        base_revision=head.revision_id,
-        base_generation=head.generation,
-        base_manifest_sha256=head.manifest_sha256,
-        revision_id=revision_id,
-        manifest_sha256=revision.manifest_sha256,
-        verification_id="verification_" + "4" * 32,
-        acceptance_id="acceptance-review",
-        observation_digest="5" * 64,
-    )
-    stored = SimpleNamespace(
-        generation=7,
-        task_run=SimpleNamespace(
-            project_id=PROJECT_ID,
-            base_revision=head.revision_id,
-            draft=draft,
-        ),
-    )
+    source, draft, stored, revision = _draft_source(revisions, head)
+    task_id = source.task_id
     monkeypatch.setattr(TaskRunStore, "load", lambda _self, _task_id: stored)
-    source_path = revisions.revision_model_path(PROJECT_ID, revision_id)
+    source_path = revisions.revision_model_path(PROJECT_ID, revision.id)
     immutable_bytes = source_path.read_bytes()
 
     opened = store.open(
         OPEN_KEY,
-        DraftCheckoutSource(
-            task_id=task_id,
-            draft_id=draft.id,
-            expected_generation=7,
-        ),
+        source,
     )
     replacement = opened.local_path.with_suffix(".edit")
     replacement.write_bytes(b"manual draft edit")
@@ -682,7 +1349,8 @@ def test_draft_checkout_edit_and_close_never_mutate_source_or_head(
 
     assert closed.dirty is True
     assert closed.source.task_id == task_id
-    assert closed.source.task_generation == 7
+    assert closed.source.task_generation == source.expected_generation
+    assert closed.source_liveness.value == "live"
     assert source_path.read_bytes() == immutable_bytes
     assert revisions.load_head(PROJECT_ID) == head
 
@@ -876,7 +1544,7 @@ def test_close_process_death_converges_to_terminal_tombstone(
 
 
 def test_post_tombstone_delete_failure_preserves_closed_descriptor(checkout_rig) -> None:
-    store, _revisions, _head, _root = checkout_rig
+    store, revisions, head, _root = checkout_rig
     opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
     extra = opened.local_path.parent / "unexpected.txt"
     extra.write_bytes(b"must not be guessed away")
@@ -887,16 +1555,51 @@ def test_post_tombstone_delete_failure_preserves_closed_descriptor(checkout_rig)
     assert raised.value.code is CheckoutErrorCode.CLEANUP_REQUIRED
     assert raised.value.descriptor is not None
     assert raised.value.descriptor.state is CheckoutState.CLOSED
+    assert raised.value.descriptor.source_liveness.value == "live"
+    _advance_head(revisions, head)
 
     with pytest.raises(CheckoutError) as replay:
         store.get(opened.checkout_id)
     assert replay.value.code is CheckoutErrorCode.CLEANUP_REQUIRED
     assert replay.value.descriptor.to_wire_mapping() == raised.value.descriptor.to_wire_mapping()
+    assert replay.value.descriptor.source_liveness.value == "stale"
 
     extra.unlink()
     closed = store.get(opened.checkout_id)
     assert closed.state is CheckoutState.CLOSED
+    assert closed.source_liveness.value == "stale"
     assert not opened.local_path.parent.exists()
+
+
+def test_tombstone_publish_uncertainty_returns_fresh_liveness(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _revisions, _head, _root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    original = SafeRoot.atomic_write
+    injected = False
+
+    def publish_then_fail(self, parent_fd, name, raw, *, token):
+        nonlocal injected
+        result = original(self, parent_fd, name, raw, token=token)
+        if self is store._root and name.startswith("closed_checkout_") and not injected:
+            injected = True
+            raise StorageFailure("post-publication failure")
+        return result
+
+    monkeypatch.setattr(SafeRoot, "atomic_write", publish_then_fail)
+    with pytest.raises(CheckoutError) as raised:
+        store.close(opened.checkout_id)
+
+    assert injected is True
+    assert raised.value.code is CheckoutErrorCode.DURABILITY_UNCERTAIN
+    assert raised.value.descriptor is not None
+    assert raised.value.descriptor.state is CheckoutState.CLOSED
+    assert raised.value.descriptor.source_liveness.value == "live"
+    observed = store.get(opened.checkout_id)
+    assert observed.state is CheckoutState.CLOSED
+    assert observed.source_liveness.value == "live"
 
 
 def test_expired_crash_close_pair_is_deleted_never_resurrected(
