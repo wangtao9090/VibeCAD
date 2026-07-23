@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 import zipfile
 from pathlib import Path
 
@@ -24,7 +25,8 @@ from vibecad.execution.executor import (
     InProcessCadExecutor,
 )
 from vibecad.execution.registry import ExecutionProfile
-from vibecad.execution.revisions import LocalRevisionStore, ProjectHead
+from vibecad.execution.revisions import LocalRevisionStore, ProjectHead, RevisionRef
+from vibecad.execution.worker_port import WorkerCadExecutionPort
 from vibecad.interaction.cad import (
     MAX_ADMITTED_CREATED_OBJECTS,
     MAX_ADMITTED_RESULT_BYTES,
@@ -37,6 +39,11 @@ from vibecad.interaction.cad import (
     ValidatedMaterializationEvidence,
 )
 from vibecad.validation import EntityObservation, EntityParameterObservation
+from vibecad.worker.generation import (
+    WorkerError,
+    WorkerErrorCode,
+    WorkerGenerationState,
+)
 from vibecad.workflow.lease import ProjectWriteLease
 
 _PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
@@ -164,6 +171,608 @@ def test_nominal_port_extends_snapshot_port_and_reports_only_headless_verified()
         MAX_ADMITTED_CREATED_OBJECTS,
         MAX_ADMITTED_RESULT_BYTES,
     ) == (30_000, 1, 262_144)
+
+
+def test_worker_port_is_lazy_and_releases_revision_capability_after_last_session() -> None:
+    store = _store()
+    revision = RevisionRef(
+        id=_BASE_REVISION,
+        project_id=_PROJECT_ID,
+        base_revision=None,
+        manifest_sha256=_DIGEST,
+        model=None,
+        artifacts=(),
+    )
+    capability = object()
+    session = object()
+
+    class Worker:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object | None]] = []
+
+        def bind_revision(self, *, store, revision):
+            assert store is not None
+            self.calls.append(("bind_revision", revision))
+            return capability
+
+        def load_revision(self, value):
+            assert value is capability
+            self.calls.append(("load_revision", value))
+            return session
+
+        def close_session(self, value):
+            assert value is session
+            self.calls.append(("close_session", value))
+
+        def release_revision(self, value):
+            assert value is capability
+            self.calls.append(("release_revision", value))
+
+        def close(self):
+            self.calls.append(("close", None))
+
+    worker = Worker()
+    starts: list[Path] = []
+    port = WorkerCadExecutionPort(
+        store=store,
+        worker_factory=lambda *, source_root: (
+            starts.append(source_root),
+            worker,
+        )[1],
+    )
+
+    assert starts == []
+    assert port.open_revision(store=store, revision=revision) is session
+    assert len(starts) == 1
+    port.close(session)
+    port.close_generation()
+
+    assert [name for name, _value in worker.calls] == [
+        "bind_revision",
+        "load_revision",
+        "close_session",
+        "release_revision",
+        "close",
+    ]
+
+
+def test_worker_port_keeps_generation_after_typed_cad_failure() -> None:
+    store = _store()
+    revision = RevisionRef(
+        id=_BASE_REVISION,
+        project_id=_PROJECT_ID,
+        base_revision=None,
+        manifest_sha256=_DIGEST,
+        model=None,
+        artifacts=(),
+    )
+    capability = object()
+    session = object()
+
+    class Worker:
+        def __init__(self) -> None:
+            self.load_calls = 0
+            self.release_calls = 0
+
+        def bind_revision(self, *, store, revision):
+            del store, revision
+            return capability
+
+        def load_revision(self, value):
+            assert value is capability
+            self.load_calls += 1
+            if self.load_calls == 1:
+                raise WorkerError(WorkerErrorCode.CAD_FAILURE)
+            return session
+
+        def close_session(self, value):
+            assert value is session
+
+        def release_revision(self, value):
+            assert value is capability
+            self.release_calls += 1
+
+        def close(self):
+            return None
+
+    worker = Worker()
+    starts = 0
+
+    def start_worker(*, source_root):
+        nonlocal starts
+        del source_root
+        starts += 1
+        return worker
+
+    port = WorkerCadExecutionPort(store=store, worker_factory=start_worker)
+    with pytest.raises(ExecutorError) as caught:
+        port.open_revision(store=store, revision=revision)
+    assert caught.value.code is ExecutorErrorCode.CAD_FAILURE
+    assert port.generation_lost is False
+
+    assert port.open_revision(store=store, revision=revision) is session
+    port.close(session)
+    port.close_generation()
+    assert starts == 1
+    assert worker.release_calls == 2
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        WorkerError(WorkerErrorCode.GENERATION_LOST),
+        RuntimeError("unexpected proxy failure"),
+    ),
+)
+def test_worker_port_retires_generation_after_transport_or_unknown_failure(
+    failure: Exception,
+) -> None:
+    store = _store()
+    revision = RevisionRef(
+        id=_BASE_REVISION,
+        project_id=_PROJECT_ID,
+        base_revision=None,
+        manifest_sha256=_DIGEST,
+        model=None,
+        artifacts=(),
+    )
+    capability = object()
+
+    class Worker:
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+
+        def bind_revision(self, *, store, revision):
+            del store, revision
+            return capability
+
+        def load_revision(self, value):
+            assert value is capability
+            raise failure
+
+        def terminate(self):
+            self.terminate_calls += 1
+
+    worker = Worker()
+    starts = 0
+
+    def start_worker(*, source_root):
+        nonlocal starts
+        del source_root
+        starts += 1
+        return worker
+
+    port = WorkerCadExecutionPort(store=store, worker_factory=start_worker)
+    with pytest.raises(ExecutorError) as caught:
+        port.open_revision(store=store, revision=revision)
+
+    assert caught.value.code is ExecutorErrorCode.CAD_FAILURE
+    assert port.generation_lost is True
+    with pytest.raises(ExecutorError) as retired:
+        port.open_revision(store=store, revision=revision)
+    assert retired.value.code is ExecutorErrorCode.CAD_FAILURE
+    assert starts == 1
+    assert worker.terminate_calls == 1
+
+
+def test_worker_port_terminates_after_unknown_generation_close_failure() -> None:
+    store = _store()
+    revision = RevisionRef(
+        id=_BASE_REVISION,
+        project_id=_PROJECT_ID,
+        base_revision=None,
+        manifest_sha256=_DIGEST,
+        model=None,
+        artifacts=(),
+    )
+    capability = object()
+    session = object()
+
+    class Worker:
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+
+        def bind_revision(self, *, store, revision):
+            del store, revision
+            return capability
+
+        def load_revision(self, value):
+            assert value is capability
+            return session
+
+        def close(self):
+            raise RuntimeError("unknown close failure")
+
+        def terminate(self):
+            self.terminate_calls += 1
+
+    worker = Worker()
+    port = WorkerCadExecutionPort(
+        store=store,
+        worker_factory=lambda *, source_root: worker,
+    )
+    assert port.open_revision(store=store, revision=revision) is session
+
+    with pytest.raises(ExecutorError) as caught:
+        port.close_generation()
+
+    assert caught.value.code is ExecutorErrorCode.CAD_FAILURE
+    assert worker.terminate_calls == 1
+    with pytest.raises(ExecutorError) as closed:
+        port.open_revision(store=store, revision=revision)
+    assert closed.value.code is ExecutorErrorCode.CAD_FAILURE
+
+
+def test_worker_port_serializes_capability_binding_and_last_session_release() -> None:
+    store = _store()
+    head = ProjectHead(
+        project_id=_PROJECT_ID,
+        generation=0,
+        revision_id=_BASE_REVISION,
+        manifest_sha256=_DIGEST,
+    )
+    lease = object.__new__(ProjectWriteLease)
+    candidate_capability = object()
+    candidate_session = object()
+    bind_entered = threading.Event()
+    release_bind = threading.Event()
+    revision = RevisionRef(
+        id=_BASE_REVISION,
+        project_id=_PROJECT_ID,
+        base_revision=None,
+        manifest_sha256=_DIGEST,
+        model=None,
+        artifacts=(),
+    )
+    revision_capability = object()
+    revision_sessions = (object(), object())
+    first_close_entered = threading.Event()
+    release_first_close = threading.Event()
+
+    class Worker:
+        def __init__(self) -> None:
+            self.candidate_bind_calls = 0
+            self.revision_load_calls = 0
+            self.revision_release_calls = 0
+            self.close_session_calls = 0
+
+        def bind_candidate(self, **_kwargs):
+            self.candidate_bind_calls += 1
+            bind_entered.set()
+            assert release_bind.wait(timeout=3)
+            return candidate_capability
+
+        def create_empty(self, value):
+            assert value is candidate_capability
+            return candidate_session
+
+        def release_candidate(self, value):
+            assert value is candidate_capability
+
+        def bind_revision(self, **_kwargs):
+            return revision_capability
+
+        def load_revision(self, value):
+            assert value is revision_capability
+            session = revision_sessions[self.revision_load_calls]
+            self.revision_load_calls += 1
+            return session
+
+        def close_session(self, value):
+            self.close_session_calls += 1
+            if value is revision_sessions[0]:
+                first_close_entered.set()
+                assert release_first_close.wait(timeout=3)
+
+        def release_revision(self, value):
+            assert value is revision_capability
+            self.revision_release_calls += 1
+
+        def close(self):
+            return None
+
+    worker = Worker()
+    port = WorkerCadExecutionPort(
+        store=store,
+        worker_factory=lambda *, source_root: worker,
+    )
+    candidate_results: list[object] = []
+    candidate_errors: list[ExecutorError] = []
+
+    def open_candidate() -> None:
+        try:
+            candidate_results.append(
+                port.open_candidate(
+                    store=store,
+                    base_head=head,
+                    revision_id=_CANDIDATE_REVISION,
+                    lease=lease,
+                    empty=True,
+                )
+            )
+        except ExecutorError as error:
+            candidate_errors.append(error)
+
+    first = threading.Thread(target=open_candidate)
+    second = threading.Thread(target=open_candidate)
+    first.start()
+    assert bind_entered.wait(timeout=2)
+    second.start()
+    release_bind.set()
+    first.join(timeout=3)
+    second.join(timeout=3)
+
+    assert candidate_results == [candidate_session]
+    assert [error.code for error in candidate_errors] == [ExecutorErrorCode.INVALID_CANDIDATE]
+    assert worker.candidate_bind_calls == 1
+    port.close(candidate_session)
+
+    first_revision = port.open_revision(store=store, revision=revision)
+    second_revision = port.open_revision(store=store, revision=revision)
+    closers = [
+        threading.Thread(target=port.close, args=(first_revision,)),
+        threading.Thread(target=port.close, args=(second_revision,)),
+    ]
+    closers[0].start()
+    assert first_close_entered.wait(timeout=2)
+    closers[1].start()
+    release_first_close.set()
+    for closer in closers:
+        closer.join(timeout=3)
+
+    assert all(not closer.is_alive() for closer in closers)
+    assert worker.revision_release_calls == 1
+    port.close_generation()
+
+
+def test_worker_port_cancellation_does_not_wait_for_first_generation_start() -> None:
+    store = _store()
+    revision = RevisionRef(
+        id=_BASE_REVISION,
+        project_id=_PROJECT_ID,
+        base_revision=None,
+        manifest_sha256=_DIGEST,
+        model=None,
+        artifacts=(),
+    )
+    factory_entered = threading.Event()
+    release_factory = threading.Event()
+    cancellation_returned = threading.Event()
+    errors: list[ExecutorError] = []
+    cancellation_errors: list[ExecutorError] = []
+
+    class Worker:
+        def __init__(self) -> None:
+            self.state = WorkerGenerationState.READY
+            self.terminate_calls = 0
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+            self.state = WorkerGenerationState.DEAD
+
+    worker = Worker()
+
+    def start_worker(*, source_root):
+        del source_root
+        factory_entered.set()
+        assert release_factory.wait(timeout=3)
+        return worker
+
+    port = WorkerCadExecutionPort(store=store, worker_factory=start_worker)
+
+    def open_revision() -> None:
+        try:
+            port.open_revision(store=store, revision=revision)
+        except ExecutorError as error:
+            errors.append(error)
+
+    opener = threading.Thread(target=open_revision)
+    opener.start()
+    assert factory_entered.wait(timeout=2)
+
+    def cancel_generation() -> None:
+        try:
+            port.terminate_generation()
+        except ExecutorError as error:
+            cancellation_errors.append(error)
+        finally:
+            cancellation_returned.set()
+
+    canceller = threading.Thread(target=cancel_generation)
+    canceller.start()
+
+    assert cancellation_returned.wait(timeout=1)
+    release_factory.set()
+    opener.join(timeout=3)
+    canceller.join(timeout=3)
+
+    assert not opener.is_alive()
+    assert not canceller.is_alive()
+    assert [error.code for error in errors] == [ExecutorErrorCode.CAD_FAILURE]
+    assert [error.code for error in cancellation_errors] == [ExecutorErrorCode.CAD_FAILURE]
+    assert worker.terminate_calls == 1
+    assert worker.state is WorkerGenerationState.DEAD
+    assert port.generation_lost is True
+
+
+@pytest.mark.parametrize(
+    "incomplete_state",
+    (WorkerGenerationState.READY, WorkerGenerationState.CLEANUP_REQUIRED),
+)
+def test_worker_port_rejects_silent_incomplete_termination_and_retries_handle(
+    incomplete_state: WorkerGenerationState,
+) -> None:
+    class Worker:
+        def __init__(self) -> None:
+            self.state = WorkerGenerationState.READY
+            self.terminate_calls = 0
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+            self.state = incomplete_state
+
+    worker = Worker()
+    port = WorkerCadExecutionPort(
+        store=_store(),
+        worker_factory=lambda *, source_root: worker,
+    )
+    assert port._start_worker() is worker
+
+    for expected_calls in (1, 2):
+        with pytest.raises(ExecutorError) as caught:
+            port.terminate_generation()
+        assert caught.value.code is ExecutorErrorCode.CAD_FAILURE
+        assert worker.terminate_calls == expected_calls
+        assert worker.state is incomplete_state
+
+
+def test_worker_port_retries_termination_after_exception_until_dead() -> None:
+    class Worker:
+        def __init__(self) -> None:
+            self.state = WorkerGenerationState.READY
+            self.terminate_calls = 0
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+            if self.terminate_calls == 1:
+                raise RuntimeError("first termination failed")
+            self.state = WorkerGenerationState.DEAD
+
+    worker = Worker()
+    port = WorkerCadExecutionPort(
+        store=_store(),
+        worker_factory=lambda *, source_root: worker,
+    )
+    assert port._start_worker() is worker
+
+    with pytest.raises(ExecutorError) as caught:
+        port.terminate_generation()
+    assert caught.value.code is ExecutorErrorCode.CAD_FAILURE
+
+    port.terminate_generation()
+    assert worker.terminate_calls == 2
+    assert worker.state is WorkerGenerationState.DEAD
+
+
+def test_worker_port_retains_call_loss_handle_until_dead_termination() -> None:
+    store = _store()
+    revision = RevisionRef(
+        id=_BASE_REVISION,
+        project_id=_PROJECT_ID,
+        base_revision=None,
+        manifest_sha256=_DIGEST,
+        model=None,
+        artifacts=(),
+    )
+    capability = object()
+
+    class Worker:
+        def __init__(self) -> None:
+            self.state = WorkerGenerationState.READY
+            self.terminate_calls = 0
+
+        def bind_revision(self, *, store, revision):
+            del store, revision
+            return capability
+
+        def load_revision(self, value):
+            assert value is capability
+            raise WorkerError(WorkerErrorCode.GENERATION_LOST)
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+            self.state = (
+                WorkerGenerationState.CLEANUP_REQUIRED
+                if self.terminate_calls == 1
+                else WorkerGenerationState.DEAD
+            )
+
+    worker = Worker()
+    port = WorkerCadExecutionPort(
+        store=store,
+        worker_factory=lambda *, source_root: worker,
+    )
+
+    with pytest.raises(ExecutorError) as caught:
+        port.open_revision(store=store, revision=revision)
+    assert caught.value.code is ExecutorErrorCode.CAD_FAILURE
+    assert port.generation_lost is True
+    assert worker.terminate_calls == 1
+    assert worker.state is WorkerGenerationState.CLEANUP_REQUIRED
+
+    port.terminate_generation()
+    assert worker.terminate_calls == 2
+    assert worker.state is WorkerGenerationState.DEAD
+
+
+def test_worker_port_start_race_requires_later_dead_proof_and_never_restarts() -> None:
+    store = _store()
+    revision = RevisionRef(
+        id=_BASE_REVISION,
+        project_id=_PROJECT_ID,
+        base_revision=None,
+        manifest_sha256=_DIGEST,
+        model=None,
+        artifacts=(),
+    )
+    factory_entered = threading.Event()
+    release_factory = threading.Event()
+    opener_errors: list[ExecutorError] = []
+
+    class Worker:
+        def __init__(self) -> None:
+            self.state = WorkerGenerationState.READY
+            self.terminate_calls = 0
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+            self.state = (
+                WorkerGenerationState.CLEANUP_REQUIRED
+                if self.terminate_calls == 1
+                else WorkerGenerationState.DEAD
+            )
+
+    worker = Worker()
+    starts = 0
+
+    def start_worker(*, source_root):
+        nonlocal starts
+        del source_root
+        starts += 1
+        factory_entered.set()
+        assert release_factory.wait(timeout=3)
+        return worker
+
+    port = WorkerCadExecutionPort(store=store, worker_factory=start_worker)
+
+    def open_revision() -> None:
+        try:
+            port.open_revision(store=store, revision=revision)
+        except ExecutorError as error:
+            opener_errors.append(error)
+
+    opener = threading.Thread(target=open_revision)
+    opener.start()
+    assert factory_entered.wait(timeout=2)
+
+    with pytest.raises(ExecutorError) as caught:
+        port.terminate_generation()
+    assert caught.value.code is ExecutorErrorCode.CAD_FAILURE
+
+    release_factory.set()
+    opener.join(timeout=3)
+    assert not opener.is_alive()
+    assert [error.code for error in opener_errors] == [ExecutorErrorCode.CAD_FAILURE]
+    assert worker.terminate_calls == 1
+    assert worker.state is WorkerGenerationState.CLEANUP_REQUIRED
+
+    port.terminate_generation()
+    assert worker.terminate_calls == 2
+    assert worker.state is WorkerGenerationState.DEAD
+    with pytest.raises(ExecutorError) as retired:
+        port.open_revision(store=store, revision=revision)
+    assert retired.value.code is ExecutorErrorCode.CAD_FAILURE
+    assert starts == 1
 
 
 def test_step_export_accepts_only_exact_owned_empty_placeholder_and_preserves_identity(

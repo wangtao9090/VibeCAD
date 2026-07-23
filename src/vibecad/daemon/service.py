@@ -595,10 +595,7 @@ def run_daemon() -> int:
     except (DaemonError, OSError, RuntimeError):
         return 1
     finally:
-        if daemon is not None and daemon.state not in {
-            LocalKernelState.CLOSED,
-            LocalKernelState.FAILED,
-        }:
+        if daemon is not None and daemon.state is not LocalKernelState.CLOSED:
             with contextlib.suppress(DaemonError):
                 daemon.close()
         for signum, handler in previous.items():

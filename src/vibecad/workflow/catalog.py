@@ -79,6 +79,16 @@ _IDLE_CANCEL_STATUSES = frozenset(
         TaskStatus.NEEDS_INPUT,
     }
 )
+_ACTIVE_CANCEL_STATUSES = frozenset(
+    {
+        TaskStatus.VALIDATING_PROGRAM,
+        TaskStatus.EXECUTING,
+        TaskStatus.VERIFYING,
+        TaskStatus.COMMITTING,
+        TaskStatus.PREPARING_REVIEW,
+        TaskStatus.ACCEPTING_DRAFT,
+    }
+)
 _CANCELLATION_STATUSES = frozenset(
     {
         TaskStatus.CANCEL_REQUESTED,
@@ -86,6 +96,83 @@ _CANCELLATION_STATUSES = frozenset(
         TaskStatus.CANCELLED,
     }
 )
+_CANCELLATION_DESCENDANT_STATUSES = _CANCELLATION_STATUSES | frozenset(
+    {
+        TaskStatus.RECOVERY_REQUIRED,
+        TaskStatus.CLEANUP_REQUIRED,
+        TaskStatus.SUCCEEDED,
+    }
+)
+_CANCELLATION_TAIL_EVENTS = frozenset(
+    {
+        TaskEvent.START_CANCELLATION,
+        TaskEvent.REQUIRE_RECOVERY,
+        TaskEvent.REQUIRE_CLEANUP,
+        TaskEvent.CONFIRM_COMMITTED,
+        TaskEvent.CONFIRM_CANCELLED,
+    }
+)
+_CANCELLATION_REQUEST_EVENTS = frozenset(
+    {
+        TaskEvent.REQUEST_CANCEL,
+        TaskEvent.REQUEST_ACTIVE_CANCEL,
+    }
+)
+
+
+def _has_task_event(task: TaskRun, event: TaskEvent) -> bool:
+    return any(record.event is event for record in task.transitions)
+
+
+def _has_cancellation_request(task: TaskRun) -> bool:
+    return task.status in _CANCELLATION_DESCENDANT_STATUSES and any(
+        record.event in _CANCELLATION_REQUEST_EVENTS for record in task.transitions
+    )
+
+
+def _has_cancellation_start(task: TaskRun) -> bool:
+    return _has_cancellation_request(task) and _has_task_event(
+        task,
+        TaskEvent.START_CANCELLATION,
+    )
+
+
+def _cancellation_payload_is_unchanged(before: TaskRun, after: TaskRun) -> bool:
+    return (
+        before.id == after.id
+        and before.project_id == after.project_id
+        and before.base_revision == after.base_revision
+        and before.reasoning_owner is after.reasoning_owner
+        and before.review_policy is after.review_policy
+        and before.creation_digest == after.creation_digest
+        and before.program == after.program
+        and before.candidate_revision == after.candidate_revision
+        and before.draft == after.draft
+        and before.steps == after.steps
+        and before.verification_reports == after.verification_reports
+        and before.artifacts == after.artifacts
+    )
+
+
+def _is_cancellation_descendant(
+    stored: StoredTaskRun,
+    desired: TaskRun,
+    *,
+    required_event: TaskEvent,
+) -> bool:
+    task = stored.task_run
+    prefix_length = len(desired.transitions)
+    return (
+        stored.generation >= 0
+        and task.status in _CANCELLATION_DESCENDANT_STATUSES
+        and _has_task_event(task, required_event)
+        and _cancellation_payload_is_unchanged(desired, task)
+        and len(task.transitions) >= prefix_length
+        and task.transitions[:prefix_length] == desired.transitions
+        and all(
+            record.event in _CANCELLATION_TAIL_EVENTS for record in task.transitions[prefix_length:]
+        )
+    )
 
 
 class _ReplayRetryBudget:
@@ -257,6 +344,24 @@ class TaskCatalogService:
     ) -> StoredTaskRun:
         """Atomically create or exactly replay one system-bound revert task."""
 
+        stored, _created_here = self.create_revert_task_with_disposition(
+            revert_key=revert_key,
+            project_id=project_id,
+            source_revision=source_revision,
+            expected_head=expected_head,
+        )
+        return stored
+
+    def create_revert_task_with_disposition(
+        self,
+        *,
+        revert_key: str,
+        project_id: str,
+        source_revision: object,
+        expected_head: object,
+    ) -> tuple[StoredTaskRun, bool]:
+        """Return the exact task plus whether this call proved its creation."""
+
         try:
             binding = build_revert_binding(
                 revert_key=revert_key,
@@ -270,9 +375,16 @@ class TaskCatalogService:
                 if error.code is RevertProgramErrorCode.INVALID_INPUT
                 else TaskCatalogErrorCode.CONFLICT
             )
-        return self._create_bound_task(binding)
+        return self._create_bound_task_with_disposition(binding)
 
     def _create_bound_task(self, binding: BoundRevert) -> StoredTaskRun:
+        stored, _created_here = self._create_bound_task_with_disposition(binding)
+        return stored
+
+    def _create_bound_task_with_disposition(
+        self,
+        binding: BoundRevert,
+    ) -> tuple[StoredTaskRun, bool]:
         retry_budget = _ReplayRetryBudget()
         task: TaskRun | None = None
         while True:
@@ -282,7 +394,7 @@ class TaskCatalogService:
                 retry_budget=retry_budget,
             )
             if existing is not None:
-                return self._replay_bound_or_conflict(existing, binding)
+                return self._replay_bound_or_conflict(existing, binding), False
             if task is None:
                 try:
                     task = new_task_run(
@@ -315,7 +427,7 @@ class TaskCatalogService:
                     )
                     if readback is None:
                         _raise(TaskCatalogErrorCode.STORE_FAILURE)
-                    return self._replay_bound_or_conflict(readback, binding)
+                    return self._replay_bound_or_conflict(readback, binding), False
                 if error.code is TaskStoreErrorCode.LOCK_UNAVAILABLE:
                     if retry_budget.wait_for_retry():
                         continue
@@ -333,7 +445,7 @@ class TaskCatalogService:
                 or stored.task_run != task
             ):
                 _raise(TaskCatalogErrorCode.STORE_FAILURE)
-            return stored
+            return stored, True
 
     @staticmethod
     def _replay_bound_or_conflict(
@@ -518,9 +630,12 @@ class TaskCatalogService:
         *,
         task_id: str,
         expected_generation: int,
+        active: bool = False,
     ) -> StoredTaskRun:
-        """Persist an idle cancellation or replay an existing cancellation intent."""
+        """Persist one cancellation request or replay its durable lineage."""
 
+        if type(active) is not bool:
+            _raise(TaskCatalogErrorCode.INVALID_INPUT)
         expected = _expected_generation(expected_generation)
         stored = self._load_replay_candidate(
             task_id,
@@ -530,10 +645,12 @@ class TaskCatalogService:
         if stored is None:
             _raise(TaskCatalogErrorCode.NOT_FOUND)
         status = stored.task_run.status
-        if status in _CANCELLATION_STATUSES:
+        if _has_cancellation_request(stored.task_run):
             if expected > stored.generation:
                 _raise(TaskCatalogErrorCode.CONFLICT)
             return stored
+        if stored.generation != expected:
+            _raise(TaskCatalogErrorCode.CONFLICT)
         if status in {
             TaskStatus.SUCCEEDED,
             TaskStatus.FAILED,
@@ -545,63 +662,129 @@ class TaskCatalogService:
             TaskStatus.CLEANUP_REQUIRED,
         }:
             _raise(TaskCatalogErrorCode.RECOVERY_REQUIRED)
-        if status not in _IDLE_CANCEL_STATUSES:
+        if status not in _IDLE_CANCEL_STATUSES | _ACTIVE_CANCEL_STATUSES:
             _raise(TaskCatalogErrorCode.INVALID_STATE)
-        if stored.generation != expected:
-            _raise(TaskCatalogErrorCode.CONFLICT)
+        event = TaskEvent.REQUEST_CANCEL
+        if active and status in _IDLE_CANCEL_STATUSES:
+            event = TaskEvent.REQUEST_ACTIVE_CANCEL
         try:
-            cancelled = transition_task(stored.task_run, TaskEvent.REQUEST_CANCEL)
+            requested = transition_task(stored.task_run, event)
         except TaskStateError:
             _raise(TaskCatalogErrorCode.INVALID_STATE)
+        return self._persist_cancellation_transition(
+            stored,
+            requested,
+            required_event=event,
+        )
+
+    def start_cancellation(
+        self,
+        *,
+        task_id: str,
+        expected_generation: int,
+    ) -> StoredTaskRun:
+        """Persist the fenced start of an already durable active cancellation."""
+
+        expected = _expected_generation(expected_generation)
+        stored = self._load_replay_candidate(
+            task_id,
+            await_publication=False,
+            retry_budget=_ReplayRetryBudget(),
+        )
+        if stored is None:
+            _raise(TaskCatalogErrorCode.NOT_FOUND)
+        if _has_cancellation_start(stored.task_run):
+            if expected > stored.generation:
+                _raise(TaskCatalogErrorCode.CONFLICT)
+            return stored
+        if stored.generation != expected:
+            _raise(TaskCatalogErrorCode.CONFLICT)
+        if (
+            stored.task_run.status is not TaskStatus.CANCEL_REQUESTED
+            or not _has_cancellation_request(stored.task_run)
+        ):
+            _raise(TaskCatalogErrorCode.INVALID_STATE)
+        try:
+            cancelling = transition_task(
+                stored.task_run,
+                TaskEvent.START_CANCELLATION,
+            )
+        except TaskStateError:
+            _raise(TaskCatalogErrorCode.INVALID_STATE)
+        return self._persist_cancellation_transition(
+            stored,
+            cancelling,
+            required_event=TaskEvent.START_CANCELLATION,
+        )
+
+    def _persist_cancellation_transition(
+        self,
+        stored: StoredTaskRun,
+        desired: TaskRun,
+        *,
+        required_event: TaskEvent,
+    ) -> StoredTaskRun:
         mutation_budget = _ReplayRetryBudget()
         while True:
             try:
                 result = self._task_store.compare_and_set(
                     stored.task_run.id,
                     stored.generation,
-                    cancelled,
+                    desired,
                 )
             except TaskStoreError as error:
                 if error.code is TaskStoreErrorCode.LOCK_UNAVAILABLE:
                     if mutation_budget.wait_for_retry():
                         continue
                     readback = self._load_replay_candidate(
-                        task_id,
+                        stored.task_run.id,
                         await_publication=False,
                         retry_budget=_ReplayRetryBudget(),
                     )
                     if (
                         type(readback) is StoredTaskRun
-                        and readback.task_run.status in _CANCELLATION_STATUSES
-                        and expected <= readback.generation
+                        and readback.generation >= stored.generation + 1
+                        and _is_cancellation_descendant(
+                            readback,
+                            desired,
+                            required_event=required_event,
+                        )
                     ):
                         return readback
                     _raise(TaskCatalogErrorCode.STORE_FAILURE)
                 if error.code is TaskStoreErrorCode.CONFLICT:
                     readback = self._load_replay_candidate(
-                        task_id,
+                        stored.task_run.id,
                         await_publication=False,
                         retry_budget=_ReplayRetryBudget(),
                     )
                     if (
                         type(readback) is StoredTaskRun
-                        and readback.task_run.status in _CANCELLATION_STATUSES
-                        and expected <= readback.generation
+                        and readback.generation >= stored.generation + 1
+                        and _is_cancellation_descendant(
+                            readback,
+                            desired,
+                            required_event=required_event,
+                        )
                     ):
                         return readback
                     _raise(TaskCatalogErrorCode.CONFLICT)
                 if error.code is TaskStoreErrorCode.DURABILITY_UNCERTAIN:
                     committed = getattr(error, "committed_generation", None)
                     readback = self._load_replay_candidate(
-                        task_id,
+                        stored.task_run.id,
                         await_publication=True,
                         retry_budget=_ReplayRetryBudget(),
                     )
                     if (
                         committed == stored.generation + 1
                         and type(readback) is StoredTaskRun
-                        and readback.generation == committed
-                        and readback.task_run == cancelled
+                        and readback.generation >= committed
+                        and _is_cancellation_descendant(
+                            readback,
+                            desired,
+                            required_event=required_event,
+                        )
                     ):
                         return readback
                     _raise(TaskCatalogErrorCode.STORE_FAILURE)
@@ -615,7 +798,7 @@ class TaskCatalogService:
             if (
                 type(result) is not StoredTaskRun
                 or result.generation != stored.generation + 1
-                or result.task_run != cancelled
+                or result.task_run != desired
             ):
                 _raise(TaskCatalogErrorCode.STORE_FAILURE)
             return result

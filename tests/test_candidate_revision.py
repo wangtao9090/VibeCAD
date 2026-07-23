@@ -415,6 +415,48 @@ def _begin(rig: Rig) -> ActiveCandidate:
     )
 
 
+def test_coordinator_routes_each_session_open_through_capability_hooks(
+    tmp_path: Path,
+) -> None:
+    class HookedPort(FakeCadSnapshotPort):
+        def __init__(self) -> None:
+            super().__init__()
+            self.hooks: list[tuple[str, str]] = []
+
+        def open_candidate(self, **kwargs):
+            self.hooks.append(("candidate", kwargs["revision_id"]))
+            return super().open_candidate(**kwargs)
+
+        def reload_candidate(self, **kwargs):
+            self.hooks.append(("reload", kwargs["revision_id"]))
+            return super().reload_candidate(**kwargs)
+
+        def open_revision(self, **kwargs):
+            revision = kwargs["revision"]
+            self.hooks.append(("revision", revision.id))
+            return super().open_revision(**kwargs)
+
+    with _rig(tmp_path, suffix="capability-hooks") as rig:
+        port = HookedPort()
+        rig.port = port
+        rig.coordinator = CandidateCoordinator(
+            store=rig.store,
+            snapshot_port=port,
+            session_slot=rig.slot,
+        )
+
+        active = _begin(rig)
+        checkpointed = rig.coordinator.checkpoint(candidate=active, lease=rig.lease)
+        checkpointed.step_path.write_bytes(b"ISO-10303-21;END-ISO-10303-21;")
+        sealed = rig.coordinator.seal(candidate=checkpointed, lease=rig.lease)
+
+        assert port.hooks == [
+            ("candidate", active.binding.revision_id),
+            ("reload", active.binding.revision_id),
+            ("revision", sealed.revision.id),
+        ]
+
+
 def _commit_rig_payload(
     rig: Rig,
     head: ProjectHead,
@@ -1585,6 +1627,22 @@ def test_public_surface_signatures_and_closed_enums() -> None:
         )
 
     expected_port = {
+        "open_candidate": (
+            "self",
+            "store",
+            "base_head",
+            "revision_id",
+            "lease",
+            "empty",
+        ),
+        "reload_candidate": (
+            "self",
+            "store",
+            "base_head",
+            "revision_id",
+            "lease",
+        ),
+        "open_revision": ("self", "store", "revision"),
         "create_empty": ("self", "revision_id"),
         "load_fcstd": ("self", "path"),
         "checkpoint_fcstd": ("self", "session", "path"),
@@ -1593,6 +1651,26 @@ def test_public_surface_signatures_and_closed_enums() -> None:
     assert public_callables(CadSnapshotPort) == set(expected_port)
     assert public_surface_names(CadSnapshotPort) == set(expected_port)
     port_annotations = {
+        "open_candidate": {
+            "store": LocalRevisionStore,
+            "base_head": ProjectHead,
+            "revision_id": str,
+            "lease": ProjectWriteLease,
+            "empty": bool,
+            "return": object,
+        },
+        "reload_candidate": {
+            "store": LocalRevisionStore,
+            "base_head": ProjectHead,
+            "revision_id": str,
+            "lease": ProjectWriteLease,
+            "return": object,
+        },
+        "open_revision": {
+            "store": LocalRevisionStore,
+            "revision": RevisionRef,
+            "return": object,
+        },
         "create_empty": {"revision_id": str, "return": object},
         "load_fcstd": {"path": Path, "return": object},
         "checkpoint_fcstd": {
@@ -1613,9 +1691,17 @@ def test_public_surface_signatures_and_closed_enums() -> None:
             inspect.get_annotations(getattr(CadSnapshotPort, name), eval_str=True)
             == (port_annotations[name])
         )
-        if name == "create_empty":
+        if name in {
+            "open_candidate",
+            "reload_candidate",
+            "open_revision",
+            "create_empty",
+        }:
             assert signature.parameters["self"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-            assert signature.parameters["revision_id"].kind is inspect.Parameter.KEYWORD_ONLY
+            assert all(
+                parameter.kind is inspect.Parameter.KEYWORD_ONLY
+                for parameter in tuple(signature.parameters.values())[1:]
+            )
         else:
             assert all(
                 parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
@@ -7894,7 +7980,15 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         "validate_candidate_payload",
         "validate_project_write_lease",
     }
-    snapshot_port_calls = {"checkpoint_fcstd", "close", "create_empty", "load_fcstd"}
+    snapshot_port_calls = {
+        "checkpoint_fcstd",
+        "close",
+        "create_empty",
+        "load_fcstd",
+        "open_candidate",
+        "open_revision",
+        "reload_candidate",
+    }
     session_slot_calls = {"compare_and_set", "current", "_retire"}
     boundary_receivers = {
         **{name: coordinator_boundary_fields["store"] for name in store_calls},
@@ -7921,6 +8015,9 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
     coordinator_session_helpers = {
         "_create_empty_session",
         "_load_fcstd_session",
+        "_open_candidate_session",
+        "_open_revision_session",
+        "_reload_candidate_session",
     }
     for method_name in coordinator_public_methods:
         method = class_method("CandidateCoordinator", method_name)
@@ -8049,6 +8146,29 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
             module = module_aliases[receiver.id]
             assert node.func.attr in allowed_module_attributes[module]
             continue
+        if enclosing_class_name(node) == "CadSnapshotPort":
+            function_node = enclosing_function_node(node)
+            assert function_node is not None
+            allowed_calls = {
+                "open_candidate": {
+                    "candidate_model_path",
+                    "create_empty",
+                    "load_fcstd",
+                },
+                "reload_candidate": {"candidate_model_path", "load_fcstd"},
+                "open_revision": {
+                    "create_empty",
+                    "load_fcstd",
+                    "revision_model_path",
+                },
+            }
+            assert function_node.name in allowed_calls
+            assert node.func.attr in allowed_calls[function_node.name]
+            if node.func.attr in {"create_empty", "load_fcstd"}:
+                assert isinstance(receiver, ast.Name) and receiver.id == "self"
+            else:
+                assert isinstance(receiver, ast.Name) and receiver.id == "store"
+            continue
         if node.func.attr in boundary_receivers:
             assert enclosing_class_name(node) == "CandidateCoordinator"
             assert isinstance(receiver, ast.Attribute)
@@ -8083,6 +8203,22 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
                 assert len(node.args) + len(node.keywords) == 1
                 path_argument = call_argument(node, 0, "path")
                 assert trusted_load_path(path_argument, function_node)
+            elif node.func.attr in {
+                "open_candidate",
+                "open_revision",
+                "reload_candidate",
+            }:
+                function_node = enclosing_function_node(node)
+                expected_helper = {
+                    "open_candidate": "_open_candidate_session",
+                    "open_revision": "_open_revision_session",
+                    "reload_candidate": "_reload_candidate_session",
+                }[node.func.attr]
+                assert function_node is class_method(
+                    "CandidateCoordinator",
+                    expected_helper,
+                )
+                assert node.args == []
             continue
         if node.func.attr in collection_calls:
             owner = enclosing_class_name(node)
@@ -8224,7 +8360,14 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
             if expression_mentions_session(node.value):
                 function_node = enclosing_function_node(node)
                 assert function_node is not None
-                assert function_node.name in coordinator_session_helpers
+                if enclosing_class_name(node) == "CadSnapshotPort":
+                    assert function_node.name in {
+                        "open_candidate",
+                        "open_revision",
+                        "reload_candidate",
+                    }
+                else:
+                    assert function_node.name in coordinator_session_helpers
 
     def safe_session_truth_test(node: ast.AST) -> bool:
         if not expression_mentions_session(node):

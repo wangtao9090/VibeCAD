@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import secrets
 import sys
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 
@@ -44,7 +46,7 @@ from vibecad.workflow.catalog import (
 )
 from vibecad.workflow.contracts import ModelProgram
 from vibecad.workflow.lease import LeaseError, LeaseRootTrust, ResourceLeaseManager
-from vibecad.workflow.state import ReasoningOwner, ReviewPolicy
+from vibecad.workflow.state import ReasoningOwner, ReviewPolicy, TaskEvent, TaskStatus
 from vibecad.workflow.store import (
     StoredTaskRun,
     TaskRunStore,
@@ -54,6 +56,7 @@ from vibecad.workflow.store import (
 __all__ = ("AgentApplication",)
 
 MAX_PROJECT_RUNTIMES = 4
+CAD_CANCELLATION_DRAIN_SECONDS = 5.0
 _PROJECT_ID = re.compile(r"^project_[0-9a-f]{32}$")
 _PROCESS_CAD_GATE = threading.Lock()
 
@@ -82,6 +85,17 @@ _CATALOG_PORT_ERRORS = {
 
 def _new_project_id() -> str:
     return f"project_{secrets.token_hex(16)}"
+
+
+def _has_cancellation_request(task: object) -> bool:
+    return any(
+        record.event
+        in {
+            TaskEvent.REQUEST_CANCEL,
+            TaskEvent.REQUEST_ACTIVE_CANCEL,
+        }
+        for record in getattr(task, "transitions", ())
+    )
 
 
 def _default_runtime_factory(**kwargs):
@@ -125,8 +139,14 @@ class AgentApplication:
         "_artifact_authority",
         "_artifact_service",
         "_artifact_store",
+        "_cad_execution_port",
+        "_cad_admission_condition",
+        "_cad_fence_required",
+        "_cad_fence_task_id",
         "_cad_gate",
+        "_cad_task_admissions",
         "_cad_validation_port",
+        "_cancellation_reconcile_lock",
         "_catalog",
         "_cad_port_factory",
         "_checkouts",
@@ -135,6 +155,8 @@ class AgentApplication:
         "_component_lock",
         "_creator_pid",
         "_direct_api",
+        "_generation_epoch",
+        "_generation_lock",
         "_layout",
         "_lease_manager",
         "_project_api",
@@ -206,6 +228,13 @@ class AgentApplication:
         self._cad_port_factory = cad_port_factory
         self._runtimes: OrderedDict[str, object] = OrderedDict()
         self._cad_gate = _PROCESS_CAD_GATE
+        self._cad_task_admissions: dict[str, int] = {}
+        self._generation_epoch = 0
+        self._generation_lock = threading.Lock()
+        self._cad_admission_condition = threading.Condition(self._generation_lock)
+        self._cad_fence_required = False
+        self._cad_fence_task_id = None
+        self._cancellation_reconcile_lock = threading.Lock()
         self._component_lock = threading.Lock()
         self._close_lock = threading.Lock()
         self._creator_pid = os.getpid()
@@ -214,6 +243,7 @@ class AgentApplication:
         self._direct_api = None
         self._project_service = None
         self._project_api = None
+        self._cad_execution_port = None
         self._cad_validation_port = None
         self._artifact_store = None
         self._artifact_authority = None
@@ -418,14 +448,56 @@ class AgentApplication:
 
     def _invoke_validation_cad(self, method: str, *args, **kwargs):
         self._ensure_live()
+        with self._generation_lock:
+            generation_epoch = self._generation_epoch
         with self._cad_gate:
             self._ensure_live()
-            from vibecad.interaction.cad import CadExecutionPort
+            port = self._cad_execution_port_under_gate(
+                expected_generation_epoch=generation_epoch,
+            )
+            if port is None:
+                from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
 
-            port = self._cad_port_factory(revision_store=self._revision_store)
-            if not isinstance(port, CadExecutionPort):
+                raise ExecutorError(ExecutorErrorCode.CAD_FAILURE)
+            try:
+                return getattr(port, method)(*args, **kwargs)
+            finally:
+                self._retire_lost_generation(port)
+
+    def _cad_execution_port_under_gate(
+        self,
+        *,
+        expected_generation_epoch: int | None = None,
+    ):
+        port = getattr(self, "_cad_execution_port", None)
+        current_epoch = getattr(self, "_generation_epoch", 0)
+        if getattr(self, "_cad_fence_required", False) or (
+            expected_generation_epoch is not None and current_epoch != expected_generation_epoch
+        ):
+            return None
+        if port is not None:
+            return port
+        from vibecad.interaction.cad import CadExecutionPort
+
+        factory = getattr(self, "_cad_port_factory", None)
+        if factory is None:
+            return None
+        generation_lock = getattr(self, "_generation_lock", None)
+        lock = generation_lock if generation_lock is not None else contextlib.nullcontext()
+        with lock:
+            current_epoch = getattr(self, "_generation_epoch", 0)
+            if getattr(self, "_cad_fence_required", False) or (
+                expected_generation_epoch is not None and current_epoch != expected_generation_epoch
+            ):
+                return None
+            port = getattr(self, "_cad_execution_port", None)
+            if port is not None:
+                return port
+            candidate = factory(revision_store=self._revision_store)
+            if not isinstance(candidate, CadExecutionPort):
                 raise TypeError("CAD factory returned an invalid execution port")
-            return getattr(port, method)(*args, **kwargs)
+            self._cad_execution_port = candidate
+            return candidate
 
     def _project_api_for_request(self):
         self._ensure_live()
@@ -943,38 +1015,171 @@ class AgentApplication:
         )
         if existing is not None:
             return existing
+        prepared, created_here = self._prepare_revert_task(
+            revert_key=revert_key,
+            project_id=project_id,
+            source_revision=source_revision,
+            expected_head=expected_head,
+        )
+        if (
+            type(prepared) is not StoredTaskRun
+            or prepared.task_run.status is not TaskStatus.PROGRAM_READY
+        ):
+            return prepared
+        if not created_here:
+            return prepared
 
         with self._cad_gate:
             self._ensure_live()
-            existing = self._revert_replay(
-                task_id=task_id,
-                revert_key=revert_key,
-                project_id=project_id,
-                source_revision=source_revision,
-                expected_head=expected_head,
-            )
-            if existing is not None:
-                return existing
-            runtime = self._runtime_for(project_id)
-            if type(runtime) is TaskServicePortFailure:
-                return runtime
-            try:
-                result = runtime.service.revert_project(
-                    revert_key=revert_key,
+            with self._cad_task_admission(task_id) as generation_epoch:
+                port = None
+                try:
+                    current = self._revert_replay(
+                        task_id=task_id,
+                        revert_key=revert_key,
+                        project_id=project_id,
+                        source_revision=source_revision,
+                        expected_head=expected_head,
+                    )
+                    if (
+                        type(current) is not StoredTaskRun
+                        or current.task_run.status is not TaskStatus.PROGRAM_READY
+                    ):
+                        return current
+                    try:
+                        runtime = self._runtime_for(
+                            project_id,
+                            expected_generation_epoch=generation_epoch,
+                        )
+                    except Exception as error:
+                        from vibecad.execution.errors import ExecutorError
+
+                        if type(error) is ExecutorError:
+                            cancellation = self._await_durable_cancellation(
+                                task_id,
+                                minimum_generation=0,
+                            )
+                            if cancellation is not None:
+                                return cancellation
+                            return TaskServicePortFailure(
+                                code=TaskServicePortErrorCode.RECOVERY_REQUIRED
+                            )
+                        raise
+                    port = getattr(self, "_cad_execution_port", None)
+                    if type(runtime) is TaskServicePortFailure:
+                        cancellation = self._await_durable_cancellation(
+                            task_id,
+                            minimum_generation=0,
+                        )
+                        return cancellation if cancellation is not None else runtime
+                    try:
+                        result = runtime.service.revert_project(
+                            revert_key=revert_key,
+                            project_id=project_id,
+                            source_revision=source_revision,
+                            expected_head=expected_head,
+                        )
+                    except Exception as error:
+                        result = self._task_service_failure(error)
+                    if type(result) is TaskServicePortFailure:
+                        cancellation = self._await_durable_cancellation(
+                            task_id,
+                            minimum_generation=0,
+                        )
+                        if cancellation is not None:
+                            result = cancellation
+                    if bool(getattr(runtime, "stale", False)):
+                        try:
+                            closed = runtime.close()
+                        except Exception:
+                            closed = False
+                        if closed is True:
+                            with self._generation_lock:
+                                if self._runtimes.get(project_id) is runtime:
+                                    del self._runtimes[project_id]
+                    return result
+                finally:
+                    if port is None:
+                        port = getattr(self, "_cad_execution_port", None)
+                    if port is not None:
+                        self._retire_lost_generation(port, task_id=task_id)
+
+    def _prepare_revert_task(
+        self,
+        *,
+        revert_key: str,
+        project_id: str,
+        source_revision: str,
+        expected_head: str,
+    ) -> tuple[StoredTaskRun | TaskServicePortFailure, bool]:
+        from vibecad.workflow.revert import (
+            RevertProgramError,
+            RevertProgramErrorCode,
+            build_revert_binding,
+            parse_bound_revert_task,
+        )
+        from vibecad.workflow.service import (
+            TaskServiceError,
+            _load_revert_source_from_store,
+        )
+
+        try:
+            with self._lease_manager.acquire_project_write(project_id):
+                head = self._revision_store.load_head(project_id)
+                if head.revision_id != expected_head:
+                    return (
+                        TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT),
+                        False,
+                    )
+                source = _load_revert_source_from_store(
+                    self._revision_store,
                     project_id=project_id,
                     source_revision=source_revision,
-                    expected_head=expected_head,
+                    head=head,
                 )
-            except Exception as error:
-                result = self._task_service_failure(error)
-            if bool(getattr(runtime, "stale", False)):
-                try:
-                    closed = runtime.close()
-                except Exception:
-                    closed = False
-                if closed is True and self._runtimes.get(project_id) is runtime:
-                    del self._runtimes[project_id]
-            return result
+                binding = build_revert_binding(
+                    revert_key=revert_key,
+                    project_id=project_id,
+                    source_revision=source,
+                    expected_head=head,
+                )
+                stored, created_here = self._catalog.create_revert_task_with_disposition(
+                    revert_key=revert_key,
+                    project_id=project_id,
+                    source_revision=source,
+                    expected_head=head,
+                )
+                if parse_bound_revert_task(stored) != binding:
+                    return (
+                        TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT),
+                        False,
+                    )
+                return stored, created_here
+        except LeaseError:
+            return (
+                TaskServicePortFailure(code=TaskServicePortErrorCode.LEASE_UNAVAILABLE),
+                False,
+            )
+        except TaskCatalogError as error:
+            return self._catalog_failure(error), False
+        except RevertProgramError as error:
+            return (
+                TaskServicePortFailure(
+                    code=(
+                        TaskServicePortErrorCode.CONFLICT
+                        if error.code is RevertProgramErrorCode.CONFLICT
+                        else TaskServicePortErrorCode.INVALID_INPUT
+                    )
+                ),
+                False,
+            )
+        except TaskServiceError as error:
+            return self._task_service_failure(error), False
+        except Exception:
+            return (
+                TaskServicePortFailure(code=TaskServicePortErrorCode.RECOVERY_REQUIRED),
+                False,
+            )
 
     def _revert_replay(
         self,
@@ -1163,6 +1368,114 @@ class AgentApplication:
 
         return self._review_transition(task_id=task_id, body=reject)
 
+    @contextlib.contextmanager
+    def _cad_task_admission(self, task_id: str):
+        with self._generation_lock:
+            generation_epoch = self._generation_epoch
+            admissions = getattr(self, "_cad_task_admissions", None)
+            if admissions is None:
+                admissions = {}
+                self._cad_task_admissions = admissions
+            admissions[task_id] = admissions.get(task_id, 0) + 1
+        try:
+            yield generation_epoch
+        finally:
+            condition = getattr(self, "_cad_admission_condition", None)
+            lock = condition if condition is not None else self._generation_lock
+            with lock:
+                admissions = getattr(self, "_cad_task_admissions", {})
+                admitted = admissions.get(task_id, 0)
+                if admitted <= 1:
+                    admissions.pop(task_id, None)
+                else:
+                    admissions[task_id] = admitted - 1
+                if condition is not None:
+                    condition.notify_all()
+
+    def _wait_for_cad_task_drain(self, task_id: str) -> bool:
+        condition = getattr(self, "_cad_admission_condition", None)
+        if condition is None:
+            with self._cad_gate:
+                return getattr(self, "_cad_task_admissions", {}).get(task_id, 0) == 0
+        deadline = time.monotonic() + CAD_CANCELLATION_DRAIN_SECONDS
+        with condition:
+            while self._cad_task_admissions.get(task_id, 0) > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                condition.wait(timeout=remaining)
+        return True
+
+    def _cancel_reservation_presence(self, stored: StoredTaskRun):
+        from vibecad.execution.revisions import (
+            CandidateReservationPresence,
+            CandidateReservationPresenceStatus,
+        )
+        from vibecad.workflow.revert import parse_bound_revert_task
+
+        task = stored.task_run
+        binding = parse_bound_revert_task(task)
+        reservation_key = binding.reservation_key if binding is not None else task.id
+        try:
+            result = self._revision_store.probe_candidate_reservation(
+                task.project_id,
+                task.base_revision,
+                reservation_key,
+            )
+        except Exception:
+            return CandidateReservationPresenceStatus.AMBIGUOUS
+        if type(result) is not CandidateReservationPresence:
+            return CandidateReservationPresenceStatus.AMBIGUOUS
+        return result.status
+
+    @staticmethod
+    def _cancellation_reservation_key(stored: StoredTaskRun) -> str:
+        from vibecad.workflow.revert import parse_bound_revert_task
+
+        binding = parse_bound_revert_task(stored.task_run)
+        if binding is not None:
+            return binding.reservation_key
+        return stored.task_run.id
+
+    def _start_orphan_cancellation(
+        self,
+        stored: StoredTaskRun,
+    ) -> StoredTaskRun | None:
+        from vibecad.execution.revisions import (
+            CandidateReservationPresence,
+            CandidateReservationPresenceStatus,
+        )
+
+        task = stored.task_run
+        reservation_key = self._cancellation_reservation_key(stored)
+        lease = None
+        try:
+            lease = self._lease_manager.acquire_project_write(task.project_id)
+            presence = self._revision_store.probe_candidate_reservation(
+                task.project_id,
+                task.base_revision,
+                reservation_key,
+            )
+            if not (
+                type(presence) is CandidateReservationPresence
+                and presence.status is CandidateReservationPresenceStatus.EXACT_PRE_CANDIDATE
+            ):
+                return None
+            return self._catalog.start_cancellation(
+                task_id=task.id,
+                expected_generation=stored.generation,
+            )
+        except (LeaseError, TaskCatalogError):
+            return None
+        except Exception:
+            return None
+        finally:
+            if lease is not None:
+                try:
+                    lease.release(owner_token=lease.owner_token)
+                except Exception:
+                    pass
+
     def cancel_task(
         self,
         *,
@@ -1170,13 +1483,219 @@ class AgentApplication:
         expected_generation: int,
     ) -> StoredTaskRun | TaskServicePortFailure:
         self._ensure_live()
+        orphan_candidate = False
+        fence_proven = False
+        with self._generation_lock:
+            admitted = self._cad_task_admissions.get(task_id, 0) > 0
+            active = admitted
+            try:
+                stored = self._catalog.get_task(task_id=task_id)
+            except TaskCatalogError:
+                stored = None
+            if (
+                not active
+                and type(stored) is StoredTaskRun
+                and stored.generation == expected_generation
+                and not _has_cancellation_request(stored.task_run)
+            ):
+                from vibecad.execution.revisions import (
+                    CandidateReservationPresenceStatus,
+                )
+
+                presence = self._cancel_reservation_presence(stored)
+                orphan_candidate = (
+                    presence is CandidateReservationPresenceStatus.EXACT_PRE_CANDIDATE
+                )
+                active = presence is not CandidateReservationPresenceStatus.ABSENT
+            try:
+                requested = self._catalog.cancel_task(
+                    task_id=task_id,
+                    expected_generation=expected_generation,
+                    active=active,
+                )
+            except TaskCatalogError as error:
+                requested = None
+                if error.code in {
+                    TaskCatalogErrorCode.CONFLICT,
+                    TaskCatalogErrorCode.STORE_FAILURE,
+                }:
+                    requested = self._await_durable_cancellation(
+                        task_id,
+                        minimum_generation=expected_generation,
+                    )
+                if requested is None:
+                    return self._catalog_failure(error)
+            if requested.task_run.status is TaskStatus.CANCEL_REQUESTED:
+                if not orphan_candidate and any(
+                    record.event is TaskEvent.REQUEST_ACTIVE_CANCEL
+                    for record in requested.task_run.transitions
+                ):
+                    from vibecad.execution.revisions import (
+                        CandidateReservationPresenceStatus,
+                    )
+
+                    orphan_candidate = (
+                        self._cancel_reservation_presence(requested)
+                        is CandidateReservationPresenceStatus.EXACT_PRE_CANDIDATE
+                    )
+                retrying_fence = self._cad_fence_required and self._cad_fence_task_id == task_id
+                if admitted or retrying_fence:
+                    if not self._fence_cad_generation_locked(task_id=task_id):
+                        return TaskServicePortFailure(
+                            code=TaskServicePortErrorCode.RECOVERY_REQUIRED
+                        )
+                    fence_proven = True
+        current = requested
+        if current.task_run.status is TaskStatus.CANCEL_REQUESTED:
+            if fence_proven:
+                try:
+                    current = self._catalog.start_cancellation(
+                        task_id=task_id,
+                        expected_generation=current.generation,
+                    )
+                except TaskCatalogError as error:
+                    replayed = self._await_durable_cancellation(
+                        task_id,
+                        minimum_generation=current.generation,
+                    )
+                    if replayed is None:
+                        return self._catalog_failure(error)
+                    current = replayed
+            elif orphan_candidate:
+                orphan_started = self._start_orphan_cancellation(current)
+                if orphan_started is not None:
+                    current = orphan_started
+        if admitted and not self._wait_for_cad_task_drain(task_id):
+            return TaskServicePortFailure(code=TaskServicePortErrorCode.RECOVERY_REQUIRED)
+        if current.task_run.status in {
+            TaskStatus.CANCELLED,
+            TaskStatus.SUCCEEDED,
+        }:
+            if admitted:
+                return self._reconcile_cancellation_store_only(
+                    task_id=task_id,
+                    expected_generation=current.generation,
+                )
+            return current
+        if current.task_run.status not in {
+            TaskStatus.CANCELLING,
+            TaskStatus.RECOVERY_REQUIRED,
+            TaskStatus.CLEANUP_REQUIRED,
+        }:
+            return requested
+        return self._reconcile_cancellation_store_only(
+            task_id=task_id,
+            expected_generation=current.generation,
+        )
+
+    def _fence_cad_generation(self) -> bool:
+        """Fence one active CAD generation without waiting for the CAD gate."""
+
+        with self._generation_lock:
+            return self._fence_cad_generation_locked()
+
+    def _fence_cad_generation_locked(self, *, task_id: str | None = None) -> bool:
+        if (
+            self._cad_fence_required
+            and self._cad_fence_task_id is not None
+            and self._cad_fence_task_id != task_id
+        ):
+            return False
+        port = self._cad_execution_port
+        if port is None:
+            if self._cad_fence_required:
+                return False
+            self._cad_fence_required = False
+            self._cad_fence_task_id = None
+            self._generation_epoch += 1
+            self._runtimes.clear()
+            return True
+        terminate = getattr(port, "terminate_generation", None)
+        if not callable(terminate):
+            return False
         try:
-            return self._catalog.cancel_task(
-                task_id=task_id,
-                expected_generation=expected_generation,
-            )
-        except TaskCatalogError as error:
-            return self._catalog_failure(error)
+            terminate()
+        except Exception:
+            self._cad_fence_required = True
+            self._cad_fence_task_id = task_id
+            self._generation_epoch += 1
+            self._runtimes.clear()
+            return False
+        if self._cad_execution_port is port:
+            self._cad_execution_port = None
+        self._cad_fence_required = False
+        self._cad_fence_task_id = None
+        self._generation_epoch += 1
+        self._runtimes.clear()
+        return True
+
+    def _retire_lost_generation(
+        self,
+        port: object,
+        *,
+        task_id: str | None = None,
+    ) -> None:
+        try:
+            lost = getattr(port, "generation_lost", False) is True
+        except Exception:
+            lost = True
+        if not lost:
+            return
+        with self._generation_lock:
+            if self._cad_execution_port is port:
+                if self._cad_fence_required:
+                    return
+                self._fence_cad_generation_locked(task_id=task_id)
+
+    def _reconcile_cancellation_store_only(
+        self,
+        *,
+        task_id: str,
+        expected_generation: int,
+    ) -> StoredTaskRun | TaskServicePortFailure:
+        from vibecad.workflow.service import (
+            TaskService,
+            TaskServiceError,
+        )
+
+        with self._cancellation_reconcile_lock:
+            try:
+                return TaskService.reconcile_cancellation(
+                    task_store=self._task_store,
+                    revision_store=self._revision_store,
+                    lease_manager=self._lease_manager,
+                    task_id=task_id,
+                    expected_generation=expected_generation,
+                )
+            except Exception as error:
+                if type(error) is TaskServiceError:
+                    cancellation = self._durable_cancellation_for(task_id)
+                    if cancellation is not None and cancellation.generation >= expected_generation:
+                        return cancellation
+                return self._task_service_failure(error)
+
+    def _durable_cancellation_for(self, task_id: str) -> StoredTaskRun | None:
+        try:
+            stored = self._catalog.get_task(task_id=task_id)
+        except TaskCatalogError:
+            return None
+        if _has_cancellation_request(stored.task_run):
+            return stored
+        return None
+
+    def _await_durable_cancellation(
+        self,
+        task_id: str,
+        *,
+        minimum_generation: int,
+    ) -> StoredTaskRun | None:
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            cancellation = self._durable_cancellation_for(task_id)
+            if cancellation is not None and cancellation.generation >= minimum_generation:
+                return cancellation
+            time.sleep(0.002)
+        return None
 
     def open_checkout(
         self,
@@ -1238,6 +1757,16 @@ class AgentApplication:
         task_id: str,
         expected_generation: int,
     ) -> StoredTaskRun | TaskServicePortFailure:
+        self._ensure_live()
+        try:
+            stored = self._catalog.get_task(task_id=task_id)
+        except TaskCatalogError as error:
+            return self._catalog_failure(error)
+        if stored.generation == expected_generation and _has_cancellation_request(stored.task_run):
+            return self._reconcile_cancellation_store_only(
+                task_id=task_id,
+                expected_generation=expected_generation,
+            )
         return self._cad_method(
             "reconcile_task",
             task_id=task_id,
@@ -1287,29 +1816,89 @@ class AgentApplication:
 
     def _cad_method(self, method: str, **kwargs):
         self._ensure_live()
+        task_id = kwargs["task_id"]
         try:
-            stored = self._catalog.get_task(task_id=kwargs["task_id"])
+            stored = self._catalog.load_expected(
+                task_id,
+                kwargs["expected_generation"],
+            )
         except TaskCatalogError as error:
             return self._catalog_failure(error)
+        if _has_cancellation_request(stored.task_run):
+            return TaskServicePortFailure(code=TaskServicePortErrorCode.INVALID_STATE)
         with self._cad_gate:
             self._ensure_live()
-            runtime = self._runtime_for(stored.task_run.project_id)
-            if type(runtime) is TaskServicePortFailure:
-                return runtime
-            try:
-                result = getattr(runtime.service, method)(**kwargs)
-            except Exception as error:
-                result = self._task_service_failure(error)
-            if bool(getattr(runtime, "stale", False)):
+            with self._cad_task_admission(task_id) as generation_epoch:
+                port = None
                 try:
-                    closed = runtime.close()
-                except Exception:
-                    closed = False
-                if closed is True and self._runtimes.get(stored.task_run.project_id) is runtime:
-                    del self._runtimes[stored.task_run.project_id]
-            return result
+                    try:
+                        stored = self._catalog.load_expected(
+                            task_id,
+                            kwargs["expected_generation"],
+                        )
+                    except TaskCatalogError as error:
+                        return self._catalog_failure(error)
+                    if _has_cancellation_request(stored.task_run):
+                        return TaskServicePortFailure(code=TaskServicePortErrorCode.INVALID_STATE)
+                    try:
+                        runtime = self._runtime_for(
+                            stored.task_run.project_id,
+                            expected_generation_epoch=generation_epoch,
+                        )
+                    except Exception as error:
+                        from vibecad.execution.errors import ExecutorError
 
-    def _runtime_for(self, project_id: str):
+                        if type(error) is ExecutorError:
+                            cancellation = self._await_durable_cancellation(
+                                task_id,
+                                minimum_generation=kwargs["expected_generation"],
+                            )
+                            if cancellation is not None:
+                                return cancellation
+                            return TaskServicePortFailure(
+                                code=TaskServicePortErrorCode.RECOVERY_REQUIRED
+                            )
+                        raise
+                    port = getattr(self, "_cad_execution_port", None)
+                    if type(runtime) is TaskServicePortFailure:
+                        cancellation = self._await_durable_cancellation(
+                            task_id,
+                            minimum_generation=kwargs["expected_generation"],
+                        )
+                        return cancellation if cancellation is not None else runtime
+                    try:
+                        result = getattr(runtime.service, method)(**kwargs)
+                    except Exception as error:
+                        result = self._task_service_failure(error)
+                    if type(result) is TaskServicePortFailure:
+                        cancellation = self._await_durable_cancellation(
+                            task_id,
+                            minimum_generation=kwargs["expected_generation"],
+                        )
+                        if cancellation is not None:
+                            result = cancellation
+                    if bool(getattr(runtime, "stale", False)):
+                        try:
+                            closed = runtime.close()
+                        except Exception:
+                            closed = False
+                        if closed is True:
+                            with self._generation_lock:
+                                if self._runtimes.get(stored.task_run.project_id) is runtime:
+                                    del self._runtimes[stored.task_run.project_id]
+                    return result
+                finally:
+                    if port is None:
+                        port = getattr(self, "_cad_execution_port", None)
+                    if port is not None:
+                        self._retire_lost_generation(port, task_id=task_id)
+
+    def _runtime_for(
+        self,
+        project_id: str,
+        *,
+        expected_generation_epoch: int | None = None,
+    ):
         try:
             lease = self._lease_manager.acquire_project_write(project_id)
         except LeaseError:
@@ -1318,29 +1907,54 @@ class AgentApplication:
         created = None
         try:
             head = self._revision_store.load_head(project_id)
-            cached = self._runtimes.get(project_id)
-            if cached is not None and cached.head == head:
-                self._runtimes.move_to_end(project_id)
-                result = cached
-            elif cached is not None:
+            with self._generation_lock:
+                if (
+                    expected_generation_epoch is not None
+                    and self._generation_epoch != expected_generation_epoch
+                ):
+                    result = TaskServicePortFailure(code=TaskServicePortErrorCode.RECOVERY_REQUIRED)
+                cached = self._runtimes.get(project_id)
+            if result is None and cached is not None and cached.head == head:
+                with self._generation_lock:
+                    if self._runtimes.get(project_id) is cached:
+                        self._runtimes.move_to_end(project_id)
+                        result = cached
+            elif result is None and cached is not None:
                 if not _close_runtime(cached):
                     result = TaskServicePortFailure(
                         code=TaskServicePortErrorCode.RESOURCE_EXHAUSTED
                     )
                 else:
-                    del self._runtimes[project_id]
-            while result is None and len(self._runtimes) >= MAX_PROJECT_RUNTIMES:
+                    with self._generation_lock:
+                        if self._runtimes.get(project_id) is cached:
+                            del self._runtimes[project_id]
+            while result is None:
+                with self._generation_lock:
+                    if len(self._runtimes) < MAX_PROJECT_RUNTIMES:
+                        break
+                    runtime_snapshot = tuple(self._runtimes.items())
                 evicted = False
-                for key, candidate in tuple(self._runtimes.items()):
+                for key, candidate in runtime_snapshot:
                     if not _close_runtime(candidate):
                         continue
-                    del self._runtimes[key]
-                    evicted = True
-                    break
+                    with self._generation_lock:
+                        if self._runtimes.get(key) is candidate:
+                            del self._runtimes[key]
+                            evicted = True
+                            break
+                        if len(self._runtimes) < MAX_PROJECT_RUNTIMES:
+                            evicted = True
+                            break
                 if not evicted:
                     result = TaskServicePortFailure(
                         code=TaskServicePortErrorCode.RESOURCE_EXHAUSTED
                     )
+            if result is None:
+                cad_port = self._cad_execution_port_under_gate(
+                    expected_generation_epoch=expected_generation_epoch,
+                )
+                if cad_port is None and getattr(self, "_cad_port_factory", None) is not None:
+                    result = TaskServicePortFailure(code=TaskServicePortErrorCode.RECOVERY_REQUIRED)
             if result is None:
                 created = self._runtime_factory(
                     project_id=project_id,
@@ -1348,9 +1962,23 @@ class AgentApplication:
                     task_store=self._task_store,
                     revision_store=self._revision_store,
                     lease_manager=self._lease_manager,
+                    cad_port=cad_port,
                 )
-                self._runtimes[project_id] = created
-                result = created
+                with self._generation_lock:
+                    generation_is_current = (
+                        (
+                            expected_generation_epoch is None
+                            or self._generation_epoch == expected_generation_epoch
+                        )
+                        and self._cad_execution_port is cad_port
+                        and getattr(cad_port, "generation_lost", False) is not True
+                    )
+                    if generation_is_current:
+                        self._runtimes[project_id] = created
+                        result = created
+                if result is None:
+                    _close_runtime(created)
+                    result = TaskServicePortFailure(code=TaskServicePortErrorCode.RECOVERY_REQUIRED)
         finally:
             release_failed = False
             try:
@@ -1358,13 +1986,19 @@ class AgentApplication:
             except Exception:
                 release_failed = True
         if release_failed:
-            if created is not None and self._runtimes.get(project_id) is created:
+            with self._generation_lock:
+                created_is_current = (
+                    created is not None and self._runtimes.get(project_id) is created
+                )
+            if created_is_current:
                 try:
                     closed = _close_runtime(created)
                 except Exception:  # pragma: no cover - defensive against corruption
                     closed = False
-                if closed and self._runtimes.get(project_id) is created:
-                    del self._runtimes[project_id]
+                if closed:
+                    with self._generation_lock:
+                        if self._runtimes.get(project_id) is created:
+                            del self._runtimes[project_id]
             return TaskServicePortFailure(code=TaskServicePortErrorCode.LEASE_UNAVAILABLE)
         return result
 
@@ -1375,11 +2009,32 @@ class AgentApplication:
             if self._closed:
                 return
             with self._component_lock:
+                close_error = None
                 with self._cad_gate:
                     self._closed = True
-                    for project_id, runtime in tuple(self._runtimes.items()):
-                        if _close_runtime(runtime) and self._runtimes.get(project_id) is runtime:
-                            del self._runtimes[project_id]
+                    with self._generation_lock:
+                        runtime_snapshot = tuple(self._runtimes.items())
+                    for project_id, runtime in runtime_snapshot:
+                        if _close_runtime(runtime):
+                            with self._generation_lock:
+                                if self._runtimes.get(project_id) is runtime:
+                                    del self._runtimes[project_id]
+                    with self._generation_lock:
+                        port = getattr(self, "_cad_execution_port", None)
+                        self._cad_execution_port = None
+                        self._generation_epoch += 1
+                    close_generation = getattr(port, "close_generation", None)
+                    if callable(close_generation):
+                        try:
+                            close_generation()
+                        except Exception as error:
+                            close_error = error
                 store = self._artifact_store
                 if store is not None:
-                    store.close()
+                    try:
+                        store.close()
+                    except Exception as error:
+                        if close_error is None:
+                            close_error = error
+                if close_error is not None:
+                    raise close_error

@@ -177,6 +177,7 @@ class TaskEvent(StrEnum):
     CONFIRM_UNCOMMITTED = "confirm_uncommitted"
     CONFIRM_PRE_CANDIDATE = "confirm_pre_candidate"
     REQUEST_CANCEL = "request_cancel"
+    REQUEST_ACTIVE_CANCEL = "request_active_cancel"
     START_CANCELLATION = "start_cancellation"
     CONFIRM_CANCELLED = "confirm_cancelled"
 
@@ -228,6 +229,7 @@ _CANCELLATION_FORBIDDEN_RECOVERY_EVENTS = frozenset(
 _CANCELLATION_TAIL_EVENTS = frozenset(
     {
         TaskEvent.REQUEST_CANCEL,
+        TaskEvent.REQUEST_ACTIVE_CANCEL,
         TaskEvent.START_CANCELLATION,
         TaskEvent.REQUIRE_RECOVERY,
         TaskEvent.REQUIRE_CLEANUP,
@@ -266,12 +268,22 @@ _REVIEW_EVENTS = frozenset(
 )
 _TRANSITIONS: dict[tuple[TaskStatus, TaskEvent], TaskStatus] = {
     (TaskStatus.CREATED, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
+    (TaskStatus.CREATED, TaskEvent.REQUEST_ACTIVE_CANCEL): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.CREATED, TaskEvent.REQUEST_PLAN): TaskStatus.NEEDS_PLAN,
     (TaskStatus.NEEDS_PLAN, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
+    (TaskStatus.NEEDS_PLAN, TaskEvent.REQUEST_ACTIVE_CANCEL): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.NEEDS_PLAN, TaskEvent.SUBMIT_PROGRAM): TaskStatus.PROGRAM_READY,
     (TaskStatus.PROGRAM_READY, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
+    (
+        TaskStatus.PROGRAM_READY,
+        TaskEvent.REQUEST_ACTIVE_CANCEL,
+    ): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.NEEDS_INPUT, TaskEvent.SUBMIT_PROGRAM): TaskStatus.PROGRAM_READY,
     (TaskStatus.NEEDS_INPUT, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
+    (
+        TaskStatus.NEEDS_INPUT,
+        TaskEvent.REQUEST_ACTIVE_CANCEL,
+    ): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.PROGRAM_READY, TaskEvent.START_VALIDATION): TaskStatus.VALIDATING_PROGRAM,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.VALIDATE_PROGRAM): TaskStatus.EXECUTING,
@@ -1841,7 +1853,14 @@ def _transition_history(records: tuple[TaskTransitionRecord, ...], status: TaskS
             )
         if record.sequence > _MAX_ORDINARY_TRANSITION_RECORDS and not (
             record.event in _CANCELLATION_TAIL_EVENTS
-            and (cancel_requested or record.event is TaskEvent.REQUEST_CANCEL)
+            and (
+                cancel_requested
+                or record.event
+                in {
+                    TaskEvent.REQUEST_CANCEL,
+                    TaskEvent.REQUEST_ACTIVE_CANCEL,
+                }
+            )
         ):
             raise _failure(
                 TaskStateErrorCode.INVARIANT_VIOLATION,
@@ -1854,7 +1873,10 @@ def _transition_history(records: tuple[TaskTransitionRecord, ...], status: TaskS
                 "/transitions",
                 "cancelled work cannot resume an execution path",
             )
-        if record.event is TaskEvent.REQUEST_CANCEL:
+        if record.event in {
+            TaskEvent.REQUEST_CANCEL,
+            TaskEvent.REQUEST_ACTIVE_CANCEL,
+        }:
             if cancel_requested:
                 raise _failure(
                     TaskStateErrorCode.INVARIANT_VIOLATION,
@@ -1977,7 +1999,14 @@ def transition_task(
             "/event",
             "event is not allowed from current status",
         )
-    cancel_requested = any(record.event is TaskEvent.REQUEST_CANCEL for record in task.transitions)
+    cancel_requested = any(
+        record.event
+        in {
+            TaskEvent.REQUEST_CANCEL,
+            TaskEvent.REQUEST_ACTIVE_CANCEL,
+        }
+        for record in task.transitions
+    )
     cancellation_started = any(
         record.event is TaskEvent.START_CANCELLATION for record in task.transitions
     )
@@ -2000,7 +2029,11 @@ def transition_task(
             "transition history budget exceeded",
         )
     if len(task.transitions) >= _MAX_ORDINARY_TRANSITION_RECORDS and not (
-        event is TaskEvent.REQUEST_CANCEL
+        event
+        in {
+            TaskEvent.REQUEST_CANCEL,
+            TaskEvent.REQUEST_ACTIVE_CANCEL,
+        }
         or (cancel_requested and event in _CANCELLATION_TAIL_EVENTS)
     ):
         raise _failure(
@@ -2207,6 +2240,7 @@ def transition_task(
                 TaskEvent.CONFIRM_DRAFT_UNCOMMITTED,
                 TaskEvent.ABORT_ACCEPT,
                 TaskEvent.REQUEST_CANCEL,
+                TaskEvent.REQUEST_ACTIVE_CANCEL,
                 TaskEvent.CONFIRM_CANCELLED,
             }
             else error

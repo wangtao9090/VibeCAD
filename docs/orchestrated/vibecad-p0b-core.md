@@ -586,6 +586,7 @@ counted as RED or GREEN.
 | P0B-RES-11 | Qt Workbench does not exist in P0-B core | G1 | Dock preview/verdict/stale/revoked/Accept/Reject visual acceptance passes |
 | P0B-RES-12 | No push, PR, tag or release is authorized | user/publication | explicit publication authority plus remote/release gates |
 | P0B-RES-13 | D11 rejects arbitrary client paths, while the existing public `create_project(kind=import_fcstd)` contract requires `source_path`; C07 does not tunnel or resolve this product boundary | C10/C13 entry review; preserve the operation-specific read-only import contract only with explicit evidence, or add a session-bound input/FD grant | all 28 operations route through the daemon without a generic path capability, and import-from-file passes the chosen threat-contract E2E |
+| P0B-RES-14 | C12's gate-free durable revert preparation reuses the private `_load_revert_source_from_store` helper from `workflow.service`; exact lease, binding and atomic creation-disposition tests cover current behavior, but ownership is split across application and service layers | non-blocking internal-structure follow-up; keep the single Task/Revision authority and do not duplicate execution | one formal store-only TaskService preparation contract owns source validation plus create disposition, and the existing replay/cancel/lost-response matrix passes unchanged |
 
 P0B-RES-12 update at P0B-R1.1: P0B-A02 closes the branch-push portion once
 remote equality is observed. PR, tag, release and marketplace publication
@@ -642,6 +643,7 @@ remain residual and unauthorized.
 | P0B-E12 / 2026-07-23T12:28:27Z | P0B-C09 under P0B-R1.1/A01/A02; P0B-D02/D11/D12/D18/D21/D22-R1; D21 packet-allowlist repair adds the directly required captured-layout composition seam in `src/vibecad/application/agent.py` plus its tests and continuous authority-liveness validation in `src/vibecad/workflow/lease.py` plus its tests | this C09 commit / non-force push required | daemon semantic RED `5 failed, 17 passed`; composition RED `14 failed, 65 deselected`; authority RED `11 failed, 180 deselected`; review repair cycles close authenticated-socket leakage, early accept-thread start, swallowed fatal handler exceptions and idle-timeout/handler-time ambiguity; final local-daemon `38 passed`; focused C09/affected `352 passed`; full non-slow `4561 passed, 95 deselected, 1 warning`; real macOS auth/double-start/crash-restart/root-and-entry-rebind/8-connection/blocked-shutdown tests pass; controller 50-ping median `3.042 ms`, p95 `3.498 ms`, max `3.782 ms`; full Ruff, changed-file format, diff and fsck clean; two final exact-code reviews both GO with `Critical 0 / Major 0`, 11-file content-manifest SHA-256 `ab5d2fcbb82961946fef0925fe85d209a8561ada957131d4ed9a3f3981eabdc9` | Linux/Windows remain P0B-RES-02 and malicious same-UID replacement remains P0B-RES-03; C10 still owns grants, C11 owns operation-aware Worker deadlines, C13 owns MCP/Workbench routing and P0B-RES-13 import-path resolution; one unchanged macOS multithreaded-fork warning remains | P0B-S12 | accepted-green |
 | P0B-E13 / 2026-07-23T13:25:15Z | P0B-C10 under P0B-R1.1/A01/A02; P0B-D14/D15/D21/D22-R1; D21 direct full-gate repair adds `src/vibecad/application/project_create.py` and `tests/test_project_bootstrap.py` to replace volatile ancestor timestamps with stable directory identity while preserving source/path rebinding checks | this C10 commit / non-force push required | protocol RED `9 failed, 16 passed, 43 deselected`; checkout-snapshot RED `12 failed, 66 deselected`; review repair cycles close mint-vs-close grant retention, non-exact open grant descriptors, pre-capture TTL loss and lifetime grant-ID exhaustion; deterministic baseline RED `1 failed, 148 deselected` closes unrelated ancestor-entry churn; canonical C10 `141 passed, 1 warning`; affected `308 passed, 1 warning`; project-bootstrap `149 passed` in three consecutive full-module runs; v1/MCP surface `100 passed, 55 deselected`; final full non-slow `4643 passed, 95 deselected, 1 warning`; full Ruff, exact 13-file format, diff and fsck clean; grant security/contract and baseline security/regression reviews all GO with `Critical 0 / Major 0 / Minor 0`; 13-file implementation/test content-manifest SHA-256 `8ed69c721c064007dab2c49efb236199a4d61ddcd0e63a08525415853e83a6fa` | Linux/Windows remain P0B-RES-02; post-claim malicious same-UID pathname replacement remains P0B-RES-03; import `source_path` remains P0B-RES-13; one unchanged macOS multithreaded-fork warning remains | P0B-S13 | accepted-green |
 | P0B-E14 / 2026-07-23T17:02:31Z | P0B-C11 under P0B-R1.1/A01/A02; P0B-D16/D17/D17A/D21/D22-R1 | this C11 commit / non-force push required | canonical C11 `341 passed, 1 deselected`; Worker non-slow `54 passed, 1 deselected` in three consecutive runs; real managed FreeCAD 1.1.0 `1 passed, 54 deselected`; adapter/program/static `163 passed, 1 deselected`; controller full `4698 passed, 96 deselected, 17 warnings`, independently repeated with the same counts; changed-file compile, Ruff, format and diff clean; three independent final reviews all GO with `Critical 0 / Important 0`; no residual Worker process or private Worker directory; 11-file implementation/test content-manifest SHA-256 `80006968e1611d048be5bda7f1a36c758d68a41224ad53545ac6eff729556de7` | C11 is an injectable Worker substrate only; the default `AgentApplication` path remains in-process until C12 owns injection plus durable loss/cancel/reconcile; the existing macOS Python 3.13 multithreaded-fork warning class remains outside C11 | P0B-S14 | accepted-green |
+| P0B-E15 / 2026-07-23T22:01:18Z | P0B-C12 under P0B-R1.1/A01/A02; P0B-D01/D05/D09/D10/D16/D17/D17A/D18/D21/D22-R1; D21 direct-impact repair adds `src/vibecad/runtime/spec.py` because `request_active_cancel` changes the canonical public contract digest while installed-package refresh remains C14 | this C12 commit / non-force push required | semantic and review RED cycles close unproved cancellation laundering, same-generation termination retry, self-loss eviction, concurrent cancel convergence, orphan reservation cleanup, pre-CAD revert durability and raced-existing create disposition; managed M03 final `10 passed, 80 deselected` across load/mutation/checkpoint/STEP/evidence × hang/crash; active-cancel fixture final `10/10`; Worker non-slow `79 passed, 11 deselected`; canonical C12 `1016 passed, 22 deselected`; controller full `4830 passed, 107 deselected, 17 warnings`, independently repeated with the same counts; 28-tool SDK projection remains `21,438` bytes and complete frame `21,483` bytes; canonical public receipt SHA-256 `ae495ba457af40a5837a03e77eef4b396b0a4209755878350bc341ac7de8bfd3`; full Ruff, exact 30-file format/compile, diff and fsck clean; independent final review GO `Critical 0 / Important 0 / Medium 1`; complete staged source/tests diff SHA-256 `47a6b13a0be9b98aa1e1081ac4dd5b49262f504dbd10269907c728d804d8b7fd`; 30-file content-manifest SHA-256 `239c37de120971fe36c98ca7f371d07b159ecf1a594cff09257f7d4a9b7a4e2c` | P0B-RES-06 permits only TaskRun-referenced sealed non-HEAD evidence revisions until GC; P0B-RES-14 records the non-blocking private preload-helper ownership split; 54 unchanged files remain outside the changed-file format gate; the existing 17 macOS multithreaded-fork warnings remain | P0B-S15 | accepted-green |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -1604,3 +1606,102 @@ remain residual and unauthorized.
   immediate non-force push and three-way local/upstream/remote equality.
   PR, tag, release, marketplace publication, force-push and external spend
   remain unauthorized.
+
+## 27. Recovery Snapshot P0B-S15
+
+### 1. Completed milestones
+
+- C12 switches the default Application CAD path to one application-owned
+  `WorkerCadExecutionPort`. A lost or cancelled generation clears every cached
+  project runtime only after exact termination proof; an uncertain cleanup
+  retains the same Worker handle and generation poison so the same durable
+  request can retry without laundering uncertainty or starting another CAD
+  generation.
+- Active cancellation is now one Task Kernel lineage. Admission-bound
+  execution, idle tasks with exact orphan candidate reservations, concurrent
+  callers, response loss and restart all converge through durable
+  `REQUEST_CANCEL` or `REQUEST_ACTIVE_CANCEL`, `START_CANCELLATION` and
+  `CONFIRM_CANCELLED` events. An unstarted durable request remains requested;
+  store-only reconciliation never invents termination proof.
+- RevisionStore exposes a read-only, fail-closed reservation-presence probe and
+  task-scoped cleanup. Ordinary idle cancellation remains one store CAS with
+  no project lease or CAD start, while an exact orphan reservation acquires
+  the project lease, starts cancellation and removes only the bound candidate.
+- A first revert request validates its immutable source and persists the bound
+  `PROGRAM_READY` task before entering the CAD gate. Catalog creation returns
+  an atomic disposition: only a directly proven create may start CAD;
+  pre-existing tasks, `ALREADY_EXISTS` and durability-uncertain readback are
+  replay-only. Queued and runtime-load-blocked reverts are therefore visible,
+  cancellable and restart-safe without touching HEAD or source bytes.
+- P0B-M03 executes literal managed FreeCAD 1.1.0 load, mutation, checkpoint,
+  STEP export and post-export evidence windows under both hang and crash.
+  Final controller evidence is `10 passed, 80 deselected in 115.78s`; the
+  independent frozen run is `10 passed, 80 deselected in 129.18s`. Every case
+  keeps the same daemon alive, removes the old PID/process group/private home,
+  preserves HEAD and immutable source data, accepts a fresh client and proves
+  a different healthy generation with reloadable FCStd/STEP and exactly one
+  intended HEAD advance. The two post-seal evidence cases retain exactly one
+  immutable non-HEAD revision referenced by the durable TaskRun; all other
+  cases leave the revision set unchanged and no case leaves a live candidate,
+  reservation, temporary file or unreferenced revision.
+- Final controller gates are Worker non-slow
+  `79 passed, 11 deselected in 15.31s`, canonical C12
+  `1016 passed, 22 deselected in 44.49s`, and full non-slow
+  `4830 passed, 107 deselected, 17 warnings in 244.34s`. The independent full
+  run produced the same counts in `232.57s`. A flaky fake-Worker publication
+  fixture was closed with exact PID-content polling, the approved 15-second
+  cold-readiness bound and strict same-generation recovery retry; its frozen
+  stress gate is `10/10`.
+- The 28-tool discovery projection remains `21,438` bytes with SHA-256
+  `5d7703a55dd7b20c21c487d6f4740fbfb894cf6867c840ccb30adf57de63efda`;
+  the complete frame remains `21,483` bytes with SHA-256
+  `22c903b05fc6e46868bd74380880cca5c915f312ac2ddf24f7e48896b8cdf826`.
+  The output-contract change updates the canonical public receipt to
+  `ae495ba457af40a5837a03e77eef4b396b0a4209755878350bc341ac7de8bfd3`;
+  C14 still owns installed-package and managed-receipt refresh.
+- Full Ruff, compile, exact 30-file format, diff and fsck gates pass. The
+  unchanged full-format baseline is `54 files would be reformatted,
+  125 already formatted`; none of those 54 files is in C12. The frozen
+  complete staged source/tests diff SHA-256 is
+  `47a6b13a0be9b98aa1e1081ac4dd5b49262f504dbd10269907c728d804d8b7fd`;
+  the 30-file content-manifest SHA-256 is
+  `239c37de120971fe36c98ca7f371d07b159ecf1a594cff09257f7d4a9b7a4e2c`.
+  Independent final review is GO with
+  `Critical 0 / Important 0 / Medium 1`; the Medium is P0B-RES-14.
+
+### 2. Next steps
+
+1. Stage the exact 30 frozen source/test files plus this artifact, excluding
+   untracked `docs/CAD_AGENT_PRODUCT_RESEARCH.md`, and commit as
+   `feat(kernel): reconcile worker loss and active cancellation`.
+2. Non-force push `codex/agent-stage3`, then verify exact
+   `HEAD == @{upstream} == origin/codex/agent-stage3`.
+3. Recover C13 from that remote anchor and route MCP plus the fake Workbench
+   client through the one daemon-owned Task Kernel without changing the
+   28-tool public modeling surface.
+
+### 3. Approved decisions
+
+- P0B-A01/A02 and P0B-D01..D22 plus D08A/D17A/D22-R1 remain active.
+- Worker generation loss, timeout and cancellation never authorize a second
+  scheduler, revision authority or direct client-to-Worker route. TaskService
+  and RevisionStore remain the only transition and commit authorities.
+- D21 directly adds `src/vibecad/runtime/spec.py` to C12 because the new
+  public cancellation event changes the canonical output-contract digest.
+  This does not perform or claim the C14 installed package/runtime refresh.
+- P0B-RES-06 continues to own mark/quarantine/sweep GC. A sealed revision
+  explicitly referenced by a durable TaskRun is auditable state, not an
+  orphan. P0B-RES-14 records the non-blocking application/service helper
+  ownership split and its exact closure condition.
+
+### 4. Execution discipline
+
+- Preserve the frozen source/tests hashes above while appending this ledger
+  evidence. Stage only the named C12 files and this artifact; do not include
+  the separate product-research document.
+- Continue with `native-plan / spawn-send-wait / repo-artifact /
+  native-session-poll`, exact named-file staging, immediate non-force push and
+  three-way local/upstream/remote equality.
+- C13 may add only thin MCP/Workbench clients over the one daemon. PR, tag,
+  release, marketplace publication, force-push and external spend remain
+  unauthorized.

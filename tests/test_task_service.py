@@ -32,6 +32,8 @@ from vibecad.execution.candidate import (
 from vibecad.execution.executor import CandidateEvidence, InProcessCadExecutor
 from vibecad.execution.results import NormalizedToolOutcome
 from vibecad.execution.revisions import (
+    CandidateReservationReconciliation,
+    CandidateReservationStatus,
     CommitJournal,
     CommitJournalState,
     LocalRevisionStore,
@@ -42,12 +44,15 @@ from vibecad.execution.revisions import (
     RevisionArtifactRef,
     RevisionRef,
     RevisionSnapshotEntry,
+    RevisionStoreError,
+    RevisionStoreErrorCode,
 )
 from vibecad.validation import (
     ArtifactObservation,
     ObservationSnapshot,
     ShapeObservation,
 )
+from vibecad.workflow.catalog import TaskCatalogError, TaskCatalogErrorCode
 from vibecad.workflow.contracts import (
     AcceptanceCriterion,
     AcceptanceKind,
@@ -524,6 +529,7 @@ class _RevisionStore(LocalRevisionStore):
             CANDIDATE_REVISION: _revision(),
         }
         self.ancestry_ids: tuple[str, ...] | None = None
+        self.reconcile_status = CandidateReconcileStatus.CLEAN
 
     def load_head(self, project_id: str) -> ProjectHead:
         self.log.append("revision.head")
@@ -562,6 +568,71 @@ class _RevisionStore(LocalRevisionStore):
             head=self.head,
             revisions=entries,
             state_sha256="f" * 64,
+        )
+
+    def reconcile(self, project_id: str, lease: object) -> ReconciliationResult:
+        del lease
+        self.log.append("revision.reconcile")
+        assert project_id == PROJECT_ID
+        if self.reconcile_status is CandidateReconcileStatus.RECOVERY_REQUIRED:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        status = ReconciliationStatus.CLEAN
+        journal = None
+        if self.reconcile_status in {
+            CandidateReconcileStatus.NOT_COMMITTED,
+            CandidateReconcileStatus.CLEANUP_REQUIRED,
+        }:
+            status = (
+                ReconciliationStatus.CLEANUP_REQUIRED
+                if self.reconcile_status is CandidateReconcileStatus.CLEANUP_REQUIRED
+                else ReconciliationStatus.NOT_COMMITTED
+            )
+            journal = CommitJournal(
+                id="transaction_abcdefabcdefabcdefabcdefabcdefab",
+                project_id=PROJECT_ID,
+                expected_head=self.head,
+                candidate_revision=CANDIDATE_REVISION,
+                manifest_sha256=CANDIDATE_MANIFEST,
+                state=CommitJournalState.NOT_COMMITTED,
+            )
+        elif self.reconcile_status is CandidateReconcileStatus.COMMITTED:
+            status = ReconciliationStatus.COMMITTED
+            journal = CommitJournal(
+                id="transaction_fedcbafedcbafedcbafedcbafedcbafe",
+                project_id=PROJECT_ID,
+                expected_head=_base_head(),
+                candidate_revision=CANDIDATE_REVISION,
+                manifest_sha256=CANDIDATE_MANIFEST,
+                state=CommitJournalState.COMMITTED,
+            )
+        return ReconciliationResult(
+            project_id=PROJECT_ID,
+            status=status,
+            head=self.head,
+            journal=journal,
+        )
+
+    def reconcile_candidate_reservation(
+        self,
+        project_id: str,
+        base_revision: str,
+        reservation_key: str,
+        lease: object,
+    ) -> CandidateReservationReconciliation:
+        assert base_revision == BASE_REVISION
+        assert reservation_key == TASK_ID or reservation_key.startswith("revert:")
+        reconciled = self.reconcile(project_id, lease)
+        status = CandidateReservationStatus.ABSENT
+        if reconciled.status is ReconciliationStatus.NOT_COMMITTED:
+            status = CandidateReservationStatus.NOT_COMMITTED
+        elif reconciled.status is ReconciliationStatus.CLEANUP_REQUIRED:
+            status = CandidateReservationStatus.CLEANUP_REQUIRED
+        elif reconciled.status is not ReconciliationStatus.CLEAN:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        return CandidateReservationReconciliation(
+            project_id=project_id,
+            status=status,
+            head=reconciled.head,
         )
 
 
@@ -1146,6 +1217,20 @@ def _store_validating(rig: _Rig) -> StoredTaskRun:
     stored = rig.tasks.compare_and_set(TASK_ID, created.generation, task)
     task = transition_task(stored.task_run, TaskEvent.START_VALIDATION)
     return rig.tasks.compare_and_set(TASK_ID, stored.generation, task)
+
+
+def _store_cancellation(
+    rig: _Rig,
+    stored: StoredTaskRun,
+    *,
+    started: bool,
+) -> StoredTaskRun:
+    requested = transition_task(stored.task_run, TaskEvent.REQUEST_CANCEL)
+    current = rig.tasks.compare_and_set(TASK_ID, stored.generation, requested)
+    if not started:
+        return current
+    cancelling = transition_task(current.task_run, TaskEvent.START_CANCELLATION)
+    return rig.tasks.compare_and_set(TASK_ID, current.generation, cancelling)
 
 
 def test_public_contract_and_fixed_errors() -> None:
@@ -2142,6 +2227,715 @@ def test_crash_stale_candidate_state_is_durably_marked_before_reconcile_side_eff
     assert rig.log.index("task.cas:recovery_required") < rig.log.index("candidate.reconcile")
 
 
+@pytest.mark.parametrize("started", [False, True], ids=("requested", "cancelling"))
+def test_cancellation_reconcile_proves_uncommitted_before_confirming_cancelled(
+    started: bool,
+) -> None:
+    rig = _Rig()
+    stored = _store_cancellation(
+        rig,
+        _store_executing(rig),
+        started=started,
+    )
+    rig.log.clear()
+    rig.revisions.reconcile_status = CandidateReconcileStatus.NOT_COMMITTED
+
+    reconciled = rig.service.reconcile_task(
+        task_id=TASK_ID,
+        expected_generation=stored.generation,
+    )
+
+    if not started:
+        assert reconciled == stored
+        assert reconciled.task_run.status is TaskStatus.CANCEL_REQUESTED
+        assert [record.event for record in reconciled.task_run.transitions[-1:]] == [
+            TaskEvent.REQUEST_CANCEL
+        ]
+        assert "lease.acquire" not in rig.log
+        assert "revision.reconcile" not in rig.log
+        assert rig.coordinator.commit_calls == 0
+        assert rig.coordinator.rollback_calls == 0
+        return
+
+    assert reconciled.task_run.status is TaskStatus.CANCELLED
+    assert reconciled.task_run.committed_revision is None
+    assert reconciled.task_run.last_error is None
+    cancellation_events = [
+        record.event
+        for record in reconciled.task_run.transitions
+        if record.event
+        in {
+            TaskEvent.REQUEST_CANCEL,
+            TaskEvent.START_CANCELLATION,
+            TaskEvent.CONFIRM_CANCELLED,
+        }
+    ]
+    assert cancellation_events == [
+        TaskEvent.REQUEST_CANCEL,
+        TaskEvent.START_CANCELLATION,
+        TaskEvent.CONFIRM_CANCELLED,
+    ]
+    assert rig.log.index("revision.reconcile") < rig.log.index("task.cas:cancelled")
+    assert rig.coordinator.commit_calls == 0
+    assert rig.coordinator.rollback_calls == 0
+
+
+def test_cancellation_reconcile_exact_verified_commit_wins_without_recommit() -> None:
+    rig = _Rig()
+    rig.tasks.fail_status = TaskStatus.SUCCEEDED
+    rig.tasks.fail_code = TaskStoreErrorCode.CONFLICT
+    with pytest.raises(TaskServiceError) as caught:
+        rig.run()
+    assert caught.value.code is TaskServiceErrorCode.RECOVERY_REQUIRED
+    committing = rig.tasks.records[TASK_ID]
+    assert committing.task_run.status is TaskStatus.COMMITTING
+    assert rig.coordinator.commit_calls == 1
+    assert rig.revisions.head == _candidate_head()
+
+    rig.tasks.fail_status = None
+    cancelling = _store_cancellation(rig, committing, started=True)
+    rig.log.clear()
+    rig.revisions.reconcile_status = CandidateReconcileStatus.COMMITTED
+
+    reconciled = rig.service.reconcile_task(
+        task_id=TASK_ID,
+        expected_generation=cancelling.generation,
+    )
+
+    assert reconciled.task_run.status is TaskStatus.SUCCEEDED
+    assert reconciled.task_run.committed_revision == CANDIDATE_REVISION
+    assert reconciled.task_run.transitions[-1].event is TaskEvent.CONFIRM_COMMITTED
+    assert rig.coordinator.commit_calls == 1
+    assert rig.coordinator.rollback_calls == 0
+    assert rig.log.count("revision.reconcile") == 1
+    assert "candidate.reconcile" not in rig.log
+
+
+@pytest.mark.parametrize(
+    "review_policy",
+    [ReviewPolicy.AUTO_COMMIT, ReviewPolicy.REQUIRE_REVIEW],
+    ids=("auto-commit", "accepted-review"),
+)
+def test_cancellation_reconcile_accepts_a_verified_commit_in_descendant_ancestry(
+    review_policy: ReviewPolicy,
+) -> None:
+    rig = _Rig()
+    if review_policy is ReviewPolicy.AUTO_COMMIT:
+        rig.tasks.fail_status = TaskStatus.SUCCEEDED
+        with pytest.raises(TaskServiceError):
+            rig.run()
+        committing = rig.tasks.records[TASK_ID]
+        assert committing.task_run.status is TaskStatus.COMMITTING
+    else:
+        awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+        assert awaiting.task_run.draft is not None
+        rig.tasks.fail_status = TaskStatus.SUCCEEDED
+        with pytest.raises(TaskServiceError):
+            rig.service.accept_draft(
+                task_id=TASK_ID,
+                draft_id=awaiting.task_run.draft.id,
+                expected_generation=awaiting.generation,
+            )
+        committing = rig.tasks.records[TASK_ID]
+        assert committing.task_run.status is TaskStatus.ACCEPTING_DRAFT
+        assert any(
+            transition.event is TaskEvent.ACCEPT_DRAFT
+            for transition in committing.task_run.transitions
+        )
+    assert any(
+        report.passed
+        and report.candidate_revision == CANDIDATE_REVISION
+        and report.manifest_sha256 == CANDIDATE_MANIFEST
+        for report in committing.task_run.verification_reports
+    )
+    assert rig.revisions.head == _candidate_head()
+
+    rig.tasks.fail_status = None
+    rig.revisions.revisions[DESCENDANT_REVISION] = _descendant_revision()
+    rig.revisions.head = _descendant_head()
+    cancelling = _store_cancellation(rig, committing, started=True)
+    rig.revisions.reconcile_status = CandidateReconcileStatus.CLEAN
+    rig.log.clear()
+
+    reconciled = TaskService.reconcile_cancellation(
+        task_store=rig.tasks,
+        revision_store=rig.revisions,
+        lease_manager=rig.leases,
+        task_id=TASK_ID,
+        expected_generation=cancelling.generation,
+    )
+
+    assert reconciled.task_run.status is TaskStatus.SUCCEEDED
+    assert reconciled.task_run.committed_revision == CANDIDATE_REVISION
+    assert reconciled.task_run.transitions[-1].event is TaskEvent.CONFIRM_COMMITTED
+    assert rig.coordinator.commit_calls == 1
+    assert rig.log.count("revision.reconcile") == 1
+    assert "candidate.reconcile" not in rig.log
+
+
+@pytest.mark.parametrize("lineage_defect", ["missing-candidate", "wrong-base"])
+def test_cancellation_reconcile_rejects_an_incomplete_candidate_lineage(
+    lineage_defect: str,
+) -> None:
+    rig = _Rig()
+    rig.tasks.fail_status = TaskStatus.SUCCEEDED
+    with pytest.raises(TaskServiceError):
+        rig.run()
+    committing = rig.tasks.records[TASK_ID]
+    assert committing.task_run.status is TaskStatus.COMMITTING
+
+    rig.tasks.fail_status = None
+    if lineage_defect == "missing-candidate":
+        del rig.revisions.revisions[CANDIDATE_REVISION]
+    else:
+        candidate = _revision()
+        rig.revisions.revisions[CANDIDATE_REVISION] = RevisionRef(
+            id=candidate.id,
+            project_id=candidate.project_id,
+            base_revision=BASE_PARENT_REVISION,
+            manifest_sha256=candidate.manifest_sha256,
+            model=candidate.model,
+            artifacts=candidate.artifacts,
+        )
+    rig.revisions.revisions[DESCENDANT_REVISION] = _descendant_revision()
+    rig.revisions.head = _descendant_head()
+    cancelling = _store_cancellation(rig, committing, started=True)
+    rig.revisions.reconcile_status = CandidateReconcileStatus.CLEAN
+
+    reconciled = TaskService.reconcile_cancellation(
+        task_store=rig.tasks,
+        revision_store=rig.revisions,
+        lease_manager=rig.leases,
+        task_id=TASK_ID,
+        expected_generation=cancelling.generation,
+    )
+
+    assert reconciled.task_run.status is TaskStatus.RECOVERY_REQUIRED
+    assert reconciled.task_run.committed_revision is None
+
+
+def test_cancellation_reconcile_rejects_committed_lineage_without_a_passing_report() -> None:
+    rig = _Rig()
+    executing = _store_executing(rig)
+    assert executing.task_run.verification_reports == ()
+    rig.revisions.revisions[DESCENDANT_REVISION] = _descendant_revision()
+    rig.revisions.head = _descendant_head()
+    cancelling = _store_cancellation(rig, executing, started=True)
+    rig.revisions.reconcile_status = CandidateReconcileStatus.CLEAN
+
+    reconciled = TaskService.reconcile_cancellation(
+        task_store=rig.tasks,
+        revision_store=rig.revisions,
+        lease_manager=rig.leases,
+        task_id=TASK_ID,
+        expected_generation=cancelling.generation,
+    )
+
+    assert reconciled.task_run.status is TaskStatus.RECOVERY_REQUIRED
+    assert reconciled.task_run.committed_revision is None
+
+
+def test_cancellation_reconcile_rejects_an_unaccepted_review_candidate() -> None:
+    rig = _Rig()
+    awaiting = rig.run(review_policy=ReviewPolicy.REQUIRE_REVIEW)
+    task_mapping = awaiting.task_run.to_mapping()
+    task_mapping["status"] = TaskStatus.PREPARING_REVIEW.value
+    task_mapping["transitions"] = task_mapping["transitions"][:-1]
+    preparing_task = type(awaiting.task_run).from_mapping(task_mapping)
+    assert not any(
+        transition.event is TaskEvent.ACCEPT_DRAFT for transition in preparing_task.transitions
+    )
+    preparing = StoredTaskRun(
+        generation=awaiting.generation,
+        task_run=preparing_task,
+    )
+    rig.tasks.records[TASK_ID] = preparing
+
+    rig.revisions.revisions[DESCENDANT_REVISION] = _descendant_revision()
+    rig.revisions.head = _descendant_head()
+    cancelling = _store_cancellation(rig, preparing, started=True)
+    rig.revisions.reconcile_status = CandidateReconcileStatus.CLEAN
+
+    reconciled = TaskService.reconcile_cancellation(
+        task_store=rig.tasks,
+        revision_store=rig.revisions,
+        lease_manager=rig.leases,
+        task_id=TASK_ID,
+        expected_generation=cancelling.generation,
+    )
+
+    assert reconciled.task_run.status is TaskStatus.RECOVERY_REQUIRED
+    assert reconciled.task_run.committed_revision is None
+
+
+def test_cancellation_reconcile_unknown_outcome_stays_recovery_required() -> None:
+    rig = _Rig()
+    cancelling = _store_cancellation(
+        rig,
+        _store_executing(rig),
+        started=True,
+    )
+    rig.log.clear()
+    rig.revisions.reconcile_status = CandidateReconcileStatus.RECOVERY_REQUIRED
+
+    reconciled = rig.service.reconcile_task(
+        task_id=TASK_ID,
+        expected_generation=cancelling.generation,
+    )
+
+    assert reconciled.task_run.status is TaskStatus.RECOVERY_REQUIRED
+    assert reconciled.task_run.committed_revision is None
+    assert reconciled.task_run.last_error is not None
+    assert reconciled.task_run.last_error.code == "recovery_required"
+    assert reconciled.task_run.transitions[-1].event is TaskEvent.REQUIRE_RECOVERY
+    assert rig.coordinator.commit_calls == 0
+    assert rig.coordinator.rollback_calls == 0
+    assert rig.log.count("revision.reconcile") == 1
+    assert "candidate.reconcile" not in rig.log
+    assert "task.cas:cancelled" not in rig.log
+    assert "task.cas:succeeded" not in rig.log
+
+
+def test_store_only_cancellation_reconcile_does_not_require_a_task_service_runtime() -> None:
+    rig = _Rig()
+    cancelling = _store_cancellation(
+        rig,
+        _store_executing(rig),
+        started=True,
+    )
+    rig.log.clear()
+    rig.revisions.reconcile_status = CandidateReconcileStatus.NOT_COMMITTED
+
+    reconciled = TaskService.reconcile_cancellation(
+        task_store=rig.tasks,
+        revision_store=rig.revisions,
+        lease_manager=rig.leases,
+        task_id=TASK_ID,
+        expected_generation=cancelling.generation,
+    )
+
+    assert reconciled.task_run.status is TaskStatus.CANCELLED
+    assert rig.log.count("revision.reconcile") == 1
+    assert "candidate.reconcile" not in rig.log
+    assert not any(item.startswith("executor.") for item in rig.log)
+
+
+def test_store_only_cancellation_requires_journal_proof_after_candidate_publication() -> None:
+    rig = _Rig()
+    cancelling = _store_cancellation(
+        rig,
+        _store_executing(rig),
+        started=True,
+    )
+    rig.log.clear()
+    rig.revisions.reconcile_status = CandidateReconcileStatus.CLEAN
+
+    reconciled = TaskService.reconcile_cancellation(
+        task_store=rig.tasks,
+        revision_store=rig.revisions,
+        lease_manager=rig.leases,
+        task_id=TASK_ID,
+        expected_generation=cancelling.generation,
+    )
+
+    assert reconciled.task_run.status is TaskStatus.RECOVERY_REQUIRED
+    assert reconciled.task_run.candidate_revision == CANDIDATE_REVISION
+    assert reconciled.task_run.committed_revision is None
+    assert reconciled.task_run.transitions[-1].event is TaskEvent.REQUIRE_RECOVERY
+    assert rig.log.count("revision.reconcile") == 1
+    assert "task.cas:cancelled" not in rig.log
+
+
+def test_store_only_cancellation_reconcile_proves_a_pre_candidate_task_cancelled() -> None:
+    rig = _Rig()
+    cancelling = _store_cancellation(
+        rig,
+        _store_validating(rig),
+        started=True,
+    )
+    rig.log.clear()
+    rig.revisions.reconcile_status = CandidateReconcileStatus.CLEAN
+
+    reconciled = TaskService.reconcile_cancellation(
+        task_store=rig.tasks,
+        revision_store=rig.revisions,
+        lease_manager=rig.leases,
+        task_id=TASK_ID,
+        expected_generation=cancelling.generation,
+    )
+
+    assert reconciled.task_run.status is TaskStatus.CANCELLED
+    assert reconciled.task_run.candidate_revision is None
+    assert rig.log.count("revision.reconcile") == 1
+    assert "candidate.reconcile" not in rig.log
+
+
+def test_pre_candidate_cancellation_ignores_a_later_clean_descendant() -> None:
+    rig = _Rig()
+    cancelling = _store_cancellation(
+        rig,
+        _store_validating(rig),
+        started=True,
+    )
+    rig.revisions.revisions[DESCENDANT_REVISION] = _descendant_revision()
+    rig.revisions.head = _descendant_head()
+    rig.revisions.reconcile_status = CandidateReconcileStatus.CLEAN
+    rig.log.clear()
+
+    reconciled = TaskService.reconcile_cancellation(
+        task_store=rig.tasks,
+        revision_store=rig.revisions,
+        lease_manager=rig.leases,
+        task_id=TASK_ID,
+        expected_generation=cancelling.generation,
+    )
+
+    assert reconciled.task_run.status is TaskStatus.CANCELLED
+    assert reconciled.task_run.candidate_revision is None
+    assert reconciled.task_run.committed_revision is None
+    assert reconciled.task_run.transitions[-1].event is TaskEvent.CONFIRM_CANCELLED
+    assert rig.log.count("revision.reconcile") == 1
+    assert "candidate.reconcile" not in rig.log
+
+
+def test_store_only_cancellation_reconcile_never_starts_an_unfenced_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = _Rig()
+    requested = _store_cancellation(
+        rig,
+        _store_executing(rig),
+        started=False,
+    )
+
+    def forbid_start(task_id, expected_generation, task_run):
+        del task_id, expected_generation, task_run
+        raise AssertionError("store-only reconcile cannot manufacture fence proof")
+
+    monkeypatch.setattr(rig.tasks, "compare_and_set", forbid_start)
+    rig.log.clear()
+
+    reconciled = TaskService.reconcile_cancellation(
+        task_store=rig.tasks,
+        revision_store=rig.revisions,
+        lease_manager=rig.leases,
+        task_id=TASK_ID,
+        expected_generation=requested.generation,
+    )
+
+    assert reconciled == requested
+    assert reconciled.task_run.status is TaskStatus.CANCEL_REQUESTED
+    assert "lease.acquire" not in rig.log
+    assert "revision.reconcile" not in rig.log
+
+
+def test_store_only_cancellation_reconcile_converges_on_a_peer_terminal_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = _Rig()
+    cancelling = _store_cancellation(
+        rig,
+        _store_executing(rig),
+        started=True,
+    )
+    real_compare_and_set = rig.tasks.compare_and_set
+    peer_settled = False
+
+    def settle_before_attention(task_id, expected_generation, task_run):
+        nonlocal peer_settled
+        if task_run.status is TaskStatus.RECOVERY_REQUIRED and not peer_settled:
+            peer_settled = True
+            current = rig.tasks.records[task_id]
+            cancelled = transition_task(
+                current.task_run,
+                TaskEvent.CONFIRM_CANCELLED,
+            )
+            real_compare_and_set(
+                task_id,
+                current.generation,
+                cancelled,
+            )
+            raise TaskStoreError(TaskStoreErrorCode.CONFLICT)
+        return real_compare_and_set(
+            task_id,
+            expected_generation,
+            task_run,
+        )
+
+    monkeypatch.setattr(rig.tasks, "compare_and_set", settle_before_attention)
+    rig.revisions.reconcile_status = CandidateReconcileStatus.RECOVERY_REQUIRED
+    rig.log.clear()
+
+    reconciled = TaskService.reconcile_cancellation(
+        task_store=rig.tasks,
+        revision_store=rig.revisions,
+        lease_manager=rig.leases,
+        task_id=TASK_ID,
+        expected_generation=cancelling.generation,
+    )
+
+    assert reconciled.task_run.status is TaskStatus.CANCELLED
+    assert rig.log.count("revision.reconcile") == 1
+    assert rig.log.count("task.cas:cancelled") == 1
+
+
+def test_ordinary_reconcile_racing_with_cancel_switches_to_the_store_only_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = _Rig()
+    executing = _store_executing(rig)
+    real_compare_and_set = rig.tasks.compare_and_set
+    cancellation_injected = False
+
+    def cancel_before_recovery(task_id, expected_generation, task_run):
+        nonlocal cancellation_injected
+        if task_run.status is TaskStatus.RECOVERY_REQUIRED and not cancellation_injected:
+            cancellation_injected = True
+            current = rig.tasks.records[task_id]
+            requested = transition_task(
+                current.task_run,
+                TaskEvent.REQUEST_CANCEL,
+            )
+            real_compare_and_set(
+                task_id,
+                current.generation,
+                requested,
+            )
+            raise TaskStoreError(TaskStoreErrorCode.CONFLICT)
+        return real_compare_and_set(
+            task_id,
+            expected_generation,
+            task_run,
+        )
+
+    monkeypatch.setattr(rig.tasks, "compare_and_set", cancel_before_recovery)
+    rig.revisions.reconcile_status = CandidateReconcileStatus.NOT_COMMITTED
+    rig.log.clear()
+
+    reconciled = rig.service.reconcile_task(
+        task_id=TASK_ID,
+        expected_generation=executing.generation,
+    )
+
+    assert reconciled.task_run.status is TaskStatus.CANCEL_REQUESTED
+    assert rig.log.count("revision.reconcile") == 0
+    assert "candidate.reconcile" not in rig.log
+
+
+def test_reservation_setup_racing_with_idle_cancel_cleans_then_converges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = _Rig()
+    real_compare_and_set = rig.tasks.compare_and_set
+    cancellation_injected = False
+
+    def cancel_before_program_publish(task_id, expected_generation, task_run):
+        nonlocal cancellation_injected
+        if task_run.status is TaskStatus.PROGRAM_READY and not cancellation_injected:
+            cancellation_injected = True
+            current = rig.tasks.records[task_id]
+            cancelled = transition_task(
+                current.task_run,
+                TaskEvent.REQUEST_CANCEL,
+            )
+            real_compare_and_set(
+                task_id,
+                current.generation,
+                cancelled,
+            )
+            raise TaskStoreError(TaskStoreErrorCode.CONFLICT)
+        return real_compare_and_set(
+            task_id,
+            expected_generation,
+            task_run,
+        )
+
+    monkeypatch.setattr(rig.tasks, "compare_and_set", cancel_before_program_publish)
+
+    cancelled = rig.run()
+
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert cancelled.task_run.candidate_revision is None
+    assert rig.coordinator.cancel_reservation_calls == 1
+    assert rig.coordinator.rollback_calls == 0
+
+
+def test_validation_rejection_racing_with_cancel_converges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = _Rig()
+    rig.executor.failure_stage = "validate"
+    real_compare_and_set = rig.tasks.compare_and_set
+    cancellation_injected = False
+
+    def cancel_before_rejection(task_id, expected_generation, task_run):
+        nonlocal cancellation_injected
+        if task_run.status is TaskStatus.NEEDS_INPUT and not cancellation_injected:
+            cancellation_injected = True
+            current = rig.tasks.records[task_id]
+            requested = transition_task(
+                current.task_run,
+                TaskEvent.REQUEST_CANCEL,
+            )
+            real_compare_and_set(
+                task_id,
+                current.generation,
+                requested,
+            )
+            raise TaskStoreError(TaskStoreErrorCode.CONFLICT)
+        return real_compare_and_set(
+            task_id,
+            expected_generation,
+            task_run,
+        )
+
+    monkeypatch.setattr(rig.tasks, "compare_and_set", cancel_before_rejection)
+
+    requested = rig.run()
+
+    assert requested.task_run.status is TaskStatus.CANCEL_REQUESTED
+    assert requested.task_run.candidate_revision is None
+    assert rig.coordinator.cancel_reservation_calls == 0
+    assert rig.coordinator.rollback_calls == 0
+
+
+def test_pre_candidate_cas_racing_with_cancel_cleans_the_private_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = _Rig()
+    real_compare_and_set = rig.tasks.compare_and_set
+    cancellation_injected = False
+
+    def cancel_before_candidate_publish(task_id, expected_generation, task_run):
+        nonlocal cancellation_injected
+        if task_run.status is TaskStatus.EXECUTING and not cancellation_injected:
+            cancellation_injected = True
+            current = rig.tasks.records[task_id]
+            requested = transition_task(
+                current.task_run,
+                TaskEvent.REQUEST_CANCEL,
+            )
+            real_compare_and_set(
+                task_id,
+                current.generation,
+                requested,
+            )
+            raise TaskStoreError(TaskStoreErrorCode.CONFLICT)
+        return real_compare_and_set(
+            task_id,
+            expected_generation,
+            task_run,
+        )
+
+    monkeypatch.setattr(rig.tasks, "compare_and_set", cancel_before_candidate_publish)
+
+    requested = rig.run()
+
+    assert requested.task_run.status is TaskStatus.CANCEL_REQUESTED
+    assert requested.task_run.candidate_revision is None
+    assert rig.coordinator.rollback_calls == 1
+    assert rig.coordinator.rollback_invocations == 1
+
+
+def test_execution_cas_racing_with_cancel_converges_without_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = _Rig()
+    real_compare_and_set = rig.tasks.compare_and_set
+    executing_writes = 0
+
+    def cancel_before_step(task_id, expected_generation, task_run):
+        nonlocal executing_writes
+        if task_run.status is TaskStatus.EXECUTING:
+            executing_writes += 1
+            if executing_writes == 2:
+                current = rig.tasks.records[task_id]
+                requested = transition_task(
+                    current.task_run,
+                    TaskEvent.REQUEST_CANCEL,
+                )
+                real_compare_and_set(
+                    task_id,
+                    current.generation,
+                    requested,
+                )
+                raise TaskStoreError(TaskStoreErrorCode.CONFLICT)
+        return real_compare_and_set(
+            task_id,
+            expected_generation,
+            task_run,
+        )
+
+    monkeypatch.setattr(rig.tasks, "compare_and_set", cancel_before_step)
+
+    result = rig.run()
+
+    assert result.task_run.status is TaskStatus.CANCEL_REQUESTED
+    assert result.task_run.transitions[-1].event is TaskEvent.REQUEST_CANCEL
+    assert rig.coordinator.rollback_calls == 0
+    assert rig.coordinator.rollback_invocations == 0
+
+
+def test_final_commit_cas_racing_with_cancel_converges_and_commit_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = _Rig()
+    real_compare_and_set = rig.tasks.compare_and_set
+    cancellation_injected = False
+
+    def cancel_after_commit(task_id, expected_generation, task_run):
+        nonlocal cancellation_injected
+        if task_run.status is TaskStatus.SUCCEEDED and not cancellation_injected:
+            cancellation_injected = True
+            current = rig.tasks.records[task_id]
+            requested = transition_task(
+                current.task_run,
+                TaskEvent.REQUEST_CANCEL,
+            )
+            real_compare_and_set(
+                task_id,
+                current.generation,
+                requested,
+            )
+            raise TaskStoreError(TaskStoreErrorCode.CONFLICT)
+        return real_compare_and_set(
+            task_id,
+            expected_generation,
+            task_run,
+        )
+
+    monkeypatch.setattr(rig.tasks, "compare_and_set", cancel_after_commit)
+
+    requested = rig.run()
+
+    assert requested.task_run.status is TaskStatus.CANCEL_REQUESTED
+    assert rig.revisions.head == _candidate_head()
+    assert rig.coordinator.commit_calls == 1
+    rig.revisions.reconcile_status = CandidateReconcileStatus.COMMITTED
+    settled = TaskService.reconcile_cancellation(
+        task_store=rig.tasks,
+        revision_store=rig.revisions,
+        lease_manager=rig.leases,
+        task_id=TASK_ID,
+        expected_generation=requested.generation,
+    )
+    assert settled == requested
+    started = rig.service._catalog.start_cancellation(  # noqa: SLF001
+        task_id=TASK_ID,
+        expected_generation=requested.generation,
+    )
+    settled = TaskService.reconcile_cancellation(
+        task_store=rig.tasks,
+        revision_store=rig.revisions,
+        lease_manager=rig.leases,
+        task_id=TASK_ID,
+        expected_generation=started.generation,
+    )
+    assert settled.task_run.status is TaskStatus.SUCCEEDED
+    assert settled.task_run.committed_revision == CANDIDATE_REVISION
+    assert rig.coordinator.commit_calls == 1
+
+
 @pytest.mark.parametrize(
     "reconcile_status",
     [CandidateReconcileStatus.CLEAN, CandidateReconcileStatus.NOT_COMMITTED],
@@ -2778,6 +3572,12 @@ def test_application_accepting_gap_evicts_then_recovers_descendant_without_recom
         runtimes.append(runtime)
         return runtime
 
+    def load_expected(task_id: str, generation: int) -> StoredTaskRun:
+        stored = rig.tasks.load(task_id)
+        if stored.generation != generation:
+            raise TaskCatalogError(TaskCatalogErrorCode.CONFLICT)
+        return stored
+
     app = object.__new__(AgentApplication)
     app._artifact_authority = SimpleNamespace(  # noqa: SLF001
         acquire_export_gate=lambda *, task_id: nullcontext()
@@ -2787,12 +3587,16 @@ def test_application_accepting_gap_evicts_then_recovers_descendant_without_recom
     app._close_lock = threading.Lock()  # noqa: SLF001
     app._component_lock = threading.Lock()  # noqa: SLF001
     app._catalog = SimpleNamespace(  # noqa: SLF001
-        get_task=lambda *, task_id: rig.tasks.load(task_id)
+        get_task=lambda *, task_id: rig.tasks.load(task_id),
+        load_expected=load_expected,
     )
     app._cad_port_factory = None  # noqa: SLF001
+    app._cad_execution_port = None  # noqa: SLF001
     app._checkouts = None  # noqa: SLF001
     app._closed = False  # noqa: SLF001
     app._creator_pid = os.getpid()  # noqa: SLF001
+    app._generation_epoch = 0  # noqa: SLF001
+    app._generation_lock = threading.Lock()  # noqa: SLF001
     app._layout = None  # noqa: SLF001
     app._lease_manager = rig.leases  # noqa: SLF001
     app._revision_store = rig.revisions  # noqa: SLF001
@@ -2808,7 +3612,7 @@ def test_application_accepting_gap_evicts_then_recovers_descendant_without_recom
     first = app.accept_draft(
         task_id=TASK_ID,
         draft_id=awaiting.task_run.draft.id,
-        expected_generation=awaiting.generation,
+        expected_generation=accepting.generation,
     )
     assert first == TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT)
     assert rig.tasks.records[TASK_ID] == accepting
@@ -2826,7 +3630,7 @@ def test_application_accepting_gap_evicts_then_recovers_descendant_without_recom
     recovered = app.accept_draft(
         task_id=TASK_ID,
         draft_id=awaiting.task_run.draft.id,
-        expected_generation=awaiting.generation,
+        expected_generation=accepting.generation,
     )
     assert type(recovered) is StoredTaskRun
     assert recovered.task_run.status is TaskStatus.SUCCEEDED

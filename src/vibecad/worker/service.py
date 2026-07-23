@@ -20,10 +20,16 @@ from vibecad.execution.executor import (
     ExecutorError,
     ExecutorErrorCode,
     InProcessCadExecutor,
+    _entity_observations,
     _export_session_step,
+    _shape_observation,
 )
 from vibecad.execution.revisions import ProjectHead
 from vibecad.freecad_env import prepare_freecad_import
+from vibecad.interaction.cad import (
+    ValidatedImportEvidence,
+    ValidatedMaterializationEvidence,
+)
 from vibecad.worker.codec import (
     MAX_WORKER_REQUEST_BYTES,
     WorkerCodecError,
@@ -36,12 +42,18 @@ from vibecad.worker.codec import (
 from vibecad.workflow.contracts import ModelProgram
 
 _CANDIDATE = re.compile(r"worker_candidate_[0-9a-f]{32}\Z")
+_WORKER_REVISION = re.compile(r"worker_revision_[0-9a-f]{32}\Z")
 _SESSION = re.compile(r"worker_session_[0-9a-f]{32}\Z")
 _PROGRAM = re.compile(r"worker_program_[0-9a-f]{32}\Z")
 _PROJECT = re.compile(r"project_[0-9a-f]{32}\Z")
 _REVISION = re.compile(r"revision_[0-9a-f]{32}\Z")
+_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_REVISION_FILE = re.compile(r"(?:manifest\.json|model\.FCStd|model\.step)\Z")
+_STAGE_NAME = re.compile(r"\.(?:import|normalized|stage)\.[0-9a-f]{32}\.FCStd\Z")
 _MAX_SESSIONS = 6
 _MAX_CANDIDATES = 8
+_MAX_REVISIONS = 8
+_MAX_DIRECTORY_ENTRIES = 64
 _MAX_FILE_BYTES = 536_870_912
 _READ_CHUNK_BYTES = 1_048_576
 
@@ -96,10 +108,30 @@ class _Candidate:
     step_identity: _Identity
 
 
+@dataclass(frozen=True, slots=True)
+class _ExpectedFile:
+    name: str
+    sha256: str
+    size_bytes: int
+
+
+@dataclass(slots=True)
+class _Revision:
+    revision_id: str
+    project_id: str
+    store_revision_id: str
+    model_name: str | None
+    directory_fd: int
+    directory_identity: _DirectoryIdentity
+    entries: tuple[tuple[str, _Identity], ...]
+    files: tuple[_ExpectedFile, ...]
+
+
 @dataclass(slots=True)
 class _Session:
     session_id: str
-    candidate_id: str
+    capability_kind: str
+    capability_id: str
     value: object
 
 
@@ -177,18 +209,19 @@ def _stable_file_identity(value: _Identity) -> tuple[int, int, int, int, int]:
 
 
 @contextlib.contextmanager
-def _candidate_cwd(candidate: _Candidate):
+def _directory_cwd(
+    directory_fd: int,
+    expected_identity: _DirectoryIdentity,
+):
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
     previous = -1
     try:
-        current = os.fstat(candidate.directory_fd)
-        if _directory_identity(current) != candidate.directory_identity or not _private_directory(
-            current
-        ):
+        current = os.fstat(directory_fd)
+        if _directory_identity(current) != expected_identity or not _private_directory(current):
             raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
         previous = os.open(".", flags)
-        os.fchdir(candidate.directory_fd)
-        if _directory_identity(os.stat(".", follow_symlinks=False)) != candidate.directory_identity:
+        os.fchdir(directory_fd)
+        if _directory_identity(os.stat(".", follow_symlinks=False)) != expected_identity:
             raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
         yield
     finally:
@@ -197,6 +230,49 @@ def _candidate_cwd(candidate: _Candidate):
                 os.fchdir(previous)
             finally:
                 os.close(previous)
+
+
+def _candidate_cwd(candidate: _Candidate):
+    return _directory_cwd(candidate.directory_fd, candidate.directory_identity)
+
+
+def _revision_cwd(revision: _Revision):
+    return _directory_cwd(revision.directory_fd, revision.directory_identity)
+
+
+def _capture_private_entries(directory_fd: int) -> tuple[tuple[str, _Identity], ...]:
+    try:
+        directory = os.fstat(directory_fd)
+        if not _private_directory(directory):
+            raise OSError
+        names = tuple(sorted(os.listdir(directory_fd)))
+        if (
+            len(names) > _MAX_DIRECTORY_ENTRIES
+            or len(names) != len(set(names))
+            or any(type(name) is not str or name in {".", ".."} for name in names)
+        ):
+            raise OSError
+        values: list[tuple[str, _Identity]] = []
+        for name in names:
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not _private_file(current) or current.st_dev != directory.st_dev:
+                raise OSError
+            values.append((name, _identity(current)))
+        return tuple(values)
+    except OSError:
+        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+
+
+def _capture_revision_entries(revision: _Revision) -> tuple[tuple[str, _Identity], ...]:
+    entries = _capture_private_entries(revision.directory_fd)
+    if tuple(name for name, _entry in entries) != tuple(item.name for item in revision.files):
+        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+    with _revision_cwd(revision):
+        for expected, (name, identity) in zip(revision.files, entries, strict=True):
+            digest, size, hashed = _hash_relative(name)
+            if hashed != identity or digest != expected.sha256 or size != expected.size_bytes:
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+    return entries
 
 
 def _hash_relative(name: str) -> tuple[str, int, _Identity]:
@@ -262,6 +338,54 @@ def _identifier(value: object, pattern: re.Pattern[str]) -> str:
     return value
 
 
+def _expected_files(value: object) -> tuple[_ExpectedFile, ...]:
+    if type(value) is not list or not 1 <= len(value) <= 3:
+        raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+    result: list[_ExpectedFile] = []
+    for raw in value:
+        fields = _exact_mapping(raw, {"name", "sha256", "size_bytes"})
+        name = _identifier(fields["name"], _REVISION_FILE)
+        digest = _identifier(fields["sha256"], _DIGEST)
+        size = fields["size_bytes"]
+        if type(size) is not int or not 1 <= size <= _MAX_FILE_BYTES:
+            raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+        result.append(
+            _ExpectedFile(
+                name=name,
+                sha256=digest,
+                size_bytes=size,
+            )
+        )
+    names = tuple(item.name for item in result)
+    if (
+        names != tuple(sorted(names))
+        or len(names) != len(set(names))
+        or "manifest.json" not in names
+    ):
+        raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+    return tuple(result)
+
+
+def _evidence_mapping(value: object) -> dict[str, object]:
+    if type(value) is not ValidatedImportEvidence:
+        raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR)
+    return {
+        "sha256": value.sha256,
+        "size_bytes": value.size_bytes,
+    }
+
+
+def _materialization_mapping(value: object) -> dict[str, object]:
+    if type(value) is not ValidatedMaterializationEvidence:
+        raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR)
+    return {
+        "fcstd_sha256": value.fcstd_sha256,
+        "fcstd_size_bytes": value.fcstd_size_bytes,
+        "step_sha256": value.step_sha256,
+        "step_size_bytes": value.step_size_bytes,
+    }
+
+
 def _outcome_mapping(outcome: object) -> dict[str, object]:
     from vibecad.execution.results import NormalizedToolOutcome
 
@@ -291,6 +415,7 @@ class WorkerService:
         "_engine",
         "_generation_id",
         "_programs",
+        "_revisions",
         "_sessions",
         "_shutdown",
     )
@@ -304,6 +429,7 @@ class WorkerService:
         self._generation_id = generation_id
         self._engine = _WorkerExecutor()
         self._candidates: dict[str, _Candidate] = {}
+        self._revisions: dict[str, _Revision] = {}
         self._sessions: dict[str, _Session] = {}
         self._programs: dict[str, _Program] = {}
         self._shutdown = False
@@ -326,6 +452,13 @@ class WorkerService:
             raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
         return session
 
+    def _revision(self, revision_id: object) -> _Revision:
+        identifier = _identifier(revision_id, _WORKER_REVISION)
+        revision = self._revisions.get(identifier)
+        if revision is None:
+            raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
+        return revision
+
     def _program(self, program_id: object) -> _Program:
         identifier = _identifier(program_id, _PROGRAM)
         program = self._programs.get(identifier)
@@ -341,9 +474,32 @@ class WorkerService:
     ) -> tuple[_Session, _Candidate]:
         session = self._session(session_id)
         candidate = self._candidate(candidate_id)
-        if session.candidate_id != candidate.candidate_id:
+        if (
+            session.capability_kind != "candidate"
+            or session.capability_id != candidate.candidate_id
+        ):
             raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
         return session, candidate
+
+    def _require_observation_pair(
+        self,
+        *,
+        session_id: object,
+        capability_kind: object,
+        capability_id: object,
+    ) -> tuple[_Session, _Candidate | _Revision]:
+        session = self._session(session_id)
+        if capability_kind == "candidate":
+            capability = self._candidate(capability_id)
+            identifier = capability.candidate_id
+        elif capability_kind == "revision":
+            capability = self._revision(capability_id)
+            identifier = capability.revision_id
+        else:
+            raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+        if session.capability_kind != capability_kind or session.capability_id != identifier:
+            raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
+        return session, capability
 
     def _bind(self, params: object, descriptors: tuple[int, ...]) -> dict[str, object]:
         fields = _exact_mapping(
@@ -405,7 +561,9 @@ class WorkerService:
         fields = _exact_mapping(params, {"candidate_id"})
         candidate = self._candidate(fields["candidate_id"])
         if any(
-            session.candidate_id == candidate.candidate_id for session in self._sessions.values()
+            session.capability_kind == "candidate"
+            and session.capability_id == candidate.candidate_id
+            for session in self._sessions.values()
         ) or any(
             program.candidate_id == candidate.candidate_id for program in self._programs.values()
         ):
@@ -417,6 +575,119 @@ class WorkerService:
         self._candidates.pop(candidate.candidate_id, None)
         return {"candidate_id": candidate.candidate_id}
 
+    def _bind_revision(
+        self,
+        params: object,
+        descriptors: tuple[int, ...],
+    ) -> dict[str, object]:
+        fields = _exact_mapping(
+            params,
+            {
+                "revision_id",
+                "project_id",
+                "store_revision_id",
+                "model_name",
+                "files",
+            },
+        )
+        if len(descriptors) != 1 or len(self._revisions) >= _MAX_REVISIONS:
+            raise _ServiceError(
+                WorkerWireErrorCode.INVALID_REQUEST
+                if len(descriptors) != 1
+                else WorkerWireErrorCode.RESOURCE_EXHAUSTED
+            )
+        revision_id = _identifier(fields["revision_id"], _WORKER_REVISION)
+        project_id = _identifier(fields["project_id"], _PROJECT)
+        store_revision_id = _identifier(fields["store_revision_id"], _REVISION)
+        model_name = fields["model_name"]
+        if model_name is not None and model_name != "model.FCStd":
+            raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+        files = _expected_files(fields["files"])
+        names = tuple(item.name for item in files)
+        if (
+            revision_id in self._revisions
+            or (model_name is None and "model.FCStd" in names)
+            or (model_name is not None and "model.FCStd" not in names)
+        ):
+            raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
+        descriptor = descriptors[0]
+        try:
+            os.set_inheritable(descriptor, False)
+            directory = os.fstat(descriptor)
+            if not _private_directory(directory):
+                raise OSError
+            revision = _Revision(
+                revision_id=revision_id,
+                project_id=project_id,
+                store_revision_id=store_revision_id,
+                model_name=model_name,
+                directory_fd=descriptor,
+                directory_identity=_directory_identity(directory),
+                entries=(),
+                files=files,
+            )
+            entries = _capture_revision_entries(revision)
+            revision.entries = entries
+        except (OSError, _ServiceError):
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+        self._revisions[revision_id] = revision
+        return {"revision_id": revision_id}
+
+    def _release_revision(self, params: object) -> dict[str, object]:
+        fields = _exact_mapping(params, {"revision_id"})
+        revision = self._revision(fields["revision_id"])
+        if any(
+            session.capability_kind == "revision" and session.capability_id == revision.revision_id
+            for session in self._sessions.values()
+        ):
+            raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
+        try:
+            os.close(revision.directory_fd)
+        except OSError:
+            raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
+        self._revisions.pop(revision.revision_id, None)
+        return {"revision_id": revision.revision_id}
+
+    def _load_revision(self, params: object) -> dict[str, object]:
+        fields = _exact_mapping(params, {"revision_id"})
+        revision = self._revision(fields["revision_id"])
+        if len(self._sessions) >= _MAX_SESSIONS:
+            raise _ServiceError(WorkerWireErrorCode.RESOURCE_EXHAUSTED)
+        with _revision_cwd(revision):
+            current = _capture_revision_entries(revision)
+            if current != revision.entries:
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+            if revision.model_name is None:
+                value = self._engine.create_empty(
+                    revision_id=revision.store_revision_id,
+                )
+            else:
+                value = self._engine.load_fcstd(Path(revision.model_name))
+            try:
+                revalidated = _capture_revision_entries(revision)
+            except BaseException as error:
+                try:
+                    self._engine.close(value)
+                except BaseException:
+                    raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
+                if not isinstance(error, Exception):
+                    raise
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+            if revalidated != current:
+                try:
+                    self._engine.close(value)
+                except BaseException:
+                    raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        session_id = f"worker_session_{secrets.token_hex(16)}"
+        self._sessions[session_id] = _Session(
+            session_id=session_id,
+            capability_kind="revision",
+            capability_id=revision.revision_id,
+            value=value,
+        )
+        return {"session_id": session_id}
+
     def _create_empty(self, params: object) -> dict[str, object]:
         fields = _exact_mapping(params, {"candidate_id"})
         candidate = self._candidate(fields["candidate_id"])
@@ -426,7 +697,8 @@ class WorkerService:
         session_id = f"worker_session_{secrets.token_hex(16)}"
         self._sessions[session_id] = _Session(
             session_id=session_id,
-            candidate_id=candidate.candidate_id,
+            capability_kind="candidate",
+            capability_id=candidate.candidate_id,
             value=value,
         )
         return {"session_id": session_id}
@@ -448,7 +720,8 @@ class WorkerService:
         session_id = f"worker_session_{secrets.token_hex(16)}"
         self._sessions[session_id] = _Session(
             session_id=session_id,
-            candidate_id=candidate.candidate_id,
+            capability_kind="candidate",
+            capability_id=candidate.candidate_id,
             value=value,
         )
         return {"session_id": session_id}
@@ -491,6 +764,144 @@ class WorkerService:
         }
         self._sessions.pop(session.session_id, None)
         return {"session_id": session.session_id}
+
+    def _observe(self, params: object) -> dict[str, object]:
+        fields = _exact_mapping(
+            params,
+            {"session_id", "capability_kind", "capability_id"},
+        )
+        session, capability = self._require_observation_pair(
+            session_id=fields["session_id"],
+            capability_kind=fields["capability_kind"],
+            capability_id=fields["capability_id"],
+        )
+        if any(item.session_id == session.session_id for item in self._programs.values()):
+            raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
+        if type(capability) is _Candidate:
+            context = _candidate_cwd(capability)
+            before = _capture_candidate_entries(capability.directory_fd)
+            if before != (capability.model_identity, capability.step_identity):
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        else:
+            context = _revision_cwd(capability)
+            before = _capture_revision_entries(capability)
+            if before != capability.entries:
+                raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        try:
+            with context:
+                objects = tuple(session.value.doc.Objects)  # type: ignore[attr-defined]
+                shape = None if not objects else _shape_observation(session.value)
+                entities = _entity_observations(session.value)
+        except _ServiceError:
+            raise
+        except BaseException:
+            raise _ServiceError(WorkerWireErrorCode.CAD_FAILURE) from None
+        if type(capability) is _Candidate:
+            after = _capture_candidate_entries(capability.directory_fd)
+        else:
+            after = _capture_revision_entries(capability)
+        if after != before:
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        return {
+            "shape": None if shape is None else shape.to_mapping(),
+            "entities": [item.to_mapping() for item in entities],
+        }
+
+    def _validation_directory(
+        self,
+        descriptors: tuple[int, ...],
+    ) -> tuple[int, _DirectoryIdentity, tuple[tuple[str, _Identity], ...]]:
+        if len(descriptors) != 1:
+            raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+        descriptor = descriptors[0]
+        try:
+            os.set_inheritable(descriptor, False)
+            current = os.fstat(descriptor)
+            if not _private_directory(current):
+                raise OSError
+            entries = _capture_private_entries(descriptor)
+        except (OSError, _ServiceError):
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+        return descriptor, _directory_identity(current), entries
+
+    def _validate_import(
+        self,
+        params: object,
+        descriptors: tuple[int, ...],
+        *,
+        normalize: bool,
+    ) -> dict[str, object]:
+        fields = _exact_mapping(params, {"name"})
+        name = _identifier(fields["name"], _STAGE_NAME)
+        descriptor, identity, before = self._validation_directory(descriptors)
+        before_mapping = dict(before)
+        target_before = before_mapping.get(name)
+        if target_before is None or target_before.size <= 0:
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        with _directory_cwd(descriptor, identity):
+            if normalize:
+                evidence = self._engine.validate_import(Path(name))
+            else:
+                evidence = self._engine.revalidate_normalized_import(Path(name))
+            digest, size, target_after_hash = _hash_relative(name)
+        after = _capture_private_entries(descriptor)
+        after_mapping = dict(after)
+        target_after = after_mapping.get(name)
+        if (
+            target_after is None
+            or target_after_hash != target_after
+            or set(after_mapping) != set(before_mapping)
+            or any(
+                after_mapping[entry_name] != entry_identity
+                for entry_name, entry_identity in before
+                if entry_name != name
+            )
+            or (not normalize and target_after != target_before)
+        ):
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        result = _evidence_mapping(evidence)
+        if result != {"sha256": digest, "size_bytes": size}:
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        return result
+
+    def _validate_materialization(
+        self,
+        params: object,
+        descriptors: tuple[int, ...],
+    ) -> dict[str, object]:
+        _exact_mapping(params, set())
+        descriptor, identity, before = self._validation_directory(descriptors)
+        before_mapping = dict(before)
+        if (
+            before_mapping.get("model.FCStd") is None
+            or before_mapping.get("model.step") is None
+            or before_mapping["model.FCStd"].size <= 0
+            or before_mapping["model.step"].size <= 0
+        ):
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        with _directory_cwd(descriptor, identity):
+            evidence = self._engine.validate_materialization(
+                fcstd=Path("model.FCStd"),
+                step=Path("model.step"),
+            )
+            fcstd_sha256, fcstd_size, fcstd_identity = _hash_relative("model.FCStd")
+            step_sha256, step_size, step_identity = _hash_relative("model.step")
+        after = _capture_private_entries(descriptor)
+        if (
+            after != before
+            or fcstd_identity != before_mapping["model.FCStd"]
+            or step_identity != before_mapping["model.step"]
+        ):
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        result = _materialization_mapping(evidence)
+        if result != {
+            "fcstd_sha256": fcstd_sha256,
+            "fcstd_size_bytes": fcstd_size,
+            "step_sha256": step_sha256,
+            "step_size_bytes": step_size,
+        }:
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        return result
 
     def _begin_program(self, params: object) -> dict[str, object]:
         fields = _exact_mapping(
@@ -639,6 +1050,12 @@ class WorkerService:
             except OSError:
                 failed = True
         self._candidates.clear()
+        for revision in tuple(self._revisions.values()):
+            try:
+                os.close(revision.directory_fd)
+            except OSError:
+                failed = True
+        self._revisions.clear()
         if failed:
             raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR)
         self._shutdown = True
@@ -650,19 +1067,43 @@ class WorkerService:
         params: object,
         descriptors: tuple[int, ...],
     ) -> dict[str, object]:
-        if method != "candidate.bind" and descriptors:
+        descriptor_methods = {
+            "candidate.bind",
+            "revision.bind",
+            "validation.validate_import",
+            "validation.revalidate_import",
+            "validation.validate_materialization",
+        }
+        if (method in descriptor_methods) != bool(descriptors):
             raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
         handlers = {
             "worker.ready": self._ready,
             "candidate.bind": lambda value: self._bind(value, descriptors),
             "candidate.release": self._release_candidate,
+            "revision.bind": lambda value: self._bind_revision(value, descriptors),
+            "revision.release": self._release_revision,
             "session.create_empty": self._create_empty,
             "session.load_fcstd": self._load,
+            "session.load_revision": self._load_revision,
             "session.checkpoint_fcstd": self._checkpoint,
+            "session.observe": self._observe,
             "session.close": self._close_session,
             "program.begin": self._begin_program,
             "program.execute_command": self._execute_command,
             "session.export_step": self._export_step,
+            "validation.validate_import": lambda value: self._validate_import(
+                value,
+                descriptors,
+                normalize=True,
+            ),
+            "validation.revalidate_import": lambda value: self._validate_import(
+                value,
+                descriptors,
+                normalize=False,
+            ),
+            "validation.validate_materialization": lambda value: self._validate_materialization(
+                value, descriptors
+            ),
             "worker.shutdown": self._shutdown_worker,
         }
         handler = handlers.get(method)
@@ -680,6 +1121,10 @@ class WorkerService:
             with contextlib.suppress(OSError):
                 os.close(candidate.directory_fd)
         self._candidates.clear()
+        for revision in tuple(self._revisions.values()):
+            with contextlib.suppress(OSError):
+                os.close(revision.directory_fd)
+        self._revisions.clear()
 
 
 def _recv_header_with_descriptors(
@@ -804,7 +1249,7 @@ def serve_worker(connection: socket.socket, generation_id: str) -> int:
                 )
                 internal = True
             finally:
-                if request["method"] != "candidate.bind" or not succeeded:
+                if request["method"] not in {"candidate.bind", "revision.bind"} or not succeeded:
                     for descriptor in descriptors:
                         with contextlib.suppress(OSError):
                             os.close(descriptor)

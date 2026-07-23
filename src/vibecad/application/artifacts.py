@@ -3593,7 +3593,7 @@ class ArtifactStore:
             except ArtifactStoreError:
                 raise
             except Exception as error:
-                from vibecad.execution.executor import (  # noqa: PLC0415
+                from vibecad.execution.errors import (  # noqa: PLC0415
                     ExecutorError,
                     ExecutorErrorCode,
                 )

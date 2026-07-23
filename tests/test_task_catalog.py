@@ -32,10 +32,14 @@ from vibecad.workflow.contracts import (
 )
 from vibecad.workflow.lease import LeaseRootTrust, ResourceLeaseManager
 from vibecad.workflow.state import (
+    CriterionOutcome,
+    CriterionVerdict,
     ReasoningOwner,
+    ReviewDraft,
     ReviewPolicy,
     TaskEvent,
     TaskStatus,
+    VerificationReport,
     new_task_run,
     transition_task,
 )
@@ -122,13 +126,43 @@ def _error(*, needs_input: bool = False) -> StepError:
     )
 
 
+def _report_for(task) -> VerificationReport:
+    assert task.program is not None
+    return VerificationReport(
+        id="verification_0123456789abcdef0123456789abcdef",
+        acceptance_id=task.program.acceptance.id,
+        candidate_revision=CANDIDATE_REVISION,
+        manifest_sha256="a" * 64,
+        observation_digest="b" * 64,
+        passed=True,
+        verdicts=(
+            CriterionVerdict(
+                criterion_id="catalog",
+                required=True,
+                outcome=CriterionOutcome.PASS,
+                message="Catalog verification passed.",
+            ),
+        ),
+    )
+
+
 def _task_in_status(head, status: TaskStatus):
+    review_policy = (
+        ReviewPolicy.REQUIRE_REVIEW
+        if status
+        in {
+            TaskStatus.PREPARING_REVIEW,
+            TaskStatus.AWAITING_USER_REVIEW,
+            TaskStatus.ACCEPTING_DRAFT,
+        }
+        else ReviewPolicy.AUTO_COMMIT
+    )
     task = new_task_run(
         task_id=TASK_ID,
         project_id=PROJECT_ID,
         base_revision=head.revision_id,
         reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
-        review_policy=ReviewPolicy.AUTO_COMMIT,
+        review_policy=review_policy,
     )
     if status is TaskStatus.CREATED:
         return task
@@ -165,6 +199,12 @@ def _task_in_status(head, status: TaskStatus):
             transition_task(task, TaskEvent.REQUEST_CANCEL),
             TaskEvent.START_CANCELLATION,
         )
+    if status is TaskStatus.ROLLING_BACK:
+        return transition_task(
+            task,
+            TaskEvent.FAIL_EXECUTION,
+            error=_error(),
+        )
     if status is TaskStatus.RECOVERY_REQUIRED:
         return transition_task(
             task,
@@ -180,6 +220,42 @@ def _task_in_status(head, status: TaskStatus):
             ),
             TaskEvent.COMPLETE_ROLLBACK,
         )
+    task = transition_task(task, TaskEvent.COMPLETE_EXECUTION)
+    if status is TaskStatus.VERIFYING:
+        return task
+    report = _report_for(task)
+    if status is TaskStatus.COMMITTING:
+        return transition_task(
+            task,
+            TaskEvent.PASS_VERIFICATION,
+            verification=report,
+        )
+    draft = ReviewDraft(
+        id=f"draft_{CANDIDATE_REVISION.removeprefix('revision_')}",
+        task_id=task.id,
+        project_id=task.project_id,
+        base_revision=head.revision_id,
+        base_generation=head.generation,
+        base_manifest_sha256=head.manifest_sha256,
+        revision_id=CANDIDATE_REVISION,
+        manifest_sha256=report.manifest_sha256,
+        verification_id=report.id,
+        acceptance_id=report.acceptance_id,
+        observation_digest=report.observation_digest,
+    )
+    task = transition_task(
+        task,
+        TaskEvent.PREPARE_REVIEW,
+        verification=report,
+        draft=draft,
+    )
+    if status is TaskStatus.PREPARING_REVIEW:
+        return task
+    task = transition_task(task, TaskEvent.PUBLISH_DRAFT)
+    if status is TaskStatus.AWAITING_USER_REVIEW:
+        return task
+    if status is TaskStatus.ACCEPTING_DRAFT:
+        return transition_task(task, TaskEvent.ACCEPT_DRAFT)
     raise AssertionError(f"unsupported task status fixture: {status.value}")
 
 
@@ -203,6 +279,7 @@ def test_catalog_creates_and_gets_a_task_without_any_cad_port(tmp_path: Path):
         "create_task",
         "get_task",
         "reject_draft",
+        "start_cancellation",
     }
 
 
@@ -213,13 +290,13 @@ def test_catalog_atomically_creates_and_exactly_replays_a_bound_revert(
     catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
     source = _revert_source()
 
-    created = catalog.create_revert_task(
+    created, created_here = catalog.create_revert_task_with_disposition(
         revert_key=REVERT_KEY,
         project_id=PROJECT_ID,
         source_revision=source,
         expected_head=head,
     )
-    replayed = catalog.create_revert_task(
+    replayed, replay_created_here = catalog.create_revert_task_with_disposition(
         revert_key=REVERT_KEY,
         project_id=PROJECT_ID,
         source_revision=source,
@@ -227,6 +304,17 @@ def test_catalog_atomically_creates_and_exactly_replays_a_bound_revert(
     )
 
     assert replayed == created
+    assert created_here is True
+    assert replay_created_here is False
+    assert (
+        catalog.create_revert_task(
+            revert_key=REVERT_KEY,
+            project_id=PROJECT_ID,
+            source_revision=source,
+            expected_head=head,
+        )
+        == created
+    )
     assert created.generation == 0
     assert created.task_run.status is TaskStatus.PROGRAM_READY
     assert created.task_run.review_policy is ReviewPolicy.REQUIRE_REVIEW
@@ -262,19 +350,70 @@ def test_catalog_revert_recovers_exact_program_ready_after_lost_create_reply(
         )
 
     monkeypatch.setattr(TaskRunStore, "create", create_then_lose_reply)
-    recovered = TaskCatalogService(
+    recovered, created_here = TaskCatalogService(
         task_store=tasks,
         revision_store=revisions,
-    ).create_revert_task(
+    ).create_revert_task_with_disposition(
         revert_key=REVERT_KEY,
         project_id=PROJECT_ID,
         source_revision=_revert_source(),
         expected_head=head,
     )
 
+    assert created_here is False
     assert recovered.generation == 0
     assert recovered.task_run.status is TaskStatus.PROGRAM_READY
     assert tasks.load(recovered.task_run.id) == recovered
+
+
+def test_catalog_revert_already_exists_readback_is_not_a_proven_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _leases, tasks, revisions, head = _stores(tmp_path)
+    source = _revert_source()
+    created = TaskCatalogService(
+        task_store=tasks,
+        revision_store=revisions,
+    ).create_revert_task(
+        revert_key=REVERT_KEY,
+        project_id=PROJECT_ID,
+        source_revision=source,
+        expected_head=head,
+    )
+    real_load = TaskCatalogService._load_replay_candidate
+    load_calls = 0
+
+    def lose_initial_replay(catalog, task_id, *, await_publication, retry_budget):
+        nonlocal load_calls
+        load_calls += 1
+        if load_calls == 1:
+            return None
+        return real_load(
+            catalog,
+            task_id,
+            await_publication=await_publication,
+            retry_budget=retry_budget,
+        )
+
+    monkeypatch.setattr(
+        TaskCatalogService,
+        "_load_replay_candidate",
+        lose_initial_replay,
+    )
+    replayed, created_here = TaskCatalogService(
+        task_store=tasks,
+        revision_store=revisions,
+    ).create_revert_task_with_disposition(
+        revert_key=REVERT_KEY,
+        project_id=PROJECT_ID,
+        source_revision=source,
+        expected_head=head,
+    )
+
+    assert replayed == created
+    assert created_here is False
+    assert load_calls == 2
 
 
 def test_catalog_cancel_is_durable_and_replays_after_response_loss_and_restart(
@@ -339,6 +478,42 @@ def test_catalog_cancel_immediately_closes_every_idle_state(
     assert revisions.load_head(PROJECT_ID) == head
 
 
+@pytest.mark.parametrize(
+    "status",
+    (
+        TaskStatus.CREATED,
+        TaskStatus.NEEDS_PLAN,
+        TaskStatus.PROGRAM_READY,
+        TaskStatus.NEEDS_INPUT,
+    ),
+)
+def test_catalog_active_cancel_keeps_every_idle_state_recoverable(
+    tmp_path: Path,
+    status: TaskStatus,
+) -> None:
+    _leases, tasks, revisions, head = _stores(tmp_path)
+    stored = tasks.create(_task_in_status(head, status))
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+
+    requested = catalog.cancel_task(
+        task_id=stored.task_run.id,
+        expected_generation=stored.generation,
+        active=True,
+    )
+    replayed = catalog.cancel_task(
+        task_id=stored.task_run.id,
+        expected_generation=stored.generation,
+        active=True,
+    )
+
+    assert requested.generation == stored.generation + 1
+    assert requested.task_run.status is TaskStatus.CANCEL_REQUESTED
+    assert requested.task_run.transitions[-1].event is (TaskEvent.REQUEST_ACTIVE_CANCEL)
+    assert replayed == requested
+    assert tasks.load(stored.task_run.id) == requested
+    assert revisions.load_head(PROJECT_ID) == head
+
+
 def test_catalog_cancel_rejects_stale_idle_and_future_terminal_generations(
     tmp_path: Path,
 ):
@@ -370,7 +545,8 @@ def test_catalog_cancel_rejects_stale_idle_and_future_terminal_generations(
 @pytest.mark.parametrize(
     ("status", "code"),
     (
-        (TaskStatus.EXECUTING, TaskCatalogErrorCode.INVALID_STATE),
+        (TaskStatus.AWAITING_USER_REVIEW, TaskCatalogErrorCode.INVALID_STATE),
+        (TaskStatus.ROLLING_BACK, TaskCatalogErrorCode.INVALID_STATE),
         (TaskStatus.RECOVERY_REQUIRED, TaskCatalogErrorCode.RECOVERY_REQUIRED),
         (TaskStatus.FAILED, TaskCatalogErrorCode.CONFLICT),
     ),
@@ -397,6 +573,44 @@ def test_catalog_cancel_fails_closed_without_mutating_non_idle_states(
 
 @pytest.mark.parametrize(
     "status",
+    (
+        TaskStatus.VALIDATING_PROGRAM,
+        TaskStatus.EXECUTING,
+        TaskStatus.VERIFYING,
+        TaskStatus.COMMITTING,
+        TaskStatus.PREPARING_REVIEW,
+        TaskStatus.ACCEPTING_DRAFT,
+    ),
+)
+def test_catalog_cancel_persists_only_the_request_from_every_active_state(
+    tmp_path: Path,
+    status: TaskStatus,
+) -> None:
+    _leases, tasks, revisions, head = _stores(tmp_path)
+    stored = tasks.create(_task_in_status(head, status))
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+
+    requested = catalog.cancel_task(
+        task_id=stored.task_run.id,
+        expected_generation=stored.generation,
+    )
+
+    assert requested.generation == stored.generation + 1
+    assert requested.task_run.status is TaskStatus.CANCEL_REQUESTED
+    assert requested.task_run.transitions[-1].event is TaskEvent.REQUEST_CANCEL
+    assert [record.event for record in requested.task_run.transitions].count(
+        TaskEvent.REQUEST_CANCEL
+    ) == 1
+    assert all(
+        record.event is not TaskEvent.START_CANCELLATION
+        for record in requested.task_run.transitions
+    )
+    assert tasks.load(stored.task_run.id) == requested
+    assert revisions.load_head(PROJECT_ID) == head
+
+
+@pytest.mark.parametrize(
+    "status",
     (TaskStatus.CANCEL_REQUESTED, TaskStatus.CANCELLING),
 )
 def test_catalog_cancel_replays_future_active_cancellation_contract_without_mutation(
@@ -414,6 +628,86 @@ def test_catalog_cancel_replays_future_active_cancellation_contract_without_muta
 
     assert replayed == stored
     assert tasks.load(stored.task_run.id) == stored
+
+
+def test_catalog_start_cancellation_is_a_separate_exact_cas_and_replays(
+    tmp_path: Path,
+) -> None:
+    _leases, tasks, revisions, head = _stores(tmp_path)
+    executing = tasks.create(_task_in_status(head, TaskStatus.EXECUTING))
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+    requested = catalog.cancel_task(
+        task_id=executing.task_run.id,
+        expected_generation=executing.generation,
+    )
+
+    cancelling = catalog.start_cancellation(
+        task_id=requested.task_run.id,
+        expected_generation=requested.generation,
+    )
+    replayed = TaskCatalogService(
+        task_store=tasks,
+        revision_store=revisions,
+    ).start_cancellation(
+        task_id=requested.task_run.id,
+        expected_generation=requested.generation,
+    )
+
+    assert cancelling.generation == requested.generation + 1
+    assert cancelling.task_run.status is TaskStatus.CANCELLING
+    assert cancelling.task_run.transitions[-1].event is TaskEvent.START_CANCELLATION
+    assert [record.event for record in cancelling.task_run.transitions].count(
+        TaskEvent.START_CANCELLATION
+    ) == 1
+    assert replayed == cancelling
+
+
+def test_concurrent_same_start_intent_converges_on_one_transition(tmp_path: Path):
+    _leases, tasks, revisions, head = _stores(tmp_path)
+    executing = tasks.create(_task_in_status(head, TaskStatus.EXECUTING))
+    requested = TaskCatalogService(
+        task_store=tasks,
+        revision_store=revisions,
+    ).cancel_task(
+        task_id=executing.task_run.id,
+        expected_generation=executing.generation,
+    )
+    barrier = threading.Barrier(16)
+    results = []
+    failures = []
+    result_lock = threading.Lock()
+
+    def start() -> None:
+        try:
+            barrier.wait()
+            value = TaskCatalogService(
+                task_store=tasks,
+                revision_store=revisions,
+            ).start_cancellation(
+                task_id=requested.task_run.id,
+                expected_generation=requested.generation,
+            )
+            with result_lock:
+                results.append(value)
+        except BaseException as error:
+            with result_lock:
+                failures.append(error)
+
+    workers = [threading.Thread(target=start) for _ in range(16)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert failures == []
+    assert len(results) == 16
+    assert len(set(results)) == 1
+    cancelling = results[0]
+    assert cancelling.task_run.status is TaskStatus.CANCELLING
+    assert [record.event for record in cancelling.task_run.transitions].count(
+        TaskEvent.START_CANCELLATION
+    ) == 1
 
 
 def test_concurrent_same_cancel_intent_converges_on_one_transition(tmp_path: Path):

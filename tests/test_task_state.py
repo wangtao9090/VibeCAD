@@ -776,12 +776,28 @@ def test_every_status_event_pair_has_exact_transition_or_rejection():
     }
     expected = {
         (TaskStatus.CREATED, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
+        (
+            TaskStatus.CREATED,
+            TaskEvent.REQUEST_ACTIVE_CANCEL,
+        ): TaskStatus.CANCEL_REQUESTED,
         (TaskStatus.CREATED, TaskEvent.REQUEST_PLAN): TaskStatus.NEEDS_PLAN,
         (TaskStatus.NEEDS_PLAN, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
+        (
+            TaskStatus.NEEDS_PLAN,
+            TaskEvent.REQUEST_ACTIVE_CANCEL,
+        ): TaskStatus.CANCEL_REQUESTED,
         (TaskStatus.NEEDS_PLAN, TaskEvent.SUBMIT_PROGRAM): TaskStatus.PROGRAM_READY,
         (TaskStatus.PROGRAM_READY, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
+        (
+            TaskStatus.PROGRAM_READY,
+            TaskEvent.REQUEST_ACTIVE_CANCEL,
+        ): TaskStatus.CANCEL_REQUESTED,
         (TaskStatus.NEEDS_INPUT, TaskEvent.SUBMIT_PROGRAM): TaskStatus.PROGRAM_READY,
         (TaskStatus.NEEDS_INPUT, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
+        (
+            TaskStatus.NEEDS_INPUT,
+            TaskEvent.REQUEST_ACTIVE_CANCEL,
+        ): TaskStatus.CANCEL_REQUESTED,
         (TaskStatus.PROGRAM_READY, TaskEvent.START_VALIDATION): TaskStatus.VALIDATING_PROGRAM,
         (TaskStatus.VALIDATING_PROGRAM, TaskEvent.VALIDATE_PROGRAM): TaskStatus.EXECUTING,
         (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REJECT_PROGRAM): TaskStatus.NEEDS_INPUT,
@@ -966,12 +982,28 @@ def _matrix_task(status: TaskStatus) -> TaskRun:
 
 LEGAL_EDGES = {
     (TaskStatus.CREATED, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
+    (
+        TaskStatus.CREATED,
+        TaskEvent.REQUEST_ACTIVE_CANCEL,
+    ): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.CREATED, TaskEvent.REQUEST_PLAN): TaskStatus.NEEDS_PLAN,
     (TaskStatus.NEEDS_PLAN, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
+    (
+        TaskStatus.NEEDS_PLAN,
+        TaskEvent.REQUEST_ACTIVE_CANCEL,
+    ): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.NEEDS_PLAN, TaskEvent.SUBMIT_PROGRAM): TaskStatus.PROGRAM_READY,
     (TaskStatus.PROGRAM_READY, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
+    (
+        TaskStatus.PROGRAM_READY,
+        TaskEvent.REQUEST_ACTIVE_CANCEL,
+    ): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.NEEDS_INPUT, TaskEvent.SUBMIT_PROGRAM): TaskStatus.PROGRAM_READY,
     (TaskStatus.NEEDS_INPUT, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
+    (
+        TaskStatus.NEEDS_INPUT,
+        TaskEvent.REQUEST_ACTIVE_CANCEL,
+    ): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.PROGRAM_READY, TaskEvent.START_VALIDATION): TaskStatus.VALIDATING_PROGRAM,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.VALIDATE_PROGRAM): TaskStatus.EXECUTING,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REJECT_PROGRAM): TaskStatus.NEEDS_INPUT,
@@ -3803,6 +3835,7 @@ def test_review_status_event_and_next_action_enums_are_exact():
         "confirm_uncommitted",
         "confirm_pre_candidate",
         "request_cancel",
+        "request_active_cancel",
         "start_cancellation",
         "confirm_cancelled",
     }

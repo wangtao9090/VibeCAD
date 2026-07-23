@@ -33,6 +33,7 @@ from vibecad.workflow.state import (
     NextAction,
     ReasoningOwner,
     ReviewPolicy,
+    TaskEvent,
     TaskStatus,
     TaskTransitionRecord,
     task_creation_identity,
@@ -240,6 +241,17 @@ def _bounded_contract_path(path: str) -> str:
     except UnicodeEncodeError:
         pass
     return "/program_json/_truncated"
+
+
+def _has_cancellation_origin(stored: StoredTaskRun) -> bool:
+    return any(
+        record.event
+        in {
+            TaskEvent.REQUEST_CANCEL,
+            TaskEvent.REQUEST_ACTIVE_CANCEL,
+        }
+        for record in stored.task_run.transitions
+    )
 
 
 def _utf8_length(value: str, path: str) -> int:
@@ -1091,6 +1103,8 @@ class TaskApi:
                 TaskStatus.ACCEPTING_DRAFT,
                 TaskStatus.RECOVERY_REQUIRED,
                 TaskStatus.CLEANUP_REQUIRED,
+                TaskStatus.CANCEL_REQUESTED,
+                TaskStatus.CANCELLING,
             }:
                 stored = self._port_result(
                     self._invoke_untrusted(
@@ -1113,8 +1127,6 @@ class TaskApi:
                 TaskStatus.NEEDS_PLAN,
                 TaskStatus.NEEDS_INPUT,
                 TaskStatus.AWAITING_USER_REVIEW,
-                TaskStatus.CANCEL_REQUESTED,
-                TaskStatus.CANCELLING,
             }:
                 _raise(TaskApiErrorCode.INVALID_STATE)
             else:
@@ -1142,11 +1154,20 @@ class TaskApi:
             )
             if stored.generation < expected_generation:
                 _raise(TaskApiErrorCode.INTERNAL_ERROR)
-            if stored.task_run.status not in {
+            status = stored.task_run.status
+            if status not in {
                 TaskStatus.CANCEL_REQUESTED,
                 TaskStatus.CANCELLING,
                 TaskStatus.CANCELLED,
-            }:
+            } and not (
+                status
+                in {
+                    TaskStatus.RECOVERY_REQUIRED,
+                    TaskStatus.CLEANUP_REQUIRED,
+                    TaskStatus.SUCCEEDED,
+                }
+                and _has_cancellation_origin(stored)
+            ):
                 _raise(TaskApiErrorCode.INTERNAL_ERROR)
             return self._task_result(stored, task_id=task_id)
 

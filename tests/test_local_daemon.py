@@ -1948,3 +1948,31 @@ def test_c09_does_not_change_public_tool_count_or_protocol_method_set() -> None:
         "rotate_part",
     )
     assert not hasattr(daemon_service, "FileGrant")
+
+
+def test_run_daemon_attempts_close_after_observing_failed_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibecad.runtime import paths
+
+    class FailedDaemon:
+        def __init__(self) -> None:
+            self.state = daemon_api.LocalKernelState.FAILED
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            self.state = daemon_api.LocalKernelState.CLOSED
+
+    daemon = FailedDaemon()
+    monkeypatch.setattr(paths, "data_root", lambda: tmp_path / "data")
+    monkeypatch.setattr(
+        daemon_service.LocalKernelDaemon,
+        "start",
+        lambda **_kwargs: daemon,
+    )
+    monkeypatch.setattr(daemon_service.signal, "signal", lambda *_args: object())
+
+    assert daemon_service.run_daemon() == 1
+    assert daemon.close_calls == 1

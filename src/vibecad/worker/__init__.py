@@ -8,6 +8,7 @@ from vibecad.worker.generation import (
 from vibecad.worker.proxy import (
     FreeCadWorker,
     WorkerCandidate,
+    WorkerRevision,
     WorkerSession,
 )
 
@@ -17,5 +18,6 @@ __all__ = (
     "WorkerError",
     "WorkerErrorCode",
     "WorkerGenerationState",
+    "WorkerRevision",
     "WorkerSession",
 )

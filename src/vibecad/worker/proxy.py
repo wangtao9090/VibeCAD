@@ -18,8 +18,15 @@ from vibecad.execution.results import (
 from vibecad.execution.revisions import (
     LocalRevisionStore,
     ProjectHead,
+    RevisionRef,
     _open_worker_candidate_staging,
+    _open_worker_revision,
 )
+from vibecad.interaction.cad import (
+    ValidatedImportEvidence,
+    ValidatedMaterializationEvidence,
+)
+from vibecad.validation import EntityObservation, ShapeObservation
 from vibecad.worker.generation import (
     WorkerError,
     WorkerErrorCode,
@@ -31,10 +38,13 @@ from vibecad.workflow.lease import ProjectWriteLease
 from vibecad.workflow.program import ValidatedProgram, validate_model_program
 
 _CANDIDATE = re.compile(r"worker_candidate_[0-9a-f]{32}\Z")
+_WORKER_REVISION = re.compile(r"worker_revision_[0-9a-f]{32}\Z")
 _SESSION = re.compile(r"worker_session_[0-9a-f]{32}\Z")
 _PROGRAM = re.compile(r"worker_program_[0-9a-f]{32}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_STAGE_NAME = re.compile(r"\.(?:import|normalized|stage)\.[0-9a-f]{32}\.FCStd\Z")
 _MAX_FILE_BYTES = 536_870_912
+_MAX_DIRECTORY_ENTRIES = 64
 _READ_CHUNK_BYTES = 1_048_576
 
 
@@ -175,6 +185,76 @@ def _hash_entry(directory_fd: int, name: str) -> tuple[str, int, _Identity]:
     return result
 
 
+def _private_entries(directory_fd: int) -> tuple[tuple[str, _Identity], ...]:
+    try:
+        directory = os.fstat(directory_fd)
+        if not _private_directory(directory):
+            raise OSError
+        names = tuple(sorted(os.listdir(directory_fd)))
+        if (
+            len(names) > _MAX_DIRECTORY_ENTRIES
+            or len(names) != len(set(names))
+            or any(type(name) is not str or name in {".", ".."} for name in names)
+        ):
+            raise OSError
+        result: list[tuple[str, _Identity]] = []
+        for name in names:
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not _private_file(current) or current.st_dev != directory.st_dev:
+                raise OSError
+            result.append((name, _identity(current)))
+        return tuple(result)
+    except OSError:
+        raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE) from None
+
+
+def _revision_files(
+    directory_fd: int,
+    revision: RevisionRef,
+) -> tuple[tuple[str, str, int, _Identity], ...]:
+    entries = _private_entries(directory_fd)
+    expected = {"manifest.json": (revision.manifest_sha256, None)}
+    if revision.model is not None:
+        expected[revision.model.name] = (
+            revision.model.sha256,
+            revision.model.size_bytes,
+        )
+    for artifact in revision.artifacts:
+        expected[artifact.name] = (artifact.sha256, artifact.size_bytes)
+    if tuple(name for name, _entry in entries) != tuple(sorted(expected)):
+        raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE)
+    result: list[tuple[str, str, int, _Identity]] = []
+    for name, identity in entries:
+        digest, size, hashed = _hash_entry(directory_fd, name)
+        expected_digest, expected_size = expected[name]
+        if (
+            hashed != identity
+            or digest != expected_digest
+            or (expected_size is not None and size != expected_size)
+        ):
+            raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE)
+        result.append((name, digest, size, identity))
+    return tuple(result)
+
+
+def _pin_private_directory(directory_fd: int) -> tuple[int, _DirectoryIdentity]:
+    if type(directory_fd) is not int or directory_fd < 0:
+        raise WorkerError(WorkerErrorCode.INVALID_INPUT)
+    pinned = -1
+    try:
+        pinned = os.dup(directory_fd)
+        os.set_inheritable(pinned, False)
+        current = os.fstat(pinned)
+        if not _private_directory(current) or os.get_inheritable(pinned):
+            raise OSError
+        return pinned, _directory_identity(current)
+    except OSError:
+        if pinned >= 0:
+            with contextlib.suppress(OSError):
+                os.close(pinned)
+        raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE) from None
+
+
 class _Opaque:
     __slots__ = ()
 
@@ -197,6 +277,12 @@ class _Opaque:
 class WorkerCandidate(_Opaque):
     generation_id: str
     candidate_id: str
+
+
+@dataclass(frozen=True, slots=True, eq=False, repr=False)
+class WorkerRevision(_Opaque):
+    generation_id: str
+    capability_id: str
 
 
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
@@ -224,9 +310,24 @@ class _CandidateState:
 
 
 @dataclass(slots=True)
+class _RevisionState:
+    handle: WorkerRevision
+    revisions_fd: int
+    revision_name: str
+    directory_fd: int
+    revisions_identity: _DirectoryIdentity
+    directory_identity: _DirectoryIdentity
+    files: tuple[tuple[str, str, int, _Identity], ...]
+    root_device: int
+    store: LocalRevisionStore
+    revision: RevisionRef
+
+
+@dataclass(slots=True)
 class _SessionState:
     handle: WorkerSession
-    candidate: WorkerCandidate
+    candidate: WorkerCandidate | None = None
+    revision: WorkerRevision | None = None
 
 
 class FreeCadWorker(_Opaque):
@@ -239,6 +340,7 @@ class FreeCadWorker(_Opaque):
         "_lifecycle_lock",
         "_operation_lock",
         "_process",
+        "_revisions",
         "_sessions",
     )
 
@@ -251,6 +353,7 @@ class FreeCadWorker(_Opaque):
         self._operation_lock = threading.Lock()
         self._lifecycle_lock = threading.RLock()
         self._candidates: dict[WorkerCandidate, _CandidateState] = {}
+        self._revisions: dict[WorkerRevision, _RevisionState] = {}
         self._sessions: dict[WorkerSession, _SessionState] = {}
 
     @classmethod
@@ -335,6 +438,12 @@ class FreeCadWorker(_Opaque):
                 with contextlib.suppress(OSError):
                     os.close(state.candidates_fd)
             self._candidates.clear()
+            for state in tuple(self._revisions.values()):
+                with contextlib.suppress(OSError):
+                    os.close(state.directory_fd)
+                with contextlib.suppress(OSError):
+                    os.close(state.revisions_fd)
+            self._revisions.clear()
             self._sessions.clear()
 
     def _request(
@@ -372,6 +481,14 @@ class FreeCadWorker(_Opaque):
         if type(value) is not WorkerCandidate:
             raise WorkerError(WorkerErrorCode.INVALID_HANDLE)
         state = self._candidates.get(value)
+        if state is None or value.generation_id != self.generation_id or state.handle is not value:
+            raise WorkerError(WorkerErrorCode.INVALID_HANDLE)
+        return state
+
+    def _revision_state(self, value: object) -> _RevisionState:
+        if type(value) is not WorkerRevision:
+            raise WorkerError(WorkerErrorCode.INVALID_HANDLE)
+        state = self._revisions.get(value)
         if state is None or value.generation_id != self.generation_id or state.handle is not value:
             raise WorkerError(WorkerErrorCode.INVALID_HANDLE)
         return state
@@ -439,6 +556,62 @@ class FreeCadWorker(_Opaque):
                 or step != state.step_identity
             ):
                 raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE)
+
+    def _require_live_revision(self, state: _RevisionState) -> None:
+        with self._lifecycle_lock:
+            self._ensure_process()
+            fresh_revisions = -1
+            fresh_directory = -1
+            try:
+                (
+                    fresh_revisions,
+                    fresh_directory,
+                    fresh_name,
+                    fresh_root_device,
+                ) = _open_worker_revision(
+                    state.store,
+                    expected_revision=state.revision,
+                )
+                pinned_parent = os.fstat(state.revisions_fd)
+                pinned_directory = os.fstat(state.directory_fd)
+                pinned_live = os.stat(
+                    state.revision_name,
+                    dir_fd=state.revisions_fd,
+                    follow_symlinks=False,
+                )
+                fresh_parent = os.fstat(fresh_revisions)
+                fresh_value = os.fstat(fresh_directory)
+                fresh_live = os.stat(
+                    fresh_name,
+                    dir_fd=fresh_revisions,
+                    follow_symlinks=False,
+                )
+                files = _revision_files(state.directory_fd, state.revision)
+                fresh_files = _revision_files(fresh_directory, state.revision)
+                if (
+                    fresh_name != state.revision_name
+                    or fresh_root_device != state.root_device
+                    or _directory_identity(pinned_parent) != state.revisions_identity
+                    or _directory_identity(fresh_parent) != state.revisions_identity
+                    or _directory_identity(pinned_directory) != state.directory_identity
+                    or _directory_identity(pinned_live) != state.directory_identity
+                    or _directory_identity(fresh_value) != state.directory_identity
+                    or _directory_identity(fresh_live) != state.directory_identity
+                    or files != state.files
+                    or fresh_files != state.files
+                ):
+                    raise OSError
+            except WorkerError:
+                raise
+            except Exception:
+                raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE) from None
+            finally:
+                if fresh_directory >= 0:
+                    with contextlib.suppress(OSError):
+                        os.close(fresh_directory)
+                if fresh_revisions >= 0:
+                    with contextlib.suppress(OSError):
+                        os.close(fresh_revisions)
 
     def bind_candidate(
         self,
@@ -557,6 +730,114 @@ class FreeCadWorker(_Opaque):
                     os.close(candidates_fd)
                 raise
 
+    def bind_revision(
+        self,
+        *,
+        store: LocalRevisionStore,
+        revision: RevisionRef,
+    ) -> WorkerRevision:
+        if type(store) is not LocalRevisionStore or type(revision) is not RevisionRef:
+            raise WorkerError(WorkerErrorCode.INVALID_INPUT)
+        revisions_fd = -1
+        descriptor = -1
+        with self._operation_lock:
+            self._ensure_process()
+            try:
+                (
+                    revisions_fd,
+                    descriptor,
+                    revision_name,
+                    root_device,
+                ) = _open_worker_revision(
+                    store,
+                    expected_revision=revision,
+                )
+                revisions_stat = os.fstat(revisions_fd)
+                directory_stat = os.fstat(descriptor)
+                live_stat = os.stat(
+                    revision_name,
+                    dir_fd=revisions_fd,
+                    follow_symlinks=False,
+                )
+                files = _revision_files(descriptor, revision)
+                if (
+                    _directory_identity(directory_stat) != _directory_identity(live_stat)
+                    or not _private_directory(directory_stat)
+                    or directory_stat.st_dev != root_device
+                ):
+                    raise OSError
+            except BaseException as error:
+                if descriptor >= 0:
+                    with contextlib.suppress(OSError):
+                        os.close(descriptor)
+                if revisions_fd >= 0:
+                    with contextlib.suppress(OSError):
+                        os.close(revisions_fd)
+                if not isinstance(error, Exception):
+                    raise
+                raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE) from None
+            capability_id = f"worker_revision_{os.urandom(16).hex()}"
+            file_mappings = [
+                {
+                    "name": name,
+                    "sha256": digest,
+                    "size_bytes": size,
+                }
+                for name, digest, size, _identity_value in files
+            ]
+            try:
+                result = self._request(
+                    "revision.bind",
+                    {
+                        "revision_id": capability_id,
+                        "project_id": revision.project_id,
+                        "store_revision_id": revision.id,
+                        "model_name": (None if revision.model is None else revision.model.name),
+                        "files": file_mappings,
+                    },
+                    timeout_ms=30_000,
+                    capability_fd=descriptor,
+                )
+                if set(result) != {"revision_id"} or result["revision_id"] != capability_id:
+                    self._protocol_loss()
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+                with contextlib.suppress(OSError):
+                    os.close(revisions_fd)
+                raise
+            handle = WorkerRevision(
+                generation_id=self.generation_id,
+                capability_id=capability_id,
+            )
+            state = _RevisionState(
+                handle=handle,
+                revisions_fd=revisions_fd,
+                revision_name=revision_name,
+                directory_fd=descriptor,
+                revisions_identity=_directory_identity(revisions_stat),
+                directory_identity=_directory_identity(directory_stat),
+                files=files,
+                root_device=root_device,
+                store=store,
+                revision=revision,
+            )
+            try:
+                with self._lifecycle_lock:
+                    self._ensure_process()
+                    try:
+                        self._require_live_revision(state)
+                    except WorkerError:
+                        self._protocol_loss()
+                    self._revisions[handle] = state
+                    return handle
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+                with contextlib.suppress(OSError):
+                    os.close(revisions_fd)
+                raise
+
     def _new_session(
         self,
         *,
@@ -605,6 +886,38 @@ class FreeCadWorker(_Opaque):
             candidate=candidate,
             method="session.load_fcstd",
         )
+
+    def load_revision(self, revision: WorkerRevision) -> WorkerSession:
+        with self._operation_lock:
+            self._ensure_process()
+            revision_state = self._revision_state(revision)
+            self._require_live_revision(revision_state)
+            result = self._request(
+                "session.load_revision",
+                {"revision_id": revision.capability_id},
+                timeout_ms=30_000,
+            )
+            if (
+                set(result) != {"session_id"}
+                or type(result["session_id"]) is not str
+                or _SESSION.fullmatch(result["session_id"]) is None
+            ):
+                self._protocol_loss()
+            with self._lifecycle_lock:
+                self._ensure_process()
+                try:
+                    self._require_live_revision(revision_state)
+                except WorkerError:
+                    self._protocol_loss()
+                handle = WorkerSession(
+                    generation_id=self.generation_id,
+                    session_id=result["session_id"],  # type: ignore[arg-type]
+                )
+                self._sessions[handle] = _SessionState(
+                    handle=handle,
+                    revision=revision,
+                )
+                return handle
 
     def _require_pair(
         self,
@@ -789,6 +1102,79 @@ class FreeCadWorker(_Opaque):
                 name="model.step",
             )
 
+    def observe(
+        self,
+        *,
+        session: WorkerSession,
+        capability: WorkerCandidate | WorkerRevision,
+    ) -> tuple[ShapeObservation | None, tuple[EntityObservation, ...]]:
+        with self._operation_lock:
+            self._ensure_process()
+            session_state = self._session_state(session)
+            if type(capability) is WorkerCandidate:
+                candidate_state = self._candidate_state(capability)
+                if session_state.candidate is not capability:
+                    raise WorkerError(WorkerErrorCode.INVALID_HANDLE)
+                self._require_live_candidate(candidate_state)
+                kind = "candidate"
+                capability_id = capability.candidate_id
+                revision_state = None
+            elif type(capability) is WorkerRevision:
+                revision_state = self._revision_state(capability)
+                if session_state.revision is not capability:
+                    raise WorkerError(WorkerErrorCode.INVALID_HANDLE)
+                self._require_live_revision(revision_state)
+                kind = "revision"
+                capability_id = capability.capability_id
+                candidate_state = None
+            else:
+                raise WorkerError(WorkerErrorCode.INVALID_HANDLE)
+            result = self._request(
+                "session.observe",
+                {
+                    "session_id": session.session_id,
+                    "capability_kind": kind,
+                    "capability_id": capability_id,
+                },
+                timeout_ms=30_000,
+            )
+            try:
+                if (
+                    set(result) != {"shape", "entities"}
+                    or (result["shape"] is not None and type(result["shape"]) is not dict)
+                    or type(result["entities"]) is not list
+                ):
+                    raise ValueError
+                shape = (
+                    None
+                    if result["shape"] is None
+                    else ShapeObservation.from_mapping(result["shape"])
+                )
+                entities = tuple(
+                    EntityObservation.from_mapping(item) for item in result["entities"]
+                )
+                object_ids = tuple(item.object_id for item in entities)
+                if object_ids != tuple(sorted(object_ids)) or len(object_ids) != len(
+                    set(object_ids)
+                ):
+                    raise ValueError
+            except Exception:
+                self._protocol_loss()
+            with self._lifecycle_lock:
+                self._ensure_process()
+                current = self._session_state(session)
+                if current is not session_state:
+                    self._protocol_loss()
+                try:
+                    if candidate_state is not None:
+                        self._require_live_candidate(candidate_state)
+                    else:
+                        assert revision_state is not None
+                        self._require_live_revision(revision_state)
+                except WorkerError:
+                    self._protocol_loss()
+                return shape, entities
+
     def _accept_artifact_result(
         self,
         state: _CandidateState,
@@ -850,6 +1236,166 @@ class FreeCadWorker(_Opaque):
             state.model_identity = model
             state.step_identity = step
 
+    def _validate_import_at(
+        self,
+        *,
+        directory_fd: int,
+        name: str,
+        normalize: bool,
+    ) -> ValidatedImportEvidence:
+        if type(name) is not str or _STAGE_NAME.fullmatch(name) is None:
+            raise WorkerError(WorkerErrorCode.INVALID_INPUT)
+        with self._operation_lock:
+            self._ensure_process()
+            pinned, directory_identity = _pin_private_directory(directory_fd)
+            try:
+                before = _private_entries(pinned)
+                before_mapping = dict(before)
+                target_before = before_mapping.get(name)
+                if target_before is None or target_before.size <= 0:
+                    raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE)
+                result = self._request(
+                    ("validation.validate_import" if normalize else "validation.revalidate_import"),
+                    {"name": name},
+                    timeout_ms=30_000,
+                    capability_fd=pinned,
+                )
+                try:
+                    after_directory = os.fstat(pinned)
+                    after = _private_entries(pinned)
+                    after_mapping = dict(after)
+                    target_after = after_mapping.get(name)
+                    digest, size, hashed = _hash_entry(pinned, name)
+                except (OSError, WorkerError):
+                    self._protocol_loss()
+                if (
+                    _directory_identity(after_directory) != directory_identity
+                    or target_after is None
+                    or hashed != target_after
+                    or set(after_mapping) != set(before_mapping)
+                    or any(
+                        after_mapping[entry_name] != entry_identity
+                        for entry_name, entry_identity in before
+                        if entry_name != name
+                    )
+                    or (not normalize and target_after != target_before)
+                    or set(result) != {"sha256", "size_bytes"}
+                    or type(result["sha256"]) is not str
+                    or _DIGEST.fullmatch(result["sha256"]) is None
+                    or type(result["size_bytes"]) is not int
+                    or result["sha256"] != digest
+                    or result["size_bytes"] != size
+                ):
+                    self._protocol_loss()
+                try:
+                    return ValidatedImportEvidence(
+                        sha256=digest,
+                        size_bytes=size,
+                    )
+                except ValueError:
+                    self._protocol_loss()
+            finally:
+                with contextlib.suppress(OSError):
+                    os.close(pinned)
+
+    def validate_import(
+        self,
+        *,
+        directory_fd: int,
+        name: str,
+    ) -> ValidatedImportEvidence:
+        return self._validate_import_at(
+            directory_fd=directory_fd,
+            name=name,
+            normalize=True,
+        )
+
+    def revalidate_normalized_import(
+        self,
+        *,
+        directory_fd: int,
+        name: str,
+    ) -> ValidatedImportEvidence:
+        return self._validate_import_at(
+            directory_fd=directory_fd,
+            name=name,
+            normalize=False,
+        )
+
+    def validate_materialization(
+        self,
+        *,
+        directory_fd: int,
+    ) -> ValidatedMaterializationEvidence:
+        with self._operation_lock:
+            self._ensure_process()
+            pinned, directory_identity = _pin_private_directory(directory_fd)
+            try:
+                before = _private_entries(pinned)
+                before_mapping = dict(before)
+                if (
+                    before_mapping.get("model.FCStd") is None
+                    or before_mapping.get("model.step") is None
+                    or before_mapping["model.FCStd"].size <= 0
+                    or before_mapping["model.step"].size <= 0
+                ):
+                    raise WorkerError(WorkerErrorCode.INTEGRITY_FAILURE)
+                result = self._request(
+                    "validation.validate_materialization",
+                    {},
+                    timeout_ms=30_000,
+                    capability_fd=pinned,
+                )
+                try:
+                    after_directory = os.fstat(pinned)
+                    after = _private_entries(pinned)
+                    fcstd_sha256, fcstd_size, fcstd_identity = _hash_entry(
+                        pinned,
+                        "model.FCStd",
+                    )
+                    step_sha256, step_size, step_identity = _hash_entry(
+                        pinned,
+                        "model.step",
+                    )
+                except (OSError, WorkerError):
+                    self._protocol_loss()
+                if (
+                    _directory_identity(after_directory) != directory_identity
+                    or after != before
+                    or fcstd_identity != before_mapping["model.FCStd"]
+                    or step_identity != before_mapping["model.step"]
+                    or set(result)
+                    != {
+                        "fcstd_sha256",
+                        "fcstd_size_bytes",
+                        "step_sha256",
+                        "step_size_bytes",
+                    }
+                    or type(result["fcstd_sha256"]) is not str
+                    or _DIGEST.fullmatch(result["fcstd_sha256"]) is None
+                    or type(result["fcstd_size_bytes"]) is not int
+                    or type(result["step_sha256"]) is not str
+                    or _DIGEST.fullmatch(result["step_sha256"]) is None
+                    or type(result["step_size_bytes"]) is not int
+                    or result["fcstd_sha256"] != fcstd_sha256
+                    or result["fcstd_size_bytes"] != fcstd_size
+                    or result["step_sha256"] != step_sha256
+                    or result["step_size_bytes"] != step_size
+                ):
+                    self._protocol_loss()
+                try:
+                    return ValidatedMaterializationEvidence(
+                        fcstd_sha256=fcstd_sha256,
+                        fcstd_size_bytes=fcstd_size,
+                        step_sha256=step_sha256,
+                        step_size_bytes=step_size,
+                    )
+                except ValueError:
+                    self._protocol_loss()
+            finally:
+                with contextlib.suppress(OSError):
+                    os.close(pinned)
+
     def close_session(self, session: WorkerSession) -> None:
         with self._operation_lock:
             self._ensure_process()
@@ -907,6 +1453,41 @@ class FreeCadWorker(_Opaque):
                     self._protocol_loss()
                 self._candidates.pop(candidate, None)
 
+    def release_revision(self, revision: WorkerRevision) -> None:
+        with self._operation_lock:
+            self._ensure_process()
+            state = self._revision_state(revision)
+            if any(item.revision is revision for item in self._sessions.values()):
+                raise WorkerError(WorkerErrorCode.INVALID_HANDLE)
+            try:
+                result = self._request(
+                    "revision.release",
+                    {"revision_id": revision.capability_id},
+                    timeout_ms=5_000,
+                )
+            except WorkerError as error:
+                if error.code is WorkerErrorCode.GENERATION_LOST:
+                    raise
+                self._protocol_loss()
+            if set(result) != {"revision_id"} or result["revision_id"] != revision.capability_id:
+                self._protocol_loss()
+            with self._lifecycle_lock:
+                self._ensure_process()
+                if self._revisions.get(revision) is not state:
+                    self._protocol_loss()
+                close_failed = False
+                for name in ("directory_fd", "revisions_fd"):
+                    descriptor = getattr(state, name)
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        close_failed = True
+                    else:
+                        setattr(state, name, -1)
+                if close_failed:
+                    self._protocol_loss()
+                self._revisions.pop(revision, None)
+
     def terminate(self) -> None:
         with self._lifecycle_lock:
             self._closing = True
@@ -926,4 +1507,9 @@ class FreeCadWorker(_Opaque):
             self._invalidate()
 
 
-__all__ = ("FreeCadWorker", "WorkerCandidate", "WorkerSession")
+__all__ = (
+    "FreeCadWorker",
+    "WorkerCandidate",
+    "WorkerRevision",
+    "WorkerSession",
+)

@@ -174,6 +174,62 @@ class CandidateError(ValueError):
 
 
 class CadSnapshotPort:
+    def open_candidate(
+        self,
+        *,
+        store: _LocalRevisionStore,
+        base_head: _ProjectHead,
+        revision_id: str,
+        lease: _ProjectWriteLease,
+        empty: bool,
+    ) -> object:
+        """Open a reserved mutable candidate through the implementation boundary."""
+
+        if empty:
+            return self.create_empty(revision_id=revision_id)
+        return self.load_fcstd(
+            store.candidate_model_path(
+                base_head.project_id,
+                revision_id,
+                lease,
+            )
+        )
+
+    def reload_candidate(
+        self,
+        *,
+        store: _LocalRevisionStore,
+        base_head: _ProjectHead,
+        revision_id: str,
+        lease: _ProjectWriteLease,
+    ) -> object:
+        """Reload a checkpointed mutable candidate without exposing its path."""
+
+        return self.load_fcstd(
+            store.candidate_model_path(
+                base_head.project_id,
+                revision_id,
+                lease,
+            )
+        )
+
+    def open_revision(
+        self,
+        *,
+        store: _LocalRevisionStore,
+        revision: _RevisionRef,
+    ) -> object:
+        """Open one immutable revision, including an empty generation zero."""
+
+        if revision.model is None:
+            return self.create_empty(revision_id=revision.id)
+        return self.load_fcstd(
+            store.revision_model_path(
+                revision.project_id,
+                revision.id,
+            )
+        )
+
     def create_empty(self, *, revision_id: str) -> object:
         raise NotImplementedError("create_empty is not implemented")
 
@@ -703,6 +759,68 @@ class CandidateCoordinator:
             try:
                 with _candidate_file_limit(self._store):
                     session = self._snapshot_port.load_fcstd(path)
+            except BaseException:
+                if session is not None:
+                    try:
+                        self._snapshot_port.close(session)
+                    except BaseException as cleanup_error:
+                        if not isinstance(cleanup_error, Exception):
+                            raise
+                raise
+            return session
+
+    def _open_candidate_session(self, base_head, revision_id, lease, *, empty):
+        with self._lock:
+            session = None
+            try:
+                with _candidate_file_limit(self._store):
+                    session = self._snapshot_port.open_candidate(
+                        store=self._store,
+                        base_head=base_head,
+                        revision_id=revision_id,
+                        lease=lease,
+                        empty=empty,
+                    )
+            except BaseException:
+                if session is not None:
+                    try:
+                        self._snapshot_port.close(session)
+                    except BaseException as cleanup_error:
+                        if not isinstance(cleanup_error, Exception):
+                            raise
+                raise
+            return session
+
+    def _reload_candidate_session(self, base_head, revision_id, lease):
+        with self._lock:
+            session = None
+            try:
+                with _candidate_file_limit(self._store):
+                    session = self._snapshot_port.reload_candidate(
+                        store=self._store,
+                        base_head=base_head,
+                        revision_id=revision_id,
+                        lease=lease,
+                    )
+            except BaseException:
+                if session is not None:
+                    try:
+                        self._snapshot_port.close(session)
+                    except BaseException as cleanup_error:
+                        if not isinstance(cleanup_error, Exception):
+                            raise
+                raise
+            return session
+
+    def _open_revision_session(self, revision):
+        with self._lock:
+            session = None
+            try:
+                with _candidate_file_limit(self._store):
+                    session = self._snapshot_port.open_revision(
+                        store=self._store,
+                        revision=revision,
+                    )
             except BaseException:
                 if session is not None:
                     try:
@@ -1471,10 +1589,12 @@ class CandidateCoordinator:
                 (model_path, step_path),
             )
             try:
-                if base_revision.model is None:
-                    session = self._create_empty_session(revision_id)
-                else:
-                    session = self._load_fcstd_session(model_path)
+                session = self._open_candidate_session(
+                    expected_head,
+                    revision_id,
+                    lease,
+                    empty=base_revision.model is None,
+                )
                 binding = SessionBinding(
                     project_id=project_id,
                     revision_id=revision_id,
@@ -1737,7 +1857,11 @@ class CandidateCoordinator:
             except Exception:
                 raise self._abort(token, lease, CandidateErrorCode.CAD_FAILURE) from None
             try:
-                session = self._load_fcstd_session(candidate.model_path)
+                session = self._reload_candidate_session(
+                    candidate.base_head,
+                    candidate.binding.revision_id,
+                    lease,
+                )
                 replacement = SessionBinding(
                     project_id=candidate.project_id,
                     revision_id=candidate.binding.revision_id,
@@ -1836,7 +1960,11 @@ class CandidateCoordinator:
                     CandidateErrorCode.STORE_FAILURE,
                 ) from None
             try:
-                session = self._load_fcstd_session(candidate.model_path)
+                session = self._reload_candidate_session(
+                    candidate.base_head,
+                    candidate.binding.revision_id,
+                    lease,
+                )
                 replacement = SessionBinding(
                     project_id=candidate.project_id,
                     revision_id=candidate.binding.revision_id,
@@ -1918,11 +2046,7 @@ class CandidateCoordinator:
             except Exception:
                 raise self._abort(token, lease, CandidateErrorCode.STORE_FAILURE) from None
             try:
-                immutable_path = self._store.revision_model_path(
-                    candidate.project_id,
-                    revision.id,
-                )
-                session = self._load_fcstd_session(immutable_path)
+                session = self._open_revision_session(revision)
                 replacement = SessionBinding(
                     project_id=candidate.project_id,
                     revision_id=revision.id,
@@ -2010,7 +2134,7 @@ class CandidateCoordinator:
                 (immutable_path, immutable_path),
             )
             try:
-                session = self._load_fcstd_session(immutable_path)
+                session = self._open_revision_session(durable_revision)
                 binding = SessionBinding(
                     project_id=project_id,
                     revision_id=revision.id,
@@ -2743,11 +2867,11 @@ class CandidateCoordinator:
                     None,
                 )
             try:
-                immutable_path = self._store.revision_model_path(
+                durable_revision = self._store.load_revision(
                     project_id,
                     reconciliation.head.revision_id,
                 )
-                session = self._load_fcstd_session(immutable_path)
+                session = self._open_revision_session(durable_revision)
                 replacement = SessionBinding(
                     project_id=project_id,
                     revision_id=reconciliation.head.revision_id,

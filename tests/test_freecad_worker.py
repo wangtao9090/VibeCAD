@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import array
 import contextlib
+import hashlib
 import json
 import os
 import pickle
+import shutil
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
@@ -37,6 +40,7 @@ from vibecad.worker.codec import (
     MAX_WORKER_REQUEST_BYTES,
     MAX_WORKER_RESPONSE_BYTES,
     WorkerCodecError,
+    WorkerWireErrorCode,
     decode_worker_request,
     decode_worker_response,
     encode_worker_request,
@@ -162,6 +166,23 @@ def _candidate_directory_at(candidate: Path) -> Path:
         path.touch(mode=0o600)
         path.chmod(0o600)
     return candidate
+
+
+def _validation_directory_at(directory: Path) -> tuple[Path, str]:
+    directory.mkdir(mode=0o700)
+    directory.chmod(0o700)
+    stage_name = ".stage." + "c" * 32 + ".FCStd"
+    normalized_name = ".normalized." + "d" * 32 + ".FCStd"
+    for name, value in (
+        (stage_name, b"normalized"),
+        (normalized_name, b"normalized"),
+        ("model.FCStd", b"model"),
+        ("model.step", b"step"),
+    ):
+        path = directory / name
+        path.write_bytes(value)
+        path.chmod(0o600)
+    return directory, stage_name
 
 
 @dataclass(slots=True)
@@ -295,6 +316,20 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                 )
                 return hashlib.sha256(value).hexdigest()
 
+            def hash_candidate(name, candidate_fd):
+                target = os.open(name, os.O_RDONLY, dir_fd=candidate_fd)
+                try:
+                    chunks = []
+                    while True:
+                        chunk = os.read(target, 1024 * 1024)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                finally:
+                    os.close(target)
+                value = b"".join(chunks)
+                return hashlib.sha256(value).hexdigest(), len(value)
+
             def send(value):
                 raw = json.dumps(
                     value, allow_nan=False, separators=(",", ":"), sort_keys=True
@@ -385,8 +420,14 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                 "checkpoint_bad_claim",
                 "export_cross",
                 "export_replace",
+                "revision_observe",
+                "observe_bad",
+                "validation_idle",
+                "validation_bad_claim",
+                "validation_cross",
             }}:
                 candidate_fd = -1
+                revision_fd = -1
                 while True:
                     method = request["method"]
                     if method == "candidate.bind":
@@ -394,14 +435,76 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                             raise SystemExit(2)
                         candidate_fd = descriptors[0]
                         result = {{"candidate_id": request["params"]["candidate_id"]}}
+                    elif method == "revision.bind":
+                        if len(descriptors) != 1 or revision_fd >= 0:
+                            raise SystemExit(2)
+                        revision_fd = descriptors[0]
+                        result = {{"revision_id": request["params"]["revision_id"]}}
+                    elif method in {{
+                        "validation.validate_import",
+                        "validation.revalidate_import",
+                        "validation.validate_materialization",
+                    }}:
+                        if len(descriptors) != 1:
+                            raise SystemExit(2)
+                        validation_fd = descriptors[0]
+                        try:
+                            if method == "validation.validate_materialization":
+                                fcstd_digest, fcstd_size = hash_candidate(
+                                    "model.FCStd", validation_fd
+                                )
+                                step_digest, step_size = hash_candidate(
+                                    "model.step", validation_fd
+                                )
+                                result = {{
+                                    "fcstd_sha256": fcstd_digest,
+                                    "fcstd_size_bytes": fcstd_size,
+                                    "step_sha256": step_digest,
+                                    "step_size_bytes": step_size,
+                                }}
+                            else:
+                                if mode == "validation_cross":
+                                    write_candidate(
+                                        "model.step", b"cross-mutation", validation_fd
+                                    )
+                                digest, size = hash_candidate(
+                                    request["params"]["name"], validation_fd
+                                )
+                                if mode == "validation_bad_claim":
+                                    digest = "0" * 64
+                                result = {{"sha256": digest, "size_bytes": size}}
+                        finally:
+                            os.close(validation_fd)
                     elif descriptors:
                         raise SystemExit(2)
                     elif method == "candidate.release":
                         os.close(candidate_fd)
                         candidate_fd = -1
                         result = {{"candidate_id": request["params"]["candidate_id"]}}
+                    elif method == "revision.release":
+                        os.close(revision_fd)
+                        revision_fd = -1
+                        result = {{"revision_id": request["params"]["revision_id"]}}
                     elif method == "session.create_empty":
                         result = {{"session_id": "worker_session_" + "8" * 32}}
+                    elif method == "session.load_revision":
+                        result = {{"session_id": "worker_session_" + "8" * 32}}
+                    elif method == "session.observe" and mode == "observe_bad":
+                        result = {{"entities": [], "shape": {{}}}}
+                    elif method == "session.observe":
+                        result = {{
+                            "entities": [],
+                            "shape": {{
+                                "area_mm2": 6,
+                                "bbox_mm": [1, 1, 1],
+                                "center_of_mass_mm": [0.5, 0.5, 0.5],
+                                "schema_version": 1,
+                                "solid_count": 1,
+                                "target": "body",
+                                "valid_shape": True,
+                                "volume_mm3": 1,
+                            }},
+                        }}
                     elif method == "program.begin":
                         operations = request["params"]["program"]["operations"]
                         result = {{
@@ -413,6 +516,10 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                             ],
                         }}
                     elif method == "program.execute_command" and mode == "command_hang":
+                        with open({str(grandchild)!r}, "w", encoding="ascii") as handle:
+                            handle.write(str(os.getpid()))
+                            handle.flush()
+                            os.fsync(handle.fileno())
                         while True:
                             time.sleep(60)
                     elif method == "session.checkpoint_fcstd" and mode == "checkpoint_cross":
@@ -452,6 +559,12 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                     elif method == "session.close":
                         result = {{"session_id": request["params"]["session_id"]}}
                     elif method == "worker.shutdown":
+                        if candidate_fd >= 0:
+                            os.close(candidate_fd)
+                            candidate_fd = -1
+                        if revision_fd >= 0:
+                            os.close(revision_fd)
+                            revision_fd = -1
                         result = {{"closed": True}}
                     else:
                         result = {{}}
@@ -2009,6 +2122,296 @@ def test_command_timeout_uses_frozen_operation_deadline_and_kills_generation(
         assert _wait_gone(pid)
 
 
+def test_agent_active_cancel_kills_mutating_worker_and_recovers_clean_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from vibecad.application.agent import AgentApplication
+    from vibecad.application.project import ProjectRuntime
+    from vibecad.application.task_api import (
+        TaskServicePortErrorCode,
+        TaskServicePortFailure,
+    )
+    from vibecad.execution.revisions import (
+        CommitJournalState,
+        ReconciliationStatus,
+    )
+    from vibecad.execution.worker_port import WorkerCadExecutionPort
+    from vibecad.workflow.state import (
+        ReasoningOwner,
+        ReviewPolicy,
+        TaskEvent,
+        TaskStatus,
+    )
+    from vibecad.workflow.store import StoredTaskRun
+
+    command_requested = threading.Event()
+    original_request = _WorkerProcess.request
+
+    def observe_command_request(
+        self: _WorkerProcess,
+        method: str,
+        params: dict[str, object],
+        *,
+        timeout_ms: int,
+        capability_fd: int | None = None,
+    ) -> dict[str, object]:
+        if method == "program.execute_command":
+            command_requested.set()
+        return original_request(
+            self,
+            method,
+            params,
+            timeout_ms=timeout_ms,
+            capability_fd=capability_fd,
+        )
+
+    monkeypatch.setattr(_WorkerProcess, "request", observe_command_request)
+
+    application: AgentApplication | None = None
+    submitter: threading.Thread | None = None
+    application_closed = False
+    task_id = _TASK_ID
+    processes: list[_WorkerProcess] = []
+    workers: list[FreeCadWorker] = []
+    command_markers: list[Path] = []
+    ports: list[WorkerCadExecutionPort] = []
+    termination_snapshots: list[StoredTaskRun] = []
+    submission_results: list[object] = []
+    submission_errors: list[BaseException] = []
+    modes = iter(("command_hang", "proxy_idle"))
+
+    def start_worker(*, source_root: Path) -> FreeCadWorker:
+        assert source_root == Path(__file__).parents[1] / "src"
+        try:
+            mode = next(modes)
+        except StopIteration:
+            raise AssertionError("unexpected third Worker generation") from None
+        process, marker = _process(tmp_path, mode)
+        if mode == "command_hang":
+            process._test_timeout_cap_ms = 5_000  # noqa: SLF001
+        worker = FreeCadWorker(process)
+        processes.append(process)
+        workers.append(worker)
+        command_markers.append(marker)
+        return worker
+
+    class ObservedWorkerCadExecutionPort(WorkerCadExecutionPort):
+        def terminate_generation(self) -> None:
+            if command_requested.is_set() and not termination_snapshots:
+                assert application is not None
+                termination_snapshots.append(
+                    application._task_store.load(task_id)  # noqa: SLF001
+                )
+            super().terminate_generation()
+
+    def build_port(*, revision_store: LocalRevisionStore) -> WorkerCadExecutionPort:
+        port = ObservedWorkerCadExecutionPort(
+            store=revision_store,
+            worker_factory=start_worker,
+        )
+        ports.append(port)
+        return port
+
+    try:
+        home = tmp_path / "agent-home"
+        home.mkdir(mode=0o700)
+        application = AgentApplication.open(
+            data_root=home / "data",
+            cad_port_factory=build_port,
+        )
+        project = application.bootstrap_empty()
+        base_head = project.head
+        base_revision = application._revision_store.load_revision(  # noqa: SLF001
+            base_head.project_id,
+            base_head.revision_id,
+        )
+        created = application.create_task(
+            task_id=task_id,
+            project_id=base_head.project_id,
+            reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+            review_policy=ReviewPolicy.AUTO_COMMIT,
+        )
+        assert type(created) is StoredTaskRun
+
+        def submit() -> None:
+            assert application is not None
+            try:
+                submission_results.append(
+                    application.submit_model_program(
+                        task_id=task_id,
+                        expected_generation=created.generation,
+                        program=_program(base_revision=base_head.revision_id),
+                    )
+                )
+            except BaseException as error:
+                submission_errors.append(error)
+
+        submitter = threading.Thread(target=submit, name="agent-mutating-submit")
+        submitter.start()
+        assert command_requested.wait(timeout=15)
+        assert len(processes) == len(workers) == len(command_markers) == 1
+        command_marker = command_markers[0]
+        expected_marker = str(processes[0].pid)
+        observed_marker = None
+        marker_deadline = time.monotonic() + 15
+        while time.monotonic() < marker_deadline:
+            with contextlib.suppress(OSError, UnicodeError):
+                observed_marker = command_marker.read_text(encoding="ascii")
+            if observed_marker == expected_marker:
+                break
+            time.sleep(0.01)
+        assert observed_marker == expected_marker
+
+        executing = application._task_store.load(task_id)  # noqa: SLF001
+        assert executing.task_run.status is TaskStatus.EXECUTING
+        assert executing.task_run.candidate_revision is not None
+        candidate_revision = executing.task_run.candidate_revision
+        first_pid = processes[0].pid
+        first_generation = workers[0].generation_id
+
+        cancelled = application.cancel_task(
+            task_id=task_id,
+            expected_generation=executing.generation,
+        )
+        if type(cancelled) is TaskServicePortFailure:
+            assert cancelled.code is TaskServicePortErrorCode.RECOVERY_REQUIRED
+            pending = application._task_store.load(task_id)  # noqa: SLF001
+            assert pending.task_run.status is TaskStatus.CANCEL_REQUESTED
+            assert [
+                record.event
+                for record in pending.task_run.transitions
+                if record.event
+                in {
+                    TaskEvent.REQUEST_CANCEL,
+                    TaskEvent.REQUEST_ACTIVE_CANCEL,
+                }
+            ] == [TaskEvent.REQUEST_CANCEL]
+            assert len(ports) == len(workers) == 1
+            assert application._cad_execution_port is ports[0]  # noqa: SLF001
+            assert ports[0]._worker is workers[0]  # noqa: SLF001
+            assert workers[0].generation_id == first_generation
+            cancelled = application.cancel_task(
+                task_id=task_id,
+                expected_generation=executing.generation,
+            )
+        assert type(cancelled) is StoredTaskRun
+        submitter.join(timeout=5)
+
+        assert not submitter.is_alive()
+        assert submission_errors == []
+        assert len(submission_results) == 1
+        submission = submission_results[0]
+        assert type(submission) is StoredTaskRun
+        assert any(
+            record.event is TaskEvent.REQUEST_CANCEL for record in submission.task_run.transitions
+        )
+        assert submission.task_run.status in {
+            TaskStatus.CANCEL_REQUESTED,
+            TaskStatus.CANCELLING,
+            TaskStatus.CANCELLED,
+        }
+        assert len(termination_snapshots) == 1
+        assert termination_snapshots[0].task_run.status is TaskStatus.CANCEL_REQUESTED
+        assert termination_snapshots[0].generation == executing.generation + 1
+        assert termination_snapshots[0].task_run.transitions[-1].event is (TaskEvent.REQUEST_CANCEL)
+
+        assert cancelled.task_run.status is TaskStatus.CANCELLED
+        assert application._task_store.load(task_id) == cancelled  # noqa: SLF001
+        assert [
+            record.event
+            for record in cancelled.task_run.transitions
+            if record.event
+            in {
+                TaskEvent.REQUEST_CANCEL,
+                TaskEvent.START_CANCELLATION,
+                TaskEvent.CONFIRM_CANCELLED,
+            }
+        ] == [
+            TaskEvent.REQUEST_CANCEL,
+            TaskEvent.START_CANCELLATION,
+            TaskEvent.CONFIRM_CANCELLED,
+        ]
+        assert workers[0].state is WorkerGenerationState.DEAD
+        assert processes[0].state is WorkerGenerationState.DEAD
+        assert _wait_gone(first_pid)
+        assert ports[0].generation_lost is True
+        assert application._cad_execution_port is None  # noqa: SLF001
+        assert application._runtimes == {}  # noqa: SLF001
+        assert application._cad_task_admissions == {}  # noqa: SLF001
+
+        assert application._revision_store.load_head(base_head.project_id) == (  # noqa: SLF001
+            base_head
+        )
+        assert (
+            application._revision_store.load_revision(  # noqa: SLF001
+                base_head.project_id,
+                base_head.revision_id,
+            )
+            == base_revision
+        )
+        with application._lease_manager.acquire_project_write(  # noqa: SLF001
+            base_head.project_id
+        ) as lease:
+            reconciliation = application._revision_store.reconcile(  # noqa: SLF001
+                base_head.project_id,
+                lease,
+            )
+        assert reconciliation.status is ReconciliationStatus.NOT_COMMITTED
+        assert reconciliation.head == base_head
+        assert reconciliation.journal is not None
+        assert reconciliation.journal.project_id == base_head.project_id
+        assert reconciliation.journal.expected_head == base_head
+        assert reconciliation.journal.candidate_revision == candidate_revision
+        assert reconciliation.journal.manifest_sha256 == base_head.manifest_sha256
+        assert reconciliation.journal.state is CommitJournalState.NOT_COMMITTED
+        assert reconciliation.journal.id.startswith("transaction_")
+        assert len(reconciliation.journal.id) == len("transaction_") + 32
+        int(reconciliation.journal.id.removeprefix("transaction_"), 16)
+
+        candidate_roots = tuple(application._layout.projects.rglob("candidates"))  # noqa: SLF001
+        reservation_roots = tuple(
+            application._layout.projects.rglob("reservations")  # noqa: SLF001
+        )
+        assert len(candidate_roots) == len(reservation_roots) == 1
+        assert all(tuple(root.iterdir()) == () for root in candidate_roots)
+        assert all(tuple(root.iterdir()) == () for root in reservation_roots)
+
+        with application._cad_gate:  # noqa: SLF001
+            replacement = application._runtime_for(  # noqa: SLF001
+                base_head.project_id
+            )
+        assert type(replacement) is ProjectRuntime
+        assert len(ports) == len(processes) == len(workers) == 2
+        assert ports[1] is application._cad_execution_port  # noqa: SLF001
+        assert replacement is application._runtimes[base_head.project_id]  # noqa: SLF001
+        assert workers[1].state is WorkerGenerationState.READY
+        assert processes[1].state is WorkerGenerationState.READY
+        assert workers[1].generation_id != first_generation
+        assert workers[1].pid != first_pid
+        second_pid = workers[1].pid
+
+        application.close()
+        application_closed = True
+        assert application._cad_execution_port is None  # noqa: SLF001
+        assert application._runtimes == {}  # noqa: SLF001
+        assert workers[1].state is WorkerGenerationState.DEAD
+        assert processes[1].state is WorkerGenerationState.DEAD
+        assert _wait_gone(second_pid)
+        assert all(worker.state is WorkerGenerationState.DEAD for worker in workers)
+    finally:
+        if application is not None and not application_closed:
+            with contextlib.suppress(Exception):
+                application._fence_cad_generation()  # noqa: SLF001
+            with contextlib.suppress(Exception):
+                application.close()
+        for worker in workers:
+            with contextlib.suppress(Exception):
+                worker.terminate()
+        if submitter is not None and submitter.is_alive():
+            submitter.join(timeout=5)
+
+
 @pytest.mark.parametrize(
     ("mode", "operation"),
     (
@@ -2103,6 +2506,1465 @@ def test_parent_importing_worker_supervision_does_not_import_freecad() -> None:
     assert "Part" not in sys.modules
 
 
+@pytest.mark.parametrize(
+    "method",
+    (
+        "revision.bind",
+        "revision.release",
+        "session.load_revision",
+        "session.observe",
+        "validation.validate_import",
+        "validation.revalidate_import",
+        "validation.validate_materialization",
+    ),
+)
+def test_worker_codec_admits_only_declared_private_capability_methods(method: str) -> None:
+    raw = encode_worker_request(
+        {
+            "schema_version": 1,
+            "generation_id": _GENERATION,
+            "request_id": _REQUEST,
+            "method": method,
+            "params": {},
+        }
+    )
+    assert decode_worker_request(raw)["method"] == method
+
+
+def test_worker_revision_is_an_opaque_generation_capability() -> None:
+    from vibecad.worker import WorkerRevision
+
+    handle = WorkerRevision(
+        generation_id=_GENERATION,
+        capability_id="worker_revision_" + "8" * 32,
+    )
+    with pytest.raises(TypeError):
+        pickle.dumps(handle)
+
+
+def test_descriptor_bound_validation_never_sends_an_absolute_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from vibecad.interaction.cad import (
+        ValidatedImportEvidence,
+        ValidatedMaterializationEvidence,
+    )
+
+    directory = tmp_path / "private-validation"
+    directory.mkdir(mode=0o700)
+    directory.chmod(0o700)
+    stage_name = ".import." + "8" * 32 + ".FCStd"
+    stage = directory / stage_name
+    stage.write_bytes(b"normalized")
+    stage.chmod(0o600)
+    normalized_name = ".normalized." + "9" * 32 + ".FCStd"
+    normalized = directory / normalized_name
+    normalized.write_bytes(b"normalized")
+    normalized.chmod(0o600)
+    model = directory / "model.FCStd"
+    step = directory / "model.step"
+    model.write_bytes(b"model")
+    step.write_bytes(b"step")
+    model.chmod(0o600)
+    step.chmod(0o600)
+
+    service = WorkerService(_GENERATION)
+    calls: list[tuple[str, object]] = []
+
+    class Engine:
+        def validate_import(self, path: Path) -> ValidatedImportEvidence:
+            calls.append(("validate_import", path))
+            return ValidatedImportEvidence(
+                sha256=hashlib.sha256(stage.read_bytes()).hexdigest(),
+                size_bytes=stage.stat().st_size,
+            )
+
+        def revalidate_normalized_import(self, path: Path) -> ValidatedImportEvidence:
+            calls.append(("revalidate", path))
+            return ValidatedImportEvidence(
+                sha256=hashlib.sha256(normalized.read_bytes()).hexdigest(),
+                size_bytes=normalized.stat().st_size,
+            )
+
+        def validate_materialization(
+            self,
+            *,
+            fcstd: Path,
+            step: Path,
+        ) -> ValidatedMaterializationEvidence:
+            calls.append(("materialization", (fcstd, step)))
+            return ValidatedMaterializationEvidence(
+                fcstd_sha256=hashlib.sha256(model.read_bytes()).hexdigest(),
+                fcstd_size_bytes=model.stat().st_size,
+                step_sha256=hashlib.sha256(step.read_bytes()).hexdigest(),
+                step_size_bytes=step.stat().st_size,
+            )
+
+    monkeypatch.setattr(service, "_engine", Engine())
+    descriptor = os.open(
+        directory,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        assert service.dispatch(
+            "validation.validate_import",
+            {"name": stage_name},
+            (descriptor,),
+        )["size_bytes"] == len(b"normalized")
+        assert service.dispatch(
+            "validation.revalidate_import",
+            {"name": normalized_name},
+            (descriptor,),
+        )["size_bytes"] == len(b"normalized")
+        assert service.dispatch(
+            "validation.validate_materialization",
+            {},
+            (descriptor,),
+        )["step_size_bytes"] == len(b"step")
+    finally:
+        os.close(descriptor)
+        service.close()
+
+    assert calls == [
+        ("validate_import", Path(stage_name)),
+        ("revalidate", Path(normalized_name)),
+        ("materialization", (Path("model.FCStd"), Path("model.step"))),
+    ]
+
+
+def test_parent_descriptor_bound_validation_returns_exact_evidence(
+    tmp_path: Path,
+) -> None:
+    process, _grandchild = _process(tmp_path, "validation_idle")
+    worker = FreeCadWorker(process)
+    directory, stage_name = _validation_directory_at(tmp_path / "proxy-validation")
+    normalized_name = ".normalized." + "d" * 32 + ".FCStd"
+    descriptor = os.open(
+        directory,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        imported = worker.validate_import(
+            directory_fd=descriptor,
+            name=stage_name,
+        )
+        revalidated = worker.revalidate_normalized_import(
+            directory_fd=descriptor,
+            name=normalized_name,
+        )
+        materialized = worker.validate_materialization(
+            directory_fd=descriptor,
+        )
+        assert imported == revalidated
+        assert imported.sha256 == hashlib.sha256(b"normalized").hexdigest()
+        assert imported.size_bytes == len(b"normalized")
+        assert materialized.fcstd_sha256 == hashlib.sha256(b"model").hexdigest()
+        assert materialized.step_sha256 == hashlib.sha256(b"step").hexdigest()
+        assert os.fstat(descriptor).st_ino == directory.stat().st_ino
+        assert worker.state is WorkerGenerationState.READY
+    finally:
+        os.close(descriptor)
+        worker.close()
+
+
+@pytest.mark.parametrize("mode", ["validation_bad_claim", "validation_cross"])
+def test_validation_claim_or_cross_file_mutation_fences_generation(
+    mode: str,
+    tmp_path: Path,
+) -> None:
+    process, _grandchild = _process(tmp_path, mode)
+    worker = FreeCadWorker(process)
+    directory, stage_name = _validation_directory_at(tmp_path / mode)
+    descriptor = os.open(
+        directory,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        with pytest.raises(WorkerError) as caught:
+            worker.validate_import(
+                directory_fd=descriptor,
+                name=stage_name,
+            )
+        assert caught.value.code is WorkerErrorCode.GENERATION_LOST
+        assert worker.state is WorkerGenerationState.DEAD
+        assert os.fstat(descriptor).st_ino == directory.stat().st_ino
+        if mode == "validation_cross":
+            assert (directory / "model.step").read_bytes() == b"cross-mutation"
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "model.FCStd",
+        "../.normalized." + "d" * 32 + ".FCStd",
+        ".normalized." + "d" * 32 + ".fcstd",
+        ".other." + "d" * 32 + ".FCStd",
+    ),
+)
+def test_validation_name_capability_is_a_closed_relative_allowlist(
+    name: str,
+    tmp_path: Path,
+) -> None:
+    process, _grandchild = _process(tmp_path, "validation_idle")
+    worker = FreeCadWorker(process)
+    directory, _stage_name = _validation_directory_at(tmp_path / "closed-name")
+    descriptor = os.open(
+        directory,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        with pytest.raises(WorkerError) as caught:
+            worker.revalidate_normalized_import(
+                directory_fd=descriptor,
+                name=name,
+            )
+        assert caught.value.code is WorkerErrorCode.INVALID_INPUT
+        assert worker.state is WorkerGenerationState.READY
+    finally:
+        os.close(descriptor)
+        worker.close()
+
+
+@pytest.mark.parametrize("has_model", [False, True])
+def test_production_service_revision_sessions_are_read_only_and_exactly_bound(
+    has_model: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.worker.service as service_module
+    from vibecad.validation import ShapeObservation
+
+    directory = tmp_path / f"revision-{has_model}"
+    directory.mkdir(mode=0o700)
+    directory.chmod(0o700)
+    contents = {"manifest.json": b"manifest"}
+    if has_model:
+        contents.update(
+            {
+                "model.FCStd": b"fcstd",
+                "model.step": b"step",
+            }
+        )
+    for name, raw in contents.items():
+        path = directory / name
+        path.write_bytes(raw)
+        path.chmod(0o600)
+    files = [
+        {
+            "name": name,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size_bytes": len(raw),
+        }
+        for name, raw in sorted(contents.items())
+    ]
+    calls: list[tuple[str, object]] = []
+
+    class Engine:
+        def create_empty(self, *, revision_id: str) -> object:
+            calls.append(("create_empty", revision_id))
+            return SimpleNamespace(doc=SimpleNamespace(Objects=[]))
+
+        def load_fcstd(self, path: Path) -> object:
+            calls.append(("load_fcstd", path))
+            return SimpleNamespace(doc=SimpleNamespace(Objects=[object()]))
+
+        def close(self, value: object) -> None:
+            calls.append(("close", value))
+
+    monkeypatch.setattr(
+        service_module,
+        "_shape_observation",
+        lambda _session: ShapeObservation(
+            target="body",
+            volume_mm3=1,
+            area_mm2=6,
+            bbox_mm=(1, 1, 1),
+            center_of_mass_mm=(0.5, 0.5, 0.5),
+            valid_shape=True,
+            solid_count=1,
+        ),
+    )
+    monkeypatch.setattr(service_module, "_entity_observations", lambda _session: ())
+    service = WorkerService(_GENERATION)
+    monkeypatch.setattr(service, "_engine", Engine())
+    descriptor = os.open(
+        directory,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    revision_id = "worker_revision_" + "a" * 32
+    try:
+        assert service.dispatch(
+            "revision.bind",
+            {
+                "revision_id": revision_id,
+                "project_id": _PROJECT_ID,
+                "store_revision_id": _BASE_REVISION,
+                "model_name": "model.FCStd" if has_model else None,
+                "files": files,
+            },
+            (descriptor,),
+        ) == {"revision_id": revision_id}
+        session_id = service.dispatch(
+            "session.load_revision",
+            {"revision_id": revision_id},
+            (),
+        )["session_id"]
+        observation = service.dispatch(
+            "session.observe",
+            {
+                "session_id": session_id,
+                "capability_kind": "revision",
+                "capability_id": revision_id,
+            },
+            (),
+        )
+        assert observation["entities"] == []
+        assert (observation["shape"] is None) is (not has_model)
+        assert service.dispatch(
+            "session.close",
+            {"session_id": session_id},
+            (),
+        ) == {"session_id": session_id}
+        assert service.dispatch(
+            "revision.release",
+            {"revision_id": revision_id},
+            (),
+        ) == {"revision_id": revision_id}
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+        descriptor = -1
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        service.close()
+
+    assert calls[0] == (
+        ("load_fcstd", Path("model.FCStd")) if has_model else ("create_empty", _BASE_REVISION)
+    )
+    assert calls[-1][0] == "close"
+
+
+@pytest.mark.parametrize(
+    ("close_fails", "expected_code"),
+    (
+        (False, WorkerWireErrorCode.INTEGRITY_FAILURE),
+        (True, WorkerWireErrorCode.INTERNAL_ERROR),
+    ),
+)
+def test_revision_drift_after_load_requires_confirmed_session_cleanup(
+    close_fails: bool,
+    expected_code: WorkerWireErrorCode,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.worker.service as service_module
+
+    directory = tmp_path / f"revision-load-drift-{close_fails}"
+    directory.mkdir(mode=0o700)
+    directory.chmod(0o700)
+    contents = {
+        "manifest.json": b"manifest",
+        "model.FCStd": b"fcstd",
+        "model.step": b"step",
+    }
+    for name, raw in contents.items():
+        path = directory / name
+        path.write_bytes(raw)
+        path.chmod(0o600)
+    files = [
+        {
+            "name": name,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size_bytes": len(raw),
+        }
+        for name, raw in sorted(contents.items())
+    ]
+    close_calls = 0
+
+    class Engine:
+        def load_fcstd(self, path: Path) -> object:
+            assert path == Path("model.FCStd")
+            model = directory / "model.FCStd"
+            model.write_bytes(b"drifted-after-load")
+            model.chmod(0o600)
+            return object()
+
+        def close(self, value: object) -> None:
+            nonlocal close_calls
+            del value
+            close_calls += 1
+            if close_fails:
+                raise RuntimeError("unconfirmed close")
+
+    service = WorkerService(_GENERATION)
+    monkeypatch.setattr(service, "_engine", Engine())
+    descriptor = os.open(
+        directory,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    revision_id = "worker_revision_" + "b" * 32
+    try:
+        assert service.dispatch(
+            "revision.bind",
+            {
+                "revision_id": revision_id,
+                "project_id": _PROJECT_ID,
+                "store_revision_id": _BASE_REVISION,
+                "model_name": "model.FCStd",
+                "files": files,
+            },
+            (descriptor,),
+        ) == {"revision_id": revision_id}
+        descriptor = -1
+        with pytest.raises(service_module._ServiceError) as caught:  # noqa: SLF001
+            service.dispatch(
+                "session.load_revision",
+                {"revision_id": revision_id},
+                (),
+            )
+        assert caught.value.code is expected_code
+        assert service._sessions == {}  # noqa: SLF001
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        service.close()
+
+    assert close_calls == 1
+
+
+def test_parent_revision_observe_lifecycle_uses_opaque_capabilities(
+    tmp_path: Path,
+) -> None:
+    process, _grandchild = _process(tmp_path, "revision_observe")
+    worker = FreeCadWorker(process)
+    with _candidate_rig(tmp_path, suffix="revision-observe-store") as rig:
+        (rig.directory / "model.FCStd").write_bytes(b"fcstd")
+        (rig.directory / "model.step").write_bytes(b"step")
+        revision = rig.store.seal_revision(
+            rig.head.project_id,
+            rig.revision_id,
+            rig.lease,
+        )
+        handle = worker.bind_revision(store=rig.store, revision=revision)
+        session = worker.load_revision(handle)
+        shape, entities = worker.observe(session=session, capability=handle)
+        assert shape is not None
+        assert shape.volume_mm3 == 1
+        assert entities == ()
+        with pytest.raises(WorkerError) as still_bound:
+            worker.release_revision(handle)
+        assert still_bound.value.code is WorkerErrorCode.INVALID_HANDLE
+        worker.close_session(session)
+        worker.release_revision(handle)
+        assert worker._revisions == {}
+        worker.close()
+
+
+def test_malformed_observation_fences_the_entire_generation(
+    tmp_path: Path,
+) -> None:
+    process, _grandchild = _process(tmp_path, "observe_bad")
+    worker = FreeCadWorker(process)
+    with _candidate_rig(tmp_path, suffix="observe-bad-store") as rig:
+        revision = rig.store.load_revision(
+            rig.head.project_id,
+            rig.head.revision_id,
+        )
+        handle = worker.bind_revision(store=rig.store, revision=revision)
+        session = worker.load_revision(handle)
+        descriptors = (
+            worker._revisions[handle].revisions_fd,
+            worker._revisions[handle].directory_fd,
+        )
+        with pytest.raises(WorkerError) as caught:
+            worker.observe(session=session, capability=handle)
+        assert caught.value.code is WorkerErrorCode.GENERATION_LOST
+        assert worker.state is WorkerGenerationState.DEAD
+        assert worker._revisions == {}
+        assert worker._sessions == {}
+        for descriptor in descriptors:
+            with pytest.raises(OSError):
+                os.fstat(descriptor)
+        with pytest.raises(WorkerError) as stale:
+            worker.close_session(session)
+        assert stale.value.code is WorkerErrorCode.GENERATION_LOST
+
+
+def test_revision_sessions_cannot_cross_into_candidate_write_operations(
+    tmp_path: Path,
+) -> None:
+    process, _grandchild = _process(tmp_path, "revision_observe")
+    worker = FreeCadWorker(process)
+    with _candidate_rig(tmp_path, suffix="cross-kind-store") as rig:
+        baseline = rig.store.load_revision(
+            rig.head.project_id,
+            rig.head.revision_id,
+        )
+        revision = worker.bind_revision(store=rig.store, revision=baseline)
+        revision_session = worker.load_revision(revision)
+        candidate = worker.bind_candidate(
+            store=rig.store,
+            lease=rig.lease,
+            base_head=rig.head,
+            revision_id=rig.revision_id,
+        )
+        candidate_session = worker.create_empty(candidate)
+        with pytest.raises(WorkerError) as observed:
+            worker.observe(
+                session=revision_session,
+                capability=candidate,
+            )
+        assert observed.value.code is WorkerErrorCode.INVALID_HANDLE
+        with pytest.raises(WorkerError) as executed:
+            worker.execute_program(
+                program=_inspect_program(base_revision=rig.head.revision_id),
+                candidate=candidate,
+                session=revision_session,
+            )
+        assert executed.value.code is WorkerErrorCode.INVALID_HANDLE
+        with pytest.raises(WorkerError) as checkpointed:
+            worker.checkpoint(
+                session=revision_session,
+                candidate=candidate,
+            )
+        assert checkpointed.value.code is WorkerErrorCode.INVALID_HANDLE
+        assert worker.state is WorkerGenerationState.READY
+        worker.close_session(candidate_session)
+        worker.release_candidate(candidate)
+        worker.close_session(revision_session)
+        worker.release_revision(revision)
+        worker.close()
+
+
+def test_revision_store_drift_revokes_operations_without_losing_cleanup(
+    tmp_path: Path,
+) -> None:
+    process, _grandchild = _process(tmp_path, "revision_observe")
+    worker = FreeCadWorker(process)
+    with _candidate_rig(tmp_path, suffix="revision-drift-store") as rig:
+        (rig.directory / "model.FCStd").write_bytes(b"fcstd")
+        (rig.directory / "model.step").write_bytes(b"step")
+        revision = rig.store.seal_revision(
+            rig.head.project_id,
+            rig.revision_id,
+            rig.lease,
+        )
+        handle = worker.bind_revision(store=rig.store, revision=revision)
+        state = worker._revisions[handle]
+        descriptor = state.directory_fd
+        target_fd = os.open(
+            "model.FCStd",
+            os.O_WRONLY | os.O_TRUNC,
+            dir_fd=descriptor,
+        )
+        try:
+            os.write(target_fd, b"drift")
+        finally:
+            os.close(target_fd)
+        with pytest.raises(WorkerError) as caught:
+            worker.load_revision(handle)
+        assert caught.value.code is WorkerErrorCode.INTEGRITY_FAILURE
+        assert worker.state is WorkerGenerationState.READY
+        worker.release_revision(handle)
+        worker.close()
+
+
+_MANAGED_FAULT_CHILD = r"""
+from __future__ import annotations
+
+import json
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+window, mode, marker_raw, arm_raw = sys.argv[1:5]
+protocol_index = sys.argv.index("--protocol-fd")
+generation_index = sys.argv.index("--generation-id")
+protocol_fd = sys.argv[protocol_index + 1]
+generation_id = sys.argv[generation_index + 1]
+marker = Path(marker_raw)
+arm = Path(arm_raw)
+
+from vibecad.worker import service as service_module
+
+original_dispatch = service_module.WorkerService.dispatch
+program_operations = {}
+ready_version = None
+arm_seen = False
+post_export = False
+
+
+def persist_marker(method):
+    payload = {
+        "freecad_version": ready_version,
+        "generation_id": generation_id,
+        "method": method,
+        "mode": mode,
+        "pgid": os.getpgrp(),
+        "pid": os.getpid(),
+        "window": window,
+    }
+    temporary = marker.with_name(marker.name + ".tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    try:
+        raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        if os.write(descriptor, raw) != len(raw):
+            raise OSError("short marker write")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, marker)
+    parent = os.open(
+        marker.parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+
+
+def fault(method):
+    if mode == "hang":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    persist_marker(method)
+    if mode == "crash":
+        os._exit(86)
+    while True:
+        time.sleep(60)
+
+
+def dispatch(self, method, params, descriptors):
+    global arm_seen, post_export, ready_version
+    armed = arm.is_file()
+    if armed and not arm_seen:
+        arm_seen = True
+        post_export = False
+    result = original_dispatch(self, method, params, descriptors)
+    if method == "worker.ready":
+        ready_version = result["freecad_version"]
+    if method == "program.begin":
+        program_id = result["program_id"]
+        program_operations[program_id] = tuple(
+            item["op"] for item in params["program"]["operations"]
+        )
+    selected = False
+    if armed and window == "load" and method == "session.load_revision":
+        selected = True
+    elif armed and window == "mutation" and method == "program.execute_command":
+        operations = program_operations.get(params["program_id"], ())
+        index = params["index"]
+        selected = index < len(operations) and operations[index] == "modify_parameter"
+    elif armed and window == "checkpoint" and method == "session.checkpoint_fcstd":
+        selected = True
+    elif armed and window == "export" and method == "session.export_step":
+        selected = True
+    elif armed and method == "session.export_step":
+        post_export = True
+    elif (
+        armed
+        and window == "evidence"
+        and post_export
+        and method == "session.observe"
+    ):
+        selected = True
+    if selected:
+        fault(method)
+    return result
+
+
+service_module.WorkerService.dispatch = dispatch
+sys.argv = [
+    sys.argv[0],
+    "--protocol-fd",
+    protocol_fd,
+    "--generation-id",
+    generation_id,
+]
+from vibecad.worker.__main__ import main
+
+raise SystemExit(main())
+"""
+
+
+def _managed_fault_program(
+    *,
+    task_id: str,
+    base_revision: str,
+    inspect_only: bool = False,
+) -> ModelProgram:
+    acceptance = AcceptanceSpec(
+        id="managed-fault-matrix",
+        criteria=(
+            AcceptanceCriterion(
+                id="valid-shape",
+                kind=AcceptanceKind.TOPOLOGY,
+                check="valid_shape",
+                target="body",
+                expected=True,
+            ),
+        ),
+    )
+    if inspect_only:
+        operations = (
+            ModelCommand(
+                id="inspect",
+                op="inspect_model",
+                target={},
+                args={},
+                depends_on=(),
+                preserve=(),
+                source=ValueSource.MODEL,
+            ),
+        )
+    else:
+        operations = (
+            ModelCommand(
+                id="fault-box",
+                op="create_box",
+                target={},
+                args={
+                    "length_mm": 4,
+                    "width_mm": 5,
+                    "height_mm": 6,
+                    "position_mm": (20, 0, 0),
+                },
+                depends_on=(),
+                preserve=(),
+                source=ValueSource.MODEL,
+            ),
+            ModelCommand(
+                id="fault-modify",
+                op="modify_parameter",
+                target={"object": {"command_id": "fault-box", "slot": "object"}},
+                args={"parameter": "length", "value_mm": 7},
+                depends_on=("fault-box",),
+                preserve=(),
+                source=ValueSource.MODEL,
+            ),
+        )
+    return ModelProgram(
+        task_id=task_id,
+        base_revision=base_revision,
+        operations=operations,
+        acceptance=acceptance,
+    )
+
+
+def _managed_setup_program(*, task_id: str, base_revision: str) -> ModelProgram:
+    return ModelProgram(
+        task_id=task_id,
+        base_revision=base_revision,
+        operations=(
+            ModelCommand(
+                id="baseline-box",
+                op="create_box",
+                target={},
+                args={
+                    "length_mm": 10,
+                    "width_mm": 20,
+                    "height_mm": 30,
+                    "position_mm": (0, 0, 0),
+                },
+                depends_on=(),
+                preserve=(),
+                source=ValueSource.MODEL,
+            ),
+        ),
+        acceptance=AcceptanceSpec(
+            id="managed-fault-baseline",
+            criteria=(
+                AcceptanceCriterion(
+                    id="valid-shape",
+                    kind=AcceptanceKind.TOPOLOGY,
+                    check="valid_shape",
+                    target="body",
+                    expected=True,
+                ),
+            ),
+        ),
+    )
+
+
+def _managed_tree_snapshot(root: Path) -> dict[str, tuple[object, ...]]:
+    snapshot: dict[str, tuple[object, ...]] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        observed = path.lstat()
+        raw = path.read_bytes() if path.is_file() else None
+        snapshot[relative] = (
+            observed.st_dev,
+            observed.st_ino,
+            observed.st_mode,
+            observed.st_size,
+            observed.st_mtime_ns,
+            raw,
+        )
+    return snapshot
+
+
+def _managed_path_snapshot(path: Path) -> tuple[object, ...]:
+    observed = path.lstat()
+    return (
+        observed.st_dev,
+        observed.st_ino,
+        observed.st_mode,
+        observed.st_size,
+        observed.st_mtime_ns,
+        path.read_bytes(),
+    )
+
+
+def _managed_application_call(client, operation: str, request: dict[str, object]):
+    response = client.call(
+        "application.call",
+        {"operation": operation, "request": request},
+    )
+    assert response.error is None
+    assert type(response.result) is dict
+    return response.result
+
+
+def _managed_success(client, operation: str, request: dict[str, object]):
+    envelope = _managed_application_call(client, operation, request)
+    assert envelope["ok"] is True, envelope
+    assert envelope["error"] is None
+    assert type(envelope["result"]) is dict
+    return envelope["result"]
+
+
+def _managed_create_task(client, *, project_id: str, key_hex: str):
+    return _managed_success(
+        client,
+        "create_task",
+        {
+            "schema_version": 1,
+            "create_key": "task_create_" + key_hex,
+            "project_id": project_id,
+            "review_policy": "auto_commit",
+        },
+    )
+
+
+def _managed_submit_request(created: dict[str, object], program: ModelProgram):
+    task = created["task_run"]
+    assert type(task) is dict
+    return {
+        "schema_version": 1,
+        "task_id": task["id"],
+        "expected_generation": created["generation"],
+        "program_json": json.dumps(
+            program.to_mapping(),
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    }
+
+
+def _wait_process_group_gone(pgid: int, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform != "darwin", reason="local kernel process identity is macOS-only")
+@pytest.mark.parametrize(
+    ("window", "mode"),
+    tuple(
+        (window, mode)
+        for window in ("load", "mutation", "checkpoint", "export", "evidence")
+        for mode in ("hang", "crash")
+    ),
+)
+def test_real_managed_daemon_fault_matrix_recovers_without_source_corruption(
+    window: str,
+    mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
+        pytest.skip("managed integration was not requested")
+    python_raw = os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON")
+    if not python_raw:
+        pytest.skip("managed FreeCAD Python was not requested")
+    python = Path(python_raw).expanduser().resolve(strict=False)
+    if not python.is_file():
+        pytest.skip("managed FreeCAD Python is unavailable")
+
+    import vibecad.worker.generation as generation_module
+    from vibecad.application.agent import AgentApplication
+    from vibecad.daemon import LocalKernelClient, LocalKernelDaemon, LocalKernelState
+    from vibecad.execution.worker_port import WorkerCadExecutionPort
+    from vibecad.runtime import paths as runtime_paths
+    from vibecad.runtime.status import (
+        capture_runtime_generation_evidence,
+        engine_compatible_generation,
+    )
+    from vibecad.workflow.state import TaskEvent, TaskStatus
+
+    runtime_evidence = capture_runtime_generation_evidence(runtime_paths.active_runtime_prefix())
+    assert engine_compatible_generation(runtime_evidence)
+    assert runtime_evidence.python.resolve() == python
+
+    case_number = (
+        ("load", "mutation", "checkpoint", "export", "evidence").index(window) * 2
+        + ("hang", "crash").index(mode)
+        + 1
+    )
+    fault_script = tmp_path / "managed_fault_worker.py"
+    fault_script.write_text(_MANAGED_FAULT_CHILD, encoding="utf-8")
+    fault_script.chmod(0o600)
+    arm = tmp_path / "fault.arm"
+    marker = tmp_path / "fault.json"
+    workers: list[FreeCadWorker] = []
+    ports: list[WorkerCadExecutionPort] = []
+    ready_results: list[dict[str, object]] = []
+    killpg_calls: list[tuple[int, int]] = []
+    original_rpc = _WorkerProcess._rpc
+    original_killpg = os.killpg
+
+    def recording_killpg(pgid: int, signum: int) -> None:
+        killpg_calls.append((pgid, signum))
+        original_killpg(pgid, signum)
+
+    def recording_rpc(
+        self: _WorkerProcess,
+        method: str,
+        params: dict[str, object],
+        *,
+        timeout_ms: int,
+        capability_fd: int | None = None,
+        allow_starting: bool = False,
+    ) -> dict[str, object]:
+        result = original_rpc(
+            self,
+            method,
+            params,
+            timeout_ms=timeout_ms,
+            capability_fd=capability_fd,
+            allow_starting=allow_starting,
+        )
+        if method == "worker.ready":
+            ready_results.append(dict(result))
+        return result
+
+    monkeypatch.setattr(_WorkerProcess, "_rpc", recording_rpc)
+    monkeypatch.setattr(generation_module.os, "killpg", recording_killpg)
+
+    def start_worker(*, source_root: Path) -> FreeCadWorker:
+        assert source_root == Path(__file__).parents[1] / "src"
+        if workers:
+            if len(workers) != 1:
+                raise AssertionError("unexpected third Worker generation")
+            worker = FreeCadWorker.start_managed(source_root=source_root)
+        else:
+            process = _WorkerProcess._spawn(  # noqa: SLF001
+                command=(
+                    str(python),
+                    "-B",
+                    str(fault_script),
+                    window,
+                    mode,
+                    str(marker),
+                    str(arm),
+                ),
+                source_root=source_root,
+                readiness_timeout_ms=15_000,
+                shutdown_timeout_ms=750,
+                test_timeout_cap_ms=5_000,
+            )
+            worker = FreeCadWorker(process)
+        workers.append(worker)
+        return worker
+
+    def build_port(*, revision_store: LocalRevisionStore) -> WorkerCadExecutionPort:
+        port = WorkerCadExecutionPort(
+            store=revision_store,
+            worker_factory=start_worker,
+        )
+        ports.append(port)
+        return port
+
+    applications: list[AgentApplication] = []
+
+    def application_factory(*, layout, lease_manager):
+        application = AgentApplication.from_captured_layout(
+            layout=layout,
+            lease_manager=lease_manager,
+            cad_port_factory=build_port,
+        )
+        applications.append(application)
+        return application
+
+    daemon = None
+    submit_client = None
+    control_client = None
+    recovery_client = None
+    submitter = None
+    submission_results: list[dict[str, object]] = []
+    submission_errors: list[BaseException] = []
+    healthy_pid = None
+    healthy_home = None
+    retained_audit_root = None
+    retained_audit_snapshot = None
+    short_root = Path(tempfile.mkdtemp(prefix="vc-m03-", dir="/private/tmp"))
+    short_root.chmod(0o700)
+    try:
+        daemon = LocalKernelDaemon.start(
+            data_root=short_root / "data",
+            application_factory=application_factory,
+        )
+        submit_client = LocalKernelClient.connect(daemon.run_root)
+        control_client = LocalKernelClient.connect(daemon.run_root)
+        daemon_id = daemon.daemon_id
+        assert submit_client.daemon_id == control_client.daemon_id == daemon_id
+        initial_ping = control_client.call("kernel.ping", {})
+        assert initial_ping.error is None
+        assert initial_ping.result["daemon_id"] == daemon_id
+
+        project = _managed_success(
+            control_client,
+            "create_project",
+            {
+                "schema_version": 1,
+                "create_key": "project_create_" + f"{case_number:032x}",
+                "kind": "empty",
+            },
+        )
+        project_id = project["project_id"]
+        setup = _managed_create_task(
+            control_client,
+            project_id=project_id,
+            key_hex=f"{case_number + 32:032x}",
+        )
+        setup_task = setup["task_run"]
+        setup_program = _managed_setup_program(
+            task_id=setup_task["id"],
+            base_revision=setup_task["base_revision"],
+        )
+        setup_terminal = _managed_success(
+            control_client,
+            "submit_model_program",
+            _managed_submit_request(setup, setup_program),
+        )
+        assert setup_terminal["task_run"]["status"] == TaskStatus.SUCCEEDED.value
+        assert len(workers) == len(ports) == len(ready_results) == 1
+        assert ready_results[0]["freecad_version"] == "1.1.0"
+
+        application = applications[0]
+        if window == "load":
+            with application._cad_gate:  # noqa: SLF001
+                with application._generation_lock:  # noqa: SLF001
+                    runtime = application._runtimes.pop(project_id)  # noqa: SLF001
+                assert runtime.close() is True
+        baseline_head = application._revision_store.load_head(project_id)  # noqa: SLF001
+        assert baseline_head.generation == 1
+        baseline_revision = application._revision_store.load_revision(  # noqa: SLF001
+            project_id,
+            baseline_head.revision_id,
+        )
+        assert baseline_revision.model is not None
+        assert len(baseline_revision.artifacts) == 1
+        project_heads = tuple(application._layout.projects.rglob("HEAD.json"))  # noqa: SLF001
+        assert len(project_heads) == 1
+        head_path = project_heads[0]
+        project_root = head_path.parent
+        revision_root = project_root / "revisions"
+        immutable_source_revision_root = application._revision_store.revision_model_path(  # noqa: SLF001
+            project_id,
+            baseline_head.revision_id,
+        ).parent
+        head_before = _managed_path_snapshot(head_path)
+        immutable_source_before = _managed_tree_snapshot(immutable_source_revision_root)
+        revision_entries_before = tuple(sorted(path.name for path in revision_root.iterdir()))
+        temporary_before = tuple(
+            sorted(
+                path.relative_to(application._layout.projects).as_posix()  # noqa: SLF001
+                for path in application._layout.projects.rglob(".*")  # noqa: SLF001
+            )
+        )
+
+        fault = _managed_create_task(
+            control_client,
+            project_id=project_id,
+            key_hex=f"{case_number + 64:032x}",
+        )
+        fault_task = fault["task_run"]
+        fault_program = _managed_fault_program(
+            task_id=fault_task["id"],
+            base_revision=fault_task["base_revision"],
+        )
+        fault_request = _managed_submit_request(fault, fault_program)
+        fault_worker = workers[0]
+        fault_pid = fault_worker.pid
+        fault_generation = fault_worker.generation_id
+        fault_home = fault_worker._process._home  # noqa: SLF001
+        assert os.getpid() != fault_pid
+        assert os.getpgid(fault_pid) == os.getsid(fault_pid) == fault_pid
+        arm.write_bytes(b"armed\n")
+        arm.chmod(0o600)
+
+        if mode == "hang":
+
+            def submit_fault() -> None:
+                try:
+                    submission_results.append(
+                        _managed_application_call(
+                            submit_client,
+                            "submit_model_program",
+                            fault_request,
+                        )
+                    )
+                except BaseException as error:
+                    submission_errors.append(error)
+
+            submitter = threading.Thread(
+                target=submit_fault,
+                name=f"managed-{window}-hang-submit",
+            )
+            submitter.start()
+            deadline = time.monotonic() + 20
+            while not marker.is_file() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert marker.is_file()
+            active = _managed_success(
+                control_client,
+                "get_task",
+                {"schema_version": 1, "task_id": fault_task["id"]},
+            )
+            request_event = (
+                TaskEvent.REQUEST_ACTIVE_CANCEL if window == "load" else TaskEvent.REQUEST_CANCEL
+            )
+            cancel_request = {
+                "schema_version": 1,
+                "task_id": fault_task["id"],
+                "expected_generation": active["generation"],
+            }
+            original_cancel_request = dict(cancel_request)
+            cancel_envelope = _managed_application_call(
+                control_client,
+                "cancel_task",
+                cancel_request,
+            )
+            if cancel_envelope["ok"] is False:
+                assert cancel_envelope["error"]["code"] == "recovery_required"
+                pending_cancel = _managed_success(
+                    control_client,
+                    "get_task",
+                    {"schema_version": 1, "task_id": fault_task["id"]},
+                )
+                assert pending_cancel["task_run"]["status"] == (TaskStatus.CANCEL_REQUESTED.value)
+                assert [
+                    item["event"]
+                    for item in pending_cancel["task_run"]["transitions"]
+                    if item["event"]
+                    in {
+                        TaskEvent.REQUEST_CANCEL.value,
+                        TaskEvent.REQUEST_ACTIVE_CANCEL.value,
+                    }
+                ] == [request_event.value]
+                assert len(workers) == 1
+                assert workers[0] is fault_worker
+                assert workers[0].generation_id == fault_generation
+                assert application._cad_execution_port is ports[0]  # noqa: SLF001
+                assert ports[0]._worker is fault_worker  # noqa: SLF001
+                assert cancel_request == original_cancel_request
+                cancel_envelope = _managed_application_call(
+                    control_client,
+                    "cancel_task",
+                    cancel_request,
+                )
+            assert cancel_envelope["ok"] is True, cancel_envelope
+            cancelled = cancel_envelope["result"]
+            assert type(cancelled) is dict
+            submitter.join(timeout=15)
+            assert not submitter.is_alive()
+            assert submission_errors == []
+            assert len(submission_results) == 1
+            assert submission_results[0]["ok"] is True
+            assert cancelled["task_run"]["status"] == TaskStatus.CANCELLED.value
+            cancellation_events = [
+                item["event"]
+                for item in cancelled["task_run"]["transitions"]
+                if item["event"]
+                in {
+                    TaskEvent.REQUEST_CANCEL.value,
+                    TaskEvent.REQUEST_ACTIVE_CANCEL.value,
+                    TaskEvent.START_CANCELLATION.value,
+                    TaskEvent.CONFIRM_CANCELLED.value,
+                }
+            ]
+            assert cancellation_events == [
+                request_event.value,
+                TaskEvent.START_CANCELLATION.value,
+                TaskEvent.CONFIRM_CANCELLED.value,
+            ]
+            fault_terminal = cancelled
+        else:
+            crash_result = _managed_application_call(
+                submit_client,
+                "submit_model_program",
+                fault_request,
+            )
+            submission_results.append(crash_result)
+            assert marker.is_file()
+            observed_fault = _managed_success(
+                control_client,
+                "get_task",
+                {"schema_version": 1, "task_id": fault_task["id"]},
+            )
+            if window == "load":
+                assert crash_result["ok"] is False
+                assert crash_result["error"]["code"] == "recovery_required"
+                assert observed_fault["task_run"]["status"] == TaskStatus.NEEDS_PLAN.value
+            else:
+                assert crash_result["ok"] is True
+                assert observed_fault["task_run"]["status"] == TaskStatus.FAILED.value
+                failure_events = [
+                    item["event"] for item in observed_fault["task_run"]["transitions"]
+                ]
+                assert failure_events[-2:] == [
+                    TaskEvent.FAIL_EXECUTION.value,
+                    TaskEvent.COMPLETE_ROLLBACK.value,
+                ]
+            fault_terminal = observed_fault
+
+        marker_payload = json.loads(marker.read_text(encoding="utf-8"))
+        assert marker_payload == {
+            "freecad_version": "1.1.0",
+            "generation_id": fault_generation,
+            "method": {
+                "load": "session.load_revision",
+                "mutation": "program.execute_command",
+                "checkpoint": "session.checkpoint_fcstd",
+                "export": "session.export_step",
+                "evidence": "session.observe",
+            }[window],
+            "mode": mode,
+            "pgid": fault_pid,
+            "pid": fault_pid,
+            "window": window,
+        }
+        assert _wait_gone(fault_pid, timeout=5)
+        assert _wait_process_group_gone(fault_pid)
+        assert fault_worker.state is WorkerGenerationState.DEAD
+        assert not fault_home.exists()
+        if mode == "hang":
+            assert (fault_pid, signal.SIGTERM) in killpg_calls
+            assert (fault_pid, signal.SIGKILL) in killpg_calls
+        assert application._cad_execution_port is None  # noqa: SLF001
+        assert application._runtimes == {}  # noqa: SLF001
+        assert application._cad_fence_required is False  # noqa: SLF001
+        assert application._revision_store.load_head(project_id) == baseline_head  # noqa: SLF001
+        assert (
+            application._revision_store.load_revision(  # noqa: SLF001
+                project_id,
+                baseline_head.revision_id,
+            )
+            == baseline_revision
+        )
+        assert _managed_path_snapshot(head_path) == head_before
+        assert _managed_tree_snapshot(immutable_source_revision_root) == immutable_source_before
+        revision_entries_after = tuple(sorted(path.name for path in revision_root.iterdir()))
+        if window == "evidence":
+            # P0B-RES-06 deliberately defers cross-store retention/GC.  Once
+            # sealing completed, the immutable detached revision remains owned
+            # by the durable terminal TaskRun; it is not an unreferenced orphan.
+            retained_revision_id = fault_terminal["task_run"]["candidate_revision"]
+            assert type(retained_revision_id) is str
+            retained_revision = application._revision_store.load_revision(  # noqa: SLF001
+                project_id,
+                retained_revision_id,
+            )
+            assert retained_revision.id == retained_revision_id
+            assert retained_revision.project_id == project_id
+            assert retained_revision.base_revision == baseline_head.revision_id
+            assert retained_revision.id != baseline_head.revision_id
+            assert retained_revision.model is not None
+            assert retained_revision.model.size_bytes > 0
+            assert len(retained_revision.artifacts) == 1
+            assert retained_revision.artifacts[0].format == "step"
+            assert retained_revision.artifacts[0].size_bytes > 0
+            retained_audit_root = application._revision_store.revision_model_path(  # noqa: SLF001
+                project_id,
+                retained_revision_id,
+            ).parent
+            assert (
+                hashlib.sha256((retained_audit_root / "manifest.json").read_bytes()).hexdigest()
+                == retained_revision.manifest_sha256
+            )
+            assert (
+                hashlib.sha256(
+                    (retained_audit_root / retained_revision.model.name).read_bytes()
+                ).hexdigest()
+                == retained_revision.model.sha256
+            )
+            retained_step = application._revision_store.revision_artifact_path(  # noqa: SLF001
+                project_id,
+                retained_revision_id,
+                retained_revision.artifacts[0].id,
+            )
+            assert hashlib.sha256(retained_step.read_bytes()).hexdigest() == (
+                retained_revision.artifacts[0].sha256
+            )
+            retained_audit_snapshot = _managed_tree_snapshot(retained_audit_root)
+            extra_revisions = set(revision_entries_after) - set(revision_entries_before)
+            assert set(revision_entries_before) < set(revision_entries_after)
+            assert extra_revisions == {retained_audit_root.name}
+        else:
+            assert revision_entries_after == revision_entries_before
+        temporary_after = tuple(
+            sorted(
+                path.relative_to(application._layout.projects).as_posix()  # noqa: SLF001
+                for path in application._layout.projects.rglob(".*")  # noqa: SLF001
+            )
+        )
+        assert temporary_after == temporary_before
+        candidate_roots = tuple(application._layout.projects.rglob("candidates"))  # noqa: SLF001
+        reservation_roots = tuple(
+            application._layout.projects.rglob("reservations")  # noqa: SLF001
+        )
+        assert candidate_roots
+        assert reservation_roots
+        assert all(tuple(path.iterdir()) == () for path in candidate_roots)
+        assert all(tuple(path.iterdir()) == () for path in reservation_roots)
+        assert daemon.state is LocalKernelState.RUNNING
+        after_fault_ping = control_client.call("kernel.ping", {})
+        assert after_fault_ping.error is None
+        assert after_fault_ping.result["daemon_id"] == daemon_id
+        recovery_client = LocalKernelClient.connect(daemon.run_root)
+        recovery_ping = recovery_client.call("kernel.ping", {})
+        assert recovery_ping.error is None
+        assert recovery_ping.result["daemon_id"] == daemon_id
+        durable_fault = _managed_success(
+            recovery_client,
+            "get_task",
+            {"schema_version": 1, "task_id": fault_task["id"]},
+        )
+        if mode == "hang":
+            assert durable_fault["task_run"]["status"] == TaskStatus.CANCELLED.value
+        elif window == "load":
+            assert durable_fault["task_run"]["status"] == TaskStatus.NEEDS_PLAN.value
+        else:
+            assert durable_fault["task_run"]["status"] == TaskStatus.FAILED.value
+        if window == "evidence":
+            assert (
+                durable_fault["task_run"]["candidate_revision"]
+                == fault_terminal["task_run"]["candidate_revision"]
+            )
+
+        healthy = _managed_create_task(
+            recovery_client,
+            project_id=project_id,
+            key_hex=f"{case_number + 96:032x}",
+        )
+        healthy_task = healthy["task_run"]
+        healthy_program = _managed_fault_program(
+            task_id=healthy_task["id"],
+            base_revision=healthy_task["base_revision"],
+            inspect_only=True,
+        )
+        healthy_terminal = _managed_success(
+            recovery_client,
+            "submit_model_program",
+            _managed_submit_request(healthy, healthy_program),
+        )
+        assert healthy_terminal["task_run"]["status"] == TaskStatus.SUCCEEDED.value
+        assert len(workers) == len(ports) == len(ready_results) == 2
+        assert all(item["freecad_version"] == "1.1.0" for item in ready_results)
+        healthy_worker = workers[1]
+        healthy_pid = healthy_worker.pid
+        healthy_home = healthy_worker._process._home  # noqa: SLF001
+        assert healthy_pid != fault_pid
+        assert healthy_worker.generation_id != fault_generation
+        assert os.getpgid(healthy_pid) == os.getsid(healthy_pid) == healthy_pid
+
+        final_head = application._revision_store.load_head(project_id)  # noqa: SLF001
+        assert final_head.generation == baseline_head.generation + 1
+        assert final_head.revision_id == healthy_terminal["task_run"]["committed_revision"]
+        final_revision = application._revision_store.load_revision(  # noqa: SLF001
+            project_id,
+            final_head.revision_id,
+        )
+        assert final_revision.model is not None
+        assert final_revision.model.size_bytes > 0
+        assert len(final_revision.artifacts) == 1
+        assert final_revision.artifacts[0].format == "step"
+        assert final_revision.artifacts[0].size_bytes > 0
+        final_directory = application._revision_store.revision_model_path(  # noqa: SLF001
+            project_id,
+            final_head.revision_id,
+        ).parent
+        validation_fd = os.open(
+            final_directory,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            materialized = healthy_worker.validate_materialization(
+                directory_fd=validation_fd,
+            )
+        finally:
+            os.close(validation_fd)
+        assert materialized.fcstd_size_bytes == final_revision.model.size_bytes
+        assert materialized.step_size_bytes == final_revision.artifacts[0].size_bytes
+        if retained_audit_root is not None:
+            assert retained_audit_snapshot is not None
+            assert _managed_tree_snapshot(retained_audit_root) == retained_audit_snapshot
+
+        final_ping = recovery_client.call("kernel.ping", {})
+        assert final_ping.error is None
+        assert final_ping.result["daemon_id"] == daemon_id
+    finally:
+        if submitter is not None and submitter.is_alive():
+            if submit_client is not None:
+                submit_client.close()
+                submit_client = None
+            for worker in workers:
+                with contextlib.suppress(Exception):
+                    worker.terminate()
+            if daemon is not None:
+                with contextlib.suppress(Exception):
+                    daemon.close()
+                daemon = None
+            submitter.join(timeout=5)
+        if submit_client is not None:
+            submit_client.close()
+        if control_client is not None:
+            control_client.close()
+        if recovery_client is not None:
+            recovery_client.close()
+        if daemon is not None:
+            with contextlib.suppress(Exception):
+                daemon.close()
+        for worker in workers:
+            with contextlib.suppress(Exception):
+                worker.terminate()
+        if healthy_pid is not None:
+            assert _wait_gone(healthy_pid, timeout=5)
+            assert _wait_process_group_gone(healthy_pid)
+        if healthy_home is not None:
+            assert not healthy_home.exists()
+        shutil.rmtree(short_root, ignore_errors=True)
+
+
 @pytest.mark.slow
 def test_real_managed_worker_load_modify_checkpoint_and_export(
     tmp_path: Path,
@@ -2125,6 +3987,24 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
         worker = FreeCadWorker.start_managed(source_root=source_root)
         candidate = None
         try:
+            baseline = rig.store.load_revision(
+                rig.head.project_id,
+                rig.head.revision_id,
+            )
+            baseline_handle = worker.bind_revision(
+                store=rig.store,
+                revision=baseline,
+            )
+            baseline_session = worker.load_revision(baseline_handle)
+            baseline_shape, baseline_entities = worker.observe(
+                session=baseline_session,
+                capability=baseline_handle,
+            )
+            assert baseline_shape is None
+            assert baseline_entities == ()
+            worker.close_session(baseline_session)
+            worker.release_revision(baseline_handle)
+
             candidate = worker.bind_candidate(
                 store=rig.store,
                 lease=rig.lease,
@@ -2153,6 +4033,13 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
             shape = loaded_outcomes[0].result.value["shape"]
             assert shape["volume_mm3"] == pytest.approx(9_000)
             assert tuple(shape["bbox_mm"]) == pytest.approx((15, 20, 30))
+            observed_shape, observed_entities = worker.observe(
+                session=loaded,
+                capability=candidate,
+            )
+            assert observed_shape is not None
+            assert observed_shape.volume_mm3 == pytest.approx(9_000)
+            assert observed_entities
             worker.close_session(loaded)
             sessions = tuple(worker.load_fcstd(candidate) for _index in range(6))
             with pytest.raises(WorkerError) as capacity:
@@ -2163,6 +4050,46 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
                 worker.close_session(cached)
             assert (rig.directory / "model.FCStd").stat().st_size > 0
             assert (rig.directory / "model.step").stat().st_size > 0
+
+            validation_directory = tmp_path / "real-validation"
+            validation_directory.mkdir(mode=0o700)
+            validation_directory.chmod(0o700)
+            stage_name = ".stage." + "d" * 32 + ".FCStd"
+            normalized_name = ".normalized." + "e" * 32 + ".FCStd"
+            for name, source in (
+                (stage_name, rig.directory / "model.FCStd"),
+                (normalized_name, rig.directory / "model.FCStd"),
+                ("model.FCStd", rig.directory / "model.FCStd"),
+                ("model.step", rig.directory / "model.step"),
+            ):
+                target = validation_directory / name
+                target.write_bytes(source.read_bytes())
+                target.chmod(0o600)
+            validation_fd = os.open(
+                validation_directory,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                imported = worker.validate_import(
+                    directory_fd=validation_fd,
+                    name=stage_name,
+                )
+                normalized_path = validation_directory / normalized_name
+                normalized_path.write_bytes((validation_directory / stage_name).read_bytes())
+                normalized_path.chmod(0o600)
+                revalidated = worker.revalidate_normalized_import(
+                    directory_fd=validation_fd,
+                    name=normalized_name,
+                )
+                materialized = worker.validate_materialization(
+                    directory_fd=validation_fd,
+                )
+            finally:
+                os.close(validation_fd)
+            assert imported == revalidated
+            assert materialized.fcstd_size_bytes > 0
+            assert materialized.step_size_bytes > 0
+
             worker.release_candidate(candidate)
             candidate = None
             for _index in range(9):
@@ -2173,6 +4100,25 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
                     revision_id=rig.revision_id,
                 )
                 worker.release_candidate(released)
+            sealed = rig.store.seal_revision(
+                rig.head.project_id,
+                rig.revision_id,
+                rig.lease,
+            )
+            revision_handle = worker.bind_revision(
+                store=rig.store,
+                revision=sealed,
+            )
+            revision_session = worker.load_revision(revision_handle)
+            revision_shape, revision_entities = worker.observe(
+                session=revision_session,
+                capability=revision_handle,
+            )
+            assert revision_shape is not None
+            assert revision_shape.volume_mm3 == pytest.approx(9_000)
+            assert revision_entities
+            worker.close_session(revision_session)
+            worker.release_revision(revision_handle)
         finally:
             if candidate is not None and worker.state is WorkerGenerationState.READY:
                 with contextlib.suppress(WorkerError):

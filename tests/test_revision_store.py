@@ -17,6 +17,10 @@ import pytest
 import vibecad.execution as execution_package
 import vibecad.execution.revisions as revisions_module
 from vibecad.execution.revisions import (
+    CandidateReservationPresence,
+    CandidateReservationPresenceStatus,
+    CandidateReservationReconciliation,
+    CandidateReservationStatus,
     CommitJournal,
     CommitJournalState,
     LocalRevisionStore,
@@ -140,6 +144,10 @@ EXPECTED_EXECUTION_EXPORTS = [
     "resolve_selector",
 ]
 EXPECTED_REVISION_EXPORTS = (
+    "CandidateReservationPresence",
+    "CandidateReservationPresenceStatus",
+    "CandidateReservationReconciliation",
+    "CandidateReservationStatus",
     "CommitJournal",
     "CommitJournalState",
     "LocalRevisionStore",
@@ -220,6 +228,19 @@ EXPECTED_STORE_METHODS = {
         "lease",
     ),
     "reconcile": ("self", "project_id", "lease"),
+    "probe_candidate_reservation": (
+        "self",
+        "project_id",
+        "base_revision",
+        "reservation_key",
+    ),
+    "reconcile_candidate_reservation": (
+        "self",
+        "project_id",
+        "base_revision",
+        "reservation_key",
+        "lease",
+    ),
     "revision_artifact_path": ("self", "project_id", "revision_id", "artifact_id"),
     "revision_model_path": ("self", "project_id", "revision_id"),
     "rollback_revision": ("self", "project_id", "revision_id", "lease"),
@@ -227,6 +248,17 @@ EXPECTED_STORE_METHODS = {
     "validate_project_write_lease": ("self", "project_id", "lease"),
 }
 EXPECTED_VALUE_FIELDS = {
+    "CandidateReservationPresence": (
+        "project_id",
+        "status",
+        "head",
+        "revision_id",
+    ),
+    "CandidateReservationReconciliation": (
+        "project_id",
+        "status",
+        "head",
+    ),
     "CommitJournal": (
         "schema_version",
         "id",
@@ -309,6 +341,16 @@ EXPECTED_VALUE_FIELDS = {
     ),
 }
 EXPECTED_ENUM_MEMBERS = {
+    "CandidateReservationPresenceStatus": {
+        "ABSENT": "absent",
+        "EXACT_PRE_CANDIDATE": "exact_pre_candidate",
+        "AMBIGUOUS": "ambiguous",
+    },
+    "CandidateReservationStatus": {
+        "ABSENT": "absent",
+        "NOT_COMMITTED": "not_committed",
+        "CLEANUP_REQUIRED": "cleanup_required",
+    },
     "CommitJournalState": {
         "STAGING": "staging",
         "PREPARED": "prepared",
@@ -3521,6 +3563,180 @@ def test_literal_staging_prepared_committed_and_not_committed_journal_vectors(
         )
 
 
+def test_task_scoped_reconcile_cleans_only_an_exact_prejournal_reservation(
+    store_parts,
+) -> None:
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    reservation_key = "task_" + "a" * 32
+    revision_id = REVISION_B
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        reserved = revisions_module._reserve_quota(
+            store,
+            "candidate",
+            PROJECT_ID,
+            head,
+            revision_id,
+            reservation_key,
+            None,
+            8,
+        )
+        assert reserved[2] is None
+        assert reserved[0]["revision_id"] == revision_id
+        candidate = _candidate_dir(root, revision_id)
+        candidate.mkdir(mode=0o700)
+        (candidate / "model.FCStd").write_bytes(b"partial")
+
+        wrong = store.reconcile_candidate_reservation(
+            PROJECT_ID,
+            head.revision_id,
+            "task_" + "b" * 32,
+            lease,
+        )
+        assert wrong == CandidateReservationReconciliation(
+            project_id=PROJECT_ID,
+            status=CandidateReservationStatus.ABSENT,
+            head=head,
+        )
+        assert candidate.is_dir()
+
+        reconciled = store.reconcile_candidate_reservation(
+            PROJECT_ID,
+            head.revision_id,
+            reservation_key,
+            lease,
+        )
+
+    assert reconciled == CandidateReservationReconciliation(
+        project_id=PROJECT_ID,
+        status=CandidateReservationStatus.NOT_COMMITTED,
+        head=head,
+    )
+    assert not candidate.exists()
+    reservation_root = root / ".revision-quota" / "reservations"
+    assert tuple(reservation_root.iterdir()) == ()
+    assert store.load_head(PROJECT_ID) == head
+
+
+def test_task_scoped_reconcile_validates_staging_binding_before_cleanup(
+    store_parts,
+) -> None:
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    reservation_key = "task_" + "c" * 32
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = revisions_module._reserve_candidate_revision(
+            store,
+            PROJECT_ID,
+            head,
+            reservation_key,
+            lease,
+        )
+        wrong = store.reconcile_candidate_reservation(
+            PROJECT_ID,
+            head.revision_id,
+            "task_" + "d" * 32,
+            lease,
+        )
+        assert wrong == CandidateReservationReconciliation(
+            project_id=PROJECT_ID,
+            status=CandidateReservationStatus.ABSENT,
+            head=head,
+        )
+        assert _candidate_dir(root, revision_id).is_dir()
+
+        reconciled = store.reconcile_candidate_reservation(
+            PROJECT_ID,
+            head.revision_id,
+            reservation_key,
+            lease,
+        )
+        replayed = store.reconcile_candidate_reservation(
+            PROJECT_ID,
+            head.revision_id,
+            reservation_key,
+            lease,
+        )
+
+    assert reconciled.status is CandidateReservationStatus.NOT_COMMITTED
+    assert reconciled.head == head
+    assert replayed == CandidateReservationReconciliation(
+        project_id=PROJECT_ID,
+        status=CandidateReservationStatus.ABSENT,
+        head=head,
+    )
+    assert not _candidate_dir(root, revision_id).exists()
+    reservation_root = root / ".revision-quota" / "reservations"
+    assert tuple(reservation_root.iterdir()) == ()
+    assert store.load_head(PROJECT_ID) == head
+
+
+def test_candidate_reservation_probe_is_exact_and_strictly_read_only(
+    store_parts,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    reservation_key = "task_" + "e" * 32
+    revision_id = REVISION_B
+
+    with manager.acquire_project_write(PROJECT_ID):
+        reserved = revisions_module._reserve_quota(
+            store,
+            "candidate",
+            PROJECT_ID,
+            head,
+            revision_id,
+            reservation_key,
+            None,
+            8,
+        )
+    assert reserved[2] is None
+    before = _all_tree_bytes(root)
+
+    def forbidden_mutation(*_args, **_kwargs):
+        raise AssertionError("reservation presence probing must be read-only")
+
+    monkeypatch.setattr(
+        revisions_module,
+        "_quota_cleanup_candidate",
+        forbidden_mutation,
+    )
+    monkeypatch.setattr(
+        revisions_module,
+        "_release_reservation",
+        forbidden_mutation,
+    )
+    monkeypatch.setattr(revisions_module, "_reconcile", forbidden_mutation)
+
+    exact = store.probe_candidate_reservation(
+        PROJECT_ID,
+        head.revision_id,
+        reservation_key,
+    )
+    foreign = store.probe_candidate_reservation(
+        PROJECT_ID,
+        head.revision_id,
+        "task_" + "f" * 32,
+    )
+
+    assert exact == CandidateReservationPresence(
+        project_id=PROJECT_ID,
+        status=CandidateReservationPresenceStatus.EXACT_PRE_CANDIDATE,
+        head=head,
+        revision_id=revision_id,
+    )
+    assert foreign == CandidateReservationPresence(
+        project_id=PROJECT_ID,
+        status=CandidateReservationPresenceStatus.ABSENT,
+        head=head,
+        revision_id=None,
+    )
+    assert _all_tree_bytes(root) == before
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -6595,6 +6811,69 @@ def test_atomic_rename_and_replace_are_dirfd_relative(store_parts, monkeypatch):
     assert all(type(source) is int and type(target) is int for source, target in replace_calls)
 
 
+@pytest.mark.parametrize("with_model", [False, True])
+def test_worker_revision_opener_pins_exact_immutable_revision(
+    store_parts,
+    with_model: bool,
+) -> None:
+    store, manager, _root = store_parts
+    head = _initialize_empty(store, manager)
+    if with_model:
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            revision_id = _begin_and_fill(store, lease, head)
+            revision = store.seal_revision(PROJECT_ID, revision_id, lease)
+    else:
+        revision = store.load_revision(PROJECT_ID, head.revision_id)
+
+    revisions_fd, revision_fd, revision_name, root_device = revisions_module._open_worker_revision(
+        store,
+        expected_revision=revision,
+    )
+    try:
+        assert not os.get_inheritable(revisions_fd)
+        assert not os.get_inheritable(revision_fd)
+        assert os.fstat(revisions_fd).st_dev == root_device
+        assert os.fstat(revision_fd).st_dev == root_device
+        assert (
+            os.stat(
+                revision_name,
+                dir_fd=revisions_fd,
+                follow_symlinks=False,
+            ).st_ino
+            == os.fstat(revision_fd).st_ino
+        )
+        expected_names = {"manifest.json"}
+        if with_model:
+            expected_names.update({"model.FCStd", "model.step"})
+        assert set(os.listdir(revision_fd)) == expected_names
+    finally:
+        os.close(revision_fd)
+        os.close(revisions_fd)
+
+
+def test_worker_revision_opener_rejects_descriptor_drift(
+    store_parts,
+) -> None:
+    store, manager, root = store_parts
+    head = _initialize_empty(store, manager)
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = _begin_and_fill(store, lease, head)
+        revision = store.seal_revision(PROJECT_ID, revision_id, lease)
+    model = _revision_dir(root, revision.id) / "model.FCStd"
+    model.write_bytes(b"drift")
+    model.chmod(0o600)
+
+    with pytest.raises(RevisionStoreError) as captured:
+        revisions_module._open_worker_revision(
+            store,
+            expected_revision=revision,
+        )
+    assert captured.value.code in {
+        RevisionStoreErrorCode.CORRUPT_CONTENT,
+        RevisionStoreErrorCode.UNSAFE_STORE,
+    }
+
+
 def test_begin_fsyncs_staging_journal_and_project_directory_before_return(
     store_parts, monkeypatch: pytest.MonkeyPatch
 ):
@@ -8684,6 +8963,8 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         return False
 
     public_value_classes = {
+        "CandidateReservationPresence",
+        "CandidateReservationReconciliation",
         "CommitJournal",
         "ProjectHead",
         "ProjectSnapshotEntry",
@@ -8697,6 +8978,10 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "RevisionSourceObservation",
     }
     expected_class_methods = {
+        "CandidateReservationPresence": {"__post_init__"},
+        "CandidateReservationPresenceStatus": set(),
+        "CandidateReservationReconciliation": {"__post_init__"},
+        "CandidateReservationStatus": set(),
         "CommitJournal": {"__post_init__", "from_mapping", "to_mapping"},
         "_CandidateFileLimit": {"__enter__", "__exit__", "__init__"},
         "_CandidateFileLimitRuntime": set(),

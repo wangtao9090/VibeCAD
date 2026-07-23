@@ -16,6 +16,7 @@ import pytest
 
 import vibecad.application.agent as agent_module
 import vibecad.application.data as data_module
+import vibecad.execution.revisions as revisions_module
 from vibecad.application.agent import AgentApplication
 from vibecad.application.artifacts import (
     ArtifactDependencyError,
@@ -40,9 +41,11 @@ from vibecad.execution.candidate import (
     SessionBinding,
     SessionSlot,
 )
+from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
 from vibecad.execution.revisions import LocalRevisionStore, ProjectHead
 from vibecad.interaction.cad import CadExecutionPort
 from vibecad.interaction.checkouts import CheckoutFileSnapshot, HeadCheckoutSource
+from vibecad.worker import WorkerGenerationState
 from vibecad.workflow.catalog import (
     TaskCatalogError,
     TaskCatalogErrorCode,
@@ -68,7 +71,14 @@ from vibecad.workflow.service import (
     TaskServiceError,
     TaskServiceErrorCode,
 )
-from vibecad.workflow.state import ReasoningOwner, ReviewPolicy
+from vibecad.workflow.state import (
+    ReasoningOwner,
+    ReviewPolicy,
+    TaskEvent,
+    TaskStatus,
+    transition_task,
+)
+from vibecad.workflow.store import StoredTaskRun
 
 
 def _task_id(index: int) -> str:
@@ -905,6 +915,42 @@ assert loaded == [], json.dumps(loaded)
     assert completed.returncode == 0, completed.stderr or completed.stdout
 
 
+def test_default_worker_port_composition_keeps_cad_modules_out_of_parent(
+    tmp_path: Path,
+) -> None:
+    data_root = _data_root(tmp_path)
+    script = f"""
+import json
+import sys
+from pathlib import Path
+from vibecad.application.agent import AgentApplication
+app = AgentApplication.open(data_root=Path({str(data_root)!r}))
+with app._cad_gate:
+    port = app._cad_execution_port_under_gate()
+assert type(port).__name__ == 'WorkerCadExecutionPort'
+forbidden = (
+    'FreeCAD',
+    'Part',
+    'vibecad.engine',
+    'vibecad.tools',
+    'vibecad.execution.executor',
+    'vibecad.worker.service',
+)
+loaded = sorted(name for name in sys.modules if any(
+    name == prefix or name.startswith(prefix + '.') for prefix in forbidden
+))
+assert loaded == [], json.dumps(loaded)
+app.close()
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
 def test_review_gate_release_failure_is_recovery_after_no_cad_reject_body(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1220,6 +1266,777 @@ def test_cancel_task_request_is_store_only_and_keeps_heavy_components_lazy(
     assert runtime_calls == []
     assert cad_calls == []
     app.close()
+
+
+@pytest.mark.parametrize(
+    ("generation_kind", "expected_code"),
+    (
+        ("stale", "conflict"),
+        ("future", "conflict"),
+        ("exact", "invalid_state"),
+    ),
+)
+def test_cancelled_task_submit_preserves_expected_generation_contract(
+    tmp_path: Path,
+    generation_kind: str,
+    expected_code: str,
+) -> None:
+    cad_calls: list[str] = []
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        cad_port_factory=lambda **_kwargs: cad_calls.append("cad"),
+    )
+    project_id, task_id, created = _seed_projects_and_tasks(app, 1)[0]
+    cancelled = app.cancel_task(
+        task_id=task_id,
+        expected_generation=created.generation,
+    )
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    generation = {
+        "stale": created.generation,
+        "future": cancelled.generation + 100,
+        "exact": cancelled.generation,
+    }[generation_kind]
+    request = {
+        "schema_version": 1,
+        "task_id": task_id,
+        "expected_generation": generation,
+        "program_json": json.dumps(
+            _model_program(task_id, created.task_run.base_revision).to_mapping(),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    }
+
+    result = app.submit_model_program_request(request)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == expected_code
+    assert app._task_store.load(task_id) == cancelled  # noqa: SLF001
+    assert app._cad_task_admissions == {}  # noqa: SLF001
+    assert cad_calls == []
+    assert project_id == cancelled.task_run.project_id
+    app.close()
+
+
+def test_idle_cancel_does_not_terminate_an_unrelated_cad_generation(
+    tmp_path: Path,
+) -> None:
+    class Generation(CadExecutionPort):
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+
+        def terminate_generation(self) -> None:
+            self.terminate_calls += 1
+
+        def close_generation(self) -> None:
+            return None
+
+    port = Generation()
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        cad_port_factory=lambda **_kwargs: port,
+    )
+    _project_id, task_id, created = _seed_projects_and_tasks(app, 1)[0]
+    app._cad_execution_port = port  # noqa: SLF001
+
+    cancelled = app.cancel_task(
+        task_id=task_id,
+        expected_generation=created.generation,
+    )
+
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert port.terminate_calls == 0
+    assert app._cad_execution_port is port  # noqa: SLF001
+    app.close()
+
+
+def test_cancel_task_request_replays_original_generation_after_response_loss(
+    tmp_path: Path,
+) -> None:
+    app = AgentApplication.open(data_root=_data_root(tmp_path))
+    _project_id, task_id, created = _seed_projects_and_tasks(app, 1)[0]
+    request = {
+        "schema_version": 1,
+        "task_id": task_id,
+        "expected_generation": created.generation,
+    }
+
+    first = app.cancel_task_request(request)
+    replayed = app.cancel_task_request(request)
+    future = app.cancel_task_request(
+        {
+            **request,
+            "expected_generation": first["result"]["generation"] + 100,
+        }
+    )
+
+    assert first["ok"] is True
+    assert replayed == first
+    assert future["ok"] is False
+    assert future["error"]["code"] == "conflict"
+    assert app._cad_task_admissions == {}  # noqa: SLF001
+    app.close()
+
+
+def test_active_cancel_fences_generation_before_store_only_reconcile_without_cad_gate(
+    tmp_path: Path,
+) -> None:
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        runtime_factory=lambda **kwargs: _Runtime(**kwargs),
+        cad_port_factory=lambda **_kwargs: None,
+    )
+    project_id, task_id, created = _seed_projects_and_tasks(app, 1)[0]
+    head = app._revision_store.load_head(project_id)  # noqa: SLF001
+    lease = app._lease_manager.acquire_project_write(project_id)  # noqa: SLF001
+    try:
+        candidate_revision = app._revision_store.begin_revision(  # noqa: SLF001
+            project_id,
+            head,
+            lease,
+        )
+    finally:
+        lease.release(owner_token=lease.owner_token)
+    submitted = transition_task(
+        created.task_run,
+        TaskEvent.SUBMIT_PROGRAM,
+        program=_model_program(task_id, created.task_run.base_revision),
+    )
+    stored = app._task_store.compare_and_set(task_id, created.generation, submitted)  # noqa: SLF001
+    validating = transition_task(stored.task_run, TaskEvent.START_VALIDATION)
+    stored = app._task_store.compare_and_set(task_id, stored.generation, validating)  # noqa: SLF001
+    executing = transition_task(
+        stored.task_run,
+        TaskEvent.VALIDATE_PROGRAM,
+        candidate_revision=candidate_revision,
+    )
+    stored = app._task_store.compare_and_set(task_id, stored.generation, executing)  # noqa: SLF001
+    assert stored.task_run.status is TaskStatus.EXECUTING
+
+    events: list[str] = []
+    terminated = threading.Event()
+
+    class Generation:
+        def terminate_generation(self) -> None:
+            durable = app._task_store.load(task_id)  # noqa: SLF001
+            assert durable.task_run.status is TaskStatus.CANCEL_REQUESTED
+            events.append("cancel_requested_then_terminate")
+            terminated.set()
+
+    class ForbiddenGate:
+        def __enter__(self):
+            raise AssertionError("active cancellation must not wait for the CAD gate")
+
+        def __exit__(self, *_args):
+            return False
+
+    app._cad_execution_port = Generation()  # noqa: SLF001
+    app._cad_task_admissions[task_id] = 1  # noqa: SLF001
+    app._runtimes[project_id] = object()  # noqa: SLF001
+    app._runtimes["project_" + "8" * 32] = object()  # noqa: SLF001
+    app._cad_gate = ForbiddenGate()  # noqa: SLF001
+
+    def drain_admission() -> None:
+        assert terminated.wait(timeout=3)
+        with app._cad_admission_condition:  # noqa: SLF001
+            app._cad_task_admissions.pop(task_id, None)  # noqa: SLF001
+            app._cad_admission_condition.notify_all()  # noqa: SLF001
+
+    drain = threading.Thread(target=drain_admission)
+    drain.start()
+
+    cancelled = app.cancel_task(
+        task_id=task_id,
+        expected_generation=stored.generation,
+    )
+    drain.join(timeout=3)
+
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert not drain.is_alive()
+    assert events == ["cancel_requested_then_terminate"]
+    assert app._cad_execution_port is None  # noqa: SLF001
+    assert app._runtimes == {}  # noqa: SLF001
+    cancellation_events = [
+        record.event
+        for record in cancelled.task_run.transitions
+        if record.event
+        in {
+            TaskEvent.REQUEST_CANCEL,
+            TaskEvent.START_CANCELLATION,
+            TaskEvent.CONFIRM_CANCELLED,
+        }
+    ]
+    assert cancellation_events == [
+        TaskEvent.REQUEST_CANCEL,
+        TaskEvent.START_CANCELLATION,
+        TaskEvent.CONFIRM_CANCELLED,
+    ]
+    app._cad_task_admissions.clear()  # noqa: SLF001
+    app._cad_gate = threading.Lock()  # noqa: SLF001
+    app.close()
+
+
+def test_cancel_keeps_the_owner_admitted_until_durable_request_is_fenced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_entered = threading.Event()
+    cancellation_persisted = threading.Event()
+    owner_returning = threading.Event()
+    results: list[object] = []
+    events: list[str] = []
+
+    class GenerationCad(CadExecutionPort):
+        generation_lost = False
+
+        def terminate_generation(self) -> None:
+            durable = app._task_store.load(task_id)  # noqa: SLF001
+            assert durable.task_run.status is TaskStatus.CANCEL_REQUESTED
+            self.generation_lost = True
+            events.append("terminate")
+
+    port = GenerationCad()
+
+    class Service:
+        def __init__(self, store) -> None:
+            self._store = store
+
+        def continue_task(self, *, task_id: str, expected_generation: int):
+            del expected_generation
+            service_entered.set()
+            assert cancellation_persisted.wait(timeout=3)
+            durable = self._store.load(task_id)
+            assert durable.task_run.status is TaskStatus.CANCEL_REQUESTED
+            events.append("owner-return")
+            owner_returning.set()
+            return durable
+
+    class Runtime(_Runtime):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.service = Service(kwargs["task_store"])
+
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        runtime_factory=lambda **kwargs: Runtime(**kwargs),
+        cad_port_factory=lambda **_kwargs: port,
+    )
+    _project_id, task_id, created = _seed_projects_and_tasks(app, 1)[0]
+    original_cancel = TaskCatalogService.cancel_task
+
+    def observed_cancel(self, **kwargs):
+        result = original_cancel(self, **kwargs)
+        if kwargs["task_id"] == task_id:
+            events.append("persist")
+            cancellation_persisted.set()
+            assert owner_returning.wait(timeout=3)
+        return result
+
+    monkeypatch.setattr(TaskCatalogService, "cancel_task", observed_cancel)
+    caller = threading.Thread(
+        target=lambda: results.append(
+            app.continue_task(
+                task_id=task_id,
+                expected_generation=created.generation,
+            )
+        )
+    )
+    caller.start()
+    assert service_entered.wait(timeout=2)
+
+    cancelled = app.cancel_task(
+        task_id=task_id,
+        expected_generation=created.generation,
+    )
+    caller.join(timeout=3)
+
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert not caller.is_alive()
+    assert len(results) == 1
+    assert type(results[0]) is StoredTaskRun
+    assert results[0].task_run.status is TaskStatus.CANCEL_REQUESTED
+    assert results[0].task_run.transitions[-1].event is TaskEvent.REQUEST_ACTIVE_CANCEL
+    assert events == ["persist", "owner-return", "terminate"]
+    assert port.generation_lost is True
+    assert app._cad_execution_port is None  # noqa: SLF001
+    assert app._cad_task_admissions == {}  # noqa: SLF001
+    app.close()
+
+
+def test_failed_generation_fence_stays_unstarted_across_store_only_reconcile_and_restart(
+    tmp_path: Path,
+) -> None:
+    data_root = _data_root(tmp_path)
+    app = AgentApplication.open(data_root=data_root)
+    project_id, task_id, created = _seed_projects_and_tasks(app, 1)[0]
+    head = app._revision_store.load_head(project_id)  # noqa: SLF001
+    with app._lease_manager.acquire_project_write(project_id) as lease:  # noqa: SLF001
+        candidate_revision = app._revision_store.begin_revision(  # noqa: SLF001
+            project_id,
+            head,
+            lease,
+        )
+    submitted = transition_task(
+        created.task_run,
+        TaskEvent.SUBMIT_PROGRAM,
+        program=_model_program(task_id, created.task_run.base_revision),
+    )
+    stored = app._task_store.compare_and_set(  # noqa: SLF001
+        task_id,
+        created.generation,
+        submitted,
+    )
+    stored = app._task_store.compare_and_set(  # noqa: SLF001
+        task_id,
+        stored.generation,
+        transition_task(stored.task_run, TaskEvent.START_VALIDATION),
+    )
+    stored = app._task_store.compare_and_set(  # noqa: SLF001
+        task_id,
+        stored.generation,
+        transition_task(
+            stored.task_run,
+            TaskEvent.VALIDATE_PROGRAM,
+            candidate_revision=candidate_revision,
+        ),
+    )
+
+    class UncertainGeneration(CadExecutionPort):
+        generation_lost = True
+
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+
+        def terminate_generation(self) -> None:
+            self.terminate_calls += 1
+            raise RuntimeError("termination is uncertain")
+
+    port = UncertainGeneration()
+    app._cad_execution_port = port  # noqa: SLF001
+    app._cad_task_admissions[task_id] = 1  # noqa: SLF001
+
+    failed = app.cancel_task(
+        task_id=task_id,
+        expected_generation=stored.generation,
+    )
+    requested = app._task_store.load(task_id)  # noqa: SLF001
+    reconciled = app.reconcile_task(
+        task_id=task_id,
+        expected_generation=requested.generation,
+    )
+
+    assert failed == TaskServicePortFailure(code=TaskServicePortErrorCode.RECOVERY_REQUIRED)
+    assert requested.task_run.status is TaskStatus.CANCEL_REQUESTED
+    assert requested.task_run.transitions[-1].event is TaskEvent.REQUEST_CANCEL
+    assert all(
+        record.event is not TaskEvent.START_CANCELLATION
+        for record in requested.task_run.transitions
+    )
+    assert reconciled == requested
+    assert port.terminate_calls == 1
+    assert app._cad_execution_port is port  # noqa: SLF001
+    assert app._cad_fence_required is True  # noqa: SLF001
+    app._cad_task_admissions.clear()  # noqa: SLF001
+    app.close()
+
+    restarted = AgentApplication.open(data_root=data_root)
+    replayed = restarted.reconcile_task(
+        task_id=task_id,
+        expected_generation=requested.generation,
+    )
+    assert replayed == requested
+    assert restarted._cad_execution_port is None  # noqa: SLF001
+    restarted.close()
+
+
+def test_failed_generation_fence_retries_the_same_handle_before_starting_cancellation(
+    tmp_path: Path,
+) -> None:
+    app = AgentApplication.open(data_root=_data_root(tmp_path))
+    _project_id, task_id, created = _seed_projects_and_tasks(app, 1)[0]
+
+    class RetryableGeneration(CadExecutionPort):
+        generation_lost = True
+
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+
+        def terminate_generation(self) -> None:
+            self.terminate_calls += 1
+            if self.terminate_calls == 1:
+                raise RuntimeError("first termination is uncertain")
+
+    port = RetryableGeneration()
+    app._cad_execution_port = port  # noqa: SLF001
+    app._cad_task_admissions[task_id] = 1  # noqa: SLF001
+
+    first = app.cancel_task(
+        task_id=task_id,
+        expected_generation=created.generation,
+    )
+    requested = app._task_store.load(task_id)  # noqa: SLF001
+    with app._cad_admission_condition:  # noqa: SLF001
+        app._cad_task_admissions.clear()  # noqa: SLF001
+        app._cad_admission_condition.notify_all()  # noqa: SLF001
+    replayed = app.cancel_task(
+        task_id=task_id,
+        expected_generation=created.generation,
+    )
+
+    assert first == TaskServicePortFailure(code=TaskServicePortErrorCode.RECOVERY_REQUIRED)
+    assert requested.task_run.status is TaskStatus.CANCEL_REQUESTED
+    assert replayed.task_run.status is TaskStatus.CANCELLED
+    assert port.terminate_calls == 2
+    assert app._cad_execution_port is None  # noqa: SLF001
+    assert app._cad_fence_required is False  # noqa: SLF001
+    app.close()
+
+
+def test_self_lost_generation_is_retained_until_termination_is_proven(
+    tmp_path: Path,
+) -> None:
+    app = AgentApplication.open(data_root=_data_root(tmp_path))
+
+    class SelfLostGeneration(CadExecutionPort):
+        generation_lost = True
+
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+
+        def terminate_generation(self) -> None:
+            self.terminate_calls += 1
+            if self.terminate_calls == 1:
+                raise RuntimeError("cleanup is still required")
+
+    port = SelfLostGeneration()
+    app._cad_execution_port = port  # noqa: SLF001
+
+    app._retire_lost_generation(port)  # noqa: SLF001
+
+    assert port.terminate_calls == 1
+    assert app._cad_execution_port is port  # noqa: SLF001
+    assert app._cad_fence_required is True  # noqa: SLF001
+    assert app._fence_cad_generation() is True  # noqa: SLF001
+    assert port.terminate_calls == 2
+    assert app._cad_execution_port is None  # noqa: SLF001
+    assert app._cad_fence_required is False  # noqa: SLF001
+    app.close()
+
+
+def test_concurrent_active_cancel_callers_converge_on_one_terminal_result(
+    tmp_path: Path,
+) -> None:
+    app = AgentApplication.open(data_root=_data_root(tmp_path))
+    _project_id, task_id, created = _seed_projects_and_tasks(app, 1)[0]
+    submitted = transition_task(
+        created.task_run,
+        TaskEvent.SUBMIT_PROGRAM,
+        program=_model_program(task_id, created.task_run.base_revision),
+    )
+    stored = app._task_store.compare_and_set(  # noqa: SLF001
+        task_id,
+        created.generation,
+        submitted,
+    )
+    stored = app._task_store.compare_and_set(  # noqa: SLF001
+        task_id,
+        stored.generation,
+        transition_task(stored.task_run, TaskEvent.START_VALIDATION),
+    )
+    terminated = threading.Event()
+
+    class Generation(CadExecutionPort):
+        generation_lost = True
+
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+
+        def terminate_generation(self) -> None:
+            self.terminate_calls += 1
+            terminated.set()
+
+    port = Generation()
+    app._cad_execution_port = port  # noqa: SLF001
+    app._cad_task_admissions[task_id] = 1  # noqa: SLF001
+
+    def drain_admission() -> None:
+        assert terminated.wait(timeout=3)
+        with app._cad_admission_condition:  # noqa: SLF001
+            app._cad_task_admissions.clear()  # noqa: SLF001
+            app._cad_admission_condition.notify_all()  # noqa: SLF001
+
+    barrier = threading.Barrier(17)
+    results: list[object] = []
+
+    def cancel() -> None:
+        barrier.wait()
+        results.append(
+            app.cancel_task(
+                task_id=task_id,
+                expected_generation=stored.generation,
+            )
+        )
+
+    drainer = threading.Thread(target=drain_admission)
+    callers = [threading.Thread(target=cancel) for _index in range(16)]
+    drainer.start()
+    for caller in callers:
+        caller.start()
+    barrier.wait()
+    for caller in callers:
+        caller.join(timeout=5)
+    drainer.join(timeout=5)
+
+    assert all(not caller.is_alive() for caller in callers)
+    assert not drainer.is_alive()
+    assert len(results) == 16
+    assert all(type(result) is StoredTaskRun for result in results), results
+    durable = app._task_store.load(task_id)  # noqa: SLF001
+    assert durable.task_run.status is TaskStatus.CANCELLED
+    assert all(result == durable for result in results)
+    assert port.terminate_calls == 1
+    app.close()
+
+
+def test_exact_orphan_cancel_replays_original_generation_after_lease_contention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentApplication.open(data_root=_data_root(tmp_path))
+    project_id, task_id, created = _seed_projects_and_tasks(app, 1)[0]
+    head = app._revision_store.load_head(project_id)  # noqa: SLF001
+    revision_id = "revision_" + "e" * 32
+    with app._lease_manager.acquire_project_write(project_id):  # noqa: SLF001
+        reserved = revisions_module._reserve_quota(
+            app._revision_store,  # noqa: SLF001
+            "candidate",
+            project_id,
+            head,
+            revision_id,
+            task_id,
+            None,
+            8,
+        )
+    assert reserved[2] is None
+    original_acquire = ResourceLeaseManager.acquire_project_write
+    acquire_calls = 0
+
+    def contend_once(self, requested_project_id):
+        nonlocal acquire_calls
+        acquire_calls += 1
+        if acquire_calls == 1:
+            raise LeaseError(LeaseErrorCode.LOCK_UNAVAILABLE)
+        return original_acquire(self, requested_project_id)
+
+    monkeypatch.setattr(
+        ResourceLeaseManager,
+        "acquire_project_write",
+        contend_once,
+    )
+
+    first = app.cancel_task(
+        task_id=task_id,
+        expected_generation=created.generation,
+    )
+    replayed = app.cancel_task(
+        task_id=task_id,
+        expected_generation=created.generation,
+    )
+
+    assert first.task_run.status is TaskStatus.CANCEL_REQUESTED
+    assert first.task_run.transitions[-1].event is TaskEvent.REQUEST_ACTIVE_CANCEL
+    assert replayed.task_run.status is TaskStatus.CANCELLED
+    assert [
+        record.event
+        for record in replayed.task_run.transitions
+        if record.event
+        in {
+            TaskEvent.REQUEST_ACTIVE_CANCEL,
+            TaskEvent.START_CANCELLATION,
+            TaskEvent.CONFIRM_CANCELLED,
+        }
+    ] == [
+        TaskEvent.REQUEST_ACTIVE_CANCEL,
+        TaskEvent.START_CANCELLATION,
+        TaskEvent.CONFIRM_CANCELLED,
+    ]
+    assert tuple(app._layout.projects.rglob("reservation.json")) == ()  # noqa: SLF001
+    assert app._revision_store.load_head(project_id) == head  # noqa: SLF001
+    app.close()
+
+
+@pytest.mark.slow
+def test_real_managed_generation_is_terminated_by_active_cancellation(
+    tmp_path: Path,
+) -> None:
+    python_raw = os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON")
+    if not python_raw:
+        pytest.skip("managed FreeCAD Python was not requested")
+    python = Path(python_raw)
+    if not python.is_file():
+        pytest.skip("managed FreeCAD Python is unavailable")
+
+    from vibecad.runtime import paths as runtime_paths
+    from vibecad.runtime.status import capture_runtime_generation_evidence
+
+    evidence = capture_runtime_generation_evidence(runtime_paths.active_runtime_prefix())
+    assert python.resolve() == evidence.python.resolve()
+
+    app = AgentApplication.open(data_root=_data_root(tmp_path))
+    project = app.bootstrap_empty()
+    with app._cad_gate:  # noqa: SLF001
+        runtime = app._runtime_for(project.head.project_id)  # noqa: SLF001
+    assert type(runtime) is not TaskServicePortFailure
+    port = app._cad_execution_port  # noqa: SLF001
+    worker = port._worker  # noqa: SLF001
+    assert worker.state is WorkerGenerationState.READY
+
+    created = app.create_task(
+        task_id=_task_id(1),
+        project_id=project.head.project_id,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+    lease = app._lease_manager.acquire_project_write(project.head.project_id)  # noqa: SLF001
+    try:
+        candidate_revision = app._revision_store.begin_revision(  # noqa: SLF001
+            project.head.project_id,
+            project.head,
+            lease,
+        )
+    finally:
+        lease.release(owner_token=lease.owner_token)
+    submitted = transition_task(
+        created.task_run,
+        TaskEvent.SUBMIT_PROGRAM,
+        program=_model_program(created.task_run.id, created.task_run.base_revision),
+    )
+    stored = app._task_store.compare_and_set(  # noqa: SLF001
+        created.task_run.id,
+        created.generation,
+        submitted,
+    )
+    validating = transition_task(stored.task_run, TaskEvent.START_VALIDATION)
+    stored = app._task_store.compare_and_set(  # noqa: SLF001
+        stored.task_run.id,
+        stored.generation,
+        validating,
+    )
+    executing = transition_task(
+        stored.task_run,
+        TaskEvent.VALIDATE_PROGRAM,
+        candidate_revision=candidate_revision,
+    )
+    stored = app._task_store.compare_and_set(  # noqa: SLF001
+        stored.task_run.id,
+        stored.generation,
+        executing,
+    )
+    admitted = threading.Event()
+    release_owner = threading.Event()
+
+    def hold_real_admission() -> None:
+        with app._cad_task_admission(stored.task_run.id):  # noqa: SLF001
+            admitted.set()
+            assert release_owner.wait(timeout=5)
+
+    owner = threading.Thread(target=hold_real_admission)
+    owner.start()
+    assert admitted.wait(timeout=2)
+
+    def release_after_worker_death() -> None:
+        deadline = time.monotonic() + 5
+        while worker.state is not WorkerGenerationState.DEAD:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        release_owner.set()
+
+    releaser = threading.Thread(target=release_after_worker_death)
+    releaser.start()
+
+    cancelled = app.cancel_task(
+        task_id=stored.task_run.id,
+        expected_generation=stored.generation,
+    )
+    owner.join(timeout=2)
+    releaser.join(timeout=2)
+
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert not owner.is_alive()
+    assert not releaser.is_alive()
+    assert worker.state is WorkerGenerationState.DEAD
+    assert port.generation_lost is True
+    assert app._cad_execution_port is None  # noqa: SLF001
+    assert app._runtimes == {}  # noqa: SLF001
+    assert app._cad_task_admissions == {}  # noqa: SLF001
+    app.close()
+
+
+def test_restart_reconciles_started_cancellation_without_starting_cad(
+    tmp_path: Path,
+) -> None:
+    data_root = _data_root(tmp_path)
+    first = AgentApplication.open(data_root=data_root)
+    project_id, task_id, created = _seed_projects_and_tasks(first, 1)[0]
+    head = first._revision_store.load_head(project_id)  # noqa: SLF001
+    lease = first._lease_manager.acquire_project_write(project_id)  # noqa: SLF001
+    try:
+        candidate_revision = first._revision_store.begin_revision(  # noqa: SLF001
+            project_id,
+            head,
+            lease,
+        )
+    finally:
+        lease.release(owner_token=lease.owner_token)
+    submitted = transition_task(
+        created.task_run,
+        TaskEvent.SUBMIT_PROGRAM,
+        program=_model_program(task_id, created.task_run.base_revision),
+    )
+    stored = first._task_store.compare_and_set(task_id, created.generation, submitted)  # noqa: SLF001
+    validating = transition_task(stored.task_run, TaskEvent.START_VALIDATION)
+    stored = first._task_store.compare_and_set(task_id, stored.generation, validating)  # noqa: SLF001
+    executing = transition_task(
+        stored.task_run,
+        TaskEvent.VALIDATE_PROGRAM,
+        candidate_revision=candidate_revision,
+    )
+    stored = first._task_store.compare_and_set(task_id, stored.generation, executing)  # noqa: SLF001
+    requested = first._catalog.cancel_task(  # noqa: SLF001
+        task_id=task_id,
+        expected_generation=stored.generation,
+    )
+    started = first._catalog.start_cancellation(  # noqa: SLF001
+        task_id=task_id,
+        expected_generation=requested.generation,
+    )
+    first.close()
+
+    calls: list[str] = []
+
+    def forbidden_factory(**_kwargs):
+        calls.append("cad")
+        raise AssertionError("cancellation recovery must remain store-only")
+
+    restarted = AgentApplication.open(
+        data_root=data_root,
+        runtime_factory=forbidden_factory,
+        cad_port_factory=forbidden_factory,
+    )
+    cancelled = restarted.reconcile_task(
+        task_id=task_id,
+        expected_generation=started.generation,
+    )
+
+    assert cancelled.task_run.project_id == project_id
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert calls == []
+    assert restarted._cad_execution_port is None  # noqa: SLF001
+    assert restarted._runtimes == {}  # noqa: SLF001
+    restarted.close()
 
 
 def test_project_discovery_is_lazy_and_reuses_the_api_for_later_mutation(
@@ -1700,10 +2517,10 @@ def test_close_wins_over_a_cad_call_waiting_before_the_global_gate(tmp_path: Pat
     release = threading.Event()
 
     class BlockingCatalog:
-        def get_task(self, *, task_id: str):
+        def load_expected(self, task_id: str, generation: object):
             entered.set()
             assert release.wait(timeout=3)
-            return authentic_catalog.get_task(task_id=task_id)
+            return authentic_catalog.load_expected(task_id, generation)
 
     app._catalog = BlockingCatalog()  # noqa: SLF001
     errors: list[BaseException] = []
@@ -1906,6 +2723,486 @@ def test_task_project_and_artifact_cad_paths_share_the_process_gate(tmp_path: Pa
     app.close()
 
 
+def test_validation_and_project_runtimes_share_one_lazy_application_cad_port(
+    tmp_path: Path,
+) -> None:
+    class SharedCad(CadExecutionPort):
+        def validate_import(self, _path: Path):
+            return object()
+
+    port = SharedCad()
+    factory_calls: list[object] = []
+    runtime_ports: list[object] = []
+
+    def cad_factory(**_kwargs):
+        factory_calls.append(object())
+        return port
+
+    def runtime_factory(**kwargs):
+        runtime_ports.append(kwargs["cad_port"])
+        return _Runtime(**kwargs)
+
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        runtime_factory=runtime_factory,
+        cad_port_factory=cad_factory,
+    )
+    _, task_id, stored = _seed_projects_and_tasks(app, 1)[0]
+
+    assert app._invoke_validation_cad("validate_import", tmp_path / "model.FCStd") is not None  # noqa: SLF001
+    assert app.continue_task(task_id=task_id, expected_generation=stored.generation) == stored
+
+    assert len(factory_calls) == 1
+    assert runtime_ports == [port]
+    app.close()
+
+
+def test_generation_fence_rejects_runtime_created_by_an_older_epoch(
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    results: list[object] = []
+    created_runtimes: list[_Runtime] = []
+
+    class KillableCad(CadExecutionPort):
+        def __init__(self) -> None:
+            self.generation_lost = False
+            self.terminate_calls = 0
+
+        def terminate_generation(self) -> None:
+            self.terminate_calls += 1
+            self.generation_lost = True
+
+    port = KillableCad()
+
+    def runtime_factory(**kwargs):
+        entered.set()
+        assert release.wait(timeout=3)
+        runtime = _Runtime(**kwargs)
+        created_runtimes.append(runtime)
+        return runtime
+
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        runtime_factory=runtime_factory,
+        cad_port_factory=lambda **_kwargs: port,
+    )
+    _, task_id, stored = _seed_projects_and_tasks(app, 1)[0]
+    caller = threading.Thread(
+        target=lambda: results.append(
+            app.continue_task(
+                task_id=task_id,
+                expected_generation=stored.generation,
+            )
+        )
+    )
+    caller.start()
+    assert entered.wait(timeout=2)
+
+    assert app._fence_cad_generation() is True  # noqa: SLF001
+    release.set()
+    caller.join(timeout=3)
+
+    assert not caller.is_alive()
+    assert results == [TaskServicePortFailure(code=TaskServicePortErrorCode.RECOVERY_REQUIRED)]
+    assert port.terminate_calls == 1
+    assert len(created_runtimes) == 1
+    assert created_runtimes[0].close_calls == 1
+    assert app._cad_execution_port is None  # noqa: SLF001
+    assert app._runtimes == {}  # noqa: SLF001
+    app.close()
+
+
+def test_idle_task_cancel_terminates_a_blocked_runtime_load_and_allows_a_new_generation(
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    results: list[object] = []
+
+    class BlockingLoadCad(CadExecutionPort):
+        def __init__(self) -> None:
+            self.generation_lost = False
+            self.terminate_calls = 0
+
+        def open_revision(self, *, store, revision):
+            del store, revision
+            entered.set()
+            assert release.wait(timeout=3)
+            if self.generation_lost:
+                raise ExecutorError(ExecutorErrorCode.CAD_FAILURE)
+            return object()
+
+        def terminate_generation(self) -> None:
+            durable = app._task_store.load(task_id)  # noqa: SLF001
+            assert durable.task_run.status is TaskStatus.CANCEL_REQUESTED
+            self.terminate_calls += 1
+            self.generation_lost = True
+            release.set()
+
+    class HealthyCad(CadExecutionPort):
+        generation_lost = False
+
+        def open_revision(self, *, store, revision):
+            del store, revision
+            return object()
+
+        def close(self, _session: object) -> None:
+            return None
+
+        def close_generation(self) -> None:
+            return None
+
+    blocked = BlockingLoadCad()
+    healthy = HealthyCad()
+    ports = [blocked, healthy]
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        cad_port_factory=lambda **_kwargs: ports.pop(0),
+    )
+    project_id, task_id, created = _seed_projects_and_tasks(app, 1)[0]
+    head_before = app._revision_store.load_head(project_id)  # noqa: SLF001
+    caller = threading.Thread(
+        target=lambda: results.append(
+            app.submit_model_program(
+                task_id=task_id,
+                expected_generation=created.generation,
+                program=_model_program(task_id, created.task_run.base_revision),
+            )
+        )
+    )
+    caller.start()
+    assert entered.wait(timeout=2)
+    assert app._task_store.load(task_id) == created  # noqa: SLF001
+
+    cancelled = app.cancel_task(
+        task_id=task_id,
+        expected_generation=created.generation,
+    )
+    caller.join(timeout=3)
+
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert not caller.is_alive()
+    assert len(results) == 1
+    assert type(results[0]) is StoredTaskRun
+    assert any(
+        record.event
+        in {
+            TaskEvent.REQUEST_CANCEL,
+            TaskEvent.REQUEST_ACTIVE_CANCEL,
+        }
+        for record in results[0].task_run.transitions
+    )
+    assert blocked.terminate_calls == 1
+    assert app._revision_store.load_head(project_id) == head_before  # noqa: SLF001
+    assert app._cad_execution_port is None  # noqa: SLF001
+    assert app._runtimes == {}  # noqa: SLF001
+    assert app._cad_task_admissions == {}  # noqa: SLF001
+
+    with app._cad_gate:  # noqa: SLF001
+        replacement = app._runtime_for(project_id)  # noqa: SLF001
+    assert type(replacement) is ProjectRuntime
+    assert app._cad_execution_port is healthy  # noqa: SLF001
+    assert ports == []
+    app.close()
+
+
+def test_cancelling_a_queued_task_does_not_terminate_the_current_gate_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_prechecked = threading.Event()
+    results: dict[str, object] = {}
+
+    class BlockingCad(CadExecutionPort):
+        def __init__(self) -> None:
+            self.open_calls = 0
+            self.terminate_calls = 0
+
+        def open_revision(self, *, store, revision):
+            del store, revision
+            self.open_calls += 1
+            first_entered.set()
+            assert release_first.wait(timeout=3)
+            return object()
+
+        def close(self, _session: object) -> None:
+            return None
+
+        def terminate_generation(self) -> None:
+            self.terminate_calls += 1
+            release_first.set()
+
+        def close_generation(self) -> None:
+            release_first.set()
+
+    port = BlockingCad()
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        cad_port_factory=lambda **_kwargs: port,
+    )
+    first, second = _seed_projects_and_tasks(app, 2)
+    original_load_expected = TaskCatalogService.load_expected
+    second_reads = 0
+
+    def observed_load_expected(self, task_id, generation):
+        nonlocal second_reads
+        result = original_load_expected(self, task_id, generation)
+        if task_id == second[1]:
+            second_reads += 1
+            if second_reads == 1:
+                second_prechecked.set()
+        return result
+
+    monkeypatch.setattr(
+        TaskCatalogService,
+        "load_expected",
+        observed_load_expected,
+    )
+    owner = threading.Thread(
+        target=lambda: results.setdefault(
+            "first",
+            app.continue_task(
+                task_id=first[1],
+                expected_generation=first[2].generation,
+            ),
+        )
+    )
+    queued = threading.Thread(
+        target=lambda: results.setdefault(
+            "second",
+            app.continue_task(
+                task_id=second[1],
+                expected_generation=second[2].generation,
+            ),
+        )
+    )
+    owner.start()
+    assert first_entered.wait(timeout=2)
+    queued.start()
+    assert second_prechecked.wait(timeout=2)
+
+    cancelled = app.cancel_task(
+        task_id=second[1],
+        expected_generation=second[2].generation,
+    )
+
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert port.terminate_calls == 0
+    assert owner.is_alive()
+    release_first.set()
+    owner.join(timeout=3)
+    queued.join(timeout=3)
+
+    assert not owner.is_alive()
+    assert not queued.is_alive()
+    assert port.open_calls == 1
+    assert results["second"] == TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT)
+    assert app._task_store.load(second[1]) == cancelled  # noqa: SLF001
+    assert app._cad_task_admissions == {}  # noqa: SLF001
+    app.close()
+
+
+def test_old_epoch_cannot_reuse_a_cached_runtime_from_the_new_generation(
+    tmp_path: Path,
+) -> None:
+    class GenerationCad(CadExecutionPort):
+        def close_generation(self) -> None:
+            return None
+
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        runtime_factory=lambda **kwargs: _Runtime(**kwargs),
+        cad_port_factory=lambda **_kwargs: GenerationCad(),
+    )
+    project_id, _task_id_value, _stored = _seed_projects_and_tasks(app, 1)[0]
+    old_epoch = app._generation_epoch  # noqa: SLF001
+    assert app._fence_cad_generation() is True  # noqa: SLF001
+    current_epoch = app._generation_epoch  # noqa: SLF001
+    assert current_epoch == old_epoch + 1
+
+    fresh = app._runtime_for(  # noqa: SLF001
+        project_id,
+        expected_generation_epoch=current_epoch,
+    )
+    stale = app._runtime_for(  # noqa: SLF001
+        project_id,
+        expected_generation_epoch=old_epoch,
+    )
+
+    assert type(fresh) is _Runtime
+    assert stale == TaskServicePortFailure(code=TaskServicePortErrorCode.RECOVERY_REQUIRED)
+    assert app._runtimes[project_id] is fresh  # noqa: SLF001
+    app.close()
+
+
+def test_runtime_startup_worker_loss_is_recoverable_and_next_generation_starts(
+    tmp_path: Path,
+) -> None:
+    class StartupCad(CadExecutionPort):
+        def __init__(self, *, fail: bool) -> None:
+            self.fail = fail
+            self.generation_lost = False
+            self.open_calls = 0
+            self.close_calls = 0
+
+        def open_revision(self, *, store, revision):
+            del store, revision
+            self.open_calls += 1
+            if self.fail:
+                self.generation_lost = True
+                raise ExecutorError(ExecutorErrorCode.CAD_FAILURE)
+            return object()
+
+        def close(self, _session: object) -> None:
+            self.close_calls += 1
+
+        def terminate_generation(self) -> None:
+            self.generation_lost = True
+
+        def close_generation(self) -> None:
+            return None
+
+    ports = [StartupCad(fail=True), StartupCad(fail=False)]
+
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        cad_port_factory=lambda **_kwargs: ports.pop(0),
+    )
+    project_id, task_id, stored = _seed_projects_and_tasks(app, 1)[0]
+
+    failed = app.continue_task(
+        task_id=task_id,
+        expected_generation=stored.generation,
+    )
+
+    assert failed == TaskServicePortFailure(code=TaskServicePortErrorCode.RECOVERY_REQUIRED)
+    assert ports[0].open_calls == 0
+    assert app._cad_execution_port is None  # noqa: SLF001
+    assert app._runtimes == {}  # noqa: SLF001
+
+    retried = app.continue_task(
+        task_id=task_id,
+        expected_generation=stored.generation,
+    )
+
+    assert retried == TaskServicePortFailure(code=TaskServicePortErrorCode.INVALID_STATE)
+    assert ports == []
+    assert set(app._runtimes) == {project_id}  # noqa: SLF001
+    app.close()
+
+
+def test_generation_fence_rejects_an_already_admitted_validation_call(
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    factory_calls: list[str] = []
+    errors: list[BaseException] = []
+
+    class BlockingGate:
+        def __enter__(self):
+            entered.set()
+            assert release.wait(timeout=3)
+
+        def __exit__(self, *_args):
+            return False
+
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        cad_port_factory=lambda **_kwargs: factory_calls.append("cad"),
+    )
+    app._cad_gate = BlockingGate()  # noqa: SLF001
+
+    def validate() -> None:
+        try:
+            app._invoke_validation_cad(  # noqa: SLF001
+                "validate_import",
+                tmp_path / "model.FCStd",
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    caller = threading.Thread(target=validate)
+    caller.start()
+    assert entered.wait(timeout=2)
+    assert app._fence_cad_generation() is True  # noqa: SLF001
+    release.set()
+    caller.join(timeout=3)
+
+    assert not caller.is_alive()
+    assert len(errors) == 1
+    assert type(errors[0]) is ExecutorError
+    assert errors[0].code is ExecutorErrorCode.CAD_FAILURE
+    assert factory_calls == []
+    assert app._cad_execution_port is None  # noqa: SLF001
+    app._cad_gate = threading.Lock()  # noqa: SLF001
+    app.close()
+
+
+def test_observed_worker_loss_evicts_every_runtime_in_the_generation(
+    tmp_path: Path,
+) -> None:
+    class LossAwareCad(CadExecutionPort):
+        generation_lost = False
+
+        def terminate_generation(self) -> None:
+            self.generation_lost = True
+
+        def close_generation(self) -> None:
+            return None
+
+    port = LossAwareCad()
+    lose_generation = False
+
+    class Service(_RuntimeService):
+        def continue_task(self, *, task_id: str, expected_generation: int):
+            result = super().continue_task(
+                task_id=task_id,
+                expected_generation=expected_generation,
+            )
+            if lose_generation:
+                port.generation_lost = True
+            return result
+
+    class Runtime(_Runtime):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.service = Service(kwargs["task_store"])
+
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        runtime_factory=lambda **kwargs: Runtime(**kwargs),
+        cad_port_factory=lambda **_kwargs: port,
+    )
+    first, second = _seed_projects_and_tasks(app, 2)
+    for _project_id, task_id, stored in (first, second):
+        assert (
+            app.continue_task(
+                task_id=task_id,
+                expected_generation=stored.generation,
+            )
+            == stored
+        )
+    assert set(app._runtimes) == {first[0], second[0]}  # noqa: SLF001
+
+    lose_generation = True
+    assert (
+        app.continue_task(
+            task_id=first[1],
+            expected_generation=first[2].generation,
+        )
+        == first[2]
+    )
+
+    assert app._cad_execution_port is None  # noqa: SLF001
+    assert app._runtimes == {}  # noqa: SLF001
+    app.close()
+
+
 def test_close_closes_admission_before_runtime_teardown_and_store_outside_cad_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1954,6 +3251,46 @@ def test_close_closes_admission_before_runtime_teardown_and_store_outside_cad_ga
     assert not closer.is_alive()
     assert store_closed.is_set()
     assert project_id not in app._runtimes  # noqa: SLF001
+
+
+def test_close_attempts_artifact_store_after_generation_close_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibecad.application.artifacts import ArtifactStore
+
+    store_close_calls = 0
+
+    class FailingCloseCad(CadExecutionPort):
+        def validate_import(self, _path: Path):
+            return object()
+
+        def close_generation(self) -> None:
+            raise RuntimeError("generation close failed")
+
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        cad_port_factory=lambda **_kwargs: FailingCloseCad(),
+    )
+    assert app._invoke_validation_cad("validate_import", tmp_path / "model.FCStd") is not None  # noqa: SLF001
+    app.export_task_artifacts_request({"schema_version": 1})
+    original_close = ArtifactStore.close
+
+    def observed_close(store) -> None:
+        nonlocal store_close_calls
+        store_close_calls += 1
+        original_close(store)
+
+    monkeypatch.setattr(ArtifactStore, "close", observed_close)
+    with pytest.raises(RuntimeError, match="generation close failed"):
+        app.close()
+
+    assert store_close_calls == 1
+    assert app._closed is True  # noqa: SLF001
+    assert app._cad_execution_port is None  # noqa: SLF001
+    assert app._runtimes == {}  # noqa: SLF001
+    app.close()
+    assert store_close_calls == 1
 
 
 @pytest.mark.parametrize("code", tuple(TaskServiceErrorCode))

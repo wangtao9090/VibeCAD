@@ -787,9 +787,9 @@ def bootstrap_import_project(
 
 
 def _default_cad_port_factory(*, revision_store):
-    from vibecad.execution.executor import InProcessCadExecutor
+    from vibecad.execution.worker_port import WorkerCadExecutionPort
 
-    return InProcessCadExecutor(store=revision_store)
+    return WorkerCadExecutionPort(store=revision_store)
 
 
 class ProjectRuntime:
@@ -831,6 +831,7 @@ def build_project_runtime(
     task_store,
     revision_store,
     lease_manager,
+    cad_port,
 ) -> ProjectRuntime:
     """Build one provisional runtime while the caller holds its short lease."""
 
@@ -839,11 +840,14 @@ def build_project_runtime(
         SessionBinding,
         SessionSlot,
     )
-    from vibecad.execution.executor import InProcessCadExecutor
+    from vibecad.interaction.cad import CadExecutionPort
     from vibecad.workflow.service import TaskService
 
     if not (
-        type(head) is ProjectHead and type(project_id) is str and head.project_id == project_id
+        type(head) is ProjectHead
+        and type(project_id) is str
+        and head.project_id == project_id
+        and isinstance(cad_port, CadExecutionPort)
     ):
         raise ValueError("invalid project runtime head")
     exact = revision_store.load_head(project_id)
@@ -857,15 +861,13 @@ def build_project_runtime(
         and revision.manifest_sha256 == head.manifest_sha256
     ):
         raise ValueError("project runtime revision is invalid")
-    port = InProcessCadExecutor(store=revision_store)
+    port = cad_port
     session = None
     try:
-        if revision.model is None:
-            session = port.create_empty(revision_id=head.revision_id)
-        else:
-            session = port.load_fcstd(
-                revision_store.revision_model_path(project_id, head.revision_id)
-            )
+        session = port.open_revision(
+            store=revision_store,
+            revision=revision,
+        )
         binding = SessionBinding(
             project_id=project_id,
             revision_id=head.revision_id,

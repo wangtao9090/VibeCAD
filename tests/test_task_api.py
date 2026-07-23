@@ -1246,6 +1246,52 @@ def test_cancel_task_accepts_every_durable_cancellation_state(status: TaskStatus
     ]
 
 
+@pytest.mark.parametrize(
+    ("event", "status"),
+    [
+        (TaskEvent.REQUIRE_RECOVERY, TaskStatus.RECOVERY_REQUIRED),
+        (TaskEvent.REQUIRE_CLEANUP, TaskStatus.CLEANUP_REQUIRED),
+        (TaskEvent.CONFIRM_COMMITTED, TaskStatus.SUCCEEDED),
+    ],
+)
+def test_cancel_task_accepts_only_proven_cancellation_descendants(
+    event: TaskEvent,
+    status: TaskStatus,
+) -> None:
+    origin = (
+        _task_at(TaskStatus.COMMITTING)
+        if event is TaskEvent.CONFIRM_COMMITTED
+        else _task_at(TaskStatus.EXECUTING)
+    )
+    requested = transition_task(origin, TaskEvent.REQUEST_CANCEL)
+    cancelling = transition_task(requested, TaskEvent.START_CANCELLATION)
+    if event is TaskEvent.CONFIRM_COMMITTED:
+        task = transition_task(
+            cancelling,
+            event,
+            committed_revision=CANDIDATE_REVISION,
+        )
+    else:
+        task = transition_task(cancelling, event, error=_step_error())
+    stored = StoredTaskRun(generation=11, task_run=task)
+    port = _FakePort(stored)
+
+    result = _assert_success(
+        TaskApi(port=port).cancel_task(
+            _cancel_request(expected_generation=7),
+        )
+    )
+
+    assert result["generation"] == 11
+    assert result["task_run"]["status"] == status.value
+
+    ordinary = _FakePort(_stored(status, generation=11))
+    response = TaskApi(port=ordinary).cancel_task(
+        _cancel_request(expected_generation=7),
+    )
+    _assert_error(response, "internal_error", "")
+
+
 def test_cancel_task_rejects_future_generation_or_non_cancellation_port_results():
     malformed = (
         StoredTaskRun(generation=6, task_run=_task_at(TaskStatus.CANCELLED)),
@@ -1469,8 +1515,8 @@ def test_review_decision_malformed_semantic_port_results_are_internal():
         (TaskStatus.CLEANUP_REQUIRED, ["get_task", "reconcile_task"], True),
         (TaskStatus.SUCCEEDED, ["get_task"], True),
         (TaskStatus.FAILED, ["get_task"], True),
-        (TaskStatus.CANCEL_REQUESTED, ["get_task"], False),
-        (TaskStatus.CANCELLING, ["get_task"], False),
+        (TaskStatus.CANCEL_REQUESTED, ["get_task", "reconcile_task"], True),
+        (TaskStatus.CANCELLING, ["get_task", "reconcile_task"], True),
         (TaskStatus.CANCELLED, ["get_task"], True),
     ],
 )

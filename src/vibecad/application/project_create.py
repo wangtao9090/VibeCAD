@@ -34,7 +34,7 @@ from vibecad.application.project_api import (
     ProjectServicePortErrorCode,
     ProjectServicePortFailure,
 )
-from vibecad.execution.executor import ExecutorError, ExecutorErrorCode
+from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
 from vibecad.execution.revisions import (
     ProjectHead,
     RevisionArtifactRef,

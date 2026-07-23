@@ -24,6 +24,8 @@ from vibecad.execution.candidate import (
 )
 from vibecad.execution.results import NormalizedToolOutcome
 from vibecad.execution.revisions import (
+    CandidateReservationReconciliation,
+    CandidateReservationStatus,
     CommitJournal,
     CommitJournalState,
     LocalRevisionStore,
@@ -95,6 +97,175 @@ class _CandidateLineage(StrEnum):
     COMMITTED = "committed"
     NOT_COMMITTED = "not_committed"
     UNKNOWN = "unknown"
+
+
+_CANCELLATION_RESULT_STATUSES = frozenset(
+    {
+        TaskStatus.CANCEL_REQUESTED,
+        TaskStatus.CANCELLING,
+        TaskStatus.CANCELLED,
+        TaskStatus.RECOVERY_REQUIRED,
+        TaskStatus.CLEANUP_REQUIRED,
+        TaskStatus.SUCCEEDED,
+    }
+)
+_CANCELLATION_REQUEST_EVENTS = frozenset(
+    {
+        TaskEvent.REQUEST_CANCEL,
+        TaskEvent.REQUEST_ACTIVE_CANCEL,
+    }
+)
+
+
+def _task_has_event(task: TaskRun, event: TaskEvent) -> bool:
+    return any(record.event is event for record in task.transitions)
+
+
+def _has_cancellation_origin(task: TaskRun) -> bool:
+    return task.status in _CANCELLATION_RESULT_STATUSES and any(
+        record.event in _CANCELLATION_REQUEST_EVENTS for record in task.transitions
+    )
+
+
+def _has_started_cancellation(task: TaskRun) -> bool:
+    return _has_cancellation_origin(task) and _task_has_event(
+        task,
+        TaskEvent.START_CANCELLATION,
+    )
+
+
+def _load_revert_source_from_store(
+    revision_store: LocalRevisionStore,
+    *,
+    project_id: str,
+    source_revision: str,
+    head: ProjectHead,
+) -> RevisionRef:
+    if type(source_revision) is not str:
+        _raise(TaskServiceErrorCode.INVALID_INPUT)
+    if source_revision == head.revision_id:
+        _raise(TaskServiceErrorCode.INVALID_INPUT)
+    try:
+        ancestry = revision_store.snapshot_revisions(project_id)
+    except RevisionStoreError as error:
+        if error.code is RevisionStoreErrorCode.NOT_FOUND:
+            _raise(TaskServiceErrorCode.NOT_FOUND)
+        _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+    except Exception:
+        _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+    if not (
+        type(ancestry) is RevisionAncestrySnapshot
+        and ancestry.project_id == project_id
+        and ancestry.head == head
+        and type(ancestry.revisions) is tuple
+    ):
+        _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+    matches = tuple(
+        entry
+        for entry in ancestry.revisions
+        if type(entry) is RevisionSnapshotEntry and entry.id == source_revision
+    )
+    if len(matches) != 1:
+        _raise(TaskServiceErrorCode.NOT_FOUND)
+    entry = matches[0]
+    if entry.base_revision is None:
+        _raise(TaskServiceErrorCode.INVALID_INPUT)
+    try:
+        source = revision_store.load_revision(project_id, source_revision)
+    except RevisionStoreError as error:
+        if error.code is RevisionStoreErrorCode.NOT_FOUND:
+            _raise(TaskServiceErrorCode.NOT_FOUND)
+        _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+    except Exception:
+        _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+    if not (
+        type(source) is RevisionRef
+        and source.id == entry.id
+        and source.project_id == entry.project_id == project_id
+        and source.base_revision == entry.base_revision
+        and source.manifest_sha256 == entry.manifest_sha256
+        and source.model is not None
+        and type(source.artifacts) is tuple
+        and len(source.artifacts) == 1
+    ):
+        _raise(TaskServiceErrorCode.INVALID_INPUT)
+    return source
+
+
+def _cancellation_descends_from(before: StoredTaskRun, after: StoredTaskRun) -> bool:
+    prior = before.task_run
+    current = after.task_run
+    return (
+        after.generation > before.generation
+        and _has_cancellation_origin(current)
+        and prior.id == current.id
+        and prior.project_id == current.project_id
+        and prior.base_revision == current.base_revision
+        and prior.reasoning_owner is current.reasoning_owner
+        and prior.review_policy is current.review_policy
+        and prior.creation_digest == current.creation_digest
+        and prior.program == current.program
+        and (
+            prior.candidate_revision is None
+            or prior.candidate_revision == current.candidate_revision
+        )
+        and (prior.draft is None or prior.draft == current.draft)
+        and current.steps[: len(prior.steps)] == prior.steps
+        and current.verification_reports[: len(prior.verification_reports)]
+        == prior.verification_reports
+        and current.artifacts[: len(prior.artifacts)] == prior.artifacts
+        and current.transitions[: len(prior.transitions)] == prior.transitions
+    )
+
+
+def _durable_candidate_lineage(
+    revision_store: LocalRevisionStore,
+    task: TaskRun,
+    durable_head: object,
+) -> tuple[_CandidateLineage, RevisionRef | None]:
+    candidate_revision = task.candidate_revision
+    if (
+        type(durable_head) is not ProjectHead
+        or candidate_revision is None
+        or candidate_revision == task.base_revision
+    ):
+        return (_CandidateLineage.UNKNOWN, None)
+    current_revision = durable_head.revision_id
+    visited: set[str] = set()
+    candidate_ref: RevisionRef | None = None
+    for _ in range(_MAX_RECONCILE_LINEAGE_DEPTH):
+        if current_revision in visited:
+            return (_CandidateLineage.UNKNOWN, None)
+        visited.add(current_revision)
+        try:
+            revision = revision_store.load_revision(
+                task.project_id,
+                current_revision,
+            )
+        except Exception:
+            return (_CandidateLineage.UNKNOWN, None)
+        if not (
+            type(revision) is RevisionRef
+            and revision.id == current_revision
+            and revision.project_id == task.project_id
+        ):
+            return (_CandidateLineage.UNKNOWN, None)
+        if current_revision == durable_head.revision_id and (
+            revision.manifest_sha256 != durable_head.manifest_sha256
+        ):
+            return (_CandidateLineage.UNKNOWN, None)
+        if current_revision == task.base_revision:
+            if candidate_ref is not None:
+                return (_CandidateLineage.COMMITTED, candidate_ref)
+            return (_CandidateLineage.NOT_COMMITTED, None)
+        if current_revision == candidate_revision:
+            if revision.base_revision != task.base_revision:
+                return (_CandidateLineage.UNKNOWN, None)
+            candidate_ref = revision
+        if revision.base_revision is None:
+            return (_CandidateLineage.UNKNOWN, None)
+        current_revision = revision.base_revision
+    return (_CandidateLineage.UNKNOWN, None)
 
 
 class TaskServiceErrorCode(StrEnum):
@@ -512,55 +683,12 @@ class TaskService:
         source_revision: str,
         head: ProjectHead,
     ) -> RevisionRef:
-        if type(source_revision) is not str:
-            _raise(TaskServiceErrorCode.INVALID_INPUT)
-        if source_revision == head.revision_id:
-            _raise(TaskServiceErrorCode.INVALID_INPUT)
-        try:
-            ancestry = self._revision_store.snapshot_revisions(project_id)
-        except RevisionStoreError as error:
-            if error.code is RevisionStoreErrorCode.NOT_FOUND:
-                _raise(TaskServiceErrorCode.NOT_FOUND)
-            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
-        except Exception:
-            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
-        if not (
-            type(ancestry) is RevisionAncestrySnapshot
-            and ancestry.project_id == project_id
-            and ancestry.head == head
-            and type(ancestry.revisions) is tuple
-        ):
-            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
-        matches = tuple(
-            entry
-            for entry in ancestry.revisions
-            if type(entry) is RevisionSnapshotEntry and entry.id == source_revision
+        return _load_revert_source_from_store(
+            self._revision_store,
+            project_id=project_id,
+            source_revision=source_revision,
+            head=head,
         )
-        if len(matches) != 1:
-            _raise(TaskServiceErrorCode.NOT_FOUND)
-        entry = matches[0]
-        if entry.base_revision is None:
-            _raise(TaskServiceErrorCode.INVALID_INPUT)
-        try:
-            source = self._revision_store.load_revision(project_id, source_revision)
-        except RevisionStoreError as error:
-            if error.code is RevisionStoreErrorCode.NOT_FOUND:
-                _raise(TaskServiceErrorCode.NOT_FOUND)
-            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
-        except Exception:
-            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
-        if not (
-            type(source) is RevisionRef
-            and source.id == entry.id
-            and source.project_id == entry.project_id == project_id
-            and source.base_revision == entry.base_revision
-            and source.manifest_sha256 == entry.manifest_sha256
-            and source.model is not None
-            and type(source.artifacts) is tuple
-            and len(source.artifacts) == 1
-        ):
-            _raise(TaskServiceErrorCode.INVALID_INPUT)
-        return source
 
     def accept_draft(
         self,
@@ -774,6 +902,9 @@ class TaskService:
             if not clean:
                 _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
             if isinstance(error, TaskServiceError):
+                cancellation = self._concurrent_cancellation(stored)
+                if cancellation is not None:
+                    return cancellation
                 raise error
             _raise(TaskServiceErrorCode.INVALID_STATE)
         return self._run_bound_revert_with_lease(
@@ -794,7 +925,12 @@ class TaskService:
                 stored,
                 transition_task(stored.task_run, TaskEvent.PUBLISH_DRAFT),
             )
-        except (TaskServiceError, TaskStateError):
+        except TaskServiceError:
+            cancellation = self._concurrent_cancellation(stored)
+            if cancellation is not None:
+                return cancellation
+            raise
+        except TaskStateError:
             _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
 
     @staticmethod
@@ -838,6 +974,393 @@ class TaskService:
             return None
         return (compiled, validated)
 
+    @classmethod
+    def reconcile_cancellation(
+        cls,
+        *,
+        task_store: TaskRunStore,
+        revision_store: LocalRevisionStore,
+        lease_manager: ResourceLeaseManager,
+        task_id: str,
+        expected_generation: int,
+    ) -> StoredTaskRun:
+        """Settle a durable cancellation without constructing a CAD runtime."""
+
+        if not (
+            isinstance(task_store, TaskRunStore)
+            and isinstance(revision_store, LocalRevisionStore)
+            and isinstance(lease_manager, ResourceLeaseManager)
+            and getattr(task_store, "_lease_manager", None) is lease_manager
+            and getattr(revision_store, "_lease_manager", None) is lease_manager
+        ):
+            _raise(TaskServiceErrorCode.INVALID_INPUT)
+        expected = _expected_generation(expected_generation)
+        catalog = TaskCatalogService(
+            task_store=task_store,
+            revision_store=revision_store,
+        )
+        stored = _catalog_call(lambda: catalog.load_expected(task_id, expected))
+        task = stored.task_run
+        if task.status in {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:
+            if _has_cancellation_origin(task):
+                return stored
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        if task.status is TaskStatus.CANCEL_REQUESTED:
+            return stored
+        if not (
+            _has_started_cancellation(task)
+            and task.status
+            in {
+                TaskStatus.CANCELLING,
+                TaskStatus.RECOVERY_REQUIRED,
+                TaskStatus.CLEANUP_REQUIRED,
+            }
+        ):
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+
+        lease = None
+        try:
+            lease = lease_manager.acquire_project_write(task.project_id)
+        except Exception:
+            _raise(TaskServiceErrorCode.LEASE_UNAVAILABLE)
+        if lease is None:
+            _raise(TaskServiceErrorCode.LEASE_UNAVAILABLE)
+
+        result: StoredTaskRun | None = None
+        caught: TaskServiceError | None = None
+        try:
+            try:
+                if task.candidate_revision is None:
+                    binding = parse_bound_revert_task(task)
+                    reservation_key = binding.reservation_key if binding is not None else task.id
+                    reconciliation = revision_store.reconcile_candidate_reservation(
+                        task.project_id,
+                        task.base_revision,
+                        reservation_key,
+                        lease,
+                    )
+                else:
+                    reconciliation = revision_store.reconcile(
+                        task.project_id,
+                        lease,
+                    )
+            except RevisionStoreError as error:
+                event = _attention_event(error) or TaskEvent.REQUIRE_RECOVERY
+                result = cls._persist_cancellation_attention(
+                    catalog,
+                    stored,
+                    event,
+                )
+            except Exception:
+                result = cls._persist_cancellation_attention(
+                    catalog,
+                    stored,
+                    TaskEvent.REQUIRE_RECOVERY,
+                )
+            else:
+                if task.candidate_revision is None:
+                    result = cls._apply_pre_candidate_cancellation_reconcile(
+                        catalog,
+                        revision_store,
+                        stored,
+                        reconciliation,
+                    )
+                else:
+                    result = cls._apply_cancellation_reconcile(
+                        catalog,
+                        revision_store,
+                        stored,
+                        reconciliation,
+                    )
+        except TaskServiceError as error:
+            caught = error
+        except Exception:
+            caught = TaskServiceError(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        finally:
+            release_failed = cls._release(lease)
+        if release_failed:
+            _raise(TaskServiceErrorCode.LEASE_UNAVAILABLE)
+        if caught is not None:
+            raise caught from None
+        if type(result) is not StoredTaskRun:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        return result
+
+    @staticmethod
+    def _persist_cancellation_transition(
+        catalog: TaskCatalogService,
+        stored: StoredTaskRun,
+        event: TaskEvent,
+        *,
+        committed_revision: str | None = None,
+    ) -> StoredTaskRun:
+        try:
+            desired = transition_task(
+                stored.task_run,
+                event,
+                committed_revision=committed_revision,
+            )
+        except TaskStateError:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        try:
+            return _catalog_call(
+                lambda: catalog._persist_cancellation_transition(  # noqa: SLF001
+                    stored,
+                    desired,
+                    required_event=event,
+                )
+            )
+        except TaskServiceError as error:
+            try:
+                latest = _catalog_call(lambda: catalog.get_task(task_id=stored.task_run.id))
+            except TaskServiceError:
+                raise error from None
+            if _cancellation_descends_from(stored, latest):
+                return latest
+            raise error
+
+    @classmethod
+    def _persist_cancellation_attention(
+        cls,
+        catalog: TaskCatalogService,
+        stored: StoredTaskRun,
+        event: TaskEvent,
+    ) -> StoredTaskRun:
+        task = stored.task_run
+        if task.status is TaskStatus.RECOVERY_REQUIRED:
+            return stored
+        if task.status is TaskStatus.CLEANUP_REQUIRED:
+            if event is TaskEvent.REQUIRE_CLEANUP:
+                return stored
+            event = TaskEvent.REQUIRE_RECOVERY
+        try:
+            desired = transition_task(
+                task,
+                event,
+                error=_attention_error(event),
+            )
+        except TaskStateError:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        try:
+            return _catalog_call(
+                lambda: catalog._persist_cancellation_transition(  # noqa: SLF001
+                    stored,
+                    desired,
+                    required_event=event,
+                )
+            )
+        except TaskServiceError as error:
+            try:
+                latest = _catalog_call(lambda: catalog.get_task(task_id=stored.task_run.id))
+            except TaskServiceError:
+                raise error from None
+            if _cancellation_descends_from(stored, latest):
+                return latest
+            raise error
+
+    @classmethod
+    def _apply_cancellation_reconcile(
+        cls,
+        catalog: TaskCatalogService,
+        revision_store: LocalRevisionStore,
+        stored: StoredTaskRun,
+        result: object,
+    ) -> StoredTaskRun:
+        task = stored.task_run
+        if type(result) is not ReconciliationResult:
+            return cls._persist_cancellation_attention(
+                catalog,
+                stored,
+                TaskEvent.REQUIRE_RECOVERY,
+            )
+        if result.status is ReconciliationStatus.CLEANUP_REQUIRED:
+            return cls._persist_cancellation_attention(
+                catalog,
+                stored,
+                TaskEvent.REQUIRE_CLEANUP,
+            )
+        try:
+            durable_head = revision_store.load_head(task.project_id)
+        except Exception:
+            durable_head = None
+        if not (
+            type(durable_head) is ProjectHead
+            and result.project_id == task.project_id
+            and result.head == durable_head
+            and durable_head.project_id == task.project_id
+        ):
+            return cls._persist_cancellation_attention(
+                catalog,
+                stored,
+                TaskEvent.REQUIRE_RECOVERY,
+            )
+        if cls._cancellation_commit_is_exact(
+            revision_store,
+            task,
+            result,
+            durable_head,
+        ):
+            assert task.candidate_revision is not None
+            return cls._persist_cancellation_transition(
+                catalog,
+                stored,
+                TaskEvent.CONFIRM_COMMITTED,
+                committed_revision=task.candidate_revision,
+            )
+        if cls._cancellation_is_proven_uncommitted(
+            revision_store,
+            task,
+            result,
+            durable_head,
+        ):
+            return cls._persist_cancellation_transition(
+                catalog,
+                stored,
+                TaskEvent.CONFIRM_CANCELLED,
+            )
+        return cls._persist_cancellation_attention(
+            catalog,
+            stored,
+            TaskEvent.REQUIRE_RECOVERY,
+        )
+
+    @classmethod
+    def _apply_pre_candidate_cancellation_reconcile(
+        cls,
+        catalog: TaskCatalogService,
+        revision_store: LocalRevisionStore,
+        stored: StoredTaskRun,
+        result: object,
+    ) -> StoredTaskRun:
+        task = stored.task_run
+        if type(result) is not CandidateReservationReconciliation:
+            return cls._persist_cancellation_attention(
+                catalog,
+                stored,
+                TaskEvent.REQUIRE_RECOVERY,
+            )
+        if result.status is CandidateReservationStatus.CLEANUP_REQUIRED:
+            return cls._persist_cancellation_attention(
+                catalog,
+                stored,
+                TaskEvent.REQUIRE_CLEANUP,
+            )
+        try:
+            durable_head = revision_store.load_head(task.project_id)
+        except Exception:
+            durable_head = None
+        if not (
+            task.candidate_revision is None
+            and result.status
+            in {
+                CandidateReservationStatus.ABSENT,
+                CandidateReservationStatus.NOT_COMMITTED,
+            }
+            and type(durable_head) is ProjectHead
+            and result.project_id == task.project_id
+            and result.head == durable_head
+            and durable_head.project_id == task.project_id
+        ):
+            return cls._persist_cancellation_attention(
+                catalog,
+                stored,
+                TaskEvent.REQUIRE_RECOVERY,
+            )
+        return cls._persist_cancellation_transition(
+            catalog,
+            stored,
+            TaskEvent.CONFIRM_CANCELLED,
+        )
+
+    @staticmethod
+    def _cancellation_commit_is_exact(
+        revision_store: LocalRevisionStore,
+        task: TaskRun,
+        result: ReconciliationResult,
+        durable_head: ProjectHead,
+    ) -> bool:
+        candidate_revision = task.candidate_revision
+        if (
+            candidate_revision is None
+            or candidate_revision == task.base_revision
+            or result.status
+            not in {
+                ReconciliationStatus.CLEAN,
+                ReconciliationStatus.COMMITTED,
+                ReconciliationStatus.NOT_COMMITTED,
+            }
+            or (
+                task.review_policy is ReviewPolicy.REQUIRE_REVIEW
+                and not _task_has_event(task, TaskEvent.ACCEPT_DRAFT)
+            )
+        ):
+            return False
+        lineage, candidate = _durable_candidate_lineage(
+            revision_store,
+            task,
+            durable_head,
+        )
+        draft = task.draft
+        return (
+            lineage is _CandidateLineage.COMMITTED
+            and type(candidate) is RevisionRef
+            and candidate.id == candidate_revision
+            and candidate.project_id == task.project_id
+            and candidate.base_revision == task.base_revision
+            and (
+                task.review_policy is not ReviewPolicy.REQUIRE_REVIEW
+                or (
+                    draft is not None
+                    and draft.project_id == task.project_id
+                    and draft.base_revision == task.base_revision
+                    and draft.revision_id == candidate_revision
+                    and draft.manifest_sha256 == candidate.manifest_sha256
+                )
+            )
+            and any(
+                report.passed
+                and report.candidate_revision == candidate_revision
+                and report.manifest_sha256 == candidate.manifest_sha256
+                for report in task.verification_reports
+            )
+        )
+
+    @staticmethod
+    def _cancellation_is_proven_uncommitted(
+        revision_store: LocalRevisionStore,
+        task: TaskRun,
+        result: ReconciliationResult,
+        durable_head: ProjectHead,
+    ) -> bool:
+        if task.candidate_revision is None and result.status is ReconciliationStatus.CLEAN:
+            return result.journal is None
+        if task.candidate_revision is None:
+            lineage_is_uncommitted = durable_head.revision_id == task.base_revision
+        else:
+            lineage, _candidate = _durable_candidate_lineage(
+                revision_store,
+                task,
+                durable_head,
+            )
+            lineage_is_uncommitted = lineage is _CandidateLineage.NOT_COMMITTED
+        if not lineage_is_uncommitted:
+            return False
+        if result.status is ReconciliationStatus.CLEAN:
+            return task.candidate_revision is None and result.journal is None
+        journal = result.journal
+        return (
+            result.status is ReconciliationStatus.NOT_COMMITTED
+            and type(journal) is CommitJournal
+            and journal.project_id == task.project_id
+            and journal.state is CommitJournalState.NOT_COMMITTED
+            and journal.expected_head == durable_head
+            and journal.expected_head.revision_id == task.base_revision
+            and (
+                task.candidate_revision is None
+                or journal.candidate_revision == task.candidate_revision
+            )
+        )
+
     def reconcile_task(
         self,
         *,
@@ -845,6 +1368,14 @@ class TaskService:
         expected_generation: int,
     ) -> StoredTaskRun:
         stored = self._load_expected(task_id, expected_generation)
+        if _has_cancellation_origin(stored.task_run):
+            return type(self).reconcile_cancellation(
+                task_store=self._task_store,
+                revision_store=self._revision_store,
+                lease_manager=self._lease_manager,
+                task_id=task_id,
+                expected_generation=stored.generation,
+            )
         if stored.task_run.status not in {
             TaskStatus.VALIDATING_PROGRAM,
             TaskStatus.EXECUTING,
@@ -874,11 +1405,46 @@ class TaskService:
                         stored,
                         TaskEvent.REQUIRE_RECOVERY,
                     )
-                result = self._coordinator.reconcile(
-                    project_id=stored.task_run.project_id,
-                    lease=lease,
-                )
-                if self._has_review_origin(stored.task_run):
+                # Cancellation requests do not acquire the project lease and can
+                # win the attention CAS after the entry load above.
+                if _has_cancellation_origin(stored.task_run):
+                    if stored.task_run.status is TaskStatus.CANCEL_REQUESTED:
+                        result = stored
+                    else:
+                        try:
+                            result = self._revision_store.reconcile(
+                                stored.task_run.project_id,
+                                lease,
+                            )
+                        except RevisionStoreError as error:
+                            stored = self._persist_cancellation_attention(
+                                self._catalog,
+                                stored,
+                                _attention_event(error) or TaskEvent.REQUIRE_RECOVERY,
+                            )
+                            result = error
+                        except Exception as error:
+                            stored = self._persist_cancellation_attention(
+                                self._catalog,
+                                stored,
+                                TaskEvent.REQUIRE_RECOVERY,
+                            )
+                            result = error
+                        else:
+                            stored = self._apply_cancellation_reconcile(
+                                self._catalog,
+                                self._revision_store,
+                                stored,
+                                result,
+                            )
+                else:
+                    result = self._coordinator.reconcile(
+                        project_id=stored.task_run.project_id,
+                        lease=lease,
+                    )
+                if _has_cancellation_origin(stored.task_run):
+                    pass
+                elif self._has_review_origin(stored.task_run):
                     stored, post_release_event = self._apply_review_reconcile(
                         stored,
                         result,
@@ -1145,12 +1711,26 @@ class TaskService:
     def _cas(self, stored: StoredTaskRun, task: TaskRun) -> StoredTaskRun:
         return _catalog_call(lambda: self._catalog.compare_and_set(stored, task))
 
+    def _concurrent_cancellation(
+        self,
+        stored: StoredTaskRun,
+    ) -> StoredTaskRun | None:
+        try:
+            latest = self._load(stored.task_run.id)
+        except TaskServiceError:
+            return None
+        if _cancellation_descends_from(stored, latest):
+            return latest
+        return None
+
     def _reject_validation(self, stored: StoredTaskRun) -> StoredTaskRun:
+        current = stored
         try:
             validating = self._cas(
                 stored,
                 transition_task(stored.task_run, TaskEvent.START_VALIDATION),
             )
+            current = validating
             return self._cas(
                 validating,
                 transition_task(
@@ -1160,6 +1740,9 @@ class TaskService:
                 ),
             )
         except TaskServiceError:
+            cancellation = self._concurrent_cancellation(current)
+            if cancellation is not None:
+                return cancellation
             raise
         except TaskStateError:
             _raise(TaskServiceErrorCode.INVALID_STATE)
@@ -1263,7 +1846,11 @@ class TaskService:
                     if not clean:
                         caught = TaskServiceError(TaskServiceErrorCode.RECOVERY_REQUIRED)
                     elif isinstance(error, TaskServiceError):
-                        caught = error
+                        cancellation = self._concurrent_cancellation(current)
+                        if cancellation is not None:
+                            result = cancellation
+                        else:
+                            caught = error
                     else:
                         caught = TaskServiceError(TaskServiceErrorCode.INVALID_STATE)
                 else:
@@ -1294,6 +1881,11 @@ class TaskService:
                     result,
                     transition_task(result.task_run, TaskEvent.PUBLISH_DRAFT),
                 )
+            except TaskServiceError:
+                cancellation = self._concurrent_cancellation(result)
+                if cancellation is not None:
+                    return cancellation
+                raise
             except TaskStateError:
                 _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
         return result
@@ -1420,7 +2012,12 @@ class TaskService:
                 stored,
                 transition_task(stored.task_run, event, error=error),
             )
-        except (TaskServiceError, TaskStateError):
+        except TaskServiceError:
+            cancellation = self._concurrent_cancellation(stored)
+            if cancellation is not None:
+                return cancellation
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        except TaskStateError:
             _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
 
     def _accept_with_lease(
@@ -2025,6 +2622,11 @@ class TaskService:
                 error=error,
             )
             return self._cas(stored, rejected)
+        except TaskServiceError:
+            cancellation = self._concurrent_cancellation(stored)
+            if cancellation is not None:
+                return cancellation
+            raise
         except TaskStateError:
             _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
 
@@ -2042,6 +2644,11 @@ class TaskService:
                     error=_attention_error(event),
                 ),
             )
+        except TaskServiceError:
+            cancellation = self._concurrent_cancellation(stored)
+            if cancellation is not None:
+                return cancellation
+            raise
         except TaskStateError:
             _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
 
@@ -2070,6 +2677,23 @@ class TaskService:
             latest = self._load(validating.task_run.id)
         except TaskServiceError:
             _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        if _cancellation_descends_from(validating, latest):
+            if event is None:
+                return latest
+            if latest.task_run.status is TaskStatus.CANCEL_REQUESTED:
+                latest = _catalog_call(
+                    lambda: self._catalog.start_cancellation(
+                        task_id=latest.task_run.id,
+                        expected_generation=latest.generation,
+                    )
+                )
+            if latest.task_run.status in {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:
+                return latest
+            return self._persist_cancellation_attention(
+                self._catalog,
+                latest,
+                event,
+            )
         if (
             latest.task_run.status is not TaskStatus.VALIDATING_PROGRAM
             or latest.task_run.candidate_revision is not None
@@ -2094,6 +2718,8 @@ class TaskService:
             _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
         if latest.generation < stored.generation:
             _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        if _cancellation_descends_from(stored, latest):
+            return latest
         current = latest
         try:
             if current.task_run.status is TaskStatus.EXECUTING:
@@ -2165,7 +2791,12 @@ class TaskService:
                     error=_attention_error(event),
                 ),
             )
-        except (TaskServiceError, TaskStateError):
+        except TaskServiceError:
+            cancellation = self._concurrent_cancellation(stored)
+            if cancellation is not None:
+                return cancellation
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        except TaskStateError:
             _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
 
     def _post_receipt_attention(self, committing: StoredTaskRun) -> StoredTaskRun:
@@ -2178,7 +2809,12 @@ class TaskService:
                     error=_RECOVERY_ERROR,
                 ),
             )
-        except (TaskServiceError, TaskStateError):
+        except TaskServiceError:
+            cancellation = self._concurrent_cancellation(committing)
+            if cancellation is not None:
+                return cancellation
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        except TaskStateError:
             _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
 
     def _finish_commit(
@@ -2234,7 +2870,12 @@ class TaskService:
                     error=_RECOVERY_ERROR,
                 )
             return self._cas(committing, task)
-        except (TaskServiceError, TaskStateError):
+        except TaskServiceError:
+            cancellation = self._concurrent_cancellation(committing)
+            if cancellation is not None:
+                return cancellation
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        except TaskStateError:
             _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
 
     def _apply_reconcile(
@@ -2356,47 +2997,11 @@ class TaskService:
         task: TaskRun,
         durable_head: object,
     ) -> tuple[_CandidateLineage, RevisionRef | None]:
-        candidate_revision = task.candidate_revision
-        if (
-            type(durable_head) is not ProjectHead
-            or candidate_revision is None
-            or candidate_revision == task.base_revision
-        ):
-            return (_CandidateLineage.UNKNOWN, None)
-        current_revision = durable_head.revision_id
-        visited: set[str] = set()
-        candidate_ref: RevisionRef | None = None
-        for _ in range(_MAX_RECONCILE_LINEAGE_DEPTH):
-            if current_revision in visited:
-                return (_CandidateLineage.UNKNOWN, None)
-            visited.add(current_revision)
-            try:
-                revision = self._revision_store.load_revision(
-                    task.project_id,
-                    current_revision,
-                )
-            except Exception:
-                return (_CandidateLineage.UNKNOWN, None)
-            if not (
-                type(revision) is RevisionRef
-                and revision.id == current_revision
-                and revision.project_id == task.project_id
-            ):
-                return (_CandidateLineage.UNKNOWN, None)
-            if current_revision == durable_head.revision_id and (
-                revision.manifest_sha256 != durable_head.manifest_sha256
-            ):
-                return (_CandidateLineage.UNKNOWN, None)
-            if current_revision == task.base_revision:
-                if candidate_ref is not None:
-                    return (_CandidateLineage.COMMITTED, candidate_ref)
-                return (_CandidateLineage.NOT_COMMITTED, None)
-            if current_revision == candidate_revision:
-                if revision.base_revision != task.base_revision:
-                    return (_CandidateLineage.UNKNOWN, None)
-                candidate_ref = revision
-            current_revision = revision.base_revision
-        return (_CandidateLineage.UNKNOWN, None)
+        return _durable_candidate_lineage(
+            self._revision_store,
+            task,
+            durable_head,
+        )
 
     def _acquire(self, project_id: str) -> object:
         lease: object | None = None
