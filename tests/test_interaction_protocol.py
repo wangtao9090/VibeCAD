@@ -5,6 +5,7 @@ import json
 import pytest
 
 import vibecad.interaction.protocol as protocol_module
+import vibecad.interaction.protocol_v2 as protocol_v2
 from vibecad.interaction.protocol import (
     MAX_PROTOCOL_DEPTH,
     MAX_PROTOCOL_KEY_BYTES,
@@ -380,3 +381,725 @@ def test_response_budget_has_exact_n_and_n_plus_one_boundary() -> None:
     with pytest.raises(ProtocolError) as raised:
         decode_response(padded + b" ")
     assert raised.value.code is ProtocolErrorCode.BUDGET_EXCEEDED
+
+
+V2_BOOT_SECRET = b"s" * 32
+V2_DAEMON_ID = "daemon_" + "a" * 32
+
+
+def _v2_json(raw: bytes) -> dict[str, object]:
+    value = json.loads(raw)
+    assert type(value) is dict
+    return value
+
+
+def _v2_raw(value: dict[str, object]) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _ready_v2_pair(
+    *,
+    secret: bytes = V2_BOOT_SECRET,
+    daemon_id: str = V2_DAEMON_ID,
+) -> tuple[protocol_v2.V2ServerConnection, protocol_v2.V2ClientConnection]:
+    server = protocol_v2.V2ServerConnection(secret, daemon_id=daemon_id)
+    client = protocol_v2.V2ClientConnection(secret, expected_daemon_id=daemon_id)
+    challenge = server.start()
+    authentication = client.answer_challenge(challenge)
+    ready = server.accept_auth(authentication)
+    client.accept_authenticated(ready)
+    assert server.state is protocol_v2.V2ConnectionState.READY
+    assert client.state is protocol_v2.V2ConnectionState.READY
+    return server, client
+
+
+def _v2_request_id(index: int) -> str:
+    return f"request_{index:032x}"
+
+
+def test_v2_contract_budgets_and_v1_export_isolation_are_frozen() -> None:
+    import vibecad.interaction as interaction
+
+    assert protocol_v2.V2_PROTOCOL == "vibecad.local"
+    assert protocol_v2.V2_VERSION == (2, 0)
+    assert protocol_v2.V2_FRAME_HEADER_BYTES == 4
+    assert protocol_v2.MAX_V2_FRAME_PAYLOAD_BYTES == 1_048_576
+    assert protocol_v2.MAX_V2_CONNECTIONS == 8
+    assert protocol_v2.MAX_V2_IN_FLIGHT == 8
+    assert protocol_v2.V2_HANDSHAKE_TIMEOUT_SECONDS == 5.0
+    assert protocol_v2.V2_IDLE_TIMEOUT_SECONDS == 30.0
+    assert interaction.decode_request is decode_request
+    assert not hasattr(interaction, "V2ServerConnection")
+
+
+def test_v2_exact_frame_boundary_and_declared_length_fail_closed() -> None:
+    maximum = protocol_v2.MAX_V2_FRAME_PAYLOAD_BYTES
+    payload = b"x" * maximum
+    framed = protocol_v2.encode_v2_frame(payload)
+    assert framed[:4] == maximum.to_bytes(4, "big")
+    assert protocol_v2.decode_v2_frame(framed) == payload
+
+    cases = (
+        (b"", protocol_v2.V2ErrorCode.TRUNCATED_FRAME),
+        (b"\x00\x00\x00", protocol_v2.V2ErrorCode.TRUNCATED_FRAME),
+        (b"\x00\x00\x00\x00", protocol_v2.V2ErrorCode.MALFORMED_FRAME),
+        (b"\x00\x00\x00\x02x", protocol_v2.V2ErrorCode.TRUNCATED_FRAME),
+        (b"\x00\x00\x00\x01xx", protocol_v2.V2ErrorCode.MALFORMED_FRAME),
+        ((maximum + 1).to_bytes(4, "big"), protocol_v2.V2ErrorCode.FRAME_TOO_LARGE),
+        (b"\xff\xff\xff\xff", protocol_v2.V2ErrorCode.FRAME_TOO_LARGE),
+    )
+    for raw, code in cases:
+        with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+            protocol_v2.decode_v2_frame(raw)
+        assert raised.value.code is code
+        assert not hasattr(raised.value, "raw")
+
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        protocol_v2.encode_v2_frame(payload + b"x")
+    assert raised.value.code is protocol_v2.V2ErrorCode.FRAME_TOO_LARGE
+
+
+def test_v2_incremental_frame_decoder_handles_fragmentation_and_multiple_frames() -> None:
+    decoder = protocol_v2.V2FrameDecoder()
+    first = protocol_v2.encode_v2_frame(b"one")
+    second = protocol_v2.encode_v2_frame(b"two")
+
+    assert decoder.feed(first[:2]) == ()
+    assert decoder.feed(first[2:] + second) == (b"one", b"two")
+    decoder.finish()
+
+    truncated = protocol_v2.V2FrameDecoder()
+    assert truncated.feed(first[:-1]) == ()
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        truncated.finish()
+    assert raised.value.code is protocol_v2.V2ErrorCode.TRUNCATED_FRAME
+
+    oversized = protocol_v2.V2FrameDecoder()
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        oversized.feed((protocol_v2.MAX_V2_FRAME_PAYLOAD_BYTES + 1).to_bytes(4, "big"))
+    assert raised.value.code is protocol_v2.V2ErrorCode.FRAME_TOO_LARGE
+
+
+def test_v2_mutual_handshake_creates_server_session_without_exposing_secret() -> None:
+    server = protocol_v2.V2ServerConnection(V2_BOOT_SECRET, daemon_id=V2_DAEMON_ID)
+    client = protocol_v2.V2ClientConnection(
+        V2_BOOT_SECRET,
+        expected_daemon_id=V2_DAEMON_ID,
+    )
+
+    challenge = server.start()
+    assert server.state is protocol_v2.V2ConnectionState.CHALLENGE_SENT
+    assert V2_BOOT_SECRET not in challenge
+    authentication = client.answer_challenge(challenge)
+    assert client.state is protocol_v2.V2ConnectionState.AUTH_SENT
+    assert V2_BOOT_SECRET not in authentication
+    ready = server.accept_auth(authentication)
+    client.accept_authenticated(ready)
+
+    ready_value = _v2_json(ready)
+    assert ready_value["type"] == "authenticated"
+    assert str(ready_value["session_id"]).startswith("session_")
+    assert server.state is protocol_v2.V2ConnectionState.READY
+    assert client.state is protocol_v2.V2ConnectionState.READY
+    assert V2_BOOT_SECRET not in ready
+
+
+def test_v2_handshake_state_machine_and_wrong_secret_fail_closed() -> None:
+    server = protocol_v2.V2ServerConnection(V2_BOOT_SECRET, daemon_id=V2_DAEMON_ID)
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        server.accept_auth(b"{}")
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_STATE
+    assert server.state is protocol_v2.V2ConnectionState.FAILED
+
+    server = protocol_v2.V2ServerConnection(V2_BOOT_SECRET, daemon_id=V2_DAEMON_ID)
+    challenge = server.start()
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        server.start()
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_STATE
+    assert server.state is protocol_v2.V2ConnectionState.FAILED
+
+    server = protocol_v2.V2ServerConnection(V2_BOOT_SECRET, daemon_id=V2_DAEMON_ID)
+    challenge = server.start()
+    client = protocol_v2.V2ClientConnection(
+        b"x" * 32,
+        expected_daemon_id=V2_DAEMON_ID,
+    )
+    authentication = client.answer_challenge(challenge)
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        server.accept_auth(authentication)
+    assert raised.value.code is protocol_v2.V2ErrorCode.AUTHENTICATION_FAILED
+    assert server.state is protocol_v2.V2ConnectionState.FAILED
+    assert not hasattr(raised.value, "proof")
+
+
+def test_v2_authentication_is_connection_bound_and_server_proof_is_verified() -> None:
+    first = protocol_v2.V2ServerConnection(V2_BOOT_SECRET, daemon_id=V2_DAEMON_ID)
+    second = protocol_v2.V2ServerConnection(V2_BOOT_SECRET, daemon_id=V2_DAEMON_ID)
+    client = protocol_v2.V2ClientConnection(
+        V2_BOOT_SECRET,
+        expected_daemon_id=V2_DAEMON_ID,
+    )
+    authentication = client.answer_challenge(first.start())
+    second.start()
+
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        second.accept_auth(authentication)
+    assert raised.value.code is protocol_v2.V2ErrorCode.AUTHENTICATION_FAILED
+    assert second.state is protocol_v2.V2ConnectionState.FAILED
+
+    server = protocol_v2.V2ServerConnection(V2_BOOT_SECRET, daemon_id=V2_DAEMON_ID)
+    verifier = protocol_v2.V2ClientConnection(
+        V2_BOOT_SECRET,
+        expected_daemon_id=V2_DAEMON_ID,
+    )
+    authentication = verifier.answer_challenge(server.start())
+    ready = _v2_json(server.accept_auth(authentication))
+    ready["session_id"] = "session_" + "f" * 32
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        verifier.accept_authenticated(_v2_raw(ready))
+    assert raised.value.code is protocol_v2.V2ErrorCode.AUTHENTICATION_FAILED
+    assert verifier.state is protocol_v2.V2ConnectionState.FAILED
+
+
+def test_v2_challenges_and_sessions_are_unique() -> None:
+    challenges: set[str] = set()
+    sessions: set[str] = set()
+    for _ in range(32):
+        server = protocol_v2.V2ServerConnection(V2_BOOT_SECRET, daemon_id=V2_DAEMON_ID)
+        client = protocol_v2.V2ClientConnection(
+            V2_BOOT_SECRET,
+            expected_daemon_id=V2_DAEMON_ID,
+        )
+        challenge = server.start()
+        challenges.add(str(_v2_json(challenge)["server_nonce"]))
+        ready = server.accept_auth(client.answer_challenge(challenge))
+        client.accept_authenticated(ready)
+        sessions.add(str(_v2_json(ready)["session_id"]))
+
+    assert len(challenges) == 32
+    assert len(sessions) == 32
+
+
+def test_v2_static_dispatcher_routes_only_five_explicit_methods() -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def handler(name: str):
+        def invoke(params: dict[str, object]) -> dict[str, object]:
+            calls.append((name, params))
+            return {"handled": name}
+
+        return invoke
+
+    dispatcher = protocol_v2.StaticV2Dispatcher(
+        kernel_ping=handler("kernel.ping"),
+        application_call=handler("application.call"),
+        checkout_open=handler("checkout.open"),
+        checkout_get=handler("checkout.get"),
+        checkout_close=handler("checkout.close"),
+        allowed_application_operations=frozenset({"get_capabilities"}),
+    )
+    server, client = _ready_v2_pair()
+    requests = (
+        ("kernel.ping", {}),
+        (
+            "application.call",
+            {"operation": "get_capabilities", "request": {"schema_version": 1}},
+        ),
+        (
+            "checkout.open",
+            {
+                "open_key": "checkout_open_" + "1" * 32,
+                "source": {"kind": "head", "project_id": "project_" + "2" * 32},
+            },
+        ),
+        ("checkout.get", {"checkout_id": "checkout_" + "3" * 32}),
+        ("checkout.close", {"checkout_id": "checkout_" + "3" * 32}),
+    )
+    for index, (method, params) in enumerate(requests, start=1):
+        raw = client.encode_request(method, params, request_id=_v2_request_id(index))
+        response = client.decode_response(server.dispatch_and_encode(raw, dispatcher))
+        assert response.result == {"handled": method}
+        assert response.error is None
+
+    assert [method for method, _params in calls] == [method for method, _params in requests]
+    with pytest.raises(AttributeError):
+        dispatcher.kernel_ping = handler("replacement")
+
+
+def test_v2_unknown_unavailable_and_handler_failure_are_fixed_signed_errors() -> None:
+    calls = 0
+
+    def explode(_params: dict[str, object]) -> object:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("/private/secret should never cross the wire")
+
+    dispatcher = protocol_v2.StaticV2Dispatcher(kernel_ping=explode)
+    server, client = _ready_v2_pair()
+
+    unknown = client.encode_request(
+        "__getattribute__",
+        {},
+        request_id=_v2_request_id(1),
+    )
+    response = client.decode_response(server.dispatch_and_encode(unknown, dispatcher))
+    assert response.error == {
+        "code": "unknown_method",
+        "message": "The local protocol method is unknown.",
+    }
+    assert calls == 0
+
+    unavailable = client.encode_request(
+        "checkout.get",
+        {"checkout_id": "checkout_" + "3" * 32},
+        request_id=_v2_request_id(2),
+    )
+    response = client.decode_response(server.dispatch_and_encode(unavailable, dispatcher))
+    assert response.error == {
+        "code": "unavailable",
+        "message": "The local protocol method is unavailable.",
+    }
+    assert calls == 0
+
+    failing = client.encode_request("kernel.ping", {}, request_id=_v2_request_id(3))
+    encoded = server.dispatch_and_encode(failing, dispatcher)
+    assert b"/private/secret" not in encoded
+    response = client.decode_response(encoded)
+    assert response.error == {
+        "code": "internal_error",
+        "message": "The local protocol operation failed.",
+    }
+    assert calls == 1
+
+
+def test_v2_dispatch_rejects_protocol_capabilities_but_preserves_public_source_path() -> None:
+    calls: list[dict[str, object]] = []
+
+    def application(params: dict[str, object]) -> dict[str, object]:
+        calls.append(params)
+        return {"ok": True}
+
+    dispatcher = protocol_v2.StaticV2Dispatcher(
+        application_call=application,
+        allowed_application_operations=frozenset({"create_project", "get_capabilities"}),
+    )
+    server, client = _ready_v2_pair()
+
+    for index, forbidden in enumerate(
+        ("local_path", "internal_root", "environment", "env", "callable", "python_name"),
+        start=1,
+    ):
+        raw = client.encode_request(
+            "application.call",
+            {
+                "operation": "get_capabilities",
+                "request": {"schema_version": 1, forbidden: "forbidden"},
+            },
+            request_id=_v2_request_id(index),
+        )
+        response = client.decode_response(server.dispatch_and_encode(raw, dispatcher))
+        assert response.error == {
+            "code": "invalid_request",
+            "message": "The local protocol request is invalid.",
+        }
+    assert calls == []
+
+    compatible = client.encode_request(
+        "application.call",
+        {
+            "operation": "create_project",
+            "request": {
+                "schema_version": 1,
+                "kind": "import_fcstd",
+                "source_path": "/read-only/source.FCStd",
+            },
+        },
+        request_id=_v2_request_id(20),
+    )
+    response = client.decode_response(server.dispatch_and_encode(compatible, dispatcher))
+    assert response.result == {"ok": True}
+    assert len(calls) == 1
+
+
+def test_v2_invalid_handler_result_is_sanitized() -> None:
+    dispatcher = protocol_v2.StaticV2Dispatcher(
+        kernel_ping=lambda _params: {"local_path": "/private/result.FCStd"}
+    )
+    server, client = _ready_v2_pair()
+    raw = client.encode_request("kernel.ping", {}, request_id=_v2_request_id(1))
+    encoded = server.dispatch_and_encode(raw, dispatcher)
+
+    assert b"/private/result" not in encoded
+    response = client.decode_response(encoded)
+    assert response.error is not None
+    assert response.error["code"] == "internal_error"
+
+
+def test_v2_request_mac_session_and_sequence_replay_fail_before_dispatch() -> None:
+    dispatcher_calls = 0
+
+    def ping(_params: dict[str, object]) -> dict[str, object]:
+        nonlocal dispatcher_calls
+        dispatcher_calls += 1
+        return {"ok": True}
+
+    dispatcher = protocol_v2.StaticV2Dispatcher(kernel_ping=ping)
+    server, client = _ready_v2_pair()
+    first = client.encode_request("kernel.ping", {}, request_id=_v2_request_id(1))
+    response = client.decode_response(server.dispatch_and_encode(first, dispatcher))
+    assert response.result == {"ok": True}
+    assert dispatcher_calls == 1
+
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        server.dispatch_and_encode(first, dispatcher)
+    assert raised.value.code is protocol_v2.V2ErrorCode.REPLAYED_MESSAGE
+    assert server.state is protocol_v2.V2ConnectionState.FAILED
+    assert dispatcher_calls == 1
+
+    gap_server, gap_client = _ready_v2_pair(daemon_id="daemon_" + "b" * 32)
+    gap_client.encode_request("kernel.ping", {}, request_id=_v2_request_id(2))
+    second = gap_client.encode_request("kernel.ping", {}, request_id=_v2_request_id(3))
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        gap_server.admit_request(second)
+    assert raised.value.code is protocol_v2.V2ErrorCode.REPLAYED_MESSAGE
+
+
+def test_v2_cross_session_and_authenticated_tamper_fail_closed() -> None:
+    server_a, client_a = _ready_v2_pair(daemon_id="daemon_" + "a" * 32)
+    server_b, _client_b = _ready_v2_pair(daemon_id="daemon_" + "b" * 32)
+    signed = client_a.encode_request("kernel.ping", {}, request_id=_v2_request_id(1))
+
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        server_b.admit_request(signed)
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_SESSION
+
+    server_c, client_c = _ready_v2_pair(daemon_id="daemon_" + "c" * 32)
+    tampered = _v2_json(client_c.encode_request("kernel.ping", {}, request_id=_v2_request_id(2)))
+    tampered["params"] = {"extra": True}
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        server_c.admit_request(_v2_raw(tampered))
+    assert raised.value.code is protocol_v2.V2ErrorCode.AUTHENTICATION_FAILED
+    assert server_c.state is protocol_v2.V2ConnectionState.FAILED
+    assert server_a.state is protocol_v2.V2ConnectionState.READY
+
+
+def test_v2_duplicate_request_ids_and_in_flight_budget_are_bounded() -> None:
+    server, client = _ready_v2_pair()
+    first_id = _v2_request_id(1)
+    first = client.encode_request("kernel.ping", {}, request_id=first_id)
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.encode_request("kernel.ping", {}, request_id=first_id)
+    assert raised.value.code is protocol_v2.V2ErrorCode.DUPLICATE_REQUEST
+
+    requests = [first] + [
+        client.encode_request("kernel.ping", {}, request_id=_v2_request_id(index))
+        for index in range(2, protocol_v2.MAX_V2_IN_FLIGHT + 1)
+    ]
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.encode_request(
+            "kernel.ping",
+            {},
+            request_id=_v2_request_id(protocol_v2.MAX_V2_IN_FLIGHT + 1),
+        )
+    assert raised.value.code is protocol_v2.V2ErrorCode.RESOURCE_EXHAUSTED
+
+    admitted = server.admit_request(requests[0])
+    client.decode_response(server.encode_success(admitted, {"ok": True}))
+    client.encode_request(
+        "kernel.ping",
+        {},
+        request_id=_v2_request_id(protocol_v2.MAX_V2_IN_FLIGHT + 1),
+    )
+
+
+def test_v2_client_correlates_out_of_order_responses_and_rejects_replay() -> None:
+    server, client = _ready_v2_pair()
+    first = server.admit_request(
+        client.encode_request("kernel.ping", {}, request_id=_v2_request_id(1))
+    )
+    second = server.admit_request(
+        client.encode_request("kernel.ping", {}, request_id=_v2_request_id(2))
+    )
+    first_response = server.encode_success(first, {"order": 1})
+    second_response = server.encode_success(second, {"order": 2})
+
+    assert client.decode_response(second_response).result == {"order": 2}
+    assert client.decode_response(first_response).result == {"order": 1}
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.decode_response(first_response)
+    assert raised.value.code is protocol_v2.V2ErrorCode.REPLAYED_MESSAGE
+    assert client.state is protocol_v2.V2ConnectionState.FAILED
+
+
+def test_v2_duplicate_json_unsupported_version_and_close_are_terminal() -> None:
+    server = protocol_v2.V2ServerConnection(V2_BOOT_SECRET, daemon_id=V2_DAEMON_ID)
+    client = protocol_v2.V2ClientConnection(
+        V2_BOOT_SECRET,
+        expected_daemon_id=V2_DAEMON_ID,
+    )
+    challenge = server.start()
+    duplicated = challenge[:-1] + b',"type":"challenge"}'
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.answer_challenge(duplicated)
+    assert raised.value.code is protocol_v2.V2ErrorCode.MALFORMED_MESSAGE
+
+    server = protocol_v2.V2ServerConnection(V2_BOOT_SECRET, daemon_id=V2_DAEMON_ID)
+    client = protocol_v2.V2ClientConnection(
+        V2_BOOT_SECRET,
+        expected_daemon_id=V2_DAEMON_ID,
+    )
+    wrong_version = _v2_json(server.start())
+    wrong_version["version"] = {"major": 1, "minor": 0}
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.answer_challenge(_v2_raw(wrong_version))
+    assert raised.value.code is protocol_v2.V2ErrorCode.UNSUPPORTED_VERSION
+
+    ready_server, ready_client = _ready_v2_pair()
+    ready_server.close()
+    ready_client.close()
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        ready_client.encode_request("kernel.ping", {}, request_id=_v2_request_id(1))
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_STATE
+
+
+def test_v2_server_response_claim_is_bound_to_the_admitting_connection() -> None:
+    server_a, client_a = _ready_v2_pair(daemon_id="daemon_" + "a" * 32)
+    server_b, client_b = _ready_v2_pair(daemon_id="daemon_" + "b" * 32)
+    request_a = server_a.admit_request(
+        client_a.encode_request("kernel.ping", {}, request_id=_v2_request_id(1))
+    )
+    request_b = server_b.admit_request(
+        client_b.encode_request("kernel.ping", {}, request_id=_v2_request_id(1))
+    )
+
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        server_b.encode_success(request_a, {"wrong_connection": True})
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_REQUEST
+
+    response = client_b.decode_response(server_b.encode_success(request_b, {"correct": True}))
+    assert response.result == {"correct": True}
+
+
+def test_v2_application_dispatch_requires_an_immutable_operation_allowlist() -> None:
+    calls: list[str] = []
+
+    def application(params: dict[str, object]) -> dict[str, object]:
+        calls.append(str(params["operation"]))
+        return {"ok": True}
+
+    dispatcher = protocol_v2.StaticV2Dispatcher(
+        application_call=application,
+        allowed_application_operations=frozenset({"get_capabilities"}),
+    )
+    server, client = _ready_v2_pair()
+    unknown = client.encode_request(
+        "application.call",
+        {"operation": "getattr", "request": {"schema_version": 1}},
+        request_id=_v2_request_id(1),
+    )
+    response = client.decode_response(server.dispatch_and_encode(unknown, dispatcher))
+    assert response.error == {
+        "code": "unknown_method",
+        "message": "The local protocol method is unknown.",
+    }
+    assert calls == []
+
+    allowed = client.encode_request(
+        "application.call",
+        {"operation": "get_capabilities", "request": {"schema_version": 1}},
+        request_id=_v2_request_id(2),
+    )
+    assert client.decode_response(server.dispatch_and_encode(allowed, dispatcher)).result == {
+        "ok": True
+    }
+    assert calls == ["get_capabilities"]
+    with pytest.raises(AttributeError):
+        dispatcher._allowed_application_operations = frozenset({"getattr"})
+
+
+def test_v2_frame_decoder_bounds_per_feed_aggregate_work() -> None:
+    decoder = protocol_v2.V2FrameDecoder()
+    nine_frames = b"".join(protocol_v2.encode_v2_frame(b"x") for _ in range(9))
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        decoder.feed(nine_frames)
+    assert raised.value.code is protocol_v2.V2ErrorCode.RESOURCE_EXHAUSTED
+
+    decoder = protocol_v2.V2FrameDecoder()
+    oversized_fragment = b"x" * (
+        protocol_v2.MAX_V2_FRAME_PAYLOAD_BYTES + protocol_v2.V2_FRAME_HEADER_BYTES + 1
+    )
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        decoder.feed(oversized_fragment)
+    assert raised.value.code is protocol_v2.V2ErrorCode.RESOURCE_EXHAUSTED
+
+    decoder = protocol_v2.V2FrameDecoder()
+    assert decoder.feed(protocol_v2.encode_v2_frame(b"done")) == (b"done",)
+    decoder.finish()
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        decoder.feed(protocol_v2.encode_v2_frame(b"late"))
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_STATE
+
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        protocol_v2.decode_v2_frame("not-bytes")
+    assert raised.value.code is protocol_v2.V2ErrorCode.MALFORMED_FRAME
+
+
+def test_v2_client_binds_expected_receipt_daemon_before_sending_proof() -> None:
+    server = protocol_v2.V2ServerConnection(
+        V2_BOOT_SECRET,
+        daemon_id="daemon_" + "b" * 32,
+    )
+    client = protocol_v2.V2ClientConnection(
+        V2_BOOT_SECRET,
+        expected_daemon_id="daemon_" + "a" * 32,
+    )
+
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.answer_challenge(server.start())
+    assert raised.value.code is protocol_v2.V2ErrorCode.AUTHENTICATION_FAILED
+    assert client.state is protocol_v2.V2ConnectionState.FAILED
+
+
+def test_v2_response_mac_session_and_request_correlation_fail_closed() -> None:
+    server, client = _ready_v2_pair()
+    request = server.admit_request(
+        client.encode_request("kernel.ping", {}, request_id=_v2_request_id(1))
+    )
+    tampered = _v2_json(server.encode_success(request, {"ok": True}))
+    tampered["result"] = {"ok": False}
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.decode_response(_v2_raw(tampered))
+    assert raised.value.code is protocol_v2.V2ErrorCode.AUTHENTICATION_FAILED
+    assert client.state is protocol_v2.V2ConnectionState.FAILED
+
+    server, client = _ready_v2_pair(daemon_id="daemon_" + "b" * 32)
+    request = server.admit_request(
+        client.encode_request("kernel.ping", {}, request_id=_v2_request_id(2))
+    )
+    wrong_session = _v2_json(server.encode_success(request, {"ok": True}))
+    wrong_session["session_id"] = "session_" + "f" * 32
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.decode_response(_v2_raw(wrong_session))
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_SESSION
+
+    server, client = _ready_v2_pair(daemon_id="daemon_" + "c" * 32)
+    request = server.admit_request(
+        client.encode_request("kernel.ping", {}, request_id=_v2_request_id(3))
+    )
+    wrong_request = _v2_json(server.encode_success(request, {"ok": True}))
+    wrong_request["request_id"] = _v2_request_id(4)
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.decode_response(_v2_raw(wrong_request))
+    assert raised.value.code is protocol_v2.V2ErrorCode.AUTHENTICATION_FAILED
+
+
+def test_v2_server_enforces_in_flight_and_duplicate_id_against_signed_clients() -> None:
+    server, client = _ready_v2_pair()
+    for index in range(1, protocol_v2.MAX_V2_IN_FLIGHT + 1):
+        server.admit_request(
+            client.encode_request("kernel.ping", {}, request_id=_v2_request_id(index))
+        )
+    client._active.clear()
+    ninth = client.encode_request(
+        "kernel.ping",
+        {},
+        request_id=_v2_request_id(protocol_v2.MAX_V2_IN_FLIGHT + 1),
+    )
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        server.admit_request(ninth)
+    assert raised.value.code is protocol_v2.V2ErrorCode.RESOURCE_EXHAUSTED
+    assert server.state is protocol_v2.V2ConnectionState.FAILED
+
+    server, client = _ready_v2_pair(daemon_id="daemon_" + "d" * 32)
+    duplicate_id = _v2_request_id(20)
+    server.admit_request(client.encode_request("kernel.ping", {}, request_id=duplicate_id))
+    client._seen_request_ids.remove(duplicate_id)
+    duplicate = client.encode_request("kernel.ping", {}, request_id=duplicate_id)
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        server.admit_request(duplicate)
+    assert raised.value.code is protocol_v2.V2ErrorCode.DUPLICATE_REQUEST
+    assert server.state is protocol_v2.V2ConnectionState.FAILED
+
+
+def test_v2_json_depth_node_key_and_string_budgets_have_exact_boundaries() -> None:
+    assert protocol_v2.MAX_V2_DEPTH == 72
+    assert protocol_v2.MAX_V2_NODES == 10_240
+    assert protocol_v2.MAX_V2_KEY_BYTES == 256
+    assert protocol_v2.MAX_V2_STRING_BYTES == 524_288
+    _server, client = _ready_v2_pair()
+
+    payload: object = None
+    for _ in range(protocol_v2.MAX_V2_DEPTH - 4):
+        payload = [payload]
+    client.encode_request(
+        "application.call",
+        {"operation": "get_capabilities", "request": {"payload": payload}},
+        request_id=_v2_request_id(1),
+    )
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.encode_request(
+            "application.call",
+            {"operation": "get_capabilities", "request": {"payload": [payload]}},
+            request_id=_v2_request_id(2),
+        )
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_REQUEST
+
+    node_payload = [None] * (protocol_v2.MAX_V2_NODES - 15)
+    client.encode_request(
+        "application.call",
+        {"operation": "get_capabilities", "request": {"payload": node_payload}},
+        request_id=_v2_request_id(3),
+    )
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.encode_request(
+            "application.call",
+            {
+                "operation": "get_capabilities",
+                "request": {"payload": node_payload + [None]},
+            },
+            request_id=_v2_request_id(4),
+        )
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_REQUEST
+
+    client.encode_request(
+        "application.call",
+        {
+            "operation": "get_capabilities",
+            "request": {"k" * protocol_v2.MAX_V2_KEY_BYTES: None},
+        },
+        request_id=_v2_request_id(5),
+    )
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.encode_request(
+            "application.call",
+            {
+                "operation": "get_capabilities",
+                "request": {"k" * (protocol_v2.MAX_V2_KEY_BYTES + 1): None},
+            },
+            request_id=_v2_request_id(6),
+        )
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_REQUEST
+
+    client.encode_request(
+        "application.call",
+        {
+            "operation": "get_capabilities",
+            "request": {"payload": "x" * protocol_v2.MAX_V2_STRING_BYTES},
+        },
+        request_id=_v2_request_id(7),
+    )
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.encode_request(
+            "application.call",
+            {
+                "operation": "get_capabilities",
+                "request": {"payload": "x" * (protocol_v2.MAX_V2_STRING_BYTES + 1)},
+            },
+            request_id=_v2_request_id(8),
+        )
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_REQUEST

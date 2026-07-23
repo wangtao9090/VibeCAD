@@ -585,6 +585,7 @@ counted as RED or GREEN.
 | P0B-RES-10 | Worker is fault isolation, not a malicious-code OS sandbox or remote pool | P3 | sandbox/queue/claim/dead-letter and multi-tenant gates pass |
 | P0B-RES-11 | Qt Workbench does not exist in P0-B core | G1 | Dock preview/verdict/stale/revoked/Accept/Reject visual acceptance passes |
 | P0B-RES-12 | No push, PR, tag or release is authorized | user/publication | explicit publication authority plus remote/release gates |
+| P0B-RES-13 | D11 rejects arbitrary client paths, while the existing public `create_project(kind=import_fcstd)` contract requires `source_path`; C07 does not tunnel or resolve this product boundary | C10/C13 entry review; preserve the operation-specific read-only import contract only with explicit evidence, or add a session-bound input/FD grant | all 28 operations route through the daemon without a generic path capability, and import-from-file passes the chosen threat-contract E2E |
 
 P0B-RES-12 update at P0B-R1.1: P0B-A02 closes the branch-push portion once
 remote equality is observed. PR, tag, release and marketplace publication
@@ -636,6 +637,7 @@ remain residual and unauthorized.
 | P0B-E07 / 2026-07-23T06:54:17Z | P0B-C04 under P0B-R1.1/A01/A02; P0B-D08/D08A/D21 | this C04 commit / non-force push required | comparison collection RED on missing module and public Agent RED `-32603`; focused `484 passed`; affected integration `614 passed, 8 deselected`; full non-slow `4177 passed, 95 deselected`; 26-tool SDK projection `20,201` bytes / SHA-256 `85914806958d15d0a7d5874566936e098729db406ad2002f9903b834904ca58c`; complete frame `20,246` bytes; public receipt `351d7de2676d6299b0ad906155e47525e59152549e3d82499fa4d05f11aacb5d`; Ruff/diff/fsck and 21-file format clean; storage and final integration reviews `0/0`, API audit `37 passed` | semantic geometry/entity/parameter diff remains explicitly unsupported; no CAD/runtime/materialization on read paths; one existing macOS fork warning; full-tree format baseline remains unrelated | P0B-S07 | accepted-green |
 | P0B-E08 / 2026-07-23T07:56:06Z | P0B-C05 under P0B-R1.1/A01/A02; P0B-D10/D21 | this C05 commit / non-force push required | state RED `28 failed`; catalog RED on missing cancel API; two review-driven concurrency/store-race RED cycles; focused `1023 passed`; core with store `1267 passed`; affected public integration `452 passed, 8 deselected`; full non-slow `4385 passed, 95 deselected`; same-intent stress controller `100/100` plus independent `200/200` and `50/50`, all with 16 callers; 27-tool SDK projection `20,717` bytes / SHA-256 `57a38baa2bb79d959037d3066e68468066893b01383cfdd8f77dac447d79e9e8`; complete frame `20,762` bytes / SHA-256 `07e4b2e6be4a3582ffea27b1a194ae6081679448e0f1903b3aaf39b804c86724`; canonical public receipt `627abca4775d57a7a975f385ad95d7ca2d3eb331f2266ffbcf62498456ac2a56`; exact changed-file format/diff/offline-lock/syntax clean; public and state/store/catalog reviews `0/0` | active Worker kill/reconcile remains C12; one existing macOS fork warning; one anchor I001 is excluded only for its unchanged local-import block; full-tree format baseline remains unrelated | P0B-S08 | accepted-green |
 | P0B-E09 / 2026-07-23T09:34:39Z | P0B-C06 under P0B-R1.1/A01/A02; P0B-D09/D21 | this C06 commit / non-force push required | semantic RED and review-repair cycles covered key/intent replay, ancestry, seeded-copy binding, accept-time drift and crash recovery; canonical `466 passed`; storage/candidate `576 passed`; affected public/API integration `636 passed`; final audit `944 passed`; full non-slow `4441 passed, 95 deselected`; real FreeCAD 1.1.0 restart/accept smoke `1 passed`; 28-tool SDK projection `21,438` bytes / SHA-256 `5d7703a55dd7b20c21c487d6f4740fbfb894cf6867c840ccb30adf57de63efda`; complete frame `21,483` bytes / SHA-256 `22c903b05fc6e46868bd74380880cca5c915f312ac2ddf24f7e48896b8cdf826`; canonical public receipt `61a9f6c662ad224147aad07b0d701f82a3407d4ec0b8f15ede48dff76c4c98d3`; changed-file Ruff/format/syntax, diff and fsck clean; API, workflow, storage and final diff reviews `Critical 0 / Important 0` | the published Skill projection remains intentionally frozen at the last accepted 27-tool package until C14 refreshes all release artifacts; first two real-smoke attempts selected the wrong managed prefix and are setup evidence, while the declared legacy-compatible prefix passed; one existing macOS fork warning and one unchanged full-Ruff I001 remain | P0B-S09 | accepted-green |
+| P0B-E10 / 2026-07-23T10:17:11Z | P0B-C07 under P0B-R1.1/A01/A02; P0B-D11/D12/D13/D21 | this C07 commit / non-force push required | initial semantic RED `19 failed, 24 passed`; independent review RED `4 failed`; final focused `54 passed`; full non-slow `4474 passed, 95 deselected`; real macOS getpeereid POC repeated 32 times in project and FreeCAD Python, plus automated socketpair and bind/listen/connect/accept flows; endpoint path/root replacement and fresh/preinitialized two-process authority races fail closed; changed-file Ruff/format/syntax, diff and fsck clean; final protocol review `Critical 0 / Important 0 / Minor 0`, identity reviews `Critical 0 / Important 0` | runnable daemon, receipt/secret persistence, pre-challenge composition and production EndpointBinding remain C09; Linux/Windows remain P0B-RES-02; existing import `source_path` versus D11 is recorded as P0B-RES-13 for C10/C13; one unchanged macOS fork warning and full-Ruff baseline I001 remain | P0B-S10 | accepted-green |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -1152,6 +1154,95 @@ remain residual and unauthorized.
   managed prefix inside the same runtime root and one violated the test's
   legacy-prefix contract. The declared legacy-compatible installed FreeCAD
   prefix passed without product-code relaxation.
+- Preserve P0B-GATE-CORR-01/02 and continue exact `PYTHONPATH=src` plus
+  changed-file format gates. PR, tag, release, marketplace publication,
+  force-push and external spend remain unauthorized.
+
+## 22. Recovery Snapshot P0B-S10
+
+### 1. Completed milestones
+
+- C07 preserves the existing non-runnable protocol v1 and adds a separate,
+  non-exported `protocol_v2` contract. It is not referenced by the current
+  server, supervisor, AgentApplication or Task Kernel, so the accepted 28-tool
+  product path and public-surface receipt remain unchanged.
+- Protocol v2 freezes a 4-byte big-endian frame header, 1 MiB payload,
+  8 connections, 8 in-flight requests, at most 8 decoded frames per feed,
+  5-second authentication timeout and 30-second idle timeout. Zero,
+  truncated, oversized, aggregate-over-budget and post-finish input all fail
+  closed.
+- Mutual HMAC-SHA256 authentication binds the boot secret, expected receipt
+  daemon id, fresh server/client nonces and a server-generated session. A
+  derived connection-local key authenticates every canonical request and
+  response; sequence starts at one and is strict, request ids cannot be
+  reused, responses may complete out of order only for their exact active
+  request object, and any cross-session, tamper or replay path fails before a
+  handler.
+- `StaticV2Dispatcher` has five code-installed methods only:
+  `kernel.ping`, `application.call`, `checkout.open`, `checkout.get` and
+  `checkout.close`. Application operations require a bounded immutable
+  allowlist supplied by the future daemon facade. No wire `getattr`, callable,
+  Python name, environment, internal root or `local_path` can select or reach
+  a handler; handler exceptions and invalid results become fixed signed
+  errors without raw details.
+- The D13 veto is GO on macOS 26.5.2 / Darwin 25.5.0 x86_64. libc
+  `getpeereid(2)` returns the exact current euid/egid in system Python 3.14.2,
+  project Python 3.13.14 and managed FreeCAD Python 3.12.13. Project and
+  FreeCAD environments each passed 32 repeated two-sided observations.
+  Missing symbol, native failure, unconnected/closed socket, changed fd and
+  different euid reject without a LOCAL_PEERCRED or secret-only fallback.
+- Temporary-root POCs require an owned exact-`0700` root and pathname
+  `S_ISSOCK`/euid/`0600`/single-link/same-device identity. They prove the
+  macOS listener fd inode is not the pathname socket inode, and detect
+  endpoint unlink/rebind plus root rename/recreate. A fixed durable authority
+  lease produces one process winner; fresh first-entry contention also
+  produces exactly one winner and a fail-closed loser, and the authority is
+  recoverable after release.
+- Controller gates are green: focused `54 passed`; full non-slow
+  `4474 passed, 95 deselected`. Changed-file Ruff, format, syntax, diff and
+  fsck checks pass. Final independent protocol review returned
+  `Critical 0 / Important 0 / Minor 0`; two identity/daemon-boundary reviews
+  returned `Critical 0 / Important 0`.
+
+### 2. Next steps
+
+1. Commit the exact C07 allowlist as
+   `feat(interaction): define authenticated local protocol v2`.
+2. Non-force push `codex/agent-stage3`, then verify exact
+   `HEAD == @{upstream}` and remote-ref equality.
+3. Rebind C08 to the accepted remote anchor and implement checkout source
+   liveness without constructing the runnable daemon early.
+
+### 3. Approved decisions
+
+- P0B-A01/A02 and P0B-D01..D22 plus D08A/D17A/D22-R1 remain active.
+- P0B-D11 keeps protocol v1 honest and makes v2 independent. P0B-D12 freezes
+  the authentication, permission, identity and budget contract; C09 owns the
+  runnable composition. P0B-D13 is satisfied and no revised approval is
+  required.
+- P0B-D21 covers the four review-driven protocol repairs, post-observation
+  socket revalidation and exact POC test expansion. These close existing C07
+  boundaries and do not introduce a second execution authority.
+- P0B-RES-13 records, without silently resolving, the existing public
+  `source_path` contract versus D11's no-arbitrary-path requirement. C07 keeps
+  `application.call` operation-specific and closed but does not connect it to
+  the application.
+
+### 4. Execution discipline
+
+- C09 must acquire the fixed authority lease against the same captured
+  application data/locks identity before constructing AgentApplication. It
+  must call `require_same_user_peer` synchronously after accept and before
+  constructing or starting `V2ServerConnection`; peer failure can never fall
+  back to possession of the boot secret.
+- C09 must implement safe run-root creation, production EndpointBinding,
+  stale-endpoint handling, canonical `0600` receipt and boot-secret atomic
+  persistence, identity-bound cleanup, connection/time limits and
+  pre-accept/pre-dispatch root/endpoint revalidation. C07's temporary POC
+  helpers are evidence, not a daemon implementation.
+- Only the future static daemon facade may supply the immutable application
+  operation allowlist. Wire values never drive attribute lookup, import,
+  callable selection, environment lookup or internal root selection.
 - Preserve P0B-GATE-CORR-01/02 and continue exact `PYTHONPATH=src` plus
   changed-file format gates. PR, tag, release, marketplace publication,
   force-push and external spend remain unauthorized.
