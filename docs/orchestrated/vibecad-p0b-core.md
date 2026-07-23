@@ -1,6 +1,6 @@
 # VibeCAD P0-B Core Orchestrated Delivery
 
-- Active revision: `P0B-R1`
+- Active revision: `P0B-R1.1`
 - Revision state: `approved / executing`
 - Approved pre-authorization SHA-256:
   `0efcff51f24f983139529212c185adf250fb4b3add37c7dd1f836477e24edc5a`
@@ -305,6 +305,13 @@ state diverges.
   Local stage closeout is allowed but must state that remote backup/publication
   is incomplete. The deviation closes only after explicit push authority and
   observable remote equality.
+- **P0B-D22-R1 — Non-force branch push authorized.** P0B-A02 supersedes
+  P0B-D22 only for non-force pushes of the current P0-B branch to `origin`.
+  Every accepted semantic/docs commit is pushed immediately and remote equality
+  is verified before its dependent packet starts. PR creation, tag, release,
+  marketplace publication, force-push and external spend remain unauthorized.
+  `OE-DEV-01` closes when the first push establishes the upstream and continues
+  to be checked by per-commit local/remote equality.
 
 ## 4. Commit Sequence
 
@@ -570,6 +577,10 @@ setup failure is not a passing RED.
 | P0B-RES-11 | Qt Workbench does not exist in P0-B core | G1 | Dock preview/verdict/stale/revoked/Accept/Reject visual acceptance passes |
 | P0B-RES-12 | No push, PR, tag or release is authorized | user/publication | explicit publication authority plus remote/release gates |
 
+P0B-RES-12 update at P0B-R1.1: P0B-A02 closes the branch-push portion once
+remote equality is observed. PR, tag, release and marketplace publication
+remain residual and unauthorized.
+
 ## 10. Authorization History
 
 - **P0B-A00 — planning only.** The user's standing instruction to continue
@@ -591,6 +602,16 @@ setup failure is not a passing RED.
   P0B-D01 through P0B-D22 including P0B-D08A and P0B-D17A, C00 through C15,
   the stage allowlist, gates, budgets, exclusions, `OE-DEV-01`, and the
   local-commit/no-publication policy.
+- **P0B-A02 — approved at 2026-07-23T03:29:39Z.** Exact user wording:
+
+  ```text
+  你改 push 的还是 push 哈
+  ```
+
+  The controller confirmed this as continuing non-force push authority for the
+  current remote branch after every accepted commit. This creates P0B-R1.1 and
+  P0B-D22-R1. It does not authorize a PR, tag, release, marketplace publication,
+  force-push or external spend.
 
 ## 11. Ledger
 
@@ -598,6 +619,7 @@ setup failure is not a passing RED.
 |---|---|---|---|---|---|---|
 | P0B-E00 / 2026-07-22 | draft P0B-R1; no implementation approval | not-created / not-pushed | three independent read-only audits; anchor/status/allowlist inspection; no source edit | P0B-RES-01..12 | P0B-S00 | draft |
 | P0B-E01 / 2026-07-23T03:27:51Z | P0B-D01..D22 plus D08A/D17A at P0B-R1; P0B-A01 | not-created / not-pushed | five pre-approval findings closed; final independent review `0/0/0`; approved digest recorded | P0B-RES-01..12; OE-DEV-01 | P0B-S01 | approved |
+| P0B-E02 / 2026-07-23T03:29:39Z | P0B-D22-R1 at P0B-R1.1; P0B-A02 | `6eb209d` plus this authority commit / push pending | exact branch/HEAD/status verified before amendment | P0B-RES-12 narrowed to PR/tag/release; OE-DEV-01 pending first equality | P0B-S02 | authorized-push |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -672,3 +694,30 @@ setup failure is not a passing RED.
   revision/authorization readback, active packet allowlist, then the last
   packet's smallest independent gate. Do not launch a duplicate long process;
   poll the original native session.
+
+## 14. Recovery Snapshot P0B-S02
+
+### 1. Completed milestones
+
+- P0B-R1 was independently reviewed `0/0/0`, approved under P0B-A01 and
+  committed locally as `6eb209d`.
+- P0B-A02 authorizes non-force branch pushes; PR/tag/release remain excluded.
+
+### 2. Next steps
+
+1. Commit this P0B-R1.1 authority amendment.
+2. Push `codex/agent-stage3` to `origin` with upstream tracking and verify exact
+   local/remote equality.
+3. Issue P0B-C01 without repeating P0B-A01 or P0B-A02.
+
+### 3. Approved decisions
+
+- P0B-D01..D22 plus D08A/D17A remain approved under P0B-A01.
+- P0B-D22-R1 under P0B-A02 supersedes only the no-push portion of P0B-D22.
+
+### 4. Execution discipline
+
+- Use non-force `git push -u origin codex/agent-stage3` for first publication,
+  then verify `HEAD == @{upstream}` after every accepted commit.
+- All previous allowlists, gates, circuit breakers and residual boundaries
+  remain unchanged. No PR/tag/release/marketplace action is authorized.
