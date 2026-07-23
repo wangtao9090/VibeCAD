@@ -1491,6 +1491,42 @@ def test_durable_import_rejects_ancestor_swap_after_descriptor_walk(
     app.close()
 
 
+def test_durable_import_allows_unrelated_source_ancestor_entry_churn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "input-root"
+    source_root.mkdir(mode=0o700)
+    source = source_root / "source.FCStd"
+    source.write_bytes(b"trusted-source")
+    source.chmod(0o600)
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        cad_port_factory=lambda **_kwargs: _HashingImportPort(),
+    )
+    service = _durable_service(app)
+    original_copy = DurableProjectService._copy_source_to_stage
+
+    def create_unrelated_entry_then_copy(self, opened, record):
+        (source_root / "unrelated").mkdir(mode=0o700)
+        return original_copy(self, opened, record)
+
+    monkeypatch.setattr(
+        DurableProjectService,
+        "_copy_source_to_stage",
+        create_unrelated_entry_then_copy,
+    )
+    created = service.create_project(
+        create_key=CREATE_KEY,
+        kind=ProjectKind.IMPORT_FCSTD,
+        source_path=str(source),
+    )
+
+    assert type(created) is ProjectCreateResult
+    assert (source_root / "unrelated").is_dir()
+    app.close()
+
+
 def test_durable_import_root_swap_never_touches_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -5,6 +5,7 @@ import multiprocessing
 import os
 import signal
 import threading
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -282,6 +283,291 @@ def test_open_copies_head_to_non_authoritative_single_link(checkout_rig) -> None
     }
     assert "local_path" not in local
     assert "source_binding" not in local
+
+
+def test_capture_live_file_returns_a_strict_bound_path_free_snapshot(
+    checkout_rig,
+) -> None:
+    store, _revisions, _head, root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+
+    snapshot = store.capture_live_file(opened.checkout_id)
+
+    assert type(snapshot) is checkout_module.CheckoutFileSnapshot
+    assert snapshot.descriptor == store.get(opened.checkout_id)
+    assert snapshot.path == opened.local_path
+    assert snapshot.model_sha256 == opened.current_model_sha256
+    assert snapshot.size_bytes == opened.current_size_bytes
+    root_info = root.lstat()
+    directory_info = opened.local_path.parent.lstat()
+    file_info = opened.local_path.lstat()
+    assert (snapshot.root_binding.dev, snapshot.root_binding.ino) == (
+        root_info.st_dev,
+        root_info.st_ino,
+    )
+    assert (snapshot.directory_binding.dev, snapshot.directory_binding.ino) == (
+        directory_info.st_dev,
+        directory_info.st_ino,
+    )
+    assert (
+        snapshot.file_binding.dev,
+        snapshot.file_binding.ino,
+        snapshot.file_binding.mode,
+        snapshot.file_binding.uid,
+        snapshot.file_binding.gid,
+        snapshot.file_binding.nlink,
+        snapshot.file_binding.size,
+        snapshot.file_binding.mtime_ns,
+        snapshot.file_binding.ctime_ns,
+    ) == (
+        file_info.st_dev,
+        file_info.st_ino,
+        file_info.st_mode,
+        file_info.st_uid,
+        file_info.st_gid,
+        file_info.st_nlink,
+        file_info.st_size,
+        file_info.st_mtime_ns,
+        file_info.st_ctime_ns,
+    )
+    with pytest.raises(FrozenInstanceError):
+        snapshot.model_sha256 = "f" * 64
+    with pytest.raises(FrozenInstanceError):
+        snapshot.file_binding.ino = snapshot.file_binding.ino + 1
+    assert snapshot.descriptor.to_wire_mapping() == opened.to_wire_mapping()
+    assert snapshot.descriptor.to_local_mapping() == opened.to_local_mapping()
+    assert "path" not in snapshot.descriptor.to_local_mapping()
+    assert "binding" not in snapshot.descriptor.to_local_mapping()
+
+
+def test_require_same_live_file_recomputes_liveness_and_full_file_identity(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, revisions, _head, _root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    original = revisions_module._validate_revision_content
+    calls = 0
+
+    def counted(revision_fd, root_device, revision):
+        nonlocal calls
+        calls += 1
+        return original(revision_fd, root_device, revision)
+
+    monkeypatch.setattr(revisions_module, "_validate_revision_content", counted)
+    captured = store.capture_live_file(opened.checkout_id)
+    required = store.require_same_live_file(captured)
+
+    assert required == captured
+    assert required.path.read_bytes() == MODEL_BYTES
+    assert calls == 4
+    assert revisions.load_head(PROJECT_ID) == captured.descriptor.source_head
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    ["symlink", "hardlink", "inode", "bytes", "mode"],
+)
+def test_require_same_live_file_rejects_managed_model_rebinding(
+    checkout_rig,
+    replacement: str,
+) -> None:
+    store, revisions, head, root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    snapshot = store.capture_live_file(opened.checkout_id)
+    authoritative = revisions.revision_model_path(PROJECT_ID, head.revision_id)
+    authoritative_bytes = authoritative.read_bytes()
+    external = root.parent / f"grant-{replacement}.FCStd"
+    external.write_bytes(b"outside managed checkout")
+    os.chmod(external, 0o600)
+
+    if replacement == "symlink":
+        opened.local_path.unlink()
+        opened.local_path.symlink_to(external)
+    elif replacement == "hardlink":
+        opened.local_path.unlink()
+        os.link(external, opened.local_path)
+    elif replacement == "inode":
+        external.write_bytes(MODEL_BYTES)
+        os.chmod(external, 0o600)
+        os.replace(external, opened.local_path)
+    elif replacement == "bytes":
+        opened.local_path.write_bytes(b"x" * len(MODEL_BYTES))
+        os.chmod(opened.local_path, 0o600)
+    else:
+        os.chmod(opened.local_path, 0o640)
+
+    with pytest.raises(CheckoutError) as raised:
+        store.require_same_live_file(snapshot)
+
+    assert raised.value.code is CheckoutErrorCode.INTEGRITY_FAILURE
+    assert authoritative.read_bytes() == authoritative_bytes
+    assert revisions.load_head(PROJECT_ID) == head
+
+
+@pytest.mark.parametrize("operation", ["capture", "require"])
+def test_file_snapshot_revalidates_the_managed_entry_after_hash(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    store, _revisions, _head, root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    snapshot = None if operation == "capture" else store.capture_live_file(opened.checkout_id)
+    original_hash = SafeRoot.hash_open_file
+    replaced = False
+
+    def replace_after_hash(self, parent_fd, name, *, maximum):
+        nonlocal replaced
+        result = original_hash(self, parent_fd, name, maximum=maximum)
+        if self is store._root and name == "model.FCStd" and not replaced:  # noqa: SLF001
+            replaced = True
+            replacement = root.parent / f"{operation}-replacement.FCStd"
+            replacement.write_bytes(b"replacement after trusted hash")
+            os.chmod(replacement, 0o600)
+            os.replace(replacement, opened.local_path)
+        return result
+
+    monkeypatch.setattr(SafeRoot, "hash_open_file", replace_after_hash)
+    with pytest.raises(CheckoutError) as raised:
+        if operation == "capture":
+            store.capture_live_file(opened.checkout_id)
+        else:
+            assert snapshot is not None
+            store.require_same_live_file(snapshot)
+
+    assert replaced is True
+    assert raised.value.code is CheckoutErrorCode.INTEGRITY_FAILURE
+
+
+@pytest.mark.parametrize("replacement", ["root", "directory"])
+def test_require_same_live_file_rejects_checkout_container_rebinding(
+    checkout_rig,
+    replacement: str,
+) -> None:
+    store, _revisions, _head, root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    snapshot = store.capture_live_file(opened.checkout_id)
+
+    if replacement == "root":
+        root.rename(root.with_name("detached-checkout-root"))
+        root.mkdir(mode=0o700)
+        os.chmod(root, 0o700)
+    else:
+        metadata = (opened.local_path.parent / "metadata.json").read_bytes()
+        model = opened.local_path.read_bytes()
+        opened.local_path.parent.rename(root.parent / "detached-checkout-directory")
+        replacement_directory = root / opened.checkout_id
+        replacement_directory.mkdir(mode=0o700)
+        os.chmod(replacement_directory, 0o700)
+        (replacement_directory / "metadata.json").write_bytes(metadata)
+        (replacement_directory / "model.FCStd").write_bytes(model)
+        os.chmod(replacement_directory / "metadata.json", 0o600)
+        os.chmod(replacement_directory / "model.FCStd", 0o600)
+
+    with pytest.raises(CheckoutError) as raised:
+        store.require_same_live_file(snapshot)
+
+    assert raised.value.code is CheckoutErrorCode.INTEGRITY_FAILURE
+
+
+def test_require_same_live_file_allows_unrelated_checkout_root_mutation(
+    checkout_rig,
+) -> None:
+    store, _revisions, _head, _root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    snapshot = store.capture_live_file(opened.checkout_id)
+
+    unrelated = store.open(
+        "checkout_open_" + "8" * 32,
+        HeadCheckoutSource(project_id=PROJECT_ID),
+    )
+
+    required = store.require_same_live_file(snapshot)
+
+    assert required.descriptor == snapshot.descriptor
+    assert required.directory_binding == snapshot.directory_binding
+    assert required.file_binding == snapshot.file_binding
+    assert required.model_sha256 == snapshot.model_sha256
+    assert required.path == snapshot.path
+    assert unrelated.checkout_id != opened.checkout_id
+
+
+def test_file_snapshot_rejects_closed_stale_and_recovery_sources(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, revisions, head, _root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    closed_snapshot = store.capture_live_file(opened.checkout_id)
+    store.close(opened.checkout_id)
+    for operation in (
+        lambda: store.capture_live_file(opened.checkout_id),
+        lambda: store.require_same_live_file(closed_snapshot),
+    ):
+        with pytest.raises(CheckoutError) as raised:
+            operation()
+        assert raised.value.code is CheckoutErrorCode.CONFLICT
+
+    live = store.open(
+        "checkout_open_" + "9" * 32,
+        HeadCheckoutSource(project_id=PROJECT_ID),
+    )
+    stale_snapshot = store.capture_live_file(live.checkout_id)
+    _advance_head(revisions, head)
+    for operation in (
+        lambda: store.capture_live_file(live.checkout_id),
+        lambda: store.require_same_live_file(stale_snapshot),
+    ):
+        with pytest.raises(CheckoutError) as raised:
+            operation()
+        assert raised.value.code is CheckoutErrorCode.CONFLICT
+
+    monkeypatch.setattr(
+        LocalRevisionStore,
+        "observe_model_source",
+        lambda _self, _project_id, _revision_id: (_ for _ in ()).throw(
+            RevisionStoreError(RevisionStoreErrorCode.CORRUPT_RECORD)
+        ),
+    )
+    for operation in (
+        lambda: store.capture_live_file(live.checkout_id),
+        lambda: store.require_same_live_file(stale_snapshot),
+    ):
+        with pytest.raises(CheckoutError) as raised:
+            operation()
+        assert raised.value.code is CheckoutErrorCode.RECOVERY_REQUIRED
+
+
+def test_file_snapshot_rejects_a_revoked_draft_source(
+    checkout_rig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, revisions, head, _root = checkout_rig
+    source, draft, stored, _revision = _draft_source(revisions, head)
+    current = {"stored": stored}
+    monkeypatch.setattr(TaskRunStore, "load", lambda _self, _task_id: current["stored"])
+    opened = store.open(OPEN_KEY, source)
+    snapshot = store.capture_live_file(opened.checkout_id)
+    current["stored"] = SimpleNamespace(
+        generation=stored.generation + 1,
+        task_run=SimpleNamespace(
+            id=source.task_id,
+            project_id=PROJECT_ID,
+            base_revision=head.revision_id,
+            review_policy=ReviewPolicy.REQUIRE_REVIEW,
+            status=TaskStatus.REJECTED,
+            draft=draft,
+        ),
+    )
+
+    for operation in (
+        lambda: store.capture_live_file(opened.checkout_id),
+        lambda: store.require_same_live_file(snapshot),
+    ):
+        with pytest.raises(CheckoutError) as raised:
+            operation()
+        assert raised.value.code is CheckoutErrorCode.CONFLICT
 
 
 def test_key_first_replay_keeps_original_source_and_observes_safe_edit(checkout_rig) -> None:

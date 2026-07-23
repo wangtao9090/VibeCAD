@@ -1872,8 +1872,7 @@ def _ancestor_identity(value: os.stat_result) -> tuple[int, ...]:
         value.st_ino,
         value.st_mode,
         value.st_uid,
-        value.st_mtime_ns,
-        value.st_ctime_ns,
+        value.st_gid,
     )
 
 

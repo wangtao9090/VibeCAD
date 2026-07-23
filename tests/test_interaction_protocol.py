@@ -385,6 +385,37 @@ def test_response_budget_has_exact_n_and_n_plus_one_boundary() -> None:
 
 V2_BOOT_SECRET = b"s" * 32
 V2_DAEMON_ID = "daemon_" + "a" * 32
+V2_FILE_GRANT_ID = "file_grant_" + "b" * 32
+V2_CHECKOUT_ID = "checkout_" + "c" * 32
+
+
+def _v2_file_grant_descriptor(
+    **changes: object,
+) -> dict[str, object]:
+    value: dict[str, object] = {
+        "schema_version": 1,
+        "grant_id": V2_FILE_GRANT_ID,
+        "purpose": "open_managed_checkout",
+        "expires_in_ms": 30_000,
+    }
+    value.update(changes)
+    return value
+
+
+def _v2_file_grant_result(
+    **changes: object,
+) -> dict[str, object]:
+    value: dict[str, object] = {
+        "schema_version": 1,
+        "grant_id": V2_FILE_GRANT_ID,
+        "checkout_id": V2_CHECKOUT_ID,
+        "purpose": "open_managed_checkout",
+        "local_path": f"/private/checkouts/{V2_CHECKOUT_ID}/model.FCStd",
+        "current_model_sha256": "d" * 64,
+        "current_size_bytes": 4096,
+    }
+    value.update(changes)
+    return value
 
 
 def _v2_json(raw: bytes) -> dict[str, object]:
@@ -509,6 +540,29 @@ def test_v2_mutual_handshake_creates_server_session_without_exposing_secret() ->
     assert V2_BOOT_SECRET not in ready
 
 
+def test_v2_server_session_id_is_readonly_and_ready_only() -> None:
+    server = protocol_v2.V2ServerConnection(V2_BOOT_SECRET, daemon_id=V2_DAEMON_ID)
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        _ = server.session_id
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_STATE
+
+    client = protocol_v2.V2ClientConnection(
+        V2_BOOT_SECRET,
+        expected_daemon_id=V2_DAEMON_ID,
+    )
+    authentication = client.answer_challenge(server.start())
+    ready = server.accept_auth(authentication)
+    client.accept_authenticated(ready)
+    assert server.session_id == _v2_json(ready)["session_id"]
+    with pytest.raises(AttributeError):
+        server.session_id = "session_" + "f" * 32
+
+    server.close()
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        _ = server.session_id
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_STATE
+
+
 def test_v2_handshake_state_machine_and_wrong_secret_fail_closed() -> None:
     server = protocol_v2.V2ServerConnection(V2_BOOT_SECRET, daemon_id=V2_DAEMON_ID)
     with pytest.raises(protocol_v2.V2ProtocolError) as raised:
@@ -585,12 +639,19 @@ def test_v2_challenges_and_sessions_are_unique() -> None:
     assert len(sessions) == 32
 
 
-def test_v2_static_dispatcher_routes_only_five_explicit_methods() -> None:
+def test_v2_static_dispatcher_routes_only_six_explicit_methods() -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
     def handler(name: str):
         def invoke(params: dict[str, object]) -> dict[str, object]:
             calls.append((name, params))
+            if name == "file_grant.claim":
+                return _v2_file_grant_result()
+            if name == "checkout.open":
+                return {
+                    "handled": name,
+                    "file_grant": _v2_file_grant_descriptor(),
+                }
             return {"handled": name}
 
         return invoke
@@ -601,6 +662,7 @@ def test_v2_static_dispatcher_routes_only_five_explicit_methods() -> None:
         checkout_open=handler("checkout.open"),
         checkout_get=handler("checkout.get"),
         checkout_close=handler("checkout.close"),
+        file_grant_claim=handler("file_grant.claim"),
         allowed_application_operations=frozenset({"get_capabilities"}),
     )
     server, client = _ready_v2_pair()
@@ -619,16 +681,244 @@ def test_v2_static_dispatcher_routes_only_five_explicit_methods() -> None:
         ),
         ("checkout.get", {"checkout_id": "checkout_" + "3" * 32}),
         ("checkout.close", {"checkout_id": "checkout_" + "3" * 32}),
+        ("file_grant.claim", {"grant_id": V2_FILE_GRANT_ID}),
     )
     for index, (method, params) in enumerate(requests, start=1):
         raw = client.encode_request(method, params, request_id=_v2_request_id(index))
         response = client.decode_response(server.dispatch_and_encode(raw, dispatcher))
-        assert response.result == {"handled": method}
+        if method == "file_grant.claim":
+            expected = _v2_file_grant_result()
+        elif method == "checkout.open":
+            expected = {
+                "handled": method,
+                "file_grant": _v2_file_grant_descriptor(),
+            }
+        else:
+            expected = {"handled": method}
+        assert response.result == expected
         assert response.error is None
 
     assert [method for method, _params in calls] == [method for method, _params in requests]
     with pytest.raises(AttributeError):
         dispatcher.kernel_ping = handler("replacement")
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {},
+        {"file_grant": {}},
+        {"file_grant": _v2_file_grant_descriptor(extra=True)},
+        {"file_grant": _v2_file_grant_descriptor(schema_version=2)},
+        {"file_grant": _v2_file_grant_descriptor(grant_id="grant_" + "b" * 32)},
+        {"file_grant": _v2_file_grant_descriptor(purpose="read_any_path")},
+        {"file_grant": _v2_file_grant_descriptor(expires_in_ms=29_999)},
+        {"file_grant": _v2_file_grant_descriptor(expires_in_ms=True)},
+    ],
+)
+def test_v2_checkout_open_server_rejects_a_non_exact_grant_descriptor(
+    result: dict[str, object],
+) -> None:
+    server, client = _ready_v2_pair()
+    request = server.admit_request(
+        client.encode_request(
+            "checkout.open",
+            {
+                "open_key": "checkout_open_" + "1" * 32,
+                "source": {"kind": "head", "project_id": "project_" + "2" * 32},
+            },
+            request_id=_v2_request_id(1),
+        )
+    )
+
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        server.encode_success(request, result)
+
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_REQUEST
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {},
+        {"file_grant": _v2_file_grant_descriptor(extra=True)},
+        {"file_grant": _v2_file_grant_descriptor(schema_version=2)},
+        {"file_grant": _v2_file_grant_descriptor(grant_id="grant_" + "e" * 32)},
+        {"file_grant": _v2_file_grant_descriptor(purpose="read_any_path")},
+        {"file_grant": _v2_file_grant_descriptor(expires_in_ms=30_001)},
+    ],
+)
+def test_v2_checkout_open_client_rejects_a_signed_non_exact_grant_descriptor(
+    result: dict[str, object],
+) -> None:
+    server, client = _ready_v2_pair()
+    request = server.admit_request(
+        client.encode_request(
+            "checkout.open",
+            {
+                "open_key": "checkout_open_" + "1" * 32,
+                "source": {"kind": "head", "project_id": "project_" + "2" * 32},
+            },
+            request_id=_v2_request_id(1),
+        )
+    )
+    encoded = server._encode_response(request, result=result, error=None)
+
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.decode_response(encoded)
+
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_REQUEST
+    assert client.state is protocol_v2.V2ConnectionState.FAILED
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"grant_id": "grant_" + "b" * 32},
+        {"grant_id": "file_grant_" + "b" * 31},
+        {"grant_id": V2_FILE_GRANT_ID, "extra": True},
+        {"grant_id": V2_FILE_GRANT_ID, "path": "/tmp/model.FCStd"},
+        {"grant_id": V2_FILE_GRANT_ID, "local_path": "/tmp/model.FCStd"},
+    ],
+)
+def test_v2_file_grant_claim_request_is_exact_before_handler(
+    params: dict[str, object],
+) -> None:
+    calls = 0
+
+    def claim(_params: dict[str, object]) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return _v2_file_grant_result()
+
+    dispatcher = protocol_v2.StaticV2Dispatcher(file_grant_claim=claim)
+    server, client = _ready_v2_pair()
+    raw = client.encode_request(
+        "file_grant.claim",
+        params,
+        request_id=_v2_request_id(1),
+    )
+    response = client.decode_response(server.dispatch_and_encode(raw, dispatcher))
+    assert response.error == {
+        "code": "invalid_request",
+        "message": "The local protocol request is invalid.",
+    }
+    assert calls == 0
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _v2_file_grant_result(extra=True),
+        _v2_file_grant_result(schema_version=2),
+        _v2_file_grant_result(grant_id="grant_" + "b" * 32),
+        _v2_file_grant_result(grant_id="file_grant_" + "e" * 32),
+        _v2_file_grant_result(checkout_id="checkout_" + "e" * 32),
+        _v2_file_grant_result(purpose="read_any_path"),
+        _v2_file_grant_result(local_path="relative/model.FCStd"),
+        _v2_file_grant_result(local_path=f"//private/checkouts/{V2_CHECKOUT_ID}/model.FCStd"),
+        _v2_file_grant_result(local_path=f"/private/checkouts/./{V2_CHECKOUT_ID}/model.FCStd"),
+        _v2_file_grant_result(
+            local_path=f"/private/checkouts/{V2_CHECKOUT_ID}/../{V2_CHECKOUT_ID}/model.FCStd"
+        ),
+        _v2_file_grant_result(local_path=f"/private/checkouts/{V2_CHECKOUT_ID}/other.FCStd"),
+        _v2_file_grant_result(
+            local_path="/private/checkouts/checkout_" + "e" * 32 + "/model.FCStd"
+        ),
+        _v2_file_grant_result(
+            local_path=f"/private/checkouts/{V2_CHECKOUT_ID}/model.FCStd\nforged"
+        ),
+        _v2_file_grant_result(
+            local_path=f"/private/checkouts/{V2_CHECKOUT_ID}/model.FCStd\u0085forged"
+        ),
+        _v2_file_grant_result(current_model_sha256="not-a-digest"),
+        _v2_file_grant_result(current_size_bytes=-1),
+    ],
+)
+def test_v2_file_grant_claim_server_rejects_non_exact_path_result(
+    result: dict[str, object],
+) -> None:
+    server, client = _ready_v2_pair()
+    request = server.admit_request(
+        client.encode_request(
+            "file_grant.claim",
+            {"grant_id": V2_FILE_GRANT_ID},
+            request_id=_v2_request_id(1),
+        )
+    )
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        server.encode_success(request, result)
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_REQUEST
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _v2_file_grant_result(local_path="relative/model.FCStd"),
+        _v2_file_grant_result(grant_id="file_grant_" + "e" * 32),
+        _v2_file_grant_result(
+            local_path=f"/private/checkouts/{V2_CHECKOUT_ID}/../{V2_CHECKOUT_ID}/model.FCStd"
+        ),
+        _v2_file_grant_result(
+            local_path="/private/checkouts/checkout_" + "e" * 32 + "/model.FCStd"
+        ),
+        _v2_file_grant_result(extra=True),
+    ],
+)
+def test_v2_file_grant_claim_client_rejects_signed_non_exact_path_result(
+    result: dict[str, object],
+) -> None:
+    server, client = _ready_v2_pair()
+    request = server.admit_request(
+        client.encode_request(
+            "file_grant.claim",
+            {"grant_id": V2_FILE_GRANT_ID},
+            request_id=_v2_request_id(1),
+        )
+    )
+    forged = server._encode_response(request, result=result, error=None)
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.decode_response(forged)
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_REQUEST
+    assert client.state is protocol_v2.V2ConnectionState.FAILED
+
+
+def test_v2_file_grant_claim_is_the_only_result_allowed_to_reveal_local_path() -> None:
+    server, client = _ready_v2_pair()
+    claim = server.admit_request(
+        client.encode_request(
+            "file_grant.claim",
+            {"grant_id": V2_FILE_GRANT_ID},
+            request_id=_v2_request_id(1),
+        )
+    )
+    assert (
+        client.decode_response(server.encode_success(claim, _v2_file_grant_result())).result
+        == _v2_file_grant_result()
+    )
+
+    server, client = _ready_v2_pair()
+    ping = server.admit_request(
+        client.encode_request("kernel.ping", {}, request_id=_v2_request_id(1))
+    )
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        server.encode_success(ping, {"local_path": _v2_file_grant_result()["local_path"]})
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_REQUEST
+
+    server, client = _ready_v2_pair()
+    ping = server.admit_request(
+        client.encode_request("kernel.ping", {}, request_id=_v2_request_id(1))
+    )
+    forged = server._encode_response(
+        ping,
+        result={"local_path": _v2_file_grant_result()["local_path"]},
+        error=None,
+    )
+    with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+        client.decode_response(forged)
+    assert raised.value.code is protocol_v2.V2ErrorCode.INVALID_REQUEST
+    assert client.state is protocol_v2.V2ConnectionState.FAILED
 
 
 def test_v2_unknown_unavailable_and_handler_failure_are_fixed_signed_errors() -> None:

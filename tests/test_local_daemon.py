@@ -22,6 +22,7 @@ import vibecad.daemon as daemon_api
 import vibecad.daemon.client as daemon_client
 import vibecad.daemon.local_identity as local_identity
 import vibecad.daemon.service as daemon_service
+from vibecad.application.agent import AgentApplication
 from vibecad.daemon.local_identity import (
     LocalIdentityError,
     LocalIdentityErrorCode,
@@ -29,7 +30,16 @@ from vibecad.daemon.local_identity import (
     darwin_peer_identity,
     require_same_user_peer,
 )
+from vibecad.execution.revisions import ProjectHead, RevisionSourceBinding
 from vibecad.interaction import protocol_v2
+from vibecad.interaction.checkouts import (
+    CheckoutDescriptor,
+    CheckoutFileSnapshot,
+    CheckoutSourceLiveness,
+    CheckoutState,
+    ResolvedCheckoutSource,
+    _CheckoutEntryBinding,
+)
 from vibecad.interaction.storage import SafeRoot, StorageFailure
 from vibecad.workflow.lease import (
     LeaseError,
@@ -419,6 +429,81 @@ class _FakeDaemonApplication:
         self.calls: list[tuple[str, object]] = []
         self.closed = 0
         self.checkout_id = "checkout_" + "6" * 32
+        self._checkout_root = Path(tempfile.mkdtemp(prefix="vibecad-c10-checkout-"))
+        self._checkout_root.chmod(0o700)
+        checkout_directory = self._checkout_root / self.checkout_id
+        checkout_directory.mkdir(mode=0o700)
+        self._model_path = checkout_directory / "model.FCStd"
+        self._model_path.write_bytes(b"fake managed FreeCAD model\n")
+        self._model_path.chmod(0o600)
+        self._snapshot = self._make_snapshot()
+
+    @staticmethod
+    def _binding(path: Path) -> _CheckoutEntryBinding:
+        value = path.stat()
+        return _CheckoutEntryBinding(
+            dev=value.st_dev,
+            ino=value.st_ino,
+            mode=value.st_mode,
+            uid=value.st_uid,
+            gid=value.st_gid,
+            nlink=value.st_nlink,
+            size=value.st_size,
+            mtime_ns=value.st_mtime_ns,
+            ctime_ns=value.st_ctime_ns,
+        )
+
+    def _make_snapshot(self) -> CheckoutFileSnapshot:
+        model = self._model_path.read_bytes()
+        digest = hashlib.sha256(model).hexdigest()
+        model_stat = self._model_path.stat()
+        source = ResolvedCheckoutSource(
+            kind="head",
+            project_id="project_" + "2" * 32,
+            revision_id="revision_" + "3" * 32,
+            manifest_sha256="4" * 64,
+            model_sha256=digest,
+            size_bytes=len(model),
+        )
+        head = ProjectHead(
+            project_id=source.project_id,
+            generation=0,
+            revision_id=source.revision_id,
+            manifest_sha256=source.manifest_sha256,
+        )
+        source_binding = RevisionSourceBinding(
+            dev=model_stat.st_dev,
+            ino=model_stat.st_ino,
+            mode=model_stat.st_mode,
+            uid=model_stat.st_uid,
+            nlink=model_stat.st_nlink,
+            size=model_stat.st_size,
+            mtime_ns=model_stat.st_mtime_ns,
+            ctime_ns=model_stat.st_ctime_ns,
+        )
+        descriptor = CheckoutDescriptor(
+            checkout_id=self.checkout_id,
+            open_key="checkout_open_" + "1" * 32,
+            state=CheckoutState.OPEN,
+            dirty=False,
+            source=source,
+            initial_model_sha256=digest,
+            current_model_sha256=digest,
+            current_size_bytes=len(model),
+            local_path=self._model_path,
+            source_head=head,
+            source_binding=source_binding,
+            source_liveness=CheckoutSourceLiveness.LIVE,
+        )
+        return CheckoutFileSnapshot(
+            descriptor=descriptor,
+            root_binding=self._binding(self._checkout_root),
+            directory_binding=self._binding(self._model_path.parent),
+            file_binding=self._binding(self._model_path),
+            model_sha256=digest,
+            size_bytes=len(model),
+            path=self._model_path,
+        )
 
     def get_capabilities_request(self, request: object) -> dict[str, object]:
         self.calls.append(("get_capabilities", request))
@@ -450,6 +535,19 @@ class _FakeDaemonApplication:
         self.calls.append(("checkout.close", checkout_id))
         return _FakeCheckoutDescriptor(checkout_id)
 
+    def capture_checkout_file(self, *, checkout_id: str) -> CheckoutFileSnapshot:
+        self.calls.append(("checkout.capture", checkout_id))
+        assert checkout_id == self.checkout_id
+        return self._snapshot
+
+    def require_same_checkout_file(
+        self,
+        snapshot: CheckoutFileSnapshot,
+    ) -> CheckoutFileSnapshot:
+        self.calls.append(("checkout.require_same", snapshot.descriptor.checkout_id))
+        assert snapshot == self._snapshot
+        return self._snapshot
+
     def invoke_direct_operation_request(
         self,
         operation: object,
@@ -465,6 +563,19 @@ class _FakeDaemonApplication:
 
     def close(self) -> None:
         self.closed += 1
+        shutil.rmtree(self._checkout_root, ignore_errors=True)
+
+
+class _BlockingCheckoutCloseApplication(_FakeDaemonApplication):
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_entered = threading.Event()
+        self.close_release = threading.Event()
+
+    def close_checkout(self, *, checkout_id: str) -> _FakeCheckoutDescriptor:
+        self.close_entered.set()
+        assert self.close_release.wait(5)
+        return super().close_checkout(checkout_id=checkout_id)
 
 
 def _c09_root() -> tuple[Path, Path]:
@@ -488,6 +599,56 @@ def _wait_until(predicate, *, timeout: float = 3.0) -> None:
             return
         time.sleep(0.01)
     assert predicate()
+
+
+def test_checkout_close_revokes_a_grant_minted_during_the_store_close() -> None:
+    application = _BlockingCheckoutCloseApplication()
+    facade = daemon_api.LocalKernelFacade(
+        application,
+        daemon_id="daemon_" + "1" * 32,
+    )
+    close_results: list[object] = []
+
+    def close_checkout() -> None:
+        try:
+            close_results.append(facade._checkout_close({"checkout_id": application.checkout_id}))
+        except BaseException as error:
+            close_results.append(error)
+
+    worker = threading.Thread(target=close_checkout)
+    worker.start()
+    assert application.close_entered.wait(5)
+    try:
+        opened = facade._checkout_open(
+            "session_" + "2" * 32,
+            {
+                "open_key": "checkout_open_" + "1" * 32,
+                "source": {
+                    "kind": "head",
+                    "project_id": "project_" + "2" * 32,
+                },
+            },
+        )
+        grant_id = opened["file_grant"]["grant_id"]
+        assert facade._file_grants.active_grants == 1
+    finally:
+        application.close_release.set()
+        worker.join(5)
+
+    try:
+        assert not worker.is_alive()
+        assert len(close_results) == 1
+        assert not isinstance(close_results[0], BaseException)
+        assert facade._file_grants.active_grants == 0
+        with pytest.raises(protocol_v2.V2ProtocolError) as raised:
+            facade._file_grant_claim(
+                "session_" + "2" * 32,
+                {"grant_id": grant_id},
+            )
+        assert raised.value.code is protocol_v2.V2ErrorCode.UNAVAILABLE
+    finally:
+        facade.close()
+        application.close()
 
 
 def _crash_daemon_process(data_root: str, ready) -> None:
@@ -636,7 +797,7 @@ def test_daemon_start_publishes_private_bound_state_and_close_cleans_exact_entri
 
 
 @DARWIN_ONLY
-def test_real_client_authenticates_and_calls_ping_application_and_path_free_checkout() -> None:
+def test_real_client_authenticates_and_claims_one_path_bound_checkout_grant() -> None:
     base, data_root = _c09_root()
     factories: list[object] = []
     daemon = None
@@ -674,16 +835,283 @@ def test_real_client_authenticates_and_calls_ping_application_and_path_free_chec
         assert opened.error is None
         assert opened.result["checkout_id"] == "checkout_" + "6" * 32
         assert "local_path" not in json.dumps(opened.result)
+        grant = opened.result["file_grant"]
+        assert set(grant) == {
+            "schema_version",
+            "grant_id",
+            "purpose",
+            "expires_in_ms",
+        }
+        assert grant["schema_version"] == 1
+        assert grant["grant_id"].startswith("file_grant_")
+        assert grant["purpose"] == "open_managed_checkout"
+        assert grant["expires_in_ms"] == 30_000
         fetched = client.call(
             "checkout.get",
             {"checkout_id": "checkout_" + "6" * 32},
         )
+        assert fetched.error is None
+        assert "local_path" not in json.dumps(fetched.result)
+        assert "file_grant" not in fetched.result
+        claim = client.call(
+            "file_grant.claim",
+            {"grant_id": grant["grant_id"]},
+        )
+        application = factories[0][2]
+        assert claim.error is None
+        assert claim.result == {
+            "schema_version": 1,
+            "grant_id": grant["grant_id"],
+            "checkout_id": application.checkout_id,
+            "purpose": "open_managed_checkout",
+            "local_path": str(application._model_path),
+            "current_model_sha256": application._snapshot.model_sha256,
+            "current_size_bytes": application._snapshot.size_bytes,
+        }
+        replay = client.call(
+            "file_grant.claim",
+            {"grant_id": grant["grant_id"]},
+        )
+        assert replay.result is None
+        assert replay.error["code"] == "unavailable"
         closed = client.call(
             "checkout.close",
             {"checkout_id": "checkout_" + "6" * 32},
         )
         assert fetched.result["source_liveness"] == "live"
         assert closed.result["checkout_id"] == "checkout_" + "6" * 32
+        assert "local_path" not in json.dumps(closed.result)
+        assert "file_grant" not in closed.result
+    finally:
+        if client is not None:
+            client.close()
+        if daemon is not None:
+            daemon.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@DARWIN_ONLY
+def test_file_grant_is_session_bound_without_consuming_the_owner_grant() -> None:
+    base, data_root = _c09_root()
+    factories: list[object] = []
+    daemon = None
+    owner = None
+    other = None
+    try:
+        daemon = daemon_api.LocalKernelDaemon.start(
+            data_root=data_root,
+            application_factory=_fake_daemon_factory(factories),
+        )
+        owner = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        other = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        opened = owner.call(
+            "checkout.open",
+            {
+                "open_key": "checkout_open_" + "1" * 32,
+                "source": {"kind": "head", "project_id": "project_" + "2" * 32},
+            },
+        )
+        grant_id = opened.result["file_grant"]["grant_id"]
+        rejected = other.call("file_grant.claim", {"grant_id": grant_id})
+        assert rejected.result is None
+        assert rejected.error["code"] == "unavailable"
+        claimed = owner.call("file_grant.claim", {"grant_id": grant_id})
+        assert claimed.error is None
+        assert claimed.result["local_path"] == str(factories[0][2]._model_path)
+    finally:
+        if owner is not None:
+            owner.close()
+        if other is not None:
+            other.close()
+        if daemon is not None:
+            daemon.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@DARWIN_ONLY
+def test_default_daemon_claims_a_real_managed_checkout_file() -> None:
+    base, data_root = _c09_root()
+    project_id = "project_" + "7" * 32
+    content = b"real managed checkout through the local daemon\n"
+    seeded = None
+    daemon = None
+    client = None
+    claimed_path = None
+    try:
+        source = base / "source.FCStd"
+        source.write_bytes(content)
+        source.chmod(0o600)
+        seeded = AgentApplication.open(data_root=data_root)
+        with seeded._lease_manager.acquire_project_write(project_id) as lease:
+            seeded._revision_store.import_trusted_fcstd(
+                project_id,
+                source,
+                hashlib.sha256(content).hexdigest(),
+                len(content),
+                lease,
+            )
+        seeded.close()
+        seeded = None
+        daemon = daemon_api.LocalKernelDaemon.start(data_root=data_root)
+        client = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        opened = client.call(
+            "checkout.open",
+            {
+                "open_key": "checkout_open_" + "7" * 32,
+                "source": {"kind": "head", "project_id": project_id},
+            },
+        )
+        assert opened.error is None
+        assert "local_path" not in json.dumps(opened.result)
+        claim = client.call(
+            "file_grant.claim",
+            {"grant_id": opened.result["file_grant"]["grant_id"]},
+        )
+        assert claim.error is None
+        claimed_path = Path(claim.result["local_path"])
+        assert claimed_path.read_bytes() == content
+        assert claimed_path.parent.parent == data_root / "checkouts"
+        assert stat.S_IMODE(claimed_path.stat().st_mode) == 0o600
+
+        closed = client.call(
+            "checkout.close",
+            {"checkout_id": opened.result["checkout_id"]},
+        )
+        assert closed.error is None
+        assert not claimed_path.exists()
+    finally:
+        if seeded is not None:
+            seeded.close()
+        if client is not None:
+            client.close()
+        if daemon is not None:
+            daemon.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@DARWIN_ONLY
+def test_file_grant_disconnect_and_checkout_close_revoke_unclaimed_grants() -> None:
+    base, data_root = _c09_root()
+    factories: list[object] = []
+    daemon = None
+    owner = None
+    verifier = None
+    try:
+        daemon = daemon_api.LocalKernelDaemon.start(
+            data_root=data_root,
+            application_factory=_fake_daemon_factory(factories),
+        )
+        owner = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        opened = owner.call(
+            "checkout.open",
+            {
+                "open_key": "checkout_open_" + "1" * 32,
+                "source": {"kind": "head", "project_id": "project_" + "2" * 32},
+            },
+        )
+        disconnected_grant = opened.result["file_grant"]["grant_id"]
+        owner.close()
+        owner = None
+        _wait_until(lambda: daemon.active_connections == 0)
+        assert daemon._facade._file_grants.active_grants == 0
+
+        verifier = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        rejected = verifier.call(
+            "file_grant.claim",
+            {"grant_id": disconnected_grant},
+        )
+        assert rejected.result is None
+        assert rejected.error["code"] == "unavailable"
+
+        opened = verifier.call(
+            "checkout.open",
+            {
+                "open_key": "checkout_open_" + "2" * 32,
+                "source": {"kind": "head", "project_id": "project_" + "2" * 32},
+            },
+        )
+        close_response = verifier.call(
+            "checkout.close",
+            {"checkout_id": opened.result["checkout_id"]},
+        )
+        assert close_response.error is None
+        assert "local_path" not in json.dumps(close_response.result)
+        rejected = verifier.call(
+            "file_grant.claim",
+            {"grant_id": opened.result["file_grant"]["grant_id"]},
+        )
+        assert rejected.result is None
+        assert rejected.error["code"] == "unavailable"
+    finally:
+        if owner is not None:
+            owner.close()
+        if verifier is not None:
+            verifier.close()
+        if daemon is not None:
+            daemon.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@DARWIN_ONLY
+def test_daemon_close_clears_its_unclaimed_file_grants() -> None:
+    base, data_root = _c09_root()
+    factories: list[object] = []
+    daemon = None
+    client = None
+    try:
+        daemon = daemon_api.LocalKernelDaemon.start(
+            data_root=data_root,
+            application_factory=_fake_daemon_factory(factories),
+        )
+        client = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        opened = client.call(
+            "checkout.open",
+            {
+                "open_key": "checkout_open_" + "1" * 32,
+                "source": {"kind": "head", "project_id": "project_" + "2" * 32},
+            },
+        )
+        assert opened.error is None
+        assert daemon._facade._file_grants.active_grants == 1
+        daemon.close()
+        assert daemon.state is daemon_api.LocalKernelState.CLOSED
+        assert daemon._facade._file_grants.active_grants == 0
+        assert factories[0][2].closed == 1
+    finally:
+        if client is not None:
+            client.close()
+        if daemon is not None and daemon.state is not daemon_api.LocalKernelState.CLOSED:
+            daemon.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@DARWIN_ONLY
+def test_second_checkout_open_rotates_the_prior_session_grant() -> None:
+    base, data_root = _c09_root()
+    factories: list[object] = []
+    daemon = None
+    client = None
+    try:
+        daemon = daemon_api.LocalKernelDaemon.start(
+            data_root=data_root,
+            application_factory=_fake_daemon_factory(factories),
+        )
+        client = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        params = {
+            "open_key": "checkout_open_" + "1" * 32,
+            "source": {"kind": "head", "project_id": "project_" + "2" * 32},
+        }
+        first = client.call("checkout.open", params)
+        second = client.call("checkout.open", params)
+        first_grant = first.result["file_grant"]["grant_id"]
+        second_grant = second.result["file_grant"]["grant_id"]
+        assert first_grant != second_grant
+        rejected = client.call("file_grant.claim", {"grant_id": first_grant})
+        assert rejected.result is None
+        assert rejected.error["code"] == "unavailable"
+        claimed = client.call("file_grant.claim", {"grant_id": second_grant})
+        assert claimed.error is None
+        assert claimed.result["grant_id"] == second_grant
     finally:
         if client is not None:
             client.close()

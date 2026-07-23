@@ -17,6 +17,7 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import PurePosixPath
 
 __all__ = (
     "MAX_V2_CONNECTIONS",
@@ -67,6 +68,7 @@ _SESSION_RE = re.compile(r"session_[0-9a-f]{32}\Z")
 _REQUEST_RE = re.compile(r"request_[0-9a-f]{32}\Z")
 _OPEN_KEY_RE = re.compile(r"checkout_open_[0-9a-f]{32}\Z")
 _CHECKOUT_RE = re.compile(r"checkout_[0-9a-f]{32}\Z")
+_FILE_GRANT_RE = re.compile(r"file_grant_[0-9a-f]{32}\Z")
 _PROJECT_RE = re.compile(r"project_[0-9a-f]{32}\Z")
 _TASK_RE = re.compile(r"task_[0-9a-f]{32}\Z")
 _DRAFT_RE = re.compile(r"draft_[0-9a-f]{32}\Z")
@@ -95,7 +97,11 @@ _METHODS = (
     "checkout.open",
     "checkout.get",
     "checkout.close",
+    "file_grant.claim",
 )
+_FILE_GRANT_PURPOSE = "open_managed_checkout"
+_FILE_GRANT_TTL_MS = 30_000
+_MAX_LOCAL_PATH_BYTES = 4096
 
 
 class V2ErrorCode(StrEnum):
@@ -640,7 +646,100 @@ def _validate_dispatch_params(method: str, params: dict[str, object]) -> None:
         value = _exact(params, {"checkout_id"})
         _identifier(value["checkout_id"], _CHECKOUT_RE)
         return
+    if method == "file_grant.claim":
+        value = _exact(params, {"grant_id"})
+        _identifier(value["grant_id"], _FILE_GRANT_RE)
+        return
     raise V2ProtocolError(V2ErrorCode.UNKNOWN_METHOD)
+
+
+def _claim_local_path(value: object, *, checkout_id: str) -> str:
+    if type(value) is not str:
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    try:
+        raw = value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST) from None
+    if not 1 <= len(raw) <= _MAX_LOCAL_PATH_BYTES or any(
+        not character.isprintable() for character in value
+    ):
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    path = PurePosixPath(value)
+    if (
+        not path.is_absolute()
+        or path.root != "/"
+        or str(path) != value
+        or ".." in path.parts
+        or path.name != "model.FCStd"
+        or path.parent.name != checkout_id
+    ):
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    return value
+
+
+def _validate_file_grant_descriptor(value: object) -> None:
+    grant = _exact(
+        value,
+        {
+            "schema_version",
+            "grant_id",
+            "purpose",
+            "expires_in_ms",
+        },
+    )
+    if type(grant["schema_version"]) is not int or grant["schema_version"] != 1:
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    _identifier(grant["grant_id"], _FILE_GRANT_RE)
+    if (
+        grant["purpose"] != _FILE_GRANT_PURPOSE
+        or type(grant["expires_in_ms"]) is not int
+        or grant["expires_in_ms"] != _FILE_GRANT_TTL_MS
+    ):
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+
+
+def _validate_success_result(
+    method: str,
+    result: object,
+    *,
+    expected_grant_id: str | None,
+) -> dict[str, object]:
+    if type(result) is not dict:
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    if method != "file_grant.claim":
+        _walk(
+            result,
+            code=V2ErrorCode.INVALID_REQUEST,
+            forbid_capabilities=True,
+        )
+        if method == "checkout.open":
+            _validate_file_grant_descriptor(result.get("file_grant"))
+        return result
+    _walk(result, code=V2ErrorCode.INVALID_REQUEST)
+    value = _exact(
+        result,
+        {
+            "schema_version",
+            "grant_id",
+            "checkout_id",
+            "purpose",
+            "local_path",
+            "current_model_sha256",
+            "current_size_bytes",
+        },
+    )
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    grant_id = _identifier(value["grant_id"], _FILE_GRANT_RE)
+    if expected_grant_id is None or grant_id != expected_grant_id:
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    checkout_id = _identifier(value["checkout_id"], _CHECKOUT_RE)
+    if value["purpose"] != _FILE_GRANT_PURPOSE:
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    _claim_local_path(value["local_path"], checkout_id=checkout_id)
+    _identifier(value["current_model_sha256"], _DIGEST_RE)
+    _nonnegative_integer(value["current_size_bytes"])
+    return value
 
 
 _Handler = Callable[[dict[str, object]], object]
@@ -648,13 +747,14 @@ _Handler = Callable[[dict[str, object]], object]
 
 @dataclass(frozen=True, slots=True, init=False)
 class StaticV2Dispatcher:
-    """Closed dispatcher whose five handlers are installed explicitly in code."""
+    """Closed dispatcher whose six handlers are installed explicitly in code."""
 
     _kernel_ping: _Handler | None
     _application_call: _Handler | None
     _checkout_open: _Handler | None
     _checkout_get: _Handler | None
     _checkout_close: _Handler | None
+    _file_grant_claim: _Handler | None
     _allowed_application_operations: frozenset[str]
 
     def __init__(
@@ -665,6 +765,7 @@ class StaticV2Dispatcher:
         checkout_open: _Handler | None = None,
         checkout_get: _Handler | None = None,
         checkout_close: _Handler | None = None,
+        file_grant_claim: _Handler | None = None,
         allowed_application_operations: frozenset[str] = frozenset(),
     ) -> None:
         handlers = (
@@ -673,6 +774,7 @@ class StaticV2Dispatcher:
             checkout_open,
             checkout_get,
             checkout_close,
+            file_grant_claim,
         )
         if any(handler is not None and not callable(handler) for handler in handlers):
             raise TypeError("dispatcher handlers must be callable or None")
@@ -690,6 +792,7 @@ class StaticV2Dispatcher:
         object.__setattr__(self, "_checkout_open", checkout_open)
         object.__setattr__(self, "_checkout_get", checkout_get)
         object.__setattr__(self, "_checkout_close", checkout_close)
+        object.__setattr__(self, "_file_grant_claim", file_grant_claim)
         object.__setattr__(
             self,
             "_allowed_application_operations",
@@ -712,6 +815,8 @@ class StaticV2Dispatcher:
             handler = self._checkout_get
         elif request.method == "checkout.close":
             handler = self._checkout_close
+        elif request.method == "file_grant.claim":
+            handler = self._file_grant_claim
         else:  # _validate_dispatch_params has already rejected unknown methods
             raise V2ProtocolError(V2ErrorCode.UNKNOWN_METHOD)
         if handler is None:
@@ -746,6 +851,12 @@ class V2ServerConnection:
         self._active: dict[int, V2Request] = {}
         self._seen_request_ids: set[str] = set()
         self.state = V2ConnectionState.NEW
+
+    @property
+    def session_id(self) -> str:
+        if self.state is not V2ConnectionState.READY or self._session_id is None:
+            raise V2ProtocolError(V2ErrorCode.INVALID_STATE)
+        return self._session_id
 
     def _terminal(self, code: V2ErrorCode) -> None:
         self._boot_secret = b""
@@ -884,16 +995,21 @@ class V2ServerConnection:
 
     def encode_success(self, request: object, result: object) -> bytes:
         canonical = self._claim_response(request)
-        if type(result) is not dict:
-            raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
-        _walk(
+        expected_grant_id = (
+            canonical.params.get("grant_id")
+            if canonical.method == "file_grant.claim"
+            and set(canonical.params) == {"grant_id"}
+            and type(canonical.params.get("grant_id")) is str
+            else None
+        )
+        canonical_result = _validate_success_result(
+            canonical.method,
             result,
-            code=V2ErrorCode.INVALID_REQUEST,
-            forbid_capabilities=True,
+            expected_grant_id=expected_grant_id,
         )
         return self._encode_response(
             canonical,
-            result=dict(result),
+            result=dict(canonical_result),
             error=None,
         )
 
@@ -971,7 +1087,7 @@ class V2ClientConnection:
         self._session_id: str | None = None
         self._session_key: bytes | None = None
         self._next_sequence = 1
-        self._active: dict[int, tuple[str, str]] = {}
+        self._active: dict[int, tuple[str, str, str | None]] = {}
         self._seen_request_ids: set[str] = set()
         self.state = V2ConnectionState.NEW
 
@@ -1081,7 +1197,18 @@ class V2ClientConnection:
         }
         proof = _mac(self._session_key, _REQUEST_DOMAIN, body)
         encoded = _encode(body | {"proof": proof})
-        self._active[sequence] = (canonical_id, canonical_method)
+        expected_grant_id = (
+            params.get("grant_id")
+            if canonical_method == "file_grant.claim"
+            and set(params) == {"grant_id"}
+            and type(params.get("grant_id")) is str
+            else None
+        )
+        self._active[sequence] = (
+            canonical_id,
+            canonical_method,
+            expected_grant_id,
+        )
         self._seen_request_ids.add(canonical_id)
         self._next_sequence += 1
         return encoded
@@ -1115,17 +1242,15 @@ class V2ClientConnection:
         if (result is None) == (error is None):
             self._terminal(V2ErrorCode.INVALID_REQUEST)
         if result is not None:
-            if type(result) is not dict:
-                self._terminal(V2ErrorCode.INVALID_REQUEST)
             try:
-                _walk(
+                validated = _validate_success_result(
+                    active[1],
                     result,
-                    code=V2ErrorCode.INVALID_REQUEST,
-                    forbid_capabilities=True,
+                    expected_grant_id=active[2],
                 )
             except V2ProtocolError as exc:
                 self._terminal(exc.code)
-            canonical_result: dict[str, object] | None = dict(result)
+            canonical_result: dict[str, object] | None = dict(validated)
             canonical_error: dict[str, str] | None = None
         else:
             try:

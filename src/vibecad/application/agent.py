@@ -31,6 +31,7 @@ from vibecad.execution.revisions import (
 )
 from vibecad.interaction.checkouts import (
     CheckoutDescriptor,
+    CheckoutFileSnapshot,
     CheckoutStoreRootTrust,
     DraftCheckoutSource,
     HeadCheckoutSource,
@@ -1189,6 +1190,17 @@ class AgentApplication:
     def get_checkout(self, *, checkout_id: str) -> CheckoutDescriptor:
         self._ensure_live()
         return self._checkouts.get(checkout_id)
+
+    def capture_checkout_file(self, *, checkout_id: str) -> CheckoutFileSnapshot:
+        self._ensure_live()
+        return self._checkouts.capture_live_file(checkout_id)
+
+    def require_same_checkout_file(
+        self,
+        snapshot: CheckoutFileSnapshot,
+    ) -> CheckoutFileSnapshot:
+        self._ensure_live()
+        return self._checkouts.require_same_live_file(snapshot)
 
     def close_checkout(self, *, checkout_id: str) -> CheckoutDescriptor:
         self._ensure_live()

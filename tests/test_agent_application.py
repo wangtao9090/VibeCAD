@@ -42,6 +42,7 @@ from vibecad.execution.candidate import (
 )
 from vibecad.execution.revisions import LocalRevisionStore, ProjectHead
 from vibecad.interaction.cad import CadExecutionPort
+from vibecad.interaction.checkouts import CheckoutFileSnapshot, HeadCheckoutSource
 from vibecad.workflow.catalog import (
     TaskCatalogError,
     TaskCatalogErrorCode,
@@ -750,6 +751,37 @@ def test_empty_bootstrap_and_task_control_never_create_a_cad_runtime(tmp_path: P
     assert app._cad_validation_port is None  # noqa: SLF001
     assert calls == []
     app.close()
+
+
+def test_application_exposes_identity_bound_checkout_file_snapshot(tmp_path: Path) -> None:
+    app = AgentApplication.open(data_root=_data_root(tmp_path))
+    try:
+        project_id = "project_" + "b" * 32
+        source = tmp_path / "source.FCStd"
+        source.write_bytes(b"identity-bound checkout")
+        source.chmod(0o600)
+        with app._lease_manager.acquire_project_write(project_id) as lease:  # noqa: SLF001
+            app._revision_store.import_trusted_fcstd(  # noqa: SLF001
+                project_id,
+                source,
+                hashlib.sha256(source.read_bytes()).hexdigest(),
+                source.stat().st_size,
+                lease,
+            )
+        opened = app.open_checkout(
+            open_key="checkout_open_" + "a" * 32,
+            source=HeadCheckoutSource(project_id=project_id),
+        )
+
+        snapshot = app.capture_checkout_file(checkout_id=opened.checkout_id)
+        current = app.require_same_checkout_file(snapshot)
+
+        assert type(snapshot) is CheckoutFileSnapshot
+        assert current == snapshot
+        assert current.descriptor == opened
+        assert current.path == opened.local_path
+    finally:
+        app.close()
 
 
 def test_task_create_request_replays_the_same_task_after_application_restart(tmp_path: Path):

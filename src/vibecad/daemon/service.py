@@ -141,6 +141,14 @@ def _close_application(application: object) -> bool:
     return result is None or result is True
 
 
+def _close_facade(facade: LocalKernelFacade) -> bool:
+    try:
+        facade.close()
+    except BaseException:
+        return False
+    return True
+
+
 def _daemon_error(error: BaseException) -> DaemonError:
     if type(error) is DaemonError:
         return error
@@ -262,6 +270,7 @@ class LocalKernelDaemon:
         application = None
         listener = None
         published = None
+        facade = None
         instance = None
         try:
             layout = ApplicationDataLayout.open(data_root)
@@ -321,6 +330,8 @@ class LocalKernelDaemon:
             if listener is not None:
                 with contextlib.suppress(OSError):
                     listener.close()
+            if facade is not None:
+                _close_facade(facade)
             if application is not None:
                 _close_application(application)
             if published is not None:
@@ -437,6 +448,8 @@ class LocalKernelDaemon:
 
     def _serve_connection(self, connection: socket.socket, accepted_at: float) -> None:
         protocol = None
+        session_id = None
+        session_cleanup_error = None
         try:
             self._require_live_bindings()
             protocol = V2ServerConnection(
@@ -448,6 +461,8 @@ class LocalKernelDaemon:
             authentication = _FrameReader().receive(connection, deadline=deadline)
             self._require_live_bindings()
             authenticated = protocol.accept_auth(authentication)
+            session_id = protocol.session_id
+            dispatcher = self._facade.open_session(session_id)
             _send(connection, authenticated, deadline=deadline)
             reader = _FrameReader()
             while not self._stop.is_set():
@@ -457,7 +472,7 @@ class LocalKernelDaemon:
                 response = _dispatch_request(
                     protocol,
                     payload,
-                    self._facade.dispatcher,
+                    dispatcher,
                     self._require_live_bindings,
                 )
                 self._require_live_bindings()
@@ -481,6 +496,11 @@ class LocalKernelDaemon:
             if not self._stop.is_set():
                 self._mark_failed(error)
         finally:
+            if session_id is not None:
+                try:
+                    self._facade.close_session(session_id)
+                except BaseException as error:
+                    session_cleanup_error = error
             if protocol is not None:
                 protocol.close()
             with contextlib.suppress(OSError):
@@ -489,6 +509,8 @@ class LocalKernelDaemon:
                 connection.close()
             with self._connections_lock:
                 self._connections.pop(connection, None)
+            if session_cleanup_error is not None and not self._stop.is_set():
+                self._mark_failed(session_cleanup_error)
 
     def wait(self, timeout: float | None = None) -> bool:
         self._ensure_process()
@@ -526,6 +548,10 @@ class LocalKernelDaemon:
                 with self._state_lock:
                     self._state = LocalKernelState.FAILED
                     self._fatal_error = DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+                raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            if not _close_facade(self._facade):
+                with self._state_lock:
+                    self._state = LocalKernelState.FAILED
                 raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
             if not _close_application(self._application):
                 with self._state_lock:

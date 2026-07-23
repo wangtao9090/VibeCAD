@@ -38,6 +38,7 @@ __all__ = (
     "CheckoutDescriptor",
     "CheckoutError",
     "CheckoutErrorCode",
+    "CheckoutFileSnapshot",
     "CheckoutSourceLiveness",
     "CheckoutState",
     "CheckoutStoreRootTrust",
@@ -315,6 +316,127 @@ class CheckoutDescriptor:
             "source_head": (None if self.source_head is None else self.source_head.to_mapping()),
             "source_liveness": self.source_liveness.value,
         }
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _CheckoutEntryBinding:
+    dev: int
+    ino: int
+    mode: int
+    uid: int
+    gid: int
+    nlink: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+    def __post_init__(self) -> None:
+        values = (
+            self.dev,
+            self.ino,
+            self.mode,
+            self.uid,
+            self.gid,
+            self.nlink,
+            self.size,
+            self.mtime_ns,
+            self.ctime_ns,
+        )
+        if any(type(value) is not int or value < 0 for value in values) or self.nlink < 1:
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+
+
+def _entry_binding(value: os.stat_result) -> _CheckoutEntryBinding:
+    try:
+        return _CheckoutEntryBinding(
+            dev=value.st_dev,
+            ino=value.st_ino,
+            mode=value.st_mode,
+            uid=value.st_uid,
+            gid=value.st_gid,
+            nlink=value.st_nlink,
+            size=value.st_size,
+            mtime_ns=value.st_mtime_ns,
+            ctime_ns=value.st_ctime_ns,
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
+
+
+def _private_directory_binding(value: _CheckoutEntryBinding) -> bool:
+    return (
+        stat.S_ISDIR(value.mode) and value.uid == os.geteuid() and stat.S_IMODE(value.mode) == 0o700
+    )
+
+
+def _private_file_binding(value: _CheckoutEntryBinding) -> bool:
+    return (
+        stat.S_ISREG(value.mode)
+        and value.uid == os.geteuid()
+        and stat.S_IMODE(value.mode) == 0o600
+        and value.nlink == 1
+    )
+
+
+def _same_root_identity(
+    left: _CheckoutEntryBinding,
+    right: _CheckoutEntryBinding,
+) -> bool:
+    return (
+        left.dev,
+        left.ino,
+        left.mode,
+        left.uid,
+        left.gid,
+    ) == (
+        right.dev,
+        right.ino,
+        right.mode,
+        right.uid,
+        right.gid,
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CheckoutFileSnapshot:
+    """One live managed file observation suitable for a short-lived grant."""
+
+    descriptor: CheckoutDescriptor
+    root_binding: _CheckoutEntryBinding
+    directory_binding: _CheckoutEntryBinding
+    file_binding: _CheckoutEntryBinding
+    model_sha256: str
+    size_bytes: int
+    path: Path
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.descriptor) is not CheckoutDescriptor
+            or type(self.root_binding) is not _CheckoutEntryBinding
+            or type(self.directory_binding) is not _CheckoutEntryBinding
+            or type(self.file_binding) is not _CheckoutEntryBinding
+            or type(self.path) is not type(Path("/"))
+            or not self.path.is_absolute()
+            or self.path.name != "model.FCStd"
+            or self.path.parent.name != self.descriptor.checkout_id
+            or self.descriptor.state is not CheckoutState.OPEN
+            or self.descriptor.source_liveness is not CheckoutSourceLiveness.LIVE
+            or self.descriptor.local_path != self.path
+            or not _private_directory_binding(self.root_binding)
+            or not _private_directory_binding(self.directory_binding)
+            or not _private_file_binding(self.file_binding)
+            or self.root_binding.dev != self.directory_binding.dev
+            or self.directory_binding.dev != self.file_binding.dev
+        ):
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+        _digest(self.model_sha256)
+        _size(self.size_bytes)
+        if (
+            self.file_binding.size != self.size_bytes
+            or self.descriptor.current_model_sha256 != self.model_sha256
+            or self.descriptor.current_size_bytes != self.size_bytes
+        ):
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -660,9 +782,8 @@ class ManagedCheckoutStore:
         except OSError:
             raise CheckoutError(CheckoutErrorCode.IO_ERROR) from None
 
-    def require_live(self, checkout_id: str) -> CheckoutDescriptor:
-        """Recompute liveness and reject a closed or non-live checkout."""
-        descriptor = self.get(checkout_id)
+    @staticmethod
+    def _require_live_descriptor(descriptor: CheckoutDescriptor) -> None:
         if descriptor.source_liveness is CheckoutSourceLiveness.RECOVERY_REQUIRED:
             raise CheckoutError(CheckoutErrorCode.RECOVERY_REQUIRED)
         if (
@@ -670,6 +791,92 @@ class ManagedCheckoutStore:
             or descriptor.source_liveness is not CheckoutSourceLiveness.LIVE
         ):
             raise CheckoutError(CheckoutErrorCode.CONFLICT)
+
+    def _capture_live_locked(
+        self,
+        root_fd: int,
+        checkout_id: str,
+        inventory: dict[str, object],
+    ) -> CheckoutFileSnapshot:
+        closed = self._load_tombstone(root_fd, checkout_id, required=False)
+        if closed is not None:
+            self._require_live_descriptor(self._project_liveness(closed.descriptor))
+            raise CheckoutError(CheckoutErrorCode.CONFLICT)
+        self._require_aggregate_budget(inventory)
+        descriptor, root_binding, directory_binding, file_binding = self._inspect_open_locked(
+            root_fd,
+            checkout_id,
+        )
+        self._require_live_descriptor(descriptor)
+        assert descriptor.local_path is not None
+        return CheckoutFileSnapshot(
+            descriptor=descriptor,
+            root_binding=root_binding,
+            directory_binding=directory_binding,
+            file_binding=file_binding,
+            model_sha256=descriptor.current_model_sha256,
+            size_bytes=descriptor.current_size_bytes,
+            path=descriptor.local_path,
+        )
+
+    def capture_live_file(self, checkout_id: str) -> CheckoutFileSnapshot:
+        """Capture one identity-bound observation without exposing it on the wire."""
+        self._ensure_process()
+        canonical_id = _identifier(checkout_id, _CHECKOUT_RE)
+        try:
+            with self._lock.hold():
+                root_fd = self._root.open()
+                try:
+                    inventory = self._inventory(root_fd, cleanup=True)
+                    return self._capture_live_locked(root_fd, canonical_id, inventory)
+                finally:
+                    os.close(root_fd)
+        except CheckoutError:
+            raise
+        except StorageFailure:
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
+        except OSError:
+            raise CheckoutError(CheckoutErrorCode.IO_ERROR) from None
+
+    def require_same_live_file(
+        self,
+        snapshot: CheckoutFileSnapshot,
+    ) -> CheckoutFileSnapshot:
+        """Re-observe liveness and require the exact managed file captured earlier."""
+        self._ensure_process()
+        if type(snapshot) is not CheckoutFileSnapshot:
+            raise CheckoutError(CheckoutErrorCode.INVALID_INPUT)
+        canonical_id = _identifier(snapshot.descriptor.checkout_id, _CHECKOUT_RE)
+        try:
+            with self._lock.hold():
+                root_fd = self._root.open()
+                try:
+                    inventory = self._inventory(root_fd, cleanup=True)
+                    current = self._capture_live_locked(root_fd, canonical_id, inventory)
+                finally:
+                    os.close(root_fd)
+            if (
+                current.descriptor != snapshot.descriptor
+                or not _same_root_identity(current.root_binding, snapshot.root_binding)
+                or current.directory_binding != snapshot.directory_binding
+                or current.file_binding != snapshot.file_binding
+                or current.model_sha256 != snapshot.model_sha256
+                or current.size_bytes != snapshot.size_bytes
+                or current.path != snapshot.path
+            ):
+                raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+            return current
+        except CheckoutError:
+            raise
+        except StorageFailure:
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
+        except OSError:
+            raise CheckoutError(CheckoutErrorCode.IO_ERROR) from None
+
+    def require_live(self, checkout_id: str) -> CheckoutDescriptor:
+        """Recompute liveness and reject a closed or non-live checkout."""
+        descriptor = self.get(checkout_id)
+        self._require_live_descriptor(descriptor)
         return descriptor
 
     def require_acceptance(
@@ -1325,7 +1532,20 @@ class ManagedCheckoutStore:
                     self._delete_checkout_directory(root_fd, temp_name, partial=True)
                     os.fsync(root_fd)
 
-    def _get_locked(self, root_fd: int, checkout_id: str) -> CheckoutDescriptor:
+    def _inspect_open_locked(
+        self,
+        root_fd: int,
+        checkout_id: str,
+    ) -> tuple[
+        CheckoutDescriptor,
+        _CheckoutEntryBinding,
+        _CheckoutEntryBinding,
+        _CheckoutEntryBinding,
+    ]:
+        try:
+            root_info = os.fstat(root_fd)
+        except OSError:
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
         record = self._load_open(root_fd, checkout_id)
         directory_fd, directory_info = self._root.open_directory_at(
             root_fd,
@@ -1351,7 +1571,8 @@ class ManagedCheckoutStore:
             )
             live_root_fd = self._root.open()
             try:
-                live_directory_fd, _ = self._root.open_directory_at(
+                live_root_info = os.fstat(live_root_fd)
+                live_directory_fd, live_directory_info = self._root.open_directory_at(
                     live_root_fd,
                     checkout_id,
                     expected_identity=record.directory_identity,
@@ -1372,7 +1593,22 @@ class ManagedCheckoutStore:
                     os.close(live_directory_fd)
             finally:
                 os.close(live_root_fd)
-        except StorageFailure:
+            root_binding = _entry_binding(root_info)
+            live_root_binding = _entry_binding(live_root_info)
+            directory_binding = _entry_binding(directory_info)
+            live_directory_binding = _entry_binding(live_directory_info)
+            file_binding = _entry_binding(model_info)
+            if (
+                root_binding != live_root_binding
+                or directory_binding != live_directory_binding
+                or not _private_directory_binding(root_binding)
+                or not _private_directory_binding(directory_binding)
+                or not _private_file_binding(file_binding)
+                or root_binding.dev != directory_binding.dev
+                or directory_binding.dev != file_binding.dev
+            ):
+                raise StorageFailure("managed checkout binding changed")
+        except (OSError, StorageFailure):
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
         finally:
             os.close(directory_fd)
@@ -1390,7 +1626,15 @@ class ManagedCheckoutStore:
             source_binding=record.source_binding,
             source_liveness=CheckoutSourceLiveness.RECOVERY_REQUIRED,
         )
-        return self._project_liveness(descriptor)
+        return (
+            self._project_liveness(descriptor),
+            live_root_binding,
+            live_directory_binding,
+            file_binding,
+        )
+
+    def _get_locked(self, root_fd: int, checkout_id: str) -> CheckoutDescriptor:
+        return self._inspect_open_locked(root_fd, checkout_id)[0]
 
     def _load_open(self, root_fd: int, checkout_id: str) -> _OpenRecord:
         try:
