@@ -635,6 +635,7 @@ remain residual and unauthorized.
 | P0B-E06 / 2026-07-23T06:02:10Z | P0B-C03 under P0B-R1.1/A01/A02; P0B-D21 direct-impact and gate-baseline repairs | this C03 commit / non-force push required | API RED `69 failed`; Agent RED `9 failed`; surface RED `14 failed`; core RED plus two review-driven directory-stability/index RED cycles; focused `503 passed`; affected integration `440 passed, 8 deselected`; full non-slow `4074 passed, 95 deselected`; 24-tool frame `18,895` bytes; Ruff/diff/fsck and changed-file format clean; API, public and final core reviews `0/0/0` | explicit `PYTHONPATH=src`; one existing macOS fork warning; full-tree format baseline still names 52 unchanged files, while all 20 changed/new Python files pass; C04 retains CAD payload hashing | P0B-S06 | accepted-green |
 | P0B-E07 / 2026-07-23T06:54:17Z | P0B-C04 under P0B-R1.1/A01/A02; P0B-D08/D08A/D21 | this C04 commit / non-force push required | comparison collection RED on missing module and public Agent RED `-32603`; focused `484 passed`; affected integration `614 passed, 8 deselected`; full non-slow `4177 passed, 95 deselected`; 26-tool SDK projection `20,201` bytes / SHA-256 `85914806958d15d0a7d5874566936e098729db406ad2002f9903b834904ca58c`; complete frame `20,246` bytes; public receipt `351d7de2676d6299b0ad906155e47525e59152549e3d82499fa4d05f11aacb5d`; Ruff/diff/fsck and 21-file format clean; storage and final integration reviews `0/0`, API audit `37 passed` | semantic geometry/entity/parameter diff remains explicitly unsupported; no CAD/runtime/materialization on read paths; one existing macOS fork warning; full-tree format baseline remains unrelated | P0B-S07 | accepted-green |
 | P0B-E08 / 2026-07-23T07:56:06Z | P0B-C05 under P0B-R1.1/A01/A02; P0B-D10/D21 | this C05 commit / non-force push required | state RED `28 failed`; catalog RED on missing cancel API; two review-driven concurrency/store-race RED cycles; focused `1023 passed`; core with store `1267 passed`; affected public integration `452 passed, 8 deselected`; full non-slow `4385 passed, 95 deselected`; same-intent stress controller `100/100` plus independent `200/200` and `50/50`, all with 16 callers; 27-tool SDK projection `20,717` bytes / SHA-256 `57a38baa2bb79d959037d3066e68468066893b01383cfdd8f77dac447d79e9e8`; complete frame `20,762` bytes / SHA-256 `07e4b2e6be4a3582ffea27b1a194ae6081679448e0f1903b3aaf39b804c86724`; canonical public receipt `627abca4775d57a7a975f385ad95d7ca2d3eb331f2266ffbcf62498456ac2a56`; exact changed-file format/diff/offline-lock/syntax clean; public and state/store/catalog reviews `0/0` | active Worker kill/reconcile remains C12; one existing macOS fork warning; one anchor I001 is excluded only for its unchanged local-import block; full-tree format baseline remains unrelated | P0B-S08 | accepted-green |
+| P0B-E09 / 2026-07-23T09:34:39Z | P0B-C06 under P0B-R1.1/A01/A02; P0B-D09/D21 | this C06 commit / non-force push required | semantic RED and review-repair cycles covered key/intent replay, ancestry, seeded-copy binding, accept-time drift and crash recovery; canonical `466 passed`; storage/candidate `576 passed`; affected public/API integration `636 passed`; final audit `944 passed`; full non-slow `4441 passed, 95 deselected`; real FreeCAD 1.1.0 restart/accept smoke `1 passed`; 28-tool SDK projection `21,438` bytes / SHA-256 `5d7703a55dd7b20c21c487d6f4740fbfb894cf6867c840ccb30adf57de63efda`; complete frame `21,483` bytes / SHA-256 `22c903b05fc6e46868bd74380880cca5c915f312ac2ddf24f7e48896b8cdf826`; canonical public receipt `61a9f6c662ad224147aad07b0d701f82a3407d4ec0b8f15ede48dff76c4c98d3`; changed-file Ruff/format/syntax, diff and fsck clean; API, workflow, storage and final diff reviews `Critical 0 / Important 0` | the published Skill projection remains intentionally frozen at the last accepted 27-tool package until C14 refreshes all release artifacts; first two real-smoke attempts selected the wrong managed prefix and are setup evidence, while the declared legacy-compatible prefix passed; one existing macOS fork warning and one unchanged full-Ruff I001 remain | P0B-S09 | accepted-green |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -1076,6 +1077,81 @@ remain residual and unauthorized.
 - `cancel_requested` and `cancelling` are durable future-path contracts, not a
   claim that C05 can stop active FreeCAD. Review uses Reject, and transport
   request cancellation never mutates TaskRun.
+- Preserve P0B-GATE-CORR-01/02 and continue exact `PYTHONPATH=src` plus
+  changed-file format gates. PR, tag, release, marketplace publication,
+  force-push and external spend remain unauthorized.
+
+## 21. Recovery Snapshot P0B-S09
+
+### 1. Completed milestones
+
+- C06 adds public `revert_project` after `compare_revisions` and before
+  `create_task`. Runtime discovery, MCPB manifest, server and supervisor now
+  expose 28 tools: 22 stable lifecycle/service tools and 6 registry-derived
+  direct CAD tools. The packaged Skill remains frozen until C14 performs the
+  single release-artifact refresh.
+- The exact public intent binds schema version, keyed request, project, source
+  revision and expected current HEAD. Same key and intent replays the existing
+  TaskRun at its current generation before CAD/runtime construction; changed
+  intent conflicts, and a second catalog replay check closes the runtime-gate
+  race.
+- A new operation accepts only a complete historical ancestor of the exact
+  live HEAD. It copies the descriptor-pinned FCStd and sole STEP payload into a
+  seeded candidate based on that HEAD, reloads and verifies the copy, then
+  enters the ordinary review path. Acceptance creates a new forward revision
+  through HEAD CAS; neither the source revision nor the previous HEAD is
+  rewritten.
+- Seed intent and seed binding are fsync-durable, fail closed on missing or
+  altered control records, and are excluded from sealed revisions. Discovery,
+  sealing and acceptance revalidate source ancestry, source/candidate payload
+  identity and crash-recovery state. Source corruption becomes
+  `recovery_required`; candidate tamper remains an ordinary failed task.
+- The canonical public-surface receipt is
+  `61a9f6c662ad224147aad07b0d701f82a3407d4ec0b8f15ede48dff76c4c98d3`.
+  The fixed 28-tool SDK projection is 21,438 bytes with SHA-256
+  `5d7703a55dd7b20c21c487d6f4740fbfb894cf6867c840ccb30adf57de63efda`;
+  its complete JSON-RPC frame is 21,483 bytes with SHA-256
+  `22c903b05fc6e46868bd74380880cca5c915f312ac2ddf24f7e48896b8cdf826`,
+  below the 32,768-byte budget.
+- Controller gates are green: canonical `466 passed`; storage/candidate
+  `576 passed`; affected public/API integration `636 passed`; final independent
+  audit `944 passed`; full non-slow `4441 passed, 95 deselected`; and the
+  installed FreeCAD 1.1.0 AgentApplication restart/accept smoke `1 passed`.
+  Changed-file Ruff, format, syntax, diff and fsck checks pass. Independent
+  API, workflow, storage and final diff reviews returned
+  `Critical 0 / Important 0`.
+
+### 2. Next steps
+
+1. Commit the exact C06 allowlist as
+   `feat(revisions): add verified forward revert`.
+2. Non-force push `codex/agent-stage3`, then verify exact
+   `HEAD == @{upstream}` and remote-ref equality.
+3. Rebind C07 to the accepted remote anchor and prove the macOS peer-euid
+   primitive before implementing authenticated local protocol v2.
+
+### 3. Approved decisions
+
+- P0B-A01/A02 and P0B-D01..D22 plus D08A/D17A/D22-R1 remain active.
+- P0B-D09 fixes revert as a new, verified, reviewable forward revision. It is
+  not HEAD rewind, in-place historical editing, unverified file copy or a
+  second execution system.
+- P0B-D21 covers the directly affected seeded reservation/storage integrity,
+  replay race, strict public result binding, runtime receipt and
+  server/supervisor projections found during C06 review. No product scope,
+  authority or delivery boundary changed.
+
+### 4. Execution discipline
+
+- Replay the existing immutable TaskRun before live HEAD, CAD or runtime
+  checks. A first execution requires the exact expected HEAD and strict
+  historical ancestry; acceptance revalidates both source and candidate.
+- Preserve exact sealed FCStd/STEP bytes on the copy path. Do not checkpoint,
+  export, mutate the source revision, rewind HEAD or treat cleanup as revert.
+- The first two real-smoke runs are retained as setup evidence: one used the
+  managed prefix inside the same runtime root and one violated the test's
+  legacy-prefix contract. The declared legacy-compatible installed FreeCAD
+  prefix passed without product-code relaxation.
 - Preserve P0B-GATE-CORR-01/02 and continue exact `PYTHONPATH=src` plus
   changed-file format gates. PR, tag, release, marketplace publication,
   force-push and external spend remain unauthorized.

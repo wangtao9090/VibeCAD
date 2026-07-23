@@ -17,6 +17,7 @@ EXPECTED_PUBLIC_TOOLS = (
     "list_projects",
     "list_revisions",
     "compare_revisions",
+    "revert_project",
     "create_task",
     "list_tasks",
     "get_task",
@@ -61,6 +62,9 @@ def test_manifest_tools_match_server_registry():
     assert declared == projected
     descriptions = dict(declared)
     assert descriptions["compare_revisions"] == ("比较同一项目两个已提交版本的谱系、清单和制品差异")
+    assert descriptions["revert_project"] == (
+        "复制历史已提交版本，创建基于当前 HEAD 的经验证待审核草案"
+    )
     assert descriptions["get_artifact_manifest"] == (
         "读取任务版本的验证绑定、制品清单和现有交付资源"
     )

@@ -15,6 +15,8 @@ import pytest
 import vibecad.workflow.catalog as catalog_module
 from vibecad.execution.revisions import (
     LocalRevisionStore,
+    RevisionArtifactRef,
+    RevisionRef,
     RevisionStoreRootTrust,
 )
 from vibecad.workflow.catalog import (
@@ -48,10 +50,36 @@ from vibecad.workflow.store import (
 TASK_ID = "task_0123456789abcdef0123456789abcdef"
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
 CREATE_KEY = "task_create_0123456789abcdef0123456789abcdef"
+REVERT_KEY = "revert_create_0123456789abcdef0123456789abcdef"
 KEYED_TASK_ID = "task_e9f9dc52c8f75cd72feddee2648564b8"
 CREATION_DIGEST = "e9f9dc52c8f75cd72feddee2648564b8b4bf0b07836368165d3a0c1fedeee1ef"
 COLLISION_DIGEST = CREATION_DIGEST[:32] + "f" * 32
 CANDIDATE_REVISION = "revision_11111111111111111111111111111111"
+
+
+def _revert_source(revision_id: str = CANDIDATE_REVISION) -> RevisionRef:
+    return RevisionRef(
+        id=revision_id,
+        project_id=PROJECT_ID,
+        base_revision="revision_22222222222222222222222222222222",
+        manifest_sha256="a" * 64,
+        model=RevisionArtifactRef(
+            id="artifact_0123456789abcdef0123456789abcdef",
+            name="model.FCStd",
+            format="fcstd",
+            sha256="b" * 64,
+            size_bytes=10,
+        ),
+        artifacts=(
+            RevisionArtifactRef(
+                id="artifact_11111111111111111111111111111111",
+                name="model.step",
+                format="step",
+                sha256="c" * 64,
+                size_bytes=20,
+            ),
+        ),
+    )
 
 
 def _stores(tmp_path: Path):
@@ -176,6 +204,77 @@ def test_catalog_creates_and_gets_a_task_without_any_cad_port(tmp_path: Path):
         "get_task",
         "reject_draft",
     }
+
+
+def test_catalog_atomically_creates_and_exactly_replays_a_bound_revert(
+    tmp_path: Path,
+) -> None:
+    _leases, tasks, revisions, head = _stores(tmp_path)
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+    source = _revert_source()
+
+    created = catalog.create_revert_task(
+        revert_key=REVERT_KEY,
+        project_id=PROJECT_ID,
+        source_revision=source,
+        expected_head=head,
+    )
+    replayed = catalog.create_revert_task(
+        revert_key=REVERT_KEY,
+        project_id=PROJECT_ID,
+        source_revision=source,
+        expected_head=head,
+    )
+
+    assert replayed == created
+    assert created.generation == 0
+    assert created.task_run.status is TaskStatus.PROGRAM_READY
+    assert created.task_run.review_policy is ReviewPolicy.REQUIRE_REVIEW
+    assert [item.event for item in created.task_run.transitions] == [
+        TaskEvent.REQUEST_PLAN,
+        TaskEvent.SUBMIT_PROGRAM,
+    ]
+    assert created.task_run.program is not None
+    assert created.task_run.program.operations[0].op == "system.restore_revision"
+
+    with pytest.raises(TaskCatalogError) as caught:
+        catalog.create_revert_task(
+            revert_key=REVERT_KEY,
+            project_id=PROJECT_ID,
+            source_revision=_revert_source("revision_33333333333333333333333333333333"),
+            expected_head=head,
+        )
+    assert caught.value.code is TaskCatalogErrorCode.CONFLICT
+
+
+def test_catalog_revert_recovers_exact_program_ready_after_lost_create_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _leases, tasks, revisions, head = _stores(tmp_path)
+    real_create = TaskRunStore.create
+
+    def create_then_lose_reply(store, task):
+        created = real_create(store, task)
+        raise TaskStoreError(
+            TaskStoreErrorCode.DURABILITY_UNCERTAIN,
+            committed_generation=created.generation,
+        )
+
+    monkeypatch.setattr(TaskRunStore, "create", create_then_lose_reply)
+    recovered = TaskCatalogService(
+        task_store=tasks,
+        revision_store=revisions,
+    ).create_revert_task(
+        revert_key=REVERT_KEY,
+        project_id=PROJECT_ID,
+        source_revision=_revert_source(),
+        expected_head=head,
+    )
+
+    assert recovered.generation == 0
+    assert recovered.task_run.status is TaskStatus.PROGRAM_READY
+    assert tasks.load(recovered.task_run.id) == recovered
 
 
 def test_catalog_cancel_is_durable_and_replays_after_response_loss_and_restart(

@@ -7,6 +7,13 @@ from enum import StrEnum
 
 from vibecad.execution.revisions import LocalRevisionStore, ProjectHead
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER
+from vibecad.workflow.revert import (
+    BoundRevert,
+    RevertProgramError,
+    RevertProgramErrorCode,
+    build_revert_binding,
+    parse_bound_revert_task,
+)
 from vibecad.workflow.state import (
     ReasoningOwner,
     ReviewDraft,
@@ -238,6 +245,104 @@ class TaskCatalogService:
             _raise(failure)
         if type(stored) is not StoredTaskRun:
             _raise(TaskCatalogErrorCode.STORE_FAILURE)
+        return stored
+
+    def create_revert_task(
+        self,
+        *,
+        revert_key: str,
+        project_id: str,
+        source_revision: object,
+        expected_head: object,
+    ) -> StoredTaskRun:
+        """Atomically create or exactly replay one system-bound revert task."""
+
+        try:
+            binding = build_revert_binding(
+                revert_key=revert_key,
+                project_id=project_id,
+                source_revision=source_revision,
+                expected_head=expected_head,
+            )
+        except RevertProgramError as error:
+            _raise(
+                TaskCatalogErrorCode.INVALID_INPUT
+                if error.code is RevertProgramErrorCode.INVALID_INPUT
+                else TaskCatalogErrorCode.CONFLICT
+            )
+        return self._create_bound_task(binding)
+
+    def _create_bound_task(self, binding: BoundRevert) -> StoredTaskRun:
+        retry_budget = _ReplayRetryBudget()
+        task: TaskRun | None = None
+        while True:
+            existing = self._load_replay_candidate(
+                binding.task_id,
+                await_publication=False,
+                retry_budget=retry_budget,
+            )
+            if existing is not None:
+                return self._replay_bound_or_conflict(existing, binding)
+            if task is None:
+                try:
+                    task = new_task_run(
+                        task_id=binding.task_id,
+                        project_id=binding.project_id,
+                        base_revision=binding.expected_head.revision_id,
+                        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+                        review_policy=ReviewPolicy.REQUIRE_REVIEW,
+                        creation_digest=binding.creation_digest,
+                    )
+                    task = transition_task(task, TaskEvent.REQUEST_PLAN)
+                    task = transition_task(
+                        task,
+                        TaskEvent.SUBMIT_PROGRAM,
+                        program=binding.program,
+                    )
+                except TaskStateError:
+                    _raise(TaskCatalogErrorCode.INVALID_INPUT)
+            try:
+                stored = self._task_store.create(task)
+            except TaskStoreError as error:
+                if error.code in {
+                    TaskStoreErrorCode.ALREADY_EXISTS,
+                    TaskStoreErrorCode.DURABILITY_UNCERTAIN,
+                }:
+                    readback = self._load_replay_candidate(
+                        binding.task_id,
+                        await_publication=True,
+                        retry_budget=retry_budget,
+                    )
+                    if readback is None:
+                        _raise(TaskCatalogErrorCode.STORE_FAILURE)
+                    return self._replay_bound_or_conflict(readback, binding)
+                if error.code is TaskStoreErrorCode.LOCK_UNAVAILABLE:
+                    if retry_budget.wait_for_retry():
+                        continue
+                    _raise(TaskCatalogErrorCode.STORE_FAILURE)
+                if error.code is TaskStoreErrorCode.INVALID_ID:
+                    _raise(TaskCatalogErrorCode.INVALID_INPUT)
+                if error.code is TaskStoreErrorCode.RESOURCE_EXHAUSTED:
+                    _raise(TaskCatalogErrorCode.RESOURCE_EXHAUSTED)
+                _raise(TaskCatalogErrorCode.STORE_FAILURE)
+            except Exception:
+                _raise(TaskCatalogErrorCode.STORE_FAILURE)
+            if (
+                type(stored) is not StoredTaskRun
+                or stored.generation != 0
+                or stored.task_run != task
+            ):
+                _raise(TaskCatalogErrorCode.STORE_FAILURE)
+            return stored
+
+    @staticmethod
+    def _replay_bound_or_conflict(
+        stored: StoredTaskRun,
+        binding: BoundRevert,
+    ) -> StoredTaskRun:
+        parsed = parse_bound_revert_task(stored)
+        if parsed != binding:
+            _raise(TaskCatalogErrorCode.CONFLICT)
         return stored
 
     def _create_keyed(

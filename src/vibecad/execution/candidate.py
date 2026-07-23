@@ -1505,6 +1505,114 @@ class CandidateCoordinator:
             self._issue(token, "active", active, binding)
             return active
 
+    def begin_seeded_reserved(
+        self,
+        *,
+        project_id: str,
+        expected_head: _ProjectHead,
+        revision_id: str,
+        source_revision: _RevisionRef,
+        reservation_key: str,
+        lease: _ProjectWriteLease,
+    ) -> ActiveCandidate:
+        with self._lock:
+            _require_project(project_id)
+            _require_revision(revision_id)
+            if type(expected_head) is not _ProjectHead or expected_head.project_id != project_id:
+                raise CandidateError(CandidateErrorCode.INVALID_INPUT)
+            if (
+                type(source_revision) is not _RevisionRef
+                or source_revision.project_id != project_id
+                or source_revision.base_revision is None
+            ):
+                raise CandidateError(CandidateErrorCode.INVALID_INPUT)
+            if (
+                type(reservation_key) is not str
+                or _re.fullmatch(
+                    r"[A-Za-z0-9._:-]{1,128}",
+                    reservation_key,
+                )
+                is None
+            ):
+                raise CandidateError(CandidateErrorCode.INVALID_INPUT)
+            if not self._store_lease_is_valid(project_id, lease):
+                raise CandidateError(CandidateErrorCode.INVALID_LEASE)
+            self._require_session_creation_allowed()
+            reservation_code = _validate_candidate_reservation(
+                self._store,
+                project_id,
+                expected_head,
+                revision_id,
+                reservation_key,
+                lease,
+            )
+            if reservation_code is not None:
+                if reservation_code is _RevisionStoreErrorCode.INVALID_LEASE:
+                    raise CandidateError(CandidateErrorCode.INVALID_LEASE)
+                if reservation_code is _RevisionStoreErrorCode.CONFLICT:
+                    raise CandidateError(CandidateErrorCode.CONFLICT)
+                if reservation_code is _RevisionStoreErrorCode.RESOURCE_EXHAUSTED:
+                    raise CandidateError(CandidateErrorCode.RESOURCE_EXHAUSTED)
+                if reservation_code in {
+                    _RevisionStoreErrorCode.RECOVERY_REQUIRED,
+                    _RevisionStoreErrorCode.CLEANUP_REQUIRED,
+                    _RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+                }:
+                    raise CandidateError(
+                        CandidateErrorCode.RECOVERY_REQUIRED,
+                        recovery_required=True,
+                    )
+                raise CandidateError(CandidateErrorCode.STORE_FAILURE)
+            try:
+                self._store.seed_candidate_from_revision(
+                    project_id,
+                    expected_head,
+                    revision_id,
+                    source_revision,
+                    reservation_key,
+                    lease,
+                )
+            except _RevisionStoreError as error:
+                if error.code is _RevisionStoreErrorCode.INVALID_LEASE:
+                    raise CandidateError(CandidateErrorCode.INVALID_LEASE) from None
+                if error.code in {
+                    _RevisionStoreErrorCode.RECOVERY_REQUIRED,
+                    _RevisionStoreErrorCode.CLEANUP_REQUIRED,
+                    _RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+                }:
+                    raise CandidateError(
+                        CandidateErrorCode.RECOVERY_REQUIRED,
+                        recovery_required=True,
+                    ) from None
+                code = CandidateErrorCode.STORE_FAILURE
+                if error.code is _RevisionStoreErrorCode.CONFLICT:
+                    code = CandidateErrorCode.CONFLICT
+                elif error.code in {
+                    _RevisionStoreErrorCode.BUDGET_EXCEEDED,
+                    _RevisionStoreErrorCode.RESOURCE_EXHAUSTED,
+                }:
+                    code = CandidateErrorCode.RESOURCE_EXHAUSTED
+                raise self._cancel_prelineage(
+                    project_id,
+                    revision_id,
+                    lease,
+                    code,
+                ) from None
+            except Exception:
+                raise self._cancel_prelineage(
+                    project_id,
+                    revision_id,
+                    lease,
+                    CandidateErrorCode.STORE_FAILURE,
+                ) from None
+            return self.begin_reserved(
+                project_id=project_id,
+                expected_head=expected_head,
+                revision_id=revision_id,
+                reservation_key=reservation_key,
+                lease=lease,
+            )
+
     def cancel_reservation(
         self,
         *,
@@ -1668,6 +1776,105 @@ class CandidateCoordinator:
             self._issue(token, "checkpointed", checkpointed, replacement)
             return checkpointed
 
+    def adopt_materialized(
+        self,
+        *,
+        candidate: ActiveCandidate,
+        source_revision: _RevisionRef,
+        lease: _ProjectWriteLease,
+    ) -> CheckpointedCandidate:
+        with self._lock:
+            if type(source_revision) is not _RevisionRef or source_revision.base_revision is None:
+                raise CandidateError(CandidateErrorCode.INVALID_INPUT)
+            token, cached = self._lookup(
+                candidate,
+                "active",
+                "adopt_materialized",
+            )
+            if cached is not None:
+                raise CandidateError(CandidateErrorCode.ALREADY_TERMINAL)
+            if source_revision.project_id != candidate.project_id:
+                raise CandidateError(CandidateErrorCode.INVALID_INPUT)
+            self._check_preconditions(token, lease)
+            self._require_session_creation_allowed()
+            try:
+                self._store.validate_candidate_payload(
+                    candidate.project_id,
+                    candidate.binding.revision_id,
+                    source_revision,
+                    lease,
+                )
+            except _RevisionStoreError as error:
+                code = CandidateErrorCode.STORE_FAILURE
+                recovery_required = False
+                if error.code is _RevisionStoreErrorCode.INVALID_LEASE:
+                    code = CandidateErrorCode.INVALID_LEASE
+                elif error.code is _RevisionStoreErrorCode.CONFLICT:
+                    code = CandidateErrorCode.CONFLICT
+                elif error.code in {
+                    _RevisionStoreErrorCode.BUDGET_EXCEEDED,
+                    _RevisionStoreErrorCode.RESOURCE_EXHAUSTED,
+                }:
+                    code = CandidateErrorCode.RESOURCE_EXHAUSTED
+                elif error.code in {
+                    _RevisionStoreErrorCode.RECOVERY_REQUIRED,
+                    _RevisionStoreErrorCode.CLEANUP_REQUIRED,
+                    _RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+                }:
+                    code = CandidateErrorCode.RECOVERY_REQUIRED
+                    recovery_required = True
+                raise self._abort(
+                    token,
+                    lease,
+                    code,
+                    recovery_required=recovery_required,
+                ) from None
+            except Exception:
+                raise self._abort(
+                    token,
+                    lease,
+                    CandidateErrorCode.STORE_FAILURE,
+                ) from None
+            try:
+                session = self._load_fcstd_session(candidate.model_path)
+                replacement = SessionBinding(
+                    project_id=candidate.project_id,
+                    revision_id=candidate.binding.revision_id,
+                    session=session,
+                )
+            except _RevisionStoreError as error:
+                if error.code is _RevisionStoreErrorCode.RECOVERY_REQUIRED:
+                    raise self._abort(
+                        token,
+                        lease,
+                        CandidateErrorCode.RECOVERY_REQUIRED,
+                        recovery_required=True,
+                    ) from None
+                if error.code is _RevisionStoreErrorCode.INVALID_LEASE:
+                    raise self._abort(token, lease, CandidateErrorCode.INVALID_LEASE) from None
+                raise self._abort(token, lease, CandidateErrorCode.CAD_FAILURE) from None
+            except Exception:
+                raise self._abort(token, lease, CandidateErrorCode.CAD_FAILURE) from None
+            if self._aliases_owned(token, replacement):
+                raise self._abort(token, lease, CandidateErrorCode.SESSION_ALIAS)
+            self._add_binding(token, replacement)
+            if self._close_binding(candidate.binding):
+                raise self._abort(
+                    token,
+                    lease,
+                    CandidateErrorCode.CLEANUP_REQUIRED,
+                    cleanup_required=True,
+                )
+            checkpointed = CheckpointedCandidate(
+                project_id=candidate.project_id,
+                base_head=candidate.base_head,
+                binding=replacement,
+                model_path=candidate.model_path,
+                step_path=candidate.step_path,
+            )
+            self._issue(token, "checkpointed", checkpointed, replacement)
+            return checkpointed
+
     def seal(
         self,
         *,
@@ -1688,13 +1895,26 @@ class CandidateCoordinator:
                 )
             except _RevisionStoreError as error:
                 code = CandidateErrorCode.STORE_FAILURE
+                recovery_required = False
                 if error.code is _RevisionStoreErrorCode.RESOURCE_EXHAUSTED:
                     code = CandidateErrorCode.RESOURCE_EXHAUSTED
                 elif error.code is _RevisionStoreErrorCode.INVALID_LEASE:
                     code = CandidateErrorCode.INVALID_LEASE
                 elif error.code is _RevisionStoreErrorCode.CONFLICT:
                     code = CandidateErrorCode.CONFLICT
-                raise self._abort(token, lease, code) from None
+                elif error.code in {
+                    _RevisionStoreErrorCode.RECOVERY_REQUIRED,
+                    _RevisionStoreErrorCode.CLEANUP_REQUIRED,
+                    _RevisionStoreErrorCode.DURABILITY_UNCERTAIN,
+                }:
+                    code = CandidateErrorCode.RECOVERY_REQUIRED
+                    recovery_required = True
+                raise self._abort(
+                    token,
+                    lease,
+                    code,
+                    recovery_required=recovery_required,
+                ) from None
             except Exception:
                 raise self._abort(token, lease, CandidateErrorCode.STORE_FAILURE) from None
             try:

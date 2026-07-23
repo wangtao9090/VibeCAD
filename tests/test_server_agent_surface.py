@@ -59,6 +59,7 @@ STABLE_TOOL_NAMES = (
     "list_projects",
     "list_revisions",
     "compare_revisions",
+    "revert_project",
     "create_task",
     "list_tasks",
     "get_task",
@@ -513,6 +514,7 @@ def test_public_annotations_match_the_independent_product_contract():
         "list_projects": (True, False, True, False),
         "list_revisions": (True, False, True, False),
         "compare_revisions": (True, False, True, False),
+        "revert_project": (False, False, True, False),
         "create_task": (False, False, True, False),
         "list_tasks": (True, False, True, False),
         "get_task": (False, False, True, False),
@@ -561,6 +563,13 @@ def test_every_public_schema_is_closed_complete_and_specialized():
             "project_id",
             "from_revision",
             "to_revision",
+        ),
+        "revert_project": (
+            "schema_version",
+            "revert_key",
+            "project_id",
+            "source_revision",
+            "expected_head",
         ),
         "create_task": ("schema_version", "create_key", "project_id", "review_policy"),
         "list_tasks": ("schema_version",),
@@ -718,6 +727,28 @@ def test_project_discovery_output_schemas_are_bounded_and_exact() -> None:
 
 def test_revision_compare_and_artifact_manifest_schemas_are_closed_and_exact() -> None:
     specs = _spec_by_name(_surface_module().public_tool_specs())
+
+    revert = specs["revert_project"]
+    assert revert.description == "复制历史已提交版本，创建基于当前 HEAD 的经验证待审核草案"
+    assert tuple(revert.input_schema["properties"]) == (
+        "schema_version",
+        "revert_key",
+        "project_id",
+        "source_revision",
+        "expected_head",
+    )
+    assert revert.input_schema["properties"]["revert_key"] == {
+        "type": "string",
+        "pattern": r"^revert_create_[0-9a-f]{32}$",
+    }
+    assert revert.input_schema["properties"]["expected_head"] == {
+        "type": "string",
+        "pattern": r"^revision_[0-9a-f]{32}$",
+    }
+    assert (
+        revert.output_schema["properties"]["result"]["anyOf"][0]
+        == specs["create_task"].output_schema["properties"]["result"]["anyOf"][0]
+    )
 
     compare_input = specs["compare_revisions"].input_schema
     assert tuple(compare_input["properties"]) == (
@@ -1231,7 +1262,7 @@ def test_low_level_tools_list_is_exact_sdk_projection_of_public_specs() -> None:
 def test_every_discovered_tool_has_a_nonempty_single_line_description() -> None:
     result = anyio.run(_server_module()._handle_list_tools)
 
-    assert len(result.tools) == 27
+    assert len(result.tools) == 28
     for tool in result.tools:
         assert type(tool.description) is str, tool.name
         assert tool.description == tool.description.strip(), tool.name
@@ -1261,7 +1292,7 @@ def test_owned_tools_list_fixed_frame_fits_the_discovery_budget() -> None:
         + b"\n"
     )
     assert response["id"] == 1
-    assert len(frame) == 20_762
+    assert len(frame) == 21_483
     assert len(frame) <= 32_768
 
 
@@ -1276,7 +1307,7 @@ def test_discovery_omits_optional_output_schema_from_every_tool() -> None:
     response = server._owned_dispatch_descriptor(descriptor)
     assert response is not None
     tools = response["result"]["tools"]
-    assert len(tools) == 27
+    assert len(tools) == 28
     assert all("outputSchema" not in tool for tool in tools)
 
 
@@ -2278,6 +2309,17 @@ def _model_program_for_server_surface() -> dict[str, object]:
                 "project_id": PROJECT_ID,
                 "from_revision": BASE_REVISION,
                 "to_revision": OTHER_REVISION,
+            },
+        ),
+        (
+            "revert_project",
+            "revert_project_request",
+            {
+                "schema_version": 1,
+                "revert_key": "revert_create_0123456789abcdef0123456789abcdef",
+                "project_id": PROJECT_ID,
+                "source_revision": OTHER_REVISION,
+                "expected_head": BASE_REVISION,
             },
         ),
         (

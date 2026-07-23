@@ -28,6 +28,7 @@ def test_tool_annotation_safety_mapping_is_independent_and_exact() -> None:
         "list_projects": (True, False, True, False),
         "list_revisions": (True, False, True, False),
         "compare_revisions": (True, False, True, False),
+        "revert_project": (False, False, True, False),
         "create_task": (False, False, True, False),
         "list_tasks": (True, False, True, False),
         "get_task": (False, False, True, False),
@@ -82,10 +83,10 @@ def test_live_sdk_projection_matches_independent_frozen_digest_and_has_no_extras
         sort_keys=True,
     ).encode("utf-8")
 
-    assert len(raw) == 20_717
+    assert len(raw) == 21_438
     assert len(raw) <= 32_768
     assert hashlib.sha256(raw).hexdigest() == (
-        "57a38baa2bb79d959037d3066e68468066893b01383cfdd8f77dac447d79e9e8"
+        "5d7703a55dd7b20c21c487d6f4740fbfb894cf6867c840ccb30adf57de63efda"
     )
     for tool in tools:
         assert tool.title is None

@@ -1088,6 +1088,7 @@ _VERIFICATION_PATTERN = r"^verification_[0-9a-f]{32}$"
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
 _CREATE_KEY_PATTERN = r"^project_create_[0-9a-f]{32}$"
 _TASK_CREATE_KEY_PATTERN = r"^task_create_[0-9a-f]{32}$"
+_REVERT_CREATE_KEY_PATTERN = r"^revert_create_[0-9a-f]{32}$"
 _PROJECT_LIST_CURSOR_PATTERN = r"^project_list_cursor_[0-9a-f]{64}$"
 _REVISION_LIST_CURSOR_PATTERN = r"^revision_list_cursor_[0-9a-f]{64}$"
 _TASK_LIST_CURSOR_PATTERN = r"^task_list_cursor_[0-9a-f]{64}$"
@@ -1109,6 +1110,7 @@ _STABLE_TOOL_NAMES = (
     "list_projects",
     "list_revisions",
     "compare_revisions",
+    "revert_project",
     "create_task",
     "list_tasks",
     "get_task",
@@ -1134,6 +1136,7 @@ _STABLE_TOOL_DESCRIPTIONS = MappingProxyType(
         "list_projects": "分页发现持久化项目的当前已提交版本摘要",
         "list_revisions": "分页读取指定项目当前 HEAD 的已提交祖先版本摘要",
         "compare_revisions": "比较同一项目两个已提交版本的谱系、清单和制品差异",
+        "revert_project": "复制历史已提交版本，创建基于当前 HEAD 的经验证待审核草案",
         "create_task": "在指定项目版本上创建可验收任务",
         "list_tasks": "分页发现可恢复的持久化任务摘要",
         "get_task": "读取任务的持久化状态与证据",
@@ -2299,6 +2302,16 @@ def _stable_input_schema(name: str) -> dict[str, object]:
                 "to_revision": _id_schema(_REVISION_PATTERN),
             }
         )
+    if name == "revert_project":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "revert_key": _id_schema(_REVERT_CREATE_KEY_PATTERN),
+                "project_id": _id_schema(_PROJECT_PATTERN),
+                "source_revision": _id_schema(_REVISION_PATTERN),
+                "expected_head": _id_schema(_REVISION_PATTERN),
+            }
+        )
     if name == "create_task":
         return _closed_schema(
             {
@@ -2417,6 +2430,7 @@ def _stable_result_schema(name: str) -> dict[str, object]:
     if name == "compare_revisions":
         return _revision_compare_result_schema()
     if name in {
+        "revert_project",
         "create_task",
         "get_task",
         "submit_model_program",
@@ -2449,6 +2463,7 @@ def _stable_annotations(name: str) -> ToolAnnotations:
         "list_projects": (True, False, True, False),
         "list_revisions": (True, False, True, False),
         "compare_revisions": (True, False, True, False),
+        "revert_project": (False, False, True, False),
         "create_task": (False, False, True, False),
         "list_tasks": (True, False, True, False),
         "get_task": (False, False, True, False),

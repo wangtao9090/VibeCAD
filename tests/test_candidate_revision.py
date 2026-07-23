@@ -415,6 +415,60 @@ def _begin(rig: Rig) -> ActiveCandidate:
     )
 
 
+def _commit_rig_payload(
+    rig: Rig,
+    head: ProjectHead,
+    *,
+    model: bytes,
+    step: bytes,
+) -> tuple[RevisionRef, ProjectHead]:
+    revision_id = rig.store.begin_revision(PROJECT_ID, head, rig.lease)
+    rig.store.candidate_model_path(PROJECT_ID, revision_id, rig.lease).write_bytes(model)
+    rig.store.candidate_artifact_path(
+        PROJECT_ID,
+        revision_id,
+        "step",
+        rig.lease,
+    ).write_bytes(step)
+    revision = rig.store.seal_revision(PROJECT_ID, revision_id, rig.lease)
+    committed = rig.store.commit_revision(PROJECT_ID, head, revision_id, rig.lease)
+    return (revision, committed)
+
+
+def _install_seeded_history(rig: Rig) -> RevisionRef:
+    source, source_head = _commit_rig_payload(
+        rig,
+        rig.head,
+        model=b"historical-seeded-model",
+        step=b"historical-seeded-step",
+    )
+    _current, current_head = _commit_rig_payload(
+        rig,
+        source_head,
+        model=b"current-model",
+        step=b"current-step",
+    )
+    current_session = FakeSession("current-baseline", b"current-model")
+    current_binding = SessionBinding(
+        project_id=PROJECT_ID,
+        revision_id=current_head.revision_id,
+        session=current_session,
+    )
+    slot = SessionSlot(current_binding)
+    port = FakeCadSnapshotPort()
+    rig.head = current_head
+    rig.baseline = current_session
+    rig.baseline_binding = current_binding
+    rig.slot = slot
+    rig.port = port
+    rig.coordinator = CandidateCoordinator(
+        store=rig.store,
+        snapshot_port=port,
+        session_slot=slot,
+    )
+    return source
+
+
 def test_pre_cas_reservation_is_replay_safe_and_enters_cad_only_when_activated(
     tmp_path: Path,
 ) -> None:
@@ -782,6 +836,247 @@ def test_begin_reserved_baseline_drift_cleans_reservation_before_lineage(
         assert rig.port.calls == []
 
 
+def test_seeded_candidate_adoption_preserves_exact_payload_without_checkpoint(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="seeded-adoption") as rig:
+        source = _install_seeded_history(rig)
+        reservation_key = "revert:" + "d" * 64
+        revision_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=reservation_key,
+            lease=rig.lease,
+        )
+        active = rig.coordinator.begin_seeded_reserved(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            revision_id=revision_id,
+            source_revision=source,
+            reservation_key=reservation_key,
+            lease=rig.lease,
+        )
+        assert active.model_path.read_bytes() == b"historical-seeded-model"
+        assert active.step_path.read_bytes() == b"historical-seeded-step"
+        exact_before = (active.model_path.read_bytes(), active.step_path.read_bytes())
+        assert [call[0] for call in rig.port.calls] == ["load_fcstd"]
+
+        checkpointed = rig.coordinator.adopt_materialized(
+            candidate=active,
+            source_revision=source,
+            lease=rig.lease,
+        )
+        assert type(checkpointed) is CheckpointedCandidate
+        assert checkpointed.binding.session.payload == b"historical-seeded-model"
+        assert active.binding.session.closed is True
+        assert (active.model_path.read_bytes(), active.step_path.read_bytes()) == exact_before
+        assert [call[0] for call in rig.port.calls] == [
+            "load_fcstd",
+            "load_fcstd",
+            "close",
+        ]
+        assert not any(call[0] == "checkpoint_fcstd" for call in rig.port.calls)
+
+        sealed = rig.coordinator.seal(candidate=checkpointed, lease=rig.lease)
+        assert sealed.revision.base_revision == rig.head.revision_id
+        assert sealed.revision.model is not None
+        assert sealed.revision.model.sha256 == source.model.sha256
+        assert sealed.revision.model.size_bytes == source.model.size_bytes
+        assert sealed.revision.artifacts[0].sha256 == source.artifacts[0].sha256
+        assert sealed.revision.artifacts[0].size_bytes == source.artifacts[0].size_bytes
+        assert not any(call[0] == "checkpoint_fcstd" for call in rig.port.calls)
+        rig.coordinator.rollback(candidate=sealed, lease=rig.lease)
+
+
+def test_seeded_reservation_cancel_cleans_unbound_intent_and_quota_owner(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="seeded-reservation-cancel") as rig:
+        reservation_key = "revert:" + "7" * 64
+        revision_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=reservation_key,
+            lease=rig.lease,
+        )
+        assert len(tuple(rig.store._root.rglob("seed-intent.json"))) == 1
+        assert tuple(rig.store._root.rglob("seed-binding.json")) == ()
+
+        result = rig.coordinator.cancel_reservation(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            revision_id=revision_id,
+            reservation_key=reservation_key,
+            lease=rig.lease,
+        )
+        assert result.status is CandidateRollbackStatus.NOT_COMMITTED
+        assert tuple(rig.store._root.rglob("seed-intent.json")) == ()
+        assert tuple(rig.store._root.rglob("seed-binding.json")) == ()
+        assert tuple(rig.store._root.rglob("reservation.json")) == ()
+        assert not any(path.is_dir() for path in rig.store._root.rglob("candidates/*"))
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        ("reload", CandidateErrorCode.CAD_FAILURE),
+        ("alias", CandidateErrorCode.SESSION_ALIAS),
+        ("close", CandidateErrorCode.CLEANUP_REQUIRED),
+    ],
+)
+def test_seeded_adoption_failures_close_or_retain_with_exact_attention(
+    tmp_path: Path,
+    failure: str,
+    expected_code: CandidateErrorCode,
+) -> None:
+    with _rig(tmp_path, suffix=f"seeded-adoption-{failure}") as rig:
+        source = _install_seeded_history(rig)
+        reservation_key = "revert:" + "e" * 64
+        revision_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=reservation_key,
+            lease=rig.lease,
+        )
+        active = rig.coordinator.begin_seeded_reserved(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            revision_id=revision_id,
+            source_revision=source,
+            reservation_key=reservation_key,
+            lease=rig.lease,
+        )
+        if failure == "reload":
+            rig.port.fail_load_number = 2
+        elif failure == "alias":
+            rig.port.load_aliases[2] = active.binding.session
+        else:
+            rig.port.close_failures.add(id(active.binding.session))
+
+        with pytest.raises(CandidateError) as captured:
+            rig.coordinator.adopt_materialized(
+                candidate=active,
+                source_revision=source,
+                lease=rig.lease,
+            )
+        error = _assert_candidate_error(captured, expected_code)
+        if failure == "close":
+            assert error.cleanup_required is True
+        assert rig.store.load_head(PROJECT_ID) == rig.head
+        assert rig.slot.current() is rig.baseline_binding
+        assert not any(call[0] == "checkpoint_fcstd" for call in rig.port.calls)
+        assert tuple(rig.store._root.rglob("reservation.json")) == ()
+
+
+def test_seeded_begin_and_adoption_reject_binding_and_payload_tamper(
+    tmp_path: Path,
+) -> None:
+    with _rig(tmp_path, suffix="seeded-binding-tamper") as rig:
+        source = _install_seeded_history(rig)
+        reservation_key = "revert:" + "f" * 64
+        revision_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=reservation_key,
+            lease=rig.lease,
+        )
+        with pytest.raises(CandidateError) as captured:
+            rig.coordinator.begin_seeded_reserved(
+                project_id=PROJECT_ID,
+                expected_head=rig.head,
+                revision_id=revision_id,
+                source_revision=source,
+                reservation_key="revert:" + "0" * 64,
+                lease=rig.lease,
+            )
+        _assert_candidate_error(captured, CandidateErrorCode.CONFLICT)
+        assert rig.port.calls == []
+
+        active = rig.coordinator.begin_seeded_reserved(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            revision_id=revision_id,
+            source_revision=source,
+            reservation_key=reservation_key,
+            lease=rig.lease,
+        )
+        active.model_path.write_bytes(b"tampered-after-load")
+        with pytest.raises(CandidateError) as captured:
+            rig.coordinator.adopt_materialized(
+                candidate=active,
+                source_revision=source,
+                lease=rig.lease,
+            )
+        _assert_candidate_error(captured, CandidateErrorCode.STORE_FAILURE)
+        assert rig.store.load_head(PROJECT_ID) == rig.head
+        assert rig.slot.current() is rig.baseline_binding
+        assert tuple(rig.store._root.rglob("reservation.json")) == ()
+        assert not any(call[0] == "checkpoint_fcstd" for call in rig.port.calls)
+
+
+@pytest.mark.parametrize("phase", ["begin", "adopt", "seal"])
+def test_seeded_source_corruption_remains_recovery_required(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    with _rig(tmp_path, suffix=f"seeded-source-corruption-{phase}") as rig:
+        source = _install_seeded_history(rig)
+        reservation_key = "revert:" + "4" * 64
+        revision_id = rig.coordinator.reserve_candidate(
+            project_id=PROJECT_ID,
+            expected_head=rig.head,
+            reservation_key=reservation_key,
+            lease=rig.lease,
+        )
+        source_model = rig.store.revision_model_path(PROJECT_ID, source.id)
+        active = None
+        checkpointed = None
+        if phase == "adopt" or phase == "seal":
+            active = rig.coordinator.begin_seeded_reserved(
+                project_id=PROJECT_ID,
+                expected_head=rig.head,
+                revision_id=revision_id,
+                source_revision=source,
+                reservation_key=reservation_key,
+                lease=rig.lease,
+            )
+        if phase == "seal":
+            checkpointed = rig.coordinator.adopt_materialized(
+                candidate=active,
+                source_revision=source,
+                lease=rig.lease,
+            )
+        source_model.write_bytes(b"corrupt-source-after-binding")
+
+        with pytest.raises(CandidateError) as captured:
+            if phase == "begin":
+                rig.coordinator.begin_seeded_reserved(
+                    project_id=PROJECT_ID,
+                    expected_head=rig.head,
+                    revision_id=revision_id,
+                    source_revision=source,
+                    reservation_key=reservation_key,
+                    lease=rig.lease,
+                )
+            elif phase == "adopt":
+                assert type(active) is ActiveCandidate
+                rig.coordinator.adopt_materialized(
+                    candidate=active,
+                    source_revision=source,
+                    lease=rig.lease,
+                )
+            else:
+                assert type(checkpointed) is CheckpointedCandidate
+                rig.coordinator.seal(candidate=checkpointed, lease=rig.lease)
+        error = _assert_candidate_error(captured, CandidateErrorCode.RECOVERY_REQUIRED)
+        assert error.recovery_required is True
+        assert rig.store.load_head(PROJECT_ID) == rig.head
+        assert rig.slot.current() is rig.baseline_binding
+        assert not any(call[0] == "checkpoint_fcstd" for call in rig.port.calls)
+        if phase == "begin":
+            assert len(tuple(rig.store._root.rglob("reservation.json"))) == 1
+
+
 def test_file_limit_restore_failure_remains_candidate_recovery_required(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1133,6 +1428,15 @@ def test_public_surface_signatures_and_closed_enums() -> None:
             "reservation_key",
             "lease",
         ),
+        "begin_seeded_reserved": (
+            "self",
+            "project_id",
+            "expected_head",
+            "revision_id",
+            "source_revision",
+            "reservation_key",
+            "lease",
+        ),
         "cancel_reservation": (
             "self",
             "project_id",
@@ -1142,6 +1446,7 @@ def test_public_surface_signatures_and_closed_enums() -> None:
             "lease",
         ),
         "checkpoint": ("self", "candidate", "lease"),
+        "adopt_materialized": ("self", "candidate", "source_revision", "lease"),
         "seal": ("self", "candidate", "lease"),
         "reopen_review": ("self", "project_id", "base_head", "revision", "lease"),
         "prepare_review": ("self", "candidate", "lease"),
@@ -1182,6 +1487,15 @@ def test_public_surface_signatures_and_closed_enums() -> None:
             "lease": ProjectWriteLease,
             "return": ActiveCandidate,
         },
+        "begin_seeded_reserved": {
+            "project_id": str,
+            "expected_head": ProjectHead,
+            "revision_id": str,
+            "source_revision": RevisionRef,
+            "reservation_key": str,
+            "lease": ProjectWriteLease,
+            "return": ActiveCandidate,
+        },
         "cancel_reservation": {
             "project_id": str,
             "expected_head": ProjectHead,
@@ -1192,6 +1506,12 @@ def test_public_surface_signatures_and_closed_enums() -> None:
         },
         "checkpoint": {
             "candidate": ActiveCandidate,
+            "lease": ProjectWriteLease,
+            "return": CheckpointedCandidate,
+        },
+        "adopt_materialized": {
+            "candidate": ActiveCandidate,
+            "source_revision": RevisionRef,
             "lease": ProjectWriteLease,
             "return": CheckpointedCandidate,
         },
@@ -2834,10 +3154,10 @@ def test_seal_store_uncertainty_issues_no_handle_and_reconciles_exactly_once(
         before = tuple(rig.port.calls)
         with pytest.raises(CandidateError) as caught:
             rig.coordinator.seal(candidate=checkpointed, lease=rig.lease)
-        error = _assert_candidate_error(caught, CandidateErrorCode.STORE_FAILURE)
+        error = _assert_candidate_error(caught, CandidateErrorCode.RECOVERY_REQUIRED)
         assert error.head_committed is False
         assert error.cleanup_required is False
-        assert error.recovery_required is False
+        assert error.recovery_required is True
         assert seal_calls == 1
         assert rollback_calls + reconcile_calls == 1
         assert rig.store.load_head(PROJECT_ID) == rig.head
@@ -7407,8 +7727,10 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         "begin",
         "reserve_candidate",
         "begin_reserved",
+        "begin_seeded_reserved",
         "cancel_reservation",
         "checkpoint",
+        "adopt_materialized",
         "seal",
         "reopen_review",
         "prepare_review",
@@ -7567,7 +7889,9 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         "reconcile",
         "revision_model_path",
         "rollback_revision",
+        "seed_candidate_from_revision",
         "seal_revision",
+        "validate_candidate_payload",
         "validate_project_write_lease",
     }
     snapshot_port_calls = {"checkpoint_fcstd", "close", "create_empty", "load_fcstd"}
@@ -7581,8 +7905,10 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         "begin",
         "reserve_candidate",
         "begin_reserved",
+        "begin_seeded_reserved",
         "cancel_reservation",
         "checkpoint",
+        "adopt_materialized",
         "seal",
         "reopen_review",
         "prepare_review",
@@ -7684,7 +8010,7 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
         if isinstance(node, ast.Name):
             return (function_node, node.id) in trusted_path_names
         return (
-            function_node.name == "checkpoint"
+            function_node.name in {"checkpoint", "adopt_materialized"}
             and isinstance(node, ast.Attribute)
             and node.attr == "model_path"
             and isinstance(node.value, ast.Name)
@@ -7783,10 +8109,17 @@ def test_source_boundary_has_no_session_private_cad_network_or_serialization_esc
             assert isinstance(receiver, (ast.Attribute, ast.Name))
             continue
         if node.func.attr in {"begin_reserved", "reserve_candidate"}:
-            assert enclosing_function_node(node) is class_method(
-                "CandidateCoordinator",
-                "begin",
-            )
+            function_node = enclosing_function_node(node)
+            if node.func.attr == "reserve_candidate":
+                assert function_node is class_method(
+                    "CandidateCoordinator",
+                    "begin",
+                )
+            else:
+                assert function_node in {
+                    class_method("CandidateCoordinator", "begin"),
+                    class_method("CandidateCoordinator", "begin_seeded_reserved"),
+                }
             assert isinstance(receiver, ast.Name) and receiver.id == "self"
             continue
         if node.func.attr in coordinator_session_helpers:

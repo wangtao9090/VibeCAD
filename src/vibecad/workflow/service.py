@@ -30,7 +30,9 @@ from vibecad.execution.revisions import (
     ProjectHead,
     ReconciliationResult,
     ReconciliationStatus,
+    RevisionAncestrySnapshot,
     RevisionRef,
+    RevisionSnapshotEntry,
     RevisionStoreError,
     RevisionStoreErrorCode,
     _candidate_file_limit,
@@ -49,6 +51,16 @@ from vibecad.workflow.catalog import (
 )
 from vibecad.workflow.contracts import ErrorCategory, ModelProgram, StepError
 from vibecad.workflow.lease import LeaseError, ResourceLeaseManager
+from vibecad.workflow.revert import (
+    BoundRevert,
+    RevertProgramError,
+    RevertProgramErrorCode,
+    build_revert_binding,
+    parse_bound_revert_task,
+    require_matching_revert_task,
+    revert_payload_matches_source,
+    revert_task_identity,
+)
 from vibecad.workflow.state import (
     ReasoningOwner,
     ReviewDraft,
@@ -223,6 +235,7 @@ _CATALOG_ERROR_MAP = {
     TaskCatalogErrorCode.CONFLICT: TaskServiceErrorCode.CONFLICT,
     TaskCatalogErrorCode.STORE_FAILURE: TaskServiceErrorCode.STORE_FAILURE,
     TaskCatalogErrorCode.RESOURCE_EXHAUSTED: TaskServiceErrorCode.RESOURCE_EXHAUSTED,
+    TaskCatalogErrorCode.RECOVERY_REQUIRED: TaskServiceErrorCode.RECOVERY_REQUIRED,
 }
 
 
@@ -360,6 +373,195 @@ class TaskService:
     def get_task(self, *, task_id: str) -> StoredTaskRun:
         return _catalog_call(lambda: self._catalog.get_task(task_id=task_id))
 
+    def revert_project(
+        self,
+        *,
+        revert_key: str,
+        project_id: str,
+        source_revision: str,
+        expected_head: str,
+    ) -> StoredTaskRun:
+        """Create or replay one verified forward restore through normal review."""
+
+        replay = self._load_revert_replay(
+            revert_key=revert_key,
+            project_id=project_id,
+            source_revision=source_revision,
+            expected_head=expected_head,
+        )
+        if replay is not None:
+            stored, binding = replay
+            if stored.task_run.status is not TaskStatus.PROGRAM_READY:
+                return stored
+            return self._continue_bound_revert(stored, binding)
+
+        lease = self._acquire(project_id)
+        result: StoredTaskRun | None = None
+        caught: TaskServiceError | None = None
+        try:
+            try:
+                replay = self._load_revert_replay(
+                    revert_key=revert_key,
+                    project_id=project_id,
+                    source_revision=source_revision,
+                    expected_head=expected_head,
+                )
+                if replay is not None:
+                    stored, binding = replay
+                    if stored.task_run.status is TaskStatus.PROGRAM_READY:
+                        result = self._continue_bound_revert_with_lease(
+                            stored,
+                            binding,
+                            lease,
+                        )
+                    else:
+                        result = stored
+                else:
+                    head = self._guard_runtime_head(project_id)
+                    if head.revision_id != expected_head:
+                        _raise(TaskServiceErrorCode.CONFLICT)
+                    source = self._load_revert_source(
+                        project_id=project_id,
+                        source_revision=source_revision,
+                        head=head,
+                    )
+                    try:
+                        binding = build_revert_binding(
+                            revert_key=revert_key,
+                            project_id=project_id,
+                            source_revision=source,
+                            expected_head=head,
+                        )
+                    except RevertProgramError as error:
+                        _raise(
+                            TaskServiceErrorCode.INVALID_INPUT
+                            if error.code is RevertProgramErrorCode.INVALID_INPUT
+                            else TaskServiceErrorCode.CONFLICT
+                        )
+                    stored = _catalog_call(
+                        lambda: self._catalog.create_revert_task(
+                            revert_key=revert_key,
+                            project_id=project_id,
+                            source_revision=source,
+                            expected_head=head,
+                        )
+                    )
+                    parsed = parse_bound_revert_task(stored)
+                    if parsed != binding:
+                        _raise(TaskServiceErrorCode.CONFLICT)
+                    if stored.task_run.status is TaskStatus.PROGRAM_READY:
+                        result = self._continue_bound_revert_with_lease(
+                            stored,
+                            binding,
+                            lease,
+                        )
+                    else:
+                        result = stored
+            except TaskServiceError as error:
+                caught = error
+            except Exception:
+                caught = TaskServiceError(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        finally:
+            release_failed = self._release(lease)
+        if release_failed:
+            _raise(TaskServiceErrorCode.LEASE_UNAVAILABLE)
+        if caught is not None:
+            raise caught from None
+        if result is None:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        return self._publish_review_if_prepared(result)
+
+    def _load_revert_replay(
+        self,
+        *,
+        revert_key: str,
+        project_id: str,
+        source_revision: str,
+        expected_head: str,
+    ) -> tuple[StoredTaskRun, BoundRevert] | None:
+        try:
+            task_id, _creation_digest = revert_task_identity(revert_key)
+        except RevertProgramError:
+            _raise(TaskServiceErrorCode.INVALID_INPUT)
+        try:
+            stored = self._catalog.get_task(task_id=task_id)
+        except TaskCatalogError as error:
+            if error.code is TaskCatalogErrorCode.NOT_FOUND:
+                return None
+            raise TaskServiceError(_CATALOG_ERROR_MAP[error.code]) from None
+        try:
+            binding = require_matching_revert_task(
+                stored,
+                revert_key=revert_key,
+                project_id=project_id,
+                source_revision=source_revision,
+                expected_head=expected_head,
+            )
+        except RevertProgramError as error:
+            _raise(
+                TaskServiceErrorCode.INVALID_INPUT
+                if error.code is RevertProgramErrorCode.INVALID_INPUT
+                else TaskServiceErrorCode.CONFLICT
+            )
+        return (stored, binding)
+
+    def _load_revert_source(
+        self,
+        *,
+        project_id: str,
+        source_revision: str,
+        head: ProjectHead,
+    ) -> RevisionRef:
+        if type(source_revision) is not str:
+            _raise(TaskServiceErrorCode.INVALID_INPUT)
+        if source_revision == head.revision_id:
+            _raise(TaskServiceErrorCode.INVALID_INPUT)
+        try:
+            ancestry = self._revision_store.snapshot_revisions(project_id)
+        except RevisionStoreError as error:
+            if error.code is RevisionStoreErrorCode.NOT_FOUND:
+                _raise(TaskServiceErrorCode.NOT_FOUND)
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        except Exception:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        if not (
+            type(ancestry) is RevisionAncestrySnapshot
+            and ancestry.project_id == project_id
+            and ancestry.head == head
+            and type(ancestry.revisions) is tuple
+        ):
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        matches = tuple(
+            entry
+            for entry in ancestry.revisions
+            if type(entry) is RevisionSnapshotEntry and entry.id == source_revision
+        )
+        if len(matches) != 1:
+            _raise(TaskServiceErrorCode.NOT_FOUND)
+        entry = matches[0]
+        if entry.base_revision is None:
+            _raise(TaskServiceErrorCode.INVALID_INPUT)
+        try:
+            source = self._revision_store.load_revision(project_id, source_revision)
+        except RevisionStoreError as error:
+            if error.code is RevisionStoreErrorCode.NOT_FOUND:
+                _raise(TaskServiceErrorCode.NOT_FOUND)
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        except Exception:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        if not (
+            type(source) is RevisionRef
+            and source.id == entry.id
+            and source.project_id == entry.project_id == project_id
+            and source.base_revision == entry.base_revision
+            and source.manifest_sha256 == entry.manifest_sha256
+            and source.model is not None
+            and type(source.artifacts) is tuple
+            and len(source.artifacts) == 1
+        ):
+            _raise(TaskServiceErrorCode.INVALID_INPUT)
+        return source
+
     def accept_draft(
         self,
         *,
@@ -491,11 +693,109 @@ class TaskService:
         program = stored.task_run.program
         if type(program) is not ModelProgram:
             _raise(TaskServiceErrorCode.INVALID_STATE)
+        binding = parse_bound_revert_task(stored)
+        if binding is not None:
+            return self._continue_bound_revert(stored, binding)
         preflight = self._preflight(program)
         if preflight is None:
             return self._reject_validation(stored)
         compiled, validated = preflight
         return self._continue_preflighted(stored, compiled, validated)
+
+    def _continue_bound_revert(
+        self,
+        stored: StoredTaskRun,
+        binding: BoundRevert,
+    ) -> StoredTaskRun:
+        lease = self._acquire(binding.project_id)
+        result: StoredTaskRun | None = None
+        caught: TaskServiceError | None = None
+        try:
+            try:
+                result = self._continue_bound_revert_with_lease(stored, binding, lease)
+            except TaskServiceError as error:
+                caught = error
+            except Exception:
+                caught = TaskServiceError(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        finally:
+            release_failed = self._release(lease)
+        if release_failed:
+            _raise(TaskServiceErrorCode.LEASE_UNAVAILABLE)
+        if caught is not None:
+            raise caught from None
+        if result is None:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        return self._publish_review_if_prepared(result)
+
+    def _continue_bound_revert_with_lease(
+        self,
+        stored: StoredTaskRun,
+        binding: BoundRevert,
+        lease: object,
+    ) -> StoredTaskRun:
+        if (
+            stored.task_run.status is not TaskStatus.PROGRAM_READY
+            or parse_bound_revert_task(stored) != binding
+        ):
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        head = self._guard_runtime_head(binding.project_id)
+        if head != binding.expected_head:
+            _raise(TaskServiceErrorCode.CONFLICT)
+        source = self._load_revert_source(
+            project_id=binding.project_id,
+            source_revision=binding.source_revision.id,
+            head=head,
+        )
+        if source != binding.source_revision:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        try:
+            compiled = compile_acceptance_spec(binding.program.acceptance)
+        except Exception:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        revision_id = self._reserve_candidate(
+            project_id=binding.project_id,
+            expected_head=head,
+            reservation_key=binding.reservation_key,
+            lease=lease,
+        )
+        try:
+            validating = self._cas(
+                stored,
+                transition_task(stored.task_run, TaskEvent.START_VALIDATION),
+            )
+        except (TaskServiceError, TaskStateError) as error:
+            clean = self._cancel_unused_reservation(
+                project_id=binding.project_id,
+                expected_head=head,
+                revision_id=revision_id,
+                reservation_key=binding.reservation_key,
+                lease=lease,
+            )
+            if not clean:
+                _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+            if isinstance(error, TaskServiceError):
+                raise error
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        return self._run_bound_revert_with_lease(
+            validating,
+            binding,
+            source,
+            compiled,
+            lease,
+            head,
+            revision_id=revision_id,
+        )
+
+    def _publish_review_if_prepared(self, stored: StoredTaskRun) -> StoredTaskRun:
+        if stored.task_run.status is not TaskStatus.PREPARING_REVIEW:
+            return stored
+        try:
+            return self._cas(
+                stored,
+                transition_task(stored.task_run, TaskEvent.PUBLISH_DRAFT),
+            )
+        except (TaskServiceError, TaskStateError):
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
 
     @staticmethod
     def _program_within_budget(program: ModelProgram) -> bool:
@@ -1158,6 +1458,30 @@ class TaskService:
                 TaskEvent.REQUIRE_RECOVERY,
                 integrity=True,
             )
+        revert = parse_bound_revert_task(task)
+        if revert is not None:
+            try:
+                source = self._revision_store.load_revision(
+                    task.project_id,
+                    revert.source_revision.id,
+                )
+            except Exception:
+                source = None
+            if not (
+                revert.expected_head == expected_head
+                and type(source) is RevisionRef
+                and source == revert.source_revision
+                and revert_payload_matches_source(
+                    revision,
+                    source,
+                    expected_head=expected_head,
+                )
+            ):
+                return self._review_attention(
+                    accepting,
+                    TaskEvent.REQUIRE_RECOVERY,
+                    integrity=True,
+                )
 
         review_candidate: object | None = None
         prepared = False
@@ -1217,6 +1541,241 @@ class TaskService:
                 )
             return self._post_receipt_attention(accepting)
         return self._finish_commit(accepting, review_candidate, result)
+
+    @staticmethod
+    def _revert_evidence_matches(
+        evidence: CandidateEvidence,
+        revision: RevisionRef,
+        source: RevisionRef,
+        expected_head: ProjectHead,
+    ) -> bool:
+        if not (
+            type(evidence) is CandidateEvidence
+            and revert_payload_matches_source(
+                revision,
+                source,
+                expected_head=expected_head,
+            )
+            and revision.model is not None
+            and len(evidence.artifacts) == 2
+        ):
+            return False
+        revision_artifacts = (revision.model,) + revision.artifacts
+        return all(
+            task_artifact.candidate_revision == revision.id
+            and task_artifact.id == revision_artifact.id
+            and task_artifact.name == revision_artifact.name
+            and task_artifact.format == revision_artifact.format
+            and task_artifact.sha256 == revision_artifact.sha256
+            and task_artifact.size_bytes == revision_artifact.size_bytes
+            for task_artifact, revision_artifact in zip(
+                evidence.artifacts,
+                revision_artifacts,
+                strict=True,
+            )
+        )
+
+    def _run_bound_revert_with_lease(
+        self,
+        validating: StoredTaskRun,
+        binding: BoundRevert,
+        source: RevisionRef,
+        compiled: CompiledAcceptance,
+        lease: object,
+        head: ProjectHead,
+        *,
+        revision_id: str,
+    ) -> StoredTaskRun:
+        task = validating.task_run
+        if (
+            parse_bound_revert_task(task) != binding
+            or head != binding.expected_head
+            or source != binding.source_revision
+        ):
+            if not self._cancel_unused_reservation(
+                project_id=task.project_id,
+                expected_head=head,
+                revision_id=revision_id,
+                reservation_key=binding.reservation_key,
+                lease=lease,
+            ):
+                _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+            return self._reject_pre_candidate(validating, _PRE_CANDIDATE_CONFLICT)
+
+        try:
+            active = self._coordinator.begin_seeded_reserved(
+                project_id=task.project_id,
+                expected_head=head,
+                revision_id=revision_id,
+                reservation_key=binding.reservation_key,
+                source_revision=source,
+                lease=lease,
+            )
+        except CandidateError as error:
+            event = _attention_event(error)
+            if event is not None:
+                return self._persist_attention(validating, event)
+            if error.code is CandidateErrorCode.CONFLICT:
+                return self._reject_pre_candidate(validating, _PRE_CANDIDATE_CONFLICT)
+            if error.code is CandidateErrorCode.RESOURCE_EXHAUSTED:
+                _raise(TaskServiceErrorCode.RESOURCE_EXHAUSTED)
+            return self._reject_pre_candidate(validating, _BEGIN_FAILURE)
+        except Exception:
+            return self._reject_pre_candidate(validating, _BEGIN_FAILURE)
+
+        try:
+            executing = self._cas(
+                validating,
+                transition_task(
+                    validating.task_run,
+                    TaskEvent.VALIDATE_PROGRAM,
+                    candidate_revision=active.binding.revision_id,
+                ),
+            )
+        except (TaskServiceError, TaskStateError) as error:
+            return self._abort_unpublished(validating, active, lease, error)
+
+        current = executing
+        current_candidate = active
+        try:
+            current_candidate = self._coordinator.adopt_materialized(
+                candidate=current_candidate,
+                source_revision=source,
+                lease=lease,
+            )
+            current_candidate = self._coordinator.seal(
+                candidate=current_candidate,
+                lease=lease,
+            )
+            revision = current_candidate.revision
+            reloaded = self._revision_store.load_revision(task.project_id, revision.id)
+            if (
+                type(reloaded) is not RevisionRef
+                or reloaded != revision
+                or revision.id == source.id
+                or not revert_payload_matches_source(
+                    revision,
+                    source,
+                    expected_head=head,
+                )
+            ):
+                raise ValueError
+            evidence = self._executor.collect_evidence(candidate=current_candidate)
+            if not self._revert_evidence_matches(evidence, revision, source, head):
+                raise ValueError
+            for artifact in evidence.artifacts:
+                current = self._cas(current, append_artifact(current.task_run, artifact))
+            current = self._cas(
+                current,
+                transition_task(current.task_run, TaskEvent.COMPLETE_EXECUTION),
+            )
+        except Exception as error:
+            return self._fail_published(
+                current,
+                current_candidate,
+                lease,
+                _EXECUTION_FAILURE,
+                error,
+            )
+
+        try:
+            verification = verify_acceptance(
+                compiled,
+                evidence.snapshot,
+                candidate_revision=current_candidate.revision.id,
+                manifest_sha256=current_candidate.revision.manifest_sha256,
+            )
+            if type(verification) is not VerificationResult:
+                raise TypeError
+        except Exception as error:
+            return self._fail_published(
+                current,
+                current_candidate,
+                lease,
+                _VERIFICATION_FAILURE,
+                error,
+            )
+        if not verification.report.passed:
+            try:
+                current = self._cas(
+                    current,
+                    append_verification(current.task_run, verification.report),
+                )
+            except (TaskServiceError, TaskStateError) as error:
+                return self._fail_published(
+                    current,
+                    current_candidate,
+                    lease,
+                    _VERIFICATION_FAILURE,
+                    error,
+                )
+            return self._fail_published(
+                current,
+                current_candidate,
+                lease,
+                _VERIFICATION_FAILURE,
+                _VERIFICATION_FAILURE,
+            )
+        if current.task_run.review_policy is not ReviewPolicy.REQUIRE_REVIEW:
+            return self._fail_published(
+                current,
+                current_candidate,
+                lease,
+                _VERIFICATION_FAILURE,
+                _VERIFICATION_FAILURE,
+            )
+
+        revision = current_candidate.revision
+        draft = ReviewDraft(
+            id=f"draft_{revision.id.removeprefix('revision_')}",
+            task_id=current.task_run.id,
+            project_id=current.task_run.project_id,
+            base_revision=head.revision_id,
+            base_generation=head.generation,
+            base_manifest_sha256=head.manifest_sha256,
+            revision_id=revision.id,
+            manifest_sha256=revision.manifest_sha256,
+            verification_id=verification.report.id,
+            acceptance_id=verification.report.acceptance_id,
+            observation_digest=verification.report.observation_digest,
+        )
+        try:
+            preparing = self._cas(
+                current,
+                transition_task(
+                    current.task_run,
+                    TaskEvent.PREPARE_REVIEW,
+                    verification=verification.report,
+                    draft=draft,
+                ),
+            )
+        except (TaskServiceError, TaskStateError) as error:
+            return self._fail_published(
+                current,
+                current_candidate,
+                lease,
+                _VERIFICATION_FAILURE,
+                error,
+            )
+        try:
+            published = self._coordinator.publish_review(
+                candidate=current_candidate,
+                receipt=verification.receipt,
+                compiled=compiled,
+                snapshot=evidence.snapshot,
+                lease=lease,
+            )
+        except Exception as error:
+            event = _attention_event(error) or TaskEvent.REQUIRE_RECOVERY
+            return self._review_attention(preparing, event)
+        if not self._review_is_durably_detached(
+            preparing.task_run,
+            draft,
+            published,
+        ):
+            event = _attention_event(published) or TaskEvent.REQUIRE_RECOVERY
+            return self._review_attention(preparing, event)
+        return preparing
 
     def _run_with_lease(
         self,

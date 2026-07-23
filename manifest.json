@@ -34,6 +34,7 @@
     { "name": "list_projects", "description": "分页发现持久化项目的当前已提交版本摘要" },
     { "name": "list_revisions", "description": "分页读取指定项目当前 HEAD 的已提交祖先版本摘要" },
     { "name": "compare_revisions", "description": "比较同一项目两个已提交版本的谱系、清单和制品差异" },
+    { "name": "revert_project", "description": "复制历史已提交版本，创建基于当前 HEAD 的经验证待审核草案" },
     { "name": "create_task", "description": "在指定项目版本上创建可验收任务" },
     { "name": "list_tasks", "description": "分页发现可恢复的持久化任务摘要" },
     { "name": "get_task", "description": "读取任务的持久化状态与证据" },

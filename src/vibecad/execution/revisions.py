@@ -71,10 +71,14 @@ _HEAD_CHECKSUM_DOMAIN = b"vibecad-project-head-v1\0"
 _JOURNAL_CHECKSUM_DOMAIN = b"vibecad-commit-journal-v1\0"
 _RESERVATION_CHECKSUM_DOMAIN = b"vibecad-revision-reservation-v1\0"
 _RESERVATION_KEY_DOMAIN = b"vibecad-revision-reservation-key-v1\0"
+_SEED_INTENT_CHECKSUM_DOMAIN = b"vibecad-revision-seed-intent-v1\0"
+_SEED_BINDING_CHECKSUM_DOMAIN = b"vibecad-revision-seed-binding-v1\0"
 _QUOTA_RESOURCE_ID = "vibecad-revision-quota-v1"
 _QUOTA_DIRECTORY = ".revision-quota"
 _RESERVATIONS_DIRECTORY = "reservations"
 _RESERVATION_RECORD = "reservation.json"
+_SEED_INTENT_RECORD = "seed-intent.json"
+_SEED_BINDING_RECORD = "seed-binding.json"
 _QUOTA_OWNER_CONFLICT = ("conflicting_reservation_owner",)
 _CAD_FILE_LIMIT_RESOURCE = "vibecad-candidate-file-limit-v1"
 _DISCOVERY_NAMESPACE_DOMAIN = b"vibecad-revision-discovery-namespace-v1\0"
@@ -2718,7 +2722,7 @@ def _parse_reservation_body(body):
         expected_head is None
         or expected_head.project_id != body["project_id"]
         or ceiling != _CANDIDATE_RESERVATION_BYTES
-        or ceiling_files != 8
+        or ceiling_files not in {8, 9}
     ):
         return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
     if body["state"] not in {"reserved", "staged", "publishing", "published"}:
@@ -2789,7 +2793,12 @@ def _quota_entry_allowed(relative, name, is_directory):
     if depth == 3 and relative[1] == "revisions":
         return not is_directory and name in {"model.FCStd", "model.step", "manifest.json"}
     if depth == 3 and relative[1] == "candidates":
-        return not is_directory and name in {"model.FCStd", "model.step"}
+        return not is_directory and name in {
+            "model.FCStd",
+            "model.step",
+            _SEED_INTENT_RECORD,
+            _SEED_BINDING_RECORD,
+        }
     return False
 
 
@@ -3329,7 +3338,12 @@ def _quota_create_initial_namespace(
     return code
 
 
-def _quota_create_candidate_namespace(store, candidates_fd, candidate_name):
+def _quota_create_candidate_namespace(
+    store,
+    candidates_fd,
+    candidate_name,
+    seed_intent_raw,
+):
     quota = _acquire_quota_lease(store)
     if quota[1] is not None:
         return quota[1]
@@ -3348,6 +3362,12 @@ def _quota_create_candidate_namespace(store, candidates_fd, candidate_name):
             code = _create_empty_file(candidate_fd, "model.FCStd")
         if code is None:
             code = _create_empty_file(candidate_fd, "model.step")
+        if code is None and seed_intent_raw is not None:
+            code = _create_durable_file(
+                candidate_fd,
+                _SEED_INTENT_RECORD,
+                seed_intent_raw,
+            )
         if code is None:
             try:
                 os.fsync(candidate_fd)
@@ -4769,6 +4789,8 @@ def _cleanup_candidate_dir(candidates_fd, candidate_name, root_device):
     candidate_fd = opened[0]
     failed = _best_unlink(candidate_fd, "model.FCStd")
     failed = _best_unlink(candidate_fd, "model.step") or failed
+    failed = _best_unlink(candidate_fd, _SEED_INTENT_RECORD) or failed
+    failed = _best_unlink(candidate_fd, _SEED_BINDING_RECORD) or failed
     failed = _close_fd(candidate_fd) or failed
     failed = _best_rmdir(candidates_fd, candidate_name) or failed
     sync_failed = False
@@ -4894,6 +4916,13 @@ def _reserve_candidate_revision(store, project_id, expected_head, reservation_ke
         _close_fd(root_open[0])
         raise RevisionStoreError(RevisionStoreErrorCode.INVALID_IDENTIFIER)
     candidate_name = _candidate_key(revision_id)
+    seeded_reservation = bool(
+        type(reservation_key) is str
+        and re.fullmatch(r"revert:[0-9a-f]{64}", reservation_key) is not None
+    )
+    ceiling_files = 8
+    if seeded_reservation:
+        ceiling_files = 9
     reservation_returned = False
     try:
         reserved = _reserve_quota(
@@ -4904,7 +4933,7 @@ def _reserve_candidate_revision(store, project_id, expected_head, reservation_ke
             revision_id,
             reservation_key,
             None,
-            8,
+            ceiling_files,
         )
         reservation_returned = True
     finally:
@@ -4917,6 +4946,19 @@ def _reserve_candidate_revision(store, project_id, expected_head, reservation_ke
         raise RevisionStoreError(reserved[2])
     revision_id = reserved[0]["revision_id"]
     candidate_name = _candidate_key(revision_id)
+    seed_intent_raw = None
+    if seeded_reservation:
+        seed_key_result = _reservation_key_digest(reservation_key)
+        if seed_key_result[1] is None:
+            seed_intent_raw = _checked_record_bytes(
+                _seed_intent_body(
+                    project_id,
+                    revision_id,
+                    expected_head,
+                    seed_key_result[0],
+                ),
+                _SEED_INTENT_CHECKSUM_DOMAIN,
+            )
     if reserved[1]:
         if reserved[0]["state"] == "published":
             _close_project_fds(project_open)
@@ -4931,7 +4973,12 @@ def _reserve_candidate_revision(store, project_id, expected_head, reservation_ke
             _close_project_fds(project_open)
             _close_fd(root_open[0])
             raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
-    namespace_code = _quota_create_candidate_namespace(store, candidates_fd, candidate_name)
+    namespace_code = _quota_create_candidate_namespace(
+        store,
+        candidates_fd,
+        candidate_name,
+        seed_intent_raw,
+    )
     if namespace_code is not None:
         cleanup_failed = _quota_cleanup_candidate(
             store,
@@ -5305,6 +5352,1085 @@ def _candidate_authority(store, project_id, revision_id, lease):
     return (root_open, project_open, None)
 
 
+def _seed_reservation_key_digest(value):
+    if type(value) is not str or re.fullmatch(r"revert:[0-9a-f]{64}", value) is None:
+        return (None, RevisionStoreErrorCode.INVALID_INPUT)
+    return _reservation_key_digest(value)
+
+
+def _seed_intent_body(project_id, revision_id, expected_head, key_sha256):
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "project_id": project_id,
+        "candidate_revision": revision_id,
+        "expected_head": _head_mapping(expected_head),
+        "key_sha256": key_sha256,
+    }
+
+
+def _seed_binding_body(
+    project_id,
+    revision_id,
+    expected_head,
+    expected_source,
+    key_sha256,
+):
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "project_id": project_id,
+        "candidate_revision": revision_id,
+        "expected_head": _head_mapping(expected_head),
+        "source_revision": _revision_mapping(expected_source),
+        "key_sha256": key_sha256,
+    }
+
+
+def _seed_intent_from_body(body):
+    expected = (
+        "schema_version",
+        "project_id",
+        "candidate_revision",
+        "expected_head",
+        "key_sha256",
+    )
+    if not _mapping_has_exact(body, expected):
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    if type(body["schema_version"]) is not int or body["schema_version"] != _SCHEMA_VERSION:
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    if _identifier_code(body["project_id"], _PROJECT_PATTERN) is not None:
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    if _identifier_code(body["candidate_revision"], _REVISION_PATTERN) is not None:
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    if _digest_code(body["key_sha256"]) is not None:
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    head_result = _head_from_record(body["expected_head"])
+    if head_result[1] is not None:
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    if (
+        head_result[0].project_id != body["project_id"]
+        or head_result[0].revision_id == body["candidate_revision"]
+    ):
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    return (
+        {
+            "project_id": body["project_id"],
+            "candidate_revision": body["candidate_revision"],
+            "expected_head": head_result[0],
+            "key_sha256": body["key_sha256"],
+        },
+        None,
+    )
+
+
+def _seed_binding_from_body(body):
+    expected = (
+        "schema_version",
+        "project_id",
+        "candidate_revision",
+        "expected_head",
+        "source_revision",
+        "key_sha256",
+    )
+    if not _mapping_has_exact(body, expected):
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    intent_result = _seed_intent_from_body(
+        {
+            "schema_version": body["schema_version"],
+            "project_id": body["project_id"],
+            "candidate_revision": body["candidate_revision"],
+            "expected_head": body["expected_head"],
+            "key_sha256": body["key_sha256"],
+        }
+    )
+    if intent_result[1] is not None:
+        return (None, intent_result[1])
+    source = None
+    try:
+        source = _revision_from_mapping(body["source_revision"])
+    except RevisionStoreError:
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    if (
+        _seed_source_code(body["project_id"], source) is not None
+        or source.id == intent_result[0]["expected_head"].revision_id
+    ):
+        return (None, RevisionStoreErrorCode.CORRUPT_RECORD)
+    value = dict(intent_result[0])
+    value["source_revision"] = source
+    return (value, None)
+
+
+def _read_seed_control(candidate_fd, root_device, name, domain, bound):
+    raw = _read_bounded_file(
+        candidate_fd,
+        name,
+        root_device,
+        _MAX_JOURNAL_BYTES,
+        RevisionStoreErrorCode.NOT_FOUND,
+    )
+    if raw[1] is RevisionStoreErrorCode.NOT_FOUND:
+        return (None, RevisionStoreErrorCode.NOT_FOUND)
+    if raw[1] is not None:
+        return (None, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    checked = _parse_checked_record(raw[0], domain, _MAX_JOURNAL_BYTES)
+    if checked[1] is not None:
+        return (None, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    parsed = _seed_intent_from_body(checked[0])
+    if bound:
+        parsed = _seed_binding_from_body(checked[0])
+    if parsed[1] is not None:
+        return (None, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    return parsed
+
+
+def _seed_control_binding_code(
+    value,
+    project_id,
+    revision_id,
+    expected_head,
+    key_sha256,
+):
+    if (
+        value["project_id"] != project_id
+        or value["candidate_revision"] != revision_id
+        or value["expected_head"] != expected_head
+        or value["key_sha256"] != key_sha256
+    ):
+        return RevisionStoreErrorCode.CONFLICT
+    return None
+
+
+def _quota_create_seed_binding(store, candidate_fd, raw):
+    quota = _acquire_quota_lease(store)
+    if quota[1] is not None:
+        return quota[1]
+    code = None
+    release_code = None
+    try:
+        code = _create_durable_file(candidate_fd, _SEED_BINDING_RECORD, raw)
+        if code is None:
+            try:
+                os.fsync(candidate_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    finally:
+        release_code = _release_quota_lease(quota[0])
+    if code is not None or release_code is not None:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return None
+
+
+def _bind_seed_source(
+    store,
+    candidate_fd,
+    root_device,
+    project_id,
+    revision_id,
+    expected_head,
+    expected_source,
+    key_sha256,
+):
+    binding = _read_seed_control(
+        candidate_fd,
+        root_device,
+        _SEED_BINDING_RECORD,
+        _SEED_BINDING_CHECKSUM_DOMAIN,
+        True,
+    )
+    if binding[1] is not None and binding[1] is not RevisionStoreErrorCode.NOT_FOUND:
+        return binding[1]
+    intent = _read_seed_control(
+        candidate_fd,
+        root_device,
+        _SEED_INTENT_RECORD,
+        _SEED_INTENT_CHECKSUM_DOMAIN,
+        False,
+    )
+    if intent[1] is not None and intent[1] is not RevisionStoreErrorCode.NOT_FOUND:
+        return intent[1]
+    if binding[1] is None:
+        code = _seed_control_binding_code(
+            binding[0],
+            project_id,
+            revision_id,
+            expected_head,
+            key_sha256,
+        )
+        if code is None and binding[0]["source_revision"] != expected_source:
+            code = RevisionStoreErrorCode.CONFLICT
+        if code is not None:
+            return code
+        if intent[1] is None:
+            code = _seed_control_binding_code(
+                intent[0],
+                project_id,
+                revision_id,
+                expected_head,
+                key_sha256,
+            )
+            if code is not None:
+                return code
+            if _quota_unlink_file(store, candidate_fd, _SEED_INTENT_RECORD):
+                return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        return None
+    if intent[1] is RevisionStoreErrorCode.NOT_FOUND:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    code = _seed_control_binding_code(
+        intent[0],
+        project_id,
+        revision_id,
+        expected_head,
+        key_sha256,
+    )
+    if code is not None:
+        return code
+    raw = _checked_record_bytes(
+        _seed_binding_body(
+            project_id,
+            revision_id,
+            expected_head,
+            expected_source,
+            key_sha256,
+        ),
+        _SEED_BINDING_CHECKSUM_DOMAIN,
+    )
+    code = _quota_create_seed_binding(store, candidate_fd, raw)
+    if code is not None:
+        return code
+    binding = _read_seed_control(
+        candidate_fd,
+        root_device,
+        _SEED_BINDING_RECORD,
+        _SEED_BINDING_CHECKSUM_DOMAIN,
+        True,
+    )
+    if binding[1] is not None:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    code = _seed_control_binding_code(
+        binding[0],
+        project_id,
+        revision_id,
+        expected_head,
+        key_sha256,
+    )
+    if code is None and binding[0]["source_revision"] != expected_source:
+        code = RevisionStoreErrorCode.CONFLICT
+    if code is not None:
+        return code
+    if _quota_unlink_file(store, candidate_fd, _SEED_INTENT_RECORD):
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return None
+
+
+def _validate_seed_binding(
+    candidate_fd,
+    root_device,
+    project_id,
+    revision_id,
+    expected_head,
+    expected_source,
+    key_sha256,
+):
+    binding = _read_seed_control(
+        candidate_fd,
+        root_device,
+        _SEED_BINDING_RECORD,
+        _SEED_BINDING_CHECKSUM_DOMAIN,
+        True,
+    )
+    if binding[1] is not None:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    intent = _read_seed_control(
+        candidate_fd,
+        root_device,
+        _SEED_INTENT_RECORD,
+        _SEED_INTENT_CHECKSUM_DOMAIN,
+        False,
+    )
+    if intent[1] is not RevisionStoreErrorCode.NOT_FOUND:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    code = _seed_control_binding_code(
+        binding[0],
+        project_id,
+        revision_id,
+        expected_head,
+        key_sha256,
+    )
+    if code is None and binding[0]["source_revision"] != expected_source:
+        code = RevisionStoreErrorCode.CONFLICT
+    return code
+
+
+def _seed_seal_source(
+    candidate_fd,
+    revisions_fd,
+    root_device,
+    project_id,
+    revision_id,
+    expected_head,
+    key_sha256,
+    seeded_required,
+):
+    intent = _read_seed_control(
+        candidate_fd,
+        root_device,
+        _SEED_INTENT_RECORD,
+        _SEED_INTENT_CHECKSUM_DOMAIN,
+        False,
+    )
+    binding = _read_seed_control(
+        candidate_fd,
+        root_device,
+        _SEED_BINDING_RECORD,
+        _SEED_BINDING_CHECKSUM_DOMAIN,
+        True,
+    )
+    if (
+        intent[1] is RevisionStoreErrorCode.NOT_FOUND
+        and binding[1] is RevisionStoreErrorCode.NOT_FOUND
+    ):
+        if seeded_required:
+            return (None, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        return (None, None)
+    if intent[1] is not RevisionStoreErrorCode.NOT_FOUND or binding[1] is not None:
+        return (None, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    code = _seed_control_binding_code(
+        binding[0],
+        project_id,
+        revision_id,
+        expected_head,
+        key_sha256,
+    )
+    if code is None:
+        code = _strict_source_ancestry_code(
+            revisions_fd,
+            root_device,
+            project_id,
+            expected_head,
+            binding[0]["source_revision"],
+            True,
+        )
+    payload = None
+    if code is None:
+        payload_result = _open_candidate_payload_readonly(candidate_fd, root_device)
+        payload = payload_result[0]
+        code = payload_result[1]
+    if code is None:
+        code = _validate_open_candidate_payload(
+            candidate_fd,
+            payload,
+            binding[0]["source_revision"],
+        )
+    close_failed = _close_candidate_payload(payload)
+    if code is None and close_failed:
+        code = RevisionStoreErrorCode.IO_ERROR
+    if code is not None:
+        return (None, code)
+    return (binding[0]["source_revision"], None)
+
+
+def _source_integrity_code(code):
+    if (
+        code is RevisionStoreErrorCode.NOT_FOUND
+        or code is RevisionStoreErrorCode.CORRUPT_RECORD
+        or code is RevisionStoreErrorCode.CORRUPT_CONTENT
+        or code is RevisionStoreErrorCode.UNSAFE_STORE
+    ):
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return code
+
+
+def _strict_source_ancestry_code(
+    revisions_fd,
+    root_device,
+    project_id,
+    expected_head,
+    expected_source,
+    bound_source,
+):
+    head_result = _load_revision_fd(
+        revisions_fd,
+        root_device,
+        project_id,
+        expected_head.revision_id,
+    )
+    if head_result[1] is not None:
+        return _source_integrity_code(head_result[1])
+    if head_result[0].manifest_sha256 != expected_head.manifest_sha256:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    current = head_result[0].base_revision
+    traversed = 0
+    while current is not None:
+        traversed += 1
+        if traversed > _MAX_REVISIONS:
+            return RevisionStoreErrorCode.RECOVERY_REQUIRED
+        loaded = _load_revision_fd(
+            revisions_fd,
+            root_device,
+            project_id,
+            current,
+        )
+        if loaded[1] is not None:
+            return _source_integrity_code(loaded[1])
+        if loaded[0].id == expected_source.id:
+            if loaded[0] != expected_source:
+                if bound_source:
+                    return RevisionStoreErrorCode.RECOVERY_REQUIRED
+                return RevisionStoreErrorCode.CONFLICT
+            return None
+        current = loaded[0].base_revision
+    if bound_source:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    return RevisionStoreErrorCode.CONFLICT
+
+
+def _seed_source_code(project_id, expected_source):
+    if type(expected_source) is not RevisionRef:
+        return RevisionStoreErrorCode.INVALID_INPUT
+    if expected_source.project_id != project_id:
+        return RevisionStoreErrorCode.INVALID_INPUT
+    if expected_source.base_revision is None or expected_source.model is None:
+        return RevisionStoreErrorCode.INVALID_INPUT
+    if type(expected_source.artifacts) is not type(()) or len(expected_source.artifacts) != 1:
+        return RevisionStoreErrorCode.INVALID_INPUT
+    if expected_source.model.name != "model.FCStd" or expected_source.model.format != "fcstd":
+        return RevisionStoreErrorCode.INVALID_INPUT
+    step = expected_source.artifacts[0]
+    if step.name != "model.step" or step.format != "step":
+        return RevisionStoreErrorCode.INVALID_INPUT
+    return None
+
+
+def _close_source_payload(source):
+    failed = False
+    if source is None:
+        return failed
+    failed = _close_fd(source[4]) or failed
+    failed = _close_fd(source[2]) or failed
+    failed = _close_fd(source[0]) or failed
+    return failed
+
+
+def _open_expected_source_payload(
+    revisions_fd,
+    root_device,
+    project_id,
+    expected_source,
+):
+    loaded = _load_revision_fd(
+        revisions_fd,
+        root_device,
+        project_id,
+        expected_source.id,
+    )
+    if loaded[1] is not None:
+        return (None, loaded[1])
+    if loaded[0] != expected_source:
+        return (None, RevisionStoreErrorCode.CONFLICT)
+    opened = _open_revision_directory(
+        revisions_fd,
+        root_device,
+        expected_source.id,
+    )
+    if opened[1] is not None:
+        return (None, opened[1])
+    source_fd = opened[0]
+    source_stat = None
+    try:
+        source_stat = os.fstat(source_fd)
+    except OSError:
+        _close_fd(source_fd)
+        return (None, RevisionStoreErrorCode.IO_ERROR)
+    if not _safe_directory_stat(source_stat, root_device):
+        _close_fd(source_fd)
+        return (None, RevisionStoreErrorCode.UNSAFE_STORE)
+    model_open = _open_checked_file(
+        source_fd,
+        "model.FCStd",
+        root_device,
+        _MAX_FILE_BYTES,
+        RevisionStoreErrorCode.CORRUPT_CONTENT,
+        False,
+    )
+    if model_open[2] is not None:
+        _close_fd(source_fd)
+        return (None, model_open[2])
+    step_open = _open_checked_file(
+        source_fd,
+        "model.step",
+        root_device,
+        _MAX_FILE_BYTES,
+        RevisionStoreErrorCode.CORRUPT_CONTENT,
+        False,
+    )
+    if step_open[2] is not None:
+        close_failed = _close_fd(model_open[0])
+        close_failed = _close_fd(source_fd) or close_failed
+        if close_failed:
+            return (None, RevisionStoreErrorCode.IO_ERROR)
+        return (None, step_open[2])
+    source = (
+        source_fd,
+        source_stat,
+        model_open[0],
+        model_open[1],
+        step_open[0],
+        step_open[1],
+    )
+    code = _hash_pinned_file(
+        source_fd,
+        "model.FCStd",
+        source[2],
+        source[3],
+        expected_source.model.size_bytes,
+        expected_source.model.sha256,
+        _COPY_CHUNK_BYTES,
+    )
+    if code is None:
+        code = _hash_pinned_file(
+            source_fd,
+            "model.step",
+            source[4],
+            source[5],
+            expected_source.artifacts[0].size_bytes,
+            expected_source.artifacts[0].sha256,
+            _COPY_CHUNK_BYTES,
+        )
+    if code is not None:
+        _close_source_payload(source)
+        return (None, code)
+    return (source, None)
+
+
+def _validate_expected_source_payload(
+    revisions_fd,
+    root_device,
+    project_id,
+    expected_source,
+    source,
+):
+    code = _hash_pinned_file(
+        source[0],
+        "model.FCStd",
+        source[2],
+        source[3],
+        expected_source.model.size_bytes,
+        expected_source.model.sha256,
+        _COPY_CHUNK_BYTES,
+    )
+    if code is not None:
+        return code
+    code = _hash_pinned_file(
+        source[0],
+        "model.step",
+        source[4],
+        source[5],
+        expected_source.artifacts[0].size_bytes,
+        expected_source.artifacts[0].sha256,
+        _COPY_CHUNK_BYTES,
+    )
+    if code is not None:
+        return code
+    directory_code = _discovery_directory_pin_code(
+        revisions_fd,
+        _revision_key(expected_source.id),
+        source[0],
+        source[1],
+        root_device,
+    )
+    if directory_code is not None:
+        return directory_code
+    loaded = _load_revision_fd(
+        revisions_fd,
+        root_device,
+        project_id,
+        expected_source.id,
+    )
+    if loaded[1] is not None:
+        return loaded[1]
+    if loaded[0] != expected_source:
+        return RevisionStoreErrorCode.CONFLICT
+    return None
+
+
+def _open_seed_destination(candidate_fd, root_device, name):
+    before = _entry_stat(candidate_fd, name)
+    if before[2] is not None:
+        return (None, None, before[2])
+    if not before[1]:
+        return (None, None, RevisionStoreErrorCode.NOT_FOUND)
+    if not _safe_immutable_stat(before[0], root_device):
+        return (None, None, RevisionStoreErrorCode.UNSAFE_STORE)
+    file_fd = None
+    try:
+        file_fd = os.open(
+            name,
+            os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+            dir_fd=candidate_fd,
+        )
+    except OSError:
+        return (None, None, RevisionStoreErrorCode.IO_ERROR)
+    try:
+        opened_stat = os.fstat(file_fd)
+    except OSError:
+        _close_fd(file_fd)
+        return (None, None, RevisionStoreErrorCode.IO_ERROR)
+    if not _safe_immutable_stat(opened_stat, root_device):
+        _close_fd(file_fd)
+        return (None, None, RevisionStoreErrorCode.UNSAFE_STORE)
+    if not _same_copy_file_stat(before[0], opened_stat):
+        _close_fd(file_fd)
+        return (None, None, RevisionStoreErrorCode.UNSAFE_STORE)
+    return (file_fd, opened_stat, None)
+
+
+def _copy_source_to_seed_destination(
+    source_parent_fd,
+    source_name,
+    source_fd,
+    source_stat,
+    destination_parent_fd,
+    destination_name,
+    destination_fd,
+    reference,
+    root_device,
+):
+    failed = False
+    try:
+        os.lseek(source_fd, 0, os.SEEK_SET)
+        os.ftruncate(destination_fd, 0)
+        os.lseek(destination_fd, 0, os.SEEK_SET)
+    except OSError:
+        failed = True
+    remaining = reference.size_bytes
+    copied_hash = hashlib.sha256()
+    while remaining > 0 and not failed:
+        maximum = min(_COPY_CHUNK_BYTES, remaining)
+        chunk = None
+        try:
+            chunk = os.read(source_fd, maximum)
+        except OSError:
+            failed = True
+        if not failed:
+            chunk_size = _byte_count(chunk, maximum)
+            if chunk_size <= 0 or chunk_size > remaining:
+                failed = True
+            elif not _write_all(destination_fd, chunk):
+                failed = True
+            else:
+                copied_hash.update(chunk)
+                remaining -= chunk_size
+    if not failed:
+        try:
+            os.fchmod(destination_fd, 384)
+            os.fsync(destination_fd)
+        except OSError:
+            failed = True
+    if failed:
+        return RevisionStoreErrorCode.IO_ERROR
+    if copied_hash.hexdigest() != reference.sha256:
+        return RevisionStoreErrorCode.RECOVERY_REQUIRED
+    source_code = _hash_pinned_file(
+        source_parent_fd,
+        source_name,
+        source_fd,
+        source_stat,
+        reference.size_bytes,
+        reference.sha256,
+        _COPY_CHUNK_BYTES,
+    )
+    if source_code is not None:
+        return _source_integrity_code(source_code)
+    try:
+        destination_stat = os.fstat(destination_fd)
+    except OSError:
+        return RevisionStoreErrorCode.IO_ERROR
+    if not _safe_immutable_stat(destination_stat, root_device):
+        return RevisionStoreErrorCode.UNSAFE_STORE
+    return _hash_pinned_file(
+        destination_parent_fd,
+        destination_name,
+        destination_fd,
+        destination_stat,
+        reference.size_bytes,
+        reference.sha256,
+        _COPY_CHUNK_BYTES,
+    )
+
+
+def _open_candidate_payload(candidate_fd, root_device):
+    model = _open_seed_destination(candidate_fd, root_device, "model.FCStd")
+    if model[2] is not None:
+        return (None, model[2])
+    step = _open_seed_destination(candidate_fd, root_device, "model.step")
+    if step[2] is not None:
+        close_failed = _close_fd(model[0])
+        if close_failed:
+            return (None, RevisionStoreErrorCode.IO_ERROR)
+        return (None, step[2])
+    return ((model[0], model[1], step[0], step[1]), None)
+
+
+def _open_candidate_payload_readonly(candidate_fd, root_device):
+    model = _open_checked_file(
+        candidate_fd,
+        "model.FCStd",
+        root_device,
+        _MAX_FILE_BYTES,
+        RevisionStoreErrorCode.CORRUPT_CONTENT,
+        False,
+    )
+    if model[2] is not None:
+        return (None, model[2])
+    step = _open_checked_file(
+        candidate_fd,
+        "model.step",
+        root_device,
+        _MAX_FILE_BYTES,
+        RevisionStoreErrorCode.CORRUPT_CONTENT,
+        False,
+    )
+    if step[2] is not None:
+        close_failed = _close_fd(model[0])
+        if close_failed:
+            return (None, RevisionStoreErrorCode.IO_ERROR)
+        return (None, step[2])
+    return ((model[0], model[1], step[0], step[1]), None)
+
+
+def _close_candidate_payload(payload):
+    if payload is None:
+        return False
+    failed = _close_fd(payload[2])
+    failed = _close_fd(payload[0]) or failed
+    return failed
+
+
+def _validate_open_candidate_payload(
+    candidate_fd,
+    payload,
+    expected_source,
+):
+    try:
+        model_stat = os.fstat(payload[0])
+    except OSError:
+        return RevisionStoreErrorCode.IO_ERROR
+    code = _hash_pinned_file(
+        candidate_fd,
+        "model.FCStd",
+        payload[0],
+        model_stat,
+        expected_source.model.size_bytes,
+        expected_source.model.sha256,
+        _COPY_CHUNK_BYTES,
+    )
+    if code is not None:
+        return code
+    try:
+        step_stat = os.fstat(payload[2])
+    except OSError:
+        return RevisionStoreErrorCode.IO_ERROR
+    code = _hash_pinned_file(
+        candidate_fd,
+        "model.step",
+        payload[2],
+        step_stat,
+        expected_source.artifacts[0].size_bytes,
+        expected_source.artifacts[0].sha256,
+        _COPY_CHUNK_BYTES,
+    )
+    if code is not None:
+        return code
+    return None
+
+
+def _seed_candidate_from_revision(
+    store,
+    project_id,
+    expected_head,
+    revision_id,
+    expected_source,
+    reservation_key,
+    lease,
+):
+    project_code = _identifier_code(project_id, _PROJECT_PATTERN)
+    revision_code = _identifier_code(revision_id, _REVISION_PATTERN)
+    source_code = _seed_source_code(project_id, expected_source)
+    key_result = _seed_reservation_key_digest(reservation_key)
+    if project_code is not None:
+        raise RevisionStoreError(project_code)
+    if revision_code is not None:
+        raise RevisionStoreError(revision_code)
+    if type(expected_head) is not ProjectHead or expected_head.project_id != project_id:
+        raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+    if source_code is not None:
+        raise RevisionStoreError(source_code)
+    if key_result[1] is not None:
+        raise RevisionStoreError(key_result[1])
+    reservation_code = _validate_candidate_reservation(
+        store,
+        project_id,
+        expected_head,
+        revision_id,
+        reservation_key,
+        lease,
+    )
+    if reservation_code is not None:
+        raise RevisionStoreError(reservation_code)
+    authority = _candidate_authority(store, project_id, revision_id, lease)
+    if authority[2] is not None:
+        raise RevisionStoreError(authority[2])
+    root_open = authority[0]
+    project_open = authority[1]
+    root_device = root_open[1].st_dev
+    source = None
+    candidate_fd = None
+    candidate_stat = None
+    payload = None
+    code = None
+    try:
+        code = _strict_source_ancestry_code(
+            project_open[1],
+            root_device,
+            project_id,
+            expected_head,
+            expected_source,
+            False,
+        )
+        if code is None:
+            candidate_open = _open_safe_directory(
+                project_open[2],
+                _candidate_key(revision_id),
+                root_device,
+                RevisionStoreErrorCode.NOT_FOUND,
+            )
+            candidate_fd = candidate_open[0]
+            code = candidate_open[1]
+        if code is None:
+            code = _bind_seed_source(
+                store,
+                candidate_fd,
+                root_device,
+                project_id,
+                revision_id,
+                expected_head,
+                expected_source,
+                key_result[0],
+            )
+        if code is None:
+            try:
+                candidate_stat = os.fstat(candidate_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.IO_ERROR
+        if code is None and not _safe_directory_stat(candidate_stat, root_device):
+            code = RevisionStoreErrorCode.UNSAFE_STORE
+        if code is None:
+            source_result = _open_expected_source_payload(
+                project_open[1],
+                root_device,
+                project_id,
+                expected_source,
+            )
+            source = source_result[0]
+            code = _source_integrity_code(source_result[1])
+        if code is None:
+            payload_result = _open_candidate_payload(candidate_fd, root_device)
+            payload = payload_result[0]
+            code = payload_result[1]
+        if code is None:
+            code = _copy_source_to_seed_destination(
+                source[0],
+                "model.FCStd",
+                source[2],
+                source[3],
+                candidate_fd,
+                "model.FCStd",
+                payload[0],
+                expected_source.model,
+                root_device,
+            )
+        if code is None:
+            code = _copy_source_to_seed_destination(
+                source[0],
+                "model.step",
+                source[4],
+                source[5],
+                candidate_fd,
+                "model.step",
+                payload[2],
+                expected_source.artifacts[0],
+                root_device,
+            )
+        if code is None:
+            code = _validate_open_candidate_payload(
+                candidate_fd,
+                payload,
+                expected_source,
+            )
+        if code is None:
+            code = _source_integrity_code(
+                _validate_expected_source_payload(
+                    project_open[1],
+                    root_device,
+                    project_id,
+                    expected_source,
+                    source,
+                )
+            )
+        if code is None:
+            code = _discovery_directory_pin_code(
+                project_open[2],
+                _candidate_key(revision_id),
+                candidate_fd,
+                candidate_stat,
+                root_device,
+            )
+        if code is None:
+            try:
+                os.fsync(candidate_fd)
+                os.fsync(project_open[2])
+            except OSError:
+                code = RevisionStoreErrorCode.IO_ERROR
+    finally:
+        close_failed = _close_candidate_payload(payload)
+        if candidate_fd is not None:
+            close_failed = _close_fd(candidate_fd) or close_failed
+        close_failed = _close_source_payload(source) or close_failed
+        close_failed = _close_project_fds(project_open) or close_failed
+        close_failed = _close_fd(root_open[0]) or close_failed
+    if code is None and close_failed:
+        code = RevisionStoreErrorCode.IO_ERROR
+    if code is not None:
+        raise RevisionStoreError(code)
+    return None
+
+
+def _validate_candidate_payload(
+    store,
+    project_id,
+    revision_id,
+    expected_source,
+    lease,
+):
+    project_code = _identifier_code(project_id, _PROJECT_PATTERN)
+    revision_code = _identifier_code(revision_id, _REVISION_PATTERN)
+    source_code = _seed_source_code(project_id, expected_source)
+    if project_code is not None:
+        raise RevisionStoreError(project_code)
+    if revision_code is not None:
+        raise RevisionStoreError(revision_code)
+    if source_code is not None:
+        raise RevisionStoreError(source_code)
+    authority = _candidate_authority(store, project_id, revision_id, lease)
+    if authority[2] is not None:
+        raise RevisionStoreError(authority[2])
+    root_open = authority[0]
+    project_open = authority[1]
+    root_device = root_open[1].st_dev
+    journal_result = _load_journal_fd(project_open[0], root_device)
+    if journal_result[1] is not None or journal_result[0] is None:
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    journal = journal_result[0]
+    reservation = _reservation_by_record(store, project_id, revision_id)
+    if reservation[1] is not None:
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+    source = None
+    candidate_fd = None
+    candidate_stat = None
+    payload = None
+    code = None
+    try:
+        candidate_open = _open_safe_directory(
+            project_open[2],
+            _candidate_key(revision_id),
+            root_device,
+            RevisionStoreErrorCode.NOT_FOUND,
+        )
+        candidate_fd = candidate_open[0]
+        code = candidate_open[1]
+        if code is None:
+            code = _validate_seed_binding(
+                candidate_fd,
+                root_device,
+                project_id,
+                revision_id,
+                journal.expected_head,
+                expected_source,
+                reservation[0]["key_sha256"],
+            )
+        if code is None:
+            code = _strict_source_ancestry_code(
+                project_open[1],
+                root_device,
+                project_id,
+                journal.expected_head,
+                expected_source,
+                True,
+            )
+        if code is None:
+            try:
+                candidate_stat = os.fstat(candidate_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.IO_ERROR
+        if code is None and not _safe_directory_stat(candidate_stat, root_device):
+            code = RevisionStoreErrorCode.UNSAFE_STORE
+        if code is None:
+            source_result = _open_expected_source_payload(
+                project_open[1],
+                root_device,
+                project_id,
+                expected_source,
+            )
+            source = source_result[0]
+            code = _source_integrity_code(source_result[1])
+        if code is None:
+            payload_result = _open_candidate_payload_readonly(
+                candidate_fd,
+                root_device,
+            )
+            payload = payload_result[0]
+            code = payload_result[1]
+        if code is None:
+            code = _validate_open_candidate_payload(
+                candidate_fd,
+                payload,
+                expected_source,
+            )
+        if code is None:
+            code = _source_integrity_code(
+                _validate_expected_source_payload(
+                    project_open[1],
+                    root_device,
+                    project_id,
+                    expected_source,
+                    source,
+                )
+            )
+        if code is None:
+            code = _discovery_directory_pin_code(
+                project_open[2],
+                _candidate_key(revision_id),
+                candidate_fd,
+                candidate_stat,
+                root_device,
+            )
+    finally:
+        close_failed = _close_candidate_payload(payload)
+        if candidate_fd is not None:
+            close_failed = _close_fd(candidate_fd) or close_failed
+        close_failed = _close_source_payload(source) or close_failed
+        close_failed = _close_project_fds(project_open) or close_failed
+        close_failed = _close_fd(root_open[0]) or close_failed
+    if code is None and close_failed:
+        code = RevisionStoreErrorCode.IO_ERROR
+    if code is not None:
+        raise RevisionStoreError(code)
+    return None
+
+
 def _discovery_stat_identity(value):
     return (
         value.st_dev,
@@ -5598,6 +6724,7 @@ def _discovery_candidate(
     candidates_fd,
     root_device,
     revision_id,
+    reservation,
 ):
     candidate_open = _open_safe_directory(
         candidates_fd,
@@ -5619,14 +6746,69 @@ def _discovery_candidate(
     try:
         entries = _discovery_entries(candidate_fd)
         code = entries[1]
+        has_model = False
+        has_step = False
+        has_intent = False
+        has_binding = False
         if code is None:
-            if len(entries[0]) != 2:
+            for item in entries[0]:
+                if item[0] == "model.FCStd":
+                    has_model = True
+                elif item[0] == "model.step":
+                    has_step = True
+                elif item[0] == _SEED_INTENT_RECORD:
+                    has_intent = True
+                elif item[0] == _SEED_BINDING_RECORD:
+                    has_binding = True
+                else:
+                    code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+                    break
+        seeded_required = reservation["ceiling_files"] == 9
+        if code is None and (not has_model or not has_step):
+            code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        if code is None and seeded_required:
+            if len(entries[0]) != 3 or has_intent == has_binding:
                 code = RevisionStoreErrorCode.RECOVERY_REQUIRED
-            else:
-                for item in entries[0]:
-                    if item[0] not in ("model.FCStd", "model.step"):
-                        code = RevisionStoreErrorCode.RECOVERY_REQUIRED
-                        break
+        if code is None and not seeded_required:
+            if len(entries[0]) != 2 or has_intent or has_binding:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+        if code is None:
+            intent = _read_seed_control(
+                candidate_fd,
+                root_device,
+                _SEED_INTENT_RECORD,
+                _SEED_INTENT_CHECKSUM_DOMAIN,
+                False,
+            )
+            binding = _read_seed_control(
+                candidate_fd,
+                root_device,
+                _SEED_BINDING_RECORD,
+                _SEED_BINDING_CHECKSUM_DOMAIN,
+                True,
+            )
+            if intent[1] is not None and intent[1] is not RevisionStoreErrorCode.NOT_FOUND:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+            elif binding[1] is not None and binding[1] is not RevisionStoreErrorCode.NOT_FOUND:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+            elif intent[1] is None and binding[1] is None:
+                code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+            elif intent[1] is None:
+                code = _seed_control_binding_code(
+                    intent[0],
+                    reservation["project_id"],
+                    reservation["revision_id"],
+                    reservation["expected_head"],
+                    reservation["key_sha256"],
+                )
+            elif binding[1] is None:
+                code = _seed_control_binding_code(
+                    binding[0],
+                    reservation["project_id"],
+                    reservation["revision_id"],
+                    reservation["expected_head"],
+                    reservation["key_sha256"],
+                )
         total_size = 0
         if code is None:
             for _name, entry_stat in entries[0]:
@@ -5638,7 +6820,8 @@ def _discovery_candidate(
                 ):
                     code = RevisionStoreErrorCode.UNSAFE_STORE
                     break
-                total_size += entry_stat.st_size
+                if _name == "model.FCStd" or _name == "model.step":
+                    total_size += entry_stat.st_size
         if code is None and total_size > _MAX_REVISION_BYTES:
             code = RevisionStoreErrorCode.BUDGET_EXCEEDED
     finally:
@@ -5748,6 +6931,7 @@ def _discovery_journal_code(
             candidates_fd,
             root_device,
             journal.candidate_revision,
+            reservation,
         )
     if reservations or candidate_names:
         return RevisionStoreErrorCode.RECOVERY_REQUIRED
@@ -6357,6 +7541,40 @@ class LocalRevisionStore:
             / "candidates"
             / _candidate_key(revision_id)
             / "model.FCStd"
+        )
+
+    def seed_candidate_from_revision(
+        self,
+        project_id,
+        expected_head,
+        revision_id,
+        expected_source,
+        reservation_key,
+        lease,
+    ):
+        return _seed_candidate_from_revision(
+            self,
+            project_id,
+            expected_head,
+            revision_id,
+            expected_source,
+            reservation_key,
+            lease,
+        )
+
+    def validate_candidate_payload(
+        self,
+        project_id,
+        revision_id,
+        expected_source,
+        lease,
+    ):
+        return _validate_candidate_payload(
+            self,
+            project_id,
+            revision_id,
+            expected_source,
+            lease,
         )
 
     def commit_revision(self, project_id, expected_head, revision_id, lease):
@@ -7394,6 +8612,22 @@ def _seal_revision(store, project_id, revision_id, lease):
         _close_fd(root_open[0])
         raise RevisionStoreError(candidate_open[1])
     candidate_fd = candidate_open[0]
+    seed_result = _seed_seal_source(
+        candidate_fd,
+        revisions_fd,
+        root_open[1].st_dev,
+        project_id,
+        revision_id,
+        journal.expected_head,
+        reservation[0]["key_sha256"],
+        reservation[0]["ceiling_files"] == 9,
+    )
+    seed_source = seed_result[0]
+    if seed_result[1] is not None:
+        _close_fd(candidate_fd)
+        _close_project_fds(project_open)
+        _close_fd(root_open[0])
+        raise RevisionStoreError(seed_result[1])
     model_source = _open_candidate_source(candidate_fd, root_open[1].st_dev, "model.FCStd")
     if model_source[2] is not None:
         _close_fd(candidate_fd)
@@ -7489,6 +8723,14 @@ def _seal_revision(store, project_id, revision_id, lease):
         code = copied_step[2]
     if _close_fd(step_source[0]) and code is None:
         code = RevisionStoreErrorCode.IO_ERROR
+    if code is None and seed_source is not None:
+        if (
+            copied_model[0] != seed_source.model.sha256
+            or copied_model[1] != seed_source.model.size_bytes
+            or copied_step[0] != seed_source.artifacts[0].sha256
+            or copied_step[1] != seed_source.artifacts[0].size_bytes
+        ):
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
     model = None
     step = None
     if code is None:

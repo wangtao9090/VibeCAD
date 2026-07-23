@@ -570,6 +570,12 @@ class AgentApplication:
         self._ensure_live()
         return api.compare_revisions(request)
 
+    def revert_project_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        api = self._task_api_for_request()
+        self._ensure_live()
+        return api.revert_project(request)
+
     def create_task_request(self, request: object) -> dict[str, object]:
         self._ensure_live()
         api = self._task_api_for_request()
@@ -829,6 +835,106 @@ class AgentApplication:
         except RevisionCompareError as error:
             return self._revision_discovery_failure(error)
 
+    def revert_project(
+        self,
+        *,
+        revert_key: str,
+        project_id: str,
+        source_revision: str,
+        expected_head: str,
+    ) -> StoredTaskRun | TaskServicePortFailure:
+        """Replay without CAD when possible, otherwise enter the project runtime."""
+
+        self._ensure_live()
+        from vibecad.workflow.revert import (
+            RevertProgramError,
+            revert_task_identity,
+        )
+
+        try:
+            task_id, _creation_digest = revert_task_identity(revert_key)
+        except RevertProgramError:
+            return TaskServicePortFailure(code=TaskServicePortErrorCode.INVALID_INPUT)
+        existing = self._revert_replay(
+            task_id=task_id,
+            revert_key=revert_key,
+            project_id=project_id,
+            source_revision=source_revision,
+            expected_head=expected_head,
+        )
+        if existing is not None:
+            return existing
+
+        with self._cad_gate:
+            self._ensure_live()
+            existing = self._revert_replay(
+                task_id=task_id,
+                revert_key=revert_key,
+                project_id=project_id,
+                source_revision=source_revision,
+                expected_head=expected_head,
+            )
+            if existing is not None:
+                return existing
+            runtime = self._runtime_for(project_id)
+            if type(runtime) is TaskServicePortFailure:
+                return runtime
+            try:
+                result = runtime.service.revert_project(
+                    revert_key=revert_key,
+                    project_id=project_id,
+                    source_revision=source_revision,
+                    expected_head=expected_head,
+                )
+            except Exception as error:
+                result = self._task_service_failure(error)
+            if bool(getattr(runtime, "stale", False)):
+                try:
+                    closed = runtime.close()
+                except Exception:
+                    closed = False
+                if closed is True and self._runtimes.get(project_id) is runtime:
+                    del self._runtimes[project_id]
+            return result
+
+    def _revert_replay(
+        self,
+        *,
+        task_id: str,
+        revert_key: str,
+        project_id: str,
+        source_revision: str,
+        expected_head: str,
+    ) -> StoredTaskRun | TaskServicePortFailure | None:
+        from vibecad.workflow.revert import (
+            RevertProgramError,
+            RevertProgramErrorCode,
+            require_matching_revert_task,
+        )
+
+        try:
+            existing = self._catalog.get_task(task_id=task_id)
+        except TaskCatalogError as error:
+            if error.code is not TaskCatalogErrorCode.NOT_FOUND:
+                return self._catalog_failure(error)
+            return None
+        try:
+            require_matching_revert_task(
+                existing,
+                revert_key=revert_key,
+                project_id=project_id,
+                source_revision=source_revision,
+                expected_head=expected_head,
+            )
+        except RevertProgramError as error:
+            code = (
+                TaskServicePortErrorCode.CONFLICT
+                if error.code is RevertProgramErrorCode.CONFLICT
+                else TaskServicePortErrorCode.INVALID_INPUT
+            )
+            return TaskServicePortFailure(code=code)
+        return existing
+
     def get_artifact_manifest(self, *, request: object):
         self._ensure_live()
         from vibecad.application.artifact_manifest import (
@@ -1065,6 +1171,30 @@ class AgentApplication:
             ),
         )
 
+    @staticmethod
+    def _task_service_failure(error: Exception) -> TaskServicePortFailure:
+        from vibecad.workflow.service import (
+            TaskServiceError,
+            TaskServiceErrorCode,
+        )
+
+        if type(error) is not TaskServiceError:
+            raise error
+        mapping = {
+            TaskServiceErrorCode.INVALID_INPUT: TaskServicePortErrorCode.INVALID_INPUT,
+            TaskServiceErrorCode.UNSUPPORTED_REASONING_OWNER: (
+                TaskServicePortErrorCode.UNSUPPORTED_REASONING_OWNER
+            ),
+            TaskServiceErrorCode.INVALID_STATE: TaskServicePortErrorCode.INVALID_STATE,
+            TaskServiceErrorCode.NOT_FOUND: TaskServicePortErrorCode.NOT_FOUND,
+            TaskServiceErrorCode.CONFLICT: TaskServicePortErrorCode.CONFLICT,
+            TaskServiceErrorCode.STORE_FAILURE: TaskServicePortErrorCode.STORE_FAILURE,
+            TaskServiceErrorCode.LEASE_UNAVAILABLE: TaskServicePortErrorCode.LEASE_UNAVAILABLE,
+            TaskServiceErrorCode.RESOURCE_EXHAUSTED: (TaskServicePortErrorCode.RESOURCE_EXHAUSTED),
+            TaskServiceErrorCode.RECOVERY_REQUIRED: TaskServicePortErrorCode.RECOVERY_REQUIRED,
+        }
+        return TaskServicePortFailure(code=mapping[error.code])
+
     def _cad_method(self, method: str, **kwargs):
         self._ensure_live()
         try:
@@ -1079,33 +1209,7 @@ class AgentApplication:
             try:
                 result = getattr(runtime.service, method)(**kwargs)
             except Exception as error:
-                from vibecad.workflow.service import (
-                    TaskServiceError,
-                    TaskServiceErrorCode,
-                )
-
-                if type(error) is not TaskServiceError:
-                    raise
-                mapping = {
-                    TaskServiceErrorCode.INVALID_INPUT: (TaskServicePortErrorCode.INVALID_INPUT),
-                    TaskServiceErrorCode.UNSUPPORTED_REASONING_OWNER: (
-                        TaskServicePortErrorCode.UNSUPPORTED_REASONING_OWNER
-                    ),
-                    TaskServiceErrorCode.INVALID_STATE: (TaskServicePortErrorCode.INVALID_STATE),
-                    TaskServiceErrorCode.NOT_FOUND: TaskServicePortErrorCode.NOT_FOUND,
-                    TaskServiceErrorCode.CONFLICT: TaskServicePortErrorCode.CONFLICT,
-                    TaskServiceErrorCode.STORE_FAILURE: (TaskServicePortErrorCode.STORE_FAILURE),
-                    TaskServiceErrorCode.LEASE_UNAVAILABLE: (
-                        TaskServicePortErrorCode.LEASE_UNAVAILABLE
-                    ),
-                    TaskServiceErrorCode.RESOURCE_EXHAUSTED: (
-                        TaskServicePortErrorCode.RESOURCE_EXHAUSTED
-                    ),
-                    TaskServiceErrorCode.RECOVERY_REQUIRED: (
-                        TaskServicePortErrorCode.RECOVERY_REQUIRED
-                    ),
-                }
-                result = TaskServicePortFailure(code=mapping[error.code])
+                result = self._task_service_failure(error)
             if bool(getattr(runtime, "stale", False)):
                 try:
                     closed = runtime.close()

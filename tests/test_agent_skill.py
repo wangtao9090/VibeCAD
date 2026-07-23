@@ -20,7 +20,7 @@ SKILL_ROOT = ROOT / "skills" / "vibecad-agent"
 SKILL_FILE = SKILL_ROOT / "SKILL.md"
 OPENAI_YAML = SKILL_ROOT / "agents" / "openai.yaml"
 
-PUBLIC_TOOL_NAMES = (
+PUBLISHED_SKILL_TOOL_NAMES = (
     "ping",
     "get_runtime_status",
     "ensure_runtime",
@@ -48,6 +48,11 @@ PUBLIC_TOOL_NAMES = (
     "modify_parameter",
     "move_part",
     "rotate_part",
+)
+PUBLIC_TOOL_NAMES = (
+    *PUBLISHED_SKILL_TOOL_NAMES[:10],
+    "revert_project",
+    *PUBLISHED_SKILL_TOOL_NAMES[10:],
 )
 
 LEGACY_TOOL_NAMES = {
@@ -209,7 +214,7 @@ def test_skill_has_canonical_files_and_minimal_trigger_frontmatter():
 def test_skill_teaches_the_exact_twenty_seven_tool_agent_first_flow():
     _metadata, body = _skill_parts()
     code_tokens = _inline_code(body)
-    assert set(PUBLIC_TOOL_NAMES) <= code_tokens
+    assert set(PUBLISHED_SKILL_TOOL_NAMES) <= code_tokens
     assert LEGACY_TOOL_NAMES.isdisjoint(code_tokens)
     assert re.search(r"\b27(?:-tool| tools?)\b|27\s*个", body, re.IGNORECASE)
 

@@ -20,8 +20,14 @@ from vibecad.application.task_api import (
     TaskServicePortFailure,
 )
 from vibecad.execution.registry import DEFAULT_OPERATION_REGISTRY, OperationRegistry
+from vibecad.execution.revisions import (
+    ProjectHead,
+    RevisionArtifactRef,
+    RevisionRef,
+)
 from vibecad.workflow.contracts import AcceptanceSpec, ErrorCategory, ModelProgram, StepError
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER
+from vibecad.workflow.revert import build_revert_binding
 from vibecad.workflow.state import (
     CriterionOutcome,
     CriterionVerdict,
@@ -43,6 +49,7 @@ PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
 BASE_REVISION = "revision_0123456789abcdef0123456789abcdef"
 CANDIDATE_REVISION = "revision_11111111111111111111111111111111"
 CREATE_KEY = "task_create_0123456789abcdef0123456789abcdef"
+REVERT_KEY = "revert_create_0123456789abcdef0123456789abcdef"
 KEYED_TASK_ID = "task_e9f9dc52c8f75cd72feddee2648564b8"
 CREATION_DIGEST = "e9f9dc52c8f75cd72feddee2648564b8b4bf0b07836368165d3a0c1fedeee1ef"
 COLLISION_DIGEST = CREATION_DIGEST[:32] + "f" * 32
@@ -172,6 +179,84 @@ def _create_request(
         "project_id": project_id,
         "review_policy": review_policy,
     }
+
+
+def _revert_request(
+    *,
+    revert_key: object = REVERT_KEY,
+    project_id: object = PROJECT_ID,
+    source_revision: object = CANDIDATE_REVISION,
+    expected_head: object = BASE_REVISION,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "revert_key": revert_key,
+        "project_id": project_id,
+        "source_revision": source_revision,
+        "expected_head": expected_head,
+    }
+
+
+def _bound_revert_task() -> TaskRun:
+    source = RevisionRef(
+        id=CANDIDATE_REVISION,
+        project_id=PROJECT_ID,
+        base_revision=OTHER_CANDIDATE_REVISION,
+        manifest_sha256="a" * 64,
+        model=RevisionArtifactRef(
+            id="artifact_33333333333333333333333333333333",
+            name="model.FCStd",
+            format="fcstd",
+            sha256="b" * 64,
+            size_bytes=101,
+        ),
+        artifacts=(
+            RevisionArtifactRef(
+                id="artifact_44444444444444444444444444444444",
+                name="model.step",
+                format="step",
+                sha256="c" * 64,
+                size_bytes=202,
+            ),
+        ),
+    )
+    head = ProjectHead(
+        project_id=PROJECT_ID,
+        generation=2,
+        revision_id=BASE_REVISION,
+        manifest_sha256="d" * 64,
+    )
+    binding = build_revert_binding(
+        revert_key=REVERT_KEY,
+        project_id=PROJECT_ID,
+        source_revision=source,
+        expected_head=head,
+    )
+    task = new_task_run(
+        task_id=binding.task_id,
+        project_id=PROJECT_ID,
+        base_revision=BASE_REVISION,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.REQUIRE_REVIEW,
+        creation_digest=binding.creation_digest,
+    )
+    task = transition_task(task, TaskEvent.REQUEST_PLAN)
+    return transition_task(task, TaskEvent.SUBMIT_PROGRAM, program=binding.program)
+
+
+def _forged_revert_needs_plan() -> TaskRun:
+    bound = _bound_revert_task()
+    return transition_task(
+        new_task_run(
+            task_id=bound.id,
+            project_id=bound.project_id,
+            base_revision=bound.base_revision,
+            reasoning_owner=bound.reasoning_owner,
+            review_policy=bound.review_policy,
+            creation_digest=bound.creation_digest,
+        ),
+        TaskEvent.REQUEST_PLAN,
+    )
 
 
 def test_create_key_derives_identity_and_accepts_a_progressed_replay_snapshot():
@@ -373,6 +458,9 @@ class _FakePort:
     def create_task(self, **kwargs):
         return self._reply("create_task", kwargs)
 
+    def revert_project(self, **kwargs):
+        return self._reply("revert_project", kwargs)
+
     def get_task(self, **kwargs):
         return self._reply("get_task", kwargs)
 
@@ -479,6 +567,7 @@ def test_public_surface_error_taxonomies_and_method_signatures_are_closed():
     }
     assert api_methods == {
         "create_task",
+        "revert_project",
         "list_tasks",
         "get_task",
         "get_task_events",
@@ -499,6 +588,7 @@ def test_public_surface_error_taxonomies_and_method_signatures_are_closed():
     }
     assert port_methods == {
         "create_task",
+        "revert_project",
         "list_tasks",
         "get_task",
         "get_task_events",
@@ -515,6 +605,13 @@ def test_public_surface_error_taxonomies_and_method_signatures_are_closed():
         "project_id",
         "reasoning_owner",
         "review_policy",
+    )
+    assert tuple(inspect.signature(TaskServicePort.revert_project).parameters) == (
+        "self",
+        "revert_key",
+        "project_id",
+        "source_revision",
+        "expected_head",
     )
     for name in ("accept_draft", "reject_draft"):
         assert tuple(inspect.signature(getattr(TaskServicePort, name)).parameters) == (
@@ -862,6 +959,117 @@ def test_create_port_raise_is_redacted_and_not_retried():
     _assert_error(response, "internal_error", "")
     assert "private" not in json.dumps(response)
     assert [name for name, _ in port.calls] == ["create_task"]
+
+
+def test_revert_project_forwards_exact_immutable_intent_and_returns_ordinary_task_result():
+    task = _bound_revert_task()
+    port = _FakePort(StoredTaskRun(generation=7, task_run=task))
+
+    response = TaskApi(port=port).revert_project(_revert_request())
+
+    assert port.calls == [
+        (
+            "revert_project",
+            {
+                "revert_key": REVERT_KEY,
+                "project_id": PROJECT_ID,
+                "source_revision": CANDIDATE_REVISION,
+                "expected_head": BASE_REVISION,
+            },
+        )
+    ]
+    assert _assert_success(response) == {
+        "generation": 7,
+        "next_action": task.next_action.value,
+        "task_run": task.to_mapping(),
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("revert_key", "revert_create_short", "invalid_value"),
+        ("revert_key", 7, "invalid_type"),
+        ("project_id", "project_bad", "invalid_value"),
+        ("source_revision", "revision_bad", "invalid_value"),
+        ("expected_head", {"generation": 0, "revision_id": BASE_REVISION}, "invalid_type"),
+    ],
+)
+def test_revert_project_ingress_is_exact_and_never_calls_the_port(field, value, code):
+    port = _FakePort(
+        StoredTaskRun(
+            generation=0,
+            task_run=_keyed_needs_plan(review_policy=ReviewPolicy.REQUIRE_REVIEW),
+        )
+    )
+    request = _revert_request()
+    request[field] = value
+
+    response = TaskApi(port=port).revert_project(request)
+
+    _assert_error(response, code, f"/{field}")
+    assert port.calls == []
+
+
+def test_revert_project_rejects_missing_or_unknown_fields_before_the_port():
+    port = _FakePort(
+        StoredTaskRun(
+            generation=0,
+            task_run=_keyed_needs_plan(review_policy=ReviewPolicy.REQUIRE_REVIEW),
+        )
+    )
+    missing = _revert_request()
+    del missing["expected_head"]
+    unknown = {**_revert_request(), "expected_generation": 0}
+
+    _assert_error(
+        TaskApi(port=port).revert_project(missing),
+        "missing_field",
+        "/expected_head",
+    )
+    _assert_error(
+        TaskApi(port=port).revert_project(unknown),
+        "unknown_field",
+        "/expected_generation",
+    )
+    assert port.calls == []
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        _keyed_needs_plan(review_policy=ReviewPolicy.REQUIRE_REVIEW),
+        _forged_revert_needs_plan(),
+        _keyed_needs_plan(
+            project_id="project_11111111111111111111111111111111",
+            review_policy=ReviewPolicy.REQUIRE_REVIEW,
+        ),
+        _keyed_needs_plan(review_policy=ReviewPolicy.AUTO_COMMIT),
+    ],
+)
+def test_revert_project_rejects_unbound_port_results(task: TaskRun):
+    port = _FakePort(StoredTaskRun(generation=0, task_run=task))
+
+    response = TaskApi(port=port).revert_project(_revert_request())
+
+    _assert_error(response, "internal_error", "")
+    assert [name for name, _ in port.calls] == ["revert_project"]
+
+
+def test_revert_project_maps_port_failure_and_redacts_untrusted_exception():
+    conflict = _FakePort(TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT))
+    raised = _FakePort(RuntimeError("/private/revert secret"))
+
+    _assert_error(
+        TaskApi(port=conflict).revert_project(_revert_request()),
+        "conflict",
+        "",
+    )
+    response = TaskApi(port=raised).revert_project(_revert_request())
+    _assert_error(response, "internal_error", "")
+    assert "private" not in json.dumps(response)
+    assert [name for name, _ in conflict.calls] == ["revert_project"]
+    assert [name for name, _ in raised.calls] == ["revert_project"]
 
 
 def test_internal_failure_type_raised_by_a_port_is_never_trusted():

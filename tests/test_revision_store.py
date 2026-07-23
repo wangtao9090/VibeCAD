@@ -110,6 +110,8 @@ MANIFEST_CHECKSUM_DOMAIN = b"vibecad-revision-manifest-v1\0"
 HEAD_CHECKSUM_DOMAIN = b"vibecad-project-head-v1\0"
 JOURNAL_CHECKSUM_DOMAIN = b"vibecad-commit-journal-v1\0"
 RESERVATION_CHECKSUM_DOMAIN = b"vibecad-revision-reservation-v1\0"
+RESERVATION_KEY_DOMAIN = b"vibecad-revision-reservation-key-v1\0"
+SEED_BINDING_CHECKSUM_DOMAIN = b"vibecad-revision-seed-binding-v1\0"
 
 EXPECTED_EXECUTION_EXPORTS = [
     "DEFAULT_OPERATION_REGISTRY",
@@ -158,6 +160,22 @@ EXPECTED_STORE_METHODS = {
     "begin_revision": ("self", "project_id", "expected_head", "lease"),
     "candidate_artifact_path": ("self", "project_id", "revision_id", "format", "lease"),
     "candidate_model_path": ("self", "project_id", "revision_id", "lease"),
+    "seed_candidate_from_revision": (
+        "self",
+        "project_id",
+        "expected_head",
+        "revision_id",
+        "expected_source",
+        "reservation_key",
+        "lease",
+    ),
+    "validate_candidate_payload": (
+        "self",
+        "project_id",
+        "revision_id",
+        "expected_source",
+        "lease",
+    ),
     "commit_revision": ("self", "project_id", "expected_head", "revision_id", "lease"),
     "copy_revision_artifacts_at": (
         "self",
@@ -627,6 +645,26 @@ def _begin_and_fill(
     model_path.write_bytes(model)
     step_path.write_bytes(step)
     return revision_id
+
+
+def _commit_payload_revision(
+    store: LocalRevisionStore,
+    lease: ProjectWriteLease,
+    head: ProjectHead,
+    *,
+    model: bytes,
+    step: bytes,
+) -> tuple[RevisionRef, ProjectHead]:
+    revision_id = _begin_and_fill(
+        store,
+        lease,
+        head,
+        model=model,
+        step=step,
+    )
+    revision = store.seal_revision(PROJECT_ID, revision_id, lease)
+    committed = store.commit_revision(PROJECT_ID, head, revision_id, lease)
+    return (revision, committed)
 
 
 def _all_tree_bytes(root: Path) -> dict[str, bytes]:
@@ -3444,6 +3482,819 @@ def test_begin_seal_commit_and_readback_complete_lifecycle(store_parts, tmp_path
         == b"ISO-10303-21;STEP;ENDSEC;"
     )
     assert _all_tree_bytes(_revision_dir(root, base_head.revision_id)) == before
+
+
+def test_seed_candidate_from_revision_is_exact_idempotent_and_preserves_source(
+    store_parts,
+    tmp_path: Path,
+):
+    store, manager, root = store_parts
+    imported = tmp_path / "seed-base.FCStd"
+    imported.write_bytes(b"seed-base")
+    base_head = _initialize_imported(store, manager, imported)
+    source_model = b"historical-model-exact"
+    source_step = b"ISO-10303-21;HISTORICAL;END-ISO-10303-21;"
+    reservation_key = "revert:" + "a" * 64
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        source, source_head = _commit_payload_revision(
+            store,
+            lease,
+            base_head,
+            model=source_model,
+            step=source_step,
+        )
+        _current, current_head = _commit_payload_revision(
+            store,
+            lease,
+            source_head,
+            model=b"current-model",
+            step=b"ISO-10303-21;CURRENT;END-ISO-10303-21;",
+        )
+        target_id = revisions_module._reserve_candidate_revision(
+            store,
+            PROJECT_ID,
+            current_head,
+            reservation_key,
+            lease,
+        )
+        source_dir = _revision_dir(root, source.id)
+        source_bytes = _all_tree_bytes(source_dir)
+
+        def stable_stat(path: Path) -> tuple[int, int, int, int, int, int, int, int]:
+            value = path.stat(follow_symlinks=False)
+            return (
+                value.st_dev,
+                value.st_ino,
+                value.st_mode,
+                value.st_uid,
+                value.st_nlink,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+            )
+
+        source_stats = {
+            str(path.relative_to(source_dir)): stable_stat(path)
+            for path in (source_dir, *sorted(source_dir.rglob("*")))
+        }
+        store.seed_candidate_from_revision(
+            PROJECT_ID,
+            current_head,
+            target_id,
+            source,
+            reservation_key,
+            lease,
+        )
+        target_dir = _candidate_dir(root, target_id)
+        assert (target_dir / "model.FCStd").read_bytes() == source_model
+        assert (target_dir / "model.step").read_bytes() == source_step
+        store.validate_candidate_payload(PROJECT_ID, target_id, source, lease)
+
+        (target_dir / "model.FCStd").write_bytes(b"partial")
+        (target_dir / "model.step").write_bytes(b"")
+        store.seed_candidate_from_revision(
+            PROJECT_ID,
+            current_head,
+            target_id,
+            source,
+            reservation_key,
+            lease,
+        )
+        store.validate_candidate_payload(PROJECT_ID, target_id, source, lease)
+        assert (target_dir / "model.FCStd").read_bytes() == source_model
+        assert (target_dir / "model.step").read_bytes() == source_step
+        assert _all_tree_bytes(source_dir) == source_bytes
+        assert {
+            str(path.relative_to(source_dir)): stable_stat(path)
+            for path in (source_dir, *sorted(source_dir.rglob("*")))
+        } == source_stats
+        store.rollback_revision(PROJECT_ID, target_id, lease)
+
+
+def test_seed_candidate_requires_source_to_be_strict_committed_head_ancestry(
+    store_parts,
+    tmp_path: Path,
+):
+    store, manager, _root = store_parts
+    imported = tmp_path / "strict-ancestry-base.FCStd"
+    imported.write_bytes(b"strict-ancestry-base")
+    base_head = _initialize_imported(store, manager, imported)
+    reservation_key = "revert:" + "1" * 64
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        source, source_head = _commit_payload_revision(
+            store,
+            lease,
+            base_head,
+            model=b"strict-source-model",
+            step=b"strict-source-step",
+        )
+        current, current_head = _commit_payload_revision(
+            store,
+            lease,
+            source_head,
+            model=b"strict-current-model",
+            step=b"strict-current-step",
+        )
+        target_id = revisions_module._reserve_candidate_revision(
+            store,
+            PROJECT_ID,
+            current_head,
+            reservation_key,
+            lease,
+        )
+        with pytest.raises(RevisionStoreError) as captured:
+            store.seed_candidate_from_revision(
+                PROJECT_ID,
+                current_head,
+                target_id,
+                current,
+                reservation_key,
+                lease,
+            )
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.CONFLICT)
+        store.rollback_revision(PROJECT_ID, target_id, lease)
+
+        detached_id = _begin_and_fill(
+            store,
+            lease,
+            current_head,
+            model=b"detached-model",
+            step=b"detached-step",
+        )
+        detached = store.seal_revision(PROJECT_ID, detached_id, lease)
+        rolled_back = store.rollback_revision(PROJECT_ID, detached_id, lease)
+        assert rolled_back.status is ReconciliationStatus.NOT_COMMITTED
+        assert store.load_revision(PROJECT_ID, detached_id) == detached
+
+        target_id = revisions_module._reserve_candidate_revision(
+            store,
+            PROJECT_ID,
+            current_head,
+            reservation_key,
+            lease,
+        )
+        with pytest.raises(RevisionStoreError) as captured:
+            store.seed_candidate_from_revision(
+                PROJECT_ID,
+                current_head,
+                target_id,
+                detached,
+                reservation_key,
+                lease,
+            )
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.CONFLICT)
+        store.rollback_revision(PROJECT_ID, target_id, lease)
+
+
+def test_first_partial_seed_durably_conflicts_with_retry_from_another_source(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    imported = tmp_path / "seed-binding-base.FCStd"
+    imported.write_bytes(b"seed-binding-base")
+    base_head = _initialize_imported(store, manager, imported)
+    reservation_key = "revert:" + "2" * 64
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        earlier, earlier_head = _commit_payload_revision(
+            store,
+            lease,
+            base_head,
+            model=b"earlier-source-model",
+            step=b"earlier-source-step",
+        )
+        later, later_head = _commit_payload_revision(
+            store,
+            lease,
+            earlier_head,
+            model=b"later-source-model",
+            step=b"later-source-step",
+        )
+        _current, current_head = _commit_payload_revision(
+            store,
+            lease,
+            later_head,
+            model=b"binding-current-model",
+            step=b"binding-current-step",
+        )
+        target_id = revisions_module._reserve_candidate_revision(
+            store,
+            PROJECT_ID,
+            current_head,
+            reservation_key,
+            lease,
+        )
+        original_copy = revisions_module._copy_source_to_seed_destination
+        copy_calls = 0
+
+        def fail_second_copy(*args):
+            nonlocal copy_calls
+            copy_calls += 1
+            if copy_calls == 2:
+                return RevisionStoreErrorCode.IO_ERROR
+            return original_copy(*args)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(
+                revisions_module,
+                "_copy_source_to_seed_destination",
+                fail_second_copy,
+            )
+            with pytest.raises(RevisionStoreError) as captured:
+                store.seed_candidate_from_revision(
+                    PROJECT_ID,
+                    current_head,
+                    target_id,
+                    earlier,
+                    reservation_key,
+                    lease,
+                )
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.IO_ERROR)
+        assert (_candidate_dir(root, target_id) / "model.FCStd").read_bytes() == (
+            b"earlier-source-model"
+        )
+
+        with pytest.raises(RevisionStoreError) as captured:
+            store.seed_candidate_from_revision(
+                PROJECT_ID,
+                current_head,
+                target_id,
+                later,
+                reservation_key,
+                lease,
+            )
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.CONFLICT)
+        assert (_candidate_dir(root, target_id) / "model.FCStd").read_bytes() == (
+            b"earlier-source-model"
+        )
+        store.rollback_revision(PROJECT_ID, target_id, lease)
+
+
+@pytest.mark.parametrize(
+    ("damage", "expected_code"),
+    [
+        ("missing", RevisionStoreErrorCode.RECOVERY_REQUIRED),
+        ("corrupt", RevisionStoreErrorCode.RECOVERY_REQUIRED),
+        ("different", RevisionStoreErrorCode.CONFLICT),
+    ],
+)
+def test_seed_binding_loss_or_tamper_never_silently_rebinds(
+    store_parts,
+    tmp_path: Path,
+    damage: str,
+    expected_code: RevisionStoreErrorCode,
+):
+    store, manager, root = store_parts
+    imported = tmp_path / f"seed-marker-{damage}.FCStd"
+    imported.write_bytes(b"seed-marker-base")
+    base_head = _initialize_imported(store, manager, imported)
+    reservation_key = "revert:" + "5" * 64
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        source, source_head = _commit_payload_revision(
+            store,
+            lease,
+            base_head,
+            model=b"marker-source-model",
+            step=b"marker-source-step",
+        )
+        alternate, alternate_head = _commit_payload_revision(
+            store,
+            lease,
+            source_head,
+            model=b"marker-alternate-model",
+            step=b"marker-alternate-step",
+        )
+        _current, current_head = _commit_payload_revision(
+            store,
+            lease,
+            alternate_head,
+            model=b"marker-current-model",
+            step=b"marker-current-step",
+        )
+        target_id = revisions_module._reserve_candidate_revision(
+            store,
+            PROJECT_ID,
+            current_head,
+            reservation_key,
+            lease,
+        )
+        reservation_path = next(root.rglob("reservation.json"))
+        assert json.loads(reservation_path.read_text(encoding="utf-8"))["ceiling_files"] == 9
+        store.seed_candidate_from_revision(
+            PROJECT_ID,
+            current_head,
+            target_id,
+            source,
+            reservation_key,
+            lease,
+        )
+        target_dir = _candidate_dir(root, target_id)
+        marker = target_dir / "seed-binding.json"
+        assert marker.is_file()
+        assert not (target_dir / "seed-intent.json").exists()
+        (target_dir / "model.FCStd").write_bytes(b"must-not-be-overwritten")
+        if damage == "missing":
+            marker.unlink()
+        elif damage == "corrupt":
+            marker.write_bytes(b"{}")
+        else:
+            key_digest = hashlib.sha256(
+                RESERVATION_KEY_DOMAIN + reservation_key.encode("ascii")
+            ).hexdigest()
+            _write_checked_record(
+                marker,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "project_id": PROJECT_ID,
+                    "candidate_revision": target_id,
+                    "expected_head": current_head.to_mapping(),
+                    "source_revision": alternate.to_mapping(),
+                    "key_sha256": key_digest,
+                },
+                SEED_BINDING_CHECKSUM_DOMAIN,
+            )
+
+        with pytest.raises(RevisionStoreError) as captured:
+            store.seed_candidate_from_revision(
+                PROJECT_ID,
+                current_head,
+                target_id,
+                source,
+                reservation_key,
+                lease,
+            )
+        _assert_closed_error(captured.value, expected_code)
+        assert (target_dir / "model.FCStd").read_bytes() == b"must-not-be-overwritten"
+        store.rollback_revision(PROJECT_ID, target_id, lease)
+        assert not target_dir.exists()
+        assert tuple(root.rglob("reservation.json")) == ()
+
+
+@pytest.mark.parametrize("tamper_binding", [False, True])
+def test_seed_binding_is_validated_and_never_enters_sealed_revision(
+    store_parts,
+    tmp_path: Path,
+    tamper_binding: bool,
+):
+    store, manager, root = store_parts
+    imported = tmp_path / f"seed-seal-{tamper_binding}.FCStd"
+    imported.write_bytes(b"seed-seal-base")
+    base_head = _initialize_imported(store, manager, imported)
+    reservation_key = "revert:" + "6" * 64
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        source, source_head = _commit_payload_revision(
+            store,
+            lease,
+            base_head,
+            model=b"seal-source-model",
+            step=b"seal-source-step",
+        )
+        alternate, alternate_head = _commit_payload_revision(
+            store,
+            lease,
+            source_head,
+            model=b"seal-alternate-model",
+            step=b"seal-alternate-step",
+        )
+        _current, current_head = _commit_payload_revision(
+            store,
+            lease,
+            alternate_head,
+            model=b"seal-current-model",
+            step=b"seal-current-step",
+        )
+        target_id = revisions_module._reserve_candidate_revision(
+            store,
+            PROJECT_ID,
+            current_head,
+            reservation_key,
+            lease,
+        )
+        store.seed_candidate_from_revision(
+            PROJECT_ID,
+            current_head,
+            target_id,
+            source,
+            reservation_key,
+            lease,
+        )
+        target_dir = _candidate_dir(root, target_id)
+        marker = target_dir / "seed-binding.json"
+        assert marker.is_file()
+        assert store.snapshot_projects()[0].revision_id == current_head.revision_id
+
+        if tamper_binding:
+            key_digest = hashlib.sha256(
+                RESERVATION_KEY_DOMAIN + reservation_key.encode("ascii")
+            ).hexdigest()
+            _write_checked_record(
+                marker,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "project_id": PROJECT_ID,
+                    "candidate_revision": target_id,
+                    "expected_head": current_head.to_mapping(),
+                    "source_revision": alternate.to_mapping(),
+                    "key_sha256": key_digest,
+                },
+                SEED_BINDING_CHECKSUM_DOMAIN,
+            )
+            with pytest.raises(RevisionStoreError) as captured:
+                store.seal_revision(PROJECT_ID, target_id, lease)
+            _assert_closed_error(captured.value, RevisionStoreErrorCode.CORRUPT_CONTENT)
+            assert marker.is_file()
+            assert not _revision_dir(root, target_id).exists()
+            store.rollback_revision(PROJECT_ID, target_id, lease)
+        else:
+            sealed = store.seal_revision(PROJECT_ID, target_id, lease)
+            assert sealed.model is not None
+            assert sealed.model.sha256 == source.model.sha256
+            assert sealed.artifacts[0].sha256 == source.artifacts[0].sha256
+            assert not target_dir.exists()
+            assert {path.name for path in _revision_dir(root, target_id).iterdir()} == {
+                "manifest.json",
+                "model.FCStd",
+                "model.step",
+            }
+            assert tuple(root.rglob("seed-binding.json")) == ()
+            assert tuple(root.rglob("seed-intent.json")) == ()
+            assert tuple(root.rglob("reservation.json")) == ()
+            rolled_back = store.rollback_revision(PROJECT_ID, target_id, lease)
+            assert rolled_back.status is ReconciliationStatus.NOT_COMMITTED
+
+
+@pytest.mark.parametrize("damage", ["marker", "step"])
+def test_seeded_discovery_requires_bound_marker_and_both_payload_files(
+    store_parts,
+    tmp_path: Path,
+    damage: str,
+):
+    store, manager, root = store_parts
+    imported = tmp_path / f"seed-discovery-{damage}.FCStd"
+    imported.write_bytes(b"seed-discovery-base")
+    base_head = _initialize_imported(store, manager, imported)
+    reservation_key = "revert:" + "8" * 64
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        source, source_head = _commit_payload_revision(
+            store,
+            lease,
+            base_head,
+            model=b"discovery-source-model",
+            step=b"discovery-source-step",
+        )
+        _current, current_head = _commit_payload_revision(
+            store,
+            lease,
+            source_head,
+            model=b"discovery-current-model",
+            step=b"discovery-current-step",
+        )
+        target_id = revisions_module._reserve_candidate_revision(
+            store,
+            PROJECT_ID,
+            current_head,
+            reservation_key,
+            lease,
+        )
+        store.seed_candidate_from_revision(
+            PROJECT_ID,
+            current_head,
+            target_id,
+            source,
+            reservation_key,
+            lease,
+        )
+        target_dir = _candidate_dir(root, target_id)
+        if damage == "marker":
+            (target_dir / "seed-binding.json").unlink()
+        else:
+            (target_dir / "model.step").unlink()
+
+        with pytest.raises(RevisionStoreError) as captured:
+            store.snapshot_projects()
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        store.rollback_revision(PROJECT_ID, target_id, lease)
+
+
+def test_seeded_seal_rejects_payload_replaced_after_binding_validation(
+    store_parts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store, manager, root = store_parts
+    imported = tmp_path / "seed-seal-race.FCStd"
+    imported.write_bytes(b"seed-seal-race-base")
+    base_head = _initialize_imported(store, manager, imported)
+    reservation_key = "revert:" + "9" * 64
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        source, source_head = _commit_payload_revision(
+            store,
+            lease,
+            base_head,
+            model=b"race-source-model",
+            step=b"race-source-step",
+        )
+        _current, current_head = _commit_payload_revision(
+            store,
+            lease,
+            source_head,
+            model=b"race-current-model",
+            step=b"race-current-step",
+        )
+        target_id = revisions_module._reserve_candidate_revision(
+            store,
+            PROJECT_ID,
+            current_head,
+            reservation_key,
+            lease,
+        )
+        store.seed_candidate_from_revision(
+            PROJECT_ID,
+            current_head,
+            target_id,
+            source,
+            reservation_key,
+            lease,
+        )
+        target_dir = _candidate_dir(root, target_id)
+        original_open = revisions_module._open_candidate_source
+        replaced_once = False
+
+        def replace_before_reopen(candidate_fd, root_device, filename):
+            nonlocal replaced_once
+            if not replaced_once:
+                replaced_once = True
+                (target_dir / "model.FCStd").write_bytes(b"race-replaced-model")
+            return original_open(candidate_fd, root_device, filename)
+
+        with monkeypatch.context() as race:
+            race.setattr(
+                revisions_module,
+                "_open_candidate_source",
+                replace_before_reopen,
+            )
+            with pytest.raises(RevisionStoreError) as captured:
+                store.seal_revision(PROJECT_ID, target_id, lease)
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.CORRUPT_CONTENT)
+        assert replaced_once is True
+        assert store.load_head(PROJECT_ID) == current_head
+        assert not _revision_dir(root, target_id).exists()
+        store.rollback_revision(PROJECT_ID, target_id, lease)
+
+
+@pytest.mark.parametrize("damage", ["record", "content", "unsafe"])
+def test_seed_source_integrity_failures_require_recovery(
+    store_parts,
+    tmp_path: Path,
+    damage: str,
+):
+    store, manager, root = store_parts
+    imported = tmp_path / f"source-integrity-{damage}.FCStd"
+    imported.write_bytes(b"source-integrity-base")
+    base_head = _initialize_imported(store, manager, imported)
+    reservation_key = "revert:" + "3" * 64
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        source, source_head = _commit_payload_revision(
+            store,
+            lease,
+            base_head,
+            model=b"integrity-source-model",
+            step=b"integrity-source-step",
+        )
+        _current, current_head = _commit_payload_revision(
+            store,
+            lease,
+            source_head,
+            model=b"integrity-current-model",
+            step=b"integrity-current-step",
+        )
+        target_id = revisions_module._reserve_candidate_revision(
+            store,
+            PROJECT_ID,
+            current_head,
+            reservation_key,
+            lease,
+        )
+        source_dir = _revision_dir(root, source.id)
+        if damage == "record":
+            (source_dir / "manifest.json").write_bytes(b"{}")
+        elif damage == "content":
+            (source_dir / "model.FCStd").write_bytes(b"corrupt-source-model")
+        else:
+            (source_dir / "model.FCStd").chmod(0o644)
+
+        with pytest.raises(RevisionStoreError) as captured:
+            store.seed_candidate_from_revision(
+                PROJECT_ID,
+                current_head,
+                target_id,
+                source,
+                reservation_key,
+                lease,
+            )
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        assert (_candidate_dir(root, target_id) / "model.FCStd").read_bytes() == (
+            b"integrity-current-model"
+        )
+
+
+@pytest.mark.parametrize("rewrite", ["source", "intermediate"])
+def test_bound_seed_source_valid_record_rewrite_requires_recovery(
+    store_parts,
+    tmp_path: Path,
+    rewrite: str,
+):
+    store, manager, root = store_parts
+    imported = tmp_path / "bound-source-record.FCStd"
+    imported.write_bytes(b"bound-source-record-base")
+    base_head = _initialize_imported(store, manager, imported)
+    reservation_key = "revert:" + "a" * 64
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        source, source_head = _commit_payload_revision(
+            store,
+            lease,
+            base_head,
+            model=b"bound-record-source-model",
+            step=b"bound-record-source-step",
+        )
+        intermediate, intermediate_head = _commit_payload_revision(
+            store,
+            lease,
+            source_head,
+            model=b"bound-record-intermediate-model",
+            step=b"bound-record-intermediate-step",
+        )
+        _current, current_head = _commit_payload_revision(
+            store,
+            lease,
+            intermediate_head,
+            model=b"bound-record-current-model",
+            step=b"bound-record-current-step",
+        )
+        target_id = revisions_module._reserve_candidate_revision(
+            store,
+            PROJECT_ID,
+            current_head,
+            reservation_key,
+            lease,
+        )
+        store.seed_candidate_from_revision(
+            PROJECT_ID,
+            current_head,
+            target_id,
+            source,
+            reservation_key,
+            lease,
+        )
+        rewritten = source
+        if rewrite == "intermediate":
+            rewritten = intermediate
+        manifest_path = _revision_dir(root, rewritten.id) / "manifest.json"
+        manifest_body = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_body.pop("checksum")
+        if rewrite == "source":
+            replacement_id = "artifact_" + "f" * 32
+            if replacement_id in {source.model.id, source.artifacts[0].id}:
+                replacement_id = "artifact_" + "e" * 32
+            manifest_body["model"]["id"] = replacement_id
+        else:
+            manifest_body["base_revision"] = base_head.revision_id
+        _write_checked_record(
+            manifest_path,
+            manifest_body,
+            MANIFEST_CHECKSUM_DOMAIN,
+        )
+
+        with pytest.raises(RevisionStoreError) as captured:
+            store.validate_candidate_payload(PROJECT_ID, target_id, source, lease)
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.RECOVERY_REQUIRED)
+
+
+def test_seed_candidate_rejects_wrong_binding_layout_and_unsafe_target(
+    store_parts,
+    tmp_path: Path,
+):
+    store, manager, root = store_parts
+    imported = tmp_path / "seed-errors-base.FCStd"
+    imported.write_bytes(b"seed-errors-base")
+    base_head = _initialize_imported(store, manager, imported)
+    reservation_key = "revert:" + "b" * 64
+
+    with manager.acquire_project_write(PROJECT_ID) as lease:
+        source, source_head = _commit_payload_revision(
+            store,
+            lease,
+            base_head,
+            model=b"source-model",
+            step=b"source-step",
+        )
+        _current, current_head = _commit_payload_revision(
+            store,
+            lease,
+            source_head,
+            model=b"current-model",
+            step=b"current-step",
+        )
+        target_id = revisions_module._reserve_candidate_revision(
+            store,
+            PROJECT_ID,
+            current_head,
+            reservation_key,
+            lease,
+        )
+        target_dir = _candidate_dir(root, target_id)
+        before_target = _all_tree_bytes(target_dir)
+
+        with pytest.raises(RevisionStoreError) as captured:
+            store.seed_candidate_from_revision(
+                PROJECT_ID,
+                current_head,
+                target_id,
+                source,
+                "revert:" + "c" * 64,
+                lease,
+            )
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.CONFLICT)
+        assert _all_tree_bytes(target_dir) == before_target
+
+        with pytest.raises(RevisionStoreError) as captured:
+            store.seed_candidate_from_revision(
+                PROJECT_ID,
+                replace(current_head, generation=current_head.generation - 1),
+                target_id,
+                source,
+                reservation_key,
+                lease,
+            )
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.CONFLICT)
+
+        with pytest.raises(RevisionStoreError) as captured:
+            store.seed_candidate_from_revision(
+                PROJECT_ID,
+                current_head,
+                target_id,
+                store.load_revision(PROJECT_ID, base_head.revision_id),
+                reservation_key,
+                lease,
+            )
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.INVALID_INPUT)
+
+        with manager.acquire_project_write(OTHER_PROJECT_ID) as foreign_lease:
+            with pytest.raises(RevisionStoreError) as captured:
+                store.seed_candidate_from_revision(
+                    PROJECT_ID,
+                    current_head,
+                    target_id,
+                    source,
+                    reservation_key,
+                    foreign_lease,
+                )
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.INVALID_LEASE)
+
+        outside = tmp_path / "must-not-change.step"
+        outside.write_bytes(b"outside-immutable")
+        outside.chmod(0o600)
+        step_path = target_dir / "model.step"
+        step_path.unlink()
+        os.link(outside, step_path)
+        with pytest.raises(RevisionStoreError) as captured:
+            store.seed_candidate_from_revision(
+                PROJECT_ID,
+                current_head,
+                target_id,
+                source,
+                reservation_key,
+                lease,
+            )
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.UNSAFE_STORE)
+        assert outside.read_bytes() == b"outside-immutable"
+        step_path.unlink()
+        step_path.write_bytes(b"")
+        step_path.chmod(0o600)
+
+        store.seed_candidate_from_revision(
+            PROJECT_ID,
+            current_head,
+            target_id,
+            source,
+            reservation_key,
+            lease,
+        )
+        (target_dir / "model.FCStd").write_bytes(b"tampered")
+        with pytest.raises(RevisionStoreError) as captured:
+            store.validate_candidate_payload(PROJECT_ID, target_id, source, lease)
+        _assert_closed_error(captured.value, RevisionStoreErrorCode.CORRUPT_CONTENT)
+        store.rollback_revision(PROJECT_ID, target_id, lease)
 
 
 def test_begin_from_empty_uses_controlled_missing_model_path(store_parts):
@@ -7231,6 +8082,7 @@ def test_import_and_execution_modules_remain_free_of_forbidden_dependencies_and_
         "dup",
         "fchmod",
         "fstat",
+        "ftruncate",
         "fsync",
         "get_inheritable",
         "geteuid",

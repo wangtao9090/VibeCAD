@@ -38,8 +38,10 @@ from vibecad.execution.revisions import (
     ProjectHead,
     ReconciliationResult,
     ReconciliationStatus,
+    RevisionAncestrySnapshot,
     RevisionArtifactRef,
     RevisionRef,
+    RevisionSnapshotEntry,
 )
 from vibecad.validation import (
     ArtifactObservation,
@@ -92,12 +94,14 @@ BASE_REVISION = "revision_0123456789abcdef0123456789abcdef"
 BASE_PARENT_REVISION = "revision_00000000000000000000000000000000"
 CANDIDATE_REVISION = "revision_11111111111111111111111111111111"
 DESCENDANT_REVISION = "revision_22222222222222222222222222222222"
+REVERT_CANDIDATE_REVISION = "revision_33333333333333333333333333333333"
 MODEL_ID = "artifact_0123456789abcdef0123456789abcdef"
 STEP_ID = "artifact_11111111111111111111111111111111"
 BASE_MANIFEST = "a" * 64
 CANDIDATE_MANIFEST = "b" * 64
 MODEL_HASH = "c" * 64
 STEP_HASH = "d" * 64
+REVERT_KEY = "revert_create_0123456789abcdef0123456789abcdef"
 
 
 @pytest.fixture(autouse=True)
@@ -244,6 +248,122 @@ def _descendant_head() -> ProjectHead:
         generation=3,
         revision_id=DESCENDANT_REVISION,
         manifest_sha256="e" * 64,
+    )
+
+
+def _revert_candidate_revision() -> RevisionRef:
+    source = _base_revision_ref()
+    return RevisionRef(
+        id=REVERT_CANDIDATE_REVISION,
+        project_id=PROJECT_ID,
+        base_revision=DESCENDANT_REVISION,
+        manifest_sha256="9" * 64,
+        model=source.model,
+        artifacts=source.artifacts,
+    )
+
+
+def _revert_candidate_head() -> ProjectHead:
+    return ProjectHead(
+        project_id=PROJECT_ID,
+        generation=4,
+        revision_id=REVERT_CANDIDATE_REVISION,
+        manifest_sha256="9" * 64,
+    )
+
+
+def _alter_model_payload(revision: RevisionRef) -> RevisionRef:
+    assert revision.model is not None
+    return RevisionRef(
+        id=revision.id,
+        project_id=revision.project_id,
+        base_revision=revision.base_revision,
+        manifest_sha256=revision.manifest_sha256,
+        model=RevisionArtifactRef(
+            id=revision.model.id,
+            name=revision.model.name,
+            format=revision.model.format,
+            sha256="8" * 64,
+            size_bytes=revision.model.size_bytes,
+        ),
+        artifacts=revision.artifacts,
+    )
+
+
+def _generation_zero_source() -> RevisionRef:
+    return RevisionRef(
+        id=BASE_PARENT_REVISION,
+        project_id=PROJECT_ID,
+        base_revision=None,
+        manifest_sha256="0" * 64,
+        model=None,
+        artifacts=(),
+    )
+
+
+def _off_branch_source() -> RevisionRef:
+    source = _base_revision_ref()
+    return RevisionRef(
+        id="revision_ffffffffffffffffffffffffffffffff",
+        project_id=source.project_id,
+        base_revision=BASE_PARENT_REVISION,
+        manifest_sha256="7" * 64,
+        model=source.model,
+        artifacts=source.artifacts,
+    )
+
+
+def _revert_evidence() -> CandidateEvidence:
+    revision = _revert_candidate_revision()
+    assert revision.model is not None
+    step = revision.artifacts[0]
+    return CandidateEvidence(
+        snapshot=ObservationSnapshot(
+            candidate_revision=revision.id,
+            shapes=(
+                ShapeObservation(
+                    target="body",
+                    volume_mm3=7200.0,
+                    area_mm2=2400.0,
+                    bbox_mm=(12.0, 20.0, 30.0),
+                    center_of_mass_mm=(6.0, 10.0, 15.0),
+                    valid_shape=True,
+                    solid_count=1,
+                ),
+            ),
+            artifacts=(
+                ArtifactObservation(
+                    target="export",
+                    exists=True,
+                    non_empty=True,
+                    format="step",
+                ),
+                ArtifactObservation(
+                    target="model",
+                    exists=True,
+                    non_empty=True,
+                    format="fcstd",
+                ),
+            ),
+        ),
+        artifacts=(
+            TaskArtifactRef(
+                id=revision.model.id,
+                name=revision.model.name,
+                format=revision.model.format,
+                sha256=revision.model.sha256,
+                size_bytes=revision.model.size_bytes,
+                candidate_revision=revision.id,
+            ),
+            TaskArtifactRef(
+                id=step.id,
+                name=step.name,
+                format=step.format,
+                sha256=step.sha256,
+                size_bytes=step.size_bytes,
+                candidate_revision=revision.id,
+            ),
+        ),
     )
 
 
@@ -403,6 +523,7 @@ class _RevisionStore(LocalRevisionStore):
             BASE_REVISION: _base_revision_ref(),
             CANDIDATE_REVISION: _revision(),
         }
+        self.ancestry_ids: tuple[str, ...] | None = None
 
     def load_head(self, project_id: str) -> ProjectHead:
         self.log.append("revision.head")
@@ -413,6 +534,35 @@ class _RevisionStore(LocalRevisionStore):
         self.log.append(f"revision.load:{revision_id}")
         assert project_id == PROJECT_ID
         return self.revisions[revision_id]
+
+    def snapshot_revisions(self, project_id: str) -> RevisionAncestrySnapshot:
+        self.log.append("revision.snapshot")
+        assert project_id == PROJECT_ID
+        selected = (
+            self.revisions.values()
+            if self.ancestry_ids is None
+            else (self.revisions[revision_id] for revision_id in self.ancestry_ids)
+        )
+        entries = tuple(
+            sorted(
+                (
+                    RevisionSnapshotEntry(
+                        id=revision.id,
+                        project_id=revision.project_id,
+                        base_revision=revision.base_revision,
+                        manifest_sha256=revision.manifest_sha256,
+                    )
+                    for revision in selected
+                ),
+                key=lambda item: item.id,
+            )
+        )
+        return RevisionAncestrySnapshot(
+            project_id=PROJECT_ID,
+            head=self.head,
+            revisions=entries,
+            state_sha256="f" * 64,
+        )
 
 
 class _Coordinator(CandidateCoordinator):
@@ -438,6 +588,7 @@ class _Coordinator(CandidateCoordinator):
         self.reconcile_live_revision: str | None = None
         self.reconcile_journal_candidate: str | None = None
         self.reconcile_journal_manifest: str | None = None
+        self.reconcile_expected_head: ProjectHead | None = None
         self.commit_calls = 0
         self.rollback_calls = 0
         self.rollback_invocations = 0
@@ -448,6 +599,9 @@ class _Coordinator(CandidateCoordinator):
         self.prepare_review_calls = 0
         self.discard_review_calls = 0
         self.receipt = None
+        self.last_reservation_key: str | None = None
+        self.next_revision = _revision()
+        self.commit_head_override: ProjectHead | None = None
         self.review_live_binding = SessionBinding(
             project_id=PROJECT_ID,
             revision_id=BASE_REVISION,
@@ -474,7 +628,7 @@ class _Coordinator(CandidateCoordinator):
             base_head=expected_head,
             binding=SessionBinding(
                 project_id=project_id,
-                revision_id=CANDIDATE_REVISION,
+                revision_id=self.next_revision.id,
                 session=object(),
             ),
             stage="active",
@@ -492,10 +646,10 @@ class _Coordinator(CandidateCoordinator):
         self.log.append("candidate.reserve")
         assert project_id == PROJECT_ID
         assert expected_head == self.revisions.head
-        assert reservation_key == TASK_ID
+        self.last_reservation_key = reservation_key
         if self.reservation_error is not None:
             raise self.reservation_error
-        return CANDIDATE_REVISION
+        return self.next_revision.id
 
     def begin_reserved(
         self,
@@ -506,9 +660,29 @@ class _Coordinator(CandidateCoordinator):
         reservation_key: str,
         lease: object,
     ) -> object:
-        assert revision_id == CANDIDATE_REVISION
-        assert reservation_key == TASK_ID
+        assert revision_id == self.next_revision.id
+        assert reservation_key == self.last_reservation_key
         return self.begin(project_id=project_id, expected_head=expected_head, lease=lease)
+
+    def begin_seeded_reserved(
+        self,
+        *,
+        project_id: str,
+        expected_head: ProjectHead,
+        revision_id: str,
+        source_revision: RevisionRef,
+        reservation_key: str,
+        lease: object,
+    ) -> object:
+        self.log.append("candidate.seed")
+        assert source_revision in self.revisions.revisions.values()
+        return self.begin_reserved(
+            project_id=project_id,
+            expected_head=expected_head,
+            revision_id=revision_id,
+            reservation_key=reservation_key,
+            lease=lease,
+        )
 
     def cancel_reservation(
         self,
@@ -524,8 +698,8 @@ class _Coordinator(CandidateCoordinator):
         self.cancel_reservation_calls += 1
         assert project_id == PROJECT_ID
         assert expected_head == self.revisions.head
-        assert revision_id == CANDIDATE_REVISION
-        assert reservation_key == TASK_ID
+        assert revision_id == self.next_revision.id
+        assert reservation_key == self.last_reservation_key
         status = self.cancel_reservation_status
         return SimpleNamespace(
             status=status,
@@ -540,15 +714,28 @@ class _Coordinator(CandidateCoordinator):
         self._maybe_fail("checkpoint")
         return SimpleNamespace(**{**candidate.__dict__, "stage": "checkpointed"})
 
+    def adopt_materialized(
+        self,
+        *,
+        candidate: object,
+        source_revision: RevisionRef,
+        lease: object,
+    ) -> object:
+        del lease
+        self.log.append("candidate.adopt")
+        assert source_revision in self.revisions.revisions.values()
+        return SimpleNamespace(**{**candidate.__dict__, "stage": "checkpointed"})
+
     def seal(self, *, candidate: object, lease: object) -> object:
         del lease
         self.log.append("candidate.seal")
         self._maybe_fail("seal")
+        self.revisions.revisions[self.next_revision.id] = self.next_revision
         return SimpleNamespace(
             project_id=candidate.project_id,
             base_head=candidate.base_head,
             binding=candidate.binding,
-            revision=_revision(),
+            revision=self.next_revision,
             stage="sealed",
         )
 
@@ -668,10 +855,11 @@ class _Coordinator(CandidateCoordinator):
         self.commit_calls += 1
         self.receipt = receipt
         self._maybe_fail("commit")
-        self.revisions.head = _candidate_head()
+        committed_head = self.commit_head_override or _candidate_head()
+        self.revisions.head = committed_head
         return SimpleNamespace(
             status=self.commit_status,
-            head=_candidate_head(),
+            head=committed_head,
             revision=candidate.revision,
             head_committed=True,
             slot_promoted=True,
@@ -715,7 +903,7 @@ class _Coordinator(CandidateCoordinator):
                 slot_promoted = False
             elif self.reconcile_status is CandidateReconcileStatus.COMMITTED:
                 reconciliation_status = ReconciliationStatus.COMMITTED
-                expected_head = _base_head()
+                expected_head = self.reconcile_expected_head or _base_head()
                 if head == _base_head():
                     expected_head = ProjectHead(
                         project_id=PROJECT_ID,
@@ -779,6 +967,7 @@ class _Executor(InProcessCadExecutor):
         self._store = revisions
         self.outcomes: tuple[NormalizedToolOutcome, ...] | None = None
         self.failure_stage: str | None = None
+        self.evidence_override: CandidateEvidence | None = None
 
     def _maybe_fail(self, stage: str) -> None:
         if self.failure_stage == stage:
@@ -816,7 +1005,7 @@ class _Executor(InProcessCadExecutor):
         del candidate
         self.log.append("executor.collect")
         self._maybe_fail("collect")
-        return _evidence()
+        return self.evidence_override or _evidence()
 
 
 class _Rig:
@@ -869,6 +1058,22 @@ class _Rig:
             expected_generation=created.generation,
             program=_program() if program is None else program,
         )
+
+
+def _configured_revert_rig() -> _Rig:
+    rig = _Rig()
+    rig.revisions.revisions[DESCENDANT_REVISION] = _descendant_revision()
+    rig.revisions.head = _descendant_head()
+    rig.coordinator.next_revision = _revert_candidate_revision()
+    rig.coordinator.commit_head_override = _revert_candidate_head()
+    rig.coordinator.review_live_binding = SessionBinding(
+        project_id=PROJECT_ID,
+        revision_id=DESCENDANT_REVISION,
+        session=object(),
+    )
+    rig.executor.evidence_override = _revert_evidence()
+    rig.refresh_runtime()
+    return rig
 
 
 def _real_task_store_rig(tmp_path: Path) -> SimpleNamespace:
@@ -2013,6 +2218,231 @@ def test_durable_review_service_contract_is_explicit() -> None:
     assert "review_policy" in create_parameters
     assert hasattr(TaskService, "accept_draft")
     assert hasattr(TaskService, "reject_draft")
+
+
+def test_bound_revert_is_reviewed_then_committed_as_one_forward_generation() -> None:
+    rig = _configured_revert_rig()
+
+    awaiting = rig.service.revert_project(
+        revert_key=REVERT_KEY,
+        project_id=PROJECT_ID,
+        source_revision=BASE_REVISION,
+        expected_head=DESCENDANT_REVISION,
+    )
+
+    assert awaiting.task_run.status is TaskStatus.AWAITING_USER_REVIEW
+    assert awaiting.task_run.base_revision == DESCENDANT_REVISION
+    assert awaiting.task_run.candidate_revision == REVERT_CANDIDATE_REVISION
+    assert awaiting.task_run.committed_revision is None
+    assert rig.revisions.head == _descendant_head()
+    assert rig.coordinator.last_reservation_key is not None
+    assert rig.coordinator.last_reservation_key.startswith("revert:")
+    assert "executor.execute" not in rig.log
+    assert "executor.export" not in rig.log
+    assert rig.log.index("candidate.seed") < rig.log.index("candidate.adopt")
+    assert rig.log.index("candidate.adopt") < rig.log.index("candidate.seal")
+
+    assert awaiting.task_run.draft is not None
+    accepted = rig.service.accept_draft(
+        task_id=awaiting.task_run.id,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+
+    assert accepted.task_run.status is TaskStatus.SUCCEEDED
+    assert accepted.task_run.committed_revision == REVERT_CANDIDATE_REVISION
+    assert rig.revisions.head == _revert_candidate_head()
+    assert rig.revisions.head.generation == _descendant_head().generation + 1
+
+    replayed = rig.service.revert_project(
+        revert_key=REVERT_KEY,
+        project_id=PROJECT_ID,
+        source_revision=BASE_REVISION,
+        expected_head=DESCENDANT_REVISION,
+    )
+    assert replayed == accepted
+    assert rig.coordinator.commit_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("source_revision", "extra_source", "expected_code"),
+    [
+        (DESCENDANT_REVISION, None, TaskServiceErrorCode.INVALID_INPUT),
+        (BASE_PARENT_REVISION, _generation_zero_source(), TaskServiceErrorCode.INVALID_INPUT),
+        (
+            "revision_ffffffffffffffffffffffffffffffff",
+            _off_branch_source(),
+            TaskServiceErrorCode.NOT_FOUND,
+        ),
+    ],
+)
+def test_bound_revert_rejects_head_generation_zero_and_non_ancestor_sources(
+    source_revision: str,
+    extra_source: RevisionRef | None,
+    expected_code: TaskServiceErrorCode,
+) -> None:
+    rig = _configured_revert_rig()
+    if extra_source is not None:
+        rig.revisions.revisions[extra_source.id] = extra_source
+    if source_revision == _off_branch_source().id:
+        rig.revisions.ancestry_ids = (BASE_REVISION, DESCENDANT_REVISION)
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.revert_project(
+            revert_key=REVERT_KEY,
+            project_id=PROJECT_ID,
+            source_revision=source_revision,
+            expected_head=DESCENDANT_REVISION,
+        )
+
+    assert caught.value.code is expected_code
+    assert rig.tasks.records == {}
+    assert rig.revisions.head == _descendant_head()
+    assert "candidate.seed" not in rig.log
+    if source_revision == _off_branch_source().id:
+        assert f"revision.load:{source_revision}" not in rig.log
+
+
+def test_bound_revert_program_ready_resume_rejects_changed_source_snapshot() -> None:
+    rig = _configured_revert_rig()
+    stored = rig.service._catalog.create_revert_task(  # noqa: SLF001
+        revert_key=REVERT_KEY,
+        project_id=PROJECT_ID,
+        source_revision=_base_revision_ref(),
+        expected_head=_descendant_head(),
+    )
+    rig.revisions.revisions[BASE_REVISION] = _alter_model_payload(_base_revision_ref())
+    rig.log.clear()
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.continue_task(
+            task_id=stored.task_run.id,
+            expected_generation=stored.generation,
+        )
+
+    assert caught.value.code is TaskServiceErrorCode.RECOVERY_REQUIRED
+    assert rig.tasks.records[stored.task_run.id] == stored
+    assert rig.revisions.head == _descendant_head()
+    assert "candidate.seed" not in rig.log
+
+
+def test_bound_revert_rejects_mismatched_seeded_payload_without_advancing_head() -> None:
+    rig = _configured_revert_rig()
+    rig.coordinator.next_revision = _alter_model_payload(_revert_candidate_revision())
+
+    failed = rig.service.revert_project(
+        revert_key=REVERT_KEY,
+        project_id=PROJECT_ID,
+        source_revision=BASE_REVISION,
+        expected_head=DESCENDANT_REVISION,
+    )
+
+    assert failed.task_run.status is TaskStatus.FAILED
+    assert failed.task_run.committed_revision is None
+    assert rig.revisions.head == _descendant_head()
+    assert rig.coordinator.commit_calls == 0
+    assert "executor.execute" not in rig.log
+    assert "executor.export" not in rig.log
+
+
+@pytest.mark.parametrize("changed_revision", ["source", "candidate"])
+def test_bound_revert_accept_rechecks_source_and_candidate_payload(
+    changed_revision: str,
+) -> None:
+    rig = _configured_revert_rig()
+    awaiting = rig.service.revert_project(
+        revert_key=REVERT_KEY,
+        project_id=PROJECT_ID,
+        source_revision=BASE_REVISION,
+        expected_head=DESCENDANT_REVISION,
+    )
+    assert awaiting.task_run.draft is not None
+    if changed_revision == "source":
+        rig.revisions.revisions[BASE_REVISION] = _alter_model_payload(_base_revision_ref())
+    else:
+        rig.revisions.revisions[REVERT_CANDIDATE_REVISION] = _alter_model_payload(
+            _revert_candidate_revision()
+        )
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.accept_draft(
+            task_id=awaiting.task_run.id,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+    assert caught.value.code is TaskServiceErrorCode.RECOVERY_REQUIRED
+    attention = rig.tasks.records[awaiting.task_run.id]
+    assert attention.task_run.status is TaskStatus.RECOVERY_REQUIRED
+    assert attention.task_run.committed_revision is None
+    assert rig.revisions.head == _descendant_head()
+    assert rig.coordinator.commit_calls == 0
+
+
+def test_bound_revert_preparing_review_recovers_without_execution_or_export() -> None:
+    rig = _configured_revert_rig()
+    rig.leases.issuer.error = True
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.revert_project(
+            revert_key=REVERT_KEY,
+            project_id=PROJECT_ID,
+            source_revision=BASE_REVISION,
+            expected_head=DESCENDANT_REVISION,
+        )
+    assert caught.value.code is TaskServiceErrorCode.LEASE_UNAVAILABLE
+    stored = next(iter(rig.tasks.records.values()))
+    assert stored.task_run.status is TaskStatus.PREPARING_REVIEW
+
+    rig.leases.issuer.error = False
+    rig.coordinator.reconcile_status = CandidateReconcileStatus.NOT_COMMITTED
+    rig.coordinator.reconcile_journal_candidate = REVERT_CANDIDATE_REVISION
+    rig.coordinator.reconcile_journal_manifest = "9" * 64
+    recovered = rig.service.reconcile_task(
+        task_id=stored.task_run.id,
+        expected_generation=stored.generation,
+    )
+
+    assert recovered.task_run.status is TaskStatus.AWAITING_USER_REVIEW
+    assert rig.revisions.head == _descendant_head()
+    assert "executor.execute" not in rig.log
+    assert "executor.export" not in rig.log
+
+
+def test_bound_revert_accepting_response_loss_recovers_without_second_commit() -> None:
+    rig = _configured_revert_rig()
+    awaiting = rig.service.revert_project(
+        revert_key=REVERT_KEY,
+        project_id=PROJECT_ID,
+        source_revision=BASE_REVISION,
+        expected_head=DESCENDANT_REVISION,
+    )
+    assert awaiting.task_run.draft is not None
+    rig.tasks.fail_status = TaskStatus.SUCCEEDED
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.accept_draft(
+            task_id=awaiting.task_run.id,
+            draft_id=awaiting.task_run.draft.id,
+            expected_generation=awaiting.generation,
+        )
+    assert caught.value.code is TaskServiceErrorCode.RECOVERY_REQUIRED
+    accepting = rig.tasks.records[awaiting.task_run.id]
+    assert accepting.task_run.status is TaskStatus.ACCEPTING_DRAFT
+    assert rig.coordinator.commit_calls == 1
+    assert rig.revisions.head == _revert_candidate_head()
+
+    rig.tasks.fail_status = None
+    rig.coordinator.reconcile_status = CandidateReconcileStatus.COMMITTED
+    rig.coordinator.reconcile_live_revision = REVERT_CANDIDATE_REVISION
+    rig.coordinator.reconcile_expected_head = _descendant_head()
+    recovered = rig.service.accept_draft(
+        task_id=awaiting.task_run.id,
+        draft_id=awaiting.task_run.draft.id,
+        expected_generation=awaiting.generation,
+    )
+
+    assert recovered.task_run.status is TaskStatus.SUCCEEDED
+    assert recovered.task_run.committed_revision == REVERT_CANDIDATE_REVISION
+    assert rig.coordinator.commit_calls == 1
 
 
 def test_require_review_detaches_and_releases_before_publishing_awaiting() -> None:

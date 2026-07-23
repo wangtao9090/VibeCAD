@@ -82,6 +82,7 @@ _DEFAULT_IDEMPOTENT_TOOLS = frozenset(
         "list_projects",
         "list_revisions",
         "compare_revisions",
+        "revert_project",
         "create_task",
         "list_tasks",
         "get_task",

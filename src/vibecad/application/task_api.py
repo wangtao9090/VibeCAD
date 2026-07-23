@@ -50,9 +50,11 @@ _MAX_PUBLIC_ERROR_PATH_BYTES = 256
 _MAX_OUTER_JSON_NODES = 8_192
 _TASK_ID = re.compile(r"^task_[0-9a-f]{32}$")
 _TASK_CREATE_KEY = re.compile(r"^task_create_[0-9a-f]{32}$")
+_REVERT_CREATE_KEY = re.compile(r"^revert_create_[0-9a-f]{32}$")
 _TASK_LIST_CURSOR = re.compile(r"^task_list_cursor_[0-9a-f]{64}$")
 _TASK_EVENT_CURSOR = re.compile(r"^task_event_cursor_[0-9a-f]{64}$")
 _PROJECT_ID = re.compile(r"^project_[0-9a-f]{32}$")
+_REVISION_ID = re.compile(r"^revision_[0-9a-f]{32}$")
 _DRAFT_ID = re.compile(r"^draft_[0-9a-f]{32}$")
 
 
@@ -141,6 +143,15 @@ class TaskServicePortFailure:
 
 class TaskServicePort(Protocol):
     """Transport-neutral subset of the deterministic task service."""
+
+    def revert_project(
+        self,
+        *,
+        revert_key: str,
+        project_id: str,
+        source_revision: str,
+        expected_head: str,
+    ) -> StoredTaskRun | TaskServicePortFailure: ...
 
     def create_task(
         self,
@@ -778,6 +789,69 @@ class TaskApi:
             ):
                 _raise(TaskApiErrorCode.INTERNAL_ERROR)
             return self._task_result(stored, task_id=generated)
+
+        return self._guard(action)
+
+    def revert_project(self, request: object) -> dict[str, object]:
+        def action() -> dict[str, object]:
+            from vibecad.workflow.revert import (
+                RevertProgramError,
+                require_matching_revert_task,
+                revert_task_identity,
+            )
+
+            data = _validate_request(
+                request,
+                required=frozenset(
+                    {
+                        "schema_version",
+                        "revert_key",
+                        "project_id",
+                        "source_revision",
+                        "expected_head",
+                    }
+                ),
+            )
+            revert_key = _identifier(
+                data["revert_key"],
+                "/revert_key",
+                _REVERT_CREATE_KEY,
+            )
+            project_id = _identifier(data["project_id"], "/project_id", _PROJECT_ID)
+            source_revision = _identifier(
+                data["source_revision"],
+                "/source_revision",
+                _REVISION_ID,
+            )
+            expected_head = _identifier(
+                data["expected_head"],
+                "/expected_head",
+                _REVISION_ID,
+            )
+            try:
+                expected_task_id, _creation_digest = revert_task_identity(revert_key)
+            except RevertProgramError:
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            value = self._invoke_untrusted(
+                lambda: self._port.revert_project(
+                    revert_key=revert_key,
+                    project_id=project_id,
+                    source_revision=source_revision,
+                    expected_head=expected_head,
+                )
+            )
+            stored = self._port_result(value, task_id=expected_task_id)
+            try:
+                require_matching_revert_task(
+                    stored,
+                    revert_key=revert_key,
+                    project_id=project_id,
+                    source_revision=source_revision,
+                    expected_head=expected_head,
+                )
+            except RevertProgramError:
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            return self._task_result(stored, task_id=expected_task_id)
 
         return self._guard(action)
 
