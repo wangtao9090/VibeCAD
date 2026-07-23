@@ -96,6 +96,26 @@ def _close_runtime(runtime: object) -> bool:
         return False
 
 
+def _require_current_layout(layout: ApplicationDataLayout) -> None:
+    for path in (
+        layout.root,
+        layout.locks,
+        layout.tasks,
+        layout.projects,
+        layout.bootstrap,
+        layout.checkouts,
+        layout.artifacts,
+    ):
+        layout.require_current(path)
+
+
+def _close_application_candidate(application: AgentApplication) -> None:
+    try:
+        application.close()
+    except Exception:
+        pass
+
+
 class AgentApplication:
     """Process-owned composition root; CAD dependencies remain lazy."""
 
@@ -200,6 +220,86 @@ class AgentApplication:
         self._artifact_api = None
 
     @classmethod
+    def from_captured_layout(
+        cls,
+        *,
+        layout,
+        lease_manager,
+        runtime_factory: Callable[..., object] = _default_runtime_factory,
+        cad_port_factory: Callable[..., object] = _default_cad_port_factory,
+    ) -> AgentApplication:
+        if not (
+            type(layout) is ApplicationDataLayout
+            and type(lease_manager) is ResourceLeaseManager
+            and callable(runtime_factory)
+            and callable(cad_port_factory)
+        ):
+            raise TypeError("invalid AgentApplication composition")
+        try:
+            lock_identity = layout.identity_for(layout.locks)
+        except Exception:
+            raise TypeError("invalid AgentApplication composition") from None
+        if not (
+            getattr(lease_manager, "_creator_pid", None) == os.getpid()
+            and getattr(lease_manager, "_root_parts", None) == layout.locks.parts
+            and getattr(lease_manager, "_root_identity", None) == lock_identity
+        ):
+            raise TypeError("invalid AgentApplication composition")
+
+        _initialize_candidate_file_limit_runtime()
+        _require_current_layout(layout)
+        recover_bootstrap_cleanup(layout.bootstrap)
+        _require_current_layout(layout)
+        tasks = TaskRunStore(
+            layout.tasks,
+            lease_manager,
+            trust=TaskStoreRootTrust.TRUSTED_LOCAL,
+        )
+        if not (
+            getattr(tasks, "_lease_manager", None) is lease_manager
+            and getattr(tasks, "_root_parts", None) == layout.tasks.parts
+            and getattr(tasks, "_root_identity", None) == layout.identity_for(layout.tasks)
+        ):
+            raise TypeError("invalid AgentApplication composition")
+        revisions = LocalRevisionStore(
+            layout.projects,
+            lease_manager,
+            trust=RevisionStoreRootTrust.TRUSTED_LOCAL,
+        )
+        if not (
+            getattr(revisions, "_lease_manager", None) is lease_manager
+            and getattr(revisions, "_root", None) == layout.projects
+            and getattr(revisions, "_identity", None) == layout.identity_for(layout.projects)
+        ):
+            raise TypeError("invalid AgentApplication composition")
+        application = None
+        try:
+            application = cls(
+                layout=layout,
+                lease_manager=lease_manager,
+                task_store=tasks,
+                revision_store=revisions,
+                runtime_factory=runtime_factory,
+                cad_port_factory=cad_port_factory,
+            )
+            if not (
+                type(application) is cls
+                and application._layout is layout
+                and application._lease_manager is lease_manager
+                and application._task_store is tasks
+                and application._revision_store is revisions
+                and application._runtime_factory is runtime_factory
+                and application._cad_port_factory is cad_port_factory
+            ):
+                raise TypeError("invalid AgentApplication composition")
+            _require_current_layout(layout)
+        except BaseException:
+            if application is not None:
+                _close_application_candidate(application)
+            raise
+        return application
+
+    @classmethod
     def open(
         cls,
         *,
@@ -207,36 +307,14 @@ class AgentApplication:
         runtime_factory: Callable[..., object] = _default_runtime_factory,
         cad_port_factory: Callable[..., object] = _default_cad_port_factory,
     ) -> AgentApplication:
-        _initialize_candidate_file_limit_runtime()
         layout = ApplicationDataLayout.open(data_root)
-        layout.require_current(layout.bootstrap)
-        recover_bootstrap_cleanup(layout.bootstrap)
-        layout.require_current(layout.bootstrap)
         leases = ResourceLeaseManager(
             layout.locks,
             trust=LeaseRootTrust.TRUSTED_LOCAL,
         )
-        if getattr(leases, "_root_identity", None) != layout.identity_for(layout.locks):
-            raise TypeError("invalid AgentApplication composition")
-        tasks = TaskRunStore(
-            layout.tasks,
-            leases,
-            trust=TaskStoreRootTrust.TRUSTED_LOCAL,
-        )
-        if getattr(tasks, "_root_identity", None) != layout.identity_for(layout.tasks):
-            raise TypeError("invalid AgentApplication composition")
-        revisions = LocalRevisionStore(
-            layout.projects,
-            leases,
-            trust=RevisionStoreRootTrust.TRUSTED_LOCAL,
-        )
-        if getattr(revisions, "_identity", None) != layout.identity_for(layout.projects):
-            raise TypeError("invalid AgentApplication composition")
-        return cls(
+        return cls.from_captured_layout(
             layout=layout,
             lease_manager=leases,
-            task_store=tasks,
-            revision_store=revisions,
             runtime_factory=runtime_factory,
             cad_port_factory=cad_port_factory,
         )

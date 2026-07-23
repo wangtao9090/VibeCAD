@@ -718,7 +718,246 @@ def test_public_call_signatures_are_exact():
         ("self", positional, empty),
         ("owner_token", keyword_only, empty),
     ]
+    assert shape(ResourceLease.require_current) == [
+        ("self", positional, empty),
+    ]
     assert shape(ProjectWriteLease.release) == shape(ResourceLease.release)
+    assert shape(ProjectWriteLease.require_current) == shape(ResourceLease.require_current)
+
+
+@POSIX_ONLY
+def test_require_current_is_read_only_for_generic_and_project_leases(lease_root: Path):
+    manager = _manager(lease_root)
+    generic = manager.acquire(RESOURCE_ID)
+    project = manager.acquire_project_write(PROJECT_ID)
+    generic_path = _lock_path(lease_root, RESOURCE_ID)
+    project_path = _lock_path(lease_root, PROJECT_ID)
+    before = {
+        "generic": (
+            generic.released,
+            generic.resource_key,
+            generic.owner_token,
+            generic._fd,
+            os.fstat(generic._fd),
+            generic_path.stat(),
+        ),
+        "project": (
+            project.released,
+            project.resource_key,
+            project.owner_token,
+            project.project_id,
+            project._fd,
+            os.fstat(project._fd),
+            project_path.stat(),
+        ),
+    }
+
+    assert generic.require_current() is None
+    assert project.require_current() is None
+    assert generic.require_current() is None
+    assert project.require_current() is None
+
+    assert before == {
+        "generic": (
+            generic.released,
+            generic.resource_key,
+            generic.owner_token,
+            generic._fd,
+            os.fstat(generic._fd),
+            generic_path.stat(),
+        ),
+        "project": (
+            project.released,
+            project.resource_key,
+            project.owner_token,
+            project.project_id,
+            project._fd,
+            os.fstat(project._fd),
+            project_path.stat(),
+        ),
+    }
+    project.release(owner_token=project.owner_token)
+    generic.release(owner_token=generic.owner_token)
+
+
+@POSIX_ONLY
+def test_require_current_rejects_released_and_forged_leases(lease_root: Path):
+    manager = _manager(lease_root)
+    lease = manager.acquire(RESOURCE_ID)
+    lease.release(owner_token=lease.owner_token)
+    with pytest.raises(LeaseError) as released:
+        lease.require_current()
+    _assert_lease_error(released, LeaseErrorCode.ALREADY_RELEASED)
+
+    for forged in (object.__new__(ResourceLease), object.__new__(ProjectWriteLease)):
+        with pytest.raises(LeaseError) as invalid:
+            forged.require_current()
+        _assert_lease_error(invalid, LeaseErrorCode.INVALID_LEASE)
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("field", ["issuer", "seal"])
+def test_require_current_rejects_changed_issuer_or_seal(
+    lease_root: Path,
+    field: str,
+):
+    manager = _manager(lease_root)
+    lease = manager.acquire(RESOURCE_ID)
+    original_issuer = lease._issuer
+    original_seal = lease._seal
+    if field == "issuer":
+        object.__setattr__(lease, "_issuer", _manager(lease_root))
+    else:
+        object.__setattr__(lease, "_seal", object())
+    try:
+        with pytest.raises(LeaseError) as caught:
+            lease.require_current()
+        _assert_lease_error(caught, LeaseErrorCode.INVALID_LEASE)
+    finally:
+        object.__setattr__(lease, "_issuer", original_issuer)
+        object.__setattr__(lease, "_seal", original_seal)
+        lease.release(owner_token=lease.owner_token)
+
+
+@POSIX_ONLY
+def test_require_current_rejects_process_reservation_replacement(lease_root: Path):
+    lease = _manager(lease_root).acquire(RESOURCE_ID)
+    key = lease._registry_key
+    original = lease_module._PROCESS_RESERVATIONS[key]
+    replacement = lease_module._Reservation(lease.owner_token)
+    replacement.fd = lease._fd
+    with lease_module._PROCESS_REGISTRY_LOCK:
+        lease_module._PROCESS_RESERVATIONS[key] = replacement
+    try:
+        with pytest.raises(LeaseError) as caught:
+            lease.require_current()
+        _assert_lease_error(caught, LeaseErrorCode.INVALID_LEASE)
+    finally:
+        with lease_module._PROCESS_REGISTRY_LOCK:
+            lease_module._PROCESS_RESERVATIONS[key] = original
+    assert lease.require_current() is None
+    lease.release(owner_token=lease.owner_token)
+
+
+@POSIX_ONLY
+def test_require_current_rejects_root_rename_and_recreation(tmp_path: Path):
+    root = tmp_path / "leases"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    moved = tmp_path / "moved-leases"
+    lease = _manager(root).acquire(RESOURCE_ID)
+    root.rename(moved)
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    try:
+        with pytest.raises(LeaseError) as caught:
+            lease.require_current()
+        _assert_lease_error(caught, LeaseErrorCode.UNSAFE_ROOT)
+    finally:
+        root.rmdir()
+        moved.rename(root)
+    assert lease.require_current() is None
+    lease.release(owner_token=lease.owner_token)
+
+
+@POSIX_ONLY
+def test_require_current_rejects_lock_unlink_and_rebind(lease_root: Path):
+    lease = _manager(lease_root).acquire(RESOURCE_ID)
+    path = _lock_path(lease_root, RESOURCE_ID)
+    original_fd_stat = os.fstat(lease._fd)
+    path.unlink()
+    path.write_bytes(b"replacement")
+    path.chmod(0o600)
+    replacement = path.stat()
+    assert (replacement.st_dev, replacement.st_ino) != (
+        original_fd_stat.st_dev,
+        original_fd_stat.st_ino,
+    )
+
+    with pytest.raises(LeaseError) as caught:
+        lease.require_current()
+    _assert_lease_error(caught, LeaseErrorCode.UNSAFE_LOCK_ENTRY)
+    lease.release(owner_token=lease.owner_token)
+
+
+@POSIX_ONLY
+def test_require_current_rejects_changed_lock_metadata(lease_root: Path):
+    lease = _manager(lease_root).acquire(RESOURCE_ID)
+    path = _lock_path(lease_root, RESOURCE_ID)
+    path.chmod(0o640)
+    try:
+        with pytest.raises(LeaseError) as caught:
+            lease.require_current()
+        _assert_lease_error(caught, LeaseErrorCode.UNSAFE_LOCK_ENTRY)
+    finally:
+        path.chmod(0o600)
+    assert lease.require_current() is None
+    lease.release(owner_token=lease.owner_token)
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("mutation", ["close", "replace"])
+def test_require_current_rejects_closed_or_replaced_held_fd(
+    tmp_path: Path,
+    lease_root: Path,
+    mutation: str,
+):
+    lease = _manager(lease_root).acquire(RESOURCE_ID)
+    held_fd = lease._fd
+    replacement_fd = -1
+    if mutation == "close":
+        os.close(held_fd)
+    else:
+        replacement = tmp_path / "replacement-fd"
+        replacement.write_bytes(b"replacement")
+        replacement.chmod(0o600)
+        replacement_fd = os.open(replacement, os.O_RDWR | os.O_CLOEXEC)
+        os.dup2(replacement_fd, held_fd)
+    try:
+        with pytest.raises(LeaseError) as caught:
+            lease.require_current()
+        _assert_lease_error(caught, LeaseErrorCode.UNSAFE_LOCK_ENTRY)
+    finally:
+        try:
+            lease.release(owner_token=lease.owner_token)
+        except LeaseError as cleanup:
+            assert mutation == "close"
+            assert cleanup.code is LeaseErrorCode.IO_ERROR
+        if replacement_fd >= 0:
+            os.close(replacement_fd)
+
+
+@POSIX_ONLY
+def test_require_current_rejects_fork_inherited_lease(lease_root: Path):
+    lease = _manager(lease_root).acquire(RESOURCE_ID)
+    read_fd, write_fd = os.pipe()
+    child_pid = os.fork()
+    if child_pid == 0:
+        os.close(read_fd)
+        try:
+            try:
+                lease.require_current()
+            except LeaseError as error:
+                result = error.code.value
+            else:
+                result = "unexpected-success"
+            os.write(write_fd, result.encode("ascii"))
+        finally:
+            os.close(write_fd)
+            os._exit(0)
+
+    os.close(write_fd)
+    deadline = time.monotonic() + 5
+    try:
+        result = _read_fd_with_deadline(read_fd, 128, deadline).decode("ascii")
+        waited, status_value = _waitpid_with_deadline(child_pid, deadline)
+    finally:
+        os.close(read_fd)
+    assert waited == child_pid
+    assert os.waitstatus_to_exitcode(status_value) == 0
+    assert result == LeaseErrorCode.WRONG_PROCESS.value
+    assert lease.require_current() is None
+    lease.release(owner_token=lease.owner_token)
 
 
 @POSIX_ONLY
@@ -4362,6 +4601,10 @@ def test_source_contains_no_ttl_stale_reclaim_or_lock_entry_deletion():
             "_PROCESS_REGISTRY_LOCK",
             "_PROCESS_RESERVATIONS",
         },
+        "_require_current_lease": {
+            "_PROCESS_REGISTRY_LOCK",
+            "_PROCESS_RESERVATIONS",
+        },
         "_prepare_for_fork": {"_PROCESS_REGISTRY_LOCK"},
         "_after_fork_parent": {"_PROCESS_REGISTRY_LOCK"},
         "_after_fork_child": {
@@ -4384,6 +4627,7 @@ def test_source_contains_no_ttl_stale_reclaim_or_lock_entry_deletion():
     allowed_lock_with_functions = {
         "_attach_process_reservation_fd",
         "_drop_process_reservation",
+        "_require_current_lease",
         "_reserve_process_reservation",
         "release",
     }
@@ -4391,6 +4635,7 @@ def test_source_contains_no_ttl_stale_reclaim_or_lock_entry_deletion():
         "_after_fork_child",
         "_attach_process_reservation_fd",
         "_drop_process_reservation",
+        "_require_current_lease",
         "_reserve_process_reservation",
     }
     unsafe_authority_load_lines: list[int] = []
@@ -4479,6 +4724,7 @@ def test_source_contains_no_ttl_stale_reclaim_or_lock_entry_deletion():
         "_reserve_process_reservation": {ast.Load, ast.Store},
         "_attach_process_reservation_fd": {ast.Load},
         "_drop_process_reservation": {ast.Load, ast.Del},
+        "_require_current_lease": {ast.Load},
     }.items():
         function = function_nodes.get(name)
         locked = direct_lock_with(function) if function is not None else None

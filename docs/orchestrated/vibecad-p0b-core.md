@@ -639,6 +639,7 @@ remain residual and unauthorized.
 | P0B-E09 / 2026-07-23T09:34:39Z | P0B-C06 under P0B-R1.1/A01/A02; P0B-D09/D21 | this C06 commit / non-force push required | semantic RED and review-repair cycles covered key/intent replay, ancestry, seeded-copy binding, accept-time drift and crash recovery; canonical `466 passed`; storage/candidate `576 passed`; affected public/API integration `636 passed`; final audit `944 passed`; full non-slow `4441 passed, 95 deselected`; real FreeCAD 1.1.0 restart/accept smoke `1 passed`; 28-tool SDK projection `21,438` bytes / SHA-256 `5d7703a55dd7b20c21c487d6f4740fbfb894cf6867c840ccb30adf57de63efda`; complete frame `21,483` bytes / SHA-256 `22c903b05fc6e46868bd74380880cca5c915f312ac2ddf24f7e48896b8cdf826`; canonical public receipt `61a9f6c662ad224147aad07b0d701f82a3407d4ec0b8f15ede48dff76c4c98d3`; changed-file Ruff/format/syntax, diff and fsck clean; API, workflow, storage and final diff reviews `Critical 0 / Important 0` | the published Skill projection remains intentionally frozen at the last accepted 27-tool package until C14 refreshes all release artifacts; first two real-smoke attempts selected the wrong managed prefix and are setup evidence, while the declared legacy-compatible prefix passed; one existing macOS fork warning and one unchanged full-Ruff I001 remain | P0B-S09 | accepted-green |
 | P0B-E10 / 2026-07-23T10:17:11Z | P0B-C07 under P0B-R1.1/A01/A02; P0B-D11/D12/D13/D21 | this C07 commit / non-force push required | initial semantic RED `19 failed, 24 passed`; independent review RED `4 failed`; final focused `54 passed`; full non-slow `4474 passed, 95 deselected`; real macOS getpeereid POC repeated 32 times in project and FreeCAD Python, plus automated socketpair and bind/listen/connect/accept flows; endpoint path/root replacement and fresh/preinitialized two-process authority races fail closed; changed-file Ruff/format/syntax, diff and fsck clean; final protocol review `Critical 0 / Important 0 / Minor 0`, identity reviews `Critical 0 / Important 0` | runnable daemon, receipt/secret persistence, pre-challenge composition and production EndpointBinding remain C09; Linux/Windows remain P0B-RES-02; existing import `source_path` versus D11 is recorded as P0B-RES-13 for C10/C13; one unchanged macOS fork warning and full-Ruff baseline I001 remain | P0B-S10 | accepted-green |
 | P0B-E11 / 2026-07-23T11:33:13Z | P0B-C08 under P0B-R1.1/A01/A02; P0B-D15/D21/D22-R1; D21 packet-allowlist repair adds `src/vibecad/execution/revisions.py` and `tests/test_revision_store.py` for the bounded source-observation seam and its integrity/performance regressions | this C08 commit / non-force push required | semantic RED `14 failed, 36 passed`; performance RED stable live get `9 > 2` actual `_validate_revision_content` passes; review Important REDs covered empty-project first draft `NOT_FOUND` and post-hash valid-manifest replacement returning a stale observation; final focused `66 passed, 1 warning`; affected `458 passed, 1 warning`; full non-slow `4508 passed, 95 deselected, 1 warning`; changed-file Ruff/format, diff and fsck clean; persistence and semantic reviews on exact source/test diff SHA-256 `bdf51474d75f653e57e54989cc7ddb1cad1ba4846ad7ec79744b33657c74dbef` both GO with `Critical 0 / Important 0 / Minor 0` | one unchanged macOS multithreaded-fork deprecation warning; legacy schema-v1 records intentionally recover as `recovery_required`; runnable daemon remains C09 and grants remain C10 | P0B-S11 | accepted-green |
+| P0B-E12 / 2026-07-23T12:28:27Z | P0B-C09 under P0B-R1.1/A01/A02; P0B-D02/D11/D12/D18/D21/D22-R1; D21 packet-allowlist repair adds the directly required captured-layout composition seam in `src/vibecad/application/agent.py` plus its tests and continuous authority-liveness validation in `src/vibecad/workflow/lease.py` plus its tests | this C09 commit / non-force push required | daemon semantic RED `5 failed, 17 passed`; composition RED `14 failed, 65 deselected`; authority RED `11 failed, 180 deselected`; review repair cycles close authenticated-socket leakage, early accept-thread start, swallowed fatal handler exceptions and idle-timeout/handler-time ambiguity; final local-daemon `38 passed`; focused C09/affected `352 passed`; full non-slow `4561 passed, 95 deselected, 1 warning`; real macOS auth/double-start/crash-restart/root-and-entry-rebind/8-connection/blocked-shutdown tests pass; controller 50-ping median `3.042 ms`, p95 `3.498 ms`, max `3.782 ms`; full Ruff, changed-file format, diff and fsck clean; two final exact-code reviews both GO with `Critical 0 / Major 0`, 11-file content-manifest SHA-256 `ab5d2fcbb82961946fef0925fe85d209a8561ada957131d4ed9a3f3981eabdc9` | Linux/Windows remain P0B-RES-02 and malicious same-UID replacement remains P0B-RES-03; C10 still owns grants, C11 owns operation-aware Worker deadlines, C13 owns MCP/Workbench routing and P0B-RES-13 import-path resolution; one unchanged macOS multithreaded-fork warning remains | P0B-S12 | accepted-green |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -1324,6 +1325,102 @@ remain residual and unauthorized.
 - Use the exact source/test review hash above only for the frozen five-file
   code packet; this append-only documentation update necessarily changes the
   overall working-tree diff hash without changing the reviewed code.
+- Continue with `native-plan / spawn-send-wait / repo-artifact /
+  native-session-poll`, exact named-file staging, `PYTHONPATH=src` gates,
+  immediate non-force push and three-way local/upstream/remote equality.
+  PR, tag, release, marketplace publication, force-push and external spend
+  remain unauthorized.
+
+## 24. Recovery Snapshot P0B-S12
+
+### 1. Completed milestones
+
+- C09 adds a runnable `python -m vibecad.daemon` production entrypoint and a
+  PID-bound local client. One fixed authority lease is acquired against the
+  same captured Application data/locks identity before one
+  `AgentApplication` is composed. The Application, task/revision stores and
+  daemon therefore share one layout and one lease manager rather than opening
+  parallel authorities.
+- The daemon owns an identity-pinned exact-`0700` run root, `0600` AF_UNIX
+  endpoint, random 32-byte boot secret and canonical receipt. Publication is
+  secret first and receipt last; cleanup removes the receipt readiness marker
+  first. Receipt, secret, endpoint, run root, data root, lock root and authority
+  lock are continuously rebound to captured filesystem identities.
+  Interrupted publication and verified complete crash leftovers recover;
+  unknown, unsafe, live or ambiguously replaced state fails closed.
+- Every accepted socket passes the real macOS same-user check before protocol
+  state or a challenge is constructed. Mutual protocol-v2 authentication,
+  strict signed sequencing and the static five-method dispatcher remain the
+  only wire path. The daemon facade contains 24 literal Application operations
+  and no reflection/import/callable lookup. The existing public surface remains
+  exactly 28 tools.
+- `kernel.ping`, path-free checkout open/get/close and the Application request
+  facades run through a real authenticated client. C09 explicitly rejects both
+  `create_project(kind=import_fcstd)` and any non-null `source_path` before the
+  Application; it does not pretend to have resolved P0B-RES-13 and does not
+  introduce a C10 file grant early.
+- Admission is capped at eight simultaneous connections. Handshake and
+  between-request idle deadlines are absolute transport bounds. Handler
+  execution does not consume the response-send budget or a client-side idle
+  budget; once the first response fragment arrives, fragment-idle protection
+  applies. C11 remains responsible for operation-aware, killable Worker RPC
+  deadlines.
+- Pre-accept, pre-authentication, pre-dispatch and post-dispatch checks bind the
+  live authority and published state. A run-root, endpoint, receipt, secret or
+  authority-lock replacement stops the service before another dispatch.
+  Unknown handler `BaseException` is terminal. EOF, bad proof and ordinary
+  protocol failure terminate only that connection. Shutdown drains accepted
+  workers before closing the Application and removes receipt/secret/endpoint
+  before releasing authority; a blocked worker or unsafe cleanup retains the
+  authority and returns `recovery_required`.
+- The genuine RED sequence was daemon `5 failed, 17 passed`, captured-layout
+  composition `14 failed, 65 deselected`, and authority liveness
+  `11 failed, 180 deselected`. Review exposed four Major regressions:
+  authenticated socket leakage after the final boot-state check, accept-thread
+  start before final validation, silent continuation after fatal handler
+  exceptions, and misuse of transport idle as a handler total deadline. Each
+  now has a passing regression.
+- Final controller gates are green: local daemon `38 passed`; combined
+  protocol/daemon/Application/lease `352 passed`; full non-slow
+  `4561 passed, 95 deselected, 1 warning`. Fifty warm authenticated pings
+  measured median `3.042 ms`, p95 `3.498 ms` and maximum `3.782 ms`. Full Ruff,
+  exact 11-file format, diff and fsck gates pass. Two independent final reviews
+  returned GO with `Critical 0 / Major 0`; the frozen implementation/test
+  content-manifest SHA-256 is
+  `ab5d2fcbb82961946fef0925fe85d209a8561ada957131d4ed9a3f3981eabdc9`.
+
+### 2. Next steps
+
+1. Commit the exact C09 allowlist as
+   `feat(daemon): add the single-instance kernel service`.
+2. Non-force push `codex/agent-stage3`, then verify exact
+   `HEAD == @{upstream}` and remote-ref equality.
+3. Rebind C10 to the accepted remote anchor and add session-bound file grants
+   without changing protocol v1, the 28 public tools or Task Kernel ownership.
+
+### 3. Approved decisions
+
+- P0B-A01/A02 and P0B-D01..D22 plus D08A/D17A/D22-R1 remain active.
+- C09 satisfies the runnable macOS single-Kernel portion of P0B-D02/D11/D12
+  and the daemon half of P0B-D18. It does not claim C13 consumer routing, a
+  Workbench UI, Linux/Windows support or protection against a malicious
+  same-UID process.
+- Under P0B-D21, the narrowed C09 packet allowlist adds
+  `src/vibecad/application/agent.py`, `tests/test_agent_application.py`,
+  `src/vibecad/workflow/lease.py` and `tests/test_workflow_lease.py`. These
+  files provide the directly required same-layout/same-manager composition
+  seam and continuous authority-liveness proof; they add no second execution
+  system, modeling operation, grant or public tool.
+
+### 4. Execution discipline
+
+- Preserve the frozen protocol-v1 and protocol-v2 wire contracts. C10 may add
+  only the approved session-bound grant method and managed-file broker; it
+  must re-evaluate C08 source liveness at claim and may not accept a
+  client-supplied path.
+- Use the exact review hash above only for the frozen 11 implementation/test
+  files. This append-only ledger/snapshot edit necessarily changes the overall
+  commit diff without changing the reviewed code.
 - Continue with `native-plan / spawn-send-wait / repo-artifact /
   native-session-poll`, exact named-file staging, `PYTHONPATH=src` gates,
   immediate non-force push and three-way local/upstream/remote equality.

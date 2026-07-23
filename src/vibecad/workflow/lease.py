@@ -409,7 +409,7 @@ def _validate_open_entry(
     root_fd: int,
     fd: int,
     expected_identity,
-) -> None:
+) -> tuple[int, int]:
     path_stat = None
     fd_stat = None
     failed = False
@@ -431,6 +431,7 @@ def _validate_open_entry(
         safe = False
     if not safe:
         raise LeaseError(LeaseErrorCode.UNSAFE_LOCK_ENTRY)
+    return path_identity
 
 
 def _resource_key(resource_id) -> str:
@@ -490,8 +491,10 @@ def _cleanup_failed_acquire(adapter, locked: bool, fd, key, owner_token: str):
 
 class ResourceLease:
     __slots__ = (
+        "_entry_identity",
         "_fd",
         "_issuer",
+        "_reservation",
         "_registry_key",
         "_seal",
         "owner_token",
@@ -504,6 +507,9 @@ class ResourceLease:
 
     def __setattr__(self, name, value) -> None:
         raise AttributeError("lease fields are immutable")
+
+    def require_current(self) -> None:
+        _require_current_lease(self)
 
     def release(self, *, owner_token) -> None:
         self._issuer.release(self, owner_token=owner_token)
@@ -527,6 +533,8 @@ def _new_lease(
     owner_token: str,
     fd: int,
     registry_key,
+    reservation: _Reservation,
+    entry_identity: tuple[int, int],
     project_id,
 ):
     lease = object.__new__(lease_type)
@@ -534,6 +542,8 @@ def _new_lease(
     object.__setattr__(lease, "_seal", seal)
     object.__setattr__(lease, "_fd", fd)
     object.__setattr__(lease, "_registry_key", registry_key)
+    object.__setattr__(lease, "_reservation", reservation)
+    object.__setattr__(lease, "_entry_identity", entry_identity)
     object.__setattr__(lease, "resource_key", resource_key)
     object.__setattr__(lease, "owner_token", owner_token)
     object.__setattr__(lease, "released", False)
@@ -606,6 +616,7 @@ class ResourceLeaseManager:
         filename = resource_key + ".lock"
         fd = None
         locked = False
+        entry_identity = None
         primary_error = None
         try:
             expected_entry = _preopen_entry_identity(filename, root_fd)
@@ -620,7 +631,7 @@ class ResourceLeaseManager:
                 os.fsync(root_fd)
             self._adapter.acquire(fd)
             locked = True
-            _validate_open_entry(filename, root_fd, fd, expected_entry)
+            entry_identity = _validate_open_entry(filename, root_fd, fd, expected_entry)
         except LeaseError as exc:
             primary_error = exc
         except OSError:
@@ -650,6 +661,8 @@ class ResourceLeaseManager:
             owner_token,
             fd,
             registry_key,
+            reservation,
+            entry_identity,
             project_id,
         )
 
@@ -693,3 +706,89 @@ class ResourceLeaseManager:
                 first_error = exc
         if first_error is not None:
             raise first_error
+
+
+def _require_current_lease(lease) -> None:
+    if type(lease) is not ResourceLease and type(lease) is not ProjectWriteLease:
+        raise LeaseError(LeaseErrorCode.INVALID_LEASE)
+    invalid_lease = False
+    try:
+        issuer = lease._issuer
+        seal = lease._seal
+        released = lease.released
+        resource_key = lease.resource_key
+        owner_token = lease.owner_token
+        fd = lease._fd
+        registry_key = lease._registry_key
+        reservation = lease._reservation
+        entry_identity = lease._entry_identity
+    except AttributeError:
+        invalid_lease = True
+    if invalid_lease:
+        raise LeaseError(LeaseErrorCode.INVALID_LEASE)
+    if type(issuer) is not ResourceLeaseManager or seal is not issuer._seal:
+        raise LeaseError(LeaseErrorCode.INVALID_LEASE)
+    issuer._ensure_process()
+    if released is True:
+        if type(resource_key) is not str or _RESOURCE_KEY_RE.fullmatch(resource_key) is None:
+            raise LeaseError(LeaseErrorCode.INVALID_LEASE)
+        raise LeaseError(LeaseErrorCode.ALREADY_RELEASED, resource_key=resource_key)
+    if (
+        released is not False
+        or type(resource_key) is not str
+        or _RESOURCE_KEY_RE.fullmatch(resource_key) is None
+        or type(owner_token) is not str
+        or _OWNER_TOKEN_RE.fullmatch(owner_token) is None
+        or type(fd) is not int
+        or fd < 0
+        or type(registry_key) is not tuple
+        or len(registry_key) != 4
+        or type(reservation) is not _Reservation
+        or type(entry_identity) is not tuple
+        or len(entry_identity) != 2
+        or any(type(item) is not int for item in entry_identity)
+    ):
+        raise LeaseError(LeaseErrorCode.INVALID_LEASE)
+    with _PROCESS_REGISTRY_LOCK:
+        try:
+            current = _PROCESS_RESERVATIONS[registry_key]
+        except KeyError:
+            raise LeaseError(LeaseErrorCode.INVALID_LEASE) from None
+        if (
+            current is not reservation
+            or reservation.owner_token != owner_token
+            or reservation.fd != fd
+        ):
+            raise LeaseError(LeaseErrorCode.INVALID_LEASE)
+        root_fd = None
+        primary_error = None
+        try:
+            root_fd, root_stat = _open_root(issuer._root_parts, issuer._root_identity)
+            expected_registry_key = (
+                issuer._adapter.platform_key,
+                root_stat.st_dev,
+                root_stat.st_ino,
+                resource_key,
+            )
+            if registry_key != expected_registry_key:
+                raise LeaseError(LeaseErrorCode.INVALID_LEASE)
+            _validate_open_entry(
+                resource_key + ".lock",
+                root_fd,
+                fd,
+                entry_identity,
+            )
+        except LeaseError as error:
+            primary_error = error
+        except OSError:
+            primary_error = LeaseError(LeaseErrorCode.IO_ERROR)
+        close_failed = False
+        if root_fd is not None:
+            try:
+                os.close(root_fd)
+            except OSError:
+                close_failed = True
+        if primary_error is not None:
+            raise primary_error
+        if close_failed:
+            raise LeaseError(LeaseErrorCode.IO_ERROR)

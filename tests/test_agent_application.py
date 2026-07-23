@@ -55,7 +55,12 @@ from vibecad.workflow.contracts import (
     ModelProgram,
     ValueSource,
 )
-from vibecad.workflow.lease import LeaseError, LeaseErrorCode, ResourceLeaseManager
+from vibecad.workflow.lease import (
+    LeaseError,
+    LeaseErrorCode,
+    LeaseRootTrust,
+    ResourceLeaseManager,
+)
 from vibecad.workflow.program import validate_model_program
 from vibecad.workflow.service import (
     TaskService,
@@ -375,6 +380,257 @@ def test_application_open_rejects_a_lock_root_replaced_after_layout_capture(
         AgentApplication.open(data_root=data_root)
 
     assert tuple((data_root / "locks").iterdir()) == ()
+
+
+def test_application_composes_from_one_captured_layout_and_lease_manager(
+    tmp_path: Path,
+) -> None:
+    layout = ApplicationDataLayout.open(_data_root(tmp_path))
+    leases = ResourceLeaseManager(
+        layout.locks,
+        trust=LeaseRootTrust.TRUSTED_LOCAL,
+    )
+
+    def runtime_factory(**_kwargs):
+        raise AssertionError("runtime construction must stay lazy")
+
+    def cad_port_factory(**_kwargs):
+        raise AssertionError("CAD construction must stay lazy")
+
+    app = AgentApplication.from_captured_layout(
+        layout=layout,
+        lease_manager=leases,
+        runtime_factory=runtime_factory,
+        cad_port_factory=cad_port_factory,
+    )
+
+    assert app._layout is layout  # noqa: SLF001
+    assert app._lease_manager is leases  # noqa: SLF001
+    assert app._task_store._lease_manager is leases  # noqa: SLF001
+    assert app._revision_store._lease_manager is leases  # noqa: SLF001
+    assert app._runtime_factory is runtime_factory  # noqa: SLF001
+    assert app._cad_port_factory is cad_port_factory  # noqa: SLF001
+    assert app._runtimes == {}  # noqa: SLF001
+    app.close()
+
+
+def test_application_open_delegates_to_the_captured_layout_composition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = object()
+    captured: list[dict[str, object]] = []
+
+    def compose(cls, **kwargs):
+        assert cls is AgentApplication
+        captured.append(kwargs)
+        return marker
+
+    monkeypatch.setattr(
+        AgentApplication,
+        "from_captured_layout",
+        classmethod(compose),
+        raising=False,
+    )
+
+    result = AgentApplication.open(data_root=_data_root(tmp_path))
+
+    assert result is marker
+    assert len(captured) == 1
+    layout = captured[0]["layout"]
+    leases = captured[0]["lease_manager"]
+    assert type(layout) is ApplicationDataLayout
+    assert type(leases) is ResourceLeaseManager
+    assert leases._root_parts == layout.locks.parts  # noqa: SLF001
+    assert leases._root_identity == layout.identity_for(layout.locks)  # noqa: SLF001
+
+
+def test_captured_layout_composition_runs_recovery_between_full_identity_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = ApplicationDataLayout.open(_data_root(tmp_path))
+    leases = ResourceLeaseManager(
+        layout.locks,
+        trust=LeaseRootTrust.TRUSTED_LOCAL,
+    )
+    expected = (
+        layout.root,
+        layout.locks,
+        layout.tasks,
+        layout.projects,
+        layout.bootstrap,
+        layout.checkouts,
+        layout.artifacts,
+    )
+    events: list[object] = []
+    original_require_current = ApplicationDataLayout.require_current
+
+    def observed_require_current(self, path):
+        events.append(path)
+        return original_require_current(self, path)
+
+    def observed_recovery(root):
+        events.append("recovery")
+        assert root == layout.bootstrap
+
+    monkeypatch.setattr(
+        ApplicationDataLayout,
+        "require_current",
+        observed_require_current,
+    )
+    monkeypatch.setattr(agent_module, "recover_bootstrap_cleanup", observed_recovery)
+
+    app = AgentApplication.from_captured_layout(
+        layout=layout,
+        lease_manager=leases,
+    )
+
+    recovery_index = events.index("recovery")
+    assert tuple(events[:7]) == expected
+    assert tuple(events[-7:]) == expected
+    assert recovery_index >= 7
+    assert recovery_index < len(events) - 7
+    app.close()
+
+
+def test_captured_layout_composition_rejects_a_different_exact_lease_manager(
+    tmp_path: Path,
+) -> None:
+    layout = ApplicationDataLayout.open(_data_root(tmp_path / "first"))
+    other = ApplicationDataLayout.open(_data_root(tmp_path / "second"))
+    leases = ResourceLeaseManager(
+        other.locks,
+        trust=LeaseRootTrust.TRUSTED_LOCAL,
+    )
+
+    with pytest.raises(TypeError, match="invalid AgentApplication composition"):
+        AgentApplication.from_captured_layout(
+            layout=layout,
+            lease_manager=leases,
+        )
+
+    assert tuple(layout.tasks.iterdir()) == ()
+    assert tuple(layout.projects.iterdir()) == ()
+    assert tuple(layout.checkouts.iterdir()) == ()
+
+
+@pytest.mark.parametrize("factory_name", ["runtime_factory", "cad_port_factory"])
+def test_captured_layout_composition_rejects_an_invalid_factory_before_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    factory_name: str,
+) -> None:
+    layout = ApplicationDataLayout.open(_data_root(tmp_path))
+    leases = ResourceLeaseManager(
+        layout.locks,
+        trust=LeaseRootTrust.TRUSTED_LOCAL,
+    )
+    recovery_calls: list[Path] = []
+    monkeypatch.setattr(
+        agent_module,
+        "recover_bootstrap_cleanup",
+        lambda root: recovery_calls.append(root),
+    )
+
+    with pytest.raises(TypeError, match="invalid AgentApplication composition"):
+        AgentApplication.from_captured_layout(
+            layout=layout,
+            lease_manager=leases,
+            **{factory_name: None},
+        )
+
+    assert recovery_calls == []
+    assert tuple(layout.tasks.iterdir()) == ()
+    assert tuple(layout.projects.iterdir()) == ()
+
+
+@pytest.mark.parametrize(
+    "path_name",
+    ["root", "locks", "tasks", "projects", "bootstrap", "checkouts", "artifacts"],
+)
+def test_captured_layout_composition_closes_a_candidate_after_postcheck_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path_name: str,
+) -> None:
+    layout = ApplicationDataLayout.open(_data_root(tmp_path))
+    leases = ResourceLeaseManager(
+        layout.locks,
+        trust=LeaseRootTrust.TRUSTED_LOCAL,
+    )
+    original_init = AgentApplication.__init__
+    original_close = AgentApplication.close
+    candidates: list[AgentApplication] = []
+    close_calls: list[AgentApplication] = []
+
+    def construct_then_swap(self, **kwargs):
+        original_init(self, **kwargs)
+        candidates.append(self)
+        target = getattr(layout, path_name)
+        detached = target.with_name(f"detached-{path_name}")
+        target.rename(detached)
+        target.mkdir(mode=0o700)
+
+    def observed_close(self):
+        close_calls.append(self)
+        return original_close(self)
+
+    monkeypatch.setattr(AgentApplication, "__init__", construct_then_swap)
+    monkeypatch.setattr(AgentApplication, "close", observed_close)
+
+    with pytest.raises(ApplicationDataError) as caught:
+        AgentApplication.from_captured_layout(
+            layout=layout,
+            lease_manager=leases,
+        )
+
+    assert caught.value.code is ApplicationDataErrorCode.UNSAFE_ROOT
+    assert len(candidates) == 1
+    assert close_calls == candidates
+    assert candidates[0]._closed is True  # noqa: SLF001
+
+
+def test_captured_layout_composition_closes_a_candidate_on_factory_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = ApplicationDataLayout.open(_data_root(tmp_path))
+    leases = ResourceLeaseManager(
+        layout.locks,
+        trust=LeaseRootTrust.TRUSTED_LOCAL,
+    )
+
+    def requested_runtime_factory(**_kwargs):
+        return None
+
+    original_init = AgentApplication.__init__
+    original_close = AgentApplication.close
+    candidates: list[AgentApplication] = []
+    close_calls: list[AgentApplication] = []
+
+    def construct_then_replace_factory(self, **kwargs):
+        original_init(self, **kwargs)
+        self._runtime_factory = lambda **_kwargs: None
+        candidates.append(self)
+
+    def observed_close(self):
+        close_calls.append(self)
+        return original_close(self)
+
+    monkeypatch.setattr(AgentApplication, "__init__", construct_then_replace_factory)
+    monkeypatch.setattr(AgentApplication, "close", observed_close)
+
+    with pytest.raises(TypeError, match="invalid AgentApplication composition"):
+        AgentApplication.from_captured_layout(
+            layout=layout,
+            lease_manager=leases,
+            runtime_factory=requested_runtime_factory,
+        )
+
+    assert len(candidates) == 1
+    assert close_calls == candidates
+    assert candidates[0]._closed is True  # noqa: SLF001
 
 
 def test_first_project_request_rejects_bootstrap_replacement_without_mutating_it(
@@ -1043,15 +1299,14 @@ def test_application_bridges_revision_discovery_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from vibecad.application.project_api import (
+        ProjectServicePortErrorCode,
+        ProjectServicePortFailure,
+    )
     from vibecad.application.revision_discovery import (
         RevisionDiscoveryError,
         RevisionDiscoveryErrorCode,
         RevisionDiscoveryService,
-    )
-
-    from vibecad.application.project_api import (
-        ProjectServicePortErrorCode,
-        ProjectServicePortFailure,
     )
 
     code = RevisionDiscoveryErrorCode[name]

@@ -1,7 +1,38 @@
-"""Local kernel daemon primitives.
+"""Authenticated, single-instance local Task Kernel."""
 
-The runnable daemon is introduced in P0B-C09.  P0B-C07 contains only the
-fail-closed local peer-identity boundary used by that later service.
-"""
+from vibecad.daemon.client import LocalKernelClient
+from vibecad.daemon.facade import ALLOWED_APPLICATION_OPERATIONS, LocalKernelFacade
+from vibecad.daemon.service import LocalKernelDaemon, LocalKernelState, run_daemon
+from vibecad.daemon.state import (
+    DAEMON_AUTHORITY,
+    DAEMON_DIRECTORY_NAME,
+    DAEMON_ENDPOINT_NAME,
+    DAEMON_RECEIPT_NAME,
+    DAEMON_SECRET_NAME,
+    DaemonEndpointBinding,
+    DaemonError,
+    DaemonErrorCode,
+    DaemonFileBinding,
+    DaemonReceipt,
+    daemon_run_root,
+)
 
-__all__: tuple[str, ...] = ()
+__all__ = (
+    "ALLOWED_APPLICATION_OPERATIONS",
+    "DAEMON_AUTHORITY",
+    "DAEMON_DIRECTORY_NAME",
+    "DAEMON_ENDPOINT_NAME",
+    "DAEMON_RECEIPT_NAME",
+    "DAEMON_SECRET_NAME",
+    "DaemonEndpointBinding",
+    "DaemonError",
+    "DaemonErrorCode",
+    "DaemonFileBinding",
+    "DaemonReceipt",
+    "LocalKernelClient",
+    "LocalKernelDaemon",
+    "LocalKernelFacade",
+    "LocalKernelState",
+    "daemon_run_root",
+    "run_daemon",
+)
