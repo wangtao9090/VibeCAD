@@ -866,6 +866,74 @@ def test_project_request_facade_replays_create_key_and_gets_current_snapshot(
     app.close()
 
 
+def test_cancel_task_request_is_store_only_and_keeps_heavy_components_lazy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_calls: list[str] = []
+    cad_calls: list[str] = []
+
+    def forbidden_runtime(**_kwargs):
+        runtime_calls.append("runtime")
+        raise AssertionError("idle cancellation must not create a CAD runtime")
+
+    def forbidden_cad(**_kwargs):
+        cad_calls.append("cad")
+        raise AssertionError("idle cancellation must not create a CAD port")
+
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        runtime_factory=forbidden_runtime,
+        cad_port_factory=forbidden_cad,
+    )
+    project = app.bootstrap_empty()
+    created = app.create_task_request(
+        {
+            "schema_version": 1,
+            "create_key": "task_create_" + "7" * 32,
+            "project_id": project.head.project_id,
+            "review_policy": "auto_commit",
+        }
+    )
+    assert created["ok"] is True
+    task_id = created["result"]["task_run"]["id"]
+    before_projects = _tree_digest(app._layout.projects)  # noqa: SLF001
+
+    def forbidden_project_write(*_args, **_kwargs):
+        raise AssertionError("idle cancellation must not acquire a project write lease")
+
+    monkeypatch.setattr(
+        ResourceLeaseManager,
+        "acquire_project_write",
+        forbidden_project_write,
+    )
+    cancelled = app.cancel_task_request(
+        {
+            "schema_version": 1,
+            "task_id": task_id,
+            "expected_generation": created["result"]["generation"],
+        }
+    )
+
+    assert cancelled["ok"] is True
+    assert cancelled["result"]["generation"] == created["result"]["generation"] + 1
+    assert cancelled["result"]["next_action"] == "none"
+    assert cancelled["result"]["task_run"]["status"] == "cancelled"
+    assert _tree_digest(app._layout.projects) == before_projects  # noqa: SLF001
+    assert app._task_api is not None  # noqa: SLF001
+    assert app._project_service is None  # noqa: SLF001
+    assert app._direct_api is None  # noqa: SLF001
+    assert app._cad_validation_port is None  # noqa: SLF001
+    assert app._artifact_store is None  # noqa: SLF001
+    assert app._artifact_authority is None  # noqa: SLF001
+    assert app._artifact_service is None  # noqa: SLF001
+    assert app._artifact_api is None  # noqa: SLF001
+    assert app._runtimes == {}  # noqa: SLF001
+    assert runtime_calls == []
+    assert cad_calls == []
+    app.close()
+
+
 def test_project_discovery_is_lazy_and_reuses_the_api_for_later_mutation(
     tmp_path: Path,
 ) -> None:

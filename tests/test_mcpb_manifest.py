@@ -23,6 +23,7 @@ EXPECTED_PUBLIC_TOOLS = (
     "get_task_events",
     "submit_model_program",
     "resume_task",
+    "cancel_task",
     "accept_draft",
     "reject_draft",
     "get_artifact_manifest",
@@ -63,6 +64,7 @@ def test_manifest_tools_match_server_registry():
     assert descriptions["get_artifact_manifest"] == (
         "读取任务版本的验证绑定、制品清单和现有交付资源"
     )
+    assert descriptions["cancel_task"] == "请求取消指定任务并返回持久化状态"
 
 
 def test_manifest_tool_entries_are_unique_and_described():
@@ -190,8 +192,10 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
         "`Part::Cylinder`",
         "create_project",
         "submit_model_program",
+        "cancel_task",
         "accept_draft",
         "export_task_artifacts",
+        "notifications/cancelled",
         "G1",
         "P1",
         "P2",
@@ -214,9 +218,10 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
     normalized_roadmap = " ".join(roadmap.replace("\n> ", " ").split())
     for required in (
         "S3-8/P0-A",
-        "26-tool 公共 MCP、durable review",
+        "27-tool 公共 MCP、durable review",
         "host-neutral skill",
         "P0-B core 正在执行",
+        "durable idle cancellation",
     ):
         assert required in normalized_roadmap
     assert "宿主 skill 和 FreeCAD 交互插件尚未交付" not in normalized_roadmap

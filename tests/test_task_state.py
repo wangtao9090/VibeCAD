@@ -775,25 +775,33 @@ def test_every_status_event_pair_has_exact_transition_or_rejection():
         TaskStatus.FAILED: transition_task(rolling_back, TaskEvent.COMPLETE_ROLLBACK),
     }
     expected = {
+        (TaskStatus.CREATED, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
         (TaskStatus.CREATED, TaskEvent.REQUEST_PLAN): TaskStatus.NEEDS_PLAN,
+        (TaskStatus.NEEDS_PLAN, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
         (TaskStatus.NEEDS_PLAN, TaskEvent.SUBMIT_PROGRAM): TaskStatus.PROGRAM_READY,
+        (TaskStatus.PROGRAM_READY, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
         (TaskStatus.NEEDS_INPUT, TaskEvent.SUBMIT_PROGRAM): TaskStatus.PROGRAM_READY,
+        (TaskStatus.NEEDS_INPUT, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
         (TaskStatus.PROGRAM_READY, TaskEvent.START_VALIDATION): TaskStatus.VALIDATING_PROGRAM,
         (TaskStatus.VALIDATING_PROGRAM, TaskEvent.VALIDATE_PROGRAM): TaskStatus.EXECUTING,
         (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REJECT_PROGRAM): TaskStatus.NEEDS_INPUT,
         (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
         (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
+        (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
         (TaskStatus.EXECUTING, TaskEvent.COMPLETE_EXECUTION): TaskStatus.VERIFYING,
         (TaskStatus.EXECUTING, TaskEvent.FAIL_EXECUTION): TaskStatus.ROLLING_BACK,
         (TaskStatus.EXECUTING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
         (TaskStatus.EXECUTING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
+        (TaskStatus.EXECUTING, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
         (TaskStatus.VERIFYING, TaskEvent.PASS_VERIFICATION): TaskStatus.COMMITTING,
         (TaskStatus.VERIFYING, TaskEvent.FAIL_VERIFICATION): TaskStatus.ROLLING_BACK,
         (TaskStatus.VERIFYING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
         (TaskStatus.VERIFYING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
+        (TaskStatus.VERIFYING, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
         (TaskStatus.COMMITTING, TaskEvent.COMMIT): TaskStatus.SUCCEEDED,
         (TaskStatus.COMMITTING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
         (TaskStatus.COMMITTING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
+        (TaskStatus.COMMITTING, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
         (TaskStatus.ROLLING_BACK, TaskEvent.COMPLETE_ROLLBACK): TaskStatus.FAILED,
         (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
         (TaskStatus.ROLLING_BACK, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
@@ -916,6 +924,9 @@ def _matrix_task(status: TaskStatus) -> TaskRun:
     awaiting_review = transition_task(preparing_review, TaskEvent.PUBLISH_DRAFT)
     accepting_draft = transition_task(awaiting_review, TaskEvent.ACCEPT_DRAFT)
     rejected = transition_task(awaiting_review, TaskEvent.REJECT_DRAFT)
+    cancel_requested = transition_task(committing, TaskEvent.REQUEST_CANCEL)
+    cancelling = transition_task(cancel_requested, TaskEvent.START_CANCELLATION)
+    cancelled = transition_task(cancelling, TaskEvent.CONFIRM_CANCELLED)
     cases = {
         TaskStatus.CREATED: _task(),
         TaskStatus.NEEDS_PLAN: needs_plan,
@@ -946,14 +957,21 @@ def _matrix_task(status: TaskStatus) -> TaskRun:
         ),
         TaskStatus.FAILED: transition_task(rolling_back, TaskEvent.COMPLETE_ROLLBACK),
         TaskStatus.REJECTED: rejected,
+        TaskStatus.CANCEL_REQUESTED: cancel_requested,
+        TaskStatus.CANCELLING: cancelling,
+        TaskStatus.CANCELLED: cancelled,
     }
     return cases[status]
 
 
 LEGAL_EDGES = {
+    (TaskStatus.CREATED, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
     (TaskStatus.CREATED, TaskEvent.REQUEST_PLAN): TaskStatus.NEEDS_PLAN,
+    (TaskStatus.NEEDS_PLAN, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
     (TaskStatus.NEEDS_PLAN, TaskEvent.SUBMIT_PROGRAM): TaskStatus.PROGRAM_READY,
+    (TaskStatus.PROGRAM_READY, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
     (TaskStatus.NEEDS_INPUT, TaskEvent.SUBMIT_PROGRAM): TaskStatus.PROGRAM_READY,
+    (TaskStatus.NEEDS_INPUT, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
     (TaskStatus.PROGRAM_READY, TaskEvent.START_VALIDATION): TaskStatus.VALIDATING_PROGRAM,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.VALIDATE_PROGRAM): TaskStatus.EXECUTING,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REJECT_PROGRAM): TaskStatus.NEEDS_INPUT,
@@ -988,6 +1006,17 @@ LEGAL_EDGES = {
     (TaskStatus.CLEANUP_REQUIRED, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
     (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_UNCOMMITTED): TaskStatus.ROLLING_BACK,
+    (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
+    (TaskStatus.EXECUTING, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
+    (TaskStatus.VERIFYING, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
+    (TaskStatus.COMMITTING, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
+    (TaskStatus.PREPARING_REVIEW, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
+    (TaskStatus.ACCEPTING_DRAFT, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
+    (TaskStatus.CANCEL_REQUESTED, TaskEvent.START_CANCELLATION): TaskStatus.CANCELLING,
+    (TaskStatus.CANCELLING, TaskEvent.CONFIRM_CANCELLED): TaskStatus.CANCELLED,
+    (TaskStatus.CANCELLING, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
+    (TaskStatus.CANCELLING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
+    (TaskStatus.CANCELLING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
 }
 
 
@@ -1025,7 +1054,12 @@ def test_full_status_event_matrix_has_exact_target_and_rejection_precedence(stat
 
     with pytest.raises(TaskStateError) as caught:
         transition_task(task, event, **_edge_payload(event))
-    if status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.REJECTED}:
+    if status in {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.REJECTED,
+        TaskStatus.CANCELLED,
+    }:
         assert caught.value.code is TaskStateErrorCode.TERMINAL_STATE
         assert caught.value.path == "/status"
     else:
@@ -1976,7 +2010,7 @@ def test_reconciliation_payload_matrix_rejects_missing_wrong_and_extra_values(st
 
 def test_authoritative_budget_constants_and_direct_exact_collections_are_accepted():
     assert MAX_STEP_RECORDS == 64
-    assert MAX_TRANSITION_RECORDS == 128
+    assert MAX_TRANSITION_RECORDS == 136
     assert MAX_VERIFICATION_REPORTS == 16
     assert MAX_ARTIFACT_REFS == 128
     assert MAX_CRITERION_VERDICTS == 128
@@ -3740,6 +3774,9 @@ def test_review_status_event_and_next_action_enums_are_exact():
         "succeeded",
         "failed",
         "rejected",
+        "cancel_requested",
+        "cancelling",
+        "cancelled",
     }
     assert {item.value for item in TaskEvent} == {
         "request_plan",
@@ -3765,6 +3802,9 @@ def test_review_status_event_and_next_action_enums_are_exact():
         "confirm_committed",
         "confirm_uncommitted",
         "confirm_pre_candidate",
+        "request_cancel",
+        "start_cancellation",
+        "confirm_cancelled",
     }
     assert {item.value for item in NextAction} == {
         "request_plan",
@@ -3782,6 +3822,9 @@ def test_review_status_event_and_next_action_enums_are_exact():
         "awaiting_user_review": "review_draft",
         "accepting_draft": "reconcile",
         "rejected": "none",
+        "cancel_requested": "reconcile",
+        "cancelling": "reconcile",
+        "cancelled": "none",
     }
     for status, action in expected.items():
         assert next_action_for(TaskStatus(status)) is NextAction(action)
@@ -4011,3 +4054,266 @@ def test_review_attention_can_only_confirm_exact_draft_uncommitted_back_to_await
         TaskStateErrorCode.INVALID_TRANSITION,
         "/event",
     )
+
+
+def _cancel_status(value: str) -> TaskStatus:
+    return TaskStatus(value)
+
+
+def _cancel_event(value: str) -> TaskEvent:
+    return TaskEvent(value)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        TaskStatus.CREATED,
+        TaskStatus.NEEDS_PLAN,
+        TaskStatus.PROGRAM_READY,
+        TaskStatus.NEEDS_INPUT,
+    ],
+)
+def test_durable_cancellation_contract_cancels_idle_states_in_one_transition(origin):
+    task = _matrix_task(origin)
+
+    cancelled = transition_task(task, _cancel_event("request_cancel"))
+
+    assert cancelled.status is _cancel_status("cancelled")
+    assert cancelled.next_action is NextAction.NONE
+    assert cancelled.program == task.program
+    assert cancelled.candidate_revision == task.candidate_revision
+    assert cancelled.draft == task.draft
+    assert cancelled.verification_reports == task.verification_reports
+    assert cancelled.artifacts == task.artifacts
+    assert cancelled.committed_revision is None
+    assert cancelled.last_error is None
+    assert cancelled.transitions[:-1] == task.transitions
+    assert cancelled.transitions[-1].event is _cancel_event("request_cancel")
+    assert TaskRun.from_mapping(cancelled.to_mapping()) == cancelled
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        TaskStatus.VALIDATING_PROGRAM,
+        TaskStatus.EXECUTING,
+        TaskStatus.VERIFYING,
+        TaskStatus.COMMITTING,
+        TaskStatus.PREPARING_REVIEW,
+        TaskStatus.ACCEPTING_DRAFT,
+    ],
+)
+def test_durable_cancellation_contract_persists_active_intent_before_cancelling(origin):
+    task = _matrix_task(origin)
+
+    requested = transition_task(task, _cancel_event("request_cancel"))
+    cancelling = transition_task(requested, _cancel_event("start_cancellation"))
+    cancelled = transition_task(cancelling, _cancel_event("confirm_cancelled"))
+
+    assert requested.status is _cancel_status("cancel_requested")
+    assert requested.next_action is NextAction.RECONCILE
+    assert cancelling.status is _cancel_status("cancelling")
+    assert cancelling.next_action is NextAction.RECONCILE
+    assert cancelled.status is _cancel_status("cancelled")
+    assert cancelled.next_action is NextAction.NONE
+    for value in (requested, cancelling, cancelled):
+        assert value.program == task.program
+        assert value.candidate_revision == task.candidate_revision
+        assert value.draft == task.draft
+        assert value.steps == task.steps
+        assert value.verification_reports == task.verification_reports
+        assert value.artifacts == task.artifacts
+        assert value.committed_revision is None
+        assert value.last_error is None
+        assert TaskRun.from_mapping(value.to_mapping()) == value
+
+
+@pytest.mark.parametrize(
+    ("origin", "forbidden_confirmation"),
+    [
+        (TaskStatus.VALIDATING_PROGRAM, TaskEvent.CONFIRM_PRE_CANDIDATE),
+        (TaskStatus.EXECUTING, TaskEvent.CONFIRM_UNCOMMITTED),
+        (TaskStatus.PREPARING_REVIEW, TaskEvent.CONFIRM_DRAFT_UNCOMMITTED),
+    ],
+)
+@pytest.mark.parametrize(
+    "attention_event",
+    [TaskEvent.REQUIRE_RECOVERY, TaskEvent.REQUIRE_CLEANUP],
+)
+def test_durable_cancellation_contract_attention_can_only_finish_or_confirm_commit(
+    origin, forbidden_confirmation, attention_event
+):
+    requested = transition_task(_matrix_task(origin), _cancel_event("request_cancel"))
+    cancelling = transition_task(requested, _cancel_event("start_cancellation"))
+    attention = transition_task(cancelling, attention_event, error=_error())
+
+    with pytest.raises(TaskStateError) as caught:
+        transition_task(attention, forbidden_confirmation)
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVALID_TRANSITION,
+        "/event",
+    )
+
+    cancelled = transition_task(attention, _cancel_event("confirm_cancelled"))
+    assert cancelled.status is _cancel_status("cancelled")
+    assert cancelled.last_error is None
+    assert cancelled.candidate_revision == cancelling.candidate_revision
+    assert cancelled.draft == cancelling.draft
+    assert TaskRun.from_mapping(cancelled.to_mapping()) == cancelled
+
+
+@pytest.mark.parametrize("origin", [TaskStatus.COMMITTING, TaskStatus.ACCEPTING_DRAFT])
+def test_durable_cancellation_contract_commit_wins_only_with_existing_verified_evidence(origin):
+    requested = transition_task(_matrix_task(origin), _cancel_event("request_cancel"))
+    cancelling = transition_task(requested, _cancel_event("start_cancellation"))
+
+    succeeded = transition_task(
+        cancelling,
+        TaskEvent.CONFIRM_COMMITTED,
+        committed_revision=CANDIDATE_REVISION,
+    )
+
+    assert succeeded.status is TaskStatus.SUCCEEDED
+    assert succeeded.committed_revision == CANDIDATE_REVISION
+    assert succeeded.verification_reports == cancelling.verification_reports
+    assert TaskRun.from_mapping(succeeded.to_mapping()) == succeeded
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        TaskStatus.AWAITING_USER_REVIEW,
+        TaskStatus.ROLLING_BACK,
+        TaskStatus.RECOVERY_REQUIRED,
+        TaskStatus.CLEANUP_REQUIRED,
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.REJECTED,
+    ],
+)
+def test_durable_cancellation_contract_rejects_review_rollback_attention_and_terminals(origin):
+    task = _matrix_task(origin)
+
+    with pytest.raises(TaskStateError) as caught:
+        transition_task(task, _cancel_event("request_cancel"))
+
+    expected = (
+        TaskStateErrorCode.TERMINAL_STATE
+        if origin in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.REJECTED}
+        else TaskStateErrorCode.INVALID_TRANSITION
+    )
+    assert caught.value.code is expected
+
+
+def test_durable_cancellation_contract_rejects_forged_confirmation_without_provenance():
+    attention = _matrix_task(TaskStatus.RECOVERY_REQUIRED)
+    forged = attention.to_mapping()
+    forged["status"] = "cancelled"
+    forged["last_error"] = None
+    forged["transitions"].append(
+        {
+            "schema_version": 1,
+            "sequence": len(forged["transitions"]) + 1,
+            "event": "confirm_cancelled",
+            "from_status": "recovery_required",
+            "to_status": "cancelled",
+        }
+    )
+
+    with pytest.raises(TaskStateError) as caught:
+        TaskRun.from_mapping(forged)
+
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/transitions",
+    )
+
+
+def test_durable_cancellation_contract_program_presence_matches_submission_provenance():
+    cancelled = transition_task(
+        _matrix_task(TaskStatus.NEEDS_PLAN),
+        _cancel_event("request_cancel"),
+    )
+    forged = cancelled.to_mapping()
+    forged["program"] = _program().to_mapping()
+
+    with pytest.raises(TaskStateError) as caught:
+        TaskRun.from_mapping(forged)
+
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/program",
+    )
+
+
+def _task_with_full_ordinary_transition_history(*, review: bool) -> TaskRun:
+    if review:
+        task = _to_awaiting_review()
+        while len(task.transitions) < 128:
+            event = (
+                TaskEvent.ACCEPT_DRAFT
+                if task.status is TaskStatus.AWAITING_USER_REVIEW
+                else TaskEvent.ABORT_ACCEPT
+            )
+            task = transition_task(task, event)
+        assert task.status is TaskStatus.ACCEPTING_DRAFT
+        return task
+
+    task = _matrix_task(TaskStatus.NEEDS_INPUT)
+    while len(task.transitions) < 128:
+        if task.status is TaskStatus.NEEDS_INPUT:
+            task = transition_task(task, TaskEvent.SUBMIT_PROGRAM, program=_program())
+        elif task.status is TaskStatus.PROGRAM_READY:
+            task = transition_task(task, TaskEvent.START_VALIDATION)
+        else:
+            assert task.status is TaskStatus.VALIDATING_PROGRAM
+            task = transition_task(
+                task,
+                TaskEvent.REJECT_PROGRAM,
+                error=_error(needs_input=True),
+            )
+    assert task.status is TaskStatus.PROGRAM_READY
+    return task
+
+
+def test_durable_cancellation_contract_reserves_a_tail_after_128_ordinary_transitions():
+    idle = _task_with_full_ordinary_transition_history(review=False)
+    with pytest.raises(TaskStateError) as caught:
+        transition_task(idle, TaskEvent.START_VALIDATION)
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.BUDGET_EXCEEDED,
+        "/transitions",
+    )
+
+    forged = idle.to_mapping()
+    forged["status"] = TaskStatus.VALIDATING_PROGRAM.value
+    forged["transitions"].append(
+        TaskTransitionRecord(
+            sequence=129,
+            event=TaskEvent.START_VALIDATION,
+            from_status=TaskStatus.PROGRAM_READY,
+            to_status=TaskStatus.VALIDATING_PROGRAM,
+        ).to_mapping()
+    )
+    with pytest.raises(TaskStateError) as caught:
+        TaskRun.from_mapping(forged)
+    assert (caught.value.code, caught.value.path) == (
+        TaskStateErrorCode.INVARIANT_VIOLATION,
+        "/transitions",
+    )
+
+    idle_cancelled = transition_task(idle, _cancel_event("request_cancel"))
+    assert len(idle_cancelled.transitions) == 129
+    assert idle_cancelled.status is _cancel_status("cancelled")
+
+    active = _task_with_full_ordinary_transition_history(review=True)
+    requested = transition_task(active, _cancel_event("request_cancel"))
+    cancelling = transition_task(requested, _cancel_event("start_cancellation"))
+    cleanup = transition_task(cancelling, TaskEvent.REQUIRE_CLEANUP, error=_error())
+    recovery = transition_task(cleanup, TaskEvent.REQUIRE_RECOVERY, error=_error())
+    cancelled = transition_task(recovery, _cancel_event("confirm_cancelled"))
+
+    assert len(cancelled.transitions) == 133
+    assert len(cancelled.transitions) <= MAX_TRANSITION_RECORDS
+    assert cancelled.status is _cancel_status("cancelled")
+    assert TaskRun.from_mapping(cancelled.to_mapping()) == cancelled

@@ -22,7 +22,12 @@ from vibecad.workflow.catalog import (
     TaskCatalogErrorCode,
     TaskCatalogService,
 )
-from vibecad.workflow.contracts import AcceptanceSpec, ModelProgram
+from vibecad.workflow.contracts import (
+    AcceptanceSpec,
+    ErrorCategory,
+    ModelProgram,
+    StepError,
+)
 from vibecad.workflow.lease import LeaseRootTrust, ResourceLeaseManager
 from vibecad.workflow.state import (
     ReasoningOwner,
@@ -33,6 +38,7 @@ from vibecad.workflow.state import (
     transition_task,
 )
 from vibecad.workflow.store import (
+    StoredTaskRun,
     TaskRunStore,
     TaskStoreError,
     TaskStoreErrorCode,
@@ -45,6 +51,7 @@ CREATE_KEY = "task_create_0123456789abcdef0123456789abcdef"
 KEYED_TASK_ID = "task_e9f9dc52c8f75cd72feddee2648564b8"
 CREATION_DIGEST = "e9f9dc52c8f75cd72feddee2648564b8b4bf0b07836368165d3a0c1fedeee1ef"
 COLLISION_DIGEST = CREATION_DIGEST[:32] + "f" * 32
+CANDIDATE_REVISION = "revision_11111111111111111111111111111111"
 
 
 def _stores(tmp_path: Path):
@@ -75,6 +82,79 @@ def _program_for(task) -> ModelProgram:
     )
 
 
+def _error(*, needs_input: bool = False) -> StepError:
+    return StepError(
+        category=ErrorCategory.RUNTIME,
+        code="catalog_injected_failure",
+        message="The injected catalog operation failed.",
+        retryable=False,
+        needs_input=needs_input,
+        related_objects=(),
+        diagnostic_artifacts=(),
+    )
+
+
+def _task_in_status(head, status: TaskStatus):
+    task = new_task_run(
+        task_id=TASK_ID,
+        project_id=PROJECT_ID,
+        base_revision=head.revision_id,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+    if status is TaskStatus.CREATED:
+        return task
+    task = transition_task(task, TaskEvent.REQUEST_PLAN)
+    if status is TaskStatus.NEEDS_PLAN:
+        return task
+    task = transition_task(
+        task,
+        TaskEvent.SUBMIT_PROGRAM,
+        program=_program_for(task),
+    )
+    if status is TaskStatus.PROGRAM_READY:
+        return task
+    task = transition_task(task, TaskEvent.START_VALIDATION)
+    if status is TaskStatus.VALIDATING_PROGRAM:
+        return task
+    if status is TaskStatus.NEEDS_INPUT:
+        return transition_task(
+            task,
+            TaskEvent.REJECT_PROGRAM,
+            error=_error(needs_input=True),
+        )
+    task = transition_task(
+        task,
+        TaskEvent.VALIDATE_PROGRAM,
+        candidate_revision=CANDIDATE_REVISION,
+    )
+    if status is TaskStatus.EXECUTING:
+        return task
+    if status is TaskStatus.CANCEL_REQUESTED:
+        return transition_task(task, TaskEvent.REQUEST_CANCEL)
+    if status is TaskStatus.CANCELLING:
+        return transition_task(
+            transition_task(task, TaskEvent.REQUEST_CANCEL),
+            TaskEvent.START_CANCELLATION,
+        )
+    if status is TaskStatus.RECOVERY_REQUIRED:
+        return transition_task(
+            task,
+            TaskEvent.REQUIRE_RECOVERY,
+            error=_error(),
+        )
+    if status is TaskStatus.FAILED:
+        return transition_task(
+            transition_task(
+                task,
+                TaskEvent.FAIL_EXECUTION,
+                error=_error(),
+            ),
+            TaskEvent.COMPLETE_ROLLBACK,
+        )
+    raise AssertionError(f"unsupported task status fixture: {status.value}")
+
+
 def test_catalog_creates_and_gets_a_task_without_any_cad_port(tmp_path: Path):
     _leases, tasks, revisions, head = _stores(tmp_path)
     catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
@@ -91,10 +171,475 @@ def test_catalog_creates_and_gets_a_task_without_any_cad_port(tmp_path: Path):
     assert created.task_run.base_revision == head.revision_id
     assert catalog.get_task(task_id=TASK_ID) == created
     assert set(TaskCatalogService.__dict__) >= {
+        "cancel_task",
         "create_task",
         "get_task",
         "reject_draft",
     }
+
+
+def test_catalog_cancel_is_durable_and_replays_after_response_loss_and_restart(
+    tmp_path: Path,
+):
+    _leases, tasks, revisions, _head = _stores(tmp_path)
+    first = TaskCatalogService(task_store=tasks, revision_store=revisions)
+    created = first.create_task(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+
+    cancelled = first.cancel_task(
+        task_id=created.task_run.id,
+        expected_generation=created.generation,
+    )
+    replayed = TaskCatalogService(
+        task_store=tasks,
+        revision_store=revisions,
+    ).cancel_task(
+        task_id=created.task_run.id,
+        expected_generation=created.generation,
+    )
+
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert cancelled.generation == created.generation + 1
+    assert replayed == cancelled
+    assert [item.event for item in cancelled.task_run.transitions].count(
+        TaskEvent.REQUEST_CANCEL
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        TaskStatus.CREATED,
+        TaskStatus.NEEDS_PLAN,
+        TaskStatus.PROGRAM_READY,
+        TaskStatus.NEEDS_INPUT,
+    ),
+)
+def test_catalog_cancel_immediately_closes_every_idle_state(
+    tmp_path: Path,
+    status: TaskStatus,
+):
+    _leases, tasks, revisions, head = _stores(tmp_path)
+    stored = tasks.create(_task_in_status(head, status))
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+
+    cancelled = catalog.cancel_task(
+        task_id=stored.task_run.id,
+        expected_generation=stored.generation,
+    )
+
+    assert cancelled.generation == stored.generation + 1
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert cancelled.task_run.transitions[-1].event is TaskEvent.REQUEST_CANCEL
+    assert cancelled.task_run.last_error is None
+    assert tasks.load(stored.task_run.id) == cancelled
+    assert revisions.load_head(PROJECT_ID) == head
+
+
+def test_catalog_cancel_rejects_stale_idle_and_future_terminal_generations(
+    tmp_path: Path,
+):
+    _leases, tasks, revisions, head = _stores(tmp_path)
+    stored = tasks.create(_task_in_status(head, TaskStatus.PROGRAM_READY))
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+
+    with pytest.raises(TaskCatalogError) as stale:
+        catalog.cancel_task(
+            task_id=stored.task_run.id,
+            expected_generation=stored.generation + 1,
+        )
+    assert stale.value.code is TaskCatalogErrorCode.CONFLICT
+    assert tasks.load(stored.task_run.id) == stored
+
+    cancelled = catalog.cancel_task(
+        task_id=stored.task_run.id,
+        expected_generation=stored.generation,
+    )
+    with pytest.raises(TaskCatalogError) as future:
+        catalog.cancel_task(
+            task_id=stored.task_run.id,
+            expected_generation=cancelled.generation + 1,
+        )
+    assert future.value.code is TaskCatalogErrorCode.CONFLICT
+    assert tasks.load(stored.task_run.id) == cancelled
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    (
+        (TaskStatus.EXECUTING, TaskCatalogErrorCode.INVALID_STATE),
+        (TaskStatus.RECOVERY_REQUIRED, TaskCatalogErrorCode.RECOVERY_REQUIRED),
+        (TaskStatus.FAILED, TaskCatalogErrorCode.CONFLICT),
+    ),
+)
+def test_catalog_cancel_fails_closed_without_mutating_non_idle_states(
+    tmp_path: Path,
+    status: TaskStatus,
+    code: TaskCatalogErrorCode,
+):
+    _leases, tasks, revisions, head = _stores(tmp_path)
+    stored = tasks.create(_task_in_status(head, status))
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+
+    with pytest.raises(TaskCatalogError) as caught:
+        catalog.cancel_task(
+            task_id=stored.task_run.id,
+            expected_generation=stored.generation,
+        )
+
+    assert caught.value.code is code
+    assert tasks.load(stored.task_run.id) == stored
+    assert revisions.load_head(PROJECT_ID) == head
+
+
+@pytest.mark.parametrize(
+    "status",
+    (TaskStatus.CANCEL_REQUESTED, TaskStatus.CANCELLING),
+)
+def test_catalog_cancel_replays_future_active_cancellation_contract_without_mutation(
+    tmp_path: Path,
+    status: TaskStatus,
+):
+    _leases, tasks, revisions, head = _stores(tmp_path)
+    stored = tasks.create(_task_in_status(head, status))
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+
+    replayed = catalog.cancel_task(
+        task_id=stored.task_run.id,
+        expected_generation=stored.generation,
+    )
+
+    assert replayed == stored
+    assert tasks.load(stored.task_run.id) == stored
+
+
+def test_concurrent_same_cancel_intent_converges_on_one_transition(tmp_path: Path):
+    _leases, tasks, revisions, _head = _stores(tmp_path)
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+    created = catalog.create_task(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+    barrier = threading.Barrier(16)
+    results = []
+    failures = []
+    result_lock = threading.Lock()
+
+    def cancel() -> None:
+        try:
+            barrier.wait()
+            value = TaskCatalogService(
+                task_store=tasks,
+                revision_store=revisions,
+            ).cancel_task(
+                task_id=created.task_run.id,
+                expected_generation=created.generation,
+            )
+            with result_lock:
+                results.append(value)
+        except BaseException as error:
+            with result_lock:
+                failures.append(error)
+
+    workers = [threading.Thread(target=cancel) for _ in range(16)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert failures == []
+    assert len(results) == 16
+    assert len(set(results)) == 1
+    cancelled = results[0]
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert cancelled.generation == created.generation + 1
+    assert [item.event for item in cancelled.task_run.transitions].count(
+        TaskEvent.REQUEST_CANCEL
+    ) == 1
+
+
+def test_cancel_gets_final_replay_after_cas_retry_budget_is_spent(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _leases, tasks, revisions, _head = _stores(tmp_path)
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+    created = catalog.create_task(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+    real_load = TaskRunStore.load
+    real_compare_and_set = TaskRunStore.compare_and_set
+    load_calls = 0
+    compare_and_set_calls = 0
+
+    def contend_once_during_final_replay(store, task_id):
+        nonlocal load_calls
+        load_calls += 1
+        if load_calls == 2:
+            raise TaskStoreError(TaskStoreErrorCode.LOCK_UNAVAILABLE)
+        return real_load(store, task_id)
+
+    def contend_until_peer_commits(store, task_id, generation, task):
+        nonlocal compare_and_set_calls
+        compare_and_set_calls += 1
+        if compare_and_set_calls <= catalog_module._REPLAY_RETRY_LIMIT:
+            raise TaskStoreError(TaskStoreErrorCode.LOCK_UNAVAILABLE)
+        real_compare_and_set(store, task_id, generation, task)
+        raise TaskStoreError(TaskStoreErrorCode.LOCK_UNAVAILABLE)
+
+    monkeypatch.setattr(TaskRunStore, "load", contend_once_during_final_replay)
+    monkeypatch.setattr(TaskRunStore, "compare_and_set", contend_until_peer_commits)
+    monkeypatch.setattr(catalog_module.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(catalog_module.time, "sleep", lambda _delay: None)
+
+    cancelled = catalog.cancel_task(
+        task_id=created.task_run.id,
+        expected_generation=created.generation,
+    )
+
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert cancelled.generation == created.generation + 1
+    assert compare_and_set_calls == catalog_module._REPLAY_RETRY_LIMIT + 1
+    assert load_calls == 3
+
+
+def test_cancel_retries_cas_without_reloading_the_idle_record(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _leases, tasks, revisions, _head = _stores(tmp_path)
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+    created = catalog.create_task(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+    real_load = TaskRunStore.load
+    real_compare_and_set = TaskRunStore.compare_and_set
+    load_calls = 0
+    compare_and_set_calls = 0
+
+    def count_loads(store, task_id):
+        nonlocal load_calls
+        load_calls += 1
+        return real_load(store, task_id)
+
+    def contend_before_success(store, task_id, generation, task):
+        nonlocal compare_and_set_calls
+        compare_and_set_calls += 1
+        if compare_and_set_calls <= 8:
+            raise TaskStoreError(TaskStoreErrorCode.LOCK_UNAVAILABLE)
+        return real_compare_and_set(store, task_id, generation, task)
+
+    monkeypatch.setattr(TaskRunStore, "load", count_loads)
+    monkeypatch.setattr(TaskRunStore, "compare_and_set", contend_before_success)
+    monkeypatch.setattr(catalog_module.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(catalog_module.time, "sleep", lambda _delay: None)
+
+    cancelled = catalog.cancel_task(
+        task_id=created.task_run.id,
+        expected_generation=created.generation,
+    )
+
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert load_calls == 1
+    assert compare_and_set_calls == 9
+
+
+def test_cancel_persistent_load_contention_is_store_failure_not_not_found(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _leases, tasks, revisions, _head = _stores(tmp_path)
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+    created = catalog.create_task(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+    load_calls = 0
+
+    def contended(_store, _task_id):
+        nonlocal load_calls
+        load_calls += 1
+        raise TaskStoreError(TaskStoreErrorCode.LOCK_UNAVAILABLE)
+
+    monkeypatch.setattr(TaskRunStore, "load", contended)
+    monkeypatch.setattr(catalog_module.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(catalog_module.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(TaskCatalogError) as caught:
+        catalog.cancel_task(
+            task_id=created.task_run.id,
+            expected_generation=created.generation,
+        )
+
+    assert caught.value.code is TaskCatalogErrorCode.STORE_FAILURE
+    assert load_calls == catalog_module._REPLAY_RETRY_LIMIT + 1
+
+
+def test_cancel_persistent_cas_contention_is_bounded_and_does_not_mutate(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _leases, tasks, revisions, _head = _stores(tmp_path)
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+    created = catalog.create_task(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+    compare_and_set_calls = 0
+
+    def contended(_store, _task_id, _generation, _task):
+        nonlocal compare_and_set_calls
+        compare_and_set_calls += 1
+        raise TaskStoreError(TaskStoreErrorCode.LOCK_UNAVAILABLE)
+
+    monkeypatch.setattr(TaskRunStore, "compare_and_set", contended)
+    monkeypatch.setattr(catalog_module.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(catalog_module.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(TaskCatalogError) as caught:
+        catalog.cancel_task(
+            task_id=created.task_run.id,
+            expected_generation=created.generation,
+        )
+
+    assert caught.value.code is TaskCatalogErrorCode.STORE_FAILURE
+    assert compare_and_set_calls == catalog_module._REPLAY_RETRY_LIMIT + 1
+    assert tasks.load(created.task_run.id) == created
+
+
+def test_cancel_conflicting_peer_program_is_not_misreported_as_cancelled(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _leases, tasks, revisions, _head = _stores(tmp_path)
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+    created = catalog.create_task(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+    real_compare_and_set = TaskRunStore.compare_and_set
+
+    def peer_submits_program(store, task_id, generation, _cancelled):
+        programmed = transition_task(
+            created.task_run,
+            TaskEvent.SUBMIT_PROGRAM,
+            program=_program_for(created.task_run),
+        )
+        real_compare_and_set(store, task_id, generation, programmed)
+        raise TaskStoreError(TaskStoreErrorCode.CONFLICT)
+
+    monkeypatch.setattr(TaskRunStore, "compare_and_set", peer_submits_program)
+
+    with pytest.raises(TaskCatalogError) as caught:
+        catalog.cancel_task(
+            task_id=created.task_run.id,
+            expected_generation=created.generation,
+        )
+
+    assert caught.value.code is TaskCatalogErrorCode.CONFLICT
+    current = tasks.load(created.task_run.id)
+    assert current.task_run.status is TaskStatus.PROGRAM_READY
+    assert all(item.event is not TaskEvent.REQUEST_CANCEL for item in current.task_run.transitions)
+
+
+def test_cancel_rejects_non_record_store_load_result(tmp_path: Path, monkeypatch):
+    _leases, tasks, revisions, _head = _stores(tmp_path)
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+    created = catalog.create_task(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+
+    monkeypatch.setattr(TaskRunStore, "load", lambda _store, _task_id: object())
+
+    with pytest.raises(TaskCatalogError) as caught:
+        catalog.cancel_task(
+            task_id=created.task_run.id,
+            expected_generation=created.generation,
+        )
+
+    assert caught.value.code is TaskCatalogErrorCode.STORE_FAILURE
+
+
+def test_cancel_rejects_wrong_generation_from_successful_store_cas(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _leases, tasks, revisions, _head = _stores(tmp_path)
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+    created = catalog.create_task(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+
+    def wrong_generation(_store, _task_id, _generation, task):
+        return StoredTaskRun(generation=42, task_run=task)
+
+    monkeypatch.setattr(TaskRunStore, "compare_and_set", wrong_generation)
+
+    with pytest.raises(TaskCatalogError) as caught:
+        catalog.cancel_task(
+            task_id=created.task_run.id,
+            expected_generation=created.generation,
+        )
+
+    assert caught.value.code is TaskCatalogErrorCode.STORE_FAILURE
+
+
+def test_cancel_recovers_exact_committed_readback_after_lost_store_reply(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _leases, tasks, revisions, _head = _stores(tmp_path)
+    catalog = TaskCatalogService(task_store=tasks, revision_store=revisions)
+    created = catalog.create_task(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.AUTO_COMMIT,
+    )
+    real_compare_and_set = TaskRunStore.compare_and_set
+
+    def commit_then_lose_reply(store, task_id, generation, task):
+        committed = real_compare_and_set(store, task_id, generation, task)
+        raise TaskStoreError(
+            TaskStoreErrorCode.DURABILITY_UNCERTAIN,
+            committed_generation=committed.generation,
+        )
+
+    monkeypatch.setattr(TaskRunStore, "compare_and_set", commit_then_lose_reply)
+
+    cancelled = catalog.cancel_task(
+        task_id=created.task_run.id,
+        expected_generation=created.generation,
+    )
+
+    assert cancelled.task_run.status is TaskStatus.CANCELLED
+    assert cancelled.generation == created.generation + 1
+    assert tasks.load(created.task_run.id) == cancelled
 
 
 def test_catalog_replays_current_generation_after_response_loss_and_restart(tmp_path: Path):

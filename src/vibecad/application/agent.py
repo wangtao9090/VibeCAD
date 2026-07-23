@@ -75,6 +75,7 @@ _CATALOG_PORT_ERRORS = {
     TaskCatalogErrorCode.CONFLICT: TaskServicePortErrorCode.CONFLICT,
     TaskCatalogErrorCode.STORE_FAILURE: TaskServicePortErrorCode.STORE_FAILURE,
     TaskCatalogErrorCode.RESOURCE_EXHAUSTED: TaskServicePortErrorCode.RESOURCE_EXHAUSTED,
+    TaskCatalogErrorCode.RECOVERY_REQUIRED: TaskServicePortErrorCode.RECOVERY_REQUIRED,
 }
 
 
@@ -605,6 +606,12 @@ class AgentApplication:
         self._ensure_live()
         return api.resume_task(request)
 
+    def cancel_task_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        api = self._task_api_for_request()
+        self._ensure_live()
+        return api.cancel_task(request)
+
     def accept_draft_request(self, request: object) -> dict[str, object]:
         self._ensure_live()
         api = self._task_api_for_request()
@@ -970,6 +977,21 @@ class AgentApplication:
                 return self._catalog_failure(error)
 
         return self._review_transition(task_id=task_id, body=reject)
+
+    def cancel_task(
+        self,
+        *,
+        task_id: str,
+        expected_generation: int,
+    ) -> StoredTaskRun | TaskServicePortFailure:
+        self._ensure_live()
+        try:
+            return self._catalog.cancel_task(
+                task_id=task_id,
+                expected_generation=expected_generation,
+            )
+        except TaskCatalogError as error:
+            return self._catalog_failure(error)
 
     def open_checkout(
         self,

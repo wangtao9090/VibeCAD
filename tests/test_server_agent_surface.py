@@ -65,6 +65,7 @@ STABLE_TOOL_NAMES = (
     "get_task_events",
     "submit_model_program",
     "resume_task",
+    "cancel_task",
     "accept_draft",
     "reject_draft",
     "get_artifact_manifest",
@@ -518,6 +519,7 @@ def test_public_annotations_match_the_independent_product_contract():
         "get_task_events": (True, False, True, False),
         "submit_model_program": (False, True, True, False),
         "resume_task": (False, True, True, False),
+        "cancel_task": (False, True, True, False),
         "accept_draft": (False, True, True, False),
         "reject_draft": (False, True, True, False),
         "get_artifact_manifest": (True, False, True, False),
@@ -571,6 +573,7 @@ def test_every_public_schema_is_closed_complete_and_specialized():
             "program_json",
         ),
         "resume_task": ("schema_version", "task_id", "expected_generation"),
+        "cancel_task": ("schema_version", "task_id", "expected_generation"),
         "accept_draft": (
             "schema_version",
             "task_id",
@@ -1228,7 +1231,7 @@ def test_low_level_tools_list_is_exact_sdk_projection_of_public_specs() -> None:
 def test_every_discovered_tool_has_a_nonempty_single_line_description() -> None:
     result = anyio.run(_server_module()._handle_list_tools)
 
-    assert len(result.tools) == 26
+    assert len(result.tools) == 27
     for tool in result.tools:
         assert type(tool.description) is str, tool.name
         assert tool.description == tool.description.strip(), tool.name
@@ -1258,6 +1261,7 @@ def test_owned_tools_list_fixed_frame_fits_the_discovery_budget() -> None:
         + b"\n"
     )
     assert response["id"] == 1
+    assert len(frame) == 20_762
     assert len(frame) <= 32_768
 
 
@@ -1272,7 +1276,7 @@ def test_discovery_omits_optional_output_schema_from_every_tool() -> None:
     response = server._owned_dispatch_descriptor(descriptor)
     assert response is not None
     tools = response["result"]["tools"]
-    assert len(tools) == 26
+    assert len(tools) == 27
     assert all("outputSchema" not in tool for tool in tools)
 
 
@@ -2306,6 +2310,11 @@ def _model_program_for_server_surface() -> dict[str, object]:
         (
             "resume_task",
             "resume_task_request",
+            {"schema_version": 1, "task_id": TASK_ID, "expected_generation": 0},
+        ),
+        (
+            "cancel_task",
+            "cancel_task_request",
             {"schema_version": 1, "task_id": TASK_ID, "expected_generation": 0},
         ),
         (

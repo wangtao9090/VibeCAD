@@ -602,6 +602,18 @@ def _regular_safe(result, root_stat) -> bool:
     )
 
 
+def _presence_safe(result, root_stat) -> bool:
+    """Validate metadata without rejecting an inode concurrently unlinked by replace."""
+
+    return (
+        stat.S_ISREG(result.st_mode)
+        and result.st_uid == _effective_uid()
+        and stat.S_IMODE(result.st_mode) == 0o600
+        and result.st_nlink in {0, 1}
+        and result.st_dev == root_stat.st_dev
+    )
+
+
 def _path_stat(root_fd: int, filename: str):
     missing = False
     failed = False
@@ -1555,11 +1567,32 @@ class TaskRunStore:
             raise TaskStoreError(TaskStoreErrorCode.IO_ERROR)
         return stored
 
+    def _record_exists(self, task_id: str) -> bool:
+        root_fd = -1
+        failure = None
+        exists = False
+        try:
+            root_fd, root_stat = _open_root(self._root_parts, self._root_identity)
+            current = _path_stat(root_fd, _record_name(task_id))
+            if current is not None:
+                if not _presence_safe(current, root_stat):
+                    raise TaskStoreError(TaskStoreErrorCode.UNSAFE_STORE)
+                exists = True
+        except TaskStoreError as exc:
+            failure = exc.code
+        except OSError:
+            failure = TaskStoreErrorCode.IO_ERROR
+        close_ok = root_fd < 0 or _close(root_fd)
+        if failure is not None:
+            raise TaskStoreError(failure)
+        if not close_ok:
+            raise TaskStoreError(TaskStoreErrorCode.IO_ERROR)
+        return exists
+
     def load(self, task_id):
         task_id = _task_id(task_id)
         _require_storage_capabilities()
-        probed = self._load_locked(task_id)
-        if probed is None:
+        if not self._record_exists(task_id):
             raise TaskStoreError(TaskStoreErrorCode.NOT_FOUND)
         lease = self._acquire(task_id)
         failure = None

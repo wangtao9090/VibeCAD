@@ -634,6 +634,7 @@ remain residual and unauthorized.
 | P0B-E05 / 2026-07-23T04:57:13Z | P0B-C02 under P0B-R1.1/A01/A02; P0B-D21 direct-impact allowlist repairs | this C02 commit / non-force push required | semantic RED `3 failed` then `5 failed`; focused `1157 passed`; affected integration `224 passed, 8 deselected`; full non-slow `3954 passed, 95 deselected`; 22-tool discovery frame `17,785` bytes; Ruff/format/diff/fsck clean; store and cursor/public reviews both `0/0/0` | Python 3.13 explicit `PYTHONPATH=src` remains; one existing macOS fork deprecation warning; no product residual | P0B-S05 | accepted-green |
 | P0B-E06 / 2026-07-23T06:02:10Z | P0B-C03 under P0B-R1.1/A01/A02; P0B-D21 direct-impact and gate-baseline repairs | this C03 commit / non-force push required | API RED `69 failed`; Agent RED `9 failed`; surface RED `14 failed`; core RED plus two review-driven directory-stability/index RED cycles; focused `503 passed`; affected integration `440 passed, 8 deselected`; full non-slow `4074 passed, 95 deselected`; 24-tool frame `18,895` bytes; Ruff/diff/fsck and changed-file format clean; API, public and final core reviews `0/0/0` | explicit `PYTHONPATH=src`; one existing macOS fork warning; full-tree format baseline still names 52 unchanged files, while all 20 changed/new Python files pass; C04 retains CAD payload hashing | P0B-S06 | accepted-green |
 | P0B-E07 / 2026-07-23T06:54:17Z | P0B-C04 under P0B-R1.1/A01/A02; P0B-D08/D08A/D21 | this C04 commit / non-force push required | comparison collection RED on missing module and public Agent RED `-32603`; focused `484 passed`; affected integration `614 passed, 8 deselected`; full non-slow `4177 passed, 95 deselected`; 26-tool SDK projection `20,201` bytes / SHA-256 `85914806958d15d0a7d5874566936e098729db406ad2002f9903b834904ca58c`; complete frame `20,246` bytes; public receipt `351d7de2676d6299b0ad906155e47525e59152549e3d82499fa4d05f11aacb5d`; Ruff/diff/fsck and 21-file format clean; storage and final integration reviews `0/0`, API audit `37 passed` | semantic geometry/entity/parameter diff remains explicitly unsupported; no CAD/runtime/materialization on read paths; one existing macOS fork warning; full-tree format baseline remains unrelated | P0B-S07 | accepted-green |
+| P0B-E08 / 2026-07-23T07:56:06Z | P0B-C05 under P0B-R1.1/A01/A02; P0B-D10/D21 | this C05 commit / non-force push required | state RED `28 failed`; catalog RED on missing cancel API; two review-driven concurrency/store-race RED cycles; focused `1023 passed`; core with store `1267 passed`; affected public integration `452 passed, 8 deselected`; full non-slow `4385 passed, 95 deselected`; same-intent stress controller `100/100` plus independent `200/200` and `50/50`, all with 16 callers; 27-tool SDK projection `20,717` bytes / SHA-256 `57a38baa2bb79d959037d3066e68468066893b01383cfdd8f77dac447d79e9e8`; complete frame `20,762` bytes / SHA-256 `07e4b2e6be4a3582ffea27b1a194ae6081679448e0f1903b3aaf39b804c86724`; canonical public receipt `627abca4775d57a7a975f385ad95d7ca2d3eb331f2266ffbcf62498456ac2a56`; exact changed-file format/diff/offline-lock/syntax clean; public and state/store/catalog reviews `0/0` | active Worker kill/reconcile remains C12; one existing macOS fork warning; one anchor I001 is excluded only for its unchanged local-import block; full-tree format baseline remains unrelated | P0B-S08 | accepted-green |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -999,6 +1000,82 @@ remain residual and unauthorized.
 - Manifest queries never acquire a CAD runtime or project-write lease and
   never create, clean or repair artifact-catalog entries. Integrity,
   concurrency or capacity ambiguity fails closed.
+- Preserve P0B-GATE-CORR-01/02 and continue exact `PYTHONPATH=src` plus
+  changed-file format gates. PR, tag, release, marketplace publication,
+  force-push and external spend remain unauthorized.
+
+## 20. Recovery Snapshot P0B-S08
+
+### 1. Completed milestones
+
+- C05 adds public `cancel_task` after `resume_task` and before `accept_draft`.
+  Runtime discovery, MCPB manifest, Skill and current product documentation now
+  agree on an exact 27-tool surface: 21 stable lifecycle/service tools and 6
+  registry-derived direct CAD tools.
+- `created`, `needs_plan`, `program_ready` and `needs_input` cancel immediately
+  through exact-generation task-store CAS. Lost responses, restart and
+  concurrent callers replay the same durable `cancelled` result without a
+  second transition. Review drafts remain reject-only.
+- TaskRun now carries `cancel_requested`, `cancelling` and `cancelled` plus
+  request/start/confirm events. The ordinary transition budget remains 128;
+  records 129 through 136 are accepted only as cancellation-proven tail. Old
+  confirmation events cannot silently resume a cancellation lineage.
+- Review-driven concurrency testing closed two real races. Cancel retries the
+  same immutable CAS on exact lock contention instead of repeatedly taking
+  read leases and starving a writer. The metadata-only presence probe accepts
+  only an otherwise safe `nlink=0` observation caused by atomic replacement;
+  the lease-held authoritative reader still requires exact `nlink=1` and all
+  other owner/mode/device/link/identity checks.
+- Idle cancellation does not compose CAD/runtime/artifact services, acquire a
+  project write lease, or alter project HEAD, source files or artifact trees.
+  MCP `notifications/cancelled` remains transport-only. Active Worker
+  termination and cancellation reconciliation remain explicitly deferred to
+  C12.
+- The canonical public-surface receipt is
+  `627abca4775d57a7a975f385ad95d7ca2d3eb331f2266ffbcf62498456ac2a56`.
+  The fixed 27-tool SDK projection is 20,717 bytes with SHA-256
+  `57a38baa2bb79d959037d3066e68468066893b01383cfdd8f77dac447d79e9e8`;
+  its complete JSON-RPC frame is 20,762 bytes with SHA-256
+  `07e4b2e6be4a3582ffea27b1a194ae6081679448e0f1903b3aaf39b804c86724`.
+- Controller gates are green: focused `1023 passed`; core with store
+  `1267 passed`; affected public integration `452 passed, 8 deselected`; full
+  non-slow `4385 passed, 95 deselected`. Controller and independent
+  concurrency runs covered 350 rounds with 16 callers and produced one durable
+  transition per round. Public and state/store/catalog reviews returned
+  `Critical 0 / Important 0`.
+
+### 2. Next steps
+
+1. Commit the exact C05 allowlist as
+   `feat(tasks): add durable cancellation contracts`.
+2. Non-force push `codex/agent-stage3`, then verify exact
+   `HEAD == @{upstream}` and remote-ref equality.
+3. Rebind C06 to the accepted remote anchor and implement verified forward
+   revert without repeating P0B-A01 or P0B-A02.
+
+### 3. Approved decisions
+
+- P0B-A01/A02 and P0B-D01..D22 plus D08A/D17A/D22-R1 remain active.
+- P0B-D10 fixes durable cancellation as a TaskRun contract. C05 exposes only
+  immediate idle cancellation; active request persistence, Worker kill,
+  generation fencing and reconcile are completed together in C12.
+- P0B-D21 covers the directly affected task-store presence/CAS repairs,
+  runtime receipt, server/supervisor projection, Skill and current
+  product-truth documents found during C05 review. No product scope, authority
+  or delivery boundary changed.
+
+### 4. Execution discipline
+
+- Retry the same immutable cancellation CAS only for exact
+  `LOCK_UNAVAILABLE`. Conflict and uncertain durability use bounded readback;
+  unsafe, I/O, capacity and invalid-store failures do not enter mutation
+  retry.
+- Presence checks are not authoritative record reads. Only the lease-held
+  decoder can validate and return TaskRun bytes; symlink, hardlink, persistent
+  zero-link, owner/mode/device/root or inode ambiguity remains fail closed.
+- `cancel_requested` and `cancelling` are durable future-path contracts, not a
+  claim that C05 can stop active FreeCAD. Review uses Reject, and transport
+  request cancellation never mutates TaskRun.
 - Preserve P0B-GATE-CORR-01/02 and continue exact `PYTHONPATH=src` plus
   changed-file format gates. PR, tag, release, marketplace publication,
   force-push and external spend remain unauthorized.

@@ -13,6 +13,7 @@ import sys
 import threading
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -3346,12 +3347,7 @@ def test_concurrent_reader_observes_only_complete_old_or_new_records(store: Task
     reader_yielded = threading.Event()
     observed: list[int] = [store.load(TASK_ID).generation]
     unexpected: list[object] = []
-    # An unlocked existence probe may straddle os.replace and fail closed on
-    # the inode change; that transient did not expose a record to the caller.
-    transient = {
-        TaskStoreErrorCode.LOCK_UNAVAILABLE,
-        TaskStoreErrorCode.UNSAFE_STORE,
-    }
+    transient = {TaskStoreErrorCode.LOCK_UNAVAILABLE}
 
     def reader() -> None:
         try:
@@ -3398,6 +3394,80 @@ def test_concurrent_reader_observes_only_complete_old_or_new_records(store: Task
     assert set(observed) <= {0, 1}
     assert observed[0] == 0
     assert observed[-1] == 1
+
+
+def test_load_decodes_the_record_only_once_under_the_task_lease(
+    store: TaskRunStore,
+    monkeypatch,
+):
+    created = store.create(_task())
+    real_load_locked = TaskRunStore._load_locked
+    load_calls = 0
+
+    def count_authoritative_read(self, task_id):
+        nonlocal load_calls
+        load_calls += 1
+        return real_load_locked(self, task_id)
+
+    monkeypatch.setattr(TaskRunStore, "_load_locked", count_authoritative_read)
+
+    assert store.load(TASK_ID) == created
+    assert load_calls == 1
+
+
+def test_load_presence_probe_tolerates_inode_unlinked_by_atomic_replace(
+    store: TaskRunStore,
+    monkeypatch,
+):
+    created = store.create(_task())
+    real_path_stat = store_module._path_stat
+    path_stat_calls = 0
+
+    def unlinked_once(root_fd, filename):
+        nonlocal path_stat_calls
+        result = real_path_stat(root_fd, filename)
+        path_stat_calls += 1
+        if path_stat_calls != 1 or result is None:
+            return result
+        fields = {
+            name: getattr(result, name)
+            for name in (
+                "st_mode",
+                "st_uid",
+                "st_nlink",
+                "st_dev",
+                "st_ino",
+                "st_size",
+            )
+        }
+        fields["st_nlink"] = 0
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(store_module, "_path_stat", unlinked_once)
+
+    assert store.load(TASK_ID) == created
+    assert path_stat_calls == 3
+
+
+def test_load_fails_closed_when_authoritative_locked_read_is_unsafe(
+    store: TaskRunStore,
+    monkeypatch,
+):
+    store.create(_task())
+    load_calls = 0
+
+    def unsafe(_self, _task_id):
+        nonlocal load_calls
+        load_calls += 1
+        raise TaskStoreError(TaskStoreErrorCode.UNSAFE_STORE)
+
+    monkeypatch.setattr(TaskRunStore, "_load_locked", unsafe)
+
+    with pytest.raises(TaskStoreError) as caught:
+        store.load(TASK_ID)
+
+    _assert_error(caught, TaskStoreErrorCode.UNSAFE_STORE)
+    assert load_calls == 1
 
 
 @pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="POSIX store only")
@@ -3775,6 +3845,43 @@ def test_awaiting_review_and_rejected_decision_round_trip_across_store_restart(
     assert updated.task_run.last_error is None
     assert updated.task_run.committed_revision is None
     assert _reopened_store(store_root, lease_root).load(TASK_ID) == updated
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected_status", "expected_next_action"),
+    [
+        ("idle_cancelled", "cancelled", "none"),
+        ("requested", "cancel_requested", "reconcile"),
+        ("cancelling", "cancelling", "reconcile"),
+        ("active_cancelled", "cancelled", "none"),
+    ],
+)
+def test_cancellation_states_round_trip_across_store_restart_and_snapshot(
+    store: TaskRunStore,
+    store_root: Path,
+    lease_root: Path,
+    stage: str,
+    expected_status: str,
+    expected_next_action: str,
+):
+    if stage == "idle_cancelled":
+        task = transition_task(_task(), TaskEvent.REQUEST_CANCEL)
+    else:
+        task = transition_task(_durable_review_task(accepting=True), TaskEvent.REQUEST_CANCEL)
+        if stage in {"cancelling", "active_cancelled"}:
+            task = transition_task(task, TaskEvent.START_CANCELLATION)
+        if stage == "active_cancelled":
+            task = transition_task(task, TaskEvent.CONFIRM_CANCELLED)
+
+    created = store.create(task)
+    restarted = _reopened_store(store_root, lease_root)
+
+    assert restarted.load(TASK_ID) == created
+    assert restarted.load(TASK_ID).task_run.to_mapping() == task.to_mapping()
+    snapshot = restarted.snapshot()
+    assert len(snapshot) == 1
+    assert snapshot[0].status == expected_status
+    assert snapshot[0].next_action == expected_next_action
 
 
 @pytest.mark.parametrize("missing", ["review_policy", "draft"])

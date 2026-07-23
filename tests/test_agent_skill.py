@@ -37,6 +37,7 @@ PUBLIC_TOOL_NAMES = (
     "get_task_events",
     "submit_model_program",
     "resume_task",
+    "cancel_task",
     "accept_draft",
     "reject_draft",
     "get_artifact_manifest",
@@ -205,12 +206,12 @@ def test_skill_has_canonical_files_and_minimal_trigger_frontmatter():
     assert "$vibecad-agent" in interface["default_prompt"]
 
 
-def test_skill_teaches_the_exact_twenty_six_tool_agent_first_flow():
+def test_skill_teaches_the_exact_twenty_seven_tool_agent_first_flow():
     _metadata, body = _skill_parts()
     code_tokens = _inline_code(body)
     assert set(PUBLIC_TOOL_NAMES) <= code_tokens
     assert LEGACY_TOOL_NAMES.isdisjoint(code_tokens)
-    assert re.search(r"\b26(?:-tool| tools?)\b|26\s*个", body, re.IGNORECASE)
+    assert re.search(r"\b27(?:-tool| tools?)\b|27\s*个", body, re.IGNORECASE)
 
     essential_order = (
         "get_capabilities",
@@ -288,6 +289,27 @@ def test_skill_has_the_exact_executable_next_action_table():
         unknown,
         re.IGNORECASE,
     )
+
+
+def test_skill_distinguishes_durable_task_cancel_from_transport_cancellation():
+    _metadata, body = _skill_parts()
+    paragraph = _paragraph_with(body, "cancel_task", "notifications/cancelled")
+    normalized = _normalized(paragraph)
+    assert {
+        "created",
+        "needs_plan",
+        "program_ready",
+        "needs_input",
+        "cancel_requested",
+        "cancelling",
+        "cancelled",
+        "reject_draft",
+    } <= _inline_code(paragraph)
+    assert "exact persisted generation" in normalized
+    assert "resume_task" in _inline_code(paragraph)
+    assert "do not call" in normalized
+    assert "pending" in normalized
+    assert "not durable task cancellation" in normalized
 
 
 def test_skill_teaches_resource_links_and_fail_closed_product_limits():

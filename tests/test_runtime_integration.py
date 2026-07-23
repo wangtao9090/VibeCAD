@@ -790,7 +790,7 @@ def test_unpacked_mcpb_agent_first_stdio_acceptance(tmp_path):
         listed_tools = tools_response["result"]["tools"]
         expected_tools = _expected_tool_projection()
         assert tools_response["id"] == 1
-        assert len(listed_tools) == 26
+        assert len(listed_tools) == 27
         assert [item["name"] for item in listed_tools] == [
             item["name"] for item in manifest["tools"]
         ]

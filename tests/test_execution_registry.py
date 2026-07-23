@@ -42,6 +42,7 @@ _STABLE_PUBLIC_TOOL_NAMES = (
     "get_task_events",
     "submit_model_program",
     "resume_task",
+    "cancel_task",
     "accept_draft",
     "reject_draft",
     "get_artifact_manifest",
@@ -210,7 +211,7 @@ def test_public_tool_names_are_unique_across_stable_and_direct_surfaces():
     names = tuple(spec.name for spec in public_tool_specs())
 
     assert names[: len(_STABLE_PUBLIC_TOOL_NAMES)] == _STABLE_PUBLIC_TOOL_NAMES
-    assert len(names) == len(set(names)) == 26
+    assert len(names) == len(set(names)) == 27
 
 
 def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contracts():

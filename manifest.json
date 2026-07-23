@@ -40,6 +40,7 @@
     { "name": "get_task_events", "description": "分页读取任务的持久化状态转换事件" },
     { "name": "submit_model_program", "description": "提交受约束的 ModelProgram 并生成候选版本" },
     { "name": "resume_task", "description": "按当前持久化代数恢复可继续任务" },
+    { "name": "cancel_task", "description": "请求取消指定任务并返回持久化状态" },
     { "name": "accept_draft", "description": "验证并接受指定草案版本" },
     { "name": "reject_draft", "description": "拒绝指定草案并保留审核记录" },
     { "name": "get_artifact_manifest", "description": "读取任务版本的验证绑定、制品清单和现有交付资源" },

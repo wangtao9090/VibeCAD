@@ -315,6 +315,9 @@ def _task_at(status: TaskStatus) -> TaskRun:
         TaskEvent.REJECT_PROGRAM,
         error=_step_error(needs_input=True),
     )
+    cancel_requested = transition_task(executing, TaskEvent.REQUEST_CANCEL)
+    cancelling = transition_task(cancel_requested, TaskEvent.START_CANCELLATION)
+    cancelled = transition_task(cancelling, TaskEvent.CONFIRM_CANCELLED)
     cases = {
         TaskStatus.CREATED: created,
         TaskStatus.NEEDS_PLAN: needs_plan,
@@ -341,6 +344,9 @@ def _task_at(status: TaskStatus) -> TaskRun:
             committed_revision=CANDIDATE_REVISION,
         ),
         TaskStatus.FAILED: transition_task(rolling_back, TaskEvent.COMPLETE_ROLLBACK),
+        TaskStatus.CANCEL_REQUESTED: cancel_requested,
+        TaskStatus.CANCELLING: cancelling,
+        TaskStatus.CANCELLED: cancelled,
     }
     return cases[status]
 
@@ -384,6 +390,9 @@ class _FakePort:
 
     def reconcile_task(self, **kwargs):
         return self._reply("reconcile_task", kwargs)
+
+    def cancel_task(self, **kwargs):
+        return self._reply("cancel_task", kwargs)
 
     def accept_draft(self, **kwargs):
         return self._reply("accept_draft", kwargs)
@@ -475,6 +484,7 @@ def test_public_surface_error_taxonomies_and_method_signatures_are_closed():
         "get_task_events",
         "submit_model_program",
         "resume_task",
+        "cancel_task",
         "get_capabilities",
         "accept_draft",
         "reject_draft",
@@ -495,6 +505,7 @@ def test_public_surface_error_taxonomies_and_method_signatures_are_closed():
         "submit_model_program",
         "continue_task",
         "reconcile_task",
+        "cancel_task",
         "accept_draft",
         "reject_draft",
     }
@@ -512,6 +523,11 @@ def test_public_surface_error_taxonomies_and_method_signatures_are_closed():
             "draft_id",
             "expected_generation",
         )
+    assert tuple(inspect.signature(TaskServicePort.cancel_task).parameters) == (
+        "self",
+        "task_id",
+        "expected_generation",
+    )
 
 
 def test_port_failure_requires_an_exact_closed_code():
@@ -964,6 +980,121 @@ def _decision_request(
     }
 
 
+def _cancel_request(*, expected_generation: object = 7) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "task_id": TASK_ID,
+        "expected_generation": expected_generation,
+    }
+
+
+def test_cancel_task_accepts_exact_request_and_returns_persisted_terminal_state():
+    cancelled = transition_task(
+        _task_at(TaskStatus.NEEDS_PLAN),
+        TaskEvent.REQUEST_CANCEL,
+    )
+    port = _FakePort(StoredTaskRun(generation=8, task_run=cancelled))
+
+    response = TaskApi(port=port).cancel_task(_cancel_request())
+
+    result = _assert_success(response)
+    assert result == {
+        "generation": 8,
+        "next_action": "none",
+        "task_run": cancelled.to_mapping(),
+    }
+    assert port.calls == [
+        (
+            "cancel_task",
+            {
+                "task_id": TASK_ID,
+                "expected_generation": 7,
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        TaskStatus.CANCEL_REQUESTED,
+        TaskStatus.CANCELLING,
+        TaskStatus.CANCELLED,
+    ],
+)
+def test_cancel_task_accepts_every_durable_cancellation_state(status: TaskStatus):
+    stored = _stored(status, generation=11)
+    port = _FakePort(stored)
+
+    result = _assert_success(TaskApi(port=port).cancel_task(_cancel_request(expected_generation=7)))
+
+    assert result["generation"] == 11
+    assert result["task_run"]["status"] == status.value
+    assert port.calls == [
+        (
+            "cancel_task",
+            {"task_id": TASK_ID, "expected_generation": 7},
+        )
+    ]
+
+
+def test_cancel_task_rejects_future_generation_or_non_cancellation_port_results():
+    malformed = (
+        StoredTaskRun(generation=6, task_run=_task_at(TaskStatus.CANCELLED)),
+        StoredTaskRun(generation=8, task_run=_task_at(TaskStatus.NEEDS_PLAN)),
+    )
+    for stored in malformed:
+        port = _FakePort(stored)
+
+        response = TaskApi(port=port).cancel_task(_cancel_request(expected_generation=7))
+
+        _assert_error(response, "internal_error", "")
+        assert [name for name, _ in port.calls] == ["cancel_task"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "code", "path"),
+    [
+        ({"schema_version": 1}, "missing_field", "/expected_generation"),
+        ({**_cancel_request(), "unknown": 1}, "unknown_field", "/unknown"),
+        ({**_cancel_request(), "task_id": "task_bad"}, "invalid_value", "/task_id"),
+        (
+            {**_cancel_request(), "expected_generation": True},
+            "invalid_type",
+            "/expected_generation",
+        ),
+        (
+            {**_cancel_request(), "expected_generation": -1},
+            "invalid_value",
+            "/expected_generation",
+        ),
+    ],
+)
+def test_cancel_task_ingress_is_exact_and_never_calls_the_port(payload, code, path):
+    port = _FakePort(_stored(TaskStatus.CANCELLED, generation=8))
+
+    response = TaskApi(port=port).cancel_task(payload)
+
+    _assert_error(response, code, path)
+    assert port.calls == []
+
+
+def test_cancel_task_maps_port_failure_and_redacts_untrusted_exception():
+    conflict = _FakePort(TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT))
+    _assert_error(
+        TaskApi(port=conflict).cancel_task(_cancel_request()),
+        "conflict",
+        "",
+    )
+    assert [name for name, _ in conflict.calls] == ["cancel_task"]
+
+    raised = _FakePort(RuntimeError("/private/cancel-secret"))
+    response = TaskApi(port=raised).cancel_task(_cancel_request())
+    _assert_error(response, "internal_error", "")
+    assert "private" not in json.dumps(response)
+    assert [name for name, _ in raised.calls] == ["cancel_task"]
+
+
 @pytest.mark.parametrize(
     ("api_method", "port_method", "terminal_status"),
     [
@@ -1130,6 +1261,9 @@ def test_review_decision_malformed_semantic_port_results_are_internal():
         (TaskStatus.CLEANUP_REQUIRED, ["get_task", "reconcile_task"], True),
         (TaskStatus.SUCCEEDED, ["get_task"], True),
         (TaskStatus.FAILED, ["get_task"], True),
+        (TaskStatus.CANCEL_REQUESTED, ["get_task"], False),
+        (TaskStatus.CANCELLING, ["get_task"], False),
+        (TaskStatus.CANCELLED, ["get_task"], True),
     ],
 )
 def test_resume_dispatches_every_status_once(status, expected_calls, success):

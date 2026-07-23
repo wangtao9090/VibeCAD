@@ -5,13 +5,13 @@ description: Use VibeCAD's Agent-first MCP surface to create, inspect, modify, r
 
 # VibeCAD Agent
 
-Use the current 26-tool Agent-first surface. Treat VibeCAD's persisted project, task, revision, draft, evidence, and artifact records as authoritative. Never infer success from prose alone.
+Use the current 27-tool Agent-first surface. Treat VibeCAD's persisted project, task, revision, draft, evidence, and artifact records as authoritative. Never infer success from prose alone.
 
 ## Public tools
 
 Runtime and capability tools: `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime`, `get_capabilities`.
 
-Project and task control tools: `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `accept_draft`, `reject_draft`, `get_artifact_manifest`, `export_task_artifacts`.
+Project and task control tools: `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft`, `get_artifact_manifest`, `export_task_artifacts`.
 
 Direct CAD tools: `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part`.
 
@@ -34,7 +34,9 @@ get_runtime_status
   -> resources/read for each returned resource URI
 ```
 
-Before `create_task`, generate and retain one fresh key matching `task_create_[0-9a-f]{32}`. Before another mutating call, read the current task when state may have advanced. After a mutating call, use the returned state and generation; do not replay merely because a response is slow. Accept only the named draft based on its evidence, or reject it with an explicit reason.
+Before `create_task`, generate and retain one fresh key matching `task_create_[0-9a-f]{32}`. Before another mutating call, read the current task when state may have advanced. After a mutating call, use the returned state and generation; do not replay merely because a response is slow. Accept only the named draft based on its evidence, or reject that exact draft explicitly.
+
+Use `cancel_task` first with the exact persisted generation. It immediately cancels only `created`, `needs_plan`, `program_ready`, or `needs_input`; if that response is unknown, replay the identical request instead of inventing a future generation. A task already in `cancel_requested`, `cancelling`, or `cancelled` returns its current durable state. Before C12, report `cancel_requested` or `cancelling` as pending and do not call `resume_task` or claim that a Worker stopped. An awaiting review draft must use `reject_draft`. Other active states cannot be interrupted through this C05 path, and other terminal states conflict. MCP `notifications/cancelled` only cancels one transport request and is not durable task cancellation.
 
 Use `list_tasks` only to recover an existing task when its id is unknown: page through bounded summaries, choose the intended task, then call `get_task`. If a snapshot cursor returns `conflict`, discard it and restart from the first page. Use `get_task_events` only to audit the ordered persisted `TaskRun.transitions`; it is not a timestamped log. If its cursor becomes stale, restart that task's event pagination from the first page.
 
@@ -52,7 +54,7 @@ Use `compare_revisions` only for two revisions in that current committed ancestr
 | `submit_program` | Submit the prepared bounded program with `submit_model_program`, or use the matching direct operation when the task contract permits it. |
 | `provide_input` | Supply the requested bounded input through `submit_model_program`, or use the matching direct operation when the task contract permits it. |
 | `validate_program` | Continue the persisted transition with `resume_task`. |
-| `reconcile` | Continue the persisted transition with `resume_task`. |
+| `reconcile` | Continue an ordinary persisted transition with `resume_task`; never use this row for `cancel_requested` or `cancelling` before C12. |
 | `cleanup` | Continue the persisted transition with `resume_task`. |
 | `review_draft` | Inspect the evidence, then call either `accept_draft` or `reject_draft`. |
 | `wait` | Poll with `get_task`; if the persisted state is resumable, call `resume_task` at most once for that observed generation. |
@@ -66,7 +68,7 @@ Call `get_artifact_manifest` first with the exact task generation, revision, and
 
 Never request, expose, or read an arbitrary filesystem path. Artifact access must use the verified resource URI returned by VibeCAD.
 
-Never call a legacy 31-tool surface or reconstruct retired tool names. Use only the live 26-tool surface above.
+Never call a legacy 31-tool surface or reconstruct retired tool names. Use only the live 27-tool surface above.
 
 Never generate or execute arbitrary Python/FreeCAD code. FreeCAD is the bounded geometry engine behind VibeCAD, not an authorization to run model-generated code.
 

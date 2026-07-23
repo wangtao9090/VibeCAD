@@ -27,7 +27,7 @@ from vibecad.workflow.errors import (
 )
 
 MAX_STEP_RECORDS = 64
-MAX_TRANSITION_RECORDS = 128
+MAX_TRANSITION_RECORDS = 136
 MAX_VERIFICATION_REPORTS = 16
 MAX_ARTIFACT_REFS = 128
 MAX_CRITERION_VERDICTS = 128
@@ -43,6 +43,7 @@ _MAX_JSON_KEY_BYTES = 256
 _MAX_EVIDENCE_POINTER_BYTES = 256
 _MAX_ERROR_PATH_LENGTH = 256
 _MAX_RENDERED_ERROR_LENGTH = 512
+_MAX_ORDINARY_TRANSITION_RECORDS = 128
 _TRUNCATED_POINTER_TOKEN = "__truncated__"
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _TASK_CREATE_KEY_RE = re.compile(r"^task_create_[0-9a-f]{32}$")
@@ -144,6 +145,9 @@ class TaskStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     REJECTED = "rejected"
+    CANCEL_REQUESTED = "cancel_requested"
+    CANCELLING = "cancelling"
+    CANCELLED = "cancelled"
 
 
 class TaskEvent(StrEnum):
@@ -172,6 +176,9 @@ class TaskEvent(StrEnum):
     CONFIRM_COMMITTED = "confirm_committed"
     CONFIRM_UNCOMMITTED = "confirm_uncommitted"
     CONFIRM_PRE_CANDIDATE = "confirm_pre_candidate"
+    REQUEST_CANCEL = "request_cancel"
+    START_CANCELLATION = "start_cancellation"
+    CONFIRM_CANCELLED = "confirm_cancelled"
 
 
 class NextAction(StrEnum):
@@ -196,7 +203,38 @@ class CriterionOutcome(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
-_TERMINAL_STATUSES = frozenset({TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.REJECTED})
+_TERMINAL_STATUSES = frozenset(
+    {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.REJECTED,
+        TaskStatus.CANCELLED,
+    }
+)
+_CANCELLATION_STATUSES = frozenset(
+    {
+        TaskStatus.CANCEL_REQUESTED,
+        TaskStatus.CANCELLING,
+        TaskStatus.CANCELLED,
+    }
+)
+_CANCELLATION_FORBIDDEN_RECOVERY_EVENTS = frozenset(
+    {
+        TaskEvent.CONFIRM_PRE_CANDIDATE,
+        TaskEvent.CONFIRM_UNCOMMITTED,
+        TaskEvent.CONFIRM_DRAFT_UNCOMMITTED,
+    }
+)
+_CANCELLATION_TAIL_EVENTS = frozenset(
+    {
+        TaskEvent.REQUEST_CANCEL,
+        TaskEvent.START_CANCELLATION,
+        TaskEvent.REQUIRE_RECOVERY,
+        TaskEvent.REQUIRE_CLEANUP,
+        TaskEvent.CONFIRM_COMMITTED,
+        TaskEvent.CONFIRM_CANCELLED,
+    }
+)
 _CANDIDATE_ACTIVE_STATUSES = frozenset(
     {
         TaskStatus.EXECUTING,
@@ -227,32 +265,42 @@ _REVIEW_EVENTS = frozenset(
     }
 )
 _TRANSITIONS: dict[tuple[TaskStatus, TaskEvent], TaskStatus] = {
+    (TaskStatus.CREATED, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
     (TaskStatus.CREATED, TaskEvent.REQUEST_PLAN): TaskStatus.NEEDS_PLAN,
+    (TaskStatus.NEEDS_PLAN, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
     (TaskStatus.NEEDS_PLAN, TaskEvent.SUBMIT_PROGRAM): TaskStatus.PROGRAM_READY,
+    (TaskStatus.PROGRAM_READY, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
     (TaskStatus.NEEDS_INPUT, TaskEvent.SUBMIT_PROGRAM): TaskStatus.PROGRAM_READY,
+    (TaskStatus.NEEDS_INPUT, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCELLED,
     (TaskStatus.PROGRAM_READY, TaskEvent.START_VALIDATION): TaskStatus.VALIDATING_PROGRAM,
+    (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.VALIDATE_PROGRAM): TaskStatus.EXECUTING,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REJECT_PROGRAM): TaskStatus.NEEDS_INPUT,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.VALIDATING_PROGRAM, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.EXECUTING, TaskEvent.COMPLETE_EXECUTION): TaskStatus.VERIFYING,
+    (TaskStatus.EXECUTING, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.EXECUTING, TaskEvent.FAIL_EXECUTION): TaskStatus.ROLLING_BACK,
     (TaskStatus.EXECUTING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.EXECUTING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.VERIFYING, TaskEvent.PASS_VERIFICATION): TaskStatus.COMMITTING,
+    (TaskStatus.VERIFYING, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.VERIFYING, TaskEvent.PREPARE_REVIEW): TaskStatus.PREPARING_REVIEW,
     (TaskStatus.VERIFYING, TaskEvent.FAIL_VERIFICATION): TaskStatus.ROLLING_BACK,
     (TaskStatus.VERIFYING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.VERIFYING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.COMMITTING, TaskEvent.COMMIT): TaskStatus.SUCCEEDED,
+    (TaskStatus.COMMITTING, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.COMMITTING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.COMMITTING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.PREPARING_REVIEW, TaskEvent.PUBLISH_DRAFT): TaskStatus.AWAITING_USER_REVIEW,
+    (TaskStatus.PREPARING_REVIEW, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.PREPARING_REVIEW, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
     (TaskStatus.PREPARING_REVIEW, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
     (TaskStatus.AWAITING_USER_REVIEW, TaskEvent.ACCEPT_DRAFT): TaskStatus.ACCEPTING_DRAFT,
     (TaskStatus.AWAITING_USER_REVIEW, TaskEvent.REJECT_DRAFT): TaskStatus.REJECTED,
     (TaskStatus.ACCEPTING_DRAFT, TaskEvent.COMMIT): TaskStatus.SUCCEEDED,
+    (TaskStatus.ACCEPTING_DRAFT, TaskEvent.REQUEST_CANCEL): TaskStatus.CANCEL_REQUESTED,
     (TaskStatus.ACCEPTING_DRAFT, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
     (TaskStatus.ACCEPTING_DRAFT, TaskEvent.ABORT_ACCEPT): TaskStatus.AWAITING_USER_REVIEW,
     (TaskStatus.ACCEPTING_DRAFT, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
@@ -275,6 +323,13 @@ _TRANSITIONS: dict[tuple[TaskStatus, TaskEvent], TaskStatus] = {
         TaskEvent.CONFIRM_DRAFT_UNCOMMITTED,
     ): TaskStatus.AWAITING_USER_REVIEW,
     (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_PRE_CANDIDATE): TaskStatus.PROGRAM_READY,
+    (TaskStatus.CANCEL_REQUESTED, TaskEvent.START_CANCELLATION): TaskStatus.CANCELLING,
+    (TaskStatus.CANCELLING, TaskEvent.CONFIRM_CANCELLED): TaskStatus.CANCELLED,
+    (TaskStatus.CANCELLING, TaskEvent.CONFIRM_COMMITTED): TaskStatus.SUCCEEDED,
+    (TaskStatus.CANCELLING, TaskEvent.REQUIRE_RECOVERY): TaskStatus.RECOVERY_REQUIRED,
+    (TaskStatus.CANCELLING, TaskEvent.REQUIRE_CLEANUP): TaskStatus.CLEANUP_REQUIRED,
+    (TaskStatus.RECOVERY_REQUIRED, TaskEvent.CONFIRM_CANCELLED): TaskStatus.CANCELLED,
+    (TaskStatus.CLEANUP_REQUIRED, TaskEvent.CONFIRM_CANCELLED): TaskStatus.CANCELLED,
 }
 
 
@@ -1312,6 +1367,15 @@ class TaskRun:
                 "candidate revision must match transition provenance",
             )
         transition_events = tuple(record.event for record in self.transitions)
+        program_submitted = TaskEvent.SUBMIT_PROGRAM in transition_events
+        if self.status in _CANCELLATION_STATUSES and (
+            program_submitted != (self.program is not None)
+        ):
+            raise _failure(
+                TaskStateErrorCode.INVARIANT_VIOLATION,
+                "/program",
+                "cancel state program must match submission provenance",
+            )
         review_started = TaskEvent.PREPARE_REVIEW in transition_events
         if self.review_policy is ReviewPolicy.AUTO_COMMIT:
             if (
@@ -1759,6 +1823,8 @@ def _transition_history(records: tuple[TaskTransitionRecord, ...], status: TaskS
     current = TaskStatus.CREATED
     candidate_published = False
     review_started = False
+    cancel_requested = False
+    cancellation_started = False
     for record in records:
         if record.from_status is not current:
             raise _failure(
@@ -1772,6 +1838,43 @@ def _transition_history(records: tuple[TaskTransitionRecord, ...], status: TaskS
                 TaskStateErrorCode.INVARIANT_VIOLATION,
                 "/transitions",
                 "transition history contains an illegal event",
+            )
+        if record.sequence > _MAX_ORDINARY_TRANSITION_RECORDS and not (
+            record.event in _CANCELLATION_TAIL_EVENTS
+            and (cancel_requested or record.event is TaskEvent.REQUEST_CANCEL)
+        ):
+            raise _failure(
+                TaskStateErrorCode.INVARIANT_VIOLATION,
+                "/transitions",
+                "transition history exceeds the ordinary budget without cancellation",
+            )
+        if cancel_requested and record.event in _CANCELLATION_FORBIDDEN_RECOVERY_EVENTS:
+            raise _failure(
+                TaskStateErrorCode.INVARIANT_VIOLATION,
+                "/transitions",
+                "cancelled work cannot resume an execution path",
+            )
+        if record.event is TaskEvent.REQUEST_CANCEL:
+            if cancel_requested:
+                raise _failure(
+                    TaskStateErrorCode.INVARIANT_VIOLATION,
+                    "/transitions",
+                    "cancel request must be unique",
+                )
+            cancel_requested = True
+        elif record.event is TaskEvent.START_CANCELLATION:
+            if not cancel_requested or cancellation_started:
+                raise _failure(
+                    TaskStateErrorCode.INVARIANT_VIOLATION,
+                    "/transitions",
+                    "cancellation start requires one durable request",
+                )
+            cancellation_started = True
+        elif record.event is TaskEvent.CONFIRM_CANCELLED and not cancellation_started:
+            raise _failure(
+                TaskStateErrorCode.INVARIANT_VIOLATION,
+                "/transitions",
+                "cancel confirmation requires a started cancellation",
             )
         if record.event is TaskEvent.CONFIRM_PRE_CANDIDATE and candidate_published:
             raise _failure(
@@ -1804,6 +1907,18 @@ def _transition_history(records: tuple[TaskTransitionRecord, ...], status: TaskS
         if record.event is TaskEvent.PREPARE_REVIEW:
             review_started = True
         current = record.to_status
+    if status in _CANCELLATION_STATUSES and not cancel_requested:
+        raise _failure(
+            TaskStateErrorCode.INVARIANT_VIOLATION,
+            "/transitions",
+            "cancel state requires durable request provenance",
+        )
+    if status is TaskStatus.CANCELLING and not cancellation_started:
+        raise _failure(
+            TaskStateErrorCode.INVARIANT_VIOLATION,
+            "/transitions",
+            "cancelling state requires start provenance",
+        )
     if current is not status:
         raise _failure(
             TaskStateErrorCode.INVARIANT_VIOLATION,
@@ -1861,6 +1976,37 @@ def transition_task(
             TaskStateErrorCode.INVALID_TRANSITION,
             "/event",
             "event is not allowed from current status",
+        )
+    cancel_requested = any(record.event is TaskEvent.REQUEST_CANCEL for record in task.transitions)
+    cancellation_started = any(
+        record.event is TaskEvent.START_CANCELLATION for record in task.transitions
+    )
+    if cancel_requested and event in _CANCELLATION_FORBIDDEN_RECOVERY_EVENTS:
+        raise _failure(
+            TaskStateErrorCode.INVALID_TRANSITION,
+            "/event",
+            "cancelled work cannot resume an execution path",
+        )
+    if event is TaskEvent.CONFIRM_CANCELLED and not (cancel_requested and cancellation_started):
+        raise _failure(
+            TaskStateErrorCode.INVALID_TRANSITION,
+            "/event",
+            "cancel confirmation requires durable start provenance",
+        )
+    if len(task.transitions) >= MAX_TRANSITION_RECORDS:
+        raise _failure(
+            TaskStateErrorCode.BUDGET_EXCEEDED,
+            "/transitions",
+            "transition history budget exceeded",
+        )
+    if len(task.transitions) >= _MAX_ORDINARY_TRANSITION_RECORDS and not (
+        event is TaskEvent.REQUEST_CANCEL
+        or (cancel_requested and event in _CANCELLATION_TAIL_EVENTS)
+    ):
+        raise _failure(
+            TaskStateErrorCode.BUDGET_EXCEEDED,
+            "/transitions",
+            "ordinary transition history budget exceeded",
         )
     if event is TaskEvent.PASS_VERIFICATION and task.review_policy is not ReviewPolicy.AUTO_COMMIT:
         raise _failure(
@@ -2060,6 +2206,8 @@ def transition_task(
                 TaskEvent.CONFIRM_PRE_CANDIDATE,
                 TaskEvent.CONFIRM_DRAFT_UNCOMMITTED,
                 TaskEvent.ABORT_ACCEPT,
+                TaskEvent.REQUEST_CANCEL,
+                TaskEvent.CONFIRM_CANCELLED,
             }
             else error
             if event in failure_events
@@ -2198,6 +2346,9 @@ def next_action_for(status: TaskStatus) -> NextAction:
         TaskStatus.SUCCEEDED: NextAction.NONE,
         TaskStatus.FAILED: NextAction.NONE,
         TaskStatus.REJECTED: NextAction.NONE,
+        TaskStatus.CANCEL_REQUESTED: NextAction.RECONCILE,
+        TaskStatus.CANCELLING: NextAction.RECONCILE,
+        TaskStatus.CANCELLED: NextAction.NONE,
     }
     return mapping[status]
 

@@ -2026,6 +2026,7 @@ def test_default_replay_tool_set_matches_public_idempotence_contract() -> None:
     expected = frozenset(spec.name for spec in public_tool_specs() if spec.annotations.idempotent)
     assert supervisor._DEFAULT_IDEMPOTENT_TOOLS == expected
     assert "create_task" in supervisor._DEFAULT_IDEMPOTENT_TOOLS
+    assert "cancel_task" in supervisor._DEFAULT_IDEMPOTENT_TOOLS
     assert {
         "list_projects",
         "list_revisions",

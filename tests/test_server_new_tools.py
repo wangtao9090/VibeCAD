@@ -25,6 +25,7 @@ EXPECTED_NAMES = (
     "get_task_events",
     "submit_model_program",
     "resume_task",
+    "cancel_task",
     "accept_draft",
     "reject_draft",
     "get_artifact_manifest",

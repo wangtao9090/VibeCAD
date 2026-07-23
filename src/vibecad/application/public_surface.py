@@ -1115,6 +1115,7 @@ _STABLE_TOOL_NAMES = (
     "get_task_events",
     "submit_model_program",
     "resume_task",
+    "cancel_task",
     "accept_draft",
     "reject_draft",
     "get_artifact_manifest",
@@ -1139,6 +1140,7 @@ _STABLE_TOOL_DESCRIPTIONS = MappingProxyType(
         "get_task_events": "分页读取任务的持久化状态转换事件",
         "submit_model_program": "提交受约束的 ModelProgram 并生成候选版本",
         "resume_task": "按当前持久化代数恢复可继续任务",
+        "cancel_task": "请求取消指定任务并返回持久化状态",
         "accept_draft": "验证并接受指定草案版本",
         "reject_draft": "拒绝指定草案并保留审核记录",
         "get_artifact_manifest": "读取任务版本的验证绑定、制品清单和现有交付资源",
@@ -2352,6 +2354,14 @@ def _stable_input_schema(name: str) -> dict[str, object]:
                 "expected_generation": _safe_integer_schema(minimum=0),
             }
         )
+    if name == "cancel_task":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "task_id": _id_schema(_TASK_ID.pattern),
+                "expected_generation": _safe_integer_schema(minimum=0),
+            }
+        )
     if name in {"accept_draft", "reject_draft"}:
         return _closed_schema(
             {
@@ -2411,6 +2421,7 @@ def _stable_result_schema(name: str) -> dict[str, object]:
         "get_task",
         "submit_model_program",
         "resume_task",
+        "cancel_task",
         "accept_draft",
         "reject_draft",
     }:
@@ -2444,6 +2455,7 @@ def _stable_annotations(name: str) -> ToolAnnotations:
         "get_task_events": (True, False, True, False),
         "submit_model_program": (False, True, True, False),
         "resume_task": (False, True, True, False),
+        "cancel_task": (False, True, True, False),
         "accept_draft": (False, True, True, False),
         "reject_draft": (False, True, True, False),
         "get_artifact_manifest": (True, False, True, False),

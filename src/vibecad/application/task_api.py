@@ -173,6 +173,10 @@ class TaskServicePort(Protocol):
         self, *, task_id: str, expected_generation: int
     ) -> StoredTaskRun | TaskServicePortFailure: ...
 
+    def cancel_task(
+        self, *, task_id: str, expected_generation: int
+    ) -> StoredTaskRun | TaskServicePortFailure: ...
+
     def accept_draft(
         self, *, task_id: str, draft_id: str, expected_generation: int
     ) -> StoredTaskRun | TaskServicePortFailure: ...
@@ -1023,16 +1027,52 @@ class TaskApi:
                     ),
                     task_id=task_id,
                 )
-            elif status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.REJECTED}:
+            elif status in {
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+                TaskStatus.REJECTED,
+                TaskStatus.CANCELLED,
+            }:
                 pass
             elif status in {
                 TaskStatus.CREATED,
                 TaskStatus.NEEDS_PLAN,
                 TaskStatus.NEEDS_INPUT,
                 TaskStatus.AWAITING_USER_REVIEW,
+                TaskStatus.CANCEL_REQUESTED,
+                TaskStatus.CANCELLING,
             }:
                 _raise(TaskApiErrorCode.INVALID_STATE)
             else:
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            return self._task_result(stored, task_id=task_id)
+
+        return self._guard(action)
+
+    def cancel_task(self, request: object) -> dict[str, object]:
+        def action() -> dict[str, object]:
+            data = _validate_request(
+                request,
+                required=frozenset({"schema_version", "task_id", "expected_generation"}),
+            )
+            task_id = _identifier(data["task_id"], "/task_id", _TASK_ID)
+            expected_generation = _generation(data["expected_generation"])
+            stored = self._port_result(
+                self._invoke_untrusted(
+                    lambda: self._port.cancel_task(
+                        task_id=task_id,
+                        expected_generation=expected_generation,
+                    )
+                ),
+                task_id=task_id,
+            )
+            if stored.generation < expected_generation:
+                _raise(TaskApiErrorCode.INTERNAL_ERROR)
+            if stored.task_run.status not in {
+                TaskStatus.CANCEL_REQUESTED,
+                TaskStatus.CANCELLING,
+                TaskStatus.CANCELLED,
+            }:
                 _raise(TaskApiErrorCode.INTERNAL_ERROR)
             return self._task_result(stored, task_id=task_id)
 

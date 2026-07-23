@@ -6,6 +6,7 @@ import time
 from enum import StrEnum
 
 from vibecad.execution.revisions import LocalRevisionStore, ProjectHead
+from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER
 from vibecad.workflow.state import (
     ReasoningOwner,
     ReviewDraft,
@@ -43,6 +44,7 @@ class TaskCatalogErrorCode(StrEnum):
     CONFLICT = "conflict"
     RESOURCE_EXHAUSTED = "resource_exhausted"
     STORE_FAILURE = "store_failure"
+    RECOVERY_REQUIRED = "recovery_required"
 
 
 _ERROR_MESSAGES = {
@@ -55,12 +57,28 @@ _ERROR_MESSAGES = {
     TaskCatalogErrorCode.CONFLICT: "The task record changed concurrently.",
     TaskCatalogErrorCode.RESOURCE_EXHAUSTED: "The task store capacity is exhausted.",
     TaskCatalogErrorCode.STORE_FAILURE: "The task record operation failed.",
+    TaskCatalogErrorCode.RECOVERY_REQUIRED: "The task requires explicit reconciliation.",
 }
 _REPLAY_WAIT_SECONDS = 1.0
 _REPLAY_RETRY_LIMIT = 512
 _REPLAY_DEADLINE_GRACE_RETRY_LIMIT = 32
 _REPLAY_LOAD_DELAY_SECONDS = 0.002
 _REPLAY_DEADLINE_GRACE_DELAY_CAP_SECONDS = 0.05
+_IDLE_CANCEL_STATUSES = frozenset(
+    {
+        TaskStatus.CREATED,
+        TaskStatus.NEEDS_PLAN,
+        TaskStatus.PROGRAM_READY,
+        TaskStatus.NEEDS_INPUT,
+    }
+)
+_CANCELLATION_STATUSES = frozenset(
+    {
+        TaskStatus.CANCEL_REQUESTED,
+        TaskStatus.CANCELLING,
+        TaskStatus.CANCELLED,
+    }
+)
 
 
 class _ReplayRetryBudget:
@@ -116,13 +134,13 @@ def _raise(code: TaskCatalogErrorCode) -> None:
 
 
 def _expected_generation(value: object) -> int:
-    if type(value) is not int or value < 0:
+    if type(value) is not int or value < 0 or value > MAX_SAFE_JSON_INTEGER:
         _raise(TaskCatalogErrorCode.INVALID_INPUT)
     return value
 
 
 class TaskCatalogService:
-    """Own create/get/reject and shared task-record CAS without loading CAD."""
+    """Own create/get/cancel/reject and shared task-record CAS without loading CAD."""
 
     __slots__ = ("_revision_store", "_task_store")
 
@@ -337,13 +355,24 @@ class TaskCatalogService:
             retry_budget = _ReplayRetryBudget()
         while True:
             try:
-                return self._task_store.load(task_id)
+                stored = self._task_store.load(task_id)
+                if type(stored) is not StoredTaskRun:
+                    _raise(TaskCatalogErrorCode.STORE_FAILURE)
+                return stored
             except TaskStoreError as error:
-                retryable = error.code in {
+                transient = error.code in {
                     TaskStoreErrorCode.LOCK_UNAVAILABLE,
                     TaskStoreErrorCode.RESOURCE_EXHAUSTED,
-                } or (await_publication and error.code is TaskStoreErrorCode.NOT_FOUND)
-                if retryable:
+                }
+                if transient:
+                    if not retry_budget.wait_for_retry():
+                        _raise(
+                            TaskCatalogErrorCode.RESOURCE_EXHAUSTED
+                            if error.code is TaskStoreErrorCode.RESOURCE_EXHAUSTED
+                            else TaskCatalogErrorCode.STORE_FAILURE
+                        )
+                    continue
+                if await_publication and error.code is TaskStoreErrorCode.NOT_FOUND:
                     if not retry_budget.wait_for_retry():
                         return None
                     continue
@@ -378,6 +407,113 @@ class TaskCatalogService:
 
     def get_task(self, *, task_id: str) -> StoredTaskRun:
         return self._load(task_id)
+
+    def cancel_task(
+        self,
+        *,
+        task_id: str,
+        expected_generation: int,
+    ) -> StoredTaskRun:
+        """Persist an idle cancellation or replay an existing cancellation intent."""
+
+        expected = _expected_generation(expected_generation)
+        stored = self._load_replay_candidate(
+            task_id,
+            await_publication=False,
+            retry_budget=_ReplayRetryBudget(),
+        )
+        if stored is None:
+            _raise(TaskCatalogErrorCode.NOT_FOUND)
+        status = stored.task_run.status
+        if status in _CANCELLATION_STATUSES:
+            if expected > stored.generation:
+                _raise(TaskCatalogErrorCode.CONFLICT)
+            return stored
+        if status in {
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.REJECTED,
+        }:
+            _raise(TaskCatalogErrorCode.CONFLICT)
+        if status in {
+            TaskStatus.RECOVERY_REQUIRED,
+            TaskStatus.CLEANUP_REQUIRED,
+        }:
+            _raise(TaskCatalogErrorCode.RECOVERY_REQUIRED)
+        if status not in _IDLE_CANCEL_STATUSES:
+            _raise(TaskCatalogErrorCode.INVALID_STATE)
+        if stored.generation != expected:
+            _raise(TaskCatalogErrorCode.CONFLICT)
+        try:
+            cancelled = transition_task(stored.task_run, TaskEvent.REQUEST_CANCEL)
+        except TaskStateError:
+            _raise(TaskCatalogErrorCode.INVALID_STATE)
+        mutation_budget = _ReplayRetryBudget()
+        while True:
+            try:
+                result = self._task_store.compare_and_set(
+                    stored.task_run.id,
+                    stored.generation,
+                    cancelled,
+                )
+            except TaskStoreError as error:
+                if error.code is TaskStoreErrorCode.LOCK_UNAVAILABLE:
+                    if mutation_budget.wait_for_retry():
+                        continue
+                    readback = self._load_replay_candidate(
+                        task_id,
+                        await_publication=False,
+                        retry_budget=_ReplayRetryBudget(),
+                    )
+                    if (
+                        type(readback) is StoredTaskRun
+                        and readback.task_run.status in _CANCELLATION_STATUSES
+                        and expected <= readback.generation
+                    ):
+                        return readback
+                    _raise(TaskCatalogErrorCode.STORE_FAILURE)
+                if error.code is TaskStoreErrorCode.CONFLICT:
+                    readback = self._load_replay_candidate(
+                        task_id,
+                        await_publication=False,
+                        retry_budget=_ReplayRetryBudget(),
+                    )
+                    if (
+                        type(readback) is StoredTaskRun
+                        and readback.task_run.status in _CANCELLATION_STATUSES
+                        and expected <= readback.generation
+                    ):
+                        return readback
+                    _raise(TaskCatalogErrorCode.CONFLICT)
+                if error.code is TaskStoreErrorCode.DURABILITY_UNCERTAIN:
+                    committed = getattr(error, "committed_generation", None)
+                    readback = self._load_replay_candidate(
+                        task_id,
+                        await_publication=True,
+                        retry_budget=_ReplayRetryBudget(),
+                    )
+                    if (
+                        committed == stored.generation + 1
+                        and type(readback) is StoredTaskRun
+                        and readback.generation == committed
+                        and readback.task_run == cancelled
+                    ):
+                        return readback
+                    _raise(TaskCatalogErrorCode.STORE_FAILURE)
+                if error.code is TaskStoreErrorCode.RESOURCE_EXHAUSTED:
+                    _raise(TaskCatalogErrorCode.RESOURCE_EXHAUSTED)
+                if error.code is TaskStoreErrorCode.INVALID_ID:
+                    _raise(TaskCatalogErrorCode.INVALID_INPUT)
+                _raise(TaskCatalogErrorCode.STORE_FAILURE)
+            except Exception:
+                _raise(TaskCatalogErrorCode.STORE_FAILURE)
+            if (
+                type(result) is not StoredTaskRun
+                or result.generation != stored.generation + 1
+                or result.task_run != cancelled
+            ):
+                _raise(TaskCatalogErrorCode.STORE_FAILURE)
+            return result
 
     def snapshot_tasks(self) -> tuple[TaskSnapshotEntry, ...]:
         try:
