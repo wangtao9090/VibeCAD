@@ -150,7 +150,7 @@ def test_expected_receipts_bind_private_package_epoch_sdk_and_public_surface():
         "public_surface_sha256": spec.PUBLIC_SURFACE_SHA256,
     }
 
-    assert spec.VIBECAD_VERSION == "0.5.0"
+    assert spec.VIBECAD_VERSION == "0.6.0"
     assert type(spec.SERVER_PACKAGE_EPOCH) is int and spec.SERVER_PACKAGE_EPOCH == 4
     assert spec.MCP_VERSION == "1.27.2"
     assert spec.PUBLIC_SURFACE_SHA256 == _canonical_public_surface_sha256()

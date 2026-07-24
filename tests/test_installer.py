@@ -3,6 +3,7 @@ import json
 import runpy
 import stat
 import threading
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -375,6 +376,86 @@ def _prepare_managed_env(monkeypatch, tmp_path, receipt):
     return python, sentinel
 
 
+def _write_same_version_wheel(
+    root: Path,
+    *,
+    sources: dict[str, bytes],
+) -> tuple[Path, str]:
+    wheel = root / f"vibecad-{spec.VIBECAD_VERSION}-py3-none-any.whl"
+    dist_info = f"vibecad-{spec.VIBECAD_VERSION}.dist-info"
+    with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, content in sorted(sources.items()):
+            archive.writestr(f"vibecad/{name}", content)
+        archive.writestr(
+            f"{dist_info}/METADATA",
+            f"Metadata-Version: 2.4\nName: vibecad\nVersion: {spec.VIBECAD_VERSION}\n",
+        )
+        archive.writestr(
+            f"{dist_info}/WHEEL",
+            "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        )
+        archive.writestr(f"{dist_info}/RECORD", "")
+    return wheel, hashlib.sha256(wheel.read_bytes()).hexdigest()
+
+
+def _write_installed_server_identity(
+    prefix: Path,
+    *,
+    sources: dict[str, bytes],
+    wheel_sha256: str,
+) -> None:
+    site_packages = (
+        prefix / "Lib" / "site-packages"
+        if inst.sys.platform == "win32"
+        else prefix
+        / "lib"
+        / f"python{spec.PYTHON_VERSION[0]}.{spec.PYTHON_VERSION[1]}"
+        / "site-packages"
+    )
+    package = site_packages / "vibecad"
+    package.mkdir(parents=True, exist_ok=True)
+    for name, content in sources.items():
+        target = package / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    dist_info = site_packages / f"vibecad-{spec.VIBECAD_VERSION}.dist-info"
+    dist_info.mkdir(parents=True, exist_ok=True)
+    (dist_info / "direct_url.json").write_text(
+        json.dumps(
+            {
+                "archive_info": {
+                    "hash": f"sha256={wheel_sha256}",
+                    "hashes": {"sha256": wheel_sha256},
+                },
+                "url": "file:///private/reviewed/vibecad.whl",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _prepare_current_same_version_server(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    sources: dict[str, bytes],
+    wheel_sha256: str,
+) -> tuple[Path, Path]:
+    python, sentinel = _prepare_managed_env(monkeypatch, tmp_path, None)
+    _write_installed_server_identity(
+        inst.paths.env_prefix(),
+        sources=sources,
+        wheel_sha256=wheel_sha256,
+    )
+    sentinel.write_text(
+        json.dumps(spec.expected_receipt(), sort_keys=True),
+        encoding="utf-8",
+    )
+    sentinel.chmod(0o600)
+    return python, sentinel
+
+
 @pytest.mark.parametrize("legacy", [True, False])
 def test_legacy_or_old_version_reuses_healthy_env_for_pip_only(monkeypatch, tmp_path, legacy):
     receipt = (
@@ -601,6 +682,343 @@ def test_failed_server_sync_keeps_old_receipt(monkeypatch, tmp_path):
 
     assert json.loads(sentinel.read_text(encoding="utf-8")) == old
     assert inst.status.runtime_ready() is False
+
+
+def test_same_version_server_refresh_forces_exact_wheel_before_receipt_commit(
+    monkeypatch,
+    tmp_path,
+):
+    old_sources = {
+        "__init__.py": b'__version__ = "0.6.0"\n',
+        "worker/service.py": b"OLD_WORKER = True\n",
+    }
+    final_sources = {
+        "__init__.py": b'__version__ = "0.6.0"\n',
+        "worker/service.py": b"FINAL_WORKER = True\n",
+    }
+    wheel, wheel_sha256 = _write_same_version_wheel(tmp_path, sources=final_sources)
+    python, sentinel = _prepare_current_same_version_server(
+        monkeypatch,
+        tmp_path / "home",
+        sources=old_sources,
+        wheel_sha256="0" * 64,
+    )
+    prefix = inst.paths.env_prefix()
+    prefix_before = prefix.lstat()
+    monkeypatch.setattr(inst.status, "engine_compatible", lambda candidate: candidate == python)
+    monkeypatch.setattr(inst.status, "verify_runtime", lambda candidate: candidate == python)
+    calls = []
+
+    def install_final(command, **_kwargs):
+        calls.append(command)
+        assert inst.paths.maintenance_lock().is_dir()
+        assert inst.paths.install_lock().is_dir()
+        assert not sentinel.exists()
+        assert inst.status.runtime_receipt_state() is inst.status.ReceiptState.MISSING
+        _write_installed_server_identity(
+            prefix,
+            sources=final_sources,
+            wheel_sha256=wheel_sha256,
+        )
+
+    monkeypatch.setattr(inst, "_run", install_final)
+    phases = []
+
+    def observe_progress(value):
+        if value.phase is Phase.READY:
+            assert sentinel.exists()
+            assert inst.status.runtime_receipt_state() is inst.status.ReceiptState.CURRENT
+        phases.append(value.phase)
+
+    installer = inst.RuntimeInstaller(on_progress=observe_progress)
+    installer.refresh_server_package(
+        wheel,
+        expected_sha256=wheel_sha256,
+    )
+
+    prefix_after = prefix.lstat()
+    assert (prefix_after.st_dev, prefix_after.st_ino) == (
+        prefix_before.st_dev,
+        prefix_before.st_ino,
+    )
+    assert len(calls) == 1
+    command = calls[0]
+    assert command[1:6] == ["run", "-r", "../..", "-p", "./"]
+    assert command[6:11] == ["python", "-B", "-m", "pip", "install"]
+    assert "--no-index" in command
+    assert "--force-reinstall" in command
+    assert "--no-deps" in command
+    assert str(wheel.resolve()) in command
+    assert "create" not in command
+    assert phases == [Phase.INSTALLING_PIP, Phase.VERIFYING, Phase.READY]
+    assert inst.status.read_runtime_receipt() == spec.expected_receipt()
+    assert inst.status.runtime_receipt_state() is inst.status.ReceiptState.CURRENT
+    assert inst.status.runtime_ready() is True
+
+
+def test_same_version_server_refresh_is_idempotent_for_exact_installed_wheel(
+    monkeypatch,
+    tmp_path,
+):
+    sources = {
+        "__init__.py": b'__version__ = "0.6.0"\n',
+        "worker/service.py": b"FINAL_WORKER = True\n",
+    }
+    wheel, wheel_sha256 = _write_same_version_wheel(tmp_path, sources=sources)
+    python, sentinel = _prepare_current_same_version_server(
+        monkeypatch,
+        tmp_path / "home",
+        sources=sources,
+        wheel_sha256=wheel_sha256,
+    )
+    receipt_before = sentinel.lstat()
+    monkeypatch.setattr(inst.status, "engine_compatible", lambda candidate: candidate == python)
+    monkeypatch.setattr(inst.status, "verify_runtime", lambda candidate: candidate == python)
+    monkeypatch.setattr(
+        inst,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("exact same-version wheel must not reinstall"),
+    )
+    phases = []
+
+    installer = inst.RuntimeInstaller(on_progress=lambda value: phases.append(value.phase))
+    installer.refresh_server_package(
+        wheel,
+        expected_sha256=wheel_sha256,
+    )
+
+    receipt_after = sentinel.lstat()
+    assert (receipt_after.st_dev, receipt_after.st_ino) == (
+        receipt_before.st_dev,
+        receipt_before.st_ino,
+    )
+    assert phases == [Phase.READY]
+    assert inst.status.runtime_receipt_state() is inst.status.ReceiptState.CURRENT
+
+
+def test_same_version_server_refresh_revokes_commit_when_ready_callback_fails(
+    monkeypatch,
+    tmp_path,
+):
+    old_sources = {
+        "__init__.py": b'__version__ = "0.6.0"\n',
+        "worker/service.py": b"OLD_WORKER = True\n",
+    }
+    final_sources = {
+        "__init__.py": b'__version__ = "0.6.0"\n',
+        "worker/service.py": b"FINAL_WORKER = True\n",
+    }
+    wheel, wheel_sha256 = _write_same_version_wheel(tmp_path, sources=final_sources)
+    python, sentinel = _prepare_current_same_version_server(
+        monkeypatch,
+        tmp_path / "home",
+        sources=old_sources,
+        wheel_sha256="0" * 64,
+    )
+    prefix = inst.paths.env_prefix()
+    monkeypatch.setattr(inst.status, "engine_compatible", lambda candidate: candidate == python)
+    monkeypatch.setattr(inst.status, "verify_runtime", lambda candidate: candidate == python)
+
+    def install_final(_command, **_kwargs):
+        assert not sentinel.exists()
+        _write_installed_server_identity(
+            prefix,
+            sources=final_sources,
+            wheel_sha256=wheel_sha256,
+        )
+
+    def fail_ready(value):
+        if value.phase is Phase.READY:
+            assert inst.status.runtime_receipt_state() is inst.status.ReceiptState.CURRENT
+            raise RuntimeError("simulated READY callback failure")
+
+    monkeypatch.setattr(inst, "_run", install_final)
+
+    with pytest.raises(inst.InstallError, match="READY callback failure"):
+        inst.RuntimeInstaller(on_progress=fail_ready).refresh_server_package(
+            wheel,
+            expected_sha256=wheel_sha256,
+        )
+
+    assert not sentinel.exists()
+    assert inst.status.runtime_receipt_state() is inst.status.ReceiptState.MISSING
+    assert inst.status.runtime_ready() is False
+
+
+def test_same_version_server_refresh_does_not_publish_failure_to_changed_generation(
+    monkeypatch,
+    tmp_path,
+):
+    old_sources = {
+        "__init__.py": b'__version__ = "0.6.0"\n',
+        "worker/service.py": b"OLD_WORKER = True\n",
+    }
+    final_sources = {
+        "__init__.py": b'__version__ = "0.6.0"\n',
+        "worker/service.py": b"FINAL_WORKER = True\n",
+    }
+    wheel, wheel_sha256 = _write_same_version_wheel(tmp_path, sources=final_sources)
+    python, sentinel = _prepare_current_same_version_server(
+        monkeypatch,
+        tmp_path / "home",
+        sources=old_sources,
+        wheel_sha256="0" * 64,
+    )
+    monkeypatch.setattr(inst.status, "engine_compatible", lambda candidate: candidate == python)
+    monkeypatch.setattr(inst.status, "verify_runtime", lambda candidate: candidate == python)
+
+    def replace_python_and_fail(_command, **_kwargs):
+        replacement = python.with_name("python.replacement")
+        replacement.write_bytes(b"different interpreter")
+        replacement.replace(python)
+        raise RuntimeError("simulated failure after generation replacement")
+
+    monkeypatch.setattr(inst, "_run", replace_python_and_fail)
+    phases = []
+
+    with pytest.raises(inst.InstallError, match="generation replacement"):
+        inst.RuntimeInstaller(
+            on_progress=lambda value: phases.append(value.phase)
+        ).refresh_server_package(
+            wheel,
+            expected_sha256=wheel_sha256,
+        )
+
+    assert phases == [Phase.INSTALLING_PIP]
+    assert not sentinel.exists()
+    assert inst.status.runtime_receipt_state() is inst.status.ReceiptState.MISSING
+
+
+def test_same_version_receipt_revocation_handles_short_descriptor_reads(
+    monkeypatch,
+    tmp_path,
+):
+    sources = {"__init__.py": b'__version__ = "0.6.0"\n'}
+    python, sentinel = _prepare_current_same_version_server(
+        monkeypatch,
+        tmp_path / "home",
+        sources=sources,
+        wheel_sha256="0" * 64,
+    )
+    prefix = inst.paths.env_prefix()
+    evidence = inst.status.capture_runtime_generation_evidence(prefix)
+    real_read = inst.os.read
+
+    def short_read(descriptor, maximum):
+        return real_read(descriptor, min(maximum, 7))
+
+    monkeypatch.setattr(inst.os, "read", short_read)
+    inst.status.revoke_current_managed_runtime_receipt(prefix, evidence)
+
+    assert python.exists()
+    assert not sentinel.exists()
+    assert inst.status.runtime_receipt_state() is inst.status.ReceiptState.MISSING
+
+
+def test_same_version_server_wheel_rejects_excess_total_uncompressed_bytes(
+    monkeypatch,
+    tmp_path,
+):
+    sources = {
+        "first.py": b"x" * 40_000,
+        "second.py": b"y" * 40_000,
+    }
+    wheel, wheel_sha256 = _write_same_version_wheel(tmp_path, sources=sources)
+    assert wheel.stat().st_size < 70_000
+    monkeypatch.setattr(inst, "_MAX_SERVER_WHEEL_BYTES", 70_000)
+
+    with pytest.raises(inst.InstallError, match="unsafe entry"):
+        inst._validated_server_wheel(wheel, wheel_sha256)
+
+
+@pytest.mark.parametrize("failure_at", ("pip", "verify", "source_parity"))
+def test_same_version_server_refresh_failure_never_leaves_current_receipt(
+    monkeypatch,
+    tmp_path,
+    failure_at,
+):
+    old_sources = {
+        "__init__.py": b'__version__ = "0.6.0"\n',
+        "worker/service.py": b"OLD_WORKER = True\n",
+    }
+    final_sources = {
+        "__init__.py": b'__version__ = "0.6.0"\n',
+        "worker/service.py": b"FINAL_WORKER = True\n",
+    }
+    wheel, wheel_sha256 = _write_same_version_wheel(tmp_path, sources=final_sources)
+    python, sentinel = _prepare_current_same_version_server(
+        monkeypatch,
+        tmp_path / "home",
+        sources=old_sources,
+        wheel_sha256="0" * 64,
+    )
+    prefix = inst.paths.env_prefix()
+    prefix_before = prefix.lstat()
+    monkeypatch.setattr(inst.status, "engine_compatible", lambda candidate: candidate == python)
+    verify_results = iter((True, failure_at != "verify"))
+    monkeypatch.setattr(
+        inst.status,
+        "verify_runtime",
+        lambda candidate: candidate == python and next(verify_results),
+    )
+
+    def fail_or_install(command, **_kwargs):
+        assert not sentinel.exists()
+        if failure_at == "pip":
+            raise RuntimeError("simulated same-version pip failure")
+        _write_installed_server_identity(
+            prefix,
+            sources=(old_sources if failure_at == "source_parity" else final_sources),
+            wheel_sha256=wheel_sha256,
+        )
+
+    monkeypatch.setattr(inst, "_run", fail_or_install)
+
+    with pytest.raises(inst.InstallError):
+        inst.RuntimeInstaller().refresh_server_package(
+            wheel,
+            expected_sha256=wheel_sha256,
+        )
+
+    prefix_after = prefix.lstat()
+    assert (prefix_after.st_dev, prefix_after.st_ino) == (
+        prefix_before.st_dev,
+        prefix_before.st_ino,
+    )
+    assert not sentinel.exists()
+    assert inst.status.runtime_receipt_state() is inst.status.ReceiptState.MISSING
+    assert inst.status.runtime_ready() is False
+
+
+def test_same_version_server_refresh_rejects_wrong_wheel_without_revoking_current(
+    monkeypatch,
+    tmp_path,
+):
+    sources = {"__init__.py": b'__version__ = "0.6.0"\n'}
+    wheel, wheel_sha256 = _write_same_version_wheel(tmp_path, sources=sources)
+    python, sentinel = _prepare_current_same_version_server(
+        monkeypatch,
+        tmp_path / "home",
+        sources=sources,
+        wheel_sha256=wheel_sha256,
+    )
+    receipt_before = sentinel.read_bytes()
+    monkeypatch.setattr(inst.status, "engine_compatible", lambda candidate: candidate == python)
+    monkeypatch.setattr(inst.status, "verify_runtime", lambda candidate: candidate == python)
+    monkeypatch.setattr(
+        inst,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("wrong wheel must stop before pip"),
+    )
+
+    with pytest.raises(inst.InstallError, match="digest"):
+        inst.RuntimeInstaller().refresh_server_package(
+            wheel,
+            expected_sha256="f" * 64,
+        )
+
+    assert sentinel.read_bytes() == receipt_before
+    assert inst.status.runtime_receipt_state() is inst.status.ReceiptState.CURRENT
 
 
 def test_unhealthy_existing_managed_env_is_removed_before_create(monkeypatch, tmp_path):

@@ -6,6 +6,7 @@ import contextlib
 import ctypes
 import errno
 import hashlib
+import json
 import os
 import secrets
 import shutil
@@ -13,8 +14,9 @@ import stat
 import subprocess
 import sys
 import urllib.request
+import zipfile
 from collections.abc import Callable, Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from vibecad.runtime import micromamba, paths, spec, status
 from vibecad.runtime.status import Phase, RuntimeStatus
@@ -29,6 +31,9 @@ _runner_unlink = os.unlink
 
 _RUNNER_DIRECTORY_NAME = ".vibecad-runner"
 _RUNNER_EXECUTABLE_NAME = "micromamba"
+_MAX_SERVER_WHEEL_BYTES = 64 * 1024 * 1024
+_MAX_SERVER_WHEEL_ENTRIES = 4096
+_MAX_DIRECT_URL_BYTES = 4096
 
 _FD_EXEC_HELPER = (
     "import os,sys\n"
@@ -415,6 +420,220 @@ def _pip_spec() -> str:
     return f"vibecad=={spec.VIBECAD_VERSION}"
 
 
+def _server_site_packages(prefix: Path) -> Path:
+    if sys.platform == "win32":
+        return prefix / "Lib" / "site-packages"
+    major, minor = spec.PYTHON_VERSION
+    return prefix / "lib" / f"python{major}.{minor}" / "site-packages"
+
+
+def _validated_server_wheel(
+    wheel: Path,
+    expected_sha256: str,
+) -> tuple[Path, tuple[int, int, int, int, int], dict[str, str]]:
+    """Bind one canonical local wheel and its exact Python-source projection."""
+
+    expected_name = f"vibecad-{spec.VIBECAD_VERSION}-py3-none-any.whl"
+    if (
+        type(wheel) is not type(Path())
+        or not wheel.is_absolute()
+        or wheel.name != expected_name
+        or type(expected_sha256) is not str
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        raise InstallError("reviewed server wheel identity is invalid")
+    try:
+        canonical = wheel.resolve(strict=True)
+        before = wheel.lstat()
+    except OSError as exc:
+        raise InstallError("reviewed server wheel is unavailable") from exc
+    getuid = getattr(os, "geteuid", None)
+    if (
+        canonical != wheel
+        or wheel.is_symlink()
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or not 0 < before.st_size <= _MAX_SERVER_WHEEL_BYTES
+        or (hasattr(before, "st_uid") and getuid is not None and before.st_uid != getuid())
+    ):
+        raise InstallError("reviewed server wheel is unsafe")
+
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(canonical, flags)
+        opened = os.fstat(descriptor)
+        live = canonical.lstat()
+        identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+            stat.S_IFMT(opened.st_mode),
+        )
+        if (
+            identity
+            != (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                stat.S_IFMT(before.st_mode),
+            )
+            or identity
+            != (
+                live.st_dev,
+                live.st_ino,
+                live.st_size,
+                live.st_mtime_ns,
+                stat.S_IFMT(live.st_mode),
+            )
+            or _sha256_fd(descriptor) != expected_sha256
+        ):
+            raise InstallError("reviewed server wheel digest or identity changed")
+
+        sources: dict[str, str] = {}
+        names: set[str] = set()
+        metadata_name = f"vibecad-{spec.VIBECAD_VERSION}.dist-info/METADATA"
+        wheel_name = f"vibecad-{spec.VIBECAD_VERSION}.dist-info/WHEEL"
+        metadata: bytes | None = None
+        wheel_metadata: bytes | None = None
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            with zipfile.ZipFile(stream) as archive:
+                entries = archive.infolist()
+                if not entries or len(entries) > _MAX_SERVER_WHEEL_ENTRIES:
+                    raise InstallError("reviewed server wheel entry count is invalid")
+                total_uncompressed_bytes = 0
+                for info in entries:
+                    relative = PurePosixPath(info.filename)
+                    total_uncompressed_bytes += info.file_size
+                    if (
+                        not info.filename
+                        or "\\" in info.filename
+                        or relative.is_absolute()
+                        or any(part in {"", ".", ".."} for part in relative.parts)
+                        or info.filename in names
+                        or stat.S_ISLNK(info.external_attr >> 16)
+                        or info.file_size > _MAX_SERVER_WHEEL_BYTES
+                        or total_uncompressed_bytes > _MAX_SERVER_WHEEL_BYTES
+                    ):
+                        raise InstallError("reviewed server wheel contains an unsafe entry")
+                    names.add(info.filename)
+                    if info.is_dir():
+                        continue
+                    content = archive.read(info)
+                    if info.filename == metadata_name:
+                        metadata = content
+                    elif info.filename == wheel_name:
+                        wheel_metadata = content
+                    if info.filename.startswith("vibecad/") and info.filename.endswith(".py"):
+                        source_name = info.filename.removeprefix("vibecad/")
+                        sources[source_name] = hashlib.sha256(content).hexdigest()
+        if (
+            not sources
+            or metadata is None
+            or wheel_metadata is None
+            or b"\nName: vibecad\n" not in b"\n" + metadata
+            or f"\nVersion: {spec.VIBECAD_VERSION}\n".encode() not in b"\n" + metadata
+            or b"\nRoot-Is-Purelib: true\n" not in b"\n" + wheel_metadata
+            or b"\nTag: py3-none-any\n" not in b"\n" + wheel_metadata
+        ):
+            raise InstallError("reviewed server wheel metadata is invalid")
+        final = os.fstat(descriptor)
+        final_live = canonical.lstat()
+        final_identity = (
+            final.st_dev,
+            final.st_ino,
+            final.st_size,
+            final.st_mtime_ns,
+            stat.S_IFMT(final.st_mode),
+        )
+        if (
+            final_identity != identity
+            or final_identity
+            != (
+                final_live.st_dev,
+                final_live.st_ino,
+                final_live.st_size,
+                final_live.st_mtime_ns,
+                stat.S_IFMT(final_live.st_mode),
+            )
+            or _sha256_fd(descriptor) != expected_sha256
+        ):
+            raise InstallError("reviewed server wheel changed during validation")
+        return canonical, identity, sources
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise InstallError("reviewed server wheel could not be validated") from exc
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+
+
+def _installed_server_package_identity(
+    prefix: Path,
+) -> tuple[dict[str, str], str | None]:
+    """Return exact installed Python sources plus pip's source-wheel digest."""
+
+    site_packages = _server_site_packages(prefix)
+    package = site_packages / "vibecad"
+    expected_dist_info = site_packages / f"vibecad-{spec.VIBECAD_VERSION}.dist-info"
+    try:
+        if (
+            package.is_symlink()
+            or not package.is_dir()
+            or expected_dist_info.is_symlink()
+            or not expected_dist_info.is_dir()
+        ):
+            raise OSError
+        dist_infos = tuple(sorted(site_packages.glob("vibecad-*.dist-info")))
+        if dist_infos != (expected_dist_info,):
+            raise OSError
+        sources: dict[str, str] = {}
+        for path in sorted(package.rglob("*")):
+            if path.is_symlink():
+                raise OSError
+            if path.is_dir():
+                continue
+            if not path.is_file():
+                raise OSError
+            if path.suffix == ".py":
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise OSError
+                sources[path.relative_to(package).as_posix()] = hashlib.sha256(
+                    path.read_bytes()
+                ).hexdigest()
+        if not sources:
+            raise OSError
+        direct_url = expected_dist_info / "direct_url.json"
+        direct_info = direct_url.lstat()
+        if (
+            direct_url.is_symlink()
+            or not stat.S_ISREG(direct_info.st_mode)
+            or direct_info.st_nlink != 1
+            or not 0 < direct_info.st_size <= _MAX_DIRECT_URL_BYTES
+        ):
+            raise OSError
+        direct = json.loads(direct_url.read_text(encoding="utf-8"))
+        archive = direct.get("archive_info") if type(direct) is dict else None
+        hashes = archive.get("hashes") if type(archive) is dict else None
+        digest = hashes.get("sha256") if type(hashes) is dict else None
+        declared = archive.get("hash") if type(archive) is dict else None
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or declared != f"sha256={digest}"
+        ):
+            digest = None
+        return sources, digest
+    except (OSError, TypeError, ValueError, UnicodeError):
+        raise InstallError("installed server package identity is invalid") from None
+
+
 class RuntimeInstaller:
     def __init__(self, on_progress: ProgressCb | None = None):
         self._cb = on_progress or (lambda s: None)
@@ -474,6 +693,200 @@ class RuntimeInstaller:
         # or removed, so an older uninstall can never observe/delete this install.
         with status.runtime_maintenance_lock():
             self._install_locked()
+
+    def refresh_server_package(
+        self,
+        wheel: Path,
+        *,
+        expected_sha256: str,
+    ) -> None:
+        """Force one reviewed same-version wheel into the default managed env.
+
+        This internal release-maintenance seam is deliberately separate from
+        ordinary install/ensure behavior.  It is not a public Agent operation,
+        and its controller must retire the local Kernel before invoking it.
+        """
+
+        with status.runtime_maintenance_lock():
+            self._refresh_server_package_locked(
+                wheel,
+                expected_sha256=expected_sha256,
+            )
+
+    def _refresh_server_package_locked(
+        self,
+        wheel: Path,
+        *,
+        expected_sha256: str,
+    ) -> None:
+        canonical, wheel_identity, wheel_sources = _validated_server_wheel(
+            wheel,
+            expected_sha256,
+        )
+        prefix = paths.env_prefix()
+        if (
+            paths.user_override_env() is not None
+            or paths.active_runtime_prefix() != prefix
+            or paths.ready_sentinel() != prefix / ".vibecad_ready"
+            or prefix.is_symlink()
+            or not prefix.is_dir()
+            or status.runtime_receipt_state() is not status.ReceiptState.CURRENT
+            or status.read_runtime_receipt() != spec.expected_receipt()
+        ):
+            raise InstallError("same-version refresh requires the exact CURRENT managed prefix")
+
+        receipt_revoked = False
+        evidence: status.RuntimeGenerationEvidence | None = None
+        try:
+            with status._pinned_runtime_write_root() as runtime_pin:
+                self._runtime_pin = runtime_pin
+                root_info = (
+                    paths.runtime_root().lstat()
+                    if runtime_pin is None
+                    else os.fstat(runtime_pin.fd)
+                )
+                self._runtime_identity = (root_info.st_dev, root_info.st_ino)
+                try:
+                    with status.FileLock(paths.install_lock()).acquire():
+                        self._validate_runtime_generation()
+                        repeated = _validated_server_wheel(canonical, expected_sha256)
+                        if repeated != (canonical, wheel_identity, wheel_sources):
+                            raise InstallError("reviewed server wheel changed before refresh")
+                        if (
+                            paths.user_override_env() is not None
+                            or paths.active_runtime_prefix() != prefix
+                            or status.runtime_receipt_state() is not status.ReceiptState.CURRENT
+                            or status.read_runtime_receipt() != spec.expected_receipt()
+                        ):
+                            raise InstallError(
+                                "same-version refresh target changed before admission"
+                            )
+                        evidence = self._capture_evidence(prefix)
+                        if not status.engine_compatible_generation(
+                            evidence
+                        ) or not status.verify_runtime_generation(evidence):
+                            raise InstallError(
+                                "same-version refresh requires a verified current engine/server"
+                            )
+                        self._revalidate_evidence(evidence)
+                        (
+                            installed_sources,
+                            installed_wheel_sha256,
+                        ) = _installed_server_package_identity(prefix)
+                        if (
+                            installed_sources == wheel_sources
+                            and installed_wheel_sha256 == expected_sha256
+                        ):
+                            self._emit(
+                                Phase.READY,
+                                100.0,
+                                "运行时就绪（已安装精确 server wheel）",
+                            )
+                            return
+
+                        status.revoke_current_managed_runtime_receipt(prefix, evidence)
+                        receipt_revoked = True
+                        if status.runtime_receipt_state() is status.ReceiptState.CURRENT:
+                            raise InstallError("current receipt survived server refresh admission")
+                        self._emit(
+                            Phase.INSTALLING_PIP,
+                            80.0,
+                            f"强制刷新 VibeCAD v{spec.VIBECAD_VERSION} server wheel",
+                        )
+                        self._ensure_current_layout()
+                        micromamba_path = self._ensure_micromamba(paths.micromamba_path())
+                        self._run_micromamba_command(
+                            micromamba_path,
+                            paths.mamba_root_prefix(),
+                            prefix,
+                            [
+                                "run",
+                                "python",
+                                "-B",
+                                "-m",
+                                "pip",
+                                "install",
+                                "--no-index",
+                                "--force-reinstall",
+                                "--no-deps",
+                                str(canonical),
+                            ],
+                            expected_env_identity=evidence.prefix_identity,
+                        )
+                        self._emit(
+                            Phase.VERIFYING,
+                            95.0,
+                            "验证同版本 server wheel 与 FreeCAD 运行时",
+                        )
+                        repeated = _validated_server_wheel(canonical, expected_sha256)
+                        if repeated != (canonical, wheel_identity, wheel_sources):
+                            raise InstallError("reviewed server wheel changed during refresh")
+                        self._revalidate_evidence(evidence)
+                        (
+                            installed_sources,
+                            installed_wheel_sha256,
+                        ) = _installed_server_package_identity(prefix)
+                        if (
+                            installed_sources != wheel_sources
+                            or installed_wheel_sha256 != expected_sha256
+                        ):
+                            raise InstallError(
+                                "installed server package does not match the reviewed wheel"
+                            )
+                        verified = self._verify_generation_or_raise(
+                            prefix,
+                            "refreshed server wheel failed managed runtime verification",
+                        )
+                        if verified != evidence:
+                            raise InstallError("managed runtime generation changed during refresh")
+                        # Receipt is the commit point. READY is published only after
+                        # that commit, and any later exception re-enters the exact
+                        # evidence-bound revocation path below.
+                        self._write_sentinel(prefix, verified)
+                        self._emit(
+                            Phase.READY,
+                            100.0,
+                            "运行时就绪（同版本 server wheel 已刷新）",
+                        )
+                finally:
+                    self._runtime_pin = None
+                    self._runtime_identity = None
+        except Exception as error:  # noqa: BLE001
+            failure: Exception = error
+            if receipt_revoked:
+                try:
+                    if status.runtime_receipt_state() is status.ReceiptState.CURRENT:
+                        if evidence is None:
+                            raise InstallError("refresh receipt evidence was lost")
+                        status.revoke_current_managed_runtime_receipt(prefix, evidence)
+                    if status.runtime_receipt_state() is status.ReceiptState.CURRENT:
+                        raise InstallError("failed same-version refresh left a CURRENT receipt")
+                except Exception as revoke_error:  # noqa: BLE001
+                    failure = InstallError(
+                        "failed same-version refresh could not revoke its CURRENT receipt"
+                    )
+                    failure.add_note(str(revoke_error))
+            failed = RuntimeStatus(
+                phase=Phase.FAILED,
+                percent=0.0,
+                message="同版本 server wheel 刷新失败",
+                error=str(failure),
+            )
+            try:
+                if evidence is None:
+                    raise ValueError("refresh failed before runtime generation admission")
+                status._validate_runtime_generation_evidence(evidence, prefix)
+                status.write_status(failed)
+                status._validate_runtime_generation_evidence(evidence, prefix)
+                self._cb(failed)
+                status._validate_runtime_generation_evidence(evidence, prefix)
+            except Exception:  # noqa: BLE001 - preserve the refresh failure
+                pass
+            if failure is not error:
+                raise failure from error
+            if isinstance(error, InstallError):
+                raise
+            raise InstallError(str(error)) from error
 
     def _install_locked(self) -> None:
         if self.is_ready():

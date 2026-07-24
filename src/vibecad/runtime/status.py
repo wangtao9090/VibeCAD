@@ -1335,6 +1335,133 @@ def runtime_receipt_state() -> ReceiptState:
     return ReceiptState.INCOMPATIBLE
 
 
+def revoke_current_managed_runtime_receipt(
+    prefix: Path,
+    evidence: RuntimeGenerationEvidence,
+) -> None:
+    """Revoke one exact CURRENT default-managed receipt before server mutation.
+
+    This is the prepare half of the internal release-maintenance refresh seam.
+    It never accepts an external or legacy prefix, and the caller must publish
+    a new receipt only after exact Python-source parity, wheel provenance and
+    full runtime verification.
+    """
+
+    expected = json.dumps(spec.expected_receipt(), sort_keys=True).encode("utf-8")
+    sentinel = prefix / ".vibecad_ready"
+    if (
+        type(prefix) is not type(Path())
+        or prefix != paths.env_prefix()
+        or paths.user_override_env() is not None
+        or paths.ready_sentinel() != sentinel
+        or paths.active_runtime_prefix() != prefix
+        or type(evidence) is not RuntimeGenerationEvidence
+        or evidence.prefix != prefix
+    ):
+        raise ValueError("current managed receipt revocation target is invalid")
+
+    def revoke_at(parent_fd: int | None) -> None:
+        selected = sentinel if parent_fd is None else sentinel.name
+        descriptor = -1
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            descriptor = os.open(selected, flags, dir_fd=parent_fd)
+            before = os.fstat(descriptor)
+            live = os.stat(selected, dir_fd=parent_fd, follow_symlinks=False)
+            getuid = getattr(os, "geteuid", None)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_size != len(expected)
+                or (before.st_dev, before.st_ino) != (live.st_dev, live.st_ino)
+                or (sys.platform != "win32" and stat.S_IMODE(before.st_mode) & 0o022)
+                or (hasattr(before, "st_uid") and getuid is not None and before.st_uid != getuid())
+            ):
+                raise ValueError("current managed receipt is unsafe")
+            maximum = len(expected) + 1
+            chunks: list[bytes] = []
+            observed = 0
+            while observed < maximum:
+                chunk = os.read(descriptor, maximum - observed)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                observed += len(chunk)
+            raw = b"".join(chunks)
+            after = os.fstat(descriptor)
+            live_after = os.stat(selected, dir_fd=parent_fd, follow_symlinks=False)
+            identity = lambda value: (  # noqa: E731
+                value.st_dev,
+                value.st_ino,
+                value.st_size,
+                value.st_mtime_ns,
+                stat.S_IFMT(value.st_mode),
+            )
+            if (
+                raw != expected
+                or identity(before) != identity(after)
+                or identity(after) != identity(live_after)
+            ):
+                raise ValueError("current managed receipt changed before revocation")
+            if parent_fd is None:
+                sentinel.unlink()
+                parent = _fallback_directory(sentinel.parent, create_missing=False)
+                directory_fd = -1
+                try:
+                    directory_fd = os.open(
+                        parent,
+                        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+                    )
+                    os.fsync(directory_fd)
+                finally:
+                    if directory_fd >= 0:
+                        os.close(directory_fd)
+            else:
+                os.unlink(sentinel.name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+        except (OSError, ValueError) as exc:
+            if isinstance(exc, ValueError):
+                raise
+            raise ValueError("current managed receipt could not be revoked") from exc
+        finally:
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+
+    with _pinned_runtime_write_root() as runtime_pinned:
+        if runtime_pinned is None:
+            current = _fallback_directory(prefix, create_missing=False)
+            _validate_runtime_generation_evidence(evidence, current)
+            revoke_at(None)
+            _validate_runtime_generation_evidence(evidence, current)
+            if os.path.lexists(sentinel):
+                raise ValueError("current managed receipt revocation was not durable")
+            return
+        relative = prefix.relative_to(paths.runtime_root())
+        prefix_pinned = _open_relative_pinned_directory(
+            runtime_pinned,
+            tuple(relative.parts),
+        )
+        try:
+            _validate_runtime_generation_evidence(evidence, prefix, prefix_pinned)
+            prefix_pinned.validate()
+            revoke_at(prefix_pinned.fd)
+            prefix_pinned.validate()
+            _validate_runtime_generation_evidence(evidence, prefix, prefix_pinned)
+            try:
+                os.stat(
+                    sentinel.name,
+                    dir_fd=prefix_pinned.fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return
+            raise ValueError("current managed receipt revocation was not durable")
+        finally:
+            prefix_pinned.close()
+
+
 def write_runtime_receipt(evidence: RuntimeGenerationEvidence | None = None) -> None:
     """验证成功后的提交点：原子替换 JSON receipt，避免 supervisor 读到半文件。"""
     if paths.user_override_env() is not None:

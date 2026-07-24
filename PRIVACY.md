@@ -26,7 +26,7 @@ VibeCAD collects no telemetry, no usage statistics, and no account information.
 
 ### Network access
 
-VibeCAD's own direct outbound network access is limited to software installation: the runtime download described above and fetching VibeCAD's open-source dependencies from PyPI at install/update time. This statement does not cover network processing performed by your MCP client or its model provider. VibeCAD 0.5.0 does not call a model provider directly and does not implement MCP Sampling or BYOK model access.
+VibeCAD's own direct outbound network access is limited to software installation: the runtime download described above and fetching VibeCAD's open-source dependencies from PyPI at install/update time. This statement does not cover network processing performed by your MCP client or its model provider. VibeCAD 0.6.0 does not call a model provider directly and does not implement MCP Sampling or BYOK model access. Its authenticated local daemon and managed FreeCAD Worker remain on your device; they do not add a cloud service or telemetry channel.
 
 ### Contact
 
@@ -55,7 +55,7 @@ VibeCAD 不收集遥测数据、不收集使用统计、不收集账号信息。
 
 ### 网络访问
 
-VibeCAD 自身主动发起的外部网络访问仅限于软件安装：上述运行时下载，以及安装/更新时从 PyPI 获取 VibeCAD 的开源依赖。此说明不涵盖 MCP 客户端或其模型供应商进行的网络处理。VibeCAD 0.5.0 不直接调用模型供应商，也尚未实现 MCP Sampling 或 BYOK 模型接入。
+VibeCAD 自身主动发起的外部网络访问仅限于软件安装：上述运行时下载，以及安装/更新时从 PyPI 获取 VibeCAD 的开源依赖。此说明不涵盖 MCP 客户端或其模型供应商进行的网络处理。VibeCAD 0.6.0 不直接调用模型供应商，也尚未实现 MCP Sampling 或 BYOK 模型接入。认证本地 daemon 与受管 FreeCAD Worker 都留在你的设备上，不会新增云服务或遥测通道。
 
 ### 联系方式
 

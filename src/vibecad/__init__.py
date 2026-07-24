@@ -9,4 +9,4 @@
 """
 
 # 与 pyproject.toml + manifest.json 同步（test_mcpb_manifest 守护）。
-__version__ = "0.5.0"
+__version__ = "0.6.0"

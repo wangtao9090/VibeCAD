@@ -876,7 +876,7 @@ def test_real_client_authenticates_and_claims_one_path_bound_checkout_grant() ->
                 "epoch": 1,
             },
             "implementation": {
-                "package_version": "0.5.0",
+                "package_version": "0.6.0",
                 "build_id": "p0b-c13.1",
             },
         }
@@ -1463,7 +1463,25 @@ def test_daemon_rejects_truncated_ancillary_and_closes_every_received_fd() -> No
             data_root=data_root,
             application_factory=_fake_daemon_factory(factories),
         )
-        before_client_fds = len(os.listdir("/dev/fd"))
+        source_identity = source.stat()
+
+        def source_descriptors() -> set[int]:
+            observed = set()
+            for raw in os.listdir("/dev/fd"):
+                if not raw.isdigit():
+                    continue
+                try:
+                    info = os.stat(f"/dev/fd/{raw}")
+                except OSError:
+                    continue
+                if (info.st_dev, info.st_ino) == (
+                    source_identity.st_dev,
+                    source_identity.st_ino,
+                ):
+                    observed.add(int(raw))
+            return observed
+
+        before_client_fds = source_descriptors()
         client = daemon_api.LocalKernelClient.connect(daemon.run_root)
         descriptors = [
             os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC) for _ in range(9)
@@ -1483,7 +1501,7 @@ def test_daemon_rejects_truncated_ancillary_and_closes_every_received_fd() -> No
         client = None
         _wait_until(lambda: daemon.active_connections == 0)
         assert factories[0][2].calls == []
-        assert len(os.listdir("/dev/fd")) == before_client_fds
+        assert source_descriptors() == before_client_fds
     finally:
         for descriptor in reversed(descriptors):
             with contextlib.suppress(OSError):

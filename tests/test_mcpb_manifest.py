@@ -221,11 +221,14 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
     roadmap = (ROOT / "docs/PRODUCT_CAPABILITY_ROADMAP.md").read_text(encoding="utf-8")
     normalized_roadmap = " ".join(roadmap.replace("\n> ", " ").split())
     for required in (
-        "S3-8/P0-A",
-        "27-tool 公共 MCP、durable review",
+        "0.6.0",
+        "28-tool 公共 MCP、durable review",
         "host-neutral skill",
-        "P0-B core 正在执行",
-        "durable idle cancellation",
+        "P0-B core backend 已完成",
+        "durable active cancellation",
+        "G1 Workbench 尚未交付",
     ):
         assert required in normalized_roadmap
+    assert "S3-8" in normalized_roadmap
+    assert "P0-A" in normalized_roadmap
     assert "宿主 skill 和 FreeCAD 交互插件尚未交付" not in normalized_roadmap

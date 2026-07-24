@@ -20,7 +20,7 @@ SKILL_ROOT = ROOT / "skills" / "vibecad-agent"
 SKILL_FILE = SKILL_ROOT / "SKILL.md"
 OPENAI_YAML = SKILL_ROOT / "agents" / "openai.yaml"
 
-PUBLISHED_SKILL_TOOL_NAMES = (
+PUBLIC_TOOL_NAMES = (
     "ping",
     "get_runtime_status",
     "ensure_runtime",
@@ -31,6 +31,7 @@ PUBLISHED_SKILL_TOOL_NAMES = (
     "list_projects",
     "list_revisions",
     "compare_revisions",
+    "revert_project",
     "create_task",
     "list_tasks",
     "get_task",
@@ -48,11 +49,6 @@ PUBLISHED_SKILL_TOOL_NAMES = (
     "modify_parameter",
     "move_part",
     "rotate_part",
-)
-PUBLIC_TOOL_NAMES = (
-    *PUBLISHED_SKILL_TOOL_NAMES[:10],
-    "revert_project",
-    *PUBLISHED_SKILL_TOOL_NAMES[10:],
 )
 
 LEGACY_TOOL_NAMES = {
@@ -211,12 +207,12 @@ def test_skill_has_canonical_files_and_minimal_trigger_frontmatter():
     assert "$vibecad-agent" in interface["default_prompt"]
 
 
-def test_skill_teaches_the_exact_twenty_seven_tool_agent_first_flow():
+def test_skill_teaches_the_exact_twenty_eight_tool_agent_first_flow():
     _metadata, body = _skill_parts()
     code_tokens = _inline_code(body)
-    assert set(PUBLISHED_SKILL_TOOL_NAMES) <= code_tokens
+    assert set(PUBLIC_TOOL_NAMES) <= code_tokens
     assert LEGACY_TOOL_NAMES.isdisjoint(code_tokens)
-    assert re.search(r"\b27(?:-tool| tools?)\b|27\s*个", body, re.IGNORECASE)
+    assert re.search(r"\b28(?:-tool| tools?)\b|28\s*个", body, re.IGNORECASE)
 
     essential_order = (
         "get_capabilities",
@@ -312,8 +308,9 @@ def test_skill_distinguishes_durable_task_cancel_from_transport_cancellation():
     } <= _inline_code(paragraph)
     assert "exact persisted generation" in normalized
     assert "resume_task" in _inline_code(paragraph)
-    assert "do not call" in normalized
-    assert "pending" in normalized
+    assert "next_action" in normalized
+    assert "reconcile" in normalized
+    assert "worker generation" in normalized
     assert "not durable task cancellation" in normalized
 
 
@@ -426,7 +423,7 @@ def test_skill_distribution_channels_are_explicit_and_non_overlapping():
     assert not any(pattern.startswith("skills") for pattern in ignored)
 
 
-def test_manifest_projection_and_all_package_versions_target_0_5_0():
+def test_manifest_projection_and_all_package_versions_target_0_6_0():
     from vibecad.application.public_surface import public_tool_specs
     from vibecad.runtime import spec
 
@@ -442,8 +439,73 @@ def test_manifest_projection_and_all_package_versions_target_0_5_0():
     source = _read(ROOT / "src" / "vibecad" / "__init__.py")
     source_version = re.search(r'^__version__ = "([^"]+)"$', source, re.MULTILINE)
     assert source_version is not None
-    assert manifest["version"] == project_version == source_version.group(1) == "0.5.0"
-    assert spec.VIBECAD_VERSION == "0.5.0"
+    with (ROOT / "uv.lock").open("rb") as handle:
+        lock = tomllib.load(handle)
+    locked = [package["version"] for package in lock["package"] if package.get("name") == "vibecad"]
+    assert locked == ["0.6.0"]
+    assert manifest["version"] == project_version == source_version.group(1) == "0.6.0"
+    assert spec.VIBECAD_VERSION == "0.6.0"
+
+
+def test_release_documents_project_the_0_6_backend_truth():
+    documents = {
+        path: _normalized(_read(ROOT / path))
+        for path in (
+            "README.md",
+            "PRIVACY.md",
+            "docs/ARCHITECTURE.md",
+            "docs/AGENT_ARCHITECTURE.md",
+            "docs/PRODUCT_CAPABILITY_ROADMAP.md",
+            "docs/USER_GUIDE.md",
+            "docs/ACCEPTANCE_TESTS.md",
+        )
+    }
+    for path, normalized in documents.items():
+        assert "0.5.0" not in normalized, path
+        assert "0.6.0" in normalized, path
+        assert "27-tool" not in normalized, path
+        assert "27 个工具" not in normalized, path
+
+    product_documents = {
+        path: documents[path]
+        for path in (
+            "README.md",
+            "docs/ARCHITECTURE.md",
+            "docs/AGENT_ARCHITECTURE.md",
+            "docs/PRODUCT_CAPABILITY_ROADMAP.md",
+            "docs/USER_GUIDE.md",
+            "docs/ACCEPTANCE_TESTS.md",
+        )
+    }
+    for path, normalized in product_documents.items():
+        assert any(claim in normalized for claim in ("28-tool", "28 个工具", "28 个公开工具")), path
+        assert "daemon" in normalized, path
+        assert "task kernel" in normalized, path
+
+    for path in (
+        "README.md",
+        "docs/ARCHITECTURE.md",
+        "docs/AGENT_ARCHITECTURE.md",
+        "docs/PRODUCT_CAPABILITY_ROADMAP.md",
+        "docs/USER_GUIDE.md",
+    ):
+        normalized = documents[path]
+        assert any(claim in normalized for claim in ("尚未交付", "仍需交付")), path
+        assert "g1 workbench 已交付" not in normalized, path
+        assert "qt ui 已交付" not in normalized, path
+
+    for path in (
+        "README.md",
+        "docs/ARCHITECTURE.md",
+        "docs/AGENT_ARCHITECTURE.md",
+        "docs/PRODUCT_CAPABILITY_ROADMAP.md",
+        "docs/ACCEPTANCE_TESTS.md",
+    ):
+        normalized = documents[path]
+        assert any(
+            claim in normalized
+            for claim in ("未发布", "当前没有 tag 或 release", "不执行 tag 或发布")
+        ), path
 
 
 def test_release_publishers_consume_gated_archives_and_attach_the_skill_asset():

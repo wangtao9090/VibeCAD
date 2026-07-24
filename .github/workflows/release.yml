@@ -30,7 +30,7 @@ jobs:
         run: uv run --frozen pytest -q -m "not slow"
 
   managed-agent:
-    needs: version-guard
+    needs: package-gate
     runs-on: macos-latest
     timeout-minutes: 60
     strategy:
@@ -45,13 +45,36 @@ jobs:
             expose-runtime-override: false
     env:
       VIBECAD_HOME: ${{ runner.temp }}/vibecad-release-runtime
-      VIBECAD_PIP_SPEC: ${{ github.workspace }}
       VIBECAD_RUN_INTEGRATION: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
+      - name: download gated Python distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: ${{ runner.temp }}/python-distributions
+      - name: download gated GitHub Release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: github-release-assets
+          path: ${{ runner.temp }}/github-release-assets
+      - name: bind the matrix to the exact gated artifacts
+        id: package
+        run: |
+          shopt -s nullglob
+          wheels=("${RUNNER_TEMP}"/python-distributions/*.whl)
+          sdists=("${RUNNER_TEMP}"/python-distributions/*.tar.gz)
+          mcpbs=("${RUNNER_TEMP}"/github-release-assets/*.mcpb)
+          skills=("${RUNNER_TEMP}"/github-release-assets/vibecad-agent-skill-*.zip)
+          [[ ${#wheels[@]} -eq 1 && ${#sdists[@]} -eq 1 ]]
+          [[ ${#mcpbs[@]} -eq 1 && ${#skills[@]} -eq 1 ]]
+          echo "wheel=${wheels[0]}" >> "$GITHUB_OUTPUT"
+          echo "mcpb=${mcpbs[0]}" >> "$GITHUB_OUTPUT"
       - run: uv sync --frozen
       - name: install and verify the current managed FreeCAD runtime
+        env:
+          VIBECAD_PIP_SPEC: ${{ steps.package.outputs.wheel }}
         run: >-
           uv run --frozen python -c
           "from vibecad.runtime.installer import RuntimeInstaller;
@@ -66,9 +89,28 @@ jobs:
           fi
       - name: Darwin slow Agent gate (${{ matrix.scenario }})
         run: uv run --frozen pytest -m slow -v -s "${{ matrix.test-target }}"
+      - name: exact packed MCPB stdio/resource gate
+        if: matrix.scenario == 'public-agent-matrix'
+        env:
+          GATED_MCPB: ${{ steps.package.outputs.mcpb }}
+        run: |
+          private_tmp="$(mktemp -d "${RUNNER_TEMP}/vibecad-mcpb.XXXXXX")"
+          chmod 700 "$private_tmp"
+          unpacked="$private_tmp/unpacked"
+          child_home="$private_tmp/child-home"
+          managed_prefix="$(dirname "$(dirname "$VIBECAD_MANAGED_FREECAD_PYTHON")")"
+          npx -y @anthropic-ai/mcpb@2.1.2 unpack "$GATED_MCPB" "$unpacked"
+          extra_json="$(CHILD_HOME="$child_home" MANAGED_PREFIX="$managed_prefix" \
+            uv run --frozen python -c \
+            'import json,os; print(json.dumps({"VIBECAD_HOME":os.environ["CHILD_HOME"],"VIBECAD_FREECAD_ENV":os.environ["MANAGED_PREFIX"]},separators=(",",":")))')"
+          VIBECAD_MCPB_UNPACKED_DIR="$unpacked" \
+          VIBECAD_MCPB_EXTRA_ENV_JSON="$extra_json" \
+          TMPDIR="$private_tmp" \
+            uv run --frozen pytest -m slow -v -s \
+            tests/test_runtime_integration.py::test_unpacked_mcpb_agent_first_stdio_acceptance
 
   package-gate:
-    needs: [version-guard, quality, managed-agent]
+    needs: [version-guard, quality]
     runs-on: ubuntu-latest
     env:
       RELEASE_DIST: ${{ runner.temp }}/release-dist
@@ -228,7 +270,51 @@ jobs:
           }
           if not (source_skill == sdist_skill == mcpb_skill == standalone_skill):
               raise SystemExit("skill files are not byte-identical across release channels")
+
+          source_python = {
+              path.relative_to("src").as_posix(): path.read_bytes()
+              for path in sorted(Path("src/vibecad").rglob("*.py"))
+          }
+          wheel_python = {
+              name: content
+              for name, content in wheel_files.items()
+              if name.startswith("vibecad/") and name.endswith(".py")
+          }
+          sdist_python = {}
+          with tarfile.open(sdist, "r:gz") as archive:
+              prefix = f"{root}/src/"
+              for member in archive.getmembers():
+                  if member.isfile() and member.name.startswith(prefix) and member.name.endswith(".py"):
+                      stream = archive.extractfile(member)
+                      if stream is None:
+                          raise SystemExit(f"cannot read sdist member: {member.name}")
+                      sdist_python[member.name.removeprefix(prefix)] = stream.read()
+          mcpb_python = {
+              name.removeprefix("src/"): content
+              for name, content in mcpb_files.items()
+              if name.startswith("src/vibecad/") and name.endswith(".py")
+          }
+          if not (source_python == wheel_python == sdist_python == mcpb_python):
+              raise SystemExit("Python sources are not byte-identical across release channels")
           PY
+      - name: fresh-install the exact wheel and sdist
+        run: |
+          shopt -s nullglob
+          wheels=("$RELEASE_DIST"/*.whl)
+          sdists=("$RELEASE_DIST"/*.tar.gz)
+          [[ ${#wheels[@]} -eq 1 && ${#sdists[@]} -eq 1 ]]
+          for channel in wheel sdist; do
+            if [[ "$channel" == "wheel" ]]; then
+              artifact="${wheels[0]}"
+            else
+              artifact="${sdists[0]}"
+            fi
+            environment="${RUNNER_TEMP}/fresh-${channel}"
+            uv venv --python 3.12 "$environment"
+            uv pip install --python "$environment/bin/python" --no-deps "$artifact"
+            EXPECTED_ROOT="$environment" "$environment/bin/python" -I -c \
+              'import os,pathlib,vibecad; from vibecad.application.public_surface import public_tool_specs; from vibecad.runtime import spec; root=pathlib.Path(os.environ["EXPECTED_ROOT"]).resolve(); installed=pathlib.Path(vibecad.__file__).resolve(); assert installed.is_relative_to(root); assert vibecad.__version__ == "0.6.0"; assert spec.SERVER_PACKAGE_EPOCH == 4; assert spec.PUBLIC_SURFACE_SHA256 == "ae495ba457af40a5837a03e77eef4b396b0a4209755878350bc341ac7de8bfd3"; assert len(public_tool_specs()) == 28'
+          done
       - name: upload gated Python distributions
         uses: actions/upload-artifact@v4
         with:
@@ -247,7 +333,7 @@ jobs:
           if-no-files-found: error
 
   pypi:
-    needs: package-gate
+    needs: [package-gate, managed-agent]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -264,7 +350,7 @@ jobs:
           packages-dir: dist/
 
   mcpb:
-    needs: package-gate
+    needs: [package-gate, managed-agent]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "vibecad",
   "display_name": "VibeCAD",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Agent-first FreeCAD：持久化项目、可验证任务与 FCStd/STEP 交付",
   "long_description": "VibeCAD 在 macOS 上提供持久化项目和任务、显式 ModelProgram、草案接受/拒绝以及经验证的 FCStd 和 STEP 资源。当前可直接调用 create_box、create_cylinder、inspect_model、modify_parameter、move_part 和 rotate_part；这六类操作也可通过受约束的 ModelProgram 执行。运行时位于扩展目录外；不再使用时，先调用 uninstall_runtime，按预览和确认两段式流程清理引擎，再在设置中移除扩展本体；项目数据保留。",
   "author": { "name": "Wang Tao", "email": "wangtao9090@gmail.com" },

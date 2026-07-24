@@ -14,8 +14,9 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -27,6 +28,7 @@ _RUN = os.environ.get("VIBECAD_RUN_INTEGRATION") == "1"
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SRC = os.path.join(_REPO, "src")
 _FRESH_MIGRATION_CONFIRMATION = "install-current-managed-preserve-external"
+_PACKAGE_REFRESH_CONFIRMATION = "install-0.6.0-preserve-runtime-data"
 
 
 @pytest.fixture
@@ -267,6 +269,424 @@ def _single_file_snapshot(path: Path) -> tuple[object, ...]:
         info.st_mtime_ns,
         _sha256_path(path),
     )
+
+
+def _managed_engine_manifest(prefix: Path) -> dict[str, object]:
+    """Snapshot stable package identity and every live engine byte separately."""
+
+    records: dict[str, tuple[Path, dict[str, object]]] = {}
+    for path in sorted((prefix / "conda-meta").glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            continue
+        name = payload.get("name") if type(payload) is dict else None
+        if name in {"python", "freecad", "occt"}:
+            assert name not in records
+            records[name] = (path, payload)
+    assert set(records) == {"python", "freecad", "occt"}
+
+    stable_entries: list[tuple[object, ...]] = []
+    live_entries: list[tuple[object, ...]] = []
+    immutable_regular_bytes = 0
+    live_regular_bytes = 0
+    symlinks = 0
+    mutable_bytecode = 0
+    for package_name in sorted(records):
+        record_path, record = records[package_name]
+        files = record.get("files")
+        assert type(files) is list and all(type(value) is str for value in files)
+        paths_data = record.get("paths_data")
+        path_records = paths_data.get("paths") if type(paths_data) is dict else None
+        assert type(path_records) is list
+        path_records_by_name = {
+            item.get("_path"): item
+            for item in path_records
+            if type(item) is dict and type(item.get("_path")) is str
+        }
+        assert set(path_records_by_name) == set(files)
+        record_entry = (
+            "record",
+            package_name,
+            record_path.name,
+            record_path.stat().st_size,
+            _sha256_path(record_path),
+        )
+        stable_entries.append(record_entry)
+        live_entries.append(record_entry)
+        for raw in files:
+            relative = PurePosixPath(raw)
+            assert (
+                raw
+                and "\\" not in raw
+                and not relative.is_absolute()
+                and all(part not in {"", ".", ".."} for part in relative.parts)
+            )
+            target = prefix.joinpath(*relative.parts)
+            info = target.lstat()
+            if target.is_symlink():
+                symlinks += 1
+                entry = (
+                    package_name,
+                    relative.as_posix(),
+                    "symlink",
+                    os.readlink(target),
+                )
+                stable_entries.append(entry)
+                live_entries.append(entry)
+            elif target.is_file():
+                live_regular_bytes += info.st_size
+                live_entry = (
+                    package_name,
+                    relative.as_posix(),
+                    "file",
+                    info.st_mode,
+                    info.st_size,
+                    _sha256_path(target),
+                )
+                live_entries.append(live_entry)
+                if relative.suffix == ".pyc":
+                    mutable_bytecode += 1
+                    if relative.parent.name == "__pycache__":
+                        source_stem = relative.name.split(".cpython-", maxsplit=1)[0]
+                        source_relative = (relative.parent.parent / f"{source_stem}.py").as_posix()
+                    else:
+                        source_relative = relative.with_suffix(".py").as_posix()
+                    assert source_relative in path_records_by_name
+                else:
+                    immutable_regular_bytes += info.st_size
+                    stable_entries.append(live_entry)
+            elif target.is_dir():
+                entry = (
+                    package_name,
+                    relative.as_posix(),
+                    "directory",
+                    info.st_mode,
+                )
+                stable_entries.append(entry)
+                live_entries.append(entry)
+            else:
+                raise AssertionError(f"unsupported conda-owned entry: {target}")
+
+    stable_raw = json.dumps(
+        stable_entries,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=False,
+    ).encode("utf-8")
+    live_raw = json.dumps(
+        live_entries,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=False,
+    ).encode("utf-8")
+    return {
+        "stable_sha256": hashlib.sha256(stable_raw).hexdigest(),
+        "live_sha256": hashlib.sha256(live_raw).hexdigest(),
+        "immutable_entries": len(stable_entries),
+        "immutable_regular_bytes": immutable_regular_bytes,
+        "live_entries": len(live_entries),
+        "live_regular_bytes": live_regular_bytes,
+        "symlinks": symlinks,
+        "mutable_bytecode": mutable_bytecode,
+    }
+
+
+def _wheel_source_manifest(path: Path) -> dict[str, str]:
+    """Read one safe 0.6.0 wheel and return its package-source digest map."""
+
+    result: dict[str, str] = {}
+    metadata: list[bytes] = []
+    with zipfile.ZipFile(path) as archive:
+        names: set[str] = set()
+        for info in archive.infolist():
+            relative = PurePosixPath(info.filename)
+            assert (
+                info.filename
+                and "\\" not in info.filename
+                and not relative.is_absolute()
+                and all(part not in {"", ".", ".."} for part in relative.parts)
+                and info.filename not in names
+            )
+            names.add(info.filename)
+            assert not stat.S_ISLNK(info.external_attr >> 16)
+            if info.is_dir():
+                continue
+            content = archive.read(info)
+            if info.filename.endswith(".dist-info/METADATA"):
+                metadata.append(content)
+            if info.filename.startswith("vibecad/") and info.filename.endswith(".py"):
+                result[info.filename.removeprefix("vibecad/")] = hashlib.sha256(content).hexdigest()
+    assert len(metadata) == 1
+    assert b"\nName: vibecad\n" in b"\n" + metadata[0]
+    assert b"\nVersion: 0.6.0\n" in b"\n" + metadata[0]
+    assert result
+    return result
+
+
+def _installed_source_manifest(prefix: Path) -> dict[str, str]:
+    package = prefix / "lib" / "python3.12" / "site-packages" / "vibecad"
+    assert package.is_dir() and not package.is_symlink()
+    result: dict[str, str] = {}
+    for path in sorted(package.rglob("*.py")):
+        assert path.is_file() and not path.is_symlink()
+        result[path.relative_to(package).as_posix()] = _sha256_path(path)
+    return result
+
+
+def _installed_wheel_sha256(prefix: Path) -> str:
+    site_packages = (
+        prefix / "Lib" / "site-packages"
+        if sys.platform == "win32"
+        else prefix / "lib" / "python3.12" / "site-packages"
+    )
+    dist_info = site_packages / "vibecad-0.6.0.dist-info"
+    direct_url = dist_info / "direct_url.json"
+    assert dist_info.is_dir() and not dist_info.is_symlink()
+    assert direct_url.is_file() and not direct_url.is_symlink()
+    value = json.loads(direct_url.read_text(encoding="utf-8"))
+    archive = value.get("archive_info") if type(value) is dict else None
+    hashes = archive.get("hashes") if type(archive) is dict else None
+    digest = hashes.get("sha256") if type(hashes) is dict else None
+    assert type(digest) is str
+    assert len(digest) == 64
+    assert all(character in "0123456789abcdef" for character in digest)
+    assert archive.get("hash") == f"sha256={digest}"
+    return digest
+
+
+@pytest.mark.skipif(
+    not _RUN or os.environ.get("VIBECAD_RUN_PACKAGE_REFRESH") != _PACKAGE_REFRESH_CONFIRMATION,
+    reason=(
+        "set VIBECAD_RUN_INTEGRATION=1 and "
+        f"VIBECAD_RUN_PACKAGE_REFRESH={_PACKAGE_REFRESH_CONFIRMATION}"
+    ),
+)
+def test_installed_0_6_server_refresh_preserves_managed_engine_and_data(
+    monkeypatch,
+) -> None:
+    """One reviewed C14 server-only refresh over the existing managed engine."""
+
+    from vibecad.daemon import retire_local_kernel
+    from vibecad.runtime import spec
+
+    if os.environ.get("VIBECAD_HOME") is not None:
+        pytest.fail("C14 package refresh must target the reviewed default VibeCAD home")
+    if paths.user_override_env() is not None:
+        pytest.fail("C14 package refresh must not use VIBECAD_FREECAD_ENV")
+    if (
+        spec.VIBECAD_VERSION != "0.6.0"
+        or spec.SERVER_PACKAGE_EPOCH != 4
+        or spec.MCP_VERSION != "1.27.2"
+        or spec.PYTHON_PIN != "python=3.12"
+        or spec.FREECAD_PIN != "freecad=1.1.0"
+        or spec.PUBLIC_SURFACE_SHA256
+        != "ae495ba457af40a5837a03e77eef4b396b0a4209755878350bc341ac7de8bfd3"
+    ):
+        pytest.fail("checkout package/runtime identity is not the frozen C14 contract")
+
+    wheel_raw = os.environ.get("VIBECAD_PACKAGE_WHEEL")
+    if not wheel_raw:
+        pytest.fail("set VIBECAD_PACKAGE_WHEEL to the reviewed final 0.6.0 wheel")
+    wheel_input = Path(wheel_raw)
+    if wheel_input.is_symlink():
+        pytest.fail("VIBECAD_PACKAGE_WHEEL must not be supplied through a symlink")
+    try:
+        wheel_input_info = wheel_input.lstat()
+        wheel = wheel_input.resolve(strict=True)
+    except OSError:
+        pytest.fail("the reviewed C14 wheel is unavailable")
+    if (
+        wheel != wheel_input
+        or not stat.S_ISREG(wheel_input_info.st_mode)
+        or not wheel.is_file()
+        or wheel.is_symlink()
+        or wheel.name != "vibecad-0.6.0-py3-none-any.whl"
+    ):
+        pytest.fail("VIBECAD_PACKAGE_WHEEL must be the canonical final wheel")
+    wheel_sha256 = os.environ.get("VIBECAD_PACKAGE_WHEEL_SHA256")
+    if (
+        type(wheel_sha256) is not str
+        or len(wheel_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in wheel_sha256)
+        or _sha256_path(wheel) != wheel_sha256
+    ):
+        pytest.fail("VIBECAD_PACKAGE_WHEEL_SHA256 must bind the reviewed final wheel")
+    wheel_sources = _wheel_source_manifest(wheel)
+
+    phases: list[str] = []
+    monkeypatch.setenv("VIBECAD_PIP_SPEC", str(wheel))
+    monkeypatch.setenv("PIP_NO_INDEX", "1")
+    with status.runtime_maintenance_lock():
+        prefix = paths.env_prefix()
+        try:
+            active_prefix = paths.active_runtime_prefix().resolve(strict=True)
+            canonical_prefix = prefix.resolve(strict=True)
+        except OSError:
+            pytest.fail("C14 package refresh managed prefix is unavailable")
+        if (
+            active_prefix != canonical_prefix
+            or canonical_prefix != prefix
+            or prefix.is_symlink()
+            or not prefix.is_dir()
+        ):
+            pytest.fail("C14 package refresh requires the exact current managed prefix")
+        prefix_before = prefix.stat()
+
+        receipt_path = paths.ready_sentinel()
+        try:
+            receipt_raw_before = receipt_path.read_bytes()
+        except OSError:
+            pytest.fail("the one-time C14 server-refresh starting receipt is unavailable")
+        receipt_sha256_before = hashlib.sha256(receipt_raw_before).hexdigest()
+        receipt_before = status.read_runtime_receipt()
+        receipt_state_before = status.runtime_receipt_state()
+        stale_server = type(receipt_before) is dict and (
+            receipt_before.get("vibecad_version") == "0.5.0"
+            and receipt_before.get("server_package_epoch") == 4
+            and receipt_before.get("public_surface_sha256")
+            == "84b6abe8c1b496153ed2be083e1ea3186f642c47d9dfa9c2f90f66e92e6139f9"
+            and receipt_state_before is status.ReceiptState.SERVER_MISMATCH
+            and receipt_sha256_before
+            == "952601b2c6943746dd5ebc72ea8d33655f86f584249d5feb2eb508fe5df11f52"
+        )
+        current_server = (
+            receipt_before == spec.expected_receipt()
+            and receipt_state_before is status.ReceiptState.CURRENT
+            and status.runtime_ready() is True
+            and receipt_sha256_before
+            == "b154e2189adaf718a9231aef30972e25774e20d4d888aa5f4e95520793d64fbd"
+        )
+        if not stale_server and not current_server:
+            pytest.fail("the one-time C14 server-refresh starting receipt has changed")
+        current_exact = current_server and (
+            _installed_source_manifest(prefix) == wheel_sources
+            and _installed_wheel_sha256(prefix) == wheel_sha256
+        )
+        current_mismatch = current_server and not current_exact
+
+        evidence = status.capture_runtime_generation_evidence(prefix)
+        assert status.engine_compatible_generation(evidence) is True
+        engine_before = _managed_engine_manifest(prefix)
+        assert engine_before["stable_sha256"] == (
+            "702776db54c7532d71e725cde2099b6d81a9a3d22d139a5a28bd0f93bce3d261"
+        )
+        assert engine_before["immutable_entries"] == 12426
+        assert engine_before["immutable_regular_bytes"] == 432421415
+        assert engine_before["live_entries"] == 14756
+        assert engine_before["symlinks"] == 117
+        assert engine_before["mutable_bytecode"] == 2330
+
+        protected_roots = {
+            "projects": paths.revision_store_root(),
+            "tasks": paths.task_store_root(),
+            "bootstrap": paths.bootstrap_root(),
+            "checkouts": paths.checkout_root(),
+            "artifacts": paths.data_root() / "artifacts",
+            "legacy": paths.legacy_env_prefix(),
+            "views": paths.vibecad_home() / "views",
+        }
+        protected_before = {
+            name: _tree_content_snapshot(root) for name, root in protected_roots.items()
+        }
+        external_before = _single_file_snapshot(paths.external_runtime_receipt())
+
+        assert retire_local_kernel(
+            reason="runtime_upgrade",
+            _maintenance_held=True,
+        )
+        prefix_after_retire = prefix.stat()
+        assert (prefix_after_retire.st_dev, prefix_after_retire.st_ino) == (
+            prefix_before.st_dev,
+            prefix_before.st_ino,
+        )
+        assert _managed_engine_manifest(prefix) == engine_before
+        protected_after_retire = {
+            name: _tree_content_snapshot(root) for name, root in protected_roots.items()
+        }
+        assert protected_after_retire == protected_before
+        assert _single_file_snapshot(paths.external_runtime_receipt()) == external_before
+
+        installer = RuntimeInstaller(on_progress=lambda value: phases.append(value.phase.value))
+        if current_mismatch:
+            installer._refresh_server_package_locked(
+                wheel,
+                expected_sha256=wheel_sha256,
+            )
+        else:
+            installer._install_locked()
+
+        engine_after = _managed_engine_manifest(prefix)
+        external_after = _single_file_snapshot(paths.external_runtime_receipt())
+        protected_after_refresh = {
+            name: _tree_content_snapshot(root) for name, root in protected_roots.items()
+        }
+
+    prefix_after = prefix.stat()
+    assert (prefix_after.st_dev, prefix_after.st_ino) == (
+        prefix_before.st_dev,
+        prefix_before.st_ino,
+    )
+    assert phases == (
+        ["installing_pip", "verifying", "ready"] if stale_server or current_mismatch else ["ready"]
+    )
+    assert engine_after == engine_before
+    assert external_after == external_before
+    assert protected_after_refresh == protected_before
+    assert _installed_source_manifest(prefix) == wheel_sources
+    assert _installed_wheel_sha256(prefix) == wheel_sha256
+
+    expected_raw = json.dumps(spec.expected_receipt(), sort_keys=True).encode("utf-8")
+    assert len(expected_raw) == 274
+    assert hashlib.sha256(expected_raw).hexdigest() == (
+        "b154e2189adaf718a9231aef30972e25774e20d4d888aa5f4e95520793d64fbd"
+    )
+    assert paths.ready_sentinel().read_bytes() == expected_raw
+    assert status.read_runtime_receipt() == spec.expected_receipt()
+    assert status.runtime_receipt_state() is status.ReceiptState.CURRENT
+    assert status.runtime_ready() is True
+    assert status.verify_runtime(paths.env_python_for(prefix)) is True
+
+    identity_script = (
+        "import importlib.metadata as m,json;"
+        "from vibecad.application.public_surface import public_tool_specs;"
+        "from vibecad.runtime import spec;"
+        "print(json.dumps({'version':m.version('vibecad'),'mcp':m.version('mcp'),"
+        "'epoch':spec.SERVER_PACKAGE_EPOCH,'surface':spec.PUBLIC_SURFACE_SHA256,"
+        "'tools':len(public_tool_specs())},sort_keys=True))"
+    )
+    identity = subprocess.run(
+        [str(paths.env_python_for(prefix)), "-I", "-B", "-c", identity_script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env=status.freecad_process_environment(os.environ),
+    )
+    assert identity.returncode == 0, identity.stderr
+    assert json.loads(identity.stdout.strip().splitlines()[-1]) == {
+        "epoch": 4,
+        "mcp": "1.27.2",
+        "surface": spec.PUBLIC_SURFACE_SHA256,
+        "tools": 28,
+        "version": "0.6.0",
+    }
+
+    smoke = subprocess.run(
+        [
+            str(paths.env_python_for(prefix)),
+            "-I",
+            "-B",
+            "-c",
+            status._PREP + "import FreeCAD,Part; assert abs(Part.makeBox(2,3,5).Volume-30.0)<1e-7",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env=status.freecad_process_environment(os.environ),
+    )
+    assert smoke.returncode == 0, smoke.stderr
 
 
 @pytest.mark.skipif(not _RUN, reason="set VIBECAD_RUN_INTEGRATION=1")

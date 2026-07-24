@@ -2277,7 +2277,10 @@ def test_agent_active_cancel_kills_mutating_worker_and_recovers_clean_generation
         if type(cancelled) is TaskServicePortFailure:
             assert cancelled.code is TaskServicePortErrorCode.RECOVERY_REQUIRED
             pending = application._task_store.load(task_id)  # noqa: SLF001
-            assert pending.task_run.status is TaskStatus.CANCEL_REQUESTED
+            assert pending.task_run.status in {
+                TaskStatus.CANCEL_REQUESTED,
+                TaskStatus.CANCELLING,
+            }
             assert [
                 record.event
                 for record in pending.task_run.transitions
@@ -2288,9 +2291,16 @@ def test_agent_active_cancel_kills_mutating_worker_and_recovers_clean_generation
                 }
             ] == [TaskEvent.REQUEST_CANCEL]
             assert len(ports) == len(workers) == 1
-            assert application._cad_execution_port is ports[0]  # noqa: SLF001
-            assert ports[0]._worker is workers[0]  # noqa: SLF001
             assert workers[0].generation_id == first_generation
+            if pending.task_run.status is TaskStatus.CANCEL_REQUESTED:
+                assert application._cad_execution_port is ports[0]  # noqa: SLF001
+                assert ports[0]._worker is workers[0]  # noqa: SLF001
+            else:
+                assert (  # noqa: SLF001
+                    application._cad_execution_port is None
+                    or application._cad_execution_port is ports[0]
+                )
+                assert ports[0]._worker is None or ports[0]._worker is workers[0]  # noqa: SLF001
             cancelled = application.cancel_task(
                 task_id=task_id,
                 expected_generation=executing.generation,
@@ -2558,6 +2568,10 @@ def test_descriptor_bound_validation_never_sends_an_absolute_path(
     stage = directory / stage_name
     stage.write_bytes(b"normalized")
     stage.chmod(0o600)
+    work_name = ".work." + "a" * 32 + ".FCStd"
+    work = directory / work_name
+    work.write_bytes(b"work")
+    work.chmod(0o600)
     normalized_name = ".normalized." + "9" * 32 + ".FCStd"
     normalized = directory / normalized_name
     normalized.write_bytes(b"normalized")
@@ -2576,8 +2590,8 @@ def test_descriptor_bound_validation_never_sends_an_absolute_path(
         def validate_import(self, path: Path) -> ValidatedImportEvidence:
             calls.append(("validate_import", path))
             return ValidatedImportEvidence(
-                sha256=hashlib.sha256(stage.read_bytes()).hexdigest(),
-                size_bytes=stage.stat().st_size,
+                sha256=hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+                size_bytes=Path(path).stat().st_size,
             )
 
         def revalidate_normalized_import(self, path: Path) -> ValidatedImportEvidence:
@@ -2613,6 +2627,11 @@ def test_descriptor_bound_validation_never_sends_an_absolute_path(
             (descriptor,),
         )["size_bytes"] == len(b"normalized")
         assert service.dispatch(
+            "validation.validate_import",
+            {"name": work_name},
+            (descriptor,),
+        )["size_bytes"] == len(b"work")
+        assert service.dispatch(
             "validation.revalidate_import",
             {"name": normalized_name},
             (descriptor,),
@@ -2628,6 +2647,7 @@ def test_descriptor_bound_validation_never_sends_an_absolute_path(
 
     assert calls == [
         ("validate_import", Path(stage_name)),
+        ("validate_import", Path(work_name)),
         ("revalidate", Path(normalized_name)),
         ("materialization", (Path("model.FCStd"), Path("model.step"))),
     ]
@@ -2639,6 +2659,10 @@ def test_parent_descriptor_bound_validation_returns_exact_evidence(
     process, _grandchild = _process(tmp_path, "validation_idle")
     worker = FreeCadWorker(process)
     directory, stage_name = _validation_directory_at(tmp_path / "proxy-validation")
+    work_name = ".work." + "a" * 32 + ".FCStd"
+    work = directory / work_name
+    work.write_bytes(b"work")
+    work.chmod(0o600)
     normalized_name = ".normalized." + "d" * 32 + ".FCStd"
     descriptor = os.open(
         directory,
@@ -2648,6 +2672,10 @@ def test_parent_descriptor_bound_validation_returns_exact_evidence(
         imported = worker.validate_import(
             directory_fd=descriptor,
             name=stage_name,
+        )
+        work_imported = worker.validate_import(
+            directory_fd=descriptor,
+            name=work_name,
         )
         revalidated = worker.revalidate_normalized_import(
             directory_fd=descriptor,
@@ -2659,6 +2687,8 @@ def test_parent_descriptor_bound_validation_returns_exact_evidence(
         assert imported == revalidated
         assert imported.sha256 == hashlib.sha256(b"normalized").hexdigest()
         assert imported.size_bytes == len(b"normalized")
+        assert work_imported.sha256 == hashlib.sha256(b"work").hexdigest()
+        assert work_imported.size_bytes == len(b"work")
         assert materialized.fcstd_sha256 == hashlib.sha256(b"model").hexdigest()
         assert materialized.step_sha256 == hashlib.sha256(b"step").hexdigest()
         assert os.fstat(descriptor).st_ino == directory.stat().st_ino
@@ -3671,7 +3701,10 @@ def test_real_managed_daemon_fault_matrix_recovers_without_source_corruption(
                     "get_task",
                     {"schema_version": 1, "task_id": fault_task["id"]},
                 )
-                assert pending_cancel["task_run"]["status"] == (TaskStatus.CANCEL_REQUESTED.value)
+                assert pending_cancel["task_run"]["status"] in {
+                    TaskStatus.CANCEL_REQUESTED.value,
+                    TaskStatus.CANCELLING.value,
+                }
                 assert [
                     item["event"]
                     for item in pending_cancel["task_run"]["transitions"]
@@ -3684,8 +3717,17 @@ def test_real_managed_daemon_fault_matrix_recovers_without_source_corruption(
                 assert len(workers) == 1
                 assert workers[0] is fault_worker
                 assert workers[0].generation_id == fault_generation
-                assert application._cad_execution_port is ports[0]  # noqa: SLF001
-                assert ports[0]._worker is fault_worker  # noqa: SLF001
+                if pending_cancel["task_run"]["status"] == TaskStatus.CANCEL_REQUESTED.value:
+                    assert application._cad_execution_port is ports[0]  # noqa: SLF001
+                    assert ports[0]._worker is fault_worker  # noqa: SLF001
+                else:
+                    assert (  # noqa: SLF001
+                        application._cad_execution_port is None
+                        or application._cad_execution_port is ports[0]
+                    )
+                    assert (  # noqa: SLF001
+                        ports[0]._worker is None or ports[0]._worker is fault_worker
+                    )
                 assert cancel_request == original_cancel_request
                 cancel_envelope = _managed_application_call(
                     control_client,

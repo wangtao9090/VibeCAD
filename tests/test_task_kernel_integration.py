@@ -1589,7 +1589,7 @@ try:
         isolated = (
             empty_runtime is not imported_runtime
             and empty_runtime._coordinator is not imported_runtime._coordinator
-            and empty_runtime.service._executor is not imported_runtime.service._executor
+            and empty_runtime.service._executor is imported_runtime.service._executor
             and empty_binding.session is not imported_binding.session
             and empty_binding.project_id == empty.head.project_id
             and imported_binding.project_id == imported.head.project_id
@@ -1852,6 +1852,7 @@ import hashlib
 import json
 import math
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -2537,6 +2538,9 @@ try:
             "restart": {
                 "project_id": project_id,
                 "base_head": draft_base,
+                "revert_source_revision": direct_records[0][3]["task_run"][
+                    "committed_revision"
+                ],
                 "accept": {
                     "task_id": accept_draft_task["task_run"]["id"],
                     "generation": accept_draft_task["generation"],
@@ -2577,6 +2581,65 @@ try:
             )
         )
         head_after_reject = current(app, STATE["project_id"])
+        revert_prepared = require(
+            app.revert_project_request(
+                {
+                    "schema_version": 1,
+                    "revert_key": "revert_create_00000000000000000000000000000001",
+                    "project_id": STATE["project_id"],
+                    "source_revision": STATE["revert_source_revision"],
+                    "expected_head": head_after_reject["revision_id"],
+                }
+            )
+        )
+        revert_task = revert_prepared["task_run"]
+        revert_draft = revert_task["draft"]
+        revert_read = require(
+            app.get_task_request(
+                {
+                    "schema_version": 1,
+                    "task_id": revert_task["id"],
+                }
+            )
+        )
+        head_after_revert_prepare = current(app, STATE["project_id"])
+        revert_export = require(
+            app.export_task_artifacts_request(
+                {
+                    "schema_version": 1,
+                    "export_key": "export_00000000000000000000000000000003",
+                    "task_id": revert_task["id"],
+                    "expected_generation": revert_prepared["generation"],
+                    "revision_id": revert_draft["revision_id"],
+                    "draft_id": revert_draft["id"],
+                }
+            )
+        )
+        revert_delivery = verify_delivery(app, revert_export, "revert")
+        revert_accepted = require(
+            app.accept_draft_request(
+                {
+                    "schema_version": 1,
+                    "task_id": revert_task["id"],
+                    "draft_id": revert_draft["id"],
+                    "expected_generation": revert_prepared["generation"],
+                }
+            )
+        )
+        head_after_revert_accept = current(app, STATE["project_id"])
+        lineage = require(
+            app.list_revisions_request(
+                {
+                    "schema_version": 1,
+                    "project_id": STATE["project_id"],
+                }
+            )
+        )
+        revert_revision = next(
+            item
+            for item in lineage["revisions"]
+            if item["id"] == head_after_revert_accept["revision_id"]
+        )
         payload = {
             "phase": PHASE,
             "pid": os.getpid(),
@@ -2585,6 +2648,17 @@ try:
             "head_after_accept": head_after_accept,
             "rejected": rejected,
             "head_after_reject": head_after_reject,
+            "revert": {
+                "source_revision": STATE["revert_source_revision"],
+                "prepared": revert_prepared,
+                "read": revert_read,
+                "head_after_prepare": head_after_revert_prepare,
+                "export": revert_export,
+                "delivery": revert_delivery,
+                "accepted": revert_accepted,
+                "head_after_accept": head_after_revert_accept,
+                "revision": revert_revision,
+            },
         }
     else:
         raise AssertionError("unknown Agent-first phase")
@@ -3441,3 +3515,25 @@ def test_real_agent_first_public_matrix_and_cross_process_review(
     assert rejected["task_run"]["status"] == "rejected"
     assert rejected["task_run"]["committed_revision"] is None
     assert decided["head_after_reject"] == decided["head_after_accept"]
+
+    revert = decided["revert"]
+    revert_prepared = revert["prepared"]
+    assert revert_prepared["task_run"]["status"] == "awaiting_user_review"
+    assert revert_prepared["task_run"]["committed_revision"] is None
+    assert revert_prepared["task_run"]["draft"] == revert["read"]["task_run"]["draft"]
+    assert revert_prepared["generation"] == revert["read"]["generation"]
+    assert revert["head_after_prepare"] == decided["head_after_reject"]
+    assert revert["revision"]["base_revision"] == decided["head_after_reject"]["revision_id"]
+    assert revert["revision"]["id"] != revert["source_revision"]
+    assert revert["head_after_accept"]["revision_id"] == revert["revision"]["id"]
+    assert revert["accepted"]["task_run"]["status"] == "succeeded"
+    assert (
+        revert["accepted"]["task_run"]["committed_revision"]
+        == revert["head_after_accept"]["revision_id"]
+    )
+    assert [item["format"] for item in revert["export"]["artifacts"]] == ["fcstd", "step"]
+    revert_geometry = revert["delivery"]["geometries"]
+    assert revert_geometry["fcstd"]["volume"] == pytest.approx(6000.0)
+    assert revert_geometry["step"]["volume"] == pytest.approx(6000.0)
+    assert revert_geometry["fcstd"]["bbox"] == pytest.approx([10.0, 20.0, 30.0])
+    assert revert_geometry["step"]["bbox"] == pytest.approx([10.0, 20.0, 30.0])

@@ -77,14 +77,50 @@ def test_release_workflow_gates_publishers_with_version_quality_managed_and_pack
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert 'python3 .github/scripts/check_release_versions.py "$GITHUB_REF_NAME"' in workflow
     assert re.search(r"(?m)^  quality:\n    needs: version-guard$", workflow)
-    assert re.search(r"(?m)^  managed-agent:\n    needs: version-guard$", workflow)
+    assert re.search(r"(?m)^  managed-agent:\n    needs: package-gate$", workflow)
     assert re.search(
         r"(?m)^  package-gate:\n"
-        r"    needs: \[version-guard, quality, managed-agent\]$",
+        r"    needs: \[version-guard, quality\]$",
         workflow,
     )
-    assert re.search(r"(?m)^  pypi:\n    needs: package-gate$", workflow)
-    assert re.search(r"(?m)^  mcpb:\n    needs: package-gate$", workflow)
+    assert re.search(
+        r"(?m)^  pypi:\n    needs: \[package-gate, managed-agent\]$",
+        workflow,
+    )
+    assert re.search(
+        r"(?m)^  mcpb:\n    needs: \[package-gate, managed-agent\]$",
+        workflow,
+    )
+
+
+def test_release_workflow_executes_the_exact_built_artifacts_before_publish():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    package = re.search(
+        r"(?ms)^  package-gate:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
+        workflow,
+    )
+    managed = re.search(
+        r"(?ms)^  managed-agent:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
+        workflow,
+    )
+    assert package is not None and managed is not None
+    package_body = package.group("body")
+    managed_body = managed.group("body")
+
+    assert "Python sources are not byte-identical across release channels" in package_body
+    assert "fresh-install the exact wheel and sdist" in package_body
+    assert 'uv pip install --python "$environment/bin/python" --no-deps "$artifact"' in package_body
+    assert "assert len(public_tool_specs()) == 28" in package_body
+
+    assert managed_body.count("actions/download-artifact@v4") == 2
+    assert "name: python-distributions" in managed_body
+    assert "name: github-release-assets" in managed_body
+    assert "VIBECAD_PIP_SPEC: ${{ steps.package.outputs.wheel }}" in managed_body
+    assert "exact packed MCPB stdio/resource gate" in managed_body
+    assert '@anthropic-ai/mcpb@2.1.2 unpack "$GATED_MCPB" "$unpacked"' in managed_body
+    assert (
+        "tests/test_runtime_integration.py::test_unpacked_mcpb_agent_first_stdio_acceptance"
+    ) in managed_body
 
 
 def test_release_workflow_uses_explicit_least_privilege_permissions():

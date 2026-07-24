@@ -645,6 +645,7 @@ remain residual and unauthorized.
 | P0B-E14 / 2026-07-23T17:02:31Z | P0B-C11 under P0B-R1.1/A01/A02; P0B-D16/D17/D17A/D21/D22-R1 | this C11 commit / non-force push required | canonical C11 `341 passed, 1 deselected`; Worker non-slow `54 passed, 1 deselected` in three consecutive runs; real managed FreeCAD 1.1.0 `1 passed, 54 deselected`; adapter/program/static `163 passed, 1 deselected`; controller full `4698 passed, 96 deselected, 17 warnings`, independently repeated with the same counts; changed-file compile, Ruff, format and diff clean; three independent final reviews all GO with `Critical 0 / Important 0`; no residual Worker process or private Worker directory; 11-file implementation/test content-manifest SHA-256 `80006968e1611d048be5bda7f1a36c758d68a41224ad53545ac6eff729556de7` | C11 is an injectable Worker substrate only; the default `AgentApplication` path remains in-process until C12 owns injection plus durable loss/cancel/reconcile; the existing macOS Python 3.13 multithreaded-fork warning class remains outside C11 | P0B-S14 | accepted-green |
 | P0B-E15 / 2026-07-23T22:01:18Z | P0B-C12 under P0B-R1.1/A01/A02; P0B-D01/D05/D09/D10/D16/D17/D17A/D18/D21/D22-R1; D21 direct-impact repair adds `src/vibecad/runtime/spec.py` because `request_active_cancel` changes the canonical public contract digest while installed-package refresh remains C14 | this C12 commit / non-force push required | semantic and review RED cycles close unproved cancellation laundering, same-generation termination retry, self-loss eviction, concurrent cancel convergence, orphan reservation cleanup, pre-CAD revert durability and raced-existing create disposition; managed M03 final `10 passed, 80 deselected` across load/mutation/checkpoint/STEP/evidence × hang/crash; active-cancel fixture final `10/10`; Worker non-slow `79 passed, 11 deselected`; canonical C12 `1016 passed, 22 deselected`; controller full `4830 passed, 107 deselected, 17 warnings`, independently repeated with the same counts; 28-tool SDK projection remains `21,438` bytes and complete frame `21,483` bytes; canonical public receipt SHA-256 `ae495ba457af40a5837a03e77eef4b396b0a4209755878350bc341ac7de8bfd3`; full Ruff, exact 30-file format/compile, diff and fsck clean; independent final review GO `Critical 0 / Important 0 / Medium 1`; complete staged source/tests diff SHA-256 `47a6b13a0be9b98aa1e1081ac4dd5b49262f504dbd10269907c728d804d8b7fd`; 30-file content-manifest SHA-256 `239c37de120971fe36c98ca7f371d07b159ecf1a594cff09257f7d4a9b7a4e2c` | P0B-RES-06 permits only TaskRun-referenced sealed non-HEAD evidence revisions until GC; P0B-RES-14 records the non-blocking private preload-helper ownership split; 54 unchanged files remain outside the changed-file format gate; the existing 17 macOS multithreaded-fork warnings remain | P0B-S15 | accepted-green |
 | P0B-E16 / 2026-07-24T00:47:05Z | P0B-C13 under P0B-R1.1/A01/A02; P0B-D02/D11/D14/D18/D21/D22-R1; P0B-C13-D21-01/D21-02 | this C13 commit / immediate non-force push required | review-driven RED/GREEN cycles close descriptor/path tunnelling, shared-OFD offset races, response rewriting, long admitted-drain truncation, uninstall/startup ABA, incomplete retirement proof and public Workbench marker bypass; canonical C13 `386 passed, 1 warning`; direct impact `526 passed, 1 deselected`; real MCP-created M04 Accept/Reject `2 passed` in two consecutive runs; real managed FreeCAD Worker smoke `1 passed, 89 deselected` in two consecutive runs; final full non-slow `4890 passed, 107 deselected, 19 warnings` after one unrelated active-cancel observation flake passed `4/4` focused; 28-tool SDK projection remains `21,438` bytes and complete frame `21,483` bytes; full changed-file Ruff/format/compile, diff and fsck clean; independent semantic/exact-diff and protocol/FD/lifecycle reviews both GO `Critical 0 / Major 0 / Medium 0`; 21-file source/test content-manifest SHA-256 `16965a7573434a491ad0bad7d884a88b22e19c64ea3223c53d099b84eaf40eaa` | C14 still owns installed-package and exact managed-receipt refresh before the current-runtime public FreeCAD matrix; the legacy slow isolation test still asserts pre-C12 per-project executor object identity; 19 warnings are the expected malformed-ancillary warning plus existing macOS multithreaded-fork deprecations; the separate research document remains excluded | P0B-S16 | accepted-green |
+| P0B-E17 / 2026-07-24T03:41:36Z | P0B-C14 under P0B-R1.1/A01/A02; P0B-D02/D11/D14/D16/D17/D17A/D18/D21/D22-R1; P0B-C14-D21-01..22 | this C14 commit / immediate non-force push required | version/package/Skill/docs advance together to 0.6.0 while epoch 4, FreeCAD 1.1.0, MCP 1.27.2, the exact 28-tool contract and public digest `ae495ba457af40a5837a03e77eef4b396b0a4209755878350bc341ac7de8bfd3` remain fixed; final wheel/sdist/MCPB/Skill SHA-256 values are `3c73451a...` / `4fc514cd...` / `1eb2f468...` / `db27e094...`; exact-wheel M05 preserves prefix device/inode, 12,426-entry immutable engine identity, complete live engine manifest and user data while committing the canonical 274-byte receipt `b154e218...`; final full non-slow `4902 passed, 108 deselected, 19 warnings`; slow Worker/P0-B `11 passed, 102 deselected`; current managed candidate/public matrix `2 passed`; fresh MCPB acceptance `1 passed`; M05 `1 passed`; full Ruff, 14-file format/compile, offline lock, version, YAML, diff and fsck gates clean; package/release, runtime-preservation and semantic/docs reviews all GO, final independent signature `Critical 0 / Major 0 / Medium 0 / Minor 0` | no automatic mid-refresh crash resume; exact installed-package proof covers all Python sources plus wheel provenance; the default live M05 data root was absent while non-empty data preservation is covered separately; G1 Qt Workbench, reverse reconstruction, photo-to-mesh and simulation remain later product stages; the separate research document remains excluded | P0B-S17 | accepted-green |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -1985,3 +1986,588 @@ or product decision.
   native-session-poll`, immediate non-force push and three-way local/upstream/
   remote equality. PR, tag, release, marketplace publication, force-push and
   external spend remain unauthorized.
+
+## 30. Task Packet P0B-C14
+
+### 1. Authorization
+
+- This packet executes the already approved P0B-C14 row under P0B-R1.1,
+  P0B-A01/A02 and P0B-D19/D20/D21/D22-R1. It inherits higher-priority system,
+  developer and user instructions, applicable directory-scoped
+  `AGENTS.md`/`CLAUDE.md`, the current host permission model and sandbox, and
+  the narrowed file allowlist below. The Skill, artifact and packet cannot
+  grant or expand permissions, elevate authority or bypass that model or
+  sandbox.
+- The user has already authorized autonomous continuation through P0-B and
+  immediate non-force pushes of accepted commits. Do not ask for the same
+  approval again. PR creation, tag, GitHub Release, PyPI/MCPB publication,
+  marketplace mutation, force-push and external spend remain unauthorized.
+- C14 is a local release-candidate/package and managed-runtime preservation
+  gate. It does not claim a published release, real Claude/Codex host
+  activation or a FreeCAD Qt Workbench UI.
+
+### 2. Workspace anchor and exact allowlist
+
+- Repository: `/Users/wangtao/Documents/DevProject/vibecad`.
+- Branch: `codex/agent-stage3`.
+- Entry anchor: `cf87fba0308f9a32820bf5237af61ea4e2d32989`.
+  `HEAD`, upstream, the remote-tracking ref and
+  `refs/heads/codex/agent-stage3` were all observed equal before this packet.
+- The only pre-existing workspace item is the untracked
+  `docs/CAD_AGENT_PRODUCT_RESEARCH.md`. It remains outside P0-B and must never
+  be staged with C14.
+- C14 may modify only:
+  - `src/vibecad/__init__.py`
+  - `src/vibecad/runtime/installer.py`
+  - `src/vibecad/runtime/status.py`
+  - `src/vibecad/worker/proxy.py`
+  - `src/vibecad/worker/service.py`
+  - `src/vibecad/runtime/spec.py`
+  - `pyproject.toml`
+  - `uv.lock`
+  - `manifest.json`
+  - `PRIVACY.md`
+  - `README.md`
+  - `skills/vibecad-agent/SKILL.md`
+  - `skills/vibecad-agent/agents/openai.yaml`
+  - `docs/ARCHITECTURE.md`
+  - `docs/AGENT_ARCHITECTURE.md`
+  - `docs/PRODUCT_CAPABILITY_ROADMAP.md`
+  - `docs/USER_GUIDE.md`
+  - `docs/ACCEPTANCE_TESTS.md`
+  - `.github/workflows/release.yml`
+  - `tests/test_agent_skill.py`
+  - `tests/test_installer.py`
+  - `tests/test_mcpb_manifest.py`
+  - `tests/test_release_workflow.py`
+  - `tests/test_runtime_integration.py`
+  - `tests/test_status.py`
+  - `tests/test_task_kernel_integration.py`
+  - `tests/test_freecad_worker.py`
+  - `tests/test_local_daemon.py`
+  - this orchestration artifact.
+- A listed file remains unchanged unless a genuine C14 RED requires it.
+  Generated distributions may exist only in ignored `dist/` or fresh
+  temporary roots. The existing managed runtime may change only inside the
+  M05 maintenance/preservation gate.
+- **P0B-C14-D21-01 — release identity allowlist repair.** The stage allowlist
+  named package metadata but omitted `uv.lock`; changing the root package from
+  0.5.0 to 0.6.0 without its frozen lock would make `uv sync --frozen`, wheel,
+  sdist and MCPB disagree. P0B-D21 therefore adds only `uv.lock`.
+- **P0B-C14-D21-02 — packaged privacy allowlist repair.** MCPB fresh-unpack
+  acceptance requires byte parity for `PRIVACY.md`, which is included at the
+  package root and still names 0.5.0. P0B-D21 therefore adds only
+  `PRIVACY.md`; the privacy boundary itself is unchanged.
+- **P0B-C14-D21-03 — runtime identity and release-gate repair.**
+  `src/vibecad/runtime/spec.py` is directly version-derived and
+  `tests/test_status.py` owns its strict receipt contract. The release
+  workflow and its tests may change only if the built-artifact RED proves that
+  a publish job can consume an untested wheel/sdist/MCPB candidate. These are
+  packaging/verification repairs inside P0B-D20, not new product capability.
+- **P0B-C14-D21-04 — shipped documentation consistency.** Read-only inventory
+  proved that `docs/USER_GUIDE.md` and `docs/ACCEPTANCE_TESTS.md` still freeze
+  the 0.5.0/27-tool/C05 package boundary. They are direct user and acceptance
+  projections of the already-approved C14 release contract, so P0B-D21 adds
+  only these two documents. Their update may describe the completed C13
+  backend but may not claim a Qt Workbench UI, tag or external publication.
+- **P0B-C14-D21-05 — Worker import protocol allowlist repair.** The exact
+  managed public matrix proved that `import_fcstd` copies an admitted source
+  to the private `.work.<intent>.FCStd` name defined by the durable project
+  service, while the parent and child Worker validation protocol allowlists
+  admit only `.import`, `.stage` and `.normalized`. The same supported
+  Box/Cylinder FCStd passes `InProcessCadExecutor.validate_import` but is
+  rejected by `WorkerCadExecutionPort` before FreeCAD with `invalid_input`.
+  P0B-D21 therefore adds only `src/vibecad/worker/proxy.py`,
+  `src/vibecad/worker/service.py` and `tests/test_freecad_worker.py` to admit
+  the already-private `.work` basename through the descriptor-bound validation
+  method. Absolute paths, arbitrary basenames and every descriptor, identity,
+  mutation and generation-fencing check remain unchanged.
+- **P0B-C14-D21-06 — managed acceptance child import repair.** After D21-05
+  admitted the real Worker import path, the existing public-matrix child
+  stopped at `create_task` because its isolated source string calls
+  `secrets.token_hex` without importing `secrets`; the outer pytest module's
+  import is intentionally unavailable to the child interpreter. The affected
+  test file is already allowlisted. Adding that one standard-library import
+  repairs only the acceptance harness and changes no product or public
+  contract.
+- **P0B-C14-D21-07 — exact same-version release-maintenance refresh.** D21-05
+  changed the final wheel after the reviewed managed prefix had already
+  installed an earlier local `0.6.0` candidate. The normal installer correctly
+  short-circuits a CURRENT receipt, and pip `--upgrade` correctly skips another
+  wheel with the same version; therefore neither path can prove that the final
+  reviewed wheel bytes are installed. P0B-D21 adds only
+  `src/vibecad/runtime/installer.py` and `tests/test_installer.py` (runtime
+  status and the M05 test are already allowlisted) for one internal,
+  release-maintenance-only transaction. It requires the default managed
+  prefix, exact CURRENT/engine evidence, canonical wheel name and caller-bound
+  SHA-256; returns idempotently when installed sources already match; otherwise
+  revokes the exact CURRENT receipt before a capability-bound
+  `pip install --no-index --force-reinstall --no-deps` and republishes it only
+  after exact source parity plus runtime verification. It is not exposed
+  through MCP, normal `ensure_runtime`, launcher auto-update or the 28-tool
+  surface. It provides no automatic general crash-resume: a hard crash after
+  receipt revocation leaves a safe non-CURRENT runtime that this CURRENT-only
+  seam cannot re-admit. A retained reviewed wheel and maintenance authority are
+  recovery inputs for an explicit controller repair, not automatic resume.
+- **P0B-C14-D21-08 — M05 reviewed-prestate and protection-order repair.**
+  Independent release review found that M05 captured engine/data baselines
+  only after daemon retirement, used lower bounds instead of the packet's
+  reviewed engine manifest, and accepted any same-named wheel. The existing
+  M05 test is therefore tightened inside the maintenance authority to bind the
+  exact reviewed engine manifest and either the exact 0.5.0 entry receipt or
+  exact current receipt, require an independently supplied final-wheel
+  SHA-256 before resolving or mutating, and snapshot every durable project
+  subtree before retirement. Retirement may change only its explicit
+  `data/daemon` and lock authority; protected data, legacy, external binding,
+  views, engine and prefix identity must match both after retirement and after
+  refresh.
+- **P0B-C14-D21-09 — per-document release-truth regression.** Independent
+  documentation review found that the combined-corpus assertion could let one
+  correct document hide another document regressing to 27 tools, delivered Qt
+  UI or a published-release claim. The already allowed README and Agent Skill
+  test are tightened per applicable document for 28 tools, shared
+  daemon/Task Kernel, G1 not delivered and no tag/release; README's stale
+  `P0-B core -> G1` sentence is corrected to start with the 0.6.0
+  package/managed-runtime closeout. Product scope is unchanged.
+- **P0B-C14-D21-10 — stable engine identity versus live mutable byte
+  preservation.** The first final M05 invocation stopped before daemon
+  retirement or package mutation because the reviewed engine manifest changed
+  from `aa72...` to `68b0...` while its 14,756 entries, 511,110,973 regular
+  bytes and 117 symlinks remained exact. Comparing the current conda-owned
+  files with their conda package-record `sha256_in_prefix` values isolated five
+  regenerated CPython bytecode files: four owned by FreeCAD and one by Python;
+  their individual sizes and digests differ from the conda records even though
+  the observed full-tree total happened to remain unchanged. OCCT and every
+  non-`.pyc` engine file remained exact. A single
+  hard-coded live-tree digest is therefore not a stable package-identity
+  precondition. M05 therefore splits the proof: a stable digest
+  `702776db54c7532d71e725cde2099b6d81a9a3d22d139a5a28bd0f93bce3d261`
+  pins exact conda records plus all 12,426 immutable entries and 432,421,415
+  immutable regular bytes; all 2,330 excluded `.pyc` entries must have a
+  package-recorded `.py` source. A separate full live digest continues to hash
+  every current byte across 14,756 entries. The stable digest is bound at
+  admission, and the complete returned manifest including the live digest must
+  remain byte-for-byte equal immediately after daemon retirement and after
+  package refresh. This removes the false positive without allowing refresh to
+  change even one mutable cache byte.
+- **P0B-C14-D21-11 — shipped release state, cancellation and documentation
+  link repair.** Independent product/package review found three contradictory
+  shipped projections: release-candidate docs still described C14 as
+  executing after the candidate gates complete; Agent architecture told a
+  host only to read an active cancellation even when the canonical
+  `next_action=reconcile` contract requires one generation-bound
+  `resume_task`; and the packaged README used relative links to `docs/` even
+  though wheel/MCPB intentionally omit that tree. The already allowed docs
+  will state that the local 0.6.0 candidate is complete but unpublished,
+  preserve the exact read-then-one-resume cancellation rule, and use canonical
+  repository URLs for extended source documentation. No runtime or product
+  scope changes.
+- **P0B-C14-D21-12 — publishers must consume the tested final artifacts.**
+  Independent release review found that the tag workflow ran macOS FreeCAD
+  gates from the checkout before building wheel/sdist/MCPB, then allowed
+  publishers to consume newly built artifacts that had never been installed
+  or launched. Local C14 evidence proves only this checkout and cannot repair
+  future tag executions. The already conditional release workflow and its
+  regression test will therefore build and audit artifacts after the version
+  and quality guards, fresh-install both wheel and sdist, compare packaged
+  Python sources across wheel/sdist/MCPB, then make the macOS managed Agent
+  matrix download and install that exact wheel. One matrix leg will also
+  fresh-unpack that exact MCPB and run its real stdio/resource acceptance
+  against the managed engine. PyPI and GitHub Release jobs must depend on this
+  downstream macOS consumer gate and may only download the previously gated
+  artifacts; they still do not rebuild or publish from the checkout.
+- **P0B-C14-D21-13 — real managed forward-revert acceptance.** Independent
+  product review found that `revert_project`, the 28th public tool and the
+  principal P0-B recovery writer, had deterministic API/daemon/fake-CAD
+  coverage but neither declared managed FreeCAD release target executed it.
+  The 28-tool discovery claim therefore exceeded the real-CAD evidence for
+  this one path. The already allowed managed Task Kernel integration test will
+  add committed ancestry followed by a verified forward-revert draft,
+  immutable draft inspection and explicit Accept publication; the existing
+  deterministic Reject/HEAD-unchanged tests remain the complementary branch.
+  User and acceptance guidance will describe this forward-draft contract and
+  name its real managed gate. This closes evidence for an approved capability;
+  it does not add a new tool or broaden CAD semantics.
+- **P0B-C14-D21-14 — maintenance seam wording precision.** Final runtime
+  review found no Critical/Major/Medium issue but noted that two internal
+  docstrings could overstate the implemented boundary: the refresh proves
+  exact Python-source parity plus wheel provenance rather than arbitrary
+  future package-data bytes, and the public Python maintenance method requires
+  its release controller to retire the local Kernel before invocation. The
+  already allowed runtime docstrings will state those exact facts. Behavior,
+  API exposure and authorization remain unchanged.
+- **P0B-C14-D21-15 — real-revert acceptance status spelling.** The first
+  D21-13 managed run completed the real revert, immutable draft export,
+  FCStd/STEP reload and Accept path, then failed only because the new parent
+  assertion used `awaiting_review` instead of the frozen public TaskStatus
+  value `awaiting_user_review`. The already allowed integration test will
+  correct that literal and rerun the identical managed target; no product code
+  or state transition changes.
+- **P0B-C14-D21-16 — daemon handshake version projection.** The first final
+  non-slow run reached 4,901 passing tests and one failure: the real daemon
+  correctly advertised package version `0.6.0`, while
+  `tests/test_local_daemon.py` still froze `0.5.0`. This is a direct
+  verification projection of the already approved C14 identity, not a daemon
+  behavior change. P0B-D21 adds only that test file, replaces the stale
+  expected value with `0.6.0`, and requires the focused daemon test plus the
+  final full suite to pass.
+- **P0B-C14-D21-17 — descriptor-leak assertion isolation.** The next full
+  suite had 4,901 passing tests and one Darwin ancillary-data test failure
+  because the process-wide `/dev/fd` count decreased from 140 to 139 while the
+  daemon test was running. A decreasing global count cannot indicate a leaked
+  received descriptor; it proves an unrelated concurrent descriptor closed
+  and makes exact equality nondeterministic in this multithreaded suite. The
+  already allowed daemon test will instead snapshot descriptors whose
+  device/inode exactly matches the imported source and require that exact set
+  after the truncated ancillary connection drains. This directly detects any
+  leaked received source descriptor while ignoring unrelated descriptor
+  churn. Daemon behavior is unchanged.
+- **P0B-C14-D21-18 — runtime receipt seam allowlist repair.** Final settled
+  review found that the exact C14 list omitted
+  `src/vibecad/runtime/status.py` even though D21-07 requires its
+  evidence-bound CURRENT receipt revocation before any same-version package
+  mutation. D21-07 incorrectly said that runtime status was already
+  allowlisted. P0B-D21 therefore adds only this directly required receipt seam
+  without rewriting the earlier record; its change remains limited to exact
+  revocation and truthful maintenance wording, with focused status/installer
+  and M05 evidence already recorded.
+- **P0B-C14-D21-19 — domain-call topology wording.** Final semantic review
+  found that README's `MCP transport or daemon -> Application` wording could
+  imply two direct stateful routes, while the implementation routes
+  project/task/revision/review/artifact/CAD domain calls from MCP and the
+  public Workbench client through the same authenticated daemon and single
+  `AgentApplication`. Runtime maintenance and inert discovery remain local MCP
+  server concerns. The already allowed README and Skill will name that exact
+  split; no execution path changes.
+- **P0B-C14-D21-20 — active-cancel observation race.** A later full run again
+  reached 4,901 passes and one known C12 test race: after
+  `cancel_task` returned `recovery_required`, the submitting thread advanced
+  the durable task from `cancel_requested` to the equally valid
+  `cancelling` state before the test's immediate observation. The same test
+  already accepts all three active-cancel states at its converged observation
+  and verifies the exact ordered cancel transitions, Worker death, unchanged
+  HEAD/source and clean next generation. No implementation change is
+  justified; the focused test will be repeated before one final full run.
+- **P0B-C14-D21-21 — active-cancel test contract correction.** Eight focused
+  reruns happened to pass, but final semantic review correctly rejected D21-20
+  as insufficient: rerunning cannot close a legal race that two full suites
+  have observed. The already allowed Worker tests will accept either
+  `cancel_requested` or `cancelling` at the immediate post-error read. They
+  still require exactly one cancel-request transition, the same first Worker
+  generation and no replacement Worker; live port ownership is required while
+  still `cancel_requested`, while `cancelling` may already have atomically
+  detached that dead generation. Final assertions remain exact for ordered
+  `request_cancel -> start_cancellation -> confirm_cancelled`, Worker/process
+  death, unchanged HEAD/source/candidate cleanup and a clean succeeding next
+  generation. This changes only the observation contract, not cancellation
+  behavior.
+- **P0B-C14-D21-22 — final artifact regeneration after topology wording.**
+  D21-19 changed packaged README and canonical Skill bytes after the earlier
+  `4b322e...` wheel candidate, so that candidate and its M05 provenance became
+  stale even though Python sources did not change. The final fresh build root
+  therefore regenerated and re-audited all four channels. Final SHA-256 values
+  are wheel
+  `3c73451aa6fd209e7e4877abad6fba0200ff97a8f6bbca45c5e4a4d5ab31014d`,
+  sdist
+  `4fc514cd49815e92c213686fcbdfe0847e651a2502baf8d68f264b4fc6e1aa83`,
+  MCPB
+  `1eb2f468cc9995da330cc8e6511a40e68eae04be90657e1f8f00c0beb8b9b1cc`
+  and standalone Skill
+  `db27e09408a0fbe8e3a275c53bf88ffad1dd60c1adf7dfe36e03ca8f9622de28`.
+  Archive/RECORD/Python/Skill parity, fresh wheel/sdist installs and fresh MCPB
+  stdio/resource acceptance passed. M05 was then repeated against this exact
+  wheel and passed in 264.13 seconds with prefix/engine/data unchanged.
+
+### 3. Context and frozen product outcome
+
+- C13 completed and pushed the one daemon-owned Task Kernel path for MCP and a
+  public fake-Workbench client. The backend supports reconnectable project,
+  task, revision, draft, Accept/Reject, FCStd/STEP resource and Worker
+  isolation flows. The real FreeCAD Qt Workbench UI remains G1.
+- C14 packages that exact backend as local candidate version `0.6.0`.
+  Runtime epoch remains integer `4`; Python remains `3.12`, FreeCAD remains
+  `1.1.0`, MCP remains `1.27.2`, the public surface remains exactly 28 tools,
+  and canonical public-surface SHA-256 remains
+  `ae495ba457af40a5837a03e77eef4b396b0a4209755878350bc341ac7de8bfd3`.
+- Discovery remains exactly 21,438 bytes for the SDK projection and 21,483
+  bytes for the complete frame, below the 32 KiB budget. C14 changes package
+  identity and truthful guidance, not public names, schemas, annotations or
+  CAD semantics.
+- At C14 packet entry, the managed prefix was
+  `/Users/wangtao/Library/Application Support/VibeCAD/runtime/mamba/envs/vibecad`
+  at device/inode `16777221/14014428`. It contains Python 3.12.13, FreeCAD
+  1.1.0 and OCCT 7.9.3, but its installed VibeCAD package and receipt are
+  0.5.0 with stale 20-tool surface
+  `84b6abe8c1b496153ed2be083e1ea3186f642c47d9dfa9c2f90f66e92e6139f9`.
+  Therefore pre-C14 `runtime_receipt_state=server_mismatch`,
+  `runtime_ready=false` and full server verification fails. This is a stale
+  server package, not a missing FreeCAD engine.
+- At packet entry, the receipt SHA-256 was
+  `952601b2c6943746dd5ebc72ea8d33655f86f584249d5feb2eb508fe5df11f52`.
+  With only the approved version change, the expected canonical 0.6.0 receipt
+  is 274 bytes and SHA-256
+  `b154e2189adaf718a9231aef30972e25774e20d4d888aa5f4e95520793d64fbd`.
+- After the final M05 gate, the same prefix remains at device/inode
+  `16777221/14014428`; it is CURRENT and runtime-ready with the exact canonical
+  0.6.0 receipt above. Installed `direct_url.json` binds final wheel SHA-256
+  `3c73451aa6fd209e7e4877abad6fba0200ff97a8f6bbca45c5e4a4d5ab31014d`,
+  and all 97 installed Python sources match that wheel.
+- The default durable `data/` root is absent at entry. Existing legacy
+  runtime, external binding and 64 historical `views/` files are out of the
+  replacement set and must stay byte-identical. The stable engine-owned conda
+  manifest covers 12,426 immutable entries, 432,421,415 immutable regular
+  bytes and 117 symlinks with SHA-256
+  `702776db54c7532d71e725cde2099b6d81a9a3d22d139a5a28bd0f93bce3d261`.
+  The full live manifest covers 14,756 entries; its observed 511,110,973 bytes
+  and `68b02e...` digest are not frozen across ordinary Python use because all
+  2,330 package-recorded `.pyc` files may be regenerated. Every mutable
+  bytecode entry has a package-recorded `.py` source, and the complete live
+  manifest must still remain equal across the M05 retirement/refresh
+  transaction.
+
+### 4. Steps and objective gates
+
+1. Update focused contract tests first and capture a genuine RED for 0.6.0,
+   28-tool Skill wording, current C12 cancellation/reconcile semantics,
+   truthful daemon/Workbench backend status, frozen lock identity and
+   built-artifact release gating. Correct the stale slow assertion so separate
+   project runtime/coordinator/session objects share the one
+   application-owned Worker executor.
+2. Change only the four synchronized release identities
+   (`pyproject.toml`, package `__version__`, manifest and `uv.lock`) to 0.6.0.
+   Keep epoch, dependency pins and public-surface digest unchanged.
+3. Refresh Skill, README, Privacy, user/acceptance guidance and
+   architecture/roadmap wording. State that the authenticated daemon backend
+   and fake-Workbench client are complete, while the FreeCAD Qt Workbench UI,
+   face/edge selection, STEP/STL import, reverse reconstruction, photo
+   reconstruction and simulation are not.
+4. Run the focused GREEN suites, exact version guard for `v0.6.0`, surface
+   count/byte/hash assertions, Ruff, exact changed-file formatting, compile
+   checks and `git diff --check`.
+5. In a fresh output root build and audit wheel plus sdist, validate and pack
+   MCPB 2.1.2, build the deterministic Skill archive, audit safe archive paths,
+   wheel RECORD, source/Skill byte parity and artifact hashes, and install the
+   wheel into a fresh isolated Python environment. The fresh install must
+   report 0.6.0, epoch 4, MCP 1.27.2, surface digest `ae495...` and 28 tools.
+6. Freshly unpack the final MCPB and run its real stdio/resource acceptance
+   against the exact managed FreeCAD runtime. The package must be byte-exact to
+   the checkout contract and may not import from the checkout through an
+   editable path.
+7. Run M05 using only the final wheel as `VIBECAD_PIP_SPEC`, with
+   `PIP_NO_INDEX=1`, no `VIBECAD_FREECAD_ENV`, and the existing runtime
+   maintenance authority. Retire any exact local Kernel as `runtime_upgrade`,
+   then let `RuntimeInstaller` select only its engine-compatible
+   `installing_pip -> verifying -> ready` path. A create/remove/download phase
+   or failed engine proof is a circuit breaker.
+8. After M05 prove: prefix device/inode unchanged; the stable 12,426-entry
+   immutable engine identity remains exact and the complete 14,756-entry live
+   engine manifest is unchanged; legacy prefix, external binding, historical
+   views and all project/task/revision bytes unchanged; receipt equals the 274-byte
+   expected value; installed source matches the final wheel; state is
+   `CURRENT`; `runtime_ready` and `verify_runtime` are true; public surface is
+   28 tools.
+9. Run:
+   - `PYTHONPATH=src .venv/bin/python -m pytest -q`
+   - the declared slow Worker/P0-B acceptance suite;
+   - the current managed task-kernel candidate and public Agent matrix;
+   - the fresh MCPB stdio acceptance;
+   - full Ruff, exact changed-file format/compile, diff and
+     `git fsck --no-dangling`.
+10. Obtain separate package/release, runtime-preservation and semantic/docs
+    reviews. Critical/Major/Medium must be zero before exact named-file staging,
+    commit `chore(release): package P0-B core as 0.6.0`, immediate non-force
+    push and exact local/upstream/remote equality.
+
+### 5. Execution discipline and circuit breakers
+
+- Capability profile:
+  `native-plan / spawn-send-wait / repo-artifact / native-session-poll`.
+- Required evidence categories:
+  - `live capability declarations`: `update_plan`, `spawn_agent`,
+    `send_message`, `wait_agent`, `exec_command` and `write_stdin` are declared
+    in this session.
+  - `observable behavior`: subagents returned bounded read-only audits;
+    commands completed synchronously and prior long gates returned pollable
+    native sessions.
+  - `environment identity`: Codex desktop on the declared macOS workspace,
+    branch and executable paths above.
+  - `public configuration`: repository branch/upstream and public package
+    metadata were inspected read-only; no other capability evidence observed.
+- Exact executable evidence at entry: Homebrew `uv 0.11.28` at
+  `/usr/local/bin/uv`; Node `v26.5.0` at `/usr/local/bin/node`; npx `11.17.0`
+  at `/usr/local/bin/npx`; controller Python 3.13.14 at `.venv/bin/python`;
+  managed Python 3.12.13 at the prefix above; FreeCAD reports 1.1.0.
+- Use `native-session-poll` for long suites and package gates; keep polling
+  the original session and never relaunch it. Use exact named-file staging,
+  never `git add .` or `git add -A`.
+- Stop on an unexpected RED, out-of-allowlist write, changed 28-tool contract,
+  discovery above 32 KiB, package-channel mismatch, engine-manifest change,
+  runtime rebuild path, user-data mutation, unverified receipt, unauthorized
+  publication or commit-budget overflow. Preserve evidence and recover from
+  `cf87fba...`; do not repair around a breaker.
+
+### 6. Delivery boundary
+
+- C14 is complete only when one reviewed 0.6.0 candidate commit is pushed,
+  package artifacts have reproducible hashes, the exact installed managed
+  candidate is CURRENT, real FreeCAD public flows pass, and the ledger plus a
+  four-section recovery snapshot record all evidence.
+- The controller alone accepts review findings, stages named files, commits,
+  pushes and verifies remote equality. C15 remains a separate orchestration
+  closeout commit.
+- Tag/release/publication, real external host activation and G1 Workbench UI
+  work remain outside C14.
+
+### 7. Required final report
+
+- Record the exact commit and push SHA, artifact filenames/sizes/SHA-256,
+  package and Skill parity, tool count/discovery bytes, focused/full/slow/E2E
+  counts, managed-runtime before/after identities and manifests, receipt hash,
+  independent review severities, residuals and final workspace state.
+- Record any justified deviation beside its RED and D21 entry. Preserve the
+  excluded research document unchanged and report `none` rather than leaving
+  evidence fields ambiguous.
+
+## 31. Recovery Snapshot P0B-S17
+
+### 1. Completed milestones
+
+- C14 packages the P0-B backend as candidate version `0.6.0` across Python,
+  project metadata, manifest, lock file, README, Privacy, architecture,
+  acceptance guidance and the standalone Skill. Runtime epoch remains `4`;
+  Python remains `3.12`, FreeCAD remains `1.1.0`, MCP remains `1.27.2`.
+- The public surface remains exactly 28 tools with canonical contract SHA-256
+  `ae495ba457af40a5837a03e77eef4b396b0a4209755878350bc341ac7de8bfd3`.
+  SDK discovery remains `21,438` bytes and the complete frame remains `21,483`
+  bytes, both below the 32 KiB budget. Project, task and CAD domain operations
+  still converge on the one daemon-owned `AgentApplication` and Task Kernel;
+  release maintenance and inert discovery remain local server concerns.
+- The Worker import protocol admits only the exact private
+  `.work.<id>.FCStd` staging form needed by the real managed path. The public
+  matrix now covers create/mutate/checkpoint/STEP/evidence, independent
+  cross-process review, Accept/Reject and historical forward-only revert:
+  verified immutable draft, FCStd/STEP reload, Accept and a new forward
+  commit without rewriting prior history.
+- Exact same-version release maintenance is fail-closed and private to the
+  default CURRENT managed prefix. It validates the canonical wheel name and
+  caller SHA before revoking the receipt, force-reinstalls with
+  `--no-index --no-deps`, verifies all installed Python sources and
+  `direct_url.json` provenance, then commits the receipt before returning
+  READY. A rejection before receipt revocation preserves the healthy CURRENT
+  prefix; once revocation has occurred, any later failure leaves the receipt
+  revoked for explicit repair.
+- Final M05 refreshed the exact final wheel in place at
+  `/Users/wangtao/Library/Application Support/VibeCAD/runtime/mamba/envs/vibecad`.
+  Prefix device/inode remains `16777221/14014428`; the 12,426-entry,
+  432,421,415-byte immutable engine identity remains
+  `702776db54c7532d71e725cde2099b6d81a9a3d22d139a5a28bd0f93bce3d261`;
+  the complete 14,756-entry live manifest and protected data remained equal.
+  State is CURRENT and runtime-ready with the canonical 274-byte receipt
+  SHA-256
+  `b154e2189adaf718a9231aef30972e25774e20d4d888aa5f4e95520793d64fbd`.
+- Final reproducible candidate artifacts are:
+  - `vibecad-0.6.0-py3-none-any.whl`: 599,337 bytes, SHA-256
+    `3c73451aa6fd209e7e4877abad6fba0200ff97a8f6bbca45c5e4a4d5ab31014d`;
+  - `vibecad-0.6.0.tar.gz`: 639,203 bytes, SHA-256
+    `4fc514cd49815e92c213686fcbdfe0847e651a2502baf8d68f264b4fc6e1aa83`;
+  - `VibeCAD.mcpb`: 703,655 bytes, SHA-256
+    `1eb2f468cc9995da330cc8e6511a40e68eae04be90657e1f8f00c0beb8b9b1cc`;
+  - `vibecad-agent-skill-0.6.0.zip`: 4,116 bytes, SHA-256
+    `db27e09408a0fbe8e3a275c53bf88ffad1dd60c1adf7dfe36e03ca8f9622de28`.
+  Archive paths, wheel RECORD, all 97 Python sources, source manifest and Skill
+  parity passed. Fresh wheel and sdist installs plus fresh MCPB unpack,
+  stdio/resource and FCStd/STEP acceptance passed.
+- Final controller evidence is full non-slow
+  `4902 passed, 108 deselected, 19 warnings in 201.06s`; slow Worker/P0-B
+  `11 passed, 102 deselected in 91.76s`; final managed candidate/public matrix
+  `2 passed in 18.39s`; fresh MCPB acceptance `1 passed in 11.76s`; exact final
+  wheel M05 `1 passed in 264.13s`; and the mechanically reformatted Skill
+  projection test `12 passed`. Full Ruff, exact 14-file format and compile,
+  offline lock, version, release-workflow YAML, diff and fsck gates pass.
+  Package/release, runtime-preservation and final semantic/docs reviews are GO;
+  the independent final signature is
+  `Critical 0 / Major 0 / Medium 0 / Minor 0`.
+
+### 2. Next steps
+
+1. Stage exactly the 27 tracked C14 files named by the packet and this
+   snapshot; do not stage `docs/CAD_AGENT_PRODUCT_RESEARCH.md`.
+2. Commit as `chore(release): package P0-B core as 0.6.0`, perform the
+   already-authorized immediate non-force push, and verify exact
+   `HEAD == @{upstream} == origin/codex/agent-stage3`.
+3. Use the C14 remote commit as the recovery anchor. C15 may record final
+   orchestration closeout; G1 Qt Workbench interaction and later reconstruction
+   or simulation phases require their own bounded task packets.
+
+### 3. Approved decisions
+
+- P0B-A01/A02, P0B-D01..D22 plus D08A/D17A/D22-R1 and
+  P0B-C14-D21-01..22 remain active.
+- Claude, Codex and future Agent hosts are clients of this expert CAD Agent.
+  They discover the 28-tool contract and receive durable FCStd/STEP resources,
+  but do not receive a second scheduler, Worker route, storage authority or
+  model-token entitlement.
+- All project, task, revision, review, artifact and CAD-domain calls enter the
+  authenticated daemon and its one `AgentApplication` and Task Kernel.
+  CAD/model mutations specifically use the project lock, immutable revision
+  evidence, review draft, explicit Accept/Reject and forward-only history.
+  Runtime ensure and uninstall remain MCP-local maintenance; exact
+  same-version refresh is a controller-only private release-maintenance seam.
+  Neither maintenance path enters the Task Kernel, and refresh is not a 29th
+  public tool.
+- Mutable package-owned `.pyc` files are excluded from stable engine identity
+  only when their exact `.py` sources are package-recorded. Complete live
+  manifest equality remains mandatory across one M05 transaction.
+- This candidate does not claim a delivered Qt Workbench UI, interactive
+  face/edge selection, STEP/STL reverse reconstruction, photo reconstruction,
+  simulation, public tag, release or marketplace publication.
+
+### 4. Execution discipline
+
+- Freeze the reviewed 27 tracked files after this append-only snapshot. Use
+  exact named-file staging; preserve the separate untracked research document
+  byte-for-byte.
+- Recovery capability profile remains
+  `native-plan / spawn-send-wait / repo-artifact / native-session-poll`.
+  Its declared adapters are `update_plan`, `spawn_agent`, `send_message`,
+  `wait_agent`, `exec_command`, `write_stdin` and `apply_patch`; long gates
+  must resume their original pollable session rather than be relaunched.
+- On recovery, first verify the declared repository/branch, exact
+  `HEAD`/upstream/remote-tracking equality, named-file status and excluded
+  research hash
+  `ada5049d80b8914c43d711649feeb968ec7c83f4a6a9846d399a431b09ee856e`.
+  Then verify the four artifact hashes, managed prefix device/inode, CURRENT
+  receipt/direct-wheel provenance and public 28-tool digest before resuming.
+  Re-run changed-file Ruff/format/compile, offline lock, version, YAML,
+  `git diff --check`, `git fsck --no-dangling`, focused affected suites and
+  the full/slow/real-FreeCAD gates in proportion to any recovered change.
+- Circuit breakers remain: an out-of-allowlist write; unexpected test RED;
+  changed tool name/schema/annotation or public digest; discovery above
+  32 KiB; package-channel or artifact-hash mismatch; runtime
+  create/remove/download instead of the admitted in-place refresh; changed
+  prefix, immutable engine identity, complete live manifest or protected user
+  data; unverified receipt; unauthorized publication, force-push, external
+  activation or spend. Stop and recover from the last three-way-equal remote
+  anchor instead of repairing around any breaker.
+- The final artifact root is
+  `/private/tmp/vibecad-c14-final4.oj3rHb`; it is evidence, not a tracked
+  publication channel. No tag, GitHub release, marketplace publication,
+  force-push, external host activation or external spend is authorized.
+- The residual ledger at Section 8 remains authoritative. P0B-RES-01..12 are
+  active: real host activation; Linux/Windows process semantics; the same-UID
+  trust boundary; already-opened FreeCAD memory; semantic geometry diff;
+  cross-store GC; private-runner digest migration; complete durable telemetry;
+  streamed artifacts above the 64 MiB buffered limit; malicious-code
+  sandbox/remote pool; G1 Qt Workbench; and publication authority. For
+  P0B-RES-12, only the explicitly authorized branch-push portion closes after
+  this push; PR, tag, release and marketplace publication remain open.
+  P0B-RES-13 is closed by C13's descriptor-bound import. P0B-RES-14 remains
+  active for the private revert-preparation ownership split.
+- C14-specific non-blocking residuals are also explicit: a hard crash after
+  receipt revocation requires an explicit repair rather than automatic resume;
+  installed-package proof currently covers exact Python sources plus wheel
+  provenance; the live M05 default data root was absent, while non-empty
+  durable data preservation is covered by separate tests.
+- Until the push succeeds, recovery remains the verified C13 remote anchor
+  `cf87fba0308f9a32820bf5237af61ea4e2d32989`. After push, the new three-way
+  equal C14 commit becomes the only continuation anchor.
