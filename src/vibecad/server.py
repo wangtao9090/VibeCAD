@@ -1,8 +1,9 @@
 """Atomic Agent MCP surface over the pinned low-level SDK server.
 
-Discovery is deliberately inert.  The concrete application composition root is
-imported and opened only after a domain request passes both public-schema
-validation and the managed-runtime guard.
+Discovery is deliberately inert.  The authenticated local-daemon client is
+opened only after a domain request passes both public-schema validation and the
+managed-runtime guard.  The daemon, never this MCP process, owns the concrete
+``AgentApplication`` and Task Kernel.
 """
 
 from __future__ import annotations
@@ -361,9 +362,9 @@ _runtime_transition_lock = threading.Lock()
 def _open_agent_application() -> object:
     if not _enter_application_effect():
         raise RuntimeError("application admission is closed")
-    from vibecad.application.agent import AgentApplication
+    from vibecad.daemon.adapters import LocalAgentClient
 
-    return AgentApplication.open(data_root=paths.data_root())
+    return LocalAgentClient.open()
 
 
 def _initialize_application_process_runtime() -> None:
@@ -375,6 +376,19 @@ def _initialize_application_process_runtime() -> None:
 
 
 _application_slot = _ApplicationSlot(_open_agent_application)
+
+
+def _close_application_for_uninstall() -> bool:
+    """Retire the detached Kernel before allowing runtime deletion."""
+
+    try:
+        from vibecad.daemon.bootstrap import retire_local_kernel
+
+        if not retire_local_kernel(reason="runtime_uninstall"):
+            return False
+    except BaseException:
+        return False
+    return _application_slot.close()
 
 
 def _close_application_at_exit() -> None:
@@ -558,11 +572,11 @@ def uninstall_runtime(confirm: bool = False) -> dict[str, object]:
         raise RuntimeError("runtime uninstall response is invalid")
     runner = _active_owned_runner
     if runner is None:
-        if not _application_slot.close():
+        if not _close_application_for_uninstall():
             raise RuntimeError("application close failed")
         if marked:
             _try_schedule_swap(uninstall=True)
-    elif marked and not _try_schedule_swap(uninstall=True):
+    elif not _try_schedule_swap(uninstall=True):
         # The marker is durable at this point.  Keeping this process alive and
         # returning recovery_required is safer than closing the application or
         # claiming a swap which the owned transport cannot perform.
@@ -1256,7 +1270,7 @@ def _run_owned_stdio(*, auto_install: bool = False) -> None:
     runner = mcp_transport.OwnedStdioRunner(
         dispatch=_owned_dispatch_descriptor,
         lifecycle=lifecycle,
-        close_application=_application_slot.close,
+        close_application=_close_application_for_uninstall,
         uninstall_recovery_response=_uninstall_recovery_response,
         exit_process=os._exit,
         failure_response=_owned_failure_response,

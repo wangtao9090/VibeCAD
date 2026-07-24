@@ -12,8 +12,10 @@ import hashlib
 import hmac
 import json
 import math
+import os
 import re
 import secrets
+import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -42,6 +44,7 @@ __all__ = (
     "V2_PROTOCOL",
     "V2_VERSION",
     "V2ServerConnection",
+    "bind_v2_import_locator",
     "decode_v2_frame",
     "encode_v2_frame",
 )
@@ -70,16 +73,19 @@ _OPEN_KEY_RE = re.compile(r"checkout_open_[0-9a-f]{32}\Z")
 _CHECKOUT_RE = re.compile(r"checkout_[0-9a-f]{32}\Z")
 _FILE_GRANT_RE = re.compile(r"file_grant_[0-9a-f]{32}\Z")
 _PROJECT_RE = re.compile(r"project_[0-9a-f]{32}\Z")
+_PROJECT_CREATE_RE = re.compile(r"project_create_[0-9a-f]{32}\Z")
 _TASK_RE = re.compile(r"task_[0-9a-f]{32}\Z")
 _DRAFT_RE = re.compile(r"draft_[0-9a-f]{32}\Z")
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _OPERATION_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+_TIMESTAMP_RE = re.compile(r"-?[0-9]{1,20}\Z")
 
 _CLIENT_AUTH_DOMAIN = b"vibecad-local-v2-client-auth\0"
 _SERVER_AUTH_DOMAIN = b"vibecad-local-v2-server-auth\0"
 _SESSION_KEY_DOMAIN = b"vibecad-local-v2-session-key\0"
 _REQUEST_DOMAIN = b"vibecad-local-v2-request\0"
 _RESPONSE_DOMAIN = b"vibecad-local-v2-response\0"
+_IMPORT_LOCATOR_DOMAIN = b"vibecad-local-v2-import-locator-v1\0"
 
 _FORBIDDEN_CAPABILITY_KEYS = frozenset(
     {
@@ -89,19 +95,30 @@ _FORBIDDEN_CAPABILITY_KEYS = frozenset(
         "internal_root",
         "local_path",
         "python_name",
+        "source_path",
     }
 )
 _METHODS = (
     "kernel.ping",
+    "kernel.retire",
     "application.call",
+    "project.import",
     "checkout.open",
     "checkout.get",
     "checkout.close",
     "file_grant.claim",
 )
+_KERNEL_RETIRE_REASONS = frozenset(
+    {
+        "incompatible_build",
+        "runtime_uninstall",
+        "runtime_upgrade",
+    }
+)
 _FILE_GRANT_PURPOSE = "open_managed_checkout"
 _FILE_GRANT_TTL_MS = 30_000
 _MAX_LOCAL_PATH_BYTES = 4096
+_MAX_IMPORT_BYTES = 512 * 1024 * 1024
 
 
 class V2ErrorCode(StrEnum):
@@ -603,6 +620,91 @@ def _without(value: dict[str, object], key: str) -> dict[str, object]:
     return {name: item for name, item in value.items() if name != key}
 
 
+_IMPORT_REQUEST_KEYS = {"schema_version", "create_key", "kind"}
+_IMPORT_LOCATOR_KEYS = {
+    "schema_version",
+    "dev",
+    "ino",
+    "mode",
+    "uid",
+    "nlink",
+    "size",
+    "mtime_ns",
+    "ctime_ns",
+    "digest",
+}
+
+
+def _validate_import_request(value: object) -> dict[str, object]:
+    request = _exact(value, _IMPORT_REQUEST_KEYS)
+    if _positive_integer(request["schema_version"]) != 1 or request["kind"] != "import_fcstd":
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    _identifier(request["create_key"], _PROJECT_CREATE_RE)
+    return request
+
+
+def _import_locator_body(value: object) -> dict[str, object]:
+    locator = _exact(value, _IMPORT_LOCATOR_KEYS)
+    if _positive_integer(locator["schema_version"]) != 1:
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    for key in ("dev", "ino", "mode", "uid"):
+        _nonnegative_integer(locator[key])
+    if _positive_integer(locator["nlink"]) != 1:
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    size = _positive_integer(locator["size"])
+    if size > _MAX_IMPORT_BYTES:
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    for key in ("mtime_ns", "ctime_ns"):
+        if type(locator[key]) is not str or _TIMESTAMP_RE.fullmatch(locator[key]) is None:
+            raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    _identifier(locator["digest"], _DIGEST_RE)
+    if not stat.S_ISREG(int(locator["mode"])) or int(locator["uid"]) != os.geteuid():
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    return _without(locator, "digest")
+
+
+def _validate_import_locator(
+    request: object,
+    value: object,
+) -> dict[str, object]:
+    canonical_request = _validate_import_request(request)
+    body = _import_locator_body(value)
+    locator = value
+    expected = hashlib.sha256(
+        _IMPORT_LOCATOR_DOMAIN + _encode({"request": canonical_request, "identity": body})
+    ).hexdigest()
+    if not hmac.compare_digest(str(locator["digest"]), expected):
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    return dict(locator)
+
+
+def bind_v2_import_locator(
+    request: object,
+    source: object,
+) -> dict[str, object]:
+    """Bind one admitted import request to one exact regular-file identity."""
+
+    canonical_request = _validate_import_request(request)
+    if type(source) is not os.stat_result:
+        raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    body: dict[str, object] = {
+        "schema_version": 1,
+        "dev": source.st_dev,
+        "ino": source.st_ino,
+        "mode": source.st_mode,
+        "uid": source.st_uid,
+        "nlink": source.st_nlink,
+        "size": source.st_size,
+        "mtime_ns": str(source.st_mtime_ns),
+        "ctime_ns": str(source.st_ctime_ns),
+    }
+    _import_locator_body(body | {"digest": "0" * 64})
+    digest = hashlib.sha256(
+        _IMPORT_LOCATOR_DOMAIN + _encode({"request": canonical_request, "identity": body})
+    ).hexdigest()
+    return body | {"digest": digest}
+
+
 def _validate_source(value: object) -> None:
     if type(value) is not dict:
         raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
@@ -629,6 +731,12 @@ def _validate_dispatch_params(method: str, params: dict[str, object]) -> None:
     if method == "kernel.ping":
         _exact(params, set())
         return
+    if method == "kernel.retire":
+        value = _exact(params, {"daemon_id", "reason"})
+        _identifier(value["daemon_id"], _DAEMON_RE)
+        if value["reason"] not in _KERNEL_RETIRE_REASONS:
+            raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+        return
     if method == "application.call":
         value = _exact(params, {"operation", "request"})
         operation = value["operation"]
@@ -636,6 +744,10 @@ def _validate_dispatch_params(method: str, params: dict[str, object]) -> None:
             raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
         if type(value["request"]) is not dict:
             raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+        return
+    if method == "project.import":
+        value = _exact(params, {"request", "locator"})
+        _validate_import_locator(value["request"], value["locator"])
         return
     if method == "checkout.open":
         value = _exact(params, {"open_key", "source"})
@@ -743,14 +855,17 @@ def _validate_success_result(
 
 
 _Handler = Callable[[dict[str, object]], object]
+_DescriptorHandler = Callable[[dict[str, object], int], object]
 
 
 @dataclass(frozen=True, slots=True, init=False)
 class StaticV2Dispatcher:
-    """Closed dispatcher whose six handlers are installed explicitly in code."""
+    """Closed dispatcher whose handlers are installed explicitly in code."""
 
     _kernel_ping: _Handler | None
+    _kernel_retire: _Handler | None
     _application_call: _Handler | None
+    _project_import: _DescriptorHandler | None
     _checkout_open: _Handler | None
     _checkout_get: _Handler | None
     _checkout_close: _Handler | None
@@ -761,7 +876,9 @@ class StaticV2Dispatcher:
         self,
         *,
         kernel_ping: _Handler | None = None,
+        kernel_retire: _Handler | None = None,
         application_call: _Handler | None = None,
+        project_import: _DescriptorHandler | None = None,
         checkout_open: _Handler | None = None,
         checkout_get: _Handler | None = None,
         checkout_close: _Handler | None = None,
@@ -770,7 +887,9 @@ class StaticV2Dispatcher:
     ) -> None:
         handlers = (
             kernel_ping,
+            kernel_retire,
             application_call,
+            project_import,
             checkout_open,
             checkout_get,
             checkout_close,
@@ -788,7 +907,9 @@ class StaticV2Dispatcher:
         ):
             raise TypeError("allowed application operations must be a bounded frozenset")
         object.__setattr__(self, "_kernel_ping", kernel_ping)
+        object.__setattr__(self, "_kernel_retire", kernel_retire)
         object.__setattr__(self, "_application_call", application_call)
+        object.__setattr__(self, "_project_import", project_import)
         object.__setattr__(self, "_checkout_open", checkout_open)
         object.__setattr__(self, "_checkout_get", checkout_get)
         object.__setattr__(self, "_checkout_close", checkout_close)
@@ -799,12 +920,29 @@ class StaticV2Dispatcher:
             allowed_application_operations,
         )
 
-    def dispatch(self, request: object) -> object:
+    def dispatch(
+        self,
+        request: object,
+        *,
+        descriptor: int | None = None,
+    ) -> object:
         if type(request) is not V2Request:
             raise TypeError("request must be a V2Request")
         _validate_dispatch_params(request.method, request.params)
+        if descriptor is not None and (type(descriptor) is not int or descriptor < 0):
+            raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+        if request.method == "project.import":
+            if descriptor is None or self._project_import is None:
+                raise V2ProtocolError(
+                    V2ErrorCode.INVALID_REQUEST if descriptor is None else V2ErrorCode.UNAVAILABLE
+                )
+            return self._project_import(dict(request.params), descriptor)
+        if descriptor is not None:
+            raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
         if request.method == "kernel.ping":
             handler = self._kernel_ping
+        elif request.method == "kernel.retire":
+            handler = self._kernel_retire
         elif request.method == "application.call":
             if request.params["operation"] not in self._allowed_application_operations:
                 raise V2ProtocolError(V2ErrorCode.UNKNOWN_METHOD)
@@ -1027,12 +1165,14 @@ class V2ServerConnection:
         self,
         payload: object,
         dispatcher: object,
+        *,
+        descriptor: int | None = None,
     ) -> bytes:
         if type(dispatcher) is not StaticV2Dispatcher:
             raise TypeError("dispatcher must be a StaticV2Dispatcher")
         request = self.admit_request(payload)
         try:
-            result = dispatcher.dispatch(request)
+            result = dispatcher.dispatch(request, descriptor=descriptor)
         except V2ProtocolError as exc:
             code = exc.code if exc.code in _PUBLIC_FAILURE_CODES else V2ErrorCode.INTERNAL_ERROR
             return self.encode_failure(request, code)

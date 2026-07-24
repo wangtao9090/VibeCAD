@@ -45,6 +45,61 @@ def test_request_marks_and_perform_deletes(monkeypatch, tmp_path):
     assert not home.exists(), "authorized cleanup may remove the now-empty container"
 
 
+def test_pending_uninstall_keeps_runtime_and_marker_when_kernel_retire_fails(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "home"
+    runtime = home / "runtime"
+    runtime.mkdir(parents=True)
+    payload = runtime / "engine.bin"
+    payload.write_bytes(b"runtime")
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    assert uninstall.request_uninstall()["marked"] is True
+    before = _fingerprint(home)
+    monkeypatch.setattr(
+        uninstall,
+        "_retire_kernel_before_runtime_removal",
+        lambda: False,
+    )
+
+    assert uninstall.perform_pending_uninstall() is False
+
+    assert _fingerprint(home) == before
+    assert payload.read_bytes() == b"runtime"
+    assert uninstall.uninstall_marker().is_file()
+
+
+def test_pending_uninstall_retires_kernel_before_first_runtime_remove(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "home"
+    runtime = home / "runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "engine.bin").write_bytes(b"runtime")
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    assert uninstall.request_uninstall()["marked"] is True
+    events: list[str] = []
+    original_remove = uninstall._remove_target
+
+    monkeypatch.setattr(
+        uninstall,
+        "_retire_kernel_before_runtime_removal",
+        lambda: events.append("retire") or True,
+    )
+
+    def remove(target):
+        events.append("remove")
+        return original_remove(target)
+
+    monkeypatch.setattr(uninstall, "_remove_target", remove)
+
+    assert uninstall.perform_pending_uninstall() is True
+    assert events[0] == "retire"
+    assert "remove" in events
+
+
 def test_perform_noop_without_marker(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBECAD_HOME", str(tmp_path))
     assert uninstall.perform_pending_uninstall() is False

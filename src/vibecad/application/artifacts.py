@@ -1940,6 +1940,455 @@ def _parse_record(raw: bytes) -> _RequestRecord:
     return record
 
 
+class _ReadOnlyFd(AbstractContextManager[int]):
+    """Close one read-only descriptor once, failing closed on uncertain release."""
+
+    __slots__ = ("_fd",)
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+
+    def __enter__(self) -> int:
+        return self._fd
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        fd = self._fd
+        self._fd = -1
+        try:
+            os.close(fd)
+        except OSError:
+            raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE) from exc
+        return False
+
+
+class ArtifactResourceReader:
+    """Strictly read an already-published resource without mutating its store."""
+
+    __slots__ = ("_expected_root_identity", "_root")
+
+    def __init__(
+        self,
+        *,
+        root: Path,
+        expected_root_identity: tuple[int, int] | None = None,
+    ) -> None:
+        if (
+            not isinstance(root, Path)
+            or not root.is_absolute()
+            or (
+                expected_root_identity is not None
+                and (
+                    type(expected_root_identity) is not tuple
+                    or len(expected_root_identity) != 2
+                    or not all(type(item) is int and item >= 0 for item in expected_root_identity)
+                )
+            )
+        ):
+            raise ArtifactResourceError(ArtifactResourceErrorCode.INVALID_IDENTIFIER)
+        try:
+            fd, identity = self._open_root(root, expected_root_identity)
+            with _ReadOnlyFd(fd):
+                pass
+        except ArtifactResourceError:
+            raise
+        except Exception:
+            raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE) from None
+        self._root = root
+        self._expected_root_identity = (identity.dev, identity.ino)
+
+    @staticmethod
+    def _directory_flags() -> int:
+        return (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+
+    @classmethod
+    def _open_root(
+        cls,
+        root: Path,
+        expected: tuple[int, int] | None,
+    ) -> tuple[int, _FileIdentity]:
+        fd = -1
+        try:
+            before = os.lstat(root)
+            if not _private_directory(before) or (
+                expected is not None and (before.st_dev, before.st_ino) != expected
+            ):
+                raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            fd = os.open(root, cls._directory_flags())
+            opened = os.fstat(fd)
+            if (
+                not _private_directory(opened)
+                or not _same_identity(before, opened)
+                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            return fd, _identity(before)
+        except BaseException as error:
+            if fd >= 0:
+                owned = fd
+                fd = -1
+                try:
+                    os.close(owned)
+                except OSError:
+                    raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE) from error
+            raise
+
+    @classmethod
+    def _open_directory_at(
+        cls,
+        parent_fd: int,
+        name: str,
+        *,
+        expected: _FileIdentity | None = None,
+    ) -> tuple[int, _FileIdentity]:
+        fd = -1
+        try:
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if not _private_directory(before) or (
+                expected is not None and _identity(before) != expected
+            ):
+                raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            fd = os.open(name, cls._directory_flags(), dir_fd=parent_fd)
+            opened = os.fstat(fd)
+            if not _private_directory(opened) or not _same_identity(before, opened):
+                raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            return fd, _identity(before)
+        except BaseException as error:
+            if fd >= 0:
+                owned = fd
+                fd = -1
+                try:
+                    os.close(owned)
+                except OSError:
+                    raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE) from error
+            raise
+
+    @staticmethod
+    def _entries(directory_fd: int) -> dict[str, _FileIdentity]:
+        entries: dict[str, _FileIdentity] = {}
+        for entry in os.scandir(directory_fd):
+            if entry.name in entries or entry.is_symlink():
+                raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            entries[entry.name] = _identity(entry.stat(follow_symlinks=False))
+        return entries
+
+    @staticmethod
+    def _read_file(
+        directory_fd: int,
+        name: str,
+        maximum: int,
+        *,
+        expected: _FileIdentity | None = None,
+        retain: bool,
+    ) -> tuple[bytes | None, _FileIdentity, str]:
+        try:
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            identity = _identity(before)
+            if (
+                not _private_file(before, allow_empty=False)
+                or before.st_size > maximum
+                or (expected is not None and identity != expected)
+            ):
+                raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
+            with _ReadOnlyFd(os.open(name, flags, dir_fd=directory_fd)) as fd:
+                opened = os.fstat(fd)
+                if not _same_identity(before, opened):
+                    raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+                chunks = [] if retain else None
+                digest = hashlib.sha256()
+                remaining = opened.st_size
+                while remaining:
+                    chunk = os.read(fd, min(ARTIFACT_COPY_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+                    if chunks is not None:
+                        chunks.append(chunk)
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                if not _same_identity(opened, os.fstat(fd)):
+                    raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not _same_identity(before, after):
+                raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            content = None if chunks is None else b"".join(chunks)
+            return content, identity, digest.hexdigest()
+        except ArtifactResourceError:
+            raise
+        except OSError:
+            raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE) from None
+
+    @staticmethod
+    def _request_name(export_key: str) -> str:
+        suffix = hashlib.sha256(_REQUEST_PATH_DOMAIN + export_key.encode("ascii")).hexdigest()
+        return f"{suffix}.json"
+
+    @classmethod
+    def _published_binding(
+        cls,
+        requests_fd: int,
+        request_entries: dict[str, _FileIdentity],
+        materialization_id: str,
+        artifact_id: str,
+    ) -> tuple[_RequestRecord, MaterializedArtifactRef]:
+        bindings: list[tuple[_RequestRecord, MaterializedArtifactRef]] = []
+        for name in sorted(request_entries):
+            if _REQUEST_NAME.fullmatch(name) is None:
+                raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            raw, identity, _digest = cls._read_file(
+                requests_fd,
+                name,
+                MAX_ARTIFACT_RECORD_BYTES,
+                expected=request_entries[name],
+                retain=True,
+            )
+            assert raw is not None
+            record = _parse_record(raw)
+            if identity != request_entries[name] or name != cls._request_name(record.export_key):
+                raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            if record.phase is not ArtifactRequestPhase.PUBLISHED:
+                continue
+            assert record.response is not None
+            request = ArtifactExportRequest(
+                export_key=record.export_key,
+                task_id=record.eligibility.task_id,
+                expected_generation=record.eligibility.task_generation,
+                revision_id=record.eligibility.revision_id,
+                draft_id=record.eligibility.draft_id,
+            )
+            if record.request_digest != _request_digest(request) or record.response != _result(
+                request, record.eligibility
+            ):
+                raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            if record.response.materialization_id != materialization_id:
+                continue
+            matches = tuple(
+                artifact for artifact in record.response.artifacts if artifact.id == artifact_id
+            )
+            if len(matches) == 1:
+                bindings.append((record, matches[0]))
+        if not bindings:
+            raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+        selected, artifact = bindings[0]
+        if any(
+            (
+                record.eligibility,
+                record.materialized_identity,
+                candidate,
+            )
+            != (
+                selected.eligibility,
+                selected.materialized_identity,
+                artifact,
+            )
+            for record, candidate in bindings[1:]
+        ):
+            raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+        return selected, artifact
+
+    @classmethod
+    def _read_materialization(
+        cls,
+        materializations_fd: int,
+        materialization_entries: dict[str, _FileIdentity],
+        record: _RequestRecord,
+        artifact: MaterializedArtifactRef,
+    ) -> str:
+        expected_directory = materialization_entries.get(record.materialization_id)
+        if (
+            expected_directory is None
+            or record.materialized_identity is None
+            or not _same_directory_binding(
+                os.stat(
+                    record.materialization_id,
+                    dir_fd=materializations_fd,
+                    follow_symlinks=False,
+                ),
+                record.materialized_identity,
+            )
+        ):
+            raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+        directory_fd, directory_identity = cls._open_directory_at(
+            materializations_fd,
+            record.materialization_id,
+            expected=expected_directory,
+        )
+        with _ReadOnlyFd(directory_fd):
+            entries = cls._entries(directory_fd)
+            if set(entries) != {"manifest.json", "model.FCStd", "model.step"}:
+                raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            selected: bytes | None = None
+            for expected_artifact in record.eligibility.artifacts:
+                retain = expected_artifact.id == artifact.id
+                content, identity, digest = cls._read_file(
+                    directory_fd,
+                    expected_artifact.name,
+                    expected_artifact.size_bytes,
+                    expected=entries[expected_artifact.name],
+                    retain=retain,
+                )
+                if (
+                    identity.size != expected_artifact.size_bytes
+                    or digest != expected_artifact.sha256
+                ):
+                    raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+                if retain:
+                    selected = content
+            raw_manifest, _identity_value, _manifest_digest = cls._read_file(
+                directory_fd,
+                "manifest.json",
+                MAX_ARTIFACT_RECORD_BYTES,
+                expected=entries["manifest.json"],
+                retain=True,
+            )
+            assert raw_manifest is not None
+            manifest = _exact_keys(
+                _parse_json(raw_manifest),
+                {"schema_version", "body", "body_sha256"},
+            )
+            if (
+                manifest["schema_version"] != SCHEMA_VERSION
+                or manifest["body"] != _delivery_manifest_body(record.eligibility)
+                or manifest["body_sha256"] != record.delivery_manifest_sha256
+                or hashlib.sha256(
+                    _DELIVERY_MANIFEST_DOMAIN + _canonical_json(manifest["body"])
+                ).hexdigest()
+                != record.delivery_manifest_sha256
+            ):
+                raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            assert selected is not None
+            blob = base64.b64encode(selected).decode("ascii")
+            if (
+                cls._entries(directory_fd) != entries
+                or _identity(os.fstat(directory_fd)) != directory_identity
+            ):
+                raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+            return blob
+
+    @staticmethod
+    def _validate_uri(uri: object) -> tuple[str, str]:
+        if type(uri) is not str:
+            raise ArtifactResourceError(ArtifactResourceErrorCode.INVALID_IDENTIFIER)
+        try:
+            raw_uri = uri.encode("ascii")
+        except UnicodeError:
+            raise ArtifactResourceError(ArtifactResourceErrorCode.INVALID_IDENTIFIER) from None
+        match = _RESOURCE_URI.fullmatch(uri)
+        if len(raw_uri) != 141 or match is None or "%" in uri or "?" in uri or "#" in uri:
+            raise ArtifactResourceError(ArtifactResourceErrorCode.INVALID_IDENTIFIER)
+        return match.groups()  # type: ignore[return-value]
+
+    def read_resource(self, uri: object) -> ArtifactResourceContent:
+        """Return one bounded published blob while leaving the catalog untouched."""
+
+        materialization_id, artifact_id = self._validate_uri(uri)
+        try:
+            root_fd, root_identity = self._open_root(
+                self._root,
+                self._expected_root_identity,
+            )
+            with _ReadOnlyFd(root_fd):
+                root_entries = self._entries(root_fd)
+                if set(root_entries) != {"requests", "materializations", _LOCK_NAME}:
+                    raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+                lock_identity = root_entries[_LOCK_NAME]
+                if not _private_file(os.stat(_LOCK_NAME, dir_fd=root_fd, follow_symlinks=False)):
+                    raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+                requests_fd, requests_identity = self._open_directory_at(
+                    root_fd,
+                    "requests",
+                    expected=root_entries["requests"],
+                )
+                with _ReadOnlyFd(requests_fd):
+                    materializations_fd, materializations_identity = self._open_directory_at(
+                        root_fd,
+                        "materializations",
+                        expected=root_entries["materializations"],
+                    )
+                    with _ReadOnlyFd(materializations_fd):
+                        request_entries = self._entries(requests_fd)
+                        materialization_entries = self._entries(materializations_fd)
+                        if (
+                            len(request_entries) > MAX_ARTIFACT_REQUESTS
+                            or len(materialization_entries) > MAX_ARTIFACT_MATERIALIZATIONS
+                            or any(
+                                _MATERIALIZATION_NAME.fullmatch(name) is None
+                                or not _private_directory(
+                                    os.stat(
+                                        name,
+                                        dir_fd=materializations_fd,
+                                        follow_symlinks=False,
+                                    )
+                                )
+                                for name in materialization_entries
+                            )
+                        ):
+                            raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+                        record, artifact = self._published_binding(
+                            requests_fd,
+                            request_entries,
+                            materialization_id,
+                            artifact_id,
+                        )
+                        if artifact.size_bytes > MAX_ARTIFACT_RESOURCE_BYTES:
+                            raise ArtifactResourceError(ArtifactResourceErrorCode.READ_LIMIT)
+                        if (
+                            _resource_incremental_allocation_bound(artifact.size_bytes)
+                            > MAX_ARTIFACT_RESOURCE_INCREMENTAL_BYTES
+                        ):
+                            raise ArtifactResourceError(ArtifactResourceErrorCode.READ_LIMIT)
+                        blob = self._read_materialization(
+                            materializations_fd,
+                            materialization_entries,
+                            record,
+                            artifact,
+                        )
+                        if (
+                            self._entries(requests_fd) != request_entries
+                            or self._entries(materializations_fd) != materialization_entries
+                            or _identity(os.fstat(requests_fd)) != requests_identity
+                            or _identity(os.fstat(materializations_fd)) != materializations_identity
+                            or self._entries(root_fd) != root_entries
+                            or _identity(os.fstat(root_fd)) != root_identity
+                            or _identity(
+                                os.stat(
+                                    _LOCK_NAME,
+                                    dir_fd=root_fd,
+                                    follow_symlinks=False,
+                                )
+                            )
+                            != lock_identity
+                            or _identity(os.lstat(self._root)) != root_identity
+                        ):
+                            raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE)
+                        mime = (
+                            "application/vnd.freecad.fcstd"
+                            if artifact.format == "fcstd"
+                            else "model/step"
+                        )
+                        return ArtifactResourceContent(
+                            uri=_resource_uri(materialization_id, artifact_id),
+                            blob=blob,
+                            mime_type=mime,
+                        )
+        except ArtifactResourceError:
+            raise
+        except (ArtifactStoreError, OSError):
+            raise ArtifactResourceError(ArtifactResourceErrorCode.UNAVAILABLE) from None
+        except Exception:
+            raise ArtifactResourceError(ArtifactResourceErrorCode.INTERNAL_ERROR) from None
+
+
 class _MutationLock:
     __slots__ = ("_fd", "_lock", "_poison", "_root_check", "_root_fd")
 
@@ -4807,6 +5256,7 @@ __all__ = (
     "ArtifactResourceContent",
     "ArtifactResourceError",
     "ArtifactResourceErrorCode",
+    "ArtifactResourceReader",
     "ArtifactServiceErrorCode",
     "ArtifactServicePort",
     "ArtifactServicePortFailure",

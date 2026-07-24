@@ -43,8 +43,9 @@ from vibecad.execution.candidate import (
 )
 from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
 from vibecad.execution.revisions import LocalRevisionStore, ProjectHead
-from vibecad.interaction.cad import CadExecutionPort
+from vibecad.interaction.cad import CadExecutionPort, ValidatedImportEvidence
 from vibecad.interaction.checkouts import CheckoutFileSnapshot, HeadCheckoutSource
+from vibecad.interaction.protocol_v2 import bind_v2_import_locator
 from vibecad.worker import WorkerGenerationState
 from vibecad.workflow.catalog import (
     TaskCatalogError,
@@ -1197,6 +1198,55 @@ def test_project_request_facade_replays_create_key_and_gets_current_snapshot(
     )
     assert loaded["ok"] is True
     assert loaded["result"]["current"] == first["result"]["generation_zero"]
+    app.close()
+
+
+def test_descriptor_project_request_preserves_public_envelope_without_a_path(
+    tmp_path: Path,
+) -> None:
+    class ImportPort(CadExecutionPort):
+        def validate_import(self, path: Path) -> ValidatedImportEvidence:
+            content = path.read_bytes()
+            return ValidatedImportEvidence(
+                sha256=hashlib.sha256(content).hexdigest(),
+                size_bytes=len(content),
+            )
+
+        def revalidate_normalized_import(
+            self,
+            path: Path,
+        ) -> ValidatedImportEvidence:
+            return self.validate_import(path)
+
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        cad_port_factory=lambda **_kwargs: ImportPort(),
+    )
+    source = tmp_path / "source.FCStd"
+    source.write_bytes(b"descriptor-agent-import")
+    source.chmod(0o600)
+    request = {
+        "schema_version": 1,
+        "create_key": "project_create_" + "5" * 32,
+        "kind": "import_fcstd",
+    }
+    locator = bind_v2_import_locator(request, source.stat())
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        result = app.import_project_descriptor_request(
+            request,
+            source_fd=descriptor,
+            locator=locator,
+        )
+        os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert result["ok"] is True
+    assert result["result"]["create_key"] == request["create_key"]
+    assert result["result"]["kind"] == "import_fcstd"
+    assert "source_path" not in result["result"]
+    assert source.read_bytes() == b"descriptor-agent-import"
     app.close()
 
 

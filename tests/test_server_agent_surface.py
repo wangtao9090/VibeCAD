@@ -7,8 +7,11 @@ import json
 import logging
 import os
 import queue
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import FrozenInstanceError, replace
@@ -1548,86 +1551,118 @@ def test_owned_stdio_initialization_failure_precedes_worker_and_input_start(monk
     assert server._active_owned_runner is None
 
 
-def test_real_owned_worker_can_lazy_open_application_after_process_initialization(
-    tmp_path: Path,
-) -> None:
-    data_root = tmp_path / "owned-worker-data"
-    script = f"""
-from pathlib import Path
+def test_real_owned_worker_can_lazy_open_daemon_client_after_process_initialization() -> None:
+    home = Path(tempfile.mkdtemp(prefix="vc-c13-owned-", dir="/private/tmp"))
+    home.chmod(0o700)
+    data_root = home / "data"
+    script = """
 from vibecad import server
 server._application_runtime_guard = lambda: None
-server.paths.data_root = lambda: Path({str(data_root)!r})
 server.main()
 """
     environment = os.environ.copy()
     environment["VIBECAD_AUTO_INSTALL"] = "0"
+    environment["VIBECAD_HOME"] = str(home)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    process = subprocess.Popen(
-        [sys.executable, "-c", script],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=environment,
-    )
-    assert process.stdin is not None and process.stdout is not None
-
-    def read_response(timeout: float = 5.0) -> dict[str, object]:
-        result: dict[str, bytes] = {}
-        reader = threading.Thread(
-            target=lambda: result.setdefault("line", process.stdout.readline()),
-            daemon=True,
+    process = None
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
         )
-        reader.start()
-        reader.join(timeout)
-        if "line" not in result:
+        assert process.stdin is not None and process.stdout is not None
+
+        def read_response(timeout: float = 20.0) -> dict[str, object]:
+            result: dict[str, bytes] = {}
+            reader = threading.Thread(
+                target=lambda: result.setdefault("line", process.stdout.readline()),
+                daemon=True,
+            )
+            reader.start()
+            reader.join(timeout)
+            if "line" not in result:
+                pytest.fail("owned stdio subprocess did not produce a bounded response")
+            return json.loads(result["line"])
+
+        initialize = {
+            "jsonrpc": "2.0",
+            "id": "initialize",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"},
+            },
+        }
+        process.stdin.write(json.dumps(initialize, separators=(",", ":")).encode() + b"\n")
+        process.stdin.flush()
+        initialized = read_response()
+        assert initialized["result"]["protocolVersion"] == "2025-11-25"
+
+        messages = (
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "id": "get-project",
+                "method": "tools/call",
+                "params": {
+                    "name": "get_project",
+                    "arguments": {"schema_version": 1, "project_id": PROJECT_ID},
+                },
+            },
+        )
+        process.stdin.write(
+            b"".join(
+                json.dumps(message, separators=(",", ":")).encode() + b"\n" for message in messages
+            )
+        )
+        process.stdin.flush()
+        response = read_response()
+        process.stdin.close()
+        returncode = process.wait(timeout=15)
+        stderr = process.stderr.read() if process.stderr is not None else b""
+
+        assert returncode == 0, stderr.decode(errors="replace")
+        assert response["id"] == "get-project"
+        assert "error" not in response, {
+            "response": response,
+            "stderr": stderr.decode(errors="replace"),
+            "data_entries": sorted(path.name for path in data_root.iterdir())
+            if data_root.is_dir()
+            else [],
+            "daemon_entries": sorted(path.name for path in (data_root / "daemon").iterdir())
+            if (data_root / "daemon").is_dir()
+            else [],
+        }
+        assert response["result"]["structuredContent"]["error"]["code"] == "not_found"
+        assert data_root.is_dir()
+        receipt = json.loads((data_root / "daemon" / "receipt.json").read_text())
+        daemon_pid = receipt["pid"]
+        assert type(daemon_pid) is int and daemon_pid > 1
+        os.kill(daemon_pid, 0)
+    finally:
+        if process is not None and process.poll() is None:
             process.kill()
             process.wait(timeout=5)
-            pytest.fail("owned stdio subprocess did not produce a bounded response")
-        return json.loads(result["line"])
-
-    initialize = {
-        "jsonrpc": "2.0",
-        "id": "initialize",
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": {"name": "test", "version": "1"},
-        },
-    }
-    process.stdin.write(json.dumps(initialize, separators=(",", ":")).encode() + b"\n")
-    process.stdin.flush()
-    initialized = read_response()
-    assert initialized["result"]["protocolVersion"] == "2025-11-25"
-
-    messages = (
-        {"jsonrpc": "2.0", "method": "notifications/initialized"},
-        {
-            "jsonrpc": "2.0",
-            "id": "get-project",
-            "method": "tools/call",
-            "params": {
-                "name": "get_project",
-                "arguments": {"schema_version": 1, "project_id": PROJECT_ID},
-            },
-        },
-    )
-    process.stdin.write(
-        b"".join(
-            json.dumps(message, separators=(",", ":")).encode() + b"\n" for message in messages
-        )
-    )
-    process.stdin.flush()
-    response = read_response()
-    process.stdin.close()
-    returncode = process.wait(timeout=15)
-    stderr = process.stderr.read() if process.stderr is not None else b""
-
-    assert returncode == 0, stderr.decode(errors="replace")
-    assert response["id"] == "get-project"
-    assert "error" not in response
-    assert response["result"]["structuredContent"]["error"]["code"] == "not_found"
-    assert data_root.is_dir()
+        receipt_path = data_root / "daemon" / "receipt.json"
+        if receipt_path.is_file():
+            daemon_pid = json.loads(receipt_path.read_text()).get("pid")
+            if type(daemon_pid) is int and daemon_pid > 1:
+                try:
+                    os.kill(daemon_pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(daemon_pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.01)
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def test_runtime_guard_response_is_flushed_before_swap_and_never_opens_application(
@@ -1837,6 +1872,87 @@ def test_confirmed_uninstall_close_failure_keeps_marker_and_returns_recovery(
     assert marker.exists()
     assert close_calls == ["close"]
     assert exits == []
+
+
+def test_uninstall_closer_retires_kernel_before_closing_client_slot(
+    monkeypatch,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+
+    server = _server_module()
+    events: list[str] = []
+
+    class Slot:
+        def close(self) -> bool:
+            events.append("slot.close")
+            return True
+
+    monkeypatch.setattr(server, "_application_slot", Slot())
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "retire_local_kernel",
+        lambda **_kwargs: events.append("kernel.retire") or True,
+    )
+
+    assert server._close_application_for_uninstall() is True
+    assert events == ["kernel.retire", "slot.close"]
+
+
+def test_uninstall_closer_fails_closed_without_closing_slot_when_retire_fails(
+    monkeypatch,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+
+    server = _server_module()
+    close_calls: list[str] = []
+
+    class Slot:
+        def close(self) -> bool:
+            close_calls.append("close")
+            return True
+
+    monkeypatch.setattr(server, "_application_slot", Slot())
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "retire_local_kernel",
+        lambda **_kwargs: False,
+    )
+
+    assert server._close_application_for_uninstall() is False
+    assert close_calls == []
+
+
+def test_confirmed_already_clean_uninstall_still_drains_and_retires_daemon(
+    monkeypatch,
+) -> None:
+    server = _server_module()
+    scheduled: list[bool] = []
+
+    class Runner:
+        def request_uninstall_recovery(self) -> bool:
+            raise AssertionError("successful drain must not enter recovery")
+
+    monkeypatch.setattr(server, "_active_owned_runner", Runner())
+    monkeypatch.setattr(
+        server._uninstall,
+        "preview_uninstall",
+        lambda: {"ok": True, "size_mb": 0},
+    )
+    monkeypatch.setattr(
+        server._uninstall,
+        "request_uninstall",
+        lambda: {"ok": True, "already_clean": True},
+    )
+    monkeypatch.setattr(
+        server,
+        "_try_schedule_swap",
+        lambda *, uninstall=False: scheduled.append(uninstall) or True,
+    )
+
+    result = server.uninstall_runtime(confirm=True)
+
+    assert result["status"] == "already_clean"
+    assert scheduled == [True]
 
 
 def test_real_owned_stdio_initializes_lists_tools_and_never_calls_sdk_stdio() -> None:

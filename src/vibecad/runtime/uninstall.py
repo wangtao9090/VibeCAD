@@ -856,6 +856,20 @@ def _remove_home_if_empty() -> None:
         home.rmdir()
 
 
+def _retire_kernel_before_runtime_removal() -> bool:
+    """Retire the authenticated detached Kernel without ever spawning one."""
+
+    try:
+        from vibecad.daemon.bootstrap import retire_local_kernel
+
+        return retire_local_kernel(
+            reason="runtime_uninstall",
+            _maintenance_held=True,
+        )
+    except BaseException:
+        return False
+
+
 def request_uninstall() -> dict:
     cleanup_home = False
     try:
@@ -906,6 +920,8 @@ def perform_pending_uninstall() -> bool:
         with status.runtime_maintenance_lock():
             if _read_marker_identity(marker) != marker_identity:
                 return False
+            if not _retire_kernel_before_runtime_removal():
+                return False
             if _recover_interrupted_removal():
                 # The identity-bound old generation is gone and a newer fixed
                 # generation exists. Resolve only the old marker; never delete it.
@@ -943,6 +959,18 @@ def uninstall_now() -> dict:
                     "preserved_paths": [str(path) for path in plan.preserved],
                     "message": "没有可授权删除的运行时；durable data 与未知内容均已保留",
                 }
+            _write_marker()
+            marker = uninstall_marker()
+            marker_identity = _read_marker_identity(marker)
+            if marker_identity is None:
+                raise ValueError("无法固定卸载 marker identity，拒绝删除运行时")
+            if not _retire_kernel_before_runtime_removal():
+                return {
+                    "ok": False,
+                    "freed_mb": 0,
+                    "data_preserved": True,
+                    "message": "Task Kernel 未能安全退役；运行时和卸载标记均已保留",
+                }
             size = sum(dir_size_mb(target.path) for target in plan.targets)
             try:
                 for target in plan.targets:
@@ -962,8 +990,13 @@ def uninstall_now() -> dict:
                     "data_preserved": True,
                     "message": "删除未完成；仍有授权运行时目标，下次重试",
                 }
-            with contextlib.suppress(OSError):
-                uninstall_marker().unlink(missing_ok=True)
+            if not _clear_matching_marker(marker, marker_identity):
+                return {
+                    "ok": False,
+                    "freed_mb": 0,
+                    "data_preserved": True,
+                    "message": "运行时已清理，但卸载 marker identity 已变化；保留待恢复",
+                }
             freed = f"{size / 1000:.1f} GB" if size >= 1000 else f"{size:.1f} MB"
             return {
                 "ok": True,

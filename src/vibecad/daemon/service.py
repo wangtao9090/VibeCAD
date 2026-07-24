@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import collections
+import array
 import contextlib
 import os
 import secrets
@@ -36,11 +36,12 @@ from vibecad.daemon.state import (
 )
 from vibecad.interaction.protocol_v2 import (
     MAX_V2_CONNECTIONS,
+    MAX_V2_FRAME_PAYLOAD_BYTES,
+    V2_FRAME_HEADER_BYTES,
     V2_HANDSHAKE_TIMEOUT_SECONDS,
     V2_IDLE_TIMEOUT_SECONDS,
     StaticV2Dispatcher,
     V2ErrorCode,
-    V2FrameDecoder,
     V2ProtocolError,
     V2Request,
     V2ServerConnection,
@@ -54,9 +55,10 @@ from vibecad.workflow.lease import (
     ResourceLeaseManager,
 )
 
-_READ_CHUNK_BYTES = 65_536
+_MAX_ANCILLARY_DESCRIPTORS = 8
 _ACCEPT_POLL_SECONDS = 0.2
 _SHUTDOWN_TIMEOUT_SECONDS = 5.0
+_STARTUP_MAINTENANCE_TIMEOUT_SECONDS = 15.0
 _PUBLIC_DISPATCH_FAILURES = frozenset(
     {
         V2ErrorCode.UNKNOWN_METHOD,
@@ -81,35 +83,112 @@ class _ConnectionClosed(Exception):
     pass
 
 
+def _close_descriptors(descriptors: list[int] | tuple[int, ...]) -> None:
+    for descriptor in descriptors:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+
+
+def _received_descriptors(
+    ancillary: list[tuple[int, int, bytes]],
+    flags: int,
+) -> list[int]:
+    descriptors: list[int] = []
+    malformed = False
+    try:
+        for level, kind, raw in ancillary:
+            if level != socket.SOL_SOCKET or kind != socket.SCM_RIGHTS:
+                malformed = True
+                continue
+            values = array.array("i")
+            usable = len(raw) - (len(raw) % values.itemsize)
+            if not raw or usable != len(raw):
+                malformed = True
+            if usable:
+                values.frombytes(raw[:usable])
+            descriptors.extend(values)
+            if len(descriptors) > _MAX_ANCILLARY_DESCRIPTORS:
+                raise V2ProtocolError(V2ErrorCode.RESOURCE_EXHAUSTED)
+        for descriptor in descriptors:
+            os.set_inheritable(descriptor, False)
+        if malformed or flags & getattr(socket, "MSG_CTRUNC", 0):
+            raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+        return descriptors
+    except BaseException:
+        _close_descriptors(descriptors)
+        raise
+
+
 class _FrameReader:
-    __slots__ = ("_decoder", "_pending")
+    __slots__ = ()
 
-    def __init__(self) -> None:
-        self._decoder = V2FrameDecoder()
-        self._pending: collections.deque[bytes] = collections.deque()
-
-    def receive(self, connection: socket.socket, *, deadline: float) -> bytes:
-        if self._pending:
-            return self._pending.popleft()
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError
-            connection.settimeout(remaining)
-            try:
-                fragment = connection.recv(_READ_CHUNK_BYTES)
-            except TimeoutError:
-                raise TimeoutError from None
-            if not fragment:
+    @staticmethod
+    def _part(
+        connection: socket.socket,
+        size: int,
+        *,
+        deadline: float,
+    ) -> tuple[bytes, list[int]]:
+        result = bytearray()
+        descriptors: list[int] = []
+        ancillary_size = socket.CMSG_SPACE(_MAX_ANCILLARY_DESCRIPTORS * array.array("i").itemsize)
+        try:
+            while len(result) < size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                connection.settimeout(remaining)
                 try:
-                    self._decoder.finish()
-                except V2ProtocolError:
-                    raise
-                raise _ConnectionClosed
-            frames = self._decoder.feed(fragment)
-            self._pending.extend(frames)
-            if self._pending:
-                return self._pending.popleft()
+                    fragment, ancillary, flags, _address = connection.recvmsg(
+                        size - len(result),
+                        ancillary_size,
+                    )
+                except TimeoutError:
+                    raise TimeoutError from None
+                descriptors.extend(_received_descriptors(ancillary, flags))
+                if len(descriptors) > _MAX_ANCILLARY_DESCRIPTORS:
+                    raise V2ProtocolError(V2ErrorCode.RESOURCE_EXHAUSTED)
+                if not fragment:
+                    raise _ConnectionClosed
+                result.extend(fragment)
+            return bytes(result), descriptors
+        except BaseException:
+            _close_descriptors(descriptors)
+            raise
+
+    def receive(
+        self,
+        connection: socket.socket,
+        *,
+        deadline: float,
+        allow_descriptor: bool = False,
+    ) -> tuple[bytes, tuple[int, ...]]:
+        header, header_descriptors = self._part(
+            connection,
+            V2_FRAME_HEADER_BYTES,
+            deadline=deadline,
+        )
+        declared = int.from_bytes(header, "big")
+        if declared == 0:
+            _close_descriptors(header_descriptors)
+            raise V2ProtocolError(V2ErrorCode.MALFORMED_FRAME)
+        if declared > MAX_V2_FRAME_PAYLOAD_BYTES:
+            _close_descriptors(header_descriptors)
+            raise V2ProtocolError(V2ErrorCode.FRAME_TOO_LARGE)
+        try:
+            payload, payload_descriptors = self._part(
+                connection,
+                declared,
+                deadline=deadline,
+            )
+        except BaseException:
+            _close_descriptors(header_descriptors)
+            raise
+        descriptors = header_descriptors + payload_descriptors
+        if not allow_descriptor and descriptors:
+            _close_descriptors(descriptors)
+            raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+        return payload, tuple(descriptors)
 
 
 def _send(connection: socket.socket, payload: bytes, *, deadline: float) -> None:
@@ -184,20 +263,29 @@ def _dispatch_request(
     payload: bytes,
     dispatcher: StaticV2Dispatcher,
     revalidate: Callable[[], None],
-) -> bytes:
+    descriptors: tuple[int, ...] = (),
+) -> tuple[bytes, bool]:
     request: V2Request = protocol.admit_request(payload)
     revalidate()
     try:
-        result = dispatcher.dispatch(request)
+        if len(descriptors) > 1:
+            raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+        result = dispatcher.dispatch(
+            request,
+            descriptor=None if not descriptors else descriptors[0],
+        )
     except V2ProtocolError as error:
         code = error.code if error.code in _PUBLIC_DISPATCH_FAILURES else V2ErrorCode.INTERNAL_ERROR
-        return protocol.encode_failure(request, code)
+        return protocol.encode_failure(request, code), False
     except Exception:
-        return protocol.encode_failure(request, V2ErrorCode.INTERNAL_ERROR)
+        return protocol.encode_failure(request, V2ErrorCode.INTERNAL_ERROR), False
     try:
-        return protocol.encode_success(request, result)
+        return (
+            protocol.encode_success(request, result),
+            request.method == "kernel.retire",
+        )
     except V2ProtocolError:
-        return protocol.encode_failure(request, V2ErrorCode.INTERNAL_ERROR)
+        return protocol.encode_failure(request, V2ErrorCode.INTERNAL_ERROR), False
 
 
 class LocalKernelDaemon:
@@ -205,6 +293,8 @@ class LocalKernelDaemon:
 
     __slots__ = (
         "_accept_thread",
+        "_active_dispatches",
+        "_admission_condition",
         "_application",
         "_authority",
         "_close_lock",
@@ -217,6 +307,7 @@ class LocalKernelDaemon:
         "_lease_manager",
         "_listener",
         "_published",
+        "_retire_requested",
         "_state",
         "_state_lock",
         "_stop",
@@ -232,6 +323,7 @@ class LocalKernelDaemon:
         listener: socket.socket,
         published: PublishedDaemonState,
         facade: LocalKernelFacade,
+        stop: threading.Event,
     ) -> None:
         self._layout = layout
         self._lease_manager = lease_manager
@@ -241,7 +333,10 @@ class LocalKernelDaemon:
         self._published = published
         self._facade = facade
         self._creator_pid = os.getpid()
-        self._stop = threading.Event()
+        self._stop = stop
+        self._retire_requested = threading.Event()
+        self._admission_condition = threading.Condition()
+        self._active_dispatches = 0
         self._state_lock = threading.Lock()
         self._close_lock = threading.Lock()
         self._connections_lock = threading.Lock()
@@ -260,8 +355,11 @@ class LocalKernelDaemon:
         *,
         data_root: object,
         application_factory: _ApplicationFactory = _default_application_factory,
+        before_accept: Callable[[], None] | None = None,
     ) -> LocalKernelDaemon:
-        if not callable(application_factory):
+        if not callable(application_factory) or (
+            before_accept is not None and not callable(before_accept)
+        ):
             raise TypeError("application_factory must be callable")
         layout = None
         lease_manager = None
@@ -271,6 +369,7 @@ class LocalKernelDaemon:
         listener = None
         published = None
         facade = None
+        stop = threading.Event()
         instance = None
         try:
             layout = ApplicationDataLayout.open(data_root)
@@ -319,8 +418,11 @@ class LocalKernelDaemon:
                 listener=listener,
                 published=published,
                 facade=facade,
+                stop=stop,
             )
             instance._require_live_bindings()
+            if before_accept is not None:
+                before_accept()
             instance._accept_thread.start()
             return instance
         except BaseException as error:
@@ -386,7 +488,7 @@ class LocalKernelDaemon:
                 return
             self._fatal_error = failure
             self._state = LocalKernelState.FAILED
-        self._stop.set()
+        self._request_stop()
         with contextlib.suppress(OSError):
             self._listener.close()
         with self._connections_lock:
@@ -394,6 +496,33 @@ class LocalKernelDaemon:
         for connection in connections:
             with contextlib.suppress(OSError):
                 connection.shutdown(socket.SHUT_RDWR)
+
+    def _request_stop(self) -> None:
+        with self._admission_condition:
+            self._stop.set()
+            self._admission_condition.notify_all()
+
+    def _request_retire(self) -> None:
+        self._retire_requested.set()
+        self._request_stop()
+
+    def _begin_dispatch(self) -> bool:
+        with self._admission_condition:
+            if self._stop.is_set():
+                return False
+            self._active_dispatches += 1
+            return True
+
+    def _finish_dispatch(self) -> None:
+        failed = False
+        with self._admission_condition:
+            if self._active_dispatches <= 0:
+                failed = True
+            else:
+                self._active_dispatches -= 1
+                self._admission_condition.notify_all()
+        if failed:
+            self._mark_failed(DaemonError(DaemonErrorCode.RECOVERY_REQUIRED))
 
     def _accept_loop(self) -> None:
         while not self._stop.is_set():
@@ -404,6 +533,10 @@ class LocalKernelDaemon:
                     accepted, _address = self._listener.accept()
                 except TimeoutError:
                     continue
+                if self._stop.is_set():
+                    accepted.close()
+                    accepted = None
+                    break
                 self._require_live_bindings()
                 require_same_user_peer(accepted)
                 self._require_live_bindings()
@@ -458,7 +591,7 @@ class LocalKernelDaemon:
             )
             deadline = accepted_at + V2_HANDSHAKE_TIMEOUT_SECONDS
             _send(connection, protocol.start(), deadline=deadline)
-            authentication = _FrameReader().receive(connection, deadline=deadline)
+            authentication, _ = _FrameReader().receive(connection, deadline=deadline)
             self._require_live_bindings()
             authenticated = protocol.accept_auth(authentication)
             session_id = protocol.session_id
@@ -467,20 +600,34 @@ class LocalKernelDaemon:
             reader = _FrameReader()
             while not self._stop.is_set():
                 deadline = time.monotonic() + V2_IDLE_TIMEOUT_SECONDS
-                payload = reader.receive(connection, deadline=deadline)
-                self._require_live_bindings()
-                response = _dispatch_request(
-                    protocol,
-                    payload,
-                    dispatcher,
-                    self._require_live_bindings,
-                )
-                self._require_live_bindings()
-                _send(
+                payload, descriptors = reader.receive(
                     connection,
-                    response,
-                    deadline=time.monotonic() + V2_IDLE_TIMEOUT_SECONDS,
+                    deadline=deadline,
+                    allow_descriptor=True,
                 )
+                if not self._begin_dispatch():
+                    _close_descriptors(descriptors)
+                    break
+                try:
+                    self._require_live_bindings()
+                    response, retire_after_send = _dispatch_request(
+                        protocol,
+                        payload,
+                        dispatcher,
+                        self._require_live_bindings,
+                        descriptors,
+                    )
+                    self._require_live_bindings()
+                    _send(
+                        connection,
+                        response,
+                        deadline=time.monotonic() + V2_IDLE_TIMEOUT_SECONDS,
+                    )
+                    if retire_after_send:
+                        self._request_retire()
+                finally:
+                    _close_descriptors(descriptors)
+                    self._finish_dispatch()
         except DaemonError as error:
             if not self._stop.is_set():
                 self._mark_failed(error)
@@ -522,17 +669,37 @@ class LocalKernelDaemon:
             with self._state_lock:
                 if self._state is LocalKernelState.CLOSED:
                     return
-                self._state = LocalKernelState.STOPPING
-            self._stop.set()
+            deadline = time.monotonic() + _SHUTDOWN_TIMEOUT_SECONDS
+            self._request_stop()
             with contextlib.suppress(OSError):
                 self._listener.close()
+            with self._admission_condition:
+                if self._retire_requested.is_set():
+                    while self._active_dispatches:
+                        self._admission_condition.wait()
+                    # The bounded cleanup window starts only after every
+                    # admitted response has been sent and accounted for.
+                    deadline = time.monotonic() + _SHUTDOWN_TIMEOUT_SECONDS
+                else:
+                    while self._active_dispatches:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        self._admission_condition.wait(remaining)
+                dispatches_drained = self._active_dispatches == 0
             with self._connections_lock:
                 connections = tuple(self._connections)
                 workers = tuple(self._connections.values())
             for connection in connections:
                 with contextlib.suppress(OSError):
                     connection.shutdown(socket.SHUT_RDWR)
-            deadline = time.monotonic() + _SHUTDOWN_TIMEOUT_SECONDS
+            if not dispatches_drained:
+                with self._state_lock:
+                    self._state = LocalKernelState.FAILED
+                    self._fatal_error = DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+                raise DaemonError(DaemonErrorCode.RECOVERY_REQUIRED)
+            with self._state_lock:
+                self._state = LocalKernelState.STOPPING
             if (
                 self._accept_thread is not threading.current_thread()
                 and self._accept_thread.is_alive()
@@ -574,27 +741,68 @@ class LocalKernelDaemon:
 def run_daemon() -> int:
     """Run the fixed production daemon until SIGINT/SIGTERM."""
 
-    from vibecad.runtime import paths
+    from vibecad.runtime import paths, status
+    from vibecad.runtime.uninstall import uninstall_marker
 
     daemon = None
+    startup_guard = None
+    startup_guard_released = False
     stop = threading.Event()
     previous: dict[int, object] = {}
 
     def request_stop(_signum, _frame) -> None:
         stop.set()
 
+    def release_startup_guard() -> None:
+        nonlocal startup_guard_released
+        if startup_guard is None or startup_guard_released:
+            return
+        startup_guard_released = True
+        startup_guard.__exit__(None, None, None)
+
     try:
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous[signum] = signal.signal(signum, request_stop)
-        daemon = LocalKernelDaemon.start(data_root=paths.data_root())
+        inherited = os.environ.pop(
+            status.RUNTIME_MAINTENANCE_CLAIM_FD_ENV,
+            None,
+        )
+        if inherited is None:
+            startup_guard = status.runtime_maintenance_lock(
+                timeout=_STARTUP_MAINTENANCE_TIMEOUT_SECONDS,
+            )
+        else:
+            try:
+                inherited_descriptor = int(inherited, 10)
+            except (TypeError, ValueError):
+                return 1
+            if str(inherited_descriptor) != inherited:
+                return 1
+            startup_guard = status.inherited_runtime_maintenance_claim(
+                inherited_descriptor,
+            )
+        startup_guard.__enter__()
+        if os.path.lexists(uninstall_marker()):
+            return 1
+        daemon = LocalKernelDaemon.start(
+            data_root=paths.data_root(),
+            before_accept=release_startup_guard,
+        )
         while not stop.wait(_ACCEPT_POLL_SECONDS):
             if daemon.state is LocalKernelState.FAILED:
                 return 1
+            if daemon.wait(0):
+                break
+        if daemon.state is LocalKernelState.FAILED:
+            return 1
         daemon.close()
         return 0
     except (DaemonError, OSError, RuntimeError):
         return 1
     finally:
+        if not startup_guard_released:
+            with contextlib.suppress(RuntimeError):
+                release_startup_guard()
         if daemon is not None and daemon.state is not LocalKernelState.CLOSED:
             with contextlib.suppress(DaemonError):
                 daemon.close()

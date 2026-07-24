@@ -149,6 +149,7 @@ _QUARANTINE_RECEIPT_KEYS = frozenset(
 _SOURCE_IDENTITY_KEYS = frozenset(
     {"dev", "ino", "mode", "uid", "nlink", "size", "mtime_ns", "ctime_ns"}
 )
+_DESCRIPTOR_SOURCE_KEYS = _SOURCE_IDENTITY_KEYS | frozenset({"schema_version", "digest"})
 _ENVELOPE_KEYS = frozenset({"schema_version", "body", "body_sha256"})
 _KEY_KEYS = frozenset({"schema_version", "key_hex", "key_id"})
 
@@ -228,7 +229,7 @@ class _OpenedSource:
     ancestor_fds: tuple[int, ...]
     ancestor_identities: tuple[tuple[int, ...], ...]
     ancestor_names: tuple[str, ...]
-    final_name: str
+    final_name: str | None
     fd: int
     before: os.stat_result
 
@@ -311,15 +312,22 @@ def _intent_digest(
     create_key: str,
     kind: ProjectKind,
     source_path: str | None,
+    source_locator: str | None = None,
 ) -> str:
-    raw = _canonical(
-        {
+    body = {
+        "schema_version": _SCHEMA_VERSION,
+        "create_key": create_key,
+        "kind": kind.value,
+        "source_path": source_path,
+    }
+    if source_locator is not None:
+        body = {
             "schema_version": _SCHEMA_VERSION,
             "create_key": create_key,
             "kind": kind.value,
-            "source_path": source_path,
+            "source_locator": source_locator,
         }
-    )
+    raw = _canonical(body)
     return hmac.new(key, _INTENT_DOMAIN + raw, hashlib.sha256).hexdigest()
 
 
@@ -2558,9 +2566,11 @@ class DurableProjectService:
         create_key: str,
         kind: ProjectKind,
         source_path: str | None,
+        source_locator: str | None = None,
+        descriptor_source: _OpenedSource | None = None,
     ) -> tuple[_Record, _OpenedSource | None]:
         catalog = self._acquire(_CATALOG_RESOURCE)
-        opened_source = None
+        opened_source = descriptor_source
         try:
             _, record_count = self._quota_admit(extra_bytes=0, extra_files=0)
             requests_fd = _open_owned(self._requests)
@@ -2587,6 +2597,7 @@ class DurableProjectService:
                     create_key=create_key,
                     kind=kind,
                     source_path=source_path,
+                    source_locator=source_locator,
                 )
                 if raw is not None:
                     record = _record_from_bytes(raw, expected_name=name)
@@ -2597,7 +2608,8 @@ class DurableProjectService:
                     if record.kind is not kind:
                         raise _ServiceError(ProjectServicePortErrorCode.CONFLICT)
                     if record.kind is ProjectKind.IMPORT_FCSTD and record.phase == "RESERVED":
-                        opened_source = self._open_source(source_path)
+                        if opened_source is None:
+                            opened_source = self._open_source(source_path)
                         if _source_identity(opened_source.before) != record.source_identity:
                             raise _ServiceError(ProjectServicePortErrorCode.CONFLICT)
                     return record, opened_source
@@ -2606,7 +2618,8 @@ class DurableProjectService:
                 source_size = None
                 source_identity = None
                 if kind is ProjectKind.IMPORT_FCSTD:
-                    opened_source = self._open_source(source_path)
+                    if opened_source is None:
+                        opened_source = self._open_source(source_path)
                     source_size = opened_source.before.st_size
                     source_identity = _source_identity(opened_source.before)
                 record = _Record(
@@ -2670,6 +2683,57 @@ class DurableProjectService:
                     with contextlib.suppress(_ServiceError):
                         opened_source.close()
                 raise
+
+    def _open_descriptor_source(
+        self,
+        *,
+        source_fd: object,
+        source_locator: object,
+        source_identity: object,
+    ) -> _OpenedSource:
+        if (
+            type(source_fd) is not int
+            or source_fd < 0
+            or type(source_locator) is not str
+            or _DIGEST.fullmatch(source_locator) is None
+        ):
+            raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+        mapping = _exact_mapping(source_identity, _DESCRIPTOR_SOURCE_KEYS)
+        _require_schema_version(mapping["schema_version"])
+        digest = _exact_string(mapping["digest"], _DIGEST)
+        if not hmac.compare_digest(digest, source_locator):
+            raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+        expected = _source_identity_from_mapping(
+            {key: mapping[key] for key in _SOURCE_IDENTITY_KEYS}
+        )
+        if expected is None:
+            raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+        descriptor = -1
+        succeeded = False
+        try:
+            descriptor = os.dup(source_fd)
+            os.set_inheritable(descriptor, False)
+            before = os.fstat(descriptor)
+            if not self._safe_source(before) or _source_identity(before) != expected:
+                raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+            opened = _OpenedSource(
+                ancestor_fds=(),
+                ancestor_identities=(),
+                ancestor_names=(),
+                final_name=None,
+                fd=descriptor,
+                before=before,
+            )
+            succeeded = True
+            return opened
+        except _ServiceError:
+            raise
+        except (OSError, ValueError):
+            raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT) from None
+        finally:
+            if descriptor >= 0 and not succeeded:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
 
     def _open_source(self, source_path: str | None) -> _OpenedSource:
         if type(source_path) is not str or not source_path.startswith("/"):
@@ -2765,15 +2829,21 @@ class DurableProjectService:
             self._verify_source_chain(opened)
             digest = hashlib.sha256()
             remaining = opened.before.st_size
+            offset = 0
             while remaining:
                 try:
-                    chunk = os.read(opened.fd, min(_COPY_CHUNK_BYTES, remaining))
+                    chunk = os.pread(
+                        opened.fd,
+                        min(_COPY_CHUNK_BYTES, remaining),
+                        offset,
+                    )
                 except OSError:
                     raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT) from None
                 if not chunk:
                     raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
                 digest.update(chunk)
                 remaining -= len(chunk)
+                offset += len(chunk)
             self._verify_source_chain(opened)
             if (
                 existing_stage.size != opened.before.st_size
@@ -2781,10 +2851,6 @@ class DurableProjectService:
             ):
                 if not self._remove_record_owned_partial(self._staging, stage_name):
                     raise _ServiceError(ProjectServicePortErrorCode.RECOVERY_REQUIRED)
-                try:
-                    os.lseek(opened.fd, 0, os.SEEK_SET)
-                except OSError:
-                    raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT) from None
             else:
                 updated = replace(record, phase="STAGED", stage=existing_stage)
                 self._write_record(updated)
@@ -2808,8 +2874,13 @@ class DurableProjectService:
             finally:
                 self._release(catalog)
             remaining = opened.before.st_size
+            offset = 0
             while remaining:
-                chunk = os.read(opened.fd, min(_COPY_CHUNK_BYTES, remaining))
+                chunk = os.pread(
+                    opened.fd,
+                    min(_COPY_CHUNK_BYTES, remaining),
+                    offset,
+                )
                 if not chunk:
                     raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
                 digest.update(chunk)
@@ -2820,6 +2891,7 @@ class DurableProjectService:
                         raise OSError
                     view = view[written:]
                 remaining -= len(chunk)
+                offset += len(chunk)
             after_source = os.fstat(opened.fd)
             if _identity(after_source) != _identity(opened.before):
                 raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
@@ -2854,9 +2926,21 @@ class DurableProjectService:
                     self._remove_record_owned_partial(self._staging, stage_name)
 
     def _verify_source_chain(self, opened: _OpenedSource) -> None:
+        if not opened.ancestor_fds:
+            if opened.ancestor_identities or opened.ancestor_names or opened.final_name is not None:
+                raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+            try:
+                current = os.fstat(opened.fd)
+            except OSError:
+                raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT) from None
+            if not self._safe_source(current) or _identity(current) != _identity(opened.before):
+                raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+            self._ensure_live()
+            return
         if not (
             len(opened.ancestor_fds) == len(opened.ancestor_identities)
             and len(opened.ancestor_names) + 1 == len(opened.ancestor_fds)
+            and opened.final_name is not None
         ):
             raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
         try:
@@ -3593,6 +3677,52 @@ class DurableProjectService:
         kind: ProjectKind,
         source_path: str | None,
     ) -> ProjectCreateResult | ProjectServicePortFailure:
+        return self._create_project(
+            create_key=create_key,
+            kind=kind,
+            source_path=source_path,
+            source_locator=None,
+            descriptor_source=None,
+        )
+
+    def create_project_from_descriptor(
+        self,
+        *,
+        create_key: str,
+        source_fd: object,
+        source_locator: object,
+        source_identity: object,
+    ) -> ProjectCreateResult | ProjectServicePortFailure:
+        try:
+            self._ensure_live()
+            if type(create_key) is not str or _CREATE_KEY.fullmatch(create_key) is None:
+                raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
+            descriptor_source = self._open_descriptor_source(
+                source_fd=source_fd,
+                source_locator=source_locator,
+                source_identity=source_identity,
+            )
+        except _ServiceError as error:
+            return self._failure(error.code)
+        except Exception:
+            return self._failure(ProjectServicePortErrorCode.INTERNAL_ERROR)
+        return self._create_project(
+            create_key=create_key,
+            kind=ProjectKind.IMPORT_FCSTD,
+            source_path=None,
+            source_locator=str(source_locator),
+            descriptor_source=descriptor_source,
+        )
+
+    def _create_project(
+        self,
+        *,
+        create_key: str,
+        kind: ProjectKind,
+        source_path: str | None,
+        source_locator: str | None,
+        descriptor_source: _OpenedSource | None,
+    ) -> ProjectCreateResult | ProjectServicePortFailure:
         opened_source = None
         key_lease = None
         slot_lease = None
@@ -3604,12 +3734,22 @@ class DurableProjectService:
                 raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
             if type(kind) is not ProjectKind:
                 raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
-            if (kind is ProjectKind.EMPTY) != (source_path is None):
+            if kind is ProjectKind.EMPTY:
+                valid_source = (
+                    source_path is None and source_locator is None and descriptor_source is None
+                )
+            else:
+                valid_source = (source_path is not None) != (
+                    source_locator is not None and descriptor_source is not None
+                )
+            if not valid_source:
                 raise _ServiceError(ProjectServicePortErrorCode.INVALID_INPUT)
             record, opened_source = self._admit_record(
                 create_key=create_key,
                 kind=kind,
                 source_path=source_path,
+                source_locator=source_locator,
+                descriptor_source=descriptor_source,
             )
             key_lease = self._acquire(f"{_PER_KEY_RESOURCE_PREFIX}{create_key}")
             current = self._load_record(create_key)

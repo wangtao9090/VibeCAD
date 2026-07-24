@@ -131,6 +131,50 @@ def _close_application_candidate(application: AgentApplication) -> None:
         pass
 
 
+class _DescriptorProjectCreatePort:
+    __slots__ = ("_descriptor", "_identity", "_locator", "_service", "_source")
+
+    def __init__(
+        self,
+        *,
+        service: object,
+        descriptor: int,
+        locator: str,
+        identity: dict[str, object],
+    ) -> None:
+        self._service = service
+        self._descriptor = descriptor
+        self._locator = locator
+        self._identity = dict(identity)
+        self._source = f"/descriptor/{locator}.FCStd"
+
+    @property
+    def source(self) -> str:
+        return self._source
+
+    def create_project(
+        self,
+        *,
+        create_key: str,
+        kind: object,
+        source_path: str | None,
+    ):
+        from vibecad.application.project_api import (
+            ProjectKind,
+            ProjectServicePortErrorCode,
+            ProjectServicePortFailure,
+        )
+
+        if kind is not ProjectKind.IMPORT_FCSTD or source_path != self._source:
+            return ProjectServicePortFailure(code=ProjectServicePortErrorCode.INVALID_INPUT)
+        return self._service.create_project_from_descriptor(
+            create_key=create_key,
+            source_fd=self._descriptor,
+            source_locator=self._locator,
+            source_identity=self._identity,
+        )
+
+
 class AgentApplication:
     """Process-owned composition root; CAD dependencies remain lazy."""
 
@@ -696,6 +740,44 @@ class AgentApplication:
         api, _ = self._project_bundle_for_request()
         self._ensure_live()
         return api.create_project(request)
+
+    def import_project_descriptor_request(
+        self,
+        request: object,
+        *,
+        source_fd: object,
+        locator: object,
+    ) -> dict[str, object]:
+        self._ensure_live()
+        _, service = self._project_bundle_for_request()
+        self._ensure_live()
+        if (
+            type(source_fd) is not int
+            or source_fd < 0
+            or type(locator) is not dict
+            or type(locator.get("digest")) is not str
+        ):
+            candidate = request
+            proxy = _DescriptorProjectCreatePort(
+                service=service,
+                descriptor=-1,
+                locator="0" * 64,
+                identity={},
+            )
+        else:
+            proxy = _DescriptorProjectCreatePort(
+                service=service,
+                descriptor=source_fd,
+                locator=locator["digest"],
+                identity=locator,
+            )
+            candidate = request
+        if type(candidate) is dict:
+            candidate = dict(candidate)
+            candidate.setdefault("source_path", proxy.source)
+        from vibecad.application.project_api import ProjectApi
+
+        return ProjectApi(port=proxy).create_project(candidate)
 
     def get_project_request(self, request: object) -> dict[str, object]:
         self._ensure_live()

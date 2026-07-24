@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 
 import pytest
 
@@ -967,7 +969,7 @@ def test_v2_unknown_unavailable_and_handler_failure_are_fixed_signed_errors() ->
     assert calls == 1
 
 
-def test_v2_dispatch_rejects_protocol_capabilities_but_preserves_public_source_path() -> None:
+def test_v2_dispatch_rejects_every_path_or_protocol_capability() -> None:
     calls: list[dict[str, object]] = []
 
     def application(params: dict[str, object]) -> dict[str, object]:
@@ -981,7 +983,15 @@ def test_v2_dispatch_rejects_protocol_capabilities_but_preserves_public_source_p
     server, client = _ready_v2_pair()
 
     for index, forbidden in enumerate(
-        ("local_path", "internal_root", "environment", "env", "callable", "python_name"),
+        (
+            "local_path",
+            "source_path",
+            "internal_root",
+            "environment",
+            "env",
+            "callable",
+            "python_name",
+        ),
         start=1,
     ):
         raw = client.encode_request(
@@ -999,21 +1009,237 @@ def test_v2_dispatch_rejects_protocol_capabilities_but_preserves_public_source_p
         }
     assert calls == []
 
-    compatible = client.encode_request(
-        "application.call",
-        {
-            "operation": "create_project",
-            "request": {
-                "schema_version": 1,
-                "kind": "import_fcstd",
-                "source_path": "/read-only/source.FCStd",
-            },
-        },
-        request_id=_v2_request_id(20),
+
+def test_v2_project_import_binds_one_descriptor_to_a_path_free_static_request(
+    tmp_path,
+) -> None:
+    source = tmp_path / "source.FCStd"
+    source.write_bytes(b"descriptor-bound-fcstd")
+    source.chmod(0o600)
+    request = {
+        "schema_version": 1,
+        "create_key": "project_create_" + "a" * 32,
+        "kind": "import_fcstd",
+    }
+    locator = protocol_v2.bind_v2_import_locator(request, os.stat(source))
+    calls: list[tuple[dict[str, object], int]] = []
+    dispatcher = protocol_v2.StaticV2Dispatcher(
+        project_import=lambda params, descriptor: calls.append((params, descriptor)) or {"ok": True}
     )
-    response = client.decode_response(server.dispatch_and_encode(compatible, dispatcher))
-    assert response.result == {"ok": True}
-    assert len(calls) == 1
+    server, client = _ready_v2_pair()
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        raw = client.encode_request(
+            "project.import",
+            {"request": request, "locator": locator},
+            request_id=_v2_request_id(1),
+        )
+        assert str(source).encode() not in raw
+        response = client.decode_response(
+            server.dispatch_and_encode(raw, dispatcher, descriptor=descriptor)
+        )
+        assert response.result == {"ok": True}
+        assert calls == [({"request": request, "locator": locator}, descriptor)]
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize(
+    ("target", "value"),
+    (
+        ("request_schema_version", True),
+        ("request_schema_version", 1.0),
+        ("locator_schema_version", True),
+        ("locator_schema_version", 1.0),
+        ("nlink", True),
+        ("nlink", 1.0),
+    ),
+)
+def test_v2_project_import_rejects_non_exact_integer_identity_fields(
+    tmp_path,
+    target: str,
+    value: object,
+) -> None:
+    source = tmp_path / "source.FCStd"
+    source.write_bytes(b"descriptor-bound-fcstd")
+    source.chmod(0o600)
+    request = {
+        "schema_version": 1,
+        "create_key": "project_create_" + "c" * 32,
+        "kind": "import_fcstd",
+    }
+    locator = protocol_v2.bind_v2_import_locator(request, os.stat(source))
+    if target == "request_schema_version":
+        request["schema_version"] = value
+    elif target == "locator_schema_version":
+        locator["schema_version"] = value
+    else:
+        locator[target] = value
+    locator_body = {key: item for key, item in locator.items() if key != "digest"}
+    locator["digest"] = hashlib.sha256(
+        protocol_v2._IMPORT_LOCATOR_DOMAIN  # noqa: SLF001
+        + protocol_v2._encode(  # noqa: SLF001
+            {
+                "request": request,
+                "identity": locator_body,
+            }
+        )
+    ).hexdigest()
+    calls = 0
+
+    def imported(_params: dict[str, object], _descriptor: int) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"ok": True}
+
+    dispatcher = protocol_v2.StaticV2Dispatcher(project_import=imported)
+    server, client = _ready_v2_pair()
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        raw = client.encode_request(
+            "project.import",
+            {"request": request, "locator": locator},
+            request_id=_v2_request_id(1),
+        )
+        response = client.decode_response(
+            server.dispatch_and_encode(raw, dispatcher, descriptor=descriptor)
+        )
+    finally:
+        os.close(descriptor)
+
+    assert response.error == {
+        "code": "invalid_request",
+        "message": "The local protocol request is invalid.",
+    }
+    assert calls == 0
+
+
+def test_v2_project_import_rejects_missing_unexpected_and_tampered_descriptors(
+    tmp_path,
+) -> None:
+    source = tmp_path / "source.FCStd"
+    source.write_bytes(b"descriptor-bound-fcstd")
+    source.chmod(0o600)
+    request = {
+        "schema_version": 1,
+        "create_key": "project_create_" + "b" * 32,
+        "kind": "import_fcstd",
+    }
+    locator = protocol_v2.bind_v2_import_locator(request, os.stat(source))
+    calls = 0
+
+    def imported(_params: dict[str, object], _descriptor: int) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"ok": True}
+
+    dispatcher = protocol_v2.StaticV2Dispatcher(
+        kernel_ping=lambda _params: {"ok": True},
+        project_import=imported,
+    )
+    server, client = _ready_v2_pair()
+    missing = client.encode_request(
+        "project.import",
+        {"request": request, "locator": locator},
+        request_id=_v2_request_id(1),
+    )
+    response = client.decode_response(server.dispatch_and_encode(missing, dispatcher))
+    assert response.error["code"] == "invalid_request"
+
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        unexpected = client.encode_request(
+            "kernel.ping",
+            {},
+            request_id=_v2_request_id(2),
+        )
+        response = client.decode_response(
+            server.dispatch_and_encode(unexpected, dispatcher, descriptor=descriptor)
+        )
+        assert response.error["code"] == "invalid_request"
+
+        tampered = dict(locator)
+        tampered["size"] = int(tampered["size"]) + 1
+        invalid = client.encode_request(
+            "project.import",
+            {"request": request, "locator": tampered},
+            request_id=_v2_request_id(3),
+        )
+        response = client.decode_response(
+            server.dispatch_and_encode(invalid, dispatcher, descriptor=descriptor)
+        )
+        assert response.error["code"] == "invalid_request"
+    finally:
+        os.close(descriptor)
+    assert calls == 0
+
+
+def test_v2_kernel_retire_has_exact_reason_and_never_accepts_a_descriptor(
+    tmp_path,
+) -> None:
+    daemon_id = "daemon_" + "d" * 32
+    calls: list[dict[str, object]] = []
+    dispatcher = protocol_v2.StaticV2Dispatcher(
+        kernel_retire=lambda params: (
+            calls.append(params)
+            or {
+                "schema_version": 1,
+                "daemon_id": daemon_id,
+                "status": "retiring",
+            }
+        )
+    )
+    server, client = _ready_v2_pair()
+    params = {
+        "daemon_id": daemon_id,
+        "reason": "runtime_uninstall",
+    }
+    valid = client.encode_request(
+        "kernel.retire",
+        params,
+        request_id=_v2_request_id(1),
+    )
+    response = client.decode_response(server.dispatch_and_encode(valid, dispatcher))
+    assert response.error is None
+    assert response.result["status"] == "retiring"
+    assert calls == [params]
+
+    invalid = client.encode_request(
+        "kernel.retire",
+        {
+            "daemon_id": daemon_id,
+            "reason": "ordinary_client_close",
+        },
+        request_id=_v2_request_id(2),
+    )
+    invalid_response = client.decode_response(
+        server.dispatch_and_encode(
+            invalid,
+            dispatcher,
+        )
+    )
+    assert invalid_response.error["code"] == "invalid_request"
+
+    source = tmp_path / "unexpected.bin"
+    source.write_bytes(b"x")
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        unexpected = client.encode_request(
+            "kernel.retire",
+            params,
+            request_id=_v2_request_id(3),
+        )
+        response = client.decode_response(
+            server.dispatch_and_encode(
+                unexpected,
+                dispatcher,
+                descriptor=descriptor,
+            )
+        )
+    finally:
+        os.close(descriptor)
+    assert response.error["code"] == "invalid_request"
+    assert calls == [params]
 
 
 def test_v2_invalid_handler_result_is_sanitized() -> None:

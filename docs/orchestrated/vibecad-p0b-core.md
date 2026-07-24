@@ -644,6 +644,7 @@ remain residual and unauthorized.
 | P0B-E13 / 2026-07-23T13:25:15Z | P0B-C10 under P0B-R1.1/A01/A02; P0B-D14/D15/D21/D22-R1; D21 direct full-gate repair adds `src/vibecad/application/project_create.py` and `tests/test_project_bootstrap.py` to replace volatile ancestor timestamps with stable directory identity while preserving source/path rebinding checks | this C10 commit / non-force push required | protocol RED `9 failed, 16 passed, 43 deselected`; checkout-snapshot RED `12 failed, 66 deselected`; review repair cycles close mint-vs-close grant retention, non-exact open grant descriptors, pre-capture TTL loss and lifetime grant-ID exhaustion; deterministic baseline RED `1 failed, 148 deselected` closes unrelated ancestor-entry churn; canonical C10 `141 passed, 1 warning`; affected `308 passed, 1 warning`; project-bootstrap `149 passed` in three consecutive full-module runs; v1/MCP surface `100 passed, 55 deselected`; final full non-slow `4643 passed, 95 deselected, 1 warning`; full Ruff, exact 13-file format, diff and fsck clean; grant security/contract and baseline security/regression reviews all GO with `Critical 0 / Major 0 / Minor 0`; 13-file implementation/test content-manifest SHA-256 `8ed69c721c064007dab2c49efb236199a4d61ddcd0e63a08525415853e83a6fa` | Linux/Windows remain P0B-RES-02; post-claim malicious same-UID pathname replacement remains P0B-RES-03; import `source_path` remains P0B-RES-13; one unchanged macOS multithreaded-fork warning remains | P0B-S13 | accepted-green |
 | P0B-E14 / 2026-07-23T17:02:31Z | P0B-C11 under P0B-R1.1/A01/A02; P0B-D16/D17/D17A/D21/D22-R1 | this C11 commit / non-force push required | canonical C11 `341 passed, 1 deselected`; Worker non-slow `54 passed, 1 deselected` in three consecutive runs; real managed FreeCAD 1.1.0 `1 passed, 54 deselected`; adapter/program/static `163 passed, 1 deselected`; controller full `4698 passed, 96 deselected, 17 warnings`, independently repeated with the same counts; changed-file compile, Ruff, format and diff clean; three independent final reviews all GO with `Critical 0 / Important 0`; no residual Worker process or private Worker directory; 11-file implementation/test content-manifest SHA-256 `80006968e1611d048be5bda7f1a36c758d68a41224ad53545ac6eff729556de7` | C11 is an injectable Worker substrate only; the default `AgentApplication` path remains in-process until C12 owns injection plus durable loss/cancel/reconcile; the existing macOS Python 3.13 multithreaded-fork warning class remains outside C11 | P0B-S14 | accepted-green |
 | P0B-E15 / 2026-07-23T22:01:18Z | P0B-C12 under P0B-R1.1/A01/A02; P0B-D01/D05/D09/D10/D16/D17/D17A/D18/D21/D22-R1; D21 direct-impact repair adds `src/vibecad/runtime/spec.py` because `request_active_cancel` changes the canonical public contract digest while installed-package refresh remains C14 | this C12 commit / non-force push required | semantic and review RED cycles close unproved cancellation laundering, same-generation termination retry, self-loss eviction, concurrent cancel convergence, orphan reservation cleanup, pre-CAD revert durability and raced-existing create disposition; managed M03 final `10 passed, 80 deselected` across load/mutation/checkpoint/STEP/evidence × hang/crash; active-cancel fixture final `10/10`; Worker non-slow `79 passed, 11 deselected`; canonical C12 `1016 passed, 22 deselected`; controller full `4830 passed, 107 deselected, 17 warnings`, independently repeated with the same counts; 28-tool SDK projection remains `21,438` bytes and complete frame `21,483` bytes; canonical public receipt SHA-256 `ae495ba457af40a5837a03e77eef4b396b0a4209755878350bc341ac7de8bfd3`; full Ruff, exact 30-file format/compile, diff and fsck clean; independent final review GO `Critical 0 / Important 0 / Medium 1`; complete staged source/tests diff SHA-256 `47a6b13a0be9b98aa1e1081ac4dd5b49262f504dbd10269907c728d804d8b7fd`; 30-file content-manifest SHA-256 `239c37de120971fe36c98ca7f371d07b159ecf1a594cff09257f7d4a9b7a4e2c` | P0B-RES-06 permits only TaskRun-referenced sealed non-HEAD evidence revisions until GC; P0B-RES-14 records the non-blocking private preload-helper ownership split; 54 unchanged files remain outside the changed-file format gate; the existing 17 macOS multithreaded-fork warnings remain | P0B-S15 | accepted-green |
+| P0B-E16 / 2026-07-24T00:47:05Z | P0B-C13 under P0B-R1.1/A01/A02; P0B-D02/D11/D14/D18/D21/D22-R1; P0B-C13-D21-01/D21-02 | this C13 commit / immediate non-force push required | review-driven RED/GREEN cycles close descriptor/path tunnelling, shared-OFD offset races, response rewriting, long admitted-drain truncation, uninstall/startup ABA, incomplete retirement proof and public Workbench marker bypass; canonical C13 `386 passed, 1 warning`; direct impact `526 passed, 1 deselected`; real MCP-created M04 Accept/Reject `2 passed` in two consecutive runs; real managed FreeCAD Worker smoke `1 passed, 89 deselected` in two consecutive runs; final full non-slow `4890 passed, 107 deselected, 19 warnings` after one unrelated active-cancel observation flake passed `4/4` focused; 28-tool SDK projection remains `21,438` bytes and complete frame `21,483` bytes; full changed-file Ruff/format/compile, diff and fsck clean; independent semantic/exact-diff and protocol/FD/lifecycle reviews both GO `Critical 0 / Major 0 / Medium 0`; 21-file source/test content-manifest SHA-256 `16965a7573434a491ad0bad7d884a88b22e19c64ea3223c53d099b84eaf40eaa` | C14 still owns installed-package and exact managed-receipt refresh before the current-runtime public FreeCAD matrix; the legacy slow isolation test still asserts pre-C12 per-project executor object identity; 19 warnings are the expected malformed-ancillary warning plus existing macOS multithreaded-fork deprecations; the separate research document remains excluded | P0B-S16 | accepted-green |
 
 ## 12. Recovery Snapshot P0B-S00
 
@@ -1705,3 +1706,282 @@ remain residual and unauthorized.
 - C13 may add only thin MCP/Workbench clients over the one daemon. PR, tag,
   release, marketplace publication, force-push and external spend remain
   unauthorized.
+
+## 28. Task Packet P0B-C13
+
+### 1. Entry state and product outcome
+
+- The accepted and remotely verified anchor is
+  `a5fba84b8c50980f73051de563445c1138fad7b3`; local `HEAD`, upstream and
+  `origin/codex/agent-stage3` are equal.
+- C09-C12 provide an authenticated daemon, session-bound managed-file grants,
+  a killable FreeCAD Worker and durable cancellation/reconciliation. The MCP
+  server still constructs an in-process `AgentApplication`, so those
+  facilities are not yet the product's sole execution path.
+- C13 makes every stateful project/revision/task/review/artifact/modeling
+  operation use one authenticated daemon-owned `AgentApplication` and Task
+  Kernel. Runtime installation/status controls remain bootstrap-local and
+  inert discovery remains daemon-independent.
+- After C13, an MCP client and a public fake-Workbench client can reconnect,
+  observe the same task generation, draft/revision hashes and verdict, claim
+  the same daemon-created checkout safely, and converge on one durable
+  Accept/Reject and HEAD result. Client EOF never stops the daemon. This is the
+  G1 backend contract, not a FreeCAD Qt Workbench or visual-diff claim.
+- The unchanged pre-RED C13 baseline is
+  `289 passed in 12.46s` for
+  `tests/test_interaction_protocol.py`, `tests/test_local_daemon.py`,
+  `tests/test_mcp_transport.py`, `tests/test_server_agent_surface.py` and
+  `tests/test_server_new_tools.py`.
+
+### 2. Bound design decisions
+
+- **P0B-C13-D01 — One stateful route.** The MCP adapter and the public local
+  client are thin facades over `LocalKernelClient`; neither may construct
+  `AgentApplication`, a Task/Revision store or a CAD Worker. The four runtime
+  maintenance controls and bootstrap-safe static capabilities remain local so
+  daemon startup never depends on runtime installation.
+- **P0B-C13-D02 — Bounded daemon bootstrap.** A managed-runtime client first
+  authenticates to the published daemon. If none is usable, it may spawn the
+  fixed `python -B -m vibecad.daemon` entry with closed descriptors and a new
+  process group, then converge within a fixed deadline. Concurrent starters
+  rely on the existing daemon authority lease, and losing starters exit.
+  Closing or losing a client closes only its authenticated session; daemon
+  shutdown is never coupled to MCP/Workbench EOF.
+- **P0B-C13-D03 — No transport retry of uncertain writes.** The high-level
+  application adapter preserves the existing envelopes and exact operation
+  allowlist. It never transparently retries a call after send/response
+  uncertainty. Recovery uses the already durable operation key, list/get or
+  explicit resume path against a new authenticated client.
+- **P0B-C13-D04 — Descriptor-bound import closes P0B-RES-13.** The public MCP
+  `create_project(kind=import_fcstd, source_path=...)` schema remains stable,
+  but the MCP process opens the exact same-user, single-link, bounded regular
+  file locally and transfers only that descriptor through a session-bound
+  macOS `SCM_RIGHTS` capability. No path crosses protocol v2. A
+  domain-separated locator digest plus exact file identity binds replay;
+  symlink, hardlink, FIFO/directory, unexpected or truncated ancillary data,
+  descriptor count, replacement and mutation races fail closed. The daemon
+  copies from the received descriptor into its existing private project-create
+  transaction and never reopens a client path.
+- **P0B-C13-D05 — Immutable resources stay readable without a second writer.**
+  MCP resource reads use a strict read-only artifact reader over already
+  published immutable materializations. It opens only existing private
+  directories and records, performs no mkdir/create/lock/recovery/cleanup or
+  FreeCAD work, and revalidates record, directory, file, size and hash
+  bindings. This preserves the existing 64 MiB resource contract without
+  tunnelling base64 through protocol v2's 1 MiB frame and without constructing
+  a second `ArtifactStore` writer.
+- **P0B-C13-D06 — Surface stability.** Public names, schemas, annotations,
+  result envelopes, ResourceLinks and discovery bytes remain unchanged at 28
+  tools. The fake Workbench imports only the public local client package and
+  receives no internal root, secret, TaskService, RevisionStore or Worker
+  object.
+- **P0B-C13-D07 — Crash-safe Kernel retirement.** Ordinary client close and
+  EOF remain session-only. Confirmed runtime removal uses the authenticated,
+  daemon-id-bound internal `kernel.retire` method; its acknowledgement is sent
+  before admission closes, already-admitted responses drain before idle
+  sessions/Application/Worker close, and the caller waits for the exact
+  receipt/secret/socket/authority publication to disappear. Ping binds the API
+  epoch, package version and Kernel build identity, so an old daemon fails
+  before any Application call; the managed opener may authenticated-retire that
+  exact incompatible daemon and perform one bounded bootstrap retry, but never
+  retries an Application mutation. A pending uninstall marker blocks daemon
+  connect/start, and pending removal must retire the Kernel before deleting a
+  runtime; failure preserves both marker and runtime.
+
+These choices implement P0B-D02/D11/D14/D18 and select the descriptor-capability
+branch already reserved by P0B-RES-13. They do not widen the product boundary
+or require another user decision under P0B-D21.
+
+### 3. Exact implementation allowlist
+
+Only the following files may change in C13. A file remains untouched when its
+RED does not require it:
+
+- `src/vibecad/server.py`
+- `src/vibecad/daemon/__init__.py`
+- `src/vibecad/daemon/client.py`
+- `src/vibecad/daemon/facade.py`
+- `src/vibecad/daemon/service.py`
+- new `src/vibecad/daemon/bootstrap.py`
+- new `src/vibecad/daemon/adapters.py`
+- `src/vibecad/interaction/protocol_v2.py`
+- `src/vibecad/application/agent.py`
+- `src/vibecad/application/project_create.py`
+- `src/vibecad/application/artifacts.py`
+- `src/vibecad/runtime/status.py`
+- `src/vibecad/runtime/uninstall.py`
+- `tests/test_interaction_protocol.py`
+- `tests/test_local_daemon.py`
+- `tests/test_server_agent_surface.py`
+- `tests/test_server_new_tools.py`
+- `tests/test_agent_application.py`
+- `tests/test_project_bootstrap.py`
+- `tests/test_artifact_materialization.py`
+- `tests/test_uninstall.py`
+- new `tests/test_p0b_acceptance.py`
+- this orchestration artifact
+
+`src/vibecad/mcp_transport.py`, `src/vibecad/supervisor.py`, public tool specs,
+package/version/release metadata and documentation are read-only unless a
+genuine C13 RED proves a direct defect and P0B-D21 is recorded before the edit.
+The untracked `docs/CAD_AGENT_PRODUCT_RESEARCH.md` is outside the P0-B
+allowlist and commit budget and remains excluded.
+
+**P0B-C13-D21-01 — exact allowlist repair.** The confirmed-uninstall RED proved
+that a server can durably write `.uninstall_requested`, crash before retiring
+the detached daemon, and then let the next supervisor delete the interpreter
+under that live daemon. The original C13 allowlist could not close this crash
+window. Under P0B-D21, only `src/vibecad/runtime/uninstall.py` and its existing
+`tests/test_uninstall.py` are added above. This is a correctness repair inside
+the already-approved runtime lifecycle boundary; it adds no public tool,
+product capability or user decision.
+
+**P0B-C13-D21-02 — startup-authority allowlist repair.** Independent protocol
+review proved a cross-process ABA window that a marker recheck cannot close:
+the bootstrap parent can spawn a still-unpublished child and crash, an
+uninstaller can then create and clear its marker while removing the runtime,
+and the delayed child can publish afterward. Closing the already-approved
+bounded-bootstrap/runtime-retirement boundary requires the existing runtime
+maintenance lock generation to remain kernel-claimed across `Popen` and daemon
+publication, including parent-process loss. Under P0B-D21,
+`src/vibecad/runtime/status.py` is added above only to expose the bounded lock
+wait and inherited-claim validation used by bootstrap and `run_daemon`; the
+deterministic regression remains in the already allowed
+`tests/test_p0b_acceptance.py`. This adds no public operation, engine behavior
+or product decision.
+
+### 4. RED, GREEN and acceptance matrix
+
+1. Prove the current MCP process still opens `AgentApplication` directly and
+   the public local client/two-client acceptance module is absent.
+2. Prove concurrent bounded bootstrap has one daemon authority, authenticated
+   reuse and clean loser exit; daemon PID survives MCP EOF and a fresh
+   MCP/Workbench connection.
+3. Prove all stateful operations route through the daemon while unknown tools,
+   invalid schemas, discovery and runtime controls do not open it.
+4. Prove a sent-but-unanswered stateful request is not transport-retried;
+   replay/list/get recovery returns one durable lineage after reconnect.
+5. Prove descriptor import success, response-loss replay, restart and the full
+   ancillary/symlink/hardlink/FIFO/directory/replacement/mutation negative
+   matrix; original source bytes and identity remain unchanged.
+6. Prove read-only resource success with exact URI/MIME/blob/hash/size and
+   read-limit/error parity while a complete before/after tree snapshot records
+   zero writes and no FreeCAD import.
+7. Run M04 twice: one MCP-created review draft is observed and claimed by a
+   fake Workbench, then Accept converges to one HEAD; a separate draft Reject
+   converges with HEAD unchanged. Stale/revoked and cross-session grants fail.
+8. Preserve exactly 28 tools and the frozen discovery projections; run the
+   canonical C13 suite, direct-impact suites, full non-slow suite, real managed
+   FreeCAD M04, full Ruff, exact changed-file format, compile, diff and fsck.
+9. Require independent semantic, protocol/FD security and exact-diff reviews
+   with Critical/Major zero before staging the named files and this ledger,
+   committing `feat(agent): route MCP and Workbench clients through one kernel`,
+   non-force pushing and verifying three-way SHA equality.
+
+### 5. Circuit breakers and recovery
+
+- If macOS `SCM_RIGHTS` cannot bind exactly one admitted request to exactly one
+  descriptor without leak/reorder ambiguity, freeze C13 rather than accepting
+  a client path or byte-size workaround.
+- If ordinary client close, MCP EOF, runtime swap or uninstall can terminate
+  or strand the daemon/Worker authority, freeze the affected lifecycle slice.
+- If a read-only resource path writes, repairs, locks or silently skips corrupt
+  state, remove it and retain the current daemon-backed export behavior until
+  a zero-write reader passes.
+- If any stateful MCP operation constructs a second Application/store/Worker,
+  or if an uncertain mutation is retried automatically, C13 is NO-GO.
+- Recovery anchor is the remotely verified C12 commit above. The separate
+  research document is preserved untracked and must never be staged with C13.
+
+## 29. Recovery Snapshot P0B-S16
+
+### 1. Completed milestones
+
+- C13 routes every stateful MCP and public fake-Workbench operation through
+  one authenticated daemon-owned `AgentApplication` and Task Kernel. The MCP
+  server no longer constructs an Application, Task/Revision store or CAD
+  Worker; runtime maintenance controls and inert discovery remain local.
+- `LocalAgentClient` is the shared public adapter. It performs pure
+  request-envelope preflight, never retries an uncertain mutation, verifies
+  exact Kernel API/package/build identity, reconnects without coupling client
+  EOF to daemon lifetime, and lets each Workbench session mint and claim only
+  its own file grant.
+- Import from a public `source_path` is converted locally into exactly one
+  `SCM_RIGHTS` descriptor plus a path-free identity locator. Protocol v2
+  rejects paths, unexpected/truncated ancillary data and non-exact integer
+  identities. The daemon duplicates and verifies the descriptor, then uses
+  explicit-offset `pread`; a retained sender changing the shared open-file
+  offset between every 7-byte chunk cannot alter the durable FCStd bytes,
+  digest or size.
+- The immutable artifact resource path now uses a strict read-only reader.
+  It opens only existing private directories, records and published files,
+  revalidates identity/size/hash bindings and performs no create, mkdir, lock,
+  recovery, cleanup or FreeCAD work. No second writer exists.
+- Runtime install/uninstall and daemon startup share one crash-safe
+  maintenance generation. A bootstrap child inherits the exact lock claim
+  through publication; an unproved losing child retains it until process exit.
+  Pending uninstall blocks canonical MCP/Workbench admission and daemon
+  publication. Authenticated retirement acknowledges before closing
+  admission, drains every admitted request without a fixed execution cutoff
+  and returns only after the exact daemon PID and publication disappear.
+- P0B-M04 now creates project, task and review draft through the real MCP
+  handler, including model-program validation, execution, FCStd checkpoint,
+  STEP export and evidence collection. A second public client independently
+  opens and claims the draft, then both clients observe identical task,
+  revision, manifest, verdict and HEAD results across reconnect, Accept and
+  Reject.
+- Final controller gates are canonical C13
+  `386 passed, 1 warning`, direct impact
+  `526 passed, 1 deselected`, two consecutive M04 runs at `2 passed`, and
+  two real managed FreeCAD Worker runs at `1 passed, 89 deselected`. The first
+  full non-slow run had one transient observation of the later legal
+  `CANCELLING` state in an unchanged active-cancel test; that test then passed
+  four focused runs. The frozen second full run is
+  `4890 passed, 107 deselected, 19 warnings in 314.28s`.
+- The public surface remains exactly 28 tools. The SDK discovery projection is
+  still `21,438` bytes with SHA-256
+  `5d7703a55dd7b20c21c487d6f4740fbfb894cf6867c840ccb30adf57de63efda`;
+  the complete frame is still `21,483` bytes with SHA-256
+  `22c903b05fc6e46868bd74380880cca5c915f312ac2ddf24f7e48896b8cdf826`.
+- Full changed-file Ruff, format and compile gates pass; `git diff --check`
+  and `git fsck --no-dangling` pass. The 21-file allowlisted source/test
+  content-manifest SHA-256 is
+  `16965a7573434a491ad0bad7d884a88b22e19c64ea3223c53d099b84eaf40eaa`.
+  Independent semantic/exact-diff and protocol/FD/lifecycle reviews are both
+  GO with `Critical 0 / Major 0 / Medium 0`.
+
+### 2. Next steps
+
+1. Stage exactly the 21 frozen C13 source/test files plus this orchestration
+   artifact. Do not stage `docs/CAD_AGENT_PRODUCT_RESEARCH.md`.
+2. Commit as
+   `feat(agent): route MCP and Workbench clients through one kernel`, perform
+   the already-authorized immediate non-force push and verify exact
+   `HEAD == @{upstream} == origin/codex/agent-stage3`.
+3. Recover C14 from that remote anchor. Refresh the installed package, Skill
+   projection and exact managed-runtime receipt together, then run the current
+   managed public FreeCAD matrix. Do not revive the pre-C12 per-project
+   executor-object identity assertion.
+
+### 3. Approved decisions
+
+- P0B-A01/A02 and P0B-D01..D22 plus D08A/D17A/D22-R1 remain active.
+- MCP, Workbench and later external Agent integrations are clients of the one
+  expert CAD Agent/Task Kernel. They do not receive a second scheduler,
+  RevisionStore authority, Worker route or model-token entitlement.
+- C13 closes P0B-RES-13 with a descriptor capability, not a path tunnel or
+  generic filesystem tool. The same-UID local client remains inside the
+  approved trust boundary; cross-platform transport remains P0B-RES-02.
+- C14, not C13, owns package/version/Skill/managed-receipt refresh. The
+  installed current-prefix receipt is intentionally not rewritten in this
+  commit.
+
+### 4. Execution discipline
+
+- Freeze the reviewed 21 source/test files while this append-only ledger edit
+  changes only the orchestration artifact. Use exact named-file staging and
+  preserve the separate untracked research document.
+- Continue with `native-plan / spawn-send-wait / repo-artifact /
+  native-session-poll`, immediate non-force push and three-way local/upstream/
+  remote equality. PR, tag, release, marketplace publication, force-push and
+  external spend remain unauthorized.

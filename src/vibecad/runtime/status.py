@@ -96,6 +96,7 @@ _MAX_RECEIPT_BYTES = 4096
 _MAX_LOG_APPEND_BYTES = 64 * 1024
 _BOUNDED_VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+RUNTIME_MAINTENANCE_CLAIM_FD_ENV = "VIBECAD_STARTUP_LOCK_FD"
 _PRE_EPOCH_MANAGED_RECEIPT_KEYS = frozenset(
     {
         "schema",
@@ -1847,18 +1848,22 @@ class FileLock:
             if not stat.S_ISDIR(info.st_mode) or identity != (live.st_dev, live.st_ino):
                 return False
             owner = self._read_owner_at(lock_fd)
+            try:
+                names = set(os.listdir(lock_fd))
+            except OSError:
+                return False
             if owner is not None and isinstance(owner.get("pid"), int):
                 stale = not _pid_alive(owner["pid"])
             else:
-                stale = time.time() - info.st_mtime > _STALE_SECONDS
+                # A crash after unlinking owner.json but before rmdir leaves an
+                # exact empty generation. Once its flock is acquired there is
+                # no live initializer/releaser, so waiting an hour would only
+                # strand bootstrap behind a lock with no possible owner.
+                stale = not names or time.time() - info.st_mtime > _STALE_SECONDS
             if not stale:
                 return False
             live = os.stat(self.path.name, dir_fd=parent.fd, follow_symlinks=False)
             if identity != (live.st_dev, live.st_ino):
-                return False
-            try:
-                names = set(os.listdir(lock_fd))
-            except OSError:
                 return False
             if not names.issubset({"owner.json", ".reclaim"}):
                 return False
@@ -2151,14 +2156,108 @@ class FileLock:
                 raise RuntimeError(f"等待运行时维护锁超时：{self.path}")
             time.sleep(poll_interval)
         try:
-            yield
+            yield self
         finally:
             self._release_owned()
 
+    def inheritable_claim_fd(self) -> int:
+        """Return the live POSIX claim fd for a crash-safe subprocess handoff."""
+
+        token = self._token
+        identity = self._identity
+        parent = self._parent_pin
+        descriptor = self._lock_fd
+        if token is None or identity is None or parent is None or descriptor < 0:
+            raise RuntimeError("当前平台没有可继承的运行时维护锁 claim")
+        try:
+            parent.validate()
+            opened = os.fstat(descriptor)
+            live = os.stat(self.path.name, dir_fd=parent.fd, follow_symlinks=False)
+            owner = self._read_owner_at(descriptor)
+        except (OSError, ValueError):
+            raise RuntimeError("运行时维护锁 claim 已失效") from None
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or identity != (opened.st_dev, opened.st_ino)
+            or identity != (live.st_dev, live.st_ino)
+            or owner is None
+            or owner.get("token") != token
+        ):
+            raise RuntimeError("运行时维护锁 claim 身份不匹配")
+        return descriptor
+
+    def defer_release(self):
+        """Transfer this exact claim to a later, single release callback."""
+
+        if (
+            self._token is None
+            or self._identity is None
+            or self._parent_pin is None
+            or self._lock_fd < 0
+        ):
+            raise RuntimeError("运行时维护锁 claim 无法延迟释放")
+        deferred = FileLock(self.path)
+        deferred._token = self._token
+        deferred._identity = self._identity
+        deferred._parent_pin = self._parent_pin
+        deferred._lock_fd = self._lock_fd
+        self._token = None
+        self._identity = None
+        self._parent_pin = None
+        self._lock_fd = -1
+        release_lock = None
+
+        def release() -> None:
+            nonlocal release_lock
+            if release_lock is None:
+                release_lock = True
+                deferred._release_owned()
+
+        return release
+
 
 @contextlib.contextmanager
-def runtime_maintenance_lock():
+def runtime_maintenance_lock(
+    *,
+    timeout: float = 300.0,
+    poll_interval: float = 0.05,
+):
     """Serialize install, repair and uninstall across replacement generations."""
     _ensure_maintenance_write_root()
-    with FileLock(paths.maintenance_lock()).acquire_wait():
+    with FileLock(paths.maintenance_lock()).acquire_wait(
+        timeout=timeout,
+        poll_interval=poll_interval,
+    ) as claim:
+        yield claim
+
+
+@contextlib.contextmanager
+def inherited_runtime_maintenance_claim(descriptor: object):
+    """Adopt a bootstrap parent's exact POSIX lock generation until publication."""
+
+    if type(descriptor) is not int or descriptor < 0:
+        raise RuntimeError("继承的运行时维护锁 descriptor 无效")
+    try:
+        import fcntl
+
+        os.set_inheritable(descriptor, False)
+        opened = os.fstat(descriptor)
+        live = os.stat(paths.maintenance_lock(), follow_symlinks=False)
+        getuid = getattr(os, "geteuid", None)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (live.st_dev, live.st_ino)
+            or stat.S_IMODE(opened.st_mode) & 0o077
+            or (hasattr(opened, "st_uid") and getuid is not None and opened.st_uid != getuid())
+        ):
+            raise RuntimeError("继承的运行时维护锁 generation 不匹配")
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (ImportError, OSError):
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        raise RuntimeError("无法验证继承的运行时维护锁 claim") from None
+    try:
         yield
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)

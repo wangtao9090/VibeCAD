@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import array
 import contextlib
 import ctypes
 import hashlib
@@ -523,6 +524,33 @@ class _FakeDaemonApplication:
             "error": None,
         }
 
+    def import_project_descriptor_request(
+        self,
+        request: object,
+        *,
+        source_fd: int,
+        locator: object,
+    ) -> dict[str, object]:
+        value = os.fstat(source_fd)
+        content = os.pread(source_fd, value.st_size, 0)
+        self.calls.append(
+            (
+                "project.import",
+                {
+                    "request": request,
+                    "locator": locator,
+                    "descriptor": source_fd,
+                    "content": content,
+                },
+            )
+        )
+        return {
+            "schema_version": 1,
+            "ok": True,
+            "result": {"kind": "import_fcstd"},
+            "error": None,
+        }
+
     def open_checkout(self, *, open_key: str, source: object) -> _FakeCheckoutDescriptor:
         self.calls.append(("checkout.open", (open_key, source)))
         return _FakeCheckoutDescriptor(self.checkout_id)
@@ -681,6 +709,34 @@ def _recv_v2_frame(connection: socket.socket) -> bytes:
     return payload
 
 
+def _raw_v2_call_with_descriptors(
+    client: object,
+    *,
+    method: str,
+    params: dict[str, object],
+    descriptors: list[int],
+    request_index: int,
+):
+    request = client._protocol.encode_request(  # noqa: SLF001
+        method,
+        params,
+        request_id=f"request_{request_index:032x}",
+    )
+    frame = protocol_v2.encode_v2_frame(request)
+    rights = array.array("i", descriptors)
+    sent = client._connection.sendmsg(  # noqa: SLF001
+        [frame],
+        [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights)],
+    )
+    if sent < len(frame):
+        client._connection.sendall(frame[sent:])  # noqa: SLF001
+    response = client._reader.receive(  # noqa: SLF001
+        client._connection,  # noqa: SLF001
+        deadline=time.monotonic() + protocol_v2.V2_IDLE_TIMEOUT_SECONDS,
+    )
+    return client._protocol.decode_response(response)  # noqa: SLF001
+
+
 def test_c09_public_contract_is_closed_and_contains_no_grant_surface() -> None:
     assert daemon_api.DAEMON_AUTHORITY == DAEMON_AUTHORITY
     assert daemon_api.DAEMON_DIRECTORY_NAME == "daemon"
@@ -815,6 +871,14 @@ def test_real_client_authenticates_and_claims_one_path_bound_checkout_grant() ->
             "daemon_id": daemon.daemon_id,
             "status": "ready",
             "protocol": {"major": 2, "minor": 0},
+            "api": {
+                "name": "vibecad.task-kernel",
+                "epoch": 1,
+            },
+            "implementation": {
+                "package_version": "0.5.0",
+                "build_id": "p0b-c13.1",
+            },
         }
         capabilities = client.call(
             "application.call",
@@ -1171,11 +1235,303 @@ def test_import_source_path_and_unknown_operation_fail_before_application() -> N
                 "request": {},
             },
         )
-        assert imported.error["code"] == "unavailable"
-        assert empty_with_path.error["code"] == "unavailable"
+        assert imported.error["code"] == "invalid_request"
+        assert empty_with_path.error["code"] == "invalid_request"
         assert reflection.error["code"] == "invalid_request"
         assert unknown.error["code"] == "unknown_method"
         assert application.calls == []
+    finally:
+        if client is not None:
+            client.close()
+        if daemon is not None:
+            daemon.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@DARWIN_ONLY
+def test_descriptor_import_crosses_daemon_without_a_path_and_closes_received_fd() -> None:
+    base, data_root = _c09_root()
+    source = base / "source.FCStd"
+    source.write_bytes(b"descriptor-bound-import")
+    source.chmod(0o600)
+    before = source.stat()
+    factories: list[object] = []
+    daemon = None
+    client = None
+    try:
+        daemon = daemon_api.LocalKernelDaemon.start(
+            data_root=data_root,
+            application_factory=_fake_daemon_factory(factories),
+        )
+        client = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        request = {
+            "schema_version": 1,
+            "create_key": "project_create_" + "1" * 32,
+            "kind": "import_fcstd",
+        }
+        response = client.import_project(request, source_path=str(source))
+        assert response.error is None
+        assert response.result["result"] == {"kind": "import_fcstd"}
+
+        application = factories[0][2]
+        assert len(application.calls) == 1
+        operation, captured = application.calls[0]
+        assert operation == "project.import"
+        assert captured["request"] == request
+        assert "source_path" not in captured["request"]
+        assert captured["content"] == b"descriptor-bound-import"
+        locator = captured["locator"]
+        assert locator["dev"] == before.st_dev
+        assert locator["ino"] == before.st_ino
+        assert locator["size"] == before.st_size
+        with pytest.raises(OSError):
+            os.fstat(captured["descriptor"])
+        assert source.read_bytes() == b"descriptor-bound-import"
+        after = source.stat()
+        assert (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_uid,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) == (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_uid,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+    finally:
+        if client is not None:
+            client.close()
+        if daemon is not None:
+            daemon.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@DARWIN_ONLY
+def test_descriptor_change_after_known_application_result_keeps_that_result() -> None:
+    base, data_root = _c09_root()
+    source = base / "source.FCStd"
+    source.write_bytes(b"descriptor-before")
+    source.chmod(0o600)
+    applications: list[object] = []
+    daemon = None
+    client = None
+
+    class MutatingApplication(_FakeDaemonApplication):
+        def import_project_descriptor_request(
+            self,
+            request: object,
+            *,
+            source_fd: int,
+            locator: object,
+        ) -> dict[str, object]:
+            result = super().import_project_descriptor_request(
+                request,
+                source_fd=source_fd,
+                locator=locator,
+            )
+            source.write_bytes(b"descriptor-changed-after-result")
+            return result
+
+    def factory(*, layout, lease_manager):
+        assert layout.root == data_root
+        assert lease_manager is not None
+        application = MutatingApplication()
+        applications.append(application)
+        return application
+
+    try:
+        daemon = daemon_api.LocalKernelDaemon.start(
+            data_root=data_root,
+            application_factory=factory,
+        )
+        client = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        response = client.import_project(
+            {
+                "schema_version": 1,
+                "create_key": "project_create_" + "9" * 32,
+                "kind": "import_fcstd",
+            },
+            source_path=str(source),
+        )
+
+        assert response.error is None
+        assert response.result["result"] == {"kind": "import_fcstd"}
+        assert len(applications[0].calls) == 1
+        assert source.read_bytes() == b"descriptor-changed-after-result"
+    finally:
+        if client is not None:
+            with contextlib.suppress(daemon_api.DaemonError):
+                client.close()
+        if daemon is not None:
+            daemon.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@DARWIN_ONLY
+def test_daemon_rejects_missing_extra_and_unexpected_ancillary_without_fd_leak() -> None:
+    base, data_root = _c09_root()
+    source = base / "source.FCStd"
+    source.write_bytes(b"descriptor-bound-import")
+    source.chmod(0o600)
+    request = {
+        "schema_version": 1,
+        "create_key": "project_create_" + "3" * 32,
+        "kind": "import_fcstd",
+    }
+    locator = protocol_v2.bind_v2_import_locator(request, source.stat())
+    params = {"request": request, "locator": locator}
+    factories: list[object] = []
+    daemon = None
+    client = None
+    try:
+        daemon = daemon_api.LocalKernelDaemon.start(
+            data_root=data_root,
+            application_factory=_fake_daemon_factory(factories),
+        )
+        client = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        baseline_fds = len(os.listdir("/dev/fd"))
+
+        missing = client.call("project.import", params)
+        assert missing.error["code"] == "invalid_request"
+
+        descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            unexpected = _raw_v2_call_with_descriptors(
+                client,
+                method="kernel.ping",
+                params={},
+                descriptors=[descriptor],
+                request_index=2,
+            )
+            assert unexpected.error["code"] == "invalid_request"
+        finally:
+            os.close(descriptor)
+
+        first = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        second = os.dup(first)
+        try:
+            extra = _raw_v2_call_with_descriptors(
+                client,
+                method="project.import",
+                params=params,
+                descriptors=[first, second],
+                request_index=3,
+            )
+            assert extra.error["code"] == "invalid_request"
+        finally:
+            os.close(second)
+            os.close(first)
+
+        assert client.call("kernel.ping", {}).error is None
+        assert factories[0][2].calls == []
+        assert len(os.listdir("/dev/fd")) == baseline_fds
+    finally:
+        if client is not None:
+            client.close()
+        if daemon is not None:
+            daemon.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@DARWIN_ONLY
+def test_daemon_rejects_truncated_ancillary_and_closes_every_received_fd() -> None:
+    base, data_root = _c09_root()
+    source = base / "source.FCStd"
+    source.write_bytes(b"descriptor-bound-import")
+    source.chmod(0o600)
+    request = {
+        "schema_version": 1,
+        "create_key": "project_create_" + "4" * 32,
+        "kind": "import_fcstd",
+    }
+    locator = protocol_v2.bind_v2_import_locator(request, source.stat())
+    factories: list[object] = []
+    daemon = None
+    client = None
+    descriptors: list[int] = []
+    try:
+        daemon = daemon_api.LocalKernelDaemon.start(
+            data_root=data_root,
+            application_factory=_fake_daemon_factory(factories),
+        )
+        before_client_fds = len(os.listdir("/dev/fd"))
+        client = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        descriptors = [
+            os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC) for _ in range(9)
+        ]
+        with pytest.raises(daemon_client._ConnectionClosed):  # noqa: SLF001
+            _raw_v2_call_with_descriptors(
+                client,
+                method="project.import",
+                params={"request": request, "locator": locator},
+                descriptors=descriptors,
+                request_index=1,
+            )
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        descriptors.clear()
+        client.close()
+        client = None
+        _wait_until(lambda: daemon.active_connections == 0)
+        assert factories[0][2].calls == []
+        assert len(os.listdir("/dev/fd")) == before_client_fds
+    finally:
+        for descriptor in reversed(descriptors):
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        if client is not None:
+            client.close()
+        if daemon is not None:
+            daemon.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@DARWIN_ONLY
+@pytest.mark.parametrize("source_kind", ["symlink", "hardlink", "fifo", "directory"])
+def test_descriptor_import_rejects_non_single_regular_sources_before_send(
+    source_kind: str,
+) -> None:
+    base, data_root = _c09_root()
+    target = base / "target.FCStd"
+    target.write_bytes(b"safe-target")
+    target.chmod(0o600)
+    source = base / "source.FCStd"
+    if source_kind == "symlink":
+        source.symlink_to(target)
+    elif source_kind == "hardlink":
+        os.link(target, source)
+    elif source_kind == "fifo":
+        os.mkfifo(source, 0o600)
+    else:
+        source.mkdir(mode=0o700)
+    factories: list[object] = []
+    daemon = None
+    client = None
+    try:
+        daemon = daemon_api.LocalKernelDaemon.start(
+            data_root=data_root,
+            application_factory=_fake_daemon_factory(factories),
+        )
+        client = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        request = {
+            "schema_version": 1,
+            "create_key": "project_create_" + "2" * 32,
+            "kind": "import_fcstd",
+        }
+        with pytest.raises(daemon_api.DaemonError) as raised:
+            client.import_project(request, source_path=str(source))
+        assert raised.value.code is daemon_api.DaemonErrorCode.UNAVAILABLE
+        assert factories[0][2].calls == []
+        assert client.call("kernel.ping", {}).error is None
     finally:
         if client is not None:
             client.close()
@@ -1950,6 +2306,197 @@ def test_c09_does_not_change_public_tool_count_or_protocol_method_set() -> None:
     assert not hasattr(daemon_service, "FileGrant")
 
 
+@DARWIN_ONLY
+def test_authenticated_retire_acknowledges_then_cleans_and_allows_restart() -> None:
+    base, data_root = _c09_root()
+    factories: list[object] = []
+    daemon = None
+    replacement = None
+    client = None
+    run_root = None
+    try:
+        daemon = daemon_api.LocalKernelDaemon.start(
+            data_root=data_root,
+            application_factory=_fake_daemon_factory(factories),
+        )
+        run_root = daemon.run_root
+        client = daemon_api.LocalKernelClient.connect(run_root)
+
+        response = client.retire(reason="runtime_uninstall")
+
+        assert response.error is None
+        assert response.result == {
+            "schema_version": 1,
+            "daemon_id": daemon.daemon_id,
+            "status": "retiring",
+        }
+        assert daemon.wait(1)
+        client.close()
+        client = None
+        daemon.close()
+        assert daemon.state is daemon_api.LocalKernelState.CLOSED
+        assert factories[0][2].closed == 1
+        assert run_root.is_dir()
+        assert list(run_root.iterdir()) == []
+
+        replacement = daemon_api.LocalKernelDaemon.start(
+            data_root=data_root,
+            application_factory=_fake_daemon_factory(factories),
+        )
+        assert replacement.daemon_id != daemon.daemon_id
+        assert replacement.state is daemon_api.LocalKernelState.RUNNING
+    finally:
+        if client is not None:
+            client.close()
+        if replacement is not None:
+            replacement.close()
+        if daemon is not None and daemon.state is not daemon_api.LocalKernelState.CLOSED:
+            daemon.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@DARWIN_ONLY
+def test_failed_retire_response_write_leaves_daemon_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base, data_root = _c09_root()
+    factories: list[object] = []
+    daemon = None
+    client = None
+    verifier = None
+    original_send = daemon_service._send
+
+    def fail_retire_response(connection, payload, *, deadline):
+        if b'"status":"retiring"' in payload:
+            raise OSError("injected response failure")
+        return original_send(connection, payload, deadline=deadline)
+
+    try:
+        daemon = daemon_api.LocalKernelDaemon.start(
+            data_root=data_root,
+            application_factory=_fake_daemon_factory(factories),
+        )
+        client = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        monkeypatch.setattr(daemon_service, "_send", fail_retire_response)
+
+        with pytest.raises(daemon_api.DaemonError) as raised:
+            client.retire(reason="runtime_uninstall")
+        assert raised.value.code is daemon_api.DaemonErrorCode.UNAVAILABLE
+        client = None
+        _wait_until(lambda: daemon.active_connections == 0)
+        assert daemon.wait(0) is False
+        assert daemon.state is daemon_api.LocalKernelState.RUNNING
+
+        verifier = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        assert verifier.call("kernel.ping", {}).result["status"] == "ready"
+    finally:
+        if client is not None:
+            client.close()
+        if verifier is not None:
+            verifier.close()
+        if daemon is not None:
+            daemon.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@DARWIN_ONLY
+def test_retire_drains_an_admitted_response_before_application_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingApplication(_FakeDaemonApplication):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def create_project_request(self, request: object) -> dict[str, object]:
+            self.entered.set()
+            assert self.release.wait(5)
+            return super().create_project_request(request)
+
+    base, data_root = _c09_root()
+    applications: list[BlockingApplication] = []
+    daemon = None
+    worker_client = None
+    retire_client = None
+    call_results: list[object] = []
+    close_results: list[object] = []
+    monkeypatch.setattr(daemon_service, "_SHUTDOWN_TIMEOUT_SECONDS", 0.05)
+
+    def factory(*, layout, lease_manager):
+        assert layout.root == data_root
+        assert lease_manager is not None
+        application = BlockingApplication()
+        applications.append(application)
+        return application
+
+    try:
+        daemon = daemon_api.LocalKernelDaemon.start(
+            data_root=data_root,
+            application_factory=factory,
+        )
+        worker_client = daemon_api.LocalKernelClient.connect(daemon.run_root)
+        retire_client = daemon_api.LocalKernelClient.connect(daemon.run_root)
+
+        def invoke() -> None:
+            try:
+                call_results.append(
+                    worker_client.call(
+                        "application.call",
+                        {
+                            "operation": "create_project",
+                            "request": {"kind": "empty"},
+                        },
+                    )
+                )
+            except BaseException as error:
+                call_results.append(error)
+
+        worker = threading.Thread(target=invoke)
+        worker.start()
+        assert applications[0].entered.wait(5)
+        retired = retire_client.retire(reason="runtime_uninstall")
+        assert retired.result["status"] == "retiring"
+
+        def close_daemon() -> None:
+            try:
+                daemon.close()
+                close_results.append("closed")
+            except BaseException as error:
+                close_results.append(error)
+
+        closer = threading.Thread(target=close_daemon)
+        closer.start()
+        time.sleep(0.2)
+        assert closer.is_alive()
+        assert applications[0].closed == 0
+
+        applications[0].release.set()
+        worker.join(5)
+        closer.join(5)
+
+        assert not worker.is_alive()
+        assert not closer.is_alive()
+        assert len(call_results) == 1
+        assert not isinstance(call_results[0], BaseException)
+        assert call_results[0].result["ok"] is True
+        assert close_results == ["closed"]
+        assert applications[0].closed == 1
+        assert daemon.state is daemon_api.LocalKernelState.CLOSED
+    finally:
+        if applications:
+            applications[0].release.set()
+        if worker_client is not None:
+            with contextlib.suppress(daemon_api.DaemonError):
+                worker_client.close()
+        if retire_client is not None:
+            with contextlib.suppress(daemon_api.DaemonError):
+                retire_client.close()
+        if daemon is not None and daemon.state is not daemon_api.LocalKernelState.CLOSED:
+            daemon.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def test_run_daemon_attempts_close_after_observing_failed_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1976,3 +2523,24 @@ def test_run_daemon_attempts_close_after_observing_failed_state(
 
     assert daemon_service.run_daemon() == 1
     assert daemon.close_calls == 1
+
+
+def test_run_daemon_refuses_start_while_uninstall_marker_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    marker = home / ".uninstall_requested"
+    marker.write_bytes(b"")
+    marker.chmod(0o600)
+    monkeypatch.setenv("VIBECAD_HOME", str(home))
+    starts: list[str] = []
+    monkeypatch.setattr(
+        daemon_service.LocalKernelDaemon,
+        "start",
+        lambda **_kwargs: starts.append("start"),
+    )
+
+    assert daemon_service.run_daemon() == 1
+    assert starts == []

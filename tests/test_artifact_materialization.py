@@ -33,6 +33,7 @@ from vibecad.application.artifacts import (
     ArtifactRequestPhase,
     ArtifactResourceError,
     ArtifactResourceErrorCode,
+    ArtifactResourceReader,
     ArtifactServiceErrorCode,
     ArtifactServicePortFailure,
     ArtifactSourceKind,
@@ -432,6 +433,167 @@ def test_resource_requires_published_binding_and_returns_canonical_bounded_conte
         store.read_resource(guessed)
     assert caught.value.code is ArtifactResourceErrorCode.UNAVAILABLE
     assert guessed not in str(caught.value)
+
+
+def _artifact_tree_snapshot(root: Path) -> dict[str, tuple[object, ...]]:
+    snapshot: dict[str, tuple[object, ...]] = {}
+    for path in (root, *sorted(root.rglob("*"))):
+        value = path.lstat()
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        content = path.read_bytes() if stat.S_ISREG(value.st_mode) else None
+        snapshot[relative] = (
+            stat.S_IFMT(value.st_mode),
+            stat.S_IMODE(value.st_mode),
+            value.st_dev,
+            value.st_ino,
+            value.st_uid,
+            value.st_gid,
+            value.st_nlink,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+            content,
+        )
+    return snapshot
+
+
+@pytest.mark.parametrize(
+    ("artifact_index", "mime_type", "expected_content"),
+    [
+        (0, "application/vnd.freecad.fcstd", MODEL_BYTES),
+        (1, "model/step", STEP_BYTES),
+    ],
+)
+def test_resource_reader_is_strictly_read_only_and_returns_exact_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    artifact_index: int,
+    mime_type: str,
+    expected_content: bytes,
+) -> None:
+    api, _service, store, _authority, cad = _composition(tmp_path)
+    response = api.export_task_artifacts(_request())
+    artifact = response["result"]["artifacts"][artifact_index]
+    root = store.root
+    root_value = root.stat()
+    store.close()
+    cad.calls.clear()
+    before = _artifact_tree_snapshot(root)
+    real_open = artifacts_module.os.open
+
+    def readonly_open(path, flags, mode=0o777, *, dir_fd=None):
+        write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+        assert flags & write_flags == 0
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("resource reader attempted a mutation or lock")
+
+    monkeypatch.setattr(artifacts_module.os, "open", readonly_open)
+    for name in ("mkdir", "unlink", "rmdir", "rename", "replace", "chmod", "fchmod", "fsync"):
+        monkeypatch.setattr(artifacts_module.os, name, forbidden)
+    monkeypatch.setattr(artifacts_module.fcntl, "flock", forbidden)
+
+    reader = ArtifactResourceReader(
+        root=root,
+        expected_root_identity=(root_value.st_dev, root_value.st_ino),
+    )
+    content = reader.read_resource(artifact["resource_uri"])
+
+    assert content.uri == artifact["resource_uri"]
+    assert content.mime_type == mime_type
+    assert base64.b64decode(content.blob) == expected_content
+    assert cad.calls == []
+    assert _artifact_tree_snapshot(root) == before
+
+
+@pytest.mark.parametrize("kind", ["missing", "unsafe", "wrong_identity"])
+def test_resource_reader_rejects_missing_or_unsafe_root_without_creating_it(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    root = tmp_path / "artifact-root"
+    expected = None
+    if kind != "missing":
+        root.mkdir(mode=0o700)
+        if kind == "unsafe":
+            root.chmod(0o755)
+        else:
+            value = root.stat()
+            expected = (value.st_dev, value.st_ino + 1)
+    before = _artifact_tree_snapshot(tmp_path)
+
+    with pytest.raises(ArtifactResourceError) as caught:
+        ArtifactResourceReader(root=root, expected_root_identity=expected)
+
+    assert caught.value.code is ArtifactResourceErrorCode.UNAVAILABLE
+    assert _artifact_tree_snapshot(tmp_path) == before
+    if kind == "missing":
+        assert not root.exists()
+
+
+@pytest.mark.parametrize("damage", ["missing", "symlink"])
+def test_resource_reader_requires_published_binding_and_rejects_unsafe_artifact(
+    tmp_path: Path,
+    damage: str,
+) -> None:
+    api, _service, store, _authority, _cad = _composition(tmp_path)
+    response = api.export_task_artifacts(_request())
+    artifact = response["result"]["artifacts"][0]
+    root = store.root
+    store.close()
+    reader = ArtifactResourceReader(root=root)
+    guessed = artifact["resource_uri"].replace(MODEL_ID, "artifact_" + "f" * 32)
+
+    with pytest.raises(ArtifactResourceError) as missing:
+        reader.read_resource(guessed)
+
+    assert missing.value.code is ArtifactResourceErrorCode.UNAVAILABLE
+    materialization = root / "materializations" / response["result"]["materialization_id"]
+    if damage == "missing":
+        shutil.rmtree(materialization)
+    else:
+        source = tmp_path / "foreign.FCStd"
+        source.write_bytes(MODEL_BYTES)
+        target = materialization / "model.FCStd"
+        target.unlink()
+        target.symlink_to(source)
+
+    with pytest.raises(ArtifactResourceError) as unsafe:
+        reader.read_resource(artifact["resource_uri"])
+
+    assert unsafe.value.code is ArtifactResourceErrorCode.UNAVAILABLE
+
+
+def test_resource_reader_fails_closed_when_selected_file_changes_during_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api, _service, store, _authority, _cad = _composition(tmp_path)
+    response = api.export_task_artifacts(_request())
+    artifact = response["result"]["artifacts"][0]
+    root = store.root
+    target = root / "materializations" / response["result"]["materialization_id"] / "model.FCStd"
+    store.close()
+    reader = ArtifactResourceReader(root=root)
+    real_encode = artifacts_module.base64.b64encode
+    raced = False
+
+    def racing_encode(value: bytes) -> bytes:
+        nonlocal raced
+        if not raced:
+            raced = True
+            target.write_bytes(b"X" + MODEL_BYTES[1:])
+            target.chmod(0o600)
+        return real_encode(value)
+
+    monkeypatch.setattr(artifacts_module.base64, "b64encode", racing_encode)
+
+    with pytest.raises(ArtifactResourceError) as caught:
+        reader.read_resource(artifact["resource_uri"])
+
+    assert raced is True
+    assert caught.value.code is ArtifactResourceErrorCode.UNAVAILABLE
 
 
 @pytest.mark.parametrize(

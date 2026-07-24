@@ -33,6 +33,7 @@ from vibecad.execution.revisions import (
 )
 from vibecad.interaction.cad import CadExecutionPort, ValidatedImportEvidence
 from vibecad.interaction.checkouts import CheckoutState, HeadCheckoutSource
+from vibecad.interaction.protocol_v2 import bind_v2_import_locator
 from vibecad.interaction.storage import SafeRoot, StorageFailure
 from vibecad.workflow.lease import (
     LeaseError,
@@ -188,6 +189,150 @@ def test_durable_import_replay_never_reopens_source_or_reexecutes_cad(
         path.read_bytes() for path in (data_root / "bootstrap").rglob("*") if path.is_file()
     )
     assert str(source).encode() not in durable_bytes
+    app.close()
+
+
+def test_durable_descriptor_import_replays_by_locator_and_preserves_caller_fd(
+    tmp_path: Path,
+) -> None:
+    port = _HashingImportPort()
+    data_root = _data_root(tmp_path)
+    app = AgentApplication.open(
+        data_root=data_root,
+        cad_port_factory=lambda **_kwargs: port,
+    )
+    service = _durable_service(app)
+    source = _source(tmp_path, b"descriptor-import-source")
+    request = {
+        "schema_version": 1,
+        "create_key": CREATE_KEY,
+        "kind": "import_fcstd",
+    }
+    before = os.stat(source)
+    locator = bind_v2_import_locator(request, before)
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        created = service.create_project_from_descriptor(
+            create_key=CREATE_KEY,
+            source_fd=descriptor,
+            source_locator=locator["digest"],
+            source_identity=locator,
+        )
+        os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        replayed = _durable_service(app).create_project_from_descriptor(
+            create_key=CREATE_KEY,
+            source_fd=descriptor,
+            source_locator=locator["digest"],
+            source_identity=locator,
+        )
+        os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert type(created) is ProjectCreateResult
+    assert replayed == created
+    assert len(port.paths) == 1
+    assert source.read_bytes() == b"descriptor-import-source"
+    after = os.stat(source)
+    assert (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_uid,
+        after.st_gid,
+        after.st_nlink,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_uid,
+        before.st_gid,
+        before.st_nlink,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    app.close()
+
+
+def test_durable_descriptor_import_ignores_sender_shared_offset_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = b"descriptor-offset-hostility-must-not-change-imported-bytes"
+    port = _HashingImportPort()
+    data_root = _data_root(tmp_path)
+    app = AgentApplication.open(
+        data_root=data_root,
+        cad_port_factory=lambda **_kwargs: port,
+    )
+    service = _durable_service(app)
+    source = _source(tmp_path, content)
+    request = {
+        "schema_version": 1,
+        "create_key": CREATE_KEY,
+        "kind": "import_fcstd",
+    }
+    source_info = os.stat(source)
+    locator = bind_v2_import_locator(request, source_info)
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    real_read = os.read
+    real_pread = os.pread
+    perturbations: list[int] = []
+
+    def perturb_if_source(value: int) -> None:
+        try:
+            current = os.fstat(value)
+        except OSError:
+            return
+        if (current.st_dev, current.st_ino) != (
+            source_info.st_dev,
+            source_info.st_ino,
+        ):
+            return
+        os.lseek(descriptor, 1, os.SEEK_SET)
+        perturbations.append(value)
+
+    def hostile_read(value: int, size: int) -> bytes:
+        perturb_if_source(value)
+        return real_read(value, size)
+
+    def hostile_pread(value: int, size: int, offset: int) -> bytes:
+        perturb_if_source(value)
+        return real_pread(value, size, offset)
+
+    monkeypatch.setattr(project_create_module, "_COPY_CHUNK_BYTES", 7)
+    monkeypatch.setattr(project_create_module.os, "read", hostile_read)
+    monkeypatch.setattr(project_create_module.os, "pread", hostile_pread)
+    try:
+        created = service.create_project_from_descriptor(
+            create_key=CREATE_KEY,
+            source_fd=descriptor,
+            source_locator=locator["digest"],
+            source_identity=locator,
+        )
+        assert os.lseek(descriptor, 0, os.SEEK_CUR) == 1
+    finally:
+        os.close(descriptor)
+
+    assert perturbations
+    assert type(created) is ProjectCreateResult
+    assert created.revision.model is not None
+    assert created.revision.model.sha256 == hashlib.sha256(content).hexdigest()
+    assert created.revision.model.size_bytes == len(content)
+    durable = app._revision_store.revision_model_path(  # noqa: SLF001
+        created.head.project_id,
+        created.revision.id,
+    )
+    assert durable.read_bytes() == content
     app.close()
 
 

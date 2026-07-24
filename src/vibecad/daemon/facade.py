@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 from functools import partial
 
+from vibecad import __version__
 from vibecad.interaction.checkouts import (
     CheckoutError,
     CheckoutErrorCode,
@@ -51,6 +53,9 @@ ALLOWED_APPLICATION_OPERATIONS = frozenset(
         "submit_model_program",
     }
 )
+KERNEL_API_EPOCH = 1
+KERNEL_API_NAME = "vibecad.task-kernel"
+KERNEL_BUILD_ID = "p0b-c13.1"
 
 _DIRECT_OPERATIONS = frozenset(
     {
@@ -86,7 +91,12 @@ class LocalKernelFacade:
 
     __slots__ = ("_application", "_daemon_id", "_file_grants")
 
-    def __init__(self, application: object, *, daemon_id: str) -> None:
+    def __init__(
+        self,
+        application: object,
+        *,
+        daemon_id: str,
+    ) -> None:
         if application is None or type(daemon_id) is not str:
             raise TypeError("invalid local kernel facade")
         self._application = application
@@ -98,7 +108,9 @@ class LocalKernelFacade:
             raise V2ProtocolError(V2ErrorCode.INVALID_STATE)
         return StaticV2Dispatcher(
             kernel_ping=self._kernel_ping,
+            kernel_retire=self._kernel_retire,
             application_call=self._application_call,
+            project_import=self._project_import,
             checkout_open=partial(self._checkout_open, session_id),
             checkout_get=self._checkout_get,
             checkout_close=self._checkout_close,
@@ -124,6 +136,23 @@ class LocalKernelFacade:
             "daemon_id": self._daemon_id,
             "status": "ready",
             "protocol": {"major": V2_VERSION[0], "minor": V2_VERSION[1]},
+            "api": {
+                "name": KERNEL_API_NAME,
+                "epoch": KERNEL_API_EPOCH,
+            },
+            "implementation": {
+                "package_version": __version__,
+                "build_id": KERNEL_BUILD_ID,
+            },
+        }
+
+    def _kernel_retire(self, params: dict[str, object]) -> dict[str, object]:
+        if params["daemon_id"] != self._daemon_id:
+            raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+        return {
+            "schema_version": 1,
+            "daemon_id": self._daemon_id,
+            "status": "retiring",
         }
 
     def _application_call(self, params: dict[str, object]) -> dict[str, object]:
@@ -170,6 +199,46 @@ class LocalKernelFacade:
         if operation in _DIRECT_OPERATIONS:
             return self._application.invoke_direct_operation_request(operation, request)
         raise V2ProtocolError(V2ErrorCode.UNKNOWN_METHOD)
+
+    @staticmethod
+    def _descriptor_matches(
+        descriptor: int,
+        locator: dict[str, object],
+    ) -> bool:
+        try:
+            value = os.fstat(descriptor)
+        except OSError:
+            return False
+        return (
+            value.st_dev == locator["dev"]
+            and value.st_ino == locator["ino"]
+            and value.st_mode == locator["mode"]
+            and value.st_uid == locator["uid"]
+            and value.st_nlink == locator["nlink"]
+            and value.st_size == locator["size"]
+            and str(value.st_mtime_ns) == locator["mtime_ns"]
+            and str(value.st_ctime_ns) == locator["ctime_ns"]
+        )
+
+    def _project_import(
+        self,
+        params: dict[str, object],
+        descriptor: int,
+    ) -> dict[str, object]:
+        request = params["request"]
+        locator = params["locator"]
+        if (
+            type(request) is not dict
+            or type(locator) is not dict
+            or not self._descriptor_matches(descriptor, locator)
+        ):
+            raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+        result = self._application.import_project_descriptor_request(
+            request,
+            source_fd=descriptor,
+            locator=locator,
+        )
+        return result
 
     @staticmethod
     def _source(value: dict[str, object]) -> HeadCheckoutSource | DraftCheckoutSource:
