@@ -7,6 +7,9 @@
 
 阅读导航：第 3–4 节是 CAD 市场/API 调研；第 5 节是 Agent 语言以及 iOS/Android/macOS/Windows 方案；第 6 节审计当前耦合；第 7–10 节给出目标架构、协议、事务和安全；第 11 节是实施路线；第 13 节汇总最终决策。
 
+与 CAD Agent 市场、开源策略、AutoCAD/国产 CAD 优先级合并后的最终决策见
+[`PRODUCT_STRATEGY.md`](PRODUCT_STRATEGY.md)。
+
 ## 1. 执行摘要
 
 ### 1.1 核心结论

@@ -10,6 +10,10 @@
 > read-only manifest、`durable active cancellation`、单 Application/shared Task Kernel、same-user
 > authenticated runnable daemon、session-bound file grants 和 managed killable Worker。真实
 > Claude/Codex 主机尚未安装激活验收，当前没有 tag 或 release；`G1 Workbench 尚未交付`。
+>
+> 产品定位、多 Backend 组合、AutoCAD/国产 DWG CAD 与统一评测决策见
+> [`PRODUCT_STRATEGY.md`](PRODUCT_STRATEGY.md)。本文继续作为当前 FreeCAD 交付主线，不因远期
+> Backend 规划提前扩大 G1/P1 范围。
 
 ## 1. 结论
 

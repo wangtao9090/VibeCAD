@@ -169,6 +169,8 @@ Workbench 交互、STEP/STL import、照片重建或 simulation。
 [整体架构](https://github.com/wangtao9090/VibeCAD/blob/main/docs/ARCHITECTURE.md)、
 [Agent 架构](https://github.com/wangtao9090/VibeCAD/blob/main/docs/AGENT_ARCHITECTURE.md) 和
 [产品能力路线图](https://github.com/wangtao9090/VibeCAD/blob/main/docs/PRODUCT_CAPABILITY_ROADMAP.md)。
+产品定位、开源策略、多 CAD Backend、AutoCAD/国产 CAD 路线和评测体系的统一决策见
+[综合产品与技术战略](https://github.com/wangtao9090/VibeCAD/blob/main/docs/PRODUCT_STRATEGY.md)。
 
 ## License
 
