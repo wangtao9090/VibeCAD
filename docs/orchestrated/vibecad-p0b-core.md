@@ -2571,3 +2571,343 @@ or product decision.
 - Until the push succeeds, recovery remains the verified C13 remote anchor
   `cf87fba0308f9a32820bf5237af61ea4e2d32989`. After push, the new three-way
   equal C14 commit becomes the only continuation anchor.
+
+## 32. Task Packet P0B-C15
+
+### 1. Authority and exact scope
+
+- P0B-A01 explicitly approved P0B-C00 through P0B-C15 at P0B-R1, including
+  the stage decisions, allowlist, gates, budgets, exclusions and local
+  commit/no-publication policy. P0B-A02 and P0B-D22-R1 authorize the immediate
+  non-force push of each accepted commit on `codex/agent-stage3`.
+- C15 is a documentation-only stage-closeout packet. It may modify only this
+  orchestration artifact. It may not change source, tests, dependencies,
+  package artifacts, the managed runtime, user data, public tools, product
+  behavior or repository configuration. The only permitted external change is
+  the one current-branch non-force push explicitly authorized by
+  P0B-A02/P0B-D22-R1.
+- PR, tag, release, marketplace publication, force-push, real-host activation,
+  external model use and external spend remain unauthorized.
+
+### 2. Entry context and append-only corrections
+
+- Entry branch is `codex/agent-stage3`. Before this packet,
+  `HEAD`, upstream, remote-tracking and the actual remote branch are all
+  `157d33f89386499dfbf3d589cd8a57ffffcde434`, the pushed C14 commit
+  `chore(release): package P0-B core as 0.6.0`.
+- At initial C15 entry no tracked file was dirty. The only workspace item was
+  the deliberately excluded untracked `docs/CAD_AGENT_PRODUCT_RESEARCH.md`,
+  SHA-256
+  `ada5049d80b8914c43d711649feeb968ec7c83f4a6a9846d399a431b09ee856e`.
+- While C15 was being drafted, a separate user-owned strategy task committed
+  `7eb4b3a92a937e005509d75b8d6b111b134a9350`
+  (`docs(strategy): consolidate product and backend direction`) with exactly
+  five strategy/research paths and explicitly excluded this orchestration
+  artifact. It was independently completed but left local; the existing
+  current-branch push authority was then used to push that commit separately.
+  `HEAD`, upstream, remote-tracking and the actual remote are now all
+  `7eb4b3a92a937e005509d75b8d6b111b134a9350`. This interleaved commit is not a
+  P0-B packet or repair commit and does not expand C15's one-file allowlist.
+- That separate strategy commit intentionally began tracking and revised
+  `docs/CAD_AGENT_PRODUCT_RESEARCH.md`; its current SHA-256 is
+  `53f75ba475db9b1d3d83e64651a77993b3a6bf5d5a0470ef912193dc33d55deb`.
+  The original P0-B exclusion was honored because the file was not staged in
+  C14 and is not changed by C15. After the strategy push, the only C15
+  execution-workspace diff is this orchestration artifact.
+- P0B-S17 is correctly preserved as a pre-C14-push snapshot. C15 supersedes,
+  rather than rewrites, its now-stale next steps and temporary C13 recovery
+  anchor with the observed C14 push and equality above.
+- P0B-E17's observable `this C14 commit / immediate non-force push required`
+  field is superseded by the actual C14 commit
+  `157d33f89386499dfbf3d589cd8a57ffffcde434`, its successful non-force push and
+  the verified four-way equality that existed before the strategy task.
+- P0B-S17 says that the residual ledger is in Section 8. The authoritative
+  residual table is actually Section 9; C15 records this correction without
+  editing the historical snapshot.
+- The first C15 artifact-readback shell command used `path` as a zsh loop
+  variable. Because `path` is zsh's tied special parameter for `PATH`, the
+  command exited 127 when the next executable could not be found. The corrected
+  read-only command used `artifact_file`, called `/usr/bin/stat` explicitly and
+  reproduced all four C14 sizes and hashes. This was a command-construction
+  error, not a product, artifact or gate RED.
+
+### 3. Closeout decisions
+
+- **P0B-C15-D01 — implementation end versus closeout envelope.** The final
+  product/package commit is C14 at `157d33f...`. C15 is the planned
+  documentation-only closeout envelope. A Git commit cannot contain its own
+  final object ID, so `SELF(P0B-C15)` means the unique commit whose sole parent
+  is `7eb4b3a92a937e005509d75b8d6b111b134a9350`, whose exact subject is
+  `docs(orchestration): close P0-B core delivery`, whose diff path is exactly
+  `docs/orchestrated/vibecad-p0b-core.md`, and whose tree contains P0B-E18,
+  P0B-E19, P0B-X01 and P0B-S18. Completion additionally requires
+  `HEAD == @{upstream} == remote-tracking == git ls-remote == SELF` after the
+  authorized non-force push. The controller reports the resolved SHA; if any
+  predicate fails, C15 is blocked, `7eb4b3a...` remains the branch recovery
+  anchor and C14 `157d33f...` remains the product/package end.
+- **P0B-C15-D02 — completion accounting.** P0B-C00 through P0B-C14 are
+  committed and pushed. The commit containing this packet's final ledger and
+  recovery snapshot completes P0B-C15, making all 16 planned packet IDs
+  terminal. P0-B then consumes 17 of the 20-commit hard budget: 16 packet
+  commits plus the authorization-only amendment
+  `a7e6881e21936dc5b5dc2c92f5c1dd70b9498dfe`. Additional repair commits are
+  used `0`; the original authorization allowed up to 4 but the hard total has
+  only 3 slots remaining after C15. The numerous gate/review repairs were
+  completed inside their owning packet commits and remain recorded beside the
+  original evidence and D21 decisions. The interleaved strategy commit is
+  outside the P0-B campaign; the branch has 18 post-Stage-3 commits after
+  `SELF(P0B-C15)` exists.
+- **P0B-C15-D03 — residual disposition.** P0B-RES-01..11 and P0B-RES-14 remain
+  active. P0B-RES-12's branch-push portion is closed by the observed remote
+  equality, while PR/tag/release/marketplace publication remains active and
+  unauthorized. P0B-RES-13 remains closed by C13's descriptor-bound import.
+  The three C14-specific non-blocking limitations recorded in P0B-S17 remain
+  active and are not silently promoted into product claims.
+- **P0B-C15-D04 — next-stage boundary.** Closing P0-B core does not authorize
+  G1 source changes. G1 Workbench MVP requires its own bounded stage artifact,
+  file allowlist, gates, visual validation matrix and explicit authority
+  binding. P0-B hardening may be planned in parallel but must close before P1
+  product delivery.
+
+### 4. Steps and objective gates
+
+1. Re-read C00-C14 commit mapping, E17/S17, all residual rows, artifact hashes
+   and the real Git remote state, including the separately pushed strategy
+   commit that is now C15's exact parent.
+2. Append C14 post-push row P0B-E18, self-resolving C15 row P0B-E19, one stage
+   closeout row P0B-X01 and one exact four-section P0B-S18 recovery snapshot.
+   Record the start/end implementation anchors, completed/planned count, gate
+   and review evidence, residual count, unexpected-repair count, workspace
+   state and all observable next branches.
+3. Obtain an independent exact-diff review of this artifact-only change.
+   Critical/Major/Medium must be zero.
+4. Run `git diff --check`, `git fsck --no-dangling`, artifact size/hash
+   readback, current tracked research-document hash readback, specific
+   `v0.6.0` tag/release absence checks and exact one-file allowlist inspection.
+   Before staging, `git status --porcelain` must contain exactly the artifact
+   as an unstaged modification and `git diff --name-only` must contain exactly
+   the artifact, with no staged or unknown path.
+   After named staging, `git diff --cached --name-only` must contain exactly
+   the artifact, `git diff --cached --check` must pass, and
+   `git status --porcelain` must contain exactly the artifact as a staged
+   modification with no unstaged or unknown path. Post-commit porcelain must
+   be empty and `git diff-tree` must name exactly the artifact. Product tests
+   are not rerun because C15 changes no packaged or executable byte; E17/S17
+   remain the frozen C14 product evidence.
+5. Stage only this artifact, inspect the staged diff, commit exactly as
+   `docs(orchestration): close P0-B core delivery`, push non-force, then verify
+   exact `HEAD == @{upstream} == remote-tracking == git ls-remote`.
+
+### 5. Execution discipline and capability profile
+
+- Selected profile:
+  `native-plan / spawn-send-wait / repo-artifact / native-session-poll`.
+  Adapter: Codex desktop on the declared macOS workspace.
+- Capability evidence uses exactly the permitted categories:
+  - `live capability declarations`: `update_plan`, `spawn_agent`,
+    `followup_task`, `send_message`, `wait_agent`, `exec_command`,
+    `write_stdin` and `apply_patch` are declared in this session.
+  - `observable behavior`: the current session has already updated the native
+    plan, dispatched bounded read-only reviews, received their results and run
+    commands with observable exit status; native session polling is available
+    for any command that yields.
+  - `environment identity`: the host exposes Codex desktop, the declared
+    macOS workspace and current shell identity passively.
+  - `public configuration`: branch and upstream configuration are exposed
+    read-only by Git; no additional capability evidence was observed.
+- Exact allowlist: only
+  `docs/orchestrated/vibecad-p0b-core.md`.
+- Circuit breakers are any second C15 diff/staged/commit path, a current
+  research hash other than
+  `53f75ba475db9b1d3d83e64651a77993b3a6bf5d5a0470ef912193dc33d55deb`,
+  unexpected artifact hash, a C15 parent other than
+  `7eb4b3a92a937e005509d75b8d6b111b134a9350`, a product end other than
+  `157d33f89386499dfbf3d589cd8a57ffffcde434`, a `v0.6.0` tag/release,
+  failed diff/fsck, nonzero independent Critical/Major/Medium, push rejection
+  or remote inequality. Stop without force, rewrite or opportunistic repair.
+
+### 6. Delivery boundary and residual rules
+
+- C15 closes the P0-B core campaign record; it does not publish 0.6.0 or claim
+  host verification, G1 UI, P0-B hardening, P1/P2, enterprise readiness,
+  reverse reconstruction, photo/video reconstruction or simulation.
+- The final branch retains all active residuals with their original owners and
+  observable closure conditions. No residual is fixed inside this docs-only
+  packet.
+- C14's wheel, sdist, MCPB and standalone Skill in
+  `/private/tmp/vibecad-c14-final4.oj3rHb/dist/` are immutable local evidence,
+  not a durable release channel.
+
+### 7. Required final report
+
+- Report the exact C15 commit SHA, non-force push result and four-way Git
+  equality; one-file diff/stat; review severities; gate results; C00-C15
+  completion count; active/closed residual status; the current tracked research
+  hash; specific absence of a `v0.6.0` tag/release; the separately pushed
+  strategy parent; and the exact next stage.
+- If any required observation differs from this packet, preserve the evidence
+  and any attempted local C15 commit/state without reset, rewrite or force.
+  Do not claim closeout; `7eb4b3a92a937e005509d75b8d6b111b134a9350`
+  remains the last three-way-equal branch recovery anchor and C14
+  `157d33f89386499dfbf3d589cd8a57ffffcde434` remains the product/package end.
+
+## 33. P0-B Closeout Ledger Addendum
+
+P0B-C15-CORR-01 preserves E17 and S17 as pre-push history and supersedes only
+their observable fields. C14 is actually commit
+`157d33f89386499dfbf3d589cd8a57ffffcde434`; it was pushed non-force, and
+`HEAD`, upstream, remote-tracking and `git ls-remote` were all equal to that
+commit before the separate strategy task. S17's C14 commit/push next steps are
+complete, its temporary C13 recovery anchor is superseded, and its reference
+to the residual ledger as Section 8 is corrected to Section 9. P0B-RES-12's
+branch-push portion is closed; its PR/tag/release/marketplace portion remains
+active and unauthorized.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| P0B-E18 / 2026-07-24T05:25:12Z | P0B-C14 post-push readback under P0B-R1.1/A01/A02; supersedes only E17/S17 observable pre-push fields | C14 `157d33f89386499dfbf3d589cd8a57ffffcde434`, pushed non-force; four-way equality observed before separately pushed strategy commit `7eb4b3a92a937e005509d75b8d6b111b134a9350` | E17 remains canonical product evidence: full non-slow `4902 passed, 108 deselected, 19 warnings`; slow `11 passed, 102 deselected`; managed matrix `2 passed`; MCPB `1 passed`; M05 `1 passed`; reviews `0/0/0/0`; exact receipt/engine/data preservation; four artifacts re-read at their exact sizes/SHA-256; `git fsck --no-dangling` green; local/remote `v0.6.0` tag absent and GitHub `v0.6.0` release absent | P0B-RES-01..11 active; P0B-RES-12 branch-push closed but publication portion active; P0B-RES-13 closed; P0B-RES-14 active; three C14 evidence limitations active | P0B-S18 | completed |
+| P0B-E19 / 2026-07-24T05:25:12Z | P0B-C15 under P0B-R1.1/A01/A02 and P0B-C15-D01..D04 | `SELF(P0B-C15)`: unique commit with sole parent `7eb4b3a92a937e005509d75b8d6b111b134a9350`, exact subject `docs(orchestration): close P0-B core delivery`, exact one-file diff, and tree containing E18/E19/X01/S18; completion requires authorized non-force push and four-way equality to SELF | corrected readback after preserved zsh `path` setup error; exact C00-C14 mapping; strategy-parent four-way equality; one-file pre-stage gate; diff/fsck; exact artifact/research hashes; specific `v0.6.0` tag/release absence; packet review and two independent final-addendum reviews all GO `Critical 0 / Major 0 / Medium 0 / Minor 0`; staged checks, SELF checks and post-push equality remain required by the predicate | 13 active residual IDs: P0B-RES-01..12 plus P0B-RES-14, with RES-12 partial; P0B-RES-13 closed; three C14 evidence limitations active | P0B-S18 | completed iff SELF predicate passes; otherwise blocked with attempted state preserved |
+
+| Closeout ID | Stage span | Completion / budget | Gate and review summary | Residual summary | Final snapshot | State |
+|---|---|---|---|---|---|---|
+| P0B-X01 | Stage-3 predecessor `4d8dc88017f658c93cd97c8ee616b9905c3af781`; first P0-B commit C00 `6eb209d99028520113c953d3eb4c8f42d43bae1c`; product/package end C14 `157d33f89386499dfbf3d589cd8a57ffffcde434`; orchestration end `SELF(P0B-C15)` after separately pushed non-P0-B strategy parent `7eb4b3a92a937e005509d75b8d6b111b134a9350` | 16/16 planned packet IDs terminal when SELF predicate passes; P0-B commits 17/20 including A02 amendment `a7e6881e21936dc5b5dc2c92f5c1dd70b9498dfe`; 3 hard-budget slots remain; additional repair commits used 0; branch has 18 post-Stage-3 commits including the interleaved strategy commit | P0B-E04..E19 evidence retained; final C14 counts/hashes/real FreeCAD gates pass; C15 artifact/hash/Git readback and one-file checks pass; package/runtime/semantic reviews for C14 plus packet and final-addendum reviews for C15 are zero-finding; staged/commit/push predicates remain mandatory | 13 active residual IDs, 1 closed ID (RES-13), plus 3 active C14 non-ID evidence limitations; no residual silently fixed or dropped | P0B-S18 | completed iff SELF predicate passes; otherwise blocked |
+
+## 34. Recovery Snapshot P0B-S18
+
+### 1. Completed milestones
+
+- Repository is `/Users/wangtao/Documents/DevProject/vibecad`, branch
+  `codex/agent-stage3`, artifact revision P0B-R1.1 plus the append-only D21 and
+  C15 addenda. Stage 3 predecessor is
+  `4d8dc88017f658c93cd97c8ee616b9905c3af781`.
+- The exact P0-B packet map is:
+
+  ```text
+  C00 6eb209d99028520113c953d3eb4c8f42d43bae1c
+  A02 a7e6881e21936dc5b5dc2c92f5c1dd70b9498dfe
+  C01 aeac5c5d42149e2b9030e8d11cda0380122be6c7
+  C02 5ecb77a9f9d87bd624dd6a4a38685c3b75711718
+  C03 29cf532a83b33f28935dfe8fbcaa7f437309e1f5
+  C04 8c07ade51f8f6c889bda46290375ad96e981618e
+  C05 65b7e9a35a7cb80317f56c0b4b92553716807561
+  C06 72817966f08aeda7fc93f24fe3e4e0c70f8712ed
+  C07 d004992d6b8fee25439b720f1e8be3ff47558f88
+  C08 2a77b860874e04d4cdae07fd54bcb6c0e03e5e6a
+  C09 11ff62968db6945061767c6fee2ed902f1ad569e
+  C10 23339a70d59a803fd7245312be410dfb23f0a084
+  C11 6ee3f9b2da60134da6906b3ab9ba6d8d17fb57f3
+  C12 a5fba84b8c50980f73051de563445c1138fad7b3
+  C13 cf87fba0308f9a32820bf5237af61ea4e2d32989
+  C14 157d33f89386499dfbf3d589cd8a57ffffcde434
+  C15 SELF(P0B-C15)
+  ```
+
+- C00-C14 are committed and pushed. C14 closes the product/package work with
+  version 0.6.0, runtime epoch 4, FreeCAD 1.1.0, MCP 1.27.2, exactly 28 public
+  tools and canonical public SHA-256
+  `ae495ba457af40a5837a03e77eef4b396b0a4209755878350bc341ac7de8bfd3`.
+  Its final gates remain E17's `4902` full, `11` slow, `2` managed public,
+  `1` MCPB and `1` M05, with independent final review
+  `Critical 0 / Major 0 / Medium 0 / Minor 0`.
+  C15's packet and complete addendum likewise received independent final
+  reviews with `Critical 0 / Major 0 / Medium 0 / Minor 0`.
+- The four immutable local candidate records re-read exactly:
+  - wheel: 599,337 bytes,
+    `3c73451aa6fd209e7e4877abad6fba0200ff97a8f6bbca45c5e4a4d5ab31014d`;
+  - sdist: 639,203 bytes,
+    `4fc514cd49815e92c213686fcbdfe0847e651a2502baf8d68f264b4fc6e1aa83`;
+  - MCPB: 703,655 bytes,
+    `1eb2f468cc9995da330cc8e6511a40e68eae04be90657e1f8f00c0beb8b9b1cc`;
+  - Skill: 4,116 bytes,
+    `db27e09408a0fbe8e3a275c53bf88ffad1dd60c1adf7dfe36e03ca8f9622de28`.
+- A separate user-owned strategy task completed and was pushed as
+  `7eb4b3a92a937e005509d75b8d6b111b134a9350`. It has sole parent C14, exact
+  subject `docs(strategy): consolidate product and backend direction`, changes
+  exactly five strategy/research paths and does not include this orchestration
+  artifact. It is outside the P0-B packet/budget count but is the exact parent
+  of C15. The research document is now tracked at SHA-256
+  `53f75ba475db9b1d3d83e64651a77993b3a6bf5d5a0470ef912193dc33d55deb`.
+- P0-B is 16/16 packets, 17/20 P0-B commits and 0 additional repair commits
+  only when `SELF(P0B-C15)` exists and its push/equality predicate passes. The
+  branch then contains 18 commits after the Stage 3 predecessor. S18 is the
+  final closeout snapshot only under that predicate; otherwise it is a
+  preserved blocked-attempt snapshot and `7eb4b3a...` remains the last
+  three-way-equal branch recovery anchor.
+
+### 2. Next steps
+
+1. Pre-commit branch: require four-way equality at
+   `7eb4b3a92a937e005509d75b8d6b111b134a9350`; pre-stage porcelain must show
+   only this artifact as unstaged; stage exactly this artifact; cached
+   name/check must be exact and post-stage porcelain must show only this
+   artifact as staged.
+2. Post-commit/pre-push branch: require `HEAD=SELF(P0B-C15)`, sole parent
+   `7eb4b3a...`, exact subject, exact one-file diff and E18/E19/X01/S18 tree
+   content; porcelain must be empty while upstream, remote-tracking and
+   `git ls-remote` still equal `7eb4b3a...`.
+3. Push `SELF(P0B-C15)` non-force. If all four refs then equal SELF, P0-B core
+   is formally closed. Resolve and report the actual SELF SHA from Git.
+4. If staging, commit, push or equality differs, preserve every local attempt
+   and status without reset, rewrite or force; do not claim closeout and do not
+   start G1. Recover from the last three-way-equal branch anchor while keeping
+   C14 as the product/package end.
+5. After successful closeout, the next packet is an independent G1 FreeCAD Qt
+   Workbench MVP plan and authority binding. P0-B hardening may be planned in
+   parallel but retention/GC, runner migration and observability/recovery must
+   close before P1 delivery. G1 implementation does not inherit C15 authority.
+
+### 3. Approved decisions
+
+- P0B-A01 approves P0B-R1, P0B-D01..D22 plus D08A/D17A, C00-C15,
+  allowlists, gates, budgets and exclusions. P0B-A02/P0B-D22-R1 approves only
+  immediate non-force pushes to the current branch; it does not authorize PR,
+  tag, release, marketplace publication, force-push or external spend.
+- P0B-C15-D01..D04 govern self-resolving identity, completion accounting,
+  residual disposition and the next-stage boundary. The interleaved strategy
+  commit is separately owned and does not expand P0-B or C15 scope.
+- Product invariants remain: expert CAD Agent; user-owned host model/token;
+  one authenticated daemon/Application/Task Kernel for domain calls; bounded
+  ModelProgram rather than arbitrary Python; Workbench as a client rather than
+  a second authority; external reconstruction/simulation through providers.
+- Real Claude/Codex host activation, G1 UI and P0-B hardening remain residuals.
+  No product-level direction is silently inferred from closeout.
+
+### 4. Execution discipline
+
+- Capability profile:
+  `native-plan / spawn-send-wait / repo-artifact / native-session-poll`;
+  adapter: Codex desktop on the declared macOS workspace.
+- Capability evidence remains:
+  - `live capability declarations`: native plan, collaboration delegation,
+    command/session polling and patch tools are declared;
+  - `observable behavior`: bounded independent reviews and commands have
+    returned observable results in this session;
+  - `environment identity`: Codex desktop and the declared macOS workspace are
+    exposed passively;
+  - `public configuration`: Git exposes branch/upstream read-only; no further
+    evidence observed.
+- Exact C15 allowlist is only
+  `docs/orchestrated/vibecad-p0b-core.md`. Current research is tracked,
+  outside the diff, and must retain SHA-256
+  `53f75ba475db9b1d3d83e64651a77993b3a6bf5d5a0470ef912193dc33d55deb`.
+- Required gates are exact pre/post-stage porcelain, unstaged/cached
+  name lists, unstaged/cached diff checks, `git fsck --no-dangling`, four
+  artifact size/hash readback, research hash readback, specific absence of a
+  local/remote `v0.6.0` tag and GitHub `v0.6.0` release, independent exact-diff
+  review, SELF parent/subject/path/tree checks, non-force push and four-way
+  equality. Product tests remain frozen at E17 because C15 changes no
+  executable or packaged byte.
+- Circuit breakers are any second path or unknown porcelain item, artifact or
+  research mismatch, wrong C15 parent/subject/tree, changed C14 product end,
+  `v0.6.0` publication, diff/fsck/review RED, push rejection or unequal refs.
+  Preserve evidence; never reset, rewrite, force, hide or repair around one.
+- Residual rules: 13 IDs remain active (P0B-RES-01..12 and P0B-RES-14, with
+  RES-12's branch portion closed), P0B-RES-13 is closed, and the three
+  C14-specific evidence limitations remain active. The authoritative residual
+  ledger is Section 9.
+- Ordered recovery checks are: inspect exact porcelain and branch; resolve
+  HEAD/upstream/remote-tracking/`git ls-remote`; validate SELF sole parent,
+  subject, one-file diff and E18/E19/X01/S18 content; re-read artifact/research
+  hashes and `v0.6.0` absence; run diff checks and fsck; then follow the
+  observable branch in Section 2. A successful final workspace is tracked
+  clean with no staged, unstaged or unknown path.
