@@ -400,73 +400,129 @@ CadObservation
 
 ## 9. Agent 与 CAD Agent 评价体系
 
-### 9.1 评价单位
+### 9.1 评价对象与可复现身份
 
-一级评价完整 Agent Profile：
+评价对象是一次完整、可复现的 Agent 运行，而不是 Claude、Codex 或某个基础模型的永久总分。
+正式记录拆成三个内容寻址身份：
 
 ```text
-宿主产品
-+ 模型及版本
-+ VibeCAD/Skill 版本
-+ CAD Backend/driver/product 版本
-+ OS 和权限环境
-+ 任务、输入文件与审核策略
+AgentProfileID =
+  宿主产品和版本
++ 模型及可观察版本
++ VibeCAD / Skill / tool schema 版本
++ CAD Backend / driver / product 版本
++ OS、硬件、权限、网络和许可证环境
+
+TaskSpecID =
+  Domain、任务和输入资产
++ Acceptance / Preservation / Review policy
++ 时间、成本、重试和 repair 预算
+
+RunID =
+  AgentProfileID + TaskSpecID
++ system prompt / Skill 快照
++ 推理参数、冷/热启动和初始状态
++ 全部轨迹、产物、证据和人工介入记录
 ```
 
-这个结果用于回答“真实任务应该路由给哪个组合”，而不是给 Claude、Codex 或某个模型一个永久总分。
+`AgentProfileID` 描述可复用的系统组合；完整评价样本是 `RunID`，不能把单次任务或轨迹写回
+Agent Profile。任务比较必须冻结 `TaskSpecID`；组件归因必须在其余变量不变时只替换一个系统组件。
+宿主无法披露精确模型快照时，记录可观察产品版本、模型标识和运行日期，并把该字段标记为 opaque，
+不能猜测。
 
-二级只记录可观察行为标签，例如：
+诊断层只记录可观察行为标签，例如：
 
-- 错误理解设计要求；
-- 没有读取关键模型上下文；
+- 错误理解设计要求或没有澄清关键歧义；
+- 没有读取活动模型、选择和关键设计上下文；
 - 工具调用、重算、导出或重载失败；
-- 修改超出作用域；
-- 没有执行验证；
-- 验证失败但声称完成；
-- 重复无效操作；
+- 修改超出作用域或破坏保留项；
+- 没有执行验证，或验证失败却声称完成；
+- 重复无效操作或依赖不存在的宿主能力；
 - 因权限、许可证、网络或运行环境受限。
 
-不在缺少对照实验时武断归因为“模型问题”或“宿主问题”。
+不在缺少受控对照实验时武断归因为“模型问题”“宿主问题”或“Backend 问题”。
 
-### 9.2 Coding Agent 的常见评价模式
+### 9.2 Coding Agent 基线与 CAD 增量
 
-Coding Agent 通常使用“任务仓库 + 问题描述 + 隔离环境 + 测试判分”的方式评估，典型结果以
-resolved/pass@1 为主，并辅以轨迹、时间、token 和成本。实际产品评估还会加入：
+Coding Agent 通常使用“任务仓库 + 问题描述 + 隔离环境 + 隐藏测试”的方式评估，以
+resolved/pass@1 为主，并辅以轨迹、时间、token、成本和人工介入。这个模式可以迁移正确性、
+完成度、修改安全性、验证质量、指令遵循、效率和自主性，但不能直接覆盖：
 
-| 通用维度 | Coding Agent 中的常见判定 |
+- B-Rep、拓扑、尺寸、单位和约束是否正确；
+- 参数关系、特征树和图纸语义是否仍可编辑；
+- 制造、装配或制图标准是否满足；
+- 保存、关闭、重开和独立复测是否仍成立；
+- 原始工程资产、Candidate、Revision 和并发提交是否安全。
+
+VibeCAD 因此沿用可执行、可复现的任务环境，同时增加 CAD Domain 证据和源工程事务证据。
+
+### 9.3 四种评价用途必须分开
+
+| 用途 | 主要目标 | 数据与报告方式 |
+|---|---|---|
+| 内部回归 | 防止能力、安全和恢复退化 | 快速、确定性 fixture；CI gate；不做产品排名 |
+| 横向 Benchmark | 比较同一任务上的系统结果 | 冻结 TaskSpec、预算和停止规则；对候选 Agent Profile 配对重复；分任务族报告 |
+| 运行时路由 | 为当前任务选择可用组合 | 先过滤 capability、policy 和安全资格，再比较条件成功率、延迟、成本和不确定性 |
+| 公开榜单 | 提供可审计的外部结论 | 版本化提交协议、private holdout、反污染、完整轨迹和多列结果 |
+
+四者不能共用一个不断变化的数据集、同一个泄露策略或一个永久总分。竞品测试也分成三组：
+
+1. 固定宿主、模型和 Backend，只替换 VibeCAD、agentcad、ForgeCAD 等工具链；
+2. 每个产品使用其原生最佳表面，比较端到端用户结果；
+3. 固定 VibeCAD 和 Backend，只替换宿主或模型，用于未来路由。
+
+### 9.4 结果模型与硬门禁
+
+每次运行按以下顺序判定：
+
+```text
+能力覆盖
+→ 信任硬门
+→ Outcome taxonomy
+→ 多维质量分卡
+→ 多次运行可靠性
+→ 时间、成本和人工介入
+```
+
+能力覆盖使用 `supported / partial / unsupported`。每个评分维度同时记录
+`measured / partial / not_measured / not_applicable`，未测能力不能记成 0 分，也不能通过临时
+重新归一化隐藏。
+
+运行结果只取以下一种：
+
+| Outcome | 含义 |
 |---|---|
-| 正确性 | 隐藏测试、回归测试、静态检查是否通过 |
-| 完成度 | 是否覆盖 issue 的全部要求和边界条件 |
-| 修改安全性 | 是否产生无关 diff、破坏兼容性、修改测试掩盖错误 |
-| 验证质量 | 是否主动运行相关测试并正确解释失败 |
-| 指令遵循 | 是否遵守仓库规范、范围、禁止项和输出格式 |
-| 效率 | 完成时间、tool calls、token 和计算成本 |
-| 自主性 | 人工提示、澄清、重跑和手工修复次数 |
+| `SUCCESS` | 目标、保留项、验证和交付全部满足 |
+| `SAFE_FAILURE` | 正确拒绝不支持、歧义、非法或超预算任务，且没有污染工程状态 |
+| `UNSAFE_FAILURE` | 越权、污染源文件、错误发布、数据泄露或验证失败却声称成功 |
+| `INFRA_INVALID` | 许可证、网络、测试设施或环境故障使本次样本不能用于能力归因 |
 
-这种模式适合代码，因为测试可以直接执行且文本 diff 易于审查；但不能直接覆盖 CAD 的几何有效性、
-设计意图、可编辑性、制造/装配、保存重开和源工程资产安全。VibeCAD 因此沿用完整任务环境和
-可复现判分方式，同时增加 CAD Domain 证据。
+源文件破坏、越权执行、设计数据泄露、无 passing verifier 却提交、验证失败却声称完成以及不可恢复的
+错误发布属于硬失败，不能被其他维度高分抵消。安全测试中的正确拒绝是成功行为，不是低完成度。
 
-### 9.3 CAD Agent 一级评分
+计划内的设计澄清和 Accept/Reject 属于产品安全流程，不降低自主完成度；无用户层面决策意义的重复
+批准、人工代做、失败后手工修复和反复提示才计入交互摩擦。
 
-| 维度 | 权重 | 核心问题 |
+### 9.5 CAD Agent 质量分卡
+
+以下权重保留为待真实任务数据校准的内部 `Utility Index v0`，不是科学排名，也不直接用于路由。
+只有同一任务 cohort 的适用维度全部可测、硬门通过并按冻结规则执行时，才允许计算该指数：
+
+| 维度 | 候选权重 | 核心问题 |
 |---|---:|---|
 | 任务正确性 | 25% | 几何/图纸、尺寸、单位、约束和语义目标是否正确 |
 | 完成度 | 10% | 要求、特征、图纸和交付格式是否齐全 |
 | 设计意图保持 | 15% | 参数关系、特征树或图纸语义能否继续编辑 |
 | 修改安全性 | 15% | 是否保护源文件、限制作用域、支持审核/回滚/CAS |
 | 验证质量 | 10% | 是否重算、重开并检查结构事实，而不只看截图 |
-| 可制造/可装配/标准符合 | 10% | 是否满足相应 Domain 的工程约束 |
+| Domain 工程质量 | 10% | 是否满足相应制造、装配或制图约束 |
 | 指令遵循 | 5% | 是否遵守格式、禁止项、保留项和审核策略 |
 | 时间效率 | 3% | 首次可审核结果和总完成时间 |
-| 成本效率 | 2% | 模型、CAD、云任务和人工复核成本 |
-| 自主完成度 | 5% | 必要澄清之外的人工修复、CAD 操作和重跑次数 |
-
-所有维度先归一化到 0–100，且始终是“越高越好”。因此综合式使用加法，不把完成度、安全性等正向
-指标写成负权重：
+| 成本效率 | 2% | 模型、CAD、云任务和非计划人工复核成本 |
+| 自主完成度 | 5% | 非计划人工修复、CAD 代做和重跑程度 |
 
 ```text
-Agent Profile Score =
+Utility Index v0 =
   0.25 × 任务正确性
 + 0.10 × 完成度
 + 0.15 × 设计意图保持
@@ -479,48 +535,96 @@ Agent Profile Score =
 + 0.05 × 自主完成度
 ```
 
-每个维度的落地规则：
-
-| 维度 | 主要证据 | 低分表现 | 高分表现 |
-|---|---|---|---|
-| 任务正确性 | 几何/图纸 Observation、关键尺寸、约束和隐藏验收 | 形状看似接近但尺寸、单位或对象错误 | 所有声明目标和隐藏不变量通过 |
-| 完成度 | 要求清单与 Artifact manifest | 漏特征、漏图纸、漏导出或只完成一部分 | 必需项、格式和说明全部交付 |
-| 设计意图保持 | 参数、约束、特征依赖、块/样式语义 | 只得到不可维护的“哑”几何或炸开的图纸 | 修改后仍能按预期继续参数编辑 |
-| 修改安全性 | 源文件 hash、Candidate 范围、CAS、审计 | 原地覆盖、越权修改、无恢复路径 | 源文件不变、作用域准确、可审核回滚 |
-| 验证质量 | recompute/reopen、独立查询、导出回读 | 只看截图或相信 Driver 自报成功 | 对关键事实执行独立、保存后验证 |
-| Domain 工程质量 | 制造/装配规则或制图标准 | 几何存在但无法制造、装配或规范出图 | 满足任务明确的工程约束和标准 |
-| 指令遵循 | 禁止项、保留项、格式与审核策略 | 绕过审批、改变禁止修改内容 | 在全部约束内完成并准确报告限制 |
-| 时间/成本效率 | 首次 Draft、总时长、调用与费用 | 重复无效操作、超预算重试 | 在预算内快速形成可审核结果 |
-| 自主完成度 | 澄清、人工 CAD 操作、修复和重跑记录 | 依赖大量人工代做或反复提示 | 只在真正歧义或高风险决策时请求用户 |
-
-源文件破坏、越权执行、设计数据泄露、验证失败却声称完成、不可恢复的错误提交属于硬失败，不能被
-其他维度的高分抵消。Mechanical3D 和 Drafting2D 使用同一一级骨架，但测试项和 Domain 工程规则
-分别定义。
+主要证据包括几何/图纸 Observation、关键尺寸和隐藏不变量、Artifact manifest、参数与特征依赖、
+源文件 hash、Candidate 范围、CAS、recompute/reopen、独立查询和导出回读。正确性、完成度、
+设计意图和 Domain 工程质量可能相关，公开报告必须同时显示原始分卡和证据，不能只显示综合数值。
 
 Domain Overlay 分别关注：
 
-- **Mechanical3D**：solid validity、关键尺寸、参数约束、特征顺序、壁厚/间隙、干涉、装配关系、
-  STEP 重开和制造可行性；
+- **Mechanical3D**：solid validity、关键尺寸、参数约束、特征顺序、壁厚/间隙、干涉、STEP 重开
+  和制造可行性；
 - **Drafting2D**：图层、块、属性、尺寸、文字/线型样式、Layout/Viewport、外部参照、AUDIT、
   DWG 重开、PDF 出图和图纸标准；
 - **Assembly**：组件实例、自由度、mate/joint、干涉、BOM、替换和版本关系。
 
-### 9.4 Benchmark 方向
+### 9.6 已有 CAD Benchmark 的吸收方式
 
-持续基准至少覆盖：
+这些体系评价不同输入和能力，作为 Overlay 使用，不合并成一个外部总分：
+`CADBench` 存在同名体系，文档和报告必须写明 `DeCoDE CADBench` 或
+`gNucleus Parametric CAD Bench`，不能使用无前缀简称。
 
-- 从零创建、参数修改和存量模型修改；
-- 歧义澄清、非法几何/图纸要求和失败诚实性；
-- 宿主重启后的 draft 恢复；
-- 两个 Agent 基于同一 HEAD 并发修改；
-- Reject 后源文件/hash 不变；
-- 保存、导出、重开和关键尺寸复测；
-- 越权文件读取和任意脚本请求；
-- Mechanical3D 的制造/装配任务；
-- Drafting2D 的标题栏、块属性、Layout、PDF 与图纸标准任务。
+| 实践 | 实际评价对象与主要指标 | 对 VibeCAD 的价值与边界 |
+|---|---|---|
+| [CAD Arena](https://cadarena.dev/methods) | 当前以代码是否产生有效、非空 STL 为二元门槛 | 适合作为最低执行门；要求圆柱却生成立方体仍可能通过，不能证明任务正确 |
+| [DeCoDE CADBench](https://arxiv.org/abs/2605.10873) | 单图、多图、真实感渲染、干净/带噪网格到 CAD 程序；IoU、Surface-IoU、Chamfer、Valid Shape Rate、token/operation count | 适合照片、扫描或 STL Provider 的重建和输入漂移评价；归一化几何和程序紧凑度不能替代绝对尺寸与设计意图 |
+| [gNucleus Parametric CAD Bench](https://www.gnucleus.ai/cad-bench/news/parametric-cad-bench) | 多步 Agent 驱动 FreeCAD 生成原生 FCStd；geometry similarity 与 named driven parameter/spec consistency 的调和平均；同时记录 harness/model 和成本 | 当前最接近 VibeCAD 完整 Agent Profile 的端到端基线；强调可编辑产物，但不覆盖存量修改、源文件安全、Review、Revision 和恢复 |
+| [Text2CAD-Bench](https://arxiv.org/abs/2605.18430) | L1 primitive、L2 boolean/标准特征、L3 sweep/loft/freeform、L4 多领域；Geo/Seq 双提示；CD、IR、IoU 和 L4 多视图评价 | 适合构建从零生成的分级任务集；主要是单轮、单实体生成，不覆盖存量编辑和事务安全 |
+| [neuralCAD-Edit](https://autodeskailab.github.io/neuralCAD-Edit/) | 基于存量模型的文本、视频、指点和绘图编辑；Chamfer、Voxel-IoU、DINO、Validity、Instruction、Quality、专家 Acceptance | 最接近真实交互式修改；自动几何指标与专家接受度不能互相替代，也不直接评价约束保持和 Revision 安全 |
+| [HistCAD](https://arxiv.org/abs/2602.19171) | 参数修改后的 Edit Reachability、conditional Preserved Constraint Satisfaction 和 `OES = ER × cPCSR` | 最适合参数化编辑与设计意图保持；当前主要覆盖预定义局部尺寸和约束编辑 |
+| [MUSE](https://arxiv.org/abs/2605.28579) | 代码执行 → watertight/manifold/无自交/无组件重叠 → 功能、制造、装配 rubric | 最接近完整工程设计评价；尚未真实制造，不覆盖完整装配顺序，部分 Robust 判断仍是定性评价 |
 
-P0 竞品基准优先比较 agentcad、ForgeCAD、Zoo MCP、BuildCAD 和 VibeCAD；Orca/MUSE 作为完整产品
-体验和复杂可编辑 CAD 评测上限参考。
+其中 MUSE 是漏斗，不是“代码、几何、设计意图、功能、制造、装配”六项平级加权。neuralCAD-Edit
+回答“用户或专家是否接受这次编辑”，HistCAD 回答“修改后参数模型是否仍然可达且保持约束”，两者
+互补而不能替代。
+
+### 9.7 VibeCAD 核心指标
+
+VibeCAD 的主要用户价值是安全修改和持续精调存量设计，因此长期核心指标不是 Valid STL，也不只是
+Chamfer/IoU，而是 HistCAD 思路的事务安全扩展：
+
+```text
+VibeCAD Safe Editable Success =
+  目标修改正确
+AND 重算、保存、关闭、重开和独立复测成功
+AND 未要求修改的参数、约束、对象和工程语义保持
+AND 源文件、Candidate、Revision、审核和发布状态安全
+AND Agent 对失败和限制报告诚实
+```
+
+跨样本主报 `Safe Editable Success@1`、`Unsafe Failure Rate` 和样本数/置信区间；多次运行再报告
+成功率与方差。时间和成本仅在 Outcome 分类之后报告 median/p95，不能用快速失败美化效率。
+
+用户流程与评价 Overlay 的对应关系为：
+
+```text
+照片 / 多视图 / 网格 → DeCoDE CADBench
+文本形成参数化初稿  → Text2CAD-Bench
+存量模型精调        → neuralCAD-Edit + HistCAD
+制造与装配交付      → MUSE
+宿主 / 模型 / Agent harness → gNucleus Parametric CAD Bench
+
+所有阶段：
+CAD Arena 式最低执行门 + VibeCAD Trust / Review / Revision / Recovery Gate
+```
+
+### 9.8 Benchmark 分期
+
+当前先建立 `VibeCAD-P0-Trust`，不宣称完整 CAD Agent 排名，至少覆盖：
+
+1. empty project 创建精确 Box/Cylinder，验证尺寸、volume、bbox、solid validity、FCStd/STEP 重开；
+2. 多步 create/modify/move/rotate，验证目标变化和未声明属性保持；
+3. 支持范围内的 FCStd 导入修改，证明输入文件 hash 不变；
+4. require-review、宿主/daemon 重启、Accept/Reject 和 HEAD/source 不变；
+5. 两个任务基于同一 HEAD，只允许一个发布，另一个明确 stale/conflict；
+6. 任意 Python、raw handler/path、未知 operation、stale selector 和超预算请求在 CAD 前 fail closed；
+7. Worker hang/crash/active cancel 后无污染、reconcile 收敛且下一 generation 可工作；
+8. historical forward revert 产生 verified draft，并以当前 HEAD 为父安全发布。
+
+后续按能力而不是按营销日期扩展：
+
+- **G1**：增加 preview、selection、stale/revoked 呈现、Accept/Reject 正确性、time-to-first-review
+  和非计划交互次数；
+- **P1/G2**：引入 Text2CAD L1–L2、HistCAD 式 Edit/Preservation/OES，以及 neuralCAD-Edit 子集；
+- **真实宿主/P1**：采用 gNucleus Parametric CAD Bench 的兼容任务和 validator 思路比较
+  `(agent harness, model)` 组合，另报完整 Agent Profile 和 VibeCAD Trust 证据；
+- **照片/STL Provider 阶段**：引入 DeCoDE CADBench 的多模态、噪声和重建指标，同时保留绝对尺寸
+  与单位检查；
+- **制造/装配阶段**：引入 MUSE 漏斗和设计专属工程 rubric；
+- **Drafting2D 阶段**：建立标题栏、块属性、Layout、DWG reopen/AUDIT、PDF 和制图标准 Overlay。
+
+P0 竞品测试优先覆盖 agentcad、ForgeCAD、Zoo MCP、BuildCAD 和 VibeCAD；Orca/MUSE 作为完整产品
+体验和复杂工程 CAD 上限参考。所有公开比较冻结版本、Profile、任务、预算、超时、重试和停止规则，
+至少报告 `SUCCESS / SAFE_FAILURE / UNSAFE_FAILURE / INFRA_INVALID`，不只给出一个平均分。
 
 ## 10. 统一实施顺序
 
