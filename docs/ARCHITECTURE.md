@@ -1,21 +1,27 @@
 # VibeCAD 当前实施架构
 
-> 实现基线：P0-B core backend / VibeCAD 0.6.0 / runtime epoch 4
+> 实现基线：P0-B core backend / VibeCAD 0.6.0 / runtime epoch 4 / MR0-C01..C04
+> internal foundation accepted
 >
-> 架构复审：AR-1 + P0-B C14 refresh / 2026-07-23
+> 架构复审：AR-1 + P0-B C14 refresh + MR0-C05 refresh / 2026-07-25
 >
 > S3-8 的宿主 skill、发现合同和 ResourceLink，以及 P0-B 的可恢复生命周期、单 Kernel daemon、
 > file grant 和可杀 Worker backend 已在本地交付。0.6.0 仍是未发布候选：尚未在真实
 > Claude/Codex 主机中安装激活并执行验收，当前没有 tag 或 release；protocol/package
 > `host-ready` 不能表述为 `host-verified`。
 >
-> MR0-C00 只冻结多 runtime 基础的架构口径；通用 runtime 合同、CAD adapter 路由和 conformance
-> 仍需 MR0-C01..C04 实现并通过 gate。当前唯一接通的 CAD adapter 仍是 FreeCAD，公共 28-tool
-> 合同不变；durable Revision/Candidate 仍固定使用 FCStd/STEP 布局，迁移只属于 MR1。
+> MR0-C01..C04 已交付并验收内部通用 runtime 合同与 descriptor registry、backend-neutral CAD
+> registry/router、FreeCAD default composition 和 provider-free conformance。当前唯一接通和默认选择的
+> CAD adapter 仍是 FreeCAD，公共 28-tool、六 operation 与 `SelectorV1` 合同不变；durable
+> Revision/Candidate 仍固定使用 FCStd/STEP 布局，迁移只属于 MR1。
 >
-> 除明确标为 MR0 target 的 §6.1 外，本文只描述当前源码已经实现的边界。产品定位与调用策略见
-> [`AGENT_ARCHITECTURE.md`](AGENT_ARCHITECTURE.md)，分期能力见
-> [`PRODUCT_CAPABILITY_ROADMAP.md`](PRODUCT_CAPABILITY_ROADMAP.md)。
+> §6.1 描述当前源码已实现的 MR0 内部基础；它不是公共 SDK/wire schema、第二 CAD 产品支持或
+> release 结论。MR0-C01..C04 的当前 completion status 以本页、
+> [`ACCEPTANCE_TESTS.md`](ACCEPTANCE_TESTS.md) 和
+> [`CAD_RUNTIME_ADAPTER_GUIDE.md`](CAD_RUNTIME_ADAPTER_GUIDE.md) 为准，内部 adapter 开发边界见后者。
+> [`AGENT_ARCHITECTURE.md`](AGENT_ARCHITECTURE.md) 与
+> [`PRODUCT_CAPABILITY_ROADMAP.md`](PRODUCT_CAPABILITY_ROADMAP.md) 仅继续作为产品定位和远期能力参考；
+> 两者保留的 C00-era completion-state wording 由 `MRG1-RES-10A` 跟踪，不能覆盖上述当前状态。
 
 ## 1. 系统定位
 
@@ -80,7 +86,8 @@ strict request
 ## 3. 入口、进程和运行时换芯
 
 本节的“运行时”是既有的受管 Python/FreeCAD 安装、receipt 与 server 换芯生命周期，不是 §6.1
-定义的 domain-neutral invocation lifecycle。C00 不改变 installer、supervisor 或 swap 行为。
+定义的 domain-neutral invocation lifecycle。MR0 新增的内部合同不改变 installer、supervisor 或
+swap 行为。
 
 ### 3.1 入口
 
@@ -232,9 +239,10 @@ Worker，也不拥有第二个 scheduler。
 `TaskApi.submit_model_program()`。多步任务直接提交一个 ModelProgram；两条路径共享 candidate、
 verifier、Revision、review 和 recovery。
 
-### 6.1 MR0 多 runtime 基础边界
+### 6.1 MR0 已实现的内部多 runtime 基础边界
 
-以下是已批准的 MR0 目标合同，不是 C00 时点已经交付的行为或公共 schema。MR0 把两个层次分开：
+以下合同已由 MR0-C01..C04 作为内部 Python 边界实现并通过独立 gate；它们不是公共 MCP/wire
+schema、稳定第三方 SDK 或第二 CAD 支持声明。MR0 把两个层次分开：
 
 1. **系统 runtime lifecycle** 只统一 immutable runtime identity/version、capability discovery、
    invocation owner 与 Task correlation、sealed Revision/Artifact 输入、budget/deadline/execution
@@ -242,7 +250,7 @@ verifier、Revision、review 和 recovery。
    diagnostics 和 evidence；它不导入 CAD、FreeCAD、重建或仿真语义。
 2. **CAD Domain Service** 才拥有 backend-neutral 设计意图、CAD capability planning、runtime registry/
    router、artifact profile 和 selector mapping。CAD adapter 只能把已规划的意图映射到一个 native
-   API；当前及 MR0 结束时唯一可称为已连接支持的 adapter 都是 FreeCAD。
+   API；当前唯一可称为已连接和默认支持的 adapter 是 FreeCAD。
 
 ```mermaid
 flowchart LR
@@ -484,8 +492,10 @@ release。
 | `src/vibecad/workflow/` | TaskRun、CAS store、catalog、lease、review/recovery service |
 | `src/vibecad/execution/` | registry、program binding、selector、candidate、revision、executor |
 | `src/vibecad/validation/` | observation、acceptance compile、deterministic checks |
-| `src/vibecad/interaction/` | CadExecutionPort、managed checkout、protocol v2 与 session-bound file grants |
-| `src/vibecad/runtime/` | paths、receipt、installer、status、uninstall |
+| `src/vibecad/interaction/cad_runtime.py`, `cad_conformance.py` | 内部 CAD runtime identity/capability/artifact/selector、adapter registry/router/domain service 与 conformance |
+| `src/vibecad/interaction/` 其他模块 | CadExecutionPort、managed checkout、protocol v2 与 session-bound file grants |
+| `src/vibecad/runtime/contracts.py`, `registry.py`, `conformance.py` | domain-neutral runtime immutable contracts、descriptor registry 与 transcript conformance |
+| `src/vibecad/runtime/` 其他模块 | 受管 Python/FreeCAD paths、receipt、installer、status、uninstall |
 | `src/vibecad/engine/`, `tools/`, `feedback/` | 内部 FreeCAD 能力库存；非公共 endpoint |
 | `manifest.json` | MCPB 平台、启动和 28-tool 静态声明 |
 | `tests/` | 纯契约、恢复/竞态、真实 FreeCAD、package/MCPB E2E |
@@ -496,16 +506,18 @@ release。
 
 - 真实 Claude/Codex 主机中的 skill 激活、canonical workflow 与文件体验验收；
 - G1 FreeCAD Qt Workbench UI；
-- 已通过 conformance 并接入 composition 的 MR0 多 runtime 基础、第二 CAD adapter 或第二 CAD 支持；
+- 第二 CAD adapter、第二 CAD 产品支持或面向产品的 runtime discovery；MR0 只交付了内部
+  conformance-ready 基础和 FreeCAD-only default composition；
 - versioned durable artifact profile；MR1 前 Revision/Candidate 仍固定为 FCStd/STEP；
 - retention/GC、private runner generation migration 和完整运行观测/恢复审计；
 - face/edge Selector Level B、可视/语义 diff、Sketcher/PartDesign；
 - STL/STEP 受控导入、mesh-to-faceted-BRep、装配、BOM、TechDraw；
 - Sampling/BYOK backend、照片/视频重建 Provider 或仿真 Provider。
 
-0.6.0 package/managed-runtime 本地候选已完成收口但尚未 tag 或发布。后续固定顺序是：
-MR0 internal foundation → G1 Workbench MVP / P0-B hardening / host verification → P1/G2 单零件与
-STL → 后续另行批准阶段。机械详细设计、预检与仿真的
+0.6.0 package/managed-runtime 本地候选已完成收口但尚未 tag 或发布。MR0-C01..C04 的内部
+foundation 已完成，本次 C05 只关闭 canonical 文档、证据与恢复记录。后续 G1 Workbench MVP、
+P0-B hardening、host verification 与 MR1 都是需要分别批准的 campaign；P0-B hardening 关闭前不能把
+P1/G2 称为可交付。机械详细设计、预检与仿真的
 [`方向调研`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)不构成 MR0、P1/P1.5/P2 功能承诺。
 真实宿主激活验收作为 S3-RES-06 residual 单独
 关闭，不阻塞已完成的 protocol/package host-ready 定义。只有阶段需要改变专家

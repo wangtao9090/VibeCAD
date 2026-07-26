@@ -3216,3 +3216,813 @@ integrity check is required. No source or test may change before commit.
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MR0-C04-E10 | D03; D05..D07; D10; D11; A01; A02 | `not-created`; artifact restage next | terra/medium post-stage PASS; cached 6; unstaged/untracked 0/0; exact 97; corrective/purity 6; all-6 hash match | none within C04; MRG1-RES-02 closes only on accepted push | MRG1-S06 | post-stage gated / final cached integrity next |
+
+## 27. MR0-C04 Acceptance and MR0-C05 Closeout Packet
+
+### 27.1 MR0-C04 accepted commit
+
+The final cached-only `gpt-5.6-terra / medium` gate passed after the Section
+26.12 evidence append: the index contained exactly six paths with
+`M/A/A/A/A/M`, unstaged and untracked sets were empty, cached/worktree hashes
+matched, the artifact contained the post-stage evidence and
+`git diff --cached --check` was clean.
+
+The controller then created and immediately pushed:
+
+```text
+7c98e36c77ea748b2c33274d00d0f895ef3d8102
+test(runtime): enforce adapter conformance
+```
+
+The accepted commit contains exactly the artifact and five C04 source/test
+paths. Local HEAD and upstream resolved to the same full hash and the
+post-push worktree was clean.
+
+The accepted evidence includes the genuine missing-module RED, the initial
+91/2 harness isolation correction, the strengthened unsupported route, the
+atomic-overflow review RED/FIX and the forged-signature review RED/FIX. The
+settled exact suite was `97 passed`; two final `gpt-5.6-sol / max` reviews
+returned `0/0/0/0`, and independent pre-stage, post-stage and cached-integrity
+mechanical gates passed.
+
+`MRG1-RES-02` closed at this accepted push. C01 supplies immutable generic
+runtime contracts and the deterministic descriptor registry; C04 supplies
+reusable generic transcript conformance, CAD admission/snapshot conformance
+and authority-negative tests. Closure means the internal foundation is
+conformance-ready. It does not add result retrieval to `RuntimeControlPort`, a
+live reconstruction/simulation provider, a second connected CAD adapter, a
+public runtime wire schema, G1 UI, host verification, a tag or a release.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C04-E11 | D01..D16; A01; A02 | `7c98e36c77ea748b2c33274d00d0f895ef3d8102`; pushed | exact 97; two reviews 0/0/0/0; terra/medium pre/post/final cached PASS; local/upstream equal | MRG1-RES-02 closed; RES-07 remains until a real second CAD adapter | MRG1-S07 | accepted / closed |
+
+### 27.2 MR0-C05 read-only audit and clean-anchor baseline
+
+At the C04 anchor, HEAD/upstream were equal, the index/worktree were clean and
+the exact C05 four-path allowlist was sufficient:
+
+```text
+docs/ACCEPTANCE_TESTS.md
+docs/ARCHITECTURE.md
+docs/CAD_RUNTIME_ADAPTER_GUIDE.md
+docs/orchestrated/vibecad-multi-runtime-g1.md
+```
+
+The documentation RED is real but non-behavioral:
+
+- `docs/CAD_RUNTIME_ADAPTER_GUIDE.md` does not exist;
+- `docs/ARCHITECTURE.md` still says C01..C04 require implementation and still
+  places MR0 as the next milestone;
+- `docs/ACCEPTANCE_TESTS.md` still labels C01..C04 as future gates rather than
+  accepted internal foundation evidence.
+
+`README.md` retains the pre-MR0 milestone wording recorded as
+`MRG1-RES-10`. It is outside the approved C05 allowlist and is not a blocker
+provided C05 claims consistency only for the canonical C05 documents and
+carries the residual. Repository-wide documentation consistency would require
+a separately approved allowlist expansion.
+
+An independent `gpt-5.6-terra / medium` clean-anchor baseline passed:
+
+```text
+full non-slow: 5001 passed, 108 deselected, 19 warnings in 175.23s
+exact C04:       97 passed in 1.93s
+Ruff src/tests:  PASS
+public surface:  28 tools / 6 operations
+diff/status:     PASS / clean
+```
+
+No pytest process remained. No C05 file had been modified.
+
+### 27.3 MR0-C05 seven-section implementation packet
+
+#### 1. Authorization
+
+MRG1-R1, D01..D16 and A01/A02 authorize the final documentation/evidence
+closeout. This packet changes no executable source, test, package, version,
+public schema, runtime behavior or external state. Architecture-sensitive
+writing and review use `gpt-5.6-sol / max`; pure mechanical gates use
+`gpt-5.6-terra / medium`. Controller-only actions remain artifact writes,
+exact staging, commit and push.
+
+#### 2. Workspace anchor and exact write scope
+
+Start from pushed commit
+`7c98e36c77ea748b2c33274d00d0f895ef3d8102` with a clean index/worktree.
+The documentation implementer may edit only:
+
+```text
+docs/ACCEPTANCE_TESTS.md
+docs/ARCHITECTURE.md
+docs/CAD_RUNTIME_ADAPTER_GUIDE.md
+```
+
+This artifact is controller-owned. README, strategy/roadmap/agent docs,
+source, tests, package/config and every other path are read-only. No worker may
+stage, commit or push.
+
+#### 3. Required documentation outcome
+
+`ARCHITECTURE.md` and `ACCEPTANCE_TESTS.md` must replace C00-era future tense
+with the accepted C01..C04 state while retaining all nonclaims: FreeCAD is the
+only connected/default CAD adapter; public tools remain 28 and operations six;
+the internal Python contracts are not a public SDK/wire schema; G1, host
+verification, release, durable artifact migration and second CAD support are
+not delivered.
+
+Create `CAD_RUNTIME_ADAPTER_GUIDE.md` as the developer guide for the current
+internal Python boundary. It must cover:
+
+- exact generic identities, capabilities, descriptor registry, immutable
+  invocation/budget/status/result/artifact/provenance values and the
+  five-method `RuntimeControlPort`;
+- exact CAD identity, five decision kinds, artifact profile, selector
+  envelope, structural adapter, registry/router/domain service and no
+  auto-discovery;
+- a single runnable metadata/routing example which performs no CAD execution
+  or persistence and is explicitly not product-support evidence;
+- admission before snapshot conformance, deterministic fake lifecycle
+  evidence and provider-free production transcript evaluation;
+- the result-retrieval caveat: a supplied successful result is an observation,
+  not a value retrieved through the current control port;
+- exact bounds, atomic 33rd-case overflow, stable non-leaking findings and
+  raw-function signature-spoof rejection;
+- Task Kernel as the sole Task/Revision/lease/review/Accept/Reject/HEAD
+  authority; structural authority checks are not an OS sandbox;
+- semantic `SelectorV1` authority, optional runtime-qualified native locator
+  and exact runtime/kind/media artifact qualification;
+- the current FreeCAD-only default composition and descriptor
+  (`cad/freecad@1.1.0`, headless, native FCStd plus exchange STEP);
+- durable non-FreeCAD native storage remains blocked on MR1; conformance alone
+  does not connect or support a second CAD.
+
+Both canonical docs link the guide. The guide links back to both docs, this
+artifact and the exact source/test modules using valid relative links.
+
+#### 4. Steps and gates
+
+Preserve the docs RED: missing guide plus exact stale statements. Implement
+only the three documentation paths, then run:
+
+- exact four-path status/allowlist and `git diff --check`;
+- scoped relative Markdown links with zero broken targets;
+- stale-state and product-overclaim searches;
+- extraction/execution of the guide's single Python example under
+  `PYTHONPATH=src`, without modifying the repository;
+- the exact 97-test C04 suite;
+- `PYTHONPATH=src .venv/bin/python -m pytest -q`, requiring exactly
+  `5001 passed, 108 deselected, 19 warnings`;
+- `.venv/bin/python -m ruff check src tests`;
+- a canonical read-only probe requiring 28 public tools and six operations.
+
+On settled document bytes, run the real gates exactly once:
+
+```text
+env -u VIBECAD_FREECAD_ENV \
+  VIBECAD_MANAGED_FREECAD_PYTHON="/Users/wangtao/Library/Application Support/VibeCAD/runtime/mamba/envs/vibecad/bin/python" \
+  PYTHONPATH=src .venv/bin/python -m pytest -q -m slow \
+  tests/test_freecad_worker.py::test_real_managed_worker_load_modify_checkpoint_and_export
+
+env -u VIBECAD_FREECAD_ENV \
+  VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src \
+  .venv/bin/python -m pytest -q -m slow \
+  tests/test_task_kernel_integration.py::test_real_task_kernel_commits_verified_candidate \
+  tests/test_task_kernel_integration.py::test_real_agent_first_public_matrix_and_cross_process_review
+```
+
+Both real commands require zero skip/deselection/warning and no process leak.
+Require distinct architecture/product review and settled-diff adversarial
+review, each `0/0/0/0`, then independent mechanical pre-stage PASS. After
+exact named staging, post-stage work is cached allowlist/hash/diff/link/claim
+integrity only; do not rerun full/real tests unless bytes changed.
+
+#### 5. Execution discipline and breakers
+
+No behavior TDD is required for a docs-only commit; the missing guide and
+stale canonical claims are the accepted documentation RED. Stop on any need
+for an out-of-allowlist edit, source/test/API correction, README closure,
+second adapter composition, durable schema/storage migration, public support
+claim, G1/host/release claim, broken link, example failure, test-count change,
+new warning/deselection, real-gate skip/red, review finding or process leak.
+Do not weaken an existing acceptance statement or use broad staging.
+
+Terminology is fixed: managed runtime means the installer/supervisor
+environment; generic runtime lifecycle means C01 contracts; CAD runtime
+adapter means the internal selection/metadata boundary; provider means a
+future read-only producer; supported/connected adapter requires real default
+composition, engine evidence and product acceptance.
+
+#### 6. Delivery boundary
+
+The intended commit is exactly:
+
+```text
+docs(orchestration): close multi-runtime foundation
+```
+
+It contains only the three documentation paths and this artifact. C05 closes
+the six-commit MR0 internal foundation, not G1, P0BH, HOST1, MR1, a second CAD,
+a public protocol, tag or release. Exact staging, commit and immediate push
+are controller-only.
+
+The commit cannot contain its own final hash/push fact. The artifact records a
+pre-closeout recovery snapshot and symbolic C05 acceptance; the controller's
+post-push report supplies the actual hash. A seventh evidence-only commit is
+forbidden by the six-commit budget.
+
+#### 7. Required final report
+
+Return exact changed paths/hashes, stale-claim and link results, example
+execution, full/C04/public counts, Ruff/diff, real Worker/Task Kernel results,
+review severities, pre/post-stage integrity, residuals/breakers, commit hash,
+push result and final local/upstream/clean state. Explicitly carry
+`MRG1-RES-10` and all product/durable residuals.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C05-E01 | D01..D16; A01; A02 | `not-created`; forbidden | docs RED: guide absent + stale C00 claims; baseline 5001/108/19; C04 97; Ruff; 28/6; audit PASS | RES-01A/03/04/05/06A/07/08/09/10 | MRG1-S07 | packet issued / docs implementation next |
+
+### 27.4 Recovery Snapshot MRG1-S07
+
+#### Completed milestones
+
+- C00 `6cc1876c8a76c9e3498262c78a0ad2c4ec6ddf6c`
+- C01 `07c6d6cd0260dcce41711a4a92d47132460571db`
+- C02 `6c3581bab14434ba7c1301e033e973d59907cc4d`
+- C03 `71a25b583363fcbd3c4f8cf56c3cde594194e648`
+- C04 `7c98e36c77ea748b2c33274d00d0f895ef3d8102`
+
+All five commits were pushed. The current anchor is clean and equals upstream.
+MRG1-RES-02 is closed. D01..D16 and A01/A02 remain active.
+
+#### Current step
+
+C05 may update only the two canonical docs, new adapter guide and this
+artifact. Its docs RED and clean-anchor baseline are recorded in Sections
+27.2–27.3. No implementation has begun.
+
+#### Recovery commands
+
+```text
+git status --short
+git rev-parse HEAD
+git rev-parse @{upstream}
+git log -6 --oneline
+```
+
+Resume only if HEAD/upstream equal the C04 anchor and status contains no path
+outside the four-path allowlist. Re-run the exact C05 gates if document bytes
+or the environment change.
+
+#### Open residuals and next campaigns
+
+- `MRG1-RES-01A`: durable Revision/Candidate/artifact storage remains fixed
+  to FCStd/STEP; close in MR1.
+- `MRG1-RES-03`: no real FreeCAD Qt Workbench UI; close in G1.
+- `MRG1-RES-04`: no real Claude/Codex host verification; close in HOST1.
+- `MRG1-RES-05`: P0-B hardening remains before P1 deliverable status.
+- `MRG1-RES-06A`: mechanical research hypotheses remain unvalidated.
+- `MRG1-RES-07`: no second real CAD adapter/engine/product acceptance.
+- `MRG1-RES-08`: no reconstruction/simulation runtime.
+- `MRG1-RES-09`: the public protocol does not expose runtime identity.
+- `MRG1-RES-10`: README retains pre-MR0 milestone wording; close only under a
+  separately approved documentation update.
+
+After C05, G1, P0BH, HOST1 and MR1 are separate campaigns requiring their own
+scope/approval. MR0 grants no authority to start them.
+
+### 27.5 MR0-C05 documentation implementation GREEN
+
+The `gpt-5.6-sol / max` architecture-writing subagent modified only the two
+canonical documents and created the approved developer guide. It did not edit
+this artifact, stage, commit or push.
+
+The accepted documentation RED is closed:
+
+- the adapter guide now exists;
+- `ARCHITECTURE.md` describes C01..C04 as the implemented, conformance-gated
+  internal foundation and no longer places MR0 as the next campaign;
+- `ACCEPTANCE_TESTS.md` converts the future contract table into accepted
+  evidence while separating generic fake lifecycle execution from fake CAD
+  identity registration/routing.
+
+The guide describes the exact internal contracts, authority boundary,
+descriptor/admission/router flow, capability decisions, artifacts/selectors,
+generic/CAD conformance, hard bounds, result-retrieval caveat, FreeCAD-only
+default composition and MR1 durable breaker. It contains exactly one runnable
+Python metadata/routing example; extracted execution under
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src` exited `0` with no output and did not
+start CAD or write persistent state.
+
+Controller and implementer checks agreed:
+
+```text
+relative links:       27 checked / 0 broken
+Python fences:        1
+example:              exit 0 / output 0
+stale C00 claims:     0
+guide whitespace:     PASS
+git diff --check:     PASS
+index:                empty
+out-of-allowlist:     0
+```
+
+The three implementation SHA-256 values are:
+
+```text
+docs/ACCEPTANCE_TESTS.md
+2bf6613ff266c07f1401b3248f8c04c91b093cc128787a4eccdf1887f6e0a881
+docs/ARCHITECTURE.md
+d208aeb4c8c67a4df269c4cbfd88b5078e946e86cc6af8f59fa8e8ada4a23509
+docs/CAD_RUNTIME_ADAPTER_GUIDE.md
+fa59c108f4a8142fbd82d94f46be3c6d8377433f695d44be94f9662a2050dc1c
+```
+
+The documents retain FreeCAD as the only connected/default adapter, 28 public
+tools and six operations, and explicitly deny second-CAD support, a public
+runtime SDK/schema, G1, host verification, durable migration and release.
+`MRG1-RES-10` is carried rather than silently changing README. Full/real gates
+have not yet been rerun on these bytes. Two distinct `gpt-5.6-sol / max`
+reviews must return `0/0/0/0` before mechanical closeout.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C05-E02 | D01..D16; A01; A02 | `not-created`; forbidden | docs RED closed; links 27/0; example 1/0; stale 0; diff/whitespace/scope PASS | RES-01A/03/04/05/06A/07/08/09/10 | MRG1-S07 | docs GREEN / independent reviews next |
+
+### 27.6 MR0-C05 adversarial review RED — linked C00-era status
+
+The first architecture review returned `0/0/0/0`, but the independent
+adversarial reviewer found one closeout blocker. The updated architecture page
+still linked `AGENT_ARCHITECTURE.md` and `PRODUCT_CAPABILITY_ROADMAP.md` as
+product/roadmap references without disclosing that those pages retain
+C00-era statements that C01..C04 are unfinished. `PRODUCT_STRATEGY.md` contains
+the same stale completion status. That contradicts the current C05 pages if
+the links are read as current MR0 completion-state authority.
+
+This finding corrects the scope of two earlier records without rewriting
+append-only history:
+
+- Section 27.2's README-only audit was incomplete;
+- Section 27.5's `stale C00 claims: 0` applies only to the three C05
+  implementation documents, not the repository.
+
+The exact out-of-scope stale clusters are:
+
+```text
+docs/AGENT_ARCHITECTURE.md
+9-10, 36, 283-285, 397-399
+docs/PRODUCT_STRATEGY.md
+53, 79, 268-270, 692-693
+docs/PRODUCT_CAPABILITY_ROADMAP.md
+93-95
+```
+
+They are now tracked as `MRG1-RES-10A`: C00-era MR0 completion-state wording
+in linked product/roadmap documents. Closure owner is a separately approved
+documentation refresh. Repository-wide documentation consistency remains
+open.
+
+The adversarial reviewer ruled that C05 can still close within its approved
+allowlist if both conditions are met:
+
+1. `ARCHITECTURE.md` explicitly states that current C01..C04 completion status
+   is governed by that page, `ACCEPTANCE_TESTS.md` and the adapter guide; the
+   linked Agent/roadmap pages remain useful only for product positioning and
+   longer-term capability content until RES-10A is closed.
+2. All subsequent snapshot, review and final reports carry RES-10A and do not
+   claim repository-wide or generalized stale-state closure.
+
+No edit to the three stale files is authorized. Changing them now would be an
+allowlist breaker. The narrow correction changes only `ARCHITECTURE.md` and
+this append-only artifact, then requires fresh link/claim/hash checks and both
+settled reviews.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C05-E03 | D01..D16; A01; A02 | `not-created`; forbidden | architecture review 0/0/0/0; adversarial review 1 blocker / 0/0/0; linked stale clusters reproduced | RES-10 plus new RES-10A; repo-wide consistency OPEN | MRG1-S07 | review RED / scoped authority clarification required |
+
+### 27.7 MR0-C05 linked-status FIX and settled review PASS
+
+The architecture-writing subagent changed only the top reference paragraph in
+`ARCHITECTURE.md`. Current C01..C04 completion status is now explicitly
+governed by the architecture page, `ACCEPTANCE_TESTS.md` and the adapter guide.
+The linked Agent and roadmap documents remain references only for product
+positioning and longer-term capability content; their C00-era completion
+wording is tracked by RES-10A and cannot override current status.
+
+The narrow correction was `+6/-4`; the settled architecture SHA-256 became:
+
+```text
+fce53832e5cf1f232176fef30848086a26058086d15bfc6997433d9b3ca33c65
+```
+
+The three out-of-scope stale documents were not modified. Controller and
+implementer checks passed with `28` relative links, zero broken links, zero
+scoped stale claims, zero scoped overclaim matches, the runnable example
+unchanged and `git diff --check` clean.
+
+Both independent `gpt-5.6-sol / max` reviewers then re-read the frozen
+candidate from zero and returned blocker/critical/major/minor `0/0/0/0`.
+They confirmed:
+
+- the prior canonical-status contradiction is closed within the approved
+  allowlist;
+- RES-10A covers the unambiguous stale completion-state clusters and
+  repository-wide consistency remains OPEN;
+- the artifact remains a strict byte-prefix append with no self-hash or
+  seventh-commit claim;
+- all current APIs, bounds, FreeCAD descriptor, authority/nonclaim language,
+  28/6 public surface, links and example match source and tests.
+
+The frozen implementation document hashes are:
+
+```text
+docs/ACCEPTANCE_TESTS.md
+2bf6613ff266c07f1401b3248f8c04c91b093cc128787a4eccdf1887f6e0a881
+docs/ARCHITECTURE.md
+fce53832e5cf1f232176fef30848086a26058086d15bfc6997433d9b3ca33c65
+docs/CAD_RUNTIME_ADAPTER_GUIDE.md
+fa59c108f4a8142fbd82d94f46be3c6d8377433f695d44be94f9662a2050dc1c
+```
+
+No full or real gate has yet been run on the final document bytes. The
+candidate may now enter the independent `gpt-5.6-terra / medium` pre-stage
+mechanical gate. All subsequent evidence and reports must carry both RES-10
+and RES-10A.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C05-E04 | D01..D16; A01; A02 | `not-created`; forbidden | review RED 1 blocker; FIX +6/-4; fresh architecture/adversarial 0/0/0/0; links 28/0; example/diff/hash/scope PASS | RES-01A/03/04/05/06A/07/08/09/10/10A | MRG1-S07 | settled reviews PASS / pre-stage mechanical gate next |
+
+### 27.8 MR0-C05 pre-stage mechanical gate RED — host-load timeout
+
+The independent `gpt-5.6-terra / medium` pre-stage gate began from the frozen
+Section 27.7 bytes. Its documentation/scope phase passed:
+
+```text
+anchor/status/index/hashes:       PASS
+artifact strict HEAD-byte prefix: PASS
+relative links:                   28 checked / 0 broken
+Python fences:                    1
+example:                          exit 0 / output 0
+scoped stale claims:              0
+RES-10 and RES-10A:               present
+repo-wide consistency:            OPEN
+diff/scope:                       PASS
+```
+
+The gate then stopped at the exact C04 suite. Three parametrizations of
+`test_public_cad_iterables_are_bounded_without_trusting_length_hints` timed
+out in their fixed `2.5`-second subprocess window for the declaration,
+decision and adapter targets. The exact C04 invocation took more than
+31 seconds instead of its prior approximately two-second settled runtime.
+No later pre-stage phase was run.
+
+The controller independently reran only those three parametrizations. That
+probe returned `2 failed, 1 passed in 12.43s`; the declaration and adapter
+subprocesses timed out. Crucially, captured stdout from both timed-out
+subprocesses already contained:
+
+```text
+bounded-cad-iterable: PASS
+```
+
+Thus the required boundedness assertion completed before termination, while
+subprocess exit/cleanup was not observed within the wall-clock deadline. At
+the failure point the host was heavily scheduled; the first gate observed the
+Codex app server near 85% CPU and Activity Monitor near 40% CPU. A later
+controller sample still showed elevated host load. No pytest, FreeCAD or
+VibeCAD worker leaked after either invocation.
+
+All four C05 candidate paths retained their frozen bytes, the index remained
+empty and nothing was staged, committed or pushed. This is retained as a
+mechanical gate RED, not waived as an implementation pass. No test edit is
+authorized by the C05 allowlist. A targeted stability probe may run only in a
+demonstrably lower-load window; the full pre-stage gate may restart from the
+beginning only after that probe passes consistently.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C05-E05 | D01..D16; A01; A02 | `not-created`; forbidden | phase A PASS; exact C04 3 timeout failures; controller probe 2 failed/1 passed in 12.43s; timed-out stdout already PASS; no leaks | RES-01A/03/04/05/06A/07/08/09/10/10A | MRG1-S07 | mechanical RED / wait for lower-load stability probe |
+
+### 27.9 MR0-C05 lower-load stability probe RED
+
+The `gpt-5.6-terra / medium` gate subagent ran the authorized targeted
+stability probe. Attempt one failed, so attempt two and the full pre-stage
+gate were not run.
+
+```text
+baseline load:                 5.62 / 5.19 / 5.43
+ending load:                   3.65 / 4.73 / 5.24
+targeted result:               2 failed / 1 passed in 12.54s
+declarations:                  TimeoutExpired(2.5s), stdout PASS
+decisions:                     TimeoutExpired(2.5s), stdout PASS
+adapters:                      PASS
+stderr from timed-out children: empty
+pytest/FreeCAD/VibeCAD leaks:  0
+index:                         empty
+git diff --check:              PASS
+```
+
+The failing targets changed from the controller probe, but the failure mode
+did not: each timed-out child completed the bounded-iteration assertion and
+printed the required success marker before its parent could observe full
+process exit. The repeated RED makes the fixed `2.5`-second wall-clock
+deadline unstable on the current host rather than a one-off gate incident.
+It does not authorize a timeout waiver or a test change. Read-only exit-latency
+measurement is the next diagnostic step; any change to the test requires an
+explicit C05 allowlist expansion before implementation.
+
+The three implementation-document hashes were unchanged. This artifact's
+pre-probe and post-probe hash was
+`ac187d3167f619475ea9027360247a4b940557c01375beff3ed78f9369e469db`;
+the value is historical evidence for the pre-Section-27.9 bytes, not a
+self-hash of the current artifact.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C05-E06 | D01..D16; A01; A02 | `not-created`; forbidden | lower-load probe attempt 1: 2 failed/1 passed; both timeout stdout PASS; no leaks; hashes/diff/index PASS | RES-01A/03/04/05/06A/07/08/09/10/10A | MRG1-S07 | mechanical RED / characterize exit latency |
+
+### 27.10 MR0-C05 timeout diagnosis and stability recovery GREEN
+
+The same `gpt-5.6-terra / medium` gate subagent reproduced the exact child
+logic outside pytest with a `20`-second safety ceiling and no workspace
+writes. Six exact launch-to-exit measurements all returned `0`, printed the
+required PASS marker and had empty stderr:
+
+```text
+declarations: 0.150550s / 0.153932s
+decisions:    0.146165s / 0.147248s
+adapters:     0.153203s / 0.146472s
+```
+
+A `flush=True` diagnostic variant separated success-marker time from process
+exit:
+
+```text
+declarations: PASS at 0.142966s; exit +0.011851s; total 0.154817s
+decisions:    PASS at 0.132767s; exit +0.011115s; total 0.143882s
+adapters:     PASS at 0.132723s; exit +0.010859s; total 0.143582s
+```
+
+Three import-only child baselines were `0.146116s`, `0.154604s` and
+`0.158567s`. Normal elapsed time is therefore almost entirely process startup
+and import; post-assertion interpreter exit is approximately `11ms`. The
+diagnostic found no implementation hang, background-thread wait or persistent
+cleanup delay.
+
+With starting load `2.78 / 3.53 / 4.54`, the authorized exact pytest stability
+probe then passed twice consecutively:
+
+```text
+attempt 1: 3 passed in 0.60s; tool wall 0.875355s
+attempt 2: 3 passed in 0.59s; tool wall 0.850537s
+```
+
+Ending load was `2.64 / 3.44 / 4.49`. No pytest, FreeCAD or VibeCAD worker
+leaked. The three implementation-document hashes remained frozen, the index
+was empty, the exact four-path worktree status was preserved and
+`git diff --check` passed. This closes the stability-probe condition without
+waiving the retained RED evidence or changing the test. The complete
+pre-stage gate must still restart from its first phase and pass on the current
+artifact bytes.
+
+The artifact hash throughout the diagnosis and recovery probe was
+`4ac99253dd02334408f0bcb41d92b98edbe38268c447282af758ac8219c99019`;
+the value denotes the pre-Section-27.10 historical bytes.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C05-E07 | D01..D16; A01; A02 | `not-created`; forbidden | six exact exits ~0.15s; post-PASS exit ~11ms; import baseline ~0.15s; stability probes 3/3 twice; no leaks | RES-01A/03/04/05/06A/07/08/09/10/10A | MRG1-S07 | timeout diagnosis GREEN / full pre-stage restart required |
+
+### 27.11 MR0-C05 timeout adversarial disposition
+
+A fresh read-only `gpt-5.6-sol / max` adversarial assessment found no product
+hang or resource-leak evidence. The bounded CAD snapshot implementation uses a
+deterministic `range(limit + 1)` plus `next()` ceiling: declarations and
+decisions perform at most `1025` reads and retain at most `1024` values;
+adapters perform at most `257` reads and retain at most `256` values. It starts
+no implementation thread or subprocess. The contract intentionally does not
+claim that an individual hostile `next()` call is a wall-clock sandbox.
+
+Fifteen additional independent read-only child probes all returned `0` in
+`0.138–0.190s`, showed only the non-daemon main thread and registered no
+`atexit` callback. Together with parameter drift across failures, PASS stdout,
+empty stderr, zero leaks, the Section 27.10 timings and consecutive recovery
+GREEN, the evidence supports transient host scheduling rather than a product
+loop or hidden cleanup wait.
+
+The reviewer authorized exactly one complete pre-stage restart from phase A
+without changing the test or C05 allowlist. This is not retry-until-green:
+another occurrence of the same timeout is an immediate breaker requiring
+explicit scope approval.
+
+If that breaker occurs, the recommended minimum technical correction is an
+independent test-only hotfix in `tests/test_cad_runtime.py`: retain all three
+parameter children, flush the success marker and use `os._exit(0)` after the
+boundedness assertion, while increasing the external watchdog to `10.0`
+seconds. That preserves exact test counts and separates proven child semantics
+from ordinary interpreter finalization. It is not authorized now. Combining
+the parameters is rejected because it would reduce C04 from `97` to `95` and
+the full selected count from `5001` to `4999`. A hotfix would also require an
+explicit change from the approved six-commit plan; it cannot be hidden inside
+the docs-only C05 commit or retroactively added to an already pushed commit.
+
+Current severity is one process blocker, zero critical findings, zero major
+product findings and one minor test-robustness risk. The process blocker clears
+only when the complete pre-stage gate passes.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C05-E08 | D01..D16; A01; A02 | `not-created`; forbidden | adversarial: no product hang/leak; 15 probes 0.138–0.190s; one full restart authorized; fallback not authorized | RES-01A/03/04/05/06A/07/08/09/10/10A; minor timeout robustness | MRG1-S07 | 1 process blocker / 0 critical / 0 major / 1 minor |
+
+### 27.12 MR0-C05 complete pre-stage mechanical PASS
+
+The authorized one-time `gpt-5.6-terra / medium` complete restart passed every
+phase from the frozen Section 27.11 bytes. No failed phase was retried.
+
+```text
+A documentation/scope:
+  exact status/index/hashes:             PASS
+  artifact strict HEAD-byte prefix:      PASS
+  relative links:                        28 checked / 0 broken
+  Python fences / example:               1 / exit 0 / output 0
+  scoped stale claims:                   0
+  RES-10 / RES-10A / repo-wide OPEN:     present
+  diff / process cleanup:                PASS
+
+B exact C04:
+  97 passed in 1.68s
+  warning / deselection:                 0 / 0
+
+C public surface:
+  targeted tests:                        2 passed in 0.21s
+  canonical projection:                  28 tools / 6 operations
+
+D Ruff:
+  src + tests:                           PASS
+
+E full default:
+  5001 passed, 108 deselected, 19 warnings in 142.31s
+  failure / error:                       0 / 0
+
+F real managed FreeCAD:
+  Worker:                                1 passed in 1.98s
+  Task Kernel:                           2 passed in 17.42s
+  skip / deselection / warning:          0 / 0 / 0
+
+G final integrity:
+  four frozen hashes / exact status:     PASS
+  index / diff / artifact prefix:        empty / PASS / PASS
+  HEAD / upstream:                       7c98e36... / 7c98e36...
+  pytest/FreeCAD/Worker/daemon leaks:    0
+```
+
+The exact settled pre-evidence artifact hash was
+`3838a0a3b725e88b88a82ec27882b4e0b25cbacc658b8ef717b4f382c384a7e6`.
+All open residuals remain explicit. The Section 27.11 process blocker is
+closed; the minor timeout-robustness observation remains recorded without a
+test change or waiver.
+
+Exact named staging of only the three documentation paths and this artifact is
+now mechanically authorized. Post-stage verification is cached
+allowlist/hash/diff/link/claim integrity only; full, C04 and real gates must
+not be rerun unless candidate bytes outside an evidence append change.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C05-E09 | D01..D16; A01; A02 | `not-created`; exact staging next | A–G PASS; C04 97; public 2 + 28/6; Ruff; full 5001/108/19; real Worker 1; Task Kernel 2; zero leaks | RES-01A/03/04/05/06A/07/08/09/10/10A; minor timeout robustness | MRG1-S07 | pre-stage PASS / no breaker |
+
+### 27.13 Post-MR0 product steering — FreeCAD E2E plus parallel MR1
+
+The user set the post-MR0 product priority:
+
+- a second CAD is not urgent; MR0's internal adapter boundary and conformance
+  reservation are sufficient for now;
+- FreeCAD end-to-end product capability is the primary path;
+- G1 and MR1 should run as coordinated parallel campaigns;
+- P0-B hardening and real Claude/Codex host verification remain supporting
+  tracks.
+
+The intended FreeCAD product chain is:
+
+```text
+Claude/Codex -> MCP/skill -> Task Kernel -> CAD Domain/FreeCAD adapter
+-> managed Worker -> candidate/verifier -> durable draft/revision
+-> FreeCAD Workbench preview and Accept/Reject -> FCStd/STEP delivery
+```
+
+G1 owns the Workbench/public-client experience and must not read or write
+Revision directories directly. MR1 owns durable schema migration,
+runtime/profile artifact identity, v1 compatibility, recovery and rollback;
+it does not connect a second CAD or expand G1's UI scope. G1 alpha may validate
+the existing v1 FCStd/STEP path, but external beta, non-disposable user data
+and release require a shared G1/MR1 integration gate. The gate must cover old
+v1 projects and new/migrated data through preview, draft, verdict,
+Accept/Reject, artifact retrieval, restart/reconcile and rollback.
+
+This is approved product direction, not an expansion of MR0-C05. G1 and MR1
+require separate exact allowlists, commit sequences and recovery packets
+before their source implementation begins. RES-07 remains deliberately open;
+RES-01A becomes the parallel MR1 closure target after C05.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C05-E10 | user post-MR0 steering | `not-created`; no MR0 scope expansion | G1/MR1 common beta/release gate required; second CAD deferred | RES-01A moves to parallel MR1; RES-07 intentionally open; P0BH/HOST1 remain | MRG1-S07 | future direction approved / exact campaign packets required |
+
+### 27.14 Post-MR0 MR1 deferral-risk audit
+
+A read-only `gpt-5.6-sol / max` source audit confirmed the approved parallel
+direction. G1 alpha need not wait for complete MR1 if its data is explicitly
+resettable or exportable. MR1 must join before the first promise that an
+external user's durable project will survive product upgrades; a tag alone is
+not the governing threshold.
+
+The audit found strict v1 durable coupling across Revision manifests, HEAD,
+journals, drafts, verification reports, task artifacts, delivery eligibility
+and materialization. Decoders reject non-v1 or unknown record fields, checksum
+domains are v1-specific, and manifest byte digests are cross-bound into those
+records. Fixed `model.FCStd`/`model.step` assumptions occur broadly across the
+revision store, execution, artifact delivery and public manifest validation.
+An in-place manifest rewrite would invalidate existing receipts and recovery
+facts.
+
+The required MR1 strategy is therefore:
+
+- preserve immutable v1 revisions and interpret an absent v1 profile only as
+  the exact FreeCAD FCStd/STEP profile;
+- add profile codec dispatch and dual-version readers before activating a v2
+  writer;
+- allow mixed v1/v2 ancestry while keeping downgrade writes fail-closed;
+- inventory projects, revisions, lineage, active journals/candidates,
+  drafts/checkouts and materializations before any migration;
+- exercise crash, restart, reconcile, rollback and backup restore rather than
+  bulk rewriting old revisions.
+
+The existing opaque `vibecad://artifact/{materialization_id}/{artifact_id}`
+resource URI is a safe G1/MR1 seam. G1 must use application APIs and file
+grants; it must not parse `manifest.json`, construct revision paths, rely on
+artifact list positions or open an internal `model.FCStd` path.
+
+Before complete MR1, a narrow preparation packet should freeze a byte-level v1
+golden corpus and a read-only migration inventory/preflight. The shared
+G1/MR1 beta gate must prove v1 readability, mixed v1-to-v2 lineage,
+draft Accept/Reject, revert, restart/reconcile, G1 preview/grant/revocation,
+opaque-URI compatibility, backup restore and fail-closed old-writer behavior.
+
+Complete MR1 may no longer be deferred after any of these triggers:
+
+- the first promised non-disposable external project;
+- the first non-FreeCAD durable profile or native format;
+- a FreeCAD feature requiring artifact cardinality beyond fixed FCStd/STEP;
+- any G1 dependency on an internal durable path;
+- an ambiguous recovery state or a migration dry-run exceeding its maintenance
+  window.
+
+As engineering warning thresholds rather than product contracts, a real
+snapshot dry-run should be forced by any of `100` projects, `1,000` revisions
+or `10 GiB` of v1 data.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C05-E11 | approved G1/MR1 parallel direction | `not-created`; no MR0 scope expansion | sol/max durable audit; immutable-v1 + dual-reader/new-v2; opaque URI seam; beta triggers fixed | RES-01A parallel closure target; RES-07 deferred | MRG1-S07 | handoff guardrails accepted / C05 exact staging next |
+
+### 27.15 MR0-C05 post-stage cached mechanical PASS
+
+The exact named stage contained only:
+
+```text
+M  docs/ACCEPTANCE_TESTS.md
+M  docs/ARCHITECTURE.md
+A  docs/CAD_RUNTIME_ADAPTER_GUIDE.md
+M  docs/orchestrated/vibecad-multi-runtime-g1.md
+```
+
+The independent `gpt-5.6-terra / medium` cached-only gate passed. There were
+zero unstaged and zero untracked paths. Cached and worktree SHA-256 values
+matched for all four paths; the pre-evidence artifact value was
+`9e2aa22b90d30315d862252b2ae3f37b801d4cc15acbec1d96fc84de9683b746`.
+`git diff --cached --check` passed, and both cached and worktree artifact bytes
+were strict appends to the HEAD artifact.
+
+Cached documentation checks returned `28` relative links with zero broken
+targets, one guide Python fence without re-execution, zero scoped stale claims
+and zero positive product overclaims. Two lexical overclaim candidates were
+both explicit negative statements denying second-CAD support. All residuals,
+RES-10A, repository-wide consistency OPEN, FreeCAD-only support, second-CAD
+non-delivery and the future/no-MR0-expansion status of G1/MR1 were retained.
+
+The artifact contained no current self-hash, no positive current-C05
+commit/push fact and no positive seventh-commit claim. HEAD and upstream both
+remained `7c98e36c77ea748b2c33274d00d0f895ef3d8102`; no pytest, FreeCAD, Worker
+or daemon process leaked. As required, the gate did not rerun the guide
+example, full suite, exact C04 suite or real gates.
+
+This evidence append changes only the controller-owned artifact. Exact
+restaging of that path followed by one final cached
+allowlist/hash/diff/prefix check is required before creating C05.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C05-E12 | D01..D16; A01; A02; post-MR0 steering | `not-created`; artifact restage next | cached M/M/A/M; unstaged/untracked 0/0; hashes/links/claims/prefix/diff/leaks PASS | RES-01A/03/04/05/06A/07/08/09/10/10A; minor timeout robustness | MRG1-S07 | post-stage PASS / final cached integrity next |

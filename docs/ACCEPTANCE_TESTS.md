@@ -11,8 +11,9 @@ operation 与 ModelProgram 的统一 Task Kernel，以及可验证的 FCStd/STEP
 0.6.0 本地交付候选的当前放行范围是前者。未授权外部模型/API 消耗，因此不能把本清单的本地模拟、测试
 double 或当前控制器执行写成 host-verified 证据。
 
-MR0-C00 另外冻结下面的 multi-runtime foundation 验收口径，但不改变本清单已有 PASS 范围或可执行
-产品声明。C00 是 documentation-only；MR0 foundation-ready 仍需 C01..C04 实现与 conformance gate。
+MR0-C01..C04 已交付并验收内部 multi-runtime foundation；本次 C05 只关闭 canonical 文档、证据与
+恢复记录，不改变本清单已有 PASS 范围或可执行产品声明。该内部 foundation 独立于 0.6.0
+release、真实宿主和产品支持 gate。
 
 ## 1. 冻结产品口径
 
@@ -75,20 +76,24 @@ artifact/proposal；设计采纳必须新建 reviewed CAD Task。
 [`调研报告`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)不提供任何 acceptance PASS，也不把其中的
 P1/P1.5/P2 建议变为当前承诺。
 
-### 1.4 MR0 foundation conformance（独立于 0.6.0 放行）
+### 1.4 MR0 foundation conformance（C01..C04 已验收，独立于 0.6.0 放行）
 
-| 合同 | 后续 MR0 gate 必须证明 | 不能据此宣称 |
-|---|---|---|
-| generic lifecycle | immutable runtime identity/version/capability；Task-correlated sealed invocation；budget/deadline；start/status/cancel/health/reconcile；immutable artifact/provenance/diagnostics/evidence；common layer 不导入 CAD/FreeCAD/Qt/FEA | 通用 CAD command、仿真或重建 schema |
-| CAD domain | capability planner 在 mutation 前精确选择 native、disclosed mapping、explicit approximation、unsupported 或 namespaced extension | 所有 runtime 语义等价或自动降级 |
-| registry/conformance | 两个 deterministic fake CAD identity 可独立 register/plan/execute/cancel/reconcile；未声明 capability fail closed | 第二 CAD 产品支持 |
-| FreeCAD adapter | 只有 FreeCAD 被 default composition 选中；现有 lifecycle、error、source safety、FCStd/STEP、cancel/recovery 全部兼容 | G1 UI、新 operation 或第二 adapter |
-| authority negative | parent compatibility adapter 的 store/lease capability 只限 bounded validation/checkpoint/export/evidence，且无独立 Task/Accept/Reject/commit/HEAD authority；child Worker/provider/Workbench 无任何 store/lease object、daemon credential 或提交能力 | 第二 scheduler 或提交路径 |
-| artifact/selector | artifact 的 runtime/profile/role/format/digest/provenance 匹配；semantic `SelectorV1` 始终权威，native locator 仅为可选 runtime evidence | 公开 runtime schema、SelectorV1 wire 变化或 face/edge 支持 |
-| D14 durable split | MR0 仍持久化固定 `model.FCStd`/`model.step`，第二 native format fail closed | Revision/Candidate/manifest/store 已泛化；该声明只在 MR1 gate 后成立 |
+| 合同 | C01..C04 已接受的证据 | 当前状态 | 不能据此宣称 |
+|---|---|---|---|
+| generic lifecycle | immutable runtime identity/version/capability；Task-correlated sealed invocation；budget/deadline；start/status/cancel/health/reconcile；immutable artifact/provenance/diagnostics/evidence；deterministic fake 实际执行 lifecycle，再由 caller 提供 observed result transcript；common layer 不导入 CAD/FreeCAD/Qt/FEA | 内部 contract/conformance PASS | 通用 CAD command、generic result retrieval、仿真或重建 schema |
+| CAD domain | capability planner 在 mutation 前精确选择 native、disclosed mapping、explicit approximation、unsupported 或 namespaced extension | 内部 planning contract PASS | 所有 runtime 语义等价或自动降级 |
+| registry/conformance | 两个 deterministic fake CAD identity 可独立 register/plan/route；未声明 capability fail closed；generic fake 另行证明 execute/cancel/reconcile lifecycle | 内部 fixture/conformance PASS | 第二 CAD adapter、engine 或产品支持 |
+| FreeCAD adapter | default composition 只注册并选择 FreeCAD；现有 lifecycle、error、source safety、FCStd/STEP、cancel/recovery compatibility 与真实 managed gates 保持通过 | FreeCAD-only PASS | G1 UI、新 operation、auto-discovery 或第二 adapter |
+| authority negative | parent compatibility adapter 的私有 store/lease capability 只限 bounded validation/checkpoint/export/evidence；control/adapter public surface 的 Task/Accept/Reject/commit/HEAD-like authority fail closed；child Worker/provider/Workbench 无提交能力 | 结构与 composition boundary PASS；不是 OS sandbox | 第二 scheduler、提交路径或恶意 provider 隔离 |
+| artifact/selector | runtime-qualified profile 与 concrete artifact 的 runtime/kind/media 精确匹配；semantic `SelectorV1` 始终权威，native locator 仅为可选 runtime/revision-qualified evidence；真实 byte/digest 仍由 domain verifier 核验 | 内部 qualification PASS | 公开 runtime schema、SelectorV1 wire 变化、face/edge 支持或 conformance 已验证 artifact bytes |
+| D14 durable split | C01..C04 不改变 `RevisionRef`、Candidate/store/manifest/recovery schema；FreeCAD 仍持久化固定 `model.FCStd`/`model.step` | MR0 preservation PASS；MR1 migration OPEN | Revision/Candidate/manifest/store 已泛化或第二 native format 可持久化 |
 
-本表是 MR0 的 future gate contract，C00 不把任何一行勾为 PASS。MR0 conformance 也不能关闭 §7 的
-真实第二宿主 residual，不能产生 tag、release 或 host-verified 结论。
+上述 accepted evidence 落在 C04 commit
+`7c98e36c77ea748b2c33274d00d0f895ef3d8102`，其 exact conformance suite 为
+`97 passed`。实现与测试入口见
+[`CAD_RUNTIME_ADAPTER_GUIDE.md`](CAD_RUNTIME_ADAPTER_GUIDE.md)。本表不是 0.6.0 release matrix；
+MR0 conformance 不能关闭 §7 的真实第二宿主 residual，也不能产生 tag、release、G1 或 host-verified
+结论。
 
 ## 2. 放行总表
 
@@ -393,10 +398,11 @@ generation-zero 合法无文件要与“manifest 声明但 payload 缺失”区�
 所有负例应返回稳定、去敏的错误 envelope，不执行 CAD 副作用，不泄露绝对内部路径、环境变量、
 token、secret、堆栈或用户文件内容。
 
-MR0-C01..C04 的独立 conformance gate 还必须覆盖 undeclared capability、runtime/artifact profile
-mismatch、只有 native locator 而没有 semantic selector、fake identity 被投影成 support、adapter/
-provider 尝试取得 commit authority，以及第二 native format 写入固定 durable store。C00 不执行这些
-新增路径；在实现 gate 通过前不得把它们记作 PASS。
+MR0-C01..C04 已接受的独立 conformance 覆盖 undeclared capability、runtime/profile 与
+artifact runtime/kind/media mismatch、只有 native locator 而没有 semantic selector、forbidden
+commit/HEAD-like public authority，以及 deterministic fake identity 的 bounded admission/plan/route。
+fake identity 仍只存在于 fixture，不能投影成产品 support。C04 没有把第二 native format 写入固定
+durable store；该路径在 D14 下刻意未接入，并继续由 MR1 / `MRG1-RES-01A` 阻断。
 
 ### E11：卸载保留数据
 
