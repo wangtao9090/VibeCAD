@@ -1784,3 +1784,445 @@ process leaks:                    0
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MR0-C01-FIX02-E04 | D03; D06; A01; A02 | `not-created`; commit next | FIX02 RED 6/25; GREEN 31; sol/max review 0/0/0/0; terra/medium pre/post-stage PASS; cached diff check 0; hashes matched | MRG1-RES-02 until C04 | MRG1-S03 | gated / ready-to-commit |
+
+## 23. MR0-C01 Finalization and MR0-C02 Task Packet
+
+### 23.1 MR0-C01 accepted commit
+
+At `2026-07-26T03:12:42Z`, the controller verified and pushed the accepted
+generic runtime foundation:
+
+- commit:
+  `07c6d6cd0260dcce41711a4a92d47132460571db`;
+- subject: `feat(runtime): add runtime capability contracts`;
+- push: `origin/codex/agent-stage3`, success;
+- local `HEAD` and upstream:
+  `07c6d6cd0260dcce41711a4a92d47132460571db`;
+- post-push worktree: clean;
+- exact accepted scope: two generic runtime modules, two focused test modules
+  and this rolling artifact; `src/vibecad/runtime/__init__.py` unchanged;
+- accepted gates: focused `31 passed`, scoped Ruff PASS, `sol / max` review
+  Critical/Major/Medium/Minor `0/0/0/0`, `terra / medium` post-staging PASS;
+- MRG1-RES-02 remains open until C04 supplies reusable conformance and
+  authority-negative tests.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C01-E05 | D01..D16; A01; A02 | `07c6d6cd0260dcce41711a4a92d47132460571db`; pushed | RED/FIX01/FIX02 preserved; GREEN 31; review 0/0/0/0; mechanical PASS; local/upstream equal | MRG1-RES-02 until C04 | MRG1-S04 | accepted / closed |
+
+### 23.2 MR0-C02 architecture audit
+
+The read-only `gpt-5.6-sol / max` C02 design audit returned PASS with no
+breaker. It confirmed:
+
+- the existing revision-bound, backend-neutral `SelectorV1` is the semantic
+  selector authority and must be wrapped without changing its wire schema;
+- the five capability outcomes require distinct immutable sum-type variants,
+  not one optional-field record;
+- a narrow adapter selection Protocol declares only a runtime descriptor,
+  `generation_lost`, `terminate_generation()` and `close_generation()`; it
+  does not inherit `RuntimeControlPort` or invent a second invocation state
+  machine;
+- C03 can construct one `WorkerCadExecutionPort`, register it, select it
+  through the router for internal capability
+  `authoring.execute_program@1`, assert the selected object is the same
+  nominal worker and return it unchanged;
+- `src/vibecad/interaction/__init__.py` should remain byte-identical with
+  SHA-256
+  `f1e9b6e50b2042c09dff60d024a6fbf53ee09f2507b6b66dfa0423de9ae776a5`.
+
+### 23.3 MR0-C02 seven-section implementation packet
+
+#### 1. Authorization
+
+MRG1-A01 authorizes C02 under D01–D15. MRG1-A02 routes routine coding to
+`gpt-5.6-sol / high`, architecture/adversarial review to
+`gpt-5.6-sol / max`, and mechanical gates to
+`gpt-5.6-terra / medium`. The packet introduces internal CAD-domain contracts
+only and does not change public product support.
+
+#### 2. Workspace anchor and exact write scope
+
+Start from clean pushed commit
+`07c6d6cd0260dcce41711a4a92d47132460571db`. The implementation subagent may
+write only:
+
+```text
+src/vibecad/interaction/cad_runtime.py
+tests/test_cad_runtime.py
+```
+
+The rolling artifact is controller-owned.
+`src/vibecad/interaction/__init__.py` remains in the approved commit allowlist
+but must stay unchanged unless a test-proven import requirement appears; in
+that case stop instead of editing it.
+
+#### 3. Context and required internal design
+
+Implement a backend-neutral internal CAD runtime layer:
+
+- `CadRuntimeIdentity` wraps an exact generic `RuntimeIdentity` whose family
+  is `cad`;
+- `CadRuntimeExtension` makes non-portable requests explicit and
+  runtime-qualified;
+- five frozen decision variants represent native execution, disclosed
+  semantic mapping, explicit non-executable approximation, mutation-free
+  unsupported rejection and namespaced runtime extension; only native,
+  mapping and extension are executable;
+- native requires the exact requested declared capability; mapping and
+  extension selections must also be declared; approximation/unsupported carry
+  no executable selection, and an unknown request becomes unsupported before
+  any adapter lifecycle call;
+- `CadArtifactProfile` contains runtime-qualified, versioned role/kind/media
+  declarations with exactly one native model; validating a concrete generic
+  `RuntimeArtifact` requires exact runtime, kind and media type. It contains no
+  path, fixed FCStd/STEP filename, store or durable schema field;
+- `CadSelectorEnvelope` contains the existing revalidated `SelectorV1` as
+  mandatory semantic authority plus an optional exact-runtime/revision
+  `NativeLocator`; dropping the native locator preserves semantic identity,
+  and a bare ephemeral locator can never stand alone;
+- `CadRuntimeDescriptor`, a bounded deterministic adapter registry, router and
+  `CadDomainService` provide exact-version planning and adapter selection for
+  two independently registered fixture identities;
+- `CadRuntimeAdapter` is a structural selection/compatibility Protocol with
+  only `runtime_descriptor`, `generation_lost`,
+  `terminate_generation()` and `close_generation()`. It exposes no store,
+  lease, Task, revision, review, Accept/Reject, commit, HEAD or public-tool
+  authority and remains separate from generic `RuntimeControlPort`;
+- define internal routing capability
+  `CAD_EXECUTE_PROGRAM_V1 =
+  RuntimeCapability(name="authoring.execute_program", version=1)` for C03
+  composition. This is not a seventh public operation or a portability claim.
+
+Permitted non-stdlib imports are the generic runtime contracts/registry and
+the existing backend-neutral `SelectorV1` contract. Do not import
+`interaction.cad`, application, workflow, worker, FreeCAD, Qt, FEA,
+reconstruction, FCStd/STEP layout or public server/tool modules.
+
+#### 4. Test-first steps and gates
+
+1. Create `tests/test_cad_runtime.py` first and syntax-check it.
+2. Run the exact approved command before implementation:
+
+   ```text
+   PYTHONPATH=src .venv/bin/python -m pytest -q \
+     tests/test_runtime_contracts.py tests/test_runtime_registry.py \
+     tests/test_cad_runtime.py
+   ```
+
+   Preserve collection exit `2` caused only by the deliberately absent
+   `vibecad.interaction.cad_runtime` module.
+3. Implement the narrow module and rerun the same command to GREEN.
+4. Tests must cover all five exact decision types/invariants, undeclared
+   capabilities, mutation-free approximation/unsupported routing with zero
+   adapter calls, explicit extension identity, duplicate/unknown/exact-version
+   registration, reversed-order fixture identities, artifact role/runtime/
+   kind/media mismatch, mandatory semantic selectors, runtime/revision/native
+   mismatch, native loss retaining semantic identity, bounded hostile/endless
+   inputs, forbidden authority names and AST import purity.
+5. Run scoped Ruff/format, `git diff --check`, exact allowlist and
+   `interaction/__init__.py` hash checks. Distinct `sol / max` and
+   `terra / medium` agents must both PASS.
+
+#### 5. Execution discipline and breakers
+
+The implementation subagent is the sole source/test writer and may not edit
+the artifact, stage, commit or push. Stop on any required edit to
+`interaction/cad.py`, `interaction/__init__.py`, application/project, worker,
+generic runtime C01, revisions/store/schema/layout, public `SelectorV1`, six
+operations or 28 tools. Also stop on any adapter authority expansion,
+FreeCAD-specific import/field, product-support claim for fixture identities,
+unsupported/approximation path that returns or invokes an adapter, or
+unbounded public iterable.
+
+#### 6. Delivery boundary
+
+The intended commit is exactly:
+
+```text
+feat(cad): add backend-neutral CAD runtime port
+```
+
+It may contain only `cad_runtime.py`, `test_cad_runtime.py` and this artifact.
+No commit or push occurs until focused GREEN, all five decision branches,
+authority/purity evidence, independent review and mechanical recheck pass.
+
+#### 7. Required final report
+
+Return the exact RED cause/exit, GREEN command/count, exact files, value/API
+decisions, branch and mutation counters, selector/artifact negatives, iterable
+bounds, purity/authority results, Ruff/diff/hash evidence, review findings,
+residuals and whether `interaction/__init__.py` remained unchanged.
+
+## 24. MR0-C02 Test-First Ledger, Review Red and Corrective Packet
+
+### 24.1 Initial RED, design correction and focused GREEN
+
+The `gpt-5.6-sol / high` implementation subagent preserved two test-first
+transitions within the exact two-file write scope:
+
+1. before source implementation, the approved exact command exited `2`; the
+   sole collection error was the deliberately absent
+   `vibecad.interaction.cad_runtime` module, while existing C01 tests collected
+   normally;
+2. after a first GREEN, three architecture checks were turned into tests
+   before correction: explicit extension requests, all six approved artifact
+   roles and immutable registry-admission descriptors. That corrective run
+   exited `1` with `6 failed, 49 passed`;
+3. the settled focused command then returned `55 passed`:
+   `31` generic runtime cases and `24` C02 cases.
+
+The two new files only were changed. Scoped Ruff/format, AST import purity,
+source-assert scan, whitespace/diff checks and hostile-iterable process cleanup
+passed. `src/vibecad/interaction/__init__.py` retained SHA-256
+`f1e9b6e50b2042c09dff60d024a6fbf53ee09f2507b6b66dfa0423de9ae776a5`.
+No stage, commit or push occurred.
+
+### 24.2 MR0-C02-E02 — independent architecture/adversarial review red
+
+At `2026-07-26T03:37:21Z`, the distinct `gpt-5.6-sol / max` review returned
+FAIL with Critical `0`, Major `1`, Medium `3`, Minor `0`:
+
+1. **Major — compound authority names bypass admission.** Exact-name filtering
+   rejects `commit` but admitted `commit_revision`, `advance_head`,
+   `accept_draft`, `reject_task` and `review_task`, allowing a routed adapter
+   to expose second-authority methods contrary to D01.
+2. **Medium — cross-runtime unsupported extension rules are admitted but
+   unreachable.** A descriptor for runtime A accepted an unsupported decision
+   whose extension request belongs to runtime B; planning then rejects the
+   request before consulting the configured rule.
+3. **Medium — singular artifact roles have no cardinality bound.** Profiles
+   admitted multiple semantic observations, selector mappings and provenance
+   declarations with different kinds.
+4. **Medium — generation hook signatures are unchecked.** Protocol runtime
+   membership admitted adapters whose `terminate_generation(reason)` and
+   `close_generation(force)` require arguments, while application call sites
+   invoke both with zero arguments.
+
+The reviewer independently reproduced all four. Focused `55`, Ruff/format,
+imports, selectors, decision branches, exact routing, mutation-free rejection,
+bounds and scope otherwise passed.
+
+Reviewed hashes:
+
+```text
+e6b4704bcbb8d674ef49a44229d3772f4a31555b2c905ab5fca81eec73fcb1ac  src/vibecad/interaction/cad_runtime.py
+cbd0f3032d851425bea2e70e984e31c679959a5ae90d9d5f7c502452e0d628bb  tests/test_cad_runtime.py
+```
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C02-E01 | D01..D15; A01; A02 | `not-created` | genuine absent-module RED 2; design RED 6/49; focused GREEN 55; Ruff/purity PASS | none | MRG1-S04 | implemented / review pending |
+| MR0-C02-E02 | D01; D03..D07; A01; A02 | `not-created`; forbidden | review 0/1/3/0; four controller/reviewer probes reproduced | none; four exact defects | MRG1-S04 | blocked / FIX01 required |
+
+The review red is preserved and is not waived or relabeled.
+
+### 24.3 MR0-C02-FIX01 — authority, request, artifact and hook correction
+
+#### 1. Authorization
+
+D01, D03, D05 and D06 plus the approved C02 authority and compatibility gates
+already require these behaviors under A01. A02 keeps narrow correction coding
+at `gpt-5.6-sol / high`, re-review at `gpt-5.6-sol / max` and mechanical gates
+at `gpt-5.6-terra / medium`. No product scope expands.
+
+#### 2. Workspace anchor and exact scope
+
+The pushed anchor remains
+`07c6d6cd0260dcce41711a4a92d47132460571db`. FIX01 may change only the same
+new `cad_runtime.py` and `test_cad_runtime.py`; this artifact remains
+controller-owned and `interaction/__init__.py` must remain unchanged.
+
+#### 3. Exact corrective behavior
+
+- inspect public adapter names by normalized identifier tokens and reject
+  commit-, HEAD-, Accept-, Reject- and review-authority names including
+  compound snake/camel forms, while allowing trusted parent compatibility
+  names such as `open_revision`, private `_store` and ordinary CAD methods;
+- require every runtime-qualified extension request, including an unsupported
+  decision, to match its decision and descriptor runtime;
+- permit multiple exchange/evidence declarations but at most one semantic
+  observation, selector mapping and provenance declaration, in addition to
+  exactly one native model;
+- validate without invoking that the bound `terminate_generation` and
+  `close_generation` hooks are callable with zero arguments; reject required
+  positional/keyword-only parameters before registry admission.
+
+#### 4. Test-first steps and gates
+
+Add regression tests for compound/camel authority names, Worker-shaped allowed
+methods/private fields, cross-runtime unsupported decisions, each singular
+role duplicate and invalid generation-hook signatures before source changes.
+Run the exact focused command and preserve a FIX01 RED, then implement narrowly
+and rerun focused GREEN, standalone C02, targeted authority/cardinality/hook
+tests, scoped Ruff/format, AST purity, `git diff --check` and hash checks.
+
+#### 5. Execution discipline and breakers
+
+The coding subagent remains sole source/test writer; no artifact edit, stage,
+commit or push. Do not reject existing trusted compatibility methods merely
+because they accept store/lease/revision arguments, do not invoke lifecycle
+hooks during validation, and do not add reflection-driven execution,
+dependencies or files.
+
+#### 6. Delivery boundary
+
+The original C02 commit subject and stage budget remain unchanged. Commit is
+forbidden until FIX01 GREEN, settled-diff `sol / max` review PASS and
+independent `terra / medium` mechanical PASS.
+
+#### 7. Required final report
+
+Return FIX01 RED/GREEN counts, rejected and permitted authority names, hook
+signature cases, role/request negatives, exact paths/hashes, Ruff/diff/purity,
+process cleanup and residuals.
+
+### 24.4 MR0-C02-FIX01 test-first execution evidence
+
+The `gpt-5.6-sol / high` coding subagent added the four requested regression
+groups before changing source. The exact focused command then exited `1` with
+`19 failed, 58 passed`:
+
+- one cross-runtime unsupported extension was admitted;
+- three singular artifact-role duplicates were admitted;
+- ten snake/camel class authority names and one instance authority name were
+  admitted;
+- four lifecycle-hook forms with a required positional or keyword-only
+  argument were admitted.
+
+After the narrow correction, the same command returned `77 passed` (`31`
+generic runtime cases plus `46` C02 cases). The standalone C02 suite returned
+`46 passed`; the new targeted matrix returned `22 passed, 24 deselected`.
+
+Admission now enumerates public class-MRO and instance-namespace names without
+`dir()`, tokenizes snake and camel identifiers, and rejects the exact
+commit/HEAD/Accept/Reject/review authority tokens. Tests cover both spellings
+of `commit_revision`, `advance_head`, `accept_draft`, `reject_task` and
+`review_task`, while permitting `open_revision` and private `_store` /
+`_lease`. Unsupported extension decisions require the request runtime to equal
+the decision runtime. Profiles retain exactly one native model, allow at most
+one semantic observation, selector mapping and provenance declaration, and
+continue to permit multiple exchange and evidence declarations. Registry
+admission binds the signatures of the two bound generation hooks with zero
+arguments but never invokes either hook; required positional/keyword-only
+forms reject, while optional/default and variadic forms admit.
+
+At `2026-07-26T03:44:48Z`, the controller independently reproduced:
+
+```text
+PYTHONPATH=src .venv/bin/python -m pytest -q \
+  tests/test_runtime_contracts.py tests/test_runtime_registry.py \
+  tests/test_cad_runtime.py
+77 passed in 1.11s
+
+.venv/bin/ruff check \
+  src/vibecad/interaction/cad_runtime.py tests/test_cad_runtime.py
+PASS
+
+.venv/bin/ruff format --check \
+  src/vibecad/interaction/cad_runtime.py tests/test_cad_runtime.py
+PASS
+
+git diff --check
+PASS
+```
+
+Settled hashes are:
+
+```text
+0e7855250664c57115ddeeb4b073ff6d32626629fa09830ecaba760329613fc3  src/vibecad/interaction/cad_runtime.py
+f26df05d5d62b806d15a6bde58ef932d48d995bdf9ee9f333ab3ae80b465a73a  tests/test_cad_runtime.py
+f1e9b6e50b2042c09dff60d024a6fbf53ee09f2507b6b66dfa0423de9ae776a5  src/vibecad/interaction/__init__.py
+```
+
+Only the two new implementation paths and this controller-owned artifact are
+changed. No stage, commit or push has occurred. The initial architecture review
+red remains preserved; the settled-diff `sol / max` re-review and independent
+`terra / medium` mechanical gate remain mandatory.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C02-E03 | D01; D03; D05; D06; A01; A02 | `not-created`; forbidden | FIX01 RED 19/58; focused GREEN 77; C02 46; targeted 22; controller tests/Ruff/diff/hash PASS | none | MRG1-S04 | corrected / re-review pending |
+
+### 24.5 MR0-C02-E04 — settled-diff adversarial PASS
+
+At `2026-07-26T03:46:35Z`, the independent `gpt-5.6-sol / max`
+architecture/adversarial re-review returned PASS with Critical `0`, Major `0`,
+Medium `0`, Minor `0`. It independently reproduced the exact focused suite as
+`77 passed in 1.13s`, plus Ruff lint/format, diff, syntax, whitespace, EOF and
+import-purity PASS.
+
+Independent probes closed each preserved review finding:
+
+- public names from the class MRO and instance namespace reject all requested
+  snake/camel authority forms; `open_revision` and private `_store` /
+  `_lease` remain compatible, and a hostile `__dir__` plus lifecycle bodies
+  remain uncalled;
+- cross-runtime unsupported extension construction rejects, while a
+  same-runtime configured unsupported rule remains reachable;
+- semantic observation, selector mapping and provenance cardinalities are
+  singular, while exchange/evidence multiplicity remains valid;
+- required positional and keyword-only generation hooks reject; optional and
+  variadic forms bind zero arguments and no hook body executes at admission.
+
+The reviewer also rechecked exact runtime/version routing, immutable admitted
+descriptors, five decision branches, non-executable rejection before adapter
+selection, selector authority, artifact qualification, bounded hostile
+iteration, narrow Protocol authority and the subprocess timeout margin. No
+new finding or waiver remains. The reviewed hashes equal Section 24.4.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C02-E04 | D01; D03..D07; A01; A02 | `not-created`; forbidden | focused 77; Ruff/diff/purity PASS; independent review 0/0/0/0; four prior findings closed | none | MRG1-S04 | review PASS / mechanical gate pending |
+
+### 24.6 MR0-C02-E05 — independent pre-stage mechanical PASS
+
+At `2026-07-26T03:49:32Z`, the distinct `gpt-5.6-terra / medium`
+mechanical-gate subagent returned PASS without waiver or state change:
+
+```text
+HEAD/upstream:       07c6d6cd0260dcce41711a4a92d47132460571db
+allowed paths:       3 exact
+staged paths:        0
+out-of-allowlist:    0
+focused:             77 passed in 1.37s
+Ruff lint/format:    PASS / PASS
+diff/whitespace/EOF: PASS
+process leaks:       0
+```
+
+It independently matched all three settled hashes, the exact three internal
+`vibecad` imports, zero source assertions, the exact four-member adapter
+Protocol and the unchanged initializer. Artifact headings were consecutive
+and unique from Sections 1 through 24 with Section 24 terminal; all required
+RED, review-red, FIX01, GREEN and re-review evidence was present, and the
+artifact made no positive C02 commit/push claim.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C02-E05 | D01..D15; A01; A02 | `not-created`; exact staging next | pre-stage mechanical PASS; focused 77; hashes/imports/Protocol/ledger exact | none | MRG1-S04 | gated / ready to stage |
+
+### 24.7 MR0-C02-E06 — post-stage mechanical PASS
+
+At `2026-07-26T03:51:45Z`, the `gpt-5.6-terra / medium` subagent
+rechecked the staged-only candidate and returned PASS:
+
+```text
+cached paths:        3 exact
+unstaged/untracked:  0 / 0
+cached diff check:   PASS
+focused:             77 passed in 1.16s
+Ruff lint/format:    PASS / PASS
+process leaks:       0
+```
+
+The staged source/test blob hashes matched Section 24.4, the initializer
+remained byte-identical, and the staged artifact retained consecutive unique
+Sections 1 through 24 with all RED/GREEN/review evidence and no positive claim
+that the C02 commit or push already existed. The artifact is restaged after
+adding this evidence; a final cached-only integrity check remains before
+commit creation.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C02-E06 | D01..D15; A01; A02 | `not-created`; commit next | post-stage mechanical PASS; cached 3; unstaged/untracked 0/0; focused 77; hashes exact | none | MRG1-S04 | gated / ready to commit |
