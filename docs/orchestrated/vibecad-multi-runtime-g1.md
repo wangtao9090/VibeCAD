@@ -5512,3 +5512,320 @@ exclusions. No additional path may enter the index.
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MRG1-G1-C00P-E02 | A04; D19 FreeCAD-first path preparation | prior A04 `4d92d04` pushed; C00P `not-created` | sol/max 0/0/0/0 GO; terra pre-stage PASS; corrected pytest 12; Ruff/diff PASS; hashes and strict append bound | native Windows and real GUI-binary identity/execution remain for later named gates; inherited residuals remain OPEN | MRG1-S10 | pre-stage GREEN / exact staging then cached-only gate |
+
+## 31. G1-C00P Closeout and MR1-P00 Candidate Ledger
+
+### 31.1 G1-C00P cached gate, commit and push
+
+The exact three-path C00P index passed the independent cached-only
+`gpt-5.6-terra / medium` projection:
+
+```text
+cached paths:
+  M docs/orchestrated/vibecad-multi-runtime-g1.md
+  M src/vibecad/runtime/paths.py
+  M tests/test_paths.py
+extra cached paths:  0
+unstaged C00P:       0
+
+cached/worktree Git object:
+  artifact 711dcc6ac2f88565bf90e1f9685a25799e0af6a7 / equal
+  paths    cf4dbacbced6b7e65e2a8475413605e68ed58b75 / equal
+  tests    2ad33f55bd6bbc73bbb8696af3169058a9980ba1 / equal
+
+artifact strict append: PASS
+staged artifact SHA-256:
+  0c41766f760f2be145689e2d9974a56dd15f9a9810af7be6e6f684d6ddff6f40
+paths.py SHA-256:
+  36bc29d8de6d6757bbdddef08efbe4e28784139a2fb72aa127716ce1a09a423d
+test_paths.py SHA-256:
+  4561cbc25d2c4bb22d36ec47592ec6b5b309ac2275fc629395b8a54195a97c97
+
+corrected pytest:     12 passed
+Ruff:                 PASS
+cached diff-check:    PASS
+dynamic exclusions:  exact five / names only / unstaged
+```
+
+The exact semantic commit was then created and pushed:
+
+```text
+commit: 50220446b851f8c0008dea4405cd09a3dadee11b
+subject: feat(runtime): expose managed FreeCAD GUI path
+push: origin/codex/agent-stage3
+post-push HEAD/upstream: equal
+ahead/behind: 0 / 0
+index: empty
+```
+
+This closes G1-C00P. Real binary identity/execute-permission validation and
+native-host launch remain intentionally deferred to C00B/C01 and their named
+real gates; C00P alone makes no readiness or launch claim.
+
+### 31.2 MR1-P00 prewrite audit and candidate
+
+The authorized `gpt-5.6-sol / max` P00 implementation packet audited the
+anchored source before writing documentation:
+
+```text
+tests/fixtures/durable_v1/:                 absent
+src/vibecad/execution/revision_codec.py:    absent
+src/vibecad/application/durable_migration.py: absent
+Revision store: strict schema v1 / fixed FCStd and STEP writer
+managed checkout: separate record-family v1/v2 reader / current local v2 writer
+canonical migration/readiness/rollback contract: absent
+```
+
+Because P00 is the approved documentation G0, this observable gap replaces a
+fabricated pytest RED. The packet then changed only its four exact
+documentation paths:
+
+```text
+M docs/ARCHITECTURE.md
+M docs/ACCEPTANCE_TESTS.md
+M docs/CAD_RUNTIME_ADAPTER_GUIDE.md
+A docs/orchestrated/vibecad-durable-v2.md
+```
+
+The candidate freezes:
+
+- record-family-local version semantics so checkout v2 cannot be presented as
+  Revision durable-v2;
+- immutable committed Revision v1 history and frozen v1 encodings without
+  forbidding legitimate existing CAS/atomic operational state changes;
+- the one strict absent-profile legacy FreeCAD FCStd/STEP mapping;
+- an independent closed, exact-keyset, canonical-byte/checksum-domain future
+  Revision profile codec, while leaving its exact v2 JSON bytes unauthorized;
+- byte-exact v1 corpus, strict v1 dispatch, observational full-root inventory,
+  future independently gated dual-reader, then a later fenced writer
+  activation;
+- mixed v1-to-v2 ancestry, unknown/hybrid fail-closed, no eager/in-place
+  rewrite and mutation-negative read/list/compare/export/preview;
+- downgrade fail-closed and whole-root preactivation restore as the only
+  path back to a v1 writer after committed v2 state;
+- `data/` root identity, `locks/` and all five record stores in P03
+  observation, with non-creating/non-lease-taking hooks and path-free output;
+- same-live-tree identity equality separately from backup/restore logical,
+  hash and reference equivalence with independent restored object identity;
+- `structurally_ready` separately from future fenced `activation_ready`;
+- disposable or independently export-verified G1 alpha separately from the
+  shared non-disposable beta gate;
+- unchanged 28 tools, six operations, `SelectorV1`, artifact URI and
+  FreeCAD-only product scope.
+
+Candidate SHA-256:
+
+```text
+docs/ARCHITECTURE.md
+  93f6003f1a8e4a53f8cb4d882efd5cb10b1b19c28bb8cc8bd3ad7db57dd289ed
+docs/ACCEPTANCE_TESTS.md
+  e7de89fa2eac893e8e53dcc25335223f8544c4def7303fac2d75c95322e82023
+docs/CAD_RUNTIME_ADAPTER_GUIDE.md
+  812cb0711c3c19b96730021c41298efdc1b138fe9d36f572adb010dbb1a3ea8d
+docs/orchestrated/vibecad-durable-v2.md
+  c750de0f0a212091bd9b2ad886aa2ed3d7e4b86d912eb65879645dec40c08d0d
+```
+
+MRG1-GATE-CORR-01 projects MR1-G00 as:
+
+```text
+git diff --check &&
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_agent_skill.py
+```
+
+Candidate evidence:
+
+```text
+exit:                 0
+tests:                12 passed
+new-file whitespace:  PASS
+relative links:       40 checked / 0 missing
+Section 28 fragments: PASS
+Markdown tables:      19 / 0 issues
+required terms:       PASS
+stale/overclaim audit: PASS
+source/test diff:     0
+index:                empty
+```
+
+### 31.3 MR1-P00 independent adversarial GO
+
+An independent `gpt-5.6-sol / max` reviewer inspected the complete four-file
+candidate, directly necessary anchored implementation facts and Sections
+28–30. Initial and final candidate hashes were identical:
+
+```text
+blocker:  0
+critical: 0
+major:    0
+minor:    0
+decision: GO
+
+corrected MR1-G00: 12 passed
+diff-check:         PASS
+relative links:     40 / 0 missing
+tables/fences:      PASS
+HEAD/upstream:      5022044... / equal / 0/0
+index:              empty
+```
+
+The review specifically challenged whether P00 improperly deferred the exact
+v2 JSON bytes. It found the deferral correct: P00 freezes the mandatory
+independent schema version, stable domain/profile identity, exact artifact
+roles/formats/media/cardinality/payload binding, independent checksum domain,
+duplicate-key rejection, exact keyset and unknown-field fail-closed
+invariants. The exact future keyset/encoding/encoder remains unauthorized and
+must be frozen in a separately approved reader packet before any writer
+activation. This neither permits permissive decode nor combines first-reader
+and first-writer delivery.
+
+The reviewer confirmed zero candidate/source/test writes, staging, commit,
+push, install or FreeCAD launch. Excluded course scripts were observed only as
+names in status and were not opened or contacted.
+
+### 31.4 Clarified future blockers
+
+The P00 audit established two new observable residuals:
+
+- `DV2-RES-08`: Section 28.5's phrase “P04 and later v2 reader/writer
+  activation” is not authority to combine first v2 reading with first v2
+  writing. No future implementation packet may start until a controller
+  append proposes exact separate reader-only and later fenced-writer commits,
+  each with its own allowlist, approval and gate. This ledger fixes the
+  interpretation but does not choose, budget or authorize those future
+  commits, so the residual remains OPEN.
+- `DV2-RES-09`: current Task snapshot and Revision discovery acquire
+  catalog/quota leases whose first acquisition may persist lock files. P03
+  cannot use them as a mutation-negative baseline or bypass store authority.
+  If reviewed non-creating hooks require `workflow/store.py` or another
+  unnamed path, the approved P03 packet stops for a new exact allowlist and
+  approval. The residual remains OPEN.
+
+The current P00 commit does not repair either future implementation concern.
+P01 may proceed after P00 is pushed because it writes only reviewed fixtures
+and one corpus test. P02 remains strict v1-only dispatch. Before dispatching
+P03, the controller must reconcile `DV2-RES-09` against its exact path budget;
+before any later dual-reader work, it must close the approval branch in
+`DV2-RES-08`.
+
+Exact serial allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+M docs/ARCHITECTURE.md
+M docs/ACCEPTANCE_TESTS.md
+M docs/CAD_RUNTIME_ADAPTER_GUIDE.md
+A docs/orchestrated/vibecad-durable-v2.md
+```
+
+Exact subject:
+
+```text
+docs(mr1): freeze durable-v2 migration contract
+```
+
+### 31.5 Recovery Snapshot MRG1-S11
+
+#### S11-1 — Completed milestones
+
+- G1-C00P passed corrected RED/GREEN, sol/max review and both terra gates, then
+  committed and pushed at `50220446`; HEAD/upstream are equal.
+- MR1-P00 completed its documentation-gap audit, four-file contract candidate,
+  corrected G00 and independent adversarial `0/0/0/0` GO.
+- No v2 implementation, inventory, activation, backup, fence, second CAD or
+  public schema change exists.
+
+#### S11-2 — Ordered next packets and branch conditions
+
+1. Run an independent `gpt-5.6-terra / medium` pre-stage gate over the exact
+   five-path P00 projection, candidate hashes, corrected command, links/tables,
+   empty index and dynamic exclusions.
+2. If GREEN, stage exactly the five P00 allowlist paths and run a second
+   cached-only projection. Any missing/extra path, byte mismatch or new
+   candidate drift is a breaker.
+3. Commit with the exact P00 subject, push and verify HEAD/upstream equality
+   and ahead/behind `0/0`. Record its final hash/push in the next semantic
+   ledger preamble.
+4. Only after that push, dispatch G1-C00B at sol/high and MR1-P01 at sol/max
+   into their disjoint exact write domains.
+5. C00B must resolve its approved real-probe branch from observable evidence;
+   P01 may freeze bytes but has no update-golden mode. Neither can absorb an
+   unnamed correction or the other's files.
+
+#### S11-3 — Active decisions and authorization
+
+A01..A04, D17..D22 and DV2-D01..D12 remain active only in their named stages.
+The first-product priority is still end-to-end FreeCAD. Second CAD, v2
+reader/writer activation, packaging/release and all other exclusions remain
+unauthorized. `DV2-RES-08/09` are active blockers at their future boundaries,
+not waivers or scope expansions. The shared non-disposable beta gate remains
+mandatory.
+
+#### S11-4 — Execution discipline
+
+Capability profile remains artifact-approval / spawn-send-wait /
+repo-artifact / native-session-poll under the same four S09 evidence
+categories. Model routing remains terra/medium for mechanics, sol/high for
+routine implementation and sol/max for durable architecture, research and
+adversarial review. MRG1-GATE-CORR-01 applies to every pytest row.
+
+One exact semantic allowlist and one controller-owned index are permitted at a
+time. No broad add, golden rewrite, test weakening, retry-until-green,
+unrecorded correction or user-file contact is permitted. Recovery verifies
+HEAD/upstream/status/index, the last pushed hash, candidate hashes, P00
+contract/review/gate evidence, dynamic exclusions, the capability profile and
+the first OPEN residual from repository artifacts; chat memory alone is not a
+recovery source.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-MR1-P00-E01 | A04; D21 MR1-prep in parallel with FreeCAD G1 | prior G1-C00P `50220446` pushed; P00 `not-created` | G0 gap audit; corrected MR1-G00 12 passed; links/tables/diff PASS; sol/max 0/0/0/0 GO; candidate hashes bound | DV2-RES-01..09 OPEN/DEFERRED under exact owners; inherited residuals remain OPEN | MRG1-S11 | candidate GREEN / fast pre-stage gate next |
+
+### 31.6 MR1-P00 pre-stage mechanical PASS
+
+The exact P00 candidate passed an independent `gpt-5.6-terra / medium`
+pre-stage projection:
+
+```text
+branch:             codex/agent-stage3
+HEAD/upstream:      50220446... / equal
+ahead/behind:       0 / 0
+index:              empty
+tracked paths:      artifact + exact three canonical docs
+new P00 path:       exact durable-v2 artifact
+source/test diff:   0
+dynamic exclusions: exact five / names only
+
+HEAD artifact:
+  263647 bytes
+  0c41766f760f2be145689e2d9974a56dd15f9a9810af7be6e6f684d6ddff6f40
+reviewed candidate artifact:
+  274610 bytes
+  dd5493a5f5e9c3ae1808a2ecc85b263dfd6ea0c2febcb275cee83f7a07f63122
+strict append:      PASS / 10963 bytes
+
+canonical hashes:   exact four candidate SHA-256 values / PASS
+corrected MR1-G00:  12 passed
+tracked diff-check: PASS
+new-file check:     PASS
+relative links:     40 / 0 missing
+fragments:          2 / 0 missing
+Markdown tables:    87 / 0 issues
+fence/final newline: PASS
+overclaim audit:    PASS
+```
+
+The mechanical agent confirmed all required Section 31 records, exact
+allowlist/subject and S11-1..S11-4. It found no v2 implementation,
+activation-ready or durable-beta PASS claim and made zero writes. Excluded
+course-script content was not opened or contacted.
+
+Exact named staging of the five P00 allowlist paths is now authorized. The
+cached-only gate must re-prove the exact staged path set, cached/worktree byte
+identity, no unstaged P00 delta, strict artifact append, all five hashes,
+corrected MR1-G00, diff/link/table/fence checks, source/test zero and the exact
+dynamic exclusions.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-MR1-P00-E02 | A04; D21 MR1-prep in parallel with FreeCAD G1 | prior G1-C00P `50220446` pushed; P00 `not-created` | sol/max 0/0/0/0 GO; terra pre-stage PASS; corrected G00 12; links/tables/fences/diff/hashes PASS | DV2-RES-01..09 OPEN/DEFERRED under exact owners; inherited residuals remain OPEN | MRG1-S11 | pre-stage GREEN / exact staging then cached-only gate |

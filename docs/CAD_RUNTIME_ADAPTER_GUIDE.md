@@ -8,7 +8,9 @@
 当前产品架构与非声明边界见
 [`ARCHITECTURE.md`](ARCHITECTURE.md)，验收状态见
 [`ACCEPTANCE_TESTS.md`](ACCEPTANCE_TESTS.md)，批准、gate 与 residual 的权威记录见
-[`orchestrated/vibecad-multi-runtime-g1.md`](orchestrated/vibecad-multi-runtime-g1.md)。
+[`orchestrated/vibecad-multi-runtime-g1.md`](orchestrated/vibecad-multi-runtime-g1.md)，
+MR1 Revision reader/writer、inventory 与 recovery 边界见
+[`orchestrated/vibecad-durable-v2.md`](orchestrated/vibecad-durable-v2.md)。
 
 ## 1. 先区分四个边界
 
@@ -120,6 +122,13 @@ CAD domain contract 位于
 其他可用 role 是 `EXCHANGE` 与 `EVIDENCE`。这些检查限定 metadata，不会打开 artifact、重新计算
 digest 或证明 native engine 能读写它。真实 byte identity、hash、reload、STEP parsing 和几何事实仍由
 FreeCAD execution/domain verifier 负责。
+
+`CadArtifactProfile` 与 `RuntimeDescriptor` 是 admission/planning 用的内部 runtime snapshot，不是
+durable/public schema source。MR1 future durable profile 必须另行定义为 versioned CAD-domain value，
+只表达稳定 profile identity、artifact role/format/media/cardinality 与 payload binding；不能
+convenience-serialize Python class/module、runtime metadata/capability、execution profile、安装路径、
+receipt 或 adapter instance。生成 runtime 如需留存，属于独立 provenance/evidence，不决定 historical
+revision 能否 decode。
 
 `CadSelectorEnvelope` 始终包含现有 revision-bound `SelectorV1` semantic authority。可选
 `NativeLocator` 只提供 runtime-specific execution/evidence reference，且 runtime 和 revision 必须与
@@ -376,6 +385,37 @@ MR0 只把当前 fixed layout 包在 runtime-qualified FreeCAD descriptor 后面
 `RevisionRef`、`LocalRevisionStore`、Candidate directory、manifest、recovery journal 和 public artifact
 delivery 仍要求 `model.FCStd` 与 `model.step`。内部 `CadArtifactProfile` 能描述另一种 native media type
 不代表 durable store 能持久化它。
+
+MR1-P00 已冻结
+[`Revision durable-v2 迁移合同`](orchestrated/vibecad-durable-v2.md)，但没有实现 Revision v2 writer
+或第二 CAD：
+
+- committed v1 Revision history 永不 eager/in-place rewrite；HEAD/Task/journal/checkout 等
+  operational instance 仍按既有 lifecycle 合法变化，但其 frozen v1 encoding 不能被 migration
+  convenience-rewrite；
+- 缺 profile 的 strict v1 record 只映射到固定 legacy FreeCAD
+  `model.FCStd`/`fcstd`/`application/vnd.freecad.fcstd` +
+  `model.step`/`step`/`model/step` profile；
+- P02 只插入 strict v1 version-dispatch seam，并让 unknown v2/hybrid fail closed；future strict
+  dual-reader 必须另行交付并保持 writer byte-exact v1，later new-write-v2 才可能获准；
+- ancestry 可以是 v1 ancestor → v2 descendant；v2 激活后 downgrade writer mutation fail closed；
+- P03 inventory 从 `data/` root identity 开始观察 `locks/` control namespace，再覆盖
+  `projects/`、`tasks/`、`bootstrap/`、`checkouts/` 和 `artifacts/`，只能观察
+  `structurally_ready`；
+- `activation_ready` 只属于 future daemon-quiesced、global writer/maintenance fence 内的第二次
+  full scan，并且 activation 还要求 capacity、独立验证的 backup/restore 与明确 rollback。
+
+P03 必须复用 Application 已 pin 的 layout 和 future non-creating snapshot hook；不能调用会补建
+root/children 的 `ApplicationDataLayout.open()`，也不能以 catalog/quota/resource lease 包装扫描，
+因为首次 lease acquisition 可创建 persistent lock file。lock entry 在 release 后仍保留，所以
+presence 不等于 active lease；quiescence 只能由 future global fence 证明。若现有 Task snapshot
+缺少这个 mutation-negative property，`workflow/store.py` 需要另一个 exact allowlist/approval，
+不能由 migration module 绕过 store authority。
+
+Managed checkout open/tombstone 当前具有自己 record family 的 v1/v2 dual-reader 和 current-v2
+writer。这个事实不能推广成 Revision durable-v2 已实现，也不能允许 adapter 根据 checkout version
+推测 Revision profile。P00..P03 不改变 `RevisionRef.to_mapping()`、28-tool MCP surface、六 operation、
+`SelectorV1` 或 artifact URI。
 
 以下任一需求都是 breaker，必须停止当前 adapter packet：
 

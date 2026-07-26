@@ -15,6 +15,13 @@
 > CAD adapter 仍是 FreeCAD，公共 28-tool、六 operation 与 `SelectorV1` 合同不变；durable
 > Revision/Candidate 仍固定使用 FCStd/STEP 布局，迁移只属于 MR1。
 >
+> MR1-P00 只冻结
+> [`Revision durable-v2 迁移合同`](orchestrated/vibecad-durable-v2.md)：v1 immutable、
+> reader-before-writer、mixed ancestry、downgrade fail-closed、full-root preflight 与
+> backup/restore/rollback。当前 Revision writer 仍是 byte-exact v1；没有 v2 byte、activation
+> marker 或 writer fence。Managed checkout 自己的 v1/v2 dual-reader/current-v2 writer 属于独立
+> record family，不能被表述为 Revision durable-v2 已实现。
+>
 > §6.1 描述当前源码已实现的 MR0 内部基础；它不是公共 SDK/wire schema、第二 CAD 产品支持或
 > release 结论。MR0-C01..C04 的当前 completion status 以本页、
 > [`ACCEPTANCE_TESTS.md`](ACCEPTANCE_TESTS.md) 和
@@ -301,6 +308,50 @@ Workbench 始终是 authenticated public client：它读取 HEAD/draft、取得 
 HEAD 权威。未来重建/仿真 Provider 也只能读取 sealed Revision/immutable Artifact 并返回 immutable、
 provenance-bound artifact 或 proposal；任何会改变设计的结果必须由新的、可审核 CAD Task 采纳。
 
+### 6.2 MR1 Revision durable-v2 迁移合同（已冻结，尚未实现）
+
+[`Revision durable-v2 迁移合同`](orchestrated/vibecad-durable-v2.md) 冻结的是后续实现必须遵守的数据与顺序
+边界，不是当前 completion claim：
+
+```text
+freeze byte-exact v1 corpus
+→ strict version-dispatch seam，reader/writer 仍固定 v1
+→ data root/locks/五个 record store 的只读 inventory
+→ future strict v1/v2 reader，writer 仍固定 v1
+→ future global writer/maintenance fence 内第二次完整扫描
+→ 独立验证 backup/restore
+→ future atomic new-write-v2 activation
+```
+
+已存在 v1 manifest、payload、digest 与 ancestry 永不 eager 或原地重写。缺少 profile 的合法 v1
+record 只映射到固定 legacy FreeCAD `model.FCStd` / `fcstd` /
+`application/vnd.freecad.fcstd` 加 `model.step` / `step` / `model/step` profile；不能从当前 runtime、
+adapter 或文件扩展名推测其他 profile。Future v2 revision 可以把 v1 revision 作为 ancestor，但每个
+manifest 必须独立 strict dispatch。v2 激活后，v1-only/downgrade writer 必须在任何 mutation 前
+fail closed。
+
+这里的 immutable v1 指 committed Revision history 和各 v1 record family 的 frozen encoding；
+HEAD、Task、journal、checkout 等 operational instance 仍可按既有 CAS/atomic lifecycle 合法变化，
+但 migration 不能伪造业务 transition 或为了 schema/profile 转换而 eager rewrite 它们。
+
+Future durable profile 是 CAD-domain versioned value；不能直接序列化内部
+`CadArtifactProfile`、`RuntimeDescriptor`、capability/metadata、安装路径或 adapter instance。
+P00 不改变现有 `RevisionRef.to_mapping()`、公共 MCP schema、28 tools、六 operations、
+`SelectorV1` 或 artifact URI，也不添加第二 CAD。
+
+P02 只插入 v1 version-dispatch seam，并让 unknown v2/hybrid fail closed；future dual-reader
+仍需新批准。P03 从 `data/` root identity 开始，观察 `locks/` control namespace，再扫描
+`projects/`、`tasks/`、`bootstrap/`、`checkouts/` 与 `artifacts/`，且只允许报告
+observational `structurally_ready`、closed blockers 与 start/end change tokens。它必须复用
+Application 已 pin 的 layout 和 future non-creating snapshot hook；不能为建立 baseline 调用会创建
+目录的 opener 或取得会首次创建 persistent lock file 的 catalog/quota lease。lock 文件在 release 后
+仍可存在，presence 不等于 active writer，也不能替代 future fence。
+只有未来在 daemon quiesced 且持有 approved global writer/maintenance fence 时执行的第二次 full-root
+扫描，才可在 fence 仍有效期间报告 `activation_ready`。任何 activation 都还必须有 capacity check、
+owner-private full backup、独立 restore drill 与无歧义 rollback；backup 可复制 persistent lock bytes/
+metadata，但 OS lock ownership 只能由 quiescence/fence 证明。G1 可在明确 disposable 或已独立
+export/verify 的 v1 data 上提供 alpha；non-disposable beta 必须通过共同 migration/Workbench gate。
+
 ## 7. 项目、任务和审核生命周期
 
 ### 7.1 项目
@@ -508,7 +559,8 @@ release。
 - G1 FreeCAD Qt Workbench UI；
 - 第二 CAD adapter、第二 CAD 产品支持或面向产品的 runtime discovery；MR0 只交付了内部
   conformance-ready 基础和 FreeCAD-only default composition；
-- versioned durable artifact profile；MR1 前 Revision/Candidate 仍固定为 FCStd/STEP；
+- versioned durable artifact profile 实现与 activation；MR1-P00 只冻结迁移合同，Revision/Candidate
+  writer 仍固定为 FCStd/STEP v1；
 - retention/GC、private runner generation migration 和完整运行观测/恢复审计；
 - face/edge Selector Level B、可视/语义 diff、Sketcher/PartDesign；
 - STL/STEP 受控导入、mesh-to-faceted-BRep、装配、BOM、TechDraw；

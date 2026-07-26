@@ -15,6 +15,12 @@ MR0-C01..C04 已交付并验收内部 multi-runtime foundation；本次 C05 只�
 恢复记录，不改变本清单已有 PASS 范围或可执行产品声明。该内部 foundation 独立于 0.6.0
 release、真实宿主和产品支持 gate。
 
+MR1-P00 已冻结
+[`Revision durable-v2 迁移合同`](orchestrated/vibecad-durable-v2.md)，但没有实现 Revision v2
+reader/writer、
+inventory、activation 或 migration。其 future acceptance 与当前 0.6.0 host-ready gate 分开，
+不得把文档合同或 managed-checkout 自己的 schema v2 写成 Revision durable-v2 PASS。
+
 ## 1. 冻结产品口径
 
 ### 1.1 公开工具
@@ -66,7 +72,8 @@ artifact/proposal；设计采纳必须新建 reviewed CAD Task。
 - FreeCAD 是唯一连接的 CAD adapter；fake runtime/adapter 只能作为 conformance fixture，不能进入
   capability/product support 声明；
 - MR0 内部 runtime/artifact/selector contract 不改变 28 tools、六 operations 或公开 `SelectorV1`；
-  durable Revision/Candidate/manifest/recovery 仍固定 FCStd/STEP，到 MR1 才允许迁移；
+  durable Revision/Candidate/manifest/recovery writer 仍固定 FCStd/STEP v1；MR1-P00 只冻结 future
+  migration contract，不创建 v2 byte；
 - active cancellation 由受管、可终止 FreeCAD Worker 和持久化 `reconcile` 路径收口；空闲取消仍不得启动
   CAD/runtime 或取得 project write lease；
 - 当前不支持通用 FCStd、STEP/STL import、任意 Python/FreeCAD code、真实 FreeCAD Qt Workbench UI、face/edge selector、
@@ -86,7 +93,7 @@ P1/P1.5/P2 建议变为当前承诺。
 | FreeCAD adapter | default composition 只注册并选择 FreeCAD；现有 lifecycle、error、source safety、FCStd/STEP、cancel/recovery compatibility 与真实 managed gates 保持通过 | FreeCAD-only PASS | G1 UI、新 operation、auto-discovery 或第二 adapter |
 | authority negative | parent compatibility adapter 的私有 store/lease capability 只限 bounded validation/checkpoint/export/evidence；control/adapter public surface 的 Task/Accept/Reject/commit/HEAD-like authority fail closed；child Worker/provider/Workbench 无提交能力 | 结构与 composition boundary PASS；不是 OS sandbox | 第二 scheduler、提交路径或恶意 provider 隔离 |
 | artifact/selector | runtime-qualified profile 与 concrete artifact 的 runtime/kind/media 精确匹配；semantic `SelectorV1` 始终权威，native locator 仅为可选 runtime/revision-qualified evidence；真实 byte/digest 仍由 domain verifier 核验 | 内部 qualification PASS | 公开 runtime schema、SelectorV1 wire 变化、face/edge 支持或 conformance 已验证 artifact bytes |
-| D14 durable split | C01..C04 不改变 `RevisionRef`、Candidate/store/manifest/recovery schema；FreeCAD 仍持久化固定 `model.FCStd`/`model.step` | MR0 preservation PASS；MR1 migration OPEN | Revision/Candidate/manifest/store 已泛化或第二 native format 可持久化 |
+| D14 durable split | C01..C04 不改变 `RevisionRef`、Candidate/store/manifest/recovery schema；FreeCAD 仍持久化固定 `model.FCStd`/`model.step` | MR0 preservation PASS；MR1-P00 contract frozen，P01..activation OPEN | Revision/Candidate/manifest/store 已泛化、v2 已实现或第二 native format 可持久化 |
 
 上述 accepted evidence 落在 C04 commit
 `7c98e36c77ea748b2c33274d00d0f895ef3d8102`，其 exact conformance suite 为
@@ -94,6 +101,41 @@ P1/P1.5/P2 建议变为当前承诺。
 [`CAD_RUNTIME_ADAPTER_GUIDE.md`](CAD_RUNTIME_ADAPTER_GUIDE.md)。本表不是 0.6.0 release matrix；
 MR0 conformance 不能关闭 §7 的真实第二宿主 residual，也不能产生 tag、release、G1 或 host-verified
 结论。
+
+### 1.5 MR1 durable-v2 migration acceptance（合同已冻结，实现未开始）
+
+本节投影
+[`Revision durable-v2 迁移合同`](orchestrated/vibecad-durable-v2.md) 的 future gate；所有结果当前均为
+NOT RUN，不能加入 §2 的 0.6.0 放行 PASS：
+
+| ID | Future gate | 必须证明 | 当前状态 |
+|---|---|---|---|
+| MR1-G00 | P00 文档一致性 | v1 immutable、absent-profile exact legacy FreeCAD FCStd/STEP、reader-before-writer、mixed ancestry、downgrade fail-closed、full-root preflight、backup/restore/rollback 与 readiness fence 在 canonical docs 一致；无 v2 implementation claim | contract frozen |
+| MR1-G01 | byte-exact v1 corpus | generation zero、sealed Revision/HEAD/journal、Task/Draft、artifact/bootstrap、checkout v1/v2 record 等 indexed fixture encoding 的 byte/hash/size 固定；normal test 无 update-golden | NOT RUN |
+| MR1-G02 | strict codec seam | reader strict dispatch v1，unknown v2/profile/hybrid fail closed；reader/writer 与所有 v1 corpus byte 保持不变 | NOT RUN |
+| MR1-G03 | full-root observational inventory | 从 `data/` root identity 开始观察 `locks/`，再扫描 `projects/`、`tasks/`、`bootstrap/`、`checkouts/`、`artifacts/`；mutation-negative、path-free、bounded；只输出 `structurally_ready` 与 blocker/token | NOT RUN |
+| MR1-READ | future dual-reader | exact v1 + v2 reader 已独立 gated/deployed，writer 仍 byte-exact v1；unknown/profile/hybrid fail closed；read/list/compare/export/preview mutation-negative | NOT AUTHORIZED |
+| MR1-ACT | later fenced activation | 在 MR1-READ 后，daemon quiesced、approved global writer/maintenance fence、第二次 full scan、capacity、verified backup/restore 后才可输出 `activation_ready` 并切换 new-write-v2 | NOT AUTHORIZED |
+| MR1-BETA | shared non-disposable beta | v1 byte identity、mixed v1→v2 ancestry、restart/reconcile、G1 opaque preview/review、artifact URI、downgrade fail-closed、interrupted activation/restore/rollback 全部在 exact integrated build 通过 | NOT RUN |
+
+MR1-G03 必须复用 Application 已 pin 的 layout 和 future non-creating snapshot hooks；调用会创建缺失
+layout child 的 opener，或取得可能首次创建 persistent lock file 的 catalog/quota/resource lease，
+都使 no-mutation gate 失败。`<64hex>.lock` 在 release 后仍可存在，presence 不是 active lease 证据；
+只有 future quiescence + global fence 能证明 `activation_ready` 所需的 writer exclusion。
+同一 live tree 的 before/after gate 必须保持 mtime/ctime/device/inode identity 不变；isolated
+backup/restore 则比较 logical path、kind/mode/uid/size/hash/record/reference closure，并要求 restored
+file 与 live/backup inode 独立，不能错误要求 restore 后 ctime/inode 相同。
+
+缺 profile 的 record 只有在 strict Revision v1 FCStd/STEP invariants 全部成立时，才映射到固定 legacy
+FreeCAD profile。Future durable profile 必须是 versioned CAD-domain value；不得通过序列化内部
+`CadArtifactProfile`、`RuntimeDescriptor`、capability/metadata 或 adapter state 构造。Managed checkout
+open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，只证明这个 record family 的
+兼容顺序，不关闭任何 MR1 gate。
+
+任何历史 v1 byte 改变、eager/in-place rewrite、unknown inventory entry、data/capacity loss、
+未独立验证的 backup、ambiguous restore/rollback、旧 writer 在 v2 root 上 mutation，或把
+`structurally_ready` 提升为 `activation_ready` 都是 release breaker。G1 只可在明确 disposable 或
+已独立 export/verify 的 v1 data 上称 alpha；承诺用户项目升级存续前必须通过 `MR1-BETA`。
 
 ## 2. 放行总表
 
@@ -402,7 +444,8 @@ MR0-C01..C04 已接受的独立 conformance 覆盖 undeclared capability、runti
 artifact runtime/kind/media mismatch、只有 native locator 而没有 semantic selector、forbidden
 commit/HEAD-like public authority，以及 deterministic fake identity 的 bounded admission/plan/route。
 fake identity 仍只存在于 fixture，不能投影成产品 support。C04 没有把第二 native format 写入固定
-durable store；该路径在 D14 下刻意未接入，并继续由 MR1 / `MRG1-RES-01A` 阻断。
+durable store；该路径在 D14 下刻意未接入，并继续由 MR1-P00 migration contract /
+`MRG1-RES-01A` 阻断。P00 没有改变该实现事实。
 
 ### E11：卸载保留数据
 
