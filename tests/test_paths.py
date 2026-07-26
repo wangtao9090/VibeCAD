@@ -72,6 +72,27 @@ def test_freecadcmd_honors_override_windows(monkeypatch, tmp_path):
     assert paths.freecadcmd_path() == tmp_path / "myenv" / "Library" / "bin" / "FreeCADCmd.exe"
 
 
+@pytest.mark.parametrize(
+    ("windows", "relative_binary"),
+    [
+        (False, ("bin", "FreeCAD")),
+        (True, ("Library", "bin", "FreeCAD.exe")),
+    ],
+)
+def test_freecad_path_honors_override_without_side_effects(
+    monkeypatch,
+    tmp_path,
+    windows,
+    relative_binary,
+):
+    prefix = tmp_path / "myenv"
+    monkeypatch.setenv("VIBECAD_FREECAD_ENV", str(prefix))
+    monkeypatch.setattr(paths.platform, "is_windows", lambda: windows)
+
+    assert paths.freecad_path() == prefix.joinpath(*relative_binary)
+    assert not prefix.exists()
+
+
 def test_bound_external_prefix_rejects_fifo_receipt_without_blocking(
     monkeypatch,
     tmp_path,

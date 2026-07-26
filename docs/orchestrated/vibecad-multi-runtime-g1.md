@@ -5242,3 +5242,273 @@ pushed and HEAD/upstream equality is verified.
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MRG1-A04-E02 | A01..A04; D17..D22 active within R2 | `not-created`; exact artifact stage next | deep 0/0/0/0 GO; fast pre-stage PASS; exact A04 binding and source diff 0 | inherited RES-01A/03/04/05/06A/07/08/09/10/10A remain OPEN | MRG1-S09 | pre-stage GREEN / cached-only gate next / source paused |
+
+## 30. MRG1-GATE-CORR-01 and G1-C00P Candidate Ledger
+
+### 30.1 Authorization persistence completed
+
+The Section 29 authorization record passed its exact cached-only gate, was
+committed and pushed before either implementation packet wrote candidate
+bytes:
+
+```text
+commit: 4d92d04eff11213a9c539c316451427a51f4dc6b
+subject: docs(orchestration): authorize G1 and MR1 execution
+push: origin/codex/agent-stage3
+post-push HEAD/upstream: equal
+ahead/behind: 0 / 0
+```
+
+This closes the source-pause condition in Section 29.3. MRG1-A04 is active
+only within its exact Sections 28.2–28.8 scope and exclusions.
+
+### 30.2 MRG1-GATE-CORR-01
+
+The first raw G1-G00P pytest invocation:
+
+```text
+.venv/bin/python -m pytest -q tests/test_paths.py \
+  -k freecad_path_honors_override_without_side_effects
+```
+
+stopped during collection with exit 2 and:
+
+```text
+ModuleNotFoundError: No module named 'vibecad'
+```
+
+Passive diagnosis established that `.venv/bin/python` is Python 3.13.14,
+`find_spec("vibecad")` is absent, the environment has no editable-project
+path, and the repository's documented source-checkout invocation prepends
+`PYTHONPATH=src`. This is the same inherited checkout condition already
+recorded by `P0B-GATE-CORR-01`; it is a setup breaker, not semantic RED
+evidence.
+
+An independent `gpt-5.6-sol / max` ruling returned GO for the following exact,
+non-semantic correction:
+
+- prepend `PYTHONPATH=src` to every Python pytest invocation in the Section
+  28.6 command matrix;
+- leave Ruff, Git, manual and real-host environment fields otherwise
+  unchanged;
+- do not install or modify the environment, `.venv`, project configuration,
+  source paths, tests or acceptance criteria;
+- require the corrected command to expose a genuine focused RED before a
+  behavior-changing production edit;
+- carry this correction in the current semantic ledger rather than create a
+  separate correction commit.
+
+Any correction that needs an install, environment mutation, `pyproject`
+change, new path, weakened test or altered product claim remains a breaker and
+requires a new packet. Every later mechanical agent must verify the corrected
+pytest projection explicitly.
+
+With only the new test present, the corrected focused command:
+
+```text
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_paths.py \
+  -k freecad_path_honors_override_without_side_effects
+```
+
+produced the genuine semantic RED:
+
+```text
+2 failed, 10 deselected
+AttributeError: module 'vibecad.runtime.paths' has no attribute 'freecad_path'
+```
+
+### 30.3 G1-C00P candidate and review evidence
+
+The authorized `gpt-5.6-sol / high` implementation packet then made only the
+two track-owned edits:
+
+- `freecad_path()` composes the GUI path from the unchanged
+  `active_runtime_prefix()` selection;
+- POSIX resolves `<prefix>/bin/FreeCAD`;
+- Windows resolves `<prefix>/Library/bin/FreeCAD.exe`;
+- the focused parameterized test uses a nonexistent override prefix and proves
+  both exact paths without creating that prefix.
+
+Candidate SHA-256 values:
+
+```text
+src/vibecad/runtime/paths.py
+  36bc29d8de6d6757bbdddef08efbe4e28784139a2fb72aa127716ce1a09a423d
+tests/test_paths.py
+  4561cbc25d2c4bb22d36ec47592ec6b5b309ac2275fc629395b8a54195a97c97
+```
+
+Corrected G1-G00P GREEN:
+
+```text
+PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_paths.py
+12 passed
+
+.venv/bin/python -m ruff check \
+  src/vibecad/runtime/paths.py tests/test_paths.py
+All checks passed!
+
+git diff --check -- \
+  src/vibecad/runtime/paths.py tests/test_paths.py
+PASS
+```
+
+The implementation packet left the index empty and did not edit this artifact,
+stage, commit, push, install, probe or launch FreeCAD. An independent
+`gpt-5.6-sol / max` adversarial review inspected the exact candidate and
+directly necessary tracked path/platform conventions:
+
+```text
+blocker:  0
+critical: 0
+major:    0
+minor:    0
+decision: GO
+focused pytest: 12 passed
+Ruff: PASS
+diff-check: PASS
+index: empty
+```
+
+The reviewer confirmed that C00P needs no package export, changes no existing
+caller or `freecadcmd_path()`, and makes no existence, verification,
+installation or launch claim. Residuals remain explicit:
+
+- Windows is covered by branch simulation, not a native Windows host;
+- GUI-binary regular-file identity and execute permission are required at every
+  real caller and are deferred to the named real-GUI gates;
+- no FreeCAD launch occurs in C00P.
+
+Exact serial allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+M src/vibecad/runtime/paths.py
+M tests/test_paths.py
+```
+
+Exact subject:
+
+```text
+feat(runtime): expose managed FreeCAD GUI path
+```
+
+The concurrent MR1-P00 candidate remains unstaged in its disjoint approved
+documentation write domain. It is not part of this commit and cannot be staged
+with it. The five dynamic course scripts remain untracked, excluded and
+untouched.
+
+### 30.4 Recovery Snapshot MRG1-S10
+
+#### S10-1 — Completed milestones
+
+- MRG1-A04 was persisted and pushed at `4d92d04`; HEAD and upstream were equal
+  before implementation began.
+- MRG1-GATE-CORR-01 converted only the inherited source-checkout test
+  projection and exposed a genuine focused C00P RED.
+- G1-C00P reached focused GREEN and independent adversarial `0/0/0/0` GO on
+  the exact two-file source candidate.
+- MR1-P00 continues independently in its four-path documentation domain.
+
+#### S10-2 — Ordered next packets and branch conditions
+
+1. Run an independent `gpt-5.6-terra / medium` pre-stage gate over the exact
+   three-path G1-C00P projection, candidate hashes, corrected command,
+   allowlist, empty index, disjoint MR1 candidate and dynamic exclusions.
+2. If GREEN, stage exactly the three G1-C00P allowlist paths and run a second
+   cached-only mechanical projection. Any additional staged path, byte drift,
+   course-script contact or gate mismatch is a breaker.
+3. Commit with the exact C00P subject, push, and verify HEAD/upstream equality
+   and ahead/behind `0/0`. Its final hash and push fact belong in the next
+   semantic ledger preamble.
+4. Independently review and gate MR1-P00, append its ledger, then stage only
+   its five-path allowlist. It may not absorb G1 bytes.
+5. Only after both first packets are independently committed and pushed may
+   the controller dispatch G1-C00B and MR1-P01.
+
+#### S10-3 — Active decisions and authorization
+
+A01..A04 and D17..D22 remain active only within their named stages. FreeCAD is
+the product priority; second-CAD implementation remains deferred. MR1-P00 is a
+contract-only immutable-v1 preparation packet. No packaging, v2 writer,
+release, external credentials/spend or other excluded feature is activated.
+The Section 28.7 shared beta gate remains mandatory before the first promised
+non-disposable external project.
+
+#### S10-4 — Execution discipline
+
+The selected capability profile remains:
+
+```text
+approval: artifact-approval
+delegation: spawn-send-wait
+persistence: repo-artifact
+process: native-session-poll
+```
+
+The same four evidence categories recorded in S09 remain observable: live
+capability declarations expose the controller, patch/command, agent and native
+session tools; this campaign has observed authorization persistence,
+sol/high implementation and sol/max review; the environment identity remains
+Codex desktop `/root` in this repository; public configuration still exposes
+Default mode, the current filesystem/approval profile and sol/terra routing.
+No applicable `AGENTS.md` or `CLAUDE.md` has appeared.
+
+All pytest rows now inherit MRG1-GATE-CORR-01. `standard`, `deep` and `fast`
+remain sol/high, sol/max and terra/medium. One controller-owned index and one
+exact semantic allowlist are permitted at a time. Recovery reads this artifact
+and verifies HEAD/upstream/status/index, candidate hashes, corrected gate,
+review evidence, dynamic exclusions and the first unclosed packet; chat memory
+alone is never sufficient.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00P-E01 | A04; D19 FreeCAD-first path preparation | prior A04 `4d92d04` pushed; C00P `not-created` | corrected RED 2 failed; GREEN 12 passed; Ruff/diff PASS; sol/max 0/0/0/0 GO | native Windows and real GUI-binary identity/execution remain for later named gates; inherited residuals remain OPEN | MRG1-S10 | candidate GREEN / fast pre-stage gate next |
+
+### 30.5 G1-C00P pre-stage mechanical PASS
+
+An independent `gpt-5.6-terra / medium` agent mechanically verified the exact
+pre-stage projection:
+
+```text
+branch:             codex/agent-stage3
+HEAD/upstream:      4d92d04... / equal
+ahead/behind:       0 / 0
+index:              empty
+
+G1 tracked paths:   exact three-path C00P allowlist
+MR1 tracked paths:  exact disjoint approved documentation domain / unstaged
+other tracked:      0
+dynamic exclusions: exact five / untracked / names only
+
+HEAD artifact SHA-256:
+  5e122022180a6d8b9292aed96e476a37c445129dc18af65aa61e3b6348ceffe5
+reviewed candidate artifact SHA-256:
+  b76e1d755c41c2bd319334b2974f1a2bd56f790338b586aae92ffa8462d4cc4a
+artifact delta:     222 additions / 0 deletions
+strict byte append: PASS
+
+paths.py SHA-256:
+  36bc29d8de6d6757bbdddef08efbe4e28784139a2fb72aa127716ce1a09a423d
+test_paths.py SHA-256:
+  4561cbc25d2c4bb22d36ec47592ec6b5b309ac2275fc629395b8a54195a97c97
+
+corrected pytest:   12 passed
+Ruff:               PASS
+diff-check:         PASS
+```
+
+The agent also confirmed the A04 push record, exact
+`MRG1-GATE-CORR-01`, genuine corrected RED, candidate hashes, adversarial
+`0/0/0/0`, exact subject/allowlist and all four S10 sections. It made zero
+writes and did not read or contact excluded course-script content.
+
+Exact named staging of the three C00P allowlist paths is now authorized. The
+next gate is cached-only: cached path equality, cached/worktree byte identity,
+strict artifact append, candidate hashes, corrected pytest, Ruff,
+`git diff --cached --check`, disjoint unstaged MR1 projection and exact dynamic
+exclusions. No additional path may enter the index.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00P-E02 | A04; D19 FreeCAD-first path preparation | prior A04 `4d92d04` pushed; C00P `not-created` | sol/max 0/0/0/0 GO; terra pre-stage PASS; corrected pytest 12; Ruff/diff PASS; hashes and strict append bound | native Windows and real GUI-binary identity/execution remain for later named gates; inherited residuals remain OPEN | MRG1-S10 | pre-stage GREEN / exact staging then cached-only gate |

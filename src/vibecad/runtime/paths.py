@@ -221,6 +221,15 @@ def freecadcmd_path() -> Path:
     )
 
 
+def freecad_path() -> Path:
+    env = active_runtime_prefix()
+    return (
+        env / "Library" / "bin" / "FreeCAD.exe"
+        if platform.is_windows()
+        else env / "bin" / "FreeCAD"
+    )
+
+
 def micromamba_path() -> Path:
     return runtime_root() / "bin" / ("micromamba.exe" if platform.is_windows() else "micromamba")
 
