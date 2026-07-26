@@ -4026,3 +4026,965 @@ allowlist/hash/diff/prefix check is required before creating C05.
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MR0-C05-E12 | D01..D16; A01; A02; post-MR0 steering | `not-created`; artifact restage next | cached M/M/A/M; unstaged/untracked 0/0; hashes/links/claims/prefix/diff/leaks PASS | RES-01A/03/04/05/06A/07/08/09/10/10A; minor timeout robustness | MRG1-S07 | post-stage PASS / final cached integrity next |
+
+## 28. MRG1-R2 G1/MR1 Parallel Execution Contract
+
+This section is an append-only successor to `MRG1-R1`. It records the
+completed MR0 closeout, the user's post-MR0 product steering, three independent
+read-only `gpt-5.6-sol / max` audits and the proposed exact first
+implementation campaigns for G1 and MR1. It does not rewrite the historical
+R1 header.
+
+### 28.1 MR0 closeout and authorization MRG1-A03
+
+MR0 completed as the approved six-commit first-parent chain:
+
+```text
+6cc1876 docs(architecture): define multi-runtime CAD boundary
+07c6d6 feat(runtime): add runtime capability contracts
+6c3581b feat(cad): add backend-neutral CAD runtime port
+71a25b5 refactor(freecad): route worker through CAD runtime adapter
+7c98e36 test(runtime): enforce adapter conformance
+2de1a37 docs(orchestration): close multi-runtime foundation
+```
+
+`2de1a37cc7e67268965a5a7b9519b2bf0e049f9a` is pushed to
+`origin/codex/agent-stage3`. Its final gates were C04 `97 passed`, public
+surface `2 passed` plus `28 tools / 6 operations`, Ruff PASS, full default
+`5001 passed, 108 deselected, 19 warnings`, real managed Worker `1 passed`,
+real Task Kernel `2 passed` and zero leaked pytest, FreeCAD, Worker or daemon
+processes.
+
+The user first directed that a second CAD is not urgent, the architecture
+reservation is sufficient and FreeCAD end-to-end product capability is the
+priority. After the controller explained that G1 and MR1 can run in parallel
+provided they join before durable external beta, the user granted:
+
+| Approval | Timestamp | Artifact | Scope | Exact user text | State |
+|---|---|---|---|---|---|
+| MRG1-A03 | 2026-07-26T07:33:57Z | MRG1-R2 direction | G1 FreeCAD alpha plus parallel MR1; common non-disposable beta gate | `那就按照这样来吧` | product direction approved / exact R2 implementation pending |
+
+MRG1-A03 carries forward MRG1-A01's product decisions and MRG1-A02's
+subagent routing. It approves parallel product direction, but cannot
+retroactively authorize allowlists and gates that had not yet been produced or
+shown when the user granted it. The exact campaigns below require a new
+MRG1-A04 after this revised packet is shown. Until A04, only this
+controller-owned artifact may be verified, committed and pushed; no G1 or MR1
+source implementation may start.
+
+MRG1-A04 is reserved for the user's explicit approval of Sections 28.2–28.8,
+including the exact initial commit budget, the conditional daemon-bootstrap
+allowlist and the shared non-disposable beta gate. Neither A03 nor a future
+A04 authorizes second-CAD implementation, face/edge selectors, semantic diff,
+manual checkout publication, an Addon Manager release, a tag/release, external
+credentials or spend.
+
+Stable decisions introduced by R2 are:
+
+- `MRG1-D17` — FreeCAD end-to-end product capability precedes a second CAD;
+  adapter/conformance reservation remains sufficient. Active under A03.
+- `MRG1-D18` — G1 and MR1 run in isolated parallel write domains and join
+  before non-disposable external beta. Active under A03.
+- `MRG1-D19` — real Workbench alpha may use disposable/exportable v1 data, but
+  cannot claim durable beta before the shared gate. Proposed under A04.
+- `MRG1-D20` — MR1-prep reports observational `structurally_ready`; only a
+  future fenced second scan can report `activation_ready`. Proposed under A04.
+- `MRG1-D21` — exact named staging, one-commit index ownership and
+  artifact-first persistence apply to every authorization and correction.
+  Proposed under A04.
+- `MRG1-D22` — the adapter routes `fast` to terra/medium mechanical work,
+  `standard` to sol/high ordinary coding and `deep` to sol/max durable
+  architecture/adversarial work. Proposed under A04.
+
+### 28.2 Product-meaningful first outcome
+
+The first user-visible vertical slice is one real managed FreeCAD 1.1
+Workbench:
+
+1. FreeCAD discovers and activates one VibeCAD Workbench and Dock.
+2. The Dock opens its own `LocalAgentClient` session to the one authenticated
+   local Kernel daemon.
+3. The user chooses one managed project and one
+   `awaiting_user_review` task.
+4. HEAD and draft are opened through `checkout.open`, same-session one-shot
+   `file_grant.claim` and two separate non-authoritative Preview Documents.
+5. The Dock shows the authoritative verification verdict plus
+   live/stale/revoked/recovery-required and local dirty state.
+6. Accept or Reject uses the latest exact task id, draft id and generation,
+   then re-reads Task and HEAD.
+7. Whole-object or feature selection from a managed Preview Document produces
+   an exact `SelectorV1` mapping for copy to the host.
+
+The Dock is a thin client. It never owns Task, Revision, HEAD, lease, candidate
+or review authority; never reads `manifest.json`, constructs a Revision path,
+selects an artifact by list position or opens an internal `model.FCStd`;
+never saves or publishes a Preview Document; and never treats `Name`, `Label`,
+`FaceN` or `EdgeN` as a durable selector.
+
+G1 may call this result an alpha only while its data is explicitly disposable
+or independently exportable. It cannot be called durable beta or be offered
+with a promise that user projects survive upgrades until the shared gate in
+Section 28.7 is GREEN.
+
+This is the final G1 vertical-slice target, not a claim that the initial
+post-A04 budget alone delivers every item. The first tranche closes addon
+registration, isolated embedded bootstrap, Dock/client threading,
+preview/review behavior and selector capture in repository/real-GUI gates.
+Deterministic user installation/launch packaging and the full real
+Accept/Reject integration commit receive exact follow-on allowlists after
+G1-M00; they are required before the vertical slice is called complete.
+
+### 28.3 Parallel write-domain lock
+
+G1 and MR1 may run concurrently only with these ownership rules:
+
+- G1 owns new `freecad/VibeCAD/**` Workbench files and their dedicated tests.
+  It treats the Application, daemon, protocol, checkout, grant, selector and
+  durable-store implementations as read-only facades.
+- MR1 owns durable revision codec, byte corpus and migration inventory work.
+  It does not modify any Workbench file.
+- `src/vibecad/daemon/{adapters,facade}.py`,
+  `src/vibecad/application/{project_api,task_api}.py`,
+  `src/vibecad/interaction/{checkouts,file_grants}.py` and
+  `src/vibecad/execution/selectors.py` are shared seams. Neither parallel track
+  may change them except where an exact commit below names the path.
+- `pyproject.toml`, `uv.lock`, `manifest.json`,
+  `.github/workflows/release.yml`, canonical release documentation and shared
+  acceptance/integration tests have one controller-owned serial integration
+  writer.
+- This artifact is the one intentional shared path in every exact commit
+  allowlist. Only the controller appends its ledger/recovery rows after a
+  subagent returns candidate bytes; coding/research/gate subagents never edit
+  it. Parallel development therefore converges through serial
+  ledger-append -> exact stage -> commit -> push cycles.
+- Any need for both tracks to edit the same unnamed source path is a breaker.
+  The controller must stop, preserve both candidate diffs and approve a new
+  serial integration commit rather than merging opportunistically.
+
+### 28.4 G1 exact first implementation campaign
+
+Each behavior-changing G1 commit is developed from a genuine focused RED to
+GREEN; RED evidence is recorded before production bytes are written, but no
+commit may leave the branch failing. A characterization-only branch may record
+the already-correct real behavior as its first GREEN. If that characterization
+exposes a defect and production bytes change, the reproduced failure is the
+required RED.
+
+#### G1-C00P — Expose the selected GUI binary path
+
+Subject:
+
+```text
+feat(runtime): expose managed FreeCAD GUI path
+```
+
+Exact controller-owned serial allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+M src/vibecad/runtime/paths.py
+M tests/test_paths.py
+```
+
+The pure path helper selects the active runtime prefix and constructs only its
+platform-specific FreeCAD GUI binary path. It does not claim that an override
+or prefix is verified, start/install/probe FreeCAD or change
+`freecadcmd_path()`. Every real GUI caller must separately validate existing
+receipt/runtime-generation evidence, the prefix identity and the GUI binary's
+regular-file identity and execute permission.
+
+#### G1-C00B — Prove embedded daemon bootstrap
+
+This commit has two mutually exclusive observable branches:
+
+```text
+GREEN probe:
+  test(workbench): prove embedded daemon bootstrap
+
+reproduced RED plus narrow correction:
+  fix(daemon): bind embedded bootstrap to managed Python
+```
+
+Exact allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+A tests/fixtures/freecad_workbench/bootstrap_probe.py
+A tests/test_freecad_workbench_bootstrap.py
+M src/vibecad/daemon/bootstrap.py
+M tests/test_p0b_acceptance.py
+```
+
+The owner-private, bounded real-FreeCAD probe runs before any addon or Dock is
+written. Its invocation includes `-P <repo>/src` and
+`-P <repo>/tests/fixtures/freecad_workbench`; it asserts the exact
+`vibecad.__file__` and `daemon/bootstrap.py` source identities, records
+`sys.executable`, cold-opens one isolated `LocalAgentClient`, records the daemon
+id and closes the client. The parent then calls bounded
+`retire_local_kernel(reason="runtime_upgrade", expected_daemon_id=<recorded>)`
+against the isolated run root and proves the recorded pid is dead, the socket
+is absent and no daemon process or live run-root identity remains. Client close
+alone is not cleanup evidence.
+
+If the current `[sys.executable, -B, -m, vibecad.daemon]` works, apart from the
+controller artifact only the two new test paths are present at commit. If and
+only if the real probe reproduces the embedded-launch failure, the same
+RED/GREEN commit may add the two named production/regression paths and bind
+daemon launch to the verified active managed Python with a development-Python
+fallback. It cannot create a second daemon, Application or Task Kernel. Any
+other path or failure mode is a breaker. This branch completes and the index
+returns empty before G1-C00 or C01 begins; no stash or mixed allowlist is
+permitted.
+
+#### G1-C00 — Register the thin-client addon
+
+Subject:
+
+```text
+feat(workbench): register thin-client FreeCAD addon
+```
+
+Exact allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+A freecad/VibeCAD/Init.py
+A freecad/VibeCAD/InitGui.py
+A freecad/VibeCAD/package.xml
+A freecad/VibeCAD/vibecad_workbench/__init__.py
+A freecad/VibeCAD/vibecad_workbench/state.py
+A tests/fixtures/freecad_workbench/fake_host.py
+A tests/test_freecad_workbench_package.py
+A tests/test_freecad_workbench_controller.py
+```
+
+RED requires the absent classic `Mod/VibeCAD` addon and presenter contracts to
+fail. GREEN requires `Init.py` to be headless/no-op, `InitGui.py` to register
+exactly once without connecting to the daemon at import time, and `state.py`
+to remain a Qt-, FreeCAD- and store-independent projection of public mappings.
+
+#### G1-C01 — Connect a responsive review Dock
+
+Subject:
+
+```text
+feat(workbench): connect review dock to public kernel
+```
+
+Exact allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+M freecad/VibeCAD/InitGui.py
+A freecad/VibeCAD/vibecad_workbench/gateway.py
+A freecad/VibeCAD/vibecad_workbench/dock.py
+A freecad/VibeCAD/vibecad_workbench/host.py
+M tests/fixtures/freecad_workbench/fake_host.py
+A tests/fixtures/freecad_workbench/gui_harness.py
+M tests/test_freecad_workbench_controller.py
+A tests/test_freecad_workbench_gui.py
+```
+
+One dedicated Qt worker thread owns one `LocalAgentClient`; connect, discovery,
+refresh and review RPC run there. All `FreeCADGui`, document, selection and
+widget operations run on the Qt main thread through queued signals carrying
+plain mappings. A blocking RPC on the GUI thread or a worker touching a GUI
+object is a breaker. The GUI harness is opt-in and bounded, drives the real
+managed `freecad` binary, emits one machine-readable result and is required
+GREEN before C01 can be committed.
+
+#### G1-C02 — Open safe HEAD and draft previews
+
+Subject:
+
+```text
+feat(workbench): preview managed head and draft
+```
+
+Exact allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+M freecad/VibeCAD/vibecad_workbench/state.py
+M freecad/VibeCAD/vibecad_workbench/gateway.py
+M freecad/VibeCAD/vibecad_workbench/dock.py
+M freecad/VibeCAD/vibecad_workbench/host.py
+A freecad/VibeCAD/vibecad_workbench/preview.py
+M tests/fixtures/freecad_workbench/fake_host.py
+M tests/test_freecad_workbench_controller.py
+A tests/test_freecad_workbench_preview.py
+```
+
+Each source uses `checkout.open` followed immediately by a same-session,
+one-shot grant claim. The main thread opens only the claimed exact path.
+Descriptor, checkout and document identities remain bound until close, in
+document -> checkout -> client order. `get_checkout` dirty/stale/revoked state
+or `Document.Modified` disables Accept and requires discard/close/reopen before
+review. Workbench code never calls save or save-as and a user-triggered save
+can affect only the non-authoritative checkout: it is never published or used
+for the old verdict. The preview cannot guess a path or reuse a grant.
+
+#### G1-C03 — Review with fresh authority
+
+Subject:
+
+```text
+feat(workbench): accept or reject reviewed draft
+```
+
+Exact allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+M freecad/VibeCAD/vibecad_workbench/state.py
+M freecad/VibeCAD/vibecad_workbench/gateway.py
+M freecad/VibeCAD/vibecad_workbench/dock.py
+M freecad/VibeCAD/vibecad_workbench/preview.py
+M tests/fixtures/freecad_workbench/fake_host.py
+M tests/test_freecad_workbench_controller.py
+M tests/test_freecad_workbench_preview.py
+A tests/test_freecad_workbench_review.py
+```
+
+Accept first re-reads Task and checkout, and is enabled only for the latest
+`awaiting_user_review`, live, disk-clean and unmodified draft. Reject also
+uses the latest awaiting-review generation and remains HEAD-neutral. A timeout
+or disconnect has unknown outcome: reconnect and read durable state; never
+blindly replay a decision. Success re-reads Task and Project and closes both
+previews.
+
+#### G1-C04 — Capture Level-A selectors
+
+Subject:
+
+```text
+feat(workbench): capture managed object selectors
+```
+
+Exact allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+M freecad/VibeCAD/vibecad_workbench/state.py
+M freecad/VibeCAD/vibecad_workbench/dock.py
+M freecad/VibeCAD/vibecad_workbench/host.py
+A freecad/VibeCAD/vibecad_workbench/selection.py
+M tests/fixtures/freecad_workbench/fake_host.py
+M tests/test_freecad_workbench_controller.py
+A tests/test_freecad_workbench_selection.py
+```
+
+Only a whole managed DocumentObject in a tracked Preview Document is accepted.
+A managed object carrying a `feature_id` yields a feature-entity selector; this
+does not select a Face or Edge subelement. Project and revision ids come only
+from the live checkout binding, never a widget or object label.
+`parse_entity_identity()` and `EntityIdentity.to_selector()` remain the sole
+identity-construction path, followed by `resolve_selector()` over that tracked
+document's complete `Document.Objects`; the result must be the same selected
+object and unique. Any subelement, missing or malformed VibeCAD metadata,
+revision mismatch or ambiguity fails closed.
+
+#### G1-M00 — Real GUI bootstrap breaker gate
+
+Before C01 grows beyond its minimal Dock, the controller must run the actual
+managed `freecad` GUI, not `freecadcmd` or mocked Qt, with an owner-private
+temporary root and the exact `freecad/VibeCAD` module. The bounded harness is
+`tests/fixtures/freecad_workbench/gui_harness.py`, asserted by
+`tests/test_freecad_workbench_gui.py`. Before process launch, the controller
+must use existing receipt/runtime-generation verification to bind the selected
+prefix identity and GUI regular-file identity/owner/mode, and record that
+evidence. Its normalized invocation is:
+
+```text
+VIBECAD_HOME=<0700-temp>/vibecad
+VIBECAD_FREECAD_ENV=<verified-managed-prefix>
+FREECAD_USER_HOME=<0700-temp>/freecad-home
+FREECAD_USER_DATA=<0700-temp>/freecad-data
+FREECAD_USER_TEMP=<0700-temp>/freecad-temp
+<verified-managed-prefix>/bin/freecad
+  -M <repo>/freecad
+  -P <repo>/src
+  -P <repo>/tests/fixtures/freecad_workbench
+  --run-test gui_harness
+```
+
+The platform-specific GUI binary comes from a validated runtime path helper,
+not a guessed command. The harness has one absolute timeout, closes every
+window it owns and may touch only the temporary VibeCAD durable root and
+temporary FreeCAD configuration/data/temp roots. It must record:
+
+- addon scan, one Workbench registration and Dock activation;
+- `sys.executable`, Qt binding/version and main/worker thread identities;
+- a cold `LocalAgentClient` open and daemon id;
+- exact `vibecad.__file__` and daemon-bootstrap source identities under the
+  reviewed repository `src/` tree;
+- a responsive Qt heartbeat while connecting and refreshing;
+- clean GUI shutdown with no dangling thread, session, grant or checkout;
+- bounded retirement by the exact recorded daemon id, followed by proof that
+  its pid, socket, process and live run-root identity are absent.
+
+One audit-only invocation of the managed GUI binary with `--help` unexpectedly
+entered Qt startup on this host, reported a missing optional
+`3DconnexionNavlib` framework, opened message-box paths and required SIGINT.
+It changed no repository byte and is not M00 gate evidence. The isolated
+harness must not assume `--help` is headless; an unhandled startup modal or
+GUI timeout is an M00 breaker and its process must be reclaimed.
+
+The embedded `sys.executable` breaker and its only authorized correction are
+resolved earlier by G1-C00B. M00 cannot reopen or widen that correction.
+
+Later launcher, deterministic addon packaging, real Accept/Reject E2E and
+canonical documentation are controller-owned integration commits whose exact
+allowlists will be frozen only after G1-M00 proves the real discovery and
+process model. Addon Manager publication is outside G1.
+
+### 28.5 MR1-prep exact first implementation campaign
+
+MR1-prep creates no v2 durable bytes, migration marker or second-CAD support.
+The current writer remains byte-exact v1 throughout P00..P03.
+
+#### MR1-P00 — Freeze the durable-v2 migration contract
+
+Subject:
+
+```text
+docs(mr1): freeze durable-v2 migration contract
+```
+
+Exact allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+M docs/ARCHITECTURE.md
+M docs/ACCEPTANCE_TESTS.md
+M docs/CAD_RUNTIME_ADAPTER_GUIDE.md
+A docs/orchestrated/vibecad-durable-v2.md
+```
+
+The contract requires immutable v1, dual-reader before new-write-v2, mixed
+ancestry, fail-closed downgrade, inventory/preflight, backup/restore and
+rollback. An absent v1 profile maps only to the fixed legacy FreeCAD
+FCStd/STEP profile. It must not serialize internal `CadArtifactProfile` or
+`RuntimeDescriptor` as a public/durable schema by convenience.
+
+P00 is a documentation G0, not a behavior test: its prewrite evidence is the
+audited absence of a v1 byte corpus, codec dispatch, full-root inventory and
+activation/rollback contract. It does not manufacture a failing pytest.
+MR1-G00 is its postwrite integrity/consistency GREEN.
+
+#### MR1-P01 — Freeze the byte-exact v1 corpus
+
+Subject:
+
+```text
+test(durable): freeze byte-exact v1 golden corpus
+```
+
+Exact allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+A tests/fixtures/durable_v1/index.json
+A tests/fixtures/durable_v1/generation_zero_empty_manifest.json
+A tests/fixtures/durable_v1/generation_zero_empty_head.json
+A tests/fixtures/durable_v1/generation_zero_import_manifest.json
+A tests/fixtures/durable_v1/generation_zero_import_head.json
+A tests/fixtures/durable_v1/sealed_revision_manifest.json
+A tests/fixtures/durable_v1/sealed_revision_head.json
+A tests/fixtures/durable_v1/journal_staging.json
+A tests/fixtures/durable_v1/journal_prepared.json
+A tests/fixtures/durable_v1/journal_committed.json
+A tests/fixtures/durable_v1/journal_not_committed.json
+A tests/fixtures/durable_v1/reservation.json
+A tests/fixtures/durable_v1/seed_intent.json
+A tests/fixtures/durable_v1/seed_binding.json
+A tests/fixtures/durable_v1/task_active.json
+A tests/fixtures/durable_v1/task_awaiting_review.json
+A tests/fixtures/durable_v1/task_succeeded.json
+A tests/fixtures/durable_v1/task_failed.json
+A tests/fixtures/durable_v1/task_rejected.json
+A tests/fixtures/durable_v1/task_cancelled.json
+A tests/fixtures/durable_v1/materialization_request.json
+A tests/fixtures/durable_v1/materialization_delivery.json
+A tests/fixtures/durable_v1/project_create_hmac_key.json
+A tests/fixtures/durable_v1/project_create_request.json
+A tests/fixtures/durable_v1/project_create_quarantine_receipt.json
+A tests/fixtures/durable_v1/checkout_open_v1.json
+A tests/fixtures/durable_v1/checkout_tombstone_v1.json
+A tests/fixtures/durable_v1/checkout_open_v2.json
+A tests/fixtures/durable_v1/checkout_tombstone_v2.json
+A tests/fixtures/durable_v1/model.FCStd
+A tests/fixtures/durable_v1/model.step
+A tests/test_durable_v1_corpus.py
+```
+
+The indexed corpus covers empty/imported generation zero, a sealed FCStd/STEP
+Revision, HEAD, all journal decisions, reservation/seed records, active and
+terminal Task states, draft/report/artifact digest cross-binding,
+materialization request/delivery, project-create request/HMAC/quarantine
+records, legacy managed-checkout v1 open/tombstone facts and the current
+managed-checkout v2 writer's open/tombstone facts.
+Fixture SHA-256, size and canonical bytes are fixed before production
+refactoring. Normal tests have no update-golden mode and may not generate a
+fixture immediately before validating it.
+
+#### MR1-P02 — Insert version-dispatch without byte drift
+
+Subject:
+
+```text
+refactor(revision): insert version-dispatch codec seam
+```
+
+Exact allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+A src/vibecad/execution/revision_codec.py
+M src/vibecad/execution/revisions.py
+A tests/test_revision_codec.py
+M tests/test_revision_store.py
+M tests/test_durable_v1_corpus.py
+```
+
+The codec accepts and returns immutable decoded values without store or path
+authority. Dispatch is strict over schema version, exact keyset and checksum
+domain. The writer remains hard-pinned to v1. `RevisionRef.to_mapping()` and
+its digest-bound projections do not gain a profile field. Unknown versions,
+domains, fields, duplicate JSON keys and v1/v2 hybrids fail closed.
+
+#### MR1-P03 — Add read-only inventory and preflight
+
+Subject:
+
+```text
+feat(migration): add read-only durable inventory
+```
+
+Exact allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+A src/vibecad/application/durable_migration.py
+M src/vibecad/application/data.py
+M src/vibecad/application/project.py
+M src/vibecad/application/project_create.py
+M src/vibecad/application/artifacts.py
+M src/vibecad/execution/revisions.py
+M src/vibecad/interaction/checkouts.py
+A tests/test_durable_migration.py
+M tests/test_revision_store.py
+M tests/test_task_store.py
+M tests/test_managed_checkout.py
+M tests/test_artifact_materialization.py
+M tests/test_project_api.py
+M tests/test_project_bootstrap.py
+```
+
+Each modification outside the new migration module is limited to a bounded,
+read-only snapshot hook. `workflow/store.py` is excluded because it already
+has a Task snapshot; a proven missing read-only fact requires a separately
+approved commit.
+
+Inventory covers `projects/`, `tasks/`, `bootstrap/`, `checkouts/` and
+`artifacts/`, including bootstrap request/staging/work/normalized residue.
+It is path-free, bounded, deterministic and mutation-negative. `ready=true`
+is not a P03 output: a sequential read-only scan cannot prove quiescence
+against a concurrent writer. P03 reports `structurally_ready=true` only when
+the observed snapshot has zero unknown/corrupt/ambiguous/dangling entries, no
+observed active candidate/journal/reservation/temp state and exact
+reference/digest closure; it also reports a closed set of observational
+blockers and the start/end change tokens used to detect visible drift.
+
+P03 cannot start a Worker/runtime, acquire a project write lease, repair,
+reconcile, delete or expose an absolute path. A later writer-activation stage
+must quiesce the daemon and hold an approved global writer/maintenance fence,
+then rerun the complete scan. Only that fenced second scan may report
+`activation_ready=true`; its lock design and exact source allowlist require a
+future approval.
+
+MR1-P04 and later v2 reader/writer activation require a new append with exact
+allowlists after P00..P03 are GREEN. Durable v2 is not equivalent to a
+repo-wide multi-CAD public/domain rewrite: until real second-CAD demand, the
+reader may normalize legacy and v2 FreeCAD records to the current compatibility
+projection while the migration layer retains profile metadata.
+
+### 28.6 Track-local and mechanical gates
+
+The initial post-A04 commit budget is fixed:
+
+| Campaign | Normal commits | Conditional commits | Stage limit |
+|---|---:|---:|---|
+| G1 | 7 (`C00P`, `C00B`, `C00`..`C04`) | 0; C00B has one approved mutually exclusive diff branch | one current commit's exact allowlist |
+| MR1-prep | 4 (`P00`..`P03`) | 0 | one current commit's exact allowlist |
+
+This artifact-only R2 recovery commit is outside the source budget. No
+integration, packaging, release, MR1-P04 or later commit is authorized by this
+budget. The index must be empty before each stage, may contain only one
+commit's named allowlist, and must be emptied by that commit before another
+track stages anything. A second corrective commit, a new path or a change in
+commit semantics stops the campaign for an append and approval.
+
+Before every semantic commit, the controller appends that attempt's candidate
+hashes, RED/GREEN/gate evidence, residuals and the preceding commit/push fact
+to this artifact, then stages it with the current exact source allowlist. A
+commit cannot contain its own final hash or post-push fact. The next semantic
+commit's preamble binds those facts. If a track blocks, hands off or reaches
+its last authorized commit without a successor, one mandatory
+controller-only evidence/recovery commit may append the missing hash, push
+state and recovery snapshot using this exact one-path allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+```
+
+Such artifact-only recovery commits are required process records, not source
+budget or corrective commits; they cannot change a decision, source allowlist
+or product claim.
+
+Expected impact through the authorized budget:
+
+- public surface remains exactly 28 tools and six operations;
+- Task/Revision/Accept/Reject and `SelectorV1` wire contracts remain unchanged;
+- MR1-prep writes only v1 bytes and must prove them byte-identical;
+- G1 adds a repository addon and isolated real-GUI test surface, but does not
+  publish or install it into a user's normal FreeCAD tree;
+- existing test cases are not deleted, combined or weakened; focused counts
+  may only increase as new tests are added.
+
+The named real-GUI/manual matrix is:
+
+| Gate | Scenario | Required evidence | Owner / closure |
+|---|---|---|---|
+| G1-V00 | isolated managed FreeCAD discovers one addon and activates Dock | bounded harness result, process/thread identities, Qt heartbeat, clean GUI exit, exact daemon retirement and pid/socket/run-root absence | controller; required before C01 commit |
+| G1-V01 | choose project/task and open separate real HEAD/draft FCStd Preview Documents | screenshot plus checkout/grant/document identity log; no real user data root | controller; required before C02 commit |
+| G1-V02 | dirty, stale and revoked transitions | visible disabled Accept; discard/reopen recovery; Reject leaves HEAD digest unchanged | controller; required before C03 commit |
+| G1-V03 | Accept and Reject across daemon/FreeCAD restart | accepted HEAD advances exactly once; rejected HEAD unchanged; Task/verdict rediscovered | controller; required before G1 alpha claim |
+| G1-V04 | whole managed object and feature-entity capture | copied SelectorV1 round-trips uniquely to the same object; Face/Edge visibly unsupported | controller; required before C04 commit |
+| G1-M01 | complete in-FreeCAD product flow at normal display scale | user-visible Dock, preview, verdict, Accept/Reject and selection review | user useful but not required for mechanical commits; required to close RES-03 product acceptance |
+
+The exact independent focused-command matrix is:
+
+| Gate | Commit | Exact command |
+|---|---|---|
+| G1-G00P | C00P | `.venv/bin/python -m pytest -q tests/test_paths.py && .venv/bin/python -m ruff check src/vibecad/runtime/paths.py tests/test_paths.py` |
+| G1-G00B | C00B | `.venv/bin/python -m pytest -q tests/test_freecad_workbench_bootstrap.py && .venv/bin/python -m ruff check src/vibecad/daemon/bootstrap.py tests/test_p0b_acceptance.py tests/fixtures/freecad_workbench/bootstrap_probe.py tests/test_freecad_workbench_bootstrap.py` |
+| G1-G00B-R | C00B correction branch only | `.venv/bin/python -m pytest -q tests/test_p0b_acceptance.py::test_embedded_freecad_uses_managed_python_for_cold_daemon` |
+| G1-G00B-F | C00B real probe | `VIBECAD_RUN_INTEGRATION=1 VIBECAD_FREECAD_ENV=<verified-prefix> .venv/bin/python -m pytest -q -m slow tests/test_freecad_workbench_bootstrap.py` |
+| G1-G00 | C00 | `.venv/bin/python -m pytest -q tests/test_freecad_workbench_package.py tests/test_freecad_workbench_controller.py && .venv/bin/python -m ruff check freecad/VibeCAD/Init.py freecad/VibeCAD/InitGui.py freecad/VibeCAD/vibecad_workbench tests/fixtures/freecad_workbench/fake_host.py tests/test_freecad_workbench_package.py tests/test_freecad_workbench_controller.py` |
+| G1-G01 | C01 | `.venv/bin/python -m pytest -q tests/test_freecad_workbench_package.py tests/test_freecad_workbench_controller.py tests/test_freecad_workbench_gui.py && .venv/bin/python -m ruff check freecad/VibeCAD tests/fixtures/freecad_workbench/fake_host.py tests/fixtures/freecad_workbench/gui_harness.py tests/test_freecad_workbench_controller.py tests/test_freecad_workbench_gui.py` |
+| G1-G01-F | C01 real GUI / M00 | `VIBECAD_RUN_INTEGRATION=1 VIBECAD_FREECAD_ENV=<verified-prefix> .venv/bin/python -m pytest -q -m slow tests/test_freecad_workbench_gui.py` |
+| G1-G02 | C02 | `.venv/bin/python -m pytest -q tests/test_freecad_workbench_controller.py tests/test_freecad_workbench_preview.py && .venv/bin/python -m ruff check freecad/VibeCAD/vibecad_workbench tests/fixtures/freecad_workbench/fake_host.py tests/test_freecad_workbench_controller.py tests/test_freecad_workbench_preview.py` |
+| G1-G03 | C03 | `.venv/bin/python -m pytest -q tests/test_freecad_workbench_controller.py tests/test_freecad_workbench_preview.py tests/test_freecad_workbench_review.py && .venv/bin/python -m ruff check freecad/VibeCAD/vibecad_workbench tests/fixtures/freecad_workbench/fake_host.py tests/test_freecad_workbench_controller.py tests/test_freecad_workbench_preview.py tests/test_freecad_workbench_review.py` |
+| G1-G04 | C04 | `.venv/bin/python -m pytest -q tests/test_freecad_workbench_controller.py tests/test_freecad_workbench_selection.py tests/test_object_selectors.py && .venv/bin/python -m ruff check freecad/VibeCAD/vibecad_workbench tests/fixtures/freecad_workbench/fake_host.py tests/test_freecad_workbench_controller.py tests/test_freecad_workbench_selection.py` |
+| MR1-G00 | P00 | `git diff --check && .venv/bin/python -m pytest -q tests/test_agent_skill.py` |
+| MR1-G01 | P01 | `.venv/bin/python -m pytest -q tests/test_durable_v1_corpus.py && .venv/bin/python -m ruff check tests/test_durable_v1_corpus.py` |
+| MR1-G02 | P02 | `.venv/bin/python -m pytest -q tests/test_durable_v1_corpus.py tests/test_revision_codec.py tests/test_revision_store.py && .venv/bin/python -m ruff check src/vibecad/execution/revision_codec.py src/vibecad/execution/revisions.py tests/test_durable_v1_corpus.py tests/test_revision_codec.py tests/test_revision_store.py` |
+| MR1-G03 | P03 | `.venv/bin/python -m pytest -q tests/test_durable_migration.py tests/test_revision_store.py tests/test_task_store.py tests/test_managed_checkout.py tests/test_artifact_materialization.py tests/test_project_api.py tests/test_project_bootstrap.py && .venv/bin/python -m ruff check src/vibecad/application/durable_migration.py src/vibecad/application/data.py src/vibecad/application/project.py src/vibecad/application/project_create.py src/vibecad/application/artifacts.py src/vibecad/execution/revisions.py src/vibecad/interaction/checkouts.py tests/test_durable_migration.py tests/test_revision_store.py tests/test_task_store.py tests/test_managed_checkout.py tests/test_artifact_materialization.py tests/test_project_api.py tests/test_project_bootstrap.py` |
+
+For every behavior-change row, RED is the first expected focused failure on
+absent or incorrect behavior; GREEN is the exact command above returning zero
+on the candidate bytes. P00 uses its explicit documentation gap audit instead
+of a fabricated test RED. C00B may be direct GREEN only on its
+characterization branch; its correction branch must preserve the reproduced
+real RED. The real commands replace `<verified-prefix>` with the
+identity-bound absolute prefix recorded by M00. Each row is followed by the
+same independent named-allowlist/status/index/hash/`git diff --check`
+mechanical gate before staging.
+
+`G1-G00B-F` and `G1-G01-F` fail unless their parent wrapper retires the exact
+recorded isolated daemon within the bound and verifies pid/socket/process/live
+run-root absence after the GUI child exits.
+
+The track gates are:
+
+- every source commit: focused RED, focused GREEN, affected tests, Ruff,
+  allowlist/status/index/hash/diff checks and a `gpt-5.6-sol / max`
+  adversarial review before commit;
+- pure mechanical gates: independent `gpt-5.6-terra / medium` subagent;
+- ordinary implementation: `gpt-5.6-sol / high` subagent;
+- critical architecture, durable migration and adversarial review:
+  `gpt-5.6-sol / max` subagent;
+- G1: package/import tests plus real FreeCAD GUI evidence; fake Qt or
+  `freecadcmd` cannot close G1 visual/thread gates;
+- MR1: v1 corpus byte equivalence, existing crash/reconcile suites and a
+  preflight before/after snapshot proving an identical path set, content
+  hashes, file kind, mode, uid, size, mtime, ctime and object identity. Access
+  time is excluded because the verification read itself may change atime.
+
+No broad `git add`, generated update of golden bytes, retry-until-green,
+test-count reduction, waiver or unrecorded correction is authorized.
+
+### 28.7 Shared non-disposable beta gate
+
+G1 alpha and MR1 development join before the first promised non-disposable
+external project. The exact integrated build must prove:
+
+1. old v1 projects remain byte-identical and readable;
+2. new v2 revisions and mixed v1 -> v2 ancestry can create, review, revert and
+   reconcile;
+3. a pending draft survives process and FreeCAD restart;
+4. G1 opens v1 and mixed-lineage HEAD/draft previews through opaque checkout
+   and grant contracts;
+5. verdict, stale/revoked/dirty state and Accept/Reject remain authoritative;
+6. `vibecad://artifact/{materialization_id}/{artifact_id}` stays compatible;
+7. interrupted activation/migration, backup restore and rollback converge;
+8. an old writer encounters v2 state and fails closed;
+9. source files and rejected HEAD remain unpolluted;
+10. addon, wheel, MCPB and host skill bytes have exact reviewed hashes.
+
+Any changed byte in immutable v1 history, data loss, ambiguous recovery,
+unknown preflight entry, insufficient free space/capacity, backup not restored
+and independently verified, dry run exceeding the declared maintenance window,
+G1 durable-path dependency or old-writer mutation is a release breaker. A real
+snapshot dry run is forced by any of 100 projects, 1,000 revisions or 10 GiB
+of v1 data.
+
+### 28.8 Dynamic user-owned exclusions
+
+After MR0 C05 was committed and pushed, these untracked paths appeared:
+
+```text
+CAD_Theory_Course_Scripts_V4.md
+CAD_Theory_Course_Scripts_V5.md
+CAD_Theory_Course_Scripts_V6_Expanded.md
+CAD_Theory_Course_Scripts_V7_FullExpanded.md
+CAD_Theory_Course_Scripts_V8_True3000.md
+```
+
+They are user-owned, outside all G1/MR1 allowlists and are demonstrably
+changing: V7 and V8 appeared during the first R2 mechanical gate. The
+controller and subagents must not read, edit, delete, package, stage or commit
+them. Every stage and gate must re-enumerate the complete untracked-name set
+and use exact named staging; later matching course-script paths receive the
+same exclusion even before this ledger is updated. The anchored name-only
+exclusion is `\ACAD_Theory_Course_Scripts_[^/]*\.md\Z` and applies only to
+untracked root paths; it never makes a tracked path ignorable. Their presence
+means the worktree is not globally clean; only the tracked tree may be
+described as clean.
+
+### 28.9 Recovery Snapshot MRG1-S08
+
+Snapshot time: `2026-07-26T08:09:42Z`.
+
+#### S08-1 — Completed milestones
+
+- MR0 C00..C05 is complete at
+  `6cc1876 -> 07c6d6 -> 6c3581b -> 71a25b5 -> 7c98e36 -> 2de1a37`;
+  final C05 gates and push evidence are recorded in Sections 27.12–27.15 and
+  Section 28.1; artifact revision before this append is `MRG1-R1`.
+- branch is `codex/agent-stage3`; HEAD and upstream are both
+  `2de1a37cc7e67268965a5a7b9519b2bf0e049f9a`.
+- Three sol/max source audits completed for G1, MR1 and their integration
+  boundary. The first R2 terra/medium mechanical gate proved a strict artifact
+  append. The R2 adversarial findings were closed with
+  `0 blocker / 0 critical / 0 major / 0 minor`; the final terra/medium
+  pre-stage gate remains next, so no final mechanical GREEN is claimed yet.
+- Before this append the tracked index/worktree was clean. Current tracked diff
+  is this artifact only; no source, test, package or durable-data byte changed.
+  The five observed course scripts and any later anchored match from
+  Section 28.8 remain untracked user-owned exclusions.
+
+#### S08-2 — Ordered next packets and branch conditions
+
+1. Close every R2 adversarial finding; rerun sol/max adversarial and
+   terra/medium mechanical gates on the final bytes.
+2. If both are GREEN, stage only this artifact, verify cached strict-append and
+   status identity, create one artifact-only R2 recovery commit and push it.
+3. Show the corrected packet and wait for MRG1-A04. No source packet starts
+   while A04 is absent.
+4. If the user grants A04, first append the exact words, timestamp, artifact
+   revision, decisions, budget, allowlists and gates to this artifact; run the
+   artifact G0; create and push a second artifact-only authorization commit.
+   That authorization commit is outside the source budget.
+5. Only after the A04 commit is upstream, start G1-C00P and MR1-P00 in disjoint
+   domains. Then run G1-C00B:
+   - if the real embedded bootstrap probe is GREEN, commit the controller
+     artifact plus only its two new test paths;
+   - if it reproduces the specified `sys.executable` failure, correct only the
+     two conditional named paths in that same RED/GREEN commit;
+   - any other failure stops G1.
+6. Continue G1-C00..C04 and MR1-P01..P03 in order. Stop before packaging,
+   integrated real Accept/Reject, MR1-P04 or v2 activation for a new exact
+   append and approval.
+
+#### S08-3 — Active approved decisions and authorization
+
+- MRG1-A01 authorizes the completed MR0 decisions D01..D16; MRG1-A02 controls
+  subagent model/reasoning routing.
+- MRG1-A03 approves only: second CAD deferred, FreeCAD end-to-end G1 first,
+  MR1 in parallel and a common gate before non-disposable external beta.
+- MRG1-A04 is reserved and absent. Sections 28.2–28.8 are proposed, not
+  executable.
+- Workbench remains a thin client of one Task Kernel; FreeCAD is the only
+  connected CAD adapter; durable storage remains fixed v1 FCStd/STEP through
+  MR1-prep.
+- The exclusions in Sections 28.1, 28.3, 28.7 and 28.8 are active. A new
+  public schema/tool, second CAD, face/edge, manual publish, Addon Manager,
+  release, external credential/spend, unnamed path or shared-file collision
+  requires a new decision and approval.
+
+#### S08-4 — Execution discipline
+
+Required capability profile:
+
+```text
+approval: artifact-approval
+delegation: spawn-send-wait
+persistence: repo-artifact
+process: native-session-poll
+```
+
+Required adapter-selection evidence:
+
+- `live capability declarations`: the current Codex desktop session declares
+  commentary/final user channels, local patch/command tools, direct
+  `spawn_agent`/`send_message`/`wait_agent` delegation and resumable
+  `exec_command`/`write_stdin` sessions. It declares Default rather than native
+  Plan approval mode. This supports artifact approval, spawn-send-wait,
+  repo-artifact writes and native session polling.
+- `observable behavior`: this campaign already spawned, messaged and waited for
+  independent agents; MR0 persisted and pushed this repo artifact; one bounded
+  FreeCAD command returned a live session id and was polled and terminated
+  through that same session. This supports the four selected profile values.
+- `environment identity`: the passive host context identifies Codex desktop,
+  root controller `/root`, a four-slot multi-agent tree and workspace
+  `/Users/wangtao/Documents/DevProject/vibecad`. This selects the Codex desktop
+  repo-artifact controller adapter.
+- `public configuration`: current public session configuration exposes Default
+  collaboration mode, unrestricted workspace filesystem, no command-approval
+  prompt and the available sol/terra model overrides. It exposes no native
+  Plan approval control in this mode.
+
+Selected adapter: Codex desktop repo-artifact controller with
+`spawn-send-wait` task packets, exact named local staging, immediate
+commit/push and `native-session-poll` for each long process. Adapter tier
+mapping is `fast -> gpt-5.6-terra / medium` for mechanical gates,
+`standard -> gpt-5.6-sol / high` for ordinary coding and
+`deep -> gpt-5.6-sol / max` for durable architecture and adversarial review.
+
+Allowlist and stage discipline are Sections 28.3–28.6. Gates include per-row
+RED/GREEN commands, Ruff, real GUI proof, sol/max review, terra/medium
+mechanical verification and shared beta gates. Circuit breakers are unnamed or
+shared writes, unapproved correction, v1 byte drift, observational preflight
+claimed as activation-ready, fake GUI evidence, dirty/stale Accept, ambiguous
+selector/recovery, data/capacity/backup failure and dynamic user-file contact.
+Residuals stay OPEN until their named closure gate; no retry, waiver, golden
+rewrite or test weakening closes one. Recovery always re-reads the full
+artifact, verifies branch/HEAD/upstream/status/approval/capability profile,
+preserves user exclusions, checks the last commit's gates and resumes only the
+first unclosed ordered packet.
+
+Recovery procedure:
+
+1. Read this entire artifact and recover MRG1-S08 without chat memory.
+2. Verify branch, HEAD/upstream and the complete status before any write.
+3. Preserve every untracked path exactly and prohibit broad staging.
+4. If the R2 append is uncommitted, verify it is a strict append to
+   `2de1a37` and finish only the artifact recovery commit.
+5. If the R2 recovery commit exists but A04 is absent, show the packet and wait;
+   do not start source implementation.
+6. If A04 exists, start or resume G1 and MR1 only at the first unclosed exact
+   commit above.
+7. Stop on any write-domain collision, unnamed path, durable mutation during
+   MR1-prep, non-real G1 GUI proof or new product decision.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-R2-E01 | MRG1-A03 direction; A01; A02; A04 reserved | `not-created`; artifact-only next | three sol/max source audits; R2 adversarial found 2 blockers / 6 major / 3 minor and correction is in progress | RES-01A/03/04/05/06A/07/08/09/10/10A; G1 GUI bootstrap and MR1-prep open | MRG1-S08 | direction approved / exact implementation pending / corrected R2 gate next |
+
+### 28.10 MRG1-R2 adversarial correction and GO
+
+The first deep review correctly rejected R2's attempt to bind MRG1-A03
+retroactively to an unseen exact packet and rejected an observational MR1 scan
+claiming quiescent activation readiness. Successive read-only reviews then
+found and closed:
+
+- reproducible real-GUI harness, isolated VibeCAD/FreeCAD roots and repository
+  source-identity gaps;
+- dirty-preview, selector uniqueness and daemon-retirement gaps;
+- exact commit budget, command matrix, manual validation and beta-breaker
+  gaps;
+- C00B stage-order and embedded `sys.executable` observability deadlocks;
+- checkout v1/v2 and project-create golden-corpus omissions;
+- the required capability profile, adapter evidence categories and four-part
+  recovery snapshot;
+- per-commit rolling-ledger allowlist and self-hash/push recording discipline;
+- invalid test-only daemon retirement reason and C00B scope wording.
+
+On the latest `865`-line strict append, the independent
+`gpt-5.6-sol / max` reviewer returned:
+
+```text
+blocker:  0
+critical: 0
+major:    0
+minor:    0
+decision: GO to terra/medium mechanical gate
+git diff --check: PASS
+course-script contents touched: 0
+```
+
+No G1/MR1 source, test, package or durable byte has been written. MRG1-A04 is
+still absent. The first two terra/medium checks on earlier R2 candidates
+already proved strict append, exact one-file tracked diff, balanced fences,
+zero broken relative links and correct dynamic user exclusions; those are
+intermediate evidence only. A fresh full mechanical gate on the exact current
+bytes is required before staging.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-R2-E02 | A03 direction; D17/D18 active; D19..D22 proposed; A04 absent | `not-created`; forbidden before final mechanical gate | sol/max 0/0/0/0 GO; strict append diff-check PASS; no user-file content contact | exact implementation not approved; final terra pre-stage pending | MRG1-S08 | adversarial GREEN / mechanical gate next |
+
+### 28.11 MRG1-R2 final pre-stage mechanical PASS
+
+An independent `gpt-5.6-terra / medium` subagent ran the complete read-only
+mechanical gate on the exact Section 28.10 candidate. It did not run pytest or
+FreeCAD and did not read, edit, stage or package any course-script content.
+Every check exited zero.
+
+```text
+branch:              codex/agent-stage3
+HEAD/upstream:       2de1a37cc7e67268965a5a7b9519b2bf0e049f9a / same
+ahead/behind:        0 / 0
+tracked diff:        artifact only
+index/cached diff:   empty
+untracked excluded:  V4, V5, V6_Expanded, V7_FullExpanded, V8_True3000
+
+HEAD artifact:       192508 bytes
+HEAD SHA-256:        179dd6d8248fdaec5aeb8cd30addb506351f8a863fe3a18b5d2b5558e7678223
+candidate artifact:  238555 bytes
+candidate SHA-256:   1dac56a398bd68bfae067a397330b34152978bc5bcd7a1d1b18cefbcd3464cf6
+strict byte append:  PASS
+git diff --check:    PASS
+
+relative links:      0 / 0 broken
+Section 28 fences:   56 / balanced
+basic table issues:  0
+semantic packets:    11
+allowlist entries:   111 / 0 invalid
+command mappings:    11 / 0 missing
+source/test/package/durable changes: 0
+```
+
+The gate also proved:
+
+- all five current dynamic root scripts match the anchored untracked-only
+  exclusion;
+- all 11 semantic packets include the controller artifact and agree with the
+  `7 + 4` source budget;
+- A03 is direction-only, A04 is reserved/absent and both text and actual diff
+  prohibit source implementation;
+- S08-1..S08-4, the four capability values and the four exact permitted
+  evidence-source category names are present;
+- no broad staging command exists in R2.
+
+This evidence append changes only the controller artifact. Exact named staging
+of that one path is now authorized. A cached-only terra/medium gate must then
+recheck the staged path set, cached/worktree byte identity, strict HEAD prefix,
+diff-check, dynamic exclusions, A04 absence and zero source diff. No expensive
+or real gate is rerun.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-R2-E03 | A03 direction; A04 absent; artifact persistence only | `not-created`; exact artifact staging next | sol/max 0/0/0/0 GO; terra pre-stage PASS; 11 packets / 111 entries; strict append and dynamic exclusions PASS | source implementation still forbidden pending A04 | MRG1-S08 | pre-stage GREEN / cached-only gate next |
