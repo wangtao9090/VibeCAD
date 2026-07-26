@@ -38,6 +38,17 @@ from vibecad.interaction.cad import (
     ValidatedImportEvidence,
     ValidatedMaterializationEvidence,
 )
+from vibecad.interaction.cad_runtime import (
+    CAD_EXECUTE_PROGRAM_V1,
+    CadArtifactRole,
+    CadDomainService,
+    CadRuntimeAdapter,
+    CadRuntimeAdapterRegistry,
+    CadRuntimeIdentity,
+    CadRuntimeRouter,
+)
+from vibecad.runtime.contracts import RuntimeIdentity
+from vibecad.runtime.spec import FREECAD_VERSION
 from vibecad.validation import EntityObservation, EntityParameterObservation
 from vibecad.worker.generation import (
     WorkerError,
@@ -171,6 +182,72 @@ def test_nominal_port_extends_snapshot_port_and_reports_only_headless_verified()
         MAX_ADMITTED_CREATED_OBJECTS,
         MAX_ADMITTED_RESULT_BYTES,
     ) == (30_000, 1, 262_144)
+
+
+def test_worker_port_is_one_lazy_immutable_freecad_runtime_adapter() -> None:
+    worker_factory_calls: list[Path] = []
+
+    def worker_factory(*, source_root: Path):
+        worker_factory_calls.append(source_root)
+        raise AssertionError("runtime descriptor discovery must stay lazy")
+
+    port = WorkerCadExecutionPort(
+        store=_store(),
+        worker_factory=worker_factory,
+    )
+
+    first = port.runtime_descriptor
+    second = port.runtime_descriptor
+    expected_identity = CadRuntimeIdentity(
+        runtime=RuntimeIdentity(
+            family="cad",
+            provider="freecad",
+            version=".".join(map(str, FREECAD_VERSION)),
+        )
+    )
+
+    assert first is second
+    assert first.identity == expected_identity
+    assert first.runtime_descriptor.identity == expected_identity.runtime
+    assert first.runtime_descriptor.capabilities == (CAD_EXECUTE_PROGRAM_V1,)
+    assert first.runtime_descriptor.execution_profiles == ("headless",)
+    assert first.decisions == ()
+    assert first.artifact_profile.runtime == expected_identity
+    assert {
+        (
+            declaration.role,
+            declaration.kind,
+            declaration.media_type,
+            declaration.version,
+        )
+        for declaration in first.artifact_profile.declarations
+    } == {
+        (
+            CadArtifactRole.NATIVE_MODEL,
+            "native_model",
+            "application/vnd.freecad.fcstd",
+            1,
+        ),
+        (
+            CadArtifactRole.EXCHANGE,
+            "exchange_model",
+            "model/step",
+            1,
+        ),
+    }
+    assert isinstance(port, CadRuntimeAdapter)
+    registry = CadRuntimeAdapterRegistry((port,))
+    selected = CadDomainService(CadRuntimeRouter(registry)).adapter_for(
+        first.identity,
+        CAD_EXECUTE_PROGRAM_V1,
+    )
+    assert registry.adapters == (port,)
+    assert registry.descriptors == (first,)
+    assert selected is port
+    assert worker_factory_calls == []
+    assert port.generation_lost is False
+    assert port._worker is None  # noqa: SLF001
+    assert port._closed is False  # noqa: SLF001
 
 
 def test_worker_port_is_lazy_and_releases_revision_capability_after_last_session() -> None:

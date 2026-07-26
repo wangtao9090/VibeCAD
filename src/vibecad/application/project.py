@@ -788,8 +788,24 @@ def bootstrap_import_project(
 
 def _default_cad_port_factory(*, revision_store):
     from vibecad.execution.worker_port import WorkerCadExecutionPort
+    from vibecad.interaction.cad_runtime import (
+        CAD_EXECUTE_PROGRAM_V1,
+        CadDomainService,
+        CadRuntimeAdapterRegistry,
+        CadRuntimeRouter,
+    )
 
-    return WorkerCadExecutionPort(store=revision_store)
+    worker = WorkerCadExecutionPort(store=revision_store)
+    registry = CadRuntimeAdapterRegistry((worker,))
+    service = CadDomainService(CadRuntimeRouter(registry))
+    selected = service.adapter_for(
+        worker.runtime_descriptor.identity,
+        CAD_EXECUTE_PROGRAM_V1,
+    )
+    if selected is not worker:
+        worker.close_generation()
+        raise TypeError("CAD runtime selection mismatch")
+    return worker
 
 
 class ProjectRuntime:

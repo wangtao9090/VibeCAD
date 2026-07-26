@@ -31,6 +31,16 @@ from vibecad.interaction.cad import (
     ValidatedImportEvidence,
     ValidatedMaterializationEvidence,
 )
+from vibecad.interaction.cad_runtime import (
+    CAD_EXECUTE_PROGRAM_V1,
+    CadArtifactDeclaration,
+    CadArtifactProfile,
+    CadArtifactRole,
+    CadRuntimeDescriptor,
+    CadRuntimeIdentity,
+)
+from vibecad.runtime.contracts import RuntimeDescriptor, RuntimeIdentity
+from vibecad.runtime.spec import FREECAD_VERSION
 from vibecad.validation import (
     ArtifactObservation,
     EntityObservation,
@@ -50,6 +60,39 @@ from vibecad.workflow.state import TaskArtifactRef
 
 _SOURCE_ROOT = Path(__file__).resolve().parents[2]
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+_FREECAD_RUNTIME_IDENTITY = CadRuntimeIdentity(
+    runtime=RuntimeIdentity(
+        family="cad",
+        provider="freecad",
+        version=".".join(map(str, FREECAD_VERSION)),
+    )
+)
+_FREECAD_RUNTIME_DESCRIPTOR = CadRuntimeDescriptor(
+    runtime_descriptor=RuntimeDescriptor(
+        identity=_FREECAD_RUNTIME_IDENTITY.runtime,
+        capabilities=(CAD_EXECUTE_PROGRAM_V1,),
+        execution_profiles=("headless",),
+    ),
+    artifact_profile=CadArtifactProfile(
+        runtime=_FREECAD_RUNTIME_IDENTITY,
+        declarations=(
+            CadArtifactDeclaration(
+                runtime=_FREECAD_RUNTIME_IDENTITY,
+                role=CadArtifactRole.NATIVE_MODEL,
+                kind="native_model",
+                media_type="application/vnd.freecad.fcstd",
+                version=1,
+            ),
+            CadArtifactDeclaration(
+                runtime=_FREECAD_RUNTIME_IDENTITY,
+                role=CadArtifactRole.EXCHANGE,
+                kind="exchange_model",
+                media_type="model/step",
+                version=1,
+            ),
+        ),
+    ),
+)
 
 
 @dataclass(slots=True)
@@ -161,6 +204,10 @@ class WorkerCadExecutionPort(CadExecutionPort):
         self._capabilities: dict[tuple[str, str, str], _Capability] = {}
         self._sessions: dict[object, _Capability] = {}
         self._retired_sessions: set[object] = set()
+
+    @property
+    def runtime_descriptor(self) -> CadRuntimeDescriptor:
+        return _FREECAD_RUNTIME_DESCRIPTOR
 
     @property
     def execution_profile(self) -> ExecutionProfile:

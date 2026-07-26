@@ -952,6 +952,116 @@ app.close()
     assert completed.returncode == 0, completed.stderr or completed.stdout
 
 
+def test_default_cad_port_factory_routes_and_returns_exact_nominal_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vibecad.application.project as project_module
+    from vibecad.execution.worker_port import WorkerCadExecutionPort
+    from vibecad.interaction.cad_runtime import (
+        CAD_EXECUTE_PROGRAM_V1,
+        CadDomainService,
+        CadRuntimeAdapterRegistry,
+    )
+
+    registered: list[object] = []
+    selected: list[object] = []
+    route_calls: list[tuple[object, object]] = []
+    original_registry_init = CadRuntimeAdapterRegistry.__init__
+    original_adapter_for = CadDomainService.adapter_for
+
+    def observed_registry_init(self, adapters=()):
+        snapshot = tuple(adapters)
+        registered.extend(snapshot)
+        original_registry_init(self, snapshot)
+
+    def observed_adapter_for(self, identity, requested):
+        route_calls.append((identity, requested))
+        result = original_adapter_for(self, identity, requested)
+        selected.append(result)
+        return result
+
+    monkeypatch.setattr(
+        CadRuntimeAdapterRegistry,
+        "__init__",
+        observed_registry_init,
+    )
+    monkeypatch.setattr(CadDomainService, "adapter_for", observed_adapter_for)
+
+    returned = project_module._default_cad_port_factory(  # noqa: SLF001
+        revision_store=object.__new__(LocalRevisionStore)
+    )
+
+    assert type(returned) is WorkerCadExecutionPort
+    assert isinstance(returned, CadExecutionPort)
+    assert len(registered) == len(selected) == len(route_calls) == 1
+    assert registered[0] is selected[0] is returned
+    identity, requested = route_calls[0]
+    assert requested == CAD_EXECUTE_PROGRAM_V1
+    assert identity == returned.runtime_descriptor.identity
+    assert returned.runtime_descriptor.runtime_descriptor.capabilities == (CAD_EXECUTE_PROGRAM_V1,)
+    assert returned._worker is None  # noqa: SLF001
+    assert returned.generation_lost is False
+    returned.close_generation()
+
+
+def test_default_cad_port_factory_rejects_nonidentical_routed_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vibecad.application.project as project_module
+    from vibecad.execution.worker_port import WorkerCadExecutionPort
+    from vibecad.interaction.cad_runtime import CAD_EXECUTE_PROGRAM_V1, CadDomainService
+
+    created: list[WorkerCadExecutionPort] = []
+    closed: list[WorkerCadExecutionPort] = []
+    selected_calls: list[tuple[object, object]] = []
+    foreign_close_calls = 0
+    original_init = WorkerCadExecutionPort.__init__
+    original_close = WorkerCadExecutionPort.close_generation
+
+    class ForeignSelection:
+        def close_generation(self) -> None:
+            nonlocal foreign_close_calls
+            foreign_close_calls += 1
+
+    foreign = ForeignSelection()
+
+    def observed_init(self, **kwargs):
+        original_init(self, **kwargs)
+        created.append(self)
+
+    def observed_close(self):
+        closed.append(self)
+        return original_close(self)
+
+    def select_foreign(self, identity, requested):
+        selected_calls.append((identity, requested))
+        return foreign
+
+    monkeypatch.setattr(WorkerCadExecutionPort, "__init__", observed_init)
+    monkeypatch.setattr(
+        WorkerCadExecutionPort,
+        "close_generation",
+        observed_close,
+    )
+    monkeypatch.setattr(CadDomainService, "adapter_for", select_foreign)
+
+    with pytest.raises(TypeError, match="CAD runtime selection mismatch"):
+        project_module._default_cad_port_factory(  # noqa: SLF001
+            revision_store=object.__new__(LocalRevisionStore)
+        )
+
+    assert len(created) == 1
+    worker = created[0]
+    assert type(worker) is WorkerCadExecutionPort
+    assert closed == [worker]
+    assert worker._closed is True  # noqa: SLF001
+    assert worker._worker is None  # noqa: SLF001
+    assert len(selected_calls) == 1
+    assert selected_calls[0][0] == worker.runtime_descriptor.identity
+    assert selected_calls[0][1] == CAD_EXECUTE_PROGRAM_V1
+    assert foreign_close_calls == 0
+
+
 def test_review_gate_release_failure_is_recovery_after_no_cad_reject_body(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -2226,3 +2226,399 @@ commit creation.
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MR0-C02-E06 | D01..D15; A01; A02 | `not-created`; commit next | post-stage mechanical PASS; cached 3; unstaged/untracked 0/0; focused 77; hashes exact | none | MRG1-S04 | gated / ready to commit |
+
+## 25. MR0-C02 Finalization and MR0-C03 Task Packet
+
+### 25.1 MR0-C02 accepted commit
+
+The exact three-path candidate was committed as:
+
+```text
+6c3581bab14434ba7c1301e033e973d59907cc4d
+feat(cad): add backend-neutral CAD runtime port
+```
+
+The commit was pushed immediately to `codex/agent-stage3`. At
+`2026-07-26T03:58:29Z`, local HEAD and upstream both resolved to the full hash
+above and the worktree was clean. The commit created only
+`cad_runtime.py` and `test_cad_runtime.py` and appended this artifact; the
+package initializer remained byte-identical.
+
+The accepted evidence chain preserves the genuine absent-module RED, the
+design-correction RED, the initial adversarial review red, FIX01 test-first
+RED/GREEN, independent `sol / max` `0/0/0/0`, independent
+`terra / medium` pre/post-stage PASS and final cached-only integrity PASS.
+No waiver or residual defect was carried into C03.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C02-E07 | D01..D15; A01; A02 | `6c3581bab14434ba7c1301e033e973d59907cc4d`; pushed | RED/design/review-red/FIX01 preserved; GREEN 77; review 0/0/0/0; mechanical PASS; local/upstream equal | none | MRG1-S05 | accepted / closed |
+
+### 25.2 MR0-C03 read-only architecture audit
+
+The `gpt-5.6-sol / max` audit returned PASS without editing, staging,
+committing or pushing. It traced the current default path from
+`AgentApplication.open()` through `_cad_execution_port_under_gate()` to
+`project._default_cad_port_factory()`, then through `build_project_runtime()`.
+The application already constructs the default Worker lazily once, verifies
+the nominal `CadExecutionPort`, caches that same object and uses it for
+revision sessions, snapshots and Task execution. Cancellation, generation-loss
+observation and application close already call the Worker's existing
+generation hooks directly.
+
+The audit found one structural gap only:
+`WorkerCadExecutionPort` already has the required locked `generation_lost`
+property and zero-argument `terminate_generation()` / `close_generation()`
+hooks, but has no immutable `runtime_descriptor`. Its constructor, twelve
+private slots and lifecycle implementation need no change.
+
+The approved narrow design is:
+
+- construct one module-level frozen runtime descriptor from the authoritative
+  `runtime.spec.FREECAD_VERSION`, yielding exact identity
+  `cad/freecad@1.1.0`;
+- declare only `authoring.execute_program@1`, execution profile `headless`,
+  native artifact `native_model` /
+  `application/vnd.freecad.fcstd` and exchange artifact
+  `exchange_model` / `model/step`;
+- return that singleton from a read-only Worker property and retain structural
+  Protocol compatibility rather than adding inheritance;
+- inside the lazy default factory, construct one nominal Worker, register that
+  exact object, route `CAD_EXECUTE_PROGRAM_V1` through
+  `CadDomainService(CadRuntimeRouter(...))`, explicitly fail closed unless
+  `selected is worker`, and return the original Worker unchanged;
+- on the impossible mismatch, close only the factory-created Worker before
+  raising a fixed `TypeError`.
+
+Imports in the default factory stay local. No Worker wrapper, second
+generation state machine, generic `RuntimeControlPort`, public operation,
+tool, Task/Revision authority or durable artifact schema is introduced.
+
+Read-only baselines before C03 source/test changes were:
+
+```text
+C02 plus nominal/lazy/lifecycle nodes: 50 passed in 2.34s
+first approved C03 compatibility set:  375 passed, 23 deselected in 28.42s
+second approved C03 compatibility set: 379 passed, 1 deselected in 48.04s
+```
+
+### 25.3 MR0-C03 seven-section implementation packet
+
+#### 1. Authorization
+
+MRG1-A01 and A02 authorize C03 under D01–D15. Routine test-first coding is
+routed to `gpt-5.6-sol / high`; settled architecture/adversarial review stays
+`gpt-5.6-sol / max`; mechanical and process gates stay
+`gpt-5.6-terra / medium`. This packet connects the delivered FreeCAD Worker
+to the internal CAD runtime boundary without expanding product support.
+
+#### 2. Workspace anchor and exact write scope
+
+Start from pushed commit
+`6c3581bab14434ba7c1301e033e973d59907cc4d`. The coding subagent may write
+only:
+
+```text
+src/vibecad/application/project.py
+src/vibecad/execution/worker_port.py
+tests/test_agent_application.py
+tests/test_cad_execution_port.py
+```
+
+`tests/test_freecad_worker.py` remains in the approved commit allowlist but is
+gate-only unless a genuine compatibility gap first requires a controller
+decision. This artifact is controller-owned. All other paths are forbidden.
+
+#### 3. Required implementation and invariants
+
+In `worker_port.py`, add only the imports and module-level immutable values
+needed for the exact FreeCAD descriptor plus a read-only
+`runtime_descriptor` property. Derive `1.1.0` from
+`runtime.spec.FREECAD_VERSION`; do not duplicate the version literal. The
+descriptor declares exactly the internal aggregate capability, headless
+profile and two artifact declarations recorded in Section 25.2. Repeated
+property access must return the same descriptor object.
+
+Do not change `WorkerCadExecutionPort` inheritance, constructor, `__slots__`,
+existing properties, worker startup, locks, generation state, lifecycle hooks,
+error translation or FCStd/STEP behavior.
+
+In `project._default_cad_port_factory()`, retain lazy local imports. Construct
+one Worker, register that exact instance in `CadRuntimeAdapterRegistry`, route
+the descriptor identity and `CAD_EXECUTE_PROGRAM_V1` through
+`CadDomainService` and `CadRuntimeRouter`, explicitly require object identity
+with the Worker, then return that Worker. Normal composition must not start a
+FreeCAD process. A mismatched selection closes the factory-owned Worker and
+raises; it never returns or closes the foreign selection.
+
+#### 4. Test-first steps and gates
+
+Before source edits, add three tests:
+
+1. the Worker is one lazy structural `CadRuntimeAdapter` with the exact
+   singleton descriptor, capability/profile/artifact declarations and zero
+   admission hook calls;
+2. the default factory routes the exact internal capability and makes the
+   registered, selected and returned object the same nominal Worker without
+   starting FreeCAD;
+3. a non-identical routed adapter fails closed and cleans up only the created
+   Worker.
+
+Run and preserve the genuine three-node RED:
+
+```text
+PYTHONPATH=src .venv/bin/python -m pytest -q \
+  tests/test_cad_execution_port.py::test_worker_port_is_one_lazy_immutable_freecad_runtime_adapter \
+  tests/test_agent_application.py::test_default_cad_port_factory_routes_and_returns_exact_nominal_worker \
+  tests/test_agent_application.py::test_default_cad_port_factory_rejects_nonidentical_routed_adapter
+```
+
+Then implement the two source changes and rerun those nodes to GREEN. Run the
+two approved C02 dependency guards, both prewritten C03 compatibility commands
+from Section 13.5, scoped Ruff/format, `git diff --check`, exact allowlist,
+module-load/lazy-start and process-leak checks. Run the managed FreeCAD smoke
+and both real Task Kernel gates exactly as Section 13.5 specifies; the Task
+Kernel command may not use `VIBECAD_FREECAD_ENV`.
+
+#### 5. Execution discipline and breakers
+
+One coding subagent owns the four implementation/test paths and may not edit
+the artifact, stage, commit or push. Stop on a top-level project import that
+eagerly imports Worker/runtime selection, a per-access descriptor rebuild,
+wrong MIME/version, use of optimized-away `assert`, a second Worker or wrapper,
+an edit to Worker slots/signatures/lifecycle, routing of individual lifecycle
+calls, a public capability/tool change, a revision/store/schema edit, an
+allowlist escape, a test-count decrease, new deselection/warning or leaked
+process.
+
+#### 6. Delivery boundary
+
+The intended commit is exactly:
+
+```text
+refactor(freecad): route worker through CAD runtime adapter
+```
+
+It contains only the accepted implementation/test paths and this artifact.
+Exact named staging, commit and immediate push remain controller-only and may
+occur only after focused/compatibility/real gates, `sol / max` review and
+`terra / medium` mechanical PASS.
+
+#### 7. Required final report
+
+Return the three RED causes/count, targeted and compatibility GREEN counts,
+exact descriptor values and singleton evidence, registered/selected/returned
+object identity, lazy-start and cleanup counters, confirmation that Worker
+constructor/slots/hooks stayed unchanged, public 28-tool and six-operation
+evidence, Task/Revision/Accept/Reject and FCStd/STEP compatibility, real gate
+results, paths/hashes, Ruff/diff/process evidence, review severities,
+residuals and any breaker.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C03-E01 | D01..D15; A01; A02 | `not-created`; forbidden | design audit PASS; pre-change baselines 50, 375/23, 379/1 | MRG1-RES-02 until C04 | MRG1-S05 | packet issued / test-first RED next |
+
+### 25.4 MR0-C03 genuine test-first RED
+
+The `gpt-5.6-sol / high` coding subagent created and syntax-checked the three
+approved tests before changing either source file. The exact three-node
+command exited `1` with `3 failed in 0.95s`:
+
+1. the Worker had no `runtime_descriptor` and raised `AttributeError`;
+2. the default factory returned its Worker without registering or routing it,
+   so the selection record remained empty;
+3. the foreign-selection branch did not exist, so the fixed `TypeError` was
+   not raised.
+
+These were contract REDs, not syntax, setup or dependency failures. No Worker
+factory or FreeCAD process started. The implementation subagent may now make
+only the two approved narrow source edits; no stage, commit or push is
+permitted.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C03-E02 | D03; D05; D06; D08; A01; A02 | `not-created`; forbidden | three-node RED 3 failed; syntax PASS; zero Worker starts | MRG1-RES-02 until C04 | MRG1-S05 | RED preserved / implementation active |
+
+### 25.5 MR0-C03 focused GREEN and compatibility evidence
+
+The coding subagent made only the four authorized implementation/test changes.
+The resulting Worker descriptor is a private module-level singleton with:
+
+```text
+identity:             cad/freecad@1.1.0
+capabilities:         authoring.execute_program@1
+execution profiles:  headless
+decisions:            none (implicit native planning)
+native artifact:      native_model / application/vnd.freecad.fcstd / v1
+exchange artifact:    exchange_model / model/step / v1
+```
+
+The version is derived from `runtime.spec.FREECAD_VERSION`. Repeated property
+access returns the same descriptor object. The Worker's nominal inheritance,
+constructor, twelve slots, locks, generation state and lifecycle hooks are
+unchanged.
+
+The default factory retains local lazy imports and constructs one Worker. The
+tests explicitly prove the registry's admitted object, the service-selected
+object and the returned nominal `WorkerCadExecutionPort` are identical, and
+that the routed identity/capability are exact. Normal discovery/start counters
+remain zero. A foreign selection closes only the one factory-created Worker,
+does not close the foreign object and raises the fixed mismatch `TypeError`.
+
+Evidence at `2026-07-26T04:17:54Z`:
+
+```text
+three-node GREEN:          3 passed in 0.46s
+C02 dependency guards:    2 passed in 0.12s
+compatibility command 1:  376 passed, 23 deselected in 21.64s
+compatibility command 2:  381 passed, 1 deselected in 46.13s
+Ruff lint/format:          PASS / PASS
+git diff --check:          PASS
+pytest/FreeCAD leak scan:  0
+```
+
+The compatibility counts increased by exactly one and two tests respectively
+from the read-only baseline; deselections did not increase. A second
+independent `gpt-5.6-sol / max` design validation also returned PASS and
+reproduced the Worker authority surface, zero-start routing and exact
+descriptor values without editing the workspace.
+
+Settled implementation/test hashes before real-runtime gates are:
+
+```text
+c686f91dd8189bae92f505ceeb586dc4eec5cb60159c4612dcc2387462d8f5e6  src/vibecad/application/project.py
+2426dc7b3d41473e7aa5aeabadef31e0fe9a03068f4aa61d946564b8f445546b  src/vibecad/execution/worker_port.py
+70492dfcc1c26df2828edda3e043f49282f932e9861f2ced9ff6369033cbafe2  tests/test_agent_application.py
+72d3e3ee56eb8360203af128221603274de445bde4dde2a743672a139f9111a9  tests/test_cad_execution_port.py
+```
+
+Only those four paths and this controller artifact are modified; no path is
+staged or untracked. Real managed-runtime gates, settled-diff adversarial
+review and mechanical staging checks remain mandatory.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C03-E03 | D03; D05; D06; D08; A01; A02 | `not-created`; forbidden | GREEN 3; guards 2; compatibility 376/23 and 381/1; Ruff/diff/leak PASS; two design reviews PASS | MRG1-RES-02 until C04 | MRG1-S05 | implemented / real gates pending |
+
+### 25.6 MR0-C03 real managed-runtime PASS
+
+At `2026-07-26T04:20:37Z`, the independent
+`gpt-5.6-terra / medium` gate verified the current managed FreeCAD
+`1.1.0` generation, exact receipt and readiness, then returned PASS:
+
+```text
+managed Worker load/modify/checkpoint/export: 1 passed in 1.97s
+real Task Kernel gates:                       2 passed in 17.39s
+skip / deselect / warning:                    0 / 0 / 0
+pytest/FreeCAD/Worker/daemon leaks:            0
+```
+
+The managed Worker command used the exact selected Python:
+
+```text
+/Users/wangtao/Library/Application Support/VibeCAD/runtime/mamba/envs/vibecad/bin/python
+```
+
+The Task Kernel command explicitly removed `VIBECAD_FREECAD_ENV`, enabled
+`VIBECAD_RUN_INTEGRATION=1` and verified that the optional managed-Python
+value matched the selected generation. Both real tests executed; none skipped
+or deselected. The runtime receipt remained current and `runtime_ready=True`
+afterward. The exact five changed paths and all four implementation/test
+hashes remained unchanged.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C03-E04 | D01; D03; D08; A01; A02 | `not-created`; forbidden | real Worker 1; real Task Kernel 2; override absent; skips/warnings/leaks 0 | MRG1-RES-02 until C04 | MRG1-S05 | real gates PASS / review pending |
+
+### 25.7 MR0-C03 settled-diff adversarial PASS
+
+At `2026-07-26T04:31:11Z`, the independent `gpt-5.6-sol / max`
+architecture/adversarial review returned PASS with Critical `0`, Major `0`,
+Medium `0`, Minor `0`. The four implementation/test hashes remained equal to
+Section 25.5 from the beginning through the end of review.
+
+The review independently established:
+
+- private immutable descriptor singleton, exact derived version/capability/
+  profile/artifact metadata, empty decisions and unchanged `__all__`;
+- nominal `CadExecutionPort` plus structural four-member
+  `CadRuntimeAdapter`, with constructor, exact twelve slots, locks,
+  lifecycle properties and hook bodies unchanged from the anchor;
+- authority admission permits trusted `open_revision` and private store state
+  without granting commit/HEAD/review/Task authority or invoking startup/hooks;
+- one default Worker, exact registry/router/service path and explicit object
+  identity in both normal and optimized mode;
+- reachable mismatch cleanup closes only the unpublished owned Worker and
+  cannot mask the fixed `TypeError`; the foreign selection remains untouched;
+- immutable admission snapshots prevent descriptor drift/TOCTOU;
+- no eager Worker/FreeCAD service load, public surface remains 28 tools and
+  six semantic operations, and no Task/Revision/schema/artifact-payload code
+  changed.
+
+Independent reruns returned:
+
+```text
+targeted / guards:       3 / 2 passed
+compatibility command 1: 376 passed, 23 deselected
+compatibility command 2: 381 passed, 1 deselected
+lazy module-load:         1 passed
+Ruff/format/diff/imports: PASS
+optimized-mode probes:    PASS
+process leaks:            0
+```
+
+No waiver, residual finding or corrective packet is required.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C03-E05 | D01..D15; A01; A02 | `not-created`; forbidden | real gates PASS; review 0/0/0/0; 28 tools; 6 operations; optimized/lazy/AST/TOCTOU PASS | MRG1-RES-02 until C04 | MRG1-S05 | review PASS / mechanical gate pending |
+
+### 25.8 MR0-C03 independent pre-stage mechanical PASS
+
+At `2026-07-26T04:36:32Z`, the distinct
+`gpt-5.6-terra / medium` subagent returned PASS without changing state:
+
+```text
+HEAD/upstream:         6c3581bab14434ba7c1301e033e973d59907cc4d
+changed paths:         5 exact
+staged/untracked:      0 / 0
+targeted / guards:     3 / 2 passed
+Ruff/format/diff:      PASS
+whitespace/EOF/leaks:  0 / 0 / 0
+```
+
+It independently matched all four hashes, exact twelve Worker slots,
+unchanged lifecycle AST bodies, private descriptor/`__all__`, lazy local
+factory imports, one Worker construction, explicit object-identity check,
+zero forbidden eager modules, 28 public tools and six direct semantic
+operations. Sections 1 through 25 were consecutive and unique with Section 25
+terminal; all C03 RED/GREEN/compatibility/real/review evidence was present and
+there was no positive C03 commit or push claim.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C03-E06 | D01..D15; A01; A02 | `not-created`; exact staging next | pre-stage mechanical PASS; five paths/four hashes exact; 28/6; AST/lazy/ledger PASS | MRG1-RES-02 until C04 | MRG1-S05 | gated / ready to stage |
+
+### 25.9 MR0-C03 post-stage mechanical PASS
+
+At `2026-07-26T04:37:52Z`, the `gpt-5.6-terra / medium` subagent
+returned PASS for the staged-only candidate:
+
+```text
+cached paths:        5 exact
+unstaged/untracked:  0 / 0
+cached diff check:   PASS
+targeted / guards:   3 / 2 passed
+Ruff lint/format:    PASS / PASS
+process leaks:       0
+```
+
+The staged blobs and worktree matched all four settled hashes. The staged
+artifact retained consecutive unique Sections 1 through 25 with Section 25
+terminal, the pre-stage evidence and no claim that C03 had already been
+committed or pushed. This artifact is restaged after adding the post-stage
+record; one final cached-only integrity check remains before commit creation.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C03-E07 | D01..D15; A01; A02 | `not-created`; commit next | post-stage mechanical PASS; cached 5; unstaged/untracked 0/0; targeted/guards/Ruff/hash exact | MRG1-RES-02 until C04 | MRG1-S05 | gated / ready to commit |
