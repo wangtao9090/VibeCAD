@@ -1375,3 +1375,412 @@ an unpredicted G0 red. It is preserved here and is not waived or relabeled.
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MR0-C00-FIX01-E03 | D16; A01; A02 | `not-created`; commit next | exact format reconstruction; staged diff check 0; links 21/0; allowlist 7/7; research status unchanged | none | MRG1-S02 | green / final adversarial recheck |
+
+## 21. MR0-C00 Finalization and MR0-C01 Task Packet
+
+### 21.1 MR0-C00 accepted commit
+
+At `2026-07-26T02:13:05Z`, the controller verified and pushed the accepted
+documentation boundary:
+
+- commit:
+  `6cc1876c8a76c9e3498262c78a0ad2c4ec6ddf6c`;
+- subject: `docs(architecture): define multi-runtime CAD boundary`;
+- push: `origin/codex/agent-stage3`, success;
+- local `HEAD` and upstream:
+  `6cc1876c8a76c9e3498262c78a0ad2c4ec6ddf6c`;
+- post-push worktree: clean;
+- exact accepted scope: seven C00 paths, including the formerly untracked
+  mechanical validation research document;
+- final independent review: Critical `0`, Major `0`, Medium `0`, Minor `0`;
+- residual: MRG1-RES-10 remains open and does not authorize a `README.md`
+  change in MR0.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C00-E04 | D01..D16; A01; A02 | `6cc1876c8a76c9e3498262c78a0ad2c4ec6ddf6c`; pushed | corrective gate PASS; architecture/adversarial review 0/0/0/0; local/upstream equal | MRG1-RES-10 | MRG1-S03 | accepted / closed |
+
+### 21.2 MR0-C01 seven-section implementation packet
+
+#### 1. Authorization
+
+MRG1-A01 authorizes MRG1-R1 and MR0-C01. MRG1-A02 routes routine coding to
+`gpt-5.6-sol / high`, architecture/adversarial review to
+`gpt-5.6-sol / max`, and mechanical gate execution to
+`gpt-5.6-terra / medium`. No new product approval is required.
+
+#### 2. Workspace anchor and exact write scope
+
+Start from clean pushed commit
+`6cc1876c8a76c9e3498262c78a0ad2c4ec6ddf6c` on
+`codex/agent-stage3`. The implementation subagent may write only:
+
+```text
+src/vibecad/runtime/contracts.py
+src/vibecad/runtime/registry.py
+tests/test_runtime_contracts.py
+tests/test_runtime_registry.py
+```
+
+`src/vibecad/runtime/__init__.py` remains in the approved commit allowlist but
+should stay unchanged unless a test-proven import requirement appears. This
+avoids an unnecessary additive package surface. The rolling artifact is
+controller-owned and must not be edited by subagents.
+
+#### 3. Context and required behavior
+
+Build the domain-neutral foundation only: immutable runtime identity and
+descriptor, declared capabilities, invocation ownership/correlation with
+sealed input, budget/deadline, lifecycle status/control port, immutable result
+artifacts/provenance/diagnostics/evidence, and a deterministic registry.
+The common layer must not import CAD, FreeCAD, Qt, FEA, reconstruction,
+application or public-tool modules. It must not change Task Kernel, durable
+revision layout, public schemas, public operation projection or the 28-tool
+surface.
+
+#### 4. Test-first steps and gates
+
+1. Create tests that specify immutability, strict validation, stable ordering,
+   duplicate rejection, budget/deadline behavior, cancellation/reconciliation
+   control and immutable artifact/provenance results.
+2. Run the approved focused command before implementation and preserve a
+   genuine RED caused by the deliberately absent contracts/registry.
+3. Implement only enough generic code to satisfy the contract.
+4. Rerun:
+
+   ```text
+   PYTHONPATH=src .venv/bin/python -m pytest -q \
+     tests/test_runtime_contracts.py tests/test_runtime_registry.py
+   ```
+
+5. Run scoped Ruff, `git diff --check`, exact allowlist and a common-layer
+   forbidden-import search. A distinct `sol / max` reviewer checks architecture
+   and authority boundaries; a `terra / medium` gate agent reruns exact
+   mechanical commands.
+
+#### 5. Execution discipline and breakers
+
+Implementation is serialized in the shared worktree. Subagents do not stage,
+commit, push or edit this artifact. The controller owns the ledger, exact named
+staging, commit and immediate push. Stop on any required change outside the
+C01 allowlist, public/API surface expansion, persistence migration, Task
+Kernel edit, non-determinism, real external runtime requirement, or gate red
+that cannot be resolved by a narrow C01 correction.
+
+#### 6. Delivery boundary
+
+The intended commit is exactly:
+
+```text
+feat(runtime): add runtime capability contracts
+```
+
+It may contain only the four implementation/test paths above plus this rolling
+artifact; `src/vibecad/runtime/__init__.py` may be added only if the recorded
+test evidence makes it necessary. No commit or push occurs until focused
+GREEN, purity evidence, independent review and mechanical recheck all pass.
+
+#### 7. Required final report
+
+Return the RED cause and exit status, GREEN commands and counts, exact files
+changed, contract decisions, forbidden-import result, scoped Ruff/diff status,
+review findings by severity, residuals and whether `runtime/__init__.py`
+remained unchanged. The controller then records the accepted hash/push state
+before issuing MR0-C02.
+
+## 22. MR0-C01 Test-First Ledger, Review Red and Corrective Packet
+
+### 22.1 Initial RED and focused GREEN
+
+The `gpt-5.6-sol / high` implementation subagent obeyed the exact write scope
+and test-first order:
+
+```text
+PYTHONPATH=src .venv/bin/python -m pytest -q \
+  tests/test_runtime_contracts.py tests/test_runtime_registry.py
+```
+
+- genuine RED before source implementation: exit `2`; both test modules
+  failed collection with
+  `ModuleNotFoundError: No module named 'vibecad.runtime.contracts'`;
+- the environment and test parsing were healthy, and the missing modules were
+  deliberately absent C01 targets;
+- initial GREEN after implementation: exit `0`, `18 passed in 0.10s`;
+- scoped Ruff lint and format check: PASS;
+- source forbidden-import search: `0` matches;
+- `git diff --check` and explicit trailing-whitespace scan: PASS;
+- exact implementation paths: the two new runtime modules and two new test
+  modules; `src/vibecad/runtime/__init__.py` remained unchanged;
+- no stage, commit or push occurred.
+
+This focused GREEN was necessary but not sufficient for acceptance.
+
+### 22.2 MR0-C01-E02 — independent architecture/adversarial review red
+
+At `2026-07-26T02:31:19Z`, the distinct `gpt-5.6-sol / max` review returned
+FAIL with Critical `0`, Major `1`, Medium `4`, Minor `0`:
+
+1. **Major:** `RuntimeControlPort` exposes only status, cancel and reconcile,
+   while approved D03 requires start, status, cancel, health and reconcile.
+   An immutable invocation value does not grant adapter start authority.
+2. **Medium:** six mapping-root fields rely on `assert`; under `python -O`,
+   descriptor/artifact metadata, invocation payload and result output probes
+   accepted list roots as tuples.
+3. **Medium:** a descriptor accepts execution profile `Headless GUI`, while an
+   invocation rejects it, so discovery can advertise an unusable route.
+4. **Medium:** a result may return artifacts with no provenance, contrary to
+   the approved provenance-bound artifact boundary.
+5. **Medium:** frozen JSON limits depth and numeric range but not traversal
+   nodes, collection width or string/key bytes; probes accepted a
+   100,000-item sequence and a one-million-character string.
+
+Registry duplicate/unknown behavior, exact-version lookup, deterministic
+lexical ordering, domain purity, file scope and the unchanged package
+`__init__.py` otherwise passed review.
+
+Controller probes independently reproduced the first three findings:
+
+```text
+python -O mapping-root probes:
+descriptor_metadata ACCEPTED tuple
+artifact_metadata   ACCEPTED tuple
+invocation_payload  ACCEPTED tuple
+result_output       ACCEPTED tuple
+
+RuntimeControlPort methods:
+cancel, get_status, reconcile
+```
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C01-E01 | D01..D16; A01; A02 | `not-created` | genuine import RED exit 2; initial focused GREEN 18; Ruff/diff/purity PASS | none | MRG1-S03 | implemented / review pending |
+| MR0-C01-E02 | D01..D16; A01; A02 | `not-created`; forbidden | independent review 0/1/4/0; optimized-mode and protocol probes reproduced | none; five exact defects | MRG1-S03 | blocked / corrective packet required |
+
+The review red is preserved and is not waived or relabeled.
+
+### 22.3 MR0-C01-FIX01 — lifecycle, validation and bounded-freeze correction
+
+#### 1. Authorization
+
+MRG1-D03, D06 and the C01 strict/immutable/budget gates already require these
+behaviors under MRG1-A01. MRG1-A02 keeps routine correction coding at
+`gpt-5.6-sol / high`, adversarial re-review at `gpt-5.6-sol / max` and final
+mechanical gates at `gpt-5.6-terra / medium`. No product scope expands.
+
+#### 2. Workspace anchor and write scope
+
+The pushed anchor remains
+`6cc1876c8a76c9e3498262c78a0ad2c4ec6ddf6c`. The correction may change only
+the existing four C01 source/test paths; this artifact remains
+controller-owned. `src/vibecad/runtime/__init__.py` must remain unchanged.
+
+#### 3. Exact corrective behavior
+
+- add Protocol-only `start(RuntimeInvocation)` plus immutable, domain-neutral
+  runtime health state/snapshot and `health(RuntimeIdentity)`;
+- replace every assertion-based mapping-root check with explicit stable
+  rejection that remains active under optimized Python;
+- use one strict execution-profile grammar for descriptor and invocation;
+- require matching provenance whenever a result contains artifacts;
+- bound frozen JSON depth, per-container width, total traversed nodes and
+  UTF-8 bytes for strings/keys, rejecting cycles and hostile containers
+  deterministically before unbounded materialization.
+
+#### 4. Test-first steps and gates
+
+Add negative and lifecycle tests first, then run the focused command and
+preserve a corrective RED attributable to the five findings. Implement the
+narrow correction, rerun the exact focused suite, scoped Ruff/format,
+`git diff --check`, optimized-mode mapping probes, bounded-container probes and
+forbidden-import search.
+
+#### 5. Execution discipline and breakers
+
+The implementation subagent remains the sole source/test writer. It must not
+edit the artifact, stage, commit or push. Stop if correction needs a public
+schema, CAD/domain import, Task Kernel/persistence edit, clock/random source,
+third-party dependency or path outside C01.
+
+#### 6. Delivery boundary
+
+The original C01 commit subject and exact commit budget remain unchanged. No
+commit occurs until all five review findings have regression coverage, the
+focused suite is GREEN and the same `sol / max` reviewer plus an independent
+`terra / medium` gate agent both return PASS.
+
+#### 7. Required final report
+
+Return corrective RED failures/count, final GREEN count, exact contract
+changes and bounds, optimized-mode evidence, hostile/cyclic evidence,
+Ruff/diff/purity results, exact paths and any residual. The controller records
+the old red, correction and re-review separately.
+
+### 22.4 MR0-C01-FIX01 result and MR0-C01-E03 re-review red
+
+FIX01 preserved a second test-first transition:
+
+- corrective RED before source changes: exit `1`,
+  `6 failed, 19 passed in 3.91s`;
+- all five E02 findings were represented, including a controlled two-second
+  timeout for the previously unbounded infinite JSON `Sequence`;
+- no timed-out child process remained;
+- focused GREEN: exit `0`, `25 passed in 2.44s`;
+- optimized/hostile targeted subset: `4 passed`;
+- scoped Ruff/format, diff/whitespace and forbidden-import gates: PASS;
+- implemented bounds: depth `32`, `1,024` items per JSON container, `8,192`
+  nodes per root, and `65,536` UTF-8 bytes per individual string/key;
+- lifecycle, optimized-root, profile-grammar and artifact-provenance findings
+  were closed.
+
+The `gpt-5.6-sol / max` re-review at `2026-07-26T02:44:33Z` nevertheless
+returned FAIL with Critical `0`, Major `0`, Medium `3`, Minor `0`:
+
+1. the UTF-8 limit is per string/key, not aggregate; `1,024` references to one
+   individually valid `65,536`-byte string produced a passing
+   `67,108,864`-byte logical value;
+2. `_typed_tuple` and `_text_tuple` still exhaust arbitrary caller
+   `Sequence` objects before validation; controlled endless profile and
+   capability sequences timed out;
+3. `RuntimeRegistry` still calls `tuple()` on a public `Iterable`; a controlled
+   endless generator timed out.
+
+All timeout subprocesses were terminated. The controller independently
+reproduced the endless profile sequence and registry generator with one-second
+timeouts. No stage, commit or push has occurred.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C01-FIX01-E03 | D03; D06; A01; A02 | `not-created` | corrective RED 6/19; GREEN 25; targeted 4; Ruff/diff/purity PASS | none | MRG1-S03 | corrected / re-review pending |
+| MR0-C01-E03 | D03; D06; A01; A02 | `not-created`; forbidden | re-review 0/0/3/0; 67,108,864 logical bytes; two controlled iterable timeouts | none; three boundedness defects | MRG1-S03 | blocked / FIX02 required |
+
+The second review red is preserved and is not waived or folded into FIX01.
+
+### 22.5 MR0-C01-FIX02 — cumulative and iterable bounds
+
+#### 1. Authorization
+
+C01's approved strict, immutable and resource-bounded input contract already
+covers these three defects under D03/A01. A02 routes the narrow correction to
+`gpt-5.6-sol / high`, re-review to `gpt-5.6-sol / max` and final mechanical
+gate execution to `gpt-5.6-terra / medium`.
+
+#### 2. Workspace anchor and exact scope
+
+The pushed anchor remains
+`6cc1876c8a76c9e3498262c78a0ad2c4ec6ddf6c`. Only the same four C01
+source/test paths may change; the artifact is controller-owned and
+`src/vibecad/runtime/__init__.py` remains unchanged.
+
+#### 3. Exact corrective behavior
+
+- add one cumulative UTF-8 byte counter to the shared per-root freeze budget
+  and count every logical string value and mapping key, including repeated
+  references;
+- replace unbounded tuple/text `Sequence` conversion with incremental
+  `limit + 1` enumeration that ignores untrusted length hints and rejects
+  excess, endless and failing iterators deterministically;
+- apply an explicit finite descriptor count to registry enumeration using the
+  same incremental pattern before materialization;
+- retain all FIX01 depth, width, node, individual string/key, cycle and
+  provenance/lifecycle behavior.
+
+#### 4. Test-first steps and gates
+
+Add aggregate-byte, endless typed/text sequence and endless registry-generator
+tests before source edits. Run the focused suite and preserve a FIX02 RED.
+Implement narrowly, then rerun the exact focused suite, controlled timeout
+probes, scoped Ruff/format, optimized-root tests, `git diff --check` and
+forbidden-import search.
+
+#### 5. Execution discipline and breakers
+
+The coding subagent remains sole source/test writer and may not stage, commit,
+push or edit this artifact. No clock, process-control implementation,
+third-party dependency, domain import or path expansion is allowed. Every
+bounded iterator must stop after at most its declared limit plus one item.
+
+#### 6. Delivery boundary
+
+The original C01 commit subject and six-commit stage budget remain unchanged.
+Commit is forbidden until FIX02 GREEN, a third settled-diff `sol / max`
+review PASS and independent `terra / medium` mechanical PASS.
+
+#### 7. Required final report
+
+Return the FIX02 RED count, final GREEN count, cumulative byte and collection
+bounds, controlled timeout outcomes, exact paths, Ruff/diff/purity evidence,
+process cleanup and residuals.
+
+### 22.6 MR0-C01-FIX02 GREEN and accepted pre-staging gates
+
+FIX02 completed within the same four source/test paths:
+
+- genuine FIX02 RED before source edits: exit `1`,
+  `6 failed, 25 passed in 6.58s`;
+- controlled failures covered aggregate UTF-8, endless capability/profile
+  sequences, explicit contract collection size, explicit registry size and
+  endless registry enumeration; all subprocesses were cleaned;
+- final focused GREEN: exit `0`, `31 passed`;
+- final bounds:
+  - JSON depth `32`;
+  - per JSON container `1,024` items;
+  - per frozen root `8,192` nodes;
+  - per string/key `65,536` UTF-8 bytes;
+  - cumulative logical string/key bytes per frozen root `1,048,576`;
+  - every non-JSON contract `Sequence` `1,024` items;
+  - runtime registry `256` descriptors;
+- all collection and registry snapshots enumerate incrementally and reject
+  after at most `limit + 1` reads without trusting `len()` or length hints.
+
+The third settled-diff `gpt-5.6-sol / max` review returned PASS:
+Critical `0`, Major `0`, Medium `0`, Minor `0`. It verified exact boundary
+acceptance/rejection, repeated key/value byte accounting, iterator read
+counts/failures, all prior lifecycle/provenance/optimized-mode closures,
+authority purity and an unchanged package `__init__.py`.
+
+The independent `gpt-5.6-terra / medium` pre-staging mechanical gate also
+returned PASS with no deviations:
+
+```text
+focused:                         31 passed
+contract hostile/bounds subset:  8 passed, 17 deselected
+registry bounds subset:          2 passed, 4 deselected
+Ruff lint / format:              PASS / PASS
+actual / allowed paths:          5 / 5
+out of allowlist:                0
+AST purity / source asserts:     0 / 0
+trailing whitespace / EOF:       0 / 0
+leftover probe processes:         0
+```
+
+Reviewed SHA-256 values:
+
+```text
+9dd1948d9da86c9ca6f8e1ba8e7fdab44d1f4dcc6dfe2927bf66bf3baa7c9c1a  src/vibecad/runtime/contracts.py
+d4c554e591afd5055a829b91aa62250f661ac26e5a7051602cc433b80248c382  src/vibecad/runtime/registry.py
+2998f34ccd48be6ffefebb64a9a5504b3c856ff7c4d579c51e636603f7c077d0  tests/test_runtime_contracts.py
+ad85d1bd878fcd9e45b347b4d14edc193af56a8891561c7d50d28f371562e3fe  tests/test_runtime_registry.py
+```
+
+`src/vibecad/runtime/__init__.py` remains byte-identical to HEAD with SHA-256
+`217184fec30d06cbe7f79f0c54589462f2ef1f23afb4ec75c36d37e02b86dee1`.
+MRG1-RES-02 remains open until C04 adds reusable conformance and authority
+negative tests; C01 supplies the generic contracts/registry portion only.
+
+After exact named staging, the same `gpt-5.6-terra / medium` agent returned a
+second mechanical PASS with no deviations:
+
+```text
+cached paths:                     5 exact
+unstaged / untracked:             0 / 0
+git diff --cached --check:        exit 0
+focused suite:                    31 passed
+Ruff lint / format:               PASS / PASS
+artifact headings:               Sections 1..22 consecutive; Section 22 terminal
+prohibited imports/asserts:       0
+process leaks:                    0
+```
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C01-FIX02-E04 | D03; D06; A01; A02 | `not-created`; commit next | FIX02 RED 6/25; GREEN 31; sol/max review 0/0/0/0; terra/medium pre/post-stage PASS; cached diff check 0; hashes matched | MRG1-RES-02 until C04 | MRG1-S03 | gated / ready-to-commit |
