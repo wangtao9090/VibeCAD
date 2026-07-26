@@ -2622,3 +2622,597 @@ record; one final cached-only integrity check remains before commit creation.
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MR0-C03-E07 | D01..D15; A01; A02 | `not-created`; commit next | post-stage mechanical PASS; cached 5; unstaged/untracked 0/0; targeted/guards/Ruff/hash exact | MRG1-RES-02 until C04 | MRG1-S05 | gated / ready to commit |
+
+## 26. MR0-C03 Finalization and MR0-C04 Task Packet
+
+### 26.1 MR0-C03 accepted commit
+
+The exact five-path candidate was committed as:
+
+```text
+71a25b583363fcbd3c4f8cf56c3cde594194e648
+refactor(freecad): route worker through CAD runtime adapter
+```
+
+The commit was pushed immediately to `codex/agent-stage3`. At
+`2026-07-26T04:39:28Z`, local HEAD and upstream both resolved to that full
+hash and the worktree was clean.
+
+The accepted evidence preserves the genuine three-failure RED, targeted
+GREEN, both compatibility suites, current managed Worker and Task Kernel real
+gates, two design reviews, settled-diff `0/0/0/0`, independent pre/post-stage
+mechanical PASS and final cached-only integrity PASS. Public tools remain 28,
+semantic operations remain six, and the Worker constructor, twelve slots and
+lifecycle hooks remain unchanged.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C03-E08 | D01..D15; A01; A02 | `71a25b583363fcbd3c4f8cf56c3cde594194e648`; pushed | RED/GREEN preserved; compatibility 376/23 and 381/1; real 1+2; review 0/0/0/0; mechanical PASS; local/upstream equal | MRG1-RES-02 until C04 | MRG1-S06 | accepted / closed |
+
+### 26.2 MR0-C04 read-only architecture audit
+
+Two `gpt-5.6-sol / max` reviews converged on PASS with one explicit contract
+caveat. C01's `RuntimeControlPort` intentionally exposes only
+`start/get_status/cancel/reconcile/health`; it has no result-retrieval hook.
+C04 therefore may not invent a second retrieval interface or actively run
+arbitrary provider code from production conformance modules.
+
+The approved interpretation of D11 is:
+
+- deterministic fake runtimes in tests really execute start, status, cancel,
+  reconcile and health and produce immutable observations/results;
+- the reusable production kit is a pure transcript/value evaluator;
+- the five control methods are inspected statically on a supplied ordinary
+  class without instantiation or invocation;
+- the fake's concrete successful `RuntimeResult` is supplied beside the
+  transcript and is not misrepresented as a value retrieved through
+  `RuntimeControlPort`.
+
+This stays within the approved C04 scope. If a future stage requires result
+retrieval through the generic port itself, it must version C01 separately.
+
+The CAD evaluator consumes one already-admitted
+`CadRuntimeAdapterRegistry` snapshot. It may route through that snapshot but
+must not reread provider descriptor properties or invoke lifecycle hooks.
+Authority-negative admission is a separate narrow evaluator that delegates
+once to the existing registry and records only stable codes, never exception
+messages or representations.
+
+#### Recommended immutable APIs
+
+`vibecad.runtime.conformance`:
+
+```text
+ConformanceFinding(code, case_id, subject)
+ConformanceReport(findings) -> conforms property
+RuntimeSuccessTranscript(invocation, start_status, final_status, result)
+RuntimeCancellationTranscript(invocation, start_status, cancel_status,
+                              reconciled_status)
+RuntimeConformanceCase(case_id, descriptor, control_class, success,
+                       cancellation, health)
+evaluate_runtime_conformance(cases)
+```
+
+`vibecad.interaction.cad_conformance`:
+
+```text
+CadRuntimeAdmissionCase(case_id, adapter)
+CadRuntimeConformanceCase(case_id, registry, identity, executable_request,
+                          unsupported_request, artifacts, selector)
+evaluate_cad_runtime_admission(cases)
+evaluate_cad_runtime_conformance(cases)
+```
+
+All value types are frozen/slots and all report data is bounded. Case
+collections are bounded to `32`, findings to `128`, case IDs to `64` ASCII
+contract characters, and CAD artifacts to `32`. Findings contain only a fixed
+code, validated case ID (or a fixed ordinal fallback) and fixed subject; no
+free-form provider text, path, class name, annotation or exception rendering
+is admitted. Results are sorted by `(case_id, code, subject)`. Duplicate case
+IDs produce deterministic findings and no member of that duplicate group is
+evaluated. Endless/hostile collections fail within the same bounds.
+
+Generic stable code families cover case bound/identity, duplicate IDs,
+missing/invalid control method signatures, forbidden authority, identity or
+capability mismatch, invalid success/cancellation transitions, result
+correlation/provenance and health identity. CAD codes cover admission
+authority/failure, registry identity, rejected executable request, accepted
+unsupported request, undeclared capability, artifact runtime/kind/media,
+required semantic selector envelope and report bound.
+
+Static control inspection uses class namespaces/MRO and signatures only. It
+requires synchronous instance forms compatible with:
+
+```text
+start(self, invocation)
+get_status(self, invocation_id)
+cancel(self, invocation_id, *, reason)
+reconcile(self, invocation_id)
+health(self, identity)
+```
+
+It does not inspect annotations, instantiate the class or call a method.
+Commit/HEAD/Accept/Reject/review authority tokens fail. Private state and
+non-authority result helpers remain outside the five-method contract.
+
+The generic transcript checks exact descriptor identity/capability/profile,
+stable invocation correlation, accepted start state, terminal successful
+status/result, exact result runtime/provenance/artifacts, a distinct
+cancellation invocation ending and reconciling as cancelled, and exact health
+identity. CAD checks use only the admitted descriptor snapshot, require an
+executable exact declared request, require an undeclared request to remain
+non-executable without fallback, validate concrete artifacts against the
+runtime-qualified profile and require a `CadSelectorEnvelope`; a bare
+`NativeLocator` fails closed.
+
+The pre-test exact C04 command returned pytest usage exit `4` because the first
+new test path did not yet exist. That is baseline evidence, not a RED. The
+valid test-first RED occurs only after all three test modules exist, syntax
+check, contain substantive assertions and fail collection solely because the
+two production conformance modules are deliberately absent. Existing
+C01/C02/C03 focused dependencies were green (`77 passed`) during audit.
+
+### 26.3 MR0-C04 seven-section implementation packet
+
+#### 1. Authorization
+
+MRG1-A01/A02 and D01, D03–D07, D10 and D11 authorize C04. Routine coding uses
+`gpt-5.6-sol / high`; architecture/adversarial review uses
+`gpt-5.6-sol / max`; mechanical gates use
+`gpt-5.6-terra / medium`. C04 proves portability contracts with deterministic
+fakes; it does not claim a delivered second runtime.
+
+#### 2. Workspace anchor and exact write scope
+
+Start from pushed commit
+`71a25b583363fcbd3c4f8cf56c3cde594194e648`. The coding subagent may create
+only:
+
+```text
+src/vibecad/runtime/conformance.py
+src/vibecad/interaction/cad_conformance.py
+tests/test_runtime_conformance.py
+tests/test_cad_runtime_conformance.py
+tests/test_runtime_purity.py
+```
+
+This artifact is controller-owned. Package initializers, C01/C02/C03 source,
+application/Worker/Task/store/revision/public modules and all other paths must
+remain unchanged.
+
+#### 3. Required implementation and invariants
+
+Implement the immutable APIs, transcript semantics, static control-class
+inspection, admitted CAD snapshot evaluation, stable codes, deterministic
+ordering and bounds from Section 26.2. Production modules may not depend on
+pytest and may not execute a provider lifecycle method. CAD admission may call
+only the existing `CadRuntimeAdapterRegistry` constructor once per bounded
+case; CAD conformance must use the supplied registry snapshot without provider
+descriptor rereads.
+
+`runtime.conformance` may import only stdlib and generic runtime
+contracts/registry. It must not import interaction/CAD/FreeCAD/Worker,
+application, workflow, Task, store, revision, Qt, FEA or reconstruction.
+`cad_conformance` may import stdlib, the generic conformance/contracts layer
+and `cad_runtime`; it may not import FreeCAD/Worker/application/workflow/
+store/revision/public tools. Both modules contain no `assert`.
+
+#### 4. Test-first steps and gates
+
+Create all three test files first and syntax-check them. They must already
+contain substantive lifecycle, authority, artifact, selector, unsupported,
+bound, deterministic and purity assertions. Run the exact Section 13.5 C04
+command before source creation and preserve exit `2` whose collection errors
+are only the deliberately absent conformance modules; existing tests must
+collect normally.
+
+Then implement the two source modules and rerun the same exact command to
+GREEN:
+
+```text
+PYTHONPATH=src .venv/bin/python -m pytest -q \
+  tests/test_runtime_contracts.py tests/test_runtime_registry.py \
+  tests/test_cad_runtime.py tests/test_runtime_conformance.py \
+  tests/test_cad_runtime_conformance.py tests/test_runtime_purity.py
+```
+
+Tests must include:
+
+- a deterministic fake control port actually exercising success,
+  cancellation and reconciliation before transcript evaluation;
+- exact lifecycle/result/artifact/provenance/health correlations;
+- static missing/wrong/async control signatures and commit/HEAD-like
+  authority negatives with zero constructor/method calls;
+- two fake CAD identities and exact admitted snapshot routing;
+- good adapter admission plus commit/HEAD authority rejection;
+- runtime/artifact kind/media mismatch, bare native locator, and undeclared
+  capability rejection before hook calls;
+- duplicate IDs, reversed input order, hostile/endless cases and finding
+  bounds;
+- AST import purity, no pytest/assert, unchanged package initializer hashes,
+  optimized-mode behavior and zero forbidden module load.
+
+Run scoped Ruff/format, `git diff --check`, exact allowlist, hashes and process
+cleanup. Settled code requires independent `sol / max` `0/0/0/0` and
+`terra / medium` pre/post-stage PASS.
+
+#### 5. Execution discipline and breakers
+
+One coding subagent owns the five implementation/test paths and may not edit
+the artifact, stage, commit or push. Stop if tests require a C01/C02/C03 edit,
+an active result-retrieval hook, production provider invocation, registry/
+router duplication, provider descriptor reread, pytest in source, unstable
+messages/reprs/paths, unbounded input, package initializer edit, public
+support claim, out-of-allowlist path, existing-count decrease, new warning/
+deselection or leaked process.
+
+#### 6. Delivery boundary
+
+The intended commit is exactly:
+
+```text
+test(runtime): enforce adapter conformance
+```
+
+It may contain only the five new files and this artifact. Exact staging,
+commit and immediate push are controller-only after RED/GREEN, purity/bound
+gates, adversarial review and mechanical PASS.
+
+#### 7. Required final report
+
+Return the genuine collection RED cause/count, exact GREEN count, fake
+lifecycle call/transition/result evidence, all stable negative codes, bounds
+and deterministic ordering, zero-constructor/hook/provider-read counters,
+CAD snapshot/artifact/selector/unsupported evidence, purity/import/init hashes,
+optimized/hostile/process results, exact paths/hashes, review severities,
+residuals and breakers.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C04-E01 | D01; D03..D07; D10; D11; A01; A02 | `not-created`; forbidden | two design audits PASS; pre-test exit 4 not RED; dependency baseline 77 | MRG1-RES-02 | MRG1-S06 | packet issued / test-first RED next |
+
+### 26.4 MR0-C04 genuine test-first RED
+
+The `gpt-5.6-sol / high` coding subagent created three substantive test
+modules before either production module. AST parsing and isolated bytecode
+compilation passed. The exact C04 command then exited `2` with
+`2 errors in 0.48s`.
+
+The only collection causes were the deliberately absent
+`vibecad.runtime.conformance` and
+`vibecad.interaction.cad_conformance` modules. Existing C01 contracts/
+registry and C02 CAD tests had no collection, syntax, setup or dependency
+failure. This is the accepted genuine RED; the earlier missing-test-path exit
+`4` remains explicitly excluded.
+
+The two production evaluators may now be created within the exact packet.
+No stage, commit or push is permitted.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C04-E02 | D03; D05..D07; D10; D11; A01; A02 | `not-created`; forbidden | three tests substantive; syntax PASS; exact RED exit 2 with two deliberate missing-module errors | MRG1-RES-02 | MRG1-S06 | RED preserved / implementation active |
+
+### 26.5 MR0-C04 implementation GREEN and settled review candidate
+
+The first exact post-source run produced `91 passed, 2 failed`. Both failures
+were isolated to new-test harness assumptions rather than product behavior:
+the artifact-bound fixture accidentally declared its nominally unsupported
+capability as supported, and the import-purity subprocess compared against an
+empty module set instead of subtracting the already-loaded interaction
+package-initializer baseline. The coding subagent changed only those two
+fixtures. It did not remove a product assertion, relax a finding code, increase
+a bound or change a production module to satisfy them. The corrected exact run
+was `93 passed`.
+
+The controller then required the unsupported CAD path to prove the real
+supplied-registry routing boundary rather than only inspect a plan. The
+evaluator now constructs `CadRuntimeRouter` over the admitted registry
+snapshot, calls `adapter_for` for the non-executable decision and accepts only
+the exact `NonExecutableCadDecisionError` carrying that same decision.
+Invalid, accidentally accepted, unexpectedly returned and wrong-error paths
+have distinct stable codes. The observer test proves one `adapter_for` call,
+one exact error, zero lifecycle hooks and no provider descriptor/generation
+reread. That strengthening added one test; the settled exact suite is
+`94 passed` (coding subagent `1.69s`, controller `1.64s`).
+
+The deterministic generic fake constructs the evidence by actually calling:
+
+```text
+start(success) -> get_status(SUCCEEDED) ->
+start(cancel) -> cancel(CANCELLED) ->
+reconcile(CANCELLED) -> health
+```
+
+That is six lifecycle calls plus one test-only concrete-result helper. The
+production evaluator does not add a constructor, helper or lifecycle call.
+Authority-negative classes remain at zero constructors and zero method calls.
+Static inspection uses ordinary class MRO namespaces and
+`inspect.signature(..., follow_wrapped=False, eval_str=False)`.
+
+Admission constructs the existing registry once per bounded case. For the
+good adapter, descriptor and generation are each read once during admission;
+the authority-negative adapter remains at zero reads. Evaluation over two
+admitted identities leaves both counters at one and leaves terminate/close
+hooks at zero. Findings contain only fixed code, bounded case ID/fallback and
+fixed subject, sort by `(case_id, code, subject)`, and do not include provider
+text, exception rendering, paths or class/annotation strings.
+
+The settled hard bounds are `32` cases, `128` findings, `64` ASCII contract
+characters per case ID and `32` CAD artifacts. Duplicate groups are not
+evaluated. Hostile and endless iterables fail closed within their corresponding
+look-ahead bound. Optimized-mode behavior, AST import purity, absence of
+pytest/`assert` in production, and zero incremental forbidden module loads
+passed. Package initializer SHA-256 values remain:
+
+```text
+runtime/__init__.py
+217184fec30d06cbe7f79f0c54589462f2ef1f23afb4ec75c36d37e02b86dee1
+interaction/__init__.py
+f1e9b6e50b2042c09dff60d024a6fbf53ee09f2507b6b66dfa0423de9ae776a5
+```
+
+Controller-scoped Ruff and format checks passed (`5 files already formatted`);
+`git diff --check` passed. The settled implementation/test SHA-256 values are:
+
+```text
+src/vibecad/runtime/conformance.py
+7e4867d5c253395355144007c7cc97b70e92b885bc587b5b93d5d2982343520e
+src/vibecad/interaction/cad_conformance.py
+0a9df3e6aee7d04624b6bec68143525e635a7d01a559939ecd9e68ce63aae65d
+tests/test_runtime_conformance.py
+edb71c97bdd43cfb6e1ed518637e2453b4dc057aea986915b6733bad24e26c82
+tests/test_cad_runtime_conformance.py
+e0b4db3aada809310fd00f5005db222e242416b1ef3d9822ef4645f7a365d815
+tests/test_runtime_purity.py
+04a118ffeae020da3de2f60959419d7f0123af2c718ed7bd0b7c0fcf836410f4
+```
+
+HEAD and upstream remain equal at
+`71a25b583363fcbd3c4f8cf56c3cde594194e648`. The worktree contains only this
+controller-owned artifact and the five authorized C04 paths. Nothing is
+staged, committed or pushed. The settled candidate now requires independent
+`gpt-5.6-sol / max` adversarial `0/0/0/0`, followed by delegated
+`gpt-5.6-terra / medium` pre/post-stage mechanical gates.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C04-E03 | D03; D05..D07; D10; D11; A01; A02 | `not-created`; forbidden | genuine RED preserved; first GREEN 91/2 harness red; corrected 93; strengthened exact 94; Ruff/format/diff/purity/bounds PASS | MRG1-RES-02 | MRG1-S06 | settled candidate / adversarial review active |
+
+### 26.6 MR0-C04 review RED — atomic case-limit correction
+
+Controller inspection found that `_prepare_cases` read the required 33rd
+look-ahead item and emitted `case_limit_exceeded`, but still returned the first
+32 unique cases for semantic evaluation. A direct CAD admission probe over 33
+unique cases therefore produced the single stable limit code while invoking
+the registry constructor 32 times.
+
+An independent `gpt-5.6-sol / max` architecture adjudication classified this
+as one high-severity/P1 merge blocker. The operations remained numerically
+bounded, so this is not an unbounded/P0 defect, but an over-limit batch is
+invalid as a whole. Evaluating its prefix is partial success rather than
+fail-closed behavior and crosses the CAD admission/provider-read boundary for
+an invalid batch.
+
+The corrective scope is deliberately narrow:
+
+- buffer at most 33 raw case references without inspecting case IDs,
+  descriptors, registries or providers;
+- on the 33rd item, return no prepared cases and exactly the stable
+  generic/CAD case-limit finding;
+- preserve raw-item counting so repeated IDs cannot bypass the limit;
+- prove that an overflow batch reads exactly 33 items and never requests a
+  34th;
+- prove that generic prefix errors are not evaluated after overflow and CAD
+  admission performs zero registry constructions/provider reads.
+
+No public API or bound changes are authorized. The prior `94 passed` result is
+preserved as pre-correction evidence, not accepted as the final GREEN. Nothing
+is staged, committed or pushed.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C04-E04 | D03; D05..D07; D10; D11; A01; A02 | `not-created`; forbidden | sol/max review 0 blocker / 0 critical / 1 major-high / 0 minor; controller probe: 33 cases caused 32 admissions | MRG1-RES-02 | MRG1-S06 | review RED / atomic-limit FIX required |
+
+### 26.7 MR0-C04 atomic case-limit FIX GREEN
+
+The `gpt-5.6-sol / high` coding subagent first added the two corrective
+regressions and syntax-checked both test modules. The targeted run then
+produced a genuine review RED: `2 failed in 0.22s`. The generic probe consumed
+exactly 33 raw items but continued evaluating 32 poisoned prefix cases,
+filling the bounded report with the limit code plus 127 semantic findings.
+The CAD probe returned a superficially clean single limit code but constructed
+the registry 32 times and consequently entered provider metadata reads. Neither
+probe requested a 34th item.
+
+The sole production correction changes the overflow return in
+`_prepare_cases`. On obtaining the 33rd raw item it now immediately returns no
+prepared cases and the single prefix-aware case-limit finding. It does not
+inspect any buffered item's case ID, descriptor, registry or provider.
+Validation, duplicate grouping, sorting and evaluation for collections of at
+most 32 items remain unchanged.
+
+The targeted GREEN was `2 passed`: the generic path consumes exactly 33 items
+and emits exactly one limit finding with zero prefix semantics; CAD admission
+performs zero registry constructions, zero descriptor/generation reads and
+zero terminate/close calls. The exact C04 suite increased from 94 to
+`96 passed` (coding subagent `1.67s`, controller `1.68s`). Controller-scoped
+Ruff, five-file format check and `git diff --check` passed.
+
+The new settled SHA-256 values are:
+
+```text
+src/vibecad/runtime/conformance.py
+304ae29f71b7b512cdce06bd68f81090a37feeb4df27df7a586e673a244b08c3
+src/vibecad/interaction/cad_conformance.py
+0a9df3e6aee7d04624b6bec68143525e635a7d01a559939ecd9e68ce63aae65d
+tests/test_runtime_conformance.py
+c451554da1960e25b012b3935d779f68f24a003df748e7895bc82bdaf1a4fcc1
+tests/test_cad_runtime_conformance.py
+aba53b4b42caab674cf20d601dc28efde75757c5596d16fbbceb8d390c25d5a7
+tests/test_runtime_purity.py
+04a118ffeae020da3de2f60959419d7f0123af2c718ed7bd0b7c0fcf836410f4
+```
+
+Package initializer hashes remain unchanged. The worktree still contains only
+the controller-owned artifact and five authorized C04 paths; nothing is
+staged, committed or pushed. A fresh settled-diff `gpt-5.6-sol / max`
+`0/0/0/0` is required before mechanical gating.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C04-E05 | D03; D05..D07; D10; D11; A01; A02 | `not-created`; forbidden | FIX RED 2; FIX GREEN 2; exact 96; overflow reads 33; semantic/admission/provider/hook calls 0; Ruff/format/diff PASS | MRG1-RES-02 | MRG1-S06 | corrected candidate / settled re-review active |
+
+### 26.8 MR0-C04 review RED — reject spoofed function signatures
+
+The fresh `gpt-5.6-sol / max` settled-diff review verified the atomic-limit
+correction, then found a separate major-severity merge blocker in static
+control-shape inspection. `inspect.signature` honors a raw Python function's
+custom `__signature__` even with `follow_wrapped=False` and `eval_str=False`.
+An adapter class could therefore expose a real
+`cancel(self, wrong_name, extra_positional)` implementation, attach a forged
+compliant `__signature__`, and receive a conforming report even though
+`cancel("id", reason="why")` immediately raises `TypeError`.
+
+The controller independently reproduced both halves: static inspection
+returned zero findings, while the real contract-shaped call failed. No class
+construction or provider method invocation occurs in production conformance,
+so that safety boundary remains intact; the defect is that untrusted signature
+metadata can spoof the required five-method call shape.
+
+The narrow correction must remain in the static inspector. A raw function
+carrying custom `__signature__` metadata is rejected with the existing stable
+`control_method_signature` code before `inspect.signature` is used. A
+test-first regression must prove that the forged method is rejected, the
+provider class remains unconstructed and uncalled, and ordinary compliant
+methods continue to pass. No new finding code, API, dynamic call or annotation
+inspection is authorized.
+
+Nothing is staged, committed or pushed; the pre-correction `96 passed` remains
+evidence but is not an accepted final GREEN.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C04-E06 | D03; D05..D07; D10; D11; A01; A02 | `not-created`; forbidden | sol/max fresh review: atomic FIX PASS; 1 new major; controller spoof: static PASS / real call TypeError | MRG1-RES-02 | MRG1-S06 | review RED / signature-spoof FIX required |
+
+### 26.9 MR0-C04 signature-spoof FIX GREEN
+
+The `gpt-5.6-sol / high` coding subagent added the forged-signature regression
+before changing production. Syntax passed; the targeted old-code run then
+failed exactly once in `0.14s`. Before the failed conformance assertion, the
+test proved that the real contract-shaped unbound `cancel` call raises
+`TypeError` and that constructor/method counters remain zero. The old static
+inspector nevertheless returned `conforms=True` with no findings.
+
+The narrow correction retains `inspect.isfunction`, rejects a raw function
+whose explicitly stored `__signature__` is non-null with the existing
+`control_method_signature` code, and only then calls
+`inspect.signature(..., follow_wrapped=False, eval_str=False)`. It neither
+unwraps nor mutates the function and never constructs or invokes the provider.
+The targeted GREEN covering the spoof, ordinary compliant control and existing
+shape/authority negatives was `3 passed`; counters remained zero.
+
+The exact C04 suite increased to `97 passed` (coding subagent `1.65s`,
+controller `1.63s`). Scoped Ruff, five-file format and `git diff --check`
+passed. Package initializer hashes remain unchanged; process cleanup was
+empty. The new settled SHA-256 values are:
+
+```text
+src/vibecad/runtime/conformance.py
+e7176e63f7b6966c2ddbddd35f822bd904fff0b863b39cfb5c38bc3b97b83d28
+src/vibecad/interaction/cad_conformance.py
+0a9df3e6aee7d04624b6bec68143525e635a7d01a559939ecd9e68ce63aae65d
+tests/test_runtime_conformance.py
+fd10a895493643377cd94ba35a180d2fed28233fc6cb8f9ebbf07e7a7e255060
+tests/test_cad_runtime_conformance.py
+aba53b4b42caab674cf20d601dc28efde75757c5596d16fbbceb8d390c25d5a7
+tests/test_runtime_purity.py
+04a118ffeae020da3de2f60959419d7f0123af2c718ed7bd0b7c0fcf836410f4
+```
+
+HEAD/upstream remain equal at
+`71a25b583363fcbd3c4f8cf56c3cde594194e648`. The worktree contains only the
+artifact plus the five C04 paths and has no staged content. A fresh independent
+settled-diff review must now return `0/0/0/0`.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C04-E07 | D03; D05..D07; D10; D11; A01; A02 | `not-created`; forbidden | spoof FIX RED 1; targeted GREEN 3; exact 97; constructor/method 0; Ruff/format/diff PASS | MRG1-RES-02 | MRG1-S06 | corrected candidate / fresh settled review required |
+
+### 26.10 MR0-C04 settled-diff adversarial PASS
+
+The independent `gpt-5.6-sol / max` reviewer re-read the final five-file
+candidate and returned blocker/critical/major/minor `0/0/0/0`. It independently
+ran four corrective regressions, the exact 97-test C04 suite, scoped Ruff,
+format and diff checks. All passed.
+
+The review confirmed that case overflow stops after the 33rd item with no
+prepared cases, a single stable limit finding and zero generic semantics/CAD
+admission/provider/hook activity. It also confirmed that non-null raw-function
+`__signature__` metadata is rejected without unwrap, construction or
+invocation while ordinary controls still conform.
+
+The remainder of the full-scope review found no defect in stable/bounded
+finding data, duplicate/hostile inputs, fake lifecycle evidence,
+provider-free transcript evaluation, canonical admitted CAD routing,
+unsupported exact-error handling, authority/artifact/selector/provenance
+negatives, optimized mode, purity/imports or unchanged package initializers.
+The reviewer reported no in-scope residual and no breaker. Its five source/test
+hashes exactly matched Section 26.9; HEAD/upstream remained equal and the index
+was empty.
+
+The candidate may now enter an independent `gpt-5.6-terra / medium` pre-stage
+mechanical gate. Exact staging remains forbidden until that gate passes.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C04-E08 | D03; D05..D07; D10; D11; A01; A02 | `not-created`; forbidden | sol/max settled review 0/0/0/0; corrective 4; exact 97; Ruff/format/diff/hash/status PASS | none within C04; MRG1-RES-02 closes only on accepted push | MRG1-S06 | adversarial PASS / pre-stage mechanical gate next |
+
+### 26.11 MR0-C04 independent pre-stage mechanical PASS
+
+A supplementary `gpt-5.6-sol / max` corrective review also returned
+blocker/critical/major/minor `0/0/0/0`, independently confirming exact
+singleton findings and zero side-effect counters rather than weaker code-set
+membership.
+
+The independent `gpt-5.6-terra / medium` pre-stage gate then returned PASS:
+
+- HEAD and upstream were equal at
+  `71a25b583363fcbd3c4f8cf56c3cde594194e648`;
+- the index was empty and status exactly matched the six-path C04 allowlist;
+- the exact C04 suite was `97 passed in 1.88s`, with no warning or deselection;
+- six signature/overflow/purity/import/optimized-mode regressions passed;
+- scoped Ruff passed and all five files were already formatted;
+- `git diff --check`, five settled hashes and both package initializer hashes
+  matched;
+- no pytest, FreeCAD or VibeCAD Worker process remained after excluding the
+  process scanner itself.
+
+The gate reported no residual and no breaker. Exact named staging of only the
+artifact and five C04 paths is now authorized. A post-stage cached/unstaged
+integrity gate remains mandatory before commit.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C04-E09 | D03; D05..D07; D10; D11; A01; A02 | `not-created`; exact staging next | two final sol/max reviews 0/0/0/0; terra/medium pre-stage PASS; exact 97; corrective/purity 6; hashes/allowlist/index/leaks PASS | none within C04; MRG1-RES-02 closes only on accepted push | MRG1-S06 | gated / exact staging authorized |
+
+### 26.12 MR0-C04 post-stage mechanical PASS
+
+The same independent `gpt-5.6-terra / medium` gate verified the staged
+candidate and returned PASS. The index contained exactly the artifact and five
+C04 implementation/test paths with the expected modified/added status.
+Unstaged and untracked path sets were empty, and cached/worktree SHA-256 values
+matched for all six paths.
+
+The cached candidate passed `git diff --cached --check`, the exact C04 suite
+(`97 passed in 1.90s`), six corrective/purity/optimized-mode regressions,
+scoped Ruff and format checks, both initializer hashes and final process
+cleanup. HEAD/upstream remained equal at the C03 anchor. The gate reported no
+residual and no breaker.
+
+This evidence append changes only the controller-owned artifact. It must be
+restaged by exact name, after which one cached-only hash/allowlist/diff
+integrity check is required. No source or test may change before commit.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MR0-C04-E10 | D03; D05..D07; D10; D11; A01; A02 | `not-created`; artifact restage next | terra/medium post-stage PASS; cached 6; unstaged/untracked 0/0; exact 97; corrective/purity 6; all-6 hash match | none within C04; MRG1-RES-02 closes only on accepted push | MRG1-S06 | post-stage gated / final cached integrity next |
