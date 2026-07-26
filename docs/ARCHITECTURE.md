@@ -9,7 +9,11 @@
 > Claude/Codex 主机中安装激活并执行验收，当前没有 tag 或 release；protocol/package
 > `host-ready` 不能表述为 `host-verified`。
 >
-> 本文只描述当前源码已经实现的边界。产品定位与调用策略见
+> MR0-C00 只冻结多 runtime 基础的架构口径；通用 runtime 合同、CAD adapter 路由和 conformance
+> 仍需 MR0-C01..C04 实现并通过 gate。当前唯一接通的 CAD adapter 仍是 FreeCAD，公共 28-tool
+> 合同不变；durable Revision/Candidate 仍固定使用 FCStd/STEP 布局，迁移只属于 MR1。
+>
+> 除明确标为 MR0 target 的 §6.1 外，本文只描述当前源码已经实现的边界。产品定位与调用策略见
 > [`AGENT_ARCHITECTURE.md`](AGENT_ARCHITECTURE.md)，分期能力见
 > [`PRODUCT_CAPABILITY_ROADMAP.md`](PRODUCT_CAPABILITY_ROADMAP.md)。
 
@@ -74,6 +78,9 @@ strict request
 提交权。
 
 ## 3. 入口、进程和运行时换芯
+
+本节的“运行时”是既有的受管 Python/FreeCAD 安装、receipt 与 server 换芯生命周期，不是 §6.1
+定义的 domain-neutral invocation lifecycle。C00 不改变 installer、supervisor 或 swap 行为。
 
 ### 3.1 入口
 
@@ -224,6 +231,67 @@ Worker，也不拥有第二个 scheduler。
 状态和 revision-bound selector，把调用编译成一个 `ModelCommand` 和一个 `ModelProgram`，最后只进入
 `TaskApi.submit_model_program()`。多步任务直接提交一个 ModelProgram；两条路径共享 candidate、
 verifier、Revision、review 和 recovery。
+
+### 6.1 MR0 多 runtime 基础边界
+
+以下是已批准的 MR0 目标合同，不是 C00 时点已经交付的行为或公共 schema。MR0 把两个层次分开：
+
+1. **系统 runtime lifecycle** 只统一 immutable runtime identity/version、capability discovery、
+   invocation owner 与 Task correlation、sealed Revision/Artifact 输入、budget/deadline/execution
+   profile、start/status/cancel/health/reconcile，以及 immutable result artifact、provenance、
+   diagnostics 和 evidence；它不导入 CAD、FreeCAD、重建或仿真语义。
+2. **CAD Domain Service** 才拥有 backend-neutral 设计意图、CAD capability planning、runtime registry/
+   router、artifact profile 和 selector mapping。CAD adapter 只能把已规划的意图映射到一个 native
+   API；当前及 MR0 结束时唯一可称为已连接支持的 adapter 都是 FreeCAD。
+
+```mermaid
+flowchart LR
+    C["MCP / future Workbench client"] --> K["one Task Kernel"]
+    K --> T[("Task / Lease / Revision / Draft / Accept / Reject / HEAD")]
+    K --> D["CAD Domain Service"]
+    D --> P["capability planner"]
+    P --> R["CAD runtime registry / router"]
+    R --> F["FreeCAD adapter<br/>only connected adapter"]
+    F --> W["managed Worker / FreeCAD"]
+    R -.-> X["future CAD adapter<br/>not connected support"]
+    T -.-> Q["future reconstruction / simulation provider<br/>sealed read-only input"]
+    Q -.-> A["immutable artifact / proposal"]
+    A -.-> K
+```
+
+capability planner 对每个请求只能作出五类显式决定：native execution、披露语义映射后执行、提出明确
+approximation、在任何 mutation 前以 unsupported 拒绝，或进入 namespaced runtime extension。runtime
+自报 capability 只是规划证据，不能跳过 Application schema、Task Kernel、verifier、review 或 commit
+policy。确定性 fake identity/adapter 只证明 contract conformance，不能被写成第二 CAD 产品支持。
+
+MR0 的内部 artifact descriptor 以 runtime identity、versioned artifact profile、role、format、digest、
+provenance 和 evidence 限定 native/exchange/observation 产物。Selector 也采用双表示：
+
+```text
+SelectorEnvelope
+├── semantic: existing revision-bound SelectorV1（持久语义权威）
+└── native: runtime-qualified NativeLocator（可选的执行/证据定位）
+```
+
+公开 `SelectorV1` wire contract 在 MR0 不变；裸 `Face3`、`Edge8` 或其他 ephemeral native index
+不能成为唯一 durable identity。native locator 丢失或 runtime/revision 不匹配时必须重新解析并产生
+证据，不能猜测。
+
+application-owned parent compatibility adapter 可以接收现有 `LocalRevisionStore` 与 lease capability，
+但只用于 Kernel 已分配、budget-bounded 的 candidate/revision validation、checkpoint、export 和
+evidence；它不能建立独立 Task store、Accept/Reject 或 commit/HEAD authority。child Worker/runtime
+provider/Workbench client 不接收任何 store/lease object、daemon credential 或提交能力，只持 opaque
+session/staging 或 sealed read-only input。
+
+这层限定不等于 durable store 已经泛化。MR0 只由 FreeCAD adapter 把 runtime-qualified profile 映射回
+现有 `model.FCStd` 与 `model.step`；`RevisionRef`、`LocalRevisionStore`、Candidate 布局和 recovery
+journal 保持不变。只有 MR1 才能迁移为 versioned durable artifact profile；MR1 关闭前不能持久化第二种
+native CAD 格式，也不能作出第二 CAD support 声明。
+
+Workbench 始终是 authenticated public client：它读取 HEAD/draft、取得 session-bound file grant 并
+提交同一 Application request，不拥有 runtime router、Task 状态机、Revision store、Accept/Reject 或
+HEAD 权威。未来重建/仿真 Provider 也只能读取 sealed Revision/immutable Artifact 并返回 immutable、
+provenance-bound artifact 或 proposal；任何会改变设计的结果必须由新的、可审核 CAD Task 采纳。
 
 ## 7. 项目、任务和审核生命周期
 
@@ -428,13 +496,17 @@ release。
 
 - 真实 Claude/Codex 主机中的 skill 激活、canonical workflow 与文件体验验收；
 - G1 FreeCAD Qt Workbench UI；
+- 已通过 conformance 并接入 composition 的 MR0 多 runtime 基础、第二 CAD adapter 或第二 CAD 支持；
+- versioned durable artifact profile；MR1 前 Revision/Candidate 仍固定为 FCStd/STEP；
 - retention/GC、private runner generation migration 和完整运行观测/恢复审计；
 - face/edge Selector Level B、可视/语义 diff、Sketcher/PartDesign；
 - STL/STEP 受控导入、mesh-to-faceted-BRep、装配、BOM、TechDraw；
 - Sampling/BYOK backend、照片/视频重建 Provider 或仿真 Provider。
 
 0.6.0 package/managed-runtime 本地候选已完成收口但尚未 tag 或发布。后续固定顺序是：
-G1 Workbench MVP → P0-B hardening 收口 → P1/G2 单零件与 STL → P2 装配/图纸/交付。
+MR0 internal foundation → G1 Workbench MVP / P0-B hardening / host verification → P1/G2 单零件与
+STL → 后续另行批准阶段。机械详细设计、预检与仿真的
+[`方向调研`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)不构成 MR0、P1/P1.5/P2 功能承诺。
 真实宿主激活验收作为 S3-RES-06 residual 单独
 关闭，不阻塞已完成的 protocol/package host-ready 定义。只有阶段需要改变专家
 Agent、用户自带模型、单 Task Kernel 或 Workbench 非第二权威这些边界时，才需要新的产品决策。

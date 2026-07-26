@@ -7,12 +7,15 @@
 > 本文是产品调研、宿主 Agent 调研、多 CAD Backend 调研和当前代码架构的统一决策页。市场证据见
 > [`CAD_AGENT_PRODUCT_RESEARCH.md`](CAD_AGENT_PRODUCT_RESEARCH.md)，接口与 Backend 证据见
 > [`CAD_BACKEND_RESEARCH.md`](CAD_BACKEND_RESEARCH.md)，近期交付顺序见
-> [`PRODUCT_CAPABILITY_ROADMAP.md`](PRODUCT_CAPABILITY_ROADMAP.md)。
+> [`PRODUCT_CAPABILITY_ROADMAP.md`](PRODUCT_CAPABILITY_ROADMAP.md)。机械详细设计、预检与仿真的
+> 方向判断见 [`MECHANICAL_DESIGN_VALIDATION_RESEARCH.md`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)；
+> 该文档是待验证的产品研究，不构成 MR0、P1、P1.5 或 P2 功能承诺。
 
 ## 1. 一句话定位
 
 > **VibeCAD 是全开源、本地优先、可被多种宿主 Agent 调用的可信 CAD Agent 内核；它用对象级操作、
-> 隔离候选、确定性验证、人工审核和不可变版本，把设计意图安全地落实到多个 CAD Backend。**
+> 隔离候选、确定性验证、人工审核和不可变版本，把设计意图安全地落实到 CAD runtime。当前唯一
+> 连接的 adapter 是 FreeCAD，多 CAD 是受 conformance 和 durable migration 约束的架构目标。**
 
 VibeCAD 当前不是：
 
@@ -43,11 +46,11 @@ VibeCAD 当前最可信的差异不是模型更聪明或建模功能最多，而
 | 是否收费/开源 | 核心和默认 FreeCAD/OCCT 路径全开源免费；第三方模型、云服务、商业 CAD 成本不代付 |
 | Agent 如何接入 | 编程 Agent 与本地通用工作 Agent 两条路线；云端 Agent 等安全 device bridge |
 | 如何评价 Agent | 评价“宿主 + 模型 + VibeCAD + CAD Backend”完整 Profile，并记录客观行为标签 |
-| 当前 CAD Backend | FreeCAD 是 reference Backend；Direct OCCT 是补充执行层 |
+| 当前 CAD runtime | FreeCAD 是唯一连接的 adapter；Direct OCCT 和其他 CAD 仍是未来候选 |
 | AutoCAD 是否接入 | 接，但定位为 Drafting2D/DWG 市场扩展；同时规划 ZWCAD、GstarCAD |
 | AutoCAD 是否推翻架构 | 不推翻 Task Kernel；需要泛化 Artifact、Execution、Observation、Verification |
-| 第二真实 Backend | 市场优先看 DWG，架构中立性验证可用 Onshape；两个优先级不混为一谈 |
-| 当前先做什么 | 真实宿主验收、G1 Workbench、Mechanical3D 能力；随后再做 Backend-neutral 化 |
+| 未来第二真实 Backend | 市场优先看 DWG，架构中立性验证可用 Onshape；两者均未连接、未承诺 |
+| 当前先做什么 | 先完成 MR0 internal foundation；再推进真实宿主验收、G1/P0-B hardening 与 Mechanical3D |
 
 ## 2. 目标用户与产品边界
 
@@ -73,6 +76,7 @@ VibeCAD 0.6.0 当前是未发布的本地 `host-ready` 候选，已经具备：
 | Sketcher/PartDesign/装配/TechDraw 不完整 | 与成熟代码式 CAD Agent 和原生 CAD 助手有明显能力差距 |
 | 存量模型修改范围有限 | “不会破坏已有工程资产”的价值还未充分兑现 |
 | Artifact/Worker/Verifier 深度绑定 FCStd/STEP | 还不能直接增加 AutoCAD 等 Backend |
+| MR0 多 runtime 合同尚未实现/验收 | C00 只是架构口径；fake conformance 不等于第二 CAD 支持 |
 
 因此现阶段应诚实描述为：
 
@@ -162,12 +166,12 @@ VibeCAD 的机会位于三件事的交集：
 
 ## 4. 开源与免费策略
 
-建议整个可信主路径开源：
+建议未来整个可信主路径开源：
 
 - Task Kernel、协议和 canonical schema；
 - object-level operation registry 与 Backend SDK；
 - Candidate、Revision、Verifier 和评测工具；
-- FreeCAD、Direct OCCT 及可公开的商业 CAD Adapter；
+- 当前 FreeCAD adapter，以及未来另行实现和验收的 Direct OCCT/商业 CAD adapter；
 - 官方安装器、Workbench 和宿主适配包。
 
 默认路径应做到“无需购买 VibeCAD 即可完整使用”：
@@ -197,41 +201,78 @@ flowchart TB
     UI --> API
     API --> K["唯一 Task Kernel"]
     K --> S["Project / Task / Lease / Candidate / Draft / Revision / Audit"]
-    K --> R["Backend Router + Capability Registry"]
-    R --> F["FreeCAD Backend"]
-    R --> O["Direct OCCT Backend"]
-    R --> D["Drafting2D Backends<br/>AutoCAD / ZWCAD / GstarCAD"]
-    R --> C["Future cloud / enterprise Backends"]
+    K --> C["CAD Domain Service"]
+    C --> P["Capability Planner"]
+    P --> R["CAD Runtime Registry / Router"]
+    R --> F["FreeCAD adapter<br/>唯一连接"]
+    R -.-> O["Direct OCCT candidate<br/>未连接"]
+    R -.-> D["Drafting2D candidates<br/>未连接"]
+    R -.-> X["future cloud / enterprise CAD<br/>未连接"]
     F --> E["Domain Evidence"]
-    O --> E
-    D --> E
-    C --> E
     E --> V["Deterministic Verifier + Policy"]
     V --> S
+    S -.-> Q["future reconstruction / simulation provider<br/>sealed read-only input"]
+    Q -.-> A["immutable artifact / proposal"]
+    A -.-> K
 ```
+
+这张图是 MR0 的目标分层，不是 C00 时点的已交付拓扑。当前 executable composition 仍只接
+FreeCAD；虚线节点既不是产品支持，也不是已发布的 runtime schema。
 
 ### 5.1 所有 Backend 必须共享的内核不变量
 
-- Task Kernel 是 task、lease、review、commit、rollback 和 recovery 的唯一权威；
+- Task Kernel 是 task、lease、Revision、review、Accept/Reject、HEAD commit、rollback 和 recovery
+  的唯一 durable authority；
 - 源文件和已发布 Revision 永不被 Agent 原地修改；
 - 模型只能提交版本化、带预算的 `ModelProgram`，不能提交动态源码；
-- Backend 只能修改 Candidate，不能直接推进 HEAD；
+- application-owned parent compatibility adapter 可接收现有 `LocalRevisionStore`/lease capability，
+  但只用于 Kernel 分配的 bounded candidate/revision validation、checkpoint、export 和 evidence；
+  它没有独立 Task store、Accept/Reject 或 commit/HEAD authority；
+- child Worker/provider/Workbench client 不接收任何 store/lease object、daemon credential 或提交能力；
 - 每次成功必须有保存后重开、结构化 Observation 和 Acceptance；
 - Accept 使用 HEAD CAS，过期 Candidate 不能覆盖新版本；
 - Driver 自报成功、截图好看或 CAD 没抛异常都不能单独构成成功；
 - Workbench 和 AutoCAD Add-in 都是薄客户端，不建立第二套状态机。
+- 重建/仿真 Provider 只读 sealed Revision/immutable Artifact 并返回 immutable artifact/proposal；
+  任何设计变更都必须由新的 reviewed CAD Task 采纳。
 
-### 5.2 必须拆开的四个概念
+### 5.2 两级 runtime 与必须拆开的概念
+
+系统 runtime family 与 CAD family 内的多 runtime 是两个独立轴：
 
 ```text
-BackendId       使用哪个 CAD 产品或几何执行器
-CadDomain       Mechanical3D / Drafting2D / Assembly / future BIM
-ExecutionMode   headless / offscreen / interactive / cloud_job
-ArtifactProfile 该 Backend 的原生文件、交换文件、预览和证据
+SystemRuntimeFamily  CAD authoring / reconstruction / simulation
+CadRuntimeIdentity   FreeCAD / future native CAD identity
+CadDomain            Mechanical3D / Drafting2D / Assembly / future BIM
+ExecutionMode        headless / offscreen / interactive / cloud_job
+ArtifactProfile      runtime-qualified native / exchange / preview / evidence
 ```
 
-Project 默认绑定一个 primary Backend 和 CadDomain。跨 CAD 转换必须建立显式迁移、新 lineage 和损失
-报告，不能把 STEP/DXF 中立格式转换冒充为无损往返。
+generic runtime lifecycle 只统一 identity/version、capability discovery、invocation ownership 与 Task
+correlation、sealed Revision/Artifact inputs、budget/deadline/profile、start/status/cancel/health/
+reconcile，以及 immutable outputs、provenance、diagnostics 和 evidence。CAD command、重建请求和
+simulation study 保持各自 domain contract，不能塞进一个伪通用 union schema。
+
+CAD capability planner 必须在 mutation 前根据 versioned fine-grained capabilities 选择：native、
+披露 semantic mapping、明确 approximation、unsupported reject，或 namespaced runtime extension。
+capability 声明不授予跳过 Task Kernel policy/verifier/review 的权限。
+
+Project 默认绑定一个 primary CAD runtime 与 CadDomain。跨 CAD 转换必须建立显式 migration Task、新
+lineage 和损失报告，不能把 STEP/DXF 转换冒充无损往返。内部 selector 同时保留 durable semantic
+identity 和 runtime-qualified native locator；后者不能以 `Face3` 等 ephemeral index 取代前者。
+
+### 5.3 MR0 基础、产品支持与 MR1
+
+| 层次 | MR0 口径 | 当前/结束条件 |
+|---|---|---|
+| generic runtime | 内部 identity/capability/invocation/lifecycle/artifact evidence 合同 | C00 仅文档；C01/C04 实现与 conformance 后才可称 foundation-ready |
+| CAD domain | capability planner、registry/router、runtime-qualified artifact profile、dual selector envelope | C02/C04 通过 fake conformance 只证明可扩展性 |
+| connected adapter | application-owned FreeCAD compatibility adapter 复用现有 bounded store/lease capabilities；child 无任何 store/lease/提交能力 | C03 通过前仍是目标接缝；MR0 不增加第二 CAD |
+| durable artifact | FreeCAD profile 映射现有 `model.FCStd` + `model.step` | MR0 保持固定布局；仅 MR1 可迁移 versioned durable schema |
+| public product | 28 tools、六 operations、Task/Revision/Accept/Reject 与 `SelectorV1` wire 不变 | 新 runtime public schema、第二 CAD、G1、仿真均需另行批准/交付 |
+
+MR0 的 deterministic fake runtime/adapter 是 architecture conformance fixture，不是可供用户选择的 CAD
+support。MR1 关闭前不能持久化第二 native CAD 格式，也不能声称 CAD 往返可移植。
 
 ## 6. CAD Backend 组合决策
 
@@ -240,22 +281,26 @@ Project 默认绑定一个 primary Backend 和 CadDomain。跨 CAD 转换必须�
 | 角色 | Backend | 战略作用 | 决策 |
 |---|---|---|---|
 | 当前 reference backend | FreeCAD | 提供完整免费、跨平台、参数化 CAD 与 Workbench | 继续完成首个产品闭环 |
-| 受控几何执行层 | Direct OCCT | 无 GUI、可服务化、缩短执行路径、增强底层控制 | 作为补充，不立即替代 FreeCAD |
-| 中国市场扩展 | AutoCAD / ZWCAD / GstarCAD | 覆盖大量 DWG、二维制图和存量图纸工作流 | Backend-neutral 后做 Drafting2D pilot |
+| 未来受控几何候选 | Direct OCCT | 无 GUI、可服务化、缩短执行路径、增强底层控制 | 尚未注册为 adapter 或产品支持 |
+| 中国市场扩展 | AutoCAD / ZWCAD / GstarCAD | 覆盖大量 DWG、二维制图和存量图纸工作流 | MR1 与独立批准后才做 Drafting2D pilot |
 | 真正跨架构验证 | Onshape | 验证 REST、远程 identity、workspace/version、异步任务 | 在资源允许时做 conformance spike |
 | 商业机械 CAD | SOLIDWORKS / Inventor / Fusion / Rhino | 覆盖专业个人和中小企业存量用户 | 由用户需求和测试许可证触发 |
 | 高端企业 CAD/PLM | NX / CATIA / Creo 及其 PLM | 高价值但版本、许可、部署和销售成本很高 | 必须绑定真实客户再接入 |
 
 ### 6.1 FreeCAD
 
-FreeCAD 保持默认 Backend。它既提供可托管的 Python/OCCT 执行环境，也能承载首个可视审核
+FreeCAD 是当前唯一连接、默认的 CAD adapter。application-owned parent compatibility adapter 只为
+bounded candidate/revision validation、checkpoint、export 和 evidence 复用现有 store/lease
+capabilities；child Worker 不接收 store/lease object、daemon credential 或提交能力。FreeCAD 既提供
+可托管的 Python/OCCT 执行环境，也能承载首个可视审核
 Workbench。近期产品成功仍取决于真实宿主验收、G1 Workbench 和 Sketcher/PartDesign/存量模型修改，
 而不是 Backend 数量。
 
 ### 6.2 Direct OCCT
 
-Direct OCCT 的优势是进程和几何生命周期更可控、适合无头执行、容器和批处理，并能减少 FreeCAD
-Document/UI 层带来的不确定性。它的边界同样明确：
+Direct OCCT 只是未连接的技术候选，不是当前第二 CAD adapter。它潜在的优势是进程和几何生命周期
+更可控、适合无头执行、容器和批处理，并能减少 FreeCAD Document/UI 层带来的不确定性。它的边界
+同样明确：
 
 - OCCT 是几何内核，不是完整参数 CAD 产品；
 - 参数文档、特征依赖、约束、Undo/Redo 和装配产品层需要自建；
@@ -314,36 +359,45 @@ AutoCAD/DWG 存量，但 VibeCAD 不能依赖盗版环境，也不能用未经�
 - 审计、恢复、幂等和本地认证 daemon；
 - MCP、Skill 与资源交付的总体模式。
 
-### 7.2 必须泛化
+### 7.2 MR0 只建立内部 adapter/domain 基础
 
-- `ExecutionProfile` 拆出 Backend identity 和 execution mode；
-- 固定 FCStd/STEP 字段改为 `ArtifactDescriptor`/`ArtifactProfile`；
-- `load_fcstd`/`checkpoint_fcstd` 改为通用 snapshot/candidate lifecycle；
-- RevisionStore 和 CandidateStore 不再知道固定文件名；
-- 三维 ShapeObservation 改为分域 Evidence；
-- operation registry 增加 domain、capability 和 backend binding；
-- FreeCAD 版本 gate 改为通用 product/API/driver compatibility；
-- Worker 错误、取消、未知状态和 reconcile 形成统一 Driver Protocol。
+- generic runtime contract 表达 identity、capability、Task-correlated invocation、budget/deadline、
+  lifecycle、immutable artifact/provenance/evidence；
+- CAD Domain Service 拆出 runtime identity、execution mode、capability planning 和 registry/router；
+- runtime-qualified artifact profile 与 dual semantic/native selector envelope 保持 internal；
+- FreeCAD adapter 映射现有 Worker、错误、取消、未知状态和 reconcile，同时保持公共行为；
+- 两个 deterministic fake identity 只进入 conformance fixture，不进入产品 discovery/support。
 
-### 7.3 Artifact 示例
+MR0 不发布 Driver Protocol、capability schema 或 runtime schema，也不改变 28 tools、六 operations、
+公开 `SelectorV1`、Task state 或 FCStd/STEP 输出。
+
+### 7.3 MR1 才迁移 durable artifact
+
+- `RevisionRef`、RevisionStore、CandidateStore、manifest 和 recovery journal 改为 versioned durable
+  artifact profile；
+- 固定 FCStd/STEP 字段与 `load_fcstd`/`checkpoint_fcstd` persistence 假设才可泛化；
+- schema migration 必须有旧数据、崩溃一致性、reconcile 和 rollback matrix；
+- MR1 未关闭前，第二 native CAD 格式不能持久化，第二 CAD 支持不能成立。
+
+### 7.4 Artifact 示例
 
 ```text
-FreeCAD
+FreeCAD（当前，MR0 仍固定）
 ├── primary: model.FCStd
 └── exchange: model.step
 
-Direct OCCT
+Direct OCCT（假设，未连接）
 ├── primary/exchange: model.step
 └── evidence: geometry.json
 
-AutoCAD / DWG CAD
+AutoCAD / DWG CAD（假设，需 MR1 与独立批准）
 ├── primary: drawing.dwg
 ├── exchange: drawing.dxf（按任务需要）
 ├── preview: drawing.pdf
 └── evidence: drawing-observation.json
 ```
 
-### 7.4 AutoCAD 第一批能力
+### 7.5 AutoCAD 第一批能力
 
 首批只做可验证、重复频率高、风险较低的对象级操作：
 
@@ -628,6 +682,16 @@ P0 竞品测试优先覆盖 agentcad、ForgeCAD、Zoo MCP、BuildCAD 和 VibeCAD
 
 ## 10. 统一实施顺序
 
+### MR0：先建立内部 multi-runtime foundation
+
+1. 冻结并实现 domain-neutral runtime lifecycle；
+2. 建立 CAD Domain Service、capability planner、registry/router 和 internal artifact/selector envelope；
+3. 只把现有 FreeCAD Worker 接成 adapter，保持公共 28 tools、六 operations 和 FCStd/STEP 行为；
+4. 用 deterministic fake identity/adapter 证明 conformance，不把它们列为产品支持。
+
+C00 只完成第 1–4 项的文档口径；MR0 foundation-ready 仍需 C01..C04 实现和 gate。MR0 不包含 G1、
+第二 CAD、仿真、新 operation、公共 runtime schema、release 或 host verification。
+
 ### 阶段 0：兑现当前承诺
 
 1. 完成真实 Claude Code、Codex 安装和端到端 `host-verified`；
@@ -646,15 +710,19 @@ P0 竞品测试优先覆盖 agentcad、ForgeCAD、Zoo MCP、BuildCAD 和 VibeCAD
 
 退出条件：VibeCAD 不再只是六个演示操作，可以完成一组公开的真实单零件任务。
 
-### 阶段 2：Backend-neutral 基础
+机械详细设计、预检和仿真的用户问题与假设见
+[`MECHANICAL_DESIGN_VALIDATION_RESEARCH.md`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)。其中
+P1/P1.5/P2 标签是方向研究，不会修改本页里程碑或形成已承诺功能。
 
-1. 引入 BackendId、CadDomain、ExecutionMode、ArtifactProfile；
-2. 发布 Driver Protocol v0、错误 taxonomy 和 capability schema；
-3. 建立 deterministic fake backend 与 conformance suite；
-4. 保持所有 FreeCAD 回归测试通过。
+### 阶段 2：MR1 durable artifact migration（第二 CAD 前置）
 
-退出条件：Kernel 源码不再需要知道 FCStd、FreeCAD Session 和固定 STEP 文件名；新增 Driver 不修改
-Kernel 即可达到规定 conformance level。
+1. 版本化迁移 RevisionRef、Revision/Candidate store、manifest 和 recovery journal；
+2. 把固定 `model.FCStd`/`model.step` durable layout 改为 versioned artifact profile；
+3. 证明旧数据、崩溃、重启、reconcile 和 rollback 的兼容矩阵；
+4. 仅在单独批准后，才讨论 versioned public runtime/driver protocol。
+
+退出条件：durable store 能安全持久化 runtime-qualified native artifact；在此之前任何第二 native CAD
+format 或第二 CAD support 都必须 fail closed。
 
 ### 阶段 3：DWG 市场 Pilot
 
@@ -671,6 +739,9 @@ Kernel 即可达到规定 conformance level。
 2. 按真实用户需求接入 SOLIDWORKS、Inventor、Fusion 或 Rhino；
 3. NX/CATIA/Creo 和 PLM 只在客户提供版本、许可和持续测试环境后启动。
 
+阶段 3/4 都是未来策略候选，不是 MR0 或当前版本承诺；启动仍需合法 runtime/SDK、用户需求、MR1 和
+独立验收批准。
+
 ## 11. 当前决策清单
 
 已经形成的产品决策：
@@ -679,25 +750,28 @@ Kernel 即可达到规定 conformance level。
 2. 目标用户首先是个人、Maker、专业个人用户和小团队，不是企业 Agent 构建平台客户。
 3. 编程 Agent 与通用工作 Agent 是两条接入路线，评价完整宿主组合。
 4. Task Kernel、Candidate、Verifier、Review、Revision 和 CAS 是不可绕过的公共内核。
-5. 公共多 CAD 抽象是版本化 Driver Protocol，不是 Python API。
-6. Project 默认绑定一个 primary Backend；跨 CAD 是显式迁移。
-7. FreeCAD 是当前 reference Backend；Direct OCCT 是补充执行层，不是短期替代品。
+5. MR0 的 generic/CAD runtime contract 是内部 foundation；公共 protocol/schema 只能另行版本化批准。
+6. Project 默认绑定一个 primary CAD runtime；跨 CAD 是显式 migration Task。
+7. FreeCAD 是唯一连接 adapter；Direct OCCT 和商业 CAD 当前都是未连接候选。
 8. AutoCAD/国产 DWG CAD 是 Drafting2D 市场扩展，不与 Mechanical3D operation 强行统一。
-9. AutoCAD 接入前先完成 Backend-neutral 化；不把商业 CAD 特例写入 Kernel。
+9. AutoCAD 接入前先完成 MR0 foundation 与 MR1 durable migration；不把商业 CAD 特例写入 Kernel。
 10. Onshape 的价值是验证真正跨进程、跨语言、跨网络架构，不代表其市场优先级高于 DWG。
 11. 模型永远不能提交任意动态源码；商业 CAD Adapter 也只能执行固定、可审计 binding。
-12. 当前近期优先级仍是宿主验收、G1 Workbench 和 Mechanical3D 能力，而不是立即增加 Backend 数量。
+12. Workbench 始终是 client，Provider 始终只读 sealed 输入；二者都不能复制 Task/Revision/Accept 权威。
+13. MR0 继续使用固定 FCStd/STEP durable layout；只有 MR1 迁移后才能持久化第二 native CAD。
+14. 机械验证报告是方向研究；当前近期优先级仍是 G1、P0-B hardening、真实宿主验收和 Mechanical3D。
 
 ## 12. 最终判断
 
 VibeCAD 不应该在“做一个免费的 FreeCAD 插件”和“同时兼容所有商业 CAD”之间摇摆。合理演进是：
 
 ```text
-可信 FreeCAD 产品闭环
+MR0 internal multi-runtime foundation（FreeCAD only）
+→ 可信 FreeCAD 产品闭环
 → 足够有用的 Mechanical3D
-→ Backend-neutral Driver Protocol
-→ AutoCAD/国产 CAD 的 Drafting2D 市场扩展
-→ 远程与商业机械 CAD
+→ MR1 durable artifact migration（第二 CAD 前置）
+→ 经独立批准的 AutoCAD/国产 CAD Drafting2D pilot
+→ 经需求与 conformance 驱动的远程/商业机械 CAD
 ```
 
 这样既保留当前最有价值的安全内核，也避免过早承担多个商业 CAD 的许可证、平台、测试和支持成本。

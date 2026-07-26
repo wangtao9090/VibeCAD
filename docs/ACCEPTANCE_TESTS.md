@@ -11,6 +11,9 @@ operation 与 ModelProgram 的统一 Task Kernel，以及可验证的 FCStd/STEP
 0.6.0 本地交付候选的当前放行范围是前者。未授权外部模型/API 消耗，因此不能把本清单的本地模拟、测试
 double 或当前控制器执行写成 host-verified 证据。
 
+MR0-C00 另外冻结下面的 multi-runtime foundation 验收口径，但不改变本清单已有 PASS 范围或可执行
+产品声明。C00 是 documentation-only；MR0 foundation-ready 仍需 C01..C04 实现与 conformance gate。
+
 ## 1. 冻结产品口径
 
 ### 1.1 公开工具
@@ -46,16 +49,46 @@ immutable base revision
 
 不得存在 public direct handler 原地改写用户文件、绕过 revision/verifier 或另建状态机。
 
+application-owned parent FreeCAD compatibility adapter 可以接收现有 `LocalRevisionStore` 与 lease
+capability，但只用于 Kernel 已分配、budget-bounded 的 candidate/revision validation、checkpoint、
+export 和 evidence；它不得建立独立 Task store、Accept/Reject 或 commit/HEAD authority。child
+Worker、Workbench client 和 reconstruction/simulation Provider 不得接收任何 store/lease object、
+daemon credential 或提交能力。Provider 只能读取 sealed Revision/immutable Artifact 并返回 immutable
+artifact/proposal；设计采纳必须新建 reviewed CAD Task。
+
 ### 1.3 当前支持边界
 
 - 项目可以是 `empty`，或导入非空、对象全为 `Part::Box` / `Part::Cylinder` 的
   `import_fcstd` envelope；
 - 当前只验证 headless execution profile；
 - 成功交付只有 FCStd 与 STEP；
+- FreeCAD 是唯一连接的 CAD adapter；fake runtime/adapter 只能作为 conformance fixture，不能进入
+  capability/product support 声明；
+- MR0 内部 runtime/artifact/selector contract 不改变 28 tools、六 operations 或公开 `SelectorV1`；
+  durable Revision/Candidate/manifest/recovery 仍固定 FCStd/STEP，到 MR1 才允许迁移；
 - active cancellation 由受管、可终止 FreeCAD Worker 和持久化 `reconcile` 路径收口；空闲取消仍不得启动
   CAD/runtime 或取得 project write lease；
 - 当前不支持通用 FCStd、STEP/STL import、任意 Python/FreeCAD code、真实 FreeCAD Qt Workbench UI、face/edge selector、
   photo/video reconstruction 或 simulation。
+
+机械详细设计、预检与仿真的
+[`调研报告`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)不提供任何 acceptance PASS，也不把其中的
+P1/P1.5/P2 建议变为当前承诺。
+
+### 1.4 MR0 foundation conformance（独立于 0.6.0 放行）
+
+| 合同 | 后续 MR0 gate 必须证明 | 不能据此宣称 |
+|---|---|---|
+| generic lifecycle | immutable runtime identity/version/capability；Task-correlated sealed invocation；budget/deadline；start/status/cancel/health/reconcile；immutable artifact/provenance/diagnostics/evidence；common layer 不导入 CAD/FreeCAD/Qt/FEA | 通用 CAD command、仿真或重建 schema |
+| CAD domain | capability planner 在 mutation 前精确选择 native、disclosed mapping、explicit approximation、unsupported 或 namespaced extension | 所有 runtime 语义等价或自动降级 |
+| registry/conformance | 两个 deterministic fake CAD identity 可独立 register/plan/execute/cancel/reconcile；未声明 capability fail closed | 第二 CAD 产品支持 |
+| FreeCAD adapter | 只有 FreeCAD 被 default composition 选中；现有 lifecycle、error、source safety、FCStd/STEP、cancel/recovery 全部兼容 | G1 UI、新 operation 或第二 adapter |
+| authority negative | parent compatibility adapter 的 store/lease capability 只限 bounded validation/checkpoint/export/evidence，且无独立 Task/Accept/Reject/commit/HEAD authority；child Worker/provider/Workbench 无任何 store/lease object、daemon credential 或提交能力 | 第二 scheduler 或提交路径 |
+| artifact/selector | artifact 的 runtime/profile/role/format/digest/provenance 匹配；semantic `SelectorV1` 始终权威，native locator 仅为可选 runtime evidence | 公开 runtime schema、SelectorV1 wire 变化或 face/edge 支持 |
+| D14 durable split | MR0 仍持久化固定 `model.FCStd`/`model.step`，第二 native format fail closed | Revision/Candidate/manifest/store 已泛化；该声明只在 MR1 gate 后成立 |
+
+本表是 MR0 的 future gate contract，C00 不把任何一行勾为 PASS。MR0 conformance 也不能关闭 §7 的
+真实第二宿主 residual，不能产生 tag、release 或 host-verified 结论。
 
 ## 2. 放行总表
 
@@ -359,6 +392,11 @@ generation-zero 合法无文件要与“manifest 声明但 payload 缺失”区�
 
 所有负例应返回稳定、去敏的错误 envelope，不执行 CAD 副作用，不泄露绝对内部路径、环境变量、
 token、secret、堆栈或用户文件内容。
+
+MR0-C01..C04 的独立 conformance gate 还必须覆盖 undeclared capability、runtime/artifact profile
+mismatch、只有 native locator 而没有 semantic selector、fake identity 被投影成 support、adapter/
+provider 尝试取得 commit authority，以及第二 native format 写入固定 durable store。C00 不执行这些
+新增路径；在实现 gate 通过前不得把它们记作 PASS。
 
 ### E11：卸载保留数据
 

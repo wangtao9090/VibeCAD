@@ -6,6 +6,9 @@
 > managed killable Worker、verified revert 和 active cancellation/reconcile 已进入未发布的 0.6.0
 > 分支候选；协议与分发包仍为本地 host-ready
 >
+> MR0 状态：C00 仅冻结通用 runtime lifecycle 与 CAD 多 runtime 边界；C01..C04 和 conformance gate
+> 尚未完成。FreeCAD 是唯一连接的 CAD adapter，固定 FCStd/STEP durable 布局保留到 MR1
+>
 > 发布边界：真实 Claude/Codex 主机尚未安装激活验收，当前没有 tag 或 release
 >
 > 文档角色：Agent 定位、调用模式、信任边界和后续阶段的决策真源
@@ -30,6 +33,7 @@ OCCT 的事实独立验收，并原子提交或安全保留审核草案。
 | Artifact | FCStd/STEP materialization、ResourceLink 与 MCP resource read 已实现 | 能 |
 | Local Kernel | same-user authenticated daemon、单 Application、session-bound file grant 已实现 | MCP 与 public client 可用 |
 | Managed Worker | 可杀 generation、RPC watchdog、crash/hang recovery 与 active cancel reconcile 已实现 | 能 |
+| 多 runtime 基础 | C00 只有已批准架构口径；实现与 conformance 尚未完成 | 不能作为第二 CAD 支持；当前仅 FreeCAD |
 | Host-neutral skill | canonical skill 与分发合同已交付并通过包级验收 | host-ready；真实宿主尚未激活验证 |
 | FreeCAD Workbench | 后端 public client/checkout/file grant 已实现；Qt UI 尚未交付 | 不能；G1 实现 UI |
 | Sampling/BYOK | 只有 reasoning-owner 枚举，未有 backend | 不能 |
@@ -73,9 +77,12 @@ FreeCAD 可以类比 CAD 编译器与执行环境，但“代码可执行”不�
 | 人工审核 | durable draft；Accept 才发布，Reject 不改 HEAD |
 | Local Kernel | MCP 与 Workbench client 共享同一个 daemon、Application、Task Kernel 和 durable truth |
 | 文件能力 | 只使用 session-bound descriptor/file grant，不向客户端开放任意本地路径 |
-| Workbench | 交互执行/预览端，不是第二 Agent、第二状态机或第二提交权威；G1 Qt UI 尚未交付 |
+| Workbench | 薄交互/预览/审核客户端，不拥有 runtime、scheduler、store 或提交权威；G1 Qt UI 尚未交付 |
+| runtime 边界 | 通用层只统一 identity/capability/invocation/lifecycle/artifact evidence；CAD 语义归 CAD Domain Service |
+| CAD runtime 支持 | capability negotiation 先于 mutation；FreeCAD 是唯一连接 adapter，fake conformance 不等于支持 |
+| Artifact/Selector | 内部产物按 runtime/profile 限定，语义 selector 始终权威；durable FCStd/STEP 到 MR1 才迁移 |
 | Headless | 当前已验证 profile，不是长期全能力强约束 |
-| 照片/STL/仿真 | 调用成熟外部引擎或 FreeCAD/OCCT 能力，不自研底层算法 |
+| 照片/STL/仿真 | 未来方向研究；若接入只调用外部引擎或 FreeCAD/OCCT 能力，不自研底层算法 |
 | 任意代码 | 表达上限高，但只可能成为未来高隔离实验通道，永不替代默认主路径 |
 
 ## 3. 当前用户工作流
@@ -241,7 +248,7 @@ installer 的首要实测路径是 `$CODEX_HOME/skills/vibecad-agent`（默认
 路径依据：[Codex skills](https://learn.chatgpt.com/docs/build-skills)、
 [Claude Code skills](https://code.claude.com/docs/en/skills)。真实宿主执行仍需单独授权和验收。
 
-## 7. Workbench：一个内核、两个执行端
+## 7. Workbench：一个内核、多个薄客户端
 
 当前 backend 与 G1 UI 目标拓扑：
 
@@ -252,12 +259,13 @@ flowchart TB
     M --> A["same-user authenticated local Kernel daemon<br/>single AgentApplication"]
     G -.->|"G1 Qt UI uses public client + session grant"| A
     A --> K["Task Kernel"]
-    K --> R["operation registry"]
-    R --> X{"profile router"}
-    X --> W["headless worker"]
-    X --> I["interactive adapter"]
+    K --> D["CAD Domain Service<br/>MR0 target"]
+    D --> P["capability planner + registry/router"]
+    P --> F["FreeCAD adapter<br/>only connected adapter"]
+    F --> W["managed headless Worker"]
+    F -.-> I["future FreeCAD GUI execution profile<br/>not G1 delivery"]
     W --> O["sealed observations"]
-    I --> O
+    I -.-> O
     O --> V["deterministic verifier"]
     V --> K
 ```
@@ -271,6 +279,16 @@ descriptor 始终不交付本地路径，插件不能绕过 grant 拼接内部�
 G1 MVP 的诚实范围是：连接项目、显示 HEAD/draft、加载前后候选、显示 verdict、Accept/Reject、捕获
 object/feature 选择。face/edge、semantic diff、参数 TaskPanel、dirty manual checkpoint/publish 属于 P1/G2，
 除非用户之后明确要求扩大 G1 首发范围。G1 FreeCAD Qt Workbench UI 尚未交付。
+
+MR0 会在 Task Kernel 与当前 Worker 之间加入内部 CAD Domain Service、capability planner 和 runtime
+registry/router，再由 FreeCAD adapter 保持现有行为；C00 只记录这条目标边界，不能把它写成已经接入
+或公开的 runtime protocol。Workbench 仍只通过 authenticated public client 消费同一个 Kernel；即使
+未来增加 FreeCAD GUI execution profile，它也位于同一 FreeCAD adapter 后方，而不是插件自行路由。
+application-owned parent compatibility adapter 可以接收现有 `LocalRevisionStore`/lease capability，
+但只用于 Kernel 分配的 bounded candidate/revision validation、checkpoint、export 和 evidence；它
+没有独立 Task store、Accept/Reject 或 commit/HEAD authority。managed child Worker 不接收任何
+store/lease object、daemon credential 或提交能力。完整边界见
+[`ARCHITECTURE.md`](ARCHITECTURE.md)。
 
 ## 8. Selector 与交互边界
 
@@ -290,11 +308,21 @@ path、geometry/adjacency fingerprint、pick point、selection context 和 ambig
 所以 G1 首版可以安全捕获 object/feature；P1 才开放 hole/fillet/chamfer 等依赖 face/edge 的 Agent-safe
 operation。禁止为了赶 UI 把旧进程内标签或裸 `Face6/Edge8` 重新当作公共 selector。
 
+MR0 的内部 adapter envelope 同时携带 revision-bound semantic `SelectorV1` 和可选、
+runtime-qualified `NativeLocator`。前者是 durable authority，后者只加强 native execution 与 evidence；
+runtime/revision 不匹配、locator 丢失或只有 ephemeral face/edge index 时必须 fail closed 或带证据
+重解析。MR0 不改变公开 `SelectorV1` wire contract，也不因此交付 face/edge 支持。
+
 ## 9. Artifact、文件体验和宿主边界
 
 ArtifactStore 只交付与 task/revision/report/manifest 全部一致的 FCStd/STEP materialization，并返回
 `vibecad://artifact/...` URI。实际二进制通过 MCP resource read 返回，不允许模型指定任意服务器输出
 路径。
+
+MR0 内部把现有 `model.FCStd` 标为 FreeCAD native artifact，把 `model.step` 标为 FreeCAD exchange
+artifact，并连同 runtime identity/version、profile、digest、provenance/evidence 做一致性检查；这不
+改变当前文件名、manifest 或 durable store。`RevisionRef`/Revision/Candidate/recovery 的 versioned
+artifact-profile migration 只属于 MR1，MR1 前不能持久化第二 native CAD 格式。
 
 S3-7 raw stdio E2E 已证明资源 hash、base64 和 FreeCAD reload；S3-8 又完成了以下协议/包层交付：
 
@@ -318,9 +346,13 @@ VibeCAD Task Kernel → 选择、修改、验证、版本化和人工审核
 Simulation Provider → revision-bound report / field artifact
 ```
 
-Provider 结果只能成为带来源和 hash 的输入或 candidate，不能获得 commit authority。P1 先实现 FreeCAD/
-OCCT 可验证的 STL → faceted BRep/STEP；结果可测量、可布尔、部分可编辑，但不宣称恢复原始草图和参数。
-照片/视频重建、参数化逆向和专业仿真继续后移。
+Provider 只能读取 sealed Revision 或 immutable Artifact，并返回带来源和 hash 的 immutable artifact
+或 proposal；它不能创建/改写 CAD candidate、推进 Revision/HEAD，或取得 Accept/Reject/commit
+authority。若结果会改变设计，必须由新的、可审核 CAD Task 显式采纳。P1 先实现 FreeCAD/OCCT
+可验证的 STL → faceted BRep/STEP；结果可测量、可布尔、部分可编辑，但不宣称恢复原始草图和参数。
+照片/视频重建、参数化逆向和专业仿真继续后移。相关
+[`机械详细设计与仿真验证调研`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)只是方向研究，不构成
+MR0、P1/P1.5/P2 承诺或 simulation support。
 
 ## 11. 任意代码通道的“上限高”到底意味着什么
 
@@ -346,10 +378,11 @@ AR-1 回答了五个问题：
 | Direct 是否薄适配 | 是；构造单命令 ModelProgram 并只调用 TaskApi，无 legacy public writer |
 | Durable review 是否支持插件 | 后端足以支撑 immutable draft 预览/Accept/Reject；secure daemon/file grant 已交付，Qt UI 尚缺 |
 | Selector/observation/verifier 是否达到 G1 前置 | 达到 object/feature G0；未达到 face/edge、semantic diff 和 PartDesign |
-| 下一步先扩 CAD 还是补可靠性 | P0-B core backend 与 0.6.0 本地候选收口已完成；下一步交付 G1 UI，P1/P2 不提前 |
+| 下一步先扩 CAD 还是补可靠性 | AR-1 原判断是下一步 G1；已批准的 MRG1-D12 将 MR0 foundation 插在 G1 前，P1/P2 仍不提前 |
 
-AR-1 没有改变以下已批准边界：专家 Agent、用户自带模型、单 Task Kernel、受控 ModelProgram、
-Workbench 非第二权威、Provider 不自研底层引擎。因此当前不需要新的产品级批准。
+AR-1 的产品边界仍有效：专家 Agent、用户自带模型、单 Task Kernel、受控 ModelProgram、
+Workbench 非第二权威、Provider 不自研底层引擎。MRG1-D01..D16 已批准 MR0 次序与边界，但没有改变
+这些 authority 不变量。
 
 固定推进顺序：
 
@@ -361,6 +394,9 @@ Workbench 非第二权威、Provider 不自研底层引擎。因此当前不需�
   + single authenticated daemon/session file grant + source liveness/revocation
   + managed killable Worker/crash isolation
 → [complete] 0.6.0 package/managed-runtime local candidate（尚未 tag/发布）
+→ MR0 multi-runtime foundation
+  C00 仅冻结合同；C01..C04 仍需实现 generic lifecycle、CAD capability/router、FreeCAD adapter
+  与 fake conformance。当前不增加公共 schema/operation 或第二 CAD；durable FCStd/STEP 保留到 MR1
 → G1 MVP（FreeCAD Qt Workbench UI 尚未交付）
   Workbench preview + verdict + stale/revoked rejection + Accept/Reject + object/feature selection
 → P0-B hardening close
@@ -389,6 +425,9 @@ P0-B hardening 可以与 G1 UI 原型并行，但进入 P1 产品交付前必须
 9. tool namespace、description、schema 和 execution profile 是否可发现且无歧义。
 10. awaiting review 是否释放 lease；Accept 是否 fresh reverify + HEAD CAS；Reject 是否 HEAD-neutral。
 11. Workbench 是否只承担交互/预览，不复制 Task Kernel、不持模型 key、不直接提交。
-12. Provider/代码 Worker 是否仍是受验证输入，不获得 commit authority。
-13. 当前文档是否把 Sampling、BYOK、GUI、face/edge、STL 参数恢复或企业能力误写成已实现。
-14. 新能力是否同时有真实 FreeCAD、failure atomicity、reload、recovery 和 package/host 证据。
+12. runtime adapter 是否只执行已协商 capability，且不获得 Task/Revision/Accept/HEAD authority。
+13. Provider/代码 Worker 是否只读 sealed 输入并返回 immutable artifact/proposal，不获得 CAD 写入权威。
+14. fake runtime/adapter conformance 是否仍被标为基础证据，而不是第二 CAD 产品支持。
+15. durable store 在 MR1 前是否仍诚实声明固定 FCStd/STEP，未把内部 profile 写成公共 runtime schema。
+16. 当前文档是否把 Sampling、BYOK、GUI、face/edge、STL 参数恢复或企业能力误写成已实现。
+17. 新能力是否同时有真实 FreeCAD、failure atomicity、reload、recovery 和 package/host 证据。
