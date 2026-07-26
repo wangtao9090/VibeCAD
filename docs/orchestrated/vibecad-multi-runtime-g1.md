@@ -4988,3 +4988,257 @@ or real gate is rerun.
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MRG1-R2-E03 | A03 direction; A04 absent; artifact persistence only | `not-created`; exact artifact staging next | sol/max 0/0/0/0 GO; terra pre-stage PASS; 11 packets / 111 entries; strict append and dynamic exclusions PASS | source implementation still forbidden pending A04 | MRG1-S08 | pre-stage GREEN / cached-only gate next |
+
+## 29. MRG1-A04 Authorization and Recovery Snapshot MRG1-S09
+
+### 29.1 MRG1-R2 persisted recovery evidence
+
+The Section 28 artifact-only recovery candidate passed its final independent
+cached-only `gpt-5.6-terra / medium` gate:
+
+```text
+cached paths:         1 / docs/orchestrated/vibecad-multi-runtime-g1.md
+unstaged tracked:     0
+HEAD artifact:        192508 bytes
+cached/worktree:      240952 bytes / byte-identical
+cached/worktree hash: e80ac502f7c468205403ee85be57dae5a9a988ac3d20267b400f10cb5e494023
+strict HEAD append:   PASS for cached and worktree
+cached/worktree diff: PASS
+relative links:       0 / 0 broken
+Section 28 fences:    58 / balanced
+basic table issues:   0
+source diff:          0
+dynamic exclusions:  exact V4, V5, V6_Expanded, V7_FullExpanded, V8_True3000
+```
+
+The recovery commit was then created and pushed:
+
+```text
+commit: 8b220d4d1f4c3d8bf704ad70e41b88c2096d63f3
+subject: docs(orchestration): prepare G1 and MR1 parallel execution
+push: origin/codex/agent-stage3
+post-push HEAD/upstream: equal
+ahead/behind: 0 / 0
+```
+
+Only the rolling artifact was committed. All five course scripts remained
+untracked and untouched.
+
+### 29.2 Exact authorization MRG1-A04
+
+After R2 was committed, pushed and shown, the user explicitly granted the
+reserved exact implementation approval:
+
+| Approval | Timestamp | Approved artifact anchor | Exact scope | Exact user text | State |
+|---|---|---|---|---|---|
+| MRG1-A04 | 2026-07-26T10:12:40Z | MRG1-R2 at `8b220d4d1f4c3d8bf704ad70e41b88c2096d63f3` | Sections 28.2–28.8; D19..D22; G1 `C00P`, `C00B`, `C00`..`C04`; MR1 `P00`..`P03`; command/manual gates; conditional C00B branch; shared non-disposable beta gate | `批准 MRG1-A04` | approved; executable only after this authorization record is committed and pushed |
+
+MRG1-A04 activates D19..D22 and the exact initial `7 + 4` semantic source
+budget. It inherits A01/A02/A03, the higher-priority instructions, the current
+host permission model and sandbox, every exact allowlist, gate, circuit breaker
+and exclusion in R2. Neither this artifact, the Skill nor any task packet can
+grant or expand permissions, elevate authority or bypass that model or
+sandbox.
+
+The approval does not authorize packaging/real Accept-Reject integration
+beyond the first tranche, MR1-P04/v2 writer activation, a second CAD,
+face/edge, semantic diff, manual publish, Addon Manager, release/tag, external
+credentials or spend. It does not authorize any contact with the dynamic
+course scripts.
+
+### 29.3 Authorization persistence and first execution boundary
+
+This Section 29 append is the required artifact-only authorization record. Its
+exact one-path allowlist is:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+```
+
+It must pass a deep approval-binding review and a fast mechanical gate, be
+committed with subject:
+
+```text
+docs(orchestration): authorize G1 and MR1 execution
+```
+
+and reach `origin/codex/agent-stage3` before any source packet starts. The
+commit's self-hash and push fact will be recorded in the first semantic
+commit's controller ledger preamble.
+
+Once upstream, two independent first packets may be developed concurrently:
+
+- G1-C00P, `standard -> gpt-5.6-sol / high`, owns only
+  `src/vibecad/runtime/paths.py` and `tests/test_paths.py`;
+- MR1-P00, `deep -> gpt-5.6-sol / max`, owns only
+  `docs/ARCHITECTURE.md`, `docs/ACCEPTANCE_TESTS.md`,
+  `docs/CAD_RUNTIME_ADAPTER_GUIDE.md` and new
+  `docs/orchestrated/vibecad-durable-v2.md`.
+
+Implementation subagents must not edit, stage, commit or push the shared
+rolling artifact. They return candidate bytes and evidence. The controller
+serially appends the ledger, reviews, stages one exact semantic commit,
+commits and pushes before staging the other track.
+
+### 29.4 Recovery Snapshot MRG1-S09
+
+#### S09-1 — Completed milestones
+
+- MR0 C00..C05 is complete and pushed through `2de1a37`.
+- MRG1-R2 passed sol/max `0/0/0/0`, terra pre-stage and cached-only gates, then
+  committed and pushed at `8b220d4`.
+- The user explicitly granted MRG1-A04 against that pushed R2 anchor.
+- At authorization receipt, tracked index/worktree were clean; only the five
+  anchored dynamic user files were untracked.
+
+#### S09-2 — Ordered next packets and branch conditions
+
+1. Deep-review and mechanically gate this exact Section 29 append.
+   - if either gate is RED, stop without staging, append a blocked S09
+     successor with the exact evidence and keep source forbidden;
+   - if the dynamic exclusion set changes or an unmatched user-owned path
+     appears, stop, enumerate names only, preserve every file and update the
+     exclusion/recovery record before retrying the gate.
+2. Stage only the artifact, commit and push the authorization record.
+   - if staged paths or cached/worktree bytes differ, unstage nothing
+     destructively; stop and inspect the index against the one-path allowlist;
+   - if commit or push fails, retain the observable state, append a blocked
+     recovery entry when safely possible and do not start source.
+3. Verify HEAD/upstream equality and the complete dynamic exclusion set.
+   - if the post-push hashes/ahead-behind state mismatch, stop and recover from
+     the pushed repository state;
+   - if the host, tools or any capability-profile field changes, repeat passive
+     discovery using only the four permitted evidence categories, append a new
+     profile/snapshot and keep source paused until it is gated.
+4. Spawn G1-C00P at standard tier and MR1-P00 at deep tier with complete
+   seven-section packets anchored to the authorization commit.
+5. If either candidate touches an unnamed/shared path, changes its semantic
+   scope or waits for the already-satisfied approval, stop that packet and
+   route the observable failure through the controller.
+   If a long process becomes ambiguous, poll only its original native session;
+   never duplicate launch or infer success. An unresolved process identity is
+   a blocked recovery condition.
+6. Review candidates independently. The controller selects one, appends its
+   ledger evidence, stages only that commit's allowlist, gates, commits and
+   pushes; then repeats for the other.
+
+#### S09-3 — Active decisions and authorization
+
+- A01/A02 remain active; A03 approves the parallel product direction.
+- A04 now approves Sections 28.2–28.8 and activates D19..D22, subject to this
+  authorization record reaching upstream.
+- D17/D18 remain active. Second CAD stays deferred; FreeCAD G1 is the product
+  priority; MR1-prep stays immutable-v1 and observational only.
+- The Section 28.7 beta breakers and Section 28.8 user-file exclusions remain
+  active without waiver.
+
+#### S09-4 — Execution discipline
+
+Capability profile remains:
+
+```text
+approval: artifact-approval
+delegation: spawn-send-wait
+persistence: repo-artifact
+process: native-session-poll
+```
+
+Required adapter-selection evidence for this recorded profile:
+
+- `live capability declarations`: the current Codex desktop session still
+  declares user commentary/final channels, local patch/command tools,
+  `spawn_agent`/`send_message`/`wait_agent`, and resumable
+  `exec_command`/`write_stdin` sessions. These declarations support
+  artifact-approval, spawn-send-wait, repo-artifact and native-session-poll.
+- `observable behavior`: in this live campaign the controller has persisted
+  and pushed R2, spawned/sent/waited for deep and mechanical agents, and polled
+  the original id of a bounded process. These already-observed behaviors
+  support all four selected fields.
+- `environment identity`: passive host context still identifies Codex desktop,
+  root controller `/root`, the four-slot agent tree and repository workspace
+  `/Users/wangtao/Documents/DevProject/vibecad`.
+- `public configuration`: current public session configuration still exposes
+  Default collaboration mode, unrestricted workspace filesystem, no command
+  approval prompt and the sol/terra model overrides; native Plan approval is
+  not exposed in this mode.
+
+Selected adapter remains the Codex desktop repo-artifact controller.
+`standard` maps to sol/high, `deep` to sol/max and `fast` to terra/medium.
+There is no applicable repository-root or directory-scoped `AGENTS.md` or
+`CLAUDE.md`. Every packet inherits higher-priority system/developer/user
+instructions, its exact R2 allowlist and the current host permission model and
+sandbox. Long processes use their original native session id; no duplicate
+launch or marker fallback is allowed. Residuals, gate REDs and blockers remain
+open until observable forward evidence closes them.
+
+Exact source allowlists and controller-only rolling-ledger ownership are
+Sections 28.3–28.5. The stage limit is the approved `7 + 4` semantic budget,
+one current commit allowlist and one controller-owned index at a time. Exact
+focused/real/manual/adversarial/mechanical gates are Section 28.6; the shared
+beta gate is Section 28.7. Circuit breakers include any unnamed/shared path,
+unexpected or repeated gate RED, process/session ambiguity, source before the
+A04 push, stage/index drift, failed commit/push or post-push mismatch,
+capability/profile drift, dynamic user-file contact, v1 byte drift,
+observational readiness presented as activation readiness, fake GUI evidence,
+dirty/stale Accept, ambiguous selector/recovery, or data/capacity/backup
+failure. No waiver, retry-until-green, test weakening or golden rewrite closes
+one.
+
+Recovery reads the full artifact, verifies the last pushed hash,
+HEAD/upstream/status/index, A04 record, capability profile and its four
+evidence categories, dynamic exclusions, prior gate evidence and the first
+unclosed packet. Residuals remain OPEN until their named observable closure
+gate. Recovery never uses chat memory alone.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-A04-E01 | A01..A04; D01..D22 within their exact stages | `not-created`; artifact-only next | R2 push verified; A04 exact user text/time/anchor recorded; source diff 0; authorization deep/mechanical gates in progress | none within authorization append; inherited RES-01A/03/04/05/06A/07/08/09/10/10A remain OPEN under their named closure gates | MRG1-S09 | approved / persistence gate next / source still paused |
+
+### 29.5 MRG1-A04 pre-stage gate PASS
+
+The exact authorization append passed independent review on its final
+pre-evidence bytes.
+
+Deep `gpt-5.6-sol / max` result:
+
+```text
+blocker:  0
+critical: 0
+major:    0
+minor:    0
+decision: GO
+```
+
+Fast `gpt-5.6-terra / medium` result:
+
+```text
+branch/HEAD/upstream: codex/agent-stage3 / 8b220d4... / same
+ahead/behind:         0 / 0
+tracked diff:         artifact only
+cached/index:         empty
+source diff:          0
+dynamic exclusions:  exact five / all anchored matches
+
+HEAD artifact:        240952 bytes
+HEAD SHA-256:         e80ac502f7c468205403ee85be57dae5a9a988ac3d20267b400f10cb5e494023
+candidate artifact:   251209 bytes
+candidate SHA-256:    a230fd23563eab6e7327dd5d6d90fce005da56fd8f116d28f1c887cfc60c930b
+strict byte append:   PASS
+git diff --check:     PASS
+table schema:         PASS
+```
+
+The reviewers confirmed the exact A04 text/time/anchor/scope, non-expansion,
+authorization-commit-before-source condition, first-packet write isolation,
+S09 four-section recovery snapshot, capability profile/evidence categories,
+all observable recovery branches, stage/gate/breaker discipline and residual
+schema. No course-script content was read or touched.
+
+This evidence append remains artifact-only. Exact named staging of this
+artifact is authorized, followed by one cached-only mechanical gate. Source
+implementation remains paused until the resulting authorization commit is
+pushed and HEAD/upstream equality is verified.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-A04-E02 | A01..A04; D17..D22 active within R2 | `not-created`; exact artifact stage next | deep 0/0/0/0 GO; fast pre-stage PASS; exact A04 binding and source diff 0 | inherited RES-01A/03/04/05/06A/07/08/09/10/10A remain OPEN | MRG1-S09 | pre-stage GREEN / cached-only gate next / source paused |
