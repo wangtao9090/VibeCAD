@@ -6773,3 +6773,1674 @@ test(durable): freeze byte-exact v1 golden corpus
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MRG1-MR1-P01-E03 | A04 P01; §28.5 exact subject/allowlist | `not-created` | sol-max GO; terra-medium 7/7, Ruff/format, 31-path/hash/canonical/production-diff PASS | exact 33-path cache, two named force-adds, cached gate, commit/push remain | MRG1-S13 | all unstaged gates GREEN / controller staging next |
+
+### 35.4 MR1-P01 commit/push closure
+
+The controller staged exactly 33 paths:
+
+- this rolling artifact;
+- all 31 exact `tests/fixtures/durable_v1/` members;
+- `tests/test_durable_v1_corpus.py`.
+
+Only `model.FCStd` and `model.step` used exact `git add -f --`; no glob,
+directory add or broad force-add was used. The cached path set equalled the
+approved sorted set, every cached blob equalled its frozen worktree blob and
+`git diff --cached --check` passed. The cached focused gate repeated:
+
+```text
+pytest:       7 passed
+Ruff check:   PASS
+Ruff format:  PASS
+```
+
+Commit `2db503ab42e25a7f68d41c45b7151999fe53a027` with subject
+`test(durable): freeze byte-exact v1 golden corpus` was pushed immediately.
+HEAD and upstream both resolved to that commit and the index returned empty.
+
+The public GitHub Actions API after both `6e89162` and `2db503a` reported the
+Release workflow's total branch-run count still at 30, with run #34 for
+`2cfbbc4` as the newest entry. Neither new ordinary branch push created a
+Release run, confirming the CI parser repair and unchanged tag filter have
+stopped the repeated release-failure emails at their source.
+
+### 35.5 Additional untracked-document residual
+
+After the cached P01 gate, status exposed another previously unobserved
+untracked path:
+
+```text
+CAD_Theory_Course_Parametric_Learning.md
+```
+
+It was outside the exact P01 allowlist and appeared concurrently with the
+campaign. The controller has not read, edited, staged or packaged it. It joins
+the existing excluded course-script set as residual `MRG1-ENV-R05` until
+provenance and intended commit scope are explicit; it cannot be folded into a
+product, fixture or orchestration commit opportunistically.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-MR1-P01-E04 | A04 P01; exact §28.5 allowlist/subject | `2db503ab42e25a7f68d41c45b7151999fe53a027`, pushed; HEAD/upstream equal | 33 exact cached paths; two exact force-adds; cached blob/whitespace gate; 7/7; Ruff/format PASS | none for P01; `MRG1-ENV-R04` and `MRG1-ENV-R05` remain globally excluded | MRG1-S13 | completed |
+
+## 36. C00B repair-design adjudication GO
+
+After the §35.1 candidate breaker, a bounded `gpt-5.6-sol / max`
+adjudication returned verdict **A**: the three major findings can be closed
+inside the existing A04 outcome, subject, write allowlist and one-real-GREEN
+budget without restricting development execution to the repository `.venv`.
+No repeated user approval is required.
+
+### 36.1 Exact daemon-interpreter selection design
+
+The selector must use one stable snapshot and classify a proven active FreeCAD
+host before considering development Python.
+
+1. Capture the active runtime prefix exactly once. Construct both host entries
+   directly from that captured prefix:
+
+   ```text
+   POSIX:  <prefix>/bin/freecadcmd
+           <prefix>/bin/FreeCAD
+   Windows:<prefix>/Library/bin/FreeCADCmd.exe
+           <prefix>/Library/bin/FreeCAD.exe
+   ```
+
+   It is forbidden to call `freecadcmd_path()` or `freecad_path()` because
+   those helpers reselect the active prefix.
+2. Capture `sys.prefix`, `sys.executable` and CPython's startup program path
+   from `ctypes.pythonapi.Py_GetProgramFullPath`. All must be absolute,
+   normalized and stable across the decision.
+3. If the startup/current executable has the same identity as exactly one
+   host derived from the captured active prefix, take the embedded managed
+   branch. Startup/current disagreement fails closed.
+4. Construct the known FreeCAD entries under the captured `sys.prefix` only
+   as a rejection set. A caller matching one of them but not an active host is
+   an inactive/unbound embedded host and fails closed.
+5. Development Python is admitted only when the normalized absolute spelling
+   of the C-level startup path, `sys.executable` and one exact platform prefix
+   entry are identical:
+
+   ```text
+   POSIX:  <sys.prefix>/bin/python
+   Windows:<sys.prefix>/python.exe
+           <sys.prefix>/Scripts/python.exe
+   ```
+
+   Generic same-file alias admission is forbidden. The entry and resolved
+   target must have stable identities, the target must be regular and
+   executable, and neither entry nor target may have the identity of any
+   derived FreeCAD host. This preserves CPython launched through its exact
+   prefix entry, including the repository venv, while intentionally rejecting
+   alternate spellings such as a generic Homebrew `python3` alias.
+6. The managed branch requires `runtime_ready()`, active-prefix equality at
+   every checkpoint and two exact
+   `capture_runtime_generation_evidence(captured_prefix)` results. Both
+   evidence values must be identical and bind the captured prefix, exact
+   Python entry and resolved target. Entry/target identities, regularity,
+   executability and target/host distinctness are rechecked immediately before
+   return.
+7. Every rejected branch raises before `Popen`. No installer, supervisor,
+   probe, receipt write or fallback launch is permitted. Existing argv suffix,
+   sanitized environment, cwd, startup-claim fd, `pass_fds`, stdio,
+   `close_fds` and `start_new_session` remain byte/semantically unchanged.
+
+Required unit coverage includes both host names, exact-prefix POSIX and mocked
+Windows entries, inactive/unbound host, mutable startup/sys/prefix snapshots,
+symlink and hardlink host aliases, A/B/B/A/A prefix drift, readiness failure,
+unequal evidence captures, entry/target swaps, missing/non-regular/
+non-executable targets and zero `Popen` calls for every rejection.
+
+### 36.2 Unconditional real-harness cleanup design
+
+The parent test must register an idempotent cleanup action before launching
+FreeCAD. After the child returns, it authenticates one exact
+`PublishedDaemonState` and captures a Darwin kernel token:
+
+```text
+(pid, birth_seconds, birth_microseconds, euid, pgid, sid)
+```
+
+The token is obtained from Darwin `libproc` `PROC_PIDTBSDINFO` plus
+`os.getsid(pid)`, not from process command text. It must bind the authenticated
+receipt PID and require `pid == pgid == sid`.
+
+An unconditional `finally` runs before semantic result assertions:
+
+1. attempt bounded authenticated `retire_local_kernel()` with the exact
+   expected daemon id;
+2. if retirement fails, signal only if a fresh
+   `PublishedDaemonState`/kernel token exactly matches the authenticated
+   snapshot and there is no replacement/conflict;
+3. send at most one exact process-group `SIGTERM`, poll under one deadline,
+   then re-authenticate and send at most one `SIGKILL`;
+4. any publication replacement/removal, PID/birth reuse, wrong uid/group/
+   session or other uncertainty forbids signaling and fails loudly;
+5. before semantic assertions escape, prove the original birth token is
+   absent, socket/publication are absent and the exact run root is absent or
+   safely empty.
+
+This fallback is a macOS test-harness contract only and makes no Windows
+cleanup claim. Residual `MRG1-C00B-R03`: Darwin has no atomic pidfd-style
+check-and-signal primitive, so an unavoidable check-to-signal TOCTOU remains.
+Exact publication plus birth/euid/pgid/sid rechecks minimize the risk; on any
+ambiguity the harness must not signal.
+
+Non-real harness tests must cover success, timeout, malformed/missing probe
+output, semantic assertion failure, retirement failure, TERM success, KILL
+escalation, publication replacement/removal, PID birth reuse, wrong euid/
+pgid/sid and proof that cleanup completes before semantic assertions.
+
+The frozen probe remains byte-identical. Implementation writes stay limited
+to:
+
+```text
+src/vibecad/daemon/bootstrap.py
+tests/test_p0b_acceptance.py
+tests/test_freecad_workbench_bootstrap.py
+```
+
+The controller artifact remains controller-owned. The exact eventual subject
+remains:
+
+```text
+fix(daemon): bind embedded bootstrap to managed Python
+```
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E06 | A04; §36 sol-max verdict A; no scope/compatibility approval reopening | prior P01 `2db503a` pushed; C00B `not-created` | two sol-max design paths reconciled; local permitted CPython C-path probe confirms repo venv exact spelling; Darwin libproc token probe returns exact 136-byte BSD info | `MRG1-C00B-R03` test-only Darwin signal TOCTOU; bounded fail-unsignaled policy | MRG1-S13 | design GREEN / sol-high repair implementation next |
+
+## 37. C00B I02 repaired candidate
+
+The resumed `gpt-5.6-sol / high` implementation stayed inside the three
+approved writable paths and did not launch real FreeCAD, a real daemon or an
+external `Popen`.
+
+### 37.1 Test-first selector evidence
+
+Before replacing the rejected selector, the exact attack selection produced
+five genuine failures, all because the candidate reached mocked `Popen`
+instead of raising:
+
+```text
+pytest tests/test_p0b_acceptance.py -k daemon_python_rejects
+  -> 5 failed, 24 deselected
+```
+
+The attacks covered mutable `sys.prefix`, A/B/B/A/A helper drift, symlink and
+hardlink host aliases, an unstable C startup path and unequal runtime
+generation evidence. The replacement uses CPython
+`Py_GetProgramFullPath()`, exact absolute normalized spellings, direct host
+construction from one active-prefix snapshot, two equal generation captures
+and final stability/identity checks. It does not use the zero-argument host
+helpers or generic same-file alias admission.
+
+### 37.2 Test-only cleanup guard
+
+The Darwin-only parent harness now pre-registers an idempotent cleanup guard
+before native launch and runs it from an unconditional `finally` before
+semantic assertions. Its authenticated token is
+`(pid, birth_sec, birth_usec, euid, pgid, sid)`, sourced from the 136-byte
+`PROC_PIDTBSDINFO` record plus `getsid`. Exact publication and token equality
+gate bounded expected-ID retirement and the single TERM/recheck/KILL
+fallback. Replacement, removal, PID reuse, wrong uid/group/session, a short
+kernel read or any ambiguity forbids signaling.
+
+The non-real matrix covers stable-token capture, ESRCH/race behavior,
+safe-root rejection, timeout and semantic-red ordering, idempotent retirement,
+TERM success, KILL escalation, publication replacement/removal, PID reuse and
+ambiguous-token no-signal behavior.
+
+### 37.3 I02 candidate gates and frozen hashes
+
+```text
+selector/C-API/attacks:  9 passed, 23 deselected
+full P0B:                32 passed
+non-real harness:        17 passed, 1 deselected
+Ruff check:              PASS
+Ruff format, writable:   3 files already formatted
+git diff --check:        PASS
+```
+
+```text
+17ed653fe4c98f714cc72d5aa1e898da0b953015cce7d68d35ee55a741ab6879  src/vibecad/daemon/bootstrap.py
+147eb0c888ca4644bc049869c2f65f6f20c5d3594147bbdfb050860e1b4d2d3f  tests/test_p0b_acceptance.py
+7cc1857092ef5ffff81a14b1f4a951d27b5128aa33f3f9cbd5bf5527c32a6407  tests/test_freecad_workbench_bootstrap.py
+fde0c459f96fc91721c7036a036fbe09c8cf8d768171f1f82e82113da1f3f3fd  tests/fixtures/freecad_workbench/bootstrap_probe.py
+```
+
+The frozen probe remains outside the write allowlist and byte-identical.
+Literal `ruff format --check` would reformat it, so its locked byte hash is an
+explicit frozen-evidence exception; no formatter touched it. The index is
+empty, HEAD/upstream remain `2db503a`, and no matching FreeCAD or
+`vibecad.daemon` process remains.
+
+The candidate is not yet approved. A distinct `gpt-5.6-sol / max`
+adversarial review must attack the exact-prefix development branch, managed
+host/evidence stability and the Darwin signal guard. Only a GO may advance to
+the `gpt-5.6-terra / medium` pre-real mechanical gate and the sole real
+FreeCAD GREEN.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E07 | A04; §36 exact repair design | `not-created` | sol-high RED 5; I02 selector 9, P0B 32, harness 17; Ruff/whitespace PASS | frozen-probe format exception; `MRG1-C00B-R03`; independent review and real gate remain | MRG1-S14 | repaired candidate frozen / sol-max review next |
+
+## 38. C00B I02 adversarial NO-GO
+
+A distinct `gpt-5.6-sol / max` reviewer reproduced the published focused
+GREEN gates but rejected I02. No real FreeCAD, daemon, external `Popen` or
+signal was used; attack seams were mocked and the frozen candidate hashes did
+not drift.
+
+### 38.1 Blockers
+
+1. The development branch returns after exact string comparison but before
+   any filesystem or host authentication. A missing exact-prefix Python
+   reached mocked `Popen` without consulting the active prefix. Therefore a
+   missing, directory/FIFO, non-executable, swapped or host-colliding
+   development entry is not fail-closed.
+2. The cleanup guard reports `clean=True/no_publication` when it has never
+   authenticated a publication or Darwin birth token. On timeout or malformed
+   output, a detached daemon may be racing publication; an absent/empty run
+   root cannot prove that unknown process absent.
+3. Managed host uniqueness is checked by spelling, not against every derived
+   host identity. Both active hosts sharing one inode reached mocked `Popen`,
+   as did a managed Python sharing identity with the unselected host.
+
+### 38.2 Major defects and missing regressions
+
+- Equal evidence can name a Python target different from the entry's actual
+  resolution, and readiness is checked only once.
+- Windows development admission implements only `<prefix>/python.exe`; the
+  required `<prefix>/Scripts/python.exe` entry is rejected.
+- The current tests omit development missing/non-regular/non-executable and
+  entry/target-swap attacks, Python collision with every host, mocked Windows
+  positives, evidence prefix/python/target mismatch, readiness drift,
+  malformed/missing probe output, an unobserved-publication cleanup failure,
+  a TERM-to-KILL generation change and a non-real end-to-end cleanup-before-
+  semantic-failure proof.
+- The named A/B/B/A/A regression rejects at its first checkpoint and does not
+  exercise the advertised later sequence.
+
+Corrected independent focused commands still returned selector `9/9`, harness
+`17/17`, Ruff PASS and whitespace PASS, proving that the existing matrix did
+not encode the full §36 contract.
+
+### 38.3 I03 correction boundary
+
+I03 remains inside the existing A04 subject and three writable paths. It must
+first turn every executable finding above into a genuine pre-correction RED,
+then:
+
+1. capture the active prefix and construct all active plus captured-prefix
+   host spellings before either development or managed admission;
+2. bind development entry and resolved target identities across two stable
+   observations, require a regular executable target and reject collision with
+   every derived host entry/target identity;
+3. admit both exact Windows development spellings while retaining exact
+   spelling equality and no generic alias admission;
+4. require exactly one authenticated active-host identity, Python
+   entry-to-target resolution equality, all-host distinctness and final
+   readiness/active/evidence stability before return;
+5. report unobserved publication as unproven/unclean with no signal, and add
+   the missing cleanup and probe-result ordering matrix.
+
+The sole real FreeCAD GREEN remains unused and forbidden until a new distinct
+sol-max reviewer returns GO.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E08 | A04; I02 independent adversarial review | `not-created` | sol-max NO-GO; mocked missing-entry, host-identity, target-binding and no-publication attacks executable | three blockers, three majors; `MRG1-C00B-R03`; real GREEN unused | MRG1-S14 | I02 rejected / sol-high I03 correction next |
+
+## 39. C00B I03 corrected candidate
+
+The resumed `gpt-5.6-sol / high` implementer converted every §38 executable
+finding into a pre-correction RED before changing the implementation. No
+slow/real FreeCAD, daemon, external `Popen`, OS signal, installation, network
+or repository mutation outside the three approved paths occurred.
+
+### 39.1 Selector RED-to-GREEN
+
+The first selector attack group produced `15 failed, 2 passed, 32
+deselected`, with no setup errors. The failures proved incorrect admission of
+missing/directory/FIFO/non-executable development entries, entry/target swaps,
+active and captured-prefix host collisions, non-unique active hosts, collision
+with an unselected host, forged target evidence, readiness drift, missing
+Windows `Scripts/python.exe` support and incomplete A/B/B/A/A checkpoint
+coverage. Additional isolated REDs proved forged equal prefix identity and
+active-versus-captured-prefix host collisions.
+
+I03 now:
+
+- captures the active prefix before either branch and directly constructs both
+  active and captured-prefix host spellings;
+- captures stable entry and resolved-target evidence for every present host;
+- admits only the exact POSIX development entry or either exact Windows
+  development entry, with regular/executable/stable target evidence and no
+  collision against any derived host identity;
+- requires exactly one active host identity, pairwise distinct host evidence,
+  managed Python entry-to-target resolution equality and Python separation
+  from every active/inactive host;
+- binds equal generation evidence to the live prefix identity, exact managed
+  Python entry and actual resolved target; and
+- repeats the active-prefix and readiness checkpoints after the live evidence
+  capture before returning.
+
+The current repository `.venv` was checked read-only and returned its exact
+`.venv/bin/python`. Both mocked Windows entries and both active FreeCAD host
+names pass their positive cases.
+
+### 39.2 Cleanup RED-to-GREEN
+
+Missing and malformed probe-output cases produced two genuine failures because
+an unobserved publication was certified as clean. I03 changes that state to
+`clean=False`, `publication_unproven`, with no retirement or signal and with
+`original_token_absent=False`. Existing TERM-to-KILL publication/token
+revalidation, single-payload parsing amid noise and cleanup-before-semantic
+ordering were independently exercised and remained correct.
+
+### 39.3 I03 gates and frozen hashes
+
+```text
+selector focused:   29 passed, 23 deselected
+full P0B:           52 passed
+non-real harness:   22 passed, 1 slow deselected
+combined non-real:  74 passed, 1 deselected
+Ruff check:         PASS
+Ruff format:        PASS
+git diff --check:   PASS
+```
+
+```text
+aee48e26d949a80e1bfc8e706ba92dfddcf9c9ba2e2715032f4dd1d7eb2a685c  src/vibecad/daemon/bootstrap.py
+55fa61280ee6ef5a6f9b8561d59657482c3ac4d5f314170e00443808974e9cc4  tests/test_p0b_acceptance.py
+0d88c9a9ee9e7d35cfc16967e97a483f24ce800730fe22a2d8258181913a724c  tests/test_freecad_workbench_bootstrap.py
+fde0c459f96fc91721c7036a036fbe09c8cf8d768171f1f82e82113da1f3f3fd  tests/fixtures/freecad_workbench/bootstrap_probe.py
+```
+
+HEAD/upstream remain `2db503a`, the index is empty and the frozen probe is
+unchanged. The candidate is not yet approved: a new independent
+`gpt-5.6-sol / max` review must validate the exact I03 hashes, including
+late-checkpoint mutation attacks, before any mechanical or real gate.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E09 | A04; §38.3 correction boundary | `not-created` | sol-high selector RED 15 plus isolated prefix/host REDs; I03 selector 29, P0B 52, harness 22, combined 74; Ruff/format/whitespace PASS | frozen-probe format exception; `MRG1-C00B-R03`; independent review and real GREEN remain | MRG1-S15 | corrected candidate frozen / new sol-max review next |
+
+## 40. C00B I03 adversarial NO-GO
+
+A fresh `gpt-5.6-sol / max` reviewer independently reproduced the 74 passing
+non-real tests, then found two fixable late-state defects. The exact I03
+hashes, HEAD/upstream and empty index remained stable; no repository write,
+real process or signal occurred.
+
+### 40.1 Final-live selector blocker
+
+Both branches capture filesystem identity before their final mutable
+callbacks. Deterministic callbacks that returned the expected prefix or
+readiness value after replacing a host entry/target, Python entry/target or
+the prefix generation reached mocked `Popen`:
+
+```text
+managed final-active/final-readiness mutations:  14 / 14 admitted
+development final-active/final-C-path mutations: 14 / 14 admitted
+```
+
+This is not an appeal to an unbounded pathname-to-exec race. The candidate
+itself performs state-observing callbacks after its claimed final live
+capture. I04 must perform all final active/readiness/C-path/sys snapshot calls
+first, then make one genuinely final host/Python/prefix filesystem recapture,
+and do only local comparisons before return.
+
+### 40.2 Post-authentication ambiguity major
+
+After a birth token has been authenticated, one short/incomplete Darwin
+identity read produces `ambiguous`; the current guard then retries during
+signal eligibility. A mocked short-read-then-success sequence sent `SIGTERM`
+and reported clean. Section 36 requires any identity uncertainty to forbid
+signaling and fail loudly.
+
+I04 must latch every post-authentication publication or token ambiguity for the
+cleanup attempt. Once latched, later successful reads cannot re-enable TERM or
+KILL. Exact expected-ID retirement may still be attempted; proof of the
+original token's absence may still yield clean, but no fallback signal is
+permitted after ambiguity.
+
+Current regressions cover readiness `True -> False` and persistent token
+failure, but not callback-side file mutation or one-time ambiguity followed by
+success. Those attacks must be RED before I04.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E10 | A04; I03 fresh independent review | `not-created` | sol-max NO-GO; 28/28 late callback mutations admitted; one-time short read re-enabled TERM | final-live recapture blocker; ambiguity-latch major; `MRG1-C00B-R03`; real GREEN unused | MRG1-S15 | I03 rejected / bounded I04 correction next |
+
+## 41. C00B I04 final-live correction candidate
+
+The `gpt-5.6-sol / high` implementer first reproduced the exact §40 failures:
+
+```text
+late callback selector RED:  28 failed, 52 deselected
+  development:               14 / 14 reached mocked Popen
+  managed:                   14 / 14 reached mocked Popen
+transient ambiguity RED:     2 failed, 23 deselected
+  token short read:          mocked TERM sent
+  publication ambiguity:     mocked TERM sent
+```
+
+No real `Popen` or signal was involved.
+
+### 41.1 Corrected final ordering
+
+Development now performs final active-prefix, C startup-path and
+`sys.executable`/`sys.prefix` snapshots before recapturing every derived host,
+the admitted Python entry/target and the captured-prefix identity. Managed
+selection completes its second generation evidence, final active-prefix,
+final readiness and final C/sys snapshots before recapturing every host,
+managed Python and active-prefix identity. After those recaptures, both
+branches only compare local immutable values and return; no active selector,
+readiness or C-path callback remains after the final filesystem evidence.
+
+The generic interval between the final filesystem read and pathname-based
+`Popen` cannot be made atomic in this patch, but I04 no longer inserts its own
+mutable callback into that interval.
+
+### 41.2 Monotonic cleanup ambiguity
+
+The cleanup guard now latches post-authentication publication ambiguity,
+kernel-token read errors and generation conflict. Expected-ID retirement still
+runs, and exact absence proof may still establish clean state, but TERM/KILL
+eligibility can only transition from allowed to permanently forbidden.
+Successful later reads cannot clear the latch; repeated cleanup returns the
+cached outcome.
+
+### 41.3 I04 gates and frozen hashes
+
+```text
+selector focused:   57 passed, 23 deselected
+full P0B:           80 passed
+non-real harness:   25 passed, 1 slow deselected
+combined non-real:  105 passed, 1 deselected
+repo venv selector: exact .venv/bin/python
+Ruff check/format:  PASS
+git diff --check:   PASS
+```
+
+```text
+d6129e2431b262708a7662ecb27306e40878d3c0c2ba14a4135077ffc31ae63b  src/vibecad/daemon/bootstrap.py
+bb52f21bee4831e61588c9b489d56cc460f88f5d247b8a3a382e30773006a230  tests/test_p0b_acceptance.py
+17cab6ffab60d4a5b0daa9f620caaa46724e140b40041b46e71819bc3f9be1c3  tests/test_freecad_workbench_bootstrap.py
+fde0c459f96fc91721c7036a036fbe09c8cf8d768171f1f82e82113da1f3f3fd  tests/fixtures/freecad_workbench/bootstrap_probe.py
+```
+
+HEAD/upstream remain `2db503a`, the index is empty and the probe is unchanged.
+I04 is frozen for a third fresh `gpt-5.6-sol / max` adversarial review; it is
+not yet authorized for the mechanical or sole real gate.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E11 | A04; bounded §40 correction | `not-created` | sol-high RED 28+2; I04 selector 57, P0B 80, harness 25, combined 105; Ruff/format/whitespace PASS | generic final-read-to-Popen pathname TOCTOU; frozen probe exception; `MRG1-C00B-R03`; fresh review/real GREEN remain | MRG1-S16 | I04 frozen / third sol-max review next |
+
+## 42. C00B I04 independent GO
+
+The first AR03 dispatch was rejected by an automated tool-channel content
+classifier before producing any repository finding. It made no write or state
+change and is not a candidate verdict. The same `gpt-5.6-sol / max` reviewer
+then completed a benign local correctness/conformance QA packet and returned
+**GO** with no blocker or major defect.
+
+Independent evidence:
+
+```text
+selector focused:                  57 passed, 23 deselected
+known late-callback regressions:    28 / 28 pre-Popen rejection
+additional callback/resource grid: 63 / 63 pre-Popen rejection
+equal-evidence forgery grid:         8 / 8 pre-Popen rejection
+mocked cleanup harness:             25 passed, 1 deselected
+one-time ambiguity grid:             6 / 6 latched, no unexpected signal
+combined allowed unit gate:        104 passed, 2 deselected
+Ruff check/format:                  PASS
+git diff --check:                   PASS
+```
+
+The two combined exclusions were the slow real FreeCAD test and an existing
+Darwin P0B test that launches a real detached daemon; both were forbidden in
+the review packet. The reviewer independently confirmed:
+
+- both selector branches perform every active/readiness/C/sys callback before
+  the final live recapture and only local comparisons afterward;
+- exact `RuntimeGenerationEvidence` type and prefix/Python/target bindings;
+- exact spawn argv, environment, cwd, fd, stdio and session behavior;
+- monotonic cleanup ambiguity across observation, proof, signal eligibility
+  and TERM-to-KILL transitions;
+- exact final absence proof before semantic assertions; and
+- the 136-byte Darwin layout and command text's evidence-only status.
+
+The unavoidable final-filesystem-read-to-pathname-launch interval and
+`MRG1-C00B-R03` remain explicit residuals. They do not contain another
+candidate-created mutable callback seam.
+
+The I04 hashes remained exactly those in §41.3, HEAD/upstream remained
+`2db503a` and the index remained empty. AR03 authorizes the
+`gpt-5.6-terra / medium` mechanical pre-real gate and, if that gate is clean,
+the sole approved real FreeCAD GREEN.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E12 | A04; sol-max AR03 GO | `not-created` | selector 57; late 28/28; callback 63/63; evidence 8/8; cleanup 25 and ambiguity 6/6; allowed combined 104; Ruff/format/whitespace PASS | generic final-read-to-launch TOCTOU; `MRG1-C00B-R03`; frozen probe exception | MRG1-S16 | adversarial GO / terra-medium pre-real next |
+
+## 43. C00B mechanical pre-real PASS
+
+The `gpt-5.6-terra / medium` mechanical agent first matched HEAD/upstream,
+empty index and all five dispatch hashes. It paused when §42 did not repeat the
+literal selector `-k` expression; the controller supplied the exact reviewed
+command rather than permitting reconstruction by guess.
+
+The permitted no-cache/no-bytecode gates then passed exactly:
+
+```text
+selector focused:   57 passed, 23 deselected
+non-slow harness:   25 passed, 1 deselected
+combined non-real:  104 passed, 2 deselected
+Ruff check:         PASS
+Ruff format:        PASS
+tracked whitespace: PASS
+untracked whitespace: no errors; expected content-difference exit 1
+```
+
+The combined exclusions were again the sole slow real FreeCAD test and the
+existing detached-daemon P0B test. Before and after process snapshots found no
+FreeCAD or `vibecad.daemon` process. All five hashes, repository status,
+HEAD/upstream and the empty index remained unchanged. No real process, signal,
+network, stage, commit or push occurred.
+
+The candidate is mechanically authorized for exactly one real FreeCAD GREEN.
+The real-gate runner must verify the managed prefix, receipt, generation
+evidence and cold process state without launching anything, then issue one and
+only one invocation of
+`test_real_freecad_embedded_interpreter_bootstraps_and_retires_one_daemon`.
+An identity/environment breaker before that invocation does not consume the
+budget. Any test failure consumes the attempt and forbids an automatic retry.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E13 | A04; sol-max GO plus terra-medium mechanical gate | `not-created` | selector 57; harness 25; combined 104; Ruff/format/whitespace/hashes/process snapshots PASS | one real invocation remains; generic pathname and `MRG1-C00B-R03` residuals | MRG1-S16 | pre-real PASS / sole real GREEN next |
+
+## 44. C00B real-gate command-selection RED
+
+The `gpt-5.6-sol / max` real-gate runner completed the non-launching Phase A
+successfully:
+
+- selected canonical managed prefix
+  `/Users/wangtao/Library/Application Support/VibeCAD/runtime/mamba/envs/vibecad`;
+- matched the exact managed receipt and observed `runtime_ready() == true`;
+- matched two generation-evidence captures, including the prefix, Python
+  entry and resolved `python3.12` target identities;
+- verified the exact regular executable `bin/freecadcmd`;
+- matched all repository hashes, HEAD/upstream and empty index; and
+- observed no existing FreeCAD or `vibecad.daemon` process.
+
+The frozen packet then allowed one exact pytest invocation. It returned exit
+5 in 0.8914 seconds:
+
+```text
+1 deselected in 0.22s
+```
+
+No probe or parent evidence line was emitted. The test body, FreeCAD, daemon,
+handshake and cleanup guard never executed. Post-run snapshots found no
+matching process, publication, socket, run root or `vibecad-c00b-*`
+container. Repository hashes and status remained unchanged, and no signal was
+sent.
+
+The controller's read-only diagnosis is exact:
+
+```toml
+[tool.pytest.ini_options]
+addopts = "-ra -m 'not slow'"
+```
+
+The gate command omitted the explicit `-m slow` used by the repository's
+Darwin slow CI commands, so pytest deselected the explicitly addressed slow
+node during collection. This is a gate-command selection failure, not a
+product or candidate execution RED.
+
+The prior packet nevertheless defined the budget as one pytest invocation and
+forbade retry under any outcome. That invocation is therefore consumed under
+the recorded rule even though no real action occurred. A corrected command
+requires explicit renewed authority:
+
+```text
+VIBECAD_RUN_INTEGRATION=1
+VIBECAD_FREECAD_ENV=<same verified prefix>
+PYTHONPATH=src
+PYTHONDONTWRITEBYTECODE=1
+.venv/bin/python -B -m pytest -q -s -p no:cacheprovider -m slow \
+  tests/test_freecad_workbench_bootstrap.py::test_real_freecad_embedded_interpreter_bootstraps_and_retires_one_daemon
+```
+
+No source/test/probe correction is proposed. If approved, exactly one
+corrected invocation is authorized, with the same no-retry and authenticated
+cleanup rules.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E14 | A04 real-gate packet; invocation limit enforced | `not-created` | Phase A PASS; pytest exit 5 / one deselected; zero test body/process/signal/residue; root cause exact global `not slow` marker | corrected `-m slow` invocation requires renewed user authority; product real GREEN still unobserved | MRG1-S17 | command-selection RED / paused before retry |
+
+## 45. RG02 corrected real-gate authorization
+
+At `2026-07-27T02:54:56-07:00`, the user supplied the exact authorization:
+
+```text
+批准 MRG1-G1-C00B-RG02
+```
+
+RG02 supersedes only the exhausted invocation limit in §44. It authorizes
+exactly one corrected invocation using the same verified managed prefix and an
+explicit `-m slow` selector:
+
+```text
+VIBECAD_RUN_INTEGRATION=1
+VIBECAD_FREECAD_ENV=/Users/wangtao/Library/Application Support/VibeCAD/runtime/mamba/envs/vibecad
+PYTHONPATH=src
+PYTHONDONTWRITEBYTECODE=1
+.venv/bin/python -B -m pytest -q -s -p no:cacheprovider -m slow \
+  tests/test_freecad_workbench_bootstrap.py::test_real_freecad_embedded_interpreter_bootstraps_and_retires_one_daemon
+```
+
+The authorization does not permit a source/test/probe edit, installation,
+network access, a second corrected invocation, a detached-daemon P0B run,
+manual signaling, staging, commit or push. An identity/readiness/cold-state
+breaker before pytest does not consume RG02. Once pytest starts, any result
+consumes RG02 and forbids automatic retry. Only the harness's authenticated
+expected-ID cleanup and bounded fallback remain authorized.
+
+### 45.1 Current adapter and capability profile
+
+Selected adapter: Codex.
+
+```text
+approval: native-plan
+delegation: spawn-send-wait
+persistence: repo-artifact
+process: native-session-poll
+```
+
+Permitted capability evidence sources:
+
+- `live capability declarations`: `update_plan`, `spawn_agent`,
+  `followup_task`, `send_message`, `wait_agent`, controllable
+  `exec_command` sessions and `write_stdin` polling are declared live.
+- `observable behavior`: native-plan projection, agent spawn/follow-up/wait
+  and synchronous command execution have succeeded in this session; no
+  capability is inferred from repository content or approval records.
+- `environment identity`: Codex desktop session with the passively exposed
+  VibeCAD workspace and macOS host context.
+- `public configuration`: unrestricted filesystem permission profile,
+  approval policy `never`, and the declared collaboration/process tools; no
+  credentials, private memory or repository content were inspected as
+  capability evidence.
+
+The repo artifact remains authoritative; native planning is only a
+projection. RG02 uses `spawn-send-wait`, deep model routing
+(`gpt-5.6-sol / max` per the user's campaign routing), and the original
+controllable process session if pytest yields. Duplicate launch is a circuit
+breaker.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E15 | RG02; exact user wording above | `not-created` | anchor HEAD/upstream `2db503a`; index empty; five S17 hashes matched before dispatch | one corrected invocation; generic pathname and `MRG1-C00B-R03` residuals | MRG1-S17 | approved / RG02 dispatch next |
+
+## 46. RG02 real environment RED
+
+RG02 passed its non-consuming preflight against the exact canonical managed
+prefix, receipt, two equal generation-evidence captures, regular executable
+`freecadcmd`, cold process state, repository hashes and empty index. The
+corrected command then started exactly once with explicit `-m slow`:
+
+```text
+exit:          1
+exec wall:     17.4672 seconds
+pytest wall:   16.87 seconds
+result:        1 failed, 1 error
+invocations:   1 / 1
+```
+
+Both the body failure and teardown error were:
+
+```text
+_CleanupOutcome(
+  clean=False,
+  retire_attempted=False,
+  term_sent=False,
+  kill_sent=False,
+  detail="publication_unproven",
+)
+```
+
+No `VIBECAD_BOOTSTRAP_PROBE=` or `VIBECAD_BOOTSTRAP_PARENT=` line reached
+pytest output. The harness captured child stdout/stderr internally, then the
+unconditional cleanup assertion raised before those diagnostics or the parent
+evidence were printed. Therefore the observable evidence proves that no
+publication/birth token was authenticated, but does not distinguish a
+selector rejection, daemon spawn failure, child import failure or another
+pre-publication semantic error.
+
+The safety outcome was correct: no manual signal was sent, the harness sent
+neither TERM nor KILL, and post-run snapshots found no FreeCAD,
+`vibecad.daemon`, run root, receipt, socket or `vibecad-c00b-*` container.
+All five dispatch hashes, HEAD/upstream, empty index and workspace status
+remained unchanged.
+
+RG02 is consumed and this is an unexpected G3 environment gate red. Automatic
+implementation, another real run, staging, commit and push are blocked.
+Read-only static diagnosis is allowed; any code/test correction or renewed
+real-run budget requires a new approved packet.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E16 | RG02 consumed; gate circuit breaker | `not-created` | exact `-m slow` invocation exit 1; 1 failed + 1 error; publication unproven; zero signal/residue; hashes unchanged | `MRG1-C00B-R04`: original child diagnostic masked by cleanup assertion; product cause unclassified | MRG1-S18 | blocked |
+
+## 47. Recovery snapshot MRG1-S18
+
+### 47.1 Completed milestones
+
+- CI release workflow repair `6e89162` and MR1-P01 `2db503a` remain pushed;
+  HEAD/upstream are both `2db503ab42e25a7f68d41c45b7151999fe53a027`.
+- C00B I04 passed sol-max independent QA, terra-medium mechanical pre-real
+  gates and 105 local non-real tests at the frozen hashes recorded in §41.
+- RG01 was collection-only and superseded by explicit RG02.
+- RG02 ran the real test body once and ended in the §46 pre-publication RED.
+  No process, signal or filesystem residue remains.
+- Last verified artifact before this snapshot:
+  `2998afb701df24b5562508db15a7cfce4772b8eb8c4929fb98d6527f96d81065`.
+
+### 47.2 Ordered next packets
+
+1. `MRG1-G1-C00B-D01`: sol-max read-only static failure analysis. If exact
+   production cause is provable without a real run, produce a bounded I05
+   proposal; otherwise classify the remaining uncertainty.
+2. `MRG1-G1-C00B-D02`: sol-max read-only harness-observability review. Define
+   the minimum change that preserves unconditional cleanup while always
+   emitting captured child stdout/stderr and cleanup evidence.
+3. Controller reconciliation:
+   - if D01 proves a source defect, present one combined source regression,
+     observability and renewed-real-budget approval;
+   - if D01 cannot prove cause, present an observability-first packet and no
+     product-source speculation;
+   - if either diagnosis requires real execution, stop before it.
+4. No implementation, real retry, stage, commit or push until the user
+   approves the reconciled post-RED packet.
+
+### 47.3 Approved decisions
+
+- A04 remains the architectural/product scope authority for FreeCAD-first
+  C00B and the three writable implementation/test paths.
+- RG02 exact authorization from §45 is fully consumed and grants no further
+  invocation.
+- The user-required routing remains: mechanical gates terra/medium; routine
+  coding sol/high; critical architecture, failure analysis and review
+  sol/max.
+- No existing approval authorizes source/test changes after E16 or another
+  real FreeCAD invocation.
+
+### 47.4 Execution discipline
+
+- Adapter/profile: Codex; `native-plan`, `spawn-send-wait`, `repo-artifact`,
+  `native-session-poll`; the repo artifact is authoritative.
+- D01/D02 are read-only sol-max packets. Allowed reads are the C00B source,
+  tests, frozen probe, directly imported helpers, exact pytest configuration
+  and static managed-runtime metadata needed for diagnosis.
+- Prohibited: repository writes outside this controller ledger append, real
+  FreeCAD/daemon/Popen, OS signal, installation, network, stage/commit/push,
+  or content access to `.workbuddy/` and excluded course documents.
+- Circuit breakers: any real launch, candidate/hash/HEAD/index drift, scope
+  expansion, or diagnosis that depends on unavailable child output.
+- Residuals: generic final-read-to-launch interval, `MRG1-C00B-R03` Darwin
+  check-to-signal interval, frozen-probe format exception, and
+  `MRG1-C00B-R04` masked child diagnostics.
+- Recovery checks: verify branch/HEAD/upstream, empty index, five candidate
+  hashes, absence of matching processes/residue and exact E16/S18 artifact
+  text before any future packet.
+
+## 48. Post-RG02 diagnosis and proposed A05
+
+Two independent `gpt-5.6-sol / max` read-only packets completed without
+changing any repository or runtime byte and without launching a process.
+
+### 48.1 D01 proven layout blocker
+
+The RG02 harness used the canonical macOS temp parent:
+
+```text
+/private/var/folders/qk/0_b6krc135j3lrz44krcddr40000gn/T
+```
+
+Its exact fixed-length derivation was:
+
+```text
+parent:                                      56 bytes
+.../vibecad-c00b-<8 chars>:                  78 bytes
+.../vibecad-home/data/daemon/kernel.sock:   115 bytes
+```
+
+`src/vibecad/daemon/state.py::bind_endpoint()` rejects an encoded endpoint
+path longer than 103 bytes. Therefore the RG02 layout cannot publish a daemon
+even if the selector, managed `Popen`, imports and application construction
+all succeed. This is a deterministic test-environment blocker, twelve bytes
+over the production Unix-socket bound.
+
+The 16.87-second pytest wall time closely matches the bootstrap's one
+15-second publication deadline: after spawning, bootstrap does not poll the
+child exit and continues waiting for publication. This makes a managed child
+exit at `bind_endpoint()` the highest-confidence causal chain. It is not
+forensic proof of RG02's first exception because the retained trace omitted
+child buffers and does not prove raw embedded C/sys spellings or `Popen`.
+
+Static managed-runtime metadata itself satisfies the selector's file
+predicates: `bin/freecadcmd`, `bin/FreeCAD` and the resolved managed Python
+target are regular, executable and inode-distinct; Phase A proved receipt,
+readiness and equal generation evidence. No production selector correction is
+justified by the current evidence.
+
+### 48.2 D02 observability GO
+
+The cleanup assertion currently has exception precedence over the action
+failure and is repeated by the finalizer, causing the body failure plus
+teardown error while suppressing captured streams and parent evidence.
+
+D02 found a single-file correction:
+
+1. capture an action exception and traceback instead of letting it escape;
+2. run non-asserting idempotent `cleanup_guard.cleanup()` unconditionally;
+3. emit exactly one flushed, sorted, bounded parent JSON record containing
+   child return code, timeout, parse error, stdout/stderr tails, cleanup
+   `clean/detail/retire/TERM/KILL` fields and bounded action error;
+4. only then raise the first body failure in transport/parse/return-code,
+   cleanup and semantic order;
+5. keep the early finalizer, but give the body ownership after evidence
+   emission so cached cleanup does not assert a second time; an earlier setup
+   failure leaves assertion ownership with the finalizer.
+
+Child text remains diagnostic only. Publication, retirement, token capture and
+signal eligibility continue to use authenticated state and kernel identity.
+
+### 48.3 Proposed MRG1-G1-C00B-A05
+
+Product outcome: make the real macOS FreeCAD gate capable of using the product
+socket contract and make any subsequent environment failure self-diagnosing,
+without changing production source or the frozen child probe.
+
+Write allowlist:
+
+```text
+tests/test_freecad_workbench_bootstrap.py
+```
+
+Implementation:
+
+- use canonical `/private/tmp` and prefix `vc-c00b-` for the Darwin-only
+  isolated root; the expected endpoint is 66 bytes;
+- before FreeCAD launch, compute the exact encoded endpoint and fail if it is
+  empty or exceeds 103 bytes;
+- implement the D02 cleanup/evidence/finalizer ownership flow with 2,000
+  character stream tails and deterministic JSON primitives;
+- add genuine non-real RED regressions for long-path admission, success,
+  timeout, missing/malformed output, action error plus cleanup red, cleanup-only
+  red, semantic red, single bounded evidence and finalizer ownership.
+
+Gates:
+
+1. sol-high test-first implementation, no real process;
+2. full non-slow harness and the previously allowed combined non-real gate;
+3. Ruff check/format, whitespace, exact hash/allowlist inspection;
+4. fresh sol-max review;
+5. terra-medium mechanical pre-real gate;
+6. if and only if all gates pass, one exact RG03 real FreeCAD invocation with
+   `-m slow`, the same verified managed prefix and no retry.
+
+Budgets and breakers:
+
+- one writable file and one eventual commit under the existing subject
+  `fix(daemon): bind embedded bootstrap to managed Python`;
+- frozen probe and production bootstrap remain byte-identical during A05;
+- unexpected non-real red, endpoint still over 103, evidence before cleanup,
+  child text entering authentication, duplicate cleanup assertion,
+  out-of-scope write or any pre-gate real process stops the packet;
+- RG03 is a new one-invocation budget. A pre-run identity/readiness/cold-state
+  breaker does not consume it; after pytest starts, any result consumes it and
+  forbids retry.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E17 | read-only D01/D02 under S18; A05 proposed, not approved | `not-created` | deterministic 115 > 103 veto; single-file observability GO; hashes/HEAD/index unchanged | actual RG02 first exception unproven; grandchild stderr remains suppressed; A05 and RG03 need user approval | MRG1-S18 | diagnosis completed / approval gate open |
+
+## 49. A05 authorization
+
+At `2026-07-27T04:07:47-07:00`, in direct response to the §48.3 approval
+request, the user supplied the exact approval identifier:
+
+```text
+MRG1-G1-C00B-A05
+```
+
+The controller interprets that direct approval response as authorization of
+the complete §48.3 packet at artifact hash
+`21d677c2dad54478695516325be6342d99a10f7b6c8d6928f06d8256042a42b2`:
+
+- one writable path, `tests/test_freecad_workbench_bootstrap.py`;
+- the short Darwin temp-root and exact endpoint-length preflight;
+- the cleanup-before-evidence-before-assertion observability flow;
+- test-first non-real implementation, independent sol-max review and
+  terra-medium mechanical pre-real gate; and
+- only after all gates pass, one no-retry RG03 real invocation.
+
+No production source, P0B regression, frozen probe, installation, network,
+stage, commit, push or real process is authorized during implementation.
+RG03 has its own branch condition and is not reachable until the named gates
+are green.
+
+The Codex capability profile from §45.1 remains current and was revalidated
+from the same four permitted evidence categories: `live capability
+declarations`, `observable behavior`, `environment identity` and `public
+configuration`. Native planning remains a projection; this artifact remains
+authoritative.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E18 | A05; exact user response above; §48.3 fully bound | `not-created` | S18 recovery anchor matched; HEAD/upstream `2db503a`; index empty; five hashes matched | actual RG02 first exception unproven; grandchild stderr suppressed; RG03 conditional on all gates | MRG1-S18 | approved / sol-high I05 next |
+
+## 50. A05 implementation candidate
+
+At `2026-07-27T04:32:39-07:00`, the reused sol-high coding agent completed the
+authorized single-file A05 implementation. The controller independently
+rechecked the candidate anchor before opening review:
+
+```text
+branch: codex/agent-stage3
+HEAD: 2db503ab42e25a7f68d41c45b7151999fe53a027
+upstream: 2db503ab42e25a7f68d41c45b7151999fe53a027
+index: empty
+artifact-before-this-entry:
+  5220010f58bc9271aac28e7cb08fa17223ebb83e106f238c9458f14724774e68
+bootstrap:
+  d6129e2431b262708a7662ecb27306e40878d3c0c2ba14a4135077ffc31ae63b
+P0B:
+  bb52f21bee4831e61588c9b489d56cc460f88f5d247b8a3a382e30773006a230
+harness-candidate:
+  a0da606e87554410a2c1f2859ba2d92fd0167c430cfdf87d135252adf9874e24
+probe:
+  fde0c459f96fc91721c7036a036fbe09c8cf8d768171f1f82e82113da1f3f3fd
+```
+
+The genuine non-real test-first transition was:
+
+- baseline: `25 passed, 1 deselected`;
+- RED: `11 failed, 25 passed, 1 deselected`, with all eleven new regressions
+  reaching not-yet-implemented helpers and no real process;
+- final focused: `13 passed, 26 deselected`;
+- final harness: `38 passed, 1 deselected`;
+- final combined non-real gate: `117 passed, 2 deselected`;
+- Ruff check and format check: pass.
+
+The candidate uses a canonical owner-private `/private/tmp/vc-c00b-<8>` root,
+preflights the exact endpoint encoding before launch, performs idempotent
+non-asserting cleanup before one bounded deterministic evidence record, then
+applies the authorized failure precedence and finalizer ownership. It does not
+change production source or the frozen probe. No real/slow test, FreeCAD,
+daemon, signal, network, install, stage, commit or push occurred.
+
+The candidate is now frozen for a fresh sol-max adversarial review and an
+independent terra-medium mechanical pre-real gate. RG03 remains unreachable
+until both produce GO against this exact hash.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E19 | approved A05 implemented by reused sol-high coding agent | `not-created` | genuine non-real RED; focused 13, harness 38, combined 117; Ruff pass; controller anchor/hash recheck | candidate adds 614 lines to a test harness; independent complexity/safety review required; RG02 first exception remains unproven | MRG1-S18 | candidate frozen / review and mechanical pre-real gates next |
+
+## 51. A05 gate RED and proposed A06
+
+At `2026-07-27T04:42:44-07:00`, both A05 pre-real branches completed against
+the exact §50 candidate. Neither branch ran RG03 or any real process.
+
+The fresh sol-max adversarial review returned NO-GO:
+
+1. cleanup `BaseException` is emitted and re-raised, but the finalizer calls
+   raw cleanup again; a reproduced
+   `cleanup,evidence,body_error,cleanup,teardown_error` sequence can repeat
+   retirement or TERM/KILL;
+2. setup failures after finalizer registration but before launch can produce a
+   body failure plus a misleading `publication_unproven` teardown failure;
+3. a timeout in the authenticated post-FreeCAD `ps` inspection overwrites the
+   already captured FreeCAD buffers and is misclassified as a FreeCAD timeout;
+4. the non-real endpoint regressions do not use the same production-shaped
+   `VIBECAD_HOME -> data_root -> daemon_run_root -> kernel.sock` composition as
+   the real harness; and
+5. evidence construction or emission failure is not itself lifecycle-managed.
+
+The independent mechanical route first attempted the authorized
+terra-medium child, but both root and delegated creation were rejected with
+`agent thread limit reached`. Per the recovery rules, an unrelated existing
+subagent executed the exact read-only packet as a recorded route fallback.
+Harness `38 passed, 1 deselected`, combined `117 passed, 2 deselected`, and
+Ruff check passed. Ruff format check then stopped on the frozen probe. The
+read-only formatter diff contains only four line-wrapping collapses and no
+semantic change.
+
+The following recovery anchor is now authoritative:
+
+```text
+Snapshot ID: MRG1-S19
+branch: codex/agent-stage3
+HEAD/upstream:
+  2db503ab42e25a7f68d41c45b7151999fe53a027
+index: empty
+artifact-before-this-section:
+  de633310d4d2d4a431cffa2cde7f27fe1ae98637ed6783728d129e4b2093ccf8
+bootstrap:
+  d6129e2431b262708a7662ecb27306e40878d3c0c2ba14a4135077ffc31ae63b
+P0B:
+  bb52f21bee4831e61588c9b489d56cc460f88f5d247b8a3a382e30773006a230
+harness:
+  a0da606e87554410a2c1f2859ba2d92fd0167c430cfdf87d135252adf9874e24
+probe:
+  fde0c459f96fc91721c7036a036fbe09c8cf8d768171f1f82e82113da1f3f3fd
+RG03 budget: unconsumed
+```
+
+### 51.1 Proposed MRG1-G1-C00B-A06
+
+Product outcome: make the real FreeCAD acceptance lifecycle at-most-once and
+truthful under cleanup, prelaunch and authenticated-inspection failures, while
+bringing the frozen probe through the already declared formatter gate.
+
+Write allowlist:
+
+```text
+tests/test_freecad_workbench_bootstrap.py
+tests/fixtures/freecad_workbench/bootstrap_probe.py
+```
+
+Implementation:
+
+- cache cleanup start, outcome and error across body and finalizer so raw
+  cleanup cannot run twice, including when it raises after retirement or a
+  signal attempt;
+- distinguish prelaunch setup failure from an attempted publication and keep
+  its finalizer cleanup non-asserting;
+- isolate FreeCAD timeout handling from authenticated `ps` inspection errors,
+  preserving the original child return code and buffers;
+- replace hand-built endpoint tests with the production-shaped path
+  composition and prove preflight occurs before any subprocess;
+- lifecycle-manage evidence construction/emission failure without losing
+  cleanup or creating a second teardown error;
+- add genuine non-real RED regressions for every item above; and
+- apply only Ruff's current semantic-neutral formatting to the probe.
+
+Gates:
+
+1. reused sol-high coding subagent, test-first, two-path maximum;
+2. focused and full non-slow harness, combined detached-test exclusion, Ruff
+   check/format, whitespace and exact hash/allowlist inspection;
+3. fresh sol-max adversarial review;
+4. independent mechanical subagent, preferring terra-medium and recording the
+   existing-thread fallback only if the platform still rejects creation; and
+5. if and only if every gate is GO, one exact no-retry RG03 real invocation.
+
+Breakers:
+
+- any production-source, P0B, artifact-external, course-document or
+  `.workbuddy/` write;
+- child-derived data entering authentication, publication, retirement or
+  signal eligibility;
+- any repeated raw cleanup, retirement or signal attempt;
+- loss or overwrite of the original FreeCAD buffers;
+- any real/slow process before both independent gates are GO; or
+- any anchor/hash/index drift not explained by this exact allowlist.
+
+Approval identifier:
+
+```text
+MRG1-G1-C00B-A06
+```
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E20 | sol-max A05 NO-GO plus mechanical formatter RED; A06 proposed, not approved | `not-created` | functional gates green; blocker and three majors reproduced; frozen probe has semantic-neutral Ruff diff; no real process | cleanup/evidence/prelaunch/inspection lifecycle requires correction; terra thread creation unavailable; RG03 unconsumed | MRG1-S19 | recovery approval gate open |
+
+## 52. A06 authorization
+
+At `2026-07-27T07:00:46-07:00`, in direct response to §51.1, the user
+supplied the exact authorization:
+
+```text
+批准 MRG1-G1-C00B-A06 接下来 你自主推进吧
+```
+
+This approves the complete §51.1 recovery packet at artifact hash
+`bef1f78b17a5d5e2d2ae8804168b00d074c7908d68c8a3802af9a8725dc17e95`
+and authorizes the controller to proceed autonomously within that packet. It
+does not expand the two-path write allowlist, permit production changes, waive
+either independent gate, or permit more than the single conditional RG03
+invocation.
+
+The current capability profile and Codex adapter selection are:
+
+```text
+approval: native-plan
+delegation: spawn-send-wait
+persistence: repo-artifact
+process: native-session-poll
+adapter: Codex
+actual delegation route: existing-thread followup-send-wait
+```
+
+Permitted evidence-source categories:
+
+- `live capability declarations`: `update_plan`, collaboration follow-up/wait,
+  agent creation, command execution and session polling are declared; the
+  current agent-creation operation is quota-limited;
+- `observable behavior`: native-plan projection, existing-agent follow-up and
+  wait, and command completion have succeeded; repeated new-agent creation
+  returned `agent thread limit reached`;
+- `environment identity`: Codex desktop in the declared VibeCAD workspace on
+  branch `codex/agent-stage3`;
+- `public configuration`: the current host declares unrestricted filesystem
+  access and no interactive approval requirement; no extra authority is
+  inferred.
+
+Environment residual:
+
+```text
+host/runtime identity: Codex desktop
+missing capability: creation of an additional agent thread
+observation evidence: repeated root and delegated spawn attempts returned
+  agent thread limit reached
+selected fallback or limitations: reuse existing agents with their already
+  selected sol-high or sol-max runtime; prefer terra-medium only if a fresh
+  thread becomes available
+impact: mechanical gates may use an independent higher-tier existing agent;
+  approval, allowlist, breakers and objective commands remain unchanged
+observable retest condition: a future spawn_agent call succeeds without the
+  thread-limit error
+```
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E21 | A06; exact user authorization above; §51.1 fully bound | `not-created` | S19 anchor and five hashes reverified; HEAD/upstream `2db503a`; index empty | new terra-medium thread unavailable; existing-agent route authorized by recovery discipline; RG03 conditional and unconsumed | MRG1-S19 | approved / sol-high implementation next |
+
+## 53. A06 implementation candidate
+
+At `2026-07-27T07:24:36-07:00`, the reused sol-high coding agent completed
+MRG1-G1-C00B-I06 within the exact two-path A06 allowlist. The controller
+independently reverified the following frozen candidate:
+
+```text
+branch: codex/agent-stage3
+HEAD/upstream:
+  2db503ab42e25a7f68d41c45b7151999fe53a027
+index: empty
+artifact-before-this-section:
+  b4663002043ea952584f39b598000731de460ee2c781d569172e878ba691b79a
+bootstrap:
+  d6129e2431b262708a7662ecb27306e40878d3c0c2ba14a4135077ffc31ae63b
+P0B:
+  bb52f21bee4831e61588c9b489d56cc460f88f5d247b8a3a382e30773006a230
+harness:
+  a9a40ce3062b3ac97d9de9ee3bd9d5dea08f64dd9473f43b33a66664db47d16f
+  2231 lines / 76136 bytes
+probe:
+  63a5bd891adc3cbc64837df211a8f67ace6ea9bace905c661bf6e13b9ba8c74d
+  163 lines / 5670 bytes
+```
+
+The genuine non-real transition was:
+
+- cleanup blocker RED: `1 failed`, proving a second raw cleanup after a
+  TERM-like side effect and `BaseException`;
+- complete focused RED: `6 failed, 3 passed, 36 deselected`, with the six
+  failures matching the reviewed defects rather than missing helpers or setup;
+- final focused GREEN: `10 passed, 36 deselected`;
+- full harness: `45 passed, 1 deselected`;
+- combined non-real: `124 passed, 2 deselected`;
+- four-path Ruff check and format check: pass.
+
+The candidate now caches cleanup start/outcome/error across body and finalizer,
+separates prelaunch state from publication attempts, preserves original
+FreeCAD buffers across authenticated inspection failure, binds endpoint
+preflight to the production-shaped runtime composition, and transfers body
+ownership safely when evidence build, stringify or emit fails. The probe
+change is Ruff-only; its preimage can be reconstructed byte-for-byte and the
+before/after Python AST is identical.
+
+No slow/real test, FreeCAD, daemon, real `Popen`, signal, network, install,
+stage, commit or push occurred. The exact candidate is frozen for fresh
+sol-max review and an independent mechanical pre-real gate. RG03 remains
+unconsumed and unreachable until both gates return GO.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E22 | approved A06 implemented by reused sol-high coding agent | `not-created` | genuine 1-fail blocker RED; focused 6/3 RED to 10 GREEN; harness 45; combined 124; Ruff pass; controller anchor/hash check | new test-harness complexity requires fresh adversarial review; RG02 first exception and existing race residuals remain | MRG1-S19 | candidate frozen / dual pre-real gates next |
+
+## 54. R06 compound-failure RED and A06 continuation
+
+The independent mechanical M06 gate passed against the exact §53 candidate:
+
+- harness: `45 passed, 1 deselected`;
+- combined non-real: `124 passed, 2 deselected`;
+- Ruff check/format, whitespace, compile/AST, five hashes, HEAD/upstream and
+  empty index: pass.
+
+The fresh sol-max R06 review returned NO-GO with zero blockers and one major.
+The first four A05 findings are closed, but an evidence build, stringify or
+emit failure is currently re-raised before the existing action, transport,
+parse, return-code or cleanup primary is selected. Three non-real compound
+diagnostics showed `EvidenceError` masking:
+
+1. an existing action primary;
+2. `_CleanupOutcome(clean=False, detail="signal_forbidden")`; and
+3. a cached cleanup `BaseException`.
+
+Raw cleanup still occurred exactly once, but the current precedence violates
+the approved requirement to lifecycle-manage evidence failure without losing
+the primary action or cleanup proof. This is inside the existing A06 decision,
+write allowlist and authority; it does not reopen approval.
+
+R06 also has an execution deviation. Its first focused command used `uv run`
+instead of the supplied direct virtual-environment command, refreshed the
+local editable environment, emitted a package-index retry, and created cache
+files that the reviewer reported removing. Repository hashes and index did not
+drift. None of the R06 command results are accepted as mechanical gate
+evidence; M06 is the independent mechanical record. A pre-existing ignored
+`bootstrap_probe.cpython-312.pyc` dated before this review remains outside the
+candidate and will not be staged.
+
+### MRG1-S20 recovery snapshot
+
+#### 1. Completed milestones
+
+- A06 I06 genuine RED/GREEN and M06 mechanical PASS are recorded above;
+- R06 closed four prior findings and reproduced the remaining compound-failure
+  precedence major;
+- HEAD/upstream remain
+  `2db503ab42e25a7f68d41c45b7151999fe53a027`, index is empty, and RG03 is
+  unconsumed.
+
+#### 2. Ordered next packets
+
+1. I06B, reused sol-high coding agent: add three genuine compound-failure
+   regressions and preserve the existing action/transport/parse/return-code/
+   cleanup primary, chaining evidence failure only as secondary.
+2. If focused and full non-real gates pass, freeze a new harness hash; probe
+   remains `63a5bd891adc3cbc64837df211a8f67ace6ea9bace905c661bf6e13b9ba8c74d`.
+3. Run fresh sol-max R06B review and independent mechanical M06B.
+4. Only if both are GO and all pre-run identity/readiness/cold-state breakers
+   pass, consume the one-invocation RG03 budget.
+5. GREEN branches to exact allowlist staging, cached gates, commit and push;
+   any RED branches to a new ledger entry with no retry.
+
+#### 3. Approved decisions
+
+- The exact user authorization in §52 keeps MRG1-G1-C00B-A06 active.
+- I06B does not expand authority: it writes only
+  `tests/test_freecad_workbench_bootstrap.py`.
+- Production bootstrap, P0B, probe, course documents and `.workbuddy/` remain
+  read-only; the same approval must not be requested again.
+
+#### 4. Execution discipline
+
+- profile: `native-plan`, existing-thread `spawn-send-wait`,
+  `repo-artifact`, `native-session-poll`, Codex adapter;
+- coding route: sol-high; review route: sol-max; mechanical route: independent
+  existing worker while fresh terra-medium creation is quota-blocked;
+- no slow/real, FreeCAD, daemon, real `Popen`, signal, network, install, stage,
+  commit or push before dual pre-real GO;
+- breakers: any repeated cleanup/retirement/signal, evidence masking a primary,
+  child data entering trust decisions, frozen-hash/index drift, out-of-scope
+  write, or any premature real process.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E23 | A06 continues unchanged after R06 compound-failure major | `not-created` | M06 PASS; R06 0 blocker/1 major; three compound cases reproduced; no RG03 | R06 used unauthorized `uv run` and local environment refresh; its command evidence excluded; ignored pre-existing pyc remains unstaged | MRG1-S20 | I06B authorized next |
+
+## 55. I06B compound-failure candidate
+
+At `2026-07-27T07:45:49-07:00`, the reused sol-high coding agent completed
+I06B within the unchanged A06 authority and one-file continuation allowlist.
+The controller independently reverified:
+
+```text
+branch: codex/agent-stage3
+HEAD/upstream:
+  2db503ab42e25a7f68d41c45b7151999fe53a027
+index: empty
+artifact-before-this-section:
+  ef16b33fd8db25f4bac4bc14f55bd2dd3d011f93e4f6d58de7f13601da623558
+bootstrap:
+  d6129e2431b262708a7662ecb27306e40878d3c0c2ba14a4135077ffc31ae63b
+P0B:
+  bb52f21bee4831e61588c9b489d56cc460f88f5d247b8a3a382e30773006a230
+harness:
+  72b21a7014e9479f92d75e0be4ac9db7f05a51b98ffb9e938962e1cdf40efdd4
+  2362 lines / 80744 bytes
+probe:
+  63a5bd891adc3cbc64837df211a8f67ace6ea9bace905c661bf6e13b9ba8c74d
+```
+
+The genuine compound RED covered action, clean-false cleanup proof and cleanup
+`BaseException`, each combined with evidence build, stringify and emit
+failure: `9 failed, 46 deselected`. The identical selection then passed
+`9 passed, 46 deselected`. Final evidence was:
+
+- lifecycle/order focused: `17 passed, 38 deselected`;
+- full harness: `54 passed, 1 deselected`;
+- combined non-real: `133 passed, 2 deselected`;
+- Ruff check/format and whitespace: pass.
+
+The candidate records evidence failure instead of immediately re-raising it,
+selects the existing action, timeout, parse, return-code or cleanup primary,
+and raises that primary with evidence failure as its explicit cause. Evidence
+failure is primary only when no earlier failure exists. Body ownership and
+the shared at-most-once cleanup cache remain intact.
+
+No slow/real test, FreeCAD, daemon, real `Popen`, signal, network, install,
+`uv`, stage, commit or push occurred. The harness and probe are frozen for
+fresh R06B and M06B. RG03 remains unconsumed.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E24 | A06 I06B compound precedence correction | `not-created` | genuine 9-case RED to GREEN; focused 17; harness 54; combined 133; Ruff pass; controller hash/anchor check | R06 command evidence remains excluded; fresh R06B/M06B required | MRG1-S20 | candidate frozen / final dual pre-real gates next |
+
+## 56. Final dual pre-real GO and standing non-product authority
+
+At `2026-07-27T07:52:41-07:00`, final R06B and M06B completed against the
+exact §55 candidate and artifact hash
+`6c44de51f68d028eba114d0dc61ea45e933659bd7c3492777520d1111b05f4fa`.
+
+R06B returned GO with zero blocker, major or minor findings. Its closure
+matrix confirmed:
+
+- shared cleanup state prevents raw cleanup/finalizer re-entry;
+- prelaunch primary errors cannot acquire a misleading publication teardown;
+- authenticated inspection failures preserve the FreeCAD result;
+- endpoint preflight uses the production-shaped runtime composition;
+- evidence-only failure remains the exact primary object; and
+- compound evidence failure is an explicit cause of the earlier
+  action/transport/parse/return-code/cleanup primary.
+
+Fresh valid R06B evidence was `9 passed, 46 deselected`, a six-closure
+selection of `19 passed, 36 deselected`, and an eight-family in-memory
+precedence/identity/traceback/finalizer diagnostic. An initial version of the
+in-memory diagnostic stopped locally with a Python `NameError` before any
+candidate assertion; the corrected diagnostic passed and caused no state
+change. No `uv`, network, install, bytecode or repository write occurred.
+
+M06B independently passed:
+
+- harness `54 passed, 1 deselected`;
+- combined non-real `133 passed, 2 deselected`;
+- Ruff check/format, whitespace and in-memory compile/AST: pass;
+- candidate hashes, HEAD/upstream and empty index: exact.
+
+The user then supplied this standing execution direction:
+
+```text
+接下来的工作你尽力推进  不涉及产品功能和形态变化 无需我审批
+```
+
+This direction permits autonomous test hardening, diagnostics, formatting,
+CI/gate work and ledger corrections that do not change product functionality,
+user-facing shape or an external contract, provided each action remains inside
+its recorded allowlist, gates and breakers. Product behavior, interaction
+shape, public contract changes, destructive actions and expanded real-run
+budgets still reopen approval. This standing direction does not weaken the
+one-shot RG03 rule.
+
+All §48.3/§51.1 branch conditions are now satisfied. RG03 is reachable for
+exactly one invocation:
+
+```text
+VIBECAD_RUN_INTEGRATION=1
+VIBECAD_FREECAD_ENV=/Users/wangtao/Library/Application Support/VibeCAD/runtime/mamba/envs/vibecad
+PYTHONPATH=src
+PYTHONDONTWRITEBYTECODE=1
+.venv/bin/python -B -m pytest -q -s -p no:cacheprovider -m slow \
+  tests/test_freecad_workbench_bootstrap.py::test_real_freecad_embedded_interpreter_bootstraps_and_retires_one_daemon
+```
+
+Before pytest starts, the sol-max runner must match the canonical managed
+prefix, receipt/readiness, two generation captures, regular executable
+FreeCAD host, repository hashes, empty index and cold process/residue state.
+A preflight breaker does not consume RG03. Once pytest starts, any result
+consumes RG03 and forbids retry. Only the harness's authenticated expected-ID
+cleanup and bounded fallback may signal; the runner must never signal
+manually.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E25 | A06 plus standing non-product execution direction; RG03 branch reached | `not-created` | R06B GO 0/0/0; M06B harness 54, combined 133, all mechanical checks PASS; hashes/index exact | existing generic final-read-to-launch and Darwin check-to-signal intervals; RG02 first exception unproven; one RG03 invocation remains | MRG1-S20 | final preflight / RG03 next |
+
+## 57. Non-consuming RG03 preflight correction
+
+At `2026-07-27T08:00:23-07:00`, the first RG03 Phase-A packet matched the
+repository anchor, five hashes, canonical managed prefix and exact managed
+receipt, then stopped before later checks because it required
+`paths.bound_external_prefix()` to equal the managed prefix. The observed
+value was `None`. Pytest invocation count remained zero; no FreeCAD, daemon,
+`Popen`, signal or state change occurred, so RG03 remains unconsumed.
+
+Read-only sol-max D03 proved that the packet condition conflated two exclusive
+runtime-selection branches:
+
+- an existing standard managed `paths.env_prefix()` is selected before any
+  external binding and uses its own `.vibecad_ready`; and
+- an external runtime requires the separate identity-pinned external receipt.
+
+The current canonical prefix is the standard managed `env_prefix`.
+`user_override_env()` is `None`, `active_runtime_prefix()` equals that
+prefix, the managed receipt is exact, receipt state is `CURRENT`, recovery is
+`READY`, two generation captures match, and Python plus `freecadcmd` targets
+are regular and inside the prefix. The default external receipt is an
+unrelated stale legacy binding whose recorded device no longer matches; it is
+correctly rejected and has no role in the managed branch. It remains
+untouched as an environment residual.
+
+The corrected Phase-A managed invariant is:
+
+```text
+no override
+canonical == env_prefix == active_runtime_prefix
+ready_sentinel == canonical/.vibecad_ready
+managed receipt == expected managed receipt
+receipt state CURRENT and runtime_ready true
+two generation captures equal and bind canonical managed Python
+managed Python target and freecadcmd are regular, executable as applicable,
+and resolve inside canonical
+```
+
+The real test subsequently switches to isolated `VIBECAD_HOME`, sets the
+explicit prefix override, captures fresh evidence, writes and verifies a new
+isolated external receipt, and only then invokes FreeCAD. Therefore default
+home external binding is neither necessary nor sufficient for this gate.
+
+This is a non-product gate-packet correction under the standing §56 direction;
+it changes no code, product behavior, candidate hash or real-run budget. The
+runner must repeat the complete non-consuming Phase A with this corrected
+branch, including the previously unreached cold process/residue checks. Only
+then may it start the unchanged one-shot RG03 command.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E26 | §56 standing non-product authority; Phase-A condition corrected | `not-created` | first Phase A stopped at invalid external-binding requirement; D03 GO; pytest count 0; hashes/index exact | stale rejected legacy external receipt remains untouched; no effect while managed env_prefix is selected | MRG1-S20 | RG03 unconsumed / corrected full Phase A next |
+
+## 58. RG03 real environment GREEN
+
+At `2026-07-27T08:04:22-07:00`, the corrected full Phase A passed and RG03
+started exactly once. The original controllable pytest session was retained
+until completion and was never relaunched.
+
+Exact command:
+
+```text
+VIBECAD_RUN_INTEGRATION=1
+VIBECAD_FREECAD_ENV=/Users/wangtao/Library/Application Support/VibeCAD/runtime/mamba/envs/vibecad
+PYTHONPATH=src
+PYTHONDONTWRITEBYTECODE=1
+.venv/bin/python -B -m pytest -q -s -p no:cacheprovider -m slow \
+  tests/test_freecad_workbench_bootstrap.py::test_real_freecad_embedded_interpreter_bootstraps_and_retires_one_daemon
+```
+
+Result:
+
+```text
+invocations: 1 / 1
+exit: 0
+pytest: 1 passed in 2.36s
+child return: 0
+probe status: ok
+timed out: false
+endpoint bytes: 66
+daemon process: <canonical managed python> -B -m vibecad.daemon
+cleanup: clean=true, detail=retired, retire_attempted=true
+TERM sent: false
+KILL sent: false
+```
+
+The bounded probe record proved the repository bootstrap and probe sources,
+empty preloaded VibeCAD modules, exact repository source insertion, managed
+FreeCAD `sys.executable`/prefix, cold absent run root, successful client close,
+published daemon ID/PID and the expected isolated run-root/socket. Parent
+evidence proved all runtime checks true, an authenticated daemon birth token,
+no action/inspection/parse/cleanup error, and exact authenticated retirement.
+
+Post-run Phase C found no FreeCAD, `freecadcmd` or `vibecad.daemon` process,
+no `/private/tmp/vc-c00b-*` residue, no socket/receipt/run-root residue, and no
+repository hash, HEAD/upstream, index or status drift. There was no retry,
+manual signal, `uv`, network, install, bytecode, repository write, stage,
+commit or push. RG03 is consumed successfully.
+
+### MRG1-S21 recovery snapshot
+
+#### 1. Completed milestones
+
+- C00B production selector and safety harness are complete at the five hashes
+  below;
+- R06B returned GO with zero findings, M06B passed all mechanical gates, and
+  RG03 passed one real managed FreeCAD invocation with authenticated
+  retirement and zero residue;
+- HEAD/upstream remain
+  `2db503ab42e25a7f68d41c45b7151999fe53a027`; index is empty before staging.
+
+#### 2. Ordered next packets
+
+1. Stage exactly artifact, bootstrap, P0B, harness and probe.
+2. Run the cached staged C00B non-real/Ruff/whitespace/hash gate.
+3. On PASS, commit once as
+   `fix(daemon): bind embedded bootstrap to managed Python` and push.
+4. Verify HEAD/upstream equality and that the Release workflow does not run
+   for this branch push.
+5. Bind commit/push evidence in the next G1-C00 preamble before any next
+   semantic staging.
+
+#### 3. Approved decisions
+
+- MRG1-G1-C00B-A06 and the standing §56 non-product execution direction
+  remain active for this exact closeout.
+- No source path beyond the five-path C00B stage allowlist is authorized.
+- The real-run budget is exhausted successfully; no further C00B real
+  invocation is permitted or needed for this commit.
+
+#### 4. Execution discipline
+
+- profile: `native-plan`, existing-thread `spawn-send-wait`,
+  `repo-artifact`, `native-session-poll`, Codex adapter;
+- exact staging only; never use broad add; excluded `.workbuddy/` and course
+  documents remain untouched and unstaged;
+- breakers: staged-path mismatch, cached gate red, source/test hash drift,
+  process residue, commit mismatch or push failure;
+- stale rejected default external receipt remains an untouched environment
+  residual and cannot enter this commit.
+
+Frozen pre-ledger hashes:
+
+```text
+artifact:
+  86028a5e2afff9feee566a14e19160e84e8bfc4dff90ab31e667172328870e8b
+bootstrap:
+  d6129e2431b262708a7662ecb27306e40878d3c0c2ba14a4135077ffc31ae63b
+P0B:
+  bb52f21bee4831e61588c9b489d56cc460f88f5d247b8a3a382e30773006a230
+harness:
+  72b21a7014e9479f92d75e0be4ac9db7f05a51b98ffb9e938962e1cdf40efdd4
+probe:
+  63a5bd891adc3cbc64837df211a8f67ace6ea9bace905c661bf6e13b9ba8c74d
+```
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E27 | A06 RG03 consumed successfully; exact C00B closeout authorized | pending exact commit/push | R06B GO; M06B PASS; RG03 exit 0 / 1 passed / authenticated retired / zero signal and residue | generic final-read-to-launch and Darwin check-to-signal intervals; RG02 first exception unproven; stale rejected legacy receipt untouched | MRG1-S21 | real GREEN / exact stage and cached gate next |
+
+## 59. Staged-gate process-filter correction
+
+At `2026-07-27T08:09:06-07:00`, SG01 proved the exact five-path stage, no
+unstaged delta on those paths, staged-blob/worktree/frozen hash equality,
+cached harness `54 passed, 1 deselected`, combined `133 passed, 2 deselected`,
+Ruff check/format, whitespace and in-memory compile/AST. It then stopped
+because its `ps | awk` residue filter matched the filter's own `zsh` and
+`awk` command lines.
+
+The two reported PIDs were inspection processes, not FreeCAD or
+`vibecad.daemon`. No candidate, index or product process changed, and RG03 was
+not rerun. This is a mechanical gate-packet self-match under the standing §56
+non-product authority.
+
+SG01B must first reverify the exact staged set and all five staged/worktree
+hashes. It may then replace only the ambiguous residue check with:
+
+```text
+pgrep -fal '[F]reeCAD|[f]reecadcmd|[v]ibecad[.]daemon'
+find /private/tmp -maxdepth 1 -type d -name 'vc-c00b-*' -print
+```
+
+The bracketed process pattern cannot match its own literal command line.
+Expected results are `pgrep` exit 1 with no matches and `find` exit 0 with no
+output. If the stage and source/test hashes remain exact, the already completed
+SG01 test/static evidence remains bound to the same bytes and does not need
+another execution. Any actual process/residue match, staged mismatch or
+unstaged candidate delta stops closeout.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E28 | §56 non-product gate correction; SG01 self-match | pending exact commit/push | staged blobs/hash PASS; harness 54; combined 133; Ruff/format/AST PASS; residue check ambiguous from two self-matches | no actual product residue proven; corrected self-excluding SG01B required | MRG1-S21 | artifact restage / SG01B next |
+
+## 60. SG01B staged closeout PASS
+
+SG01B reverified the exact five-path stage, no unstaged candidate delta and
+staged-blob/worktree/frozen hash equality. `git diff --cached --check` passed.
+The corrected residue commands returned:
+
+```text
+pgrep bracketed product/daemon pattern: exit 1, no output
+find /private/tmp/vc-c00b-*: exit 0, no output
+```
+
+SG01's cached `54 passed, 1 deselected`, `133 passed, 2 deselected`, Ruff
+check/format and compile/AST evidence remains bound to identical source/test
+bytes. RG03 was not rerun. The candidate is ready for the single prewritten
+commit:
+
+```text
+fix(daemon): bind embedded bootstrap to managed Python
+```
+
+The publish helper's full draft-PR workflow is not applicable to this
+approved closeout: local `gh` is not authenticated and no PR was authorized.
+The controller may use the repository's existing Git remote authentication
+for the approved commit and push only. No PR will be created.
+
+The final artifact hash and commit/push fact cannot be included in their own
+commit. Per §28.6 and S21, the next G1-C00 preamble must bind those values
+before any subsequent semantic staging.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E29 | A06/S21 exact closeout | pending exact commit/push | SG01B exact stage/hash/whitespace/zero-residue PASS; cached 54/133/Ruff/AST; RG03 GREEN | final commit/push fact deferred to next preamble; no PR authorized | MRG1-S21 | commit and push next |

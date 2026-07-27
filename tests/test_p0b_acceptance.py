@@ -7,12 +7,13 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -438,6 +439,1180 @@ class _BootstrapProcess:
     def wait(self, *, timeout: float | None = None) -> int:
         self.wait_timeouts.append(timeout)
         return 0
+
+
+def _replace_executable_generation(path: Path) -> None:
+    replacement = path.with_name(path.name + ".replacement")
+    replacement.write_bytes(b"replacement executable")
+    replacement.chmod(0o700)
+    os.replace(replacement, path)
+
+
+def _replace_directory_generation(path: Path) -> None:
+    parked = path.with_name(path.name + ".parked")
+    path.rename(parked)
+    shutil.copytree(parked, path, symlinks=True)
+
+
+def _symlink_executable(path: Path) -> Path:
+    target = path.with_name(path.name + ".target")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"target executable")
+    target.chmod(0o700)
+    path.symlink_to(target.name)
+    return target
+
+
+@pytest.mark.parametrize("host_name", ("freecadcmd", "FreeCAD"))
+def test_each_embedded_freecad_host_uses_managed_python_for_cold_daemon(
+    host_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+
+    managed_prefix = tmp_path / "managed"
+    managed_bin = managed_prefix / "bin"
+    managed_bin.mkdir(parents=True)
+    managed_python = managed_bin / "python"
+    freecadcmd = managed_bin / "freecadcmd"
+    freecad = managed_bin / "FreeCAD"
+    selected_host = managed_bin / host_name
+    development_prefix = tmp_path / "development"
+    development_python = development_prefix / "bin" / "python"
+    development_python.parent.mkdir(parents=True)
+    override_prefix = tmp_path / "unbound-override"
+    override_python = override_prefix / "bin" / "python"
+    override_freecadcmd = override_prefix / "bin" / "freecadcmd"
+    override_freecad = override_prefix / "bin" / "FreeCAD"
+    override_python.parent.mkdir(parents=True)
+    arbitrary_host = tmp_path / "arbitrary-host"
+    for executable in (
+        managed_python,
+        freecadcmd,
+        freecad,
+        development_python,
+        override_python,
+        override_freecadcmd,
+        override_freecad,
+        arbitrary_host,
+    ):
+        executable.write_bytes(b"test executable")
+        executable.chmod(0o700)
+    managed_evidence = status.capture_runtime_generation_evidence(managed_prefix)
+    ready = True
+    selected_prefix = managed_prefix
+    captures: list[Path] = []
+    popen_calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def capture(prefix: Path) -> status.RuntimeGenerationEvidence:
+        captures.append(prefix)
+        return managed_evidence
+
+    def popen(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        popen_calls.append((argv, kwargs))
+        return SimpleNamespace(pid=8_001 + len(popen_calls))
+
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: selected_prefix)
+    monkeypatch.setattr(
+        paths,
+        "freecadcmd_path",
+        lambda: selected_prefix / "bin" / "freecadcmd",
+    )
+    monkeypatch.setattr(
+        paths,
+        "freecad_path",
+        lambda: selected_prefix / "bin" / "FreeCAD",
+    )
+    monkeypatch.setattr(status, "runtime_ready", lambda: ready)
+    monkeypatch.setattr(status, "capture_runtime_generation_evidence", capture)
+    monkeypatch.setattr(daemon_bootstrap.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: daemon_bootstrap.sys.executable,
+    )
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(managed_prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(selected_host))
+
+    daemon_bootstrap._spawn_daemon(startup_lock_fd=73)  # noqa: SLF001
+
+    assert popen_calls[0][0] == [
+        str(managed_python),
+        "-B",
+        "-m",
+        "vibecad.daemon",
+    ]
+    embedded_kwargs = popen_calls[0][1]
+    assert embedded_kwargs["stdin"] is subprocess.DEVNULL
+    assert embedded_kwargs["stdout"] is subprocess.DEVNULL
+    assert embedded_kwargs["stderr"] is subprocess.DEVNULL
+    assert embedded_kwargs["close_fds"] is True
+    assert embedded_kwargs["start_new_session"] is True
+    assert embedded_kwargs["cwd"] == str(Path(daemon_bootstrap.__file__).resolve().parents[2])
+    assert embedded_kwargs["pass_fds"] == (73,)
+    embedded_environment = embedded_kwargs["env"]
+    assert type(embedded_environment) is dict
+    assert embedded_environment[status.RUNTIME_MAINTENANCE_CLAIM_FD_ENV] == "73"
+    assert embedded_environment["PYTHONNOUSERSITE"] == "1"
+    assert embedded_environment["PYTHONUNBUFFERED"] == "1"
+    assert "PYTHONPATH" not in embedded_environment
+    assert set(embedded_environment) <= (
+        daemon_bootstrap._SAFE_ENVIRONMENT_NAMES  # noqa: SLF001
+        | {
+            "PYTHONNOUSERSITE",
+            "PYTHONUNBUFFERED",
+            status.RUNTIME_MAINTENANCE_CLAIM_FD_ENV,
+        }
+    )
+    assert captures == [managed_prefix, managed_prefix]
+
+    ready = False
+    with pytest.raises((OSError, ValueError)):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=74)  # noqa: SLF001
+    assert len(popen_calls) == 1
+
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(development_prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(development_python))
+    daemon_bootstrap._spawn_daemon(startup_lock_fd=75)  # noqa: SLF001
+    assert popen_calls[1][0] == [
+        str(development_python),
+        "-B",
+        "-m",
+        "vibecad.daemon",
+    ]
+    development_kwargs = popen_calls[1][1]
+    assert {
+        name: development_kwargs[name]
+        for name in (
+            "stdin",
+            "stdout",
+            "stderr",
+            "close_fds",
+            "start_new_session",
+            "cwd",
+            "pass_fds",
+        )
+    } == {
+        **{
+            name: embedded_kwargs[name]
+            for name in (
+                "stdin",
+                "stdout",
+                "stderr",
+                "close_fds",
+                "start_new_session",
+                "cwd",
+            )
+        },
+        "pass_fds": (75,),
+    }
+    assert development_kwargs["env"] == {
+        **embedded_environment,
+        status.RUNTIME_MAINTENANCE_CLAIM_FD_ENV: "75",
+    }
+    assert captures == [managed_prefix, managed_prefix]
+
+    selected_prefix = override_prefix
+    ready = True
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(tmp_path / "arbitrary-prefix"))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(arbitrary_host))
+    with pytest.raises((OSError, ValueError)):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=76)  # noqa: SLF001
+    assert len(popen_calls) == 2
+    assert captures == [managed_prefix, managed_prefix]
+
+
+def test_daemon_python_rejects_mutable_sys_prefix_program_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+
+    trusted_prefix = tmp_path / "trusted"
+    trusted_python = trusted_prefix / "bin" / "python"
+    attacker_prefix = tmp_path / "attacker"
+    attacker_python = attacker_prefix / "bin" / "python"
+    active_prefix = tmp_path / "managed"
+    for executable in (
+        trusted_python,
+        attacker_python,
+        active_prefix / "bin" / "python",
+        active_prefix / "bin" / "freecadcmd",
+        active_prefix / "bin" / "FreeCAD",
+    ):
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b"test executable")
+        executable.chmod(0o700)
+    popen_calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(trusted_python),
+        raising=False,
+    )
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(attacker_python))
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(attacker_prefix))
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: active_prefix)
+    monkeypatch.setattr(status, "runtime_ready", lambda: False)
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    with pytest.raises(ValueError):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=81)  # noqa: SLF001
+    assert popen_calls == []
+
+
+def test_python_program_path_is_exact_for_current_development_interpreter() -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+
+    program = daemon_bootstrap._python_program_path()  # noqa: SLF001
+
+    assert program == sys.executable
+    assert Path(program).is_absolute()
+    assert os.path.normpath(program) == program
+
+
+def test_daemon_python_rejects_cross_generation_active_host(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+
+    prefix_a = tmp_path / "runtime-a"
+    prefix_b = tmp_path / "runtime-b"
+    for prefix in (prefix_a, prefix_b):
+        for name in ("python", "freecadcmd", "FreeCAD"):
+            executable = prefix / "bin" / name
+            executable.parent.mkdir(parents=True, exist_ok=True)
+            executable.write_bytes(b"test executable")
+            executable.chmod(0o700)
+    evidence_a = status.capture_runtime_generation_evidence(prefix_a)
+    active_values = iter((prefix_a, prefix_b, prefix_b, prefix_a, prefix_a))
+    host_helper_calls: list[str] = []
+    popen_calls: list[list[str]] = []
+
+    def active_prefix() -> Path:
+        return next(active_values, prefix_a)
+
+    def freecadcmd_path() -> Path:
+        host_helper_calls.append("freecadcmd")
+        return active_prefix() / "bin" / "freecadcmd"
+
+    def freecad_path() -> Path:
+        host_helper_calls.append("FreeCAD")
+        return active_prefix() / "bin" / "FreeCAD"
+
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(prefix_b / "bin" / "FreeCAD"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.sys,
+        "executable",
+        str(prefix_b / "bin" / "FreeCAD"),
+    )
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(prefix_b))
+    monkeypatch.setattr(paths, "active_runtime_prefix", active_prefix)
+    monkeypatch.setattr(paths, "freecadcmd_path", freecadcmd_path)
+    monkeypatch.setattr(paths, "freecad_path", freecad_path)
+    monkeypatch.setattr(status, "runtime_ready", lambda: True)
+    monkeypatch.setattr(
+        status,
+        "capture_runtime_generation_evidence",
+        lambda _prefix: evidence_a,
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    with pytest.raises(ValueError):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=82)  # noqa: SLF001
+    assert host_helper_calls == []
+    assert popen_calls == []
+
+
+def test_daemon_python_rejects_symlink_and_hardlink_host_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+
+    prefix = tmp_path / "managed"
+    python = prefix / "bin" / "python"
+    freecadcmd = prefix / "bin" / "freecadcmd"
+    freecad = prefix / "bin" / "FreeCAD"
+    for executable in (python, freecadcmd, freecad):
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b"test executable")
+        executable.chmod(0o700)
+    symlink_alias = tmp_path / "freecadcmd-symlink"
+    hardlink_alias = tmp_path / "freecadcmd-hardlink"
+    symlink_alias.symlink_to(freecadcmd)
+    os.link(freecadcmd, hardlink_alias)
+    evidence = status.capture_runtime_generation_evidence(prefix)
+    selected_alias = symlink_alias
+    popen_calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(selected_alias),
+        raising=False,
+    )
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(prefix))
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: prefix)
+    monkeypatch.setattr(paths, "freecadcmd_path", lambda: freecadcmd)
+    monkeypatch.setattr(paths, "freecad_path", lambda: freecad)
+    monkeypatch.setattr(status, "runtime_ready", lambda: True)
+    monkeypatch.setattr(
+        status,
+        "capture_runtime_generation_evidence",
+        lambda _prefix: evidence,
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    for alias in (symlink_alias, hardlink_alias):
+        selected_alias = alias
+        monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(alias))
+        with pytest.raises(ValueError):
+            daemon_bootstrap._spawn_daemon(startup_lock_fd=83)  # noqa: SLF001
+    assert popen_calls == []
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ("program_path", "generation_evidence", "sys_executable", "sys_prefix"),
+)
+def test_daemon_python_rejects_unstable_startup_and_generation(
+    attack: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+
+    prefix = tmp_path / "managed"
+    python = prefix / "bin" / "python"
+    freecadcmd = prefix / "bin" / "freecadcmd"
+    freecad = prefix / "bin" / "FreeCAD"
+    for executable in (python, freecadcmd, freecad):
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b"test executable")
+        executable.chmod(0o700)
+    evidence = status.capture_runtime_generation_evidence(prefix)
+    changed_evidence = replace(
+        evidence,
+        python_target_identity=(
+            *evidence.python_target_identity[:-1],
+            evidence.python_target_identity[-1] + 1,
+        ),
+    )
+    program_values = iter(
+        (
+            str(freecadcmd),
+            str(freecad if attack == "program_path" else freecadcmd),
+        )
+    )
+    evidence_values = iter(
+        (
+            evidence,
+            changed_evidence if attack == "generation_evidence" else evidence,
+        )
+    )
+    capture_calls = 0
+    popen_calls: list[list[str]] = []
+
+    def capture(_prefix: Path) -> status.RuntimeGenerationEvidence:
+        nonlocal capture_calls
+        capture_calls += 1
+        if capture_calls == 2 and attack == "sys_executable":
+            monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(freecad))
+        if capture_calls == 2 and attack == "sys_prefix":
+            monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(tmp_path / "changed"))
+        return next(evidence_values, evidence)
+
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: next(program_values, str(freecadcmd)),
+        raising=False,
+    )
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(freecadcmd))
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(prefix))
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: prefix)
+    monkeypatch.setattr(paths, "freecadcmd_path", lambda: freecadcmd)
+    monkeypatch.setattr(paths, "freecad_path", lambda: freecad)
+    monkeypatch.setattr(status, "runtime_ready", lambda: True)
+    monkeypatch.setattr(
+        status,
+        "capture_runtime_generation_evidence",
+        capture,
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    with pytest.raises(ValueError):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=84)  # noqa: SLF001
+    assert popen_calls == []
+
+
+@pytest.mark.parametrize(
+    "entry_kind",
+    ("missing", "directory", "fifo", "non_executable"),
+)
+def test_daemon_python_rejects_invalid_exact_development_entry(
+    entry_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+    from vibecad.runtime import platform as runtime_platform
+
+    development_prefix = tmp_path / "development"
+    development_python = development_prefix / "bin" / "python"
+    development_python.parent.mkdir(parents=True)
+    if entry_kind == "directory":
+        development_python.mkdir()
+    elif entry_kind == "fifo":
+        os.mkfifo(development_python)
+    elif entry_kind == "non_executable":
+        development_python.write_bytes(b"python")
+        development_python.chmod(0o600)
+    active_prefix = tmp_path / "managed"
+    popen_calls: list[list[str]] = []
+
+    monkeypatch.setattr(runtime_platform, "is_windows", lambda: False)
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: active_prefix)
+    monkeypatch.setattr(status, "runtime_ready", lambda: False)
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(development_prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(development_python))
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(development_python),
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    with pytest.raises(ValueError):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=85)  # noqa: SLF001
+    assert popen_calls == []
+
+
+def test_daemon_python_rejects_development_entry_target_swap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths
+    from vibecad.runtime import platform as runtime_platform
+
+    development_prefix = tmp_path / "development"
+    development_python = development_prefix / "bin" / "python"
+    first_target = development_prefix / "bin" / "python-first"
+    second_target = development_prefix / "bin" / "python-second"
+    development_python.parent.mkdir(parents=True)
+    for target in (first_target, second_target):
+        target.write_bytes(b"python")
+        target.chmod(0o700)
+    development_python.symlink_to(first_target.name)
+    active_prefix = tmp_path / "managed"
+    original_access = daemon_bootstrap.os.access
+    swapped = False
+    popen_calls: list[list[str]] = []
+
+    def access(path: object, mode: int) -> bool:
+        nonlocal swapped
+        if Path(os.fspath(path)) == first_target and not swapped:
+            swapped = True
+            development_python.unlink()
+            development_python.symlink_to(second_target.name)
+        return original_access(path, mode)
+
+    monkeypatch.setattr(runtime_platform, "is_windows", lambda: False)
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: active_prefix)
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(development_prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(development_python))
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(development_python),
+    )
+    monkeypatch.setattr(daemon_bootstrap.os, "access", access)
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    with pytest.raises(ValueError):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=86)  # noqa: SLF001
+    assert popen_calls == []
+
+
+@pytest.mark.parametrize(
+    ("host_scope", "host_name", "alias_kind"),
+    (
+        ("active", "freecadcmd", "symlink"),
+        ("active", "FreeCAD", "hardlink"),
+        ("captured", "freecadcmd", "hardlink"),
+        ("captured", "FreeCAD", "symlink"),
+    ),
+)
+def test_development_python_rejects_collision_with_every_derived_host(
+    host_scope: str,
+    host_name: str,
+    alias_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths
+    from vibecad.runtime import platform as runtime_platform
+
+    development_prefix = tmp_path / "development"
+    active_prefix = tmp_path / "managed"
+    selected_prefix = active_prefix if host_scope == "active" else development_prefix
+    host = selected_prefix / "bin" / host_name
+    host.parent.mkdir(parents=True)
+    host.write_bytes(b"host")
+    host.chmod(0o700)
+    development_python = development_prefix / "bin" / "python"
+    development_python.parent.mkdir(parents=True, exist_ok=True)
+    if alias_kind == "symlink":
+        development_python.symlink_to(host)
+    else:
+        os.link(host, development_python)
+    popen_calls: list[list[str]] = []
+
+    monkeypatch.setattr(runtime_platform, "is_windows", lambda: False)
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: active_prefix)
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(development_prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(development_python))
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(development_python),
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    with pytest.raises(ValueError):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=87)  # noqa: SLF001
+    assert popen_calls == []
+
+
+def test_managed_host_identity_must_be_unique(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+    from vibecad.runtime import platform as runtime_platform
+
+    prefix = tmp_path / "managed"
+    python = prefix / "bin" / "python"
+    freecadcmd = prefix / "bin" / "freecadcmd"
+    freecad = prefix / "bin" / "FreeCAD"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    python.chmod(0o700)
+    freecadcmd.write_bytes(b"host")
+    freecadcmd.chmod(0o700)
+    os.link(freecadcmd, freecad)
+    evidence = status.capture_runtime_generation_evidence(prefix)
+    popen_calls: list[list[str]] = []
+
+    monkeypatch.setattr(runtime_platform, "is_windows", lambda: False)
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: prefix)
+    monkeypatch.setattr(status, "runtime_ready", lambda: True)
+    monkeypatch.setattr(
+        status,
+        "capture_runtime_generation_evidence",
+        lambda _prefix: evidence,
+    )
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(freecadcmd))
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(freecadcmd),
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    with pytest.raises(ValueError):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=88)  # noqa: SLF001
+    assert popen_calls == []
+
+
+def test_managed_host_identity_must_be_distinct_from_captured_prefix_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+    from vibecad.runtime import platform as runtime_platform
+
+    active_prefix = tmp_path / "managed"
+    captured_prefix = tmp_path / "embedded"
+    python = active_prefix / "bin" / "python"
+    freecadcmd = active_prefix / "bin" / "freecadcmd"
+    freecad = active_prefix / "bin" / "FreeCAD"
+    captured_freecadcmd = captured_prefix / "bin" / "freecadcmd"
+    captured_freecad = captured_prefix / "bin" / "FreeCAD"
+    for executable in (python, freecadcmd, freecad, captured_freecad):
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(executable.name.encode())
+        executable.chmod(0o700)
+    captured_freecadcmd.parent.mkdir(parents=True, exist_ok=True)
+    os.link(freecadcmd, captured_freecadcmd)
+    evidence = status.capture_runtime_generation_evidence(active_prefix)
+    popen_calls: list[list[str]] = []
+
+    monkeypatch.setattr(runtime_platform, "is_windows", lambda: False)
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: active_prefix)
+    monkeypatch.setattr(status, "runtime_ready", lambda: True)
+    monkeypatch.setattr(
+        status,
+        "capture_runtime_generation_evidence",
+        lambda _prefix: evidence,
+    )
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(captured_prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(freecadcmd))
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(freecadcmd),
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    with pytest.raises(ValueError):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=95)  # noqa: SLF001
+    assert popen_calls == []
+
+
+@pytest.mark.parametrize("selected", (True, False))
+def test_managed_python_rejects_collision_with_selected_or_unselected_host(
+    selected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+    from vibecad.runtime import platform as runtime_platform
+
+    prefix = tmp_path / "managed"
+    python = prefix / "bin" / "python"
+    freecadcmd = prefix / "bin" / "freecadcmd"
+    freecad = prefix / "bin" / "FreeCAD"
+    python.parent.mkdir(parents=True)
+    selected_host = freecadcmd
+    collision_host = selected_host if selected else freecad
+    collision_host.write_bytes(b"collision")
+    collision_host.chmod(0o700)
+    other_host = freecad if selected else freecadcmd
+    other_host.write_bytes(b"other")
+    other_host.chmod(0o700)
+    os.link(collision_host, python)
+    evidence = status.capture_runtime_generation_evidence(prefix)
+    popen_calls: list[list[str]] = []
+
+    monkeypatch.setattr(runtime_platform, "is_windows", lambda: False)
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: prefix)
+    monkeypatch.setattr(status, "runtime_ready", lambda: True)
+    monkeypatch.setattr(
+        status,
+        "capture_runtime_generation_evidence",
+        lambda _prefix: evidence,
+    )
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(selected_host))
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(selected_host),
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    with pytest.raises(ValueError):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=89)  # noqa: SLF001
+    assert popen_calls == []
+
+
+def test_managed_python_rejects_forged_equal_target_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+    from vibecad.runtime import platform as runtime_platform
+
+    prefix = tmp_path / "managed"
+    python = prefix / "bin" / "python"
+    forged_target = prefix / "bin" / "forged-python"
+    freecadcmd = prefix / "bin" / "freecadcmd"
+    freecad = prefix / "bin" / "FreeCAD"
+    for executable in (python, forged_target, freecadcmd, freecad):
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(executable.name.encode())
+        executable.chmod(0o700)
+    evidence = status.capture_runtime_generation_evidence(prefix)
+    forged_info = forged_target.stat()
+    forged = replace(
+        evidence,
+        python_target=forged_target,
+        python_target_identity=(
+            forged_info.st_dev,
+            forged_info.st_ino,
+            stat.S_IFMT(forged_info.st_mode),
+            forged_info.st_size,
+            forged_info.st_mtime_ns,
+        ),
+    )
+    popen_calls: list[list[str]] = []
+
+    monkeypatch.setattr(runtime_platform, "is_windows", lambda: False)
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: prefix)
+    monkeypatch.setattr(status, "runtime_ready", lambda: True)
+    monkeypatch.setattr(
+        status,
+        "capture_runtime_generation_evidence",
+        lambda _prefix: forged,
+    )
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(freecadcmd))
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(freecadcmd),
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    with pytest.raises(ValueError):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=90)  # noqa: SLF001
+    assert popen_calls == []
+
+
+def test_managed_python_rejects_forged_equal_prefix_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+    from vibecad.runtime import platform as runtime_platform
+
+    prefix = tmp_path / "managed"
+    python = prefix / "bin" / "python"
+    freecadcmd = prefix / "bin" / "freecadcmd"
+    freecad = prefix / "bin" / "FreeCAD"
+    for executable in (python, freecadcmd, freecad):
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(executable.name.encode())
+        executable.chmod(0o700)
+    evidence = status.capture_runtime_generation_evidence(prefix)
+    forged = replace(
+        evidence,
+        prefix_identity=(
+            evidence.prefix_identity[0],
+            evidence.prefix_identity[1] + 1,
+        ),
+    )
+    popen_calls: list[list[str]] = []
+
+    monkeypatch.setattr(runtime_platform, "is_windows", lambda: False)
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: prefix)
+    monkeypatch.setattr(status, "runtime_ready", lambda: True)
+    monkeypatch.setattr(
+        status,
+        "capture_runtime_generation_evidence",
+        lambda _prefix: forged,
+    )
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(freecadcmd))
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(freecadcmd),
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    with pytest.raises(ValueError):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=94)  # noqa: SLF001
+    assert popen_calls == []
+
+
+def test_managed_python_rejects_readiness_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+    from vibecad.runtime import platform as runtime_platform
+
+    prefix = tmp_path / "managed"
+    python = prefix / "bin" / "python"
+    freecadcmd = prefix / "bin" / "freecadcmd"
+    freecad = prefix / "bin" / "FreeCAD"
+    for executable in (python, freecadcmd, freecad):
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(executable.name.encode())
+        executable.chmod(0o700)
+    evidence = status.capture_runtime_generation_evidence(prefix)
+    readiness = iter((True, False))
+    popen_calls: list[list[str]] = []
+
+    monkeypatch.setattr(runtime_platform, "is_windows", lambda: False)
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: prefix)
+    monkeypatch.setattr(status, "runtime_ready", lambda: next(readiness, False))
+    monkeypatch.setattr(
+        status,
+        "capture_runtime_generation_evidence",
+        lambda _prefix: evidence,
+    )
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(freecadcmd))
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(freecadcmd),
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    with pytest.raises(ValueError):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=91)  # noqa: SLF001
+    assert popen_calls == []
+
+
+@pytest.mark.parametrize("entry", ("python.exe", "Scripts/python.exe"))
+def test_windows_exact_development_python_entries_are_admitted(
+    entry: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths
+    from vibecad.runtime import platform as runtime_platform
+
+    prefix = tmp_path / "development"
+    python = prefix / Path(entry)
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    python.chmod(0o700)
+    active_prefix = tmp_path / "managed"
+    popen_calls: list[list[str]] = []
+
+    monkeypatch.setattr(runtime_platform, "is_windows", lambda: True)
+    monkeypatch.setattr(paths, "active_runtime_prefix", lambda: active_prefix)
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(python))
+    monkeypatch.setattr(daemon_bootstrap, "_python_program_path", lambda: str(python))
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    daemon_bootstrap._spawn_daemon(startup_lock_fd=92)  # noqa: SLF001
+    assert popen_calls == [[str(python), "-B", "-m", "vibecad.daemon"]]
+
+
+def test_daemon_python_checks_full_active_a_b_b_a_a_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+    from vibecad.runtime import platform as runtime_platform
+
+    prefix_a = tmp_path / "runtime-a"
+    prefix_b = tmp_path / "runtime-b"
+    for prefix in (prefix_a, prefix_b):
+        for name in ("python", "freecadcmd", "FreeCAD"):
+            executable = prefix / "bin" / name
+            executable.parent.mkdir(parents=True, exist_ok=True)
+            executable.write_bytes(executable.name.encode())
+            executable.chmod(0o700)
+    evidence = status.capture_runtime_generation_evidence(prefix_a)
+    values = iter((prefix_a, prefix_b, prefix_b, prefix_a, prefix_a))
+    active_calls: list[Path] = []
+    popen_calls: list[list[str]] = []
+
+    def active_prefix() -> Path:
+        value = next(values, prefix_a)
+        active_calls.append(value)
+        return value
+
+    monkeypatch.setattr(runtime_platform, "is_windows", lambda: False)
+    monkeypatch.setattr(paths, "active_runtime_prefix", active_prefix)
+    monkeypatch.setattr(status, "runtime_ready", lambda: True)
+    monkeypatch.setattr(
+        status,
+        "capture_runtime_generation_evidence",
+        lambda _prefix: evidence,
+    )
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(prefix_a))
+    monkeypatch.setattr(
+        daemon_bootstrap.sys,
+        "executable",
+        str(prefix_a / "bin" / "freecadcmd"),
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(prefix_a / "bin" / "freecadcmd"),
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    with pytest.raises(ValueError):
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=93)  # noqa: SLF001
+    assert active_calls == [prefix_a, prefix_b, prefix_b, prefix_a, prefix_a]
+    assert popen_calls == []
+
+
+@pytest.mark.parametrize("final_callback", ("active_prefix", "program_path"))
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "active_host_entry",
+        "active_host_target",
+        "captured_host_entry",
+        "captured_host_target",
+        "python_entry",
+        "python_target",
+        "prefix_inode",
+    ),
+)
+def test_development_final_callback_precedes_final_live_recapture(
+    final_callback: str,
+    mutation: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths
+    from vibecad.runtime import platform as runtime_platform
+
+    active_prefix = tmp_path / "active"
+    captured_prefix = tmp_path / "development"
+    active_host = active_prefix / "bin" / "freecadcmd"
+    active_host_target = _symlink_executable(active_host)
+    _symlink_executable(active_prefix / "bin" / "FreeCAD")
+    captured_host = captured_prefix / "bin" / "freecadcmd"
+    captured_host_target = _symlink_executable(captured_host)
+    _symlink_executable(captured_prefix / "bin" / "FreeCAD")
+    python = captured_prefix / "bin" / "python"
+    python_target = _symlink_executable(python)
+    mutated = False
+    active_calls = 0
+    program_calls = 0
+    popen_calls: list[list[str]] = []
+
+    def mutate_once() -> None:
+        nonlocal mutated
+        if mutated:
+            raise AssertionError("late mutation ran more than once")
+        actions = {
+            "active_host_entry": lambda: _replace_executable_generation(active_host),
+            "active_host_target": lambda: _replace_executable_generation(active_host_target),
+            "captured_host_entry": lambda: _replace_executable_generation(captured_host),
+            "captured_host_target": lambda: _replace_executable_generation(captured_host_target),
+            "python_entry": lambda: _replace_executable_generation(python),
+            "python_target": lambda: _replace_executable_generation(python_target),
+            "prefix_inode": lambda: _replace_directory_generation(captured_prefix),
+        }
+        actions[mutation]()
+        mutated = True
+
+    def active_runtime_prefix() -> Path:
+        nonlocal active_calls
+        active_calls += 1
+        if final_callback == "active_prefix" and active_calls == 2:
+            mutate_once()
+        return active_prefix
+
+    def program_path() -> str:
+        nonlocal program_calls
+        program_calls += 1
+        if final_callback == "program_path" and program_calls == 2:
+            mutate_once()
+        return str(python)
+
+    monkeypatch.setattr(runtime_platform, "is_windows", lambda: False)
+    monkeypatch.setattr(paths, "active_runtime_prefix", active_runtime_prefix)
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(captured_prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(python))
+    monkeypatch.setattr(daemon_bootstrap, "_python_program_path", program_path)
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    rejection: ValueError | None = None
+    try:
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=96)  # noqa: SLF001
+    except ValueError as error:
+        rejection = error
+
+    assert mutated
+    assert rejection is not None, popen_calls
+    assert popen_calls == []
+
+
+@pytest.mark.parametrize("final_callback", ("active_prefix", "readiness"))
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "active_host_entry",
+        "active_host_target",
+        "captured_host_entry",
+        "captured_host_target",
+        "python_entry",
+        "python_target",
+        "prefix_inode",
+    ),
+)
+def test_managed_final_callback_precedes_final_live_recapture(
+    final_callback: str,
+    mutation: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.bootstrap as daemon_bootstrap
+    from vibecad.runtime import paths, status
+    from vibecad.runtime import platform as runtime_platform
+
+    active_prefix = tmp_path / "managed"
+    captured_prefix = tmp_path / "embedded"
+    active_host = active_prefix / "bin" / "freecadcmd"
+    active_host_target = _symlink_executable(active_host)
+    _symlink_executable(active_prefix / "bin" / "FreeCAD")
+    captured_host = captured_prefix / "bin" / "freecadcmd"
+    captured_host_target = _symlink_executable(captured_host)
+    _symlink_executable(captured_prefix / "bin" / "FreeCAD")
+    python = active_prefix / "bin" / "python"
+    python_target = _symlink_executable(python)
+    evidence = status.capture_runtime_generation_evidence(active_prefix)
+    mutated = False
+    active_calls = 0
+    readiness_calls = 0
+    popen_calls: list[list[str]] = []
+
+    def mutate_once() -> None:
+        nonlocal mutated
+        if mutated:
+            raise AssertionError("late mutation ran more than once")
+        actions = {
+            "active_host_entry": lambda: _replace_executable_generation(active_host),
+            "active_host_target": lambda: _replace_executable_generation(active_host_target),
+            "captured_host_entry": lambda: _replace_executable_generation(captured_host),
+            "captured_host_target": lambda: _replace_executable_generation(captured_host_target),
+            "python_entry": lambda: _replace_executable_generation(python),
+            "python_target": lambda: _replace_executable_generation(python_target),
+            "prefix_inode": lambda: _replace_directory_generation(active_prefix),
+        }
+        actions[mutation]()
+        mutated = True
+
+    def active_runtime_prefix() -> Path:
+        nonlocal active_calls
+        active_calls += 1
+        if final_callback == "active_prefix" and active_calls == 5:
+            mutate_once()
+        return active_prefix
+
+    def runtime_ready() -> bool:
+        nonlocal readiness_calls
+        readiness_calls += 1
+        if final_callback == "readiness" and readiness_calls == 2:
+            mutate_once()
+        return True
+
+    monkeypatch.setattr(runtime_platform, "is_windows", lambda: False)
+    monkeypatch.setattr(paths, "active_runtime_prefix", active_runtime_prefix)
+    monkeypatch.setattr(status, "runtime_ready", runtime_ready)
+    monkeypatch.setattr(
+        status,
+        "capture_runtime_generation_evidence",
+        lambda _prefix: evidence,
+    )
+    monkeypatch.setattr(daemon_bootstrap.sys, "prefix", str(captured_prefix))
+    monkeypatch.setattr(daemon_bootstrap.sys, "executable", str(active_host))
+    monkeypatch.setattr(
+        daemon_bootstrap,
+        "_python_program_path",
+        lambda: str(active_host),
+    )
+    monkeypatch.setattr(
+        daemon_bootstrap.subprocess,
+        "Popen",
+        lambda argv, **_kwargs: popen_calls.append(argv),
+    )
+
+    rejection: ValueError | None = None
+    try:
+        daemon_bootstrap._spawn_daemon(startup_lock_fd=97)  # noqa: SLF001
+    except ValueError as error:
+        rejection = error
+
+    assert mutated
+    assert rejection is not None, popen_calls
+    assert popen_calls == []
 
 
 def test_public_local_agent_client_is_a_thin_exact_application_adapter() -> None:

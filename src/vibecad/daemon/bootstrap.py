@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import os
 import re
 import signal
@@ -11,7 +12,8 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from vibecad.daemon.client import LocalKernelClient
@@ -24,6 +26,7 @@ from vibecad.daemon.state import (
 )
 from vibecad.interaction.protocol_v2 import V2_HANDSHAKE_TIMEOUT_SECONDS
 from vibecad.runtime import paths, status
+from vibecad.runtime import platform as runtime_platform
 
 DAEMON_BOOTSTRAP_TIMEOUT_SECONDS = 15.0
 DAEMON_BOOTSTRAP_POLL_SECONDS = 0.02
@@ -58,12 +61,337 @@ def _daemon_environment() -> dict[str, str]:
     return environment
 
 
+def _python_program_path() -> str:
+    getter = ctypes.pythonapi.Py_GetProgramFullPath
+    getter.argtypes = ()
+    getter.restype = ctypes.c_wchar_p
+    value = getter()
+    if type(value) is not str or not value:
+        raise ValueError("Python startup program path is unavailable")
+    return value
+
+
+_FileIdentity = tuple[int, int, int, int, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _ExecutableEvidence:
+    entry: Path
+    entry_identity: _FileIdentity
+    entry_mode: int
+    target: Path
+    target_identity: _FileIdentity
+    target_mode: int
+
+
+def _exact_absolute_path(value: object, *, label: str) -> Path:
+    try:
+        spelling = os.fspath(value)
+    except TypeError as error:
+        raise ValueError(f"{label} is unavailable") from error
+    if type(spelling) is not str or not spelling or "\0" in spelling:
+        raise ValueError(f"{label} is unavailable")
+    candidate = Path(spelling)
+    if not candidate.is_absolute() or os.path.normpath(spelling) != spelling:
+        raise ValueError(f"{label} is not an exact absolute spelling")
+    return candidate
+
+
+def _file_identity(value: os.stat_result) -> _FileIdentity:
+    return (
+        value.st_dev,
+        value.st_ino,
+        stat.S_IFMT(value.st_mode),
+        value.st_size,
+        value.st_mtime_ns,
+    )
+
+
+def _capture_executable(
+    entry: Path,
+    *,
+    allow_missing: bool,
+) -> _ExecutableEvidence | None:
+    try:
+        entry_before = entry.lstat()
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        raise ValueError(f"executable entry is unavailable: {entry}") from None
+    except OSError as error:
+        raise ValueError(f"executable entry is unavailable: {entry}") from error
+    if not (stat.S_ISREG(entry_before.st_mode) or stat.S_ISLNK(entry_before.st_mode)):
+        raise ValueError(f"executable entry is not a regular file or symlink: {entry}")
+    try:
+        target = entry.resolve(strict=True)
+        target_before = target.lstat()
+        executable_before = os.access(target, os.X_OK)
+        entry_after = entry.lstat()
+        resolved_after = entry.resolve(strict=True)
+        target_after = target.lstat()
+        executable_after = os.access(target, os.X_OK)
+    except OSError as error:
+        raise ValueError(f"executable identity is unavailable: {entry}") from error
+    if (
+        not stat.S_ISREG(target_before.st_mode)
+        or not stat.S_ISREG(target_after.st_mode)
+        or not executable_before
+        or not executable_after
+        or resolved_after != target
+        or _file_identity(entry_before) != _file_identity(entry_after)
+        or stat.S_IMODE(entry_before.st_mode) != stat.S_IMODE(entry_after.st_mode)
+        or _file_identity(target_before) != _file_identity(target_after)
+        or stat.S_IMODE(target_before.st_mode) != stat.S_IMODE(target_after.st_mode)
+    ):
+        raise ValueError(f"executable identity is invalid or unstable: {entry}")
+    return _ExecutableEvidence(
+        entry=entry,
+        entry_identity=_file_identity(entry_before),
+        entry_mode=stat.S_IMODE(entry_before.st_mode),
+        target=target,
+        target_identity=_file_identity(target_before),
+        target_mode=stat.S_IMODE(target_before.st_mode),
+    )
+
+
+def _capture_directory_identity(directory: Path) -> _FileIdentity:
+    try:
+        before = directory.lstat()
+        resolved = directory.resolve(strict=True)
+        after = directory.lstat()
+    except OSError as error:
+        raise ValueError(f"runtime prefix is unavailable: {directory}") from error
+    getuid = getattr(os, "getuid", None)
+    if (
+        not stat.S_ISDIR(before.st_mode)
+        or directory != resolved
+        or _file_identity(before) != _file_identity(after)
+        or (hasattr(before, "st_uid") and getuid is not None and before.st_uid != getuid())
+    ):
+        raise ValueError(f"runtime prefix identity is invalid or unstable: {directory}")
+    return _file_identity(before)
+
+
+def _host_spellings(prefix: Path) -> tuple[Path, Path]:
+    if runtime_platform.is_windows():
+        return (
+            prefix / "Library" / "bin" / "FreeCADCmd.exe",
+            prefix / "Library" / "bin" / "FreeCAD.exe",
+        )
+    return prefix / "bin" / "freecadcmd", prefix / "bin" / "FreeCAD"
+
+
+def _development_python_spellings(prefix: Path) -> tuple[Path, ...]:
+    if runtime_platform.is_windows():
+        return prefix / "python.exe", prefix / "Scripts" / "python.exe"
+    return (prefix / "bin" / "python",)
+
+
+def _capture_derived_hosts(
+    host_paths: tuple[Path, ...],
+) -> dict[Path, _ExecutableEvidence | None]:
+    return {
+        host: _capture_executable(host, allow_missing=True) for host in dict.fromkeys(host_paths)
+    }
+
+
+def _inode_keys(evidence: _ExecutableEvidence) -> frozenset[tuple[int, int]]:
+    return frozenset(
+        {
+            evidence.entry_identity[:2],
+            evidence.target_identity[:2],
+        }
+    )
+
+
+def _executables_are_distinct(
+    evidence_values: Iterable[_ExecutableEvidence | None],
+) -> bool:
+    seen: set[tuple[int, int]] = set()
+    for value in evidence_values:
+        if value is None:
+            continue
+        current = _inode_keys(value)
+        if not current.isdisjoint(seen):
+            return False
+        seen.update(current)
+    return True
+
+
+def _daemon_python() -> str:
+    """Select only an exact stable development or managed-runtime Python."""
+
+    active_prefix = _exact_absolute_path(
+        paths.active_runtime_prefix(),
+        label="active runtime prefix",
+    )
+    program_spelling = _python_program_path()
+    executable_spelling = sys.executable
+    prefix_spelling = sys.prefix
+    if type(executable_spelling) is not str or type(prefix_spelling) is not str:
+        raise ValueError("Python startup metadata is unavailable")
+    program = _exact_absolute_path(
+        program_spelling,
+        label="Python startup program path",
+    )
+    executable = _exact_absolute_path(executable_spelling, label="sys.executable")
+    captured_prefix = _exact_absolute_path(prefix_spelling, label="sys.prefix")
+
+    active_hosts = _host_spellings(active_prefix)
+    captured_hosts = _host_spellings(captured_prefix)
+    all_host_paths = (*active_hosts, *captured_hosts)
+    first_host_evidence = _capture_derived_hosts(all_host_paths)
+
+    if program != executable:
+        raise ValueError("Python startup path and sys.executable disagree")
+
+    if program not in active_hosts:
+        if program in captured_hosts:
+            raise ValueError("inactive FreeCAD host cannot select a daemon Python")
+        development_pythons = _development_python_spellings(captured_prefix)
+        if program not in development_pythons:
+            raise ValueError("daemon caller is not an exact admitted interpreter")
+        first_prefix_identity = _capture_directory_identity(captured_prefix)
+        first_python = _capture_executable(program, allow_missing=False)
+        if first_python is None:  # pragma: no cover - allow_missing=False
+            raise ValueError("development Python is unavailable")
+        final_active_prefix = _exact_absolute_path(
+            paths.active_runtime_prefix(),
+            label="active runtime prefix",
+        )
+        final_program_spelling = _python_program_path()
+        final_executable_spelling = sys.executable
+        final_prefix_spelling = sys.prefix
+
+        second_host_evidence = _capture_derived_hosts(all_host_paths)
+        second_python = _capture_executable(program, allow_missing=False)
+        second_prefix_identity = _capture_directory_identity(captured_prefix)
+        if second_python is None:  # pragma: no cover - allow_missing=False
+            raise ValueError("development Python is unavailable")
+        host_inode_keys = {
+            key
+            for evidence in first_host_evidence.values()
+            if evidence is not None
+            for key in _inode_keys(evidence)
+        }
+        if (
+            first_python != second_python
+            or first_host_evidence != second_host_evidence
+            or first_prefix_identity != second_prefix_identity
+            or not _inode_keys(first_python).isdisjoint(host_inode_keys)
+            or final_active_prefix != active_prefix
+            or final_program_spelling != program_spelling
+            or type(final_executable_spelling) is not str
+            or final_executable_spelling != executable_spelling
+            or type(final_prefix_spelling) is not str
+            or final_prefix_spelling != prefix_spelling
+        ):
+            raise ValueError("development Python identity changed during selection")
+        return executable_spelling
+
+    selected_host = first_host_evidence[program]
+    active_host_evidence = tuple(first_host_evidence[host] for host in active_hosts)
+    if selected_host is None or any(evidence is None for evidence in active_host_evidence):
+        raise ValueError("active FreeCAD host identity is unavailable")
+    admitted_active_hosts = tuple(
+        evidence for evidence in active_host_evidence if evidence is not None
+    )
+    selected_inode_keys = _inode_keys(selected_host)
+    if sum(
+        not selected_inode_keys.isdisjoint(_inode_keys(evidence))
+        for evidence in admitted_active_hosts
+    ) != 1 or not _executables_are_distinct(first_host_evidence.values()):
+        raise ValueError("active FreeCAD host identity is not unique")
+
+    active_checkpoints = [active_prefix]
+    active_checkpoints.append(
+        _exact_absolute_path(
+            paths.active_runtime_prefix(),
+            label="active runtime prefix",
+        )
+    )
+    initially_ready = status.runtime_ready()
+    active_checkpoints.append(
+        _exact_absolute_path(
+            paths.active_runtime_prefix(),
+            label="active runtime prefix",
+        )
+    )
+    if not initially_ready:
+        raise ValueError("managed runtime is not ready for embedded daemon startup")
+
+    first_prefix_identity = _capture_directory_identity(active_prefix)
+    first = status.capture_runtime_generation_evidence(active_prefix)
+    active_checkpoints.append(
+        _exact_absolute_path(
+            paths.active_runtime_prefix(),
+            label="active runtime prefix",
+        )
+    )
+    second = status.capture_runtime_generation_evidence(active_prefix)
+    if (
+        type(first) is not status.RuntimeGenerationEvidence
+        or type(second) is not status.RuntimeGenerationEvidence
+    ):
+        raise ValueError("managed runtime evidence has an invalid type")
+    daemon_python_spelling = os.fspath(first.python)
+
+    expected_python = paths.env_python_for(active_prefix)
+    first_python = _capture_executable(expected_python, allow_missing=False)
+    if first_python is None:  # pragma: no cover - allow_missing=False
+        raise ValueError("managed runtime Python is unavailable")
+    active_checkpoints.append(
+        _exact_absolute_path(
+            paths.active_runtime_prefix(),
+            label="active runtime prefix",
+        )
+    )
+    finally_ready = status.runtime_ready()
+    final_program_spelling = _python_program_path()
+    final_executable_spelling = sys.executable
+    final_prefix_spelling = sys.prefix
+
+    second_host_evidence = _capture_derived_hosts(all_host_paths)
+    second_python = _capture_executable(expected_python, allow_missing=False)
+    second_prefix_identity = _capture_directory_identity(active_prefix)
+    if second_python is None:  # pragma: no cover - allow_missing=False
+        raise ValueError("managed runtime Python is unavailable")
+    host_inode_keys = {
+        key
+        for evidence in first_host_evidence.values()
+        if evidence is not None
+        for key in _inode_keys(evidence)
+    }
+    if (
+        first != second
+        or first_host_evidence != second_host_evidence
+        or any(checkpoint != active_prefix for checkpoint in active_checkpoints)
+        or not finally_ready
+        or first.prefix != active_prefix
+        or first.prefix_identity != first_prefix_identity[:2]
+        or first_prefix_identity != second_prefix_identity
+        or first.python != expected_python
+        or first.python_target != first_python.target
+        or first.python_entry_identity != first_python.entry_identity
+        or first.python_target_identity != first_python.target_identity
+        or first_python != second_python
+        or not _inode_keys(first_python).isdisjoint(host_inode_keys)
+        or final_program_spelling != program_spelling
+        or type(final_executable_spelling) is not str
+        or final_executable_spelling != executable_spelling
+        or type(final_prefix_spelling) is not str
+        or final_prefix_spelling != prefix_spelling
+    ):
+        raise ValueError("managed runtime evidence changed during daemon selection")
+    return daemon_python_spelling
+
+
 def _spawn_daemon(*, startup_lock_fd: int) -> subprocess.Popen[bytes]:
     package_root = Path(__file__).resolve().parents[2]
     environment = _daemon_environment()
     environment[status.RUNTIME_MAINTENANCE_CLAIM_FD_ENV] = str(startup_lock_fd)
     return subprocess.Popen(
-        [sys.executable, "-B", "-m", "vibecad.daemon"],
+        [_daemon_python(), "-B", "-m", "vibecad.daemon"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
