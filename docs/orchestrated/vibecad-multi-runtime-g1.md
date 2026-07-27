@@ -5829,3 +5829,947 @@ dynamic exclusions.
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MRG1-MR1-P00-E02 | A04; D21 MR1-prep in parallel with FreeCAD G1 | prior G1-C00P `50220446` pushed; P00 `not-created` | sol/max 0/0/0/0 GO; terra pre-stage PASS; corrected G00 12; links/tables/fences/diff/hashes PASS | DV2-RES-01..09 OPEN/DEFERRED under exact owners; inherited residuals remain OPEN | MRG1-S11 | pre-stage GREEN / exact staging then cached-only gate |
+
+## 32. MR1-P00 Closeout and G1-C00B Harness Recovery
+
+### 32.1 MR1-P00 cached gate, commit and push
+
+The exact five-path P00 index passed its independent cached-only
+`gpt-5.6-terra / medium` projection:
+
+```text
+cached paths:        exact five-path P00 allowlist
+extra cached paths:  0
+unstaged P00:        0
+cached/worktree:     byte-identical for all five
+
+staged artifact SHA-256:
+  07d89afc4be2d9af0e3761c45ebdbcc4aa019151c1f568b615461624fad1bc50
+artifact strict append: PASS
+canonical candidate hashes: exact four / PASS
+corrected MR1-G00:  12 passed
+cached diff-check:  PASS
+links/fragments:    40 / 2 / 0 missing
+tables/fences:      PASS
+source/test diff:   0
+dynamic exclusions: exact five / names only
+```
+
+The exact semantic commit was then created and pushed:
+
+```text
+commit: 2cfbbc416d789491c1c532653b4e460c53dfac60
+subject: docs(mr1): freeze durable-v2 migration contract
+push: origin/codex/agent-stage3
+post-push HEAD/upstream: equal
+ahead/behind: 0 / 0
+index: empty
+```
+
+This closes MR1-P00. Corpus, codec, inventory and every future activation
+residual remain OPEN under the owners and breakers recorded in Sections
+31.4–31.5.
+
+### 32.2 C00B first real-host setup breaker
+
+The authorized C00B packet verified the exact managed runtime receipt, prefix
+generation and executable identity, then invoked one bounded real child with
+both required paths:
+
+```text
+<verified-prefix>/bin/freecadcmd
+  -P <repo>/src
+  -P <repo>/tests/fixtures/freecad_workbench
+  <repo>/tests/fixtures/freecad_workbench/bootstrap_probe.py
+```
+
+The first child, pid `59431`, loaded and ran the exact probe script but
+resolved `vibecad` and `daemon/bootstrap.py` from the managed installation's
+site-packages rather than the current repository. It exited 1 with:
+
+```text
+RuntimeError: vibecad source identity mismatch
+```
+
+This happened before `LocalAgentClient.open()`. No daemon id, daemon pid,
+socket or run-root publication existed. The child was dead, `ps` and bounded
+daemon-name checks were empty, and the isolated run root/socket were absent.
+Therefore this was a real-host harness/source-precedence setup breaker, not
+the approved embedded daemon-launch semantic RED. It did not authorize a
+production correction.
+
+An independent `gpt-5.6-sol / max` audit found that this FreeCAD host's `-P`
+made the repository paths searchable but did not outrank managed
+site-packages. It approved `MRG1-C00B-HARNESS-CORR-01` within the two already
+named test paths:
+
+- derive the repository only from the exact resolved probe `__file__`;
+- verify the exact fixture and regular source identities;
+- fail if any `vibecad` module is already loaded; never delete/reload it;
+- put the deduplicated exact repo source at `sys.path[0]`, invalidate caches
+  and verify exact `vibecad.__file__` and bootstrap source identities;
+- preserve both `-P` arguments, bounded output and cleanup evidence.
+
+No global `PYTHONPATH`, sitecustomize, install, production or acceptance
+change was permitted.
+
+### 32.3 C00B second real-host setup breaker
+
+After the first narrow harness correction, one authorized re-characterization
+ran. Repository source identity succeeded:
+
+```text
+child pid:            60514
+return code:          1
+timed out:            false
+stderr:               empty
+bootstrap source:     exact <repo>/src/vibecad/daemon/bootstrap.py
+preloaded vibecad:    none
+cold run root:        absent
+error:
+  ValueError: runtime write directory is unavailable
+```
+
+The isolated home had been created with a `/tmp/...` spelling. On this macOS
+host `/tmp` is an alias for the canonical `/private/...` tree, and the
+identity-pinned runtime traversal correctly rejected the alias. The failure
+again occurred before a daemon id/pid/socket was published and before the
+characterized child command could be assessed. Child `60514` was dead; no
+daemon process, socket, run root or temporary root remained. Production
+remained byte-identical:
+
+```text
+src/vibecad/daemon/bootstrap.py
+  b1c9b3e37b0f3d1de7551b5c6921e21057f12f0d67b75d88b2dcbd60b4494eec
+tests/test_p0b_acceptance.py
+  b1d70fa8a064a8a993b49674bcd2cd595fb6bb9d98d670276bd1994e9d72f975
+```
+
+Harness candidate after the second stop:
+
+```text
+tests/fixtures/freecad_workbench/bootstrap_probe.py
+  fde0c459f96fc91721c7036a036fbe09c8cf8d768171f1f82e82113da1f3f3fd
+tests/test_freecad_workbench_bootstrap.py
+  adf960d4a788f50561e7ba796f608f625e51f5cac6889aeba6b43bc760d5743a
+focused non-real: 1 passed / 1 deselected
+Ruff: PASS
+diff-check: PASS
+index: empty
+```
+
+This second observable cause is distinct from source precedence and remains a
+setup breaker, not daemon semantic RED. No production branch or commit subject
+has been selected.
+
+### 32.4 MRG1-C00B-HARNESS-CORR-02 ruling
+
+The independent sol/max audit returned a bounded non-expansion ruling:
+MRG1-A04 may continue without a new user approval only under all of these
+conditions:
+
+1. correction bytes remain limited to the two already authorized new
+   test/harness paths plus this controller artifact;
+2. the parent creates the temporary root beneath a canonical resolved macOS
+   temporary parent, then requires exact path spelling equal to strict
+   resolution, current-user ownership, directory kind and owner-private mode;
+3. every `VIBECAD_HOME`, FreeCAD user root and child temp path is derived from
+   that one canonical pinned spelling; `/tmp/...` and `/private/...` are never
+   mixed;
+4. deterministic non-FreeCAD tests prove canonical-root admission before any
+   next real invocation;
+5. a sol/max review and terra/medium mechanical gate bind the artifact,
+   candidate hashes, both setup failures, zero-leak evidence and the exact
+   one-shot budget before execution;
+6. exactly one third real invocation is permitted. It is the last setup
+   recovery attempt under A04; no fourth invocation is allowed;
+7. if the third invocation reaches `LocalAgentClient.open()` and reproduces
+   the `[sys.executable, -B, -m, vibecad.daemon]` embedded-launch failure, that
+   is the first authorized semantic RED and may select the already approved
+   narrow production correction branch;
+8. any third setup/source/identity/process/cleanup failure, any unnamed path,
+   global environment/acceptance change or production edit before semantic
+   RED stops C00B for a new controller append and explicit user approval.
+
+This is not retry-until-green: neither prior child reached the behavior under
+characterization; each fail-closed cause is distinct and observable; candidate
+bytes and deterministic admission evidence must change before the only
+remaining attempt; the attempt budget is now explicit and finite. Runtime
+identity validation is not weakened or bypassed.
+
+The next implementation action may only add the canonical owner-private root
+helper/assertions in `tests/test_freecad_workbench_bootstrap.py` and run
+non-real tests/Ruff/diff. It must stop before real FreeCAD until the independent
+pre-real review and mechanical gate are GREEN.
+
+### 32.5 Recovery Snapshot MRG1-S12
+
+#### S12-1 — Completed milestones
+
+- G1-C00P and MR1-P00 are committed and pushed through `2cfbbc416`.
+- C00B produced two cleanly contained, pre-semantic real-host setup breakers:
+  import precedence, then macOS temporary-path aliasing.
+- MRG1-C00B-HARNESS-CORR-01 fixed only source selection. No production or
+  public behavior changed.
+- MR1-P01 continues independently in its exact fixture/test domain.
+
+#### S12-2 — Ordered next packets and branch conditions
+
+1. Apply only the canonical-root test correction and deterministic non-real
+   assertion; run focused non-real pytest, Ruff, diff, status and hashes.
+2. Independently review the exact artifact + two-test-path pre-real candidate
+   at sol/max, then mechanically gate it at terra/medium.
+3. If both are GREEN, run the one remaining real invocation and poll only its
+   original session.
+4. Direct real GREEN selects
+   `test(workbench): prove embedded daemon bootstrap` with production diff 0.
+   A genuine daemon-launch RED selects the already approved narrow
+   `fix(daemon): bind embedded bootstrap to managed Python` branch, which must
+   reach real GREEN and pass its regression/adversarial/mechanical gates.
+5. Any other result blocks C00B and consumes the final attempt. Preserve
+   evidence; do not delete the candidate or retry.
+6. MR1-P01 may independently proceed to review/gates/commit. The controller
+   serializes indexes and commits.
+
+#### S12-3 — Active decisions and authorization
+
+A01..A04 and D17..D22 remain active only in their exact stages.
+MRG1-C00B-HARNESS-CORR-02 changes no product claim, source allowlist,
+acceptance criterion, environment contract or commit budget. It grants only
+one pre-gated real setup recovery attempt. Second CAD, packaging/release and
+all other exclusions remain unchanged.
+
+#### S12-4 — Execution discipline
+
+Capability profile and four evidence categories remain those in S09/S11.
+Critical real-process boundary review uses sol/max; mechanical projection uses
+terra/medium. MRG1-GATE-CORR-01 still supplies `PYTHONPATH=src` to the parent
+pytest command; it does not replace the child source-identity proof.
+
+One controller-owned index remains empty until a complete semantic candidate
+is ready. Long processes use their one native session and are never duplicate
+launched. Exact-daemon cleanup requires identity-bound retirement; no broad
+kill is permitted. Recovery verifies both child pids are dead, no daemon
+process/socket/run root exists, source/production hashes, candidate hashes,
+HEAD/upstream/status/index, dynamic exclusions and the remaining one-shot
+budget from this artifact.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E01 | A04 C00B; test-only harness corrections under existing allowlist | prior P00 `2cfbbc416` pushed; C00B `not-created` | setup 1 source mismatch / zero leak; sol/max CORR-01 GO; setup 2 canonical-path rejection / zero leak; focused 1 passed; Ruff/diff PASS; production hashes unchanged | one pre-gated real attempt remains; any non-semantic failure requires new explicit approval; all inherited residuals remain OPEN | MRG1-S12 | blocked before real behavior / CORR-02 test bytes and pre-real gates next |
+
+### 32.6 C00B final pre-real review and mechanical PASS
+
+The locked CORR-02 candidate passed independent adversarial review:
+
+```text
+model:     gpt-5.6-sol / max
+blocker:   0
+critical:  0
+major:     0
+minor:     0
+decision:  GO for exactly one final real invocation
+non-real:  2 passed / 1 deselected
+Ruff:      PASS
+```
+
+The audit mapped the anchored client/bootstrap/retirement contracts and
+confirmed that the startup path bounds and cleans an unpublished losing child,
+while the parent additionally reads any partial exact boot receipt and retires
+only its authenticated daemon id. FreeCAD's primary implementation appends
+each `-P` value to `sys.path`; it does not promise precedence. The
+fixture-derived, pre-import `sys.path[0]` correction is therefore required to
+test current checkout bytes and does not weaken the two retained `-P`
+requirements.
+
+The reviewer accepted the canonical temporary-root admission, preload/source
+identity checks, bounded child/timeout behavior, partial-publication handling,
+expected-daemon-only retirement and no-fourth governance. It found no
+production, environment-contract, acceptance or path-scope expansion.
+
+An independent `gpt-5.6-terra / medium` pre-real gate then returned PASS:
+
+```text
+branch/HEAD/upstream: codex/agent-stage3 / 2cfbbc416... / equal
+ahead/behind:         0 / 0
+index:                empty
+
+reviewed artifact SHA-256:
+  d6d5b41f56ca0bbffee24662aa898becabc67bb1732c41da392ec2920afc0664
+strict append:
+  276700-byte HEAD prefix / PASS
+  10237 appended bytes
+
+probe SHA-256 start/end:
+  fde0c459f96fc91721c7036a036fbe09c8cf8d768171f1f82e82113da1f3f3fd
+parent SHA-256 start/end:
+  6713918f880db77a83914b204cbc01fbb1e3b5204d20a32344e96d9a8c0e95a2
+production hashes:   exact unchanged pair / no diff
+canonical admission: PASS
+non-real pytest:     2 passed / 1 deselected
+Ruff/diff/new-file:  PASS
+P01 domain:          disjoint / unstaged
+dynamic exclusions: exact five / names only
+integration launch:  none
+```
+
+The only remaining execution allowance is one real invocation on the bound
+candidate hashes. Direct GREEN selects the test-only subject. Only a failure
+that reaches the characterized embedded
+`[sys.executable, -B, -m, vibecad.daemon]` launch may select the already
+approved production-correction branch. Any other failure, timeout, leak,
+candidate/artifact drift or unknown process consumes the attempt and stops
+C00B for a new explicit approval.
+
+Before that invocation, one final fast agent must verify that this evidence
+append is itself a strict append and that the artifact/test/production hashes,
+index, HEAD/upstream and one-shot budget remain unchanged. It must not launch
+FreeCAD.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E02 | A04 C00B; CORR-02 exact final one-shot setup recovery | prior P00 `2cfbbc416` pushed; C00B `not-created` | sol/max 0/0/0/0 GO; terra pre-real PASS; non-real 2 passed/1 deselected; Ruff/diff/hashes/production-zero PASS | exactly one real invocation remains; no fourth; non-semantic failure requires new explicit approval | MRG1-S12 | pre-real GREEN / final evidence-byte check then one real invocation |
+
+## 33. G1-C00B Semantic RED and Conditional Correction Branch
+
+### 33.1 Final locked real invocation reached the characterized behavior
+
+After the Section 32.6 evidence append, a final independent fast byte check
+returned PASS:
+
+```text
+final pre-real artifact SHA-256:
+  f3059e8a2f6925c31e15cd2579f5f54352b4b2ae2f6921946deb79466b9038cd
+strict append to 276700-byte HEAD artifact: PASS
+probe/parent/production hashes: exact locked values / stable
+HEAD/upstream: 2cfbbc416... / equal / 0/0
+index: empty
+non-real: 2 passed / 1 deselected
+Ruff/diff: PASS
+integration launch during byte gate: none
+```
+
+The one remaining unchanged-candidate characterization then ran exactly once:
+
+```text
+VIBECAD_RUN_INTEGRATION=1
+VIBECAD_FREECAD_ENV=<verified-absolute-managed-prefix>
+PYTHONPATH=src
+.venv/bin/python -m pytest -q -m slow
+  tests/test_freecad_workbench_bootstrap.py
+```
+
+Observable result:
+
+```text
+duration:             15.52 seconds
+FreeCAD child pid:    62452
+child return:         1
+timed out:            false
+stderr:               empty
+probe JSON:           one unambiguous object
+probe/bootstrap:      exact repository identities
+canonical temp root:  admitted
+preloaded vibecad:    none
+cold run root:        absent
+reached call:         LocalAgentClient.open()
+error:
+  DaemonError: The local daemon is unavailable.
+```
+
+The 15-second interval matches `DAEMON_BOOTSTRAP_TIMEOUT_SECONDS`. The probe
+executed the current `_spawn_daemon()` path whose fixed command is:
+
+```text
+[sys.executable, "-B", "-m", "vibecad.daemon"]
+```
+
+Inside the embedded interpreter `sys.executable` denotes the FreeCAD host, not
+the verified managed Python. No authenticated daemon receipt was ever
+published; therefore no daemon id/pid/process command or valid retirement
+target existed. Parent leak assertions passed before the semantic RED was
+reported:
+
+```text
+child 62452:          dead / ps absent
+FreeCAD processes:    none from the isolated run
+vibecad.daemon:       none
+kernel socket:        absent
+daemon run root:      absent
+canonical temp root: removed
+retired:              false / no published target
+```
+
+The final invocation consumed the setup-characterization budget and no retry
+occurred. All locked bytes remained unchanged:
+
+```text
+tests/fixtures/freecad_workbench/bootstrap_probe.py
+  fde0c459f96fc91721c7036a036fbe09c8cf8d768171f1f82e82113da1f3f3fd
+tests/test_freecad_workbench_bootstrap.py
+  6713918f880db77a83914b204cbc01fbb1e3b5204d20a32344e96d9a8c0e95a2
+src/vibecad/daemon/bootstrap.py
+  b1c9b3e37b0f3d1de7551b5c6921e21057f12f0d67b75d88b2dcbd60b4494eec
+tests/test_p0b_acceptance.py
+  b1d70fa8a064a8a993b49674bcd2cd595fb6bb9d98d670276bd1994e9d72f975
+```
+
+This is the first genuine C00B embedded daemon-launch semantic RED. It is not
+a setup failure, identity mismatch, environment repair request or cleanup
+ambiguity.
+
+### 33.2 Approved conditional branch selected
+
+The exact observable condition in Section 28.4 is now satisfied. The
+authorized branch and subject are selected:
+
+```text
+branch:  reproduced RED plus narrow correction
+subject: fix(daemon): bind embedded bootstrap to managed Python
+```
+
+Exact serial allowlist remains:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+A tests/fixtures/freecad_workbench/bootstrap_probe.py
+A tests/test_freecad_workbench_bootstrap.py
+M src/vibecad/daemon/bootstrap.py
+M tests/test_p0b_acceptance.py
+```
+
+This selection requires no new user approval because MRG1-A04 explicitly
+approved this mutually exclusive C00B branch, these exact production/regression
+paths and this subject after a real reproduced embedded-launch RED. It does not
+authorize another setup correction, a new path, a second daemon/Application/
+Task Kernel, install/config change or broader launcher refactor.
+
+The correction may be implemented only after a `gpt-5.6-sol / max` design
+review freezes:
+
+- the exact identity-bound active managed-Python selection predicate;
+- the development-Python fallback and its fail-closed embedded-host boundary;
+- external-override receipt/binding behavior in the isolated real harness;
+- unchanged daemon environment, cwd, startup-claim fd, session and cleanup
+  semantics;
+- the exact named regression that is RED on current production bytes.
+
+Implementation then follows:
+
+1. add only
+   `test_embedded_freecad_uses_managed_python_for_cold_daemon` in the approved
+   P0B test path;
+2. run it on unchanged production and record the genuine deterministic RED;
+3. make the smallest reviewed bootstrap correction;
+4. run the regression, full affected P0B/C00B non-real suites and Ruff to
+   GREEN;
+5. obtain independent sol/max adversarial review and terra/medium pre-real
+   mechanical gate on final hashes;
+6. run one bounded **post-correction GREEN verification**, not another
+   characterization/setup retry;
+7. require exact daemon id/pid/process publication, client close, expected-id
+   retirement and pid/socket/process/live-run-root absence.
+
+The “no fourth setup invocation” rule remains closed: no unchanged/harness
+characterization is permitted. The future post-correction real run is a
+separately pre-gated verification of new production bytes under the
+already-selected A04 branch. If it is not GREEN, C00B stops with no second
+correction verification or retry.
+
+### 33.3 Concurrent MR1-P01 state
+
+MR1-P01 independently generated its reviewed corpus candidate and then stopped
+on one test-only ordering assertion: it expected `index.json` before a
+lexicographically sorted member list, while the actual first member is
+`checkout_open_v1.json`. Six semantic/round-trip tests passed and all 31
+repository fixture bytes match the one-time reviewed candidate. The agent did
+not opportunistically edit the assertion after final bytes.
+
+This P01 stop is disjoint from C00B and remains unstaged. It will receive its
+own correction ruling, review and gate; it cannot enter the C00B index or
+influence the selected daemon branch.
+
+### 33.4 Recovery Snapshot MRG1-S13
+
+#### S13-1 — Completed milestones
+
+- G1-C00P and MR1-P00 are pushed through `2cfbbc416`.
+- C00B setup admission is closed: source precedence and canonical macOS temp
+  path both passed on the final locked candidate.
+- The final characterization reached `LocalAgentClient.open()` and reproduced
+  the exact existing embedded-launch defect with zero leaks.
+- The A04 conditional managed-Python correction branch is now selected.
+- P01 corpus bytes exist unstaged; its one failing ordering assertion remains
+  unmodified.
+
+#### S13-2 — Ordered next packets and branch conditions
+
+1. Complete the sol/max managed-Python selection design review.
+2. Dispatch the exact two-path production/regression correction at sol/high.
+   Capture focused regression RED before production bytes.
+3. Review/gate final non-real C00B bytes. Only then run one post-correction
+   real GREEN verification; failure blocks with no retry.
+4. In parallel or after the real gate, independently rule on the P01
+   test-order assertion and permit only a test-only correction if it does not
+   change fixture/index bytes or acceptance semantics.
+5. The controller serializes candidate ledgers, exact indexes, cached gates,
+   commits and pushes. C00B and P01 bytes never share one commit.
+
+#### S13-3 — Active decisions and authorization
+
+A01..A04 and D17..D22 remain active only at their exact stages. C00B is now on
+its pre-approved correction branch. P01 remains characterization-only and
+production-free. Second CAD, G1 addon/Dock work, P02, packaging/release and
+all other later scopes remain excluded until their predecessor commits are
+pushed.
+
+#### S13-4 — Execution discipline
+
+Capability profile, model routing and dynamic exclusions remain unchanged.
+Real-process and correction-design review uses sol/max; routine implementation
+uses sol/high; mechanical gates use terra/medium. MRG1-GATE-CORR-01 remains
+active for parent pytest imports.
+
+The controller-owned index remains empty. Recovery verifies the three observed
+FreeCAD child pids, zero-leak evidence, selected branch/subject/allowlist,
+locked pre-correction hashes, HEAD/upstream/status/index, P01 disjoint paths,
+dynamic exclusions and the first unclosed design/gate from this artifact.
+There is no broad kill, repeated characterization, update-golden, test
+weakening or user-file contact.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E03 | A04 conditional correction branch selected by exact semantic RED | prior P00 `2cfbbc416` pushed; C00B `not-created` | final byte gate PASS; real child 62452 reached LocalAgentClient.open; bounded 15.52s unavailable RED; zero leak; four locked hashes unchanged | managed-Python selection design/regression/non-real/review/real GREEN still required; one correction verification only | MRG1-S13 | semantic RED bound / sol/max correction design next |
+
+### 33.5 Managed-Python correction design GO
+
+The required independent `gpt-5.6-sol / max` design review returned GO and
+froze one private selector in `daemon/bootstrap.py`. Only
+`_spawn_daemon()`'s argv[0] may change.
+
+Selection order:
+
+1. A development interpreter is proven only when `sys.executable` is the same
+   file as `paths.env_python_for(Path(sys.prefix))`. That exact running Python
+   is retained.
+2. Otherwise the caller is accepted only when `sys.executable` is the same
+   file as the active `freecadcmd_path()` or `freecad_path()`. An unknown
+   embedding host fails closed.
+3. Embedded FreeCAD requires `status.runtime_ready()`, a stable active prefix
+   across capture, exact `RuntimeGenerationEvidence` for that prefix and
+   `env_python_for(prefix)`, a regular executable Python target, and proof that
+   selected Python is not the FreeCAD host.
+4. Missing/incompatible receipt, arbitrary unbound override, alias/identity
+   drift, unavailable Python or unready embedded runtime raises before
+   `Popen`. There is no embedded fallback to `sys.executable`.
+
+Decision table:
+
+| Context | Result |
+|---|---|
+| proven repository or venv Python | unchanged exact `sys.executable` |
+| default managed FreeCAD + current receipt | exact captured active managed Python |
+| external override FreeCAD + identity-bound external receipt | exact captured override Python |
+| embedded FreeCAD + missing/incompatible receipt | fail before `Popen` |
+| unknown non-Python embedding host | fail closed |
+| arbitrary unbound override | never selected |
+
+The helper does not import the supervisor, call `verify_runtime*()`, launch a
+probe, install/repair anything or fall back after an embedded-host failure.
+Existing stdin/stdout/stderr, safe environment, cwd, close-fd,
+`start_new_session`, inherited startup-claim fd and `pass_fds` arguments remain
+semantically identical. The existing runtime-maintenance claim surrounds
+selection and spawn. A user-maintained external prefix can still be mutated
+out of band; this is the pre-existing external-runtime residual, not a reason
+to weaken the receipt/generation boundary.
+
+The real harness must, after setting isolated `VIBECAD_HOME` and the verified
+override, publish the external binding with the existing
+`status.write_external_runtime_receipt(prefix, evidence=runtime_evidence)`
+inside a bounded maintenance-lock scope, then require:
+
+```text
+paths.bound_external_prefix() == verified prefix
+status.runtime_ready() is true
+```
+
+It must release that harness claim before FreeCAD launches so the embedded
+client can acquire the normal claim. Hand-written receipt JSON is forbidden.
+The parent also binds the observed daemon process to the recorded managed
+Python.
+
+The exact named regression must mock `Popen` and cover within one test:
+
+- ready embedded FreeCAD selects
+  `[managed_python, "-B", "-m", "vibecad.daemon"]`;
+- unready embedded FreeCAD raises before `Popen`;
+- proven venv Python with runtime unready retains `sys.executable`;
+- an arbitrary unbound override cannot select its Python;
+- every existing spawn kwarg and safe-environment/startup-claim fact remains
+  unchanged.
+
+On the pre-correction production bytes, the first assertion is deterministically
+RED because argv[0] is the mocked FreeCAD host. The implementation packet must
+stop before the post-correction real invocation; review and mechanical gates
+own that authority.
+
+### 33.6 MR1-P01 blocker review GO
+
+An independent `gpt-5.6-sol / max` P01 review reproduced `6 passed / 1 failed`
+and independently verified:
+
+```text
+index:            7921 bytes
+index SHA-256:    b6cee09ee434b9e952e011534124b11f9f910b9d706570c3030a0c05c35cc432
+indexed members:  30 / unique / exact directory coverage excluding index
+repo fixtures:    31 / regular / non-symlink
+candidate diff:   byte-identical to reviewed one-time temp candidate
+hash/size fields: exact for all indexed members
+canonical JSON:   PASS
+cross-reference:  PASS
+update mode:      absent
+real credential/path: absent
+```
+
+The only semantic failure is the test's false assumption that `index.json`
+sorts before every indexed member. The exact authorized assertion shape is:
+
+```python
+expected_paths = tuple(sorted(("index.json", *EXPECTED_MEMBERS)))
+assert tuple(path.name for path in actual_paths) == expected_paths
+```
+
+All 31 fixture bytes, including `index.json`, are frozen and cannot change.
+The same test file also requires removal of an unused import, Ruff import-order
+cleanup and formatting; these are mechanical same-file corrections and cannot
+weaken coverage.
+
+Two approved binary fixture paths are ignored by repository patterns:
+
+```text
+tests/fixtures/durable_v1/model.FCStd
+tests/fixtures/durable_v1/model.step
+```
+
+They remain required P01 bytes with frozen hashes:
+
+```text
+model.FCStd
+  b8b93ace9ff2f0dff51c9e5affac2241522cde21ccea95b993269d6c2d688ecc
+model.step
+  e2fba839d0be4827a2c92e730f352f44ec1c3d9bacec021306847bc4f1fbc215
+```
+
+At the later P01 staging step the controller must use exact force-add for only
+those two paths, then prove the cached path set equals the full approved P01
+allowlist. No broad force-add or ignore-rule change is authorized.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E04 | A04 conditional correction; exact selector/harness design frozen | prior P00 `2cfbbc416` pushed; C00B `not-created` | sol/max design GO; semantic RED and zero leak remain bound | regression RED/GREEN, non-real review/mechanical and one real GREEN still required | MRG1-S13 | design GREEN / sol-high two-path production correction next |
+| MRG1-MR1-P01-E01 | A04 P01; immutable one-time corpus bytes | prior P00 `2cfbbc416` pushed; P01 `not-created` | initial missing-index RED; 31 fixtures generated once; 6 semantic tests pass; sol/max member/hash/provenance review GO | one test-order assertion plus same-file lint/format correction; exact force-add of two ignored payloads required | MRG1-S13 | corpus bytes frozen / one-test-file correction and gates next |
+
+## 34. Independent release-workflow parser repair authorization
+
+GitHub's run annotation for branch commit `5022044` reports that
+`.github/workflows/release.yml` is invalid before job creation:
+
+```text
+(Line: 47, Col: 21): Unrecognized named-value: 'runner'
+(Line: 116, Col: 21): Unrecognized named-value: 'runner'
+```
+
+Both invalid expressions are job-level environment values:
+
+```yaml
+VIBECAD_HOME: ${{ runner.temp }}/vibecad-release-runtime
+RELEASE_DIST: ${{ runner.temp }}/release-dist
+```
+
+The `runner` context is not available while GitHub evaluates
+`jobs.<job_id>.env`; consequently the tag-only workflow is rejected during
+workflow validation and branch pushes produce a failed run with no jobs.
+
+The controller presented the following exact repair to the user:
+
+1. keep the `v*` tag trigger and all release behavior unchanged;
+2. remove the two invalid job-level `runner.temp` expressions;
+3. initialize `VIBECAD_HOME` and `RELEASE_DIST` from the runner-provided
+   `$RUNNER_TEMP` inside the first step of their respective jobs by appending
+   to `$GITHUB_ENV`;
+4. validate the workflow mechanically and commit it independently from
+   G1-C00B and MR1-P01.
+
+The user explicitly replied `批准` on 2026-07-26. This authorization is bound
+to the exact implementation allowlist `.github/workflows/release.yml`, the
+subject `fix(ci): bind runner temp paths at step runtime`, and these gates:
+
+- YAML syntax parse;
+- no `runner` expression in any job-level `env`;
+- the four legitimate step-level `runner.temp` artifact paths remain;
+- exactly one runtime binding for each approved variable, before its first
+  consumer;
+- focused diff/whitespace inspection;
+- independent mechanical review of the final bytes.
+
+No notification setting, trigger, release permission, action version, product
+source, test, fixture, package content or untracked course document may
+change. The implementation agent cannot stage, commit or push; the controller
+owns exact staging, cached gates, the commit and the immediate push. The
+controller artifact remains controller-owned and is not part of this
+independent CI commit while the earlier C00B/P01 evidence is unstaged.
+
+### 34.1 Capability profile and adapter evidence
+
+Selected adapter: Codex native adapter.
+
+```text
+approval: native-plan
+delegation: spawn-send-wait
+persistence: repo-artifact
+process: native-session-poll
+```
+
+- `live capability declarations`: `update_plan`, `spawn_agent`,
+  `followup_task`, `wait_agent`, `exec_command` and `write_stdin` are declared
+  live; explicit model/reasoning selectors are declared on `spawn_agent`.
+- `observable behavior`: native plan projection, subagent state observation
+  and synchronous repository inspection have succeeded in this session;
+  completed subagent reports are observable through `list_agents`.
+- `environment identity`: Codex desktop exposes the repository root
+  `/Users/wangtao/Documents/DevProject/vibecad`, branch
+  `codex/agent-stage3`, macOS/zsh controller environment and current
+  unrestricted filesystem profile.
+- `public configuration`: collaboration mode is Default; the live tool
+  declarations expose four total concurrency slots and controllable native
+  sessions; the user requires routine coding at `gpt-5.6-sol / high`,
+  mechanical gates at `gpt-5.6-terra / medium`, and critical review at
+  `gpt-5.6-sol / max`.
+
+Applicable directory-scoped `AGENTS.md` / `CLAUDE.md`: none observed in this
+repository. The current host permission model and sandbox remain binding.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-CI-REL-E01 | user approval on 2026-07-26; exact §34 repair | `not-created` | public run annotation identifies the two invalid job-level contexts; local pre-edit scan confirms lines 47 and 116 | `gh` CLI is not authenticated; local and public read-only evidence remains sufficient for implementation, but post-push confirmation must use the public run/workflow state | MRG1-S13 | approved / sol-high implementation next |
+
+### 34.2 Implementation, independent gate and push
+
+The `gpt-5.6-sol / high` implementation changed only
+`.github/workflows/release.yml`:
+
+```text
+4 insertions / 3 deletions
+candidate SHA-256:
+  be9455ef607ab4fe7f8aeade1ea241ba21d6612b30d5361605f07d4dfda442ee
+```
+
+The two invalid job-level values were removed. Each affected job now has one
+first step that appends the exact runner-time value to `$GITHUB_ENV`:
+
+```text
+VIBECAD_HOME=$RUNNER_TEMP/vibecad-release-runtime
+RELEASE_DIST=$RUNNER_TEMP/release-dist
+```
+
+An independent `gpt-5.6-terra / medium` mechanical gate returned PASS:
+
+- system Ruby/Psych parsed the YAML;
+- `on.push.tags` remains exactly `["v*"]`;
+- job IDs, dependencies, runners, permissions and action sequence are
+  unchanged;
+- no `${{ runner.* }}` expression remains in job-level `env`;
+- each approved binding exists exactly once as its job's first step and
+  precedes every consumer;
+- `VIBECAD_RUN_INTEGRATION` remains job-level `"1"`;
+- the six legitimate `${{ runner.temp }}` occurrences remain only in the four
+  step-level artifact download/upload paths;
+- `git diff --check` passed and the index was empty at review.
+
+The controller staged exactly `.github/workflows/release.yml`; the cached path
+set contained that one path, cached/worktree blob IDs both equalled
+`7a4a0a9a3093566934ac132feb328693804a86be`, and the cached whitespace gate
+passed. Commit `6e89162bf38be434f2a22cecbc3586f03beab4ed` with subject
+`fix(ci): bind runner temp paths at step runtime` was pushed immediately.
+HEAD and upstream both resolved to that commit.
+
+The public Release workflow page after the push still listed Release #34 at
+`2cfbbc4` as its newest branch run and had no run for `6e89162`. This is the
+expected postcondition: once the workflow parses, the unchanged tag-only
+filter does not create a release run for an ordinary branch push.
+
+### 34.3 Unexpected environment-memory residual
+
+After the CI push, status exposed a new untracked private-memory-shaped path:
+
+```text
+.workbuddy/memory/2026-07-27.md
+birth:  2026-07-27T00:05:46-0700
+size:   1289 bytes
+```
+
+It was not present in the preceding controller status snapshots and was not
+in any active allowlist. The controller inspected only path metadata, not
+file content: private memory is neither campaign evidence nor authorized
+source material. The active C00B and P01 reviewers both report that their
+packets did not create, inspect or write it. The path remains untracked,
+unread, unmodified and excluded from every stage/commit/package operation.
+
+Residual `MRG1-ENV-R04`: provenance is unknown and impact on accepted
+candidates is none while the path stays excluded. Closure requires passive
+host provenance or explicit user authority before any content inspection,
+deletion, ignore-rule change or staging. It does not invalidate the CI gate
+or the disjoint C00B/P01 byte candidates.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-CI-REL-E02 | user approval on 2026-07-26; exact §34 allowlist/subject | `6e89162bf38be434f2a22cecbc3586f03beab4ed`, pushed; HEAD/upstream equal | sol-high exact one-file implementation; terra-medium independent PASS; cached path/blob/diff gates PASS; public page has no branch release run for commit | unauthenticated `gh` did not block public confirmation; no release-workflow residual | MRG1-S13 | completed |
+| MRG1-ENV-E04 | no change authority; preserve unexpected private-memory path | `not-created` | path metadata only; absent from preceding snapshots; two active reviewers deny provenance | `MRG1-ENV-R04`, exclude until passive provenance or explicit authority | MRG1-S13 | residual / non-blocking for disjoint candidates |
+
+## 35. C00B candidate review breaker and P01 final review
+
+### 35.1 C00B adversarial NO-GO
+
+The independent `gpt-5.6-sol / max` candidate review returned NO-GO with
+three major findings. The controller stopped before both the mechanical gate
+and the one post-correction real FreeCAD invocation, so the sole real GREEN
+budget remains unused.
+
+1. The development fast path trusts mutable `sys.prefix` and same-file
+   aliasing before classifying an embedded host. A prefix whose `bin/python`
+   is a symlink or hardlink to FreeCADCmd returns the FreeCAD host while
+   readiness, receipt and generation evidence remain unreachable.
+2. The selector captures active prefix A, then calls `freecadcmd_path()` and
+   `freecad_path()`, which each select the active prefix again. The observed
+   mock sequence `A, B, B, A, A` authorized a B host and returned A Python
+   while all later stability comparisons passed.
+3. The real harness performs assertions, `ps` and normal retirement before
+   its `finally`. On an assertion, process-inspection or retirement failure,
+   `finally` only asserts absence; it does not unconditionally retire or
+   terminate the exact published daemon. A gate-red can therefore leak the
+   new-session daemon.
+
+The focused regression and non-real harness still pass, demonstrating that
+their current coverage does not veto these attacks:
+
+```text
+focused regression:  1 passed
+non-real harness:     2 passed, 1 deselected
+diff whitespace:      PASS
+```
+
+The rejected candidate hashes remain:
+
+```text
+bootstrap
+  a7f2248454326e4f39b10988069fc7da673092310e80202d882c243eb846173e
+P0B regression
+  35755d859548df10fc07b344a96a3235f50568ecba8e31afbd289c6da1528a44
+probe
+  fde0c459f96fc91721c7036a036fbe09c8cf8d768171f1f82e82113da1f3f3fd
+parent harness
+  f802ab947119c3753acf994dd7ef1ce7cc719257717fc89d96c1888843a71872
+```
+
+Circuit breaker `MRG1-GATE-C00B-R02` requires a new sol/max design that:
+
+- gives an identity-proven active FreeCAD host precedence over any
+  development shortcut and does not use mutable `sys.prefix` path
+  shape/same-file aliasing alone as interpreter proof;
+- derives both host candidates from one captured prefix without calling a
+  helper that selects the active prefix again, and proves prefix stability
+  around all identity/evidence work;
+- makes real-harness cleanup unconditional, authenticates the exact
+  publication, attempts normal bounded retirement first, applies only a
+  bounded exact-PID/session fallback when necessary, and proves absence
+  before any semantic assertion can escape.
+
+The correction may remain under A04 without a repeated approval only if it
+keeps the existing C00B subject, four-path implementation allowlist, one-real-
+GREEN budget, fail-closed product outcome and no broader development-runtime
+compatibility change. Any source allowlist expansion, new persistent state,
+additional real invocation or intentional restriction of supported
+development interpreters reopens the user approval gate.
+
+### 35.2 MR1-P01 final adversarial GO
+
+The independent `gpt-5.6-sol / max` final review returned GO with no
+actionable corpus finding:
+
+```text
+focused corrected gate:  7 passed
+Ruff check:               PASS
+Ruff format:              PASS
+paths:                    31 exact regular non-symlinks
+indexed members:          30 exact / unique / full coverage excluding index
+JSON members:             29 canonical / duplicate-key-free
+opaque payloads:          2 frozen
+production diff:          absent
+update/generate mode:     absent
+```
+
+The review's first pytest invocation omitted `PYTHONPATH=src` and failed
+during collection with `ModuleNotFoundError`; it was classified as a setup
+error, not product RED. The corrected exact command passed 7/7. Concurrent
+controller advancement from `2cfbbc4` to `6e89162` touched only the independent
+CI workflow; P01 hashes, test bytes and imported production sources remained
+unchanged. A separate `gpt-5.6-terra / medium` mechanical gate owns final
+acceptance before exact staging.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00B-E05 | A04 outcome remains; §33.5 exact algorithm superseded by adversarial evidence | prior independent CI commit `6e89162` pushed; C00B `not-created` | sol-max NO-GO; two mock identity bypasses reproduced; harness cleanup trace fails zero-leak requirement; real invocation not run | `MRG1-GATE-C00B-R02`; new in-allowlist sol-max design required | MRG1-S13 | blocked before mechanical/real gate |
+| MRG1-MR1-P01-E02 | A04 P01 immutable corpus | prior independent CI commit `6e89162` pushed; P01 `not-created` | sol-max GO; corrected 7/7; Ruff/format/hash/schema/canonical/cross-reference/provenance PASS | terra-medium final gate and exact ignored-payload force-add remain | MRG1-S13 | adversarial GREEN / mechanical gate running |
+
+### 35.3 MR1-P01 independent mechanical PASS
+
+The final `gpt-5.6-terra / medium` gate returned PASS at
+`6e89162bf38be434f2a22cecbc3586f03beab4ed` with an empty index:
+
+```text
+PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 \
+  .venv/bin/python -B -m pytest -q -p no:cacheprovider \
+  tests/test_durable_v1_corpus.py
+  -> 7 passed
+
+.venv/bin/ruff check --no-cache tests/test_durable_v1_corpus.py
+  -> PASS
+
+.venv/bin/ruff format --check --no-cache tests/test_durable_v1_corpus.py
+  -> PASS
+```
+
+The gate independently confirmed:
+
+- exactly 31 regular non-symlink corpus paths;
+- 29 JSON members including the index and two opaque payloads;
+- exactly 30 unique lexically ordered index entries covering every member
+  except the index itself;
+- exact indexed sizes and SHA-256 values;
+- duplicate-key-free canonical JSON, no member terminal LF and exactly one
+  index terminal LF;
+- no mutation/update/generate switch;
+- no working diff in imported durable-v1 production modules;
+- clean whitespace for the test and every fixture path.
+
+The two ignored payloads remain byte-frozen and require exact force-add:
+
+```text
+model.FCStd  b8b93ace9ff2f0dff51c9e5affac2241522cde21ccea95b993269d6c2d688ecc
+model.step   e2fba839d0be4827a2c92e730f352f44ec1c3d9bacec021306847bc4f1fbc215
+```
+
+The controller may now stage the rolling artifact plus the exact 31 corpus
+paths and one corpus test from §28.5. Only the two named opaque payloads may
+use `git add -f`; every other path uses ordinary exact staging. The cached
+path set must equal those 33 paths, cached hashes must match the frozen
+worktree bytes, and cached whitespace/focused tests remain mandatory before
+the approved subject:
+
+```text
+test(durable): freeze byte-exact v1 golden corpus
+```
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-MR1-P01-E03 | A04 P01; §28.5 exact subject/allowlist | `not-created` | sol-max GO; terra-medium 7/7, Ruff/format, 31-path/hash/canonical/production-diff PASS | exact 33-path cache, two named force-adds, cached gate, commit/push remain | MRG1-S13 | all unstaged gates GREEN / controller staging next |
