@@ -8444,3 +8444,605 @@ before any subsequent semantic staging.
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MRG1-G1-C00B-E29 | A06/S21 exact closeout | pending exact commit/push | SG01B exact stage/hash/whitespace/zero-residue PASS; cached 54/133/Ruff/AST; RG03 GREEN | final commit/push fact deferred to next preamble; no PR authorized | MRG1-S21 | commit and push next |
+
+## 61. C00B closeout fact and G1-C00 execution preamble
+
+At `2026-07-27T08:14:41-07:00`, C00B closed:
+
+```text
+commit:
+  27e95461185dde7da8d72d21d58ea78e576ba288
+subject:
+  fix(daemon): bind embedded bootstrap to managed Python
+commit artifact:
+  1a410ec645b71237cc2c3dec67e2a3131c522d423c5da149c7dac55b252e52d2
+push:
+  origin/codex/agent-stage3
+HEAD/upstream:
+  equal at 27e95461185dde7da8d72d21d58ea78e576ba288
+Release workflow push runs for this SHA:
+  0
+```
+
+The remote's moved-location response was normalized locally to
+`https://github.com/wangtao9090/VibeCAD.git` and the exact upstream branch was
+read back at the pushed commit. No PR was created. Only the three excluded
+untracked paths remain outside Git.
+
+MRG1-A04 explicitly approved G1 `C00` through `C04`; therefore G1-C00 may
+start without another approval. The user's §56 standing direction additionally
+permits its non-product test, diagnostic, formatting, gate and ledger work,
+but the product implementation remains bounded by the already approved A04
+contract below.
+
+### 61.1 Context and success criteria
+
+G1-C00 registers the repository's classic `Mod/VibeCAD` thin-client addon
+without connecting to the daemon or importing GUI/runtime ownership into the
+presenter. Success means:
+
+- `Init.py` is a headless no-op;
+- `InitGui.py` registers exactly one Workbench and performs no daemon
+  connection at import time;
+- package metadata describes one repository-local VibeCAD addon; and
+- presenter state is a Qt-, FreeCAD- and durable-store-independent projection
+  of public mappings.
+
+The public 28-tool/six-operation surface and all daemon/application/store
+contracts remain unchanged.
+
+### 61.2 Decisions and commit sequence
+
+Active decisions are MRG1-D17, D19, D21 and D22 under exact authorization
+MRG1-A04. One behavior commit is allowed:
+
+| ID | Commit | Scope | Independent gate |
+|---|---|---|---|
+| G1-C00 | `feat(workbench): register thin-client FreeCAD addon` | classic addon registration, package metadata, pure presenter projection and fake-host/package/controller tests | genuine absent-addon RED; G1-G00 pytest/Ruff; fresh sol-max review; independent mechanical staged gate |
+
+No packaging, Addon Manager publication, installation into the user's normal
+FreeCAD tree, daemon connection, Qt worker or real GUI launch belongs to C00.
+
+### 61.3 Manual validation and expected impact
+
+C00 has no user-present or real-GUI action. Real addon discovery,
+registration, activation, thread identities, daemon retirement and zero
+residue are owned by G1-M00 before C01 grows beyond its minimal Dock.
+
+Expected automated impact is two new focused test modules and one fake host.
+No existing test is deleted, merged or weakened. The RED must arise because
+the addon and presenter contracts are absent, not because of import setup or a
+missing test dependency.
+
+### 61.4 Budget, allowlist and breakers
+
+Commit budget: one. Exact controller-owned allowlist:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+A freecad/VibeCAD/Init.py
+A freecad/VibeCAD/InitGui.py
+A freecad/VibeCAD/package.xml
+A freecad/VibeCAD/vibecad_workbench/__init__.py
+A freecad/VibeCAD/vibecad_workbench/state.py
+A tests/fixtures/freecad_workbench/fake_host.py
+A tests/test_freecad_workbench_package.py
+A tests/test_freecad_workbench_controller.py
+```
+
+Breakers:
+
+- any import-time daemon connection, runtime installation or process launch;
+- Qt, FreeCAD or durable-store imports in `state.py`;
+- more than one registration under repeated `InitGui.py` execution;
+- an out-of-allowlist write, existing-contract change or public-surface drift;
+- an unexpected RED, failed focused/static gate, review blocker/major or
+  staged-path mismatch; or
+- any real FreeCAD/GUI action before the separately bounded M00 packet.
+
+Exact G1-G00 command:
+
+```text
+.venv/bin/python -m pytest -q \
+  tests/test_freecad_workbench_package.py \
+  tests/test_freecad_workbench_controller.py
+.venv/bin/python -m ruff check \
+  freecad/VibeCAD/Init.py \
+  freecad/VibeCAD/InitGui.py \
+  freecad/VibeCAD/vibecad_workbench \
+  tests/fixtures/freecad_workbench/fake_host.py \
+  tests/test_freecad_workbench_package.py \
+  tests/test_freecad_workbench_controller.py
+```
+
+### 61.5 Residuals and execution route
+
+Real FreeCAD discovery/activation, Dock responsiveness, GUI worker isolation,
+clean GUI shutdown and installer/packaging behavior remain deferred to their
+named M00/C01/follow-on gates. This commit cannot claim a complete vertical
+slice or durable beta.
+
+Implementation uses the existing sol-high coding subagent, fresh sol-max
+adversarial review and an independent mechanical worker. Fresh terra-medium
+thread creation remains quota-blocked, so the recorded existing-thread
+fallback is permitted without weakening the gate. The controller alone edits
+this artifact, stages, commits and pushes.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00-E01 | MRG1-A04 exact C00 scope; C00B closeout bound above | `not-created` | HEAD/upstream `27e9546`; index empty; absent addon confirmed; exact allowlist/gates frozen | real discovery/GUI/M00, packaging and full vertical slice remain open | MRG1-S21 | approved execution / sol-high RED-first packet next |
+
+## 62. G1-C00 D00 exact thin-addon contract
+
+At `2026-07-27T08:25:16-07:00`, a read-only sol-max D00 review returned GO
+with no blocker or major finding and no need for an existing-API or allowlist
+change.
+
+The five product files are frozen as follows:
+
+- `Init.py` and `vibecad_workbench/__init__.py` contain only module
+  docstrings;
+- `InitGui.py` imports only `FreeCADGui`, defines `VibeCADWorkbench` with
+  `MenuText = "VibeCAD"`, `ToolTip = "VibeCAD thin client"`, no-op
+  `Initialize()` and `GetClassName() == "Gui::PythonWorkbench"`;
+- registration uses host-persistent slot
+  `_vibecad_workbench_instance`, calls `FreeCADGui.addWorkbench()` only when
+  the slot is absent, and writes the slot only after successful registration;
+- `package.xml` uses format 1, project version `0.6.0`, MIT, Wang Tao and the
+  canonical repository URL, and declares exactly one
+  `VibeCADWorkbench` workbench without an icon or dynamic date; and
+- `state.py` imports only stdlib `dataclasses` and `re`.
+
+The exact `state.py` public surface is:
+
+```text
+ProjectionError
+ProjectSummary(project_id, generation, revision_id, manifest_sha256)
+ProjectPage(projects, next_cursor)
+TaskSummary(
+  task_id, project_id, generation, base_revision, reasoning_owner,
+  review_policy, status, next_action, candidate_revision,
+  committed_revision, draft_id
+)
+TaskPage(tasks, next_cursor)
+project_page_from_mapping(value)
+task_page_from_mapping(value)
+```
+
+All four summaries/pages are frozen slotted dataclasses; arrays become tuples
+and no input container reference is retained. Project parsing accepts only
+the exact public success envelope and nested schema-v1 project/result shapes.
+Task parsing accepts only the exact public success envelope and task/result
+shapes. Every container must be exact `dict`/`list`; unknown or missing keys,
+subclasses, booleans-as-integers, generation outside
+`0..9007199254740991`, invalid fixed-format IDs/digests, empty non-null
+cursors, unsorted/duplicate primary IDs or invalid optional revisions/drafts
+fail closed as:
+
+```text
+ProjectionError("invalid public mapping")
+```
+
+The parser never echoes input. Task enum-like presentation strings remain
+non-empty opaque public strings; C00 does not copy private server enums.
+
+The fake host is limited to `FakeWorkbench`, a `ModuleType("FreeCADGui")`
+with an `added_workbenches` list and append-only `addWorkbench`, plus a fixture
+that installs it in `sys.modules`. Tests execute `InitGui.py` through
+`runpy.run_path(..., init_globals={"Workbench": FakeWorkbench})`; product
+imports are late-loaded inside tests so the absent-addon RED collects cleanly.
+
+Exact test inventory:
+
+```text
+tests/test_freecad_workbench_package.py:
+  test_classic_addon_layout_is_complete
+  test_package_xml_declares_local_vibecad_workbench
+  test_init_and_workbench_package_imports_are_side_effect_free
+
+tests/test_freecad_workbench_controller.py:
+  test_init_gui_registers_exactly_one_workbench_across_reexecution
+  test_init_gui_import_boundary_excludes_daemon_qt_and_store
+  test_state_module_import_boundary_excludes_freecad_qt_daemon_and_store
+  test_project_page_from_mapping_projects_and_detaches_public_response
+  test_task_page_from_mapping_projects_and_detaches_public_response
+  test_projection_rejects_malformed_public_mappings (8 parameters)
+  test_projection_error_is_stable_and_does_not_echo_input
+```
+
+This is ten test functions and seventeen collected cases. The genuine RED
+runs the registration and project-projection sentinels and expects two
+failures because `InitGui.py` and `state.py` are absent, not because of
+collection, dependency or setup failure. GREEN requires the same two to pass,
+then all seventeen cases and the exact G1-G00 Ruff gate.
+
+C01 may consume these project/task page projections without modifying
+`state.py`. Selection, connection, preview, review and mutable UI state remain
+excluded for C01 through C04. Real host injection, addon discovery and
+activation remain M00 residuals.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00-E02 | A04 C00; sol-max D00 exact contract | `not-created` | D00 GO; exact 8 non-artifact paths; 10 functions/17 cases; genuine two-sentinel RED frozen | fake host only until M00; package metadata not Addon Manager proof; host marker collision low risk | MRG1-S21 | design frozen / sol-high implementation next |
+
+## 63. G1-C00 I01 candidate
+
+At `2026-07-27T08:36:24-07:00`, the reused sol-high coding agent completed
+I01 within the exact eight-path non-artifact allowlist. The controller
+reverified HEAD/upstream
+`27e95461185dde7da8d72d21d58ea78e576ba288`, empty index, the single
+controller-owned artifact modification and exactly eight new candidate paths.
+
+The genuine RED and GREEN were:
+
+```text
+sentinel RED:
+  2 failed after normal collection
+  exact causes: absent InitGui.py and absent state.py
+identical sentinel GREEN:
+  2 passed
+full focused:
+  17 passed
+Ruff check:
+  PASS
+Ruff format check:
+  7 files already formatted
+compile/AST, whitespace and allowlist:
+  PASS
+```
+
+Frozen candidate hashes:
+
+```text
+Init.py:
+  5fdc5f3e83d877e1195c9917e2ed7266838990afc6cc0a82eb2877834c6a0f68
+InitGui.py:
+  bb54c3c451a8877852e7a99f4933bea5713ce3c467e80f9571ff39f0042992a1
+package.xml:
+  55f0358375354018e4ad572317f93a5a3d317a58f2547c82c0611af1c1919c4f
+vibecad_workbench/__init__.py:
+  7053954476c0a23fb3eba1fdaf706ba9bef43fec8df1aac3b5af74894900fb9a
+state.py:
+  2af5c3002cb5daa4bb33ebec33c5783a4e45087109f2cb8aea23d7c85fcf90cc
+fake_host.py:
+  5a4f9217a38a2c1706ce912670a44bfa84fe622123b99a6873720cc4773073d9
+package tests:
+  33a942757443c8e8d13064555758ce070681ab6e31866355c240746736fdb1ba
+controller tests:
+  fd21e30b4de80b86cd833746bd801f99ab5809c26b89a1fc775ff926b57c8d3e
+```
+
+`InitGui.py` imports only `FreeCADGui` and performs host-persistent idempotent
+registration. `state.py` imports only `re` and `dataclasses`, creates frozen
+tuple-backed projections, validates exact public mapping shapes and emits only
+the stable non-echo `ProjectionError`. No existing product/public API changed.
+
+No real FreeCAD/GUI/daemon, process, signal, network, install, stage, commit or
+push occurred. The exact candidate is frozen for fresh sol-max review and an
+independent mechanical gate.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00-E03 | A04 C00; D00 design implemented by sol-high | `not-created` | genuine 2-fail RED to 2-pass GREEN; full 17; Ruff/format/AST/whitespace PASS; controller hash/allowlist check | fake host only until M00; independent review and mechanical gate required | MRG1-S21 | candidate frozen / dual gate next |
+
+## 64. G1-C00 R01 recovery
+
+The fresh sol-max R01 review returned NO-GO before staging or commit. It found
+one blocker, two majors and two minors:
+
+- the package layout test required exact equality with C00's five files and
+  would therefore fail deterministically when the already approved C01 adds
+  `gateway.py`, `dock.py` and `host.py`;
+- `InitGui.py` inherited a fake-only `FreeCADGui.Workbench` attribute rather
+  than the classic host-injected `Workbench` global frozen by D00;
+- the host-persistent marker was written before `addWorkbench()` succeeded,
+  so one registration exception permanently suppressed retry in that host
+  session;
+- `ToolTip` did not equal the frozen `"VibeCAD thin client"` value and was not
+  asserted; and
+- an exact `dict` containing a `str`-subclass key equal to a legal field name
+  passed projection validation.
+
+All other reviewed boundaries passed: docstring-only headless modules, the
+single `FreeCADGui` import, package metadata, public response field topology,
+generation/ID/digest validation, ordering and duplicate rejection, frozen
+tuple-backed detachment, stable non-echo errors and the C01 projection fields.
+Cursor grammar, closed presentation enums and page-size limits remain owned by
+the upstream public facade; C00 continues to treat the already validated
+strings as opaque.
+
+I02 is authorized by MRG1-A04 and the user's standing non-product direction.
+It may modify only:
+
+```text
+freecad/VibeCAD/InitGui.py
+freecad/VibeCAD/vibecad_workbench/state.py
+tests/fixtures/freecad_workbench/fake_host.py
+tests/test_freecad_workbench_package.py
+tests/test_freecad_workbench_controller.py
+```
+
+I02 must first add regression tests that fail for the reviewed causes, then:
+
+- make the layout assertion a required-file subset check so future approved
+  addon modules do not invalidate C00;
+- execute `InitGui.py` with an injected `Workbench`, use
+  `getattr(FreeCADGui, slot, None) is None`, call `addWorkbench()` on a local
+  instance and write the marker only after success;
+- prove one failed registration leaves no marker and a later execution retries
+  successfully, while successful reexecution still registers once;
+- restore and assert the exact tooltip;
+- reject non-exact-string mapping keys at every validated dictionary level;
+  and
+- retain every previously passing projection, metadata and import boundary.
+
+After I02, all focused tests, exact Ruff/format checks, compile/XML/whitespace
+checks, a fresh sol-max review and an independent mechanical gate must pass on
+new frozen hashes. R01 consumed no real FreeCAD/GUI/daemon action and caused
+no repository mutation.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00-E04 | A04 C00; R01 sol-max recovery within exact five-path subset | `not-created` | R01 NO-GO: 1 blocker / 2 major / 2 minor; anchor and original hashes stable; no stage | real host remains M00; upstream facade owns cursor/enums/page limit | MRG1-S21 | correction required / sol-high I02 next |
+
+## 65. G1-C00 I02 corrected candidate
+
+The reused sol-high coding agent completed I02 without expanding the
+five-path recovery subset. The regression sentinel first returned
+`4 failed, 1 passed`: the failures were the reviewed classic-host protocol,
+registration retry and exact-key defects; the package subset assertion was
+already a passing test-only correction. The identical sentinel then returned
+`5 passed`.
+
+The resulting candidate:
+
+- inherits the classic host-injected `Workbench` and retains only the
+  `FreeCADGui` import;
+- uses the exact tooltip and writes the persistent marker only after
+  `addWorkbench()` succeeds;
+- retries after a synthetic first registration failure and remains
+  idempotent after success;
+- accepts future approved addon files while still requiring every C00 file;
+- removes the fake-only `FreeCADGui.Workbench` attribute and executes
+  `InitGui.py` through `runpy.run_path()` with an injected
+  `FakeWorkbench`; and
+- rejects non-exact-string keys at every validated public mapping layer.
+
+Corrected gate evidence:
+
+```text
+focused pytest:
+  19 passed
+Ruff check:
+  PASS
+Ruff format check:
+  7 files already formatted
+compile/AST/XML:
+  PASS (7 Python paths; package VibeCAD)
+git diff --check and eight no-index whitespace checks:
+  PASS
+```
+
+Frozen candidate hashes:
+
+```text
+Init.py:
+  5fdc5f3e83d877e1195c9917e2ed7266838990afc6cc0a82eb2877834c6a0f68
+InitGui.py:
+  582e255816a9f0f966fd9e62956d111ac445a66dcd4a25be8b4be2226e0b365c
+package.xml:
+  55f0358375354018e4ad572317f93a5a3d317a58f2547c82c0611af1c1919c4f
+vibecad_workbench/__init__.py:
+  7053954476c0a23fb3eba1fdaf706ba9bef43fec8df1aac3b5af74894900fb9a
+state.py:
+  0ec5454d51823d897e857ab053deb2c90c1bc32d5c3e977eb3c8617380378113
+fake_host.py:
+  b44398364fab68e04a1b0c7d1e6682381dd5a1f0090cb2d24ad3316d34370e12
+package tests:
+  1e35797129fcd3b05bc8ffa86fdfc8182f83eabb57efab55c84d5535b39eadd6
+controller tests:
+  ae0ad01a9e89f5affc6825585e24f018eee53260f54bd11c5d0b181906ad0aa1
+```
+
+The controller independently read back the corrected sources, hashes, empty
+index and unchanged HEAD/upstream
+`27e95461185dde7da8d72d21d58ea78e576ba288`. No real FreeCAD/GUI/daemon,
+network, install, process, signal, stage, commit or push occurred. Fresh
+sol-max semantic review and a new independent mechanical gate are required
+because five hashes changed.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00-E05 | A04 C00; R01 exact recovery implemented by sol-high | `not-created` | genuine 4-fail/1-pass sentinel to 5-pass; full 19; Ruff/format/AST/XML/whitespace PASS; controller readback | real classic host remains M00; fresh dual gate required | MRG1-S21 | corrected candidate frozen / R02+M02 next |
+
+## 66. G1-C00 accepted pre-staging gates
+
+Fresh sol-max R02 returned GO with zero blocker, major, minor or nit. It
+independently reproduced the registration matrix for absent, null, existing,
+failed and successful host slots; verified the exact import boundary and
+public-facade response topology; and closed every R01 finding. Its focused
+run returned `19 passed`, Ruff passed and all nine frozen hashes matched.
+
+R02 retained two explicitly disclosed non-findings:
+
+- cursor grammar, closed presentation enums and the page-size bound are
+  authenticated public-facade responsibilities rather than claims of the C00
+  projection; and
+- a synthetic host that registers an instance and then throws is not assumed
+  atomic. Real discovery and registration behavior remains a named M00 gate.
+
+Independent M02 also passed:
+
+```text
+branch:
+  codex/agent-stage3
+HEAD/upstream:
+  27e95461185dde7da8d72d21d58ea78e576ba288
+index:
+  empty
+focused pytest:
+  19 passed
+Ruff / format:
+  PASS / 7 files already formatted
+compile/AST/XML:
+  PASS
+git diff --check / eight no-index whitespace checks:
+  PASS
+pre/post anchor, status and nine hashes:
+  identical
+```
+
+Fresh terra-medium thread creation remained quota-blocked, so M02 used the
+recorded independent existing-thread fallback. Neither gate changed state or
+ran real FreeCAD/GUI/daemon behavior. The controller may now append this
+evidence, stage exactly the Section 61 nine-path allowlist and require one
+post-stage mechanical readback before committing
+`feat(workbench): register thin-client FreeCAD addon`.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00-E06 | A04 C00; corrected R02+M02 acceptance | `not-created`; exact stage next | R02 GO 0/0/0/0; M02 PASS; exact 19; Ruff/format/AST/XML/whitespace and frozen hashes PASS | real host atomicity/discovery remains M00; facade-owned cursor/enums/page bound | MRG1-S21 | accepted candidate / staged gate next |
+
+## 67. G1-C01 D00 public-kernel and M00 preflight
+
+In parallel with the read-only C00 gates, a sol-max architecture preflight
+returned GO with zero blocker or major. It found that the existing public
+client/facade surface is sufficient for C01 without changing a shared seam:
+
+```text
+connect/identity:
+  LocalAgentClient.open(), daemon_id, ping()
+discovery:
+  list_projects_request(), list_tasks_request()
+refresh:
+  get_project_request(), get_task_request()
+review transport:
+  accept_draft_request(), reject_draft_request()
+shutdown:
+  close()
+```
+
+Project and Task discovery use pages of 50 and cursor-driven incremental
+loading. `list_tasks` has no server-side project/status filter, so the worker
+must paginate incrementally and filter locally; it must never synchronously
+scan the complete store on the GUI thread. C01 may provide accept/reject
+transport for later consumption but exposes no review action. C03 owns
+fresh-authority policy. A review transport exception has unknown outcome:
+close/reconnect/read durable state later and never replay automatically.
+
+### 67.1 Thread and mapping boundary
+
+The fixed ownership topology is:
+
+```text
+Qt main thread:
+  ReviewDock, FreeCADGui, widgets and selection
+    -> queued exact plain command mapping
+one QThread:
+  _GatewayWorker -> KernelGateway -> one LocalAgentClient
+    -> queued exact plain event mapping
+Qt main thread:
+  validate latest request/selection and update widgets
+```
+
+The client is created, called and closed only in the worker. The worker holds
+no widget, `FreeCADGui`, Document or Selection. The main thread performs no
+socket call, client close, daemon retirement or blocking `QThread.wait()`.
+Deactivate queues close; `closed` causes `thread.quit()` and asynchronous
+destruction. Late events whose request or selection identity is no longer
+current are discarded.
+
+Commands are exact schema-v1 dictionaries for `connect`, `list_projects`,
+`list_tasks`, `refresh_project`, `refresh_task`, `review` and `close`.
+Events are exact schema-v1 dictionaries for `connected`, `projects`, `tasks`,
+`project`, `task`, `review`, `closed` or a stable non-echo `error`. Only exact
+plain dict/list/scalar values cross signals; no client, exception, QObject,
+Path, dataclass or FreeCAD object may cross. Gateway validation copies the
+mapping under a depth/node budget.
+
+### 67.2 Exact C01 path responsibilities
+
+- `InitGui.py` retains C00 registration. `Initialize()` stays disconnected;
+  `Activated()` and `Deactivated()` late-import the host activation functions.
+- `gateway.py` exports only `KernelGateway`. Its first worker-thread connect
+  creates one client; every subsequent operation and close must use that
+  thread. It accepts a closed command set and never retries review.
+- `dock.py` exports only `ReviewDock`, with stable object name
+  `VibeCADReviewDock`, connection state, project selector,
+  awaiting-review-task selector and Refresh. There is no Accept/Reject action.
+- `host.py` exports only `activate_workbench`, `deactivate_workbench` and
+  `workbench_snapshot`; it owns one Dock, one worker and one QThread, uses the
+  FreeCAD-provided PySide compatibility namespace, and returns only plain
+  lifecycle diagnostics.
+- the fake host adds deterministic main-window/dock and queued-event
+  facilities while failing immediately on worker-widget or main-thread-client
+  access. It cannot claim real Qt behavior.
+- `gui_harness.py` emits exactly one canonical
+  `VIBECAD_GUI_HARNESS=<json>` line and uses a nested event loop with one
+  absolute deadline, not sleep polling.
+- controller tests retain all C00 coverage and add deterministic unit/thread
+  contracts; GUI tests split non-slow parent safety from one slow real M00.
+
+The first genuine RED is the normally collected absence of gateway lifecycle
+and workbench activation behavior. The fake gate covers single-thread client
+ownership, no import-time connection, idempotent activation/deactivation,
+exact request mappings, one-shot review transport, plain detached events,
+stale-event rejection, negative thread authority and absence of review UI.
+
+### 67.3 Real M00 safety packet
+
+M00 begins only after C00 is committed, pushed and the index is empty. The C01
+candidate first supplies the minimal Dock and bounded harness; C01 cannot be
+committed until M00 passes.
+
+The parent must verify the canonical managed prefix receipt and runtime
+generation, then bind the GUI entry and resolved target identity under that
+prefix: lstat/stat device and inode, owner, mode, link count, size and
+timestamps; regular file, current uid, executable and not group/world
+writable. It revalidates immediately before launch and after exit.
+
+One owner-private canonical `0700` root contains isolated `vibecad`,
+`freecad-home`, `freecad-data`, `freecad-temp` and `tmp` children. The exact
+GUI invocation is:
+
+```text
+<verified-prefix>/bin/FreeCAD
+  -M <repo>/freecad
+  -P <repo>/src
+  -P <repo>/tests/fixtures/freecad_workbench
+  --run-test gui_harness
+```
+
+Only the isolated VibeCAD/FreeCAD/TMP roots, verified prefix and
+`PYTHONDONTWRITEBYTECODE=1` are supplied. `FreeCAD --help` is forbidden
+because it is already known to enter Qt/modal startup on this host.
+
+One campaign-wide 60-second monotonic deadline covers launch, communication,
+inspection, process reclamation and daemon retirement. The GUI child starts a
+new session and is immediately bound to a Darwin birth/uid/pgid/sid token. On
+timeout, modal or missing result, the parent may signal the exact group only
+after revalidation; identity ambiguity or replacement forbids signaling and
+fails the gate.
+
+The harness must prove exactly one addon, Workbench and Dock; reviewed source
+identities; Qt binding/version; different main/worker thread identities; a
+responsive heartbeat during connect/refresh; one client and exact daemon id;
+and clean asynchronous deactivate, client close, thread finish and Dock
+removal without a modal.
+
+Cleanup precedes semantic acceptance on every path. It retires the
+authenticated exact daemon id, proves the original process token, socket,
+receipt and live run-root identity absent, and proves isolated checkout/run
+roots absent or empty. The parent accepts exactly one canonical result line,
+child exit zero, clean cleanup and all semantic assertions. It launches at
+most once and polls the original process session.
+
+Residuals are bounded and disclosed: no RPC cancellation beyond existing
+15-second bootstrap/30-second idle bounds; exact FreeCAD 1.1 PySide namespace
+and native quit order require M00; same-uid binary replacement has a narrow
+check-to-exec residual; review disconnect outcome is unknown until C03
+re-reads durable state. None requires a product decision or shared API change.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E00 | A04 C01/M00; sol-max read-only architecture preflight | `not-created`; forbidden before C00 close | public seam audit GO 0 blocker/major; exact 8-path/thread/mapping/test/M00 packet frozen | task pagination, RPC cancellation, real Qt/quit and binary check-to-exec bounded as above | MRG1-S21 | ready after C00 push / no product decision needed |
