@@ -44,9 +44,10 @@ jobs:
             test-target: tests/test_task_kernel_integration.py::test_real_task_kernel_commits_verified_candidate
             expose-runtime-override: false
     env:
-      VIBECAD_HOME: ${{ runner.temp }}/vibecad-release-runtime
       VIBECAD_RUN_INTEGRATION: "1"
     steps:
+      - name: bind the release runtime path
+        run: printf 'VIBECAD_HOME=%s\n' "$RUNNER_TEMP/vibecad-release-runtime" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: download gated Python distributions
@@ -112,9 +113,9 @@ jobs:
   package-gate:
     needs: [version-guard, quality]
     runs-on: ubuntu-latest
-    env:
-      RELEASE_DIST: ${{ runner.temp }}/release-dist
     steps:
+      - name: bind the release distribution path
+        run: printf 'RELEASE_DIST=%s\n' "$RUNNER_TEMP/release-dist" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
