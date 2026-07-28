@@ -11291,3 +11291,189 @@ changed.
 | MRG1-G1-C01-E27 | A04; autonomous I17 recovery | `9a008d349c2ce4f189abc61a6977d3494c7a4d3e`, pushed | deterministic RED; focused 109+1; R19 GO; M19 full 5269+110 | 19 known warnings | MRG1-S24 | completed |
 | MRG1-G1-C01-E28 | A04 C01/M00; bilingual README | `d017254a02ae7a6120b3a97e2381071618ea4eef`, pushed | R16/R17 GO; M16/M19 PASS; real M00 PASS; release runs absent for both pushed SHAs | G1 C02-C04 remains; no further C01 real launch | MRG1-S24 | completed |
 | MRG1-G1-C01-E29 | A04 closeout ledger | `this ledger commit`, push immediately after exact G0 gate | exact-path diff check, content hash, Git/index/status and remote release-trigger verification | none beyond E27/E28 residuals | MRG1-S24 | closeout commit next |
+
+## 95. G1-C02 safe-preview architecture and implementation freeze
+
+The C01 ledger closeout was committed and pushed as:
+
+```text
+18e627c73e72a966cff3e37a7d95aab8639f2ee9
+docs(orchestration): close G1 C01 evidence
+```
+
+Local HEAD and upstream were equal at that commit, the index was empty and
+the tracked worktree was clean. GitHub's public Actions API reported no
+workflow run and no release run at that exact SHA. The three excluded
+untracked user paths remained preserved and unstaged.
+
+G1-C02 resumes the exact MRG1-A04 authorization from Sections 28 and 29. Its
+product outcome is to open two separate, non-authoritative FreeCAD Preview
+Documents for the current project HEAD and the selected awaiting-review
+draft. Users may visually compare them, but C02 does not yet add the
+authoritative Accept/Reject action or Level-A selector capture reserved for
+C03 and C04.
+
+### 95.1 D20 architecture verdict
+
+Read-only sol-max D20 returned GO with
+`Blocker/Major/Minor/Nit = 0/0/0/0`. It inspected the complete C01 Workbench
+implementation, the public checkout and file-grant facades, the daemon
+protocol and the existing FreeCAD document seams. No shared Application,
+daemon, checkout, grant or protocol change is required.
+
+The exact C02 implementation contract is:
+
+1. the existing Qt worker remains the sole owner of one
+   `LocalAgentClient`; preview open, refresh and close are new gateway
+   commands;
+2. a HEAD source contains only `kind` and `project_id`; a draft source
+   contains only `kind`, `task_id`, `draft_id` and `expected_generation`;
+3. each source executes `open_checkout` followed immediately by
+   `claim_file_grant` on that same worker and client, using only the grant
+   returned by the open response and claiming it exactly once;
+4. the worker emits plain mappings only; the GUI main thread validates
+   source, open-key, descriptor, checkout, grant, digest and size identity
+   before passing only the claim's exact `local_path` to
+   `FreeCAD.openDocument`;
+5. the new `preview.py` owns frozen HEAD/draft bindings that retain source,
+   open-key, descriptor, checkout, claim and exact document object/Name
+   identity; no artifact position, internal revision path, label or guessed
+   path is an identity source;
+6. any checkout with `dirty=true`, state other than open, source liveness
+   other than live, or a Preview Document whose `Modified` is not exactly
+   false permanently disables review for that open cycle and requires
+   discard, close and reopen;
+7. cleanup is document, then checkout, then client; registry identity must be
+   exact before closing a named document; partial failure becomes
+   recovery-required and never reuses a grant; and
+8. Workbench code never calls save, save-as or publish. A user-triggered save
+   can affect only the non-authoritative checkout and cannot become the basis
+   for the old verdict.
+
+The deterministic test-first matrix freezes these RED cases:
+
+1. open and claim on different clients or sessions;
+2. a second claim or grant reuse;
+3. checkout, digest or size disagreement between descriptor and claim;
+4. a relative, guessed or non-exact claimed path reaching `openDocument`;
+5. HEAD and draft resolving to the same document object or Name;
+6. a GUI/document operation on the worker thread;
+7. a client RPC on the GUI thread;
+8. dirty checkout review eligibility;
+9. stale, revoked or recovery-required checkout eligibility;
+10. `Document.Modified=True`, including a refresh that attempts to re-enable
+    the same open cycle;
+11. project, task, draft or generation identity drift and stale responses;
+12. normal and partial-failure cleanup ordering, with claim and close calls at
+    most once.
+
+### 95.2 D21 real-host and V01 verdict
+
+A second, separately bounded sol-max adversarial stage returned
+GO-with-pre-commit-gate and
+`Blocker/Major/Minor/Nit = 0/1/2/0`.
+
+The major is a gate-boundary finding, not a C02 product-code NO-GO. The
+existing `gui_harness.py` automates only C01
+activate -> refresh -> deactivate. It does not create an awaiting-review
+fixture, open previews or emit checkout/grant/document evidence, and that
+path is intentionally absent from the approved C02 allowlist. Section 28
+already defines G1-V01 as a controller-owned screenshot plus identity log, so
+the exact product commit may proceed only after that one manual/controlled
+V01 passes. Making V01 a repeatable `--run-test` harness requires a future
+exact approval for `gui_harness.py` and its GUI tests; it is not smuggled into
+C02.
+
+The two minor risks become required tests and V01 observations:
+
+- `openDocument(path)` may reuse a registered document, so HEAD and draft
+  must have different objects and Names and each
+  `getDocument(Name) is document`;
+- Qt DeferredDelete is not document cleanup evidence. Both documents must be
+  synchronously closed and absent from the FreeCAD registry before checkout
+  or client cleanup is queued.
+
+The single admitted G1-V01 contract is:
+
+```text
+cold preflight:
+  authenticated managed prefix and exact GUI identity
+  isolated owner-private VIBECAD/FreeCAD roots
+  no GUI, daemon, checkout or grant residue
+fixture:
+  public APIs only
+  one project with FCStd HEAD
+  one awaiting_user_review task/draft
+  exact project/task/draft/generation recorded
+machine evidence:
+  main/worker thread identities and daemon id
+  both source/open-key/descriptor/grant/checkout records
+  claimed path identity, digest and size
+  both document Names, registry object identity and Modified state
+  document -> checkout -> client close sequence
+  final pid/socket/run-root/checkout/grant absence
+screenshot:
+  selected project/task in the Dock
+  separate HEAD and draft document tabs
+  connected/live/clean state
+  no absolute path or real-user root
+PASS:
+  every identity agrees, documents are distinct, no modal/reuse occurs,
+  screenshot is complete and cleanup is clean
+FAIL:
+  any collision, partial create, Modified state, disconnect, claim/close
+  failure, order defect or residue; no retry-until-green
+```
+
+### 95.3 Exact C02 implementation packet and recovery snapshot
+
+The source packet keeps the original approved subject:
+
+```text
+feat(workbench): preview managed head and draft
+```
+
+Its exact allowlist remains:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+M freecad/VibeCAD/vibecad_workbench/state.py
+M freecad/VibeCAD/vibecad_workbench/gateway.py
+M freecad/VibeCAD/vibecad_workbench/dock.py
+M freecad/VibeCAD/vibecad_workbench/host.py
+A freecad/VibeCAD/vibecad_workbench/preview.py
+M tests/fixtures/freecad_workbench/fake_host.py
+M tests/test_freecad_workbench_controller.py
+A tests/test_freecad_workbench_preview.py
+```
+
+The implementation subagent may modify only the eight source/test paths; the
+controller alone owns this artifact. It must capture a genuine deterministic
+RED before production bytes, implement the smallest contract, then run
+G1-G02 and affected C01 regressions. A new or shared seam, a public
+tool/protocol change, Accept/Reject, selector work, save/publish behavior,
+real GUI launch before review/mechanical gates, or any excluded-path access is
+a circuit breaker.
+
+#### MRG1-S25
+
+1. **Completed:** C01 and its ledger are pushed through `18e627c`; D20 is GO
+   0/0/0/0; D21 is product-code GO with one manual V01 pre-commit gate and two
+   testable real/fake parity risks.
+2. **Next:** run an independent terra-medium G0 on this append and persist it;
+   delegate exact RED-first implementation to sol-high; obtain sol-max
+   adversarial and terra-medium mechanical gates; only then admit one V01.
+   V01 PASS permits exact staging/commit/push; any V01 red stops without
+   repeat or scope expansion.
+3. **Authority:** MRG1-A04 remains the exact approval. The user's standing
+   autonomy covers this technical decomposition because it does not change
+   the approved C02 product outcome. C03/C04, automatic V01 harness
+   expansion, packaging and release remain separate boundaries.
+4. **Discipline:** approval=native-plan,
+   delegation=spawn-send-wait, persistence=repo-artifact and
+   process=native-session-poll. Use only the four evidence categories in
+   section 93, exact named staging and the dynamic exclusions above.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C02-E01 | A04 exact C02; autonomous technical decomposition | `not-created`; artifact G0/persistence next | D20 GO 0/0/0/0; D21 GO-with-gate 0/1/2/0; exact contract and 12 RED cases frozen | V01 manual gate required; automated harness expansion separately approved only | MRG1-S25 | design GREEN / source not started |
