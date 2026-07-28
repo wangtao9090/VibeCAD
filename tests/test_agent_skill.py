@@ -452,6 +452,7 @@ def test_release_documents_project_the_0_6_backend_truth():
         path: _normalized(_read(ROOT / path))
         for path in (
             "README.md",
+            "README.zh-CN.md",
             "PRIVACY.md",
             "docs/ARCHITECTURE.md",
             "docs/AGENT_ARCHITECTURE.md",
@@ -470,6 +471,7 @@ def test_release_documents_project_the_0_6_backend_truth():
         path: documents[path]
         for path in (
             "README.md",
+            "README.zh-CN.md",
             "docs/ARCHITECTURE.md",
             "docs/AGENT_ARCHITECTURE.md",
             "docs/PRODUCT_CAPABILITY_ROADMAP.md",
@@ -482,8 +484,13 @@ def test_release_documents_project_the_0_6_backend_truth():
         assert "daemon" in normalized, path
         assert "task kernel" in normalized, path
 
+    english_readme = documents["README.md"]
+    assert "has not been delivered" in english_readme
+    assert "g1 workbench has been delivered" not in english_readme
+    assert "qt ui has been delivered" not in english_readme
+
     for path in (
-        "README.md",
+        "README.zh-CN.md",
         "docs/ARCHITECTURE.md",
         "docs/AGENT_ARCHITECTURE.md",
         "docs/PRODUCT_CAPABILITY_ROADMAP.md",
@@ -494,8 +501,12 @@ def test_release_documents_project_the_0_6_backend_truth():
         assert "g1 workbench 已交付" not in normalized, path
         assert "qt ui 已交付" not in normalized, path
 
+    assert any(
+        claim in english_readme
+        for claim in ("unpublished candidate", "has not been tagged or published")
+    )
     for path in (
-        "README.md",
+        "README.zh-CN.md",
         "docs/ARCHITECTURE.md",
         "docs/AGENT_ARCHITECTURE.md",
         "docs/PRODUCT_CAPABILITY_ROADMAP.md",

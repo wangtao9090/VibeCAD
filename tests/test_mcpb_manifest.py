@@ -186,8 +186,41 @@ def test_mcpbignore_excludes_heavy_dirs():
 
 
 def test_packaged_readme_describes_only_the_agent_first_surface():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    normalized_readme = " ".join(readme.split())
+    english_path = ROOT / "README.md"
+    chinese_path = ROOT / "README.zh-CN.md"
+    assert english_path.is_file()
+    assert chinese_path.is_file()
+
+    english_readme = " ".join(english_path.read_text(encoding="utf-8").split())
+    chinese_readme = " ".join(chinese_path.read_text(encoding="utf-8").split())
+    assert "[简体中文](README.zh-CN.md)" in english_readme
+    assert "[English](README.md)" in chinese_readme
+
+    for required in (
+        "Current Agent-first Workflow",
+        "user's own host model",
+        "An FCStd import must be non-empty",
+        "`Part::Box`",
+        "`Part::Cylinder`",
+        "create_project",
+        "submit_model_program",
+        "cancel_task",
+        "accept_draft",
+        "export_task_artifacts",
+        "notifications/cancelled",
+        "0.6.0",
+        "28 tools",
+        "daemon",
+        "Task Kernel",
+        "G1",
+        "P1",
+        "P2",
+        "The G1 Workbench (the real FreeCAD Qt UI) has not been delivered",
+        "STEP/STL import, reverse engineering, and simulation are not yet integrated",
+        "unpublished candidate",
+    ):
+        assert required in english_readme
+
     for required in (
         "当前 Agent-first 工作流",
         "用户自己的宿主模型",
@@ -200,13 +233,18 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
         "accept_draft",
         "export_task_artifacts",
         "notifications/cancelled",
+        "0.6.0",
+        "28 个工具",
+        "daemon",
+        "Task Kernel",
         "G1",
         "P1",
         "P2",
         "G1 Workbench 尚未交付",
         "STEP/STL 导入、逆向工程和仿真 尚未接入",
+        "未发布候选",
     ):
-        assert required in normalized_readme
+        assert required in chinese_readme
     for removed_endpoint in (
         "`smoke_cad`",
         "`new_document`",
@@ -216,7 +254,11 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
         "`new_part`",
         "`export_part`",
     ):
-        assert removed_endpoint not in normalized_readme
+        assert removed_endpoint not in english_readme
+        assert removed_endpoint not in chinese_readme
+
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        assert tomllib.load(handle)["project"]["readme"] == "README.md"
 
     roadmap = (ROOT / "docs/PRODUCT_CAPABILITY_ROADMAP.md").read_text(encoding="utf-8")
     normalized_roadmap = " ".join(roadmap.replace("\n> ", " ").split())

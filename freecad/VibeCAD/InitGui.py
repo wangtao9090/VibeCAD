@@ -8,6 +8,20 @@ class VibeCADWorkbench(Workbench):  # noqa: F821
     def Initialize(self) -> None:
         return None
 
+    def Activated(self) -> None:
+        host = __import__(
+            "vibecad_workbench.host",
+            fromlist=("activate_workbench",),
+        )
+        host.activate_workbench()
+
+    def Deactivated(self) -> None:
+        host = __import__(
+            "vibecad_workbench.host",
+            fromlist=("deactivate_workbench",),
+        )
+        host.deactivate_workbench()
+
     def GetClassName(self) -> str:
         return "Gui::PythonWorkbench"
 
