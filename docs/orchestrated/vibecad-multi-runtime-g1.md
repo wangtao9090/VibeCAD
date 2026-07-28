@@ -9046,3 +9046,2248 @@ re-reads durable state. None requires a product decision or shared API change.
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MRG1-G1-C01-E00 | A04 C01/M00; sol-max read-only architecture preflight | `not-created`; forbidden before C00 close | public seam audit GO 0 blocker/major; exact 8-path/thread/mapping/test/M00 packet frozen | task pagination, RPC cancellation, real Qt/quit and binary check-to-exec bounded as above | MRG1-S21 | ready after C00 push / no product decision needed |
+
+## 68. G1-C00 closeout and C01 execution start
+
+G1-C00 was committed and pushed as:
+
+```text
+commit:
+  15d58794b67c17794cdcb583b84be7a7c5a0cbfe
+subject:
+  feat(workbench): register thin-client FreeCAD addon
+paths:
+  exact Section 61 M+8A allowlist
+staged gate:
+  SG02 PASS; staged/worktree hashes identical; 19 passed; Ruff/format PASS
+local/upstream:
+  equal at 15d58794b67c17794cdcb583b84be7a7c5a0cbfe
+index:
+  empty
+Release workflow push runs for exact SHA:
+  0
+```
+
+Only the three standing excluded untracked paths remain outside Git. C00
+therefore closes without a release-workflow failure notification and without
+touching those paths.
+
+MRG1-A04 already authorizes C01, and Section 67 found no new product decision
+or shared-seam change. C01 may now start against the exact eight non-artifact
+paths in Section 28.4. The implementation remains split by breakers:
+
+1. sol-high test-first fake-host/gateway/Dock/parent-harness candidate;
+2. fresh sol-max semantic/adversarial review and independent non-real
+   mechanical gate;
+3. one bounded real M00 launch with cleanup-before-semantics; and
+4. staged-byte gate, commit and push only if every prior gate is green.
+
+No Accept/Reject UI, preview, selection, packaging or normal-user installation
+belongs to C01. Any need to modify a shared daemon/application seam, C00
+`state.py`, package metadata or an unnamed path is a breaker.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C00-E07 | A04 C00; SG02 accepted | `15d58794b67c17794cdcb583b84be7a7c5a0cbfe`; pushed | local/upstream equal; index empty; exact Release push-run count 0 | real discovery/threading remains M00 | MRG1-S22 | C00 closed |
+| MRG1-G1-C01-E01 | A04 C01/M00; D00 GO | `not-created` | C00 prerequisite closed; exact 8-path allowlist; no product decision/shared seam | real GUI launch deferred until candidate passes non-real gates | MRG1-S22 | approved execution / sol-high RED-first next |
+
+## 69. G1-C01 I01 split candidate
+
+Two non-overlapping sol-high agents produced the eight-path C01 candidate. The
+core tests first returned the required normally collected sentinel RED:
+
+```text
+test_gateway_client_lifecycle_is_owned_by_one_worker_thread
+test_workbench_activation_creates_one_dock_without_blocking_main
+
+RED:
+  2 failed; absent gateway.py and host.py behavior only
+identical GREEN:
+  2 passed
+final package + controller:
+  25 passed
+```
+
+Core Ruff, format, compile and diff checks passed. The separate GUI-parent
+surface returned `13 passed, 1 deselected`; its only deselected case is the
+single slow M00 launch. Ruff, format, AST and diff checks also passed. No real
+FreeCAD, GUI, daemon or child process ran.
+
+The controller required a first harness correction before freezing the
+candidate. It now activates the discovered Workbench through
+`FreeCADGui.activateWorkbench()`, deactivates through the real Workbench
+callback, uses authenticated prefix-receipt and full runtime-generation
+verification, excludes mutable access time from binary identity, pre-registers
+idempotent cleanup ownership and reports a proved client-connected boolean
+rather than an invented count.
+
+Frozen I01 hashes:
+
+```text
+InitGui.py:
+  c8d2df3af1b3db39c57a3a40d610efd0adf4b581da4f00bcb0eb0de7ed911e4c
+gateway.py:
+  a293283cc923640a2f7dce0c51d7143e0fd10e85b0ea40fe78395b8d606c5194
+dock.py:
+  68f0f60760b216d8c5dfbfe0e45a4a191867720dd893ea836de2c381a51ba221
+host.py:
+  f4da6e86955164b923dd8dbf6e4910ee4c4096e904020559d27fc5bde58f571a
+fake_host.py:
+  d7b9e455d31d5313ad32755f7531b6c607f38ec31d50fc9a9ed1d27c38c2235b
+gui_harness.py:
+  48b1aac95e3eef64918a0423cc0d91f9365ba08deff412f3468fa32cd2dd44b0
+controller tests:
+  9c899d7c48d0b05f1db8c3a2011c4cbec5527f6916b7404831f9369497b66cdc
+GUI parent tests:
+  d65ff5b51d08faf6dcb255540c06fd63ab11f62fc0d8567a7bab18fbac79a9f1
+```
+
+Controller readback did not accept the candidate merely because the local
+tests passed. Fresh review must specifically compare command/event field names
+and types with Section 67, stable error envelopes, page/filter ownership,
+inactive snapshot clearing, lifecycle closure, malformed/stale event handling,
+actual refresh semantics and M00 finalizer/identity assertions. The real M00
+launch remains forbidden until all blocker/major findings from that review are
+closed and the full non-real mechanical gate is green.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E02 | A04 C01; split sol-high I01 | `not-created` | genuine 2-fail RED to 2-pass; core 25; GUI parent 13+1 deselected; Ruff/format/compile/AST/diff PASS | exact contract and M00 semantics require fresh adversarial review; no real launch yet | MRG1-S22 | candidate frozen / R01+M01 non-real next |
+
+## 70. G1-C01 R01 recovery and exact wire table
+
+Fresh sol-max R01 returned NO-GO with two blockers and five majors. It also
+confirmed that the full non-real candidate is mechanically green
+(`38 passed, 1 deselected`; Ruff and format pass), all nine hashes remained
+frozen, and no real process ran.
+
+### 70.1 Exact internal command/event contract
+
+The I01 discriminator and request-id model drifted from D00. I02 is bound to
+this complete exact table. Every container and key is an exact built-in type;
+`schema_version` is exact integer 1 and a normal request id is an exact
+non-boolean integer in `0..9007199254740991`.
+
+```text
+commands:
+  connect:
+    {schema_version, request_id, kind}
+  list_projects / list_tasks:
+    {schema_version, request_id, kind, cursor}
+  refresh_project:
+    {schema_version, request_id, kind, project_id}
+  refresh_task:
+    {schema_version, request_id, kind, task_id}
+  review:
+    {schema_version, request_id, kind, decision, task_id, draft_id,
+     expected_generation}
+  close:
+    {schema_version, request_id, kind}
+
+success events:
+  connected:
+    {schema_version, request_id, kind, daemon_id, worker_thread_id}
+  projects / tasks / project / task / review:
+    {schema_version, request_id, kind, response}
+  closed:
+    {schema_version, request_id, kind}
+
+error event:
+  {schema_version, request_id, kind, operation, code, outcome}
+```
+
+An error has `kind = "error"`. If no valid request id or operation can be
+recovered, it uses reserved `request_id = -1` and
+`operation = "invalid"`. Otherwise it preserves the validated id and kind.
+The error-code set is exactly:
+
+```text
+invalid_input
+unavailable
+internal_error
+closed
+wrong_process
+incompatible_kernel
+```
+
+Outcome is exactly `known_failure` or `unknown_outcome`. An authenticated
+public `ok:false` mapping is a successful transport response, not an error
+event. A review transport exception always yields unknown outcome, closes the
+client and is never replayed or echoed.
+
+`list_tasks` does not carry `project_id`. Gateway returns the detached
+authenticated page; the Dock binds each request id to the selected project,
+filters projected summaries by that project and
+`status == "awaiting_user_review"`, and discards a response after the
+selection context changes.
+
+### 70.2 R01 blockers and majors
+
+Blockers:
+
+1. Gateway, Dock and their tests used `command`/`event`, string request ids,
+   an extra task project id, `action`, extra success fields and non-contract
+   error codes/keys. The complete table above must replace that self-consistent
+   but incompatible protocol.
+2. Host copied active worker/daemon identities into its inactive snapshot, so
+   the real harness would deterministically wait until its deadline.
+   Lifecycle must be exactly
+   `inactive -> starting -> active -> stopping -> inactive`; connection alone
+   enters active, finish clears active identities, and construction failure
+   must unwind every partial Dock/thread/session without a main-thread wait.
+
+Majors:
+
+1. Detached signal mappings need bounded string, key, integer and per-container
+   sizes in addition to the existing depth/node bounds.
+2. Dock must validate exact event shapes and non-boolean schema/id values,
+   turn malformed or authenticated `ok:false` projections into stable visible
+   failure rather than a main-thread exception, own project/status filtering,
+   clear stale task state, bind every page to selection context and implement
+   both project and selected-task refresh.
+3. The fake client must fail on main-thread use and fake widgets must fail on
+   worker-thread access, so negative authority tests prove the intended
+   boundary rather than merely documenting thread ids.
+4. Real harness evidence must prove one active Dock, responsive main-thread
+   heartbeat through Refresh, one actual client construction, reviewed
+   InitGui/gateway/dock/host/bootstrap sources, exact prefix/home/PySide
+   binding and the complete initial/starting/active/stopping/final lifecycle.
+5. If GUI `Popen` succeeds and token capture fails, cleanup must never signal
+   an unauthenticated pid but must boundedly wait, emit an explicit residual
+   outcome and never let the action error conceal cleanup failure. With a
+   token, only a freshly revalidated original session may be signaled.
+
+I02 remains inside the approved eight-path C01 allowlist and is split into the
+same non-overlapping core and harness write domains. Both sides add regression
+tests first and rerun the full non-real gate. Real M00 remains forbidden until
+fresh sol-max R02 and independent M02 both pass on corrected hashes.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E03 | A04 C01; sol-max R01 recovery | `not-created`; M00 forbidden | R01 NO-GO: 2 blocker / 5 major; non-real 38+1 deselected and static gates green; hashes stable | exact protocol, host teardown, boundary budgets/authority and M00 proof require I02 | MRG1-S22 | blocked / split sol-high I02 next |
+
+## 71. G1-C01 I02 corrected candidate and dual-gate packet
+
+The two non-overlapping sol-high correction agents closed the complete R01
+recovery packet without changing the approved C01 product surface. Core I02A
+first ran four targeted regressions against I01 and observed four failures.
+After correction, the package and controller surface returned `34 passed`;
+Ruff, format, compile and diff checks passed.
+
+Harness I02B first ran three targeted regressions against I01 and observed
+three failures: incomplete lifecycle/real Refresh evidence, absent
+token-capture-failure recovery, and an action error masking cleanup failure.
+After correction, the non-slow GUI-parent surface returned
+`16 passed, 1 deselected`; Ruff, format, AST and diff checks passed. The one
+deselected test remains the single real M00 launch. Neither correction agent
+started FreeCAD, a GUI, a daemon or another child process.
+
+I02 adds one technical-only snapshot extension needed for M00 evidence. It is
+not a product feature or product-shape change. `workbench_snapshot()` is now an
+exact eight-key mapping:
+
+```text
+schema_version
+lifecycle
+dock_count
+main_thread_id
+worker_thread_id
+daemon_id
+heartbeat_count
+client_construction_count
+```
+
+`client_construction_count` is driven by successful construction in the
+gateway factory, not inferred from connection state. It is zero in initial and
+starting snapshots and remains cumulatively one through active, stopping and
+final snapshots. `heartbeat_count` advances on worker events and the real
+harness uses its delta, together with a main-thread timer delta and the emitted
+Refresh command kinds, to prove observable Refresh behavior.
+
+The corrected candidate uses the exact Section 70 command/event table, bounded
+detachment budgets, Dock-owned project/status filtering and selection
+contexts, main/worker negative authority in fakes, and the exact lifecycle
+`inactive -> starting -> active -> stopping -> inactive`. Final inactive state
+clears worker and daemon identities while retaining cumulative technical
+counters. The parent harness binds the selected managed runtime generation and
+GUI binary identity, permits only one launch, reserves cleanup time inside one
+60-second campaign deadline, performs cleanup before semantic assertions and
+never signals a child without a freshly revalidated Darwin birth token.
+
+Frozen I02 code/test hashes:
+
+```text
+InitGui.py:
+  c8d2df3af1b3db39c57a3a40d610efd0adf4b581da4f00bcb0eb0de7ed911e4c
+gateway.py:
+  4e8fb3542781a3768c9ac95bd26cb2bd92d5041dd940a8baf9200051e5a9cfce
+dock.py:
+  24889eea9605ec42c808c4bb59fb636115764c93ad30c841903679f178865524
+host.py:
+  70ad563c1f774c9dda8d1348dd5b3c7f26330374fb778f1a2e8e29b6a81f72a8
+fake_host.py:
+  1c012570b894db79ce425800c952305f922262988ac5f60748f885950e262d53
+gui_harness.py:
+  4cd4bfe07987020239d84f792620c2228286b251339734bdccafea56f7c2094c
+controller tests:
+  5edc4d104ff286ab863f72bd2e162d3a8d19386ea25760fb4aab42314b90db78
+GUI parent tests:
+  532ec4ea4c9d310110f16bf6fe8d7a64cc788560236d54af294fcf8d79e7fdfd
+```
+
+Fresh R02 must use sol-max and independently compare all eight frozen paths
+with Sections 67 and 70, including construction-failure unwind, exact event
+semantics, stale/malformed response behavior, cleanup ownership and the real
+M00 assertions. Independent M02 must use terra-medium and run the combined
+non-real suite, Ruff check and format check, AST/XML/diff checks, exact hashes,
+allowlist status and process-residue observations. The expected combined
+pytest result is `50 passed, 1 deselected`.
+
+M00 remains forbidden unless R02 returns GO with zero blocker and zero major
+and M02 returns PASS on the same nine-file snapshot. If both pass, M00 may run
+exactly once. Its evidence must separately record `live capability
+declarations`, `observable behavior`, `environment identity` and `public
+configuration`; cleanup and zero-residue proof precede semantic acceptance.
+Any real-run failure enters diagnosis/recovery without an automatic retry.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E04 | A04 C01; user authorized autonomous non-product work; split sol-high I02 | `not-created`; M00 still forbidden | core RED 4 then 34 passed; harness RED 3 then 16+1 deselected; all local static gates PASS; eight code/test hashes frozen | fresh sol-max R02 and independent terra-medium M02 required on artifact-inclusive snapshot | MRG1-S22 | corrected candidate frozen / dual non-real gates next |
+
+## 72. G1-C01 R02 recovery and I03 packet
+
+Independent terra-medium M02 passed on the complete nine-file I02 snapshot:
+`50 passed, 1 deselected`; Ruff check, Ruff format check, AST, XML, diff and
+all nine hashes passed; status, index and process observations remained
+unchanged. The first report used an ambiguous artifact label and therefore
+looked for a nonexistent `artifact.py`; the same agent corrected only that
+path interpretation, verified
+`docs/orchestrated/vibecad-multi-runtime-g1.md` at the frozen hash, did not
+rerun the gates and returned PASS.
+
+Fresh sol-max R02 nevertheless returned NO-GO with one blocker, two majors and
+no minor or nit. It independently reproduced each behavioral failure while
+the existing non-real suite remained green.
+
+Blocker:
+
+1. The real GUI harness imports `vibecad.daemon.bootstrap` before establishing
+   repository-source precedence. Section 32 already proved that FreeCAD `-P`
+   appends paths, and the selected managed prefix contains an installed
+   `vibecad`. M00 would therefore load installed code before the reviewed
+   repository source and fail the parent source-identity assertions; the
+   gateway could also use an installed stale client. I03 must, before the
+   first `vibecad` import, derive repository `src` from the canonical harness
+   `__file__`, reject any preloaded `vibecad` namespace, remove duplicate
+   spellings, place the repository path at exact `sys.path[0]`, invalidate
+   import caches, import and immediately verify `vibecad` plus bootstrap
+   source identities. A non-real regression must simulate an installed path
+   ahead of repository source and prove the correction.
+
+Majors:
+
+1. If session construction fails after the worker thread has started, Host
+   removes the Dock and calls `thread.quit()` without a worker-owned gateway
+   close. R02 reproduced an emitted connect followed by failure and observed
+   one constructed client with no close. I03 must queue an exact close on the
+   worker, let the `closed` event drive thread quit, never close or wait on the
+   main thread, and prove async final inactive state, zero Dock and exact-once
+   client close for failures before and after worker start.
+2. Task pagination is bound only to project and selection epoch. Starting a
+   second scan for the same selected project leaves the first scan's pages
+   acceptable; R02 reproduced a stale task entering the selector. I03 must add
+   a monotonically distinct task-load epoch for every `cursor=None` scan, bind
+   all continuation pages to it and accept/update/continue only the latest
+   epoch. It must also remove the explicit `_project_changed(0)` call after
+   `QComboBox.setCurrentIndex(0)`, because real Qt already emits the index
+   signal, and prove one initial task scan plus same-selection/interleaved-page
+   stale rejection.
+
+I03 remains inside the approved C01 product surface. The core write domain is
+`host.py`, `dock.py`, the fake host and controller tests. The harness write
+domain is `gui_harness.py` and the GUI-parent test. `InitGui.py` and
+`gateway.py` remain frozen unless a new reviewed recovery packet proves a need
+to change them. Both sol-high correction agents must add regression tests
+first, observe RED on I02, then implement and run their complete non-real
+domain gates. They may not start real FreeCAD, a GUI, a daemon or another
+child process.
+
+After I03 freezes, both independent gates restart on new hashes: sol-max R03
+must return GO with zero blocker and zero major, and terra-medium M03 must
+return PASS. M00 remains forbidden until both results hold on the same
+snapshot. No automatic real-run retry is authorized by this recovery packet.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E05 | A04 C01; autonomous technical recovery | `not-created`; M00 forbidden | M02 PASS: 50+1 deselected and all static/hash/status gates; R02 NO-GO: 1 blocker / 2 major | repository-source precedence, worker-owned partial unwind and task-load epoch require split sol-high I03 | MRG1-S22 | blocked / I03 RED-first next |
+
+## 73. G1-C01 I03 corrected candidate and restarted dual gates
+
+The split sol-high I03 agents stayed inside their non-overlapping write
+domains and added regression tests before implementation.
+
+Core I03 observed three targeted failures on I02: the initial project load
+started two task scans, an old same-selection continuation was accepted after
+a new scan, and a post-connect `Dock.start()` failure left the constructed
+client unclosed. The corrected targeted set returned `4 passed`; the complete
+package and controller surface returned `36 passed`. Ruff, format, AST and
+diff checks passed.
+
+Harness I03 observed five targeted failures on I02 because the repository
+binding operation did not exist. The identical targeted selection then
+returned `5 passed, 17 deselected`; the complete non-slow GUI-parent surface
+returned `21 passed, 1 deselected`. Ruff, format, AST and diff checks passed.
+Neither agent started FreeCAD, a GUI, a daemon, `Popen`, network work or an
+installer.
+
+Host now uses a session-owned queued close signal for a partial failure after
+worker-thread start. The close command is processed by the same worker that
+owns the gateway/client, and only an exact three-key `closed` event with the
+reserved recovery request id drives thread quit. The main thread neither
+closes the client nor waits. Regression evidence proves final inactive
+eight-key state, zero Dock, one construction, exact-once close on the
+construction thread, thread finish and global-session clearing. A failure
+before thread start retains the direct inactive unwind.
+
+Dock now advances a distinct task-load epoch for every first page and binds
+each continuation to `(project_id, selection_epoch, task_load_epoch)`.
+Responses can update or continue only the current triple. Project population
+sets the selector through one real signal transition and no longer calls
+`_project_changed()` explicitly; the fake selector now models first-item,
+clear and same-index signal behavior closely enough to prove one initial scan.
+
+The real GUI harness now performs repository binding as the first operation in
+the nested probe, before any `vibecad` import. It derives canonical repository
+and `src` identities from its own reviewed source path, verifies regular source
+files, rejects every preloaded `vibecad` namespace, removes equivalent
+repository-source spellings, inserts the canonical source at exact
+`sys.path[0]`, invalidates caches, imports the package and bootstrap in order
+and immediately verifies both source identities. The binding is delayed until
+probe execution, so ordinary parent-side module inspection remains inert. M00
+now also reports and the parent asserts `vibecad_source`.
+
+Frozen I03 code/test hashes:
+
+```text
+InitGui.py:
+  c8d2df3af1b3db39c57a3a40d610efd0adf4b581da4f00bcb0eb0de7ed911e4c
+gateway.py:
+  4e8fb3542781a3768c9ac95bd26cb2bd92d5041dd940a8baf9200051e5a9cfce
+dock.py:
+  239790327fc3f59fb081171201a4c3dd349e6b4be324165737adea11e6fd10b4
+host.py:
+  6ae1e148d2684b4d1a644d8f0bc280572aa5bf7d05caf86361f589c92ae18330
+fake_host.py:
+  0bfa6a6b05f5aec03a94f664ea3d9988fb48992efeca8e3213a58253da087e3b
+gui_harness.py:
+  c7006d9ffa611aa66a513f55a7ce6a4cd7f489baf4b0e05b417efe12f36740f9
+controller tests:
+  c12eabd2d40d930d0efd438643d1c9d375baf5b15ffefff02d83afd03de5ab27
+GUI parent tests:
+  5b429272e324f06c82290b02d06a7c6fa7661948d13ac0c0274f0552a4353e75
+```
+
+The complete non-real expected result is now `57 passed, 1 deselected`.
+Independent R03 restarts with sol-max and must recheck all R01/R02 findings,
+the exact wire contract and the real-M00 proof. Independent M03 restarts with
+terra-medium and must run the combined suite plus static/hash/status/process
+gates. Both use the same artifact-inclusive nine-file snapshot. M00 remains
+forbidden until R03 is GO with zero blocker and zero major and M03 is PASS.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E06 | A04 C01; split sol-high I03 | `not-created`; M00 still forbidden | core RED 3 then target 4/full 36; harness RED 5 then target 5/full 21+1 deselected; all local static gates PASS | fresh sol-max R03 and independent terra-medium M03 required on new artifact-inclusive snapshot | MRG1-S22 | I03 candidate frozen / dual gates restarted |
+
+## 74. G1-C01 M00 pre-launch failure and D01 recovery
+
+The I03 dual gates passed on the same frozen snapshot. Terra-medium M03
+returned PASS with `57 passed, 1 deselected`, Ruff, format, AST, XML, diff,
+nine hashes, unchanged Git/index state and no real process. Sol-max R03
+returned GO with zero blocker, zero major, zero minor and zero nit after
+rechecking every R01/R02 finding and the M00 recovery semantics.
+
+The subsequently authorized slow test invocation failed in 0.42 seconds at
+the first full managed-runtime authentication. It failed before the isolated
+M00 root, `Popen`, process-token capture or `launch_count` were created.
+Consequently the real FreeCAD GUI launch count remains zero. Immediate
+observation found no FreeCAD or daemon process, no
+`/private/tmp/vc-g1m00-*` directory, no Git/index drift and no changed
+candidate hash. Per the recovery rule, the test was not rerun.
+
+Independent sol-max D01 proved a deterministic test-harness environment
+contract conflict:
+
+1. M00 requires `VIBECAD_FREECAD_ENV` in order to select the explicit managed
+   prefix.
+2. `verify_runtime_generation()` prepares private FreeCAD process directories
+   before spawning its evidence-bound verification child.
+3. That preparation treats any `VIBECAD_FREECAD_ENV` value as an external
+   override and correctly rejects overlap between an external prefix and the
+   private VibeCAD runtime tree.
+4. The selected canonical managed prefix is inside that runtime tree, so the
+   M00 test's temporary selection variable triggers the external-overlap
+   defense. The resulting `ValueError` is conservatively returned as
+   verification false before a verification child can spawn.
+
+The same generation evidence with the variable present returned
+`verify=false`, zero verification spawns and unchanged generation. With only
+that variable removed, the exact full verification spawned once, returned
+zero with empty stdout/stderr, returned `verify=true` and recaptured the same
+generation. The in-prefix receipt is exact current and has SHA-256
+`b154e2189adaf718a9231aef30972e25774e20d4d888aa5f4e95520793d64fbd`.
+Python 3.12, FreeCAD 1.1.0, installed VibeCAD 0.6.0, server epoch 4, MCP
+1.27.2 and the 28-tool public-surface digest all match the current contract.
+This is neither engine drift, stale server code, a false-current receipt nor
+host damage.
+
+I04 is test-only and does not alter product behavior or weaken the production
+external-overlap defense. Its sole implementation path is
+`tests/test_freecad_workbench_gui.py`. After resolving and binding the
+canonical managed prefix, the M00 helper must remove
+`VIBECAD_FREECAD_ENV` only for the evidence capture/full authentication
+interval, restore the exact original value in a `finally` path, and only then
+resolve the FreeCAD binary and construct the real GUI environment. Regression
+tests must first fail on I03, then prove removal during authentication,
+exact restoration on success and failure, prefix/evidence binding, and
+continued rejection of a genuine external-overlap case.
+
+I04 recovery gates are:
+
+1. sol-high RED-first implementation and the complete non-slow GUI-parent
+   suite;
+2. non-slow `tests/test_status.py` together with the complete C01 combined
+   suite, Ruff, format, AST/XML/diff and new frozen hashes;
+3. a terra-medium bounded stability gate of three consecutive full managed
+   verifications, each with exactly one child spawn, return code zero, exact
+   receipt and unchanged recaptured generation;
+4. fresh sol-max R04 with zero blocker and zero major plus independent
+   terra-medium M04 PASS on the same artifact-inclusive snapshot;
+5. zero FreeCAD/daemon/process/temp-root residue before and after all non-real
+   recovery gates.
+
+Only after all five hold may one new M00 launch be authorized. The pre-launch
+failure did not consume the real GUI launch budget, but it cannot be treated
+as an automatic retry.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E07 | A04 C01; R03/M03 dual release; autonomous test-only recovery | `not-created`; GUI launch count 0 | R03 GO 0/0/0/0; M03 PASS 57+1; slow invocation failed before Popen; D01 deterministic managed-selection/external-overlap conflict; zero residue | I04 RED-first harness fix, stability gate and fresh R04/M04 required before one new launch | MRG1-S22 | recovery / M00 rerun forbidden |
+
+## 75. G1-C01 I04 managed-authentication correction
+
+The sol-high I04 agent modified only
+`tests/test_freecad_workbench_gui.py`. Five new non-real regressions first
+returned four failures because the managed-authentication helper was absent;
+the genuine external-overlap defense already passed. The identical targeted
+selection then returned `5 passed`.
+
+The new helper accepts only the canonical managed prefix, dynamically resolves
+its dependencies so monkeypatching remains authoritative, removes
+`VIBECAD_FREECAD_ENV` only across generation capture and full authentication,
+binds both captured and authenticated evidence to the selected prefix, and
+restores the exact original environment mapping in `finally` on success or
+failure. Authentication errors are not swallowed. M00 resolves the canonical
+prefix from the original selection, uses the helper, explicitly confirms the
+selection has been restored, and only then resolves the FreeCAD executable.
+No production runtime or external-overlap code changed.
+
+Post-format evidence:
+
+```text
+targeted I04:
+  5 passed
+GUI parent, non-slow:
+  26 passed, 1 deselected
+C01 package + controller + GUI, non-slow:
+  62 passed, 1 deselected
+status + C01 package + controller + GUI, non-slow:
+  139 passed, 1 deselected
+Ruff / format / AST / XML / diff:
+  PASS
+```
+
+The only changed I03 code/test hash is:
+
+```text
+tests/test_freecad_workbench_gui.py:
+  98c8c6d547a17e28f3f1067f315a5300ca464ab3105fb39692d81e0fe110330e
+```
+
+All other Section 73 code/test hashes remain frozen. I04 did not run slow,
+FreeCAD, a GUI, a daemon, `Popen`, an installer, network work or a real managed
+verification child. The index remained empty and HEAD/upstream did not move.
+
+The artifact-inclusive I04 snapshot now restarts R04 and M04. M04 must include
+the bounded three-run full managed verification stability gate with the
+selection variable removed: each run must observe exact receipt, one
+evidence-bound child spawn, return code zero, unchanged generation and no
+FreeCAD/daemon/temp-root residue. It must also repeat the `62 passed,
+1 deselected` C01 gate, the `139 passed, 1 deselected` status-inclusive gate
+and all static/hash/status checks. R04 must independently prove that the helper
+does not turn a genuine external prefix into a managed one, restores every
+environment path and preserves all previously closed C01 findings.
+
+One new real GUI launch remains forbidden until M04 is PASS and R04 is GO with
+zero blocker and zero major on the same snapshot.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E08 | A04 C01; sol-high I04 test-only recovery | `not-created`; GUI launch count 0 | RED 4/1 existing defense pass; targeted 5; GUI 26+1; C01 62+1; status-inclusive 139+1; static gates PASS | three-run stability, fresh sol-max R04 and terra-medium M04 required | MRG1-S22 | I04 frozen / new launch forbidden |
+
+## 76. G1-C01 R04 recovery and I05 packet
+
+Terra-medium M04 passed the complete I04 snapshot. Its three consecutive full
+managed verifications each observed exact receipt, one evidence-bound child
+spawn, return code zero, empty stdout/stderr, verification true and an exactly
+equal fresh recapture; the generation was identical across all three runs.
+The `62 passed, 1 deselected` C01 gate, `139 passed, 1 deselected`
+status-inclusive gate, static checks, nine hashes, Git state and zero
+FreeCAD/daemon/temp-root observations also passed.
+
+Fresh sol-max R04 returned NO-GO with zero blocker, three majors and no minor
+or nit:
+
+1. The helper compared resolved managed prefixes but restored an unvalidated
+   original `VIBECAD_FREECAD_ENV` spelling. An alias or `..` spelling could
+   therefore authenticate the canonical prefix, be restored exactly and then
+   drive `paths.freecad_path()` with a noncanonical launch spelling. I05 must
+   require the selection's exact built-in string value to equal
+   `str(canonical_prefix)` before removing it; absent, aliased or other-typed
+   values fail before capture.
+2. `_authenticate_runtime_generation()` retained definition-time defaults for
+   receipt read, capture and verification. A monkeypatched verifier was not
+   used by the default path. I05 must use `None` defaults and dynamically
+   resolve all status dependencies at call time.
+3. The helper checked only the authenticated evidence prefix, so an injected
+   authentication result with the same prefix but different identities was
+   accepted. I05 must require exact `RuntimeGenerationEvidence` type and exact
+   equality between authenticated and captured generations in addition to the
+   canonical prefix binding.
+
+I05 remains a one-file, test-only sol-high correction in
+`tests/test_freecad_workbench_gui.py`. It must add targeted tests first and
+observe all three omissions on I04. The tests must also retain success/failure
+environment restoration, the genuine external-overlap defense and M00's
+post-helper `freecad_path()` ordering.
+
+After I05 freezes, M05 repeats the complete non-real suites, all static/hash
+checks and the bounded three-verification stability gate. Fresh sol-max R05
+must return zero blocker and zero major. One new GUI launch remains forbidden
+until both pass on the same artifact-inclusive snapshot.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E09 | A04 C01; autonomous test-only hardening | `not-created`; GUI launch count 0 | M04 PASS including three stable verifies; R04 NO-GO 0 blocker / 3 major | canonical selection spelling, dynamic defaults and exact generation equality require I05 | MRG1-S22 | blocked / sol-high I05 RED-first |
+
+## 77. G1-C01 I05 exact-selection and evidence hardening
+
+The sol-high I05 correction remained in the single
+`tests/test_freecad_workbench_gui.py` write domain. Its new targeted selection
+first returned `11 failed, 1 passed, 27 deselected`. The failures covered the
+definition-time dependency capture, seven absent/aliased/non-exact selection
+forms, non-exact captured evidence type, non-exact authenticated evidence type
+and a same-prefix/different-generation authentication result. The already
+correct helper/restoration/`freecad_path()` ordering test passed.
+
+I05 now:
+
+1. requires `VIBECAD_FREECAD_ENV` to be present, an exact built-in string and
+   exactly `str(canonical_managed_prefix)` before capture or environment
+   mutation;
+2. resolves receipt-read, capture and verify dependencies dynamically at each
+   `_authenticate_runtime_generation()` call;
+3. requires exact `RuntimeGenerationEvidence` type at every boundary and exact
+   equality between captured and authenticated generations;
+4. repeats the exact canonical selection check in the M00 body before calling
+   the helper, then confirms exact restoration before `freecad_path()`.
+
+Post-format frozen evidence:
+
+```text
+I05 targeted plus retained I04 recovery tests:
+  17 passed, 22 deselected
+GUI parent, non-slow:
+  38 passed, 1 deselected
+C01 package + controller + GUI, non-slow:
+  74 passed, 1 deselected
+status + C01 package + controller + GUI, non-slow:
+  151 passed, 1 deselected
+Ruff / format / AST / XML / diff:
+  PASS
+```
+
+The new GUI-parent test SHA-256 is:
+
+```text
+1043c69248fc367f7718df16b0dd0979bf465732643e7cb81ef948637be6d150
+```
+
+All other Section 73 code/test hashes remain frozen. No slow, real verifier,
+FreeCAD, GUI, daemon, `Popen`, installer or network operation ran; the index
+remained empty.
+
+Fresh R05 and M05 restart on the artifact-inclusive I05 snapshot. M05 repeats
+the `74 passed, 1 deselected` and `151 passed, 1 deselected` suites, static and
+hash gates, zero-residue observations and the complete three-run managed
+verification stability gate. R05 must adversarially reproduce the three R04
+attacks and return zero blocker and zero major. One new GUI launch remains
+forbidden until both pass.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E10 | A04 C01; sol-high I05 test-only hardening | `not-created`; GUI launch count 0 | RED 11/1; targeted 17; GUI 38+1; C01 74+1; status-inclusive 151+1; static gates PASS | fresh sol-max R05 and terra-medium M05 including three stable verifies | MRG1-S22 | I05 frozen / launch forbidden |
+
+## 78. G1-C01 first real GUI result and D02 recovery packet
+
+Fresh sol-max R05 returned GO with zero blocker, zero major, zero minor and
+zero nit. Independent terra-medium M05 passed the complete I05 snapshot. Its
+three consecutive managed-runtime verifications each observed the exact
+receipt, exactly one evidence-bound verification child, return code zero,
+empty stdout/stderr, verification true and an exactly equal fresh generation
+recapture. The `74 passed, 1 deselected` C01 gate, `151 passed, 1 deselected`
+status-inclusive gate, static checks, nine frozen hashes, Git/index state and
+zero-residue observations also passed.
+
+The then-admitted single real GUI launch ran once and failed after
+approximately 41.86 seconds. The GUI child exited naturally, the managed
+runtime and executable identity rechecks passed, but the daemon cleanup guard
+returned `publication_unproven`. Cleanup-first handling correctly prevented
+semantic validation. It also raised before exposing the already captured child
+stdout/stderr, leaving insufficient bounded evidence for direct diagnosis.
+The launch was not retried. Immediate and repeated observations found no
+FreeCAD, FreeCADCmd or `vibecad.daemon` process, no
+`/private/tmp/vc-g1m00-*` root, no daemon receipt or socket, no index drift and
+no candidate-file drift.
+
+Read-only sol-max D02 located a high-confidence static root-cause chain:
+
+1. The admitted runtime contains FreeCAD 1.1.0 with PySide6 6.10.2. Its
+   generated interface exposes `Qt.ConnectionType.QueuedConnection` and
+   `Qt.DockWidgetArea.RightDockWidgetArea`.
+2. `host.py` instead reads the legacy flat `Qt.QueuedConnection` four times
+   and `Qt.RightDockWidgetArea` once.
+3. The fake Qt host exposes only those flat attributes, so every non-real
+   controller test reproduced the legacy shape and concealed the real PySide6
+   incompatibility.
+4. The first flat lookup occurs before `thread.start()` and `dock.start()`.
+   Session construction catches the resulting exception, disposes the
+   unstarted objects and returns to `inactive`.
+5. The GUI harness activation loop does not treat `inactive`, `stopping` or a
+   Dock status of `Unavailable` as a terminal activation failure. It therefore
+   waits near its absolute deadline, then exits without a gateway dispatch or
+   an authenticated daemon publication. The parent consequently observes
+   `publication_unproven`.
+
+`publication_unproven` proves only that the parent could not authenticate a
+publication when it observed the run root. It does not by itself prove that a
+daemon never spawned. A healthy daemon would remain available after the GUI
+session, however, so a healthy publication being merely missed is unlikely.
+D02 ranked the remaining diagnostic candidates below the enum mismatch:
+
+1. exact GUI program spelling versus the daemon bootstrap's exact
+   `Py_GetProgramFullPath` / `sys.executable` admission;
+2. the GUI test's seven-variable environment versus the inherited C00B probe
+   environment and its `QT_QPA_PLATFORM=offscreen`;
+3. a transient daemon publication followed by an early crash;
+4. run-root, repository-import or unittest-loader disagreement.
+
+I06 is a technical recovery within A04 and does not change product scope or
+shape. Its sol-high write domain is limited to `host.py`, the fake host, the
+GUI harness and the controller/GUI test files. It must first obtain non-real
+RED evidence, then:
+
+1. use the PySide6 nested enum members with a narrowly tested Qt5 flat fallback;
+2. exercise a nested-only fake Qt shape so the real binding contract cannot be
+   concealed again;
+3. make activation fail fast on `inactive`, `stopping` or `Unavailable`, with
+   a bounded last snapshot and Dock status;
+4. preserve cleanup-first ownership while always attempting one bounded parent
+   evidence emission after cleanup and before cleanup/action/semantic
+   assertions;
+5. cap child stdout/stderr tails at 2,000 characters and prohibit all child
+   text from participating in process, receipt, cleanup or signal authority;
+6. prove cleanup executes only once across action, cleanup, evidence-emission
+   and finalizer error combinations.
+
+After I06 freezes, a fresh sol-max adversarial review and independent
+terra-medium mechanical gate must both pass on the same artifact-inclusive
+snapshot. They must include the complete non-slow C01 and status suites,
+managed verification stability, static/hash/Git checks and zero-residue
+observations. No second real GUI launch is admitted until both gates explicitly
+confirm every I06 recovery invariant and the cold-start preflight is clean.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E11 | A04 C01; autonomous technical recovery; first real launch consumed | `not-created`; GUI launch count 1 | R05 GO 0/0/0/0; M05 PASS; one real child natural exit; cleanup `publication_unproven`; D02 high-confidence PySide6 enum chain; zero residue | I06 RED-first compatibility, fail-fast and bounded cleanup-first evidence; fresh dual gates | MRG1-S22 | recovery / new launch forbidden |
+
+## 79. G1-C01 I06 PySide6 and diagnostic recovery
+
+The sol-high I06 agent remained inside the five-path recovery write domain:
+
+```text
+freecad/VibeCAD/vibecad_workbench/host.py
+tests/fixtures/freecad_workbench/fake_host.py
+tests/fixtures/freecad_workbench/gui_harness.py
+tests/test_freecad_workbench_controller.py
+tests/test_freecad_workbench_gui.py
+```
+
+The same targeted selection first returned `6 failed`, covering the
+nested-only PySide6 enum shape, three activation terminal states and two
+cleanup/evidence lifecycle cases. After implementation it returned
+`6 passed`.
+
+I06 now:
+
+1. resolves `QueuedConnection` and `RightDockWidgetArea` from the PySide6
+   nested enum namespaces, with a narrow legacy flat fallback when a nested
+   member is unavailable;
+2. provides a nested-only fake Qt shape and proves a complete
+   activate/deactivate lifecycle against it;
+3. treats `inactive`, `stopping` and Dock `Unavailable` as terminal while the
+   GUI harness is activating, emits a bounded diagnostic containing the last
+   snapshot and Dock status, and quits the nested loop instead of waiting for
+   the absolute deadline;
+4. captures the GUI action result, executes and caches cleanup exactly once,
+   attempts exactly one bounded parent-evidence emission, and only then raises
+   cleanup, action, evidence or semantic failures;
+5. retains at most 2,000 characters of each child output stream and extracts
+   only bounded status/error diagnostics; no child text participates in
+   daemon receipt, process-token, cleanup or signal authority;
+6. combines action, cleanup and evidence-emission errors without allowing the
+   finalizer to re-enter cleanup.
+
+Post-format non-real evidence:
+
+```text
+I06 targeted:
+  RED 6 failed
+  GREEN 6 passed
+C01 package + controller + GUI, non-slow:
+  80 passed, 1 deselected
+status + C01 package + controller + GUI, non-slow:
+  157 passed, 1 deselected
+Ruff / format / AST / XML / diff:
+  PASS
+```
+
+The code/test snapshot before this artifact entry was:
+
+```text
+freecad/VibeCAD/InitGui.py:
+  c8d2df3af1b3db39c57a3a40d610efd0adf4b581da4f00bcb0eb0de7ed911e4c
+freecad/VibeCAD/vibecad_workbench/gateway.py:
+  4e8fb3542781a3768c9ac95bd26cb2bd92d5041dd940a8baf9200051e5a9cfce
+freecad/VibeCAD/vibecad_workbench/dock.py:
+  239790327fc3f59fb081171201a4c3dd349e6b4be324165737adea11e6fd10b4
+freecad/VibeCAD/vibecad_workbench/host.py:
+  c81b6e5759ef35aa454a8f642d5ed61ee595594a1451804b49924aa775f344c2
+tests/fixtures/freecad_workbench/fake_host.py:
+  528a61ec9b0e1a4c7500466ce6fd8d38fd63cb222c86f3f793782dbded409a6c
+tests/fixtures/freecad_workbench/gui_harness.py:
+  9e00c58c6075599d33d2e822e3e7b108bb503c90dc04d720f98d82c11efcb409
+tests/test_freecad_workbench_controller.py:
+  5059107de207a5caef649705186334032c8626bcb708d61d6323ec9bf457e5ec
+tests/test_freecad_workbench_gui.py:
+  7ed57a99d7ca595d37231bee6e001ae1be20023bb22b806315080918e6a47f7a
+```
+
+I06 did not run a slow test, real verifier, FreeCAD, GUI, daemon, installer or
+network operation. HEAD and upstream remain
+`15d58794b67c17794cdcb583b84be7a7c5a0cbfe`, the index remains empty and
+the excluded untracked paths remain outside the campaign.
+
+Fresh sol-max R06 and independent terra-medium M06 now restart on the
+artifact-inclusive snapshot. M06 must repeat the complete non-real suites,
+three consecutive managed full verifications, static/hash/Git checks and
+zero-residue observations. R06 must adversarially attack the nested/legacy
+enum resolver, activation terminal detection, bounded evidence, cleanup
+ownership and the separation between untrusted child output and cleanup
+authority. A new real GUI launch remains forbidden until both gates pass on
+the same frozen snapshot.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E12 | A04 C01; sol-high I06 technical recovery | `not-created`; GUI launch count 1 | RED 6; targeted 6; C01 80+1; status-inclusive 157+1; static gates PASS; zero residue | fresh sol-max R06 and terra-medium M06 including three stable managed verifies | MRG1-S22 | I06 frozen / new launch forbidden |
+
+## 80. G1-C01 R06 recovery and I07 packet
+
+Fresh sol-max R06 returned NO-GO with zero blocker, two majors, one minor and
+zero nit. The I06 targeted selection, the `80 passed, 1 deselected` C01 gate,
+the `157 passed, 1 deselected` status-inclusive gate and Ruff, format, AST,
+XML and diff checks all passed. An independent eight-case enum attack matrix
+also passed nested-member preference, legacy flat fallback, missing or `None`
+nested namespaces/members, `AttributeError` fallback, non-attribute descriptor
+failure closure and failed-import cleanup. Those passes did not close three
+recovery-contract gaps:
+
+1. **Major:** `_cleanup_before_semantics()` parsed untrusted child stdout
+   before calling `cleanup_once()`. The observed event order was
+   `action -> parse -> cleanup -> evidence`. A large or adversarial result can
+   therefore consume the cleanup reserve before authenticated cleanup begins.
+   I07 must require `action -> cleanup -> parse -> evidence`; parse errors
+   remain bounded evidence and must not delay, authorize or suppress cleanup.
+2. **Major:** the M00 action created a populated `_ParentAttempt`, then
+   performed publication, executable-identity and runtime-generation checks.
+   A post-capture exception escaped the action, causing the outer lifecycle to
+   replace the populated attempt with an empty action-error attempt. R06
+   reproduced parent evidence with a `None` return code and empty streams even
+   though the child result had already been captured. I07 must attach each
+   post-capture error to an attempt that preserves return code, timeout and
+   both captured streams.
+3. **Minor:** the artifact requires a narrowly tested Qt5 flat fallback, but
+   the default fake Qt exposes both nested and flat members and the new
+   nested-only test exercises only the PySide6 branch. The implementation's
+   fallback passed R06's synthetic attack, but the frozen regression suite
+   never executes it. I07 must add a flat-only fake and a complete
+   activate/deactivate regression.
+
+I07 remains a non-product, sol-high recovery. Its write domain is limited to
+the fake host, controller tests and GUI-parent tests. It must obtain RED
+evidence for all three gaps, then repeat the complete non-slow and static
+gates. No managed full verification or M00 launch is admitted while I07 is
+mutable. After I07 freezes, both R07 and M07 restart on its
+artifact-inclusive snapshot; earlier R06/M05 results cannot release it.
+
+R06 observed no candidate/hash/Git/index drift, real process or M00 temporary
+root. The terra-medium M06 attempt was not run: agent creation was refused by
+the current subagent thread limit, and the main agent did not substitute a
+different model or self-execute the mechanical release gate.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E13 | A04 C01; autonomous technical hardening | `not-created`; GUI launch count 1 | R06 NO-GO 0 blocker / 2 major / 1 minor / 0 nit; non-real suites/static gates PASS; zero residue; M06 not run due agent limit | cleanup-before-parse, preserve post-capture evidence, explicit flat-only regression | MRG1-S22 | blocked / sol-high I07 RED-first |
+
+## 81. G1-C01 I07 strict cleanup-first recovery
+
+The sol-high I07 correction modified only the three expanded recovery paths:
+
+```text
+tests/fixtures/freecad_workbench/fake_host.py
+tests/test_freecad_workbench_controller.py
+tests/test_freecad_workbench_gui.py
+```
+
+The same targeted selection first returned `5 failed`: one strict
+cleanup-before-parse ordering failure, three post-capture preservation cases
+and one missing flat-only Qt5 lifecycle case. After implementation it returned
+`5 passed`.
+
+I07 now:
+
+1. calls `cleanup_once()` before parsing or otherwise inspecting child stdout;
+   only after cleanup has returned does it parse bounded diagnostic fields,
+   attempt exactly one evidence emission and then assert cleanup/action/evidence
+   or semantic outcomes;
+2. uses a non-real `_finalize_captured_attempt()` helper for post-capture
+   publication and runtime/executable rechecks. A failing recheck is attached
+   to a replacement attempt that preserves the original return code, timeout,
+   stdout and stderr;
+3. retains the existing best-effort policy for an unobserved publication
+   represented by `RuntimeError`, continues the post-capture recheck, and
+   leaves authenticated cleanup to the cleanup guard;
+4. adds a mutually exclusive flat-only fake Qt shape and proves a full
+   activate/deactivate lifecycle through the Qt5 compatibility branch.
+
+Post-format non-real evidence:
+
+```text
+I07 targeted:
+  RED 5 failed
+  GREEN 5 passed
+C01 package + controller + GUI, non-slow:
+  85 passed, 1 deselected
+status + C01 package + controller + GUI, non-slow:
+  162 passed, 1 deselected
+Ruff / format / AST / XML / diff:
+  PASS
+```
+
+The code/test snapshot before this artifact entry was:
+
+```text
+freecad/VibeCAD/InitGui.py:
+  c8d2df3af1b3db39c57a3a40d610efd0adf4b581da4f00bcb0eb0de7ed911e4c
+freecad/VibeCAD/vibecad_workbench/gateway.py:
+  4e8fb3542781a3768c9ac95bd26cb2bd92d5041dd940a8baf9200051e5a9cfce
+freecad/VibeCAD/vibecad_workbench/dock.py:
+  239790327fc3f59fb081171201a4c3dd349e6b4be324165737adea11e6fd10b4
+freecad/VibeCAD/vibecad_workbench/host.py:
+  c81b6e5759ef35aa454a8f642d5ed61ee595594a1451804b49924aa775f344c2
+tests/fixtures/freecad_workbench/fake_host.py:
+  ba75447c5887016064c2439acb9e43044d11f38e93b89e6a92c810814f9d2fd4
+tests/fixtures/freecad_workbench/gui_harness.py:
+  9e00c58c6075599d33d2e822e3e7b108bb503c90dc04d720f98d82c11efcb409
+tests/test_freecad_workbench_controller.py:
+  75144c6b08314df4b22b5aef999e387c5b83f9f4282d2b7d0380288dab0252c0
+tests/test_freecad_workbench_gui.py:
+  bebde58d58416feae1004ef4c854b94cabbcd09266d99a115e4c5d76352366d3
+```
+
+I07 ran no slow test, managed verifier, FreeCAD, GUI, daemon, `Popen`,
+installer or network operation. HEAD/upstream remain
+`15d58794b67c17794cdcb583b84be7a7c5a0cbfe`; the index is empty, the exact
+campaign status is unchanged and no real process or M00 temporary root was
+observed.
+
+Fresh sol-max R07 and independent terra-medium M07 restart on this
+artifact-inclusive snapshot. R07 must reproduce every R06 finding and attack
+strict cleanup-before-parse, preserved post-capture errors, publication
+best-effort handling and the explicit flat-only lifecycle. M07 must repeat all
+non-real suites, static/hash/Git checks, zero-residue observations and three
+consecutive managed full verifications. One new real GUI launch remains
+forbidden until both gates pass the identical frozen candidate and a final
+cold-start preflight is clean.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E14 | A04 C01; sol-high I07 strict cleanup-first recovery | `not-created`; GUI launch count 1 | RED 5; targeted 5; C01 85+1; status-inclusive 162+1; static gates PASS; zero residue | fresh sol-max R07 and terra-medium M07 including three stable managed verifies | MRG1-S22 | I07 frozen / new launch forbidden |
+
+## 82. G1-C01 R07/M07 and I08 publication fail-closed recovery
+
+Independent terra-medium M07 passed the complete I07 snapshot. Three
+consecutive managed full verifications each observed the exact receipt,
+exactly one verification child, return code zero, empty stdout/stderr,
+verification true and an exactly equal fresh generation recapture; all three
+generations were equal. The I07 targeted selection returned `5 passed`, C01
+returned `85 passed, 1 deselected`, the status-inclusive gate returned
+`162 passed, 1 deselected`, and all static/hash/Git/status/zero-residue checks
+passed.
+
+Sol-max R07 reproduced and closed all two majors and one minor from R06, but
+found one new major in `_finalize_captured_attempt()`. I07 treated every
+`RuntimeError` from `observe_publication()` as the best-effort “not observed”
+case. The actual cleanup guard represents an unobserved publication by a
+normal `None` return. Its `RuntimeError` cases instead include a missing cold
+proof, ambiguous publication, invalid authenticated receipt and a publication
+that changed after authentication. Swallowing those errors could therefore
+conceal a daemon-identity or generation failure. R07 was NO-GO with zero
+blocker, one major, zero minor and zero nit. Once I08 changed the snapshot,
+the old R07 run was stopped rather than completing redundant release checks;
+M07's PASS remains historical evidence and cannot release I08.
+
+The sol-high I08 correction modified only
+`tests/test_freecad_workbench_gui.py`. Its targeted selection first returned
+`5 failed, 2 passed`: four parameterized authenticated-publication
+`RuntimeError` cases and one cleanup/evidence integration case failed, while a
+normal `None` result and an already fail-closed non-`RuntimeError` case passed.
+The same selection then returned `7 passed`.
+
+I08 now:
+
+1. continues post-capture rechecks only when publication observation returns
+   normally, including the no-publication `None` result;
+2. attaches every publication `RuntimeError` or other `BaseException` to a
+   replacement attempt preserving return code, timeout and both child streams;
+3. does not run the later recheck after a publication-observation exception;
+4. still performs cleanup exactly once and emits bounded evidence containing
+   the preserved child fields and publication error.
+
+Post-format non-real evidence:
+
+```text
+I08 targeted:
+  RED 5 failed, 2 passed
+  GREEN 7 passed
+C01 package + controller + GUI, non-slow:
+  91 passed, 1 deselected
+status + C01 package + controller + GUI, non-slow:
+  168 passed, 1 deselected
+Ruff / format / AST / XML / diff:
+  PASS
+```
+
+The only I07 code/test hash changed by I08 is:
+
+```text
+tests/test_freecad_workbench_gui.py:
+  dafc66c806a2a5ce0271f834080c922bcfb6f789f182c30584554da95de1acb3
+```
+
+All other Section 81 code/test hashes remain frozen. I08 ran no slow test,
+managed verifier, FreeCAD, GUI, daemon, `Popen`, installer or network
+operation. HEAD/upstream remain
+`15d58794b67c17794cdcb583b84be7a7c5a0cbfe`; the index is empty and no real
+process or M00 temporary root was observed.
+
+Fresh sol-max R08 and independent terra-medium M08 restart on the new
+artifact-inclusive snapshot. R08 must prove the semantic distinction between
+a normal no-publication result and every exceptional publication state, while
+rechecking all prior cleanup/evidence/lifecycle findings. M08 repeats the
+complete non-real suites, managed-verification stability, static/hash/Git
+checks and zero-residue observations. A real GUI launch remains forbidden
+until both gates pass the identical candidate.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E15 | A04 C01; sol-high I08 publication fail-closed recovery | `not-created`; GUI launch count 1 | M07 PASS on superseded I07; R07 NO-GO 0 blocker / 1 major / 0 minor / 0 nit; I08 RED 5/2 then 7; C01 91+1; status-inclusive 168+1; static gates PASS | fresh sol-max R08 and terra-medium M08 | MRG1-S22 | I08 frozen / new launch forbidden |
+
+## 83. G1-C01 R08/M08 and I09 control-flow recovery
+
+Independent terra-medium M08 passed the complete I08 snapshot. Each of three
+managed full verifications observed an exact receipt, one verification child,
+return code zero, empty stdout/stderr, verification true and an exactly equal
+fresh generation recapture; all three generations were identical. I08
+targeted returned `7 passed`, C01 returned `91 passed, 1 deselected`, the
+status-inclusive gate returned `168 passed, 1 deselected`, and all
+static/hash/Git/status/zero-residue checks passed.
+
+Fresh sol-max R08 closed R07's publication finding and all R06 findings, but
+returned NO-GO with zero blocker, one major, zero minor and zero nit.
+`_cleanup_before_semantics()` caught every parse `BaseException` and converted
+it only to bounded diagnostic text. A one-shot `KeyboardInterrupt` or
+`SystemExit` could therefore be swallowed: the later semantic validator's
+second parse succeeded and ordinary semantics ran. R08 reproduced both cases
+with one semantic invocation. Its remaining publication, cleanup/evidence,
+finalizer, enum/lifecycle and non-real suite attacks all passed. M08 cannot
+release that control-flow gap.
+
+The sol-high I09 correction modified only
+`tests/test_freecad_workbench_gui.py`. The targeted selection first returned
+`4 failed`: one case each for `KeyboardInterrupt`, `SystemExit` and
+`GeneratorExit`, plus a combined failure-order case. The same selection then
+returned `4 passed`.
+
+I09 preserves the original non-`Exception` parse `BaseException` object,
+finishes cleanup and one bounded evidence attempt, and then raises it. When
+failures combine, the deterministic order is cleanup, action, parse-control
+and evidence. Semantics does not execute and the finalizer cannot re-enter
+cleanup. Ordinary parse `Exception` values remain bounded diagnostics and the
+normal semantic validator remains authoritative.
+
+Post-format non-real evidence:
+
+```text
+I09 targeted:
+  RED 4 failed
+  GREEN 4 passed
+C01 package + controller + GUI, non-slow:
+  95 passed, 1 deselected
+status + C01 package + controller + GUI, non-slow:
+  172 passed, 1 deselected
+Ruff / format / AST / XML / diff:
+  PASS
+```
+
+The only I08 code/test hash changed by I09 is:
+
+```text
+tests/test_freecad_workbench_gui.py:
+  2a7ecd827da7e540d88fb90802cb11b2631de778814c6c770daabb4600afdf8b
+```
+
+All other Section 81 code/test hashes remain frozen. I09 ran no slow test,
+managed verifier, FreeCAD, GUI, daemon, `Popen`, installer or network
+operation. HEAD/upstream remain
+`15d58794b67c17794cdcb583b84be7a7c5a0cbfe`; the index is empty and no real
+process or M00 temporary root was observed.
+
+Fresh sol-max R09 and independent terra-medium M09 restart on the new
+artifact-inclusive snapshot. R09 must re-run the control-flow, publication,
+strict cleanup/evidence and enum/lifecycle attack matrices. M09 repeats the
+complete non-real suites, managed verification stability and all
+static/hash/Git/zero-residue checks. A real GUI launch remains forbidden until
+both gates pass the identical candidate and a clean cold-start preflight is
+recorded.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E16 | A04 C01; sol-high I09 control-flow recovery | `not-created`; GUI launch count 1 | M08 PASS on superseded I08; R08 NO-GO 0 blocker / 1 major / 0 minor / 0 nit; I09 RED 4 then 4; C01 95+1; status-inclusive 172+1; static gates PASS | fresh sol-max R09 and terra-medium M09 | MRG1-S22 | I09 frozen / new launch forbidden |
+
+## 84. G1-C01 R09/M09, selector recovery and second real GUI result
+
+Fresh sol-max R09 returned GO with zero blocker, zero major, zero minor and
+zero nit. Its control-flow, publication, cleanup/evidence, post-capture,
+malicious-output, enum/lifecycle and harness fail-fast matrices all passed.
+The targeted adversarial selection returned `21 passed`, C01 returned
+`95 passed, 1 deselected`, and the status-inclusive gate returned
+`172 passed, 1 deselected`. Independent terra-medium M09 passed the identical
+artifact-inclusive snapshot, including three exact managed full
+verifications, all static/hash/Git/status checks and zero-residue
+observations.
+
+The first admitted post-R09 pytest invocation did not enter M00. Repository
+configuration supplies `-m 'not slow'`; the exact node ID did not override
+that marker expression, so pytest returned exit code 5 with
+`1 deselected in 0.15s`. The test body, setup, GUI `Popen` and GUI launch count
+all remained zero. No automatic retry occurred.
+
+Read-only sol-max D03 reproduced the old invocation with collect-only as zero
+selected and one deselected. Adding the explicit command-line expression
+`-m slow` collected exactly one test and deselected none. D03 returned GO
+recovery with zero findings: command-line `-m slow` empirically overrides the
+configured expression, while the exact node ID prevents selection of any
+other slow test. Candidate bytes and runtime state had not changed, so R09 and
+M09 remained valid. A new invocation was admitted only after another complete
+cold-start preflight.
+
+The corrected single invocation was:
+
+```text
+VIBECAD_RUN_INTEGRATION=1 \
+VIBECAD_FREECAD_ENV='/Users/wangtao/Library/Application Support/VibeCAD/runtime/mamba/envs/vibecad' \
+PYTHONPATH=src \
+PYTHONDONTWRITEBYTECODE=1 \
+.venv/bin/python -B -m pytest -q -s -p no:cacheprovider -m slow \
+  tests/test_freecad_workbench_gui.py::test_real_managed_freecad_gui_workbench_m00
+```
+
+Its immediate preflight passed the nine frozen hashes, HEAD/upstream, empty
+index, exact status, cold daemon/process/temp state, canonical managed
+selection and receipt, one exact full managed verification, and exact GUI
+binary identity. The invocation then performed exactly one GUI launch and
+returned exit code 1 with `1 failed in 8.41s`; it was not retried.
+
+The new cleanup-first bounded parent evidence succeeded:
+
+```text
+evidence count:
+  1
+child return code:
+  1
+timed out / action error / parse error:
+  false / null / null
+GUI status:
+  error
+GUI error:
+  RuntimeError: expected one registered VibeCAD Workbench, observed 0
+cleanup:
+  clean=false
+  detail=gui=exited;identity_rechecked;daemon=publication_unproven
+  retire_attempted=false
+  term_sent=false
+  kill_sent=false
+```
+
+The GUI executable spelling and identity were exact. The child ran its single
+nested unittest and exited normally after the early registration assertion.
+Its stderr contained only the missing optional
+`3DconnexionNavlib.framework` diagnostic. No host, Dock, gateway or daemon
+code ran, no daemon publication occurred, and postflight found no related
+process, M00 temporary root, endpoint or receipt. All nine hashes, Git/index
+state and the exact campaign status remained unchanged.
+
+Read-only sol-max D04 located a high-confidence module-discovery root cause.
+`_gui_command()` passed `repo/freecad` to FreeCAD's `-M/--module-path`.
+FreeCAD's official startup documentation defines this argument as an actual
+module directory and illustrates it with a path such as
+`~/.FreeCAD/Mod/Draft`, not the containing `Mod` directory. VibeCAD's actual
+module directory is `repo/freecad/VibeCAD`, the directory that directly
+contains `Init.py`, `InitGui.py` and `package.xml`. Passing its parent exactly
+explains a normal GUI/test-runner startup with zero registered VibeCAD
+workbenches. The remaining candidates rank lower: test-runner ordering,
+swallowed `InitGui.py` registration failure, private user paths and the
+optional Navlib warning.
+
+I10 is a non-product, sol-high recovery limited to the GUI command, harness
+and non-real GUI tests. It must first freeze RED evidence for the direct module
+root, then pass `repo/freecad/VibeCAD` to `-M`. It must also validate that the
+canonical module root directly contains the reviewed init and manifest files
+and improve bounded registration diagnostics without changing workbench
+loading behavior. No new real launch is admitted until fresh R10/M10 gates
+pass the I10 artifact-inclusive snapshot.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E17 | A04 C01; autonomous technical recovery; second real GUI launch consumed | `not-created`; current recovery launch count 1 | R09 GO 0/0/0/0; M09 PASS; selector invocation body/launch 0; D03 GO; corrected invocation one GUI launch; bounded error registered Workbench count 0; zero residue; D04 direct-module-root chain | I10 direct `-M` module root and bounded registration diagnostics; fresh R10/M10 | MRG1-S22 | recovery / new launch forbidden |
+
+## 85. G1-C01 I10 direct FreeCAD module-root recovery
+
+The sol-high I10 correction modified only:
+
+```text
+tests/fixtures/freecad_workbench/gui_harness.py
+tests/test_freecad_workbench_gui.py
+```
+
+The same targeted selection first returned `8 failed`: one exact command
+failure, five missing direct-module-root validation cases and two missing
+registration-diagnostic cases. After implementation it returned `8 passed`.
+
+I10 now:
+
+1. passes the canonical `repo/freecad/VibeCAD` directory to FreeCAD's `-M`
+   option instead of its `repo/freecad` parent;
+2. requires the repository and module-root spellings to be canonical and
+   owner controlled, and requires the module root to directly contain
+   canonical regular `Init.py`, `InitGui.py` and `package.xml` files;
+3. rejects missing sources, source symlinks, repository aliases and the wrong
+   parent level before a GUI launch;
+4. enriches an early registration failure with canonical bounded evidence:
+   total workbench count, at most eight normalized names, a truncation flag,
+   expected-addon-root presence, `AdditionalModulePaths` and the type of a
+   diagnostic-read error;
+5. keeps diagnostic collection subordinate to the primary registration
+   failure and does not change module loading or registration behavior.
+
+Post-format non-real evidence:
+
+```text
+I10 targeted:
+  RED 8 failed
+  GREEN 8 passed
+C01 package + controller + GUI, non-slow:
+  102 passed, 1 deselected
+status + C01 package + controller + GUI, non-slow:
+  179 passed, 1 deselected
+Ruff / format / AST / XML / diff:
+  PASS
+```
+
+The I10 code/test hashes before this artifact entry were:
+
+```text
+tests/fixtures/freecad_workbench/gui_harness.py:
+  02008e8e3cc9cb01b3b781cf92e6476b1c52a55770e17eb94beee2a91a579c32
+tests/test_freecad_workbench_gui.py:
+  c7db3d2e026bc63ee2c67f8851db12694f2a0faaf47104eb27f0cc6fc72e452b
+```
+
+All other Section 81 code/test hashes remain frozen. I10 ran no slow test,
+managed verifier, FreeCAD, GUI, daemon, `Popen`, installer or network
+operation. HEAD/upstream remain
+`15d58794b67c17794cdcb583b84be7a7c5a0cbfe`; the index is empty and no real
+process or M00 temporary root was observed.
+
+Fresh sol-max R10 and independent terra-medium M10 restart on this
+artifact-inclusive snapshot. R10 must attack module-root canonicality,
+required-source identity, exact CLI ordering and bounded registration
+diagnostics while rechecking every prior cleanup/lifecycle finding. M10
+repeats the complete non-real suites, managed verification stability and all
+static/hash/Git/zero-residue checks. A new real GUI launch remains forbidden
+until both gates pass the identical candidate and a final cold-start preflight
+is clean.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E18 | A04 C01; sol-high I10 direct-module-root recovery | `not-created`; current recovery launch count 1 | RED 8; targeted 8; C01 102+1; status-inclusive 179+1; static gates PASS; zero residue | fresh sol-max R10 and terra-medium M10 | MRG1-S22 | I10 frozen / new launch forbidden |
+
+## 86. G1-C01 R10/M10 and I11 module-chain hardening
+
+Independent terra-medium M10 passed the complete I10 snapshot. Its three
+managed full verifications, `8 passed` targeted selection,
+`102 passed, 1 deselected` C01 gate, `179 passed, 1 deselected`
+status-inclusive gate, static/hash/Git checks and zero-residue observations
+all passed.
+
+Fresh sol-max R10 confirmed that the direct module root closes the observed
+FreeCAD discovery failure, but returned NO-GO with three blockers, one major,
+no minor and no nit:
+
+1. **Blocker:** the module-root validator accepted world-writable repository,
+   `freecad` and module-root directories and world-writable init/manifest
+   files. FreeCAD could therefore execute mutable `InitGui.py` content after
+   preflight.
+2. **Blocker:** registration diagnostics fully materialized an arbitrary
+   workbench iterable before truncating names, and an attacker-controlled
+   exception class name could make the supposedly bounded diagnostic exceed
+   2,000 characters.
+3. **Blocker:** an `OSError` from the expected addon root's `is_dir()` check
+   replaced the primary registration failure.
+4. **Major:** diagnostic collection caught `BaseException`, converting
+   `KeyboardInterrupt` and `SystemExit` into the ordinary primary
+   `RuntimeError`.
+
+R10's remaining alias, symlink, non-regular, unreadable, wrong-owner,
+direct-module-root and existing lifecycle attacks passed. M10 cannot release
+the four diagnostic/module-chain findings.
+
+The sol-high I11 correction remained in the GUI-parent test and GUI harness
+write domain. The targeted selection first returned
+`16 failed, 1 passed`; after implementation it returned `17 passed`.
+
+I11 now:
+
+1. validates the repository, `freecad` ancestor and `VibeCAD` module root
+   separately as canonical exact-owner directories with owner read/search
+   access and no group/world write bits;
+2. validates `Init.py`, `InitGui.py` and `package.xml` as canonical
+   exact-owner, owner-readable regular files with no group/world write bits;
+3. consumes at most 65 entries from a generic workbench iterable, retains at
+   most 64 for bounded processing, reports exact built-in-dict length in
+   constant time, and emits at most eight bounded normalized names;
+4. bounds all diagnostic strings and exception type names before constructing
+   canonical JSON, keeping the complete diagnostic at or below 2,000
+   characters without truncating encoded JSON;
+5. converts ordinary addon-stat, iterable and configuration-read exceptions
+   into bounded subordinate diagnostic fields while preserving the primary
+   registration failure;
+6. catches only `Exception` for diagnostic reads, allowing
+   `KeyboardInterrupt`, `SystemExit` and `GeneratorExit` to propagate as their
+   original objects.
+
+Post-format non-real evidence:
+
+```text
+I11 targeted:
+  RED 16 failed, 1 passed
+  GREEN 17 passed
+C01 package + controller + GUI, non-slow:
+  119 passed, 1 deselected
+status + C01 package + controller + GUI, non-slow:
+  196 passed, 1 deselected
+Ruff / format / AST / XML / diff:
+  PASS
+```
+
+The I11 code/test hashes before this artifact entry were:
+
+```text
+tests/fixtures/freecad_workbench/gui_harness.py:
+  f4647f4b3aeec8d39e7734c3ffdf7458727bed61f1f6da07baf1862c76ddf728
+tests/test_freecad_workbench_gui.py:
+  2a734ec6f07b8c0dc9961c0e086dbea8e91e572aac83f1678c2239baab377f7e
+```
+
+One initial permissions-negative run left a pytest temporary directory
+unremovable because the fixture had not restored directory permissions. I11
+restored and removed only that exact test-owned target, moved permission
+restoration into `finally`, and repeated both full suites without warnings.
+Final observation found no pytest garbage, FreeCAD/daemon process or M00
+temporary root.
+
+I11 ran no slow test, managed verifier, FreeCAD, GUI, daemon, `Popen`,
+installer or network operation. HEAD/upstream remain
+`15d58794b67c17794cdcb583b84be7a7c5a0cbfe`; the index is empty.
+
+Fresh sol-max R11 and independent terra-medium M11 restart on this
+artifact-inclusive snapshot. R11 must repeat the module-chain permission,
+bounded-iteration, bounded-JSON, subordinate diagnostic and control-flow
+attacks together with all prior C01 invariants. M11 repeats the complete
+non-real suites, managed verification stability and static/hash/Git/residue
+checks. A new real GUI launch remains forbidden until both gates pass the same
+candidate.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E19 | A04 C01; sol-high I11 module-chain hardening | `not-created`; current recovery launch count 1 | M10 PASS on superseded I10; R10 NO-GO 3 blocker / 1 major / 0 minor / 0 nit; I11 RED 16/1 then 17; C01 119+1; status-inclusive 196+1; static gates PASS; zero residue | fresh sol-max R11 and terra-medium M11 | MRG1-S22 | I11 frozen / new launch forbidden |
+
+## 87. G1-C01 R11/M11 and I12 structured diagnostic recovery
+
+Independent terra-medium M11 passed the complete I11 snapshot. The I11
+targeted selection returned `17 passed` without warnings, C01 returned
+`119 passed, 1 deselected`, the status-inclusive gate returned
+`196 passed, 1 deselected`, and three managed full verifications were exact.
+All static/hash/Git/status and zero unsafe-residue observations passed.
+
+Fresh sol-max R11 closed every R10 finding but returned NO-GO with one blocker,
+one major, no minor and no nit:
+
+1. **Blocker:** the diagnostic trusted `expected_addon_root.is_dir()` to
+   return a Boolean. A hostile path-like object could return NaN, an arbitrary
+   object, string or integer; those values either broke canonical JSON or
+   polluted the Boolean schema, replacing the primary registration failure.
+2. **Major:** simultaneous ordinary failures while reading workbenches,
+   `AdditionalModulePaths` and the expected addon root retained only the first
+   unlabelled exception type. Later failures and their phases disappeared,
+   leaving a scarce real-launch diagnostic materially ambiguous.
+
+R11 confirmed the complete execution-chain permission policy, bounded
+65-entry iterable consumption, exact-dict fast path, bounded names and
+strings, control-flow propagation and all earlier C01 invariants.
+
+The sol-high I12 correction remained in the GUI-parent test and GUI harness
+write domain. Its diagnostic-focused selection first returned
+`15 failed, 10 passed, 70 deselected`; after implementation the same selection
+returned `25 passed, 70 deselected`.
+
+I12 now:
+
+1. accepts the addon-root existence result only when
+   `type(value) is bool`;
+2. converts NaN, arbitrary objects, strings, integers and `None` into
+   `expected_addon_root_exists=null` plus a bounded root-phase `TypeError`;
+3. replaces the singular error field with an exact built-in
+   `diagnostic_read_errors` list;
+4. records at most three exact plain mappings with exactly `phase` and `type`
+   keys, no messages, closed phases and ASCII exception type names bounded to
+   64 characters;
+5. retains all ordinary concurrent diagnostic errors in deterministic order:
+   workbenches, `AdditionalModulePaths`, expected addon root;
+6. continues to propagate `KeyboardInterrupt`, `SystemExit` and
+   `GeneratorExit` as their original objects from all three phases;
+7. preserves the canonical complete JSON and 2,000-character upper bound.
+
+Post-format non-real evidence:
+
+```text
+I12 diagnostic focused:
+  RED 15 failed, 10 passed, 70 deselected
+  GREEN 25 passed, 70 deselected
+C01 package + controller + GUI, non-slow:
+  132 passed, 1 deselected
+status + C01 package + controller + GUI, non-slow:
+  209 passed, 1 deselected
+Ruff / format / AST / XML / diff:
+  PASS
+```
+
+The I12 code/test hashes before this artifact entry were:
+
+```text
+tests/fixtures/freecad_workbench/gui_harness.py:
+  45c298ab33d9809a54d3b63f2ce3872f5a6f5e8c44d5bd0f2479afc37a430dc7
+tests/test_freecad_workbench_gui.py:
+  674da1037a9926f968362458318ff818f50933de1c4ae92214b2eb42b3f94dc8
+```
+
+I12 ran no slow test, managed verifier, FreeCAD, GUI, daemon, `Popen`,
+installer or network operation. HEAD/upstream remain
+`15d58794b67c17794cdcb583b84be7a7c5a0cbfe`; the index is empty and no
+FreeCAD/daemon/M00/unsafe pytest garbage was observed.
+
+Fresh sol-max R12 and independent terra-medium M12 restart on this
+artifact-inclusive snapshot. R12 must reproduce both R11 findings and the
+entire module-chain, diagnostic, cleanup/publication/control-flow and
+enum/lifecycle matrices. M12 repeats the complete non-real suites, managed
+verification stability and static/hash/Git/residue checks. A new real GUI
+launch remains forbidden until both gates pass the same candidate.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E20 | A04 C01; sol-high I12 structured diagnostic recovery | `not-created`; current recovery launch count 1 | M11 PASS on superseded I11; R11 NO-GO 1 blocker / 1 major / 0 minor / 0 nit; I12 RED 15/10 then 25; C01 132+1; status-inclusive 209+1; static gates PASS; zero unsafe residue | fresh sol-max R12 and terra-medium M12 | MRG1-S22 | I12 frozen / new launch forbidden |
+
+## 88. G1-C01 R12/M12 and I13 encoded-budget recovery
+
+Independent terra-medium M12 passed the complete I12 snapshot. Diagnostic
+focused returned `25 passed, 70 deselected`, C01 returned
+`132 passed, 1 deselected`, the status-inclusive gate returned
+`209 passed, 1 deselected`, and three managed full verifications were exact.
+All static/hash/Git/status and zero unsafe-residue checks passed.
+
+Fresh sol-max R12 closed both R11 findings but returned NO-GO with one new
+blocker and no other finding. The field-level diagnostic bounds did not imply
+the promised complete 2,000-character bound after JSON escaping:
+`_diagnostic_ascii()` retained printable double quotes and backslashes, so
+eight maximal workbench names plus a maximal `AdditionalModulePaths` value and
+three errors produced a canonical but 2,386-character diagnostic. R12
+reproduced the double-quote and backslash cases independently. The I12
+exact-Boolean, structured multi-error and control-flow contracts all passed.
+
+The sol-high I13 correction remained in the GUI-parent test and GUI harness
+write domain. Its targeted selection first returned `6 failed, 1 passed`:
+backslash, double-quote and alternating-sensitive-character cases each broke
+the complete and three-error budgets, while the normal macOS path case passed.
+After implementation it returned `7 passed`.
+
+I13 makes the smallest encoding-safe change: `_diagnostic_ascii()` maps
+double quote and backslash to `?` along with non-printable/non-ASCII
+characters. Other meaningful printable characters, including `/` and spaces
+in normal macOS paths, remain unchanged. Each bounded diagnostic character
+therefore occupies one JSON string character, so the complete canonical
+payload remains within 2,000 characters without truncating encoded JSON.
+
+Post-format non-real evidence:
+
+```text
+I13 targeted:
+  RED 6 failed, 1 passed
+  GREEN 7 passed
+C01 package + controller + GUI, non-slow:
+  139 passed, 1 deselected
+status + C01 package + controller + GUI, non-slow:
+  216 passed, 1 deselected
+Ruff / format / AST / XML / diff:
+  PASS
+```
+
+The I13 code/test hashes before this artifact entry were:
+
+```text
+tests/fixtures/freecad_workbench/gui_harness.py:
+  6d172e03388af8cb4905da225cff107bb2e929048145d5d21ace3f96719f7d33
+tests/test_freecad_workbench_gui.py:
+  1130d1fe17f8afa93bd642921a8306dcf781e1ae198752c269d863ca7f63a31d
+```
+
+I13 ran no slow test, managed verifier, FreeCAD, GUI, daemon, `Popen`,
+installer or network operation. HEAD/upstream remain
+`15d58794b67c17794cdcb583b84be7a7c5a0cbfe`; the index is empty and no
+FreeCAD/daemon/M00/unsafe pytest garbage was observed.
+
+Fresh sol-max R13 and independent terra-medium M13 restart on this
+artifact-inclusive snapshot. R13 must reproduce the complete aggregate
+encoded-budget attack together with every prior diagnostic, module-chain and
+C01 lifecycle invariant. M13 repeats all non-real suites, managed verification
+stability and static/hash/Git/residue checks. A new real GUI launch remains
+forbidden until both gates pass the same candidate.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E21 | A04 C01; sol-high I13 encoded-budget recovery | `not-created`; current recovery launch count 1 | M12 PASS on superseded I12; R12 NO-GO 1 blocker / 0 major / 0 minor / 0 nit; I13 RED 6/1 then 7; C01 139+1; status-inclusive 216+1; static gates PASS; zero unsafe residue | fresh sol-max R13 and terra-medium M13 | MRG1-S22 | I13 frozen / new launch forbidden |
+
+## 89. G1-C01 R13/M13, third real result, bilingual README and I14
+
+Fresh sol-max R13 returned GO with zero blocker, zero major, zero minor and
+zero nit. Its aggregate encoded-budget, exact-Boolean, multi-error,
+control-flow, bounded-iteration, permission, direct-module-root,
+cleanup/publication and lifecycle matrices passed. Diagnostic focused returned
+`32 passed, 70 deselected`, and the complete C01 non-slow gate returned
+`139 passed, 1 deselected`. Independent terra-medium M13 passed the identical
+artifact-inclusive snapshot, including `7 passed` I13 targeted,
+`216 passed, 1 deselected` status-inclusive, three exact managed full
+verifications, all static/hash/Git/status checks and zero unsafe residue.
+
+The then-admitted single real M00 invocation passed registration, activation,
+daemon and semantic execution but returned exit code 1 with
+`1 failed in 36.28s`. It was not retried. The single bounded parent evidence
+reported:
+
+```text
+GUI launch count:
+  1
+child return code / timed out:
+  0 / false
+action error / parse error:
+  null / null
+GUI status / error:
+  ok / null
+cleanup:
+  clean=true
+  detail=gui=exited;identity_rechecked;daemon=retired
+  retire_attempted=true
+  term_sent=false
+  kill_sent=false
+daemon id:
+  daemon_995103b84db3dfdc13a7476f4878653a
+```
+
+The Workbench registered exactly once as `VibeCADWorkbench`, activated,
+connected one client, refreshed through the daemon and closed the authenticated
+daemon cleanly. All six lifecycle snapshots passed:
+
+```text
+initial:  inactive / dock 0 / client 0
+starting: starting / dock 1 / client 0
+active:   active / dock 1 / client 1
+refresh:  active / dock 1 / client 1
+stopping: stopping / dock 1 / client 1
+final:    inactive / dock 0 / client 1
+```
+
+The only failure was a physical-object-tree disagreement:
+`final_snapshot.dock_count` was zero while
+`dock_count_after_shutdown` from `main_window.findChildren()` was one.
+Postflight found no FreeCAD/daemon process, M00 root, endpoint, receipt or
+unsafe pytest garbage; all hashes and Git/index/status remained unchanged.
+
+Read-only sol-max D05 proved the Qt ownership/timing chain. `_finished()` had
+already executed; `removeDockWidget()` removed the Dock from QMainWindow's
+layout but did not remove the main window as QObject parent. `deleteLater()`
+only queued DeferredDelete. The harness quit its nested event loop immediately
+after observing logical inactive/dock-zero state, then queried
+`findChildren()` before the outer FreeCAD event loop processed DeferredDelete.
+The fake host concealed this because it equated layout removal with object
+removal and treated `deleteLater()` as immediate destruction.
+
+In parallel, the repository README was split into two complete language
+files:
+
+```text
+README.md:
+  English, 216 lines
+  f9ab41b2debd703486c1c102a9b33df295468fe89d710b35050560d6fb6f0ee4
+README.zh-CN.md:
+  Simplified Chinese, 180 lines
+  47db89084599f25adc69557f18b4c1f3f0c1776a1a8728a2058f0e0e42f9bc30
+```
+
+Both files contain reciprocal language links. Automated parity checks matched
+all nine headings, eight code-fence lines, thirteen table lines, twelve links
+and link targets, version sequences, all 28 public tools, key URI/MIME values,
+host paths, cancellation/recovery semantics and roadmap literals. Both remain
+conservative about G1 delivery and the latest completed real M00 result.
+
+The sol-high I14 recovery modified only `host.py`, the fake host and controller
+tests. Its realistic parent-tree/deferred-delete targeted selection first
+returned `2 failed, 1 passed`: both normal shutdown and add-Dock failure left
+the constructed Dock in the main-window object tree. After implementation the
+directed gate returned `6 passed, 33 deselected`, controller returned
+`39 passed`, and the combined status-inclusive non-slow gate returned
+`220 passed, 1 deselected`.
+
+I14 now:
+
+1. distinguishes layout membership from QObject parent ownership in the fake
+   Qt host;
+2. models `removeDockWidget()` as layout-only and `deleteLater()` as scheduled,
+   not immediate, destruction;
+3. synchronously executes `hide`, layout removal and `setParent(None)` before
+   scheduling deletion;
+4. covers both normal finished shutdown and a constructed-but-never-started
+   add-Dock failure;
+5. attempts every detach step independently, retains honest layout/parent
+   ownership flags after an exception, and does not publish dock zero while
+   either ownership remains.
+
+The I14 code/test hashes before this artifact entry were:
+
+```text
+freecad/VibeCAD/vibecad_workbench/host.py:
+  7b65ae9e34ef013df66359012eca99dae12304cbc59eb60b9f6e58ec5045f95b
+tests/fixtures/freecad_workbench/fake_host.py:
+  7cfb0079cf64dbc0c57a2d3fead57dffc957402a60c53dcca8d13d02ca6c5966
+tests/test_freecad_workbench_controller.py:
+  fe570cb2ef75adc1c01955d1676bb3a68cb255c9d7db16b8600ef815516a576e
+```
+
+I14 and the README split ran no slow test, managed verifier, FreeCAD, GUI,
+daemon, `Popen`, installer or network operation. HEAD/upstream remain
+`15d58794b67c17794cdcb583b84be7a7c5a0cbfe`; the index is empty.
+
+Fresh sol-max R14 and independent terra-medium M14 restart on the complete
+artifact/code/test/README snapshot. R14 must adversarially attack synchronous
+Dock detachment, honest residual ownership and fake/real Qt parity while
+rechecking the full earlier C01 matrix. M14 repeats all non-real suites,
+managed verification stability, bilingual README parity and all
+static/hash/Git/residue checks. A new real GUI launch remains forbidden until
+both gates pass the same candidate.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E22 | A04 C01; bilingual README; sol-high I14 Dock ownership recovery | `not-created`; current recovery launch count 1 | R13 GO 0/0/0/0; M13 PASS; real child rc0/GUI ok/daemon retired; only object-tree Dock 1; D05 deferred-delete chain; I14 RED 2/1 then directed 6; status-inclusive 220+1; README parity PASS | fresh sol-max R14 and terra-medium M14 on 11-hash snapshot | MRG1-S22 | I14 frozen / new launch forbidden |
+
+## 90. G1-C01 R14/M14, verifier-command recovery and I15 fail-closed ownership
+
+Independent terra-medium M14 passed every candidate-facing part of the I14
+snapshot: the directed Dock selection returned `6 passed, 33 deselected`,
+controller returned `39 passed`, C01 returned `143 passed, 1 deselected`, and
+the status-inclusive gate returned `220 passed, 1 deselected`. Scoped Ruff,
+format, AST, XML, diff, bilingual README parity, all eleven frozen hashes,
+Git/index/status and zero-residue checks also passed.
+
+M14 initially reported FAIL because its three managed-runtime stability
+commands each observed an exact receipt but `verify=false`. No real GUI or
+slow test was admitted. Read-only D06 proved this was a gate-command false
+red, not runtime or candidate drift: the command had incorrectly set the
+canonical managed prefix as `VIBECAD_FREECAD_ENV`, thereby selecting the
+external-override branch. That branch correctly rejects overlap with
+VibeCAD's private managed runtime tree. Repeating the exact evidence-bound
+full verifier with `VIBECAD_FREECAD_ENV` absent returned `verify=true` three
+consecutive times. All three runs had identical generation identities, one
+child return code zero and empty stdout/stderr. M14 is therefore recovered
+PASS, with the false-red command and correction retained as gate evidence.
+
+Fresh sol-max R14 returned NO-GO with zero blocker, one major, zero minor and
+zero nit. I14 closed the normal real-M00 object-tree root cause, but an
+adversarial detach exception still lost the residual ownership session.
+After either `removeDockWidget()` or `setParent(None)` failed, `_finished()`
+reported the honest residual `dock_count=1` but published `inactive` and
+cleared `_session`. A subsequent activation could then construct a second
+Dock while the first still remained in the layout or QObject tree. The same
+control-flow defect applied to an unstarted add-Dock failure followed by a
+detach failure. R14 did not classify `_best_effort` catching
+`BaseException` as a separate finding: merely narrowing that catch would
+interrupt the remaining cleanup steps.
+
+The sol-high I15 correction remained in `host.py` and its controller tests.
+Its four-case directed selection first returned
+`3 failed, 1 passed, 37 deselected`. The three expected failures reproduced
+the unstarted and two finished residual-ownership paths; the passing case
+proved that a `deleteLater()` failure alone remains a legal terminal state
+once both main-window ownership dimensions are absent.
+
+After the smallest product correction, the directed gate returned
+`4 passed, 37 deselected`, controller returned `41 passed`, C01 returned
+`145 passed, 1 deselected`, and the status-inclusive gate returned
+`222 passed, 1 deselected`. Scoped Ruff and format, eleven-path AST,
+`package.xml`, tracked/untracked diff and zero-process checks all passed.
+
+I15 now:
+
+1. retains `_session` and the non-terminal `stopping` lifecycle while either
+   layout membership or QObject parent ownership remains;
+2. records whether the worker thread has retired and forbids cleanup retry or
+   replacement while it is still live;
+3. makes a later activation retry only the retired session's synchronous
+   Dock detach on the main thread;
+4. constructs no new Dock, client or thread while cleanup continues to fail;
+5. clears the old session and permits one replacement only after both
+   ownership flags reach zero; and
+6. preserves the ownership-focused terminal contract when only
+   `deleteLater()` fails.
+
+The I15 code/test hashes before this artifact entry were:
+
+```text
+freecad/VibeCAD/vibecad_workbench/host.py:
+  4b4ef6a8738faaa636429e48f2a4594f91c3e6d6554f91900336f3ea6d5c7aa3
+tests/test_freecad_workbench_controller.py:
+  d2f01fbdb6361a911a7c81bbcfb77d2230d9c7251aae9cd017d13f2d9bbe4069
+```
+
+R14, M14/D06 and I15 ran no real FreeCAD GUI, slow test, installer, network
+operation or product-shape change. HEAD/upstream remain
+`15d58794b67c17794cdcb583b84be7a7c5a0cbfe`; the index is empty.
+
+Fresh sol-max R15 and independent terra-medium M15 restart on the complete
+artifact/code/test/README snapshot. R15 must attack residual-session
+retention, live-versus-retired cleanup authority, persistent failure and
+successful replacement while rechecking the prior M00 and C01 matrices. M15
+must repeat all non-real suites, the corrected three-run managed verifier,
+bilingual README parity and static/hash/Git/residue checks. A new real GUI
+launch remains forbidden until both gates pass the same frozen candidate.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E23 | A04 C01; autonomous technical recovery; sol-high I15 | `not-created`; current recovery launch count 1 | M14 candidate gates PASS; D06 false-red command recovered by three exact managed verifies; R14 NO-GO 0/1/0/0; I15 RED 3/1 then directed 4; status-inclusive 222+1; static gates PASS | fresh sol-max R15 and terra-medium M15 on artifact-inclusive snapshot | MRG1-S22 | I15 frozen / new launch forbidden |
+
+## 91. G1-C01 R15/M15, I16 deferred deletion and bilingual contract recovery
+
+Independent terra-medium M15 passed the complete I15 snapshot. Its directed
+selection returned `4 passed, 37 deselected`, controller returned
+`41 passed`, C01 returned `145 passed, 1 deselected`, and the
+status-inclusive gate returned `222 passed, 1 deselected`. Three corrected
+managed full verifiers each ran with `VIBECAD_FREECAD_ENV` absent, observed
+the exact receipt and identical generation, spawned one evidence-bound child
+with return code zero and empty stdout/stderr, and returned true. Static,
+bilingual README, hash, Git/index/status and zero-residue checks passed.
+
+Fresh sol-max R15 returned NO-GO with zero blocker, one major, zero minor and
+zero nit. I15 correctly prevented duplicate sessions, but still scheduled
+`deleteLater()` while layout or parent ownership remained after a synchronous
+detach exception. Real Qt may process that DeferredDelete and destroy the C++
+Dock while the Python wrapper and ownership flags remain. Every later retry
+would then operate on a deleted wrapper, leaving the session permanently
+`stopping/dock_count=1`. The fake only marked deletion as scheduled and
+therefore concealed this liveness and snapshot-consistency defect.
+
+The sol-high I16 correction remained in `host.py` and its controller tests.
+Its first directed RED round returned five expected failures: remove and
+parent residual paths scheduled deletion too early, the unstarted residual
+did the same, and normal plus failing deletion were attempted repeatedly by
+duplicate `_finished()` calls. Its second three-case RED round proved that an
+already attempted deletion still allowed duplicate callbacks to call
+`hide()` twice more.
+
+I16 now:
+
+1. never schedules deletion while either main-window ownership flag remains;
+2. marks a single deletion attempt before invoking `deleteLater()`, so even a
+   deletion exception is never retried;
+3. returns immediately from later detach calls after that attempt and no
+   longer dereferences a possibly deleted wrapper;
+4. keeps the live wrapper available while residual ownership is still
+   retryable;
+5. permits terminal state or replacement only after synchronous ownership
+   reaches zero; and
+6. lets only the current global session publish `_last_snapshot` or clear
+   itself, preventing a stale duplicate finish from overwriting a replacement
+   session's evidence.
+
+The post-format I16 controller gate returned `41 passed`; C01 returned
+`145 passed, 1 deselected`. Ruff, format, AST, XML and diff checks passed.
+The final I16 hashes before this artifact entry were:
+
+```text
+freecad/VibeCAD/vibecad_workbench/host.py:
+  4159f8eee30de798f2482ea9ecd4c9b3b72780b6c43b59e617e844f5e4cd4e0f
+tests/test_freecad_workbench_controller.py:
+  fb536a08836a39b6d298cb3f4b4343c1517e83463dffb694b5400d6472957c90
+```
+
+The first complete repository non-slow gate on the bilingual README candidate
+returned `5264 passed, 110 deselected, 2 failed`. Both failures were stale
+test contracts, not product or I16 failures:
+
+```text
+tests/test_agent_skill.py::test_release_documents_project_the_0_6_backend_truth
+tests/test_mcpb_manifest.py::test_packaged_readme_describes_only_the_agent_first_surface
+```
+
+They still required Chinese claims inside the now-English `README.md`. Per
+the circuit breaker the full gate was not retried on that snapshot.
+
+A separate sol-high bilingual test-contract recovery modified only those two
+tests. Its exact two-test selection first reproduced both failures, then
+returned `2 passed`; both complete test files returned `22 passed`. The
+contracts now validate the English and Simplified Chinese READMEs in their
+own languages, require reciprocal links, and preserve the full 0.6.0,
+28-tool, daemon, Task Kernel, Agent-first, import, cancellation, unsupported
+surface, roadmap, unpublished and G1-not-delivered claims. `pyproject.toml`
+continues to use the English `README.md` as its package metadata README.
+
+The bilingual contract-test hashes before this artifact entry were:
+
+```text
+tests/test_agent_skill.py:
+  01771a03ec4c75276fca9ccae2d3d8461c90a2823039d564a1004041d4cf63e8
+tests/test_mcpb_manifest.py:
+  51953e5b89324972c3604dbe0df10766b2f170d57288bab982efe253c716079e
+```
+
+R15, M15, I16 and the README contract recovery ran no real GUI, slow test,
+installer, network action or product-shape change. HEAD/upstream remain
+`15d58794b67c17794cdcb583b84be7a7c5a0cbfe`; the index is empty.
+
+Fresh sol-max R16 and independent terra-medium M16 restart on the complete
+thirteen-file artifact/code/test/README snapshot. R16 must reattack the real
+DeferredDelete ordering, single attempt, wrapper terminal guard, stale finish
+and replacement invariants together with all prior C01/M00 matrices. M16 must
+repeat the complete repository non-slow gate, corrected managed verifiers,
+README parity, static/hash/Git/status and residue checks. A new real GUI
+launch remains forbidden until both gates pass the same frozen candidate.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E24 | A04 C01; autonomous technical recovery; sol-high I16 and bilingual contract tests | `not-created`; current recovery launch count 1 | M15 PASS; R15 NO-GO 0/1/0/0; I16 RED 5 then RED 3, controller 41, C01 145+1; repository gate exposed exactly two stale README tests; contract RED 2 then GREEN 2/full 22 | fresh sol-max R16 and terra-medium M16 on 13-hash snapshot | MRG1-S22 | I16 + bilingual tests frozen / new launch forbidden |
+
+## 92. G1-C01 R16/M16 and successful real M00
+
+Fresh sol-max R16 returned GO with zero blocker, zero major, zero minor and
+zero nit. It reproduced the residual-ownership, DeferredDelete, wrapper
+terminal-guard, stale-finish, live-versus-retired, replacement, partial-start,
+thread/client and normal-M00 matrices. The bilingual README contracts also
+retained their full English and Chinese product truth without weakening the
+existing Chinese roadmap contract.
+
+Independent terra-medium M16 passed the identical thirteen-file snapshot.
+Its final evidence included:
+
+```text
+I16 directed:
+  7 passed, 34 deselected
+controller:
+  41 passed
+C01 non-slow:
+  142 passed, 1 deselected
+status-inclusive:
+  219 passed, 1 deselected
+bilingual README directed / full files:
+  2 passed / 22 passed
+complete repository non-slow:
+  5266 passed, 110 deselected, 19 warnings
+```
+
+Three corrected managed full verifiers each ran without
+`VIBECAD_FREECAD_ENV`, observed an exact receipt before and after, returned
+true on an identical generation, and used exactly one child with return code
+zero and empty stdout/stderr. Ruff, format, AST, XML, diff, thirteen hashes,
+Git/index/status, bilingual structure and zero-residue checks passed.
+
+The final cold-start preflight then passed, in the same controlled command
+that conditionally admitted the real launch:
+
+```text
+candidate files:
+  13 exact SHA-256 values
+Git:
+  HEAD = upstream = 15d58794b67c17794cdcb583b84be7a7c5a0cbfe
+  index empty
+  exact status 7 modified + 9 untracked, including 3 excluded paths
+runtime:
+  exact receipt
+  full verification true
+  unchanged generation f8933fc0a1f2bee6...
+GUI binary:
+  owner-controlled canonical managed target
+cold state:
+  no FreeCAD, daemon, M00 root, endpoint or receipt
+```
+
+The admitted single real M00 invocation then returned exit code zero with
+`1 passed in 10.78s`. It launched the GUI exactly once. The bounded parent
+evidence reported:
+
+```text
+child return code / timed out:
+  0 / false
+action error / parse error:
+  null / null
+GUI status / error:
+  ok / null
+cleanup:
+  clean=true
+  detail=gui=exited;identity_rechecked;daemon=retired
+  retire_attempted=true
+  term_sent=false
+  kill_sent=false
+```
+
+The real FreeCAD 1.1 host loaded PySide/Qt 6.10.2, imported the reviewed
+repository sources, registered exactly one `VibeCADWorkbench`, created
+exactly one Dock and one daemon client, refreshed through daemon
+`daemon_778dd4e1ddbb6c93c46ad92b54a6e4f4`, and completed asynchronous
+shutdown. The final snapshot was `inactive/dock_count=0` with one client
+construction and four heartbeats; the main-window physical Dock search was
+also zero. The only stderr text was the host's pre-existing missing optional
+3Dconnexion framework diagnostic.
+
+Immediate postflight found no FreeCAD, FreeCADCmd, daemon, pytest or M00
+temporary process/root. The exact thirteen launch hashes, Git status and
+empty index remained unchanged.
+
+After that proof, both READMEs were updated conservatively. They still state
+that the complete G1 Workbench has not been delivered, but now record that
+the local C01 bootstrap/lifecycle slice passed real M00 and distinguish it
+from later preview/verdict, Accept/Reject, object/feature-selection and full
+Workbench slices. Their new hashes are:
+
+```text
+README.md:
+  770510bdff0a2399f8920664963adf444e67ce7cc8e6899485e8cbd6e189c8e9
+README.zh-CN.md:
+  7e594ca3a4a5d31aaf72d3e2bc01b0a8128d45f32a865cb9cf07f30202f5c322
+```
+
+The two directed bilingual contract tests returned `2 passed` and
+`git diff --check` passed after this documentation update.
+
+The C01 candidate is now eligible for final post-M00 review and mechanical
+pre-stage gates. No additional real GUI launch is admitted or required. The
+next product work remains the later approved G1 slices; this M00 proves only
+the C01 bootstrap/lifecycle vertical slice.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E25 | A04 C01/M00; autonomous technical execution; R16/M16 release | `not-created`; successful final GUI launch count 1 | R16 GO 0/0/0/0; M16 PASS; repository non-slow 5266+110 deselected; preflight PASS; real M00 1 passed/child rc0/GUI ok/physical dock0/clean daemon retirement; postflight clean | complete G1 product surface remains later C02-C04 work; no more C01 real launch | MRG1-S22 | real M00 GREEN / final pre-stage gates next |
+
+## 93. Post-M00 final gates, M18 cancellation residual and I17 recovery
+
+Fresh sol-max R17 returned GO with zero blocker, zero major, zero minor and
+zero nit on the post-M00 thirteen-file candidate. Its review found no README
+overclaim, no remaining DeferredDelete or stale-finish defect, and no
+candidate-integrity drift.
+
+The first attempted final mechanical rerun, M17, completed its directed gates
+but lost the terminal full-suite result through the tool channel. It is
+retained as incomplete evidence and was never relabelled PASS. A historical
+pytest process from the earlier I16 tool-channel return was then observed
+until it exited naturally; no signal was sent. Its exact temporary root was
+moved recoverably to:
+
+```text
+/Users/wangtao/.Trash/vibecad-pytest-254-orphan-20260727-2055
+```
+
+Reliable recovery M18 used one directly controlled native session and the
+fixed basetemp `/private/tmp/vc-g1-m18-basetemp`. It returned exit code one:
+
+```text
+1 failed, 5265 passed, 110 deselected, 19 warnings in 147.12s
+```
+
+The only failure was
+`test_concurrent_active_cancel_callers_converge_on_one_terminal_result`.
+Some of the sixteen callers observed `TaskServicePortFailure(CONFLICT)`
+instead of the one durable `StoredTaskRun`. All thirteen C01/README hashes,
+Git status and the empty index remained unchanged, so this was treated as an
+unexpected real gate red rather than retried for a favourable schedule.
+
+Read-only sol-max D07 returned NO-GO with zero blocker, one major, zero minor
+and zero nit. It proved a pre-existing product race outside the C01 code:
+
+1. concurrent callers share the same non-blocking per-task lease;
+2. one caller can durably complete cancellation while a stale-generation
+   caller receives the expected service `CONFLICT`;
+3. the store-only reconciliation fallback then performed only one durable
+   readback;
+4. that readback could itself encounter transient `LOCK_UNAVAILABLE` and
+   return no result; and
+5. the original `CONFLICT` therefore escaped even though the durable task was
+   already cancelled.
+
+The sol-high I17 correction modified only
+`src/vibecad/application/agent.py` and
+`tests/test_agent_application.py`. Before implementation, its deterministic
+single regression test returned one failure for the intended reason, and the
+three-test contract returned three failures. I17 replaced the one-shot
+fallback with the existing monotonic, one-second
+`_await_durable_cancellation()` readback, retaining the same task id,
+cancellation lineage checks, the expected-generation floor, fail-closed
+timeout behaviour and the original service-error mapping.
+
+I17 post-change evidence was:
+
+```text
+three deterministic regressions:
+  3 passed, 107 deselected
+original sixteen-caller convergence test:
+  1 passed
+cancellation selection:
+  17 passed, 93 deselected
+complete test_agent_application.py non-slow:
+  109 passed, 1 deselected
+Ruff / format / AST / diff:
+  PASS
+```
+
+Fresh independent sol-max R19 returned GO with
+`Blocker/Major/Minor/Nit = 0/0/0/0`. It verified the one-second bound,
+same-task and cancellation-lineage identity, generation floor, original-error
+preservation, non-`TaskServiceError` behaviour, lease release, lock ordering,
+no re-entrancy or global serialization change, and the three deterministic
+tests together with the unchanged real concurrent-caller test. It also found
+no product or architecture conflict between I17 and the thirteen-file
+C01/README candidate.
+
+Independent terra-medium M19 passed the frozen fifteen-file snapshot:
+
+```text
+four I17/concurrent-cancel tests:
+  4 passed in 12.98s
+Ruff / format / AST / diff:
+  PASS
+README and FreeCAD non-real-host directed:
+  164 passed, 1 deselected in 14.24s
+complete repository non-slow, native session 95395:
+  5269 passed, 110 deselected, 19 warnings in 416.91s
+postflight:
+  all 15 SHA-256 values unchanged
+  HEAD = upstream = 15d58794b67c17794cdcb583b84be7a7c5a0cbfe
+  index empty
+  no pytest, FreeCAD or VibeCAD daemon process
+```
+
+The nineteen warnings are the existing runtime/fork deprecation warnings;
+there was no unexpected red. No M17, M18, D07, I17, R19 or M19 step launched
+the real FreeCAD GUI, installer or network operation. The successful real M00
+from section 92 remains the sole admitted final C01 launch.
+
+After all evidence was captured, the exact M18 and M19 fixed basetemps were
+moved to the system Trash rather than deleted:
+
+```text
+/Users/wangtao/.Trash/vibecad-m18-basetemp-20260727
+/Users/wangtao/.Trash/vibecad-m19-basetemp-20260727
+```
+
+The selected Codex adapter profile for closeout is:
+
+```text
+approval: native-plan
+delegation: spawn-send-wait
+persistence: repo-artifact
+process: native-session-poll
+```
+
+The permitted capability evidence categories are recorded exactly:
+
+- `live capability declarations`: current `update_plan`, `spawn_agent`,
+  `send_message`, `wait_agent`, `exec_command` and `write_stdin`
+  declarations support the selected operations.
+- `observable behavior`: those declared plan, delegation and original-session
+  polling operations succeeded in this session.
+- `environment identity`: Codex desktop on the current macOS workspace.
+- `public configuration`: none observed.
+
+The controller will close the frozen work as three independently revertible
+commits: the two-file cancellation convergence fix, the twelve-file C01 and
+bilingual README product slice, then this ledger closeout with both exact
+commit hashes. Each commit uses an explicit staging allowlist and is pushed
+before the next commit. The three excluded untracked paths remain preserved,
+unread and unstaged.
+
+### MRG1-S23 recovery snapshot
+
+1. **Completed milestones:** R17 GO; M17 evidence-incomplete; M18 reproducible
+   gate red; D07 root cause; I17 deterministic RED then focused GREEN; R19 GO
+   0/0/0/0; M19 full repository PASS 5269/110; real C01 M00 remains PASS from
+   section 92. The verified pre-commit anchor is branch
+   `codex/agent-stage3` at
+   `15d58794b67c17794cdcb583b84be7a7c5a0cbfe`, equal to upstream, with an
+   empty index.
+2. **Ordered next packets:** commit and push only the I17 two-file fix; commit
+   and push only the twelve-file C01/README slice; append their hashes and
+   commit/push the ledger; then inspect GitHub CI and confirm that branch
+   pushes do not create the former empty release workflow. Any staging drift,
+   push rejection, unexpected CI red or release-workflow regression stops
+   closeout and preserves the exact observable state.
+3. **Active decisions and authority:** MRG1-A04 admits C00-C04/M00; the user
+   separately authorized MRG1-G1-C00B-A05/A06 and autonomous technical,
+   recovery and gate work that does not change product function or form.
+   FreeCAD remains first; a second CAD runtime receives architecture
+   reservation only. No approval is reopened by I17 because it restores an
+   already documented cancellation-convergence contract without changing
+   product form.
+4. **Execution discipline:** use the adapter profile and evidence record
+   above; exact named staging only; never read, modify or stage `.workbuddy/`,
+   `CAD_Theory_Course_Parametric_Learning.md` or
+   `CAD_Theory_Course_Scripts_V8_True3000.md`; no duplicate full-suite or real
+   GUI launch; stop on any out-of-allowlist change, unexpected gate red,
+   ambiguous process state or remote rejection. The remaining product
+   residual is G1 C02-C04: preview/verdict, Accept/Reject,
+   object/feature-selection and the full FreeCAD Workbench experience.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E26 | A04 C01/M00; autonomous technical recovery; I17 | `not-created`; exact split and push sequence declared | R17 GO; M17 incomplete; M18 1/5265; D07 NO-GO 0/1/0/0; I17 RED then focused GREEN; R19 GO 0/0/0/0; M19 PASS 5269+110 | G1 C02-C04 remains; 19 known warnings; no more C01 real launch | MRG1-S23 | gates GREEN / exact commit closeout next |
+
+## 94. G1-C01 commit, push and release-trigger closeout
+
+The controller staged only the two I17 files, verified the cached allowlist
+and diff, committed them as:
+
+```text
+9a008d349c2ce4f189abc61a6977d3494c7a4d3e
+fix(agent): converge concurrent cancellation readback
+```
+
+That commit was pushed immediately to
+`origin/codex/agent-stage3`. The controller then staged only the twelve
+FreeCAD C01, bilingual README and associated test files, verified that cached
+allowlist and diff, committed them as:
+
+```text
+d017254a02ae7a6120b3a97e2381071618ea4eef
+feat(freecad): add G1 C01 workbench lifecycle
+```
+
+That commit was also pushed immediately. After both pushes, local HEAD and
+the upstream tracking ref were exactly
+`d017254a02ae7a6120b3a97e2381071618ea4eef`; the index was empty. The only
+remaining tracked worktree modification was this rolling ledger. The only
+remaining untracked entries were the three explicitly excluded user paths;
+there was no other untracked mechanical-verification research document
+eligible for this closeout.
+
+GitHub's public Actions API reported no workflow run at either new SHA and no
+`release.yml` run at either SHA. The newest historical branch release run
+remained run `30199416174` at
+`2cfbbc416d789491c1c532653b4e460c53dfac60`, created
+`2026-07-26T11:03:41Z`, before the trigger correction. The repository's
+current `.github/workflows/release.yml` trigger is restricted to:
+
+```yaml
+on:
+  push:
+    tags:
+      - "v*"
+```
+
+Therefore ordinary `codex/agent-stage3` pushes no longer create the empty
+release workflow failures that previously generated notification mail. The
+GitHub connector's pull-request-run view also returned no run for either new
+SHA. The local `gh` CLI had no separate authenticated session, so the
+read-only connector and public API were used; no authentication state was
+changed.
+
+### MRG1-S24 closeout snapshot
+
+1. **Completed milestones and commits:** I17 is
+   `9a008d349c2ce4f189abc61a6977d3494c7a4d3e`, pushed; FreeCAD G1-C01 plus
+   bilingual README is
+   `d017254a02ae7a6120b3a97e2381071618ea4eef`, pushed. R19 is GO 0/0/0/0,
+   M19 is PASS 5269/110, and the real C01 M00 is PASS as recorded in section
+   92. This ledger is the sole final named staging target.
+2. **Ordered next packets:** commit and push this ledger closeout; verify that
+   exact final SHA on the remote and confirm once more that its ordinary
+   branch push creates no release run. Then resume the already approved G1
+   product sequence at C02 without another C01 real launch.
+3. **Active decisions and authority:** MRG1-A04 and the later autonomous
+   technical authorization remain active. FreeCAD stays the only end-to-end
+   product target for the current G1 sequence; additional CAD runtimes retain
+   architecture reservation only.
+4. **Execution discipline and residuals:** retain the Codex capability
+   profile from section 93; stage this file by its exact path only; preserve
+   all excluded paths. Stop on a ledger push rejection or any observed
+   release-workflow regression. The product residual is C02-C04:
+   preview/verdict, Accept/Reject, object/feature selection and the complete
+   FreeCAD Workbench experience. The test residual is nineteen known
+   runtime/fork deprecation warnings.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C01-E27 | A04; autonomous I17 recovery | `9a008d349c2ce4f189abc61a6977d3494c7a4d3e`, pushed | deterministic RED; focused 109+1; R19 GO; M19 full 5269+110 | 19 known warnings | MRG1-S24 | completed |
+| MRG1-G1-C01-E28 | A04 C01/M00; bilingual README | `d017254a02ae7a6120b3a97e2381071618ea4eef`, pushed | R16/R17 GO; M16/M19 PASS; real M00 PASS; release runs absent for both pushed SHAs | G1 C02-C04 remains; no further C01 real launch | MRG1-S24 | completed |
+| MRG1-G1-C01-E29 | A04 closeout ledger | `this ledger commit`, push immediately after exact G0 gate | exact-path diff check, content hash, Git/index/status and remote release-trigger verification | none beyond E27/E28 residuals | MRG1-S24 | closeout commit next |
