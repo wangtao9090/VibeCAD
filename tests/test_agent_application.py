@@ -1886,6 +1886,130 @@ def test_self_lost_generation_is_retained_until_termination_is_proven(
     app.close()
 
 
+def test_store_only_cancel_retries_durable_readback_after_service_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentApplication.open(data_root=_data_root(tmp_path))
+    _project_id, task_id, created = _seed_projects_and_tasks(app, 1)[0]
+    cancelled = app.cancel_task(
+        task_id=task_id,
+        expected_generation=created.generation,
+    )
+    readbacks: list[str] = []
+    durable_results = iter((None, cancelled))
+
+    def fail_reconcile(**_kwargs):
+        raise TaskServiceError(TaskServiceErrorCode.CONFLICT)
+
+    def durable_after_contention(_self, requested_task_id):
+        readbacks.append(requested_task_id)
+        return next(durable_results)
+
+    with monkeypatch.context() as reconcile_patch:
+        reconcile_patch.setattr(TaskService, "reconcile_cancellation", fail_reconcile)
+        reconcile_patch.setattr(
+            AgentApplication,
+            "_durable_cancellation_for",
+            durable_after_contention,
+        )
+        reconcile_patch.setattr(agent_module.time, "sleep", lambda _seconds: None)
+        result = app._reconcile_cancellation_store_only(  # noqa: SLF001
+            task_id=task_id,
+            expected_generation=cancelled.generation,
+        )
+    app.close()
+
+    assert result == cancelled
+    assert readbacks == [task_id, task_id]
+
+
+def test_store_only_cancel_preserves_service_failure_without_durable_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentApplication.open(data_root=_data_root(tmp_path))
+    _project_id, task_id, created = _seed_projects_and_tasks(app, 1)[0]
+    cancelled = app.cancel_task(
+        task_id=task_id,
+        expected_generation=created.generation,
+    )
+    monotonic_values = iter((0.0, 0.0, 0.6, 1.1))
+    readbacks: list[str] = []
+
+    def fail_reconcile(**_kwargs):
+        raise TaskServiceError(TaskServiceErrorCode.CONFLICT)
+
+    def no_durable_result(_self, requested_task_id):
+        readbacks.append(requested_task_id)
+        return None
+
+    with monkeypatch.context() as reconcile_patch:
+        reconcile_patch.setattr(TaskService, "reconcile_cancellation", fail_reconcile)
+        reconcile_patch.setattr(
+            AgentApplication,
+            "_durable_cancellation_for",
+            no_durable_result,
+        )
+        reconcile_patch.setattr(
+            agent_module.time,
+            "monotonic",
+            lambda: next(monotonic_values),
+        )
+        reconcile_patch.setattr(agent_module.time, "sleep", lambda _seconds: None)
+        result = app._reconcile_cancellation_store_only(  # noqa: SLF001
+            task_id=task_id,
+            expected_generation=cancelled.generation,
+        )
+    app.close()
+
+    assert result == TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT)
+    assert readbacks == [task_id, task_id]
+
+
+def test_store_only_cancel_does_not_accept_durable_result_below_generation_floor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = AgentApplication.open(data_root=_data_root(tmp_path))
+    _project_id, task_id, created = _seed_projects_and_tasks(app, 1)[0]
+    cancelled = app.cancel_task(
+        task_id=task_id,
+        expected_generation=created.generation,
+    )
+    monotonic_values = iter((0.0, 0.0, 0.6, 1.1))
+    readbacks: list[str] = []
+
+    def fail_reconcile(**_kwargs):
+        raise TaskServiceError(TaskServiceErrorCode.CONFLICT)
+
+    def stale_durable_result(_self, requested_task_id):
+        readbacks.append(requested_task_id)
+        return cancelled
+
+    with monkeypatch.context() as reconcile_patch:
+        reconcile_patch.setattr(TaskService, "reconcile_cancellation", fail_reconcile)
+        reconcile_patch.setattr(
+            AgentApplication,
+            "_durable_cancellation_for",
+            stale_durable_result,
+        )
+        reconcile_patch.setattr(
+            agent_module.time,
+            "monotonic",
+            lambda: next(monotonic_values),
+        )
+        reconcile_patch.setattr(agent_module.time, "sleep", lambda _seconds: None)
+        result = app._reconcile_cancellation_store_only(  # noqa: SLF001
+            task_id=task_id,
+            expected_generation=cancelled.generation + 1,
+        )
+    app.close()
+
+    assert result == TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT)
+    assert readbacks == [task_id, task_id]
+
+
 def test_concurrent_active_cancel_callers_converge_on_one_terminal_result(
     tmp_path: Path,
 ) -> None:

@@ -1751,8 +1751,11 @@ class AgentApplication:
                 )
             except Exception as error:
                 if type(error) is TaskServiceError:
-                    cancellation = self._durable_cancellation_for(task_id)
-                    if cancellation is not None and cancellation.generation >= expected_generation:
+                    cancellation = self._await_durable_cancellation(
+                        task_id,
+                        minimum_generation=expected_generation,
+                    )
+                    if cancellation is not None:
                         return cancellation
                 return self._task_service_failure(error)
 
