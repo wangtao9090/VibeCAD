@@ -18931,3 +18931,789 @@ architecture boundary.
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MRG1-G1-A13-E06 | A13-R2-D01..D10; user exact words above | `A13-R2-PERSIST` pending self-anchor | `AUTH-R2-G0`: approval SHA, branch/upstream/index and exact-eight hashes PASS; new-root0/preflight0/GUI0 | external filesystem prompt may be required; no suitable external data volume mounted | MRG1-S104 | authorized / persistence gate active |
+
+## 106. DESIGN-R2 frozen input
+
+This section is the compact, approval-derived design input for the one
+independent `DESIGN-R2` review. It introduces no new product or approval
+decision. The anchor is pushed commit
+`99fbf743245575e500b857eaeac896e06949526d`; the new root, manifest,
+preflight and real-process counts remain zero.
+
+### 106.1 Process and authority graph
+
+```text
+runner.py (sole controller; owns all deadlines, effects and cleanup)
+├── fresh isolated daemon process group
+└── managed FreeCAD GUI process group
+    └── probe.py in GUI process
+        ├── Qt GUI-main thread: document/UI callbacks only
+        └── distinct scenario-worker thread: gateway/RPC ownership only
+```
+
+There is no acceptance worker, parent/worker result relay, daemon adoption,
+retry/resume, scenario registry or installed-G1 branch. The controller keeps
+each returned process handle and registers its cleanup owner before any
+receipt parse, authority publication or other fallible step.
+
+### 106.2 Controller state machine
+
+| State | Entry invariant | Only allowed next state |
+|---|---|---|
+| `PRISTINE` | no root effect, child or reservation | `ADMITTED`, `HOLD` |
+| `ADMITTED` | exact authorization/source/Git/runtime/product identities; no child | `LOCKED`, `HOLD` |
+| `LOCKED` | nonblocking exclusive root lock held | `RESERVED`, `HOLD` |
+| `RESERVED` | fixed consumption record exclusively written and fsynced; attempt permanently spent | `PREPARED`, `CLEANING` |
+| `PREPARED` | deterministic run directory, capsule, captures and isolated roots are exact | `DAEMON_OWNED`, `CLEANING` |
+| `DAEMON_OWNED` | in-memory daemon handle/start identity already registered | `FIXTURE_BOUND`, `CLEANING` |
+| `FIXTURE_BOUND` | fresh receipt/generation and exact fixture tuple durably bound | `GUI_OWNED`, `CLEANING` |
+| `GUI_OWNED` | in-memory GUI handle/start identity registered; capture drains owned | `SEMANTIC_BOUND`, `CLEANING` |
+| `SEMANTIC_BOUND` | GUI exit zero plus strict probe tuple and screenshot admitted | `CLEANING` |
+| `CLEANING` | no new product effect; all known owners retire in reverse order | `FAILED`, `SUCCEEDED` |
+| `FAILED` | durable failure/final evidence; never reusable | terminal |
+| `SUCCEEDED` | cleanup exact, final and evidence manifest durable | terminal |
+| `HOLD` | failure before reservation; no real attempt consumed | terminal |
+
+Every exception or catchable `TERM`/`INT`/`HUP` after `RESERVED` enters
+`CLEANING`; no state skips cleanup or constructs success directly. Uncatchable
+controller death can never produce success: the permanent reservation blocks
+replay and requires manual incident cleanup plus a new plan. No automatic
+recovery launch is allowed.
+
+`--preflight` is a separate read-only admission path:
+`PRISTINE→ADMITTED→HOLD/PASS`. It cannot acquire a launch reservation, create
+a run directory or start a daemon/GUI.
+
+### 106.3 Canonical record contract
+
+Every JSON record is UTF-8 canonical JSON with recursively sorted keys,
+`ensure_ascii=True`, `allow_nan=False`, separators `(",",":")`, one LF,
+duplicate-key rejection and exact field/type checking. Missing or extra
+fields, booleans used as integers, unbounded strings/lists and unknown enum
+values fail closed. Identity-bearing records include
+`schema_version=1`, exact `record_type`, `approval_id`, `authorization_sha256`,
+`scenario="c02-preview"` and the fields below where applicable.
+
+| Record | Required identity/content fields |
+|---|---|
+| `authorization.source` | approval revision/commit; repository realpath; branch/HEAD/upstream; exact-eight, addon and controller path/hash inventories; interpreter launcher/target/version/flags; managed prefix, receipt and daemon/GUI executable entry/target identities; exact one scenario |
+| `authorization` | source SHA; frozen runner/probe/contract-test hashes; canonical projection of every source identity; no time/random field |
+| `consumption` | deterministic run ID; authorization/scenario; controller PID/start token; state `reserved`; invocation seed digest |
+| `invocation` | run/authorization/source/implementation hashes; absolute monotonic deadline budget; exact fixture expectation; daemon/GUI executable identities; capsule hash |
+| `daemon-authority` | PID, PGID, start token, executable/argv hash, owned socket/receipt/generation identity, ownership state |
+| `gui-authority` | PID, PGID, start token, executable/argv hash, isolated profile/cwd and capsule identities, capture limits |
+| `fixture` | daemon receipt/generation/session; project/task/draft/generation; exact HEAD and draft source path/hash/size; expected checkout/grant tuple |
+| `probe-result` | invocation/run/auth hashes; GUI-main and scenario-worker IDs; exact-eight pairs; one open and one claim record; HEAD/draft document tuple; screenshot hash/size; ordered semantic cleanup |
+| `cleanup` | document, checkout and client closure evidence; per-child TERM/wait/KILL/reap/drain results; PID/PGID/start-token and socket absence results; `complete` boolean |
+| `final` | terminal state; exact invocation/probe/screenshot/cleanup hashes; GUI exit; failure codes; success allowed only by the conjunction below |
+| `evidence-manifest` | exact allowed relative paths with hash/size/mode; final hash; exact tree digest |
+
+`final.state="succeeded"` requires, independently of any nested status
+string: exact authorization/invocation rebind, GUI exit zero, strict
+`probe-result`, exact screenshot, `cleanup.complete=True`, durable reread of
+all named records and an exact evidence tree. There is no permissive merge or
+caller-supplied override.
+
+### 106.4 Lock, reservation and run identity
+
+The run ID is deterministic:
+
+```text
+hex(sha256("MRG1-G1-C02-ONE-SHOT\0" +
+           authorization_sha256 + "\0c02-preview"))[0:32]
+```
+
+The controller opens `control/lock` without following symlinks, verifies the
+owner/mode/nlink identity and holds a nonblocking exclusive lock through final
+evidence. While holding it, it creates `control/c02-preview.json` with
+`O_CREAT|O_EXCL|O_NOFOLLOW`, writes canonically with write-all, fsyncs the
+file, then fsyncs `control/` and the root. Any existing/ambiguous record or
+lock contention rejects before child `Popen`. The fixed record is never
+deleted or reset, so concurrent and sequential second invocations both fail.
+The deterministic run directory must also be absent and is created once.
+
+### 106.5 Deadlines, writes and retirement
+
+One absolute monotonic deadline is established for the real invocation.
+Remaining time is recomputed immediately before every filesystem publication,
+RPC/effect, daemon/GUI `Popen`, wait, capture drain, semantic admission,
+cleanup action and durable reread. Nonpositive remaining time forbids the
+next effect and enters cleanup/failure.
+
+All bounded writes use one contract:
+
+1. write only the remaining allowed slice;
+2. retry `InterruptedError`;
+3. reject zero or negative progress;
+4. advance count and digest by the bytes actually committed;
+5. reject overflow/truncation;
+6. fsync, close, reread stat/size/hash and require exact equality.
+
+Immediately after each `Popen(start_new_session=True)`, the returned handle,
+PID, provisional `PGID=PID`, executable identity and start token are retained
+in memory and registered for cleanup before publication. Retirement is:
+
+```text
+request graceful protocol close when available
+→ TERM exact process group
+→ bounded wait
+→ KILL exact group if still alive
+→ bounded wait and reap
+→ drain/close captures using write-all
+→ prove PID/PGID/start-token absence
+→ for daemon also prove owned socket/generation absence
+```
+
+A publication/output marker never proves retirement. Failure or ambiguity in
+any retirement step makes cleanup incomplete and forbids success.
+
+### 106.6 Exact GUI semantic binding
+
+After activation/connect and exact initial project/task settlement, the probe
+records GUI-main and scenario-worker thread identities and requires them to
+differ. RPC/gateway calls occur only on the scenario worker; Qt document/UI
+callbacks occur only on GUI main. The exact command/event window is:
+
+```text
+preview_open, preview_open, refresh_project, refresh_task,
+preview_refresh, preview_refresh, list_tasks, review
+```
+
+Each pair binds sequence, request/correlation/object identity and the actual
+call/callback thread IDs; no missing, duplicate or extra pair is accepted.
+Connect/settlement precedes this window. Cleanup follows it separately.
+
+The invocation capsule binds the fixture path/hash/size plus exact
+project/task/draft/generation. The probe requires exactly one
+`open_checkout` and one `claim_file_grant`, binds their receipts to the
+fixture checkout/grant/digest/size tuple, and binds both distinct clean HEAD
+and Draft documents, their exact `FileName` values and the screenshot to that
+same tuple. Semantic cleanup is exactly documents, then checkout(s), then
+client; the controller independently validates the entire tuple and order.
+
+### 106.7 Seven attack contracts
+
+| ID | Genuine RED observable | Required GREEN closure |
+|---|---|---|
+| `R2-A1` forged/nonzero success | nonzero GUI or wrong final tuple still yields success | strict schema plus exit/identity/cleanup conjunction returns failure |
+| `R2-A2` duplicate launch | concurrent or sequential second call reaches a child spawn counter | root lock and permanent O_EXCL reservation reject with child-spawn count zero |
+| `R2-A3` daemon authority gap | receipt/deadline failure immediately after daemon spawn leaves owned process/socket | retained pre-parse handle enters full retirement and absence proof |
+| `R2-A4` false cleanup marker | TERM/wait/publication failure permits success or live child | marker ignored; escalation, reap/drain/absence mandatory; ambiguity fails |
+| `R2-A5` short/zero evidence write | truncated bytes are counted as complete | short writes loop; zero/overflow fail; reread count/hash exact |
+| `R2-A6` same-thread trace | identical main/worker IDs pass exact-eight | probe and controller reject equality and wrong callback ownership |
+| `R2-A7` fabricated preview tuple | self-consistent fake documents without exact open/claim/fixture bind pass | exact-one RPC receipts and complete fixture→documents→screenshot tuple required |
+
+`CONTRACT-TDD` must first exercise production helpers with injected process/
+filesystem fakes and observe all seven RED failures for these exact reasons,
+not syntax, import, `NotImplemented` or an uncalled seam. The same seven cases
+form the single GREEN execution; real `Popen` remains zero.
+
+### 106.8 SOURCE-R2-G0 forbidden structure
+
+The frozen source fails G0 if it contains or permits:
+
+- a worker subcommand/process, parent/worker relay or success merge;
+- more than two child-spawn sites or any `Popen`/signal/manifest authority in
+  `probe.py`;
+- scenario registry/loop, retry/resume, daemon reuse/adoption or installed-G1
+  branch;
+- `shell=True`, ambient first-party import, normal user FreeCAD roots or
+  system-FreeCAD fallback;
+- acceptance-critical Python `assert`, `except: pass`, status-only success or
+  cleanup inferred from marker existence;
+- direct single `os.write` outside the bounded write-all primitive;
+- wall-clock deadline ownership, automatic consumption deletion/reset or
+  any path outside the exact allowlist;
+- runtime combined size over `1,500` logical lines or `64 KiB`, contract test
+  over `800` lines, runtime file count other than two, or child roles other
+  than fresh daemon and GUI.
+
+### 106.9 DESIGN-R2 verdict branch
+
+The one independent reviewer must map every state transition, record field,
+effect boundary, retirement step and `R2-A1..A7` assertion to Sections
+104–106; test for tautology, fake bypass, success without cleanup, replay and
+product/API expansion; and return canonical
+`Blocker / Major / Minor / Nit`.
+
+Only exact `0/0/0/0` authorizes creation of the new root and implementation.
+Any finding stops before external writes; no design correction/re-review is
+implied.
+
+### MRG1-S105
+
+1. **Completed milestones:** A13-R2-PERSIST `99fbf743…` is pushed; Sections
+   104–106 define the approved replacement and frozen design; new-root,
+   preflight and GUI counts remain zero.
+2. **Next steps:** run the one read-only `DESIGN-R2` review against the
+   artifact freeze. Exact `0/0/0/0` starts implementation; any finding stops.
+3. **Approved decisions:** A13-R2-D01..D10 remain active; this design makes no
+   new product or authority decision.
+4. **Execution discipline:** product and rejected packet remain immutable;
+   no external write, code, manifest, preflight or process before design GO;
+   exact budgets and breakers from Section 104 apply.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-A13-E07 | A13-R2-D01..D10; DESIGN-R2 input | `99fbf743…`, pushed | compact state/schema/process/attack design; new-root0/preflight0/GUI0 | uncatchable controller death is fail-closed and manual-cleanup/new-plan only | MRG1-S105 | design frozen / review next |
+
+## 106. MRG1-G1-A13-R2 immutable one-shot design
+
+This is the sole immutable input to `DESIGN-R2`, bound to approval commit
+`99fbf743245575e500b857eaeac896e06949526d`, Sections 104-105 and parent
+artifact SHA-256 `af20ff89869f9e54f841f237e658ebffe7cd88c188c6cbb74306f720ad187989`.
+It is design only: no implementation, external-root, manifest, preflight or
+process authority is created here.
+
+### 106.1 Process/authority graph and invariants
+
+```text
+invoker -> P0 runner/controller
+             |-- Popen #1 -> D1 fresh isolated daemon
+             |-- Popen #2 -> G1 one FreeCAD GUI
+             |                 `-> probe.py in G1
+             |                       |-- M: Qt application/main thread
+             |                       `-- W: one scenario QThread
+             `-> lock, reservation, deadlines, evidence, signal/wait/reap
+```
+
+P0 alone launches, owns handles and PID/PGID/start-token identities, writes
+evidence, decides success and retires processes. D1 and G1 are its only child
+roles, each at most once. Probe performs only C02 GUI semantics; it never
+spawns, signals, waits, reaps, retries, chooses a scenario, writes final
+evidence or claims process/socket cleanup. There is no acceptance worker,
+relay, registry, retry/resume, daemon adoption/reuse or installed-G1 path.
+Receipts/results/markers are evidence only and never transfer authority.
+
+### 106.2 Finite-state machine and crash ownership
+
+| State | Only allowed transition(s) |
+|---|---|
+| `PRISTINE` | `ADMITTED` or terminal pre-reservation failure |
+| `ADMITTED` | `LOCKED`, concurrent refusal or terminal pre-reservation failure |
+| `LOCKED` | `RESERVED`, consumed/ambiguous refusal or terminal pre-reservation failure |
+| `RESERVED` | `INVOCATION_DURABLE` or `CLEANING` |
+| `INVOCATION_DURABLE` | `DAEMON_INTENT` or `CLEANING` |
+| `DAEMON_INTENT` | `DAEMON_OWNED` or `CLEANING` |
+| `DAEMON_OWNED` | `DAEMON_ADMITTED` or `CLEANING` |
+| `DAEMON_ADMITTED` | `FIXTURE_DURABLE` or `CLEANING` |
+| `FIXTURE_DURABLE` | `GUI_INTENT` or `CLEANING` |
+| `GUI_INTENT` | `GUI_OWNED` or `CLEANING` |
+| `GUI_OWNED` | `EVIDENCE_ADMITTED` or `CLEANING` |
+| `EVIDENCE_ADMITTED` | `CLEANING` |
+| `CLEANING` | `CLEANUP_VERIFIED` or `CLEANUP_FAILED` |
+| `CLEANUP_VERIFIED` / `CLEANUP_FAILED` | `MANIFEST_DURABLE` when writable, else terminal nonzero |
+| `MANIFEST_DURABLE` | `FINAL_SUCCESS` or `FINAL_FAILURE` |
+
+Every caught error/deadline/signal after `RESERVED` enters `CLEANING`; no
+marker suppresses it. Success requires the unique forward path, GUI exit zero,
+strict evidence admission and verified cleanup. No backward, resume or
+unlisted transition exists. P0 is cleanup owner at every live-child state.
+
+Crash boundaries are exhaustive: before reservation, no child/consumption and
+fresh admission is allowed; during reservation, absent/partial fixed record
+fails closed with no child; after reservation but before Popen, consumption is
+permanent with no replay; after either Popen return but before authority fsync,
+the fsynced intent remains and an uncatchable P0 death requires a new
+identity-recovery plan; after authority fsync, caught failures use the owned
+handle, while uncatchable death leaves durable identity for that same new plan;
+during cleanup/evidence write, partial fixed files are permanent failure
+evidence; after final fsync, only canonical/hash recomputation admits it.
+No crash authorizes R2 resume, overwrite or a second launch.
+
+### 106.3 Canonical schemas
+
+All JSON is canonical UTF-8: one object, sorted keys, compact separators, one
+LF; exact key sets; NFC strings; integers only; lowercase 64-hex digests.
+Missing/extra/duplicate keys, `null`, floats, negative zero, `NaN` and
+infinities are rejected. Arrays have stated order/length and no duplicates.
+Re-encoding must reproduce identical bytes. Required shared field sets are:
+`FileID={path,realpath,device,inode,mode,uid,gid,nlink,size_bytes,sha256}`;
+`ProcID={role,spawn_ordinal,pid,pgid,start_token,executable:FileID,argv_sha256,environment_sha256}`;
+`B={campaign,scenario,authorization_sha256,run_id,invocation_id}`;
+`E=B+{consumption_sha256,invocation_sha256,fixture_sha256}`;
+`Capture={path,cap_bytes,observed_bytes,committed_bytes,sha256,eof,overflow,write_error}`.
+
+| Record | Exact required fields and closed nested sets |
+|---|---|
+| `authorization.source` | `schema,campaign,scenario,evidence_root,approval,design,candidate_sources,acceptance_sources,runtime_requirements,limits`; `approval={commit,branch,artifact_sha256,sections,authorization_words_sha256}`; `design={section_id,section_sha256,review_evidence_sha256,review_counts}`; candidates are exact Section 105 eight `{path,sha256}`; acceptance is exact `runner.py,probe.py,contract_test.py` entries `{path,sha256,logical_lines,size_bytes,runtime}`; runtime requirements bind interpreter, receipt/generation, daemon executable/argv/env/version, GUI, addon tree and probe entry; limits are the Section 104 hard bounds plus effect `300000ms`, cleanup `120000ms`, four phase graces `10000ms`, each stream `4194304B`, PNG `16777216B`. |
+| `authorization` | `schema,source_sha256,campaign,scenario,evidence_root,approval,design,candidate,acceptance,runtime,limits`; every expected file resolves to `FileID`, addon to `{path,realpath,device,inode,mode,uid,gid,nlink,file_count,tree_sha256}`, receipt also binds `generation`, launches also bind `version,argv_sha256,environment_sha256`; no time/random field. |
+| `consumption` | `schema,B,controller:ProcID,created_wall_utc,created_monotonic_ns,effect_deadline_monotonic_ns,cleanup_deadline_monotonic_ns`; existence of the admitted fixed `control/c02-preview.json`, not a status field, is consumption. |
+| `invocation` | `schema,B,consumption_sha256,controller:ProcID,paths,deadlines,spawn_budget`; paths are exact run/runtime/profile, fixture, four captures, probe result, PNG, cleanup, manifest and final; deadlines repeat the two absolutes; spawn budget is exactly `{daemon:1,gui:1}`. |
+| daemon/GUI authority | For each role, immutable intent is `schema,B,consumption_sha256,invocation_sha256,role,spawn_ordinal,launch,stdout_path,stderr_path,created_monotonic_ns` plus daemon `socket_path` or GUI `profile_dir,addon,probe`; bound authority replaces `created_monotonic_ns` with `intent_sha256,process:ProcID,registered_monotonic_ns` and repeats role paths. Intent is fsynced before Popen; returned handle enters unconditional cleanup first, authority is fsynced second, before receipt/read/poll. |
+| `fixture` | `schema,B,consumption_sha256,invocation_sha256,project,task,head,draft,expected_documents,screenshot_contract`; project/task IDs cross-match; HEAD/draft contain revision, generation, file path, digest, size; draft parent equals HEAD; expected tuple is distinct `[HEAD,Draft]` with exact IDs/names/source identities; PNG contract is exact path, PNG, `1280x800`, cap and roles. |
+| `probe result` | `schema,E,thread_identity,callback_trace,open_checkout,claim_file_grant,documents,screenshot,semantic_cleanup`; each call is `{count,thread_native_id,request,response}`; documents are exact distinct `[HEAD,Draft]` and draft binds checkout/grant; screenshot binds both IDs, dimensions, digest, callback ordinal and chain digest; cleanup is ordered documents/checkout/client with zero residue. No `status`/`ok`. |
+| `cleanup` | `schema,E,probe_result_sha256,semantic,children,captures,residue,cleanup_deadline_monotonic_ns,completed_monotonic_ns`; children are exact `[GUI,daemon]`, each recording identity, TERM/wait/KILL/wait/reap/drain and identity/PGID/socket absence primitives; captures are exact four `Capture`; all document/checkout/grant/client/process/socket residue counts are required zero. |
+| `evidence manifest` | `schema,E,probe_result_sha256,cleanup_sha256,entries,excluded_paths`; entries are the complete unique root-relative sorted `{path,mode,uid,nlink,size_bytes,sha256}` set through cleanup; exclusions are only lock, manifest and final to avoid cycles. |
+| `final` | `schema,E,probe_result_sha256,cleanup_sha256,evidence_manifest_sha256,evidence_manifest_size_bytes,primitives,failure_codes,terminal_success`; primitives are exact spawn counts, GUI-zero, schema/binding/thread/eight/fixture/screenshot/semantic/process/capture/manifest/deadline booleans. P0 reparses/recomputes all; zero exit iff counts are one, all booleans true and codes empty. Stored booleans/strings never override a primitive; mismatch is failure. |
+
+`authorization_sha256=SHA256(canonical authorization bytes)`. The exact IDs
+are:
+
+```text
+run_id = "mrg1-g1-c02-" + hex(SHA256(UTF8("MRG1-G1-A13-R2\0c02-preview\0") + raw32(authorization_sha256)))
+invocation_id = "inv-" + hex(SHA256(UTF8("MRG1-G1-A13-R2\0invocation\0") + raw32(authorization_sha256) + UTF8("\0"+run_id)))
+```
+
+### 106.4 Lock, deadlines, retirement and writes
+
+P0 validates root/directories `0700`, regular files owner-current `0600`
+nlink one, no symlinks/unexpected entries. It holds a nonblocking exclusive
+whole-file lock on stable `control/lock` through final fsync. Contention fails
+before children. Under lock it creates `control/c02-preview.json` with
+`O_EXCL|O_NOFOLLOW`, write-all, file fsync, directory fsync and root fsync
+before either Popen. It never deletes/renames/truncates/overwrites it.
+Concurrent launch loses the lock; every sequential launch, even with changed
+authorization or prior failure, sees permanent consumption and spawns zero.
+
+At reservation P0 fixes `effect_deadline=T0+300000ms` and
+`cleanup_deadline=T0+420000ms`; neither resets. The same monotonic-domain
+deadline is checked immediately before D1 Popen/activation, fixture effect, G1
+Popen, open_checkout, claim_file_grant, each GUI callback and PNG creation.
+Expiry starts cleanup; cleanup uses only remaining absolute cleanup time.
+
+For GUI then daemon, P0 verifies PID/PGID/start-token, sends TERM, waits at
+most 10s, sends KILL only if the same identity lives, waits/reaps, drains both
+pipes to EOF, then proves PID/start-token and PGID absence. For daemon it next
+proves socket absence; only an exact owner/type stale socket after process
+absence may be unlinked and parent-fsynced. Ambiguity signals nothing and
+fails. Any unreaped identity, undrained pipe, residue or deadline expiry is
+terminal failure and permanent consumption.
+
+Write-all keeps offset/count/SHA over bytes actually committed: EINTR retries
+the unchanged view; a positive short write advances/hashes only that prefix;
+zero or other error fails. At cap overflow it commits only through cap,
+continues draining to EOF, records overflow and fails. Admission requires EOF,
+no error/overflow, committed=observed=stat size, exact digest, file fsync,
+close, parent fsync and no-follow readback. Requested bytes are never counted.
+
+### 106.5 Qt trace and semantic chain
+
+M is the Qt application thread; W is exactly one named scenario QThread.
+Their native IDs are nonempty and unequal. W makes the API calls and queues
+one GUI callback at a time; every callback executes on M and completes back
+on W before the next. Exact trace is:
+
+```text
+1 create_head_document       2 load_head_document
+3 create_draft_document      4 load_draft_document
+5 fit_head_view              6 fit_draft_view
+7 capture_bound_preview      8 close_preview_documents
+```
+
+Each item records ordinal/name, dispatch/callback/completion thread IDs and
+monotonic times, occurrence exactly one, W→M→W order and completion before
+next dispatch. Exact eight with equal IDs or any callback off M fails.
+Binding is fixture→exactly-one open_checkout→exactly-one claim_file_grant→
+distinct HEAD/Draft documents with exact project/task/revision/generation/
+checkout/grant/path/digest/size→ordinal-seven PNG. Cleanup is ordinal-eight
+Draft then HEAD absence→checkout/grant durable absence→client close/absence.
+Any internally consistent substitution fails.
+
+### 106.6 Seven attack contracts
+
+| # / Section 103 finding | Genuine RED observable | Required GREEN closure |
+|---|---|---|
+| 1 worker failure promotion | success-looking bound result plus nonzero fake GUI yields zero runner/final success | GUI nonzero forces nonzero/failure regardless of result/final strings |
+| 2 missing global consumption | concurrent and sequential second calls each cross effect/Popen fence | one lock winner; concurrent `CONCURRENT_INVOCATION`, sequential `ALREADY_CONSUMED`, both spawn zero |
+| 3 incomplete daemon binding | Popen returns live handle, receipt read raises/expires, daemon omitted/alive | handle registered before receipt; full retirement runs and final fails |
+| 4 unproved emergency cleanup | marker suppresses cleanup or TERM-ignoring process/socket remains yet succeeds | marker ignored; KILL/wait/reap/drain/absence required; residue fails |
+| 5 short/zero capture writes | injected short/zero records requested length or admits truncation | EINTR/small positives handled exactly; zero/overflow/non-EOF/digest mismatch fails |
+| 6 same Qt thread | correct eight with `M==W` is admitted | equal IDs rejected; only distinct W→M→W exact-eight admitted |
+| 7 unbound preview | 0/2 calls or one substituted tuple member remains self-consistent and admits | every mutation rejected at its chain link; exact one-call/two-document/PNG/cleanup chain admits |
+
+Each RED must reach the named boundary with injected fakes and real Popen
+count zero; an earlier exception or wrong failure reason is not RED.
+
+### 106.7 `SOURCE-R2-G0` forbiddens and `DESIGN-R2`
+
+Forbidden structure is exact: runtime files other than `runner.py,probe.py`;
+combined runtime over `1500` logical lines or `65536` bytes; contract test
+over `800` lines; literals/identifiers `MRG1-G1-ACCEPTANCE`,
+`g1-installed-e2e`, `--worker`, `acceptance_worker`, `result_relay`,
+`scenario_registry`, `--scenario`, `--resume`, `resume_run`, `--retry`,
+`retry_launch`, `--reuse-daemon`, `reuse_daemon`, `adopt_daemon`;
+`multiprocessing`, process pools, shell/os.spawn/posix_spawn/pty spawn or
+subprocess run/call/check APIs; any probe spawn/signal/wait/reap or
+authorization/manifest/final writer; any Popen loop/recursion/replay,
+shell launch, third child or pre-reservation Popen; existing-daemon/socket
+admission; random/time/PID run ID; consumption mutation; marker-conditioned
+cleanup; permissive JSON/default required fields; `"status"`-selected
+success; non-fsync/overwrite evidence; or writes outside the exact new root.
+
+The single independent sol-max reviewer checks: exact anchor/allowlist;
+two-child authority graph; all FSM/crash boundaries; closed non-circular
+schemas; deterministic lock/consumption; absolute fences; handle registration
+and retirement; write-all; distinct exact-eight; fixture/PNG/cleanup chain;
+seven one-to-one RED/GREEN contracts; forbidden shape/bounds/exclusions.
+Only `Blocker/Major/Minor/Nit = 0/0/0/0` on these exact bytes and exact
+branch/upstream/index permits implementation. Any finding, drift or ambiguity
+is HOLD before external writes/processes, with no correction or duplicate
+design review. The author does not self-review.
+
+### MRG1-S105
+
+1. **Completed milestones:** A13-R2 is persisted/pushed at `99fbf743…`; this
+   exact design is frozen for its one review; product GO `0/0/0/0`, old
+   packet NO-GO `2/5/0/0`, product bytes and zero launch state are unchanged.
+2. **Next steps:** artifact G0, then one independent `DESIGN-R2`; only exact
+   GO advances to exact-root implementation, otherwise HOLD.
+3. **Approved decisions:** A13-R2-D01..D10 and Sections 104-105 remain the
+   full authority; Section 106 adds no path, API, process, retry or budget.
+4. **Execution discipline:** `native-plan`, `spawn-send-wait`,
+   `repo-artifact`, `native-session-poll`, Codex adapter; artifact only, with
+   product/index/history/external root/tests/imports/manifests/processes untouched.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-A13-E07 | A13-R2 design freeze | `99fbf743245575e500b857eaeac896e06949526d` pushed; no new commit | exact parent SHA; artifact G0 only | one independent `DESIGN-R2`; uncatchable P0 death requires a new identity-bound recovery plan, never replay | MRG1-S105 | design frozen / review pending |
+
+## 107. DESIGN-R2 NO-GO and orchestration race breaker
+
+At `2026-07-31 05:23:15 PDT` (`2026-07-31T12:23:15Z`), the one and only
+approved `DESIGN-R2` review completed against exact pre-entry artifact
+SHA-256:
+
+```text
+892f94660b3c8a95f71600a4d1291a292647fc0d31556a48b53d857f0b14a921
+```
+
+It verified branch `codex/agent-stage3`, equal HEAD/upstream
+`99fbf743245575e500b857eaeac896e06949526d`, the artifact hash before and
+after review and zero file/process mutation. Its immutable verdict was:
+
+```text
+Blocker / Major / Minor / Nit  2 / 3 / 1 / 0
+verdict                         NO-GO
+```
+
+Under A13-R2-D09 and Sections 104.6/106, this stops before external writes.
+The new one-shot root remains absent; manifest, preflight, daemon, GUI and
+real-attempt counts remain zero. No design correction or second design review
+is authorized.
+
+### 107.1 Orchestration race evidence
+
+The first Blocker was introduced by the orchestration itself. A design-author
+agent had been interrupted after failing to produce an observable write, then
+was given one bounded follow-up and interrupted again. Its already-entered
+tool boundary nevertheless completed an append after the interruption. The
+controller, observing the prior unchanged artifact but not re-reading it
+immediately before its own patch, appended a second design.
+
+The artifact therefore contains two append-only headings named Section 106:
+
+```text
+18935  ## 106. DESIGN-R2 frozen input
+19160  ## 106. MRG1-G1-A13-R2 immutable one-shot design
+```
+
+They disagree on run-ID form, deadline ownership, exact-eight representation
+and final/manifest hash topology. Both remain preserved as failed evidence;
+neither may be silently deleted, rewritten or selected as canonical under
+A13-R2. This is a confirmed tool-channel/concurrency failure and a
+controller recovery-check miss.
+
+### 107.2 Canonical findings
+
+1. **Blocker — two incompatible normative Section 106 designs.** Separate
+   coders could correctly follow different run-ID, deadline and exact-eight
+   contracts. One variant also introduces a circular final↔manifest digest.
+2. **Blocker — early post-reservation failure records are unsatisfiable.**
+   Shared schema fields require invocation, fixture, GUI, probe and screenshot
+   identities even when failure occurs before those artifacts can exist,
+   forcing fabrication or preventing durable failure finalization.
+3. **Major — nested probe/final schema is not closed.** Required nested key
+   sets, enums, bounds and cleanup proof fields are incomplete, permitting
+   incompatible admissions and unbounded content.
+4. **Major — catchable signal crosses the `Popen` return-to-registration
+   boundary.** A child can exist before a usable cleanup owner/start identity
+   is registered; the ambiguity rule then forbids safe signaling.
+5. **Major — path authority is not pinned across effects.** Path validation
+   followed by pathname writes allows an intermediate-component rename/
+   symlink substitution despite `O_NOFOLLOW` on the leaf; root allowlist and
+   lock identity can diverge.
+6. **Minor — logical-line hard bounds lack one canonical counting rule.**
+   Tokenizer logical lines and nonblank physical lines can produce opposite
+   breaker results.
+
+The review otherwise found the permanent consumption model, bounded
+write-all, normal registered-owner retirement, RED reason boundary,
+no-worker/no-retry/two-child shape and product/API freeze explicit.
+
+### MRG1-S107
+
+1. **Completed milestones:** A13-R2-PERSIST `99fbf743…` is pushed; the sole
+   DESIGN-R2 review returned NO-GO `2/3/1/0`; both conflicting designs and
+   exact review evidence are preserved; new-root/preflight/GUI remain zero.
+2. **Next steps:** remain stopped. A new plan must first remove the
+   orchestration race as an execution hazard, designate one append-only
+   superseding canonical design, make failure schemas state-indexed, close
+   nested schemas, eliminate the `Popen` registration window, pin root
+   operations by retained directory descriptors and define one line-count
+   formula. It must state whether another design review is permitted.
+3. **Approved decisions:** A13-R2 remains historical authority, but its
+   design-review breaker is consumed. No implementation authority survives
+   the NO-GO. Product exact-eight and API/protocol shape remain frozen.
+4. **Execution discipline:** do not create or modify the one-shot root,
+   product, manifest, preflight or process; do not delete either Section 106;
+   before any future controller patch, re-read and bind the artifact hash
+   immediately before `apply_patch`; one artifact writer at a time.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-A13-E09 | A13-R2-D09 breaker | `99fbf743…`, pushed; no C02 commit | DESIGN-R2 NO-GO `2/3/1/0`; artifact exact; new-root0/preflight0/GUI0 | duplicate-design orchestration race; six canonical design findings | MRG1-S107 | blocked / new plan required |
+
+## 108. MRG1-G1-A13-R3 trusted-local acceptance recovery
+
+At `2026-07-31 06:44:49 PDT` (`2026-07-31T13:44:49Z`), the user selected
+the recommended trust-boundary option presented after the Section 107
+breaker. The exact user words were:
+
+> 方案 A
+
+The choice was presented as: the C02 acceptance runner is a non-shipping,
+current-user-private development tool; it must resist accidental duplicate
+invocation, child-process failure and evidence corruption, but does not claim
+resistance to a malicious process already acting as the same account, an
+uncatchable controller `SIGKILL` or host power loss. The exact artifact
+SHA-256 immediately before this authorization entry was:
+
+```text
+80605979ef03fa5bfffd4d7db2b3a3712fb870581b342c5c189bf86acea4f237
+```
+
+This architecture choice activates `MRG1-G1-A13-R3` below. It does not
+retroactively pass A13-R1/R2 or delete either Section 106. Mechanical details
+inside this trust boundary proceed without another user approval.
+
+### 108.1 Decisions and canonical supersession
+
+1. **A13-R3-D01 — trusted-local threat model.** Same-account malicious path
+   replacement, hostile signal injection, controller `SIGKILL` and power loss
+   are excluded attack claims. Their observation is always inconclusive or
+   failure, never success or permission to replay. Accidental concurrency,
+   normal catchable signals, child failure, truncated/corrupt evidence and
+   ordinary filesystem drift remain in scope.
+2. **A13-R3-D02 — append-only canonical source.** Sections 106 at lines
+   `18935` and `19160` remain failed history. Section 108 alone supersedes
+   both for implementation. Only the root controller writes the artifact;
+   it must re-hash immediately before every patch. No delegated artifact
+   writer is permitted.
+3. **A13-R3-D03 — unchanged process shape.** One C02-only runner owns exactly
+   one fresh daemon and one managed FreeCAD GUI. Probe runs in GUI and owns
+   semantics only. No acceptance worker, result relay, daemon reuse,
+   retry/resume, scenario registry or installed-G1 branch.
+4. **A13-R3-D04 — state-indexed failure evidence.** Failure records contain
+   only identities that can exist at their exact reached state. They never
+   fabricate fixture, GUI, probe or screenshot evidence. Success uses a
+   separate closed schema and complete evidence conjunction.
+5. **A13-R3-D05 — no digest cycle.** `final.json` never contains the evidence
+   manifest hash. `evidence-manifest.json` is written last and contains the
+   final hash. Exit zero requires an independent canonical reread of both.
+6. **A13-R3-D06 — deferred catchable signals.** Installed `TERM/INT/HUP`
+   handlers only set a stop flag and never raise. After `Popen` returns, the
+   assignment and in-memory cleanup-owner registration complete before the
+   flag is acted upon. Thus a catchable signal cannot divert control between
+   child creation and ownership.
+7. **A13-R3-D07 — stable local filesystem authority.** The controller retains
+   verified root/control/run directory descriptors and performs control and
+   evidence operations descriptor-relative with no-follow leaf opens and
+   directory fsync. This protects ordinary drift; it makes no same-account
+   hostile-rename claim under D01.
+8. **A13-R3-D08 — deterministic bounds.** A physical line is every element of
+   `path.read_bytes().splitlines()`, including blank/comment lines. Runtime
+   combined hard limits remain `1,500` physical lines and `65,536` bytes;
+   `contract_test.py` remains at most `800` physical lines.
+9. **A13-R3-D09 — one implementation and review path.** There is no further
+   standalone design review. Permit one genuine contract RED, one GREEN, one
+   static/source gate and one final sol-max code/assertion review. Only final
+   `0/0/0/0` admits installation/manifest/preflight. No corrective re-review
+   is implied.
+10. **A13-R3-D10 — unchanged execution budget.** At most two preflights with
+    one setup-only correction, one permanent real-GUI reservation with no
+    retry, no full repository suite before integration and no product/API/
+    protocol change.
+
+### 108.2 Canonical implementation contract
+
+The deterministic run ID is:
+
+```text
+"mrg1-g1-c02-" + hex(sha256(
+  b"MRG1-G1-A13-R3\0c02-preview\0" + raw_authorization_sha256
+))
+```
+
+Admission holds the verified root/control directory descriptors, acquires a
+nonblocking exclusive lock and creates/fsyncs the fixed consumption record
+with `O_EXCL` before either child spawn. Contention or an existing record
+rejects with spawn count zero. Consumption is permanent.
+
+The real state sequence is:
+
+```text
+PRISTINE → ADMITTED → LOCKED → RESERVED → INVOCATION_DURABLE
+→ DAEMON_OWNED → FIXTURE_DURABLE → GUI_OWNED → SEMANTIC_DURABLE
+→ CLEANING → SUCCESS | FAILURE
+```
+
+Any error after reservation enters cleanup. A state-indexed failure envelope
+has the exact closed fields:
+
+```text
+schema, record_type, approval_id, authorization_sha256, scenario, run_id,
+reached_state, failure_codes, available_records, known_children,
+cleanup_attempted, cleanup_complete, terminal_success
+```
+
+`available_records` is a sorted map of only already-fsynced record names to
+hashes. `known_children` is an exact list of zero, daemon, or daemon+GUI
+closed child-cleanup objects according to `reached_state`. Failure codes are
+one or more members of a closed enum defined in `contract_test.py`; strings
+are bounded to `256` UTF-8 bytes, lists to `32`, JSON records to `1 MiB`.
+`terminal_success` is always false. Pre-reservation failure writes only a
+preflight/HOLD record and no terminal run record.
+
+The distinct success envelope requires exact authorization/invocation,
+fixture, daemon/GUI authority, probe result, screenshot, semantic cleanup,
+process cleanup and capture hashes; GUI exit must be zero; all primitive
+booleans must be true; failure codes must be empty. Nested schemas are closed
+in one `SCHEMAS` table used by both production validators and independent
+test vectors. Missing/extra/duplicate keys, wrong exact types, unknown enums,
+oversize content, `NaN` or noncanonical bytes fail.
+
+Runner writes `final.json`, then writes the complete sorted evidence manifest
+excluding only itself. It rereads and recomputes both independently before
+returning zero; no stored status string overrides a primitive.
+
+Catchable signals only set `stop_requested`. Spawn sequence is exact:
+
+```text
+fsync intent → proc = Popen(start_new_session=True)
+→ append proc to in-memory cleanup stack
+→ capture PID/PGID/start token
+→ check stop_requested → publish authority or clean up
+```
+
+Normal cleanup remains graceful close, TERM, bounded wait, KILL if the same
+identity lives, bounded wait/reap, capture drain and PID/PGID/start-token plus
+daemon-socket absence. Ambiguity forbids success.
+
+The only semantic trace is the product exact-eight:
+
+```text
+preview_open, preview_open, refresh_project, refresh_task,
+preview_refresh, preview_refresh, list_tasks, review
+```
+
+Each pair binds sequence, request/correlation/object identity, scenario-worker
+RPC thread and Qt-main event callback thread; the thread identities must be
+nonempty and unequal. Connect/settlement precedes the window; document→
+checkout→client cleanup follows separately. The fixture binds exact project,
+task, draft/generation, path/hash/size and exactly one `open_checkout` plus
+one `claim_file_grant` to distinct clean HEAD/Draft documents and screenshot.
+
+All bounded writes retry EINTR/positive short writes, reject zero, overflow
+and missing EOF, hash/count only committed bytes, fsync and reread exact
+size/hash. Effect and cleanup deadlines are separate fixed absolute monotonic
+values and never reset.
+
+### 108.3 Files, staging and single-writer discipline
+
+Implementation is authored with `apply_patch` only in this transient,
+owner-private staging directory:
+
+```text
+/private/tmp/mrg1-g1-c02-r3-stage/
+  runner.py
+  probe.py
+  contract_test.py
+  authorization.source.json
+```
+
+The directory must be absent before creation, then mode `0700`; files are
+mode `0600`. One sol-high implementation agent owns all four files, may not
+delegate and may not write the artifact. After final code GO, the controller
+mechanically installs exact reviewed bytes into the approved
+`MRG1-G1-C02-ONE-SHOT` root. Rejected roots remain immutable.
+
+Repository staging after real GO remains the exact G1-C02 allowlist in
+Section 104.4. No other repository path, normal FreeCAD root, `.workbuddy/**`
+or either named course document is readable/writable scope.
+
+### 108.4 Gates, budgets and branch conditions
+
+`CONTRACT-TDD-R3` has seven rows, consolidating R2 design findings without
+adding executions:
+
+1. strict success plus state-indexed early/mid/late failure records and no
+   final↔manifest cycle;
+2. concurrent/sequential consumption and descriptor-relative ordinary path
+   stability;
+3. daemon/GUI returned-handle ownership plus deferred catchable signal;
+4. TERM/wait/KILL/reap/drain/absence and marker independence;
+5. EINTR/short/zero/overflow/non-EOF evidence writes;
+6. exact product eight with distinct worker/main ownership;
+7. exact fixture/open/claim/documents/screenshot/semantic cleanup chain.
+
+One RED must fail all seven at the intended production boundary with injected
+fakes and real `Popen=0`; wrong-path RED stops. One GREEN runs the identical
+seven rows. `SOURCE-R3-G0` then proves Ruff/format/compile/import safety,
+physical-line/byte bounds, exact two spawn sites and absence of worker/retry/
+reuse/generalization/probe-process authority. It does not repeat behavior.
+
+One final sol-max reviewer reads the exact four frozen files, RED/GREEN and
+static evidence without rerunning them. Any nonzero severity stops; exact
+`0/0/0/0` admits mechanical install, deterministic manifest build twice,
+one atomic install, at most two preflights and the single real reservation.
+
+```text
+contract executions             2  (RED, GREEN)
+source/static executions        1
+final semantic reviews          1
+preflight attempts              2 maximum
+setup-only preflight fixes      1 maximum
+real-GUI reservations           1 permanent
+real-GUI retries                0
+full repository suites          0 before integration
+```
+
+This recovery adds `A13-R3-PERSIST`; with G1-C02, C03, Integration, C04 and
+Close the campaign reaches but does not exceed the existing eight-commit hard
+ceiling. Stop on staging-path collision, wrong RED, hard bounds, unexpected
+real process, final-review finding, byte drift, nondeterministic manifest,
+preflight exhaustion, second reservation, incomplete evidence/cleanup or any
+product/API/allowlist expansion.
+
+### 108.5 Expected impact, validation and residuals
+
+Until real GO, only this artifact and the private transient/final acceptance
+files change. Product exact-eight remains byte-for-byte frozen. REAL-C02 is
+controller-owned and requires distinct clean HEAD/Draft documents, exact
+authority tuple, screenshot and zero ordinary residue; user presence is not
+required. The later installed G1 Alpha remains the first user-present test.
+
+Trusted-local exclusions are explicit residuals: a malicious same-account
+process, runner `SIGKILL` or power loss can leave inconclusive residue, but
+cannot create admitted success or authorize replay. Generic/multi-scenario
+acceptance, installed G1 E2E, C03, C04, MR1, second CAD and release work stay
+deferred to their planned packets.
+
+### MRG1-S108
+
+1. **Completed milestones:** user selected trusted-local Scheme A against
+   artifact `80605979…`; A13-R1/R2 failures remain preserved; product exact
+   eight, HEAD/upstream `99fbf743…`, new-root0/preflight0/GUI0 remain exact.
+2. **Next steps:** persist/push `A13-R3-PERSIST`; verify transient staging
+   path absence; create it privately; assign one sol-high implementation
+   packet for all four files; capture one RED, one GREEN and one static gate.
+3. **Approved decisions:** A13-R3-D01..D10 and exact user words above are
+   active. Section 108 solely supersedes both failed Section 106 designs.
+4. **Execution discipline:** root-only artifact writes with immediate hash
+   rebind; one implementation writer; no design-review loop; exact trust
+   residuals, gates, hard bounds, final review and process budgets above.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-A13-E10 | Scheme A; A13-R3-D01..D10; exact user words above | `A13-R3-PERSIST` pending | trust boundary and recovery plan bound to pre-entry SHA; new-root0/preflight0/GUI0 | malicious same-account/SIGKILL/power loss explicitly unclaimed | MRG1-S108 | authorized / persistence next |
