@@ -1,0 +1,1 @@
+{"changes":[{"action":"set","line":8,"path":["hashes","product_after_sha256"],"value":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}],"rule_id":"A16-HSH-001","schema_version":1,"type":"fixture_overlay"}

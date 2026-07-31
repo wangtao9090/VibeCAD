@@ -1,0 +1,1 @@
+{"changes":[{"action":"set","line":7,"path":["outcome"],"value":"failure"},{"action":"set","line":7,"path":["error_code"],"value":"late_error"}],"rule_id":"A16-ERR-001","schema_version":1,"type":"fixture_overlay"}

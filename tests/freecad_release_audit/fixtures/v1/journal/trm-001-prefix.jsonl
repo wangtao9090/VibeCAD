@@ -1,0 +1,1 @@
+{"changes":[{"action":"set","line":8,"path":["prefix_sha256"],"value":"0000000000000000000000000000000000000000000000000000000000000000"}],"reseal":false,"rule_id":"A16-TRM-001","schema_version":1,"type":"fixture_overlay"}

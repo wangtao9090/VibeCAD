@@ -1,0 +1,1 @@
+{"changes":[{"action":"set","line":8,"path":["digests","screenshot_sha256"],"value":null}],"rule_id":"A16-ART-001","schema_version":1,"type":"fixture_overlay"}

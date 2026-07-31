@@ -1,0 +1,1 @@
+{"changes":[{"action":"set","line":5,"path":["identities","daemon_id"],"value":"daemon_2"}],"rule_id":"A16-IDN-001","schema_version":1,"type":"fixture_overlay"}

@@ -1,0 +1,1 @@
+{"changes":[{"action":"set","line":3,"path":["correlation","callback_id"],"value":99}],"rule_id":"A16-COR-001","schema_version":1,"type":"fixture_overlay"}

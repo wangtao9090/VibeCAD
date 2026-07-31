@@ -1,0 +1,1 @@
+{"changes":[{"action":"set","line":4,"path":["counts","dropped_frame_count"],"value":1}],"rule_id":"A16-IPC-001","schema_version":1,"type":"fixture_overlay"}

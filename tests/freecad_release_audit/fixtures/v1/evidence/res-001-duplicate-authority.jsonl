@@ -1,0 +1,1 @@
+{"changes":[{"action":"set","line":1,"path":["identities","checkout_id"],"value":"checkout_head"},{"action":"set","line":1,"path":["identities","grant_id"],"value":"grant_head"}],"rule_id":"A16-RES-001","schema_version":1,"type":"fixture_overlay"}

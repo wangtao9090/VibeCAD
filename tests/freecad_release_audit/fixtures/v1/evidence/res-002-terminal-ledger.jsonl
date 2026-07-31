@@ -1,0 +1,1 @@
+{"changes":[{"action":"set","line":8,"path":["resources","open_checkouts"],"value":1}],"rule_id":"A16-RES-002","schema_version":1,"type":"fixture_overlay"}
