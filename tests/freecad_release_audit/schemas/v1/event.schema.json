@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "event.schema.json",
+  "title": "VibeCAD release audit event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "type",
+    "run_id",
+    "seq",
+    "monotonic_ns",
+    "emitter",
+    "role",
+    "phase",
+    "event",
+    "correlation",
+    "identities",
+    "outcome",
+    "error_code",
+    "digests",
+    "counts"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "type": {"const": "event"},
+    "run_id": {"$ref": "#/$defs/identifier"},
+    "seq": {"type": "integer", "minimum": 1},
+    "monotonic_ns": {"type": "integer", "minimum": 0},
+    "emitter": {"$ref": "#/$defs/code"},
+    "role": {"$ref": "#/$defs/code"},
+    "phase": {"$ref": "#/$defs/code"},
+    "event": {"$ref": "#/$defs/code"},
+    "outcome": {"enum": ["started", "observed", "success", "failure"]},
+    "error_code": {
+      "oneOf": [{"$ref": "#/$defs/code"}, {"type": "null"}]
+    },
+    "correlation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {"type": "integer", "minimum": 0},
+        "callback_id": {"type": "integer", "minimum": 0},
+        "operation": {"$ref": "#/$defs/code"},
+        "checkout_id": {"$ref": "#/$defs/identifier"},
+        "grant_id": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "identities": {"$ref": "#/$defs/identities"},
+    "digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_sha256": {"$ref": "#/$defs/digest"},
+        "response_sha256": {"$ref": "#/$defs/digest"},
+        "callback_sha256": {"$ref": "#/$defs/digest"},
+        "result_sha256": {"$ref": "#/$defs/digest"},
+        "screenshot_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "checkout_count": {"type": "integer", "minimum": 0},
+        "grant_count": {"type": "integer", "minimum": 0},
+        "document_count": {"type": "integer", "minimum": 0},
+        "pending_request_count": {"type": "integer", "minimum": 0},
+        "dropped_frame_count": {"type": "integer", "minimum": 0},
+        "truncated_log_count": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "$defs": {
+    "code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "maxLength": 64
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "maxLength": 128
+    },
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "daemon_id": {"$ref": "#/$defs/identifier"},
+        "daemon_pid": {"type": "integer", "minimum": 0},
+        "gui_pid": {"type": "integer", "minimum": 0},
+        "project_id": {"$ref": "#/$defs/identifier"},
+        "task_id": {"$ref": "#/$defs/identifier"},
+        "draft_id": {"$ref": "#/$defs/identifier"},
+        "revision_id": {"$ref": "#/$defs/identifier"},
+        "candidate_revision": {"$ref": "#/$defs/identifier"},
+        "checkout_id": {"$ref": "#/$defs/identifier"},
+        "grant_id": {"$ref": "#/$defs/identifier"}
+      }
+    }
+  }
+}

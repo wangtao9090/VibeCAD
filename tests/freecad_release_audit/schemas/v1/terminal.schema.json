@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "terminal.schema.json",
+  "title": "VibeCAD release audit terminal v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "type",
+    "run_id",
+    "seq",
+    "monotonic_ns",
+    "emitter",
+    "role",
+    "phase",
+    "event",
+    "outcome",
+    "error_code",
+    "identities",
+    "last_event_seq",
+    "record_count",
+    "prefix_sha256",
+    "elapsed_ns",
+    "deadline_ns",
+    "planned_exits",
+    "observed_exits",
+    "hashes",
+    "digests",
+    "resources",
+    "dropped_frames",
+    "truncated_logs"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "type": {"const": "terminal"},
+    "run_id": {"$ref": "event.schema.json#/$defs/identifier"},
+    "seq": {"type": "integer", "minimum": 1},
+    "monotonic_ns": {"type": "integer", "minimum": 0},
+    "emitter": {"const": "controller"},
+    "role": {"const": "controller"},
+    "phase": {"const": "terminal"},
+    "event": {"const": "terminal_snapshot"},
+    "outcome": {"enum": ["success", "failure"]},
+    "error_code": {
+      "oneOf": [
+        {"$ref": "event.schema.json#/$defs/code"},
+        {"type": "null"}
+      ]
+    },
+    "identities": {"$ref": "event.schema.json#/$defs/identities"},
+    "last_event_seq": {"type": "integer", "minimum": 0},
+    "record_count": {"type": "integer", "minimum": 1},
+    "prefix_sha256": {"$ref": "event.schema.json#/$defs/digest"},
+    "elapsed_ns": {"type": "integer", "minimum": 0},
+    "deadline_ns": {"type": "integer", "minimum": 0},
+    "planned_exits": {"$ref": "#/$defs/exits"},
+    "observed_exits": {"$ref": "#/$defs/exits"},
+    "hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product_before_sha256",
+        "product_after_sha256",
+        "runtime_before_sha256",
+        "runtime_after_sha256"
+      ],
+      "properties": {
+        "product_before_sha256": {"$ref": "event.schema.json#/$defs/digest"},
+        "product_after_sha256": {"$ref": "event.schema.json#/$defs/digest"},
+        "runtime_before_sha256": {"$ref": "event.schema.json#/$defs/digest"},
+        "runtime_after_sha256": {"$ref": "event.schema.json#/$defs/digest"}
+      }
+    },
+    "digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result_sha256",
+        "screenshot_sha256",
+        "daemon_stdout_sha256",
+        "daemon_stderr_sha256",
+        "gui_stdout_sha256",
+        "gui_stderr_sha256"
+      ],
+      "properties": {
+        "result_sha256": {"$ref": "#/$defs/optional_digest"},
+        "screenshot_sha256": {"$ref": "#/$defs/optional_digest"},
+        "daemon_stdout_sha256": {"$ref": "#/$defs/optional_digest"},
+        "daemon_stderr_sha256": {"$ref": "#/$defs/optional_digest"},
+        "gui_stdout_sha256": {"$ref": "#/$defs/optional_digest"},
+        "gui_stderr_sha256": {"$ref": "#/$defs/optional_digest"}
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "open_checkouts",
+        "file_grants",
+        "documents",
+        "pending_requests",
+        "active_daemons",
+        "active_sockets",
+        "active_gui_processes"
+      ],
+      "properties": {
+        "open_checkouts": {"type": "integer", "minimum": 0},
+        "file_grants": {"type": "integer", "minimum": 0},
+        "documents": {"type": "integer", "minimum": 0},
+        "pending_requests": {"type": "integer", "minimum": 0},
+        "active_daemons": {"type": "integer", "minimum": 0},
+        "active_sockets": {"type": "integer", "minimum": 0},
+        "active_gui_processes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "dropped_frames": {"type": "integer", "minimum": 0},
+    "truncated_logs": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {
+    "optional_digest": {
+      "oneOf": [
+        {"$ref": "event.schema.json#/$defs/digest"},
+        {"type": "null"}
+      ]
+    },
+    "exits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["daemon", "gui"],
+      "properties": {
+        "daemon": {"type": ["integer", "null"]},
+        "gui": {"type": ["integer", "null"]}
+      }
+    }
+  }
+}
