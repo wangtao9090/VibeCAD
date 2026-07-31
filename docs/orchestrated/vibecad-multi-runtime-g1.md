@@ -18104,3 +18104,830 @@ Required capability evidence categories:
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MRG1-G1-A13-E01 | A13-D01..D09; user exact words above | `A13-PERSIST` pending self-anchor | `AUTH-G0`: approval SHA, branch/upstream, index, allowlist and budget exact | C02 real acceptance and later G1 packets open by plan | MRG1-S98 | authorized / persistence gate active |
+
+## 100. C02 review-budget breaker and proposed A13-R1 amendment
+
+At `2026-07-31 03:22:55 PDT`
+(`2026-07-31T03:22:55-0700`), the controller stopped all three active C02
+writers after auditing Section 98.8. The normal corrective-review allowance
+was two, but the post-A13 C02 campaign had already executed more than two
+distinct corrective semantic/adversarial reviews. This is an exhausted
+declared budget and therefore a circuit breaker. It may not be reclassified
+as ordinary autonomous correction.
+
+The artifact SHA-256 immediately before this breaker entry was:
+
+```text
+99f4bca08dd4242f1eb1ed4e74a9b2d260c62f4f7883df72641f2692f3cfddf8
+```
+
+### 100.1 Exact stopped state
+
+Repository identity:
+
+```text
+branch                         codex/agent-stage3
+HEAD                           d6ae6a98a0a18e618649370fffee47d48b09983e
+upstream                       d6ae6a98a0a18e618649370fffee47d48b09983e
+index                          empty
+real C02 GUI attempts          0
+preflight attempts             0
+```
+
+The product candidate remains unstaged. The final completed product review
+was R4, which returned `0 Blocker / 1 Major / 0 Minor / 0 Nit`: active
+cleanup can lose its finalization wakeup when Refresh overlaps the last
+checkout close and the last normal response retires while lifecycle remains
+active. The paused product correction had not yet changed the R4 candidate:
+
+```text
+dock.py                        f58d36882995deaa4369efaa847ef8ce63eea6fbd05bef52f003a13713aff733
+gateway.py                     070c4b73f82dc313e1570bb8a338cc5c8b173ca5cf4253bc7502f38f4edba27c
+host.py                        95ea2405ead30fedd531f96dc4fc510481eebef5600460eb43f6184cf82476f1
+state.py                       f9a3450b1645aa757141ffd51207a342da6c7971055ff184d561f286506fb895
+preview.py                     11dab5685c53ccdfc7ee600a5963e37df9e19ae75b9d107a6a20bb3baed9f99a
+fake_host.py                   4d102652bb54afa19a6eff053e9ab5068fb74ba5b6edb594960e3bb4039bec24
+test controller                84b14e987032307e0787c9252cd4066f3e635660eaab170ea2486c1bcc2752be
+test preview                   39a9ff41b1ce9aec47a5d8f4d5a8463a9de8e347e481782b083b44fd354ac836
+```
+
+The user separately and explicitly authorized the private whole-file runner
+replacement:
+
+> 我明确批准整文件覆盖 /Users/wangtao/Documents/DevProject/vibecad-c02-evidence/MRG1-G1-ACCEPTANCE/runner.py（将旧 5,326 行 runner 替换为约 1,799 行的新 runner）。
+
+The root controller applied that exact replacement. The external root remains
+owner-private and exact-three with no `runs/`. `authorization.json` remains
+the intentional old-hash HOLD. The runner had not entered its paused
+correction; the probe had entered a partial, unreviewed correction before the
+budget audit:
+
+```text
+authorization.json             830c968edfebf964d01a8a53f5e8305b3fadd5ca233bfa372702fb86aeaaf134
+runner.py                      477e05a17971207a045dc51e1947840593bf0f0064b18a98551bdc527091b754
+runner lines / mode            1800 / 0600
+probe.py                       f2a487b94ade7a5217dc5bb63dabb8d29864b6600cfd0c7b096acee6e6ac48f9
+probe lines / mode             622 / 0600
+```
+
+No current packet is admitted. `ENV-PREFLIGHT`, manifest regeneration and
+`REAL-C02` remain forbidden.
+
+### 100.2 Proposed amendment MRG1-G1-A13-R1
+
+`MRG1-G1-A13-R1` is proposed only; it is not active without explicit user
+approval.
+
+1. **A13-R1-D01 — acknowledge history, do not reset it.** Preserve every
+   completed NO-GO and the exhausted original two-review allowance as
+   append-only evidence. The amendment grants no retroactive PASS.
+2. **A13-R1-D02 — finish exactly three paused corrections.** Resume only:
+   the one product finalization-wakeup correction in `host.py` plus its
+   controller test; the named runner corrections from the rebuild review;
+   and the named probe corrections from that same review. The existing C02
+   allowlist and private exact-three root do not expand.
+3. **A13-R1-D03 — two final reviews only.** After focused/static gates and
+   one immutable freeze, permit exactly one final product exact-eight review
+   and exactly one final runner/probe/authorization-source review. Any
+   Blocker, Major or Minor from either final review stops C02 and requires a
+   new plan; no additional corrective review is implied.
+4. **A13-R1-D04 — unchanged execution budgets.** Do not increase commit,
+   real-GUI, preflight-correction, full-suite, file, product, API, protocol,
+   durable-schema or release budgets. The C02 GUI attempt remains unused.
+5. **A13-R1-D05 — user-testable milestone priority.** Record the user's
+   requirement:
+
+   > 我可以实际使用 测试的版本
+
+   After C02, implement C03 and then the already-designed installed-form
+   `vibecad --freecad` integration to produce `G1 Alpha Test`; move C04
+   selector-copy implementation after that testable milestone. This changes
+   commit order only, not the final feature set or product contract.
+6. **A13-R1-D06 — admission sequence.** Only dual final `0/0/0/0` review may
+   authorize a mechanical rebuild of `authorization.json`, followed by one
+   read-only `ENV-PREFLIGHT` and the single `REAL-C02`. A preflight finding
+   remains governed by the unchanged two-correction preflight budget.
+
+Proposed amended order after `G1-C02`:
+
+```text
+G1-C03
+G1-INTEGRATION  -> first user-installable G1 Alpha Test
+G1-C04
+G1-CLOSE
+```
+
+Approval wording:
+
+> Approve `MRG1-G1-A13-R1` as recorded in Section 100: acknowledge the
+> exhausted corrective-review history; resume only the three paused C02
+> corrections; permit one final product review and one final acceptance
+> packet review, with any finding stopping C02; keep all GUI, preflight,
+> commit, full-suite, allowlist and product budgets unchanged; prioritize the
+> user-installable `G1 Alpha Test` after C03 and integration, before C04.
+
+### MRG1-S99
+
+1. **Completed milestones:** A13-PERSIST is commit
+   `d6ae6a98a0a18e618649370fffee47d48b09983e` and is pushed; C02 product
+   behavior, negative authority matrices and the smaller three-file
+   acceptance architecture are substantially implemented; all real C02
+   attempts remain unused; the original conditional-review budget is
+   exhausted and recorded.
+2. **Next steps:** wait for explicit `MRG1-G1-A13-R1` approval. If approved,
+   resume only the three named frozen correction packets; run their already
+   declared focused/static gates; freeze once; execute the two final reviews.
+   On dual `0/0/0/0`, rebuild the manifest mechanically, run preflight once
+   and then run `REAL-C02` once. On any final finding, stop and replan.
+3. **Approved decisions:** A13-D01..D09 and the user's exact runner-overwrite
+   authorization remain active. A13-R1-D01..D06 are proposed only. MR1,
+   second CAD, release/tag/PR, Addon Manager and normal user FreeCAD roots
+   remain excluded.
+4. **Execution discipline:** capability profile remains `native-plan`,
+   `spawn-send-wait`, `repo-artifact`, `native-session-poll`, Codex adapter.
+   The G1-C02 allowlist, excluded paths, no-broad-stage rule, immutable freeze,
+   named gate questions and breaker discipline remain binding.
+
+Required capability evidence categories:
+
+- `live capability declarations`: `update_plan`, bounded command sessions,
+  and spawn/send/follow-up/wait collaboration are declared live.
+- `observable behavior`: this session updated the native plan, performed
+  bounded delegated packets, waited on their exact sessions and interrupted
+  three active writers at the budget breaker without duplicate launch.
+- `environment identity`: Codex desktop on the local macOS workspace
+  `/Users/wangtao/Documents/DevProject/vibecad`.
+- `public configuration`: repository workspace-write access, restricted
+  network and permission-controlled external writes; none expands A13.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-A13-E02 | A13 active; A13-R1 proposed | `d6ae6a98…`, pushed; C02 not created | product R4 NO-GO `0/1/0/0`; rebuilt packet review NO-GO `5/3/1/0`; GUI0; preflight0; exact stopped hashes above | original corrective-review budget exhausted; C02 and Alpha Test open | MRG1-S99 | blocked / A13-R1 approval required |
+
+## 101. MRG1-G1-A13-R1 authorization and activation
+
+At `2026-07-31 03:35:47 PDT` (`2026-07-31T10:35:47Z`), the user explicitly
+approved the exact Section 100 revision whose pre-authorization artifact
+SHA-256 was:
+
+```text
+ce49fdee591d770cfb5363d13c5e641da67e1fe632f90d74560be194bc08a694
+```
+
+The user's exact authorization words were:
+
+> 批准 MRG1-G1-A13-R1
+
+This activates `MRG1-G1-A13-R1-D01..D06` exactly as recorded in Section
+100.2. The exhausted original corrective-review history remains evidence and
+is not reset. The controller may resume only the three named paused
+corrections, freeze each resulting artifact once, and execute exactly one
+final product exact-eight review plus exactly one final
+runner/probe/authorization-source review. Any Blocker, Major or Minor from
+either final review stops C02 for replanning. No GUI, preflight-correction,
+commit, full-suite, allowlist, API, protocol, product or release budget is
+increased.
+
+For the admission sequence, Section 100.2 D06 controls: the final acceptance
+packet review examines the immutable runner and probe plus the authorization
+source contract and mechanical builder inputs. Only dual final
+`0 Blocker / 0 Major / 0 Minor / 0 Nit` results authorize the exact mechanical
+regeneration and admission of `authorization.json`; that admission is an
+integrity check, not an additional semantic corrective review. It is followed
+by the single read-only `ENV-PREFLIGHT`, then the still-unused single
+`REAL-C02`.
+
+The post-C02 execution order is now:
+
+```text
+G1-C03
+G1-INTEGRATION  -> first user-installable G1 Alpha Test
+G1-C04
+G1-CLOSE
+```
+
+This approval changes neither product requirements nor product shape.
+Routine orchestration, parallel scheduling, mechanical gates, documentation,
+commits and pushes inside the approved scope proceed autonomously. A new user
+approval is required only for a material product/function change, substantive
+scope or authority expansion, or an unapproved irreversible high-risk action.
+
+The execution profile is revalidated without expansion:
+
+```text
+approval: native-plan
+delegation: spawn-send-wait
+persistence: repo-artifact
+process: native-session-poll
+adapter: Codex
+```
+
+Required capability evidence categories:
+
+- `live capability declarations`: `update_plan`, bounded command sessions,
+  and spawn/send/follow-up/wait collaboration are declared live in this
+  session.
+- `observable behavior`: the approved artifact revision was read back at its
+  exact hash; the branch, HEAD, index and stopped candidate state were
+  observed without starting a product or acceptance process.
+- `environment identity`: Codex desktop on the local macOS workspace
+  `/Users/wangtao/Documents/DevProject/vibecad`.
+- `public configuration`: repository workspace-write access, restricted
+  network and permission-controlled external writes; none is expanded by
+  A13-R1.
+
+### MRG1-S100
+
+1. **Completed milestones:** A13-PERSIST remains commit
+   `d6ae6a98a0a18e618649370fffee47d48b09983e` and pushed; A13-R1 is approved
+   against exact pre-authorization SHA-256 `ce49fdee…`; the product R4 and
+   rebuilt-packet findings, exact stopped hashes, GUI0 and preflight0 remain
+   preserved.
+2. **Next steps:** resume in parallel only the paused product finalization
+   wakeup correction, runner correction and probe correction. For each,
+   execute its declared focused/static gate and freeze once. Then run the two
+   final reviews exactly once. Dual `0/0/0/0` admits mechanical manifest
+   regeneration, one preflight and one real C02; any final Blocker, Major or
+   Minor stops for replanning.
+3. **Approved decisions:** A13-D01..D09, A13-R1-D01..D06 and the user's exact
+   whole-file runner-overwrite authorization are active. MR1, second-CAD
+   implementation, release/tag/PR, Addon Manager and normal user FreeCAD
+   roots remain excluded.
+4. **Execution discipline:** `native-plan`, `spawn-send-wait`,
+   `repo-artifact`, `native-session-poll`, Codex adapter; exact C02
+   allowlists, immutable freezes, named gates, dual-final-review breaker and
+   excluded-path rules remain binding. Stage only named files; do not run a
+   real GUI, preflight or manifest regeneration before dual final GO.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-A13-E03 | A13-R1-D01..D06; user exact words above | `d6ae6a98…`, pushed; C02 not created | approval SHA exact; branch/HEAD/index and stopped hashes reverified; GUI0; preflight0 | final product and acceptance-packet corrections/reviews remain | MRG1-S100 | authorized / executing |
+
+## 102. A13-R1 frozen corrections and final product review
+
+At `2026-07-31 04:02:35 PDT` (`2026-07-31T11:02:35Z`), the controller
+verified all three A13-R1 correction freezes. No real FreeCAD, GUI, worker,
+daemon, acceptance or preflight process had been launched.
+
+### 102.1 Product finalization-wakeup correction
+
+The implementer preserved a genuine two-row RED: after refresh success and
+correlated error paths had retired all normal responses, both rows failed
+because the old cleanup cycle had not finalized. The minimum production
+correction makes normal pending retirement wake any existing cleanup cycle
+regardless of lifecycle and clears a cleanup-owned refresh barrier only after
+the normal lane is empty.
+
+```text
+focused RED                   2 failed at finalized == []
+focused GREEN                 2 passed
+affected subset               123 passed, 126 deselected
+Ruff / format / diff-check    PASS / PASS / PASS
+real process attempts         0
+```
+
+The one and only A13-R1 final product semantic/adversarial review then
+verified the exact eight frozen files before and after its read-only review
+and returned:
+
+```text
+Blocker / Major / Minor / Nit  0 / 0 / 0 / 0
+verdict                         GO
+```
+
+The reviewer mapped same-session binding, host-only wire authority,
+fail-closed refresh/review authority, exact cleanup and at-most-once
+finalization to non-vacuous positive, negative, malformed, unknown-outcome,
+cleanup and restart assertions. It confirmed the R4 success/error and
+response-order permutations, immediate successor behavior and all prior
+closures without running tests or modifying the workspace.
+
+Frozen product hashes:
+
+```text
+dock.py                        f58d36882995deaa4369efaa847ef8ce63eea6fbd05bef52f003a13713aff733
+gateway.py                     070c4b73f82dc313e1570bb8a338cc5c8b173ca5cf4253bc7502f38f4edba27c
+host.py                        4a22086c9c90eed05efd189d3797f590c6aaeca4d310abf6cabe062526fc04d6
+state.py                       f9a3450b1645aa757141ffd51207a342da6c7971055ff184d561f286506fb895
+preview.py                     11dab5685c53ccdfc7ee600a5963e37df9e19ae75b9d107a6a20bb3baed9f99a
+fake_host.py                   4d102652bb54afa19a6eff053e9ab5068fb74ba5b6edb594960e3bb4039bec24
+test controller                3e6eaedadbcca0b482d86073e517aa575072fa529edeae902cb7f89c985090f1
+test preview                   39a9ff41b1ce9aec47a5d8f4d5a8463a9de8e347e481782b083b44fd354ac836
+```
+
+### 102.2 Acceptance runner and probe freezes
+
+The external root remains owner-private, contains exactly the three regular
+files below and contains no `runs/`:
+
+```text
+root mode                      0700
+authorization.json             830c968edfebf964d01a8a53f5e8305b3fadd5ca233bfa372702fb86aeaaf134
+runner.py                      93f0bdef215322f515d6c21e425448ad08536395e4e37eb60a2fdba374234057
+probe.py                       85c32884f3b38dd802d6a56fe1307c0d4b7ce017dd9d9d24904fd2e0770cb8b1
+file mode / owner / nlink      0600 / 501 / 1
+```
+
+The runner's 31 unique focused synthetic scenarios all passed with real
+`Popen=0`. They cover nlink-two executable identity with drift rejection,
+semantic deadlines before every effect and GUI attempt, immediate local
+daemon and GUI authority, provisional process publication, exact
+group-kill/wait/drain and parent recovery, exception-total finalization,
+total outcomes, validated-runtime reuse, dedicated safe GUI cwd and capsule,
+and the exact-eight semantic trace with separate cleanup. Ruff, format,
+in-memory compile and import-safety gates passed.
+
+The runner is `2,184` lines and `81,523` bytes, exceeding the non-binding
+feasibility target of at most `1,800` lines / `64 KiB`. The implementer
+correctly preserved the reviewed behavior rather than add a late structural
+refactor. One existing three-case capture gate was unnecessarily rerun after
+the file freeze; it passed with `Popen=0`, changed no file and is recorded as
+a process-density deviation, not duplicate evidence.
+
+The probe is `571` lines and exactly `28,672` bytes. Its static, compile,
+import-safety, exact-eight, seven negative, strict first-party finder,
+dedicated cwd/safe-path, capsule-failure and bounded short/zero-write
+synthetic gates passed with real process count zero.
+
+`authorization.json` remains the intentional old-hash HOLD. It may not be
+regenerated until the one final acceptance-packet semantic review returns
+exact `0 / 0 / 0 / 0`.
+
+### MRG1-S101
+
+1. **Completed milestones:** all three A13-R1 corrections are frozen at the
+   hashes above; product focused/static gates passed; the single final
+   product review returned GO `0/0/0/0`; external root is exact-three and
+   owner-private; GUI0 and preflight0 remain.
+2. **Next steps:** execute exactly one final read-only
+   runner/probe/authorization-source review. On exact `0/0/0/0`, mechanically
+   rebuild and admit `authorization.json`, then run the one preflight. On any
+   Blocker, Major or Minor, stop C02 and replan without another review.
+3. **Approved decisions:** A13-D01..D09 and A13-R1-D01..D06 remain active,
+   including exact dual-final-review limits and the post-C02
+   C03→Integration/Alpha→C04→Close order.
+4. **Execution discipline:** profile and adapter remain `native-plan`,
+   `spawn-send-wait`, `repo-artifact`, `native-session-poll`, Codex. Product,
+   runner and probe are immutable review inputs; no manifest rebuild,
+   preflight or real process before final acceptance-packet GO.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-A13-E04 | A13-R1-D02/D03/D06 | C02 not created | product RED2/GREEN2/subset123; final product GO `0/0/0/0`; runner synthetic31/Popen0; probe synthetic/static PASS; hashes above | runner size target missed; one duplicate capture rerun recorded; packet final review open | MRG1-S101 | executing / final packet review next |
+
+## 103. Final acceptance-packet NO-GO and A13-R1 breaker
+
+At `2026-07-31 04:24:10 PDT` (`2026-07-31T11:24:10Z`), the one and only
+A13-R1 final runner/probe/authorization-source semantic review completed.
+Before reading the candidate, it verified the repository, branch, HEAD and
+upstream, exact-three/no-runs evidence root, `0700` root, `0600` regular
+owner-bound files with nlink one, and every frozen SHA-256 in Section 102.
+It executed no candidate code, imports, tests, synthetic gate, preflight,
+FreeCAD, GUI, worker or daemon and modified no file.
+
+The immutable verdict was:
+
+```text
+Blocker / Major / Minor / Nit  2 / 5 / 0 / 0
+verdict                         NO-GO
+```
+
+Under A13-R1-D03 and D06, this immediately stops C02. Manifest regeneration,
+`ENV-PREFLIGHT`, `REAL-C02`, staging, commit and any additional correction or
+semantic review are forbidden until a new plan is established. The old-HOLD
+manifest remains exact and intentional.
+
+### 103.1 Canonical findings
+
+1. **Blocker — worker failure can be promoted to success.** After a nonzero
+   worker exit, `runner.py` accepts an insufficiently authenticated
+   `final.json`; `main()` can return success from `status:"ok"` without
+   requiring zero worker exit or matching exact run, scenario, authorization,
+   generations and invocation identity.
+2. **Blocker — no durable scenario consumption/global launch lock.** Each
+   invocation creates an independent random run directory. Concurrent or
+   sequential `c02-preview` invocations can each reach their own effect fence
+   and GUI, violating at-most-once and the single-real-GUI budget.
+3. **Major — incomplete daemon binding can lose retirement authority.** A
+   local kernel can exist before `daemon_provisional` is established; a
+   deadline or receipt-read failure in that interval closes only the client
+   socket and may leave the daemon alive.
+4. **Major — emergency GUI/daemon cleanup does not prove retirement.**
+   Output-marker existence can suppress parent recovery even when terminate
+   failed, while parent recovery uses a single signal without wait,
+   escalation, drain or absence proof.
+5. **Major — bounded capture ignores short/zero writes.** GUI stderr/stdout
+   capture can record requested byte counts and successful completion after a
+   truncated write.
+6. **Major — exact-eight does not prove a distinct worker thread.** Both
+   probe and runner accept `main_thread_id == worker_thread_id`, so the
+   required queued main↔worker boundary can be absent.
+7. **Major — preview evidence is internally consistent but not bound to the
+   authoritative fixture/open/claim identity.** The probe does not require
+   exact-once `open_checkout`/`claim_file_grant` or bind project/task/draft,
+   generation, checkout/grant, digest and size to the fixture.
+
+The reviewer supplied concrete counterexamples and exact line mappings for
+all seven findings. It also produced an informational deterministic manifest
+input map, but the NO-GO forbids applying it. The runner-size residual and
+duplicate-gate process deviation remain unchanged and are not additional
+findings.
+
+### MRG1-S102
+
+1. **Completed milestones:** product correction and final product review are
+   GO `0/0/0/0`; runner/probe corrections and their local synthetic/static
+   gates are frozen; the single final acceptance-packet review returned
+   NO-GO `2/5/0/0`; all exact hashes and zero real-attempt counts remain
+   preserved.
+2. **Next steps:** C02 is stopped. First establish a new plan that responds to
+   the seven canonical findings without silently reopening A13-R1's exhausted
+   correction/review budget. Prefer reducing the acceptance architecture over
+   accumulating another patch layer. Any future execution must state exact
+   branch conditions, review count and whether the runner is corrected,
+   replaced or its responsibilities redistributed.
+3. **Approved decisions:** A13-D01..D09 and A13-R1-D01..D06 remain historical
+   authority. D03's final-review breaker is now consumed and active.
+   Product/API shape, MR1, second-CAD implementation, release/tag/PR and
+   normal user FreeCAD roots remain outside any implicit recovery authority.
+4. **Execution discipline:** `native-plan`, `spawn-send-wait`,
+   `repo-artifact`, `native-session-poll`, Codex adapter. Current product,
+   runner, probe and old-HOLD manifest are immutable blocked inputs. Do not
+   regenerate a manifest, run preflight/GUI, modify acceptance code, stage,
+   commit or request a duplicate review until the new plan is recorded and
+   authorized under the applicable approval boundary.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-A13-E05 | A13-R1-D03/D06 breaker | C02 not created; no push | final product GO `0/0/0/0`; final packet NO-GO `2/5/0/0`; GUI0; preflight0; hashes preserved | seven canonical packet findings; runner-size and duplicate-gate deviations | MRG1-S102 | blocked / new plan required |
+
+## 104. Proposed MRG1-G1-A13-R2 one-shot acceptance replacement
+
+`MRG1-G1-A13-R2` is proposed only. It does not authorize implementation,
+manifest generation, preflight, a real process or staging without explicit
+user approval of this exact revision.
+
+The planning source was Section 103 at artifact SHA-256:
+
+```text
+5fbcf5269195e7dc47ac96206257b2f1c0e67a04cd1683e6c4e0f84ebd16840e
+```
+
+### 104.1 Context and objective
+
+The frozen product exact-eight has final semantic GO `0/0/0/0`. The rejected
+external parent/worker acceptance packet has final NO-GO `2/5/0/0`, remains
+an intentional old-HOLD, and has grown to `2,184` runner lines. Continuing to
+patch that architecture would preserve the boundary responsible for the
+review loop.
+
+The objective is to replace only the external acceptance mechanism with a
+smaller C02-only, permanently one-shot controller that proves one real
+FreeCAD managed HEAD/draft preview, screenshot, exact authority and complete
+cleanup. Product behavior, API, protocol and the exact-eight candidate remain
+unchanged.
+
+No suitable external data volume is currently mounted. `/Volumes/BOOTCAMP`
+is an internal system partition and is not an evidence target. Therefore the
+proposed exact root remains under the existing owner-controlled evidence
+parent:
+
+```text
+/Users/wangtao/Documents/DevProject/vibecad-c02-evidence/MRG1-G1-C02-ONE-SHOT
+```
+
+A later user-designated external-volume path would require an exact path
+revision before creation; it would not silently redirect this allowlist.
+
+### 104.2 Decisions
+
+1. **A13-R2-D01 — preserve the rejected packet.** Treat
+   `MRG1-G1-ACCEPTANCE/**` as immutable historical evidence. Do not reuse,
+   rewrite, import or copy its runner/probe implementation.
+2. **A13-R2-D02 — one C02-only controller.** The new `runner.py` directly
+   owns exactly two child roles: one fresh isolated daemon and one FreeCAD
+   GUI. There is no acceptance worker process, worker subcommand, result
+   relay, scenario registry, retry/resume engine, daemon reuse/adoption or
+   installed-G1 scenario.
+3. **A13-R2-D03 — narrow probe authority.** `probe.py` performs only C02 GUI
+   semantics. It may not spawn, signal, retry, generate a manifest or declare
+   process cleanup. It reports one strictly bound result to the controller.
+4. **A13-R2-D04 — durable one-shot consumption.** Before either child
+   `Popen`, the controller acquires an owner-private root-wide lock and
+   creates/fsyncs one fixed `O_EXCL` C02 consumption record. Concurrent and
+   sequential second runs fail. A launch reservation is never reset or
+   deleted automatically.
+5. **A13-R2-D05 — sole process authority.** The controller registers a fresh
+   daemon handle in an unconditional cleanup stack before any receipt parse
+   or later fallible step. Each child follows TERM, bounded wait, KILL
+   escalation, reap, capture drain and PID/PGID/start-token plus socket
+   absence proof. Output markers have no cleanup authority.
+6. **A13-R2-D06 — exact evidence.** All bounded writes retry EINTR and short
+   positive writes, reject zero, record committed byte count and digest,
+   fsync and fail on overflow/truncation. Controller success requires GUI exit
+   zero, strict bound probe schema, complete cleanup and durable final
+   evidence; no status string can override exit or identity.
+7. **A13-R2-D07 — exact C02 semantic binding.** The probe must prove distinct
+   Qt GUI-main and scenario-worker identities, every GUI callback on main,
+   exact-eight ordering, exactly one `open_checkout` and one
+   `claim_file_grant`, and exact fixture→project/task/draft/generation→
+   checkout/grant/digest/size→two documents→screenshot binding. The
+   controller independently validates the complete tuple and cleanup.
+8. **A13-R2-D08 — structural bounds.** Runtime files are exactly
+   `runner.py` and `probe.py`; combined hard bounds are `1,500` logical lines
+   and `64 KiB`. Soft targets are runner `≤850` lines and probe `≤350`.
+   `contract_test.py` is non-runtime and has a hard `800`-line bound. Any hard
+   bound or forbidden architecture token/path stops implementation.
+9. **A13-R2-D09 — bounded review and execution.** Permit exactly one
+   independent design review and one final code/assertion review, each
+   requiring `0/0/0/0`; no corrective re-review is implied. Permit one
+   combined RED/GREEN contract gate, one static/source gate, at most two
+   preflights total with only one setup-only correction, and exactly one
+   durable real-GUI launch reservation with no retry.
+10. **A13-R2-D10 — preserve delivery order.** On C02 real GO, stage only the
+    frozen C02 repository allowlist, commit and push. Continue
+    C03→Integration/G1 Alpha Test→C04→Close. Run no full repository suite
+    before the single integration full-suite gate.
+
+### 104.3 Commit sequence
+
+The replacement adds one approval-persistence commit but stays inside the
+existing eight-commit hard ceiling:
+
+| ID | Subject | Outcome | Independent gate |
+|---|---|---|---|
+| A13-R2-PERSIST | `docs(orchestration): replace C02 acceptance boundary` | persist exact R2 approval and blocked-history anchor | `AUTH-R2-G0` |
+| G1-C02 | `feat(workbench): preview managed head and draft` | admit the already-frozen product only after one-shot real acceptance | gates in 104.6 |
+| G1-C03 | unchanged | accept/reject reviewed draft | existing C03 gates |
+| G1-INTEGRATION | unchanged | first installable G1 Alpha Test | existing integration gates |
+| G1-C04 | unchanged | managed selectors | existing C04 gates |
+| G1-CLOSE | unchanged | truthful EN/ZH closeout | existing close gates |
+
+### 104.4 Exact allowlists
+
+Repository planning/persistence before real GO:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+```
+
+New private acceptance root:
+
+```text
+runner.py
+probe.py
+contract_test.py
+authorization.source.json
+authorization.json                 generated only after final review GO
+control/lock
+control/c02-preview.json
+preflight/attempt-{1,2}.json
+runs/<authorization-derived-run-id>/invocation.json
+runs/<authorization-derived-run-id>/fixture.json
+runs/<authorization-derived-run-id>/runtime/**
+runs/<authorization-derived-run-id>/freecad-profile/**
+runs/<authorization-derived-run-id>/daemon-stdout.bin
+runs/<authorization-derived-run-id>/daemon-stderr.bin
+runs/<authorization-derived-run-id>/gui-stdout.bin
+runs/<authorization-derived-run-id>/gui-stderr.bin
+runs/<authorization-derived-run-id>/probe-result.json
+runs/<authorization-derived-run-id>/preview.png
+runs/<authorization-derived-run-id>/cleanup.json
+runs/<authorization-derived-run-id>/final.json
+runs/<authorization-derived-run-id>/evidence-manifest.json
+```
+
+The root is mode `0700`; every regular control/source/evidence file is
+owner-current, mode `0600` and nlink one. No other external root is writable.
+
+After real GO, the G1-C02 repository staging allowlist remains exactly:
+
+```text
+M docs/orchestrated/vibecad-multi-runtime-g1.md
+M freecad/VibeCAD/vibecad_workbench/state.py
+M freecad/VibeCAD/vibecad_workbench/gateway.py
+M freecad/VibeCAD/vibecad_workbench/dock.py
+M freecad/VibeCAD/vibecad_workbench/host.py
+A freecad/VibeCAD/vibecad_workbench/preview.py
+M tests/fixtures/freecad_workbench/fake_host.py
+M tests/test_freecad_workbench_controller.py
+A tests/test_freecad_workbench_preview.py
+```
+
+Normal FreeCAD roots, system FreeCAD, `.workbuddy/**`, both named course
+documents, product/API/protocol/schema expansion and all other repository
+paths remain excluded.
+
+### 104.5 Manual validation matrix
+
+| Scenario | Environment | Expected observation | Owner | User present |
+|---|---|---|---|---|
+| Design contract | read-only exact state machine/schema/process graph | independent `0/0/0/0` before implementation | sol-max reviewer | no |
+| REAL-C02 | admitted managed FreeCAD in isolated profile | distinct clean HEAD and Draft documents, exact sources/checkouts/grants, screenshot, zero daemon/GUI/checkout/client residue | controller | no |
+| First user-installable test | installed G1 Alpha after C03/integration | user can launch `vibecad --freecad` and exercise preview/review path | user + controller | yes, later |
+
+### 104.6 Unique-purpose gates and ordered execution
+
+1. `AUTH-R2-G0`: exact approval revision, branch/upstream/index, product
+   hashes, allowlists, exclusions and budgets only.
+2. Draft the exact controller/probe state machines, schemas, process graph
+   and seven attack contracts; one fresh sol-max `DESIGN-R2` reads only that
+   design. Any nonzero severity stops before code.
+3. Implement new files from the approved public contracts; do not copy the
+   rejected implementation.
+4. `CONTRACT-TDD` runs once RED before enforcement and once GREEN after it.
+   The seven Section 103 counterexamples must fail for their intended
+   observable reasons, then pass using injected process fakes with real
+   `Popen=0`.
+5. `SOURCE-R2-G0` answers only syntax/style/shape: Ruff, format, in-memory
+   compile/import-safety, hard size bounds and structural absence of
+   worker/retry/daemon-reuse paths.
+6. Freeze runner, probe, test and source manifest. One final sol-max
+   `REVIEW-R2` maps assertions and source to the seven contracts. Any
+   Blocker/Major/Minor/Nit stops; no corrective review follows.
+7. On exact review GO, `MANIFEST-R2-G0` builds canonical sorted UTF-8 JSON
+   twice from identical frozen inputs with no timestamp/random fields,
+   requires byte identity, then atomically installs and fsyncs it.
+8. `ENV-PREFLIGHT-R2` may run at most twice total. It launches no daemon/GUI.
+   Only one setup-only correction is permitted and may not alter reviewed
+   code, source manifest, admitted identity or product bytes.
+9. Atomically create and fsync the sole launch reservation before either
+   child process. `REAL-C02` runs once; any result consumes the attempt.
+10. `EVIDENCE-R2-G0` proves exact tuple, screenshot, capture durability,
+    process/checkout/client cleanup and evidence manifest. `STAGE-G0-C02`
+    verifies exact reviewed blobs, then commit and push.
+
+No gate duplicates another gate's evidence question. No repository full suite
+runs in R2.
+
+### 104.7 Budgets and circuit breakers
+
+```text
+design reviews                  1
+contract executions             2  (one RED, one GREEN)
+source/static gates             1
+final code reviews              1
+manifest generations            2 deterministic builds, 1 atomic install
+preflight attempts              2 maximum
+setup-only preflight fixes      1 maximum
+durable real-GUI reservations   1
+real-GUI retries                0
+full repository suites          0 before integration
+new commits                     2 through C02 (R2-PERSIST, G1-C02)
+```
+
+Stop on anchor/hash drift, design or final-review finding, wrong RED signal,
+hard size/shape violation, unexpected real process in a synthetic/preflight
+gate, nondeterministic manifest, reviewed-byte drift, preflight-budget
+exhaustion, existing/ambiguous consumption state, second launch request,
+capture truncation, identity ambiguity, incomplete retirement/screenshot/
+document evidence, out-of-allowlist access or any product/API expansion.
+
+Before launch, failure leaves the new root at HOLD and product bytes unstaged.
+After reservation, consumption is permanent; failure still performs complete
+cleanup and evidence finalization, then stops for a new plan/new root. No
+destructive rollback is authorized.
+
+### 104.8 Expected impact and residuals
+
+Expected impact is limited to the external acceptance mechanism and plan
+artifact until one real GO. Runtime acceptance code should shrink about
+`40–50%` relative to the rejected runner. The product exact-eight remains
+byte-for-byte unchanged. No dependency, lockfile, public CLI, MCP surface,
+protocol or normal user FreeCAD directory changes.
+
+Deferred residuals remain: generic/multi-scenario acceptance, daemon reuse,
+cross-platform supervision, installed-form G1 E2E, C03, C04, MR1, second CAD,
+Addon Manager and release/tag work. Installed-form G1 E2E is intentionally
+implemented later by the approved integration packet rather than generalized
+inside the C02 runner.
+
+### 104.9 Approval boundary
+
+The one architecture decision requiring user approval is replacing the
+rejected parent/worker acceptance boundary with the new owner-private,
+single-controller, permanently one-shot C02 architecture and its exact new
+root. Product behavior and APIs do not change. After approval, design review,
+implementation, mechanical gates, manifest generation, allowed setup-only
+preflight correction, the single real attempt, evidence, staging, commit and
+push proceed without further product approval unless a recorded breaker
+fires.
+
+Approval wording:
+
+> Approve `MRG1-G1-A13-R2`: preserve the rejected A13-R1 acceptance root as
+> immutable historical evidence; authorize the new owner-private
+> `MRG1-G1-C02-ONE-SHOT` root and exact allowlist; replace the parent/worker
+> packet with one C02-only controller that solely owns fresh daemon and
+> FreeCAD launch, strict result admission, durable root-wide
+> single-flight/consumption, bounded evidence writes and verified retirement;
+> keep the frozen product/API contracts unchanged; permit one design review
+> and one final code review, each requiring `0/0/0/0`, at most two preflights
+> with one setup-only correction, and exactly one durable real-GUI launch
+> reservation with no retry; run no full repository suite before integration;
+> stop on any recorded breaker, otherwise execute the mechanical gates,
+> manifest generation, evidence, C02 commit and push autonomously.
+
+### MRG1-S103
+
+1. **Completed milestones:** Section 103 blocker state and all frozen hashes
+   remain exact; A13-R2 is a proposal only; no old or new acceptance file,
+   manifest, preflight or process was created or executed.
+2. **Next steps:** present the exact Section 104 revision and artifact hash.
+   On explicit A13-R2 approval, append authorization, persist/push
+   `A13-R2-PERSIST` and start `DESIGN-R2`. Without approval, remain stopped.
+3. **Approved decisions:** A13 and A13-R1 remain historical authority with the
+   R1 breaker active. A13-R2-D01..D10 are not active.
+4. **Execution discipline:** current profile and adapter are unchanged.
+   Planning reads only the artifact; product and rejected packet remain
+   immutable; all implementation/process actions stay forbidden.
+
+## 105. MRG1-G1-A13-R2 authorization and activation
+
+At `2026-07-31 04:41:59 PDT` (`2026-07-31T11:41:59Z`), the user explicitly
+approved the exact Section 104 revision whose pre-authorization artifact
+SHA-256 was:
+
+```text
+9e5e07903bacf6126cdebb146f93ca197fdcba73b0f39ede191abb5d27da4a87
+```
+
+The user's exact authorization words were:
+
+> 批准 MRG1-G1-A13-R2
+
+This activates `MRG1-G1-A13-R2-D01..D10`, the exact new owner-private root,
+file allowlists, process shape, structural bounds, gate questions, budgets,
+breakers, recovery rules and approval boundary in Section 104. It does not
+erase or retroactively pass any A13-R1 finding. The rejected
+`MRG1-G1-ACCEPTANCE/**` root remains immutable historical evidence.
+
+The frozen product exact-eight is reverified at the approved hashes:
+
+```text
+dock.py                        f58d36882995deaa4369efaa847ef8ce63eea6fbd05bef52f003a13713aff733
+gateway.py                     070c4b73f82dc313e1570bb8a338cc5c8b173ca5cf4253bc7502f38f4edba27c
+host.py                        4a22086c9c90eed05efd189d3797f590c6aaeca4d310abf6cabe062526fc04d6
+state.py                       f9a3450b1645aa757141ffd51207a342da6c7971055ff184d561f286506fb895
+preview.py                     11dab5685c53ccdfc7ee600a5963e37df9e19ae75b9d107a6a20bb3baed9f99a
+fake_host.py                   4d102652bb54afa19a6eff053e9ab5068fb74ba5b6edb594960e3bb4039bec24
+test controller                3e6eaedadbcca0b482d86073e517aa575072fa529edeae902cb7f89c985090f1
+test preview                   39a9ff41b1ce9aec47a5d8f4d5a8463a9de8e347e481782b083b44fd354ac836
+```
+
+At activation, branch and upstream both equal
+`d6ae6a98a0a18e618649370fffee47d48b09983e`, the index is empty and the new
+`MRG1-G1-C02-ONE-SHOT` root has not been created. Preflight and real-GUI
+attempt counts remain zero.
+
+The execution profile is revalidated without expansion:
+
+```text
+approval: native-plan
+delegation: spawn-send-wait
+persistence: repo-artifact
+process: native-session-poll
+adapter: Codex
+```
+
+Required capability evidence categories:
+
+- `live capability declarations`: native plan projection, bounded command
+  sessions and spawn/send/follow-up/wait collaboration are declared live.
+- `observable behavior`: the exact approved artifact hash, branch, equal
+  HEAD/upstream, empty index and eight frozen product hashes were read back
+  without creating an external root or launching a process.
+- `environment identity`: Codex desktop on the local macOS workspace
+  `/Users/wangtao/Documents/DevProject/vibecad`.
+- `public configuration`: repository workspace-write access, restricted
+  network and permission-controlled external writes; A13-R2 expands no host
+  permission and cannot bypass a filesystem approval prompt.
+
+Routine implementation and mechanical execution inside A13-R2 now proceed
+without repeated product approval. A new user decision is required only if a
+recorded breaker fires and the recovery changes product/API shape, the exact
+root/allowlist, process authority, review/attempt budget or another material
+architecture boundary.
+
+### MRG1-S104
+
+1. **Completed milestones:** A13-R2 is approved against exact
+   pre-authorization SHA-256 `9e5e0790…`; A13-R1 NO-GO history, frozen
+   product hashes, branch/upstream and empty index remain exact; new-root,
+   preflight and GUI counts are zero.
+2. **Next steps:** persist and push the docs-only `A13-R2-PERSIST` commit;
+   draft the exact one-controller state machine, schemas, process graph and
+   seven attack contracts; execute the one `DESIGN-R2` review. On exact
+   `0/0/0/0`, create the new root and implement. On any design finding, stop
+   before external writes.
+3. **Approved decisions:** A13-R2-D01..D10 and the exact user wording above
+   are active. A13/A13-R1 remain historical authority; their failed evidence
+   is preserved. Product/API/protocol shape remains frozen.
+4. **Execution discipline:** `native-plan`, `spawn-send-wait`,
+   `repo-artifact`, `native-session-poll`, Codex adapter; exact allowlists,
+   hard size/shape bounds, one design review, one final review, two-preflight
+   maximum, one permanent GUI reservation and all Section 104 breakers apply.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-A13-E06 | A13-R2-D01..D10; user exact words above | `A13-R2-PERSIST` pending self-anchor | `AUTH-R2-G0`: approval SHA, branch/upstream/index and exact-eight hashes PASS; new-root0/preflight0/GUI0 | external filesystem prompt may be required; no suitable external data volume mounted | MRG1-S104 | authorized / persistence gate active |
