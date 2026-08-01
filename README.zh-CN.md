@@ -12,6 +12,47 @@ VibeCAD 是面向 Claude、Codex 等宿主 Agent 的 FreeCAD 专家 Agent。它�
 VibeCAD 不内置或转售大模型。推理使用用户自己的宿主模型及其订阅或 API 配额；VibeCAD 负责 CAD
 合同、隔离执行、确定性验证、恢复与交付。
 
+## VibeCAD 当前提供什么
+
+- 从设计意图到持久 CAD 项目和版本化结果的 Agent-native 路径；
+- 可实际运行的 FreeCAD Workbench Alpha，支持项目/任务发现、HEAD 与草案预览、verdict、Accept
+  和 Reject；
+- 确定性的 Task Kernel 执行：隔离候选、明确审核策略、经过验证的 FCStd/STEP 制品、恢复与安全重放；
+- VibeCAD 自行管理 FreeCAD 运行时，用户无需预先配置兼容的系统 FreeCAD。
+
+## 体验 FreeCAD Workbench Alpha
+
+最简单的安装方式是把下面这句话交给编码 Agent：
+
+> 请从 https://github.com/wangtao9090/VibeCAD 安装并启动 VibeCAD FreeCAD
+> Workbench Alpha。使用 commit `83879b67ee3fd10a728abbf22360d2002aca06ee`，
+> 克隆到持久目录，构建 wheel，通过 `uv tool install --force` 安装，保留 checkout
+> 和构建出的 wheel，最后运行 `vibecad --freecad`。不要安装或回退到系统版 FreeCAD。
+
+Agent 应执行以下可复现步骤：
+
+```bash
+git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
+git -C VibeCAD checkout 83879b67ee3fd10a728abbf22360d2002aca06ee
+cd VibeCAD
+uv build --wheel
+uv tool install --force dist/vibecad-0.6.0-py3-none-any.whl
+vibecad --freecad
+```
+
+安装说明：
+
+- 使用这个 Alpha 期间，保留持久 checkout、wheel 及其原路径；
+- 不搜索 `PATH`、`/Applications`、普通 FreeCAD `Mod` 目录，也不安装系统 FreeCAD 作为后备；
+  `vibecad --freecad` 只使用经过验证的受管运行时；
+- 首次启动允许下载约 2–3 GB 的锁定运行时文件，后续启动复用；
+- 成功判据是受管 FreeCAD 打开，VibeCAD Workbench 与审核 Dock 均已激活；若失败，报告 launcher
+  的精确错误并停止，不切换运行时，也不自行发明其他安装路径。
+
+当前 Dock 可以列出项目和任务、刷新所选状态、打开相互独立的受管 HEAD 与草案预览文档、展示审核
+结论，并对新鲜草案执行 Accept 或 Reject。完整对象和 feature selector 捕获是下一段 G1 工作；当前
+尚不宣称 face/edge 子元素选择能力。
+
 ## 当前 Agent-first 工作流
 
 ```text
@@ -96,37 +137,6 @@ request，不是持久任务取消。
 `unsupported`。交付前先调用只读的 `get_artifact_manifest`：已有经过验证的 PUBLISHED delivery 时
 直接返回两个 ResourceLink；否则返回 `materialized=false`，且不会创建、复制或清理任何交付文件，
 此时才调用 `export_task_artifacts`。
-
-## FreeCAD Workbench Alpha
-
-推荐安装方式：把下面这句话交给你的编码 Agent：
-
-> 请从 https://github.com/wangtao9090/VibeCAD 安装并启动 VibeCAD FreeCAD
-> Workbench Alpha。使用 commit `83879b67ee3fd10a728abbf22360d2002aca06ee`，
-> 克隆到持久目录，构建 wheel，通过 `uv tool install --force` 安装，保留 checkout
-> 和构建出的 wheel，最后运行 `vibecad --freecad`。不要安装或回退到系统版 FreeCAD。
-
-为了便于核验，Agent 应执行等价步骤：
-
-```bash
-git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout 83879b67ee3fd10a728abbf22360d2002aca06ee
-cd VibeCAD
-uv build --wheel
-uv tool install --force dist/vibecad-0.6.0-py3-none-any.whl
-vibecad --freecad
-```
-
-使用这个 Alpha 期间，Agent 应保留该 checkout、wheel 及其原路径。每次启动都会把受管服务端绑定到
-该精确制品；运行时已经匹配时只走幂等快速路径。
-
-无需另行安装系统版 FreeCAD。该命令只接受 VibeCAD 已验证的受管运行时；首次缺失时由现有安装器
-建立运行时，绝不会从 `PATH`、`/Applications` 或普通 FreeCAD `Mod` 目录寻找后备版本。Workbench
-直接从已安装的 VibeCAD wheel 加载，并使用每次启动新建的私有 FreeCAD 配置。
-
-本 Alpha 的 Dock 可以列出项目和任务、刷新所选状态、打开相互独立的受管 HEAD 与草案预览文档、
-展示审核结论，并对新鲜草案执行 Accept 或 Reject。完整对象和 feature selector 捕获是下一段 G1
-工作；当前尚不宣称 face/edge 子元素选择能力。
 
 ## 安装：MCP 服务与 Agent Skill 是两件事
 

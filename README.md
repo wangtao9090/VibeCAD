@@ -14,6 +14,52 @@ VibeCAD neither embeds nor resells a large language model. Reasoning uses the us
 model and its subscription or API quota; VibeCAD is responsible for CAD contracts, isolated
 execution, deterministic verification, recovery, and delivery.
 
+## What VibeCAD Delivers
+
+- An Agent-native path from design intent to persistent CAD projects and versioned results.
+- A real FreeCAD Workbench Alpha for project/task discovery, HEAD and draft preview, verdict,
+  Accept, and Reject.
+- Deterministic Task Kernel execution: isolated candidates, explicit review policy, verified
+  FCStd/STEP artifacts, recovery, and replay-safe request semantics.
+- A VibeCAD-managed FreeCAD runtime, so users do not need to prepare a compatible system FreeCAD.
+
+## Try the FreeCAD Workbench Alpha
+
+The easiest installation path is to give your coding Agent this request:
+
+> Install and launch the VibeCAD FreeCAD Workbench Alpha from
+> https://github.com/wangtao9090/VibeCAD. Use commit
+> `83879b67ee3fd10a728abbf22360d2002aca06ee`, clone it into a persistent
+> directory, build its wheel, install it with `uv tool install --force`, keep
+> the checkout and built wheel, and run `vibecad --freecad`. Do not install or
+> fall back to a system copy of FreeCAD.
+
+The Agent's reproducible procedure is:
+
+```bash
+git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
+git -C VibeCAD checkout 83879b67ee3fd10a728abbf22360d2002aca06ee
+cd VibeCAD
+uv build --wheel
+uv tool install --force dist/vibecad-0.6.0-py3-none-any.whl
+vibecad --freecad
+```
+
+Installation notes:
+
+- Keep the persistent checkout and built wheel at the same path while this Alpha is installed.
+- Do not search `PATH`, `/Applications`, the normal FreeCAD `Mod` directory, or install a system
+  FreeCAD fallback. `vibecad --freecad` owns the verified managed runtime.
+- Allow the first launch to download approximately 2–3 GB of locked runtime files; later launches
+  reuse them.
+- Success means managed FreeCAD opens with the VibeCAD Workbench and review Dock active. On
+  failure, report the exact launcher error and stop instead of switching runtimes or inventing an
+  alternate installation path.
+
+The Dock can list projects and tasks, refresh selected state, open separate managed HEAD and
+draft preview documents, show the review verdict, and Accept or Reject a fresh draft. Whole-object
+and feature selector capture is the next G1 slice; face/edge subelement selection is not claimed.
+
 ## Current Agent-first Workflow
 
 ```text
@@ -116,42 +162,6 @@ delivery, call the read-only `get_artifact_manifest`. If a verified PUBLISHED de
 exists, it directly returns two ResourceLinks. Otherwise it returns `materialized=false`
 without creating, copying, or cleaning any delivery file; only then should
 `export_task_artifacts` be called.
-
-## FreeCAD Workbench Alpha
-
-Recommended installation: give your coding Agent this request:
-
-> Install and launch the VibeCAD FreeCAD Workbench Alpha from
-> https://github.com/wangtao9090/VibeCAD. Use commit
-> `83879b67ee3fd10a728abbf22360d2002aca06ee`, clone it into a persistent
-> directory, build its wheel, install it with `uv tool install --force`, keep
-> the checkout and built wheel, and run `vibecad --freecad`. Do not install or
-> fall back to a system copy of FreeCAD.
-
-For auditability, the Agent's reproducible procedure is:
-
-```bash
-git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout 83879b67ee3fd10a728abbf22360d2002aca06ee
-cd VibeCAD
-uv build --wheel
-uv tool install --force dist/vibecad-0.6.0-py3-none-any.whl
-vibecad --freecad
-```
-
-The Agent should keep that checkout and wheel at the same path while this Alpha is installed. Each
-launch binds the managed server package to that exact artifact; an already matching runtime takes
-the idempotent fast path.
-
-You do not need to install a system copy of FreeCAD. The command accepts only VibeCAD's verified
-managed runtime, installs that runtime on the first launch when it is missing, and never searches
-`PATH`, `/Applications`, or the normal FreeCAD `Mod` directory. The Workbench itself is loaded
-from the installed VibeCAD wheel into a fresh private FreeCAD profile.
-
-In this Alpha, the Dock can list projects and tasks, refresh the selected state, open separate
-managed HEAD and draft preview documents, show the review verdict, and Accept or Reject a fresh
-draft. Whole-object and feature selector capture is the next G1 slice; face/edge subelement
-selection is not claimed yet.
 
 ## Installation: The MCP Service and Agent Skill Are Separate
 

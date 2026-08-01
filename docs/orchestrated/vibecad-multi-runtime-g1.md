@@ -24267,3 +24267,31 @@ launcher, runtime, addon, runner, test harness or protocol source changes.
 | Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
 |---|---|---|---|---|---|---|
 | MRG1-G1-INTEGRATION-H01 | explicit repository-first Agent handoff | pending documentation commit | two README contract tests pending | current Alpha remains pinned to `83879b6` until superseded | MRG1-S174 | executing |
+
+## 175. README product-first, Agent-friendly information architecture
+
+The user clarified that README's primary role is product introduction while
+remaining directly usable by Agents. Both language variants now lead with the
+product problem and value, summarize the currently delivered product surface,
+then provide the repository-first Agent installation entry: pinned Alpha
+commit, reproducible commands, persistent-artifact requirement,
+managed-runtime-only prohibition, first-launch cost, observable success
+criteria and fail-closed reporting.
+
+The remaining README already describes the Agent workflow, public tools,
+request/replay semantics, review behavior and delivery contract. Internal gate
+counts, PID evidence and orchestration history remain here rather than being
+copied into the public README. The two existing release-document contract tests
+pass (`2 passed in 0.12s`); no product source or broader gate changed.
+
+### MRG1-S175
+
+1. **Completed milestones:** repository-first handoff commit `656b27f` pushed;
+   bilingual README reordered as a product introduction with an Agent-usable
+   quick-start path.
+2. **Next steps:** commit/push this two-README information-architecture change,
+   then resume C04.
+3. **Approved decisions:** explicit user direction that README face Agents;
+   standing documentation/commit/push authority.
+4. **Execution discipline:** README plus rolling artifact only; two targeted
+   contract tests; no subagent, GUI, installer, runner or full-suite work.
