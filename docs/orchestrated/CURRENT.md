@@ -1,10 +1,10 @@
 # VibeCAD Active Plan — G1 Outcome Closeout
 
-> Status: active / approved
+> Status: complete / accepted
 >
 > Updated: 2026-08-01
 >
-> Repository anchor: `codex/agent-stage3@b43b23c`
+> Repository anchor: `codex/agent-stage3@315fc6c`
 >
 > This is the only mutable orchestration plan. Earlier campaign files are
 > frozen historical records or future reference contracts; do not append
@@ -12,14 +12,14 @@
 
 ## 1. Outcome
 
-Close G1 as one usable FreeCAD workflow rather than another infrastructure
-stage. A user must be able to select a managed preview object, obtain its exact
+G1 closes as one usable FreeCAD workflow rather than another infrastructure
+stage. A user can select a managed preview object, obtain its exact
 VibeCAD selector, inspect the candidate, and Accept or Reject it. The same thin
-Workbench must then complete one evidence-backed pilot inside a compatible
+Workbench completed one evidence-backed pilot inside a compatible
 user-installed FreeCAD while the managed runtime remains the execution,
 verification, and fallback authority.
 
-G1 is complete when all of the following are true:
+G1 is accepted because all of the following are true:
 
 1. whole-object and feature selection produce exact, uniquely resolved `SelectorV1` values in the managed Workbench;
 2. one admitted user-FreeCAD pilot connects through a bounded external bridge and completes the existing preview/review workflow;
@@ -33,7 +33,7 @@ G1 is complete when all of the following are true:
 - The Workbench already provides lifecycle, Preview, and Accept/Reject against the authenticated local kernel.
 - Managed installed-form Alpha is anchored at `83879b6`; repository-first and product-first docs at `656b27f` and `ebc29d9`.
 - The dual-host product decision is recorded at `a4e5ab2`.
-- C04 selector capture is accepted at `b43b23c`; the external bridge pilot is accepted at `91207b1`; user-host selector/review completion and documentation truth remain open.
+- C04 selector capture is accepted at `b43b23c`; the external bridge pilot is accepted at `91207b1`; user-host selector/review completion is accepted at `91c94f4`; product documentation truth is accepted at `315fc6c`.
 - The topology review found an in-process `vibecad.daemon` import, while VibeCAD requires Python 3.12+ and the FreeCAD 1.1.3 pilot embeds Python 3.11.14. Installing the complete VibeCAD package there is not the pilot design.
 
 ## 3. Approved decisions and authority
@@ -234,12 +234,54 @@ G1-03 closeout gate rather than being inferred from this observation.
 
 ### G1-03 — Product closeout and truth alignment
 
+State: **accepted at product commit `91c94f4` and documentation commit `315fc6c`**.
+
 - demonstrate C04 selector output plus Accept or Reject in the admitted user-FreeCAD pilot;
 - align README, User Guide, Architecture, Product Capability Roadmap, and Acceptance Tests with Alpha, pilot, and deferred scope;
 - remove assertions requiring the stale statement that G1 Workbench is undelivered;
 - run one settled final relevant suite after product and docs stop changing.
 
 Closeout gate: Section 1 is proven, residuals are recorded, and the next plan is a narrow P1 vertical slice.
+
+Implemented result:
+
+- the Python 3.11 thin addon detaches only bounded raw VibeCAD identity metadata
+  from the complete tracked preview document; it does not infer from FreeCAD
+  Name/Label or construct a selector locally;
+- the existing private Workbench worker lane sends that inventory through the
+  closed external bridge method set. Managed Python performs the exact existing
+  `parse_entity_identity()` → `EntityIdentity.to_selector()` → unique
+  `resolve_selector()` authority path and returns canonical JSON;
+- selection generation, live GUI selection, checkout binding identity,
+  project/revision and canonical response are revalidated before the Dock
+  displays a result. Stale or malformed responses fail closed;
+- the bridge remains one child per Workbench session and receives no Task,
+  Revision, HEAD, review, commit, store, lease or daemon-secret authority.
+
+Evidence admitted for this slice:
+
+1. the selector bridge began with three expected RED failures and passed its
+   targeted GREEN gate; the settled bridge/selection/controller focus was
+   `202 passed` before the real observation;
+2. installed-form managed selector resolution returned one canonical feature
+   selector, and the live addon was upgraded to ownership receipt
+   `0c8d2d9ce9170941e5494c5ec175ffeb04c26d0baaa255f6420c08b072da017a`;
+3. one isolated real `/Applications/FreeCAD.app` 1.1.3 session used a non-empty
+   committed HEAD plus a second-box review draft, opened both previews, selected
+   the `review-box` feature, received a candidate-revision selector, and
+   completed Reject. The task persisted as `rejected` at generation 10, HEAD
+   remained `revision_95766005fda59eba8269faac7a380fb4`, and both checkout and
+   FreeCAD document counts ended at zero;
+4. README, bilingual README, User Guide, Architecture, Agent Architecture,
+   Product Capability Roadmap, Acceptance Tests, and the existing release-doc
+   contract test now describe the same managed-default/single-host-pilot truth;
+5. the only settled closeout suite passed `382` tests; scoped Ruff, format and
+   `git diff --check` were GREEN.
+
+G1 is complete. Remaining limits are not G1 failures: face/edge selectors,
+topology persistence, dirty manual publish, a GUI CAD execution profile,
+general user-FreeCAD compatibility, host-verified Claude/Codex execution,
+P0-B hardening, and P1/G2 geometry breadth remain outside this campaign.
 
 ## 6. Evidence budget
 
@@ -258,26 +300,29 @@ diagnostic explanation does not block an otherwise established outcome.
 
 ## 7. Recovery and exact next action
 
-Recovery anchor: `codex/agent-stage3@91207b1`. Preserve the pre-existing
+Recovery anchor: `codex/agent-stage3@315fc6c`. Preserve the pre-existing
 untracked `.workbuddy/` and both CAD course documents. On resume, inspect only
 state and inputs that may have changed.
 
-Exact next action in G1-03:
+Exact next action after G1:
 
-> Close the one known user-host gap: external FreeCAD cannot import the managed
-> selector backend. Add the smallest bounded selector-authority path that keeps
-> exact construction/unique resolution in managed code, then run one isolated
-> non-empty user-host Preview plus Accept or Reject observation. After product
-> behavior settles, align the five public capability documents and their
-> existing contract tests; do not add another GUI harness or validation runner.
+> Select and approve one narrow P1/G2 vertical product slice before
+> implementation. Reuse the completed Workbench/Task Kernel path and define one
+> user-visible outcome plus its acceptance contract; do not reopen G1 bridge,
+> selector, validation-runner, or compatibility-matrix scope without a named
+> regression.
 
-Material residuals entering G1-03:
+Material residuals after G1:
 
 - only one fingerprinted macOS FreeCAD 1.1.3 pilot target has local evidence;
-- external FreeCAD selection currently fails closed because the managed
-  selector backend is intentionally absent from the thin addon;
-- no non-empty user-host Preview/Accept-or-Reject observation has yet been run;
-- public docs still contain stale pre-G1 statements to correct at G1-03.
+- the observed app has an invalid code signature and group-writable critical
+  files, so its exact local fingerprint is not a general trust/support claim;
+- managed mode remains the default and fallback; no second external host is
+  admitted;
+- true Claude/Codex second-host activation remains unverified and no tag or
+  general release was authorized;
+- the next P1/G2 slice changes product capability and therefore requires a new
+  scope decision under the user's autonomy boundary.
 
 Additional residual after G1-01:
 
