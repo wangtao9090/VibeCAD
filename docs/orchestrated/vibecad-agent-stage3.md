@@ -1,10 +1,14 @@
 # VibeCAD Agent-first Stage 3 编排计划
 
+> **Frozen historical record.** Stage 3 is complete; this file is no longer an
+> active plan and must not receive new execution logs. Continue from
+> [`CURRENT.md`](CURRENT.md).
+
 - Campaign: vibecad-agent-stage3
 - Revision: S3-R3
 - Control addendum: S3-R3.1
 - Active control addendum: S3-R3.2
-- Status: executing
+- Status: completed / frozen
 - Prepared: 2026-07-20
 - Repository anchor: codex/task-kernel-phase2@ca8ca57ebb8d91eaab4220fd7f3beb05f64c7fb4
 - Target branch: codex/agent-stage3

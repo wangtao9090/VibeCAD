@@ -18,6 +18,7 @@ __all__ = ("ReviewDock",)
 
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _MAX_PENDING_REQUESTS = 1024
+_MAX_SELECTOR_TEXT_BYTES = 4096
 _HOSTED_RESTRICTED_COMMAND_KINDS = frozenset(("preview_close", "review", "close"))
 _COMMAND_KINDS = frozenset(
     (
@@ -131,12 +132,18 @@ class ReviewDock(QtWidgets.QDockWidget):
         ) = None
         self._review_confirmation: dict[str, object] | None = None
         self._hosted_projection: tuple[int, str, object] | None = None
+        self._selector_text: str | None = None
 
         container = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(container)
         self.status_label = QtWidgets.QLabel("Disconnected", container)
         self.preview_status_label = QtWidgets.QLabel("Preview closed", container)
         self.review_status_label = QtWidgets.QLabel("No review decision", container)
+        self.selector_status_label = QtWidgets.QLabel(
+            "Select a managed preview object",
+            container,
+        )
+        self.selector_value_label = QtWidgets.QLabel("", container)
         self.project_selector = QtWidgets.QComboBox(container)
         self.task_selector = QtWidgets.QComboBox(container)
         self.refresh_button = QtWidgets.QPushButton("Refresh", container)
@@ -144,7 +151,10 @@ class ReviewDock(QtWidgets.QDockWidget):
         self.open_draft_button = QtWidgets.QPushButton("Open Draft Preview", container)
         self.accept_button = QtWidgets.QPushButton("Accept Draft", container)
         self.reject_button = QtWidgets.QPushButton("Reject Draft", container)
+        self.copy_selector_button = QtWidgets.QPushButton("Copy Selector", container)
         self.status_label.setObjectName("VibeCADConnectionStatus")
+        self.selector_status_label.setObjectName("VibeCADSelectorStatus")
+        self.selector_value_label.setObjectName("VibeCADSelectorValue")
         self.project_selector.setObjectName("VibeCADProjectSelector")
         self.task_selector.setObjectName("VibeCADReviewTaskSelector")
         self.refresh_button.setObjectName("VibeCADRefresh")
@@ -152,10 +162,13 @@ class ReviewDock(QtWidgets.QDockWidget):
         self.open_draft_button.setObjectName("VibeCADOpenDraftPreview")
         self.accept_button.setObjectName("VibeCADAcceptDraft")
         self.reject_button.setObjectName("VibeCADRejectDraft")
+        self.copy_selector_button.setObjectName("VibeCADCopySelector")
         for widget in (
             self.status_label,
             self.preview_status_label,
             self.review_status_label,
+            self.selector_status_label,
+            self.selector_value_label,
             self.project_selector,
             self.task_selector,
             self.refresh_button,
@@ -163,6 +176,7 @@ class ReviewDock(QtWidgets.QDockWidget):
             self.open_draft_button,
             self.accept_button,
             self.reject_button,
+            self.copy_selector_button,
         ):
             layout.addWidget(widget)
         self.setWidget(container)
@@ -171,8 +185,10 @@ class ReviewDock(QtWidgets.QDockWidget):
         self.open_draft_button.clicked.connect(self.open_draft_preview)
         self.accept_button.clicked.connect(self.accept_draft)
         self.reject_button.clicked.connect(self.reject_draft)
+        self.copy_selector_button.clicked.connect(self.copy_selector)
         self.project_selector.currentIndexChanged.connect(self._project_changed)
         self.task_selector.currentIndexChanged.connect(self._task_changed)
+        self._clear_selector()
         self._update_preview_actions()
 
     def _bind_host_transport(self, transport: object) -> None:
@@ -197,6 +213,51 @@ class ReviewDock(QtWidgets.QDockWidget):
             raise RuntimeError("review host callbacks are invalid")
         self._review_host_submit = submit_review
         self._review_host_discard = discard_preview
+
+    def _clear_selector(self) -> None:
+        self._selector_text = None
+        self.selector_status_label.setText("Select a managed preview object")
+        self.selector_value_label.setText("")
+        self.copy_selector_button.setEnabled(False)
+
+    def _reject_selector(self, *, unsupported: bool = False) -> None:
+        self._selector_text = None
+        self.selector_status_label.setText(
+            "Selection unsupported" if unsupported else "Selection unavailable"
+        )
+        self.selector_value_label.setText("")
+        self.copy_selector_button.setEnabled(False)
+
+    def _set_selector_capture(self, text: object) -> None:
+        if (
+            type(text) is not str
+            or not text
+            or "\n" in text
+            or len(text.encode("utf-8")) > _MAX_SELECTOR_TEXT_BYTES
+        ):
+            self._reject_selector()
+            return
+        self._selector_text = text
+        self.selector_status_label.setText("Selector ready")
+        self.selector_value_label.setText(text)
+        self.copy_selector_button.setEnabled(True)
+
+    def copy_selector(self) -> None:
+        text = self._selector_text
+        if type(text) is not str or not text:
+            return
+        try:
+            application = QtWidgets.QApplication.instance()
+            if application is None:
+                raise RuntimeError("clipboard unavailable")
+            clipboard = application.clipboard()
+            if not callable(getattr(clipboard, "setText", None)):
+                raise RuntimeError("clipboard unavailable")
+            clipboard.setText(text)
+        except Exception:
+            self.selector_status_label.setText("Selector copy failed")
+            return
+        self.selector_status_label.setText("Selector copied")
 
     def _submit_host_review(
         self,
@@ -235,6 +296,7 @@ class ReviewDock(QtWidgets.QDockWidget):
         if len(matched) != 1:
             raise ProjectionError("invalid host preview projection")
         del self._preview_checkouts[matched[0]]
+        self._clear_selector()
         self.set_preview_eligibility(False)
         self._update_preview_actions()
 
@@ -242,6 +304,7 @@ class ReviewDock(QtWidgets.QDockWidget):
         if self._preview_checkouts or self._preview_pending_sources or self._preview_epochs:
             raise ProjectionError("preview cycle projection is not retired")
         self._preview_recovery_required = self._review_recovery_required
+        self._clear_selector()
         self.set_preview_eligibility(False)
         self._update_preview_actions()
 
@@ -674,6 +737,7 @@ class ReviewDock(QtWidgets.QDockWidget):
         self._update_preview_actions()
 
     def _project_changed(self, index: int) -> None:
+        self._clear_selector()
         self.set_preview_eligibility(False)
         self._selection_epoch += 1
         self._clear_tasks()
@@ -682,6 +746,7 @@ class ReviewDock(QtWidgets.QDockWidget):
         self._update_preview_actions()
 
     def _task_changed(self, _index: int) -> None:
+        self._clear_selector()
         self._task_selection_epoch += 1
         self._update_preview_actions()
 
@@ -1039,6 +1104,7 @@ class ReviewDock(QtWidgets.QDockWidget):
         return len(self._preview_epochs)
 
     def _fail(self) -> None:
+        self._clear_selector()
         self.status_label.setText("Unavailable")
 
     @staticmethod
@@ -1321,6 +1387,7 @@ class ReviewDock(QtWidgets.QDockWidget):
                 if not self._authenticated_ok(event["response"]):
                     self._fail()
             elif kind == "closed":
+                self._clear_selector()
                 self.status_label.setText("Closed")
         except (AssertionError, KeyError, ProjectionError, TypeError, ValueError):
             self._fail()

@@ -19,6 +19,7 @@ _EXPECTED_FILES = {
     "vibecad_workbench/gateway.py",
     "vibecad_workbench/host.py",
     "vibecad_workbench/preview.py",
+    "vibecad_workbench/selection.py",
     "vibecad_workbench/state.py",
 }
 

@@ -1,10 +1,15 @@
 # VibeCAD Multi-Runtime Foundation and G1 Handoff
 
-> Rolling cross-session source of truth for the next VibeCAD campaign.
+> **Superseded historical record.** Multi-runtime foundation and G1 C01-C03
+> history remain authoritative here, but this file is no longer the mutable
+> execution plan. Continue from [`CURRENT.md`](CURRENT.md); do not append new
+> packets, command logs, retries, or recovery snapshots to this file.
+
+> Historical cross-session record through G1 C03 and the dual-host handoff.
 >
 > Artifact revision: `MRG1-R1`
 >
-> State: `approved / executing`
+> State: `superseded / frozen`
 >
 > Created: `2026-07-26T01:17:24Z`
 >

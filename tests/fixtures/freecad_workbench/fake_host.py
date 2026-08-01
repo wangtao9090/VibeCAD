@@ -35,6 +35,49 @@ class FakeWorkbench:
     pass
 
 
+class FakeSelectionRecord:
+    def __init__(self, selected_object: object, subelements: tuple[str, ...]) -> None:
+        self.Object = selected_object
+        self.SubElementNames = list(subelements)
+
+
+class FakeSelection:
+    def __init__(self) -> None:
+        self.observers: list[object] = []
+        self.records: list[FakeSelectionRecord] = []
+
+    def addObserver(self, observer: object) -> None:
+        _require_main_thread()
+        if observer in self.observers:
+            raise RuntimeError("synthetic duplicate selection observer")
+        self.observers.append(observer)
+
+    def removeObserver(self, observer: object) -> None:
+        _require_main_thread()
+        self.observers.remove(observer)
+
+    def getSelectionEx(self) -> list[FakeSelectionRecord]:
+        _require_main_thread()
+        return list(self.records)
+
+    def setSelection(
+        self,
+        selected_object: object,
+        *,
+        subelements: tuple[str, ...] = (),
+    ) -> None:
+        _require_main_thread()
+        self.records = [FakeSelectionRecord(selected_object, subelements)]
+        for observer in tuple(self.observers):
+            observer.addSelection("ignored-document", "ignored-object", "", (0.0, 0.0, 0.0))
+
+    def clearSelection(self) -> None:
+        _require_main_thread()
+        self.records = []
+        for observer in tuple(self.observers):
+            observer.clearSelection("ignored-document")
+
+
 class FakeFreeCADGui(ModuleType):
     def __init__(
         self,
@@ -47,6 +90,7 @@ class FakeFreeCADGui(ModuleType):
         self.add_attempts = 0
         self._fail_first_add = fail_first_add
         self.main_window = FakeMainWindow(fail_first_add=fail_first_dock_add)
+        self.Selection = FakeSelection()
 
     def addWorkbench(self, workbench: object) -> None:
         _require_main_thread()
@@ -76,6 +120,7 @@ class FakeDocument:
         self.Name = name
         self.FileName = local_path
         self.Modified = False
+        self.Objects: list[object] = []
         self._events = events
 
 
@@ -845,6 +890,27 @@ class _QPushButton(_Widget):
             self.clicked.emit()
 
 
+class _Clipboard:
+    def __init__(self) -> None:
+        self.text = ""
+
+    def setText(self, text: str) -> None:
+        _require_main_thread()
+        self.text = text
+
+
+class _QApplication:
+    _clipboard = _Clipboard()
+
+    @classmethod
+    def instance(cls) -> type[_QApplication]:
+        return cls
+
+    @classmethod
+    def clipboard(cls) -> _Clipboard:
+        return cls._clipboard
+
+
 class _ConnectionType:
     QueuedConnection = object()
 
@@ -897,6 +963,8 @@ def install_fake_pyside(
     module.QtWidgets.QLabel = _QLabel
     module.QtWidgets.QComboBox = _QComboBox
     module.QtWidgets.QPushButton = _QPushButton
+    _QApplication._clipboard = _Clipboard()
+    module.QtWidgets.QApplication = _QApplication
     return module
 
 

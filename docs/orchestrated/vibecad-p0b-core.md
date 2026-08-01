@@ -1,7 +1,11 @@
 # VibeCAD P0-B Core Orchestrated Delivery
 
+> **Frozen historical record.** P0-B is complete; this file is no longer an
+> active plan and must not receive new execution logs. Continue from
+> [`CURRENT.md`](CURRENT.md).
+
 - Active revision: `P0B-R1.1`
-- Revision state: `approved / executing`
+- Revision state: `completed / frozen`
 - Approved pre-authorization SHA-256:
   `0efcff51f24f983139529212c185adf250fb4b3add37c7dd1f836477e24edc5a`
 - Repository: `/Users/wangtao/Documents/DevProject/vibecad`

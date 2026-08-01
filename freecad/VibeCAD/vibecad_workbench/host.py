@@ -15,6 +15,11 @@ from .gateway import (
     _PrivateWireEvent,
 )
 from .preview import PreviewCoordinator, PreviewError
+from .selection import (
+    ManagedSelectionObserver,
+    SelectionCaptureError,
+    capture_managed_selector,
+)
 from .state import ProjectionError
 
 __all__ = (
@@ -129,7 +134,7 @@ class _GatewayWorker(QtCore.QObject):
 class _WorkbenchSession(QtCore.QObject):
     _dispatch = QtCore.Signal(object)
 
-    def __init__(self, main_window: object) -> None:
+    def __init__(self, main_window: object, freecad_gui: object) -> None:
         super().__init__()
         self.main_window = main_window
         self.main_thread_id = threading.get_ident()
@@ -162,6 +167,7 @@ class _WorkbenchSession(QtCore.QObject):
         self._cleanup_cycle_id: int | None = None
         self._fresh_preview_descriptors: dict[str, object] = {}
         self.preview: PreviewCoordinator | None = None
+        self.selection: ManagedSelectionObserver | None = None
         self.dock: ReviewDock | None = None
         self.thread: object | None = None
         self.worker: _GatewayWorker | None = None
@@ -194,6 +200,13 @@ class _WorkbenchSession(QtCore.QObject):
                 submit_review=self._request_review,
                 discard_preview=self._discard_preview_binding,
             )
+            self.selection = ManagedSelectionObserver(
+                freecad_gui.Selection,
+                capture=self._capture_selection,
+                clear=self._clear_selection,
+                reject=self._reject_selection,
+            )
+            self.selection.attach()
             self._thread_start_attempted = True
             self.thread.start()
             self._thread_started = True
@@ -215,7 +228,74 @@ class _WorkbenchSession(QtCore.QObject):
     def _dock_count(self) -> int:
         return 1 if self._dock_added or self._dock_parented else 0
 
+    def _clear_selection(self) -> None:
+        dock = self.dock
+        if dock is not None:
+            dock._clear_selector()
+
+    def _reject_selection(self) -> None:
+        dock = self.dock
+        if dock is not None:
+            dock._reject_selector()
+
+    def _capture_selection(
+        self,
+        selected_object: object,
+        document: object,
+        subelements: tuple[str, ...],
+    ) -> None:
+        dock = self.dock
+        coordinator = self.preview
+        if dock is None or coordinator is None or self.lifecycle != "active":
+            self._reject_selection()
+            return
+        try:
+            if selected_object.Document is not document:
+                raise TypeError("invalid selected document")
+            matches: list[tuple[str, object]] = []
+            for source_kind, checkout_id in tuple(dock._preview_checkouts.items()):
+                binding = coordinator._observe_local_binding(checkout_id)
+                if binding.document is document:
+                    matches.append((source_kind, binding))
+            if len(matches) != 1:
+                raise PreviewError("selection is not in one managed preview")
+            source_kind, binding = matches[0]
+            descriptor = dict(binding.descriptor)
+            source = dict(descriptor["source"])
+            project_id = source.get("project_id")
+            revision_id = source.get("revision_id")
+            if (
+                source.get("kind") != source_kind
+                or type(project_id) is not str
+                or type(revision_id) is not str
+                or project_id != dock.current_project_id()
+                or dock._preview_checkouts.get(source_kind) != descriptor.get("checkout_id")
+            ):
+                raise PreviewError("selection binding is stale")
+            captured = capture_managed_selector(
+                selected_object=selected_object,
+                document_objects=document.Objects,
+                project_id=project_id,
+                revision_id=revision_id,
+                subelements=subelements,
+            )
+        except SelectionCaptureError as error:
+            dock._reject_selector(unsupported=error.code == "unsupported_subelement")
+            return
+        except (KeyError, PreviewError, RuntimeError, TypeError, ValueError):
+            dock._reject_selector()
+            return
+        dock._set_selector_capture(captured.text)
+
+    def _detach_selection(self) -> None:
+        selection = self.selection
+        if selection is None:
+            return
+        if _best_effort(selection.detach) and not selection.attached:
+            self.selection = None
+
     def _detach_dock(self, *, schedule_delete: bool = True) -> None:
+        self._detach_selection()
         dock = self.dock
         if dock is None or self._dock_delete_attempted:
             return
@@ -1763,7 +1843,7 @@ def activate_workbench() -> None:
         _remember(session, dock_count=0)
         _session = None
     freecad_gui = __import__("FreeCADGui")
-    session = _WorkbenchSession(freecad_gui.getMainWindow())
+    session = _WorkbenchSession(freecad_gui.getMainWindow(), freecad_gui)
     _session = session if session.lifecycle != "inactive" else None
     _remember(session, dock_count=session._dock_count)
 
