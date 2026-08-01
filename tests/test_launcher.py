@@ -117,6 +117,32 @@ def test_malformed_freecad_request_fails_without_fallback(
     assert sup_stub["calls"] == []
 
 
+def test_external_freecad_flag_dispatches_exactly_once_without_server(
+    monkeypatch,
+    sup_stub,
+):
+    calls = []
+    from vibecad import freecad_external
+
+    monkeypatch.setattr(
+        freecad_external,
+        "handle_cli",
+        lambda arguments: calls.append(arguments) or 9,
+    )
+    monkeypatch.setattr(
+        launcher.sys,
+        "argv",
+        ["vibecad", "--freecad-app", "/Applications/FreeCAD.app", "--doctor"],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        launcher.main()
+
+    assert exc.value.code == 9
+    assert calls == [["--freecad-app", "/Applications/FreeCAD.app", "--doctor"]]
+    assert sup_stub["calls"] == []
+
+
 # --- --uninstall CLI 分支（Task 4 Step 4） ---
 
 

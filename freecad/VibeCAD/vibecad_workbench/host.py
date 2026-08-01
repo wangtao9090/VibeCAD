@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from PySide import QtCore
 
+from .bridge import external_client_factory
 from .dock import ReviewDock
 from .gateway import (
     KernelGateway,
@@ -110,7 +111,12 @@ class _GatewayWorker(QtCore.QObject):
 
     def __init__(self, capability: object) -> None:
         super().__init__()
-        self.gateway = KernelGateway()
+        client_factory = external_client_factory()
+        self.gateway = (
+            KernelGateway()
+            if client_factory is None
+            else KernelGateway(client_factory=client_factory)
+        )
         self.gateway._bind_wire_capability(capability)
         self.thread_id: int | None = None
 

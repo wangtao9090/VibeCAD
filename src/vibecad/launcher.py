@@ -33,6 +33,10 @@ def _cli_uninstall() -> None:
 
 def main() -> None:
     arguments = sys.argv[1:]
+    if "--freecad-app" in arguments:
+        from vibecad import freecad_external
+
+        raise SystemExit(freecad_external.handle_cli(arguments))
     if "--freecad" in arguments:
         if arguments != ["--freecad"]:
             print("usage: vibecad --freecad", file=sys.stderr)

@@ -26,10 +26,12 @@ _ADDON_FILES = frozenset(
         "InitGui.py",
         "package.xml",
         "vibecad_workbench/__init__.py",
+        "vibecad_workbench/bridge.py",
         "vibecad_workbench/dock.py",
         "vibecad_workbench/gateway.py",
         "vibecad_workbench/host.py",
         "vibecad_workbench/preview.py",
+        "vibecad_workbench/selection.py",
         "vibecad_workbench/state.py",
     }
 )

@@ -15,6 +15,7 @@ _EXPECTED_FILES = {
     "InitGui.py",
     "package.xml",
     "vibecad_workbench/__init__.py",
+    "vibecad_workbench/bridge.py",
     "vibecad_workbench/dock.py",
     "vibecad_workbench/gateway.py",
     "vibecad_workbench/host.py",
@@ -129,3 +130,22 @@ def test_init_and_workbench_package_imports_are_side_effect_free() -> None:
         namespace = {"__name__": "_vibecad_docstring_test", "__file__": str(path)}
         exec(compile(module, str(path), "exec"), namespace)
         assert set(namespace) == {"__builtins__", "__doc__", "__file__", "__name__"}
+
+
+def test_external_addon_transport_and_selection_import_without_vibecad_package() -> None:
+    source = (
+        "import sys; "
+        f"sys.path.insert(0, {str(_ADDON_ROOT)!r}); "
+        "import vibecad_workbench.bridge; "
+        "import vibecad_workbench.selection; "
+        "assert 'vibecad' not in sys.modules"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", source],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr

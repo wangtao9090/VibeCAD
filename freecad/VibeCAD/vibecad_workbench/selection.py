@@ -5,13 +5,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from vibecad.execution.selectors import (
-    EntityKind,
-    SelectorV1,
-    parse_entity_identity,
-    resolve_selector,
-)
-
 __all__ = (
     "CapturedSelector",
     "ManagedSelectionObserver",
@@ -21,6 +14,7 @@ __all__ = (
 
 _ERROR_MESSAGES = {
     "invalid_selection": "invalid selection",
+    "selector_backend_unavailable": "selector backend unavailable",
     "unsupported_subelement": "unsupported subelement",
     "selected_object_mismatch": "selected object mismatch",
 }
@@ -40,7 +34,7 @@ class SelectionCaptureError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class CapturedSelector:
-    selector: SelectorV1
+    selector: object
     text: str
 
 
@@ -58,6 +52,14 @@ def capture_managed_selector(
         raise SelectionCaptureError("invalid_selection")
     if subelements:
         raise SelectionCaptureError("unsupported_subelement")
+    try:
+        from vibecad.execution.selectors import (
+            EntityKind,
+            parse_entity_identity,
+            resolve_selector,
+        )
+    except ImportError:
+        raise SelectionCaptureError("selector_backend_unavailable") from None
     identity = parse_entity_identity(selected_object)
     kind = EntityKind.FEATURE if identity.feature_id is not None else EntityKind.OBJECT
     selector = identity.to_selector(
