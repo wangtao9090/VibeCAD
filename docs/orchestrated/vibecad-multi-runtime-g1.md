@@ -24295,3 +24295,106 @@ pass (`2 passed in 0.12s`); no product source or broader gate changed.
    standing documentation/commit/push authority.
 4. **Execution discipline:** README plus rolling artifact only; two targeted
    contract tests; no subagent, GUI, installer, runner or full-suite work.
+
+## 176. Dual-mode FreeCAD product decision and new-session recovery
+
+At anchor `ebc29d9dbbb9a475d6903f9c6f9eb1a9062cf0ab`, local HEAD and
+`origin/codex/agent-stage3` are equal. The installed managed-FreeCAD Alpha is
+GREEN at product commit `83879b67ee3fd10a728abbf22360d2002aca06ee`;
+repository-first installation and the product-first, Agent-friendly bilingual
+README are pushed in `656b27f` and `ebc29d9`.
+
+The user made the following product decision for the next session:
+
+1. Managed-only GUI hosting is an Alpha validation boundary, not the intended
+   final product experience.
+2. The primary end-user experience should allow the thin VibeCAD Workbench
+   plugin to run inside a compatible FreeCAD already installed by the user.
+3. The VibeCAD-managed FreeCAD runtime remains authoritative for isolated CAD
+   execution, deterministic verification, automation and compatibility
+   fallback. Running the UI plugin in user FreeCAD does not transfer Task
+   Kernel, commit, store or delivery authority into that GUI process.
+4. Existing `vibecad --freecad` remains the known-good managed mode and must
+   not be removed while user-FreeCAD integration is introduced.
+5. User FreeCAD is adopted only through explicit discovery and compatibility
+   admission. There is no opportunistic `PATH` fallback. Incompatible version,
+   Python/PySide host or unsafe addon location fails with an actionable result
+   and offers managed mode.
+6. Plugin installation is per-user, reversible and must not rewrite the user's
+   FreeCAD application, preferences, macros or unrelated addons. The plugin
+   remains a least-authority daemon client using existing authenticated
+   protocol/file-grant boundaries; arbitrary model-generated FreeCAD Python is
+   still forbidden.
+
+This changes product shape and therefore the next session must not begin by
+coding. It first audits the current plugin/runtime boundary and presents one
+product implementation packet for approval. The packet should decide supported
+FreeCAD versions/platforms, discovery source, per-user addon path, install and
+uninstall UX, compatibility failure UX, managed-mode fallback, upgrade binding
+and the minimum real-host acceptance. C04 selector capture follows that host
+decision because selector behavior belongs in whichever GUI host is selected.
+Second-CAD implementation remains deferred.
+
+Ordered next packets:
+
+1. `G1-UF00` — read-only topology audit of addon packaging, GUI imports,
+   launcher/runtime authority and existing FreeCAD discovery seams; no runner.
+2. `G1-UF01` — show one product-significant dual-mode implementation approval
+   packet. Stop for user approval because this is a product-shape change.
+3. `G1-UF02` — after approval, implement bounded compatibility discovery and
+   reversible per-user plugin install/uninstall while retaining managed mode.
+4. `G1-UF03` — prove the installed plugin connects to the existing authenticated
+   daemon and exercises current project/task/preview/review behavior without
+   gaining execution or commit authority.
+5. `G1-C04` — add whole-object/feature selector capture against the settled
+   dual-host contract; face/edge subelements remain out of scope unless newly
+   approved.
+
+Verification remains product-first: focused unit/contract tests during coding,
+one real compatible user-FreeCAD gate, one managed-mode regression gate and one
+settled final suite. Use existing product logs for diagnosis. Do not create a
+new acceptance runner, controller framework, scenario registry, evidence
+language or frequent deep audit loop.
+
+Capability profile for recovery:
+
+```text
+approval: native-plan
+delegation: spawn-send-wait
+persistence: repo-artifact
+process: native-session-poll
+```
+
+- `live capability declarations`: native commentary/final conversation,
+  bounded command/session polling and explicit subagent coordination tools are
+  declared in the current Codex desktop host.
+- `observable behavior`: product and documentation commits through `ebc29d9`
+  were committed/pushed; local and upstream identities match; no active product
+  or subagent process is required for this handoff.
+- `environment identity`: Codex desktop repository
+  `/Users/wangtao/Documents/DevProject/vibecad`, branch
+  `codex/agent-stage3`, macOS controller environment.
+- `public configuration`: repository workspace writes are available; Git/network
+  writes remain permission-controlled; excluded user paths remain outside the
+  campaign.
+
+### MRG1-S176
+
+1. **Completed milestones:** MR0/C00B/C01/C02/C03 and managed installed-form
+   Alpha; exact commits `83879b6`, `656b27f`, `ebc29d9` pushed; bilingual
+   product-first README complete.
+2. **Next steps:** `G1-UF00` read-only audit, then `G1-UF01` product approval;
+   after approval implement user-FreeCAD plugin adoption before C04.
+3. **Approved decisions:** user-FreeCAD plugin hosting is the intended primary
+   UX; managed FreeCAD remains execution/verification authority and fallback;
+   managed-only hosting is temporary Alpha policy. Detailed install/compatibility
+   shape is not yet approved and must be presented once in `G1-UF01`.
+4. **Execution discipline:** architecture/adversarial review `sol/max`, routine
+   coding `sol/high`, mechanical gates `terra/medium`; parallelize only
+   independent worktrees; no validation-tool growth; no repeat approvals for
+   non-product mechanics; `.workbuddy` and both user-owned CAD course documents
+   remain untouched and untracked.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-DUALHOST-D01 | user decision: compatible user FreeCAD hosts primary UI plugin; managed runtime remains authority/fallback | pending recovery commit | architectural rationale recorded; no implementation | detailed compatibility/install UX requires one product approval | MRG1-S176 | decision persisted / UF00 next |
