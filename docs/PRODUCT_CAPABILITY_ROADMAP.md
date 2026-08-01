@@ -1,15 +1,17 @@
 # VibeCAD 产品能力与企业化路线
 
-> 状态：AR-1 reviewed；P0-B core backend 已完成，0.6.0 仍是未发布的本地 host-ready 候选；
-> G1 Workbench 尚未交付
+> 状态：AR-1 reviewed；P0-B core backend、MR0 internal foundation 与 G1 Workbench Alpha 已完成；
+> 0.6.0 仍是未发布的本地 host-ready 候选
 >
-> 日期：2026-07-23
+> 日期：2026-08-01
 >
 > 当前基线：VibeCAD 0.6.0 / runtime epoch 4、`28-tool 公共 MCP、durable review`、首批六操作、
 > host-neutral skill 与 FCStd/STEP ResourceLink。P0-B 已交付 keyed replay/discovery、compare/revert、
 > read-only manifest、`durable active cancellation`、单 Application/shared Task Kernel、same-user
-> authenticated runnable daemon、session-bound file grants 和 managed killable Worker。真实
-> Claude/Codex 主机尚未安装激活验收，当前没有 tag 或 release；`G1 Workbench 尚未交付`。
+> authenticated runnable daemon、session-bound file grants 和 managed killable Worker。G1 已交付
+> managed Workbench 的 HEAD/draft preview、verdict、精确 object/feature selector 与 Accept/Reject，
+> 并完成一个指纹绑定的 macOS FreeCAD 1.1.3 外部 addon 试点。真实 Claude/Codex 主机尚未安装激活
+> 验收，当前没有 tag 或 release。
 >
 > 产品定位、多 Backend 组合、AutoCAD/国产 DWG CAD 与统一评测决策见
 > [`PRODUCT_STRATEGY.md`](PRODUCT_STRATEGY.md)。本文继续作为当前 FreeCAD 交付主线，不因远期
@@ -72,9 +74,9 @@ Artifact 并返回 immutable artifact/proposal；任何设计变更必须由新�
 
 P0-B core backend 已关闭 verified forward revert、active CAD cancellation/Worker kill 与 reconcile、
 same-user authenticated daemon、session-bound file grant、source liveness/revocation 和最小
-crash/hang isolation。0.6.0 package/managed-runtime 本地候选也已完成收口但尚未 tag 或发布。当前近期
-缺口是 P0-B hardening 的 retention/GC、runner migration 与完整运行观测，以及 G1 的 FreeCAD Qt
-Workbench UI。
+crash/hang isolation。0.6.0 package/managed-runtime 本地候选与 G1 Workbench Alpha 也已完成收口但
+尚未 tag 或发布。当前近期缺口是 P0-B hardening 的 retention/GC、runner migration 与完整运行观测，
+以及 P1/G2 的首个窄纵向能力切片。外部 FreeCAD 目前只是单一指纹试点，不是兼容矩阵。
 
 ### 2.3 AR-1 的阶段裁决
 
@@ -90,12 +92,12 @@ Workbench draft 预览所需的权威语义。当前不应立刻扩大几何白�
    Worker crash/hang isolation；
 3. **[已完成] C14 本地候选** 统一 0.6.0、28-tool、Skill、wheel/sdist/MCPB、fresh install 与 managed
    receipt；候选尚未 tag 或发布；
-4. **MR0 internal multi-runtime foundation** 先建立 generic lifecycle、CAD capability/router、
-   runtime-qualified artifact/selector contract、FreeCAD adapter 和 fake conformance；C00 仅完成
-   文档口径，C01..C04 与 gate 尚未完成，FreeCAD 仍是唯一连接 adapter；
-5. G1 交付 Workbench 的 HEAD/draft 预览、verdict、stale/revoked 拒绝、Accept/Reject 与 object/feature
-   选择；
-6. P0-B hardening 与真实 host verification 可与 G1 UI 并行，但 retention/GC、runner upgrade 和恢复
+4. **[已完成] MR0 internal multi-runtime foundation** 建立 generic lifecycle、CAD
+   capability/router、runtime-qualified artifact/selector contract、FreeCAD adapter 和 fake
+   conformance；FreeCAD 仍是唯一连接 adapter；
+5. **[已完成] G1 Workbench Alpha** 交付 HEAD/draft 预览、verdict、stale/revoked 拒绝、
+   Accept/Reject、object/feature 选择，以及一个有界 user-FreeCAD 外部桥接试点；
+6. P0-B hardening 与真实 host verification 继续推进；retention/GC、runner upgrade 和恢复
    缺口必须在 P1 交付前关闭；
 7. P1/G2 再扩 Selector Level B、Sketcher、PartDesign、受控导入和 STL 主流程。
 
@@ -110,7 +112,7 @@ flowchart TB
     U --> G["VibeCAD FreeCAD Workbench"]
     H --> M["MCP + host-neutral skill"]
     M --> A["same-user authenticated local Kernel daemon<br/>single AgentApplication"]
-    G -.->|"G1 Qt UI via public client + session grant"| A
+    G -->|"Workbench Alpha via public client + session grant"| A
     A --> K["Task Kernel"]
     K --> S["Project / Task / Revision / Draft / Artifact / Audit"]
     K --> D["CAD Domain Service<br/>MR0 target"]
@@ -128,8 +130,8 @@ flowchart TB
     Q -.-> K
 ```
 
-图中 MR0 与 G1 节点只表示目标边界，不代表 C00 时点的 product delivery；唯一已连接 CAD runtime
-是 FreeCAD。
+图中 MR0 内部基础与 G1 Workbench Alpha 已交付；future GUI execution profile 和 Provider 节点仍只
+表示目标边界。唯一已连接 CAD runtime 是 FreeCAD。
 Workbench 是 public client，未来 Provider 是只读派生路径，两者都不是 CAD 写入端。
 
 架构约束：
@@ -366,9 +368,10 @@ P0 分成两个可连续实施的切片：
   liveness/revocation 和最小 crash isolation；
 - P0-B hardening：retention/GC、runner generation upgrade、可观测性和恢复矩阵收口。
 
-P0-B core backend 已完成并进入 0.6.0 本地 host-ready 候选；真实 Claude/Codex 主机激活验证仍受
-S3-RES-06 约束，且当前没有 tag 或 release。G1 FreeCAD Qt Workbench UI 尚未交付；它可以与
-P0-B hardening 并行，但 P1 作为可交付产品完成前必须关闭 hardening residual。
+P0-B core backend 与 G1 FreeCAD Qt Workbench Alpha 已完成并进入 0.6.0 本地 host-ready 候选；
+真实 Claude/Codex 主机激活验证仍受 S3-RES-06 约束，且当前没有 tag 或 release。Workbench 默认
+使用受管 FreeCAD；显式 user-FreeCAD 只覆盖一个指纹绑定的 1.1.3 本机试点。P1 作为可交付产品完成
+前仍必须关闭 P0-B hardening residual。
 
 ### P1 — 交互式单零件设计与 STL 主流程
 

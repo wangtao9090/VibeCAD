@@ -29,7 +29,7 @@ The easiest installation path is to give your coding Agent this request:
 
 > Install and launch the VibeCAD FreeCAD Workbench Alpha from
 > https://github.com/wangtao9090/VibeCAD. Use commit
-> `83879b67ee3fd10a728abbf22360d2002aca06ee`, clone it into a persistent
+> `91c94f4a2761d19b878f92dc892130a920e7ba85`, clone it into a persistent
 > directory, build its wheel, install it with `uv tool install --force`, keep
 > the checkout and built wheel, and run `vibecad --freecad`. Do not install or
 > fall back to a system copy of FreeCAD.
@@ -38,7 +38,7 @@ The Agent's reproducible procedure is:
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout 83879b67ee3fd10a728abbf22360d2002aca06ee
+git -C VibeCAD checkout 91c94f4a2761d19b878f92dc892130a920e7ba85
 cd VibeCAD
 uv build --wheel
 uv tool install --force dist/vibecad-0.6.0-py3-none-any.whl
@@ -57,8 +57,25 @@ Installation notes:
   alternate installation path.
 
 The Dock can list projects and tasks, refresh selected state, open separate managed HEAD and
-draft preview documents, show the review verdict, and Accept or Reject a fresh draft. Whole-object
-and feature selector capture is the next G1 slice; face/edge subelement selection is not claimed.
+draft preview documents, show the review verdict, capture exact whole-object or feature
+`SelectorV1` values, and Accept or Reject a fresh draft. Face/edge subelement selection is not
+claimed.
+
+The managed launcher above remains the default and fallback. One additional, deliberately narrow
+macOS pilot can install the same thin Workbench into an explicitly selected user FreeCAD:
+
+```bash
+vibecad --freecad-app /Applications/FreeCAD.app --doctor
+vibecad --freecad-app /Applications/FreeCAD.app --install-addon
+# reversible cleanup
+vibecad --freecad-app /Applications/FreeCAD.app --uninstall-addon
+```
+
+This is not general system-FreeCAD support. The current local evidence admits only the exact
+fingerprinted macOS FreeCAD 1.1.3 host with embedded CPython 3.11 and PySide6 6.8.3. The doctor
+fails closed for every other host. The installed addon holds no daemon secret and delegates
+selector construction and unique resolution to the managed Python bridge and the same Task
+Kernel used by managed mode.
 
 ## Current Agent-first Workflow
 
@@ -229,24 +246,27 @@ maintenance and stateless discovery remain local responsibilities of the MCP ser
 form a second domain-write path. The daemon provides same-user authentication and constrained,
 one-time file grants; it does not create a second commit system.
 
-S3-8 and the 0.6.0 package/managed-runtime local candidate closeout are complete. The candidate
-has not been tagged or published. The remaining order is G1 → P0-B hardening → P1/G2 → P2:
+S3-8, the 0.6.0 package/managed-runtime local candidate closeout, and the bounded G1 Workbench
+Alpha are complete. The candidate has not been tagged or published. The remaining order is
+P0-B hardening → P1/G2 → P2:
 
 - **P0-B core (backend complete)**: task/project/version discovery, file-level comparison,
   verified forward revert, cancellation/reconcile, authenticated daemon, file grants, source
   liveness, and the managed killable FreeCAD Worker all enter the same Task Kernel;
-- **G1 (Alpha available, selectors next)**: preview, verdict, and Accept/Reject are available in
-  the real FreeCAD Qt Workbench UI; object/feature selector capture remains the next slice;
+- **G1 (Alpha complete)**: preview, verdict, exact object/feature selector capture, and
+  Accept/Reject are available in the real FreeCAD Qt Workbench UI; one fingerprinted external
+  FreeCAD 1.1.3 pilot is evidenced, while managed mode remains the default;
 - **P1/G2**: Sketcher/PartDesign, controlled import, single-part production capability, and
   manual checkpoints;
 - **P2**: assemblies, BOM, TechDraw, manufacturing release, and enterprise delivery chains.
 
-The first G1 Workbench Alpha now packages the real FreeCAD Qt UI and its deterministic managed
-launcher. It includes one Workbench and Dock, daemon-backed refresh, separate HEAD/draft preview,
-verdict, Accept/Reject, and asynchronous client/thread shutdown. The daemon is a reusable managed
-background service; update and uninstall retire it through the authenticated maintenance path.
-G1 is not complete until object/feature selector capture lands. Face/edge selection, STEP/STL
-import, photo reconstruction, and simulation are also not currently supported.
+The G1 Workbench Alpha packages the real FreeCAD Qt UI and its deterministic managed launcher. It
+includes one Workbench and Dock, daemon-backed refresh, separate HEAD/draft preview, verdict,
+exact object/feature selector capture, Accept/Reject, and asynchronous client/thread shutdown.
+The daemon is a reusable managed background service; update and uninstall retire it through the
+authenticated maintenance path. The thin external pilot reuses those state machines through one
+bounded managed-Python bridge and does not add a second write authority. Face/edge selection,
+STEP/STL import, photo reconstruction, and simulation are not currently supported.
 
 Further reading in the source repository:
 [User Guide](https://github.com/wangtao9090/VibeCAD/blob/main/docs/USER_GUIDE.md),

@@ -3,7 +3,7 @@
 > 实现基线：P0-B core backend / VibeCAD 0.6.0 / runtime epoch 4 / MR0-C01..C04
 > internal foundation accepted
 >
-> 架构复审：AR-1 + P0-B C14 refresh + MR0-C05 refresh / 2026-07-25
+> 架构复审：AR-1 + P0-B C14 refresh + MR0-C05 refresh + G1 closeout / 2026-08-01
 >
 > S3-8 的宿主 skill、发现合同和 ResourceLink，以及 P0-B 的可恢复生命周期、单 Kernel daemon、
 > file grant 和可杀 Worker backend 已在本地交付。0.6.0 仍是未发布候选：尚未在真实
@@ -14,6 +14,11 @@
 > registry/router、FreeCAD default composition 和 provider-free conformance。当前唯一接通和默认选择的
 > CAD adapter 仍是 FreeCAD，公共 28-tool、六 operation 与 `SelectorV1` 合同不变；durable
 > Revision/Candidate 仍固定使用 FCStd/STEP 布局，迁移只属于 MR1。
+>
+> G1 FreeCAD Workbench Alpha 已交付项目/任务发现、HEAD/draft preview、verdict、精确
+> object/feature selector capture 与 Accept/Reject。默认与回退仍是 `vibecad --freecad` 的受管
+> FreeCAD；另有一个仅覆盖指纹绑定 macOS FreeCAD 1.1.3 / CPython 3.11 / PySide6 6.8.3 的薄外部
+> addon 试点，不构成通用系统 FreeCAD 支持。
 >
 > MR1-P00 只冻结
 > [`Revision durable-v2 迁移合同`](orchestrated/vibecad-durable-v2.md)：v1 immutable、
@@ -43,8 +48,9 @@ VibeCAD 是一个由 Claude、Codex 等外部宿主调用的本地 FreeCAD 专�
 - 模型不能提交 Python、FreeCAD 脚本、handler 名、shell 命令或任意输出路径。
 - 所有 CAD 修改都发生在 committed revision 的隔离副本中，并由确定性 verifier 决定能否发布。
 - 当前真实 CAD 执行 profile 是 macOS 上的 managed `headless` Worker；same-user authenticated
-  daemon、session-bound file grant 和 Worker crash/hang recovery 已实现，G1 FreeCAD Qt Workbench
-  UI 与 interactive GUI profile 尚未交付。
+  daemon、session-bound file grant、Worker crash/hang recovery 和 G1 FreeCAD Qt Workbench Alpha
+  已实现。Workbench 仍不是 interactive GUI CAD execution profile，所有 CAD mutation 继续由受管
+  Worker 执行。
 - 当前项目可从空模型或只含 `Part::Box` / `Part::Cylinder` 的受支持 FCStd 信封开始；公开交付格式为
   FCStd 和 STEP，通用 FCStd 导入仍属 P1。
 
@@ -61,7 +67,7 @@ flowchart LR
     L --> T["owned MCP transport"]
     T --> M["MCP thin client"]
     M <-->|"authenticated local protocol v2"| A["Local Kernel daemon<br/>single AgentApplication"]
-    G["G1 FreeCAD Qt Workbench UI<br/>尚未交付"] -.->|"same public client + session grant"| A
+    G["G1 FreeCAD Qt Workbench Alpha<br/>thin client"] -->|"same public client + session grant"| A
     A --> K["Task Kernel"]
     K --> D[("Project / Task / Revision / Draft / Artifact")]
     K --> C["Worker-backed CadExecutionPort"]
@@ -217,7 +223,7 @@ direct operation 与稳定工具重名会 fail closed。
 ## 6. Application 与 Task Kernel 分层
 
 ```text
-MCP server / future Workbench UI
+MCP server / Workbench Alpha
 └── LocalAgentClient                 thin public adapter
     └── authenticated protocol v2
         └── Local Kernel daemon
@@ -261,7 +267,7 @@ schema、稳定第三方 SDK 或第二 CAD 支持声明。MR0 把两个层次分
 
 ```mermaid
 flowchart LR
-    C["MCP / future Workbench client"] --> K["one Task Kernel"]
+    C["MCP / Workbench client"] --> K["one Task Kernel"]
     K --> T[("Task / Lease / Revision / Draft / Accept / Reject / HEAD")]
     K --> D["CAD Domain Service"]
     D --> P["capability planner"]
@@ -489,10 +495,12 @@ run root、same-user peer identity、secret proof、session/error framing 和单
 inode 与有效期的一次性 file grant；跨 session、重放、过期、symlink/hardlink 或 source
 stale/revoked 都 fail closed。
 
-当前 fake Workbench client 已通过公共 client package 与 MCP 共享同一个 daemon、TaskRun、draft、
-verdict 和 HEAD；这证明 G1 可以作为薄客户端实现。G1 FreeCAD Qt Workbench UI 尚未交付。首版 UI
-仍只承诺 HEAD/draft 预览、verdict、Accept/Reject 和 object/feature 选择；face/edge 与 dirty manual
-publish 不在首版口径。
+真实 G1 Workbench Alpha 与 MCP 通过公共 client 共享同一个 daemon、TaskRun、draft、verdict 和
+HEAD。Workbench 打开 session-bound checkout/file grant，只承诺 HEAD/draft 预览、verdict、
+Accept/Reject 和 object/feature 选择；face/edge 与 dirty manual publish 不在首版口径。受管模式把
+Workbench 打入受管 FreeCAD；用户 FreeCAD 试点则让 Python 3.11 薄 addon 通过一个有界、封闭方法集
+的 Python 3.12 managed bridge 访问同一 client。桥接配置只绑定可执行文件身份与包版本，不持久化
+daemon receipt、secret、store 或 lease capability。
 
 ## 11. 安全与失败语义
 
@@ -556,7 +564,7 @@ release。
 当前可可靠完成简单 object-level 单零件建模和尺寸/位置修改，但还没有：
 
 - 真实 Claude/Codex 主机中的 skill 激活、canonical workflow 与文件体验验收；
-- G1 FreeCAD Qt Workbench UI；
+- 通用 user-installed FreeCAD 兼容性；当前仅有一个指纹绑定的 macOS FreeCAD 1.1.3 本机试点；
 - 第二 CAD adapter、第二 CAD 产品支持或面向产品的 runtime discovery；MR0 只交付了内部
   conformance-ready 基础和 FreeCAD-only default composition；
 - versioned durable artifact profile 实现与 activation；MR1-P00 只冻结迁移合同，Revision/Candidate
@@ -566,9 +574,9 @@ release。
 - STL/STEP 受控导入、mesh-to-faceted-BRep、装配、BOM、TechDraw；
 - Sampling/BYOK backend、照片/视频重建 Provider 或仿真 Provider。
 
-0.6.0 package/managed-runtime 本地候选已完成收口但尚未 tag 或发布。MR0-C01..C04 的内部
-foundation 已完成，本次 C05 只关闭 canonical 文档、证据与恢复记录。后续 G1 Workbench MVP、
-P0-B hardening、host verification 与 MR1 都是需要分别批准的 campaign；P0-B hardening 关闭前不能把
+0.6.0 package/managed-runtime 本地候选与 G1 Workbench Alpha 已完成收口但尚未 tag 或发布。
+MR0-C01..C04 的内部 foundation 已完成。后续 P0-B hardening、P1/G2、host verification 与 MR1
+都是独立 campaign；P0-B hardening 关闭前不能把
 P1/G2 称为可交付。机械详细设计、预检与仿真的
 [`方向调研`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)不构成 MR0、P1/P1.5/P2 功能承诺。
 真实宿主激活验收作为 S3-RES-06 residual 单独

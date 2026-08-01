@@ -486,24 +486,21 @@ def test_release_documents_project_the_0_6_backend_truth():
 
     english_readme = documents["README.md"]
     assert "freecad workbench alpha" in english_readme
-    assert "g1 is not complete" in english_readme
-    assert "object/feature selector capture" in english_readme
+    assert "g1 (alpha complete)" in english_readme
+    assert "exact object/feature selector capture" in english_readme
+    assert "not general system-freecad support" in english_readme
 
     chinese_readme = documents["README.zh-CN.md"]
     assert "freecad workbench alpha" in chinese_readme
-    assert "g1 仍不算全部结束" in chinese_readme
-    assert "object/feature selector 捕获" in chinese_readme
+    assert "g1（alpha 完成）" in chinese_readme
+    assert "精确 object/feature selector 捕获" in chinese_readme
+    assert "不是通用的系统 freecad 支持" in chinese_readme
 
-    for path in (
-        "docs/ARCHITECTURE.md",
-        "docs/AGENT_ARCHITECTURE.md",
-        "docs/PRODUCT_CAPABILITY_ROADMAP.md",
-        "docs/USER_GUIDE.md",
-    ):
-        normalized = documents[path]
-        assert any(claim in normalized for claim in ("尚未交付", "仍需交付")), path
-        assert "g1 workbench 已交付" not in normalized, path
-        assert "qt ui 已交付" not in normalized, path
+    assert "g1 freecad workbench alpha 已交付" in documents["docs/ARCHITECTURE.md"]
+    assert "g1 mvp 已在这个范围交付" in documents["docs/AGENT_ARCHITECTURE.md"]
+    assert "g1 workbench alpha 已完成" in documents["docs/PRODUCT_CAPABILITY_ROADMAP.md"]
+    assert "真实 freecad qt workbench alpha 已交付" in documents["docs/USER_GUIDE.md"]
+    assert "g1 freecad qt workbench alpha 支持" in documents["docs/ACCEPTANCE_TESTS.md"]
 
     assert any(
         claim in english_readme

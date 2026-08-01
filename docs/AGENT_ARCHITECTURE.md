@@ -35,7 +35,7 @@ OCCT 的事实独立验收，并原子提交或安全保留审核草案。
 | Managed Worker | 可杀 generation、RPC watchdog、crash/hang recovery 与 active cancel reconcile 已实现 | 能 |
 | 多 runtime 基础 | C00 只有已批准架构口径；实现与 conformance 尚未完成 | 不能作为第二 CAD 支持；当前仅 FreeCAD |
 | Host-neutral skill | canonical skill 与分发合同已交付并通过包级验收 | host-ready；真实宿主尚未激活验证 |
-| FreeCAD Workbench | 后端 public client/checkout/file grant 已实现；Qt UI 尚未交付 | 不能；G1 实现 UI |
+| FreeCAD Workbench | G1 Qt UI、public client/checkout/file grant、object/feature selector 与 review 已实现 | Alpha；外部 FreeCAD 仅单一指纹试点 |
 | Sampling/BYOK | 只有 reasoning-owner 枚举，未有 backend | 不能 |
 | 自动 repair/replan | 当前零次语义重试 | 不能 |
 | 照片/STL/仿真 Provider | 只有架构预留 | 不能 |
@@ -77,7 +77,7 @@ FreeCAD 可以类比 CAD 编译器与执行环境，但“代码可执行”不�
 | 人工审核 | durable draft；Accept 才发布，Reject 不改 HEAD |
 | Local Kernel | MCP 与 Workbench client 共享同一个 daemon、Application、Task Kernel 和 durable truth |
 | 文件能力 | 只使用 session-bound descriptor/file grant，不向客户端开放任意本地路径 |
-| Workbench | 薄交互/预览/审核客户端，不拥有 runtime、scheduler、store 或提交权威；G1 Qt UI 尚未交付 |
+| Workbench | 已交付的薄交互/预览/审核 Alpha，不拥有 runtime、scheduler、store 或提交权威 |
 | runtime 边界 | 通用层只统一 identity/capability/invocation/lifecycle/artifact evidence；CAD 语义归 CAD Domain Service |
 | CAD runtime 支持 | capability negotiation 先于 mutation；FreeCAD 是唯一连接 adapter，fake conformance 不等于支持 |
 | Artifact/Selector | 内部产物按 runtime/profile 限定，语义 selector 始终权威；durable FCStd/STEP 到 MR1 才迁移 |
@@ -250,14 +250,14 @@ installer 的首要实测路径是 `$CODEX_HOME/skills/vibecad-agent`（默认
 
 ## 7. Workbench：一个内核、多个薄客户端
 
-当前 backend 与 G1 UI 目标拓扑：
+当前 backend 与 G1 Workbench Alpha 拓扑：
 
 ```mermaid
 flowchart TB
     H["MCP host"] --> M["MCP adapter"]
     U["用户"] --> G["FreeCAD Workbench"]
     M --> A["same-user authenticated local Kernel daemon<br/>single AgentApplication"]
-    G -.->|"G1 Qt UI uses public client + session grant"| A
+    G -->|"Workbench Alpha uses public client + session grant"| A
     A --> K["Task Kernel"]
     K --> D["CAD Domain Service<br/>MR0 target"]
     D --> P["capability planner + registry/router"]
@@ -272,13 +272,14 @@ flowchart TB
 
 P0-B backend 已交付 local Kernel daemon 生命周期、同用户认证、protocol v2、session-bound
 file grant、task/revision/artifact discovery、checkout source liveness/revocation，以及 managed
-killable Worker 的 crash/hang recovery。MCP 和 fake Workbench public client 已证明它们连接同一个
-Application/Task Kernel，并在重连、Accept 和 Reject 后观察同一 draft、verdict 与 HEAD。wire
-descriptor 始终不交付本地路径，插件不能绕过 grant 拼接内部文件。
+killable Worker 的 crash/hang recovery。MCP 和真实 Workbench Alpha 连接同一个 Application/Task
+Kernel，并在重连、Accept 和 Reject 后观察同一 draft、verdict 与 HEAD。wire descriptor 始终不
+交付本地路径，插件不能绕过 grant 拼接内部文件。
 
-G1 MVP 的诚实范围是：连接项目、显示 HEAD/draft、加载前后候选、显示 verdict、Accept/Reject、捕获
-object/feature 选择。face/edge、semantic diff、参数 TaskPanel、dirty manual checkpoint/publish 属于 P1/G2，
-除非用户之后明确要求扩大 G1 首发范围。G1 FreeCAD Qt Workbench UI 尚未交付。
+G1 MVP 已在这个范围交付：连接项目、显示 HEAD/draft、加载前后候选、显示 verdict、Accept/Reject、
+捕获精确 object/feature 选择。受管模式是默认与回退；另有一个经指纹绑定的 macOS FreeCAD 1.1.3
+外部 addon 试点，通过有界 managed-Python bridge 复用同一 client。face/edge、semantic diff、参数
+TaskPanel、dirty manual checkpoint/publish 属于 P1/G2，除非用户之后明确扩大范围。
 
 MR0 会在 Task Kernel 与当前 Worker 之间加入内部 CAD Domain Service、capability planner 和 runtime
 registry/router，再由 FreeCAD adapter 保持现有行为；C00 只记录这条目标边界，不能把它写成已经接入
@@ -376,7 +377,7 @@ AR-1 回答了五个问题：
 |---|---|
 | Claude/Codex 能否创建、修改、看证据、安全提交 | 内核/协议能；S3-8 已补 descriptions、skill、ResourceLink 和分发 E2E，当前为 host-ready；真实宿主验证仍需授权 |
 | Direct 是否薄适配 | 是；构造单命令 ModelProgram 并只调用 TaskApi，无 legacy public writer |
-| Durable review 是否支持插件 | 后端足以支撑 immutable draft 预览/Accept/Reject；secure daemon/file grant 已交付，Qt UI 尚缺 |
+| Durable review 是否支持插件 | 是；Workbench Alpha 已通过 secure daemon/file grant 完成 immutable draft 预览/Accept/Reject |
 | Selector/observation/verifier 是否达到 G1 前置 | 达到 object/feature G0；未达到 face/edge、semantic diff 和 PartDesign |
 | 下一步先扩 CAD 还是补可靠性 | AR-1 原判断是下一步 G1；已批准的 MRG1-D12 将 MR0 foundation 插在 G1 前，P1/P2 仍不提前 |
 
@@ -394,10 +395,10 @@ Workbench 非第二权威、Provider 不自研底层引擎。MRG1-D01..D16 已�
   + single authenticated daemon/session file grant + source liveness/revocation
   + managed killable Worker/crash isolation
 → [complete] 0.6.0 package/managed-runtime local candidate（尚未 tag/发布）
-→ MR0 multi-runtime foundation
-  C00 仅冻结合同；C01..C04 仍需实现 generic lifecycle、CAD capability/router、FreeCAD adapter
-  与 fake conformance。当前不增加公共 schema/operation 或第二 CAD；durable FCStd/STEP 保留到 MR1
-→ G1 MVP（FreeCAD Qt Workbench UI 尚未交付）
+→ [complete] MR0 multi-runtime foundation
+  C01..C04 已实现 generic lifecycle、CAD capability/router、FreeCAD adapter 与 fake conformance。
+  当前不增加公共 schema/operation 或第二 CAD；durable FCStd/STEP 保留到 MR1
+→ [complete] G1 MVP（FreeCAD Qt Workbench Alpha）
   Workbench preview + verdict + stale/revoked rejection + Accept/Reject + object/feature selection
 → P0-B hardening close
   retention/GC + runner upgrade + observability/recovery gaps

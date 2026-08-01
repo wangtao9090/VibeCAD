@@ -25,7 +25,7 @@ VibeCAD 不内置或转售大模型。推理使用用户自己的宿主模型及
 最简单的安装方式是把下面这句话交给编码 Agent：
 
 > 请从 https://github.com/wangtao9090/VibeCAD 安装并启动 VibeCAD FreeCAD
-> Workbench Alpha。使用 commit `83879b67ee3fd10a728abbf22360d2002aca06ee`，
+> Workbench Alpha。使用 commit `91c94f4a2761d19b878f92dc892130a920e7ba85`，
 > 克隆到持久目录，构建 wheel，通过 `uv tool install --force` 安装，保留 checkout
 > 和构建出的 wheel，最后运行 `vibecad --freecad`。不要安装或回退到系统版 FreeCAD。
 
@@ -33,7 +33,7 @@ Agent 应执行以下可复现步骤：
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout 83879b67ee3fd10a728abbf22360d2002aca06ee
+git -C VibeCAD checkout 91c94f4a2761d19b878f92dc892130a920e7ba85
 cd VibeCAD
 uv build --wheel
 uv tool install --force dist/vibecad-0.6.0-py3-none-any.whl
@@ -50,8 +50,22 @@ vibecad --freecad
   的精确错误并停止，不切换运行时，也不自行发明其他安装路径。
 
 当前 Dock 可以列出项目和任务、刷新所选状态、打开相互独立的受管 HEAD 与草案预览文档、展示审核
-结论，并对新鲜草案执行 Accept 或 Reject。完整对象和 feature selector 捕获是下一段 G1 工作；当前
-尚不宣称 face/edge 子元素选择能力。
+结论、捕获精确的完整对象或 feature `SelectorV1`，并对新鲜草案执行 Accept 或 Reject。当前尚不
+宣称 face/edge 子元素选择能力。
+
+上述受管启动器仍是默认与回退路径。另有一个刻意收窄的 macOS 试点，可把同一个薄 Workbench 安装
+到用户显式指定的 FreeCAD：
+
+```bash
+vibecad --freecad-app /Applications/FreeCAD.app --doctor
+vibecad --freecad-app /Applications/FreeCAD.app --install-addon
+# 可逆清理
+vibecad --freecad-app /Applications/FreeCAD.app --uninstall-addon
+```
+
+这不是通用的系统 FreeCAD 支持。当前本地证据只准入精确指纹绑定的 macOS FreeCAD 1.1.3、内嵌
+CPython 3.11 与 PySide6 6.8.3；doctor 对其他主机 fail closed。安装的 addon 不持有 daemon secret，
+selector 构造与唯一解析由受管 Python bridge 和受管模式共用的同一 Task Kernel 完成。
 
 ## 当前 Agent-first 工作流
 
@@ -195,21 +209,23 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 daemon 进入该 Application/Task Kernel。运行时维护和无状态 discovery 仍由 MCP server 本地处理，不是
 第二条领域写入路径。daemon 提供同用户认证及受限的一次性 file grant，不形成第二套提交系统。
 
-S3-8 与 0.6.0 package/managed-runtime 本地候选收口均已完成；该候选尚未 tag 或发布。后续顺序为
-G1 → P0-B hardening → P1/G2 → P2：
+S3-8、0.6.0 package/managed-runtime 本地候选收口与有界 G1 Workbench Alpha 均已完成；该候选
+尚未 tag 或发布。后续顺序为 P0-B hardening → P1/G2 → P2：
 
 - **P0-B core（后端完成）**：任务/项目/版本发现、文件级比较、verified forward revert、取消/reconcile、
   认证 daemon、file grant、source liveness 与受管可终止 FreeCAD Worker 都进入同一 Task Kernel；
-- **G1（Alpha 可用，selector 下一步）**：真实 FreeCAD Qt Workbench UI 已具备 preview、verdict 与
-  Accept/Reject；object/feature selector 捕获是下一段工作；
+- **G1（Alpha 完成）**：真实 FreeCAD Qt Workbench UI 已具备 preview、verdict、精确
+  object/feature selector 捕获与 Accept/Reject；一个指纹绑定的外部 FreeCAD 1.1.3 试点已有证据，
+  受管模式仍是默认路径；
 - **P1/G2**：Sketcher/PartDesign、受控导入、单零件生产能力和手工 checkpoint；
 - **P2**：装配、BOM、TechDraw、制造发布与企业交付链。
 
-首个 G1 Workbench Alpha 现已把真实 FreeCAD Qt UI 与确定性的受管启动器打入安装包。它具备恰好一个
-Workbench 与 Dock、daemon-backed refresh、相互独立的 HEAD/草案预览、verdict、Accept/Reject、
-异步 client/thread shutdown。daemon 是可复用的受管后台服务，更新与卸载会通过认证维护路径将其退休。
-object/feature selector 捕获完成前，G1 仍不算全部结束；当前也不支持 face/edge 选择、STEP/STL import、
-照片重建或 simulation。
+G1 Workbench Alpha 已把真实 FreeCAD Qt UI 与确定性的受管启动器打入安装包。它具备恰好一个
+Workbench 与 Dock、daemon-backed refresh、相互独立的 HEAD/草案预览、verdict、精确
+object/feature selector 捕获、Accept/Reject 与异步 client/thread shutdown。daemon 是可复用的受管
+后台服务，更新与卸载会通过认证维护路径将其退休。薄外部试点通过一个有界受管 Python bridge 复用
+这些状态机，不增加第二写入权威。当前仍不支持 face/edge 选择、STEP/STL import、照片重建或
+simulation。
 
 进一步阅读（源代码仓库）：
 [用户手册](https://github.com/wangtao9090/VibeCAD/blob/main/docs/USER_GUIDE.md)、

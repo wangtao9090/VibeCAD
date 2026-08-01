@@ -76,8 +76,11 @@ artifact/proposal；设计采纳必须新建 reviewed CAD Task。
   migration contract，不创建 v2 byte；
 - active cancellation 由受管、可终止 FreeCAD Worker 和持久化 `reconcile` 路径收口；空闲取消仍不得启动
   CAD/runtime 或取得 project write lease；
-- 当前不支持通用 FCStd、STEP/STL import、任意 Python/FreeCAD code、真实 FreeCAD Qt Workbench UI、face/edge selector、
-  photo/video reconstruction 或 simulation。
+- G1 FreeCAD Qt Workbench Alpha 支持 HEAD/draft preview、verdict、精确 object/feature selector 与
+  Accept/Reject；默认路径是受管 FreeCAD，user-FreeCAD 只覆盖一个指纹绑定的 macOS FreeCAD 1.1.3
+  本机试点；
+- 当前不支持通用 FCStd、STEP/STL import、任意 Python/FreeCAD code、通用 user-FreeCAD 兼容性、
+  face/edge selector、photo/video reconstruction 或 simulation。
 
 机械详细设计、预检与仿真的
 [`调研报告`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)不提供任何 acceptance PASS，也不把其中的
@@ -90,7 +93,7 @@ P1/P1.5/P2 建议变为当前承诺。
 | generic lifecycle | immutable runtime identity/version/capability；Task-correlated sealed invocation；budget/deadline；start/status/cancel/health/reconcile；immutable artifact/provenance/diagnostics/evidence；deterministic fake 实际执行 lifecycle，再由 caller 提供 observed result transcript；common layer 不导入 CAD/FreeCAD/Qt/FEA | 内部 contract/conformance PASS | 通用 CAD command、generic result retrieval、仿真或重建 schema |
 | CAD domain | capability planner 在 mutation 前精确选择 native、disclosed mapping、explicit approximation、unsupported 或 namespaced extension | 内部 planning contract PASS | 所有 runtime 语义等价或自动降级 |
 | registry/conformance | 两个 deterministic fake CAD identity 可独立 register/plan/route；未声明 capability fail closed；generic fake 另行证明 execute/cancel/reconcile lifecycle | 内部 fixture/conformance PASS | 第二 CAD adapter、engine 或产品支持 |
-| FreeCAD adapter | default composition 只注册并选择 FreeCAD；现有 lifecycle、error、source safety、FCStd/STEP、cancel/recovery compatibility 与真实 managed gates 保持通过 | FreeCAD-only PASS | G1 UI、新 operation、auto-discovery 或第二 adapter |
+| FreeCAD adapter | default composition 只注册并选择 FreeCAD；现有 lifecycle、error、source safety、FCStd/STEP、cancel/recovery compatibility 与真实 managed gates 保持通过 | FreeCAD-only PASS | 新 operation、auto-discovery、通用外部 FreeCAD 支持或第二 adapter |
 | authority negative | parent compatibility adapter 的私有 store/lease capability 只限 bounded validation/checkpoint/export/evidence；control/adapter public surface 的 Task/Accept/Reject/commit/HEAD-like authority fail closed；child Worker/provider/Workbench 无提交能力 | 结构与 composition boundary PASS；不是 OS sandbox | 第二 scheduler、提交路径或恶意 provider 隔离 |
 | artifact/selector | runtime-qualified profile 与 concrete artifact 的 runtime/kind/media 精确匹配；semantic `SelectorV1` 始终权威，native locator 仅为可选 runtime/revision-qualified evidence；真实 byte/digest 仍由 domain verifier 核验 | 内部 qualification PASS | 公开 runtime schema、SelectorV1 wire 变化、face/edge 支持或 conformance 已验证 artifact bytes |
 | D14 durable split | C01..C04 不改变 `RevisionRef`、Candidate/store/manifest/recovery schema；FreeCAD 仍持久化固定 `model.FCStd`/`model.step` | MR0 preservation PASS；MR1-P00 contract frozen，P01..activation OPEN | Revision/Candidate/manifest/store 已泛化、v2 已实现或第二 native format 可持久化 |
@@ -153,6 +156,7 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 | G10 | 数据保护 | runtime uninstall 与持久取消不删除/改写项目数据；执行和导出不污染源文件或暴露任意路径 | ☐ |
 | G11 | 打包后会话 | 从全新解包 MCPB 启动并复跑 discovery、真实 CAD 与资源读取 | ☐ |
 | G12 | 独立审查 | 至少两路 settled-diff review；所有 Critical/Important 关闭 | ☐ |
+| G13 | Workbench Alpha | managed Workbench 完成 preview/selector/review；指纹绑定 user-FreeCAD 试点经薄 bridge 完成同一非空 Reject 或 Accept 流程 | ☐ |
 
 ## 3. 自动化与打包 Gate
 
@@ -435,7 +439,7 @@ generation-zero 合法无文件要与“manifest 声明但 payload 缺失”区�
 - 未知 operation、未知或已退役工具名、稳定/direct 命名碰撞；
 - 伪造 project/task/revision/draft/artifact id；
 - SelectorV1 绑定错误 revision、对象类型、provenance 或 cardinality；
-- 任意 Python/FreeCAD code、STEP/STL import、Workbench/face-edge/photo/simulation 请求。
+- 任意 Python/FreeCAD code、STEP/STL import、通用 user-FreeCAD/face-edge/photo/simulation 请求。
 
 所有负例应返回稳定、去敏的错误 envelope，不执行 CAD 副作用，不泄露绝对内部路径、环境变量、
 token、secret、堆栈或用户文件内容。
@@ -455,6 +459,27 @@ durable store；该路径在 D14 下刻意未接入，并继续由 MR1-P00 migra
 4. 比较前后 durable data tree/hash，必须完全保留；
 5. 重新安装同版本 runtime 后，项目、任务、草案与 artifact resource 仍可恢复；
 6. engine 外部目录与用户日常 FreeCAD 配置均不被污染或删除。
+
+### E12：Workbench Alpha 与单主机外部试点
+
+1. `vibecad --freecad` 打开受管 FreeCAD，并只激活一个 VibeCAD Workbench/Dock；Workbench 在 GUI
+   主线程更新，daemon client 在既有私有 worker lane 运行；
+2. 对非空 HEAD 创建 `require_review` draft，分别打开 HEAD 与 draft checkout；选择 draft 中一个带
+   VibeCAD identity 的 object/feature，必须得到绑定当前 project/revision 的 canonical `SelectorV1`，
+   且 managed selector core 对完整对象清单唯一解析回同一对象；
+3. Reject 后 TaskRun 持久化为 `rejected`、generation 只按一次决策推进、HEAD 仍指向 base revision，
+   两个 checkout 与 FreeCAD preview document 全部关闭；Accept 变体则必须继续满足现有 HEAD CAS；
+4. user-FreeCAD 路径只允许显式绝对 `.app`，依次验证 `--doctor`、原子 `--install-addon` 和可逆
+   `--uninstall-addon`；不搜索 `PATH`、不改 app/preferences/macros/其他 addon，也不接管外来或变异树；
+5. 当前准入只绑定已观察的 macOS FreeCAD 1.1.3、CPython 3.11、PySide6 6.8.3 与 host fingerprint；
+   不得把单点 PASS 扩写成通用兼容性；
+6. 外部 addon 在 FreeCAD 进程内不导入完整 VibeCAD/daemon backend，不保存 daemon secret，也不持有
+   store/lease/commit authority；它只通过一个版本化、有界、封闭方法集的 managed-Python bridge
+   复用同一 public client。bridge 失败时必须 fail closed，并保留 `vibecad --freecad` 回退。
+
+当前本地 G1-03 观察已满足第 2–3 项的非空 Reject 变体：canonical feature selector 指向 candidate
+revision，Reject 后 task generation 为 10、HEAD 仍为 base revision，checkout/document 均为零。
+该证据只关闭 Workbench 产品链路，不关闭 §7 的真实第二宿主或一般 release gate。
 
 ## 5. 打包后独立会话
 

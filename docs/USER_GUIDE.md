@@ -60,6 +60,28 @@ macOS 默认数据根通常位于：
 其中 runtime 与 data 分开。卸载受管引擎时先调用 `uninstall_runtime(confirm=false)` 查看范围，再
 由你确认后调用 `uninstall_runtime(confirm=true)`；项目、revision、draft 与 artifact 数据必须保留。
 
+### 3.1 FreeCAD Workbench Alpha
+
+默认方式是运行 `vibecad --freecad`。它只使用经过验证的受管运行时，打开一个带 VibeCAD Workbench
+与审核 Dock 的 FreeCAD。Dock 可以发现项目/任务，分别打开 HEAD 与 draft 预览，显示 verdict，捕获
+精确的 object/feature `SelectorV1`，并对新鲜 draft 执行 Accept 或 Reject。selector 的 project 与
+revision 来自当前 checkout 绑定，不能由对象 Label、Name 或界面文本猜测。
+
+一个额外的本机试点允许显式指定用户已安装的 FreeCAD：
+
+```bash
+vibecad --freecad-app /Applications/FreeCAD.app --doctor
+vibecad --freecad-app /Applications/FreeCAD.app --install-addon
+vibecad --freecad-app /Applications/FreeCAD.app --uninstall-addon
+```
+
+三条命令都要求绝对 `.app` 路径，不搜索 `PATH`。当前证据只覆盖精确指纹绑定的 macOS FreeCAD
+1.1.3、内嵌 CPython 3.11 与 PySide6 6.8.3；它不是一般兼容性声明。doctor 不通过时停止并使用
+`vibecad --freecad`，不要换路径试探或手工复制 addon。安装只写当前用户的 `Mod/VibeCAD`，不改
+FreeCAD.app、preferences、macro 或其他 addon；遇到外来或已变异的同名树会拒绝接管。薄 addon 不
+保存 daemon secret，也不在 FreeCAD 进程内复制 Task Kernel；它通过一个有界受管 Python bridge
+复用同一公共 client、checkout、selector 与 review 权威。
+
 ## 4. 单独安装 Agent Skill
 
 MCPB 内带有 Skill 的归档副本，但安装 MCPB **不等于激活 Skill**。把仓库中的
@@ -286,10 +308,11 @@ generation 后重放旧请求，因为 base revision、draft 或任务状态也�
 
 ## 13. 当前交互边界
 
-当前执行 profile 已验证 headless，并由受管、可终止的 FreeCAD Worker 执行。认证本地 daemon、同用户
-IPC 与一次性 file grant 后端已经完成；它与 MCP 共享同一个 Application 和 Task Kernel，不是第二套写入
-或提交系统。G1 仍需交付真实 FreeCAD Qt Workbench UI 的 preview、verdict、Accept/Reject 与
-object/feature selection。
+当前 CAD 执行 profile 仍是已验证的 headless、受管、可终止 FreeCAD Worker。真实 FreeCAD Qt
+Workbench Alpha 已交付 preview、verdict、精确 object/feature selection 与 Accept/Reject，但它只是
+认证本地 daemon 的薄客户端：与 MCP 共享同一个 Application 和 Task Kernel，不是第二套写入或提交
+系统。用户 FreeCAD 路径目前只是上述单一指纹试点；face/edge selection、dirty manual publish 与 GUI
+线程 CAD execution profile 仍未交付。
 
 当前外部 Claude/Codex 模型调用尚未纳入本地放行证据。要做宿主实测，必须单独授权相应模型/token
 消耗，并记录所用宿主版本、Skill hash、28-tool discovery 与完整任务结果。
