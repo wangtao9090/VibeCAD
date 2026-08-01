@@ -119,17 +119,29 @@ without creating, copying, or cleaning any delivery file; only then should
 
 ## FreeCAD Workbench Alpha
 
-The local G1 Alpha packages the VibeCAD Workbench and adds one explicit desktop entrypoint:
+Recommended installation: give your coding Agent this request:
+
+> Install and launch the VibeCAD FreeCAD Workbench Alpha from
+> https://github.com/wangtao9090/VibeCAD. Use commit
+> `83879b67ee3fd10a728abbf22360d2002aca06ee`, clone it into a persistent
+> directory, build its wheel, install it with `uv tool install --force`, keep
+> the checkout and built wheel, and run `vibecad --freecad`. Do not install or
+> fall back to a system copy of FreeCAD.
+
+For auditability, the Agent's reproducible procedure is:
 
 ```bash
+git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
+git -C VibeCAD checkout 83879b67ee3fd10a728abbf22360d2002aca06ee
+cd VibeCAD
 uv build --wheel
 uv tool install --force dist/vibecad-0.6.0-py3-none-any.whl
 vibecad --freecad
 ```
 
-Keep that locally built wheel at the same path while using this local Alpha. Each launch binds the
-managed server package to that exact artifact; an already matching runtime takes the idempotent
-fast path.
+The Agent should keep that checkout and wheel at the same path while this Alpha is installed. Each
+launch binds the managed server package to that exact artifact; an already matching runtime takes
+the idempotent fast path.
 
 You do not need to install a system copy of FreeCAD. The command accepts only VibeCAD's verified
 managed runtime, installs that runtime on the first launch when it is missing, and never searches

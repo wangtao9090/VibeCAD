@@ -24231,3 +24231,39 @@ index installations do not depend on this local-artifact path.
 |---|---|---|---|---|---|---|
 | MRG1-G1-INTEGRATION-E01 | A13; product-only installed Alpha | pending exact Integration commit | real 1/1/1 process chain; exact ready marker; focused 112 | local direct-install wheel must remain addressable | MRG1-S173 | product GREEN / stage next |
 | MRG1-G1-INTEGRATION-G01 | standing autonomous gates | pending | FULL-1 5463 pass; sandbox socket cluster classified by unchanged authorized PASS | full suite not repeated outside sandbox | MRG1-S173 | bounded gate accepted |
+
+## 174. Repository-first Agent installation handoff
+
+The user corrected the delivery entry after Integration commit
+`83879b67ee3fd10a728abbf22360d2002aca06ee` was pushed: the product should not
+present a controller-machine wheel path as the user workflow. The public entry
+is now the repository URL `https://github.com/wangtao9090/VibeCAD`; the user
+asks their coding Agent to install and launch the Alpha.
+
+Both README variants now lead with a copyable natural-language request. It
+pins the current Alpha commit, requires a persistent clone, delegates wheel
+build and `uv tool install --force` to the Agent, retains the checkout/wheel
+needed by the current direct-artifact binding, runs `vibecad --freecad`, and
+forbids system-FreeCAD fallback. Exact shell commands remain visible only as
+the Agent's reproducible/auditable procedure.
+
+This is a handoff correction, not a new installer or product-shape change. No
+launcher, runtime, addon, runner, test harness or protocol source changes.
+
+### MRG1-S174
+
+1. **Completed milestones:** installable Alpha commit `83879b6` is pushed;
+   GitHub-repository-first Agent installation contract is recorded in English
+   and Chinese.
+2. **Next steps:** run only the two existing README contract tests, commit and
+   push this documentation correction, then continue C04.
+3. **Approved decisions:** the user's explicit repository-first correction and
+   standing documentation/commit/push autonomy cover this exact three-file
+   packet.
+4. **Execution discipline:** serial documentation-only change; no subagent,
+   GUI, full suite, runner or installer work; excluded user files remain
+   untouched.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-INTEGRATION-H01 | explicit repository-first Agent handoff | pending documentation commit | two README contract tests pending | current Alpha remains pinned to `83879b6` until superseded | MRG1-S174 | executing |

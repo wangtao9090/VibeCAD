@@ -99,16 +99,26 @@ request，不是持久任务取消。
 
 ## FreeCAD Workbench Alpha
 
-本地 G1 Alpha 已把 VibeCAD Workbench 打进安装包，并提供一个明确的桌面入口：
+推荐安装方式：把下面这句话交给你的编码 Agent：
+
+> 请从 https://github.com/wangtao9090/VibeCAD 安装并启动 VibeCAD FreeCAD
+> Workbench Alpha。使用 commit `83879b67ee3fd10a728abbf22360d2002aca06ee`，
+> 克隆到持久目录，构建 wheel，通过 `uv tool install --force` 安装，保留 checkout
+> 和构建出的 wheel，最后运行 `vibecad --freecad`。不要安装或回退到系统版 FreeCAD。
+
+为了便于核验，Agent 应执行等价步骤：
 
 ```bash
+git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
+git -C VibeCAD checkout 83879b67ee3fd10a728abbf22360d2002aca06ee
+cd VibeCAD
 uv build --wheel
 uv tool install --force dist/vibecad-0.6.0-py3-none-any.whl
 vibecad --freecad
 ```
 
-使用这个本地 Alpha 期间，请保留上述 wheel 及其原路径。每次启动都会把受管服务端绑定到该精确制品；
-运行时已经匹配时只走幂等快速路径。
+使用这个 Alpha 期间，Agent 应保留该 checkout、wheel 及其原路径。每次启动都会把受管服务端绑定到
+该精确制品；运行时已经匹配时只走幂等快速路径。
 
 无需另行安装系统版 FreeCAD。该命令只接受 VibeCAD 已验证的受管运行时；首次缺失时由现有安装器
 建立运行时，绝不会从 `PATH`、`/Applications` 或普通 FreeCAD `Mod` 目录寻找后备版本。Workbench
