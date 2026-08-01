@@ -45,6 +45,8 @@ _STATE_PUBLIC_NAMES = (
     "TaskSummary",
     "TaskPage",
     "project_page_from_mapping",
+    "project_summary_from_detail_mapping",
+    "task_summary_from_detail_mapping",
     "task_page_from_mapping",
 )
 _PROJECT_FIELDS = (
@@ -538,6 +540,33 @@ def test_task_page_from_mapping_projects_and_detaches_public_response(
     assert not hasattr(page, "__dict__")
 
 
+def test_c03_detail_parsers_accept_real_fake_authority_and_reject_project_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _load_state_module(monkeypatch)
+    client = FakeLocalAgentClient()
+    task = state.task_summary_from_detail_mapping(
+        client.get_task_request({"schema_version": 1, "task_id": "task_" + "1" * 32})
+    )
+    project_response = client.get_project_request(
+        {"schema_version": 1, "project_id": "project_" + "1" * 32}
+    )
+    project = state.project_summary_from_detail_mapping(project_response)
+
+    assert (task.generation, task.base_revision, task.draft_id) == (
+        3,
+        "revision_" + "1" * 32,
+        "draft_" + "4" * 32,
+    )
+    assert (project.generation, project.revision_id) == (
+        2,
+        "revision_" + "1" * 32,
+    )
+    project_response["result"]["current"]["revision"]["manifest_sha256"] = "f" * 64
+    with pytest.raises(state.ProjectionError):
+        state.project_summary_from_detail_mapping(project_response)
+
+
 @pytest.mark.parametrize(
     "case_id",
     (
@@ -738,7 +767,7 @@ def test_c02_dock_selected_head_and_draft_buttons_emit_preview_open_commands(
         "1",
         generation=3,
         candidate_revision="revision_" + "4" * 32,
-        draft_id="draft_" + "5" * 32,
+        draft_id="draft_" + "4" * 32,
     )
     task["status"] = "awaiting_user_review"
     dock._task_ids = [task["task_id"]]
@@ -757,7 +786,7 @@ def test_c02_dock_selected_head_and_draft_buttons_emit_preview_open_commands(
     assert preview_commands[1]["source"] == {
         "kind": "draft",
         "task_id": "task_" + "1" * 32,
-        "draft_id": "draft_" + "5" * 32,
+        "draft_id": "draft_" + "4" * 32,
         "expected_generation": 3,
     }
     assert preview_commands[0]["open_key"].startswith("checkout_open_")
@@ -1088,8 +1117,10 @@ def test_workbench_activation_creates_one_dock_without_blocking_main(
     assert host.workbench_snapshot()["lifecycle"] in {"starting", "active"}
     dock = freecad_gui.main_window.docks[0]
     assert dock.object_name == "VibeCADReviewDock"
-    assert not hasattr(dock, "accept_button")
-    assert not hasattr(dock, "reject_button")
+    assert dock.accept_button.object_name == "VibeCADAcceptDraft"
+    assert dock.reject_button.object_name == "VibeCADRejectDraft"
+    assert dock.accept_button.enabled is False
+    assert dock.reject_button.enabled is False
     host.activate_workbench()
     assert len(freecad_gui.main_window.docks) == 1
     pump_main_events(lambda: host.workbench_snapshot()["heartbeat_count"] == 1)
@@ -1239,7 +1270,7 @@ def test_fix04_legacy_gateway_private_review_detaches_and_stays_one_call(
     gateway = _fix04_gateway(gateway_module, lambda: client, capability)
     project_id = "project_" + "1" * 32
     task_id = "task_" + "1" * 32
-    draft_id = "draft_" + "5" * 32
+    draft_id = "draft_" + "4" * 32
 
     assert (
         gateway.handle({"schema_version": 1, "kind": "connect", "request_id": 0})["kind"]
@@ -1549,7 +1580,7 @@ def test_c02_gateway_rejects_non_exact_preview_source_and_open_key_without_effec
     source: dict[str, object] = {
         "kind": "draft",
         "task_id": "task_" + "1" * 32,
-        "draft_id": "draft_" + "5" * 32,
+        "draft_id": "draft_" + "4" * 32,
         "expected_generation": 3,
     }
     if malformation.startswith("head-") or malformation in {"wrong-kind", "project-id"}:
@@ -1621,7 +1652,7 @@ def test_fix04_legacy_gateway_authenticated_review_exception_is_one_call_unknown
     gateway.handle({"schema_version": 1, "request_id": 0, "kind": "connect"})
     client.review_failure = True
     task_id = "task_" + "1" * 32
-    draft_id = "draft_" + "5" * 32
+    draft_id = "draft_" + "4" * 32
 
     event = gateway.handle(
         _fix04_private_gateway_command(
@@ -3063,7 +3094,7 @@ def test_fix02_stale_success_is_cleanup_only_after_current_selection_drift(
                 generation=4 if selection_drift == "generation" else 3,
                 candidate_revision="revision_" + "4" * 32,
                 draft_id=(
-                    "draft_" + "9" * 32 if selection_drift == "draft" else "draft_" + "5" * 32
+                    "draft_" + "9" * 32 if selection_drift == "draft" else "draft_" + "4" * 32
                 ),
             )
             task["project_id"] = "project_" + "1" * 32
@@ -3625,8 +3656,10 @@ def test_fix02_private_host_guard_and_single_discard_seam(
         assert callable(discard)
         assert not hasattr(session.dock, "_guard_preview_binding")
         assert not hasattr(session.dock, "_discard_preview_binding")
-        assert not hasattr(session.dock, "accept_button")
-        assert not hasattr(session.dock, "reject_button")
+        assert session.dock.accept_button.object_name == "VibeCADAcceptDraft"
+        assert session.dock.reject_button.object_name == "VibeCADRejectDraft"
+        assert session.dock.accept_button.enabled is False
+        assert session.dock.reject_button.enabled is False
 
         binding = session.preview.binding_for_checkout(head_checkout)
         failures: queue.Queue[BaseException] = queue.Queue()
@@ -3883,7 +3916,7 @@ def _fix04_request_review(session: object, *, decision: str) -> object:
     return available[0](
         decision=decision,
         task_id="task_" + "1" * 32,
-        draft_id="draft_" + "5" * 32,
+        draft_id="draft_" + "4" * 32,
         expected_generation=3,
     )
 
@@ -3907,13 +3940,15 @@ def test_c02_host_seam_binds_once_without_review_ui_or_rpc(
         assert callable(bind)
         assert callable(submit)
         assert callable(discard)
-        assert not hasattr(dock, "accept_button")
-        assert not hasattr(dock, "reject_button")
+        assert dock.accept_button.objectName() == "VibeCADAcceptDraft"
+        assert dock.reject_button.objectName() == "VibeCADRejectDraft"
+        assert dock.accept_button.enabled is False
+        assert dock.reject_button.enabled is False
         assert (
             dock.request_review(
                 decision="accept",
                 task_id="task_" + "1" * 32,
-                draft_id="draft_" + "5" * 32,
+                draft_id="draft_" + "4" * 32,
                 expected_generation=3,
             )
             is None
@@ -3922,7 +3957,7 @@ def test_c02_host_seam_binds_once_without_review_ui_or_rpc(
             submit(
                 decision="accept",
                 task_id="task_" + "1" * 32,
-                draft_id="draft_" + "5" * 32,
+                draft_id="draft_" + "4" * 32,
                 expected_generation=3,
             )
         with pytest.raises(RuntimeError, match="review host is already bound"):
@@ -3969,7 +4004,7 @@ def test_c02_authenticated_correlated_review_completion_and_error_deliver_once(
         first_request = dock._submit_host_review(
             decision="accept",
             task_id="task_" + "1" * 32,
-            draft_id="draft_" + "5" * 32,
+            draft_id="draft_" + "4" * 32,
             expected_generation=3,
         )
         assert entered.wait(1.0)
@@ -3999,7 +4034,12 @@ def test_c02_authenticated_correlated_review_completion_and_error_deliver_once(
 
         release.set()
         pump_main_events(lambda: len(deliveries) == 1)
-        assert deliveries == [(success, first_context, session.main_thread_id)]
+        delivered_success, delivered_context, delivered_thread = deliveries[0]
+        assert delivered_success["request_id"] == first_request
+        assert delivered_success["kind"] == "review"
+        assert dock._authenticated_ok(delivered_success["response"])
+        assert delivered_context == first_context
+        assert delivered_thread == session.main_thread_id
 
         session._receive(_fix04_wrap(event_type, success, capability))
         session._receive(dict(success))
@@ -4007,13 +4047,18 @@ def test_c02_authenticated_correlated_review_completion_and_error_deliver_once(
 
         client.review_entered = None
         client.review_release = None
+        client.review_task_generation = 3
+        client.review_task_status = "awaiting_user_review"
+        client.review_committed_revision = None
+        client.review_project_generation = 2
+        client.review_project_revision = "revision_" + "1" * 32
         _fix04_refresh_cycle(host, dock, client)
         second_context = session._selection_stamp()
         client.review_failure = True
         second_request = dock._submit_host_review(
             decision="accept",
             task_id="task_" + "1" * 32,
-            draft_id="draft_" + "5" * 32,
+            draft_id="draft_" + "4" * 32,
             expected_generation=3,
         )
         pump_main_events(lambda: len(deliveries) == 2)
@@ -5043,7 +5088,7 @@ def test_fix04_legacy_stale_dock_close_stays_on_rejected_public_lane(
             dock.request_review(
                 decision="accept",
                 task_id="task_" + "1" * 32,
-                draft_id="draft_" + "5" * 32,
+                draft_id="draft_" + "4" * 32,
                 expected_generation=3,
             ),
             dock.request_client_close(),
@@ -5095,7 +5140,7 @@ def test_fix04_legacy_authenticated_review_exception_retains_client_authority(
                 "kind": "review",
                 "decision": "accept",
                 "task_id": "task_" + "1" * 32,
-                "draft_id": "draft_" + "5" * 32,
+                "draft_id": "draft_" + "4" * 32,
                 "expected_generation": 3,
             },
             capability,
@@ -5778,7 +5823,7 @@ def test_fix04_restricted_command_representation_matrix_is_rejected(
             "kind": "review",
             "decision": "accept",
             "task_id": "task_" + "1" * 32,
-            "draft_id": "draft_" + "5" * 32,
+            "draft_id": "draft_" + "4" * 32,
             "expected_generation": 3,
         },
         "close": {
@@ -7167,7 +7212,7 @@ def test_fix04_cross_project_preview_authorities_require_one_exact_project_cycle
         "2",
         generation=4,
         candidate_revision="revision_" + "8" * 32,
-        draft_id="draft_" + "9" * 32,
+        draft_id="draft_" + "8" * 32,
     )
     task_b["status"] = "awaiting_user_review"
     task_b_id = task_b["task_id"]
@@ -7178,7 +7223,7 @@ def test_fix04_cross_project_preview_authorities_require_one_exact_project_cycle
         "1",
         generation=3,
         candidate_revision="revision_" + "4" * 32,
-        draft_id="draft_" + "5" * 32,
+        draft_id="draft_" + "4" * 32,
     )
     task_a["status"] = "awaiting_user_review"
     projects_response = _project_envelope(
@@ -7198,6 +7243,30 @@ def test_fix04_cross_project_preview_authorities_require_one_exact_project_cycle
         )
         client.projects_response = projects_response
         client.tasks_response = tasks_response
+        original_get_task = client.get_task_request
+
+        def get_task(request: dict[str, object]) -> dict[str, object]:
+            response = original_get_task(request)
+            if request.get("task_id") != task_b_id:
+                return response
+            result = response["result"]
+            assert type(result) is dict
+            task_run = result["task_run"]
+            assert type(task_run) is dict
+            draft = task_run["draft"]
+            assert type(draft) is dict
+            result["generation"] = 4
+            result["next_action"] = "review"
+            task_run["project_id"] = project_b
+            task_run["status"] = "awaiting_user_review"
+            task_run["candidate_revision"] = "revision_" + "8" * 32
+            task_run["committed_revision"] = None
+            draft["id"] = task_b_draft
+            draft["project_id"] = project_b
+            draft["revision_id"] = "revision_" + "8" * 32
+            return response
+
+        client.get_task_request = get_task
         return client
 
     host, freecad, freecad_gui, clients, _events = _start_fix02_host(
@@ -7527,7 +7596,7 @@ def test_fix04_review_requires_final_local_file_observation(
             ) == (
                 "accept",
                 "task_" + "1" * 32,
-                "draft_" + "5" * 32,
+                "draft_" + "4" * 32,
                 3,
             )
         assert freecad_gui.main_window.docks == [dock]

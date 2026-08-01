@@ -182,8 +182,14 @@ class FakeLocalAgentClient:
         self.closed_thread_id: int | None = None
         self.close_call_count = 0
         self.review_failure = False
+        self.review_effect_after_loss = False
         self.review_entered: threading.Event | None = None
         self.review_release: threading.Event | None = None
+        self.review_task_generation = 3
+        self.review_task_status = "awaiting_user_review"
+        self.review_committed_revision: str | None = None
+        self.review_project_generation = 2
+        self.review_project_revision = "revision_" + "1" * 32
         self.last_tasks_response: dict[str, object] | None = None
         self.projects_response: dict[str, object] | None = None
         self.tasks_response: dict[str, object] | None = None
@@ -254,11 +260,22 @@ class FakeLocalAgentClient:
 
     def get_project_request(self, request: dict[str, object]) -> dict[str, object]:
         self._record("get_project", request)
-        return {"schema_version": 1, "ok": True, "result": {}, "error": None}
+        return _fake_project_detail(
+            generation=self.review_project_generation,
+            revision_id=self.review_project_revision,
+        )
 
     def get_task_request(self, request: dict[str, object]) -> dict[str, object]:
         self._record("get_task", request)
-        return {"schema_version": 1, "ok": True, "result": {}, "error": None}
+        digit = "2" if request.get("task_id") == "task_" + "2" * 32 else "1"
+        if digit == "2":
+            return _fake_task_detail(digit, status="active")
+        return _fake_task_detail(
+            digit,
+            generation=self.review_task_generation,
+            status=self.review_task_status,
+            committed_revision=self.review_committed_revision,
+        )
 
     def accept_draft_request(self, request: dict[str, object]) -> dict[str, object]:
         self._record("accept_draft", request)
@@ -268,7 +285,21 @@ class FakeLocalAgentClient:
             raise RuntimeError("synthetic review release deadline exceeded")
         if self.review_failure:
             raise RuntimeError("synthetic uncertain review")
-        return {"schema_version": 1, "ok": True, "result": {}, "error": None}
+        if self.review_task_status != "awaiting_user_review":
+            raise RuntimeError("synthetic duplicate review")
+        self.review_task_generation += 1
+        self.review_task_status = "succeeded"
+        self.review_committed_revision = "revision_" + "4" * 32
+        self.review_project_generation += 1
+        self.review_project_revision = "revision_" + "4" * 32
+        if self.review_effect_after_loss:
+            raise RuntimeError("synthetic review response loss after effect")
+        return _fake_task_detail(
+            "1",
+            generation=self.review_task_generation,
+            status=self.review_task_status,
+            committed_revision=self.review_committed_revision,
+        )
 
     def reject_draft_request(self, request: dict[str, object]) -> dict[str, object]:
         self._record("reject_draft", request)
@@ -276,7 +307,19 @@ class FakeLocalAgentClient:
             self.review_entered.set()
         if self.review_release is not None and not self.review_release.wait(1.0):
             raise RuntimeError("synthetic review release deadline exceeded")
-        return {"schema_version": 1, "ok": True, "result": {}, "error": None}
+        if self.review_task_status != "awaiting_user_review":
+            raise RuntimeError("synthetic duplicate review")
+        self.review_task_generation += 1
+        self.review_task_status = "rejected"
+        self.review_committed_revision = None
+        if self.review_effect_after_loss:
+            raise RuntimeError("synthetic review response loss after effect")
+        return _fake_task_detail(
+            "1",
+            generation=self.review_task_generation,
+            status=self.review_task_status,
+            committed_revision=None,
+        )
 
     def open_checkout(
         self,
@@ -464,7 +507,112 @@ def _fake_task(digit: str, *, status: str) -> dict[str, object]:
         "next_action": "review",
         "candidate_revision": "revision_" + "4" * 32,
         "committed_revision": None,
-        "draft_id": "draft_" + "5" * 32,
+        "draft_id": "draft_" + "4" * 32,
+    }
+
+
+def _fake_task_detail(
+    digit: str,
+    *,
+    generation: int = 3,
+    status: str,
+    committed_revision: str | None = None,
+) -> dict[str, object]:
+    summary = _fake_task(digit, status=status)
+    task_id = summary["task_id"]
+    project_id = summary["project_id"]
+    base_revision = summary["base_revision"]
+    candidate_revision = summary["candidate_revision"]
+    draft_id = summary["draft_id"]
+    assert type(task_id) is str
+    assert type(project_id) is str
+    assert type(base_revision) is str
+    assert type(candidate_revision) is str
+    assert type(draft_id) is str
+    return {
+        "schema_version": 1,
+        "ok": True,
+        "result": {
+            "generation": generation,
+            "next_action": "review" if status == "awaiting_user_review" else "none",
+            "task_run": {
+                "schema_version": 1,
+                "id": task_id,
+                "project_id": project_id,
+                "base_revision": base_revision,
+                "reasoning_owner": summary["reasoning_owner"],
+                "review_policy": summary["review_policy"],
+                "status": status,
+                "creation_digest": "a" * 64,
+                "program": None,
+                "candidate_revision": candidate_revision,
+                "committed_revision": committed_revision,
+                "draft": {
+                    "schema_version": 1,
+                    "id": draft_id,
+                    "task_id": task_id,
+                    "project_id": project_id,
+                    "base_revision": base_revision,
+                    "base_generation": 2,
+                    "base_manifest_sha256": "b" * 64,
+                    "revision_id": candidate_revision,
+                    "manifest_sha256": "c" * 64,
+                    "verification_id": "verification_" + "d" * 32,
+                    "acceptance_id": "acceptance-c03",
+                    "observation_digest": "e" * 64,
+                },
+                "steps": [],
+                "verification_reports": [],
+                "artifacts": [],
+                "last_error": None,
+                "transitions": [],
+            },
+        },
+        "error": None,
+    }
+
+
+def _fake_project_detail(*, generation: int, revision_id: str) -> dict[str, object]:
+    project_id = "project_" + "1" * 32
+    manifest = ("1" if revision_id == "revision_" + "1" * 32 else "4") * 64
+    model = {
+        "schema_version": 1,
+        "id": "artifact_" + "6" * 32,
+        "name": "model.FCStd",
+        "format": "fcstd",
+        "sha256": "7" * 64,
+        "size_bytes": 23,
+    }
+    return {
+        "schema_version": 1,
+        "ok": True,
+        "result": {
+            "schema_version": 1,
+            "project_id": project_id,
+            "current": {
+                "head": {
+                    "schema_version": 1,
+                    "project_id": project_id,
+                    "generation": generation,
+                    "revision_id": revision_id,
+                    "manifest_sha256": manifest,
+                },
+                "revision": {
+                    "schema_version": 1,
+                    "id": revision_id,
+                    "project_id": project_id,
+                    "base_revision": (
+                        "revision_" + "0" * 32
+                        if revision_id == "revision_" + "1" * 32
+                        else "revision_" + "1" * 32
+                    ),
+                    "manifest_sha256": manifest,
+                    "model": model,
+                    "artifacts": [],
+                },
+            },
+        },
+        "error": None,
     }
 
 

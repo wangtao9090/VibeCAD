@@ -9,7 +9,9 @@ from .state import (
     ProjectionError,
     _preview_projection,
     project_page_from_mapping,
+    project_summary_from_detail_mapping,
     task_page_from_mapping,
+    task_summary_from_detail_mapping,
 )
 
 __all__ = ("ReviewDock",)
@@ -105,6 +107,7 @@ class ReviewDock(QtWidgets.QDockWidget):
         self._loading_all_task_ids: list[str] = []
         self._loading_tasks_by_id: dict[str, object] = {}
         self._tasks_by_id: dict[str, object] = {}
+        self._invalidated_task_ids: set[str] = set()
         self._project_cursors: set[str] = set()
         self._task_cursors: set[str] = set()
         self._preview_checkouts: dict[str, str] = {}
@@ -112,40 +115,62 @@ class ReviewDock(QtWidgets.QDockWidget):
         self._preview_epochs: dict[int, tuple[int, int]] = {}
         self._preview_eligible = False
         self._preview_recovery_required = False
+        self._review_recovery_required = False
         self._host_transport: object | None = None
         self._review_host_submit: object | None = None
         self._review_host_discard: object | None = None
+        self._review_pending: (
+            tuple[
+                int | None,
+                str,
+                tuple[object, ...],
+                tuple[str, str],
+                tuple[str, str],
+            ]
+            | None
+        ) = None
+        self._review_confirmation: dict[str, object] | None = None
         self._hosted_projection: tuple[int, str, object] | None = None
 
         container = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(container)
         self.status_label = QtWidgets.QLabel("Disconnected", container)
         self.preview_status_label = QtWidgets.QLabel("Preview closed", container)
+        self.review_status_label = QtWidgets.QLabel("No review decision", container)
         self.project_selector = QtWidgets.QComboBox(container)
         self.task_selector = QtWidgets.QComboBox(container)
         self.refresh_button = QtWidgets.QPushButton("Refresh", container)
         self.open_head_button = QtWidgets.QPushButton("Open HEAD Preview", container)
         self.open_draft_button = QtWidgets.QPushButton("Open Draft Preview", container)
+        self.accept_button = QtWidgets.QPushButton("Accept Draft", container)
+        self.reject_button = QtWidgets.QPushButton("Reject Draft", container)
         self.status_label.setObjectName("VibeCADConnectionStatus")
         self.project_selector.setObjectName("VibeCADProjectSelector")
         self.task_selector.setObjectName("VibeCADReviewTaskSelector")
         self.refresh_button.setObjectName("VibeCADRefresh")
         self.open_head_button.setObjectName("VibeCADOpenHeadPreview")
         self.open_draft_button.setObjectName("VibeCADOpenDraftPreview")
+        self.accept_button.setObjectName("VibeCADAcceptDraft")
+        self.reject_button.setObjectName("VibeCADRejectDraft")
         for widget in (
             self.status_label,
             self.preview_status_label,
+            self.review_status_label,
             self.project_selector,
             self.task_selector,
             self.refresh_button,
             self.open_head_button,
             self.open_draft_button,
+            self.accept_button,
+            self.reject_button,
         ):
             layout.addWidget(widget)
         self.setWidget(container)
         self.refresh_button.clicked.connect(self.refresh)
         self.open_head_button.clicked.connect(self.open_head_preview)
         self.open_draft_button.clicked.connect(self.open_draft_preview)
+        self.accept_button.clicked.connect(self.accept_draft)
+        self.reject_button.clicked.connect(self.reject_draft)
         self.project_selector.currentIndexChanged.connect(self._project_changed)
         self.task_selector.currentIndexChanged.connect(self._task_changed)
         self._update_preview_actions()
@@ -216,7 +241,7 @@ class ReviewDock(QtWidgets.QDockWidget):
     def _project_host_preview_cycle_retired(self) -> None:
         if self._preview_checkouts or self._preview_pending_sources or self._preview_epochs:
             raise ProjectionError("preview cycle projection is not retired")
-        self._preview_recovery_required = False
+        self._preview_recovery_required = self._review_recovery_required
         self.set_preview_eligibility(False)
         self._update_preview_actions()
 
@@ -225,7 +250,145 @@ class ReviewDock(QtWidgets.QDockWidget):
         event: object,
         context: object,
     ) -> None:
-        return None
+        pending = self._review_pending
+        if pending is None or type(event) is not dict:
+            return
+        if event.get("request_id") != pending[0] or context != pending[2]:
+            return
+        if event.get("kind") == "error":
+            self._enter_review_unknown()
+            return
+        if event.get("kind") != "review" or not self._authenticated_ok(event.get("response")):
+            self._enter_review_unknown()
+            return
+        request_id, decision, selection_stamp, checkout_ids, revisions = pending
+        project_id, task_id, draft_id, generation = selection_stamp[:4]
+        base_revision, candidate_revision = revisions
+        if (
+            type(request_id) is not int
+            or type(project_id) is not str
+            or type(task_id) is not str
+            or type(draft_id) is not str
+            or type(generation) is not int
+        ):
+            self._fail_review_confirmation()
+            return
+        confirmation: dict[str, object] = {
+            "review_request_id": request_id,
+            "decision": decision,
+            "project_id": project_id,
+            "task_id": task_id,
+            "draft_id": draft_id,
+            "generation": generation,
+            "base_revision": base_revision,
+            "candidate_revision": candidate_revision,
+            "task": None,
+            "project": None,
+        }
+        self._review_confirmation = confirmation
+        self.review_status_label.setText("Confirming review decision")
+        try:
+            self._send(
+                "task",
+                "refresh_task",
+                context=("review-confirmation", request_id, "task"),
+                task_id=task_id,
+            )
+            self._send(
+                "project",
+                "refresh_project",
+                context=("review-confirmation", request_id, "project"),
+                project_id=project_id,
+            )
+        except BaseException:
+            self._fail_review_confirmation()
+        finally:
+            cleanup_failed = False
+            for checkout_id in checkout_ids:
+                try:
+                    self._discard_host_preview(checkout_id)
+                except BaseException:
+                    cleanup_failed = True
+            if cleanup_failed:
+                self._fail_review_confirmation()
+
+    def _enter_review_unknown(self) -> None:
+        pending = self._review_pending
+        checkout_ids = () if pending is None else tuple(pending[3])
+        self._review_recovery_required = True
+        self.review_status_label.setText("Review outcome unknown")
+        self.set_preview_eligibility(False, recovery_required=True)
+        self._review_confirmation = None
+        self._review_pending = None
+        self._update_preview_actions()
+        for checkout_id in checkout_ids:
+            try:
+                self._discard_host_preview(checkout_id)
+            except BaseException:
+                pass
+
+    @staticmethod
+    def _review_confirmation_context(context: object, kind: str) -> bool:
+        return (
+            type(context) is tuple
+            and len(context) == 3
+            and context[0] == "review-confirmation"
+            and type(context[1]) is int
+            and context[2] == kind
+        )
+
+    def _fail_review_confirmation(self) -> None:
+        self._review_recovery_required = True
+        self._review_confirmation = None
+        self._review_pending = None
+        self.review_status_label.setText("Review confirmation failed")
+        self.set_preview_eligibility(False, recovery_required=True)
+
+    def _finish_review_confirmation(self) -> None:
+        confirmation = self._review_confirmation
+        if confirmation is None:
+            return
+        task = confirmation["task"]
+        project = confirmation["project"]
+        if task is None or project is None:
+            return
+        decision = confirmation["decision"]
+        task_id = confirmation["task_id"]
+        project_id = confirmation["project_id"]
+        draft_id = confirmation["draft_id"]
+        generation = confirmation["generation"]
+        base_revision = confirmation["base_revision"]
+        candidate_revision = confirmation["candidate_revision"]
+        valid = (
+            task.task_id == task_id
+            and task.project_id == project_id
+            and task.draft_id == draft_id
+            and task.base_revision == base_revision
+            and task.candidate_revision == candidate_revision
+            and type(generation) is int
+            and task.generation > generation
+            and project.project_id == project_id
+            and (
+                decision == "accept"
+                and task.status == "succeeded"
+                and task.committed_revision == candidate_revision
+                and project.revision_id == candidate_revision
+                or decision == "reject"
+                and task.status == "rejected"
+                and task.committed_revision is None
+                and project.revision_id == base_revision
+            )
+        )
+        if not valid:
+            self._fail_review_confirmation()
+            return
+        assert type(task_id) is str
+        self._tasks_by_id.pop(task_id, None)
+        self._invalidated_task_ids.add(task_id)
+        self._review_confirmation = None
+        self._review_pending = None
+        self.review_status_label.setText(f"Draft {decision}ed")
+        self._update_preview_actions()
 
     def _retire_request_id(self, request_id: int) -> None:
         self._retired_request_ids.clear()
@@ -398,6 +561,7 @@ class ReviewDock(QtWidgets.QDockWidget):
 
     def refresh(self) -> None:
         try:
+            self._invalidated_task_ids.clear()
             checkout_ids = tuple(self._preview_checkouts.values())
             transport = self._host_transport
             if callable(transport):
@@ -504,6 +668,7 @@ class ReviewDock(QtWidgets.QDockWidget):
         self._loading_all_task_ids = []
         self._loading_tasks_by_id = {}
         self._tasks_by_id = {}
+        self._invalidated_task_ids.clear()
         self._task_cursors = set()
         self.task_selector.clear()
         self._update_preview_actions()
@@ -547,6 +712,106 @@ class ReviewDock(QtWidgets.QDockWidget):
         )
         self.open_head_button.setEnabled(project_ready)
         self.open_draft_button.setEnabled(draft_ready)
+        review_ready = self._review_context() is not None
+        self.accept_button.setEnabled(review_ready)
+        self.reject_button.setEnabled(review_ready)
+
+    @staticmethod
+    def _canonical_identifier(value: object, prefix: str) -> bool:
+        return (
+            type(value) is str
+            and value.startswith(prefix)
+            and len(value) == len(prefix) + 32
+            and all(character in "0123456789abcdef" for character in value[len(prefix) :])
+        )
+
+    def _review_context(
+        self,
+    ) -> tuple[tuple[object, ...], tuple[str, str], tuple[str, str]] | None:
+        task = self._selected_task()
+        project_id = self.current_project_id()
+        task_id = self.current_task_id()
+        draft_id = self._task_value(task, "draft_id")
+        generation = self._task_value(task, "generation")
+        candidate_revision = self._task_value(task, "candidate_revision")
+        base_revision = self._task_value(task, "base_revision")
+        head_checkout = self._preview_checkouts.get("head")
+        draft_checkout = self._preview_checkouts.get("draft")
+        if (
+            self._review_pending is not None
+            or not self.preview_projection().review_eligible
+            or set(self._preview_checkouts) != {"head", "draft"}
+            or not self._canonical_identifier(project_id, "project_")
+            or not self._canonical_identifier(task_id, "task_")
+            or self._task_value(task, "task_id") != task_id
+            or self._task_value(task, "project_id") != project_id
+            or self._task_value(task, "status") != "awaiting_user_review"
+            or not self._canonical_identifier(draft_id, "draft_")
+            or type(generation) is not int
+            or not 0 <= generation <= _MAX_SAFE_INTEGER
+            or not self._canonical_identifier(candidate_revision, "revision_")
+            or not self._canonical_identifier(base_revision, "revision_")
+            or draft_id != f"draft_{candidate_revision.removeprefix('revision_')}"
+            or not self._canonical_identifier(head_checkout, "checkout_")
+            or not self._canonical_identifier(draft_checkout, "checkout_")
+            or head_checkout == draft_checkout
+        ):
+            return None
+        assert type(project_id) is str
+        assert type(task_id) is str
+        assert type(draft_id) is str
+        assert type(base_revision) is str
+        assert type(candidate_revision) is str
+        assert type(head_checkout) is str
+        assert type(draft_checkout) is str
+        return (
+            (
+                project_id,
+                task_id,
+                draft_id,
+                generation,
+                self._selection_epoch,
+                self._task_selection_epoch,
+            ),
+            (head_checkout, draft_checkout),
+            (base_revision, candidate_revision),
+        )
+
+    def _submit_decision(self, decision: str) -> None:
+        context = self._review_context()
+        if context is None or decision not in ("accept", "reject"):
+            return
+        selection_stamp, checkout_ids, revisions = context
+        task_id = selection_stamp[1]
+        draft_id = selection_stamp[2]
+        generation = selection_stamp[3]
+        assert type(task_id) is str
+        assert type(draft_id) is str
+        assert type(generation) is int
+        sentinel = (None, decision, selection_stamp, checkout_ids, revisions)
+        self._review_pending = sentinel
+        self.review_status_label.setText("Review pending")
+        self._update_preview_actions()
+        try:
+            request_id = self._submit_host_review(
+                decision=decision,
+                task_id=task_id,
+                draft_id=draft_id,
+                expected_generation=generation,
+            )
+            if type(request_id) is not int or request_id < 0:
+                raise ProjectionError("invalid review request authority")
+        except BaseException:
+            if self._review_pending is sentinel:
+                self._enter_review_unknown()
+            return
+        self._review_pending = (request_id, decision, selection_stamp, checkout_ids, revisions)
+
+    def accept_draft(self) -> None:
+        self._submit_decision("accept")
+
+    def reject_draft(self) -> None:
+        self._submit_decision("reject")
 
     def _open_preview(self, source: dict[str, object]) -> None:
         kind = source["kind"]
@@ -614,6 +879,7 @@ class ReviewDock(QtWidgets.QDockWidget):
             self.preview_status_label.setText("Preview review disabled")
         else:
             self.preview_status_label.setText("Preview closed")
+        self._update_preview_actions()
 
     def preview_projection(self) -> PreviewProjection:
         return _preview_projection(
@@ -854,6 +1120,12 @@ class ReviewDock(QtWidgets.QDockWidget):
                 pending = self._pending.pop(request_id, None)
                 if pending is not None:
                     self._retire_request_id(request_id)
+                if pending is not None and (
+                    self._review_confirmation_context(pending[1], "task")
+                    or self._review_confirmation_context(pending[1], "project")
+                ):
+                    self._fail_review_confirmation()
+                    return
                 if (
                     pending is not None
                     and pending[0] == "preview_opened"
@@ -914,14 +1186,26 @@ class ReviewDock(QtWidgets.QDockWidget):
                 filtered = [
                     task
                     for task in page.tasks
-                    if task.project_id == context[0] and task.status == "awaiting_user_review"
+                    if (
+                        task.project_id == context[0]
+                        and task.status == "awaiting_user_review"
+                        and task.task_id not in self._invalidated_task_ids
+                    )
                 ]
                 filtered_ids = [task.task_id for task in filtered]
                 if self._loading_task_ids and filtered_ids:
                     if filtered_ids[0] <= self._loading_task_ids[-1]:
                         raise ProjectionError("invalid public mapping")
                 self._loading_task_ids.extend(filtered_ids)
-                self._loading_tasks_by_id.update({task.task_id: task for task in filtered})
+                for task in filtered:
+                    previous = self._tasks_by_id.get(task.task_id)
+                    previous_generation = self._task_value(previous, "generation")
+                    if type(previous_generation) is int and previous_generation > task.generation:
+                        self._loading_tasks_by_id[task.task_id] = previous
+                    elif previous_generation == task.generation and previous != task:
+                        raise ProjectionError("invalid public mapping")
+                    else:
+                        self._loading_tasks_by_id[task.task_id] = task
                 if page.next_cursor is not None:
                     self._request_tasks(
                         context[0],
@@ -942,19 +1226,59 @@ class ReviewDock(QtWidgets.QDockWidget):
                     self.task_selector.blockSignals(False)
                 self._update_preview_actions()
             elif kind == "project":
+                if self._review_confirmation_context(context, "project"):
+                    confirmation = self._review_confirmation
+                    if confirmation is None or context[1] != confirmation["review_request_id"]:
+                        return
+                    try:
+                        confirmation["project"] = project_summary_from_detail_mapping(
+                            event["response"]
+                        )
+                    except ProjectionError:
+                        self._fail_review_confirmation()
+                        return
+                    self._finish_review_confirmation()
+                    return
                 if context != (self.current_project_id(), self._selection_epoch):
                     return
                 if not self._authenticated_ok(event["response"]):
                     self._fail()
             elif kind == "task":
+                if self._review_confirmation_context(context, "task"):
+                    confirmation = self._review_confirmation
+                    if confirmation is None or context[1] != confirmation["review_request_id"]:
+                        return
+                    try:
+                        confirmation["task"] = task_summary_from_detail_mapping(event["response"])
+                    except ProjectionError:
+                        self._fail_review_confirmation()
+                        return
+                    self._finish_review_confirmation()
+                    return
                 if context != (
                     self.current_project_id(),
                     self.current_task_id(),
                     self._selection_epoch,
                 ):
                     return
-                if not self._authenticated_ok(event["response"]):
-                    self._fail()
+                task_id = context[1]
+                previous = self._tasks_by_id.pop(task_id, None)
+                self._invalidated_task_ids.add(task_id)
+                self.set_preview_eligibility(False)
+                task = task_summary_from_detail_mapping(event["response"])
+                previous_generation = self._task_value(previous, "generation")
+                if (
+                    task.task_id != task_id
+                    or task.project_id != context[0]
+                    or task.status != "awaiting_user_review"
+                    or type(previous_generation) is not int
+                    or task.generation < previous_generation
+                    or (task.generation == previous_generation and task != previous)
+                ):
+                    raise ProjectionError("invalid public mapping")
+                self._tasks_by_id[task.task_id] = task
+                self._invalidated_task_ids.discard(task.task_id)
+                self._update_preview_actions()
             elif kind == "preview_opened":
                 response = event["response"]
                 if type(context) is not tuple or len(context) != 3:

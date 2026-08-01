@@ -23861,3 +23861,188 @@ Accept/Reject behavior; no acceptance-tool stage intervenes.
 | MRG1-G1-C02-FIX-MODIFIED | support managed FreeCAD 1.1 document dirty-state API | pending C02 commit | real openDocument PASS; isTouched=False; focused and sol-max PASS | none | MRG1-S169 | product GREEN |
 | MRG1-G1-C02-FIX-DEPTH | admit legitimate bounded task response event | pending C02 commit | real depth10/event11/nodes236; depth11 replay PASS; depth13 reject PASS; sol-max GO | none | MRG1-S169 | product GREEN |
 | MRG1-G1-C02-E30 | close real C02 product path despite R5 observer false negative | pending exact commit/push | screenshot; task rejected generation10; checkouts closed/clean; daemon exit0; G1-G02 254 PASS | `MRG1-G1-C02-OBS-R1` non-blocking; durable evidence sealing deferred | MRG1-S169 | ready to stage |
+
+## 170. C02 pushed and G1-C03 product execution entry
+
+Recorded against pre-entry artifact SHA-256
+`ea09845a300830af743c18f296c09c06520ec7db64d628d195007512e0460771`.
+G1-C02 was committed as
+`928c60633b66a952b7061202c9ea913ed85e8ead` with the exact subject
+`feat(workbench): preview managed head and draft` and pushed to
+`https://github.com/wangtao9090/VibeCAD.git`, branch
+`codex/agent-stage3`. Local HEAD and upstream were equal at that identity.
+The user explicitly wrote `批准` after root named that exact commit, remote and
+branch. This authorization closes only the previously blocked external push;
+G1-C03 implementation continues under the already approved `MRG1-A04` and the
+standing direction to advance non-product-shape work autonomously.
+
+The current Codex adapter capability record is intentionally small:
+
+- `live capability declarations`: `update_plan`, `spawn_agent`,
+  `followup_task`, `send_message`, `wait_agent`, `exec_command` and
+  `write_stdin` are declared live. Selected profile is
+  `approval: native-plan`, `delegation: spawn-send-wait`,
+  `persistence: repo-artifact`, `process: native-session-poll` when a command
+  yields a session and otherwise one bounded blocking command.
+- `observable behavior`: the exact C02 push completed with exit zero; completed
+  agents can accept bounded follow-up work; local and upstream C02 identities
+  matched; no product process is running. This supports the selected adapter
+  without inducing a discovery side effect.
+- `environment identity`: Codex desktop controller; repository
+  `/Users/wangtao/Documents/DevProject/vibecad`; branch
+  `codex/agent-stage3`; anchor
+  `928c60633b66a952b7061202c9ea913ed85e8ead`.
+- `public configuration`: workspace-write is declared for the repository;
+  Git metadata writes and network egress remain subject to the live permission
+  model. The user's routing remains mechanical=`fast` -> terra/medium,
+  routine implementation=`standard` -> sol/high, and critical review=`deep`
+  -> sol/max.
+
+### G1-C03-P01 — fresh-authority review product packet
+
+1. **Authorization:** `MRG1-A04`, the approved G1-C03 contract and this
+   recovery entry authorize the existing fresh-authority Accept/Reject scope.
+   This packet inherits higher-priority instructions, the exact allowlist and
+   the current host permission model and sandbox; none of the skill, artifact
+   or packet expands permissions. Do not request the same approval again.
+2. **Workspace anchor:** use the repository, branch and C02 commit above. No
+   directory-scoped `AGENTS.md` or `CLAUDE.md` was observed. Modify only the
+   nine paths in the existing G1-C03 allowlist. Exclude `.workbuddy`, both
+   user-owned CAD course documents, runner/audit code, C04 selectors and
+   integration packaging.
+3. **Context:** C02 owns separate clean HEAD/draft previews and exact checkout
+   authority. C03 must make Accept and Reject user-operable only after a fresh
+   Task/checkout reread proves the latest `awaiting_user_review` generation and
+   both previews remain eligible. Reject is HEAD-neutral. An interrupted or
+   disconnected decision has unknown outcome and must be resolved from durable
+   Task/Project state, never by replaying the verdict.
+4. **Steps and gates:** inspect existing seams; add focused failing C03 tests
+   for fresh authority, dirty/stale/revoked disablement, known success and
+   unknown-outcome reread; implement the smallest state/gateway/Dock/preview
+   correction; run the focused C03 tests during development and one final
+   `FOCUSED-C03` gate on the settled candidate; obtain one distinct deep review;
+   run one exact staged G0 identity check; commit
+   `feat(workbench): accept or reject reviewed draft` and push immediately.
+5. **Execution discipline:** `spawn-send-wait`; routine code uses `standard`
+   mapped by user direction to sol/high, critical semantic review uses `deep`
+   mapped to sol/max, and the final mechanical gate uses `fast` mapped to
+   terra/medium. Reuse completed agent slots; do not create an A23 or any new
+   validation architecture. Stop on an unexpected RED, out-of-allowlist write,
+   product/UX expansion, ambiguous decision semantics or need for protocol
+   changes outside the approved contract.
+6. **Delivery boundary:** C03 ends only with the focused gate, distinct review,
+   exact stage, commit, push and recovery fact. Real installed-form FreeCAD E2E
+   belongs to G1-INTEGRATION; observer hardening remains non-blocking audit work.
+7. **Final report:** return changed behavior, exact paths, RED/GREEN evidence,
+   review findings, residuals, commit/push identities and clean workspace state.
+
+### MRG1-S170
+
+1. **Completed milestones:** G1-C02 committed and pushed at `928c606`; A22 is
+   terminal and no A23 is admitted; exact external-push authorization recorded.
+2. **Next steps:** execute `G1-C03-P01`; branch on focused expected RED ->
+   minimum implementation -> GREEN, unexpected RED -> stop, clean GREEN ->
+   deep review and exact stage/commit/push.
+3. **Approved decisions:** `MRG1-A04` for C03; C02 exact push authorized by the
+   user's `批准`; non-product process work remains autonomous inside the fixed
+   scope.
+4. **Execution discipline:** capability profile and adapter above; exact C03
+   allowlist; one final focused gate and one review; no runner work, A23,
+   product-shape change or excluded-file access.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C02-E31 | A04; exact user push approval | `928c60633b66a952b7061202c9ea913ed85e8ead`; pushed to `origin/codex/agent-stage3` | inherited G1-G02 254 PASS; local/upstream exact before C03 | `MRG1-G1-C02-OBS-R1` non-blocking | MRG1-S170 | completed / closed |
+| MRG1-G1-C03-P01 | A04; approved C03 product contract | not-created | focused RED/GREEN, deep review and exact stage gate pending | none observed at entry | MRG1-S170 | executing |
+
+## 171. G1-C03 fresh-authority review candidate closure
+
+Recorded against pre-closeout artifact SHA-256
+`8416998c29c6f23d9dacf2230d051cfa6167c29bd871dca65945210506ae1450`
+and source anchor `928c60633b66a952b7061202c9ea913ed85e8ead`.
+This entry closes implementation and review for `G1-C03-P01`; it creates no
+new acceptance-tool stage and does not reopen A22.
+
+The FreeCAD review Dock now exposes `Accept Draft` and `Reject Draft`, but both
+remain disabled until one refresh cycle combines a strict current Task detail
+projection with the existing fresh HEAD/draft checkout barrier. Malformed,
+terminal, identity-drifted or same-generation-conflicting Task detail removes
+the selected authority and cannot be resurrected by a later stale list page.
+The final Host dispatch still re-attests both local FreeCAD documents and file
+observations. Accept and Reject therefore share the same dual-preview authority;
+the public Dock review request path is not used.
+
+One click atomically consumes the UI authority and issues exactly one private
+review mutation. A known success causes exactly one strict Task reread and one
+strict Project reread. Accept is projected only when the Task generation has
+advanced to `succeeded`, its committed revision is the captured candidate and
+the Project head equals that candidate. Reject is projected only when the Task
+has advanced to `rejected`, has no committed revision and the Project head
+remains the captured base. The two submit-time preview identities are cleaned
+in frozen HEAD-then-draft order, independent of later GUI selection.
+
+An application/transport exception is terminal `Review outcome unknown`:
+there is no same-session confirmation read and no automatic replay. Both the
+no-effect and effect-then-response-loss cases prove mutation count one or less,
+replay zero and captured-preview cleanup. A new session must inspect durable
+Task/Project state before the user creates a new fresh barrier. This residual is
+inherent in the current protocol because review has no caller-persisted
+operation key; no Host or protocol expansion was admitted for C03.
+
+The distinct sol-max review found and closed two S1 races. First, a stale or
+wrong-context completion previously could retire a newer pending review and
+its previews; non-correlated completions now have zero state or cleanup effect.
+Second, a synchronous failure while discarding the first captured preview
+previously skipped the second; both are now attempted exactly once and any
+failure is projected only after both attempts, with recovery required and no
+mutation replay. The final sol-max verdict is GO with no remaining S0/S1.
+
+The first settled focused gate exposed four legacy-test/fixture mismatches
+after 265 passes: two still asserted the new buttons were absent, one reused a
+durably advanced fake for an independent error-delivery scenario, and one
+constructed an impossible candidate/draft identity. The product was not
+weakened. The fixtures were migrated to the real one-to-one draft invariant and
+strict Task detail, after which the affected set passed. The final mechanical
+release-candidate gate then ran once on the last product repair:
+`270 passed in 5.10s`; Ruff check, Ruff format check, `git diff --check` and the
+G1-C03 allowlist check all passed.
+
+The final modified product/test SHA-256 set is:
+
+```text
+dock.py                              9937cac2a3ccdd64ce9b51f98a0610660de8314d024f9c59466edd2896503f69
+state.py                             90efa44cda8a60e679e49f90eb8134bff06a0b15bde7d47602fc0ac7bcea11b3
+fake_host.py                         7f58b00d19aef16e52b63748c73944770f3dfd1447d330168451c27b2b0904a4
+test_freecad_workbench_controller.py 87942418160e86d9c1e845cb88392b609acac4d9a5dc9a9e4f2a4f164900e55d
+test_freecad_workbench_review.py     ea0d320f4e35139da8b639df91c42a52befa62263f79d0ff68dd0d2d702234ea
+```
+
+`gateway.py`, `preview.py` and `host.py` remain unchanged from the C02 anchor.
+The actual C03 change set is the artifact, `state.py`, `dock.py`, the truthful
+fake client, the migrated controller tests and the new focused review tests.
+`.workbuddy` and both user-owned CAD course documents remain excluded and
+untracked. The exact next action is to stage only those six paths, run a cached
+identity/diff check, commit `feat(workbench): accept or reject reviewed draft`,
+push `codex/agent-stage3`, and enter G1-INTEGRATION; no audit-tool work may
+intervene.
+
+### MRG1-S171
+
+1. **Completed milestones:** C03 fresh Task authority, dual-preview Accept and
+   Reject, durable known-success confirmation, terminal unknown/no-replay,
+   captured cleanup and both adversarial S1 repairs; final focused gate 270 and
+   sol-max GO.
+2. **Next steps:** exact six-path stage, cached identity gate, exact commit and
+   push, then G1-INTEGRATION/Alpha installed-form FreeCAD use.
+3. **Approved decisions:** `MRG1-A04` authorizes the C03 product contract; the
+   user's standing autonomous direction covers bounded repair, evidence, gate,
+   commit and push inside that contract.
+4. **Execution discipline:** no A23, runner, packet or protocol expansion; no
+   additional test loop after the cached staged identity check; excluded files
+   remain untouched.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C03-E01 | A04; fresh authority and one-shot private decision | pending exact C03 commit | focused RED/GREEN; known Accept/Reject durable confirmation | none | MRG1-S171 | product GREEN |
+| MRG1-G1-C03-R01 | deep adversarial review | included in pending C03 commit | stale-completion S1 and partial-cleanup S1 closed; final sol-max GO | no remaining S0/S1 | MRG1-S171 | closed |
+| MRG1-G1-C03-G01 | final mechanical release-candidate gate | included in pending C03 commit | 270 pytest PASS; Ruff/format/diff/allowlist PASS | unknown outcome requires new-session durable inspection; no replay | MRG1-S171 | ready to stage |

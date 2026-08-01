@@ -8,6 +8,8 @@ __all__ = (
     "TaskSummary",
     "TaskPage",
     "project_page_from_mapping",
+    "project_summary_from_detail_mapping",
+    "task_summary_from_detail_mapping",
     "task_page_from_mapping",
 )
 
@@ -17,6 +19,8 @@ _REVISION_ID = re.compile(r"revision_[0-9a-f]{32}")
 _TASK_ID = re.compile(r"task_[0-9a-f]{32}")
 _DRAFT_ID = re.compile(r"draft_[0-9a-f]{32}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+_VERIFICATION_ID = re.compile(r"verification_[0-9a-f]{32}")
+_ARTIFACT_ID = re.compile(r"artifact_[0-9a-f]{32}")
 _OUTER_KEYS = frozenset(("schema_version", "ok", "result", "error"))
 _PROJECT_RESULT_KEYS = frozenset(("schema_version", "projects", "next_cursor"))
 _PROJECT_KEYS = frozenset(
@@ -28,6 +32,20 @@ _PROJECT_KEYS = frozenset(
         "manifest_sha256",
     )
 )
+_PROJECT_DETAIL_RESULT_KEYS = frozenset(("schema_version", "project_id", "current"))
+_PROJECT_CURRENT_KEYS = frozenset(("head", "revision"))
+_REVISION_KEYS = frozenset(
+    (
+        "schema_version",
+        "id",
+        "project_id",
+        "base_revision",
+        "manifest_sha256",
+        "model",
+        "artifacts",
+    )
+)
+_ARTIFACT_KEYS = frozenset(("schema_version", "id", "name", "format", "sha256", "size_bytes"))
 _TASK_RESULT_KEYS = frozenset(("tasks", "next_cursor"))
 _TASK_KEYS = frozenset(
     (
@@ -42,6 +60,44 @@ _TASK_KEYS = frozenset(
         "candidate_revision",
         "committed_revision",
         "draft_id",
+    )
+)
+_TASK_DETAIL_RESULT_KEYS = frozenset(("generation", "next_action", "task_run"))
+_TASK_RUN_KEYS = frozenset(
+    (
+        "schema_version",
+        "id",
+        "project_id",
+        "base_revision",
+        "reasoning_owner",
+        "review_policy",
+        "status",
+        "creation_digest",
+        "program",
+        "candidate_revision",
+        "committed_revision",
+        "draft",
+        "steps",
+        "verification_reports",
+        "artifacts",
+        "last_error",
+        "transitions",
+    )
+)
+_DRAFT_KEYS = frozenset(
+    (
+        "schema_version",
+        "id",
+        "task_id",
+        "project_id",
+        "base_revision",
+        "base_generation",
+        "base_manifest_sha256",
+        "revision_id",
+        "manifest_sha256",
+        "verification_id",
+        "acceptance_id",
+        "observation_digest",
     )
 )
 
@@ -197,6 +253,51 @@ def project_page_from_mapping(mapping: object) -> ProjectPage:
     return ProjectPage(tuple(projects), _cursor(result["next_cursor"]))
 
 
+def _artifact(value: object) -> None:
+    artifact = _plain_dict(value, _ARTIFACT_KEYS)
+    _schema_version(artifact["schema_version"])
+    _identifier(artifact["id"], _ARTIFACT_ID)
+    _nonempty_string(artifact["name"])
+    _nonempty_string(artifact["format"])
+    _identifier(artifact["sha256"], _DIGEST)
+    _generation(artifact["size_bytes"])
+
+
+def project_summary_from_detail_mapping(mapping: object) -> ProjectSummary:
+    result = _plain_dict(_result_from_outer(mapping), _PROJECT_DETAIL_RESULT_KEYS)
+    _schema_version(result["schema_version"])
+    project_id = _identifier(result["project_id"], _PROJECT_ID)
+    current = _plain_dict(result["current"], _PROJECT_CURRENT_KEYS)
+    head = _plain_dict(current["head"], _PROJECT_KEYS)
+    revision = _plain_dict(current["revision"], _REVISION_KEYS)
+    _schema_version(head["schema_version"])
+    _schema_version(revision["schema_version"])
+    revision_id = _identifier(head["revision_id"], _REVISION_ID)
+    manifest = _identifier(head["manifest_sha256"], _DIGEST)
+    if (
+        _identifier(head["project_id"], _PROJECT_ID) != project_id
+        or _identifier(revision["id"], _REVISION_ID) != revision_id
+        or _identifier(revision["project_id"], _PROJECT_ID) != project_id
+        or _identifier(revision["manifest_sha256"], _DIGEST) != manifest
+    ):
+        _invalid()
+    base_revision = revision["base_revision"]
+    if base_revision is not None:
+        if _identifier(base_revision, _REVISION_ID) == revision_id:
+            _invalid()
+    model = revision["model"]
+    if model is not None:
+        _artifact(model)
+    for artifact in _plain_list(revision["artifacts"]):
+        _artifact(artifact)
+    return ProjectSummary(
+        project_id=project_id,
+        generation=_generation(head["generation"]),
+        revision_id=revision_id,
+        manifest_sha256=manifest,
+    )
+
+
 def task_page_from_mapping(mapping: object) -> TaskPage:
     result = _plain_dict(_result_from_outer(mapping), _TASK_RESULT_KEYS)
     records = _plain_list(result["tasks"])
@@ -230,3 +331,56 @@ def task_page_from_mapping(mapping: object) -> TaskPage:
         )
         previous_id = task_id
     return TaskPage(tuple(tasks), _cursor(result["next_cursor"]))
+
+
+def task_summary_from_detail_mapping(mapping: object) -> TaskSummary:
+    result = _plain_dict(_result_from_outer(mapping), _TASK_DETAIL_RESULT_KEYS)
+    record = _plain_dict(result["task_run"], _TASK_RUN_KEYS)
+    _schema_version(record["schema_version"])
+    task_id = _identifier(record["id"], _TASK_ID)
+    project_id = _identifier(record["project_id"], _PROJECT_ID)
+    base_revision = _identifier(record["base_revision"], _REVISION_ID)
+    candidate_revision = _optional_identifier(record["candidate_revision"], _REVISION_ID)
+    committed_revision = _optional_identifier(record["committed_revision"], _REVISION_ID)
+    creation_digest = record["creation_digest"]
+    if creation_digest is not None:
+        _identifier(creation_digest, _DIGEST)
+    if record["program"] is not None and type(record["program"]) is not dict:
+        _invalid()
+    for name in ("steps", "verification_reports", "artifacts", "transitions"):
+        _plain_list(record[name])
+    if record["last_error"] is not None and type(record["last_error"]) is not dict:
+        _invalid()
+    draft_id: str | None = None
+    if record["draft"] is not None:
+        draft = _plain_dict(record["draft"], _DRAFT_KEYS)
+        _schema_version(draft["schema_version"])
+        draft_id = _identifier(draft["id"], _DRAFT_ID)
+        draft_revision = _identifier(draft["revision_id"], _REVISION_ID)
+        if (
+            _identifier(draft["task_id"], _TASK_ID) != task_id
+            or _identifier(draft["project_id"], _PROJECT_ID) != project_id
+            or _identifier(draft["base_revision"], _REVISION_ID) != base_revision
+            or _generation(draft["base_generation"]) < 0
+            or _identifier(draft["base_manifest_sha256"], _DIGEST) == ""
+            or _identifier(draft["manifest_sha256"], _DIGEST) == ""
+            or _identifier(draft["verification_id"], _VERIFICATION_ID) == ""
+            or _nonempty_string(draft["acceptance_id"]) == ""
+            or _identifier(draft["observation_digest"], _DIGEST) == ""
+            or candidate_revision != draft_revision
+            or draft_id != f"draft_{draft_revision.removeprefix('revision_')}"
+        ):
+            _invalid()
+    return TaskSummary(
+        task_id=task_id,
+        project_id=project_id,
+        generation=_generation(result["generation"]),
+        base_revision=base_revision,
+        reasoning_owner=_nonempty_string(record["reasoning_owner"]),
+        review_policy=_nonempty_string(record["review_policy"]),
+        status=_nonempty_string(record["status"]),
+        next_action=_nonempty_string(result["next_action"]),
+        candidate_revision=candidate_revision,
+        committed_revision=committed_revision,
+        draft_id=draft_id,
+    )
