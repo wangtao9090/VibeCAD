@@ -4,7 +4,7 @@
 >
 > Updated: 2026-08-01
 >
-> Repository baseline: `codex/agent-stage3@a4e5ab2`
+> Repository anchor: `codex/agent-stage3@b43b23c`
 >
 > This is the only mutable orchestration plan. Earlier campaign files are
 > frozen historical records or future reference contracts; do not append
@@ -33,7 +33,7 @@ G1 is complete when all of the following are true:
 - The Workbench already provides lifecycle, Preview, and Accept/Reject against the authenticated local kernel.
 - Managed installed-form Alpha is anchored at `83879b6`; repository-first and product-first docs at `656b27f` and `ebc29d9`.
 - The dual-host product decision is recorded at `a4e5ab2`.
-- C04 selector capture is accepted by the commit containing this record; user-FreeCAD adoption, a real dual-host outcome, and documentation truth remain open.
+- C04 selector capture is accepted at `b43b23c`; the external bridge pilot is accepted at `91207b1`; user-host selector/review completion and documentation truth remain open.
 - The topology review found an in-process `vibecad.daemon` import, while VibeCAD requires Python 3.12+ and the FreeCAD 1.1.3 pilot embeds Python 3.11.14. Installing the complete VibeCAD package there is not the pilot design.
 
 ## 3. Approved decisions and authority
@@ -47,9 +47,9 @@ The user approved this reset and execution order on 2026-08-01:
 5. defer P1 breadth until the complete G1 user outcome is demonstrated.
 
 This approval settles the sequence and bridge direction. The later instructions
-to execute and continue the plan authorize the G1-01 implementation and its
-non-force publication. They do not authorize an unplanned live addon write or
-material change to transport/support policy.
+to execute and continue autonomously authorize the approved G1 slices, their
+bounded live pilot effects, and non-force publication. Reopen approval only for
+a blocker or an unplanned product/transport/support-policy change.
 
 Selected orchestration controls:
 
@@ -95,7 +95,7 @@ Gate: **GREEN** — the diff is consistent, the prior campaign records are froze
 
 ### G1-01 — Managed C04 selector outcome
 
-State: **accepted by the commit containing this record**.
+State: **accepted and pushed at `b43b23c`**.
 
 Implement the already approved C04 contract:
 
@@ -146,6 +146,8 @@ integration tests rather than a new end-to-end GUI scenario.
 
 ### G1-02 — Single-host external-bridge pilot
 
+State: **accepted at `91207b1`**.
+
 Keep the Workbench self-contained in FreeCAD's Python/PySide environment. Run daemon-client/bootstrap logic in an external Python 3.12+ VibeCAD process over a bounded protocol.
 
 The pilot must provide:
@@ -159,10 +161,76 @@ The pilot must provide:
 Outcome gate:
 
 1. focused bridge/discovery/install contract tests pass;
-2. FreeCAD 1.1.3 connects to the authenticated daemon and uses project/task/preview/review without kernel authority;
+2. FreeCAD 1.1.3 connects to the authenticated daemon and the installed bridge
+   carries the existing project/task/preview/review method set without kernel
+   authority; the non-empty product outcome remains G1-03;
 3. install/uninstall recovery is observed and one managed-mode regression remains green.
 
-Before a live addon write, resolve the target and use the host permission boundary. If the bridge requires copying the full runtime or weakening authentication, stop for a new architecture decision and retain managed-only fallback.
+Fixed pilot contract:
+
+- admit only an explicit absolute `.app` bundle whose exact observed metadata is the
+  observed macOS FreeCAD `1.1.3`, embedded CPython `3.11`, and PySide6 `6.8.3`;
+- keep the existing Workbench gateway, Preview, review, and checkout authority
+  state machines inside FreeCAD, but proxy only the `LocalAgentClient` methods
+  through one exact managed-Python `3.12+` child;
+- use a versioned, bounded, length-prefixed canonical-JSON stdio protocol with
+  an exact hello/ready handshake, monotonically increasing request ids, a closed
+  method allowlist, fixed error codes, and one child per Workbench session;
+- bind the child to the verified managed runtime executable and current VibeCAD
+  package version; the addon receives no daemon receipt or secret and performs
+  no direct Kernel connection;
+- install only under the current user's FreeCAD `Mod/VibeCAD` directory from an
+  exact payload allowlist, with a receipt binding host, bridge, hashes, and
+  target; refuse an unknown existing tree, mutated owned payload, or mismatched
+  uninstall request;
+- keep `vibecad --freecad` unchanged as the managed fallback. The user-host CLI
+  surface is exact: `--freecad-app <absolute.app>` plus one of `--doctor`,
+  `--install-addon`, or `--uninstall-addon`; no `PATH` discovery is permitted.
+
+Implemented result:
+
+- the installed addon remains self-contained under FreeCAD's Python 3.11 and
+  proxies only the closed `LocalAgentClient` surface through one managed Python
+  3.12 child; persistent configuration contains executable identity, not daemon
+  credentials;
+- the child protocol has bounded canonical JSON frames, hello/ready nonce
+  binding, monotonic request ids, fixed methods/errors, process retirement, and
+  an environment allowlist;
+- the doctor admits only the explicit observed 1.1.3/Python 3.11/PySide6 6.8.3
+  bundle and records a stable fingerprint; no bundle execution or `PATH`
+  discovery occurs during diagnosis;
+- per-user installation is staged and atomic, binds host/payload/bridge hashes
+  in an ownership receipt, supports same- and cross-package upgrades, and
+  refuses foreign or mutated trees during upgrade or uninstall;
+- the managed interpreter entry symlink, its canonical target, and target hash
+  are bound separately so daemon bootstrap remains strict rather than admitting
+  a resolved-but-unrecognized executable spelling.
+
+Evidence admitted for this slice:
+
+1. the settled bridge/install/launcher/Workbench/selector focus is `367 passed`;
+2. scoped Ruff, format, and `git diff --check` are GREEN;
+3. installed-form doctor admitted only `/Applications/FreeCAD.app` 1.1.3 and
+   produced host fingerprint
+   `ddfe5d97ceef9dfc93cdde01571207486416ad722e99fb588b29fe4059cb050c`;
+4. the live installed addon completed bridge hello/ready, authenticated daemon
+   ping, and project/task listing; the final bridge ping returned `ready`;
+5. the real user FreeCAD GUI activated `VibeCADWorkbench`, reached one active
+   connected Dock, and its process group was reaped after observation;
+6. verified uninstall removed only the owned addon, and reinstall restored the
+   exact final receipt
+   `b8b92de7c1d79d516edf34c50c0250e3631c9e5ab435c921c7a89778cf42e5f2`.
+
+The observed app has an invalid macOS code signature and some critical bundle
+files are group-writable. The exact user-selected, user/root-owned,
+non-world-writable bundle is therefore admitted only as this fingerprinted
+local pilot, not as a general trust or compatibility claim. Missing
+3DconnexionNavlib produced a non-blocking host warning during GUI startup.
+
+The pilot data store contained zero projects and tasks. G1-02 therefore proves
+the installed transport, lifecycle, list path, and reversible ownership, while
+the non-empty user-host Preview/Accept-or-Reject outcome remains the explicit
+G1-03 closeout gate rather than being inferred from this observation.
 
 ### G1-03 — Product closeout and truth alignment
 
@@ -190,22 +258,25 @@ diagnostic explanation does not block an otherwise established outcome.
 
 ## 7. Recovery and exact next action
 
-Recovery anchor: the commit containing this record, based on
-`codex/agent-stage3@a4e5ab2`. Preserve the pre-existing untracked `.workbuddy/`
-and both CAD course documents. On resume, inspect only state and inputs that may
-have changed.
+Recovery anchor: `codex/agent-stage3@91207b1`. Preserve the pre-existing
+untracked `.workbuddy/` and both CAD course documents. On resume, inspect only
+state and inputs that may have changed.
 
-Exact next action after G1-01:
+Exact next action in G1-03:
 
-> Begin G1-02 with a read-only fixation of the small external bridge protocol,
-> executable identity, compatibility boundary, and reversible install ownership
-> before any live addon write.
+> Close the one known user-host gap: external FreeCAD cannot import the managed
+> selector backend. Add the smallest bounded selector-authority path that keeps
+> exact construction/unique resolution in managed code, then run one isolated
+> non-empty user-host Preview plus Accept or Reject observation. After product
+> behavior settles, align the five public capability documents and their
+> existing contract tests; do not add another GUI harness or validation runner.
 
-Material residuals entering G1-02:
+Material residuals entering G1-03:
 
-- the external bridge wire protocol and executable identity are not yet fixed;
-- only one macOS FreeCAD 1.1.3 pilot target has local evidence;
-- no live user addon installation has been performed under this plan;
+- only one fingerprinted macOS FreeCAD 1.1.3 pilot target has local evidence;
+- external FreeCAD selection currently fails closed because the managed
+  selector backend is intentionally absent from the thin addon;
+- no non-empty user-host Preview/Accept-or-Reject observation has yet been run;
 - public docs still contain stale pre-G1 statements to correct at G1-03.
 
 Additional residual after G1-01:
