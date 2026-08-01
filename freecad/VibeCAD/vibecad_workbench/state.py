@@ -85,6 +85,32 @@ class TaskPage:
     next_cursor: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class PreviewProjection:
+    head_open: bool
+    draft_open: bool
+    review_eligible: bool
+    recovery_required: bool
+
+
+def _preview_projection(
+    *,
+    head_open: bool,
+    draft_open: bool,
+    requested_eligible: bool,
+    recovery_required: bool,
+) -> PreviewProjection:
+    head = head_open is True
+    draft = draft_open is True
+    recovery = recovery_required is True
+    return PreviewProjection(
+        head_open=head,
+        draft_open=draft,
+        review_eligible=requested_eligible is True and head and draft and not recovery,
+        recovery_required=recovery,
+    )
+
+
 def _invalid() -> None:
     raise ProjectionError("invalid public mapping")
 

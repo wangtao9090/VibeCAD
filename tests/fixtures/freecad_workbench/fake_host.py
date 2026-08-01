@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import queue
+import tempfile
 import threading
 import time
+from pathlib import Path
 from types import ModuleType
 
 _MAIN_THREAD_ID = threading.get_ident()
@@ -68,6 +71,56 @@ def make_fake_freecad_gui(
     )
 
 
+class FakeDocument:
+    def __init__(self, name: str, local_path: str, events: list[str]) -> None:
+        self.Name = name
+        self.FileName = local_path
+        self.Modified = False
+        self._events = events
+
+
+class FakeFreeCAD(ModuleType):
+    def __init__(self, *, events: list[str] | None = None) -> None:
+        super().__init__("FreeCAD")
+        self.events = [] if events is None else events
+        self.documents: dict[str, FakeDocument] = {}
+        self.opened_paths: list[str] = []
+        self.close_failures = 0
+        self._next_document_index: int | None = None
+
+    def openDocument(self, local_path: str) -> FakeDocument:
+        _require_main_thread()
+        self.events.append("document.open")
+        self.opened_paths.append(local_path)
+        if self._next_document_index is None:
+            self._next_document_index = len(self.documents) + 1
+        name = f"VibeCADPreview{self._next_document_index}"
+        self._next_document_index += 1
+        document = FakeDocument(name, local_path, self.events)
+        self.documents[name] = document
+        return document
+
+    def getDocument(self, name: str) -> FakeDocument | None:
+        _require_main_thread()
+        return self.documents.get(name)
+
+    def listDocuments(self) -> dict[str, FakeDocument]:
+        _require_main_thread()
+        return dict(self.documents)
+
+    def closeDocument(self, name: str) -> None:
+        _require_main_thread()
+        self.events.append("document.close")
+        if self.close_failures:
+            self.close_failures -= 1
+            raise RuntimeError("synthetic document close failure")
+        self.documents.pop(name, None)
+
+
+def make_fake_freecad(*, events: list[str] | None = None) -> FakeFreeCAD:
+    return FakeFreeCAD(events=events)
+
+
 class FakeMainWindow:
     def __init__(self, *, fail_first_add: bool = False) -> None:
         self._qt_children: list[object] = []
@@ -100,16 +153,51 @@ class FakeMainWindow:
 
 
 class FakeLocalAgentClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        events: list[str] | None = None,
+        monotonic_preview_authorities: bool = False,
+        draft_project_by_task_id: dict[str, str] | None = None,
+        materialized_checkout_root: Path | None = None,
+        materialized_model_bytes: bytes = b"VibeCAD materialized model\n",
+    ) -> None:
         self.daemon_id = "daemon_" + "a" * 32
         self.calls: list[tuple[str, dict[str, object], int]] = []
+        self.events = [] if events is None else events
+        self.monotonic_preview_authorities = monotonic_preview_authorities is True
+        self.draft_project_by_task_id = (
+            {} if draft_project_by_task_id is None else dict(draft_project_by_task_id)
+        )
+        self._materialized_checkout_tmp: tempfile.TemporaryDirectory[str] | None = None
+        if materialized_checkout_root is None:
+            self._materialized_checkout_tmp = tempfile.TemporaryDirectory(
+                prefix="vibecad-fake-checkouts-"
+            )
+            self.materialized_checkout_root = Path(self._materialized_checkout_tmp.name).resolve()
+        else:
+            self.materialized_checkout_root = materialized_checkout_root.resolve()
+        self.materialized_model_bytes = bytes(materialized_model_bytes)
         self.created_thread_id = threading.get_ident()
         self.closed_thread_id: int | None = None
         self.close_call_count = 0
         self.review_failure = False
+        self.review_entered: threading.Event | None = None
+        self.review_release: threading.Event | None = None
         self.last_tasks_response: dict[str, object] | None = None
         self.projects_response: dict[str, object] | None = None
         self.tasks_response: dict[str, object] | None = None
+        self.checkout_close_failures = 0
+        self.checkout_close_responses: list[dict[str, object]] = []
+        self.client_close_failures = 0
+        self.claim_file_grant_failures = 0
+        self.open_checkout_entered: threading.Event | None = None
+        self.open_checkout_release: threading.Event | None = None
+        self.open_checkout_transform: object | None = None
+        self.checkout_descriptors: dict[str, dict[str, object]] = {}
+        self.checkout_paths: dict[str, Path] = {}
+        self._next_preview_authority = 6
+        self._preview_grant_claims: dict[str, dict[str, object]] = {}
 
     def _record(self, name: str, request: dict[str, object]) -> None:
         if threading.get_ident() != self.created_thread_id:
@@ -174,19 +262,194 @@ class FakeLocalAgentClient:
 
     def accept_draft_request(self, request: dict[str, object]) -> dict[str, object]:
         self._record("accept_draft", request)
+        if self.review_entered is not None:
+            self.review_entered.set()
+        if self.review_release is not None and not self.review_release.wait(1.0):
+            raise RuntimeError("synthetic review release deadline exceeded")
         if self.review_failure:
             raise RuntimeError("synthetic uncertain review")
         return {"schema_version": 1, "ok": True, "result": {}, "error": None}
 
     def reject_draft_request(self, request: dict[str, object]) -> dict[str, object]:
         self._record("reject_draft", request)
+        if self.review_entered is not None:
+            self.review_entered.set()
+        if self.review_release is not None and not self.review_release.wait(1.0):
+            raise RuntimeError("synthetic review release deadline exceeded")
         return {"schema_version": 1, "ok": True, "result": {}, "error": None}
+
+    def open_checkout(
+        self,
+        *,
+        open_key: str,
+        source: dict[str, object],
+    ) -> dict[str, object]:
+        self._record("open_checkout", {"open_key": open_key, "source": source})
+        if self.open_checkout_entered is not None:
+            self.open_checkout_entered.set()
+        if self.open_checkout_release is not None and not self.open_checkout_release.wait(1.0):
+            raise RuntimeError("synthetic preview-open release deadline exceeded")
+        if self.monotonic_preview_authorities:
+            authority = self._next_preview_authority
+            self._next_preview_authority += 1
+            identifier = f"{authority:032x}"
+        else:
+            digit = "6" if source["kind"] == "head" else "7"
+            identifier = digit * 32
+        checkout_id = "checkout_" + identifier
+        grant_id = "file_grant_" + identifier
+        path = (self.materialized_checkout_root / checkout_id / "model.FCStd").resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(self.materialized_model_bytes)
+        self.checkout_paths[checkout_id] = path
+        local_path = str(path)
+        model_digest = hashlib.sha256(self.materialized_model_bytes).hexdigest()
+        size = len(self.materialized_model_bytes)
+        if source["kind"] == "head":
+            resolved_project_id = source["project_id"]
+        else:
+            task_id = source.get("task_id")
+            resolved_project_id = self.draft_project_by_task_id.get(
+                task_id if type(task_id) is str else "",
+                "project_" + "1" * 32,
+            )
+        head_revision_id = "revision_" + "1" * 32
+        candidate_revision_id = "revision_" + "4" * 32
+        tasks_response = self.last_tasks_response
+        task_records: object = None
+        if type(tasks_response) is dict:
+            result = tasks_response.get("result")
+            if type(result) is dict:
+                task_records = result.get("tasks")
+        if type(task_records) is list:
+            for task in task_records:
+                if type(task) is not dict:
+                    continue
+                matches = (
+                    source["kind"] == "draft"
+                    and task.get("task_id") == source.get("task_id")
+                    or source["kind"] == "head"
+                    and task.get("project_id") == source.get("project_id")
+                    and task.get("status") == "awaiting_user_review"
+                )
+                if not matches:
+                    continue
+                base_revision = task.get("base_revision")
+                candidate_revision = task.get("candidate_revision")
+                if type(base_revision) is str:
+                    head_revision_id = base_revision
+                if source["kind"] == "draft" and type(candidate_revision) is str:
+                    candidate_revision_id = candidate_revision
+                break
+        head_manifest_digest = head_revision_id.removeprefix("revision_") * 2
+        if source["kind"] == "head":
+            resolved_revision_id = head_revision_id
+            resolved_manifest_digest = head_manifest_digest
+        else:
+            resolved_revision_id = candidate_revision_id
+            resolved_manifest_digest = candidate_revision_id.removeprefix("revision_") * 2
+        resolved_source = {
+            "kind": source["kind"],
+            "project_id": resolved_project_id,
+            "revision_id": resolved_revision_id,
+            "manifest_sha256": resolved_manifest_digest,
+            "model_sha256": model_digest,
+            "size_bytes": size,
+            "task_id": source.get("task_id"),
+            "draft_id": source.get("draft_id"),
+            "task_generation": source.get("expected_generation"),
+        }
+        response = {
+            "checkout_id": checkout_id,
+            "open_key": open_key,
+            "state": "open",
+            "authoritative": False,
+            "dirty": False,
+            "source": resolved_source,
+            "initial_model_sha256": model_digest,
+            "current_model_sha256": model_digest,
+            "current_size_bytes": size,
+            "source_head": {
+                "schema_version": 1,
+                "project_id": resolved_project_id,
+                "generation": 2,
+                "revision_id": head_revision_id,
+                "manifest_sha256": head_manifest_digest,
+            },
+            "source_liveness": "live",
+            "file_grant": {
+                "schema_version": 1,
+                "grant_id": grant_id,
+                "purpose": "open_managed_checkout",
+                "expires_in_ms": 30_000,
+            },
+        }
+        self._preview_grant_claims[grant_id] = {
+            "schema_version": 1,
+            "grant_id": grant_id,
+            "checkout_id": checkout_id,
+            "purpose": "open_managed_checkout",
+            "local_path": local_path,
+            "current_model_sha256": model_digest,
+            "current_size_bytes": size,
+        }
+        transform = self.open_checkout_transform
+        if callable(transform):
+            response = transform(response)
+        if type(response) is dict and type(response.get("checkout_id")) is str:
+            descriptor = dict(response)
+            descriptor.pop("file_grant", None)
+            self.checkout_descriptors[response["checkout_id"]] = descriptor
+        return response
+
+    def claim_file_grant(self, *, grant_id: str) -> dict[str, object]:
+        self._record("claim_file_grant", {"grant_id": grant_id})
+        if self.claim_file_grant_failures:
+            self.claim_file_grant_failures -= 1
+            raise RuntimeError("synthetic file grant claim failure")
+        retained = self._preview_grant_claims.get(grant_id)
+        if retained is not None:
+            return dict(retained)
+        digit = grant_id[-1]
+        checkout_id = "checkout_" + digit * 32
+        return {
+            "schema_version": 1,
+            "grant_id": grant_id,
+            "checkout_id": checkout_id,
+            "purpose": "open_managed_checkout",
+            "local_path": f"/managed/checkouts/{checkout_id}/model.FCStd",
+            "current_model_sha256": digit * 64,
+            "current_size_bytes": 23,
+        }
+
+    def close_checkout(self, *, checkout_id: str) -> dict[str, object]:
+        self._record("close_checkout", {"checkout_id": checkout_id})
+        if self.checkout_close_failures:
+            self.checkout_close_failures -= 1
+            raise RuntimeError("synthetic checkout close failure")
+        if self.checkout_close_responses:
+            return self.checkout_close_responses.pop(0)
+        self.events.append(f"checkout.close:{checkout_id}")
+        descriptor = dict(self.checkout_descriptors[checkout_id])
+        descriptor["state"] = "closed"
+        return descriptor
+
+    def get_checkout(self, *, checkout_id: str) -> dict[str, object]:
+        self._record("get_checkout", {"checkout_id": checkout_id})
+        return dict(self.checkout_descriptors[checkout_id])
 
     def close(self) -> None:
         if threading.get_ident() != self.created_thread_id:
             raise RuntimeError("fake client thread authority violation")
         self.close_call_count += 1
+        if self.client_close_failures:
+            self.client_close_failures -= 1
+            raise RuntimeError("synthetic client close failure")
         self.closed_thread_id = threading.get_ident()
+        self.events.append("client.close")
+        if self._materialized_checkout_tmp is not None:
+            self._materialized_checkout_tmp.cleanup()
+            self._materialized_checkout_tmp = None
 
 
 def _fake_task(digit: str, *, status: str) -> dict[str, object]:
@@ -422,10 +685,16 @@ class _QPushButton(_Widget):
     def __init__(self, text: str, parent: object) -> None:
         super().__init__(parent)
         self.text = text
+        self.enabled = True
+
+    def setEnabled(self, enabled: bool) -> None:
+        _require_main_thread()
+        self.enabled = enabled is True
 
     def click(self) -> None:
         _require_main_thread()
-        self.clicked.emit()
+        if self.enabled:
+            self.clicked.emit()
 
 
 class _ConnectionType:
@@ -498,3 +767,96 @@ def pump_main_events(
         except queue.Empty:
             continue
         slot(*args)
+
+
+def _take_owned_main_event(owner: object) -> tuple[object, tuple[object, ...]] | None:
+    with _MAIN_EVENTS.mutex:
+        for index, item in enumerate(_MAIN_EVENTS.queue):
+            slot, _args = item
+            if getattr(slot, "__self__", None) is owner:
+                del _MAIN_EVENTS.queue[index]
+                return item
+    return None
+
+
+def _discard_owned_main_events(owner: object) -> None:
+    while _take_owned_main_event(owner) is not None:
+        pass
+
+
+def settle_workbench_events(
+    session: object,
+    predicate: object,
+    *,
+    maximum_rounds: int = 16,
+) -> None:
+    """Cross each worker/main FIFO boundary without a multi-hop wall-clock race."""
+    if not callable(predicate) or type(maximum_rounds) is not int or maximum_rounds <= 0:
+        raise TypeError("invalid fake Qt settlement request")
+    thread = getattr(session, "thread", None)
+    if thread is None:
+        raise AssertionError("fake Qt session has no worker thread")
+    for _round in range(maximum_rounds):
+        if predicate():
+            return
+        if thread.isRunning():
+            if getattr(session, "_retirement_authorized", False):
+                thread.join()
+            else:
+                settled = threading.Event()
+                thread.post(settled.set, ())
+                if not settled.wait(1.0):
+                    raise AssertionError("fake Qt worker barrier deadline exceeded")
+        progressed = False
+        while True:
+            item = _take_owned_main_event(session)
+            if item is None:
+                break
+            progressed = True
+            slot, args = item
+            slot(*args)
+            if predicate():
+                return
+        if not thread.isRunning() and not progressed:
+            break
+    raise AssertionError("fake Qt lifecycle did not settle")
+
+
+def _release_fake_client_waits(session: object) -> None:
+    worker = getattr(session, "worker", None)
+    gateway = getattr(worker, "gateway", None)
+    client = getattr(gateway, "_client", None)
+    for name in ("open_checkout_release", "review_release"):
+        release = getattr(client, name, None)
+        if isinstance(release, threading.Event):
+            release.set()
+
+
+def force_cleanup_workbench(host: object, freecad: FakeFreeCAD) -> None:
+    """Retire only the fake session owned by one failure-injection test."""
+    session = getattr(host, "_session", None)
+    if session is None:
+        freecad.documents.clear()
+        return
+    thread = getattr(session, "thread", None)
+    if thread is not None and thread.isRunning():
+        if getattr(session, "_close_request_id", None) is None:
+            session._queue_partial_close()
+        try:
+            settle_workbench_events(
+                session,
+                lambda: getattr(host, "_session", None) is None,
+            )
+        except AssertionError:
+            _release_fake_client_waits(session)
+            thread.quit()
+            thread.join()
+    if thread is not None and thread.isRunning():
+        raise AssertionError("fake Qt worker thread did not retire")
+    _discard_owned_main_events(session)
+    if getattr(host, "_session", None) is session:
+        session._detach_dock()
+        session.lifecycle = "inactive"
+        session._thread_retired = True
+        host._session = None
+    freecad.documents.clear()
