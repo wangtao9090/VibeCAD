@@ -703,8 +703,8 @@ class RuntimeInstaller:
         """Force one reviewed same-version wheel into the default managed env.
 
         This internal release-maintenance seam is deliberately separate from
-        ordinary install/ensure behavior.  It is not a public Agent operation,
-        and its controller must retire the local Kernel before invoking it.
+        ordinary install/ensure behavior. It retires the local Kernel under the
+        same maintenance claim before replacing a mismatched server package.
         """
 
         with status.runtime_maintenance_lock():
@@ -783,6 +783,17 @@ class RuntimeInstaller:
                                 "运行时就绪（已安装精确 server wheel）",
                             )
                             return
+
+                        from vibecad.daemon.bootstrap import retire_local_kernel
+
+                        if (
+                            retire_local_kernel(
+                                reason="incompatible_build",
+                                _maintenance_held=True,
+                            )
+                            is not True
+                        ):
+                            raise InstallError("local Kernel did not retire before server refresh")
 
                         status.revoke_current_managed_runtime_receipt(prefix, evidence)
                         receipt_revoked = True

@@ -24046,3 +24046,188 @@ intervene.
 | MRG1-G1-C03-E01 | A04; fresh authority and one-shot private decision | pending exact C03 commit | focused RED/GREEN; known Accept/Reject durable confirmation | none | MRG1-S171 | product GREEN |
 | MRG1-G1-C03-R01 | deep adversarial review | included in pending C03 commit | stale-completion S1 and partial-cleanup S1 closed; final sol-max GO | no remaining S0/S1 | MRG1-S171 | closed |
 | MRG1-G1-C03-G01 | final mechanical release-candidate gate | included in pending C03 commit | 270 pytest PASS; Ruff/format/diff/allowlist PASS | unknown outcome requires new-session durable inspection; no replay | MRG1-S171 | ready to stage |
+
+## 172. C03 pushed and product-first G1 Alpha integration entry
+
+G1-C03 was committed as
+`10583c7f3817d95e0a70aaebc19818b0c9a9bd37` with exact subject
+`feat(workbench): accept or reject reviewed draft` and pushed to
+`https://github.com/wangtao9090/VibeCAD.git`, branch
+`codex/agent-stage3`. Local HEAD and upstream are equal. The user explicitly
+authorized that push and added the standing direction:
+
+> 批准将提交 10583c7f3817d95e0a70aaebc19818b0c9a9bd37 推送至 以后提交代码不要让我审批了
+
+This standing authorization applies to routine exact-scope code commits and
+pushes in the already approved G1 campaign. It does not expand product shape,
+external credentials, release/tag/PR, destructive actions or excluded paths;
+it removes repeated user approval from ordinary staging, commit and push.
+
+The current adapter profile remains deliberately small:
+
+- `live capability declarations`: native plan update, bounded command
+  execution/session wait and spawn/follow-up/wait delegation are declared.
+- `observable behavior`: the exact C03 push completed exit zero; local and
+  upstream identities match; the three existing agents accepted bounded
+  read-only follow-ups; no product or GUI process was started.
+- `environment identity`: Codex desktop, repository
+  `/Users/wangtao/Documents/DevProject/vibecad`, branch
+  `codex/agent-stage3`, anchor `10583c7f3817d95e0a70aaebc19818b0c9a9bd37`.
+- `public configuration`: repository workspace-write is available; network
+  and Git metadata writes remain permission-controlled. No permission is
+  inferred for normal FreeCAD profiles, excluded files or release actions.
+
+### G1-INTEGRATION-P01 — product-only Alpha packet
+
+The single objective is a user-installable Alpha that launches the packaged
+VibeCAD workbench with `vibecad --freecad` through the existing managed
+FreeCAD runtime. This packet contains no acceptance runner, audit framework,
+scenario registry, packet controller, A23/A24 stage or generalized process
+orchestration. Any such idea is recorded as a deferred residual and is not
+implemented.
+
+The approved Integration allowlist remains exactly Section 98.5: this
+artifact, `pyproject.toml`, both README files, `src/vibecad/launcher.py`, new
+`src/vibecad/freecad_launcher.py`, launcher/package tests, and the one named
+G1 E2E fixture/test. `uv.lock`, runtime installer/status/path sources, the
+FreeCAD addon sources, protocol/API/schema, C04 selectors, `.workbuddy` and
+both user-owned CAD course documents are read-only or excluded.
+
+Implementation is bounded to these product facts:
+
+1. exact CLI dispatch never sends a malformed `--freecad` request to the MCP
+   Supervisor;
+2. wheel and sdist contain the complete checked-in `freecad/VibeCAD` tree at
+   one stable package resource path without duplicating its source;
+3. launch uses only the canonical managed prefix, current runtime receipt,
+   prefix-contained GUI executable, isolated private FreeCAD profile and the
+   packaged addon module path; there is no PATH/system FreeCAD or user `Mod`
+   fallback;
+4. the existing installer may establish a missing managed runtime, but this
+   packet adds no download, repair or update mechanism;
+5. the launcher owns one GUI child through exit, forwards termination and
+   mirrors its result; failure is nonzero and never falls back to server.
+
+Execution cadence is hard-capped: one genuine focused RED, small targeted
+GREEN checks while coding, one settled `FOCUSED-INTEGRATION`, one read-only
+sol-max semantic review, one installed-form real Alpha run and one `FULL-1`.
+An unchanged RED is never retried. A changed candidate may rerun only the
+affected check before the final settled gate. Any coding agent with no source
+write for roughly two minutes is interrupted and narrowed or replaced by the
+controller. Tests and evidence may not grow into a standalone product.
+
+The exact commit subject remains
+`feat(freecad): add deterministic G1 launch and acceptance`. The first manual
+milestone is preview plus Accept/Reject in installed form; C04 selector
+capture remains the next product commit and cannot delay this Alpha.
+
+### MRG1-S172
+
+1. **Completed milestones:** C02 and C03 are committed and pushed; C03 final
+   gate 270 and sol-max GO; local/upstream equal at `10583c7`.
+2. **Next steps:** produce one focused Integration RED, implement only the
+   five product facts above, settle one focused gate/review, then perform one
+   installed-form real Alpha and one full non-slow gate before exact commit
+   and autonomous push.
+3. **Approved decisions:** A04, A13-D01..D09, A13-R1-D05/D06 and the user's
+   standing no-repeat commit/push approval are active. Product-shape change,
+   release, MR1, second CAD and C04 remain outside this packet.
+4. **Execution discipline:** `native-plan`, `spawn-send-wait`,
+   `repo-artifact`, `native-session-poll`; routine code sol/high, mechanical
+   terra/medium, critical review sol/max; one writer, read-only parallel
+   review; exact allowlist and product-first hard cap; no runner growth.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-C03-E02 | A04; exact push approval | `10583c7f3817d95e0a70aaebc19818b0c9a9bd37`; pushed | final C03 270; sol-max GO; local/upstream equal | same-session unknown requires durable restart inspection | MRG1-S172 | completed / closed |
+| MRG1-G1-INTEGRATION-P01 | A13 product-first Alpha; standing commit/push autonomy | not-created | read-only gap inventory complete; focused RED pending | no selector claim before C04 | MRG1-S172 | executing |
+
+## 173. Installed-form FreeCAD Alpha GREEN without runner growth
+
+Integration remained product-only. No runner, controller, scenario registry,
+evidence root, A23/A24 packet or new subagent loop was created. The delivered
+surface is the packaged addon, exact `vibecad --freecad` dispatch, managed GUI
+launcher, local-wheel/runtime synchronization and bilingual README contract.
+
+The genuine installed-form run exposed one real packaging boundary that unit
+fixtures could not prove. The current addon came from the newly built wheel,
+while the managed FreeCAD interpreter still imported an older same-version
+`vibecad` server package. Workbench activation reached
+`pending_starting_w1_c0_h1`, and its daemon could not complete the current
+bootstrap. The correction uses the existing reviewed same-version wheel seam:
+
+1. a direct local wheel installation resolves and hashes its immutable
+   `direct_url.json` artifact;
+2. before GUI launch, the managed environment is compared/refreshed from that
+   exact wheel with `--no-index --force-reinstall --no-deps`;
+3. a mismatched live Kernel is authenticatedly retired under the same runtime
+   maintenance claim before package replacement; and
+4. an exact match remains an idempotent fast path.
+
+This required a narrow factual expansion beyond Section 172: only
+`src/vibecad/runtime/installer.py` and its existing same-version refresh test
+were added to the product allowlist. Three old release-document/unit assertions
+were also updated because they still required README to say the Workbench was
+undelivered or omitted the already-required authenticated uninstall retirement.
+No API, protocol, addon behavior, selector scope or second-CAD shape changed.
+
+The corrected installed-form run printed the three expected managed-runtime
+phases (refresh, verification, ready), launched managed FreeCAD 1.1.0, and
+produced the exact ready marker `VibeCADWorkbench`. The live census contained
+exactly one launcher, one managed FreeCAD GUI and one managed Python daemon.
+The optional missing `3DconnexionNavlib` warning was non-fatal. The launcher
+then returned 143 for an exact SIGTERM. The intentionally reusable daemon was
+removed after the diagnostic through `retire_local_kernel`, which returned
+`True`; there was no process residue.
+
+That real close also showed that FreeCAD ignores forwarded SIGINT. The launcher
+now maps terminal Ctrl-C to child SIGTERM while preserving shell exit 130 for
+the caller. The affected signal test is GREEN. The GUI was not relaunched only
+to repeat this mechanical signal mapping, in accordance with the product-first
+test cap.
+
+Final evidence on the settled source is:
+
+```text
+FOCUSED-INTEGRATION  112 passed in 7.96s
+Ruff / format / diff PASS
+FULL-1 sandbox       5463 passed, 110 deselected; 46 failed, 3 errors
+README contract FIX  2 passed in 0.15s
+uninstall seam FIX   1 passed in 0.76s
+socket attribution   representative Darwin peer test PASS in 0.17s outside sandbox
+```
+
+The FULL-1 nonpasses are not concealed: after the three stale assertions were
+fixed, the remaining cluster requires Darwin Unix-domain socket `bind`, which
+the workspace sandbox rejected with `Operation not permitted`. One exact
+representative failed in the sandbox and passed unchanged under authorized
+execution. FULL-1 was not repeated. Focused product/installer/package coverage
+is fully GREEN.
+
+The final locally installable artifact is
+`dist/vibecad-0.6.0-py3-none-any.whl`, size about 649 KiB, SHA-256
+`2b344dac2a29998a242896ac7d2d21261b57843cbde1aba407f046eaf9923b9d`.
+For a direct local Alpha installation that wheel must remain at the recorded
+path so subsequent launches can re-attest the same artifact. Published immutable
+index installations do not depend on this local-artifact path.
+
+### MRG1-S173
+
+1. **Completed milestones:** packaged addon/CLI, exact managed runtime launch,
+   same-wheel server synchronization, real FreeCAD 1.1.0 Workbench/daemon
+   activation, shell signal semantics, bilingual Alpha documentation and final
+   local wheel.
+2. **Next steps:** exact stage, commit and autonomous push of this Integration
+   candidate; then start C04 whole-object/feature selector capture. No runner
+   work may intervene.
+3. **Approved decisions:** A13 product-first Alpha and standing autonomous
+   repair/commit/push authority cover this direct blocker correction. There is
+   no product-shape expansion.
+4. **Execution discipline:** no live agents; no further full-suite or GUI loop;
+   exclude `.workbuddy` and both user-owned CAD course documents; stage only
+   named product, documentation and contract-test paths.
+
+| Entry ID | Decision / approval | Commit / push | Gate evidence | Residual | Snapshot | State |
+|---|---|---|---|---|---|---|
+| MRG1-G1-INTEGRATION-E01 | A13; product-only installed Alpha | pending exact Integration commit | real 1/1/1 process chain; exact ready marker; focused 112 | local direct-install wheel must remain addressable | MRG1-S173 | product GREEN / stage next |
+| MRG1-G1-INTEGRATION-G01 | standing autonomous gates | pending | FULL-1 5463 pass; sandbox socket cluster classified by unchanged authorized PASS | full suite not repeated outside sandbox | MRG1-S173 | bounded gate accepted |

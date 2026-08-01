@@ -117,6 +117,30 @@ exists, it directly returns two ResourceLinks. Otherwise it returns `materialize
 without creating, copying, or cleaning any delivery file; only then should
 `export_task_artifacts` be called.
 
+## FreeCAD Workbench Alpha
+
+The local G1 Alpha packages the VibeCAD Workbench and adds one explicit desktop entrypoint:
+
+```bash
+uv build --wheel
+uv tool install --force dist/vibecad-0.6.0-py3-none-any.whl
+vibecad --freecad
+```
+
+Keep that locally built wheel at the same path while using this local Alpha. Each launch binds the
+managed server package to that exact artifact; an already matching runtime takes the idempotent
+fast path.
+
+You do not need to install a system copy of FreeCAD. The command accepts only VibeCAD's verified
+managed runtime, installs that runtime on the first launch when it is missing, and never searches
+`PATH`, `/Applications`, or the normal FreeCAD `Mod` directory. The Workbench itself is loaded
+from the installed VibeCAD wheel into a fresh private FreeCAD profile.
+
+In this Alpha, the Dock can list projects and tasks, refresh the selected state, open separate
+managed HEAD and draft preview documents, show the review verdict, and Accept or Reject a fresh
+draft. Whole-object and feature selector capture is the next G1 slice; face/edge subelement
+selection is not claimed yet.
+
 ## Installation: The MCP Service and Agent Skill Are Separate
 
 The current MCPB product declaration covers only the verified macOS (Darwin) path. Installing
@@ -134,8 +158,9 @@ Skill discovery paths are:
 
 The release asset `vibecad-agent-skill-0.6.0.zip` contains exactly one top-level
 `vibecad-agent/` directory after extraction. That directory can be copied as a whole to any path
-listed above. The Python wheel and managed runtime contain only the server side; they neither
-contain nor activate the Skill.
+listed above. The Python wheel contains the server and the FreeCAD Workbench addon, while the
+managed runtime contains the matching server environment. Neither package activates the Agent
+Skill.
 
 On first launch, the extension needs network access to fetch locked Python packages and, when
 needed, install approximately 2–3 GB of FreeCAD runtime files. Later launches reuse the verified
@@ -188,19 +213,18 @@ has not been tagged or published. The remaining order is G1 → P0-B hardening �
 - **P0-B core (backend complete)**: task/project/version discovery, file-level comparison,
   verified forward revert, cancellation/reconcile, authenticated daemon, file grants, source
   liveness, and the managed killable FreeCAD Worker all enter the same Task Kernel;
-- **G1**: preview, verdict, Accept/Reject, and object/feature selection in a real FreeCAD Qt
-  Workbench UI;
+- **G1 (Alpha available, selectors next)**: preview, verdict, and Accept/Reject are available in
+  the real FreeCAD Qt Workbench UI; object/feature selector capture remains the next slice;
 - **P1/G2**: Sketcher/PartDesign, controlled import, single-part production capability, and
   manual checkpoints;
 - **P2**: assemblies, BOM, TechDraw, manufacturing release, and enterprise delivery chains.
 
-The G1 Workbench (the real FreeCAD Qt UI) has not been delivered as a complete product surface.
-Its local C01 bootstrap/lifecycle slice now passes the real managed-FreeCAD M00 gate: exactly one
-Workbench and Dock, daemon-backed refresh, asynchronous client/thread shutdown, physical Dock
-removal, and clean daemon retirement. The released primary path remains managed Agent/headless
-execution until later G1 slices add and verify preview/verdict, Accept/Reject, object/feature
-selection, and full Workbench interaction. Face/edge selection, STEP/STL import, photo
-reconstruction, and simulation are also not currently supported.
+The first G1 Workbench Alpha now packages the real FreeCAD Qt UI and its deterministic managed
+launcher. It includes one Workbench and Dock, daemon-backed refresh, separate HEAD/draft preview,
+verdict, Accept/Reject, and asynchronous client/thread shutdown. The daemon is a reusable managed
+background service; update and uninstall retire it through the authenticated maintenance path.
+G1 is not complete until object/feature selector capture lands. Face/edge selection, STEP/STL
+import, photo reconstruction, and simulation are also not currently supported.
 
 Further reading in the source repository:
 [User Guide](https://github.com/wangtao9090/VibeCAD/blob/main/docs/USER_GUIDE.md),

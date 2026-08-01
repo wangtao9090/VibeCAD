@@ -485,12 +485,16 @@ def test_release_documents_project_the_0_6_backend_truth():
         assert "task kernel" in normalized, path
 
     english_readme = documents["README.md"]
-    assert "has not been delivered" in english_readme
-    assert "g1 workbench has been delivered" not in english_readme
-    assert "qt ui has been delivered" not in english_readme
+    assert "freecad workbench alpha" in english_readme
+    assert "g1 is not complete" in english_readme
+    assert "object/feature selector capture" in english_readme
+
+    chinese_readme = documents["README.zh-CN.md"]
+    assert "freecad workbench alpha" in chinese_readme
+    assert "g1 仍不算全部结束" in chinese_readme
+    assert "object/feature selector 捕获" in chinese_readme
 
     for path in (
-        "README.zh-CN.md",
         "docs/ARCHITECTURE.md",
         "docs/AGENT_ARCHITECTURE.md",
         "docs/PRODUCT_CAPABILITY_ROADMAP.md",

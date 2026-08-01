@@ -88,6 +88,8 @@ def test_owned_runner_latch_replaces_timer_for_production_swap(monkeypatch) -> N
 
 
 def test_confirmed_uninstall_closes_application_and_uses_exception_swap(monkeypatch) -> None:
+    from vibecad.daemon import bootstrap
+
     class Slot:
         close_calls = 0
 
@@ -96,7 +98,13 @@ def test_confirmed_uninstall_closes_application_and_uses_exception_swap(monkeypa
             return True
 
     slot = Slot()
+    retirements = []
     monkeypatch.setattr(server, "_application_slot", slot)
+    monkeypatch.setattr(
+        bootstrap,
+        "retire_local_kernel",
+        lambda **kwargs: (retirements.append(kwargs), True)[1],
+    )
     monkeypatch.setattr(
         server._uninstall,
         "preview_uninstall",
@@ -125,6 +133,7 @@ def test_confirmed_uninstall_closes_application_and_uses_exception_swap(monkeypa
         "message": "The managed CAD runtime is marked for removal; durable data is preserved.",
     }
     assert slot.close_calls == 1
+    assert retirements == [{"reason": "runtime_uninstall"}]
     assert swap_arguments == [True]
 
 

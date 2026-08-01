@@ -3,11 +3,12 @@
 原三态判断（已在 conda / ready re-exec / bootstrap）随 Round 11 C 分支迁入
 supervisor._server_cmd，等价单元测试见 tests/test_supervisor.py（判据不变）。
 """
+
 import types
 
 import pytest
 
-from vibecad import launcher
+from vibecad import freecad_launcher, launcher
 
 
 @pytest.fixture(autouse=True)
@@ -20,10 +21,14 @@ def sup_stub(monkeypatch):
             state["calls"].append("supervisor.run")
             return state["code"]
 
-    monkeypatch.setattr(launcher, "supervisor", types.SimpleNamespace(
-        Supervisor=_FakeSupervisor,
-        run_pending_uninstall=lambda: state["calls"].append("run_pending_uninstall"),
-    ))
+    monkeypatch.setattr(
+        launcher,
+        "supervisor",
+        types.SimpleNamespace(
+            Supervisor=_FakeSupervisor,
+            run_pending_uninstall=lambda: state["calls"].append("run_pending_uninstall"),
+        ),
+    )
     return state
 
 
@@ -62,6 +67,56 @@ def test_main_runs_pending_uninstall_before_supervisor(monkeypatch, sup_stub):
     assert sup_stub["calls"] == ["run_pending_uninstall", "supervisor.run"]
 
 
+# --- packaged FreeCAD GUI entrypoint (G1 Integration) ---
+
+
+def test_freecad_flag_dispatches_exactly_once_without_starting_server(
+    monkeypatch,
+    sup_stub,
+):
+    calls = []
+    monkeypatch.setattr(
+        freecad_launcher,
+        "launch",
+        lambda: calls.append("freecad.launch") or 7,
+    )
+    monkeypatch.setattr(launcher.sys, "argv", ["vibecad", "--freecad"])
+
+    with pytest.raises(SystemExit) as exc:
+        launcher.main()
+
+    assert exc.value.code == 7
+    assert calls == ["freecad.launch"]
+    assert sup_stub["calls"] == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--freecad", "extra"],
+        ["--uninstall", "--freecad"],
+        ["--freecad", "--yes"],
+    ],
+)
+def test_malformed_freecad_request_fails_without_fallback(
+    monkeypatch,
+    sup_stub,
+    arguments,
+):
+    monkeypatch.setattr(launcher.sys, "argv", ["vibecad", *arguments])
+    monkeypatch.setattr(
+        launcher.uninstall,
+        "uninstall_now",
+        lambda: pytest.fail("malformed --freecad must fail before uninstall"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        launcher.main()
+
+    assert exc.value.code == 2
+    assert sup_stub["calls"] == []
+
+
 # --- --uninstall CLI 分支（Task 4 Step 4） ---
 
 
@@ -72,6 +127,7 @@ def test_uninstall_flag_calls_uninstall_now_and_exits(monkeypatch, sup_stub, cap
     def _fake_uninstall_now():
         called["called"] = True
         return {"ok": True}
+
     monkeypatch.setattr(launcher.uninstall, "uninstall_now", _fake_uninstall_now)
 
     launcher.main()
@@ -87,6 +143,7 @@ def test_uninstall_yes_skips_tty_prompt(monkeypatch):
 
     def _boom(*a, **kw):
         raise AssertionError("--yes 时不应询问确认")
+
     monkeypatch.setattr("builtins.input", _boom)
     monkeypatch.setattr(launcher.uninstall, "uninstall_now", lambda: {"ok": True})
 
@@ -100,12 +157,14 @@ def test_uninstall_non_tty_skips_prompt(monkeypatch):
 
     def _boom(*a, **kw):
         raise AssertionError("非 TTY 不应调用 input")
+
     monkeypatch.setattr("builtins.input", _boom)
     called = {}
 
     def _fake_uninstall_now():
         called["called"] = True
         return {"ok": True}
+
     monkeypatch.setattr(launcher.uninstall, "uninstall_now", _fake_uninstall_now)
 
     launcher.main()
@@ -119,7 +178,8 @@ def test_uninstall_tty_prompt_declined_cancels(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda prompt="": "n")
     called = {}
     monkeypatch.setattr(
-        launcher.uninstall, "uninstall_now",
+        launcher.uninstall,
+        "uninstall_now",
         lambda: called.setdefault("called", True),
     )
 
@@ -138,6 +198,7 @@ def test_uninstall_tty_prompt_accepted(monkeypatch):
     def _fake_uninstall_now():
         called["called"] = True
         return {"ok": True}
+
     monkeypatch.setattr(launcher.uninstall, "uninstall_now", _fake_uninstall_now)
 
     launcher.main()
@@ -152,10 +213,12 @@ def test_uninstall_tty_eof_treated_as_cancel(monkeypatch, capsys):
 
     def _eof(prompt=""):
         raise EOFError
+
     monkeypatch.setattr("builtins.input", _eof)
     called = {}
     monkeypatch.setattr(
-        launcher.uninstall, "uninstall_now",
+        launcher.uninstall,
+        "uninstall_now",
         lambda: called.setdefault("called", True),
     )
 
@@ -169,7 +232,8 @@ def test_uninstall_failure_exits_nonzero(monkeypatch):
     """护栏拒删等 ok:false 结果应以非零退出码结束，供脚本化调用方判断。"""
     monkeypatch.setattr(launcher.sys, "argv", ["vibecad", "--uninstall", "--yes"])
     monkeypatch.setattr(
-        launcher.uninstall, "uninstall_now",
+        launcher.uninstall,
+        "uninstall_now",
         lambda: {"ok": False, "message": "目录不含 VibeCAD 安装产物，拒绝删除"},
     )
 

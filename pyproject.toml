@@ -42,9 +42,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/vibecad"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"freecad/VibeCAD" = "vibecad/_freecad/VibeCAD"
+
 [tool.hatch.build.targets.sdist]
 include = [
     "/src/vibecad",
+    "/freecad/VibeCAD",
     "/skills/vibecad-agent",
     "/README.md",
     "/LICENSE",

@@ -708,6 +708,15 @@ def test_same_version_server_refresh_forces_exact_wheel_before_receipt_commit(
     monkeypatch.setattr(inst.status, "engine_compatible", lambda candidate: candidate == python)
     monkeypatch.setattr(inst.status, "verify_runtime", lambda candidate: candidate == python)
     calls = []
+    retirements = []
+
+    from vibecad.daemon import bootstrap
+
+    monkeypatch.setattr(
+        bootstrap,
+        "retire_local_kernel",
+        lambda **kwargs: (retirements.append(kwargs), True)[1],
+    )
 
     def install_final(command, **_kwargs):
         calls.append(command)
@@ -742,6 +751,7 @@ def test_same_version_server_refresh_forces_exact_wheel_before_receipt_commit(
         prefix_before.st_ino,
     )
     assert len(calls) == 1
+    assert retirements == [{"reason": "incompatible_build", "_maintenance_held": True}]
     command = calls[0]
     assert command[1:6] == ["run", "-r", "../..", "-p", "./"]
     assert command[6:11] == ["python", "-B", "-m", "pip", "install"]

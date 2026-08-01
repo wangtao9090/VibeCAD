@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import ast
+import subprocess
+import sys
+import tarfile
 import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -11,6 +15,10 @@ _EXPECTED_FILES = {
     "InitGui.py",
     "package.xml",
     "vibecad_workbench/__init__.py",
+    "vibecad_workbench/dock.py",
+    "vibecad_workbench/gateway.py",
+    "vibecad_workbench/host.py",
+    "vibecad_workbench/preview.py",
     "vibecad_workbench/state.py",
 }
 
@@ -29,10 +37,49 @@ def test_classic_addon_layout_is_complete() -> None:
     files = {
         path.relative_to(_ADDON_ROOT).as_posix()
         for path in _ADDON_ROOT.rglob("*")
-        if path.is_file()
+        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
     }
 
-    assert _EXPECTED_FILES <= files
+    assert files == _EXPECTED_FILES
+
+
+def test_wheel_and_sdist_contain_the_complete_addon(tmp_path: Path) -> None:
+    output = tmp_path / "dist"
+    for target in ("wheel", "sdist"):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "hatchling",
+                "build",
+                "-t",
+                target,
+                "-d",
+                str(output),
+            ],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+    (wheel,) = output.glob("*.whl")
+    (sdist,) = output.glob("*.tar.gz")
+
+    with zipfile.ZipFile(wheel) as archive:
+        packaged = {
+            name.removeprefix("vibecad/_freecad/VibeCAD/")
+            for name in archive.namelist()
+            if name.startswith("vibecad/_freecad/VibeCAD/") and not name.endswith("/")
+        }
+    assert packaged == _EXPECTED_FILES
+
+    with tarfile.open(sdist, "r:gz") as archive:
+        source = {
+            "/".join(name.split("/freecad/VibeCAD/", 1)[1:])
+            for name in archive.getnames()
+            if "/freecad/VibeCAD/" in name and not name.endswith("/")
+        }
+    assert source == _EXPECTED_FILES
 
 
 def test_package_xml_declares_local_vibecad_workbench() -> None:

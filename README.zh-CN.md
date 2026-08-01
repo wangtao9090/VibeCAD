@@ -97,6 +97,27 @@ request，不是持久任务取消。
 直接返回两个 ResourceLink；否则返回 `materialized=false`，且不会创建、复制或清理任何交付文件，
 此时才调用 `export_task_artifacts`。
 
+## FreeCAD Workbench Alpha
+
+本地 G1 Alpha 已把 VibeCAD Workbench 打进安装包，并提供一个明确的桌面入口：
+
+```bash
+uv build --wheel
+uv tool install --force dist/vibecad-0.6.0-py3-none-any.whl
+vibecad --freecad
+```
+
+使用这个本地 Alpha 期间，请保留上述 wheel 及其原路径。每次启动都会把受管服务端绑定到该精确制品；
+运行时已经匹配时只走幂等快速路径。
+
+无需另行安装系统版 FreeCAD。该命令只接受 VibeCAD 已验证的受管运行时；首次缺失时由现有安装器
+建立运行时，绝不会从 `PATH`、`/Applications` 或普通 FreeCAD `Mod` 目录寻找后备版本。Workbench
+直接从已安装的 VibeCAD wheel 加载，并使用每次启动新建的私有 FreeCAD 配置。
+
+本 Alpha 的 Dock 可以列出项目和任务、刷新所选状态、打开相互独立的受管 HEAD 与草案预览文档、
+展示审核结论，并对新鲜草案执行 Accept 或 Reject。完整对象和 feature selector 捕获是下一段 G1
+工作；当前尚不宣称 face/edge 子元素选择能力。
+
 ## 安装：MCP 服务与 Agent Skill 是两件事
 
 当前 MCPB 产品声明只覆盖经过验证的 macOS（Darwin）路径。安装 `VibeCAD.mcpb` 会安装 MCP 服务，
@@ -112,7 +133,8 @@ Skill 的发现路径如下：
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
 
 发布资产中的 `vibecad-agent-skill-0.6.0.zip` 解压后只有一个顶层 `vibecad-agent/` 目录，可整体复制
-到上述任一路径。Python wheel 和受管运行时只包含服务端，不包含或激活 Skill。
+到上述任一路径。Python wheel 包含服务端和 FreeCAD Workbench 插件，受管运行时包含匹配的服务端
+环境；两者都不会自动激活 Agent Skill。
 
 扩展首次启动需要联网获取锁定的 Python 包，并按需安装约 2–3 GB 的 FreeCAD 运行时；后续启动复用
 已验证缓存。macOS 默认数据根通常是：
@@ -158,15 +180,16 @@ G1 → P0-B hardening → P1/G2 → P2：
 
 - **P0-B core（后端完成）**：任务/项目/版本发现、文件级比较、verified forward revert、取消/reconcile、
   认证 daemon、file grant、source liveness 与受管可终止 FreeCAD Worker 都进入同一 Task Kernel；
-- **G1**：真实 FreeCAD Qt Workbench UI 中的 preview、verdict、Accept/Reject 与 object/feature selection；
+- **G1（Alpha 可用，selector 下一步）**：真实 FreeCAD Qt Workbench UI 已具备 preview、verdict 与
+  Accept/Reject；object/feature selector 捕获是下一段工作；
 - **P1/G2**：Sketcher/PartDesign、受控导入、单零件生产能力和手工 checkpoint；
 - **P2**：装配、BOM、TechDraw、制造发布与企业交付链。
 
-G1 Workbench 尚未交付完整产品能力（真实 FreeCAD Qt UI）；本地 C01 bootstrap/lifecycle 纵切现已通过
-真实 managed-FreeCAD M00 门禁：恰好一个 Workbench 与 Dock、daemon-backed refresh、异步
-client/thread shutdown、物理 Dock 移除及 daemon clean retirement 均已验证。在后续 G1 切片补齐并验证
-preview/verdict、Accept/Reject、object/feature selection 与完整 Workbench 交互前，已发布主路径仍是受管
-Agent/headless 执行。当前也不支持 face/edge 选择、STEP/STL import、照片重建或 simulation。
+首个 G1 Workbench Alpha 现已把真实 FreeCAD Qt UI 与确定性的受管启动器打入安装包。它具备恰好一个
+Workbench 与 Dock、daemon-backed refresh、相互独立的 HEAD/草案预览、verdict、Accept/Reject、
+异步 client/thread shutdown。daemon 是可复用的受管后台服务，更新与卸载会通过认证维护路径将其退休。
+object/feature selector 捕获完成前，G1 仍不算全部结束；当前也不支持 face/edge 选择、STEP/STL import、
+照片重建或 simulation。
 
 进一步阅读（源代码仓库）：
 [用户手册](https://github.com/wangtao9090/VibeCAD/blob/main/docs/USER_GUIDE.md)、

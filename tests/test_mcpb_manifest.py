@@ -215,7 +215,8 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
         "G1",
         "P1",
         "P2",
-        "The G1 Workbench (the real FreeCAD Qt UI) has not been delivered",
+        "FreeCAD Workbench Alpha",
+        "Whole-object and feature selector capture is the next G1 slice",
         "STEP/STL import, reverse engineering, and simulation are not yet integrated",
         "unpublished candidate",
     ):
@@ -240,7 +241,8 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
         "G1",
         "P1",
         "P2",
-        "G1 Workbench 尚未交付",
+        "FreeCAD Workbench Alpha",
+        "完整对象和 feature selector 捕获是下一段 G1 工作",
         "STEP/STL 导入、逆向工程和仿真 尚未接入",
         "未发布候选",
     ):
