@@ -127,6 +127,46 @@ def test_capture_without_feature_metadata_yields_whole_object_selector(
     assert captured.selector.feature_id is None
 
 
+def test_external_identity_request_contains_only_raw_managed_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selection = _load_selection(monkeypatch)
+    document = object()
+    first = _ManagedObject(document, object_id="object_" + "3" * 32, feature_id=None)
+    selected = _ManagedObject(document)
+
+    request = selection.selector_identity_request(
+        selected_object=selected,
+        document_objects=(first, selected),
+        project_id=_PROJECT,
+        revision_id=_REVISION,
+        subelements=(),
+    )
+
+    assert request == {
+        "schema_version": 1,
+        "project_id": _PROJECT,
+        "revision_id": _REVISION,
+        "selected_index": 1,
+        "objects": [
+            {
+                "object_id": "object_" + "3" * 32,
+                "feature_id": "",
+                "object_type": "Part::Box",
+                "semantic_role": "primitive",
+                "provenance": first.VibeCADProvenance,
+            },
+            {
+                "object_id": _OBJECT,
+                "feature_id": _FEATURE,
+                "object_type": "Part::Box",
+                "semantic_role": "primitive",
+                "provenance": selected.VibeCADProvenance,
+            },
+        ],
+    }
+
+
 @pytest.mark.parametrize("subelement", ["Face1", "Edge2", "Vertex3"])
 def test_capture_rejects_every_subelement(
     monkeypatch: pytest.MonkeyPatch,
@@ -277,5 +317,95 @@ def test_managed_host_visibly_rejects_face_and_untracked_document(
         assert dock.selector_status_label.text == "Selection unavailable"
         assert dock.selector_value_label.text == ""
         assert dock.copy_selector_button.enabled is False
+    finally:
+        force_cleanup_workbench(host, freecad)
+
+
+def test_external_host_resolves_selector_on_existing_private_worker_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_pyside = install_fake_pyside()
+    monkeypatch.setitem(sys.modules, "PySide", fake_pyside)
+    monkeypatch.setitem(sys.modules, "PySide.QtCore", fake_pyside.QtCore)
+    monkeypatch.setitem(sys.modules, "PySide.QtWidgets", fake_pyside.QtWidgets)
+    freecad = make_fake_freecad()
+    freecad_gui = make_fake_freecad_gui()
+    monkeypatch.setitem(sys.modules, "FreeCAD", freecad)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", freecad_gui)
+    monkeypatch.syspath_prepend(str(_ADDON_ROOT))
+    _clear_workbench_modules(monkeypatch)
+    gateway = importlib.import_module("vibecad_workbench.gateway")
+    clients: list[FakeLocalAgentClient] = []
+    original_gateway = gateway.KernelGateway
+
+    class _ExternalSelectorClient(FakeLocalAgentClient):
+        def resolve_selector_request(self, request: dict[str, object]) -> dict[str, object]:
+            self._record("resolve_selector", request)
+            selected = request["objects"][request["selected_index"]]
+            selector = {
+                "schema_version": 1,
+                "project_id": request["project_id"],
+                "revision_id": request["revision_id"],
+                "entity_kind": "feature",
+                "object_id": selected["object_id"],
+                "feature_id": selected["feature_id"],
+                "object_type": selected["object_type"],
+                "semantic_role": selected["semantic_role"],
+                "provenance": json.loads(selected["provenance"]),
+                "expected_cardinality": 1,
+            }
+            return {
+                "schema_version": 1,
+                "selector": selector,
+                "text": json.dumps(
+                    selector,
+                    allow_nan=False,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            }
+
+    def make_client() -> FakeLocalAgentClient:
+        client = _ExternalSelectorClient()
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(gateway, "KernelGateway", lambda: original_gateway(make_client))
+    host = importlib.import_module("vibecad_workbench.host")
+
+    def unavailable(**_kwargs: object) -> object:
+        raise host.SelectionCaptureError("selector_backend_unavailable")
+
+    monkeypatch.setattr(host, "capture_managed_selector", unavailable)
+    host.activate_workbench()
+    try:
+        pump_main_events(
+            lambda: (
+                bool(freecad_gui.main_window.docks)
+                and bool(freecad_gui.main_window.docks[0].task_selector.items)
+            )
+        )
+        dock = freecad_gui.main_window.docks[0]
+        dock.open_draft_button.click()
+        pump_main_events(lambda: len(freecad.documents) == 1)
+        session = host._session
+        assert session is not None
+        assert session.preview is not None
+        checkout_id = dock._preview_checkouts["draft"]
+        document = session.preview.binding_for_checkout(checkout_id).document
+        selected = _ManagedObject(document)
+        document.Objects.append(selected)
+
+        freecad_gui.Selection.setSelection(selected)
+        pump_main_events(lambda: dock.selector_status_label.text == "Selector ready")
+
+        mapping = json.loads(dock.selector_value_label.text)
+        assert mapping["project_id"] == _PROJECT
+        assert mapping["revision_id"] == _REVISION
+        assert mapping["object_id"] == _OBJECT
+        assert mapping["feature_id"] == _FEATURE
+        assert [name for name, _, _ in clients[0].calls].count("resolve_selector") == 1
+        assert clients[0].created_thread_id != session.main_thread_id
     finally:
         force_cleanup_workbench(host, freecad)

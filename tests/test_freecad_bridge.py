@@ -185,6 +185,88 @@ def test_bridge_rejects_unknown_method_without_dispatch() -> None:
     assert client.calls == [("close", {})]
 
 
+def test_bridge_resolves_raw_identity_inventory_with_managed_selector_core() -> None:
+    nonce = "f" * 32
+    client = _Client()
+    request = {
+        "schema_version": 1,
+        "project_id": "project_" + "1" * 32,
+        "revision_id": "revision_" + "2" * 32,
+        "selected_index": 1,
+        "objects": [
+            {
+                "object_id": "object_" + "3" * 32,
+                "feature_id": None,
+                "object_type": "Part::Feature",
+                "semantic_role": "part",
+                "provenance": '{"operation_id":null,"source":"system"}',
+            },
+            {
+                "object_id": "object_" + "4" * 32,
+                "feature_id": "feature_" + "5" * 32,
+                "object_type": "Part::Box",
+                "semantic_role": "primitive",
+                "provenance": '{"operation_id":"box","source":"model"}',
+            },
+        ],
+    }
+    source = io.BytesIO(
+        _frame(
+            {
+                "schema_version": 1,
+                "kind": "ready",
+                "protocol": "vibecad-freecad-bridge",
+                "protocol_version": 1,
+                "nonce": nonce,
+            }
+        )
+        + _frame(
+            {
+                "schema_version": 1,
+                "kind": "request",
+                "request_id": 1,
+                "method": "resolve_selector",
+                "params": {"request": request},
+            }
+        )
+        + _frame(
+            {
+                "schema_version": 1,
+                "kind": "request",
+                "request_id": 2,
+                "method": "close",
+                "params": {},
+            }
+        )
+    )
+    target = io.BytesIO()
+
+    assert (
+        freecad_bridge.serve_bridge(
+            source,
+            target,
+            client_factory=lambda: client,
+            nonce_factory=lambda: nonce,
+        )
+        == 0
+    )
+
+    response = _frames(target)[2]
+    assert response["ok"] is True
+    result = response["result"]
+    assert result["schema_version"] == 1
+    assert result["selector"]["entity_kind"] == "feature"
+    assert result["selector"]["object_id"] == "object_" + "4" * 32
+    assert result["selector"]["feature_id"] == "feature_" + "5" * 32
+    assert result["text"] == json.dumps(
+        result["selector"],
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def test_bridge_frame_rejects_duplicate_keys_and_oversize() -> None:
     duplicate = b'{"schema_version":1,"schema_version":1}'
     with pytest.raises(freecad_bridge.BridgeProtocolError):

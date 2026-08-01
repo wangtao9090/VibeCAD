@@ -16,6 +16,7 @@ _MAX_KEY = 128
 _MAX_CONTAINER = 1000
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _PROJECT_ID_PREFIX = "project_"
+_REVISION_ID_PREFIX = "revision_"
 _TASK_ID_PREFIX = "task_"
 _DRAFT_ID_PREFIX = "draft_"
 _CHECKOUT_ID_PREFIX = "checkout_"
@@ -35,7 +36,7 @@ _PUBLIC_COMMAND_KINDS = frozenset(
         "preview_refresh",
     )
 )
-_RESTRICTED_COMMAND_KINDS = frozenset(("preview_close", "review", "close"))
+_RESTRICTED_COMMAND_KINDS = frozenset(("preview_close", "review", "selector_resolve", "close"))
 _ERROR_CODES = frozenset(
     (
         "invalid_input",
@@ -74,6 +75,7 @@ _COMMAND_KEYS = {
             "expected_generation",
         )
     ),
+    "selector_resolve": frozenset(("schema_version", "request_id", "kind", "request")),
     "close": frozenset(("schema_version", "request_id", "kind")),
 }
 
@@ -235,6 +237,41 @@ def _preview_source(value: object) -> None:
     raise _invalid_command()
 
 
+def _selector_request(value: object) -> None:
+    if type(value) is not dict or set(value) != {
+        "schema_version",
+        "project_id",
+        "revision_id",
+        "selected_index",
+        "objects",
+    }:
+        raise _invalid_command()
+    objects = value["objects"]
+    selected_index = value["selected_index"]
+    if (
+        value["schema_version"] != 1
+        or type(objects) is not list
+        or not 0 < len(objects) <= _MAX_CONTAINER
+        or type(selected_index) is not int
+        or not 0 <= selected_index < len(objects)
+    ):
+        raise _invalid_command()
+    _identifier(value["project_id"], _PROJECT_ID_PREFIX)
+    _identifier(value["revision_id"], _REVISION_ID_PREFIX)
+    keys = {"object_id", "feature_id", "object_type", "semantic_role", "provenance"}
+    for item in objects:
+        if type(item) is not dict or set(item) != keys:
+            raise _invalid_command()
+        if (
+            type(item["object_id"]) is not str
+            or (item["feature_id"] is not None and type(item["feature_id"]) is not str)
+            or type(item["object_type"]) is not str
+            or type(item["semantic_role"]) is not str
+            or type(item["provenance"]) is not str
+        ):
+            raise _invalid_command()
+
+
 def _validate_command(command: object) -> dict[str, object]:
     copied = _detach(command)
     if type(copied) is not dict:
@@ -269,6 +306,8 @@ def _validate_command(command: object) -> dict[str, object]:
         generation = copied["expected_generation"]
         if type(generation) is not int or not 0 <= generation <= _MAX_SAFE_INTEGER:
             raise _invalid_command()
+    if kind == "selector_resolve":
+        _selector_request(copied["request"])
     return copied
 
 
@@ -805,6 +844,9 @@ class KernelGateway:
                     raise RuntimeError("unknown worker checkout authority")
                 response = client.get_checkout(checkout_id=data["checkout_id"])
                 return _event("preview_refreshed", request_id, response=response)
+            if kind == "selector_resolve":
+                response = client.resolve_selector_request(data["request"])
+                return _event("selector_resolved", request_id, response=response)
             if kind == "preview_close":
                 checkout_id = data["checkout_id"]
                 record = self._checkouts.get(checkout_id)

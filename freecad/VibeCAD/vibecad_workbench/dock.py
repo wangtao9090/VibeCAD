@@ -31,6 +31,7 @@ _COMMAND_KINDS = frozenset(
         "preview_refresh",
         "preview_close",
         "review",
+        "selector_resolve",
         "close",
     )
 )
@@ -52,6 +53,7 @@ _EVENT_KEYS = {
     "preview_refreshed": frozenset(("schema_version", "request_id", "kind", "response")),
     "preview_closed": frozenset(("schema_version", "request_id", "kind", "response")),
     "review": frozenset(("schema_version", "request_id", "kind", "response")),
+    "selector_resolved": frozenset(("schema_version", "request_id", "kind", "response")),
     "closed": frozenset(("schema_version", "request_id", "kind")),
     "error": frozenset(
         (
@@ -84,6 +86,7 @@ _EVENT_OPERATIONS = {
     "preview_refreshed": "preview_refresh",
     "preview_closed": "preview_close",
     "review": "review",
+    "selector_resolved": "selector_resolve",
     "closed": "close",
 }
 

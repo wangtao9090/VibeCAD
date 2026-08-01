@@ -10,6 +10,7 @@ __all__ = (
     "ManagedSelectionObserver",
     "SelectionCaptureError",
     "capture_managed_selector",
+    "selector_identity_request",
 )
 
 _ERROR_MESSAGES = {
@@ -36,6 +37,68 @@ class SelectionCaptureError(ValueError):
 class CapturedSelector:
     selector: object
     text: str
+
+
+def selector_identity_request(
+    *,
+    selected_object: object,
+    document_objects: object,
+    project_id: str,
+    revision_id: str,
+    subelements: tuple[str, ...],
+) -> dict[str, object]:
+    """Detach raw managed identity fields for resolution by the managed backend."""
+
+    if (
+        type(project_id) is not str
+        or type(revision_id) is not str
+        or type(subelements) is not tuple
+        or any(type(item) is not str for item in subelements)
+        or type(document_objects) not in {list, tuple}
+        or not 0 < len(document_objects) <= 1000
+    ):
+        raise SelectionCaptureError("invalid_selection")
+    if subelements:
+        raise SelectionCaptureError("unsupported_subelement")
+    records: list[dict[str, object]] = []
+    selected_indices: list[int] = []
+    try:
+        for index, item in enumerate(document_objects):
+            if item is selected_object:
+                selected_indices.append(index)
+            object_id = item.VibeCADObjectId
+            feature_id = item.VibeCADFeatureId
+            object_type = item.TypeId
+            semantic_role = item.VibeCADSemanticRole
+            provenance = item.VibeCADProvenance
+            if (
+                type(object_id) is not str
+                or (feature_id is not None and type(feature_id) is not str)
+                or type(object_type) is not str
+                or type(semantic_role) is not str
+                or type(provenance) is not str
+            ):
+                raise TypeError
+            records.append(
+                {
+                    "object_id": object_id,
+                    "feature_id": feature_id,
+                    "object_type": object_type,
+                    "semantic_role": semantic_role,
+                    "provenance": provenance,
+                }
+            )
+    except Exception:
+        raise SelectionCaptureError("invalid_selection") from None
+    if len(selected_indices) != 1:
+        raise SelectionCaptureError("selected_object_mismatch")
+    return {
+        "schema_version": 1,
+        "project_id": project_id,
+        "revision_id": revision_id,
+        "selected_index": selected_indices[0],
+        "objects": records,
+    }
 
 
 def capture_managed_selector(
@@ -125,6 +188,30 @@ class ManagedSelectionObserver:
             raise RuntimeError("selection observer cannot be detached")
         remove_observer(self)
         self._attached = False
+
+    def matches(
+        self,
+        selected_object: object,
+        document: object,
+        subelements: tuple[str, ...],
+    ) -> bool:
+        try:
+            get_selection = getattr(self._selection, "getSelectionEx", None)
+            if not callable(get_selection):
+                return False
+            records = get_selection()
+            if type(records) is not list or len(records) != 1:
+                return False
+            record = records[0]
+            raw_subelements = record.SubElementNames
+            return (
+                record.Object is selected_object
+                and selected_object.Document is document
+                and type(raw_subelements) in {list, tuple}
+                and tuple(raw_subelements) == subelements
+            )
+        except Exception:
+            return False
 
     def _refresh(self) -> None:
         try:

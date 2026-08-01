@@ -45,8 +45,26 @@ _METHOD_KEYS = {
     "get_checkout": frozenset({"checkout_id"}),
     "close_checkout": frozenset({"checkout_id"}),
     "claim_file_grant": frozenset({"grant_id"}),
+    "resolve_selector": frozenset({"request"}),
     "close": frozenset(),
 }
+
+
+class _IdentityRecord:
+    __slots__ = (
+        "TypeId",
+        "VibeCADFeatureId",
+        "VibeCADObjectId",
+        "VibeCADProvenance",
+        "VibeCADSemanticRole",
+    )
+
+    def __init__(self, value: dict[str, object]) -> None:
+        self.VibeCADObjectId = value["object_id"]
+        self.VibeCADFeatureId = value["feature_id"]
+        self.TypeId = value["object_type"]
+        self.VibeCADSemanticRole = value["semantic_role"]
+        self.VibeCADProvenance = value["provenance"]
 
 
 class BridgeProtocolError(ValueError):
@@ -232,7 +250,9 @@ def _dispatch(client: object, method: str, params: dict[str, object]) -> dict[st
     keys = _METHOD_KEYS.get(method)
     if keys is None or set(params) != keys:
         raise BridgeProtocolError("invalid bridge method")
-    if method == "ping":
+    if method == "resolve_selector":
+        result = _resolve_selector(params["request"])
+    elif method == "ping":
         result = client.ping()
     elif method in {
         "list_projects",
@@ -257,6 +277,72 @@ def _dispatch(client: object, method: str, params: dict[str, object]) -> dict[st
     if type(copied) is not dict:
         raise BridgeProtocolError("invalid bridge result")
     return copied
+
+
+def _resolve_selector(value: object) -> dict[str, object]:
+    if type(value) is not dict or set(value) != {
+        "schema_version",
+        "project_id",
+        "revision_id",
+        "selected_index",
+        "objects",
+    }:
+        raise BridgeProtocolError("invalid selector request")
+    project_id = value["project_id"]
+    revision_id = value["revision_id"]
+    selected_index = value["selected_index"]
+    objects = value["objects"]
+    if (
+        value["schema_version"] != 1
+        or type(project_id) is not str
+        or type(revision_id) is not str
+        or type(selected_index) is not int
+        or type(objects) is not list
+        or not 0 < len(objects) <= _MAX_CONTAINER
+        or not 0 <= selected_index < len(objects)
+    ):
+        raise BridgeProtocolError("invalid selector request")
+    keys = {"object_id", "feature_id", "object_type", "semantic_role", "provenance"}
+    if any(type(item) is not dict or set(item) != keys for item in objects):
+        raise BridgeProtocolError("invalid selector request")
+    try:
+        from vibecad.execution.selectors import (
+            EntityKind,
+            SelectorError,
+            parse_entity_identity,
+            resolve_selector,
+        )
+
+        records = tuple(_IdentityRecord(item) for item in objects)
+        selected = records[selected_index]
+        identity = parse_entity_identity(selected)
+        kind = EntityKind.FEATURE if identity.feature_id is not None else EntityKind.OBJECT
+        selector = identity.to_selector(
+            project_id=project_id,
+            revision_id=revision_id,
+            entity_kind=kind,
+        )
+        if (
+            resolve_selector(
+                selector,
+                records,
+                project_id=project_id,
+                revision_id=revision_id,
+            )
+            is not selected
+        ):
+            raise BridgeProtocolError("invalid selector resolution")
+    except SelectorError:
+        raise BridgeProtocolError("invalid selector request") from None
+    mapping = selector.to_mapping()
+    text = json.dumps(
+        mapping,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return {"schema_version": 1, "selector": mapping, "text": text}
 
 
 def serve_bridge(

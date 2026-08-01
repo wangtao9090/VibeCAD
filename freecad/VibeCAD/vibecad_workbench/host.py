@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from .selection import (
     ManagedSelectionObserver,
     SelectionCaptureError,
     capture_managed_selector,
+    selector_identity_request,
 )
 from .state import ProjectionError
 
@@ -47,9 +49,10 @@ _EXPECTED_EVENTS = {
     "preview_refresh": "preview_refreshed",
     "preview_close": "preview_closed",
     "review": "review",
+    "selector_resolve": "selector_resolved",
     "close": "closed",
 }
-_RESTRICTED_OPERATIONS = frozenset(("preview_close", "review", "close"))
+_RESTRICTED_OPERATIONS = frozenset(("preview_close", "review", "selector_resolve", "close"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +169,7 @@ class _WorkbenchSession(QtCore.QObject):
         self._cleanup_cursor = _NORMAL_ID_MAX + 1
         self._open_recovery_required = False
         self._review_enqueue_ambiguous_id: int | None = None
+        self._selector_generation = 0
         self._refresh_generation = 0
         self._refresh_barrier: _RefreshBarrier | None = None
         self._refresh_candidates: dict[str, _FreshToken] = {}
@@ -235,11 +239,13 @@ class _WorkbenchSession(QtCore.QObject):
         return 1 if self._dock_added or self._dock_parented else 0
 
     def _clear_selection(self) -> None:
+        self._selector_generation += 1
         dock = self.dock
         if dock is not None:
             dock._clear_selector()
 
     def _reject_selection(self) -> None:
+        self._selector_generation += 1
         dock = self.dock
         if dock is not None:
             dock._reject_selector()
@@ -250,6 +256,8 @@ class _WorkbenchSession(QtCore.QObject):
         document: object,
         subelements: tuple[str, ...],
     ) -> None:
+        self._selector_generation += 1
+        generation = self._selector_generation
         dock = self.dock
         coordinator = self.preview
         if dock is None or coordinator is None or self.lifecycle != "active":
@@ -278,13 +286,46 @@ class _WorkbenchSession(QtCore.QObject):
                 or dock._preview_checkouts.get(source_kind) != descriptor.get("checkout_id")
             ):
                 raise PreviewError("selection binding is stale")
-            captured = capture_managed_selector(
-                selected_object=selected_object,
-                document_objects=document.Objects,
-                project_id=project_id,
-                revision_id=revision_id,
-                subelements=subelements,
-            )
+            try:
+                captured = capture_managed_selector(
+                    selected_object=selected_object,
+                    document_objects=document.Objects,
+                    project_id=project_id,
+                    revision_id=revision_id,
+                    subelements=subelements,
+                )
+            except SelectionCaptureError as error:
+                if error.code != "selector_backend_unavailable":
+                    raise
+                request = selector_identity_request(
+                    selected_object=selected_object,
+                    document_objects=document.Objects,
+                    project_id=project_id,
+                    revision_id=revision_id,
+                    subelements=subelements,
+                )
+                checkout_id = descriptor.get("checkout_id")
+                if type(checkout_id) is not str:
+                    raise PreviewError("selection binding is stale") from error
+                dock._clear_selector()
+                request_id = self._reserve_private_normal_request(
+                    "selector_resolved",
+                    "selector_resolve",
+                    context=(
+                        generation,
+                        selected_object,
+                        document,
+                        subelements,
+                        source_kind,
+                        checkout_id,
+                        id(binding),
+                        project_id,
+                        revision_id,
+                    ),
+                    request=request,
+                )
+                self._enqueue_request(request_id)
+                return
         except SelectionCaptureError as error:
             dock._reject_selector(unsupported=error.code == "unsupported_subelement")
             return
@@ -669,6 +710,7 @@ class _WorkbenchSession(QtCore.QObject):
         allowed = {
             ("review", "review"),
             ("preview_close", "preview_closed"),
+            ("selector_resolve", "selector_resolved"),
         }
         if (
             (operation, expected_kind) not in allowed
@@ -1578,6 +1620,116 @@ class _WorkbenchSession(QtCore.QObject):
                 recovery_required=True,
             )
 
+    def _receive_selector_resolution(
+        self,
+        event: dict[str, object],
+        request_id: int,
+        pending: _PendingRequest,
+    ) -> bool:
+        context = pending[1]
+        dock = self.dock
+        if type(context) is not tuple or len(context) != 9 or dock is None:
+            return False
+        (
+            generation,
+            selected_object,
+            document,
+            subelements,
+            source_kind,
+            checkout_id,
+            binding_identity,
+            project_id,
+            revision_id,
+        ) = context
+        current = (
+            type(generation) is int
+            and generation == self._selector_generation
+            and self.lifecycle == "active"
+        )
+        if event["kind"] == "error":
+            retired = self._retire_pending(request_id, pending)
+            if retired and current:
+                self._reject_selection()
+            if retired and self.lifecycle == "stopping":
+                self._advance_cleanup()
+            return retired
+        try:
+            if (
+                not current
+                or type(subelements) is not tuple
+                or type(source_kind) is not str
+                or type(checkout_id) is not str
+                or type(binding_identity) is not int
+                or type(project_id) is not str
+                or type(revision_id) is not str
+                or self.selection is None
+                or not self.selection.matches(selected_object, document, subelements)
+                or self.preview is None
+            ):
+                raise ProjectionError("stale selector resolution")
+            binding = self.preview._observe_local_binding(checkout_id)
+            descriptor = dict(binding.descriptor)
+            source = dict(descriptor["source"])
+            if (
+                id(binding) != binding_identity
+                or binding.document is not document
+                or source.get("kind") != source_kind
+                or source.get("project_id") != project_id
+                or source.get("revision_id") != revision_id
+                or dock.current_project_id() != project_id
+                or dock._preview_checkouts.get(source_kind) != checkout_id
+            ):
+                raise ProjectionError("stale selector resolution")
+            response = event["response"]
+            if (
+                type(response) is not dict
+                or set(response) != {"schema_version", "selector", "text"}
+                or response.get("schema_version") != 1
+                or type(response.get("selector")) is not dict
+                or type(response.get("text")) is not str
+            ):
+                raise ProjectionError("invalid selector resolution")
+            selector = response["selector"]
+            text = response["text"]
+            if (
+                set(selector)
+                != {
+                    "schema_version",
+                    "project_id",
+                    "revision_id",
+                    "entity_kind",
+                    "object_id",
+                    "feature_id",
+                    "object_type",
+                    "semantic_role",
+                    "provenance",
+                    "expected_cardinality",
+                }
+                or selector.get("project_id") != project_id
+                or selector.get("revision_id") != revision_id
+                or selector.get("object_id") != selected_object.VibeCADObjectId
+                or json.dumps(
+                    selector,
+                    allow_nan=False,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                != text
+            ):
+                raise ProjectionError("invalid selector resolution")
+        except (KeyError, PreviewError, ProjectionError, TypeError, ValueError):
+            retired = self._retire_pending(request_id, pending)
+            if retired and current:
+                self._reject_selection()
+            if retired and self.lifecycle == "stopping":
+                self._advance_cleanup()
+            return retired
+        if not self._retire_pending(request_id, pending):
+            return False
+        dock._set_selector_capture(text)
+        return True
+
     def _receive_private(
         self,
         event: dict[str, object],
@@ -1587,6 +1739,8 @@ class _WorkbenchSession(QtCore.QObject):
         operation = pending[2]
         kind = event["kind"]
         dock = self.dock
+        if operation == "selector_resolve":
+            return self._receive_selector_resolution(event, request_id, pending)
         if operation == "review":
             if dock is None:
                 return False

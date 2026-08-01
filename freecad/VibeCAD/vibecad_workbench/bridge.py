@@ -464,6 +464,9 @@ class ExternalBridgeClient:
     def claim_file_grant(self, *, grant_id: object) -> dict[str, object]:
         return self._call("claim_file_grant", {"grant_id": grant_id})
 
+    def resolve_selector_request(self, request: object) -> dict[str, object]:
+        return self._call("resolve_selector", {"request": request})
+
     def close(self) -> None:
         if self._closed:
             return
