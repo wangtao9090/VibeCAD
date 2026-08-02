@@ -21,6 +21,7 @@ _TASK_ID_PREFIX = "task_"
 _DRAFT_ID_PREFIX = "draft_"
 _CHECKOUT_ID_PREFIX = "checkout_"
 _OPEN_KEY_PREFIX = "checkout_open_"
+_CHECKPOINT_KEY_PREFIX = "checkpoint_create_"
 _DAEMON_ID_PREFIX = "daemon_"
 _REPLAY_CAPACITY = 64
 _MAX_CHECKOUT_AUTHORITIES = 8
@@ -36,7 +37,9 @@ _PUBLIC_COMMAND_KINDS = frozenset(
         "preview_refresh",
     )
 )
-_RESTRICTED_COMMAND_KINDS = frozenset(("preview_close", "review", "selector_resolve", "close"))
+_RESTRICTED_COMMAND_KINDS = frozenset(
+    ("preview_close", "edit_checkpoint", "review", "selector_resolve", "close")
+)
 _ERROR_CODES = frozenset(
     (
         "invalid_input",
@@ -62,6 +65,15 @@ _COMMAND_KEYS = {
             "kind",
             "checkout_id",
             "document_absent",
+        )
+    ),
+    "edit_checkpoint": frozenset(
+        (
+            "schema_version",
+            "request_id",
+            "kind",
+            "checkpoint_key",
+            "checkout_id",
         )
     ),
     "review": frozenset(
@@ -297,6 +309,9 @@ def _validate_command(command: object) -> dict[str, object]:
         _identifier(copied["open_key"], _OPEN_KEY_PREFIX)
     if kind in {"preview_refresh", "preview_close"}:
         _identifier(copied["checkout_id"], _CHECKOUT_ID_PREFIX)
+    if kind == "edit_checkpoint":
+        _identifier(copied["checkpoint_key"], _CHECKPOINT_KEY_PREFIX)
+        _identifier(copied["checkout_id"], _CHECKOUT_ID_PREFIX)
     if kind == "preview_close" and copied["document_absent"] is not True:
         raise _invalid_command()
     if kind == "review":
@@ -417,6 +432,19 @@ class KernelGateway:
     @property
     def client_construction_count(self) -> int:
         return self._client_construction_count
+
+    def keepalive(self) -> bool:
+        """Refresh the authenticated daemon connection without consuming a request id."""
+
+        self._claim_thread()
+        client = self._client
+        if self._closed or client is None:
+            return False
+        try:
+            client.ping()
+        except BaseException:
+            return False
+        return True
 
     def _claim_thread(self) -> None:
         current = threading.get_ident()
@@ -575,6 +603,66 @@ class KernelGateway:
             )
         del self._checkouts[record.checkout_id]
         return _event("preview_closed", request_id, response=response)
+
+    def _handle_edit_checkpoint(
+        self,
+        client: object,
+        record: _WorkerCheckout,
+        request_id: int,
+        checkpoint_key: str,
+    ) -> dict[str, object]:
+        try:
+            descriptor = _detach(client.get_checkout(checkout_id=record.checkout_id))
+            if (
+                type(descriptor) is not dict
+                or descriptor.get("checkout_id") != record.checkout_id
+                or descriptor.get("open_key") != record.open_key
+                or descriptor.get("state") != "open"
+                or descriptor.get("authoritative") is not False
+                or type(descriptor.get("dirty")) is not bool
+                or descriptor.get("source")
+                != (None if record.descriptor is None else record.descriptor.get("source"))
+                or descriptor.get("source_head")
+                != (None if record.descriptor is None else record.descriptor.get("source_head"))
+                or descriptor.get("initial_model_sha256")
+                != (
+                    None
+                    if record.descriptor is None
+                    else record.descriptor.get("initial_model_sha256")
+                )
+                or descriptor.get("source_liveness") != "live"
+            ):
+                raise ValueError("invalid editable checkout descriptor")
+        except BaseException as error:
+            return _error(
+                request_id,
+                "edit_checkpoint",
+                _known_error_code(error),
+            )
+        if descriptor["dirty"] is False:
+            return _event(
+                "edit_checkpointed",
+                request_id,
+                response={"schema_version": 1, "outcome": "clean", "task": None},
+            )
+        try:
+            response = client.checkpoint_checkout(
+                checkpoint_key=checkpoint_key,
+                checkout_id=record.checkout_id,
+            )
+        except BaseException as error:
+            self._sticky_recovery = True
+            return _error(
+                request_id,
+                "edit_checkpoint",
+                _known_error_code(error),
+                "unknown_outcome",
+            )
+        return _event(
+            "edit_checkpointed",
+            request_id,
+            response={"schema_version": 1, "outcome": "task", "task": response},
+        )
 
     def _handle_close(self, request_id: int) -> dict[str, object]:
         if self._closed:
@@ -844,6 +932,17 @@ class KernelGateway:
                     raise RuntimeError("unknown worker checkout authority")
                 response = client.get_checkout(checkout_id=data["checkout_id"])
                 return _event("preview_refreshed", request_id, response=response)
+            if kind == "edit_checkpoint":
+                checkout_id = data["checkout_id"]
+                record = self._checkouts.get(checkout_id)
+                if record is None or record.source.get("kind") != "head":
+                    raise RuntimeError("unknown editable checkout authority")
+                return self._handle_edit_checkpoint(
+                    client,
+                    record,
+                    request_id,
+                    data["checkpoint_key"],
+                )
             if kind == "selector_resolve":
                 response = client.resolve_selector_request(data["request"])
                 return _event("selector_resolved", request_id, response=response)

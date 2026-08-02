@@ -19,7 +19,9 @@ __all__ = ("ReviewDock",)
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _MAX_PENDING_REQUESTS = 1024
 _MAX_SELECTOR_TEXT_BYTES = 4096
-_HOSTED_RESTRICTED_COMMAND_KINDS = frozenset(("preview_close", "review", "close"))
+_HOSTED_RESTRICTED_COMMAND_KINDS = frozenset(
+    ("preview_close", "edit_checkpoint", "review", "close")
+)
 _COMMAND_KINDS = frozenset(
     (
         "connect",
@@ -30,6 +32,7 @@ _COMMAND_KINDS = frozenset(
         "preview_open",
         "preview_refresh",
         "preview_close",
+        "edit_checkpoint",
         "review",
         "selector_resolve",
         "close",
@@ -52,6 +55,7 @@ _EVENT_KEYS = {
     "preview_opened": frozenset(("schema_version", "request_id", "kind", "response")),
     "preview_refreshed": frozenset(("schema_version", "request_id", "kind", "response")),
     "preview_closed": frozenset(("schema_version", "request_id", "kind", "response")),
+    "edit_checkpointed": frozenset(("schema_version", "request_id", "kind", "response")),
     "review": frozenset(("schema_version", "request_id", "kind", "response")),
     "selector_resolved": frozenset(("schema_version", "request_id", "kind", "response")),
     "closed": frozenset(("schema_version", "request_id", "kind")),
@@ -85,6 +89,7 @@ _EVENT_OPERATIONS = {
     "preview_opened": "preview_open",
     "preview_refreshed": "preview_refresh",
     "preview_closed": "preview_close",
+    "edit_checkpointed": "edit_checkpoint",
     "review": "review",
     "selector_resolved": "selector_resolve",
     "closed": "close",
@@ -119,10 +124,14 @@ class ReviewDock(QtWidgets.QDockWidget):
         self._preview_epochs: dict[int, tuple[int, int]] = {}
         self._preview_eligible = False
         self._preview_recovery_required = False
+        self._edit_checkpoint_pending: tuple[int | None, str, str] | None = None
+        self._edit_recovery_required = False
         self._review_recovery_required = False
         self._host_transport: object | None = None
         self._review_host_submit: object | None = None
         self._review_host_discard: object | None = None
+        self._edit_host_checkpoint: object | None = None
+        self._edit_host_discard: object | None = None
         self._review_pending: (
             tuple[
                 int | None,
@@ -141,6 +150,8 @@ class ReviewDock(QtWidgets.QDockWidget):
         layout = QtWidgets.QVBoxLayout(container)
         self.status_label = QtWidgets.QLabel("Disconnected", container)
         self.preview_status_label = QtWidgets.QLabel("Preview closed", container)
+        self.edit_status_label = QtWidgets.QLabel("Editable HEAD closed", container)
+        self.ownership_status_label = QtWidgets.QLabel("No managed preview", container)
         self.review_status_label = QtWidgets.QLabel("No review decision", container)
         self.selector_status_label = QtWidgets.QLabel(
             "Select a managed preview object",
@@ -152,10 +163,14 @@ class ReviewDock(QtWidgets.QDockWidget):
         self.refresh_button = QtWidgets.QPushButton("Refresh", container)
         self.open_head_button = QtWidgets.QPushButton("Open HEAD Preview", container)
         self.open_draft_button = QtWidgets.QPushButton("Open Draft Preview", container)
+        self.open_edit_button = QtWidgets.QPushButton("Open Editable HEAD", container)
+        self.checkpoint_edit_button = QtWidgets.QPushButton("Checkpoint Edit", container)
+        self.discard_edit_button = QtWidgets.QPushButton("Discard Edit", container)
         self.accept_button = QtWidgets.QPushButton("Accept Draft", container)
         self.reject_button = QtWidgets.QPushButton("Reject Draft", container)
         self.copy_selector_button = QtWidgets.QPushButton("Copy Selector", container)
         self.status_label.setObjectName("VibeCADConnectionStatus")
+        self.ownership_status_label.setObjectName("VibeCADEditingOwnership")
         self.selector_status_label.setObjectName("VibeCADSelectorStatus")
         self.selector_value_label.setObjectName("VibeCADSelectorValue")
         self.project_selector.setObjectName("VibeCADProjectSelector")
@@ -163,12 +178,17 @@ class ReviewDock(QtWidgets.QDockWidget):
         self.refresh_button.setObjectName("VibeCADRefresh")
         self.open_head_button.setObjectName("VibeCADOpenHeadPreview")
         self.open_draft_button.setObjectName("VibeCADOpenDraftPreview")
+        self.open_edit_button.setObjectName("VibeCADOpenEditableHead")
+        self.checkpoint_edit_button.setObjectName("VibeCADCheckpointEdit")
+        self.discard_edit_button.setObjectName("VibeCADDiscardEdit")
         self.accept_button.setObjectName("VibeCADAcceptDraft")
         self.reject_button.setObjectName("VibeCADRejectDraft")
         self.copy_selector_button.setObjectName("VibeCADCopySelector")
         for widget in (
             self.status_label,
             self.preview_status_label,
+            self.edit_status_label,
+            self.ownership_status_label,
             self.review_status_label,
             self.selector_status_label,
             self.selector_value_label,
@@ -177,6 +197,9 @@ class ReviewDock(QtWidgets.QDockWidget):
             self.refresh_button,
             self.open_head_button,
             self.open_draft_button,
+            self.open_edit_button,
+            self.checkpoint_edit_button,
+            self.discard_edit_button,
             self.accept_button,
             self.reject_button,
             self.copy_selector_button,
@@ -186,6 +209,9 @@ class ReviewDock(QtWidgets.QDockWidget):
         self.refresh_button.clicked.connect(self.refresh)
         self.open_head_button.clicked.connect(self.open_head_preview)
         self.open_draft_button.clicked.connect(self.open_draft_preview)
+        self.open_edit_button.clicked.connect(self.open_editable_head)
+        self.checkpoint_edit_button.clicked.connect(self.checkpoint_edit)
+        self.discard_edit_button.clicked.connect(self.discard_edit)
         self.accept_button.clicked.connect(self.accept_draft)
         self.reject_button.clicked.connect(self.reject_draft)
         self.copy_selector_button.clicked.connect(self.copy_selector)
@@ -216,6 +242,19 @@ class ReviewDock(QtWidgets.QDockWidget):
             raise RuntimeError("review host callbacks are invalid")
         self._review_host_submit = submit_review
         self._review_host_discard = discard_preview
+
+    def _bind_edit_host(
+        self,
+        *,
+        checkpoint_edit: object,
+        discard_edit: object,
+    ) -> None:
+        if self._edit_host_checkpoint is not None or self._edit_host_discard is not None:
+            raise RuntimeError("edit host is already bound")
+        if not callable(checkpoint_edit) or not callable(discard_edit):
+            raise RuntimeError("edit host callbacks are invalid")
+        self._edit_host_checkpoint = checkpoint_edit
+        self._edit_host_discard = discard_edit
 
     def _clear_selector(self) -> None:
         self._selector_text = None
@@ -298,7 +337,12 @@ class ReviewDock(QtWidgets.QDockWidget):
             return
         if len(matched) != 1:
             raise ProjectionError("invalid host preview projection")
-        del self._preview_checkouts[matched[0]]
+        role = matched[0]
+        del self._preview_checkouts[role]
+        if role == "edit":
+            self._edit_checkpoint_pending = None
+            if not self._edit_recovery_required:
+                self.edit_status_label.setText("Editable HEAD closed")
         self._clear_selector()
         self.set_preview_eligibility(False)
         self._update_preview_actions()
@@ -628,7 +672,11 @@ class ReviewDock(QtWidgets.QDockWidget):
     def refresh(self) -> None:
         try:
             self._invalidated_task_ids.clear()
-            checkout_ids = tuple(self._preview_checkouts.values())
+            checkout_ids = tuple(
+                checkout_id
+                for role, checkout_id in self._preview_checkouts.items()
+                if role in {"head", "draft"}
+            )
             transport = self._host_transport
             if callable(transport):
                 self.set_preview_eligibility(False)
@@ -764,8 +812,31 @@ class ReviewDock(QtWidgets.QDockWidget):
         return None if task_id is None else self._tasks_by_id.get(task_id)
 
     def _update_preview_actions(self) -> None:
+        editing = "edit" in self._preview_checkouts or "edit" in self._preview_pending_sources
+        preview_roles = {"head", "draft"} & (
+            set(self._preview_checkouts) | self._preview_pending_sources
+        )
+        if self._edit_recovery_required:
+            self.ownership_status_label.setText(
+                "Editable HEAD recovery required — reload before continuing"
+            )
+        elif editing:
+            self.ownership_status_label.setText(
+                "User editable HEAD — Save stays local; Checkpoint publishes a revision"
+            )
+        elif self._preview_recovery_required:
+            self.ownership_status_label.setText(
+                "Preview ownership recovery required — reload managed previews"
+            )
+        elif preview_roles:
+            self.ownership_status_label.setText(
+                "Agent preview — do not edit; local edits disable review"
+            )
+        else:
+            self.ownership_status_label.setText("No managed preview")
         project_ready = (
             self.current_project_id() is not None
+            and not editing
             and "head" not in self._preview_checkouts
             and "head" not in self._preview_pending_sources
         )
@@ -775,11 +846,26 @@ class ReviewDock(QtWidgets.QDockWidget):
             and self._task_value(task, "status") == "awaiting_user_review"
             and type(self._task_value(task, "draft_id")) is str
             and type(self._task_value(task, "generation")) is int
+            and not editing
             and "draft" not in self._preview_checkouts
             and "draft" not in self._preview_pending_sources
         )
         self.open_head_button.setEnabled(project_ready)
         self.open_draft_button.setEnabled(draft_ready)
+        edit_open_ready = (
+            self.current_project_id() is not None
+            and not self._preview_checkouts
+            and not self._preview_pending_sources
+            and not self._edit_recovery_required
+        )
+        edit_active = (
+            self._preview_checkouts.get("edit") is not None
+            and self._edit_checkpoint_pending is None
+            and not self._edit_recovery_required
+        )
+        self.open_edit_button.setEnabled(edit_open_ready)
+        self.checkpoint_edit_button.setEnabled(edit_active)
+        self.discard_edit_button.setEnabled(edit_active)
         review_ready = self._review_context() is not None
         self.accept_button.setEnabled(review_ready)
         self.reject_button.setEnabled(review_ready)
@@ -881,9 +967,23 @@ class ReviewDock(QtWidgets.QDockWidget):
     def reject_draft(self) -> None:
         self._submit_decision("reject")
 
-    def _open_preview(self, source: dict[str, object]) -> None:
-        kind = source["kind"]
-        assert type(kind) is str
+    def _open_preview(
+        self,
+        source: dict[str, object],
+        *,
+        role: str | None = None,
+    ) -> None:
+        source_kind = source["kind"]
+        assert type(source_kind) is str
+        kind = source_kind if role is None else role
+        if kind not in {"head", "draft", "edit"}:
+            raise ProjectionError("invalid checkout role")
+        if kind == "edit" and (self._preview_checkouts or self._preview_pending_sources):
+            return
+        if kind != "edit" and (
+            "edit" in self._preview_checkouts or "edit" in self._preview_pending_sources
+        ):
+            return
         if kind in self._preview_checkouts or kind in self._preview_pending_sources:
             return
         self._preview_pending_sources.add(kind)
@@ -930,6 +1030,126 @@ class ReviewDock(QtWidgets.QDockWidget):
             }
         )
 
+    def open_editable_head(self) -> None:
+        project_id = self.current_project_id()
+        if (
+            project_id is None
+            or self._preview_checkouts
+            or self._preview_pending_sources
+            or self._edit_recovery_required
+        ):
+            return
+        self.edit_status_label.setText("Opening editable HEAD")
+        self._open_preview(
+            {"kind": "head", "project_id": project_id},
+            role="edit",
+        )
+
+    def checkpoint_edit(self) -> None:
+        checkout_id = self._preview_checkouts.get("edit")
+        checkpoint = self._edit_host_checkpoint
+        if (
+            type(checkout_id) is not str
+            or not callable(checkpoint)
+            or self._edit_checkpoint_pending is not None
+            or self._edit_recovery_required
+        ):
+            return
+        checkpoint_key = "checkpoint_create_" + secrets.token_hex(16)
+        sentinel = (None, checkout_id, checkpoint_key)
+        self._edit_checkpoint_pending = sentinel
+        self.edit_status_label.setText("Checkpoint pending")
+        self._update_preview_actions()
+        try:
+            request_id = checkpoint(
+                checkout_id=checkout_id,
+                checkpoint_key=checkpoint_key,
+            )
+            if request_id is None:
+                self._edit_checkpoint_pending = None
+                self.edit_status_label.setText("No unsaved changes to checkpoint")
+                self._update_preview_actions()
+                return
+            if type(request_id) is not int or request_id < 0:
+                raise ProjectionError("invalid edit checkpoint authority")
+        except BaseException:
+            if self._edit_checkpoint_pending is sentinel:
+                self._edit_recovery_required = True
+                self.edit_status_label.setText("Checkpoint outcome unknown — reload project")
+                self._update_preview_actions()
+            return
+        self._edit_checkpoint_pending = (request_id, checkout_id, checkpoint_key)
+
+    def discard_edit(self) -> None:
+        checkout_id = self._preview_checkouts.get("edit")
+        discard = self._edit_host_discard
+        if (
+            type(checkout_id) is not str
+            or not callable(discard)
+            or self._edit_checkpoint_pending is not None
+        ):
+            return
+        self.edit_status_label.setText("Discarding editable HEAD")
+        self._update_preview_actions()
+        try:
+            discard(checkout_id)
+        except BaseException:
+            self._edit_recovery_required = True
+            self.edit_status_label.setText("Editable HEAD recovery required")
+            self._update_preview_actions()
+
+    def _receive_host_edit_completion(
+        self,
+        event: dict[str, object],
+        context: object,
+    ) -> str:
+        pending = self._edit_checkpoint_pending
+        if pending is None or context != pending[1:] or event.get("request_id") != pending[0]:
+            return "invalid"
+        self._edit_checkpoint_pending = None
+        if event.get("kind") == "error":
+            self._edit_recovery_required = event.get("outcome") == "unknown_outcome"
+            self.edit_status_label.setText(
+                "Checkpoint outcome unknown — reload project"
+                if self._edit_recovery_required
+                else "Checkpoint failed — edit remains local"
+            )
+            self._update_preview_actions()
+            return "unknown" if self._edit_recovery_required else "failed"
+        response = event.get("response")
+        if (
+            type(response) is not dict
+            or set(response) != {"schema_version", "outcome", "task"}
+            or response.get("schema_version") != 1
+            or response.get("outcome") not in {"clean", "task"}
+        ):
+            self._edit_recovery_required = True
+            self.edit_status_label.setText("Checkpoint response invalid — reload project")
+            self._update_preview_actions()
+            return "invalid"
+        if response["outcome"] == "clean":
+            if response["task"] is not None:
+                self._edit_recovery_required = True
+                self.edit_status_label.setText("Checkpoint response invalid — reload project")
+                self._update_preview_actions()
+                return "invalid"
+            self.edit_status_label.setText("No saved changes to checkpoint")
+            self._update_preview_actions()
+            return "failed"
+        task_response = response["task"]
+        task = task_response.get("task_run") if type(task_response) is dict else None
+        if type(task) is not dict or type(task.get("status")) is not str:
+            self._edit_recovery_required = True
+            self.edit_status_label.setText("Checkpoint response invalid — reload project")
+            self._update_preview_actions()
+            return "invalid"
+        succeeded = task["status"] == "succeeded"
+        self.edit_status_label.setText(
+            "Checkpoint committed" if succeeded else "Checkpoint rejected — edit remains local"
+        )
+        self._update_preview_actions()
+        return "succeeded" if succeeded else "failed"
+
     def set_preview_eligibility(
         self,
         eligible: bool,
@@ -943,7 +1163,7 @@ class ReviewDock(QtWidgets.QDockWidget):
             self.preview_status_label.setText("Preview recovery required")
         elif self._preview_eligible:
             self.preview_status_label.setText("Preview live")
-        elif self._preview_checkouts:
+        elif {"head", "draft"} & set(self._preview_checkouts):
             self.preview_status_label.setText("Preview review disabled")
         else:
             self.preview_status_label.setText("Preview closed")
@@ -1067,11 +1287,11 @@ class ReviewDock(QtWidgets.QDockWidget):
         kind, source, _open_key = context
         if epochs[0] != self._selection_epoch or self.current_project_id() != (
             source.get("project_id")
-            if kind == "head"
+            if kind in {"head", "edit"}
             else self._task_value(self._selected_task(), "project_id")
         ):
             return None
-        if kind == "head":
+        if kind in {"head", "edit"}:
             return context
         task = self._selected_task()
         if (
@@ -1360,7 +1580,7 @@ class ReviewDock(QtWidgets.QDockWidget):
                 if (
                     type(source) is not dict
                     or source != expected_source
-                    or source.get("kind") != source_kind
+                    or source.get("kind") != ("head" if source_kind == "edit" else source_kind)
                     or response.get("open_key") != expected_open_key
                 ):
                     raise ProjectionError("invalid public mapping")
@@ -1369,7 +1589,10 @@ class ReviewDock(QtWidgets.QDockWidget):
                     raise ProjectionError("invalid public mapping")
                 self._preview_pending_sources.discard(source_kind)
                 self._preview_checkouts[source_kind] = checkout_id
-                self.set_preview_eligibility(False)
+                if source_kind == "edit":
+                    self.edit_status_label.setText("Editable HEAD open — save or Checkpoint")
+                else:
+                    self.set_preview_eligibility(False)
                 self._update_preview_actions()
             elif kind == "preview_refreshed":
                 response = event["response"]

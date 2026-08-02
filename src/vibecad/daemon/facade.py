@@ -7,6 +7,10 @@ import re
 from functools import partial
 
 from vibecad import __version__
+from vibecad.application.task_api import (
+    TaskServicePortErrorCode,
+    TaskServicePortFailure,
+)
 from vibecad.interaction.checkouts import (
     CheckoutError,
     CheckoutErrorCode,
@@ -24,6 +28,7 @@ from vibecad.interaction.protocol_v2 import (
     V2ErrorCode,
     V2ProtocolError,
 )
+from vibecad.workflow.store import StoredTaskRun
 
 ALLOWED_APPLICATION_OPERATIONS = frozenset(
     {
@@ -55,7 +60,7 @@ ALLOWED_APPLICATION_OPERATIONS = frozenset(
 )
 KERNEL_API_EPOCH = 1
 KERNEL_API_NAME = "vibecad.task-kernel"
-KERNEL_BUILD_ID = "p0b-c13.1"
+KERNEL_BUILD_ID = "p1-s03.1"
 
 _DIRECT_OPERATIONS = frozenset(
     {
@@ -82,6 +87,14 @@ def _file_grant_failure(error: FileGrantError) -> V2ProtocolError:
     if error.code is FileGrantErrorCode.INVALID_INPUT:
         return V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
     if error.code is FileGrantErrorCode.RESOURCE_EXHAUSTED:
+        return V2ProtocolError(V2ErrorCode.RESOURCE_EXHAUSTED)
+    return V2ProtocolError(V2ErrorCode.UNAVAILABLE)
+
+
+def _checkpoint_failure(error: TaskServicePortFailure) -> V2ProtocolError:
+    if error.code is TaskServicePortErrorCode.INVALID_INPUT:
+        return V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    if error.code is TaskServicePortErrorCode.RESOURCE_EXHAUSTED:
         return V2ProtocolError(V2ErrorCode.RESOURCE_EXHAUSTED)
     return V2ProtocolError(V2ErrorCode.UNAVAILABLE)
 
@@ -113,6 +126,7 @@ class LocalKernelFacade:
             project_import=self._project_import,
             checkout_open=partial(self._checkout_open, session_id),
             checkout_get=self._checkout_get,
+            checkout_checkpoint=self._checkout_checkpoint,
             checkout_close=self._checkout_close,
             file_grant_claim=partial(self._file_grant_claim, session_id),
             allowed_application_operations=ALLOWED_APPLICATION_OPERATIONS,
@@ -297,6 +311,25 @@ class LocalKernelFacade:
         except CheckoutError as error:
             raise _checkout_failure(error) from None
         return self._descriptor(descriptor)
+
+    def _checkout_checkpoint(self, params: dict[str, object]) -> dict[str, object]:
+        try:
+            result = self._application.checkpoint_checkout(
+                checkpoint_key=params["checkpoint_key"],
+                checkout_id=params["checkout_id"],
+            )
+        except CheckoutError as error:
+            raise _checkout_failure(error) from None
+        if type(result) is TaskServicePortFailure:
+            raise _checkpoint_failure(result)
+        if type(result) is not StoredTaskRun:
+            raise V2ProtocolError(V2ErrorCode.INTERNAL_ERROR)
+        return {
+            "schema_version": 1,
+            "generation": result.generation,
+            "next_action": result.task_run.next_action.value,
+            "task_run": result.task_run.to_mapping(),
+        }
 
     def _checkout_close(self, params: dict[str, object]) -> dict[str, object]:
         checkout_id = params["checkout_id"]

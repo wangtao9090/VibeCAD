@@ -11,6 +11,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
+from functools import partial
 
 from vibecad.application.data import ApplicationDataLayout
 from vibecad.application.project import (
@@ -1809,6 +1810,73 @@ class AgentApplication:
     def close_checkout(self, *, checkout_id: str) -> CheckoutDescriptor:
         self._ensure_live()
         return self._checkouts.close(checkout_id)
+
+    def checkpoint_checkout(
+        self,
+        *,
+        checkpoint_key: str,
+        checkout_id: str,
+    ) -> StoredTaskRun | TaskServicePortFailure:
+        """Commit one exact dirty HEAD checkout through its project Task Kernel."""
+
+        self._ensure_live()
+        snapshot = self._checkouts.require_checkpoint_source(checkout_id)
+        descriptor = snapshot.descriptor
+        head = descriptor.source_head
+        if head is None:
+            return TaskServicePortFailure(code=TaskServicePortErrorCode.RECOVERY_REQUIRED)
+        try:
+            from vibecad.workflow.manual_checkpoint import (
+                ManualCheckpointError,
+                manual_checkpoint_task_identity,
+            )
+
+            task_id, _creation_digest = manual_checkpoint_task_identity(checkpoint_key)
+        except ManualCheckpointError:
+            return TaskServicePortFailure(code=TaskServicePortErrorCode.INVALID_INPUT)
+
+        with self._cad_gate:
+            self._ensure_live()
+            with self._cad_task_admission(task_id) as generation_epoch:
+                port = None
+                try:
+                    runtime = self._runtime_for(
+                        head.project_id,
+                        expected_generation_epoch=generation_epoch,
+                    )
+                    port = getattr(self, "_cad_execution_port", None)
+                    if type(runtime) is TaskServicePortFailure:
+                        return runtime
+                    try:
+                        result = runtime.service.checkpoint_manual_edit(
+                            checkpoint_key=checkpoint_key,
+                            checkout_id=checkout_id,
+                            project_id=head.project_id,
+                            expected_head=head,
+                            model_sha256=snapshot.model_sha256,
+                            model_size_bytes=snapshot.size_bytes,
+                            stage_candidate=partial(
+                                self._checkouts.stage_checkpoint_candidate,
+                                snapshot,
+                            ),
+                        )
+                    except Exception as error:
+                        result = self._task_service_failure(error)
+                    if bool(getattr(runtime, "stale", False)):
+                        try:
+                            closed = runtime.close()
+                        except Exception:
+                            closed = False
+                        if closed is True:
+                            with self._generation_lock:
+                                if self._runtimes.get(head.project_id) is runtime:
+                                    del self._runtimes[head.project_id]
+                    return result
+                finally:
+                    if port is None:
+                        port = getattr(self, "_cad_execution_port", None)
+                    if port is not None:
+                        self._retire_lost_generation(port, task_id=task_id)
 
     def submit_model_program(
         self,

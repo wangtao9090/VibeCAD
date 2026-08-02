@@ -1680,11 +1680,50 @@ try:
                 expected_generation=before.generation,
             )
         )
-        final_head = app._revision_store.load_head(STATE["project_id"])
+        accepted_head = app._revision_store.load_head(STATE["project_id"])
+        accepted_model = app._revision_store.revision_model_path(
+            STATE["project_id"],
+            accepted_head.revision_id,
+        )
+        accepted_model_digest = sha256(accepted_model)
+
+        checkout = app.open_checkout(
+            open_key="checkout_open_cccccccccccccccccccccccccccccccc",
+            source=HeadCheckoutSource(project_id=STATE["project_id"]),
+        )
+        if checkout.local_path is None:
+            raise AssertionError("post-Accept editable checkout has no managed file")
+        edit_port = InProcessCadExecutor(store=app._revision_store)
+        edit_session = edit_port.load_fcstd(checkout.local_path)
+        try:
+            edited_box = next(
+                obj for obj in edit_session.doc.Objects if obj.TypeId == "Part::Box"
+            )
+            edited_box.Length = 14
+            edit_session.doc.recompute()
+            edit_session.doc.save()
+        finally:
+            edit_port.close(edit_session)
+        freecad_save_mode = checkout.local_path.stat().st_mode & 0o777
+        checkout.local_path.chmod(0o600)
+        private_mode_before_checkpoint = checkout.local_path.stat().st_mode & 0o777
+        dirty = app.get_checkout(checkout_id=checkout.checkout_id)
+        if not dirty.dirty:
+            raise AssertionError("real FreeCAD edit was not detected as dirty")
+        checkpointed = require_task(
+            app.checkpoint_checkout(
+                checkpoint_key="checkpoint_create_ffffffffffffffffffffffffffffffff",
+                checkout_id=checkout.checkout_id,
+            )
+        )
+        checkpoint_head = app._revision_store.load_head(STATE["project_id"])
+        closed = app.close_checkout(checkout_id=checkout.checkout_id)
+        if sha256(accepted_model) != accepted_model_digest:
+            raise AssertionError("manual checkpoint mutated the accepted base revision")
         entities = import_entities(
             app,
-            final_head.project_id,
-            final_head.revision_id,
+            checkpoint_head.project_id,
+            checkpoint_head.revision_id,
         )
         payload = {
             "phase": PHASE,
@@ -1696,7 +1735,34 @@ try:
                 "committed_revision": accepted.task_run.committed_revision,
                 "generation": accepted.generation,
             },
-            "final_head": final_head.to_mapping(),
+            "accepted_head": accepted_head.to_mapping(),
+            "checkpoint": {
+                "dirty_before": dirty.dirty,
+                "freecad_save_mode": freecad_save_mode,
+                "private_mode_before_checkpoint": private_mode_before_checkpoint,
+                "status": checkpointed.task_run.status.value,
+                "committed_revision": checkpointed.task_run.committed_revision,
+                "reasoning_owner": checkpointed.task_run.reasoning_owner.value,
+                "review_policy": checkpointed.task_run.review_policy.value,
+                "operation": checkpointed.task_run.program.operations[0].op,
+                "source": checkpointed.task_run.program.operations[0].source.value,
+                "artifact_formats": [
+                    artifact.format for artifact in checkpointed.task_run.artifacts
+                ],
+                "report_passed": [
+                    report.passed
+                    for report in checkpointed.task_run.verification_reports
+                ],
+                "transitions": [
+                    transition.event.value
+                    for transition in checkpointed.task_run.transitions
+                ],
+                "closed_state": closed.state.value,
+                "closed_path": closed.local_path,
+                "base_revision_unchanged": sha256(accepted_model)
+                == accepted_model_digest,
+            },
+            "final_head": checkpoint_head.to_mapping(),
             "entities": entities,
         }
     else:
@@ -3321,7 +3387,7 @@ def test_real_pre_epoch_external_legacy_fails_closed_without_mutation(
 
 
 @pytest.mark.slow
-def test_real_agent_application_bootstrap_isolation_checkout_and_restart_accept(
+def test_real_agent_application_bootstrap_isolation_restart_accept_and_checkpoint(
     existing_freecad_python: str,
     tmp_path: Path,
 ) -> None:
@@ -3380,11 +3446,29 @@ def test_real_agent_application_bootstrap_isolation_checkout_and_restart_accept(
     assert accepted["before_generation"] == restart["generation"]
     assert accepted["accepted"]["status"] == "succeeded"
     assert accepted["accepted"]["committed_revision"] == restart["draft_revision"]
-    assert accepted["final_head"]["project_id"] == restart["project_id"]
-    assert accepted["final_head"]["generation"] == 1
-    assert accepted["final_head"]["revision_id"] == restart["draft_revision"]
+    assert accepted["accepted_head"]["project_id"] == restart["project_id"]
+    assert accepted["accepted_head"]["generation"] == 1
+    assert accepted["accepted_head"]["revision_id"] == restart["draft_revision"]
+    checkpoint = accepted["checkpoint"]
+    assert checkpoint["dirty_before"] is True
+    assert checkpoint["freecad_save_mode"] in {0o600, 0o644}
+    assert checkpoint["private_mode_before_checkpoint"] == 0o600
+    assert checkpoint["status"] == "succeeded"
+    assert checkpoint["committed_revision"] == accepted["final_head"]["revision_id"]
+    assert checkpoint["reasoning_owner"] == "external_plan"
+    assert checkpoint["review_policy"] == "auto_commit"
+    assert checkpoint["operation"] == "system.checkpoint_checkout"
+    assert checkpoint["source"] == "user"
+    assert checkpoint["artifact_formats"] == ["fcstd", "step"]
+    assert checkpoint["report_passed"] == [True]
+    assert checkpoint["transitions"][-1] == "commit"
+    assert checkpoint["closed_state"] == "closed"
+    assert checkpoint["closed_path"] is None
+    assert checkpoint["base_revision_unchanged"] is True
+    assert accepted["final_head"]["generation"] == 2
+    assert accepted["final_head"]["revision_id"] != restart["draft_revision"]
     assert [item["object_type"] for item in accepted["entities"]] == ["Part::Box"]
-    assert accepted["entities"][0]["volume"] == pytest.approx(6000.0)
+    assert accepted["entities"][0]["volume"] == pytest.approx(8400.0)
 
 
 @pytest.mark.slow

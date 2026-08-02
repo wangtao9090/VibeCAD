@@ -1,338 +1,226 @@
-# VibeCAD Active Plan — G1 Outcome Closeout
+# VibeCAD Active Plan — P1 sequential user editing
 
-> Status: complete / accepted
+> Status: **P1 complete; publication authorized**
 >
-> Updated: 2026-08-01
+> Updated: 2026-08-02
 >
-> Repository anchor: `codex/agent-stage3@315fc6c`
+> Repository anchor: `codex/agent-stage3@b518f46`
 >
 > This is the only mutable orchestration plan. Earlier campaign files are
-> frozen historical records or future reference contracts; do not append
-> command transcripts, retries, raw logs, or routine snapshots to them.
+> frozen historical records; G1 closed at `b518f46` with the recorded
+> `382 passed` final related suite.
 
-## 1. Outcome
+## 1. Goal and success criteria
 
-G1 closes as one usable FreeCAD workflow rather than another infrastructure
-stage. A user can select a managed preview object, obtain its exact
-VibeCAD selector, inspect the candidate, and Accept or Reject it. The same thin
-Workbench completed one evidence-backed pilot inside a compatible
-user-installed FreeCAD while the managed runtime remains the execution,
-verification, and fallback authority.
+Deliver the smallest trustworthy workflow for the common product sequence:
 
-G1 is accepted because all of the following are true:
+```text
+Agent edits isolated candidate
+-> user reviews and Accepts or Rejects
+-> Agent phase ends
+-> user optionally makes small FreeCAD UI edits
+-> explicit checkpoint verifies and publishes one new VibeCAD Revision
+```
 
-1. whole-object and feature selection produce exact, uniquely resolved `SelectorV1` values in the managed Workbench;
-2. one admitted user-FreeCAD pilot connects through a bounded external bridge and completes the existing preview/review workflow;
-3. the GUI gains no kernel or commit authority, and managed mode still works;
-4. public docs and their contract tests describe the product that exists;
-5. focused gates, one GUI observation per host, and one final settled suite prove the outcome without new validation infrastructure.
+Success requires:
 
-## 2. Current state
+1. the Workbench clearly identifies Agent preview/review as non-editable product state and explains what happens if it is modified;
+2. after the Agent phase, the user can open an editable working copy of the current HEAD;
+3. dirty state is detected before another Agent task or publication decision;
+4. explicit manual checkpoint creates a new user-origin candidate, reopens it, observes it, verifies it, and advances HEAD only through the existing lease/CAS authority;
+5. no automatic user/Agent merge, rebase, conflict editor, or same-document concurrent editing is introduced;
+6. product and architecture docs consistently keep Git optional and non-authoritative.
 
-- Stage 3, P0-B, the multi-runtime foundation, and G1 C01-C03 are complete.
-- The Workbench already provides lifecycle, Preview, and Accept/Reject against the authenticated local kernel.
-- Managed installed-form Alpha is anchored at `83879b6`; repository-first and product-first docs at `656b27f` and `ebc29d9`.
-- The dual-host product decision is recorded at `a4e5ab2`.
-- C04 selector capture is accepted at `b43b23c`; the external bridge pilot is accepted at `91207b1`; user-host selector/review completion is accepted at `91c94f4`; product documentation truth is accepted at `315fc6c`.
-- The topology review found an in-process `vibecad.daemon` import, while VibeCAD requires Python 3.12+ and the FreeCAD 1.1.3 pilot embeds Python 3.11.14. Installing the complete VibeCAD package there is not the pilot design.
+## 2. Approved decisions and authority
 
-## 3. Approved decisions and authority
+The user approved the following product boundary on 2026-08-01 and then asked
+to execute it:
 
-The user approved this reset and execution order on 2026-08-01:
+- collaboration is sequential ownership transfer, not concurrent editing;
+- users are warned not to edit while VibeCAD is executing or presenting an Agent draft;
+- edits made after the Agent phase may be explicitly checkpointed;
+- unexpected simultaneous edits are detected and rejected, not automatically resolved;
+- branch/worktree-style proposal isolation is deferred to future Agent Teams;
+- research whether CAD files belong in Git and apply the result to this plan.
 
-1. finish C04 in the verified managed Alpha before expanding dual-host work;
-2. then prove one user-FreeCAD host through a small external VibeCAD bridge;
-3. treat macOS `/Applications/FreeCAD.app`, currently 1.1.3, as the first evidence target—not a broad compatibility claim;
-4. keep `vibecad --freecad` as the known-good managed path and fallback;
-5. defer P1 breadth until the complete G1 user outcome is demonstrated.
+The request authorizes reversible implementation, tests, durable documentation,
+and—on 2026-08-02—an intentional commit and push of this scope. It does not
+authorize a PR, release, marketplace publication, dependency purchase, or
+destructive cleanup.
 
-This approval settles the sequence and bridge direction. The later instructions
-to execute and continue autonomously authorize the approved G1 slices, their
-bounded live pilot effects, and non-force publication. Reopen approval only for
-a blocker or an unplanned product/transport/support-policy change.
+Selected controls:
 
-Selected orchestration controls:
+- **Continuity:** the work spans backend, protocol, Workbench, and tests, so this file is the compact recovery record.
+- **Approval:** the product boundary above is settled; reopen only if implementation requires automatic merge, a second authority, or materially broader import support.
+- **Gates:** use focused contract/integration tests and the existing final related suite; do not build a new validation framework.
 
-- **Continuity:** this file holds the compact cross-session state.
-- **Approval:** the order and bridge direction are settled; reopen only if a branch condition changes product shape.
-- **Delegation/review:** only for bounded independent work or an invariant that justifies a distinct reviewer.
+No delegation, long-running process controller, production ledger, or
+independent-review requirement is selected.
 
-No process controller, validation runner, scenario registry, evidence language,
-or per-command ledger is selected.
-
-## 4. Scope, exclusions, and invariants
+## 3. Scope, exclusions, and invariants
 
 In scope:
 
-- C04 whole-object/feature selector capture in the Workbench;
-- a minimal bridge, compatibility doctor, and reversible per-user install/uninstall for the single pilot;
-- one managed-host and one user-host product observation;
-- correction of stale G1 capability documentation and its contract tests.
+- explicit Agent-owned preview state and user guidance;
+- one editable HEAD checkout after the Agent phase;
+- dirty/clean/stale/revoked state presentation;
+- explicit discard/reload and checkpoint actions;
+- a manual checkpoint kernel path with immutable base binding, project lease,
+  private candidate, deterministic validation, fresh HEAD CAS, and rollback;
+- an optional future Git export boundary for accepted revisions only.
 
 Out of scope:
 
-- Face/Edge selectors, topology persistence, and arbitrary model-generated FreeCAD Python;
-- a second CAD, PartDesign/Mechanical3D breadth, and generic imported-model reconstruction;
-- opportunistic `PATH` discovery, a compatibility matrix, marketplace publication, tags, or a general release;
-- unrelated user files, `.workbuddy/`, and the two untracked CAD course documents.
+- automatic conflict resolution, semantic rebase, or background two-way sync;
+- simultaneous edits to one FreeCAD document;
+- multi-Agent branch merging, component ownership, or proposal selection UI;
+- treating Git, GitHub, Git LFS, or a native CAD file as VibeCAD authority;
+- unpack-and-merge of FCStd, generic native-CAD merge, or broad FCStd import;
+- unrelated `.workbuddy/` and the two untracked CAD course documents.
 
 Invariants:
 
-- the Task Kernel remains the sole Task, Revision, HEAD, review, and commit authority;
-- candidate mutation remains isolated and source models are never contaminated;
-- selector construction uses tracked checkout identity and fails closed on malformed metadata, ambiguity, revision mismatch, or subelements;
-- the least-authority plugin receives no daemon secrets in persistent configuration;
-- installation never rewrites `FreeCAD.app`, preferences, macros, or unrelated addons, nor adopts an unknown existing tree;
-- managed mode remains functional throughout the pilot.
+- Task Kernel remains the sole Task, Revision, review, lease, HEAD, commit, and recovery authority;
+- immutable revisions and Agent drafts are never edited in place;
+- a checkout is non-authoritative and its ordinary FreeCAD Save never advances HEAD;
+- an old draft verdict is never reused after user edits;
+- dirty/stale/mismatched input fails closed and cannot overwrite a newer HEAD;
+- source artifacts and unrelated user documents remain untouched;
+- managed FreeCAD remains the default and the existing single external-host pilot claim does not expand.
 
-## 5. Execution slices
+## 4. Execution slices
 
-### G1-00 — Plan reset
+### P1-S01 — Decision, research, and preview ownership UX
 
-State: **complete** in the working tree; this file exists and the Stage 3, P0-B, and MRG1 rolling files are visibly frozen.
+State: **complete**.
 
-Gate: **GREEN** — the diff is consistent, the prior campaign records are frozen, and the exact next action is explicit.
+- record the sequential editing decision and CAD-in-Git research;
+- change Workbench copy/state so Agent previews explicitly say not to edit;
+- surface local modification as a recoverable discard/reload action, not a
+  merge conflict;
+- keep review disabled whenever the preview document or checkout is dirty.
 
-### G1-01 — Managed C04 selector outcome
+Gate: focused Dock/Host/Preview tests, doc consistency, Ruff/format/diff check.
 
-State: **accepted and pushed at `b43b23c`**.
+Result: the sequential ownership decision and Git/CAD storage policy are now
+durable; the Dock identifies managed Agent previews as non-editable and keeps
+the existing dirty/touched fail-closed review behavior. Focused controller gate:
+`187 passed`; changed-file Ruff, format, and diff checks passed.
 
-Implement the already approved C04 contract:
+### P1-S02 — Editable HEAD working copy
 
-- accept only a whole managed `DocumentObject` from a tracked Preview Document;
-- map an object carrying `feature_id` to a feature-entity selector;
-- derive project/revision only from the live checkout binding;
-- construct through `parse_entity_identity()` and `EntityIdentity.to_selector()`, then uniquely `resolve_selector()` against the complete tracked document;
-- reject Face/Edge subelements and every malformed, stale, mismatched, or ambiguous selection.
+State: **complete**.
 
-Outcome gate:
+- create a distinct editable checkout mode only from a live current HEAD;
+- never reuse a review draft checkout for manual authoring;
+- show clean, dirty, stale, and recovery-required states;
+- require checkpoint or discard before starting another Agent-owned action.
 
-1. focused selection/controller tests pass;
-2. one managed FreeCAD observation shows select → exact selector → existing Preview/Accept/Reject behavior;
-3. the diff does not alter gateway transport or kernel authority.
+Gate: managed checkout + protocol + Workbench integration tests prove that the
+copy is non-authoritative, HEAD-neutral on Save, and stale after HEAD advances.
 
-If C04 requires gateway/transport redesign, move that requirement into G1-02; do not expand C04 to solve it.
+Result: the Dock now has a distinct editable role with **Open Editable HEAD**,
+**Checkpoint Edit**, and **Discard Edit**. It is mutually exclusive with Agent
+preview/review. Save remains local; a clean checkpoint is a no-op; successful
+checkpoint closes the old document/checkout and refreshes the project. Both
+auto-save-on-checkpoint and user-save-before-checkpoint paths are covered.
 
-Implemented result:
+### P1-S03 — Manual checkpoint kernel path
 
-- the Workbench observes FreeCAD selection lifecycle and detaches the observer
-  with its session;
-- the Host accepts exactly one selected whole object from exactly one live
-  tracked Preview binding and derives project/revision from that binding;
-- identity construction and complete-document unique resolution use the
-  existing selector authority; no Name/Label or Face/Edge fallback exists;
-- the Dock shows a bounded canonical selector, copies that exact value, and
-  clears or rejects it on selection, project/task, preview, or lifecycle drift;
-- gateway transport, kernel authority, and review semantics are unchanged.
+State: **complete**.
 
-Evidence admitted for this slice:
+- bind an idempotent checkpoint request to exact project, base HEAD, checkout
+  identity, model digest, and size;
+- copy only the exact dirty managed file into a private candidate;
+- reopen, normalize/checkpoint, export STEP, seal, observe, and verify the
+  P1 single-part envelope;
+- publish only after fresh lease and complete base HEAD CAS;
+- produce a normal durable task/revision outcome with user-origin provenance;
+- fail closed on clean, closed, stale, revoked, replaced, oversized, malformed,
+  unsupported, or concurrently changed input.
 
-1. settled selector/controller/Preview/Review/package focus: `332 passed`;
-2. scoped Ruff, format, and `git diff --check`: GREEN;
-3. the real managed FreeCAD GUI loaded the changed Workbench, reached active
-   lifecycle with one Dock and the authenticated daemon, and exited with clean
-   daemon retirement;
-4. managed `FreeCADCmd` created a real `Part::Feature`; selector capture emitted
-   canonical JSON and `resolve_selector()` returned that identical object.
+Gate: focused Task Kernel tests plus a real managed FreeCAD checkpoint of one
+small post-Accept parameter edit. Failure and stale-base cases leave HEAD and
+the prior accepted revision unchanged.
 
-The existing M00 harness then failed its legacy Refresh diagnostic because it
-still observes `dock.request`, while hosted Refresh has used `_host_transport`
-since the prior C03 anchor. This mismatch predates G1-01 and does not exercise
-selector capture. It is recorded as a non-C04 diagnostic residual; no new
-runner or harness repair was admitted. The real-GUI portion of the selector
-outcome is therefore supported by the bounded combination of current-Workbench
-activation, a real FreeCAD object round-trip, and product-level selection/review
-integration tests rather than a new end-to-end GUI scenario.
+Result: `system.checkpoint_checkout` reserves an immutable request bound
+to exact checkout, base HEAD, digest, and size; the checkout store stages only
+that exact file into a private candidate; the normal export, evidence,
+verification, Revision, and HEAD CAS path publishes it. Source-stage failure,
+idempotent replay, key rebinding, stale HEAD, and rejection all preserve the
+prior authoritative state.
 
-### G1-02 — Single-host external-bridge pilot
+Real gate: the existing cross-process managed FreeCAD harness completed a
+post-Accept Box edit from length 10 to 14, detected the checkout as dirty,
+published verified FCStd/STEP, advanced HEAD generation 1 → 2, reloaded volume
+`8400 mm³`, and preserved the accepted base Revision hash: `1 passed, 10
+deselected`.
 
-State: **accepted at `91207b1`**.
+### P1-S04 — Product integration and closeout
 
-Keep the Workbench self-contained in FreeCAD's Python/PySide environment. Run daemon-client/bootstrap logic in an external Python 3.12+ VibeCAD process over a bounded protocol.
+State: **complete**.
 
-The pilot must provide:
+- connect the Workbench editable action to the public local client without
+  exposing local paths or daemon secrets;
+- update user guide and capability truth;
+- run the final affected suite and one bounded GUI observation;
+- close this plan only when the full sequential outcome works.
 
-- explicit `--freecad-app` discovery and compatibility diagnostics;
-- protocol/version handshake and actionable incompatible-host failure;
-- per-user atomic install, ownership receipt, upgrade binding, and safe uninstall that refuses a mutated or foreign tree;
-- no opportunistic `PATH` fallback and no broad support claim;
-- an actionable managed-mode fallback.
+Gate: user-visible Agent -> review -> Accept -> manual edit -> checkpoint ->
+new HEAD outcome, with no automatic merge path and no regression to G1 review.
 
-Outcome gate:
+Computer-use result: an isolated normal managed FreeCAD launch connected to the
+real local daemon, opened the accepted editable HEAD, selected `Box`, changed
+Length 10 → 14, clicked **Checkpoint Edit**, closed the old checkout, and
+refreshed the project while the Workbench remained Connected. HEAD advanced
+generation 1 → 2 and a fresh managed checkout reopened as `14 × 20 × 30`, volume
+`8400 mm³`. The Workbench's 10-second ping kept the worker-owned connection alive
+past the daemon's 30-second idle timeout without consuming protocol request IDs.
 
-1. focused bridge/discovery/install contract tests pass;
-2. FreeCAD 1.1.3 connects to the authenticated daemon and the installed bridge
-   carries the existing project/task/preview/review method set without kernel
-   authority; the non-empty product outcome remains G1-03;
-3. install/uninstall recovery is observed and one managed-mode regression remains green.
+The GUI run also exposed a real FreeCAD state nuance: recompute clears
+`Document.isTouched()` before Save. The editable flow now observes document and
+object mutations from the moment the editable binding opens, so a recomputed but
+unsaved change is still saved at checkpoint. A clean checkpoint still skips Save,
+avoiding a false revision caused solely by FCStd reopen/reserialization bytes.
 
-Fixed pilot contract:
+## 5. Current state and next action
 
-- admit only an explicit absolute `.app` bundle whose exact observed metadata is the
-  observed macOS FreeCAD `1.1.3`, embedded CPython `3.11`, and PySide6 `6.8.3`;
-- keep the existing Workbench gateway, Preview, review, and checkout authority
-  state machines inside FreeCAD, but proxy only the `LocalAgentClient` methods
-  through one exact managed-Python `3.12+` child;
-- use a versioned, bounded, length-prefixed canonical-JSON stdio protocol with
-  an exact hello/ready handshake, monotonically increasing request ids, a closed
-  method allowlist, fixed error codes, and one child per Workbench session;
-- bind the child to the verified managed runtime executable and current VibeCAD
-  package version; the addon receives no daemon receipt or secret and performs
-  no direct Kernel connection;
-- install only under the current user's FreeCAD `Mod/VibeCAD` directory from an
-  exact payload allowlist, with a receipt binding host, bridge, hashes, and
-  target; refuse an unknown existing tree, mutated owned payload, or mismatched
-  uninstall request;
-- keep `vibecad --freecad` unchanged as the managed fallback. The user-host CLI
-  surface is exact: `--freecad-app <absolute.app>` plus one of `--doctor`,
-  `--install-addon`, or `--uninstall-addon`; no `PATH` discovery is permitted.
+Completed facts:
 
-Implemented result:
+- G1 is complete at `b518f46` and local/upstream were equal at this campaign anchor;
+- existing managed checkout already computes content dirty state and source liveness;
+- existing PreviewCoordinator already rejects touched FreeCAD documents and dirty checkout descriptors for review;
+- existing draft Accept re-verifies and applies HEAD CAS;
+- Git/LFS research concludes that Git is an optional export/mirror, not the live CAD database or merge authority.
+- the exact checkpoint method is wired through AgentApplication, protocol v2,
+  daemon facade, local client, bounded external bridge, gateway, Host, and Dock
+  without exposing a checkout path on the wire;
+- affected Workbench/bridge regression is `198 passed`; the application,
+  protocol, checkout, revision, checkpoint, Task Kernel, and local daemon
+  regression is `860 passed, 1 deselected` (two expected platform warnings).
+- real FreeCAD exposed two save byproducts that are now handled at their narrow
+  authority boundaries: Workbench restores the exact granted document to
+  private mode after owner/no-follow/single-link checks, and checkout cleanup
+  accepts only a bounded timestamped `.FCBak` name set while continuing to
+  reject unknown extras;
+- the Workbench keeps its authenticated daemon connection alive on the existing
+  worker thread while idle, stops the timer during cleanup, and fails closed if
+  the ping itself fails; focused Workbench controller regression is `195 passed`;
+- the settled repository default suite is `5568 passed, 110 deselected` with
+  19 expected platform/security-test warnings; full Ruff, changed-file format,
+  and `git diff --check` pass. Full-repository format still reports 52
+  pre-existing unrelated files and was intentionally not rewritten.
+- the normal interactive GUI gate passed with a real parameter mutation,
+  checkpoint, authoritative generation advance, and FreeCAD-kernel geometry
+  verification; P1 is therefore closed.
 
-- the installed addon remains self-contained under FreeCAD's Python 3.11 and
-  proxies only the closed `LocalAgentClient` surface through one managed Python
-  3.12 child; persistent configuration contains executable identity, not daemon
-  credentials;
-- the child protocol has bounded canonical JSON frames, hello/ready nonce
-  binding, monotonic request ids, fixed methods/errors, process retirement, and
-  an environment allowlist;
-- the doctor admits only the explicit observed 1.1.3/Python 3.11/PySide6 6.8.3
-  bundle and records a stable fingerprint; no bundle execution or `PATH`
-  discovery occurs during diagnosis;
-- per-user installation is staged and atomic, binds host/payload/bridge hashes
-  in an ownership receipt, supports same- and cross-package upgrades, and
-  refuses foreign or mutated trees during upgrade or uninstall;
-- the managed interpreter entry symlink, its canonical target, and target hash
-  are bound separately so daemon bootstrap remains strict rather than admitting
-  a resolved-but-unrecognized executable spelling.
+Next action:
 
-Evidence admitted for this slice:
+1. stage only the P1 implementation, tests, and documentation while preserving
+   `.workbuddy/` and the two unrelated CAD course documents;
+2. commit the completed sequential FreeCAD editing workflow and push the current
+   `codex/agent-stage3` branch;
+3. do not open a PR or publish a release without separate authorization.
 
-1. the settled bridge/install/launcher/Workbench/selector focus is `367 passed`;
-2. scoped Ruff, format, and `git diff --check` are GREEN;
-3. installed-form doctor admitted only `/Applications/FreeCAD.app` 1.1.3 and
-   produced host fingerprint
-   `ddfe5d97ceef9dfc93cdde01571207486416ad722e99fb588b29fe4059cb050c`;
-4. the live installed addon completed bridge hello/ready, authenticated daemon
-   ping, and project/task listing; the final bridge ping returned `ready`;
-5. the real user FreeCAD GUI activated `VibeCADWorkbench`, reached one active
-   connected Dock, and its process group was reaped after observation;
-6. verified uninstall removed only the owned addon, and reinstall restored the
-   exact final receipt
-   `b8b92de7c1d79d516edf34c50c0250e3631c9e5ab435c921c7a89778cf42e5f2`.
-
-The observed app has an invalid macOS code signature and some critical bundle
-files are group-writable. The exact user-selected, user/root-owned,
-non-world-writable bundle is therefore admitted only as this fingerprinted
-local pilot, not as a general trust or compatibility claim. Missing
-3DconnexionNavlib produced a non-blocking host warning during GUI startup.
-
-The pilot data store contained zero projects and tasks. G1-02 therefore proves
-the installed transport, lifecycle, list path, and reversible ownership, while
-the non-empty user-host Preview/Accept-or-Reject outcome remains the explicit
-G1-03 closeout gate rather than being inferred from this observation.
-
-### G1-03 — Product closeout and truth alignment
-
-State: **accepted at product commit `91c94f4` and documentation commit `315fc6c`**.
-
-- demonstrate C04 selector output plus Accept or Reject in the admitted user-FreeCAD pilot;
-- align README, User Guide, Architecture, Product Capability Roadmap, and Acceptance Tests with Alpha, pilot, and deferred scope;
-- remove assertions requiring the stale statement that G1 Workbench is undelivered;
-- run one settled final relevant suite after product and docs stop changing.
-
-Closeout gate: Section 1 is proven, residuals are recorded, and the next plan is a narrow P1 vertical slice.
-
-Implemented result:
-
-- the Python 3.11 thin addon detaches only bounded raw VibeCAD identity metadata
-  from the complete tracked preview document; it does not infer from FreeCAD
-  Name/Label or construct a selector locally;
-- the existing private Workbench worker lane sends that inventory through the
-  closed external bridge method set. Managed Python performs the exact existing
-  `parse_entity_identity()` → `EntityIdentity.to_selector()` → unique
-  `resolve_selector()` authority path and returns canonical JSON;
-- selection generation, live GUI selection, checkout binding identity,
-  project/revision and canonical response are revalidated before the Dock
-  displays a result. Stale or malformed responses fail closed;
-- the bridge remains one child per Workbench session and receives no Task,
-  Revision, HEAD, review, commit, store, lease or daemon-secret authority.
-
-Evidence admitted for this slice:
-
-1. the selector bridge began with three expected RED failures and passed its
-   targeted GREEN gate; the settled bridge/selection/controller focus was
-   `202 passed` before the real observation;
-2. installed-form managed selector resolution returned one canonical feature
-   selector, and the live addon was upgraded to ownership receipt
-   `0c8d2d9ce9170941e5494c5ec175ffeb04c26d0baaa255f6420c08b072da017a`;
-3. one isolated real `/Applications/FreeCAD.app` 1.1.3 session used a non-empty
-   committed HEAD plus a second-box review draft, opened both previews, selected
-   the `review-box` feature, received a candidate-revision selector, and
-   completed Reject. The task persisted as `rejected` at generation 10, HEAD
-   remained `revision_95766005fda59eba8269faac7a380fb4`, and both checkout and
-   FreeCAD document counts ended at zero;
-4. README, bilingual README, User Guide, Architecture, Agent Architecture,
-   Product Capability Roadmap, Acceptance Tests, and the existing release-doc
-   contract test now describe the same managed-default/single-host-pilot truth;
-5. the only settled closeout suite passed `382` tests; scoped Ruff, format and
-   `git diff --check` were GREEN.
-
-G1 is complete. Remaining limits are not G1 failures: face/edge selectors,
-topology persistence, dirty manual publish, a GUI CAD execution profile,
-general user-FreeCAD compatibility, host-verified Claude/Codex execution,
-P0-B hardening, and P1/G2 geometry breadth remain outside this campaign.
-
-## 6. Evidence budget
-
-For each product slice, admit at most:
-
-1. focused automated tests for changed behavior and invariants;
-2. one real GUI observation for the affected host;
-3. one independent review only when it changes an outcome or invariant
-   decision.
-
-Run the broader settled suite once at G1 closeout. A new runner, observer,
-controller, harness, or evidence format is forbidden unless existing tests,
-product logs, and direct observation cannot answer a named outcome or invariant;
-any admitted aid must have a bounded scope and retirement condition. A missing
-diagnostic explanation does not block an otherwise established outcome.
-
-## 7. Recovery and exact next action
-
-Recovery anchor: `codex/agent-stage3@315fc6c`. Preserve the pre-existing
-untracked `.workbuddy/` and both CAD course documents. On resume, inspect only
-state and inputs that may have changed.
-
-Exact next action after G1:
-
-> Select and approve one narrow P1/G2 vertical product slice before
-> implementation. Reuse the completed Workbench/Task Kernel path and define one
-> user-visible outcome plus its acceptance contract; do not reopen G1 bridge,
-> selector, validation-runner, or compatibility-matrix scope without a named
-> regression.
-
-Material residuals after G1:
-
-- only one fingerprinted macOS FreeCAD 1.1.3 pilot target has local evidence;
-- the observed app has an invalid code signature and group-writable critical
-  files, so its exact local fingerprint is not a general trust/support claim;
-- managed mode remains the default and fallback; no second external host is
-  admitted;
-- true Claude/Codex second-host activation remains unverified and no tag or
-  general release was authorized;
-- the next P1/G2 slice changes product capability and therefore requires a new
-  scope decision under the user's autonomy boundary.
-
-Additional residual after G1-01:
-
-- the M00 real-GUI harness has a pre-existing hosted-Refresh observation
-  mismatch and must not be mistaken for a selector failure or expanded into a
-  second validation project.
-
-Historical detail remains in:
-
-- [`vibecad-agent-stage3.md`](vibecad-agent-stage3.md)
-- [`vibecad-p0b-core.md`](vibecad-p0b-core.md)
-- [`vibecad-multi-runtime-g1.md`](vibecad-multi-runtime-g1.md)
-- [`vibecad-durable-v2.md`](vibecad-durable-v2.md) (future reference contract)
+Recovery boundary: the P1 implementation is complete and authorized for branch
+publication only. Preserve the three pre-existing untracked paths.

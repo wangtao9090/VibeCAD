@@ -43,6 +43,7 @@ _METHOD_KEYS = {
     "reject_draft": frozenset({"request"}),
     "open_checkout": frozenset({"open_key", "source"}),
     "get_checkout": frozenset({"checkout_id"}),
+    "checkpoint_checkout": frozenset({"checkpoint_key", "checkout_id"}),
     "close_checkout": frozenset({"checkout_id"}),
     "claim_file_grant": frozenset({"grant_id"}),
     "resolve_selector": frozenset({"request"}),
@@ -265,6 +266,11 @@ def _dispatch(client: object, method: str, params: dict[str, object]) -> dict[st
         result = getattr(client, f"{method}_request")(params["request"])
     elif method == "open_checkout":
         result = client.open_checkout(open_key=params["open_key"], source=params["source"])
+    elif method == "checkpoint_checkout":
+        result = client.checkpoint_checkout(
+            checkpoint_key=params["checkpoint_key"],
+            checkout_id=params["checkout_id"],
+        )
     elif method in {"get_checkout", "close_checkout"}:
         result = getattr(client, method)(checkout_id=params["checkout_id"])
     elif method == "claim_file_grant":

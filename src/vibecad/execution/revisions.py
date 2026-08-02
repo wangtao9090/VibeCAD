@@ -4507,6 +4507,114 @@ def _validate_candidate_reservation(
     return None
 
 
+def _replace_candidate_model_at(
+    store,
+    project_id,
+    expected_head,
+    revision_id,
+    reservation_key,
+    source_parent_fd,
+    source_name,
+    expected_binding,
+    expected_sha256,
+    expected_size,
+    lease,
+):
+    """Copy one descriptor-bound external FCStd into a reserved private candidate."""
+
+    reservation_code = _validate_candidate_reservation(
+        store,
+        project_id,
+        expected_head,
+        revision_id,
+        reservation_key,
+        lease,
+    )
+    if reservation_code is not None:
+        raise RevisionStoreError(reservation_code)
+    if (
+        type(expected_sha256) is not str
+        or re.fullmatch(_DIGEST_PATTERN, expected_sha256) is None
+        or type(expected_size) is not int
+        or expected_size <= 0
+    ):
+        raise RevisionStoreError(RevisionStoreErrorCode.INVALID_INPUT)
+    if expected_size > _MAX_FILE_BYTES:
+        raise RevisionStoreError(RevisionStoreErrorCode.BUDGET_EXCEEDED)
+    source = _open_external_source_at(
+        source_parent_fd,
+        source_name,
+        expected_binding,
+    )
+    if source[4] is not None:
+        raise RevisionStoreError(source[4])
+    if source[2].st_size != expected_size:
+        _close_two(source[1], source[0])
+        raise RevisionStoreError(RevisionStoreErrorCode.CORRUPT_CONTENT)
+
+    authority = _candidate_authority(store, project_id, revision_id, lease)
+    if authority[2] is not None:
+        close_failed = _close_two(source[1], source[0])
+        if close_failed:
+            raise RevisionStoreError(RevisionStoreErrorCode.RECOVERY_REQUIRED)
+        raise RevisionStoreError(authority[2])
+    root_open = authority[0]
+    project_open = authority[1]
+    candidate_fd = None
+    code = None
+    try:
+        candidate_open = _open_safe_directory(
+            project_open[2],
+            _candidate_key(revision_id),
+            root_open[1].st_dev,
+            RevisionStoreErrorCode.NOT_FOUND,
+        )
+        candidate_fd = candidate_open[0]
+        code = candidate_open[1]
+        existing = None
+        if code is None:
+            existing = _entry_stat(candidate_fd, "model.FCStd")
+            code = existing[2]
+        precreated = False
+        if code is None and existing[1]:
+            if not _safe_immutable_stat(existing[0], root_open[1].st_dev):
+                code = RevisionStoreErrorCode.UNSAFE_STORE
+            else:
+                precreated = True
+        copied = None
+        if code is None:
+            copied = _copy_open_file(
+                source[0],
+                source[1],
+                source[2],
+                source[3],
+                candidate_fd,
+                "model.FCStd",
+                precreated,
+            )
+            code = copied[2]
+        if code is None and (copied[0] != expected_sha256 or copied[1] != expected_size):
+            code = RevisionStoreErrorCode.CORRUPT_CONTENT
+        if code is None:
+            code = _source_parent_after_code(source[0], source[5])
+        if code is None:
+            try:
+                os.fsync(candidate_fd)
+            except OSError:
+                code = RevisionStoreErrorCode.IO_ERROR
+    finally:
+        close_failed = False
+        if candidate_fd is not None:
+            close_failed = _close_fd(candidate_fd) or close_failed
+        close_failed = _close_project_fds(project_open) or close_failed
+        close_failed = _close_fd(root_open[0]) or close_failed
+        close_failed = _close_two(source[1], source[0]) or close_failed
+        if close_failed and code is None:
+            code = RevisionStoreErrorCode.RECOVERY_REQUIRED
+    if code is not None:
+        raise RevisionStoreError(code)
+
+
 def _converge_generation_zero_publication(
     store,
     root_fd,
@@ -8120,6 +8228,34 @@ class LocalRevisionStore:
             revision_id,
             expected_source,
             reservation_key,
+            lease,
+        )
+
+    def replace_candidate_model_at(
+        self,
+        project_id,
+        expected_head,
+        revision_id,
+        reservation_key,
+        *,
+        source_parent_fd,
+        source_name,
+        expected_binding,
+        expected_sha256,
+        expected_size,
+        lease,
+    ):
+        return _replace_candidate_model_at(
+            self,
+            project_id,
+            expected_head,
+            revision_id,
+            reservation_key,
+            source_parent_fd,
+            source_name,
+            expected_binding,
+            expected_sha256,
+            expected_size,
             lease,
         )
 

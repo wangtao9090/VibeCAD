@@ -55,6 +55,7 @@ ABANDONED_TEMP_TTL_SECONDS = 86_400
 CLOSED_TOMBSTONE_TTL_SECONDS = 2_592_000
 MAX_CHECKOUT_TEMP_ENTRIES = 8
 MAX_CLOSED_TOMBSTONES = 1_024
+_MAX_FREECAD_BACKUPS = 8
 
 _LEGACY_SCHEMA_VERSION = 1
 _OPEN_SCHEMA_VERSION = 2
@@ -76,6 +77,7 @@ _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _OPEN_TEMP_RE = re.compile(r"\.checkout_[0-9a-f]{32}\.tmp\Z")
 _TOMBSTONE_RE = re.compile(r"closed_checkout_[0-9a-f]{32}\.json\Z")
 _TOMBSTONE_TEMP_RE = re.compile(r"\.closed_checkout_[0-9a-f]{32}\.json\.[0-9a-f]{32}\.tmp\Z")
+_FREECAD_BACKUP_RE = re.compile(r"model\.[0-9]{8}-[0-9]{6}\.FCBak\Z")
 
 
 class CheckoutStoreRootTrust(StrEnum):
@@ -867,6 +869,93 @@ class ManagedCheckoutStore:
                 raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
             return current
         except CheckoutError:
+            raise
+        except StorageFailure:
+            raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
+        except OSError:
+            raise CheckoutError(CheckoutErrorCode.IO_ERROR) from None
+
+    def require_checkpoint_source(self, checkout_id: str) -> CheckoutFileSnapshot:
+        """Capture one dirty, live HEAD checkout suitable for manual checkpointing."""
+
+        snapshot = self.capture_live_file(checkout_id)
+        descriptor = snapshot.descriptor
+        if (
+            descriptor.source.kind != "head"
+            or descriptor.source_head is None
+            or not descriptor.dirty
+        ):
+            raise CheckoutError(CheckoutErrorCode.CONFLICT)
+        return snapshot
+
+    def stage_checkpoint_candidate(
+        self,
+        snapshot: CheckoutFileSnapshot,
+        *,
+        expected_head: ProjectHead,
+        revision_id: str,
+        reservation_key: str,
+        lease: object,
+    ) -> None:
+        """Copy an exact dirty HEAD snapshot into one reserved private candidate."""
+
+        self._ensure_process()
+        if type(snapshot) is not CheckoutFileSnapshot or type(expected_head) is not ProjectHead:
+            raise CheckoutError(CheckoutErrorCode.INVALID_INPUT)
+        checkout_id = _identifier(snapshot.descriptor.checkout_id, _CHECKOUT_RE)
+        try:
+            with self._lock.hold():
+                root_fd = self._root.open()
+                directory_fd = None
+                try:
+                    inventory = self._inventory(root_fd, cleanup=True)
+                    current = self._capture_live_locked(root_fd, checkout_id, inventory)
+                    descriptor = current.descriptor
+                    if (
+                        current != snapshot
+                        or descriptor.source.kind != "head"
+                        or descriptor.source_head != expected_head
+                        or not descriptor.dirty
+                    ):
+                        raise CheckoutError(CheckoutErrorCode.CONFLICT)
+                    directory_fd, _directory_info = self._root.open_directory_at(
+                        root_fd,
+                        checkout_id,
+                        expected_identity=(
+                            snapshot.directory_binding.dev,
+                            snapshot.directory_binding.ino,
+                        ),
+                    )
+                    file_binding = snapshot.file_binding
+                    self._revision_store.replace_candidate_model_at(
+                        expected_head.project_id,
+                        expected_head,
+                        revision_id,
+                        reservation_key,
+                        source_parent_fd=directory_fd,
+                        source_name="model.FCStd",
+                        expected_binding=RevisionSourceBinding(
+                            dev=file_binding.dev,
+                            ino=file_binding.ino,
+                            mode=file_binding.mode,
+                            uid=file_binding.uid,
+                            nlink=file_binding.nlink,
+                            size=file_binding.size,
+                            mtime_ns=file_binding.mtime_ns,
+                            ctime_ns=file_binding.ctime_ns,
+                        ),
+                        expected_sha256=snapshot.model_sha256,
+                        expected_size=snapshot.size_bytes,
+                        lease=lease,
+                    )
+                    after = self._capture_live_locked(root_fd, checkout_id, inventory)
+                    if after != snapshot:
+                        raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
+                finally:
+                    if directory_fd is not None:
+                        os.close(directory_fd)
+                    os.close(root_fd)
+        except (CheckoutError, RevisionStoreError):
             raise
         except StorageFailure:
             raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE) from None
@@ -1952,7 +2041,14 @@ class ManagedCheckoutStore:
         try:
             entries = os.listdir(directory_fd)
             allowed = {"model.FCStd", "metadata.json"}
-            if any(entry not in allowed for entry in entries):
+            backups = tuple(entry for entry in entries if _FREECAD_BACKUP_RE.fullmatch(entry))
+            if (
+                any(
+                    entry not in allowed and _FREECAD_BACKUP_RE.fullmatch(entry) is None
+                    for entry in entries
+                )
+                or len(backups) > _MAX_FREECAD_BACKUPS
+            ):
                 raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
             for entry in entries:
                 info = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
@@ -1962,7 +2058,8 @@ class ManagedCheckoutStore:
                     or info.st_nlink != 1
                 ):
                     raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
-                if not partial and stat.S_IMODE(info.st_mode) != 0o600:
+                allowed_mode = {0o600, 0o644} if _FREECAD_BACKUP_RE.fullmatch(entry) else {0o600}
+                if not partial and stat.S_IMODE(info.st_mode) not in allowed_mode:
                     raise CheckoutError(CheckoutErrorCode.INTEGRITY_FAILURE)
                 os.unlink(entry, dir_fd=directory_fd)
                 self._fault("after_checkout_entry_unlink")

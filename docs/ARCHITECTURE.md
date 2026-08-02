@@ -486,7 +486,8 @@ result 中返回带精确 MIME type 的 FCStd/STEP 标准 ResourceLink，并用 
 
 `ManagedCheckoutStore` 可以从 HEAD 或 durable draft 创建只读来源绑定的私有 FCStd 副本，记录 source
 revision、task generation、manifest、hash 和 open/closed tombstone。Checkout 永远不是权威数据；手工
-修改若未来需要发布，必须形成新 candidate 并重新 observe/verify。
+修改若需要发布，必须来自 Agent 阶段结束后的 live HEAD 工作副本，形成新 user-origin candidate 并
+重新 observe/verify。FreeCAD 的普通 Save 不推进 HEAD。
 
 `interaction.protocol_v2` 与 local Kernel daemon 已形成可运行协议。daemon 使用 pinned private
 run root、same-user peer identity、secret proof、session/error framing 和单实例发布；启动、升级、
@@ -495,12 +496,26 @@ run root、same-user peer identity、secret proof、session/error framing 和单
 inode 与有效期的一次性 file grant；跨 session、重放、过期、symlink/hardlink 或 source
 stale/revoked 都 fail closed。
 
-真实 G1 Workbench Alpha 与 MCP 通过公共 client 共享同一个 daemon、TaskRun、draft、verdict 和
-HEAD。Workbench 打开 session-bound checkout/file grant，只承诺 HEAD/draft 预览、verdict、
-Accept/Reject 和 object/feature 选择；face/edge 与 dirty manual publish 不在首版口径。受管模式把
-Workbench 打入受管 FreeCAD；用户 FreeCAD 试点则让 Python 3.11 薄 addon 通过一个有界、封闭方法集
-的 Python 3.12 managed bridge 访问同一 client。桥接配置只绑定可执行文件身份与包版本，不持久化
-daemon receipt、secret、store 或 lease capability。
+真实 Workbench 与 MCP 通过公共 client 共享同一个 daemon、TaskRun、draft、verdict 和 HEAD。G1
+Workbench Alpha 交付了 session-bound HEAD/draft 预览、verdict、Accept/Reject 和 object/feature
+选择；当前 P1 分片在同一客户端上增加 Agent 阶段结束后的 editable HEAD、checkpoint 和 discard，
+但仍不包含 face/edge。受管模式把 Workbench 打入受管 FreeCAD；用户 FreeCAD 试点则让 Python 3.11
+薄 addon 通过一个有界、封闭方法集的 Python 3.12 managed bridge 访问同一 client。桥接配置只绑定
+可执行文件身份与包版本，不持久化 daemon receipt、secret、store 或 lease capability。
+
+P1 采用顺序编辑权，而不是并发合并：Agent 执行和 draft review 期间，Preview Document 明确提示
+不可编辑；若用户仍修改，review fail closed，并要求 discard/reload。Agent 阶段结束后，用户才可从
+当前 live HEAD 打开 editable checkout。再次启动 Agent 或发布前若存在 dirty 修改，只允许显式
+checkpoint 或 discard；checkpoint 绑定 exact base HEAD、checkout identity 与内容 digest，重新形成
+candidate、重开、观察、验证并通过 HEAD CAS 发布。系统不做自动 rebase、语义冲突解决或背景双向同步。
+FreeCAD Save 可能原子替换 `model.FCStd`、把模式改为 `0644`，并生成时间戳 `.FCBak`；Workbench 在
+checkpoint 前只对当前 grant 绑定路径执行 no-follow、owner、single-link 校验后恢复 `0600`。Checkout
+关闭时只会清理由当前已验证 FreeCAD 产生、名称和数量均有界的备份；未知额外文件仍进入
+`cleanup_required`，不会被猜测性删除。
+
+Git 不属于这条写入路径。accepted Revision 可以未来显式导出 canonical intent/manifest，以及可选的
+Git LFS FCStd/STEP 快照；Git branch、worktree、commit 或 LFS lock 都不能替代 Task Kernel 的 Revision、
+verifier 与 HEAD 权威。详见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VERSIONING_RESEARCH.md)。
 
 ## 11. 安全与失败语义
 

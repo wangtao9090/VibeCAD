@@ -44,7 +44,11 @@ from vibecad.execution.candidate import (
 from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
 from vibecad.execution.revisions import LocalRevisionStore, ProjectHead
 from vibecad.interaction.cad import CadExecutionPort, ValidatedImportEvidence
-from vibecad.interaction.checkouts import CheckoutFileSnapshot, HeadCheckoutSource
+from vibecad.interaction.checkouts import (
+    CheckoutFileSnapshot,
+    HeadCheckoutSource,
+    ManagedCheckoutStore,
+)
 from vibecad.interaction.protocol_v2 import bind_v2_import_locator
 from vibecad.worker import WorkerGenerationState
 from vibecad.workflow.catalog import (
@@ -138,6 +142,31 @@ class _Runtime:
     def close(self):
         self.close_calls += 1
         return self.closeable
+
+
+class _CheckpointRuntimeService:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def checkpoint_manual_edit(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        kwargs["stage_candidate"](
+            expected_head=kwargs["expected_head"],
+            revision_id="revision_" + "f" * 32,
+            reservation_key="checkpoint:" + "e" * 64,
+            lease=object(),
+        )
+        return TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT)
+
+
+class _CheckpointRuntime:
+    def __init__(self, *, head, service: _CheckpointRuntimeService, **_ignored) -> None:
+        self.head = head
+        self.service = service
+        self.stale = False
+
+    def close(self) -> bool:
+        return True
 
 
 class _FailingRuntimeService:
@@ -791,6 +820,79 @@ def test_application_exposes_identity_bound_checkout_file_snapshot(tmp_path: Pat
         assert current == snapshot
         assert current.descriptor == opened
         assert current.path == opened.local_path
+    finally:
+        app.close()
+
+
+def test_application_checkpoints_only_an_exact_dirty_head_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_service = _CheckpointRuntimeService()
+    staged: list[tuple[CheckoutFileSnapshot, dict[str, object]]] = []
+
+    def runtime_factory(**kwargs):
+        return _CheckpointRuntime(service=runtime_service, **kwargs)
+
+    def observe_stage(self, snapshot, **kwargs) -> None:
+        staged.append((snapshot, dict(kwargs)))
+
+    monkeypatch.setattr(ManagedCheckoutStore, "stage_checkpoint_candidate", observe_stage)
+    app = AgentApplication.open(
+        data_root=_data_root(tmp_path),
+        runtime_factory=runtime_factory,
+        cad_port_factory=lambda **_kwargs: _GapCadPort(),
+    )
+    try:
+        project_id = "project_" + "c" * 32
+        source = tmp_path / "checkpoint-source.FCStd"
+        source.write_bytes(b"initial managed model")
+        source.chmod(0o600)
+        with app._lease_manager.acquire_project_write(project_id) as lease:  # noqa: SLF001
+            imported = app._revision_store.import_trusted_fcstd(  # noqa: SLF001
+                project_id,
+                source,
+                hashlib.sha256(source.read_bytes()).hexdigest(),
+                source.stat().st_size,
+                lease,
+            )
+        opened = app.open_checkout(
+            open_key="checkout_open_" + "c" * 32,
+            source=HeadCheckoutSource(project_id=project_id),
+        )
+        assert opened.local_path is not None
+        opened.local_path.write_bytes(b"user edited managed model")
+
+        result = app.checkpoint_checkout(
+            checkpoint_key="checkpoint_create_" + "c" * 32,
+            checkout_id=opened.checkout_id,
+        )
+
+        assert result == TaskServicePortFailure(code=TaskServicePortErrorCode.CONFLICT)
+        assert len(runtime_service.calls) == 1
+        call = runtime_service.calls[0]
+        assert set(call) == {
+            "checkpoint_key",
+            "checkout_id",
+            "project_id",
+            "expected_head",
+            "model_sha256",
+            "model_size_bytes",
+            "stage_candidate",
+        }
+        assert call["checkpoint_key"] == "checkpoint_create_" + "c" * 32
+        assert call["checkout_id"] == opened.checkout_id
+        assert call["project_id"] == project_id
+        assert call["expected_head"] == imported
+        assert call["model_sha256"] == hashlib.sha256(b"user edited managed model").hexdigest()
+        assert call["model_size_bytes"] == len(b"user edited managed model")
+        assert len(staged) == 1
+        snapshot, stage_kwargs = staged[0]
+        assert snapshot.descriptor.checkout_id == opened.checkout_id
+        assert snapshot.model_sha256 == call["model_sha256"]
+        assert stage_kwargs["expected_head"] == imported
+        assert "local_path" not in call
+        assert "source_fd" not in call
     finally:
         app.close()
 

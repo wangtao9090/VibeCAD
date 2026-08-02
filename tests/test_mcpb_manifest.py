@@ -185,7 +185,7 @@ def test_mcpbignore_excludes_heavy_dirs():
         assert pattern in ignore, f".mcpbignore 缺 {pattern}"
 
 
-def test_packaged_readme_describes_only_the_agent_first_surface():
+def test_packaged_readme_describes_the_current_agent_first_surface():
     english_path = ROOT / "README.md"
     chinese_path = ROOT / "README.zh-CN.md"
     assert english_path.is_file()
@@ -216,8 +216,12 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
         "P1",
         "P2",
         "FreeCAD Workbench Alpha",
-        "Whole-object and feature selector capture is the next G1 slice",
-        "STEP/STL import, reverse engineering, and simulation are not yet integrated",
+        "exact object/feature selector capture",
+        "Open Editable HEAD",
+        "Save** stays local",
+        "Checkpoint Edit",
+        "there is no automatic merge or rebase",
+        "STEP/STL import, photo reconstruction, and simulation are not currently supported",
         "unpublished candidate",
     ):
         assert required in english_readme
@@ -242,8 +246,12 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
         "P1",
         "P2",
         "FreeCAD Workbench Alpha",
-        "完整对象和 feature selector 捕获是下一段 G1 工作",
-        "STEP/STL 导入、逆向工程和仿真 尚未接入",
+        "精确 object/feature selector 捕获",
+        "Open Editable HEAD",
+        "Save** 只保存在本地",
+        "Checkpoint Edit",
+        "系统不做自动 merge 或 rebase",
+        "当前仍不支持 face/edge 选择、STEP/STL import、照片重建或 simulation",
         "未发布候选",
     ):
         assert required in chinese_readme
@@ -268,9 +276,9 @@ def test_packaged_readme_describes_only_the_agent_first_surface():
         "0.6.0",
         "28-tool 公共 MCP、durable review",
         "host-neutral skill",
-        "P0-B core backend 已完成",
+        "P0-B core backend（已完成）",
         "durable active cancellation",
-        "G1 Workbench 尚未交付",
+        "G1 Workbench Alpha 已完成",
     ):
         assert required in normalized_roadmap
     assert "S3-8" in normalized_roadmap

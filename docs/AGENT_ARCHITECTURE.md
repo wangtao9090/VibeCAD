@@ -278,8 +278,10 @@ Kernel，并在重连、Accept 和 Reject 后观察同一 draft、verdict 与 HE
 
 G1 MVP 已在这个范围交付：连接项目、显示 HEAD/draft、加载前后候选、显示 verdict、Accept/Reject、
 捕获精确 object/feature 选择。受管模式是默认与回退；另有一个经指纹绑定的 macOS FreeCAD 1.1.3
-外部 addon 试点，通过有界 managed-Python bridge 复用同一 client。face/edge、semantic diff、参数
-TaskPanel、dirty manual checkpoint/publish 属于 P1/G2，除非用户之后明确扩大范围。
+外部 addon 试点，通过有界 managed-Python bridge 复用同一 client。当前 P1 分片又交付了“Agent 完成
+→ 用户编辑 live HEAD → 显式 checkpoint/discard”的顺序交接。face/edge、semantic diff 和参数
+TaskPanel 仍在后续 P1/G2；自动 rebase/merge、冲突编辑器和多 Agent proposal branch 属于未来阶段，
+不能为实现手工收尾而提前引入。
 
 MR0 会在 Task Kernel 与当前 Worker 之间加入内部 CAD Domain Service、capability planner 和 runtime
 registry/router，再由 FreeCAD adapter 保持现有行为；C00 只记录这条目标边界，不能把它写成已经接入

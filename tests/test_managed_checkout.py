@@ -340,6 +340,53 @@ def test_capture_live_file_returns_a_strict_bound_path_free_snapshot(
     assert "binding" not in snapshot.descriptor.to_local_mapping()
 
 
+def test_dirty_head_checkout_stages_exact_candidate_without_advancing_head(
+    checkout_rig,
+) -> None:
+    store, revisions, head, _root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    edited = b"user-edited-checkout"
+    opened.local_path.write_bytes(edited)
+    snapshot = store.require_checkpoint_source(opened.checkout_id)
+    assert snapshot.descriptor.dirty is True
+    reservation_key = "checkpoint:" + "a" * 64
+
+    with revisions._lease_manager.acquire_project_write(PROJECT_ID) as lease:
+        revision_id = revisions_module._reserve_candidate_revision(
+            revisions,
+            PROJECT_ID,
+            head,
+            reservation_key,
+            lease,
+        )
+        store.stage_checkpoint_candidate(
+            snapshot,
+            expected_head=head,
+            revision_id=revision_id,
+            reservation_key=reservation_key,
+            lease=lease,
+        )
+        assert revisions.candidate_model_path(PROJECT_ID, revision_id, lease).read_bytes() == edited
+        assert store.require_same_live_file(snapshot) == snapshot
+        assert revisions.load_head(PROJECT_ID) == head
+        revisions.rollback_revision(PROJECT_ID, revision_id, lease)
+
+
+def test_checkpoint_source_rejects_clean_or_stale_head_checkout(checkout_rig) -> None:
+    store, revisions, head, _root = checkout_rig
+    clean = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    with pytest.raises(CheckoutError) as clean_error:
+        store.require_checkpoint_source(clean.checkout_id)
+    assert clean_error.value.code is CheckoutErrorCode.CONFLICT
+
+    clean.local_path.write_bytes(b"dirty-before-head-advance")
+    advanced = _advance_head(revisions, head)
+    assert advanced != head
+    with pytest.raises(CheckoutError) as stale_error:
+        store.require_checkpoint_source(clean.checkout_id)
+    assert stale_error.value.code is CheckoutErrorCode.CONFLICT
+
+
 def test_require_same_live_file_recomputes_liveness_and_full_file_identity(
     checkout_rig,
     monkeypatch: pytest.MonkeyPatch,
@@ -1855,6 +1902,26 @@ def test_post_tombstone_delete_failure_preserves_closed_descriptor(checkout_rig)
     assert closed.state is CheckoutState.CLOSED
     assert closed.source_liveness.value == "stale"
     assert not opened.local_path.parent.exists()
+
+
+@pytest.mark.parametrize("backup_mode", [0o600, 0o644])
+def test_close_removes_only_bounded_freecad_save_backups(
+    checkout_rig,
+    backup_mode: int,
+) -> None:
+    store, _revisions, _head, _root = checkout_rig
+    opened = store.open(OPEN_KEY, HeadCheckoutSource(project_id=PROJECT_ID))
+    checkout_directory = opened.local_path.parent
+    backup = checkout_directory / "model.20260801-214704.FCBak"
+    backup.write_bytes(b"FreeCAD managed-save backup")
+    backup.chmod(backup_mode)
+
+    observed = store.get(opened.checkout_id)
+    closed = store.close(opened.checkout_id)
+
+    assert observed.state is CheckoutState.OPEN
+    assert closed.state is CheckoutState.CLOSED
+    assert not checkout_directory.exists()
 
 
 def test_tombstone_publish_uncertainty_returns_fresh_liveness(

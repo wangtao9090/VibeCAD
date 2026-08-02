@@ -641,7 +641,7 @@ def test_v2_challenges_and_sessions_are_unique() -> None:
     assert len(sessions) == 32
 
 
-def test_v2_static_dispatcher_routes_only_six_explicit_methods() -> None:
+def test_v2_static_dispatcher_routes_only_seven_explicit_methods() -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
     def handler(name: str):
@@ -663,6 +663,7 @@ def test_v2_static_dispatcher_routes_only_six_explicit_methods() -> None:
         application_call=handler("application.call"),
         checkout_open=handler("checkout.open"),
         checkout_get=handler("checkout.get"),
+        checkout_checkpoint=handler("checkout.checkpoint"),
         checkout_close=handler("checkout.close"),
         file_grant_claim=handler("file_grant.claim"),
         allowed_application_operations=frozenset({"get_capabilities"}),
@@ -682,6 +683,13 @@ def test_v2_static_dispatcher_routes_only_six_explicit_methods() -> None:
             },
         ),
         ("checkout.get", {"checkout_id": "checkout_" + "3" * 32}),
+        (
+            "checkout.checkpoint",
+            {
+                "checkpoint_key": "checkpoint_create_" + "4" * 32,
+                "checkout_id": "checkout_" + "3" * 32,
+            },
+        ),
         ("checkout.close", {"checkout_id": "checkout_" + "3" * 32}),
         ("file_grant.claim", {"grant_id": V2_FILE_GRANT_ID}),
     )
@@ -703,6 +711,48 @@ def test_v2_static_dispatcher_routes_only_six_explicit_methods() -> None:
     assert [method for method, _params in calls] == [method for method, _params in requests]
     with pytest.raises(AttributeError):
         dispatcher.kernel_ping = handler("replacement")
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"checkout_id": "checkout_" + "3" * 32},
+        {
+            "checkpoint_key": "checkpoint_" + "4" * 32,
+            "checkout_id": "checkout_" + "3" * 32,
+        },
+        {
+            "checkpoint_key": "checkpoint_create_" + "4" * 32,
+            "checkout_id": "checkout_" + "3" * 32,
+            "local_path": "/tmp/model.FCStd",
+        },
+    ],
+)
+def test_v2_checkout_checkpoint_request_is_exact_before_handler(
+    params: dict[str, object],
+) -> None:
+    calls = 0
+
+    def checkpoint(_params: dict[str, object]) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"status": "succeeded"}
+
+    dispatcher = protocol_v2.StaticV2Dispatcher(checkout_checkpoint=checkpoint)
+    server, client = _ready_v2_pair()
+    raw = client.encode_request(
+        "checkout.checkpoint",
+        params,
+        request_id=_v2_request_id(1),
+    )
+    response = client.decode_response(server.dispatch_and_encode(raw, dispatcher))
+
+    assert response.error == {
+        "code": "invalid_request",
+        "message": "The local protocol request is invalid.",
+    }
+    assert calls == 0
 
 
 @pytest.mark.parametrize(

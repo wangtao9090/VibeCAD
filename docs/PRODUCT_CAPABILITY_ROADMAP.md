@@ -261,14 +261,16 @@ MCP Resource 行为。QwenPaw 是基于 AgentScope 的国内开放替代，不�
 首版插件不在 FreeCAD 中重复实现聊天模型。用户仍可在 Claude/Codex 中描述任务，
 插件提供 CAD 原生交互：
 
-- 连接当前 managed project，显示 HEAD、dirty 状态和冲突；
+- 连接当前 managed project，显示 HEAD、dirty/stale 状态，以及需要 checkpoint、discard 或 reload
+  的顺序编辑权；不提供自动冲突解决；
 - 显示任务历史、候选状态、验证结果和 artifact；
 - 首版捕获用户在画布中选中的 object/feature，生成 SelectorV1 Level A；
 - 在独立 Preview Document 中展示 HEAD 与 candidate；
 - Accept、Reject；“要求修改”在 G1 只返回宿主创建新 Task，不在 Workbench 内直接改写 candidate；
 - 定位、高亮 Agent 所引用的 object/feature；
-- face/edge、semantic diff 和手工修改 checkpoint/publish 在 P1/G2 完成，旧 draft verdict 永远不能
-  被手工修改后的 checkout 复用。
+- 当前 P1 分片已增加顺序式 editable HEAD 与手工 checkpoint/publish；用户只在 Agent 阶段结束后
+  编辑 live HEAD 工作副本，旧 draft verdict 永远不能被手工修改后的 checkout 复用；face/edge 与
+  review semantic diff 仍在后续 P1/G2。
 
 ### 5.2 持久 review 流程
 
@@ -318,8 +320,8 @@ revision-bound semantic selector 作为 durable authority，并可附带 runtime
 |---|---|---|
 | G0/backend | `CadExecutionPort`、durable draft/review、managed checkout、runnable authenticated daemon、session-bound file grant、SelectorV1 Level A | 后端和 public client 已可供 UI 消费，但没有 FreeCAD Qt Workbench UI |
 | G1 | 消费 P0-B core backend，交付 Python Workbench Dock、HEAD/draft preview、verdict、stale/revoked rejection、Accept/Reject、object/feature capture | 用户可以在 FreeCAD 中看见并验收 Agent 修改 |
-| G2 | Selector Level B、经批准时由 FreeCAD adapter 承载 GUI execution profile、TaskPanel 参数微调、semantic diff、手工 checkpoint/publish | 用户与 Agent 可以围绕同一模型协同精调 |
-| G3 | 多 proposal、可视 diff、冲突解决、离线恢复、Addon Manager 分发、审计和策略 | 团队级稳定交互产品 |
+| G2 | 顺序编辑权、editable HEAD、dirty checkpoint/publish、Selector Level B、TaskPanel 参数微调和 review semantic diff | Agent 完成后，用户可在 FreeCAD 收尾并显式发布新 Revision；不自动合并 |
+| G3 | Agent Teams 多 proposal、revision branch、可视比较、方案选择、离线恢复、Addon Manager 分发、审计和策略 | 团队级隔离提案；原生 CAD 语义合并仍需另行批准 |
 
 插件 MVP 采用纯 Python Workbench。暂不使用 C++，以避免 FreeCAD ABI、跨平台编译和发布矩阵成本。
 P0-B 已把相同 Application API 放入独立本地 Kernel daemon，交付 authenticated transport、
@@ -377,7 +379,9 @@ P0-B core backend 与 G1 FreeCAD Qt Workbench Alpha 已完成并进入 0.6.0 本
 
 新增或迁移：
 
-- G2 Workbench 精调与 Selector Level B；
+- G2 Workbench 顺序精调：Agent preview 阶段不编辑，结束后打开 editable HEAD，dirty 修改经新
+  candidate 重新 observe/verify 后显式 checkpoint/publish；自动 rebase/merge 与冲突编辑器不在 P1；
+- Selector Level B；
 - 完整约束草图：线、圆、圆弧、槽、构造线、尺寸/几何约束、DoF 和冲突诊断；
 - Pad、Pocket、Revolve、Groove、Hole、Fillet、Chamfer；
 - 布尔输入诊断、candidate-only Shape Healing 和几何修复报告；

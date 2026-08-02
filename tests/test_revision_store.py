@@ -179,6 +179,19 @@ EXPECTED_STORE_METHODS = {
         "reservation_key",
         "lease",
     ),
+    "replace_candidate_model_at": (
+        "self",
+        "project_id",
+        "expected_head",
+        "revision_id",
+        "reservation_key",
+        "source_parent_fd",
+        "source_name",
+        "expected_binding",
+        "expected_sha256",
+        "expected_size",
+        "lease",
+    ),
     "validate_candidate_payload": (
         "self",
         "project_id",
@@ -2652,10 +2665,19 @@ def test_local_revision_store_method_surface_and_signatures_are_exact():
                 inspect.Parameter.KEYWORD_ONLY,
                 inspect.Parameter.KEYWORD_ONLY,
             )
-        elif name == "import_trusted_fcstd_at":
+        elif name in {"import_trusted_fcstd_at", "replace_candidate_model_at"}:
             assert tuple(parameter.kind for parameter in signature.parameters.values()) == (
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                *(
+                    (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                    if name == "replace_candidate_model_at"
+                    else ()
+                ),
                 inspect.Parameter.KEYWORD_ONLY,
                 inspect.Parameter.KEYWORD_ONLY,
                 inspect.Parameter.KEYWORD_ONLY,
@@ -3962,6 +3984,125 @@ def test_seed_candidate_from_revision_is_exact_idempotent_and_preserves_source(
             for path in (source_dir, *sorted(source_dir.rglob("*")))
         } == source_stats
         store.rollback_revision(PROJECT_ID, target_id, lease)
+
+
+def test_replace_candidate_model_at_is_exact_idempotent_and_head_neutral(
+    store_parts,
+    tmp_path: Path,
+) -> None:
+    store, manager, root = store_parts
+    base_source = tmp_path / "base.FCStd"
+    base_source.write_bytes(b"base-model")
+    head = _initialize_imported(store, manager, base_source)
+    source_parent = tmp_path / "manual-checkpoint-source"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "model.FCStd"
+    payload = b"user-edited-model"
+    source.write_bytes(payload)
+    source.chmod(0o600)
+    binding = _source_binding(source)
+    digest = hashlib.sha256(payload).hexdigest()
+    reservation_key = "checkpoint:" + "a" * 64
+    parent_fd = os.open(
+        source_parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            revision_id = revisions_module._reserve_candidate_revision(
+                store,
+                PROJECT_ID,
+                head,
+                reservation_key,
+                lease,
+            )
+            candidate = store.candidate_model_path(PROJECT_ID, revision_id, lease)
+            assert candidate.read_bytes() == b"base-model"
+            store.replace_candidate_model_at(
+                PROJECT_ID,
+                head,
+                revision_id,
+                reservation_key,
+                source_parent_fd=parent_fd,
+                source_name=source.name,
+                expected_binding=binding,
+                expected_sha256=digest,
+                expected_size=len(payload),
+                lease=lease,
+            )
+            assert candidate.read_bytes() == payload
+            candidate.write_bytes(b"partial-retry")
+            store.replace_candidate_model_at(
+                PROJECT_ID,
+                head,
+                revision_id,
+                reservation_key,
+                source_parent_fd=parent_fd,
+                source_name=source.name,
+                expected_binding=binding,
+                expected_sha256=digest,
+                expected_size=len(payload),
+                lease=lease,
+            )
+            assert candidate.read_bytes() == payload
+            assert store.load_head(PROJECT_ID) == head
+            assert source.read_bytes() == payload
+            store.rollback_revision(PROJECT_ID, revision_id, lease)
+        assert os.fstat(parent_fd).st_ino == source_parent.stat().st_ino
+    finally:
+        os.close(parent_fd)
+    assert not _candidate_dir(root, revision_id).exists()
+
+
+def test_replace_candidate_model_at_rejects_rebound_source_without_changing_head(
+    store_parts,
+    tmp_path: Path,
+) -> None:
+    store, manager, _root = store_parts
+    head = _initialize_empty(store, manager)
+    source_parent = tmp_path / "rebound-checkpoint-source"
+    source_parent.mkdir(mode=0o700)
+    source = source_parent / "model.FCStd"
+    original = b"captured-edit"
+    source.write_bytes(original)
+    source.chmod(0o600)
+    binding = _source_binding(source)
+    replacement = source_parent / "replacement.FCStd"
+    replacement.write_bytes(b"rebound-edit")
+    replacement.chmod(0o600)
+    replacement.replace(source)
+    parent_fd = os.open(
+        source_parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    reservation_key = "checkpoint:" + "b" * 64
+    try:
+        with manager.acquire_project_write(PROJECT_ID) as lease:
+            revision_id = revisions_module._reserve_candidate_revision(
+                store,
+                PROJECT_ID,
+                head,
+                reservation_key,
+                lease,
+            )
+            with pytest.raises(RevisionStoreError) as caught:
+                store.replace_candidate_model_at(
+                    PROJECT_ID,
+                    head,
+                    revision_id,
+                    reservation_key,
+                    source_parent_fd=parent_fd,
+                    source_name=source.name,
+                    expected_binding=binding,
+                    expected_sha256=hashlib.sha256(original).hexdigest(),
+                    expected_size=len(original),
+                    lease=lease,
+                )
+            assert caught.value.code is RevisionStoreErrorCode.CORRUPT_CONTENT
+            assert store.load_head(PROJECT_ID) == head
+            store.rollback_revision(PROJECT_ID, revision_id, lease)
+    finally:
+        os.close(parent_fd)
 
 
 def test_seed_candidate_requires_source_to_be_strict_committed_head_ancestry(

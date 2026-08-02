@@ -8,6 +8,7 @@ import inspect
 import os
 import queue
 import runpy
+import stat
 import sys
 import threading
 import time
@@ -750,6 +751,110 @@ def test_c02_gateway_opens_then_claims_on_same_worker_client_and_emits_plain_map
     assert event["response"]["claim"]["local_path"].endswith("/model.FCStd")
 
 
+def test_p1_gateway_keepalive_uses_owner_thread_without_consuming_request_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway_module = _load_workbench_module(monkeypatch, "gateway")
+    results: queue.Queue[tuple[object, ...]] = queue.Queue()
+
+    def worker() -> None:
+        client = FakeLocalAgentClient()
+        gateway = gateway_module.KernelGateway(lambda: client)
+        connected = gateway.handle({"schema_version": 1, "request_id": 0, "kind": "connect"})
+        first = gateway.keepalive()
+        client.ping_failures = 1
+        second = gateway.keepalive()
+        projects = gateway.handle(
+            {
+                "schema_version": 1,
+                "request_id": 1,
+                "kind": "list_projects",
+                "cursor": None,
+            }
+        )
+        results.put((connected, first, second, projects, client))
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(1)
+    assert not thread.is_alive()
+
+    connected, first, second, projects, client = results.get_nowait()
+    assert connected["kind"] == "connected"
+    assert first is True
+    assert second is False
+    assert projects["kind"] == "projects"
+    assert [call[0] for call in client.calls] == [
+        "ping",
+        "ping",
+        "ping",
+        "list_projects",
+    ]
+    assert len({call[2] for call in client.calls}) == 1
+
+
+def test_p1_gateway_requires_private_authority_for_edit_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway_module = _load_workbench_module(monkeypatch, "gateway")
+    capability = object()
+    results: queue.Queue[tuple[object, object, FakeLocalAgentClient]] = queue.Queue()
+
+    def worker() -> None:
+        client = FakeLocalAgentClient()
+        gateway = gateway_module.KernelGateway(
+            lambda: client,
+            wire_capability=capability,
+        )
+        gateway.handle({"schema_version": 1, "request_id": 0, "kind": "connect"})
+        gateway.handle(
+            {
+                "schema_version": 1,
+                "request_id": 1,
+                "kind": "preview_open",
+                "source": {"kind": "head", "project_id": "project_" + "1" * 32},
+                "open_key": "checkout_open_" + "2" * 32,
+            }
+        )
+        editable_path = client.checkout_paths["checkout_" + "6" * 32]
+        editable_path.write_bytes(editable_path.read_bytes() + b"saved user edit\n")
+        public = gateway.handle(
+            {
+                "schema_version": 1,
+                "request_id": 2,
+                "kind": "edit_checkpoint",
+                "checkpoint_key": "checkpoint_create_" + "3" * 32,
+                "checkout_id": "checkout_" + "6" * 32,
+            }
+        )
+        command = gateway_module._PrivateWireCommand(  # noqa: SLF001
+            {
+                "schema_version": 1,
+                "request_id": 3,
+                "kind": "edit_checkpoint",
+                "checkpoint_key": "checkpoint_create_" + "4" * 32,
+                "checkout_id": "checkout_" + "6" * 32,
+            },
+            capability,
+        )
+        private = gateway.handle(command)
+        results.put((public, private, client))
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(2)
+    assert not thread.is_alive()
+    public, private, client = results.get_nowait()
+
+    assert public["kind"] == "error"
+    assert public["code"] == "invalid_input"
+    assert private["kind"] == "edit_checkpointed"
+    assert private["response"]["outcome"] == "task"
+    assert private["response"]["task"]["task_run"]["status"] == "succeeded"
+    assert [call[0] for call in client.calls].count("get_checkout") == 1
+    assert [call[0] for call in client.calls].count("checkpoint_checkout") == 1
+
+
 def test_c02_dock_selected_head_and_draft_buttons_emit_preview_open_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -792,6 +897,29 @@ def test_c02_dock_selected_head_and_draft_buttons_emit_preview_open_commands(
     assert preview_commands[0]["open_key"].startswith("checkout_open_")
     assert preview_commands[1]["open_key"].startswith("checkout_open_")
     assert preview_commands[0]["open_key"] != preview_commands[1]["open_key"]
+
+
+def test_p1_dock_marks_managed_previews_as_agent_owned(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_pyside = install_fake_pyside()
+    monkeypatch.setitem(sys.modules, "PySide", fake_pyside)
+    monkeypatch.setitem(sys.modules, "PySide.QtCore", fake_pyside.QtCore)
+    monkeypatch.setitem(sys.modules, "PySide.QtWidgets", fake_pyside.QtWidgets)
+    dock_module = _load_workbench_module(monkeypatch, "dock")
+    dock = dock_module.ReviewDock()
+
+    assert dock.ownership_status_label.objectName() == "VibeCADEditingOwnership"
+    assert dock.ownership_status_label.text == "No managed preview"
+
+    dock._preview_pending_sources.add("head")
+    dock._update_preview_actions()
+
+    assert dock.ownership_status_label.text == (
+        "Agent preview — do not edit; local edits disable review"
+    )
+    dock.set_preview_eligibility(False, recovery_required=True)
+    assert dock.ownership_status_label.text == (
+        "Preview ownership recovery required — reload managed previews"
+    )
 
 
 def test_c02_host_opens_on_main_and_deactivates_document_checkout_client_order(
@@ -850,6 +978,232 @@ def test_c02_host_opens_on_main_and_deactivates_document_checkout_client_order(
             "checkout.close:" + "checkout_" + "7" * 32,
             "client.close",
         ]
+    finally:
+        host.deactivate_workbench()
+        pump_main_events(lambda: host.workbench_snapshot()["lifecycle"] == "inactive")
+
+
+def test_p1_host_timer_keeps_gateway_connection_live_on_worker_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_pyside = install_fake_pyside()
+    monkeypatch.setitem(sys.modules, "PySide", fake_pyside)
+    monkeypatch.setitem(sys.modules, "PySide.QtCore", fake_pyside.QtCore)
+    monkeypatch.setitem(sys.modules, "PySide.QtWidgets", fake_pyside.QtWidgets)
+    freecad = make_fake_freecad()
+    freecad_gui = make_fake_freecad_gui()
+    monkeypatch.setitem(sys.modules, "FreeCAD", freecad)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", freecad_gui)
+    gateway_module = _load_workbench_module(monkeypatch, "gateway")
+    clients: list[FakeLocalAgentClient] = []
+
+    def make_client() -> FakeLocalAgentClient:
+        client = FakeLocalAgentClient()
+        clients.append(client)
+        return client
+
+    original_gateway = gateway_module.KernelGateway
+    monkeypatch.setattr(gateway_module, "KernelGateway", lambda: original_gateway(make_client))
+    monkeypatch.delitem(sys.modules, "vibecad_workbench.dock", raising=False)
+    host = _load_workbench_module(monkeypatch, "host")
+    host.activate_workbench()
+    session = host._session
+    assert session is not None
+    timer = session.keepalive_timer
+    assert timer is not None
+    try:
+        pump_main_events(lambda: session.lifecycle == "active" and not session._pending)
+        assert timer.isActive()
+        assert timer.interval == 10_000
+        assert len(clients) == 1
+        timer.timeout.emit()
+        pump_main_events(lambda: session._keepalive_count == 1)
+
+        ping_calls = [call for call in clients[0].calls if call[0] == "ping"]
+        assert len(ping_calls) == 2
+        assert ping_calls[0][2] == ping_calls[1][2] == session.worker_thread_id
+        assert session.lifecycle == "active"
+        assert session.client_construction_count == 1
+    finally:
+        host.deactivate_workbench()
+        pump_main_events(lambda: host.workbench_snapshot()["lifecycle"] == "inactive")
+    assert not timer.isActive()
+
+
+@pytest.mark.parametrize(
+    ("save_before_checkpoint", "recomputed_before_checkpoint"),
+    [(False, False), (True, False), (False, True)],
+)
+def test_p1_editable_head_checkpoints_then_closes_and_refreshes(
+    monkeypatch: pytest.MonkeyPatch,
+    save_before_checkpoint: bool,
+    recomputed_before_checkpoint: bool,
+) -> None:
+    fake_pyside = install_fake_pyside()
+    monkeypatch.setitem(sys.modules, "PySide", fake_pyside)
+    monkeypatch.setitem(sys.modules, "PySide.QtCore", fake_pyside.QtCore)
+    monkeypatch.setitem(sys.modules, "PySide.QtWidgets", fake_pyside.QtWidgets)
+    events: list[str] = []
+    freecad = make_fake_freecad(events=events)
+    freecad_gui = make_fake_freecad_gui()
+    monkeypatch.setitem(sys.modules, "FreeCAD", freecad)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", freecad_gui)
+    gateway_module = _load_workbench_module(monkeypatch, "gateway")
+    clients: list[FakeLocalAgentClient] = []
+
+    def make_client() -> FakeLocalAgentClient:
+        client = FakeLocalAgentClient(events=events)
+        clients.append(client)
+        return client
+
+    original_gateway = gateway_module.KernelGateway
+    monkeypatch.setattr(gateway_module, "KernelGateway", lambda: original_gateway(make_client))
+    monkeypatch.delitem(sys.modules, "vibecad_workbench.dock", raising=False)
+    host = _load_workbench_module(monkeypatch, "host")
+    host.activate_workbench()
+    try:
+        pump_main_events(
+            lambda: (
+                bool(freecad_gui.main_window.docks)
+                and freecad_gui.main_window.docks[0].task_selector.items
+            )
+        )
+        dock = freecad_gui.main_window.docks[0]
+        assert dock.open_edit_button.enabled is True
+
+        dock.open_edit_button.click()
+        pump_main_events(lambda: len(freecad.documents) == 1)
+
+        checkout_id = dock._preview_checkouts["edit"]
+        document = next(iter(freecad.documents.values()))
+        assert dock.ownership_status_label.text == (
+            "User editable HEAD — Save stays local; Checkpoint publishes a revision"
+        )
+        assert dock.open_head_button.enabled is False
+        assert dock.open_draft_button.enabled is False
+        document.Modified = True
+        if save_before_checkpoint:
+            document.save()
+            assert stat.S_IMODE(Path(document.FileName).stat().st_mode) == 0o644
+        elif recomputed_before_checkpoint:
+            document.simulate_recomputed_edit()
+            assert document.Modified is False
+
+        edited_path = Path(document.FileName)
+
+        dock.checkpoint_edit_button.click()
+        pump_main_events(
+            lambda: (
+                not freecad.documents
+                and "edit" not in dock._preview_checkouts
+                and any(call[0] == "checkpoint_checkout" for call in clients[0].calls)
+            )
+        )
+
+        operation_names = [call[0] for call in clients[0].calls]
+        assert operation_names.index("checkpoint_checkout") < operation_names.index(
+            "close_checkout"
+        )
+        checkpoint_call = next(
+            call for call in clients[0].calls if call[0] == "checkpoint_checkout"
+        )
+        assert checkpoint_call[1]["checkout_id"] == checkout_id
+        assert checkpoint_call[1]["checkpoint_key"].startswith("checkpoint_create_")
+        if save_before_checkpoint:
+            assert "document.recompute" not in events
+        else:
+            assert events.index("document.recompute") < events.index("document.save")
+            assert events.count("document.recompute") == 1
+        assert events.count("document.save") == 1
+        assert freecad.document_observers == []
+        assert events.index("document.save") < events.index("document.close")
+        assert stat.S_IMODE(edited_path.stat().st_mode) == 0o600
+        assert dock.edit_status_label.text == "Editable HEAD closed"
+        assert dock.open_edit_button.enabled is True
+    finally:
+        host.deactivate_workbench()
+        pump_main_events(lambda: host.workbench_snapshot()["lifecycle"] == "inactive")
+
+
+def test_p1_private_mode_restore_is_exact_and_rejects_file_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_pyside = install_fake_pyside()
+    monkeypatch.setitem(sys.modules, "PySide", fake_pyside)
+    monkeypatch.setitem(sys.modules, "PySide.QtCore", fake_pyside.QtCore)
+    monkeypatch.setitem(sys.modules, "PySide.QtWidgets", fake_pyside.QtWidgets)
+    host = _load_workbench_module(monkeypatch, "host")
+
+    managed = tmp_path / "model.FCStd"
+    managed.write_bytes(b"managed FreeCAD edit")
+    managed.chmod(0o644)
+    host._restore_private_document_mode(str(managed))
+    assert stat.S_IMODE(managed.stat().st_mode) == 0o600
+
+    target = tmp_path / "aliased.FCStd"
+    target.write_bytes(b"must remain untouched")
+    target.chmod(0o644)
+    symbolic = tmp_path / "symbolic.FCStd"
+    symbolic.symlink_to(target)
+    with pytest.raises(host.PreviewError):
+        host._restore_private_document_mode(str(symbolic))
+
+    hardlink = tmp_path / "hardlink.FCStd"
+    os.link(target, hardlink)
+    with pytest.raises(host.PreviewError):
+        host._restore_private_document_mode(str(hardlink))
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_p1_editable_head_clean_checkpoint_is_noop_and_discard_never_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_pyside = install_fake_pyside()
+    monkeypatch.setitem(sys.modules, "PySide", fake_pyside)
+    monkeypatch.setitem(sys.modules, "PySide.QtCore", fake_pyside.QtCore)
+    monkeypatch.setitem(sys.modules, "PySide.QtWidgets", fake_pyside.QtWidgets)
+    freecad = make_fake_freecad()
+    freecad_gui = make_fake_freecad_gui()
+    monkeypatch.setitem(sys.modules, "FreeCAD", freecad)
+    monkeypatch.setitem(sys.modules, "FreeCADGui", freecad_gui)
+    gateway_module = _load_workbench_module(monkeypatch, "gateway")
+    clients: list[FakeLocalAgentClient] = []
+
+    def make_client() -> FakeLocalAgentClient:
+        client = FakeLocalAgentClient()
+        clients.append(client)
+        return client
+
+    original_gateway = gateway_module.KernelGateway
+    monkeypatch.setattr(gateway_module, "KernelGateway", lambda: original_gateway(make_client))
+    monkeypatch.delitem(sys.modules, "vibecad_workbench.dock", raising=False)
+    host = _load_workbench_module(monkeypatch, "host")
+    host.activate_workbench()
+    try:
+        pump_main_events(
+            lambda: (
+                bool(freecad_gui.main_window.docks)
+                and freecad_gui.main_window.docks[0].task_selector.items
+            )
+        )
+        dock = freecad_gui.main_window.docks[0]
+        dock.open_edit_button.click()
+        pump_main_events(lambda: len(freecad.documents) == 1)
+
+        dock.checkpoint_edit_button.click()
+        pump_main_events(lambda: dock.edit_status_label.text == "No saved changes to checkpoint")
+        assert dock.edit_status_label.text == "No saved changes to checkpoint"
+        assert "edit" in dock._preview_checkouts
+        assert not any(call[0] == "checkpoint_checkout" for call in clients[0].calls)
+
+        next(iter(freecad.documents.values())).Modified = True
+        dock.discard_edit_button.click()
+        pump_main_events(lambda: not freecad.documents and "edit" not in dock._preview_checkouts)
+
+        assert not any(call[0] == "checkpoint_checkout" for call in clients[0].calls)
+        assert any(call[0] == "close_checkout" for call in clients[0].calls)
+        assert dock.edit_status_label.text == "Editable HEAD closed"
     finally:
         host.deactivate_workbench()
         pump_main_events(lambda: host.workbench_snapshot()["lifecycle"] == "inactive")

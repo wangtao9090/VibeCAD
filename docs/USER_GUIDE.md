@@ -311,8 +311,24 @@ generation 后重放旧请求，因为 base revision、draft 或任务状态也�
 当前 CAD 执行 profile 仍是已验证的 headless、受管、可终止 FreeCAD Worker。真实 FreeCAD Qt
 Workbench Alpha 已交付 preview、verdict、精确 object/feature selection 与 Accept/Reject，但它只是
 认证本地 daemon 的薄客户端：与 MCP 共享同一个 Application 和 Task Kernel，不是第二套写入或提交
-系统。用户 FreeCAD 路径目前只是上述单一指纹试点；face/edge selection、dirty manual publish 与 GUI
-线程 CAD execution profile 仍未交付。
+系统。用户 FreeCAD 路径目前只是上述单一指纹试点；face/edge selection 与 GUI 线程 CAD execution
+profile 仍未交付。
+
+P1 的手工收尾采用顺序模式：Agent 执行和 draft review 时不要修改 Preview Document；Accept/Reject
+完成后，才从当前 HEAD 打开可编辑工作副本。FreeCAD 的 Save 只修改非权威 checkout；要让后续 Agent
+看到这些修改，必须显式创建 VibeCAD checkpoint。checkpoint 会重新形成 candidate、重开、验证并通过
+HEAD CAS 发布。若 checkout 已 dirty/stale，用户只能 checkpoint、discard 或 reload，系统不会自动
+合并用户修改与 Agent draft。
+
+Workbench 中的具体操作是：先结束 Agent preview/review，选择项目后点击 **Open Editable HEAD**；在
+FreeCAD 中完成小修改。普通 **Save** 只保存该受管工作副本，**Checkpoint Edit** 会在需要时先重算并
+保存，再让 Kernel 检查 exact checkout/HEAD/digest、生成 STEP、验证并发布新 Revision。成功后旧工作
+副本会关闭并自动刷新项目；**Discard Edit** 只关闭工作副本，绝不提交。没有已保存变化时 Checkpoint
+是 no-op；checkout 已 stale 或来源不再可证明时会拒绝，用户应 discard/reload，而不是尝试合并。
+
+把 CAD 项目放入 Git 时，优先提交 ModelProgram、AcceptanceSpec、manifest 和其他文本意图。FCStd、
+STEP 等只适合作为 accepted Revision 的可选 Git LFS 快照；Git 不是 VibeCAD HEAD，也不能语义合并
+原生 CAD 文件。完整边界见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VERSIONING_RESEARCH.md)。
 
 当前外部 Claude/Codex 模型调用尚未纳入本地放行证据。要做宿主实测，必须单独授权相应模型/token
 消耗，并记录所用宿主版本、Skill hash、28-tool discovery 与完整任务结果。

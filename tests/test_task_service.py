@@ -107,6 +107,8 @@ CANDIDATE_MANIFEST = "b" * 64
 MODEL_HASH = "c" * 64
 STEP_HASH = "d" * 64
 REVERT_KEY = "revert_create_0123456789abcdef0123456789abcdef"
+CHECKPOINT_KEY = "checkpoint_create_0123456789abcdef0123456789abcdef"
+CHECKOUT_ID = "checkout_0123456789abcdef0123456789abcdef"
 
 
 @pytest.fixture(autouse=True)
@@ -1387,6 +1389,137 @@ def test_happy_path_is_transactional_and_persists_all_evidence() -> None:
     ]
     assert positions == sorted(positions)
     assert rig.log.index("task.cas:committing") < rig.log.index("candidate.commit")
+
+
+def test_manual_checkpoint_stages_exact_source_then_verifies_and_commits_once() -> None:
+    rig = _Rig()
+    stage_calls: list[tuple[ProjectHead, str, str, object]] = []
+
+    def stage_candidate(*, expected_head, revision_id, reservation_key, lease):
+        rig.log.append("checkout.stage")
+        stage_calls.append((expected_head, revision_id, reservation_key, lease))
+
+    stored = rig.service.checkpoint_manual_edit(
+        checkpoint_key=CHECKPOINT_KEY,
+        checkout_id=CHECKOUT_ID,
+        project_id=PROJECT_ID,
+        expected_head=_base_head(),
+        model_sha256="7" * 64,
+        model_size_bytes=1234,
+        stage_candidate=stage_candidate,
+    )
+
+    assert stored.task_run.status is TaskStatus.SUCCEEDED
+    assert stored.task_run.review_policy is ReviewPolicy.AUTO_COMMIT
+    assert stored.task_run.committed_revision == CANDIDATE_REVISION
+    assert stored.task_run.program is not None
+    operation = stored.task_run.program.operations[0]
+    assert operation.op == "system.checkpoint_checkout"
+    assert operation.source is ValueSource.USER
+    assert len(stage_calls) == 1
+    assert stage_calls[0][0] == _base_head()
+    assert stage_calls[0][1] == CANDIDATE_REVISION
+    assert stage_calls[0][2].startswith("checkpoint:")
+    assert rig.log.index("candidate.reserve") < rig.log.index("checkout.stage")
+    assert rig.log.index("checkout.stage") < rig.log.index("candidate.begin")
+    assert rig.log.index("candidate.checkpoint") < rig.log.index("executor.export")
+    assert rig.log.index("executor.collect") < rig.log.index("candidate.commit")
+    assert "executor.execute" not in rig.log
+
+    replay = rig.service.checkpoint_manual_edit(
+        checkpoint_key=CHECKPOINT_KEY,
+        checkout_id=CHECKOUT_ID,
+        project_id=PROJECT_ID,
+        expected_head=_base_head(),
+        model_sha256="7" * 64,
+        model_size_bytes=1234,
+        stage_candidate=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a committed checkpoint must replay without restaging")
+        ),
+    )
+    assert replay == stored
+    assert len(stage_calls) == 1
+
+
+def test_manual_checkpoint_stage_failure_cleans_reservation_and_preserves_head() -> None:
+    rig = _Rig()
+
+    def fail_stage(**_kwargs) -> None:
+        rig.log.append("checkout.stage")
+        raise RuntimeError("private source changed")
+
+    stored = rig.service.checkpoint_manual_edit(
+        checkpoint_key=CHECKPOINT_KEY,
+        checkout_id=CHECKOUT_ID,
+        project_id=PROJECT_ID,
+        expected_head=_base_head(),
+        model_sha256="7" * 64,
+        model_size_bytes=1234,
+        stage_candidate=fail_stage,
+    )
+
+    assert stored.task_run.status is TaskStatus.NEEDS_INPUT
+    assert stored.task_run.candidate_revision is None
+    assert stored.task_run.last_error is not None
+    assert stored.task_run.last_error.code == "project_state_conflict"
+    assert rig.revisions.head == _base_head()
+    assert rig.coordinator.cancel_reservation_calls == 1
+    assert "candidate.begin" not in rig.log
+    assert "candidate.commit" not in rig.log
+
+
+def test_manual_checkpoint_same_key_rejects_changed_immutable_source() -> None:
+    rig = _Rig()
+    first = rig.service.checkpoint_manual_edit(
+        checkpoint_key=CHECKPOINT_KEY,
+        checkout_id=CHECKOUT_ID,
+        project_id=PROJECT_ID,
+        expected_head=_base_head(),
+        model_sha256="7" * 64,
+        model_size_bytes=1234,
+        stage_candidate=lambda **_kwargs: None,
+    )
+    assert first.task_run.status is TaskStatus.SUCCEEDED
+    lease_count = rig.log.count("lease.acquire")
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.checkpoint_manual_edit(
+            checkpoint_key=CHECKPOINT_KEY,
+            checkout_id=CHECKOUT_ID,
+            project_id=PROJECT_ID,
+            expected_head=_base_head(),
+            model_sha256="8" * 64,
+            model_size_bytes=1234,
+            stage_candidate=lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("a conflicting request must not stage")
+            ),
+        )
+
+    assert caught.value.code is TaskServiceErrorCode.CONFLICT
+    assert rig.log.count("lease.acquire") == lease_count
+    assert rig.coordinator.commit_calls == 1
+
+
+def test_manual_checkpoint_rejects_stale_expected_head_before_task_creation() -> None:
+    rig = _Rig()
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.checkpoint_manual_edit(
+            checkpoint_key=CHECKPOINT_KEY,
+            checkout_id=CHECKOUT_ID,
+            project_id=PROJECT_ID,
+            expected_head=_candidate_head(),
+            model_sha256="7" * 64,
+            model_size_bytes=1234,
+            stage_candidate=lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("a stale request must not stage")
+            ),
+        )
+
+    assert caught.value.code is TaskServiceErrorCode.CONFLICT
+    assert not rig.tasks.records
+    assert "candidate.reserve" not in rig.log
+    assert "checkout.stage" not in rig.log
 
 
 def test_real_task_store_round_trips_float_rich_submit_to_terminal(

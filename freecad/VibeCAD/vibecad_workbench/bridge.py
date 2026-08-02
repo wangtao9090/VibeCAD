@@ -458,6 +458,20 @@ class ExternalBridgeClient:
     def get_checkout(self, *, checkout_id: object) -> dict[str, object]:
         return self._call("get_checkout", {"checkout_id": checkout_id})
 
+    def checkpoint_checkout(
+        self,
+        *,
+        checkpoint_key: object,
+        checkout_id: object,
+    ) -> dict[str, object]:
+        return self._call(
+            "checkpoint_checkout",
+            {
+                "checkpoint_key": checkpoint_key,
+                "checkout_id": checkout_id,
+            },
+        )
+
     def close_checkout(self, *, checkout_id: object) -> dict[str, object]:
         return self._call("close_checkout", {"checkout_id": checkout_id})
 

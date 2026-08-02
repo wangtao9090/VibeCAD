@@ -668,7 +668,8 @@ CAD Arena 式最低执行门 + VibeCAD Trust / Review / Revision / Recovery Gate
 
 - **G1**：增加 preview、selection、stale/revoked 呈现、Accept/Reject 正确性、time-to-first-review
   和非计划交互次数；
-- **P1/G2**：引入 Text2CAD L1–L2、HistCAD 式 Edit/Preservation/OES，以及 neuralCAD-Edit 子集；
+- **P1/G2**：先交付 Agent review 后的顺序手工精调、dirty checkpoint/publish，再引入 Text2CAD
+  L1–L2、HistCAD 式 Edit/Preservation/OES，以及 neuralCAD-Edit 子集；不把自动冲突解决作为门槛；
 - **真实宿主/P1**：采用 gNucleus Parametric CAD Bench 的兼容任务和 validator 思路比较
   `(agent harness, model)` 组合，另报完整 Agent Profile 和 VibeCAD Trust 证据；
 - **照片/STL Provider 阶段**：引入 DeCoDE CADBench 的多模态、噪声和重建指标，同时保留绝对尺寸

@@ -319,6 +319,23 @@ class LocalAgentClient:
         self._ensure_live()
         return self._result(self._kernel.call("checkout.get", {"checkout_id": checkout_id}))
 
+    def checkpoint_checkout(
+        self,
+        *,
+        checkpoint_key: object,
+        checkout_id: object,
+    ) -> dict[str, object]:
+        self._ensure_live()
+        return self._result(
+            self._kernel.call(
+                "checkout.checkpoint",
+                {
+                    "checkpoint_key": checkpoint_key,
+                    "checkout_id": checkout_id,
+                },
+            )
+        )
+
     def close_checkout(self, *, checkout_id: object) -> dict[str, object]:
         self._ensure_live()
         return self._result(self._kernel.call("checkout.close", {"checkout_id": checkout_id}))

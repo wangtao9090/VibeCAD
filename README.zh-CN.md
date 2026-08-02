@@ -53,6 +53,10 @@ vibecad --freecad
 结论、捕获精确的完整对象或 feature `SelectorV1`，并对新鲜草案执行 Accept 或 Reject。当前尚不
 宣称 face/edge 子元素选择能力。
 
+当前 P1 源码还增加了 Agent review 结束后的顺序手工收尾：**Open Editable HEAD** 创建非权威工作
+副本，普通 **Save** 只保存在本地，**Checkpoint Edit** 验证并发布新 Revision，**Discard Edit** 不会
+发布任何内容。Agent preview 与 editable HEAD 相互排斥；系统不做自动 merge 或 rebase。
+
 上述受管启动器仍是默认与回退路径。另有一个刻意收窄的 macOS 试点，可把同一个薄 Workbench 安装
 到用户显式指定的 FreeCAD：
 
@@ -217,7 +221,8 @@ S3-8、0.6.0 package/managed-runtime 本地候选收口与有界 G1 Workbench Al
 - **G1（Alpha 完成）**：真实 FreeCAD Qt Workbench UI 已具备 preview、verdict、精确
   object/feature selector 捕获与 Accept/Reject；一个指纹绑定的外部 FreeCAD 1.1.3 试点已有证据，
   受管模式仍是默认路径；
-- **P1/G2**：Sketcher/PartDesign、受控导入、单零件生产能力和手工 checkpoint；
+- **P1/G2**：当前源码已实现窄范围的顺序 editable HEAD/手工 checkpoint；Sketcher/PartDesign、
+  受控导入和更广的单零件生产能力仍待后续完成；
 - **P2**：装配、BOM、TechDraw、制造发布与企业交付链。
 
 G1 Workbench Alpha 已把真实 FreeCAD Qt UI 与确定性的受管启动器打入安装包。它具备恰好一个

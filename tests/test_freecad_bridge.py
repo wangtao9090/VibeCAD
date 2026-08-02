@@ -29,6 +29,25 @@ class _Client:
         self.calls.append(("list_projects", request))
         return {"schema_version": 1, "projects": [], "next_cursor": None}
 
+    def checkpoint_checkout(
+        self,
+        *,
+        checkpoint_key: object,
+        checkout_id: object,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "checkpoint_checkout",
+                {"checkpoint_key": checkpoint_key, "checkout_id": checkout_id},
+            )
+        )
+        return {
+            "schema_version": 1,
+            "generation": 4,
+            "next_action": "done",
+            "task_run": {"status": "succeeded"},
+        }
+
     def close(self) -> None:
         self.calls.append(("close", {}))
         self.closed = True
@@ -183,6 +202,39 @@ def test_bridge_rejects_unknown_method_without_dispatch() -> None:
         "error": {"code": "invalid_input"},
     }
     assert client.calls == [("close", {})]
+
+
+def test_bridge_dispatches_checkpoint_without_a_path_capability() -> None:
+    client = _Client()
+    result = freecad_bridge._dispatch(  # noqa: SLF001
+        client,
+        "checkpoint_checkout",
+        {
+            "checkpoint_key": "checkpoint_create_" + "4" * 32,
+            "checkout_id": "checkout_" + "5" * 32,
+        },
+    )
+
+    assert result["task_run"]["status"] == "succeeded"
+    assert client.calls == [
+        (
+            "checkpoint_checkout",
+            {
+                "checkpoint_key": "checkpoint_create_" + "4" * 32,
+                "checkout_id": "checkout_" + "5" * 32,
+            },
+        )
+    ]
+    with pytest.raises(freecad_bridge.BridgeProtocolError):
+        freecad_bridge._dispatch(  # noqa: SLF001
+            client,
+            "checkpoint_checkout",
+            {
+                "checkpoint_key": "checkpoint_create_" + "4" * 32,
+                "checkout_id": "checkout_" + "5" * 32,
+                "local_path": "/tmp/model.FCStd",
+            },
+        )
 
 
 def test_bridge_resolves_raw_identity_inventory_with_managed_selector_core() -> None:

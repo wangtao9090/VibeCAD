@@ -71,6 +71,7 @@ _SESSION_RE = re.compile(r"session_[0-9a-f]{32}\Z")
 _REQUEST_RE = re.compile(r"request_[0-9a-f]{32}\Z")
 _OPEN_KEY_RE = re.compile(r"checkout_open_[0-9a-f]{32}\Z")
 _CHECKOUT_RE = re.compile(r"checkout_[0-9a-f]{32}\Z")
+_CHECKPOINT_KEY_RE = re.compile(r"checkpoint_create_[0-9a-f]{32}\Z")
 _FILE_GRANT_RE = re.compile(r"file_grant_[0-9a-f]{32}\Z")
 _PROJECT_RE = re.compile(r"project_[0-9a-f]{32}\Z")
 _PROJECT_CREATE_RE = re.compile(r"project_create_[0-9a-f]{32}\Z")
@@ -105,6 +106,7 @@ _METHODS = (
     "project.import",
     "checkout.open",
     "checkout.get",
+    "checkout.checkpoint",
     "checkout.close",
     "file_grant.claim",
 )
@@ -758,6 +760,11 @@ def _validate_dispatch_params(method: str, params: dict[str, object]) -> None:
         value = _exact(params, {"checkout_id"})
         _identifier(value["checkout_id"], _CHECKOUT_RE)
         return
+    if method == "checkout.checkpoint":
+        value = _exact(params, {"checkpoint_key", "checkout_id"})
+        _identifier(value["checkpoint_key"], _CHECKPOINT_KEY_RE)
+        _identifier(value["checkout_id"], _CHECKOUT_RE)
+        return
     if method == "file_grant.claim":
         value = _exact(params, {"grant_id"})
         _identifier(value["grant_id"], _FILE_GRANT_RE)
@@ -868,6 +875,7 @@ class StaticV2Dispatcher:
     _project_import: _DescriptorHandler | None
     _checkout_open: _Handler | None
     _checkout_get: _Handler | None
+    _checkout_checkpoint: _Handler | None
     _checkout_close: _Handler | None
     _file_grant_claim: _Handler | None
     _allowed_application_operations: frozenset[str]
@@ -881,6 +889,7 @@ class StaticV2Dispatcher:
         project_import: _DescriptorHandler | None = None,
         checkout_open: _Handler | None = None,
         checkout_get: _Handler | None = None,
+        checkout_checkpoint: _Handler | None = None,
         checkout_close: _Handler | None = None,
         file_grant_claim: _Handler | None = None,
         allowed_application_operations: frozenset[str] = frozenset(),
@@ -892,6 +901,7 @@ class StaticV2Dispatcher:
             project_import,
             checkout_open,
             checkout_get,
+            checkout_checkpoint,
             checkout_close,
             file_grant_claim,
         )
@@ -912,6 +922,7 @@ class StaticV2Dispatcher:
         object.__setattr__(self, "_project_import", project_import)
         object.__setattr__(self, "_checkout_open", checkout_open)
         object.__setattr__(self, "_checkout_get", checkout_get)
+        object.__setattr__(self, "_checkout_checkpoint", checkout_checkpoint)
         object.__setattr__(self, "_checkout_close", checkout_close)
         object.__setattr__(self, "_file_grant_claim", file_grant_claim)
         object.__setattr__(
@@ -951,6 +962,8 @@ class StaticV2Dispatcher:
             handler = self._checkout_open
         elif request.method == "checkout.get":
             handler = self._checkout_get
+        elif request.method == "checkout.checkpoint":
+            handler = self._checkout_checkpoint
         elif request.method == "checkout.close":
             handler = self._checkout_close
         elif request.method == "file_grant.claim":

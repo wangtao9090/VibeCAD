@@ -7,6 +7,13 @@ from enum import StrEnum
 
 from vibecad.execution.revisions import LocalRevisionStore, ProjectHead
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER
+from vibecad.workflow.manual_checkpoint import (
+    BoundManualCheckpoint,
+    ManualCheckpointError,
+    ManualCheckpointErrorCode,
+    build_manual_checkpoint_binding,
+    parse_bound_manual_checkpoint_task,
+)
 from vibecad.workflow.revert import (
     BoundRevert,
     RevertProgramError,
@@ -377,14 +384,70 @@ class TaskCatalogService:
             )
         return self._create_bound_task_with_disposition(binding)
 
-    def _create_bound_task(self, binding: BoundRevert) -> StoredTaskRun:
+    def create_manual_checkpoint_task(
+        self,
+        *,
+        checkpoint_key: str,
+        checkout_id: str,
+        project_id: str,
+        expected_head: object,
+        model_sha256: str,
+        model_size_bytes: int,
+    ) -> StoredTaskRun:
+        stored, _created_here = self.create_manual_checkpoint_task_with_disposition(
+            checkpoint_key=checkpoint_key,
+            checkout_id=checkout_id,
+            project_id=project_id,
+            expected_head=expected_head,
+            model_sha256=model_sha256,
+            model_size_bytes=model_size_bytes,
+        )
+        return stored
+
+    def create_manual_checkpoint_task_with_disposition(
+        self,
+        *,
+        checkpoint_key: str,
+        checkout_id: str,
+        project_id: str,
+        expected_head: object,
+        model_sha256: str,
+        model_size_bytes: int,
+    ) -> tuple[StoredTaskRun, bool]:
+        try:
+            binding = build_manual_checkpoint_binding(
+                checkpoint_key=checkpoint_key,
+                checkout_id=checkout_id,
+                project_id=project_id,
+                expected_head=expected_head,
+                model_sha256=model_sha256,
+                model_size_bytes=model_size_bytes,
+            )
+        except ManualCheckpointError as error:
+            _raise(
+                TaskCatalogErrorCode.INVALID_INPUT
+                if error.code is ManualCheckpointErrorCode.INVALID_INPUT
+                else TaskCatalogErrorCode.CONFLICT
+            )
+        return self._create_bound_task_with_disposition(binding)
+
+    def _create_bound_task(
+        self,
+        binding: BoundRevert | BoundManualCheckpoint,
+    ) -> StoredTaskRun:
         stored, _created_here = self._create_bound_task_with_disposition(binding)
         return stored
 
     def _create_bound_task_with_disposition(
         self,
-        binding: BoundRevert,
+        binding: BoundRevert | BoundManualCheckpoint,
     ) -> tuple[StoredTaskRun, bool]:
+        if type(binding) is BoundRevert:
+            review_policy = ReviewPolicy.REQUIRE_REVIEW
+        elif type(binding) is BoundManualCheckpoint:
+            review_policy = ReviewPolicy.AUTO_COMMIT
+        else:
+            _raise(TaskCatalogErrorCode.INVALID_INPUT)
         retry_budget = _ReplayRetryBudget()
         task: TaskRun | None = None
         while True:
@@ -402,7 +465,7 @@ class TaskCatalogService:
                         project_id=binding.project_id,
                         base_revision=binding.expected_head.revision_id,
                         reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
-                        review_policy=ReviewPolicy.REQUIRE_REVIEW,
+                        review_policy=review_policy,
                         creation_digest=binding.creation_digest,
                     )
                     task = transition_task(task, TaskEvent.REQUEST_PLAN)
@@ -450,9 +513,14 @@ class TaskCatalogService:
     @staticmethod
     def _replay_bound_or_conflict(
         stored: StoredTaskRun,
-        binding: BoundRevert,
+        binding: BoundRevert | BoundManualCheckpoint,
     ) -> StoredTaskRun:
-        parsed = parse_bound_revert_task(stored)
+        if type(binding) is BoundRevert:
+            parsed = parse_bound_revert_task(stored)
+        elif type(binding) is BoundManualCheckpoint:
+            parsed = parse_bound_manual_checkpoint_task(stored)
+        else:
+            _raise(TaskCatalogErrorCode.INVALID_INPUT)
         if parsed != binding:
             _raise(TaskCatalogErrorCode.CONFLICT)
         return stored

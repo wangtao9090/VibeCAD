@@ -61,6 +61,11 @@ draft preview documents, show the review verdict, capture exact whole-object or 
 `SelectorV1` values, and Accept or Reject a fresh draft. Face/edge subelement selection is not
 claimed.
 
+The current P1 source also provides a sequential manual-finish path after Agent review ends:
+**Open Editable HEAD** creates a non-authoritative working copy, normal **Save** stays local,
+**Checkpoint Edit** verifies and publishes a new Revision, and **Discard Edit** publishes nothing.
+Agent preview and editable HEAD are mutually exclusive; there is no automatic merge or rebase.
+
 The managed launcher above remains the default and fallback. One additional, deliberately narrow
 macOS pilot can install the same thin Workbench into an explicitly selected user FreeCAD:
 
@@ -256,8 +261,9 @@ P0-B hardening → P1/G2 → P2:
 - **G1 (Alpha complete)**: preview, verdict, exact object/feature selector capture, and
   Accept/Reject are available in the real FreeCAD Qt Workbench UI; one fingerprinted external
   FreeCAD 1.1.3 pilot is evidenced, while managed mode remains the default;
-- **P1/G2**: Sketcher/PartDesign, controlled import, single-part production capability, and
-  manual checkpoints;
+- **P1/G2**: the narrow sequential editable-HEAD/manual-checkpoint slice is implemented in the
+  current source; Sketcher/PartDesign, controlled import, and broader single-part production
+  capability remain;
 - **P2**: assemblies, BOM, TechDraw, manufacturing release, and enterprise delivery chains.
 
 The G1 Workbench Alpha packages the real FreeCAD Qt UI and its deterministic managed launcher. It

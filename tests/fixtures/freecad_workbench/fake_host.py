@@ -116,12 +116,42 @@ def make_fake_freecad_gui(
 
 
 class FakeDocument:
-    def __init__(self, name: str, local_path: str, events: list[str]) -> None:
+    def __init__(
+        self,
+        name: str,
+        local_path: str,
+        events: list[str],
+        freecad: FakeFreeCAD,
+    ) -> None:
         self.Name = name
         self.FileName = local_path
         self.Modified = False
+        self.Document = self
         self.Objects: list[object] = []
         self._events = events
+        self._freecad = freecad
+        self._pending_model_change = False
+
+    def recompute(self) -> None:
+        _require_main_thread()
+        self._events.append("document.recompute")
+
+    def save(self) -> None:
+        _require_main_thread()
+        self._events.append("document.save")
+        if self.Modified or self._pending_model_change:
+            path = Path(self.FileName)
+            path.write_bytes(path.read_bytes() + b"user edit\n")
+            path.chmod(0o644)
+        self.Modified = False
+        self._pending_model_change = False
+
+    def simulate_recomputed_edit(self) -> None:
+        _require_main_thread()
+        self._pending_model_change = True
+        self.Modified = False
+        self._freecad._notify_changed_object(self, "Length")
+        self._events.append("document.recompute")
 
 
 class FakeFreeCAD(ModuleType):
@@ -129,6 +159,7 @@ class FakeFreeCAD(ModuleType):
         super().__init__("FreeCAD")
         self.events = [] if events is None else events
         self.documents: dict[str, FakeDocument] = {}
+        self.document_observers: list[object] = []
         self.opened_paths: list[str] = []
         self.close_failures = 0
         self._next_document_index: int | None = None
@@ -141,9 +172,25 @@ class FakeFreeCAD(ModuleType):
             self._next_document_index = len(self.documents) + 1
         name = f"VibeCADPreview{self._next_document_index}"
         self._next_document_index += 1
-        document = FakeDocument(name, local_path, self.events)
+        document = FakeDocument(name, local_path, self.events, self)
         self.documents[name] = document
         return document
+
+    def addDocumentObserver(self, observer: object) -> None:
+        _require_main_thread()
+        if observer in self.document_observers:
+            raise RuntimeError("synthetic duplicate document observer")
+        self.document_observers.append(observer)
+
+    def removeDocumentObserver(self, observer: object) -> None:
+        _require_main_thread()
+        self.document_observers.remove(observer)
+
+    def _notify_changed_object(self, changed_object: object, property_name: str) -> None:
+        for observer in tuple(self.document_observers):
+            callback = getattr(observer, "slotChangedObject", None)
+            if callable(callback):
+                callback(changed_object, property_name)
 
     def getDocument(self, name: str) -> FakeDocument | None:
         _require_main_thread()
@@ -226,6 +273,7 @@ class FakeLocalAgentClient:
         self.created_thread_id = threading.get_ident()
         self.closed_thread_id: int | None = None
         self.close_call_count = 0
+        self.ping_failures = 0
         self.review_failure = False
         self.review_effect_after_loss = False
         self.review_entered: threading.Event | None = None
@@ -247,6 +295,7 @@ class FakeLocalAgentClient:
         self.open_checkout_transform: object | None = None
         self.checkout_descriptors: dict[str, dict[str, object]] = {}
         self.checkout_paths: dict[str, Path] = {}
+        self.checkout_file_observations: dict[str, tuple[object, object, object]] = {}
         self._next_preview_authority = 6
         self._preview_grant_claims: dict[str, dict[str, object]] = {}
 
@@ -257,6 +306,9 @@ class FakeLocalAgentClient:
 
     def ping(self) -> dict[str, object]:
         self._record("ping", {})
+        if self.ping_failures:
+            self.ping_failures -= 1
+            raise RuntimeError("synthetic ping failure")
         return {"schema_version": 1, "status": "ready"}
 
     def list_projects_request(self, request: dict[str, object]) -> dict[str, object]:
@@ -487,7 +539,13 @@ class FakeLocalAgentClient:
         if type(response) is dict and type(response.get("checkout_id")) is str:
             descriptor = dict(response)
             descriptor.pop("file_grant", None)
-            self.checkout_descriptors[response["checkout_id"]] = descriptor
+            stored_checkout_id = response["checkout_id"]
+            self.checkout_descriptors[stored_checkout_id] = descriptor
+            self.checkout_file_observations[stored_checkout_id] = (
+                descriptor.get("current_model_sha256"),
+                descriptor.get("current_size_bytes"),
+                descriptor.get("dirty"),
+            )
         return response
 
     def claim_file_grant(self, *, grant_id: str) -> dict[str, object]:
@@ -524,7 +582,47 @@ class FakeLocalAgentClient:
 
     def get_checkout(self, *, checkout_id: str) -> dict[str, object]:
         self._record("get_checkout", {"checkout_id": checkout_id})
-        return dict(self.checkout_descriptors[checkout_id])
+        descriptor = dict(self.checkout_descriptors[checkout_id])
+        observed = (
+            descriptor.get("current_model_sha256"),
+            descriptor.get("current_size_bytes"),
+            descriptor.get("dirty"),
+        )
+        if observed == self.checkout_file_observations[checkout_id]:
+            path = self.checkout_paths[checkout_id]
+            content = path.read_bytes()
+            descriptor["current_model_sha256"] = hashlib.sha256(content).hexdigest()
+            descriptor["current_size_bytes"] = len(content)
+            descriptor["dirty"] = (
+                descriptor["current_model_sha256"] != descriptor["initial_model_sha256"]
+            )
+            self.checkout_file_observations[checkout_id] = (
+                descriptor["current_model_sha256"],
+                descriptor["current_size_bytes"],
+                descriptor["dirty"],
+            )
+        self.checkout_descriptors[checkout_id] = descriptor
+        return dict(descriptor)
+
+    def checkpoint_checkout(
+        self,
+        *,
+        checkpoint_key: str,
+        checkout_id: str,
+    ) -> dict[str, object]:
+        self._record(
+            "checkpoint_checkout",
+            {"checkpoint_key": checkpoint_key, "checkout_id": checkout_id},
+        )
+        return {
+            "schema_version": 1,
+            "generation": 8,
+            "next_action": "done",
+            "task_run": {
+                "id": "task_" + "8" * 32,
+                "status": "succeeded",
+            },
+        }
 
     def close(self) -> None:
         if threading.get_ident() != self.created_thread_id:
@@ -775,6 +873,27 @@ class _QThread(_QObject):
             self._thread.join(timeout)
 
 
+class _QTimer(_QObject):
+    timeout = _Signal()
+
+    def __init__(self, parent: object = None) -> None:
+        super().__init__(parent)
+        self.interval = 0
+        self.active = False
+
+    def setInterval(self, interval: int) -> None:
+        self.interval = interval
+
+    def start(self) -> None:
+        self.active = True
+
+    def stop(self) -> None:
+        self.active = False
+
+    def isActive(self) -> bool:
+        return self.active
+
+
 class _Widget(_QObject):
     def __init__(self, *_args: object) -> None:
         _require_main_thread()
@@ -948,6 +1067,7 @@ def install_fake_pyside(
     module.QtCore = ModuleType("PySide.QtCore")
     module.QtCore.QObject = _QObject
     module.QtCore.QThread = _QThread
+    module.QtCore.QTimer = _QTimer
     module.QtCore.Signal = _Signal
     module.QtCore.Slot = lambda *_args: lambda function: function
     if nested_only:

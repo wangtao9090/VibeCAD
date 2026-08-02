@@ -48,6 +48,15 @@ from vibecad.workflow.lease import (
     LeaseRootTrust,
     ResourceLeaseManager,
 )
+from vibecad.workflow.manual_checkpoint import build_manual_checkpoint_binding
+from vibecad.workflow.state import (
+    ReasoningOwner,
+    ReviewPolicy,
+    TaskEvent,
+    new_task_run,
+    transition_task,
+)
+from vibecad.workflow.store import StoredTaskRun
 
 DARWIN_ONLY = pytest.mark.skipif(sys.platform != "darwin", reason="macOS peer-euid POC")
 DAEMON_AUTHORITY = "vibecad.kernel-daemon.authority.v1"
@@ -563,6 +572,38 @@ class _FakeDaemonApplication:
         self.calls.append(("checkout.close", checkout_id))
         return _FakeCheckoutDescriptor(checkout_id)
 
+    def checkpoint_checkout(
+        self,
+        *,
+        checkpoint_key: str,
+        checkout_id: str,
+    ) -> StoredTaskRun:
+        self.calls.append(
+            (
+                "checkout.checkpoint",
+                {"checkpoint_key": checkpoint_key, "checkout_id": checkout_id},
+            )
+        )
+        binding = build_manual_checkpoint_binding(
+            checkpoint_key=checkpoint_key,
+            checkout_id=checkout_id,
+            project_id=self._snapshot.descriptor.source.project_id,
+            expected_head=self._snapshot.descriptor.source_head,
+            model_sha256=self._snapshot.model_sha256,
+            model_size_bytes=self._snapshot.size_bytes,
+        )
+        task = new_task_run(
+            task_id=binding.task_id,
+            project_id=binding.project_id,
+            base_revision=binding.expected_head.revision_id,
+            reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+            review_policy=ReviewPolicy.AUTO_COMMIT,
+            creation_digest=binding.creation_digest,
+        )
+        task = transition_task(task, TaskEvent.REQUEST_PLAN)
+        task = transition_task(task, TaskEvent.SUBMIT_PROGRAM, program=binding.program)
+        return StoredTaskRun(generation=2, task_run=task)
+
     def capture_checkout_file(self, *, checkout_id: str) -> CheckoutFileSnapshot:
         self.calls.append(("checkout.capture", checkout_id))
         assert checkout_id == self.checkout_id
@@ -618,6 +659,40 @@ def _fake_daemon_factory(log: list[object]):
         return application
 
     return factory
+
+
+def test_kernel_facade_checkpoint_returns_path_free_durable_task_projection() -> None:
+    application = _FakeDaemonApplication()
+    facade = daemon_api.LocalKernelFacade(
+        application,
+        daemon_id="daemon_" + "1" * 32,
+    )
+    try:
+        result = facade._checkout_checkpoint(  # noqa: SLF001
+            {
+                "checkpoint_key": "checkpoint_create_" + "7" * 32,
+                "checkout_id": application.checkout_id,
+            }
+        )
+
+        assert result["schema_version"] == 1
+        assert result["generation"] == 2
+        assert result["next_action"] == "validate_program"
+        assert result["task_run"]["program"]["operations"][0]["op"] == (
+            "system.checkpoint_checkout"
+        )
+        assert "local_path" not in json.dumps(result)
+        assert "source_fd" not in json.dumps(result)
+        assert application.calls[-1] == (
+            "checkout.checkpoint",
+            {
+                "checkpoint_key": "checkpoint_create_" + "7" * 32,
+                "checkout_id": application.checkout_id,
+            },
+        )
+    finally:
+        facade.close()
+        application.close()
 
 
 def _wait_until(predicate, *, timeout: float = 3.0) -> None:
@@ -877,7 +952,7 @@ def test_real_client_authenticates_and_claims_one_path_bound_checkout_grant() ->
             },
             "implementation": {
                 "package_version": "0.6.0",
-                "build_id": "p0b-c13.1",
+                "build_id": "p1-s03.1",
             },
         }
         capabilities = client.call(

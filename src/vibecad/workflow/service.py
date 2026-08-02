@@ -53,6 +53,13 @@ from vibecad.workflow.catalog import (
 )
 from vibecad.workflow.contracts import ErrorCategory, ModelProgram, StepError
 from vibecad.workflow.lease import LeaseError, ResourceLeaseManager
+from vibecad.workflow.manual_checkpoint import (
+    BoundManualCheckpoint,
+    ManualCheckpointError,
+    ManualCheckpointErrorCode,
+    build_manual_checkpoint_binding,
+    parse_bound_manual_checkpoint_task,
+)
 from vibecad.workflow.revert import (
     BoundRevert,
     RevertProgramError,
@@ -642,6 +649,165 @@ class TaskService:
             _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
         return self._publish_review_if_prepared(result)
 
+    def checkpoint_manual_edit(
+        self,
+        *,
+        checkpoint_key: str,
+        checkout_id: str,
+        project_id: str,
+        expected_head: ProjectHead,
+        model_sha256: str,
+        model_size_bytes: int,
+        stage_candidate: object,
+    ) -> StoredTaskRun:
+        """Publish one exact user-edited checkout through the normal commit kernel."""
+
+        if not callable(stage_candidate):
+            _raise(TaskServiceErrorCode.INVALID_INPUT)
+        try:
+            binding = build_manual_checkpoint_binding(
+                checkpoint_key=checkpoint_key,
+                checkout_id=checkout_id,
+                project_id=project_id,
+                expected_head=expected_head,
+                model_sha256=model_sha256,
+                model_size_bytes=model_size_bytes,
+            )
+        except ManualCheckpointError as error:
+            _raise(
+                TaskServiceErrorCode.INVALID_INPUT
+                if error.code is ManualCheckpointErrorCode.INVALID_INPUT
+                else TaskServiceErrorCode.CONFLICT
+            )
+        try:
+            existing = self._catalog.get_task(task_id=binding.task_id)
+        except TaskCatalogError as error:
+            if error.code is not TaskCatalogErrorCode.NOT_FOUND:
+                raise TaskServiceError(_CATALOG_ERROR_MAP[error.code]) from None
+            existing = None
+        if existing is not None:
+            if parse_bound_manual_checkpoint_task(existing) != binding:
+                _raise(TaskServiceErrorCode.CONFLICT)
+            if existing.task_run.status is not TaskStatus.PROGRAM_READY:
+                return existing
+
+        lease = self._acquire(project_id)
+        result: StoredTaskRun | None = None
+        caught: TaskServiceError | None = None
+        try:
+            try:
+                head = self._guard_runtime_head(project_id)
+                if head != expected_head:
+                    _raise(TaskServiceErrorCode.CONFLICT)
+                stored = _catalog_call(
+                    lambda: self._catalog.create_manual_checkpoint_task(
+                        checkpoint_key=checkpoint_key,
+                        checkout_id=checkout_id,
+                        project_id=project_id,
+                        expected_head=head,
+                        model_sha256=model_sha256,
+                        model_size_bytes=model_size_bytes,
+                    )
+                )
+                if parse_bound_manual_checkpoint_task(stored) != binding:
+                    _raise(TaskServiceErrorCode.CONFLICT)
+                if stored.task_run.status is TaskStatus.PROGRAM_READY:
+                    result = self._continue_manual_checkpoint_with_lease(
+                        stored,
+                        binding,
+                        stage_candidate,
+                        lease,
+                    )
+                else:
+                    result = stored
+            except TaskServiceError as error:
+                caught = error
+            except Exception:
+                caught = TaskServiceError(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        finally:
+            release_failed = self._release(lease)
+        if release_failed:
+            _raise(TaskServiceErrorCode.LEASE_UNAVAILABLE)
+        if caught is not None:
+            raise caught from None
+        if result is None:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        return result
+
+    def _continue_manual_checkpoint_with_lease(
+        self,
+        stored: StoredTaskRun,
+        binding: BoundManualCheckpoint,
+        stage_candidate: object,
+        lease: object,
+    ) -> StoredTaskRun:
+        if (
+            stored.task_run.status is not TaskStatus.PROGRAM_READY
+            or parse_bound_manual_checkpoint_task(stored) != binding
+            or not callable(stage_candidate)
+        ):
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        head = self._guard_runtime_head(binding.project_id)
+        if head != binding.expected_head:
+            _raise(TaskServiceErrorCode.CONFLICT)
+        try:
+            compiled = compile_acceptance_spec(binding.program.acceptance)
+        except Exception:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        revision_id = self._reserve_candidate(
+            project_id=binding.project_id,
+            expected_head=head,
+            reservation_key=binding.reservation_key,
+            lease=lease,
+        )
+        try:
+            validating = self._cas(
+                stored,
+                transition_task(stored.task_run, TaskEvent.START_VALIDATION),
+            )
+        except (TaskServiceError, TaskStateError) as error:
+            clean = self._cancel_unused_reservation(
+                project_id=binding.project_id,
+                expected_head=head,
+                revision_id=revision_id,
+                reservation_key=binding.reservation_key,
+                lease=lease,
+            )
+            if not clean:
+                _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+            if isinstance(error, TaskServiceError):
+                cancellation = self._concurrent_cancellation(stored)
+                if cancellation is not None:
+                    return cancellation
+                raise error
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        try:
+            stage_candidate(
+                expected_head=head,
+                revision_id=revision_id,
+                reservation_key=binding.reservation_key,
+                lease=lease,
+            )
+        except Exception:
+            clean = self._cancel_unused_reservation(
+                project_id=binding.project_id,
+                expected_head=head,
+                revision_id=revision_id,
+                reservation_key=binding.reservation_key,
+                lease=lease,
+            )
+            if not clean:
+                return self._persist_attention(validating, TaskEvent.REQUIRE_RECOVERY)
+            return self._reject_pre_candidate(validating, _PRE_CANDIDATE_CONFLICT)
+        return self._run_manual_checkpoint_with_lease(
+            validating,
+            binding,
+            compiled,
+            lease,
+            head,
+            revision_id=revision_id,
+        )
+
     def _load_revert_replay(
         self,
         *,
@@ -824,6 +990,8 @@ class TaskService:
         binding = parse_bound_revert_task(stored)
         if binding is not None:
             return self._continue_bound_revert(stored, binding)
+        if parse_bound_manual_checkpoint_task(stored) is not None:
+            _raise(TaskServiceErrorCode.INVALID_STATE)
         preflight = self._preflight(program)
         if preflight is None:
             return self._reject_validation(stored)
@@ -2171,6 +2339,163 @@ class TaskService:
                 strict=True,
             )
         )
+
+    def _run_manual_checkpoint_with_lease(
+        self,
+        validating: StoredTaskRun,
+        binding: BoundManualCheckpoint,
+        compiled: CompiledAcceptance,
+        lease: object,
+        head: ProjectHead,
+        *,
+        revision_id: str,
+    ) -> StoredTaskRun:
+        task = validating.task_run
+        if (
+            parse_bound_manual_checkpoint_task(task) != binding
+            or head != binding.expected_head
+            or task.review_policy is not ReviewPolicy.AUTO_COMMIT
+        ):
+            if not self._cancel_unused_reservation(
+                project_id=task.project_id,
+                expected_head=head,
+                revision_id=revision_id,
+                reservation_key=binding.reservation_key,
+                lease=lease,
+            ):
+                _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+            return self._reject_pre_candidate(validating, _PRE_CANDIDATE_CONFLICT)
+
+        try:
+            active = self._coordinator.begin_reserved(
+                project_id=task.project_id,
+                expected_head=head,
+                revision_id=revision_id,
+                reservation_key=binding.reservation_key,
+                lease=lease,
+            )
+        except CandidateError as error:
+            event = _attention_event(error)
+            if event is not None:
+                return self._persist_attention(validating, event)
+            if error.code is CandidateErrorCode.CONFLICT:
+                return self._reject_pre_candidate(validating, _PRE_CANDIDATE_CONFLICT)
+            if error.code is CandidateErrorCode.RESOURCE_EXHAUSTED:
+                _raise(TaskServiceErrorCode.RESOURCE_EXHAUSTED)
+            return self._reject_pre_candidate(validating, _BEGIN_FAILURE)
+        except Exception:
+            return self._reject_pre_candidate(validating, _BEGIN_FAILURE)
+
+        try:
+            executing = self._cas(
+                validating,
+                transition_task(
+                    validating.task_run,
+                    TaskEvent.VALIDATE_PROGRAM,
+                    candidate_revision=active.binding.revision_id,
+                ),
+            )
+        except (TaskServiceError, TaskStateError) as error:
+            return self._abort_unpublished(validating, active, lease, error)
+
+        current = executing
+        current_candidate = active
+        try:
+            current_candidate = self._coordinator.checkpoint(
+                candidate=current_candidate,
+                lease=lease,
+            )
+            with _candidate_file_limit(self._revision_store):
+                self._executor.export_step(candidate=current_candidate, lease=lease)
+            current_candidate = self._coordinator.seal(
+                candidate=current_candidate,
+                lease=lease,
+            )
+            evidence = self._executor.collect_evidence(candidate=current_candidate)
+            if type(evidence) is not CandidateEvidence:
+                raise TypeError
+            for artifact in evidence.artifacts:
+                current = self._cas(current, append_artifact(current.task_run, artifact))
+            current = self._cas(
+                current,
+                transition_task(current.task_run, TaskEvent.COMPLETE_EXECUTION),
+            )
+        except Exception as error:
+            return self._fail_published(
+                current,
+                current_candidate,
+                lease,
+                _EXECUTION_FAILURE,
+                error,
+            )
+
+        try:
+            verification = verify_acceptance(
+                compiled,
+                evidence.snapshot,
+                candidate_revision=current_candidate.revision.id,
+                manifest_sha256=current_candidate.revision.manifest_sha256,
+            )
+            if type(verification) is not VerificationResult:
+                raise TypeError
+        except Exception as error:
+            return self._fail_published(
+                current,
+                current_candidate,
+                lease,
+                _VERIFICATION_FAILURE,
+                error,
+            )
+        if not verification.report.passed:
+            try:
+                current = self._cas(
+                    current,
+                    append_verification(current.task_run, verification.report),
+                )
+            except (TaskServiceError, TaskStateError) as error:
+                return self._fail_published(
+                    current,
+                    current_candidate,
+                    lease,
+                    _VERIFICATION_FAILURE,
+                    error,
+                )
+            return self._fail_published(
+                current,
+                current_candidate,
+                lease,
+                _VERIFICATION_FAILURE,
+                _VERIFICATION_FAILURE,
+            )
+
+        try:
+            committing = self._cas(
+                current,
+                transition_task(
+                    current.task_run,
+                    TaskEvent.PASS_VERIFICATION,
+                    verification=verification.report,
+                ),
+            )
+        except (TaskServiceError, TaskStateError) as error:
+            return self._fail_published(
+                current,
+                current_candidate,
+                lease,
+                _VERIFICATION_FAILURE,
+                error,
+            )
+        try:
+            commit_result = self._coordinator.commit(
+                candidate=current_candidate,
+                receipt=verification.receipt,
+                compiled=compiled,
+                snapshot=evidence.snapshot,
+                lease=lease,
+            )
+        except Exception:
+            return self._post_receipt_attention(committing)
+        return self._finish_commit(committing, current_candidate, commit_result)
 
     def _run_bound_revert_with_lease(
         self,

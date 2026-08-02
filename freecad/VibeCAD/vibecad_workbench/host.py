@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,7 +18,7 @@ from .gateway import (
     _PrivateWireCommand,
     _PrivateWireEvent,
 )
-from .preview import PreviewCoordinator, PreviewError
+from .preview import PreviewCoordinator, PreviewError, _document_is_touched
 from .selection import (
     ManagedSelectionObserver,
     SelectionCaptureError,
@@ -37,6 +39,8 @@ _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _CLEANUP_ID_RESERVE = 1024
 _NORMAL_ID_MAX = _MAX_SAFE_INTEGER - _CLEANUP_ID_RESERVE
 _MAX_PENDING_REQUESTS = 64
+_KEEPALIVE_INTERVAL_MILLISECONDS = 10_000
+_KEEPALIVE_COMMAND = object()
 _LANE_NORMAL = "normal"
 _LANE_PRIVATE = "private"
 _EXPECTED_EVENTS = {
@@ -48,11 +52,14 @@ _EXPECTED_EVENTS = {
     "preview_open": "preview_opened",
     "preview_refresh": "preview_refreshed",
     "preview_close": "preview_closed",
+    "edit_checkpoint": "edit_checkpointed",
     "review": "review",
     "selector_resolve": "selector_resolved",
     "close": "closed",
 }
-_RESTRICTED_OPERATIONS = frozenset(("preview_close", "review", "selector_resolve", "close"))
+_RESTRICTED_OPERATIONS = frozenset(
+    ("preview_close", "edit_checkpoint", "review", "selector_resolve", "close")
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,8 +116,120 @@ def _best_effort(action: Callable[..., object], *args: object) -> bool:
     return True
 
 
+def _restore_private_document_mode(local_path: object) -> None:
+    """Restore the private checkout mode after FreeCAD's atomic Save rewrite."""
+
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    geteuid = getattr(os, "geteuid", None)
+    if type(local_path) is not str or not local_path or nofollow is None or not callable(geteuid):
+        raise PreviewError("editable HEAD file authority is unavailable")
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    file_descriptor = -1
+    try:
+        file_descriptor = os.open(local_path, flags)
+        before = os.fstat(file_descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != geteuid() or before.st_nlink != 1:
+            raise PreviewError("editable HEAD file authority is invalid")
+        os.fchmod(file_descriptor, 0o600)
+        after = os.fstat(file_descriptor)
+        current = os.stat(local_path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or stat.S_IMODE(after.st_mode) != 0o600
+            or (after.st_dev, after.st_ino, after.st_uid, after.st_nlink)
+            != (before.st_dev, before.st_ino, before.st_uid, before.st_nlink)
+            or (current.st_dev, current.st_ino, current.st_mode, current.st_uid, current.st_nlink)
+            != (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_nlink)
+        ):
+            raise PreviewError("editable HEAD file privacy could not be restored")
+    except PreviewError:
+        raise
+    except (OSError, TypeError, ValueError):
+        raise PreviewError("editable HEAD file privacy could not be restored") from None
+    finally:
+        if file_descriptor >= 0:
+            try:
+                os.close(file_descriptor)
+            except OSError:
+                raise PreviewError("editable HEAD file authority could not be retired") from None
+
+
+class _EditableDocumentObserver:
+    """Remember model mutations even after FreeCAD recompute clears isTouched()."""
+
+    def __init__(self, freecad: object) -> None:
+        add_observer = getattr(freecad, "addDocumentObserver", None)
+        remove_observer = getattr(freecad, "removeDocumentObserver", None)
+        if not callable(add_observer) or not callable(remove_observer):
+            raise PreviewError("editable HEAD change observation is unavailable")
+        self._add_observer = add_observer
+        self._remove_observer = remove_observer
+        self._document: object | None = None
+        self._changed = False
+        self._attached = False
+
+    def watch(self, document: object) -> None:
+        if self._attached or self._document is not None:
+            raise PreviewError("editable HEAD change observation is already active")
+        self._add_observer(self)
+        self._document = document
+        self._changed = False
+        self._attached = True
+
+    def changed(self, document: object) -> bool:
+        if not self._attached or self._document is not document:
+            raise PreviewError("editable HEAD change observation is unavailable")
+        return self._changed
+
+    def reset(self, document: object) -> None:
+        if not self._attached or self._document is not document:
+            raise PreviewError("editable HEAD change observation is unavailable")
+        self._changed = False
+
+    def detach(self, document: object) -> None:
+        if not self._attached or self._document is not document:
+            raise PreviewError("editable HEAD change observation is unavailable")
+        self._remove_observer(self)
+        self._attached = False
+        self._document = None
+        self._changed = False
+
+    def _mark_document(self, document: object) -> None:
+        if self._attached and document is self._document:
+            self._changed = True
+
+    def _mark_object(self, candidate: object) -> None:
+        if not self._attached:
+            return
+        try:
+            matches = getattr(candidate, "Document", None) is self._document
+        except BaseException:
+            matches = True
+        if matches:
+            self._changed = True
+
+    def slotChangedObject(self, changed_object: object, _property: object) -> None:
+        self._mark_object(changed_object)
+
+    def slotCreatedObject(self, created_object: object) -> None:
+        self._mark_object(created_object)
+
+    def slotDeletedObject(self, deleted_object: object) -> None:
+        self._mark_object(deleted_object)
+
+    def slotChangedDocument(self, document: object, _property: object) -> None:
+        self._mark_document(document)
+
+    def slotUndoDocument(self, document: object) -> None:
+        self._mark_document(document)
+
+    def slotRedoDocument(self, document: object) -> None:
+        self._mark_document(document)
+
+
 class _GatewayWorker(QtCore.QObject):
     event_ready = QtCore.Signal(object)
+    keepalive_ready = QtCore.Signal(bool)
 
     def __init__(self, capability: object) -> None:
         super().__init__()
@@ -130,6 +249,9 @@ class _GatewayWorker(QtCore.QObject):
     @QtCore.Slot(object)
     def dispatch(self, command: object) -> None:
         self.thread_id = threading.get_ident()
+        if command is _KEEPALIVE_COMMAND:
+            self.keepalive_ready.emit(self.gateway.keepalive())
+            return
         event = self.gateway.handle(command)
         if (
             type(command) is _PrivateWireCommand
@@ -150,6 +272,8 @@ class _WorkbenchSession(QtCore.QObject):
         self.worker_thread_id: int | None = None
         self.daemon_id: str | None = None
         self.heartbeat_count = 0
+        self._keepalive_count = 0
+        self._keepalive_pending = False
         self.lifecycle = "starting"
         self._dock_added = False
         self._dock_parented = False
@@ -169,6 +293,7 @@ class _WorkbenchSession(QtCore.QObject):
         self._cleanup_cursor = _NORMAL_ID_MAX + 1
         self._open_recovery_required = False
         self._review_enqueue_ambiguous_id: int | None = None
+        self._edit_refresh_pending = False
         self._selector_generation = 0
         self._refresh_generation = 0
         self._refresh_barrier: _RefreshBarrier | None = None
@@ -177,10 +302,12 @@ class _WorkbenchSession(QtCore.QObject):
         self._cleanup_cycle_id: int | None = None
         self._fresh_preview_descriptors: dict[str, object] = {}
         self.preview: PreviewCoordinator | None = None
+        self._edit_observer: _EditableDocumentObserver | None = None
         self.selection: ManagedSelectionObserver | None = None
         self.dock: ReviewDock | None = None
         self.thread: object | None = None
         self.worker: _GatewayWorker | None = None
+        self.keepalive_timer: object | None = None
         try:
             self.dock = ReviewDock(main_window)
             self._dock_parented = True
@@ -195,6 +322,13 @@ class _WorkbenchSession(QtCore.QObject):
                 self._receive,
                 _QUEUED_CONNECTION,
             )
+            self.worker.keepalive_ready.connect(
+                self._receive_keepalive,
+                _QUEUED_CONNECTION,
+            )
+            self.keepalive_timer = QtCore.QTimer(self)
+            self.keepalive_timer.setInterval(_KEEPALIVE_INTERVAL_MILLISECONDS)
+            self.keepalive_timer.timeout.connect(self._queue_keepalive)
             self.thread.finished.connect(self.worker.deleteLater)
             self.thread.finished.connect(
                 self._finished,
@@ -209,6 +343,10 @@ class _WorkbenchSession(QtCore.QObject):
             self.dock._bind_review_host(
                 submit_review=self._request_review,
                 discard_preview=self._discard_preview_binding,
+            )
+            self.dock._bind_edit_host(
+                checkpoint_edit=self._request_edit_checkpoint,
+                discard_edit=self._discard_preview_binding,
             )
             self.selection = ManagedSelectionObserver(
                 freecad_gui.Selection,
@@ -268,6 +406,8 @@ class _WorkbenchSession(QtCore.QObject):
                 raise TypeError("invalid selected document")
             matches: list[tuple[str, object]] = []
             for source_kind, checkout_id in tuple(dock._preview_checkouts.items()):
+                if source_kind not in {"head", "draft"}:
+                    continue
                 binding = coordinator._observe_local_binding(checkout_id)
                 if binding.document is document:
                     matches.append((source_kind, binding))
@@ -334,6 +474,33 @@ class _WorkbenchSession(QtCore.QObject):
             return
         dock._set_selector_capture(captured.text)
 
+    def _watch_edit_document(self, document: object) -> None:
+        coordinator = self._coordinator()
+        if self._edit_observer is not None:
+            raise PreviewError("editable HEAD change observation is already active")
+        observer = _EditableDocumentObserver(coordinator._freecad)
+        observer.watch(document)
+        self._edit_observer = observer
+
+    def _edit_document_changed(self, document: object) -> bool:
+        observer = self._edit_observer
+        if observer is None:
+            raise PreviewError("editable HEAD change observation is unavailable")
+        return observer.changed(document)
+
+    def _reset_edit_document(self, document: object) -> None:
+        observer = self._edit_observer
+        if observer is None:
+            raise PreviewError("editable HEAD change observation is unavailable")
+        observer.reset(document)
+
+    def _unwatch_edit_document(self, document: object) -> None:
+        observer = self._edit_observer
+        if observer is None:
+            raise PreviewError("editable HEAD change observation is unavailable")
+        observer.detach(document)
+        self._edit_observer = None
+
     def _detach_selection(self) -> None:
         selection = self.selection
         if selection is None:
@@ -359,6 +526,7 @@ class _WorkbenchSession(QtCore.QObject):
             _best_effort(dock.deleteLater)
 
     def _dispose_unstarted(self) -> None:
+        self._stop_keepalive()
         if self._thread_start_attempted:
             self._open_recovery_required = True
             dock = self.dock
@@ -396,6 +564,7 @@ class _WorkbenchSession(QtCore.QObject):
         return True
 
     def _transport_exhausted(self) -> None:
+        self._stop_keepalive()
         self.lifecycle = "stopping"
         self._retire_refresh_authority_for_stopping()
         dock = self.dock
@@ -416,6 +585,56 @@ class _WorkbenchSession(QtCore.QObject):
                 elif dock is not None:
                     dock.set_preview_eligibility(False)
         raise ProjectionError("host request authority exhausted")
+
+    def _start_keepalive(self) -> None:
+        timer = self.keepalive_timer
+        if timer is not None and self.lifecycle == "active" and not timer.isActive():
+            timer.start()
+
+    def _stop_keepalive(self) -> None:
+        timer = self.keepalive_timer
+        if timer is not None and timer.isActive():
+            timer.stop()
+
+    @QtCore.Slot()
+    def _queue_keepalive(self) -> None:
+        if (
+            self.lifecycle != "active"
+            or self._keepalive_pending
+            or self._pending
+            or self.worker is None
+        ):
+            return
+        self._keepalive_pending = True
+        self._dispatch.emit(_KEEPALIVE_COMMAND)
+
+    @QtCore.Slot(bool)
+    def _receive_keepalive(self, succeeded: object) -> None:
+        if not self._keepalive_pending:
+            return
+        self._keepalive_pending = False
+        if succeeded is True:
+            if self.lifecycle == "active":
+                self._keepalive_count += 1
+            return
+        self._stop_keepalive()
+        dock = self.dock
+        recovery_required = bool(
+            dock is not None
+            and (
+                dock._preview_checkouts
+                or dock._preview_pending_sources
+                or dock._edit_checkpoint_pending is not None
+            )
+        )
+        self._open_recovery_required = self._open_recovery_required or recovery_required
+        if dock is not None:
+            dock._fail()
+            dock.set_preview_eligibility(
+                False,
+                recovery_required=recovery_required,
+            )
+        self.close_async()
 
     def _selection_stamp(self) -> tuple[object, ...]:
         dock = self.dock
@@ -710,6 +929,7 @@ class _WorkbenchSession(QtCore.QObject):
         allowed = {
             ("review", "review"),
             ("preview_close", "preview_closed"),
+            ("edit_checkpoint", "edit_checkpointed"),
             ("selector_resolve", "selector_resolved"),
         }
         if (
@@ -883,6 +1103,7 @@ class _WorkbenchSession(QtCore.QObject):
             or dock._preview_checkouts
             or dock._preview_pending_sources
             or dock._preview_epochs
+            or dock._edit_checkpoint_pending is not None
             or dock._pending
             or dock._hosted_projection is not None
         ):
@@ -930,6 +1151,8 @@ class _WorkbenchSession(QtCore.QObject):
             return
         dock = self.dock
         if dock is None:
+            return
+        if dock._edit_checkpoint_pending is not None:
             return
         if dock.pending_preview_open_count():
             return
@@ -1003,6 +1226,9 @@ class _WorkbenchSession(QtCore.QObject):
                         recovery_required=True,
                     )
                     return
+                if self._edit_refresh_pending and self.lifecycle == "active":
+                    self._edit_refresh_pending = False
+                    dock.refresh()
         if (
             self.lifecycle != "stopping"
             or self._open_recovery_required
@@ -1183,6 +1409,66 @@ class _WorkbenchSession(QtCore.QObject):
             raise
         return request_id
 
+    def _request_edit_checkpoint(
+        self,
+        *,
+        checkout_id: str,
+        checkpoint_key: str,
+    ) -> int | None:
+        dock = self.dock
+        coordinator = self.preview
+        if (
+            self.lifecycle != "active"
+            or dock is None
+            or coordinator is None
+            or dock._preview_checkouts.get("edit") != checkout_id
+            or any(pending[2] == "edit_checkpoint" for pending in self._pending.values())
+        ):
+            raise PreviewError("editable HEAD authority is unavailable")
+        binding = coordinator.binding_for_checkout(checkout_id)
+        document = binding.document
+        claim = dict(binding.claim)
+        save = getattr(document, "save", None)
+        recompute = getattr(document, "recompute", None)
+        if (
+            type(checkpoint_key) is not str
+            or not checkpoint_key.startswith("checkpoint_create_")
+            or len(checkpoint_key) != len("checkpoint_create_") + 32
+            or any(
+                character not in "0123456789abcdef"
+                for character in checkpoint_key.removeprefix("checkpoint_create_")
+            )
+            or not callable(save)
+            or getattr(document, "FileName", None) != claim.get("local_path")
+        ):
+            raise PreviewError("editable HEAD authority is invalid")
+        touched = _document_is_touched(document)
+        changed = self._edit_document_changed(document)
+        if touched or changed:
+            if touched and callable(recompute):
+                recompute()
+            save()
+        _restore_private_document_mode(claim.get("local_path"))
+        if (
+            _document_is_touched(document)
+            or coordinator.binding_for_checkout(checkout_id) is not binding
+            or getattr(document, "FileName", None) != claim.get("local_path")
+        ):
+            raise PreviewError("editable HEAD save did not settle")
+        context = (checkout_id, checkpoint_key)
+        request_id = self._reserve_private_normal_request(
+            "edit_checkpointed",
+            "edit_checkpoint",
+            context=context,
+            checkpoint_key=checkpoint_key,
+            checkout_id=checkout_id,
+        )
+        self._enqueue_request(
+            request_id,
+            commit_before_emit=True,
+        )
+        return request_id
+
     def _guard_preview_binding(self, checkout_id: object) -> None:
         coordinator = self._coordinator()
         try:
@@ -1201,11 +1487,13 @@ class _WorkbenchSession(QtCore.QObject):
         coordinator = self._coordinator()
         if self._cleanup_cycle_id is None:
             self._cleanup_cycle_id = coordinator._active_cycle_id()
-        coordinator.binding_for_checkout(checkout_id)
+        binding = coordinator.binding_for_checkout(checkout_id)
+        dock = self.dock
+        if dock is not None and dock._preview_checkouts.get("edit") == checkout_id:
+            self._unwatch_edit_document(binding.document)
         self._invalidate_review_tokens()
         self._refresh_barrier = None
         coordinator.discard_document(checkout_id)
-        dock = self.dock
         if dock is not None:
             dock.set_preview_eligibility(False)
         self._advance_cleanup()
@@ -1365,12 +1653,22 @@ class _WorkbenchSession(QtCore.QObject):
                     return False
                 self._advance_cleanup()
                 return True
-            applied = dock._apply_hosted_event(
-                event,
-                expected_kind=pending[0],
-                context=context,
-            )
+            watching_edit = context[0] == "edit"
+            if watching_edit:
+                self._watch_edit_document(binding.document)
+            try:
+                applied = dock._apply_hosted_event(
+                    event,
+                    expected_kind=pending[0],
+                    context=context,
+                )
+            except BaseException:
+                if watching_edit:
+                    self._unwatch_edit_document(binding.document)
+                raise
             if not applied:
+                if watching_edit:
+                    self._unwatch_edit_document(binding.document)
                 checkout_id = dict(binding.descriptor)["checkout_id"]
                 coordinator.discard_document(checkout_id)
                 self._open_recovery_required = True
@@ -1599,6 +1897,7 @@ class _WorkbenchSession(QtCore.QObject):
             self.worker_thread_id = event["worker_thread_id"]
             if self.lifecycle == "starting":
                 self.lifecycle = "active"
+                self._start_keepalive()
         retired = self._retire_pending(request_id, pending)
         if retired and self.lifecycle == "stopping":
             self._advance_cleanup()
@@ -1741,6 +2040,70 @@ class _WorkbenchSession(QtCore.QObject):
         dock = self.dock
         if operation == "selector_resolve":
             return self._receive_selector_resolution(event, request_id, pending)
+        if operation == "edit_checkpoint":
+            context = pending[1]
+            if (
+                dock is None
+                or type(context) is not tuple
+                or len(context) != 2
+                or type(context[0]) is not str
+                or type(context[1]) is not str
+            ):
+                return False
+            if not self._retire_pending(request_id, pending):
+                return False
+            completion = dock._receive_host_edit_completion(event, context)
+            if kind == "error":
+                if event["outcome"] == "unknown_outcome":
+                    self._open_recovery_required = True
+                    self.lifecycle = "stopping"
+                    dock.set_preview_eligibility(False, recovery_required=True)
+                    self._retire_refresh_authority_for_stopping()
+                return True
+            if completion == "failed":
+                response = event.get("response")
+                if (
+                    kind == "edit_checkpointed"
+                    and type(response) is dict
+                    and response.get("outcome") == "clean"
+                ):
+                    coordinator = self.preview
+                    if coordinator is None:
+                        self._open_recovery_required = True
+                        return True
+                    try:
+                        binding = coordinator.binding_for_checkout(context[0])
+                        self._reset_edit_document(binding.document)
+                    except (PreviewError, RuntimeError, TypeError, ValueError):
+                        self._open_recovery_required = True
+                        self.lifecycle = "stopping"
+                        dock.set_preview_eligibility(False, recovery_required=True)
+                return True
+            if completion != "succeeded":
+                self._open_recovery_required = True
+                self.lifecycle = "stopping"
+                dock.set_preview_eligibility(False, recovery_required=True)
+                self._retire_refresh_authority_for_stopping()
+                return True
+            coordinator = self.preview
+            checkout_id = context[0]
+            if coordinator is None:
+                self._open_recovery_required = True
+                return True
+            try:
+                if self._cleanup_cycle_id is None:
+                    self._cleanup_cycle_id = coordinator._active_cycle_id()
+                binding = coordinator.binding_for_checkout(checkout_id)
+                self._unwatch_edit_document(binding.document)
+                coordinator.discard_document(checkout_id)
+                self._edit_refresh_pending = True
+            except (PreviewError, RuntimeError, TypeError, ValueError):
+                self._open_recovery_required = True
+                self.lifecycle = "stopping"
+                dock.set_preview_eligibility(False, recovery_required=True)
+                return True
+            self._advance_cleanup()
+            return True
         if operation == "review":
             if dock is None:
                 return False
@@ -1911,6 +2274,7 @@ class _WorkbenchSession(QtCore.QObject):
             return
         if self._thread_retired or self._client_close_requested:
             return
+        self._stop_keepalive()
         self.lifecycle = "stopping"
         self._retire_refresh_authority_for_stopping()
         if self._cleanup_request_id is not None:
@@ -1920,6 +2284,10 @@ class _WorkbenchSession(QtCore.QObject):
             coordinator = self.preview
             if coordinator is not None:
                 try:
+                    observer = self._edit_observer
+                    if observer is not None and dock._preview_checkouts.get("edit") is not None:
+                        binding = coordinator.binding_for_checkout(dock._preview_checkouts["edit"])
+                        self._unwatch_edit_document(binding.document)
                     if self._cleanup_cycle_id is None:
                         self._cleanup_cycle_id = coordinator._active_cycle_id()
                     coordinator.close_documents()
@@ -1940,6 +2308,7 @@ class _WorkbenchSession(QtCore.QObject):
         global _session
         if self._thread_retired:
             return
+        self._stop_keepalive()
         self._thread_retired = True
         self._thread_started = False
         if self.thread is not None:
