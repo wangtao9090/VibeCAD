@@ -12,7 +12,7 @@ import json
 import math
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from types import MappingProxyType
 
@@ -165,6 +165,19 @@ class CompiledParametricDesign:
 
 
 CompiledSketchSet = CompiledParametricDesign
+
+
+@dataclass(frozen=True, slots=True)
+class ParametricParameterEdit:
+    design_id: str
+    design_digest: str
+    body: object
+    parameter_id: str
+    parameter_name: str
+    unit: str
+    before_value: float
+    after_value: float
+    consumer_ids: tuple[str, ...]
 
 
 def _canonical(value: object) -> str:
@@ -1526,6 +1539,312 @@ def stabilize_parametric_session(session: object) -> None:
             parametric_entity_facts(obj)
 
 
+def _source_parameter_mapping(
+    records: tuple[tuple[object, dict[str, object]], ...],
+    design: ParametricDesignIR,
+) -> tuple[object, tuple[dict[str, object], ...]]:
+    """Authenticate the persisted compiler graph against one immutable source IR."""
+
+    expected_ids = {
+        design.id,
+        design.body.id,
+        *(item.id for item in design.sketches),
+        *(item.id for item in design.features),
+    }
+    if len(records) != 2 + len(design.sketches) + len(design.features):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    by_ir_id: dict[str, tuple[object, dict[str, object]]] = {}
+    for obj, data in records:
+        if data["design_id"] != design.id or data["design_digest"] != design.digest:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        ir_id = _text(data["ir_id"], _IR_ID)
+        if ir_id in by_ir_id:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        by_ir_id[ir_id] = (obj, data)
+    if set(by_ir_id) != expected_ids:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+    _, body_data = by_ir_id[design.body.id]
+    if (
+        body_data["kind"] != "body"
+        or body_data["feature_ids"] != [item.id for item in design.features]
+        or body_data["sketch_ids"] != [item.id for item in design.sketches]
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+    carrier, carrier_data = by_ir_id[design.id]
+    if carrier_data["kind"] != "parameters":
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    entries = tuple(
+        _exact_mapping(raw, {"id", "property", "unit"})
+        for raw in _sequence(carrier_data["parameters"], maximum=64)
+    )
+    expected_entries = tuple(
+        (item.id, _parameter_property(item), item.unit.value) for item in design.parameters
+    )
+    actual_entries = tuple(
+        (_text(item["id"], _IR_ID), _text(item["property"], _PARAMETER_PROPERTY), item["unit"])
+        for item in entries
+    )
+    if actual_entries != expected_entries:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    return carrier, entries
+
+
+def _placement_snapshot(obj: object) -> tuple[float, ...]:
+    try:
+        placement = obj.Placement  # type: ignore[attr-defined]
+        base = placement.Base
+        quaternion = tuple(placement.Rotation.Q)
+        values = (base.x, base.y, base.z, *quaternion)
+        snapshot = tuple(float(item) for item in values)
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if len(snapshot) != 7 or not all(math.isfinite(item) for item in snapshot):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    return snapshot
+
+
+def _quantity_as_unit(value: object, unit: str) -> float:
+    try:
+        convert = value.getValueAs  # type: ignore[attr-defined]
+    except Exception:
+        convert = None
+    if callable(convert):
+        try:
+            value = convert(unit)
+        except Exception:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    try:
+        raw = value if type(value) in {int, float} else value.Value  # type: ignore[attr-defined]
+        result = float(raw)
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if not math.isfinite(result):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    return result
+
+
+def _require_parameter_consumer_values(
+    records: tuple[tuple[object, dict[str, object]], ...],
+    *,
+    parameter_id: str,
+    unit: str,
+    expected: float,
+    consumer_ids: tuple[str, ...],
+) -> None:
+    actual_consumers: set[str] = set()
+    for obj, data in records:
+        if data["kind"] == "sketch":
+            for raw in _sequence(data["constraints"], maximum=256):
+                entry = _exact_mapping(raw, {"id", "indices", "types", "names", "bindings"})
+                indices = _sequence(entry["indices"], maximum=8)
+                bindings = _sequence(entry["bindings"], maximum=8)
+                if len(indices) != len(bindings):
+                    _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+                for index, raw_binding in zip(indices, bindings, strict=True):
+                    binding = _constraint_binding(raw_binding)
+                    if binding is None or binding[0] != parameter_id:
+                        continue
+                    try:
+                        datum = obj.getDatum(index)  # type: ignore[attr-defined]
+                    except Exception:
+                        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+                    if not math.isclose(
+                        _quantity_as_unit(datum, unit),
+                        expected,
+                        rel_tol=0.0,
+                        abs_tol=1e-8,
+                    ):
+                        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+                    actual_consumers.add(_text(data["ir_id"], _IR_ID))
+        elif data["kind"] == "feature":
+            for raw_binding in _sequence(data["bindings"], maximum=4):
+                _, bound_id, _, target, _ = _feature_binding(raw_binding)
+                if bound_id != parameter_id:
+                    continue
+                try:
+                    quantity = getattr(obj, target)
+                except Exception:
+                    _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+                if not math.isclose(
+                    _quantity_as_unit(quantity, unit),
+                    expected,
+                    rel_tol=0.0,
+                    abs_tol=1e-8,
+                ):
+                    _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+                actual_consumers.add(_text(data["ir_id"], _IR_ID))
+    if tuple(sorted(actual_consumers)) != consumer_ids:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+
+def modify_parametric_parameter(
+    session: object,
+    design: object,
+    *,
+    body: object,
+    parameter_id: object,
+    value: object,
+    verify: Callable[[ParametricParameterEdit], None] | None = None,
+) -> ParametricParameterEdit:
+    """Atomically edit one public design parameter in an existing native body."""
+
+    if type(design) is not ParametricDesignIR:
+        _raise(ParametricCompileErrorCode.INVALID_INPUT, "/design")
+    if type(parameter_id) is not str or _IR_ID.fullmatch(parameter_id) is None:
+        _raise(ParametricCompileErrorCode.INVALID_INPUT, "/parameter_id")
+    if not parameter_id.startswith("ir_parameter_"):
+        _raise(ParametricCompileErrorCode.INVALID_INPUT, "/parameter_id")
+    if type(value) not in {int, float} or not math.isfinite(float(value)):
+        _raise(ParametricCompileErrorCode.INVALID_INPUT, "/value")
+    if verify is not None and not callable(verify):
+        _raise(ParametricCompileErrorCode.INVALID_INPUT, "/verify")
+    parameter = next((item for item in design.parameters if item.id == parameter_id), None)
+    if parameter is None or not parameter.public:
+        _raise(ParametricCompileErrorCode.INVALID_INPUT, "/parameter_id")
+    consumer_ids = tuple(
+        sorted(
+            {
+                *(
+                    sketch.id
+                    for sketch in design.sketches
+                    if any(
+                        constraint.parameter_id == parameter_id for constraint in sketch.constraints
+                    )
+                ),
+                *(
+                    feature.id
+                    for feature in design.features
+                    if parameter_id in feature.parameters.values()
+                ),
+            }
+        )
+    )
+    if not consumer_ids:
+        _raise(ParametricCompileErrorCode.INVALID_INPUT, "/parameter_id")
+
+    try:
+        document = session.doc  # type: ignore[attr-defined]
+        objects_before = tuple(document.Objects)
+        undo_mode = document.UndoMode
+        transaction = session._transaction  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.INVALID_INPUT, "/session")
+    if (
+        document is None
+        or not any(item is body for item in objects_before)
+        or type(undo_mode) is not int
+        or undo_mode != 1
+        or not callable(transaction)
+    ):
+        _raise(ParametricCompileErrorCode.INVALID_INPUT, "/session")
+
+    stabilize_parametric_session(session)
+    objects_before = tuple(document.Objects)
+    records = _parametric_records(document)
+    body_records = tuple(item for item in records if item[1]["kind"] == "body")
+    carrier_records = tuple(item for item in records if item[1]["kind"] == "parameters")
+    if len(body_records) != 1 or len(carrier_records) != 1 or body_records[0][0] is not body:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    body_data = body_records[0][1]
+    if (
+        body_data["design_id"] != design.id
+        or body_data["design_digest"] != design.digest
+        or body_data["ir_id"] != design.body.id
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+    carrier, entries = _source_parameter_mapping(records, design)
+    entry = next((item for item in entries if item["id"] == parameter_id), None)
+    expected_unit = parameter.unit.value
+    expected_property = _parameter_property(parameter)
+    if entry is None or entry["unit"] != expected_unit or entry["property"] != expected_property:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    before_values = {
+        item.id: _quantity_value(carrier, _parameter_property(item)) for item in design.parameters
+    }
+    before_value = before_values[parameter.id]
+    if math.isclose(before_value, float(value), rel_tol=0.0, abs_tol=1e-9):
+        _raise(ParametricCompileErrorCode.INVALID_INPUT, "/value")
+
+    try:
+        replace(
+            design,
+            parameters=tuple(
+                replace(
+                    item,
+                    value=float(value) if item.id == parameter.id else before_values[item.id],
+                )
+                for item in design.parameters
+            ),
+        )
+    except Exception:
+        _raise(ParametricCompileErrorCode.INVALID_INPUT, "/value")
+
+    metadata_before = tuple((obj, getattr(obj, PARAMETRIC_METADATA_PROPERTY)) for obj, _ in records)
+    placements_before = tuple((obj, _placement_snapshot(obj)) for obj, _ in records)
+    edit: ParametricParameterEdit | None = None
+
+    try:
+        with transaction("modify_parametric_parameter", claim_new_objects=False):
+            setattr(carrier, expected_property, value)
+            stabilize_parametric_session(session)
+            objects_after = tuple(document.Objects)
+            if len(objects_after) != len(objects_before) or any(
+                current is not previous
+                for current, previous in zip(objects_after, objects_before, strict=True)
+            ):
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            after_value = _quantity_value(carrier, expected_property)
+            if not math.isclose(after_value, float(value), rel_tol=0.0, abs_tol=1e-9):
+                _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+            for item in design.parameters:
+                actual = _quantity_value(carrier, _parameter_property(item))
+                expected = float(value) if item.id == parameter.id else before_values[item.id]
+                if not math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-9):
+                    _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            if any(
+                getattr(obj, PARAMETRIC_METADATA_PROPERTY) != raw for obj, raw in metadata_before
+            ) or any(
+                any(
+                    not math.isclose(left, right, rel_tol=0.0, abs_tol=1e-9)
+                    for left, right in zip(_placement_snapshot(obj), snapshot, strict=True)
+                )
+                for obj, snapshot in placements_before
+            ):
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            current_records = _parametric_records(document)
+            _source_parameter_mapping(current_records, design)
+            _require_parameter_consumer_values(
+                current_records,
+                parameter_id=parameter.id,
+                unit=expected_unit,
+                expected=after_value,
+                consumer_ids=consumer_ids,
+            )
+            edit = ParametricParameterEdit(
+                design_id=design.id,
+                design_digest=design.digest,
+                body=body,
+                parameter_id=parameter.id,
+                parameter_name=parameter.name,
+                unit=expected_unit,
+                before_value=before_value,
+                after_value=after_value,
+                consumer_ids=consumer_ids,
+            )
+            if verify is not None:
+                verify(edit)
+    except ParametricCompileError:
+        raise
+    except Exception:
+        _raise(ParametricCompileErrorCode.CAD_FAILURE)
+    if edit is None:  # pragma: no cover - the transaction must either assign or raise
+        _raise(ParametricCompileErrorCode.CAD_FAILURE)
+    return edit
+
+
 def compile_parametric_design(
     session: object,
     design: object,
@@ -1879,9 +2198,11 @@ __all__ = (
     "ParametricCompileError",
     "ParametricCompileErrorCode",
     "ParametricEntityFact",
+    "ParametricParameterEdit",
     "SketchSolverFacts",
     "compile_design_sketches",
     "compile_parametric_design",
+    "modify_parametric_parameter",
     "parametric_entity_facts",
     "stabilize_parametric_session",
 )

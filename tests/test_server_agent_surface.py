@@ -2916,7 +2916,7 @@ os.environ['VIBECAD_HOME'] = {str(home)!r}
 import vibecad.server as server
 result = anyio.run(server._handle_call_tool, 'get_capabilities', {{'schema_version': 1}})
 assert result.isError is False
-assert len(result.structuredContent['result']['operations']) == 10
+assert len(result.structuredContent['result']['operations']) == 11
 assert 'vibecad.application.agent' not in sys.modules
 assert 'vibecad.interaction.cad' not in sys.modules
 assert 'FreeCAD' not in sys.modules and 'Part' not in sys.modules

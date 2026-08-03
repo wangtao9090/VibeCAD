@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S10.4 Task/Worker integration` 已完成；`VCAD-S10.5` 执行中**
+> 状态：**`VCAD-S10 Parametric Core` 已完成；下一步为 `VCAD-S20.0` 合同设计**
 >
 > 更新：2026-08-03
 >
 > 产品基线：已发布 `v0.6.1@e7dd0c0`
 >
-> 当前里程碑：`VCAD-S10.5`
+> 当前里程碑：`VCAD-S20.0`
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -173,7 +173,7 @@ S10.1 保持 `ObservationSnapshot v1`、`SelectorV1` 和 `AcceptanceSpec v1` 的
 2. `S10.2` 实现 Sketcher 编译、观察、DoF/冲突/冗余诊断（**complete**）；
 3. `S10.3` 实现 datum-plane Pad/Pocket/Revolve，随后补 Hole（**complete**）；
 4. `S10.4` 把 IR 编译进现有 ModelProgram/Task Kernel（**complete**）；
-5. `S10.5` 完成“创建 → review → Accept → 修改参数 → 新 Revision”的真实 FreeCAD 纵切片（**active**）。
+5. `S10.5` 完成“创建 → review → Accept → 修改参数 → 新 Revision”的真实 FreeCAD 纵切片（**complete**）。
 
 退出门：
 
@@ -259,6 +259,24 @@ S10.4 closeout：
   deselected；Ruff/format/compile、wheel/sdist 与隔离 wheel import 通过，两个独立只读复审均无剩余 finding；
 - Worker wire/service、Revision durable v1、ObservationSnapshot v1、SelectorV1、AcceptanceSpec v1、public
   direct tool 与第二控制面均未改变。Accept 后参数修改和新 Revision 属于 S10.5。
+
+S10.5 closeout：
+
+- registry 新增一个 ModelProgram-only 的 `modify_parametric_parameter`，以 revision-bound Body selector、
+  完整原始 IR、parameter ID 和有限数值为输入；复用既有 `NONBLANK_STRING`/`FINITE_NUMBER`，没有新增
+  value shape、direct MCP 工具或公开 schema，MCP 工具数保持 31，public surface digest 保持不变；
+- 锁定的 source IR digest 和完整 carrier `(parameter id, property, unit)` 映射共同认证编辑来源；修改前把
+  所有 live carrier 值覆盖回 source IR 并重新构造合同，因此 public/min/max、正长度及角度等跨字段规则
+  仍由同一 `ParametricDesignIR` 真源判定；`design_ir_digest` 始终表示不可变的原始设计意图；
+- carrier 更新、Sketcher/feature consumer 读回、solver/graph/single-solid gate 与 executor 的 identity、placement、
+  provenance、result-root、非目标保持验证位于同一 FreeCAD transaction；任一失败会回滚，不在 commit 后
+  才发现不可恢复的漂移；
+- 3,405-node / 45,774-byte IR 的 modify program 与 durable TaskRun 分别为 3,470 / 3,526 nodes，未放宽
+  4,096-node durable 或 512 KiB API 预算；
+- 五条真实 managed FreeCAD 门覆盖 adoption rollback、Sketcher-bound edit verifier rollback、精确 26 objects、
+  Worker checkpoint/reload，以及 R1 create/Accept → R2 modify/Accept。最后一条证明 draft 不提前推进 HEAD、
+  R1 tree 字节不变、Body/feature identities 不变、Pad 8→12 mm、旧新 FCStd 均可重开且新 STEP 可由
+  `Part.read` 导入为有效单实体；没有新增 runner/controller/scenario language。
 
 ### VCAD-S20 — Visual Input 与提案合同
 
@@ -466,8 +484,8 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前事实：
 
 - `v0.6.1` 已发布；Task/Revision/Review、RuntimeArtifact/Invocation 和 WorkBuddy MCP 路径可复用；
-- 已发布的 `v0.6.1` 没有真正的 Sketcher/PartDesign 可编辑基座；当前 S10.4 branch candidate 已有原生
-  Sketcher/PartDesign 创建路径，但尚未完成 Accept 后参数修改的 S10.5 纵切片或公开发布；
+- 已发布的 `v0.6.1` 没有真正的 Sketcher/PartDesign 可编辑基座；当前 branch candidate 已完成 S10 原生
+  Sketcher/PartDesign 创建、Accept 后参数修改和第二 Revision 纵切片，但尚未公开发布；
 - 当前没有 ImageSet、VisualObservation、ReconstructionProposal 或 reconstruction domain service；
 - Revision durable v1 仍固定 FCStd/STEP，但不阻塞 task-scoped image/proposal artifact；
 - 当前 durable-root 合同还必须把已存在的 `releases/` 与未来 `visual_inputs/reconstruction_drafts` 一并校正；
@@ -483,15 +501,15 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-执行 S10.5：从 S10.4 的 review draft 开始 Accept 并推进 HEAD，再通过同一 Task/ModelProgram 权威修改
-一个已公开的 parametric parameter，产生第二个 verified candidate/Revision；证明新值驱动 native feature
-recompute，旧 Revision 不变，新 FCStd/STEP 保存重开仍有效。保持 sequential ownership，不增加 GUI 并发
-merge、逐草图元素 selector、第二控制面、测试 controller 或视觉 Provider。
+执行 S20.0 的只读/合同设计：冻结 ReconstructionDraft lifecycle、ImageSet seal/retention/delete、未来
+durable-root topology 与 v1 compatibility 方案，形成 VCAD-A02 审批包。A02 批准前不实现图片持久写路径，
+不接真实视觉 Provider，不发送外部图片，也不改变 public/durable schema。保持 sequential ownership，
+不增加 GUI 并发 merge、第二控制面、测试 controller 或 runner。
 ```
 
 执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
-为 `1c52d7a`。S10.5 只扩展既有 ModelProgram/Task/Worker/identity seam；不运行真实 Provider，也不进入
-S20 持久化写路径。
+为 `1c52d7a`，S10.4 anchor 为 `368ccf8`。S10.5 只扩展既有 ModelProgram/Task/Worker/identity seam；
+S20.0 只做合同设计，不运行真实 Provider，也不进入 S20 持久化写路径。
 
 ## 11. Material event ledger
 
@@ -503,6 +521,7 @@ S20 持久化写路径。
 | `VCAD-E03` | S10.2 compiler 与 managed FreeCAD outcome | 建立真实 Sketcher、参数表达式、稳定映射、有界 graph/solver gate 和 v1 entity parameter facts | 497 focused/core tests；真实 edit/save/reopen 与 fail-closed outcomes；独立 review clean；恢复动作是继续 S10.3 | feature/solid、identity adoption、Worker stabilization 和 Task Kernel 接入留在 S10.3/S10.4 |
 | `VCAD-E04` | S10.3 feature compiler 与 managed FreeCAD outcome | 建立闭合 profile → native single-solid feature chain、feature mapping/facts 与 fail-closed shape gate | 505 focused/core tests；真实 plate/hole/shaft edit/save/reopen、partial multi-cut rejection、rollback 和 tamper outcomes；独立 review clean；恢复动作是继续 S10.4 | ModelProgram/Task/Worker、EntityIdentity、Revision review 纵切片留在 S10.4/S10.5；multi-loop Pocket / multi-location Hole 留在 S35 |
 | `VCAD-E05` | S10.4 Task/Worker integration 与 managed FreeCAD outcomes | 完整 IR 经一个 hidden atomic operation 进入既有 Task Kernel；Body/feature identity、stabilization、review draft 与 HEAD authority 保持单一 | 3,405-node durable round-trip；精确 26-object/rollback/Worker reload/Task draft 四条真实门；full/static/package/isolated-wheel gate；双重独立 review clean；恢复动作是继续 S10.5 | Accept 后参数修改与第二 Revision 留在 S10.5；A02–A06 均未到达 |
+| `VCAD-E06` | S10.5 hidden edit operation 与 managed FreeCAD outcomes | 已接受 Revision 的公开 parameter 经同一 Task/Worker 权威原子修改，产生 identity-stable 的第二 Revision | 3,526-node durable modify TaskRun；五条真实门覆盖 rollback、R1/R2 Accept、FCStd/STEP reload 和旧 Revision 不变；full/static/package/review gate；恢复动作是 S20.0 合同设计 | 尚未公开发布；A02–A06 均未到达 |
 
 ## 12. 研究依据
 

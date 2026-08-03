@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD Parametric Core
 
-> Status: **S10.4 Task/Worker integration is complete; S10.5 is in progress**
+> Status: **S10 Parametric Core is complete; S20.0 contract design is next**
 >
 > Updated: 2026-08-03
 >
@@ -35,11 +35,14 @@ explicit S35 extension. S10.4 now carries this complete IR through one hidden,
 atomic ModelProgram/Task/Worker operation. The compiler adopts stable
 Body/feature EntityIdentity inside the same FreeCAD transaction, stabilizes
 parametric state before observation/checkpoint/export, and produces an ordinary
-review draft without advancing HEAD. It adds no direct MCP tool or second write
-authority; the MCP tool count remains 31. The active slice is S10.5: accept that
-draft, modify one public parametric value through the same Task authority, and
-prove a new immutable Revision survives recompute, checkpoint, STEP export, and
-FCStd reload.
+review draft without advancing HEAD. S10.5 adds one hidden
+`modify_parametric_parameter` operation: a revision-bound Body selector, the
+immutable source IR, parameter ID, and finite value drive one native carrier
+edit. The compiler revalidates the effective live IR and reads every affected
+Sketcher/PartDesign consumer back before an in-transaction executor verifier
+admits the result. R1 and R2 retain the same Body/feature identities while the
+old Revision remains byte-immutable. It adds no direct MCP tool or second write
+authority; the MCP tool count remains 31.
 Real vision providers, visual persistence, public product claims, Freeform, and
 publication remain behind A02–A06.
 
@@ -51,6 +54,16 @@ static/package/isolated-wheel gates; and two clean independent reviews. The
 capability fingerprint changed with the new hidden
 operation, so stale runtime receipts fail closed through the existing surface
 digest while private epoch 4 and public version 0.6.1 remain unchanged.
+
+S10.5 closeout keeps the additional evidence at the product seam: the existing
+3,405-node IR produces a 3,526-node durable modify TaskRun without widening the
+4,096-node budget; five real managed-FreeCAD outcomes cover adoption rollback,
+edit-verifier rollback through a Sketcher-bound parameter, the exact 26-object
+maximum, Worker reload, and the full R1 create/Accept → R2 modify/Accept flow.
+That final flow reopens both FCStd revisions, imports the new STEP with
+`Part.read`, preserves identities and the complete R1 tree, and proves the
+8→12 mm native Pad change. No new value shape or public MCP schema was added,
+so the public surface digest remains unchanged.
 
 ## 1. Completed P2 product truth (historical)
 
@@ -67,11 +80,12 @@ STEP/STL import, and mesh-to-faceted-BRep remain future work. Product documents
 must refer to the completed milestone as **P1 sequential editing / G2**, not as
 completion of the entire historical P1 capability inventory.
 
-The public semantic operation registry now contains ten operations. The six
-existing direct operations remain direct-exposed. Four ModelProgram-only
+The public semantic operation registry now contains eleven operations. The six
+existing direct operations remain direct-exposed. Five ModelProgram-only
 operations, `create_component`, `place_component`, `set_component_bom`, and
-`create_parametric_design`, establish the bounded assembly/flat-BOM path and
-native parametric-design creation; `create_box` and
+`create_parametric_design` plus `modify_parametric_parameter`, establish the
+bounded assembly/flat-BOM path and native parametric creation/editing;
+`create_box` and
 `create_cylinder` accept an optional explicit component target. The MCP surface
 contains 31 tools: the prior 28 plus `create_release`, `get_release`, and
 `approve_release`.
@@ -319,7 +333,7 @@ Selected controls are intentionally small:
 
 No production ledger, background controller, new validation framework, PR,
 release, or deployment is selected. Read-only independent review is limited to
-the coherent S10.4 closeout and creates no persistent validation machinery.
+the coherent S10 closeout and creates no persistent validation machinery.
 The user's standing publication instruction permits intentional commits and
 branch pushes when a coherent verified slice is ready; scope must still be
 audited because the worktree contains unrelated untracked paths.

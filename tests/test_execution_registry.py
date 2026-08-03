@@ -117,7 +117,7 @@ def _operation(
     )
 
 
-def test_default_registry_exposes_six_direct_and_four_private_operations():
+def test_default_registry_exposes_six_direct_and_five_private_operations():
     assert tuple(DEFAULT_OPERATION_REGISTRY) == (
         "create_box",
         "create_cylinder",
@@ -129,8 +129,9 @@ def test_default_registry_exposes_six_direct_and_four_private_operations():
         "set_component_bom",
         "place_component",
         "create_parametric_design",
+        "modify_parametric_parameter",
     )
-    assert len(DEFAULT_OPERATION_REGISTRY) == 10
+    assert len(DEFAULT_OPERATION_REGISTRY) == 11
     assert all(
         metadata.handler_name == operation
         for operation, metadata in DEFAULT_OPERATION_REGISTRY.operations.items()
@@ -235,6 +236,7 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
         "set_component_bom",
         "place_component",
         "create_parametric_design",
+        "modify_parametric_parameter",
     )
 
     create_box = DEFAULT_OPERATION_REGISTRY.lookup("create_box")
@@ -264,6 +266,7 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
             "set_component_bom",
             "place_component",
             "create_parametric_design",
+            "modify_parametric_parameter",
         )
     )
 
@@ -456,6 +459,11 @@ def test_default_registry_has_exact_handler_risk_and_evidence_metadata():
             RiskClass.MUTATING,
             True,
         ),
+        "modify_parametric_parameter": (
+            "modify_parametric_parameter",
+            RiskClass.MUTATING,
+            True,
+        ),
     }
 
     actual = {
@@ -578,6 +586,26 @@ def test_default_registry_has_exact_field_shapes_and_bindings():
     assert tuple(slot.name for slot in create_parametric_design.result_slots) == ("body",)
     assert create_parametric_design.result_slots[0].result_field == "object_id"
     assert create_parametric_design.result_slots[0].value_shape is ValueShape.OBJECT_ID
+
+    modify_parametric_parameter = DEFAULT_OPERATION_REGISTRY.lookup("modify_parametric_parameter")
+    assert _fields(modify_parametric_parameter.target_fields) == (
+        ("body", "target", ValueShape.OBJECT_SELECTOR, True),
+    )
+    assert modify_parametric_parameter.target_fields[0].referenced_value_shape is None
+    assert _fields(modify_parametric_parameter.argument_fields) == (
+        ("design", "design", ValueShape.PARAMETRIC_DESIGN_IR, True),
+        ("parameter_id", "parameter_id", ValueShape.NONBLANK_STRING, True),
+        ("value", "value", ValueShape.FINITE_NUMBER, True),
+    )
+    assert all(field.allowed_units == () for field in modify_parametric_parameter.argument_fields)
+    assert modify_parametric_parameter.direct_exposed is False
+    assert modify_parametric_parameter.preservation_fields == ()
+    assert modify_parametric_parameter.resource_budget == ResourceBudget(
+        max_runtime_ms=30_000,
+        max_created_objects=0,
+        max_result_bytes=65_536,
+    )
+    assert modify_parametric_parameter.result_slots == ()
 
 
 def test_only_entity_mutators_declare_the_closed_preservation_vocabulary():

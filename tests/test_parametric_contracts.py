@@ -11,6 +11,7 @@ import pytest
 
 import vibecad.execution.executor as executor_module
 from vibecad.execution.registry import ValueShape, _matches_value_shape
+from vibecad.execution.selectors import SelectorV1, SemanticRole
 from vibecad.parametric import (
     MAX_DESIGN_EVIDENCE,
     MAX_DESIGN_PARAMETERS,
@@ -310,6 +311,83 @@ def test_parametric_design_is_one_strict_frozen_model_program_value() -> None:
     assert validated.commands[0].preserve == ()
     with pytest.raises(TypeError):
         bound["name"] = "mutated"  # type: ignore[index]
+
+
+def test_parametric_modify_binds_and_round_trips_complete_task_contract() -> None:
+    task_id = "task_11111111111111111111111111111111"
+    project_id = "project_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    revision_id = "revision_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    design = _near_boundary_design()
+    selector = {
+        "schema_version": 1,
+        "project_id": project_id,
+        "revision_id": revision_id,
+        "entity_kind": "object",
+        "object_id": "object_11111111111111111111111111111111",
+        "feature_id": None,
+        "object_type": "PartDesign::Body",
+        "semantic_role": "part",
+        "provenance": {"source": "model", "operation_id": "create-design"},
+        "expected_cardinality": 1,
+    }
+    program = ModelProgram(
+        task_id=task_id,
+        base_revision=revision_id,
+        operations=(
+            ModelCommand(
+                id="modify-depth",
+                op="modify_parametric_parameter",
+                target={"body": selector},
+                args={"design": design.to_mapping(), "parameter_id": PAD_DEPTH, "value": 12.5},
+                source=ValueSource.MODEL,
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-parametric-modify", criteria=()),
+    )
+    bound = validate_model_program(program).commands[0].handler_kwargs
+    assert type(bound["target"]) is SelectorV1
+    assert bound["target"].semantic_role is SemanticRole.PART
+    assert ParametricDesignIR.from_mapping(bound["design"]) == design
+    assert (bound["parameter_id"], bound["value"]) == (PAD_DEPTH, 12.5)
+
+    task = new_task_run(
+        task_id=task_id,
+        project_id=project_id,
+        base_revision=revision_id,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.REQUIRE_REVIEW,
+    )
+    task = transition_task(task, TaskEvent.REQUEST_PLAN)
+    task = transition_task(task, TaskEvent.SUBMIT_PROGRAM, program=program)
+
+    restored = TaskRun.from_mapping(task.to_mapping())
+    restored_command = restored.program.operations[0]
+
+    assert restored == task
+    assert 3_500 <= _json_node_count(restored.to_mapping()) <= 3_600
+    assert ParametricDesignIR.from_mapping(restored_command.args["design"]) == design
+    assert restored_command.target["body"] == selector
+    assert (restored_command.args["parameter_id"], restored_command.args["value"]) == (
+        PAD_DEPTH,
+        12.5,
+    )
+
+    stale = program.to_mapping()
+    stale["base_revision"] = "revision_cccccccccccccccccccccccccccccccc"
+    with pytest.raises(ProgramValidationError) as caught:
+        validate_model_program(ModelProgram.from_mapping(stale))
+    assert caught.value.code is ProgramErrorCode.INVALID_VALUE_SHAPE
+    assert caught.value.path == "/operations/0/target/body"
+
+    immediate_edit = program.to_mapping()
+    immediate_edit["operations"][0]["target"]["body"] = {
+        "command_id": "create-design",
+        "slot": "body",
+    }
+    with pytest.raises(ProgramValidationError) as caught:
+        validate_model_program(ModelProgram.from_mapping(immediate_edit))
+    assert caught.value.code is ProgramErrorCode.INVALID_VALUE_SHAPE
+    assert caught.value.path == "/operations/0/target/body"
 
 
 @pytest.mark.parametrize(

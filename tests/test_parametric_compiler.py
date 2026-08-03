@@ -526,6 +526,49 @@ def test_real_compiler_rolls_back_geometry_identity_and_result_root_when_adoptio
 
 
 @pytest.mark.slow
+def test_real_parametric_parameter_verifier_failure_rolls_back_same_transaction() -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    design = _rectangle_design()
+    session = Session()
+    session.open_document("ParametricModifyRollback")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        session.set_result_object(compiled.body)
+        objects_before = tuple(session.doc.Objects)
+        roots_before = dict(session._result_roots)
+        volume_before = float(compiled.body.Shape.Volume)
+
+        def reject(_edit: object) -> None:
+            raise RuntimeError("reject verified edit")
+
+        with pytest.raises(ParametricCompileError) as caught:
+            compiler_module.modify_parametric_parameter(
+                session,
+                design,
+                body=compiled.body,
+                parameter_id=WIDTH,
+                value=50,
+                verify=reject,
+            )
+
+        assert caught.value.code is ParametricCompileErrorCode.CAD_FAILURE
+        stabilize_parametric_session(session)
+        assert tuple(session.doc.Objects) == objects_before
+        assert session._result_roots == roots_before
+        assert float(compiled.body.Shape.Volume) == pytest.approx(volume_before)
+        width_property = compiler_module._parameter_property(
+            next(item for item in design.parameters if item.id == WIDTH)
+        )
+        assert getattr(compiled.parameter_carrier, width_property).Value == pytest.approx(60)
+    finally:
+        session.close_document()
+
+
+@pytest.mark.slow
 def test_real_maximum_ir_uses_exact_26_object_operation_budget() -> None:
     if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
         pytest.skip("managed FreeCAD Python was not requested")
