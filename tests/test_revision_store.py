@@ -2900,7 +2900,9 @@ def test_public_value_types_are_frozen_slotted_keyword_only_and_exact():
                 assert parameter.default is inspect.Parameter.empty
         with pytest.raises((FrozenInstanceError, AttributeError)):
             value.schema_version = 2
-        with pytest.raises((FrozenInstanceError, AttributeError)):
+        # CPython 3.12's generated frozen-slots setter reports TypeError for
+        # an unknown slot; 3.13+ reports AttributeError.
+        with pytest.raises((FrozenInstanceError, AttributeError, TypeError)):
             value.extra = True
         assert "__dict__" not in dir(value)
         assert type(type(value).from_mapping(value.to_mapping())) is type(value)
@@ -2953,7 +2955,7 @@ def test_discovery_snapshot_values_are_frozen_slotted_keyword_only_and_exact():
             for parameter in signature.parameters.values()
         )
         assert "__dict__" not in dir(value)
-        with pytest.raises((FrozenInstanceError, AttributeError)):
+        with pytest.raises((FrozenInstanceError, AttributeError, TypeError)):
             value.extra = True
 
 

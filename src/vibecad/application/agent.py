@@ -1721,6 +1721,13 @@ class AgentApplication:
                 orphan_started = self._start_orphan_cancellation(current)
                 if orphan_started is not None:
                     current = orphan_started
+            else:
+                progressed = self._await_durable_cancellation(
+                    task_id,
+                    minimum_generation=current.generation + 1,
+                )
+                if progressed is not None:
+                    current = progressed
         if admitted and not self._wait_for_cad_task_drain(task_id):
             return TaskServicePortFailure(code=TaskServicePortErrorCode.RECOVERY_REQUIRED)
         if current.task_run.status in {
@@ -1815,23 +1822,34 @@ class AgentApplication:
         )
 
         with self._cancellation_reconcile_lock:
-            try:
-                return TaskService.reconcile_cancellation(
-                    task_store=self._task_store,
-                    revision_store=self._revision_store,
-                    lease_manager=self._lease_manager,
-                    task_id=task_id,
-                    expected_generation=expected_generation,
-                )
-            except Exception as error:
-                if type(error) is TaskServiceError:
+            reconcile_generation = expected_generation
+            deadline: float | None = None
+            while True:
+                try:
+                    cancellation = TaskService.reconcile_cancellation(
+                        task_store=self._task_store,
+                        revision_store=self._revision_store,
+                        lease_manager=self._lease_manager,
+                        task_id=task_id,
+                        expected_generation=reconcile_generation,
+                    )
+                except Exception as error:
+                    if type(error) is not TaskServiceError:
+                        return self._task_service_failure(error)
                     cancellation = self._await_durable_cancellation(
                         task_id,
-                        minimum_generation=expected_generation,
+                        minimum_generation=reconcile_generation,
                     )
-                    if cancellation is not None:
-                        return cancellation
-                return self._task_service_failure(error)
+                    if cancellation is None:
+                        return self._task_service_failure(error)
+                if cancellation.task_run.status is not TaskStatus.CANCELLING:
+                    return cancellation
+                reconcile_generation = cancellation.generation
+                if deadline is None:
+                    deadline = time.monotonic() + 1.0
+                if time.monotonic() >= deadline:
+                    return TaskServicePortFailure(code=TaskServicePortErrorCode.RECOVERY_REQUIRED)
+                time.sleep(0.002)
 
     def _durable_cancellation_for(self, task_id: str) -> StoredTaskRun | None:
         try:

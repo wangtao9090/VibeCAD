@@ -1,9 +1,9 @@
 # WorkBuddy compatibility and model-selection research
 
-> Status: host evidence collected; VibeCAD end-to-end certification waits for
-> the P2 release surface
+> Status: VibeCAD stdio registration and connection confirmed; exact tool,
+> resource, recovery, and Release certification remains
 >
-> Evidence date: 2026-08-02
+> Evidence date: 2026-08-03
 >
 > Tested installation: WorkBuddy 5.3.5 on macOS
 
@@ -33,7 +33,7 @@ capability rather than an unbounded Blob allocation.
 
 | Required behavior | Evidence | Current status |
 |---|---|---|
-| Local stdio MCP | The installed connector catalog contains multiple command-backed entries with `type: stdio`; WorkBuddy documentation supports custom MCP connectors | Confirmed at host/config level; VibeCAD registration pending |
+| Local stdio MCP | WorkBuddy CLI 2.115.0 registered the source candidate in an isolated project configuration; `mcp get vibecad` reported `Connected` for the exact Python stdio command | Confirmed with VibeCAD; packed release candidate still pending |
 | `tools/list` and strict input schema | The installed CLI is launched with strict MCP configuration and exposes tool-call-capable models | Host-ready; exact VibeCAD 31-tool discovery and invalid-input rejection pending |
 | ResourceLink and resource commands | WorkBuddy 5.3.5 contains ResourceLink handling and launches the CLI with `ListMcpResources` and `ReadMcpResource`; the changelog explicitly records MCP Resource support | Confirmed at host implementation level |
 | Binary Blob for PDF/ZIP | Blob handling exists in the installed client, but no official statement proves arbitrary MCP binary round-tripping | Must pass a real VibeCAD PDF and approved ZIP test |
@@ -46,6 +46,12 @@ Sources: [WorkBuddy connector documentation](https://www.workbuddy.cn/docs/workb
 [WorkBuddy task management](https://www.workbuddy.cn/docs/workbuddy/Task-Management),
 [WorkBuddy Skills](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Skills-Market),
 and [WorkBuddy changelog](https://www.workbuddy.cn/docs/workbuddy/Changelog).
+
+The live registration used only an isolated project configuration under a
+private temporary directory. It did not install or replace the managed VibeCAD
+runtime and did not invoke a model. WorkBuddy correctly required explicit
+approval before exposing the project-scoped server to a task; the remaining
+certification therefore starts at that approval boundary.
 
 ## Models available to the installed WorkBuddy account
 

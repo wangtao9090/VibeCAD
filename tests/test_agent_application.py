@@ -2193,7 +2193,7 @@ def test_concurrent_active_cancel_callers_converge_on_one_terminal_result(
     assert all(type(result) is StoredTaskRun for result in results), results
     durable = app._task_store.load(task_id)  # noqa: SLF001
     assert durable.task_run.status is TaskStatus.CANCELLED
-    assert all(result == durable for result in results)
+    assert results == [durable] * len(results)
     assert port.terminate_calls == 1
     app.close()
 

@@ -1013,6 +1013,23 @@ def test_worker_launch_uses_fresh_posix_spawn_without_parent_fork(
     assert not home.exists()
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="libSystem waitid fallback is macOS-only")
+def test_worker_cleanup_uses_libsystem_waitid_when_python_has_no_waitid(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.worker.generation as generation_module
+
+    monkeypatch.delattr(generation_module.os, "waitid", raising=False)
+    process, _grandchild = _process(tmp_path, "typed_error")
+    pid = process.pid
+    home = process._home
+    process.terminate()
+    assert process.state is WorkerGenerationState.DEAD
+    assert _wait_gone(pid)
+    assert not home.exists()
+
+
 @pytest.mark.parametrize(
     "mode",
     ("startup_exit", "startup_corrupt", "startup_hang"),

@@ -19,7 +19,8 @@ jobs:
 
   quality:
     needs: version-guard
-    runs-on: ubuntu-latest
+    # The shipped application-data and worker contracts are Darwin-only.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6

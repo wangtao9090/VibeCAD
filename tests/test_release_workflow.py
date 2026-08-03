@@ -93,6 +93,16 @@ def test_release_workflow_gates_publishers_with_version_quality_managed_and_pack
     )
 
 
+def test_release_quality_gate_runs_on_the_supported_darwin_platform():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    quality = re.search(
+        r"(?ms)^  quality:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
+        workflow,
+    )
+    assert quality is not None
+    assert re.search(r"(?m)^    runs-on: macos-latest$", quality.group("body"))
+
+
 def test_release_workflow_executes_the_exact_built_artifacts_before_publish():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     package = re.search(

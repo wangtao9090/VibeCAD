@@ -5,6 +5,7 @@ from __future__ import annotations
 import array
 import contextlib
 import ctypes
+import errno
 import os
 import re
 import secrets
@@ -43,6 +44,71 @@ _STARTUP_CLEANUP_CONDITION = threading.Condition(_STARTUP_CLEANUP_LOCK)
 _STARTUP_CLEANUP: dict[str, _WorkerProcess] = {}
 _STARTUP_CLEANUP_SWEEPER: threading.Thread | None = None
 _STARTUP_CLEANUP_SWEEPER_READY: threading.Event | None = None
+
+
+class _DarwinSiginfo(ctypes.Structure):
+    _fields_ = (
+        ("si_signo", ctypes.c_int),
+        ("si_errno", ctypes.c_int),
+        ("si_code", ctypes.c_int),
+        ("si_pid", ctypes.c_int32),
+        ("si_uid", ctypes.c_uint32),
+        ("si_status", ctypes.c_int),
+        ("si_addr", ctypes.c_void_p),
+        ("si_value", ctypes.c_void_p),
+        ("si_band", ctypes.c_long),
+        ("_reserved", ctypes.c_ulong * 7),
+    )
+
+
+def _darwin_waitid() -> object | None:
+    if os.sys.platform != "darwin" or ctypes.sizeof(_DarwinSiginfo) != 104:
+        return None
+    try:
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        function = library.waitid
+    except (AttributeError, OSError):
+        return None
+    function.argtypes = [
+        ctypes.c_int,
+        ctypes.c_uint32,
+        ctypes.POINTER(_DarwinSiginfo),
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_int
+    return function
+
+
+_DARWIN_WAITID = _darwin_waitid()
+
+
+def _child_exited_without_reaping(pid: int) -> bool:
+    native = getattr(os, "waitid", None)
+    if native is not None:
+        return (
+            native(
+                os.P_PID,
+                pid,
+                os.WEXITED | os.WNOHANG | os.WNOWAIT,
+            )
+            is not None
+        )
+    if _DARWIN_WAITID is None:
+        raise OSError("waitid with WNOWAIT is unavailable")
+    information = _DarwinSiginfo()
+    ctypes.set_errno(0)
+    result = _DARWIN_WAITID(
+        os.P_PID,
+        pid,
+        ctypes.byref(information),
+        os.WEXITED | os.WNOHANG | os.WNOWAIT,
+    )
+    if result != 0:
+        code = ctypes.get_errno()
+        if code == errno.ECHILD:
+            raise ChildProcessError(code, os.strerror(code))
+        raise OSError(code, os.strerror(code))
+    return information.si_pid != 0
 
 
 class WorkerGenerationState(StrEnum):
@@ -188,15 +254,10 @@ class _SpawnedProcess:
             if self._returncode is not None or self._externally_reaped:
                 raise _ChildIdentityReleased("Worker child identity was already released")
             try:
-                result = os.waitid(
-                    os.P_PID,
-                    self.pid,
-                    os.WEXITED | os.WNOHANG | os.WNOWAIT,
-                )
+                return _child_exited_without_reaping(self.pid)
             except ChildProcessError:
                 self._externally_reaped = True
                 raise _ChildIdentityReleased("Worker child was reaped outside its owner") from None
-            return result is not None
 
     def poll(self) -> int | None:
         with self._lock:

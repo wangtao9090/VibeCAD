@@ -709,7 +709,9 @@ def test_v2_static_dispatcher_routes_only_seven_explicit_methods() -> None:
         assert response.error is None
 
     assert [method for method, _params in calls] == [method for method, _params in requests]
-    with pytest.raises(AttributeError):
+    # CPython 3.12's generated frozen-slots setter raises TypeError here;
+    # 3.13+ reports the more specific AttributeError. Both prove immutability.
+    with pytest.raises((AttributeError, TypeError)):
         dispatcher.kernel_ping = handler("replacement")
 
 
