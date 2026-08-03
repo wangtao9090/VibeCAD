@@ -4,15 +4,9 @@ on:
   pull_request: {}
 jobs:
   lint-unit:
-    strategy:
-      fail-fast: false
-      matrix:
-        # macos-13（Intel runner）已被 GitHub 退役——保留会永远 queued 并卡死 needs 它的 runtime-integration
-        # 当前产品只声明 Darwin；POSIX Linux runner 继续提供纯 Python/架构回归覆盖。
-        # Windows 应在原生应用数据、进程与文件限额契约完成后再恢复，而不是把
-        # POSIX 专用的 resource/RLIMIT 安全边界静默降级成无保护实现。
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
-    runs-on: ${{ matrix.os }}
+    # 当前产品只声明 Darwin。Linux/Windows 应在各自的原生应用数据、进程、
+    # 文件能力与真实 FreeCAD 契约完成后再恢复完整门禁，不能静默降级安全边界。
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -20,7 +14,6 @@ jobs:
       - run: uv run ruff check .
       - run: uv run pytest -q            # slow 默认跳过
       - run: npx -y @anthropic-ai/mcpb@2.1.2 validate manifest.json
-        if: matrix.os == 'ubuntu-latest'   # mcpb manifest 回归防线（仅跑一次）
   runtime-integration:
     needs: lint-unit
     # AgentApplication、文件能力边界和发布 runtime 当前只在 Darwin 上受支持。
