@@ -70,6 +70,7 @@ from vibecad.interaction.cad import (
     ValidatedImportEvidence,
     ValidatedMaterializationEvidence,
 )
+from vibecad.parametric.compiler import parametric_entity_facts
 from vibecad.tools.modeling import add_box as _add_box
 from vibecad.tools.modeling import add_cylinder as _add_cylinder
 from vibecad.tools.modify import modify_part as _modify_part
@@ -573,13 +574,20 @@ def _bound_box_center(shape: object) -> tuple[int | float, int | float, int | fl
 
 def _entity_observation(obj: object, identity: EntityIdentity) -> EntityObservation:
     try:
-        parameters = tuple(
+        standard_parameters = tuple(
             EntityParameterObservation(
                 name=name,
                 value=_quantity_value(getattr(obj, property_name)),
                 unit=unit,
             )
             for name, property_name, unit in _PARAMETER_FIELDS.get(identity.object_type, ())
+        )
+        parametric_parameters = tuple(
+            EntityParameterObservation(name=fact.name, value=fact.value, unit=fact.unit)
+            for fact in parametric_entity_facts(obj)
+        )
+        parameters = tuple(
+            sorted((*standard_parameters, *parametric_parameters), key=lambda item: item.name)
         )
         placement = _canonical_placement(obj.Placement)  # type: ignore[attr-defined]
         # ``App::Part`` starts exposing an aggregate Shape after its first member is

@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S10.1 ParametricDesignIR` 已完成；`VCAD-S10.2` 执行中**
+> 状态：**`VCAD-S10.2 Sketcher compiler` 已完成；`VCAD-S10.3` 执行中**
 >
 > 更新：2026-08-03
 >
 > 产品基线：已发布 `v0.6.1@e7dd0c0`
 >
-> 当前里程碑：`VCAD-S10.2`
+> 当前里程碑：`VCAD-S10.3`
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -170,8 +170,8 @@ S10.1 保持 `ObservationSnapshot v1`、`SelectorV1` 和 `AcceptanceSpec v1` 的
 顺序：
 
 1. `S10.1` 冻结 `ParametricDesignIR`、stable ID、单位、约束和 feature schema（**complete**）；
-2. `S10.2` 实现 Sketcher 编译、观察、DoF/冲突/冗余诊断；
-3. `S10.3` 实现 datum-plane Pad/Pocket/Revolve，随后补 Hole；
+2. `S10.2` 实现 Sketcher 编译、观察、DoF/冲突/冗余诊断（**complete**）；
+3. `S10.3` 实现 datum-plane Pad/Pocket/Revolve，随后补 Hole（**active**）；
 4. `S10.4` 把 IR 编译进现有 ModelProgram/Task Kernel；
 5. `S10.5` 完成“创建 → review → Accept → 修改参数 → 新 Revision”的真实 FreeCAD 纵切片。
 
@@ -198,6 +198,26 @@ S10.1 closeout：
   均未改变；package wheel/sdist 已包含并可导入新子包；
 - focused contract gate 为 22 passed，既有核心 contract/program/registry/selector 回归为 405 passed，
   Ruff/format clean，独立复审 clean。
+
+S10.2 closeout：
+
+- 新增 import-safe 的 Sketcher compiler：一个外部参数 carrier、一个 `PartDesign::Body` 和最多八个
+  `Sketcher::SketchObject`；Point/Line/Circle/Arc、三种 origin plane、显式 datum frame 和十五类约束
+  使用真实 FreeCAD API 编译，Slot 在事务前安全拒绝；
+- named length/angle 参数通过稳定 constraint name 与 FreeCAD expression 驱动草图；锁定 metadata
+  保存 IR ID 到 geometry/constraint index 的内部映射。一个有界 document-graph gate 校验唯一 body、
+  carrier、sketch 集合、Body membership、共享 design digest 和表达式绑定；求解失败在事务内回滚；
+- `EntityObservation.parameters` 可承载 design/mapping digest、当前参数值、geometry/constraint count、
+  DoF、fully-constrained、solver/conflict/redundancy/malformed facts，而不改变 ObservationSnapshot v1；
+- managed FreeCAD outcome 证明全约束矩形参数从 60 mm 改为 75 mm 后几何实际更新，保存/重开仍为
+  `DoF=0`；断开表达式、删除草图和冲突约束均 fail closed，合法 Point/Whole 对称约束不再触发原生
+  崩溃；十九个 geometry/constraint 映射样例均由真实 FreeCAD 构造；
+- 包含六个 focused compiler tests 的 497 个 contract/program/registry/selector/executor/worker 测试通过，
+  Ruff/format/source compile 和独立复审通过。未新增 runner、controller 或 observation v2；全局 Worker
+  stabilization 延后到 S10.4，与 solid、EntityIdentity 和真实 Worker outcome 一次接入。
+
+S10.2 的 datum 语义是“显式正交 frame 编译为稳定 Placement”，不是生成面 attachment，也不宣称
+已经创建用户可见的 FreeCAD DatumPlane 对象。S10.3 必须保持这一边界或显式版本化扩展。
 
 ### VCAD-S20 — Visual Input 与提案合同
 
@@ -422,13 +442,13 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-执行 S10.2：把 ParametricDesignIR 的草图子集编译成真实 Sketcher 对象，并在既有
-EntityObservation parameter 容器中返回有限 DoF/solver facts；先用 managed runtime 做一个矩形
-草图的 solve/save/reopen outcome，不新增 observation v2 或测试 controller。
+执行 S10.3：复用 S10.2 的真实 Sketcher 对象和稳定参数绑定，先验证 profile closure，再编译
+Pad/Pocket/Revolve，随后补 Hole；以一个全约束安装板完成参数修改、recompute、保存和重开 outcome，
+不新增 public operation、Worker 控制面、测试 controller 或视觉 Provider。
 ```
 
-执行分支为 `codex/visual-cad-m0`，基于 `origin/main@d7ab6b7`。S10.2 只实现草图 compiler、内部
-IR-ID/index 映射和有限 observation facts；不运行真实 Provider，也不进入 S20 持久化写路径。
+执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`。S10.3 只扩展 native feature compiler
+与 feature facts；不运行真实 Provider，也不进入 S20 持久化写路径。
 
 ## 11. Material event ledger
 
@@ -437,6 +457,7 @@ IR-ID/index 映射和有限 observation facts；不运行真实 Provider，也�
 | `VCAD-E00` | 用户要求先设计、确认后执行 | 冻结机械参数化主线与 Freeform 分轨设计；本计划处于 waiting approval | 本文件；恢复动作是等待 `VCAD-A01` | 真实 Provider、公开包络和 Freeform 激活仍需后续 gate |
 | `VCAD-E01` | 用户批准按整体计划执行 | `VCAD-A01` 生效；允许 S10 和 S20.0 范围内的本地可逆实现及既有授权内 commit/branch push | `origin/main@d7ab6b7`；`codex/visual-cad-m0`；恢复动作是继续 S10.1 | A02–A06 未授权，范围保持不变 |
 | `VCAD-E02` | `VCAD-A01` 与 S10.1 focused gate | 冻结 ParametricDesignIR v1；不改变现有公共/持久合同 | 22 focused + 405 core regression；Ruff/format/package import；独立 review clean；恢复动作是继续 S10.2 | profile closure/solver/DoF/recompute 由 S10.2/S10.3 真实 FreeCAD gate 证明 |
+| `VCAD-E03` | S10.2 compiler 与 managed FreeCAD outcome | 建立真实 Sketcher、参数表达式、稳定映射、有界 graph/solver gate 和 v1 entity parameter facts | 497 focused/core tests；真实 edit/save/reopen 与 fail-closed outcomes；独立 review clean；恢复动作是继续 S10.3 | feature/solid、identity adoption、Worker stabilization 和 Task Kernel 接入留在 S10.3/S10.4 |
 
 ## 12. 研究依据
 
