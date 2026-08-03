@@ -2131,6 +2131,7 @@ def test_capabilities_match_the_exact_sorted_public_projection():
         "create_box",
         "create_component",
         "create_cylinder",
+        "create_parametric_design",
         "inspect_model",
         "modify_parameter",
         "move_part",
@@ -2183,6 +2184,32 @@ def test_capabilities_match_the_exact_sorted_public_projection():
         "length_mm",
         "position_mm",
         "width_mm",
+    ]
+    create_parametric_design = operations[3]
+    assert create_parametric_design["target_fields"] == []
+    assert create_parametric_design["argument_fields"] == [
+        {
+            "name": "design",
+            "value_shape": "parametric_design_ir",
+            "required": True,
+            "enum_values": [],
+            "allowed_units": [],
+            "referenced_value_shape": None,
+        }
+    ]
+    assert create_parametric_design["direct_exposed"] is False
+    assert create_parametric_design["resource_budget"] == {
+        "max_runtime_ms": 30_000,
+        "max_created_objects": 26,
+        "max_result_bytes": 65_536,
+    }
+    assert create_parametric_design["result_slots"] == [
+        {
+            "name": "body",
+            "value_shape": "object_id",
+            "enum_values": [],
+            "allowed_units": [],
+        }
     ]
 
 

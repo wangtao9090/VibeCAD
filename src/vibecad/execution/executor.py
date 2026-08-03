@@ -70,7 +70,16 @@ from vibecad.interaction.cad import (
     ValidatedImportEvidence,
     ValidatedMaterializationEvidence,
 )
-from vibecad.parametric.compiler import parametric_entity_facts
+from vibecad.parametric.compiler import (
+    compile_parametric_design as _compile_parametric_design,
+)
+from vibecad.parametric.compiler import (
+    parametric_entity_facts,
+)
+from vibecad.parametric.compiler import (
+    stabilize_parametric_session as _stabilize_parametric_session,
+)
+from vibecad.parametric.contracts import ParametricDesignIR
 from vibecad.tools.modeling import add_box as _add_box
 from vibecad.tools.modeling import add_cylinder as _add_cylinder
 from vibecad.tools.modify import modify_part as _modify_part
@@ -431,6 +440,7 @@ def _shape_center_of_mass(
 
 def _shape_observation(session: object) -> ShapeObservation:
     try:
+        _stabilize_parametric_session(session)
         shape = _managed_assembly_shape(session)
         volume = _finite_number(shape.Volume, nonnegative=True)
         area = _finite_number(shape.Area, nonnegative=True)
@@ -522,13 +532,14 @@ def _entity_geometry(shape: object) -> dict[str, object]:
                     "solid_count": None,
                 }
         bound_box = shape.BoundBox  # type: ignore[attr-defined]
-        center = shape.CenterOfMass  # type: ignore[attr-defined]
         valid_shape = shape.isValid()  # type: ignore[attr-defined]
         if type(valid_shape) is not bool:
             raise _ObservationFailure
-        solid_count = len(shape.Solids)  # type: ignore[attr-defined]
+        solids = tuple(shape.Solids)  # type: ignore[attr-defined]
+        solid_count = len(solids)
         if type(solid_count) is not int or solid_count < 0:
             raise _ObservationFailure
+        center_of_mass = _shape_center_of_mass(shape, solids)
         return {
             "volume_mm3": _finite_number(shape.Volume, nonnegative=True),  # type: ignore[attr-defined]
             "area_mm2": _finite_number(shape.Area, nonnegative=True),  # type: ignore[attr-defined]
@@ -537,11 +548,7 @@ def _entity_geometry(shape: object) -> dict[str, object]:
                 _finite_number(bound_box.YLength, nonnegative=True),
                 _finite_number(bound_box.ZLength, nonnegative=True),
             ),
-            "center_of_mass_mm": (
-                _finite_number(center.x, nonnegative=False),
-                _finite_number(center.y, nonnegative=False),
-                _finite_number(center.z, nonnegative=False),
-            ),
+            "center_of_mass_mm": center_of_mass,
             "valid_shape": valid_shape,
             "solid_count": solid_count,
         }
@@ -625,6 +632,7 @@ def _entity_observation(obj: object, identity: EntityIdentity) -> EntityObservat
 
 def _entity_observations(session: object) -> tuple[EntityObservation, ...]:
     try:
+        _stabilize_parametric_session(session)
         document_objects = tuple(session.doc.Objects)  # type: ignore[attr-defined]
         list_identities = getattr(session, "list_object_identities", None)
         if callable(list_identities):
@@ -1134,6 +1142,23 @@ def _same_import_observations(actual: object, expected: object) -> bool:
     )
 
 
+def _same_shape_observation(actual: object, expected: object) -> bool:
+    """Compare save/reload geometry without treating OCC float noise as drift."""
+
+    return (
+        type(actual) is ShapeObservation
+        and type(expected) is ShapeObservation
+        and actual.schema_version == expected.schema_version
+        and actual.target == expected.target
+        and _same_geometry_number(actual.volume_mm3, expected.volume_mm3)
+        and _same_geometry_number(actual.area_mm2, expected.area_mm2)
+        and _same_geometry_vector(actual.bbox_mm, expected.bbox_mm)
+        and _same_geometry_vector(actual.center_of_mass_mm, expected.center_of_mass_mm)
+        and actual.valid_shape is expected.valid_shape
+        and actual.solid_count == expected.solid_count
+    )
+
+
 def _axis_rotation(axis: object, angle: object) -> tuple[float, float, float, float]:
     if type(axis) is not str or axis not in {"x", "y", "z"}:
         raise _operation_failure()
@@ -1409,6 +1434,159 @@ def _managed_create(
     if component_identity is not None:
         result["component_id"] = component_identity.object_id
     return result
+
+
+def _managed_create_parametric_design(
+    session: object,
+    context: _InvocationContext,
+    *,
+    design: object,
+) -> dict[str, object]:
+    """Compile and atomically adopt one complete editable parametric design."""
+
+    if context.preserve:
+        raise _operation_failure()
+    try:
+        checked = ParametricDesignIR.from_mapping(design)
+    except Exception:
+        raise _operation_failure() from None
+
+    before = _entity_observations(session)
+    before_by_id = _observation_map(before)
+    adopted: tuple[object, EntityIdentity, tuple[EntityIdentity, ...]] | None = None
+    provenance = Provenance(
+        source=ProvenanceSource(context.source.value),
+        operation_id=context.operation_id,
+    )
+
+    def adopt(compiled: object) -> None:
+        nonlocal adopted
+        if adopted is not None:
+            raise ValueError
+        try:
+            compiled_features = tuple(compiled.features)  # type: ignore[attr-defined]
+            if (
+                compiled.design_id != checked.id  # type: ignore[attr-defined]
+                or compiled.design_digest != checked.digest  # type: ignore[attr-defined]
+                or getattr(compiled.body, "TypeId", None) != "PartDesign::Body"  # type: ignore[attr-defined]
+                or tuple(item.feature_id for item in compiled_features)
+                != tuple(item.id for item in checked.features)
+                or len(tuple(compiled.sketches)) != len(checked.sketches)  # type: ignore[attr-defined]
+            ):
+                raise ValueError
+            attach = session.attach_object_identity  # type: ignore[attr-defined]
+            read = session.read_object_identity  # type: ignore[attr-defined]
+            set_result = session.set_result_object  # type: ignore[attr-defined]
+            if not all(callable(item) for item in (attach, read, set_result)):
+                raise ValueError
+            body_identity = EntityIdentity(
+                object_id=f"object_{secrets.token_hex(16)}",
+                feature_id=None,
+                object_type="PartDesign::Body",
+                semantic_role=SemanticRole.PART,
+                provenance=provenance,
+            )
+            feature_identities = tuple(
+                EntityIdentity(
+                    object_id=f"object_{secrets.token_hex(16)}",
+                    feature_id=f"feature_{secrets.token_hex(16)}",
+                    object_type=feature.object.TypeId,
+                    semantic_role=SemanticRole.FEATURE,
+                    provenance=provenance,
+                )
+                for feature in compiled_features
+            )
+            bindings = (
+                ((compiled.body, body_identity),)  # type: ignore[attr-defined]
+                + tuple(
+                    (item.object, identity)
+                    for item, identity in zip(
+                        compiled_features,
+                        feature_identities,
+                        strict=True,
+                    )
+                )
+            )
+            for obj, identity in bindings:
+                if attach(obj, identity) != identity or read(obj) != identity:
+                    raise ValueError
+            set_result(compiled.body)  # type: ignore[attr-defined]
+            adopted = compiled, body_identity, feature_identities
+        except Exception:
+            raise ValueError from None
+
+    try:
+        compiled = _compile_parametric_design(session, checked, adopt=adopt)
+    except Exception:
+        raise _operation_failure() from None
+    if adopted is None or adopted[0] is not compiled:
+        raise _operation_failure()
+    _, body_identity, feature_identities = adopted
+
+    after = _entity_observations(session)
+    after_by_id = _observation_map(after)
+    new_ids = {body_identity.object_id, *(item.object_id for item in feature_identities)}
+    if set(before_by_id) - set(after_by_id) or set(after_by_id) - set(before_by_id) != new_ids:
+        raise _operation_failure()
+    comparisons = _require_non_target_preservation(
+        before_by_id,
+        {key: value for key, value in after_by_id.items() if key not in new_ids},
+        target=None,
+    )
+
+    body = after_by_id[body_identity.object_id]
+    body_parameters = {item.name: item.value for item in body.parameters}
+    if (
+        body.feature_id is not None
+        or body.object_type != "PartDesign::Body"
+        or body.semantic_role != SemanticRole.PART.value
+        or body.provenance != provenance.to_mapping()
+        or body_parameters.get("parametric.design_ir_digest") != checked.digest
+        or body_parameters.get("parametric.feature_count") != len(checked.features)
+        or body_parameters.get("parametric.sketch_count") != len(checked.sketches)
+        or body.valid_shape is not True
+        or body.solid_count != 1
+        or body.volume_mm3 is None
+        or body.volume_mm3 <= 0
+    ):
+        raise _operation_failure()
+
+    feature_observations = tuple(after_by_id[item.object_id] for item in feature_identities)
+    for index, (feature, identity, observation) in enumerate(
+        zip(checked.features, feature_identities, feature_observations, strict=True)
+    ):
+        parameters = {item.name: item.value for item in observation.parameters}
+        if (
+            observation.feature_id != identity.feature_id
+            or observation.object_type != identity.object_type
+            or observation.semantic_role != SemanticRole.FEATURE.value
+            or observation.provenance != provenance.to_mapping()
+            or parameters.get("parametric.design_ir_digest") != checked.digest
+            or parameters.get("parametric.feature.index") != index
+            or parameters.get("parametric.feature.kind") != feature.kind.value
+            or parameters.get("parametric.shape_valid") is not True
+            or parameters.get("parametric.solid_count") != 1
+            or observation.valid_shape is not True
+            or observation.solid_count != 1
+            or observation.volume_mm3 is None
+            or observation.volume_mm3 <= 0
+        ):
+            raise _operation_failure()
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "parametric_design_created",
+        "operation": context.operation,
+        "design_id": checked.id,
+        "design_digest": checked.digest,
+        "object_id": body_identity.object_id,
+        "tip_object_id": feature_identities[-1].object_id,
+        "feature_object_ids": [item.object_id for item in feature_identities],
+        "feature_ids": [item.feature_id for item in feature_identities],
+        "after": body.to_mapping(),
+        "features": [item.to_mapping() for item in feature_observations],
+        "preservation": [item.to_mapping() for item in comparisons],
+    }
 
 
 def _resolve_entity_target(
@@ -2279,6 +2457,7 @@ def _export_session_step(
         parent = os.lstat(step_path.parent)
         if not stat.S_ISDIR(parent.st_mode):
             raise _ArtifactReadFailure
+        _stabilize_parametric_session(session)
         shape = _managed_assembly_shape(session)
     except _ArtifactReadFailure:
         raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
@@ -2671,6 +2850,7 @@ class InProcessCadExecutor(CadExecutionPort):
         try:
             document = session.doc
             document.recompute()
+            _stabilize_parametric_session(session)
             session.persist_state()
         except Exception:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
@@ -2813,6 +2993,7 @@ class InProcessCadExecutor(CadExecutionPort):
                 _move_part,
                 _rotate_part,
                 _set_absolute_component_placement,
+                _compile_parametric_design,
             )
             if not all(callable(item) for item in fixed_leaves):
                 raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
@@ -2910,6 +3091,10 @@ class InProcessCadExecutor(CadExecutionPort):
                         project_id=project_id,
                         revision_id=revision_id,
                     ),
+                ),
+                "create_parametric_design": _queued_handler(
+                    contexts.get("create_parametric_design", deque()),
+                    partial(_managed_create_parametric_design, session),
                 ),
             }
         except ExecutorError:
@@ -3040,8 +3225,8 @@ class InProcessCadExecutor(CadExecutionPort):
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
         if (
             sealed_shape is None
-            or sealed_shape != live_shape
-            or entities != live_entities
+            or not _same_shape_observation(sealed_shape, live_shape)
+            or not _same_import_observations(entities, live_entities)
             or components != live_components
             or interferences != live_interferences
             or bom != live_bom

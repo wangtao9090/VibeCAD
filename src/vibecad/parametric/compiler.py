@@ -11,7 +11,7 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
@@ -1513,26 +1513,29 @@ def stabilize_parametric_session(session: object) -> None:
     records = _parametric_records(document)
     if not records:
         return
+    for obj, data in records:
+        if data["kind"] == "sketch":
+            _require_solver_success(_validate_sketch_metadata(obj, data))
     try:
         document.recompute()
     except Exception:
         _raise(ParametricCompileErrorCode.CAD_FAILURE)
-    for obj, data in records:
-        if data["kind"] == "sketch":
-            _require_solver_success(_validate_sketch_metadata(obj, data))
     _validate_parametric_graph(records)
     for obj, data in records:
         if data["kind"] != "sketch":
             parametric_entity_facts(obj)
-    try:
-        document.recompute()
-    except Exception:
-        _raise(ParametricCompileErrorCode.CAD_FAILURE)
 
 
-def compile_parametric_design(session: object, design: object) -> CompiledParametricDesign:
+def compile_parametric_design(
+    session: object,
+    design: object,
+    *,
+    adopt: Callable[[CompiledParametricDesign], None] | None = None,
+) -> CompiledParametricDesign:
     """Compile a validated design into one native editable PartDesign body."""
 
+    if adopt is not None and not callable(adopt):
+        _raise(ParametricCompileErrorCode.INVALID_INPUT, "/adopt")
     checked = _preflight(session, design)
     parameter_by_id = {item.id: item for item in checked.parameters}
     parameter_properties = {item.id: _parameter_property(item) for item in checked.parameters}
@@ -1844,18 +1847,21 @@ def compile_parametric_design(session: object, design: object) -> CompiledParame
             parametric_entity_facts(carrier)
             parametric_entity_facts(body)
             _validate_parametric_graph(_parametric_records(document))
+            compiled = CompiledParametricDesign(
+                design_id=checked.id,
+                design_digest=checked.digest,
+                body=body,
+                parameter_carrier=carrier,
+                sketches=bindings,
+                features=tuple(compiled_features),
+            )
+            if adopt is not None:
+                adopt(compiled)
     except ParametricCompileError:
         raise
     except Exception:
         _raise(ParametricCompileErrorCode.CAD_FAILURE)
-    return CompiledParametricDesign(
-        design_id=checked.id,
-        design_digest=checked.digest,
-        body=body,
-        parameter_carrier=carrier,
-        sketches=bindings,
-        features=tuple(compiled_features),
-    )
+    return compiled
 
 
 def compile_design_sketches(session: object, design: object) -> CompiledSketchSet:

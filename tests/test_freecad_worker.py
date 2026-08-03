@@ -139,6 +139,51 @@ def _program(*, base_revision: str = _BASE_REVISION) -> ModelProgram:
     )
 
 
+def _parametric_program(
+    *,
+    base_revision: str,
+    maximum: bool = False,
+) -> tuple[ModelProgram, object]:
+    from tests.test_parametric_compiler import (
+        _maximum_feature_design,
+        _rectangle_design,
+    )
+
+    design = _maximum_feature_design() if maximum else _rectangle_design()
+    return (
+        ModelProgram(
+            task_id=_TASK_ID,
+            base_revision=base_revision,
+            operations=(
+                ModelCommand(
+                    id="parametric-design",
+                    op="create_parametric_design",
+                    target={},
+                    args={"design": design.to_mapping()},
+                    depends_on=(),
+                    preserve=(),
+                    source=ValueSource.MODEL,
+                ),
+            ),
+            acceptance=AcceptanceSpec(
+                id="acceptance-parametric-worker",
+                criteria=(
+                    AcceptanceCriterion(
+                        id="criterion-parametric-volume",
+                        kind=AcceptanceKind.GEOMETRY,
+                        check="volume",
+                        target="body",
+                        expected=19_200,
+                        tolerance=1e-6,
+                        parameters={"unit": "mm^3"},
+                    ),
+                ),
+            ),
+        ),
+        design,
+    )
+
+
 def _inspect_program(*, base_revision: str = _BASE_REVISION) -> ModelProgram:
     return ModelProgram(
         task_id=_TASK_ID,
@@ -4197,6 +4242,168 @@ def test_real_managed_daemon_fault_matrix_recovers_without_source_corruption(
         if healthy_home is not None:
             assert not healthy_home.exists()
         shutil.rmtree(short_root, ignore_errors=True)
+
+
+@pytest.mark.slow
+def test_real_managed_worker_round_trips_parametric_design(
+    tmp_path: Path,
+) -> None:
+    python_raw = os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON")
+    if not python_raw:
+        pytest.skip("managed FreeCAD Python was not requested")
+    python = Path(python_raw)
+    if not python.is_file():
+        pytest.skip("managed FreeCAD Python is unavailable")
+
+    from vibecad.runtime import paths as runtime_paths
+    from vibecad.runtime.status import capture_runtime_generation_evidence
+
+    evidence = capture_runtime_generation_evidence(runtime_paths.active_runtime_prefix())
+    assert python.resolve() == evidence.python.resolve()
+
+    source_root = Path(__file__).parents[1] / "src"
+    with _candidate_rig(tmp_path, suffix="real-parametric-store") as rig:
+        worker = FreeCadWorker.start_managed(source_root=source_root)
+        candidate = None
+        try:
+            candidate = worker.bind_candidate(
+                store=rig.store,
+                lease=rig.lease,
+                base_head=rig.head,
+                revision_id=rig.revision_id,
+            )
+            session = worker.create_empty(candidate)
+            program, design = _parametric_program(
+                base_revision=rig.head.revision_id,
+                maximum=True,
+            )
+            outcomes = worker.execute_program(
+                program=program,
+                candidate=candidate,
+                session=session,
+            )
+            assert len(outcomes) == 1
+            assert outcomes[0].result.ok is True, outcomes[0].result.to_mapping()
+            result = outcomes[0].result.value
+            assert result["design_id"] == design.id
+            assert result["design_digest"] == design.digest
+            assert "design" not in result
+
+            before = worker.observe(session=session, capability=candidate)
+            shape, entities, components, interferences, bom = before
+            assert shape is not None
+            assert shape.valid_shape is True
+            assert shape.solid_count == 1
+            assert len(entities) == 9
+            body = next(item for item in entities if item.semantic_role == "part")
+            features = tuple(item for item in entities if item.semantic_role == "feature")
+            feature = next(item for item in features if item.object_id == result["tip_object_id"])
+            assert body.object_id == result["object_id"]
+            assert feature.object_id == result["tip_object_id"]
+            assert body.feature_id is None
+            assert len(features) == len(result["feature_ids"]) == 8
+            assert feature.feature_id == result["feature_ids"][-1]
+            assert {item.name: item.value for item in body.parameters}[
+                "parametric.design_ir_digest"
+            ] == design.digest
+            assert all(
+                {item.name: item.value for item in current.parameters}["parametric.feature.kind"]
+                == "pad"
+                for current in features
+            )
+            assert components == ()
+            assert interferences == ()
+            assert bom is None
+
+            worker.checkpoint(session=session, candidate=candidate)
+            worker.export_step(session=session, candidate=candidate)
+            worker.close_session(session)
+            loaded = worker.load_fcstd(candidate)
+            after = worker.observe(session=loaded, capability=candidate)
+            from vibecad.execution.executor import (
+                _same_import_observations,
+                _same_shape_observation,
+            )
+
+            assert _same_shape_observation(after[0], before[0])
+            assert _same_import_observations(after[1], before[1])
+            assert after[2:] == before[2:]
+            worker.close_session(loaded)
+            assert (rig.directory / "model.FCStd").stat().st_size > 0
+            assert (rig.directory / "model.step").stat().st_size > 0
+        finally:
+            if candidate is not None and worker.state is WorkerGenerationState.READY:
+                with contextlib.suppress(WorkerError):
+                    worker.release_candidate(candidate)
+            worker.close()
+
+
+@pytest.mark.slow
+def test_real_managed_task_publishes_parametric_review_draft_without_advancing_head(
+    tmp_path: Path,
+) -> None:
+    python_raw = os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON")
+    if not python_raw or not Path(python_raw).is_file():
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.application.agent import AgentApplication
+    from vibecad.execution.worker_port import WorkerCadExecutionPort
+    from vibecad.workflow.state import (
+        ReasoningOwner,
+        ReviewPolicy,
+        TaskStatus,
+    )
+    from vibecad.workflow.store import StoredTaskRun
+
+    def build_port(*, revision_store: LocalRevisionStore) -> WorkerCadExecutionPort:
+        return WorkerCadExecutionPort(
+            store=revision_store,
+            worker_factory=FreeCadWorker.start_managed,
+        )
+
+    application = AgentApplication.open(
+        data_root=tmp_path / "parametric-agent",
+        cad_port_factory=build_port,
+    )
+    try:
+        project = application.bootstrap_empty()
+        base_head = project.head
+        created = application.create_task(
+            task_id=_TASK_ID,
+            project_id=base_head.project_id,
+            reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+            review_policy=ReviewPolicy.REQUIRE_REVIEW,
+        )
+        assert type(created) is StoredTaskRun
+        program, design = _parametric_program(base_revision=base_head.revision_id)
+
+        submitted = application.submit_model_program(
+            task_id=_TASK_ID,
+            expected_generation=created.generation,
+            program=program,
+        )
+
+        assert type(submitted) is StoredTaskRun
+        task = submitted.task_run
+        assert task.status is TaskStatus.AWAITING_USER_REVIEW
+        assert task.draft is not None
+        assert task.candidate_revision == task.draft.revision_id
+        assert task.committed_revision is None
+        assert application._revision_store.load_head(base_head.project_id) == base_head
+        candidate = application._revision_store.load_revision(  # noqa: SLF001
+            base_head.project_id,
+            task.candidate_revision,
+        )
+        assert candidate.base_revision == base_head.revision_id
+        assert candidate.model is not None
+        assert candidate.model.size_bytes > 0
+        assert len(candidate.artifacts) == 1
+        assert candidate.artifacts[0].format == "step"
+        result = task.steps[0].result.value
+        assert result["design_id"] == design.id
+        assert result["design_digest"] == design.digest
+    finally:
+        application.close()
 
 
 @pytest.mark.slow

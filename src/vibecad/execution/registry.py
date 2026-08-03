@@ -17,6 +17,7 @@ from types import MappingProxyType
 from typing import Self
 
 from vibecad.execution.selectors import EntityKind, SelectorV1, SemanticRole
+from vibecad.parametric.contracts import ParametricDesignIR
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER, SCHEMA_VERSION
 
 _SNAKE_CASE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
@@ -109,6 +110,7 @@ class ValueShape(StrEnum):
     OBJECT_ID = "object_id"
     ENTITY_TARGET = "entity_target"
     ANGLE_DEGREES = "angle_degrees"
+    PARAMETRIC_DESIGN_IR = "parametric_design_ir"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -230,6 +232,12 @@ def _matches_value_shape(
             return _matches_value_shape(snapshot, ValueShape.RESULT_REF)
         try:
             SelectorV1.from_mapping(snapshot)
+        except Exception:
+            return False
+        return True
+    if shape is ValueShape.PARAMETRIC_DESIGN_IR:
+        try:
+            ParametricDesignIR.from_mapping(value)
         except Exception:
             return False
         return True
@@ -1240,6 +1248,32 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                 max_runtime_ms=30_000,
                 max_created_objects=0,
                 max_result_bytes=65_536,
+            ),
+        ),
+        OperationMetadata(
+            operation="create_parametric_design",
+            handler_name="create_parametric_design",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            argument_fields=(
+                FieldMetadata(
+                    "design",
+                    "design",
+                    ValueShape.PARAMETRIC_DESIGN_IR,
+                ),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=26,
+                max_result_bytes=65_536,
+            ),
+            direct_exposed=False,
+            result_slots=(
+                ResultSlotMetadata(
+                    "body",
+                    "object_id",
+                    ValueShape.OBJECT_ID,
+                ),
             ),
         ),
     )

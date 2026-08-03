@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD Parametric Core
 
-> Status: **S10.3 native feature compiler is complete; S10.4 is in progress**
+> Status: **S10.4 Task/Worker integration is complete; S10.5 is in progress**
 >
 > Updated: 2026-08-03
 >
@@ -31,11 +31,26 @@ Pad/Pocket/Revolution/Hole chain, preserves feature parameter expressions and
 IR mappings across FCStd reload, and rejects invalid, multi-solid, stale, or
 no-op feature outcomes. This first compiler slice accepts exactly one live wire
 for each Pocket/Hole; multi-loop pockets and multi-location holes remain an
-explicit S35 extension. The active slice is S10.4: carry this complete IR
-through one atomic ModelProgram/Task/Worker path and adopt stable EntityIdentity
-without adding a second write authority.
+explicit S35 extension. S10.4 now carries this complete IR through one hidden,
+atomic ModelProgram/Task/Worker operation. The compiler adopts stable
+Body/feature EntityIdentity inside the same FreeCAD transaction, stabilizes
+parametric state before observation/checkpoint/export, and produces an ordinary
+review draft without advancing HEAD. It adds no direct MCP tool or second write
+authority; the MCP tool count remains 31. The active slice is S10.5: accept that
+draft, modify one public parametric value through the same Task authority, and
+prove a new immutable Revision survives recompute, checkpoint, STEP export, and
+FCStd reload.
 Real vision providers, visual persistence, public product claims, Freeform, and
 publication remain behind A02–A06.
+
+S10.4 closeout evidence is bounded to the product seam: a 3,405-node IR durable
+round-trip; four real managed-FreeCAD outcomes covering atomic rollback, the
+exact 26-object maximum, Worker checkpoint/STEP/reload, and Task review without
+HEAD advance; `5,672 passed, 118 deselected` in the final non-slow suite plus
+static/package/isolated-wheel gates; and two clean independent reviews. The
+capability fingerprint changed with the new hidden
+operation, so stale runtime receipts fail closed through the existing surface
+digest while private epoch 4 and public version 0.6.1 remain unchanged.
 
 ## 1. Completed P2 product truth (historical)
 
@@ -52,10 +67,11 @@ STEP/STL import, and mesh-to-faceted-BRep remain future work. Product documents
 must refer to the completed milestone as **P1 sequential editing / G2**, not as
 completion of the entire historical P1 capability inventory.
 
-The public semantic operation registry now contains nine operations. The six
-existing direct operations remain direct-exposed. Three ModelProgram-only
-operations, `create_component`, `place_component`, and `set_component_bom`,
-establish the bounded assembly and flat-BOM path; `create_box` and
+The public semantic operation registry now contains ten operations. The six
+existing direct operations remain direct-exposed. Four ModelProgram-only
+operations, `create_component`, `place_component`, `set_component_bom`, and
+`create_parametric_design`, establish the bounded assembly/flat-BOM path and
+native parametric-design creation; `create_box` and
 `create_cylinder` accept an optional explicit component target. The MCP surface
 contains 31 tools: the prior 28 plus `create_release`, `get_release`, and
 `approve_release`.
@@ -301,8 +317,9 @@ Selected controls are intentionally small:
   full repository, real FreeCAD Release, MCP/resource, and Workbench gates for
   S04.
 
-No delegation, independent-review ceremony, production ledger, background
-controller, new validation framework, PR, release, or deployment is selected.
+No production ledger, background controller, new validation framework, PR,
+release, or deployment is selected. Read-only independent review is limited to
+the coherent S10.4 closeout and creates no persistent validation machinery.
 The user's standing publication instruction permits intentional commits and
 branch pushes when a coherent verified slice is ready; scope must still be
 audited because the worktree contains unrelated untracked paths.

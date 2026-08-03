@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -10,6 +11,12 @@ import pytest
 
 import vibecad.execution.executor as executor_module
 import vibecad.parametric.compiler as compiler_module
+from vibecad.execution.selectors import (
+    EntityIdentity,
+    Provenance,
+    ProvenanceSource,
+    SemanticRole,
+)
 from vibecad.parametric import (
     BodyDefinition,
     ConstraintKind,
@@ -189,6 +196,136 @@ def _rectangle_design() -> ParametricDesignIR:
     )
 
 
+def _maximum_feature_design() -> ParametricDesignIR:
+    base = _rectangle_design()
+    radius_id = _id("parameter", 10)
+    depth_id = _id("parameter", 11)
+    parameters = [
+        DesignParameter(
+            id=radius_id,
+            name="Radius",
+            kind=ParameterKind.LENGTH,
+            value=10,
+            unit=DesignUnit.MM,
+            evidence_ids=(EVIDENCE,),
+            minimum=0.1,
+            maximum=1_000,
+        ),
+        DesignParameter(
+            id=depth_id,
+            name="Depth",
+            kind=ParameterKind.LENGTH,
+            value=8,
+            unit=DesignUnit.MM,
+            evidence_ids=(EVIDENCE,),
+            minimum=0.1,
+            maximum=1_000,
+        ),
+    ]
+    sketches: list[ParametricSketch] = []
+    features: list[PartDesignFeature] = []
+    previous_feature_id = None
+    for design_index in range(1, 9):
+        x_offset = (design_index - 1) * 15
+        y_offset = 0 if design_index == 1 else 1
+        geometry_id = _id("geometry", design_index)
+        center = SketchReference(target=geometry_id, point=ReferencePoint.CENTER)
+        origin = SketchReference(target="@origin", point=ReferencePoint.CENTER)
+        constraints = [
+            SketchConstraint(
+                id=_id("constraint", design_index * 8 + 1),
+                kind=ConstraintKind.RADIUS,
+                references=(SketchReference(target=geometry_id, point=ReferencePoint.WHOLE),),
+                parameter_id=radius_id,
+                evidence_ids=(EVIDENCE,),
+            )
+        ]
+        if design_index == 1:
+            constraints.append(
+                SketchConstraint(
+                    id=_id("constraint", design_index * 8 + 2),
+                    kind=ConstraintKind.COINCIDENT,
+                    references=(center, origin),
+                )
+            )
+        else:
+            x_parameter = replace(
+                parameters[0],
+                id=_id("parameter", 100 + design_index * 2),
+                name=f"Offset X {design_index}",
+                value=x_offset,
+                public=False,
+            )
+            y_parameter = replace(
+                parameters[0],
+                id=_id("parameter", 101 + design_index * 2),
+                name=f"Offset Y {design_index}",
+                value=y_offset,
+                public=False,
+            )
+            parameters.extend((x_parameter, y_parameter))
+            constraints.extend(
+                (
+                    SketchConstraint(
+                        id=_id("constraint", design_index * 8 + 2),
+                        kind=ConstraintKind.DISTANCE_X,
+                        references=(origin, center),
+                        parameter_id=x_parameter.id,
+                        evidence_ids=(EVIDENCE,),
+                    ),
+                    SketchConstraint(
+                        id=_id("constraint", design_index * 8 + 3),
+                        kind=ConstraintKind.DISTANCE_Y,
+                        references=(origin, center),
+                        parameter_id=y_parameter.id,
+                        evidence_ids=(EVIDENCE,),
+                    ),
+                )
+            )
+        sketch_id = _id("sketch", design_index)
+        feature_id = _id("feature", design_index)
+        sketches.append(
+            ParametricSketch(
+                id=sketch_id,
+                name=f"Constrained circle {design_index}",
+                role=SketchRole.PROFILE,
+                plane=SketchPlane(kind=PlaneKind.ORIGIN, origin=OriginPlane.XY),
+                geometries=(
+                    SketchGeometry(
+                        id=geometry_id,
+                        kind=GeometryKind.CIRCLE,
+                        dimensions={
+                            "cx_mm": x_offset,
+                            "cy_mm": y_offset,
+                            "radius_mm": 10,
+                        },
+                    ),
+                ),
+                constraints=tuple(constraints),
+                evidence_ids=(EVIDENCE,),
+            )
+        )
+        features.append(
+            PartDesignFeature(
+                id=feature_id,
+                name=f"Pad {design_index}",
+                kind=FeatureKind.PAD,
+                sketch_id=sketch_id,
+                base_feature_id=previous_feature_id,
+                parameters={"length": depth_id},
+                evidence_ids=(EVIDENCE,),
+                extent=FeatureExtent.LENGTH,
+            )
+        )
+        previous_feature_id = feature_id
+    return replace(
+        base,
+        parameters=tuple(parameters),
+        sketches=tuple(sketches),
+        features=tuple(features),
+    )
+
+
 def test_compiler_rejects_non_ir_before_loading_cad_runtime() -> None:
     with pytest.raises(ParametricCompileError) as caught:
         compile_design_sketches(object(), object())
@@ -287,6 +424,127 @@ def test_solver_failures_cannot_leave_the_compiler_as_success() -> None:
         compiler_module._require_solver_success(facts)
 
     assert caught.value.code is ParametricCompileErrorCode.SOLVER_FAILURE
+
+
+def test_stabilization_solves_all_sketches_before_recompute_and_shape_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    sketch_a = SimpleNamespace(name="sketch-a")
+    sketch_b = SimpleNamespace(name="sketch-b")
+    body = SimpleNamespace(name="body")
+    carrier = SimpleNamespace(name="parameters")
+    feature = SimpleNamespace(name="feature")
+    records = (
+        (body, {"kind": "body"}),
+        (carrier, {"kind": "parameters"}),
+        (sketch_a, {"kind": "sketch"}),
+        (sketch_b, {"kind": "sketch"}),
+        (feature, {"kind": "feature"}),
+    )
+    solver = compiler_module.SketchSolverFacts(
+        solve_result=0,
+        dof=0,
+        fully_constrained=True,
+        geometry_count=4,
+        constraint_count=9,
+        conflicting_constraint_count=0,
+        redundant_constraint_count=0,
+        malformed_constraint_count=0,
+    )
+
+    monkeypatch.setattr(compiler_module, "_parametric_records", lambda _document: records)
+    monkeypatch.setattr(
+        compiler_module,
+        "_validate_sketch_metadata",
+        lambda obj, _data: events.append(f"solve:{obj.name}") or solver,
+    )
+    monkeypatch.setattr(
+        compiler_module,
+        "_validate_parametric_graph",
+        lambda _records: events.append("graph"),
+    )
+    monkeypatch.setattr(
+        compiler_module,
+        "parametric_entity_facts",
+        lambda obj: events.append(f"facts:{obj.name}") or (),
+    )
+    document = SimpleNamespace(recompute=lambda: events.append("recompute"))
+
+    stabilize_parametric_session(SimpleNamespace(doc=document))
+
+    assert events == [
+        "solve:sketch-a",
+        "solve:sketch-b",
+        "recompute",
+        "graph",
+        "facts:body",
+        "facts:parameters",
+        "facts:feature",
+    ]
+
+
+@pytest.mark.slow
+def test_real_compiler_rolls_back_geometry_identity_and_result_root_when_adoption_fails() -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    session = Session()
+    session.open_document("ParametricAdoptionRollback")
+    try:
+
+        def reject(compiled: object) -> None:
+            identity = EntityIdentity(
+                object_id="object_" + "a" * 32,
+                feature_id=None,
+                object_type="PartDesign::Body",
+                semantic_role=SemanticRole.PART,
+                provenance=Provenance(
+                    source=ProvenanceSource.MODEL,
+                    operation_id="parametric-adoption",
+                ),
+            )
+            session.attach_object_identity(compiled.body, identity)  # type: ignore[attr-defined]
+            session.set_result_object(compiled.body)  # type: ignore[attr-defined]
+            raise RuntimeError("reject adoption")
+
+        with pytest.raises(ParametricCompileError) as caught:
+            compiler_module.compile_parametric_design(
+                session,
+                _rectangle_design(),
+                adopt=reject,
+            )
+
+        assert caught.value.code is ParametricCompileErrorCode.CAD_FAILURE
+        assert tuple(session.doc.Objects) == ()
+        assert session.list_object_identities() == ()
+        assert session._result_roots == {}
+    finally:
+        session.close_document()
+
+
+@pytest.mark.slow
+def test_real_maximum_ir_uses_exact_26_object_operation_budget() -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    session = Session()
+    session.open_document("ParametricMaximumBudget")
+    try:
+        compiled = compiler_module.compile_parametric_design(
+            session,
+            _maximum_feature_design(),
+        )
+
+        assert len(compiled.sketches) == 8
+        assert len(compiled.features) == 8
+        assert len(tuple(session.doc.Objects)) == 26
+    finally:
+        session.close_document()
 
 
 def test_solver_diagnostic_indexes_are_one_based() -> None:

@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S10.3 native feature compiler` 已完成；`VCAD-S10.4` 执行中**
+> 状态：**`VCAD-S10.4 Task/Worker integration` 已完成；`VCAD-S10.5` 执行中**
 >
 > 更新：2026-08-03
 >
 > 产品基线：已发布 `v0.6.1@e7dd0c0`
 >
-> 当前里程碑：`VCAD-S10.4`
+> 当前里程碑：`VCAD-S10.5`
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -146,8 +146,8 @@ IR-local stable ID 使用独立 `ir_*_<32 lowercase hex>` 命名空间。它不�
 必须显式维护三者之间的内部映射。
 
 S10.1 保持 `ObservationSnapshot v1`、`SelectorV1` 和 `AcceptanceSpec v1` 的 wire 与 digest 不变。
-新的 ModelProgram value shape、默认 operation、compiler 和 Worker handler 在 S10.4 一次完整接入，
-不提前公布一个无法执行的半成品 operation。
+新的 ModelProgram value shape、默认 operation、compiler 和 Worker handler 已在 S10.4 一次完整接入；
+该 operation 只进入 capabilities/ModelProgram，不作为 direct MCP 建模工具暴露。
 
 ## 5. 分阶段执行计划
 
@@ -172,8 +172,8 @@ S10.1 保持 `ObservationSnapshot v1`、`SelectorV1` 和 `AcceptanceSpec v1` 的
 1. `S10.1` 冻结 `ParametricDesignIR`、stable ID、单位、约束和 feature schema（**complete**）；
 2. `S10.2` 实现 Sketcher 编译、观察、DoF/冲突/冗余诊断（**complete**）；
 3. `S10.3` 实现 datum-plane Pad/Pocket/Revolve，随后补 Hole（**complete**）；
-4. `S10.4` 把 IR 编译进现有 ModelProgram/Task Kernel（**active**）；
-5. `S10.5` 完成“创建 → review → Accept → 修改参数 → 新 Revision”的真实 FreeCAD 纵切片。
+4. `S10.4` 把 IR 编译进现有 ModelProgram/Task Kernel（**complete**）；
+5. `S10.5` 完成“创建 → review → Accept → 修改参数 → 新 Revision”的真实 FreeCAD 纵切片（**active**）。
 
 退出门：
 
@@ -239,6 +239,26 @@ S10.3 closeout：
   clean；没有新增
   public operation、Worker hook、runner/controller、Observation v2 或视觉 Provider。Task/Worker、identity
   adoption 与真实 Revision outcome 仍属于 S10.4/S10.5。
+
+S10.4 closeout：
+
+- registry 只新增 ModelProgram-only 的 `create_parametric_design` 和严格
+  `parametric_design_ir` value shape；完整 IR 作为一个 frozen value 进入既有 program，未新增 direct MCP
+  建模工具，MCP 工具数仍为 31；canonical capability fingerprint 随投影更新，private runtime epoch 保持 4；
+- compiler 的 trusted adoption callback 位于同一 FreeCAD transaction 内：最终 `PartDesign::Body` 采用
+  `PART` identity，每个 native feature 采用 `FEATURE` identity，Body 同时成为 result root；callback 任一步
+  失败会连同几何、metadata、identity 和 result root 一起回滚；
+- parametric stabilization 在 observation、checkpoint、STEP export 和 save/reload evidence 前统一执行；先
+  solve/校验所有 sketch，再 recompute，最后校验 graph/feature/solid facts，避免观察 stale Shape。保存重开
+  比较只容忍既有几何浮点阈值内的 OCC noise，不放宽 identity、metadata 或拓扑计数；
+- 单 operation 精确容纳 FreeCAD 自动 Origin 对象在内的 26-object 最大设计，全局 admission ceiling 为 32；
+  3,405-node / 45,774-byte IR 已通过 ModelProgram validation、Task 状态迁移和 durable TaskRun round-trip，
+  没有放宽 512 KiB API 或 4,096-node durable preflight 预算；
+- 真实 managed FreeCAD 门证明 transaction rollback、精确 26 objects、Worker checkpoint/STEP/reload 和
+  Task `REQUIRE_REVIEW` draft；最后一项保持 HEAD 不前移。完整非慢速回归为 5,672 passed / 118
+  deselected；Ruff/format/compile、wheel/sdist 与隔离 wheel import 通过，两个独立只读复审均无剩余 finding；
+- Worker wire/service、Revision durable v1、ObservationSnapshot v1、SelectorV1、AcceptanceSpec v1、public
+  direct tool 与第二控制面均未改变。Accept 后参数修改和新 Revision 属于 S10.5。
 
 ### VCAD-S20 — Visual Input 与提案合同
 
@@ -446,7 +466,8 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前事实：
 
 - `v0.6.1` 已发布；Task/Revision/Review、RuntimeArtifact/Invocation 和 WorkBuddy MCP 路径可复用；
-- 当前 public 产品没有真正的 Sketcher/PartDesign 可编辑基座；现有 profile extrusion 是静态 Shape；
+- 已发布的 `v0.6.1` 没有真正的 Sketcher/PartDesign 可编辑基座；当前 S10.4 branch candidate 已有原生
+  Sketcher/PartDesign 创建路径，但尚未完成 Accept 后参数修改的 S10.5 纵切片或公开发布；
 - 当前没有 ImageSet、VisualObservation、ReconstructionProposal 或 reconstruction domain service；
 - Revision durable v1 仍固定 FCStd/STEP，但不阻塞 task-scoped image/proposal artifact；
 - 当前 durable-root 合同还必须把已存在的 `releases/` 与未来 `visual_inputs/reconstruction_drafts` 一并校正；
@@ -455,22 +476,22 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 - S10.1 已选择冻结 `ObservationSnapshot v1`、`SelectorV1` 和 `AcceptanceSpec v1`；有限的重开后
   parametric facts 在 S10.2 复用既有 entity parameter 容器，完整 feature/constraint observation 若
   将来需要则走显式 v2；
-- 当前 Task API `program_json` 上限为 512 KiB，但 durable TaskRun 的 nested preflight 上限为 4,096
-  nodes；IR 的 3,500-node 上限为原子 program envelope 留出余量。S10.4 仍须加入一个近边界 round-trip
-  fixture，不能靠放宽公共请求预算通过；
+- 当前 Task API `program_json` 上限为 512 KiB，durable TaskRun 的 nested preflight 上限为 4,096
+  nodes；IR 的 3,500-node 上限保持不变，3,405-node fixture 已通过原子 program/durable TaskRun round-trip；
 - `.workbuddy/` 与两份 CAD 课程文档均为用户所有，不在本计划范围。
 
 当前下一动作：
 
 ```text
-执行 S10.4：把完整 ParametricDesignIR 作为一个原子 ModelProgram value/operation 接入现有 Task Kernel
-与私有 FreeCAD Worker；编译后为最终 Body/feature 采用既有 EntityIdentity，并在 shape observation 前调用
-现有 bounded parametric stabilization。保持单一候选/Revision/review 权威，不提前公开逐草图元素 selector，
-不新增测试 controller 或视觉 Provider。
+执行 S10.5：从 S10.4 的 review draft 开始 Accept 并推进 HEAD，再通过同一 Task/ModelProgram 权威修改
+一个已公开的 parametric parameter，产生第二个 verified candidate/Revision；证明新值驱动 native feature
+recompute，旧 Revision 不变，新 FCStd/STEP 保存重开仍有效。保持 sequential ownership，不增加 GUI 并发
+merge、逐草图元素 selector、第二控制面、测试 controller 或视觉 Provider。
 ```
 
-执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`。S10.4 只接入
-既有 ModelProgram/Task/Worker/identity seam；不运行真实 Provider，也不进入 S20 持久化写路径。
+执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
+为 `1c52d7a`。S10.5 只扩展既有 ModelProgram/Task/Worker/identity seam；不运行真实 Provider，也不进入
+S20 持久化写路径。
 
 ## 11. Material event ledger
 
@@ -481,6 +502,7 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 | `VCAD-E02` | `VCAD-A01` 与 S10.1 focused gate | 冻结 ParametricDesignIR v1；不改变现有公共/持久合同 | 22 focused + 405 core regression；Ruff/format/package import；独立 review clean；恢复动作是继续 S10.2 | profile closure/solver/DoF/recompute 由 S10.2/S10.3 真实 FreeCAD gate 证明 |
 | `VCAD-E03` | S10.2 compiler 与 managed FreeCAD outcome | 建立真实 Sketcher、参数表达式、稳定映射、有界 graph/solver gate 和 v1 entity parameter facts | 497 focused/core tests；真实 edit/save/reopen 与 fail-closed outcomes；独立 review clean；恢复动作是继续 S10.3 | feature/solid、identity adoption、Worker stabilization 和 Task Kernel 接入留在 S10.3/S10.4 |
 | `VCAD-E04` | S10.3 feature compiler 与 managed FreeCAD outcome | 建立闭合 profile → native single-solid feature chain、feature mapping/facts 与 fail-closed shape gate | 505 focused/core tests；真实 plate/hole/shaft edit/save/reopen、partial multi-cut rejection、rollback 和 tamper outcomes；独立 review clean；恢复动作是继续 S10.4 | ModelProgram/Task/Worker、EntityIdentity、Revision review 纵切片留在 S10.4/S10.5；multi-loop Pocket / multi-location Hole 留在 S35 |
+| `VCAD-E05` | S10.4 Task/Worker integration 与 managed FreeCAD outcomes | 完整 IR 经一个 hidden atomic operation 进入既有 Task Kernel；Body/feature identity、stabilization、review draft 与 HEAD authority 保持单一 | 3,405-node durable round-trip；精确 26-object/rollback/Worker reload/Task draft 四条真实门；full/static/package/isolated-wheel gate；双重独立 review clean；恢复动作是继续 S10.5 | Accept 后参数修改与第二 Revision 留在 S10.5；A02–A06 均未到达 |
 
 ## 12. 研究依据
 

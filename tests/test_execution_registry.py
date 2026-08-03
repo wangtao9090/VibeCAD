@@ -117,7 +117,7 @@ def _operation(
     )
 
 
-def test_default_registry_exposes_six_direct_and_three_component_operations():
+def test_default_registry_exposes_six_direct_and_four_private_operations():
     assert tuple(DEFAULT_OPERATION_REGISTRY) == (
         "create_box",
         "create_cylinder",
@@ -128,8 +128,9 @@ def test_default_registry_exposes_six_direct_and_three_component_operations():
         "create_component",
         "set_component_bom",
         "place_component",
+        "create_parametric_design",
     )
-    assert len(DEFAULT_OPERATION_REGISTRY) == 9
+    assert len(DEFAULT_OPERATION_REGISTRY) == 10
     assert all(
         metadata.handler_name == operation
         for operation, metadata in DEFAULT_OPERATION_REGISTRY.operations.items()
@@ -233,6 +234,7 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
         "create_component",
         "set_component_bom",
         "place_component",
+        "create_parametric_design",
     )
 
     create_box = DEFAULT_OPERATION_REGISTRY.lookup("create_box")
@@ -257,7 +259,12 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
     )
     assert all(
         not DEFAULT_OPERATION_REGISTRY.lookup(name).direct_exposed
-        for name in ("create_component", "set_component_bom", "place_component")
+        for name in (
+            "create_component",
+            "set_component_bom",
+            "place_component",
+            "create_parametric_design",
+        )
     )
 
     modify = DEFAULT_OPERATION_REGISTRY.lookup("modify_parameter")
@@ -291,6 +298,7 @@ def test_stage3_value_shapes_and_execution_profiles_are_closed():
         "object_id",
         "entity_target",
         "angle_degrees",
+        "parametric_design_ir",
     }
 
 
@@ -443,6 +451,11 @@ def test_default_registry_has_exact_handler_risk_and_evidence_metadata():
         "create_component": ("create_component", RiskClass.MUTATING, True),
         "set_component_bom": ("set_component_bom", RiskClass.MUTATING, True),
         "place_component": ("place_component", RiskClass.MUTATING, True),
+        "create_parametric_design": (
+            "create_parametric_design",
+            RiskClass.MUTATING,
+            True,
+        ),
     }
 
     actual = {
@@ -554,6 +567,17 @@ def test_default_registry_has_exact_field_shapes_and_bindings():
         ("rotation_axis", "rotation_axis", ValueShape.ENUM, True),
         ("angle_deg", "angle", ValueShape.FINITE_NUMBER, True),
     )
+
+    create_parametric_design = DEFAULT_OPERATION_REGISTRY.lookup("create_parametric_design")
+    assert create_parametric_design.target_fields == ()
+    assert _fields(create_parametric_design.argument_fields) == (
+        ("design", "design", ValueShape.PARAMETRIC_DESIGN_IR, True),
+    )
+    assert create_parametric_design.direct_exposed is False
+    assert create_parametric_design.resource_budget.max_created_objects == 26
+    assert tuple(slot.name for slot in create_parametric_design.result_slots) == ("body",)
+    assert create_parametric_design.result_slots[0].result_field == "object_id"
+    assert create_parametric_design.result_slots[0].value_shape is ValueShape.OBJECT_ID
 
 
 def test_only_entity_mutators_declare_the_closed_preservation_vocabulary():

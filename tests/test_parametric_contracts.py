@@ -5,10 +5,14 @@ from __future__ import annotations
 import dataclasses
 import math
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
+import vibecad.execution.executor as executor_module
+from vibecad.execution.registry import ValueShape, _matches_value_shape
 from vibecad.parametric import (
+    MAX_DESIGN_EVIDENCE,
     MAX_DESIGN_PARAMETERS,
     BodyDefinition,
     ConstraintKind,
@@ -36,6 +40,26 @@ from vibecad.parametric import (
     SketchReference,
     SketchRole,
     UnitSystem,
+)
+from vibecad.parametric.compiler import ParametricEntityFact
+from vibecad.workflow.contracts import (
+    AcceptanceSpec,
+    ModelCommand,
+    ModelProgram,
+    ValueSource,
+)
+from vibecad.workflow.program import (
+    ProgramErrorCode,
+    ProgramValidationError,
+    validate_model_program,
+)
+from vibecad.workflow.state import (
+    ReasoningOwner,
+    ReviewPolicy,
+    TaskEvent,
+    TaskRun,
+    new_task_run,
+    transition_task,
 )
 
 
@@ -181,6 +205,259 @@ def test_parametric_design_round_trips_and_has_a_stable_digest() -> None:
         "sketches",
         "features",
     }
+
+
+def _program_for_design(
+    design: object,
+    *,
+    task_id: str = "task-parametric-design",
+    base_revision: str = "revision-parametric-base",
+) -> ModelProgram:
+    return ModelProgram(
+        task_id=task_id,
+        base_revision=base_revision,
+        operations=(
+            ModelCommand(
+                id="create-design",
+                op="create_parametric_design",
+                args={"design": design},
+                source=ValueSource.MODEL,
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-parametric-design", criteria=()),
+    )
+
+
+def _json_node_count(value: object) -> int:
+    if type(value) is dict:
+        return 1 + sum(1 + _json_node_count(item) for item in value.values())
+    if type(value) is list:
+        return 1 + sum(_json_node_count(item) for item in value)
+    return 1
+
+
+def _near_boundary_design() -> ParametricDesignIR:
+    base = _design()
+    evidence = (
+        base.evidence[0],
+        *(
+            dataclasses.replace(
+                base.evidence[0],
+                id=_id("evidence", 1_000 + index),
+                source_refs=tuple(f"source-{index}-{item}" for item in range(8)),
+                description="Near-boundary task round-trip evidence",
+            )
+            for index in range(MAX_DESIGN_EVIDENCE - 1)
+        ),
+    )
+    padding_parameters = tuple(
+        dataclasses.replace(
+            base.parameters[0],
+            id=_id("parameter", 1_000 + index),
+            name=f"Reserved parameter {index}",
+            public=False,
+        )
+        for index in range(20)
+    )
+    return dataclasses.replace(
+        base,
+        evidence=evidence,
+        parameters=(*base.parameters, *padding_parameters),
+    )
+
+
+def test_near_boundary_design_round_trips_through_durable_task_contract() -> None:
+    task_id = "task_" + "a" * 32
+    project_id = "project_" + "b" * 32
+    base_revision = "revision_" + "c" * 32
+    design = _near_boundary_design()
+    design_mapping = design.to_mapping()
+    program = _program_for_design(
+        design_mapping,
+        task_id=task_id,
+        base_revision=base_revision,
+    )
+
+    validated = validate_model_program(ModelProgram.from_mapping(program.to_mapping()))
+    task = new_task_run(
+        task_id=task_id,
+        project_id=project_id,
+        base_revision=base_revision,
+        reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
+        review_policy=ReviewPolicy.REQUIRE_REVIEW,
+    )
+    task = transition_task(task, TaskEvent.REQUEST_PLAN)
+    task = transition_task(task, TaskEvent.SUBMIT_PROGRAM, program=program)
+    restored = TaskRun.from_mapping(task.to_mapping())
+
+    assert 3_400 <= _json_node_count(design_mapping) <= 3_500
+    assert ParametricDesignIR.from_mapping(validated.commands[0].handler_kwargs["design"]) == design
+    assert restored == task
+    assert restored.program == program
+
+
+def test_parametric_design_is_one_strict_frozen_model_program_value() -> None:
+    design = _design()
+    source = _program_for_design(design.to_mapping())
+    restored = ModelProgram.from_mapping(source.to_mapping())
+
+    validated = validate_model_program(restored)
+    bound = validated.commands[0].handler_kwargs["design"]
+
+    assert _matches_value_shape(bound, ValueShape.PARAMETRIC_DESIGN_IR)
+    assert ParametricDesignIR.from_mapping(bound) == design
+    assert validated.commands[0].handler_name == "create_parametric_design"
+    assert validated.commands[0].preserve == ()
+    with pytest.raises(TypeError):
+        bound["name"] = "mutated"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda value: value.__setitem__("unexpected", True),
+        lambda value: value.__setitem__("schema_version", 2),
+        lambda value: value["features"][0].__setitem__("sketch_id", _id("sketch", 99)),
+    ),
+)
+def test_model_program_rejects_malformed_parametric_design_at_atomic_field(
+    mutate,
+) -> None:
+    encoded = _design().to_mapping()
+    mutate(encoded)
+
+    with pytest.raises(ProgramValidationError) as caught:
+        validate_model_program(_program_for_design(encoded))
+
+    assert caught.value.code is ProgramErrorCode.INVALID_VALUE_SHAPE
+    assert caught.value.path == "/operations/0/args/design"
+
+
+def test_managed_parametric_operation_adopts_body_and_features_without_echoing_ir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    design = _design()
+    events: list[str] = []
+    placement = SimpleNamespace(
+        Base=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+        Rotation=SimpleNamespace(Q=(0.0, 0.0, 0.0, 1.0)),
+    )
+    shape = SimpleNamespace(
+        Volume=19_200.0,
+        Area=6_080.0,
+        BoundBox=SimpleNamespace(XLength=60.0, YLength=40.0, ZLength=8.0),
+        CenterOfMass=SimpleNamespace(x=0.0, y=0.0, z=4.0),
+        Solids=(object(),),
+        isNull=lambda: False,
+        isValid=lambda: True,
+    )
+    body = SimpleNamespace(
+        Name="Body",
+        TypeId="PartDesign::Body",
+        Placement=placement,
+        Shape=shape,
+    )
+    feature = SimpleNamespace(
+        Name="Pad",
+        TypeId="PartDesign::Pad",
+        Placement=placement,
+        Shape=shape,
+    )
+
+    class Session:
+        freecad_version = (1, 1)
+
+        def __init__(self) -> None:
+            self.doc = SimpleNamespace(Objects=())
+            self.identities: list[tuple[object, object]] = []
+            self.result = None
+
+        def attach_object_identity(self, obj: object, identity: object) -> object:
+            events.append(f"adopt:{obj.TypeId}")  # type: ignore[attr-defined]
+            self.identities.append((obj, identity))
+            return identity
+
+        def read_object_identity(self, obj: object) -> object:
+            return next(identity for current, identity in self.identities if current is obj)
+
+        def list_object_identities(self) -> tuple[tuple[object, object], ...]:
+            return tuple(self.identities)
+
+        def set_result_object(self, obj: object) -> None:
+            events.append("result")
+            self.result = obj
+
+    session = Session()
+
+    def compile_design(session_arg: object, checked: object, *, adopt) -> object:
+        assert session_arg is session
+        assert checked == design
+        events.append("compile")
+        compiled = SimpleNamespace(
+            design_id=design.id,
+            design_digest=design.digest,
+            body=body,
+            parameter_carrier=object(),
+            sketches=(object(),),
+            features=(SimpleNamespace(feature_id=design.features[0].id, object=feature),),
+        )
+        session.doc.Objects = (body, feature)
+        adopt(compiled)
+        events.append("compiled")
+        return compiled
+
+    def facts(obj: object) -> tuple[ParametricEntityFact, ...]:
+        common = (ParametricEntityFact("parametric.design_ir_digest", design.digest),)
+        if obj is body:
+            return common + (
+                ParametricEntityFact("parametric.feature_count", 1),
+                ParametricEntityFact("parametric.sketch_count", 1),
+            )
+        return common + (
+            ParametricEntityFact("parametric.feature.index", 0),
+            ParametricEntityFact("parametric.feature.kind", "pad"),
+            ParametricEntityFact("parametric.shape_valid", True),
+            ParametricEntityFact("parametric.solid_count", 1),
+        )
+
+    monkeypatch.setattr(executor_module, "_compile_parametric_design", compile_design)
+    monkeypatch.setattr(
+        executor_module,
+        "_stabilize_parametric_session",
+        lambda _session: events.append("stabilize"),
+    )
+    monkeypatch.setattr(executor_module, "parametric_entity_facts", facts)
+
+    result = executor_module._managed_create_parametric_design(
+        session,
+        executor_module._InvocationContext(
+            operation_id="create-design",
+            operation="create_parametric_design",
+            preserve=(),
+            source=ValueSource.MODEL,
+        ),
+        design=design.to_mapping(),
+    )
+
+    assert events == [
+        "stabilize",
+        "compile",
+        "adopt:PartDesign::Body",
+        "adopt:PartDesign::Pad",
+        "result",
+        "compiled",
+        "stabilize",
+    ]
+    assert session.result is body
+    assert [identity.semantic_role.value for _, identity in session.identities] == [
+        "part",
+        "feature",
+    ]
+    assert session.identities[0][1].feature_id is None
+    assert session.identities[1][1].feature_id.startswith("feature_")
+    assert result["object_id"] == session.identities[0][1].object_id
+    assert result["tip_object_id"] == session.identities[1][1].object_id
+    assert "design" not in result
 
 
 def test_unordered_collections_have_one_canonical_order() -> None:
