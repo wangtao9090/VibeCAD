@@ -1,16 +1,38 @@
-# VibeCAD Active Plan — WorkBuddy host verification
+# VibeCAD Active Plan — Visual CAD Parametric Core
 
-> Status: **P2-S01 through P2-S04 and the WorkBuddy compatibility patch are
-> published as v0.6.1; the GLM-5.2 real-model Profile is verified**
+> Status: **S10.1 ParametricDesignIR is complete; S10.2 is in progress**
 >
 > Updated: 2026-08-03
 >
 > Repository anchor: published tag `v0.6.1@e7dd0c0`
 >
-> This is the only mutable orchestration plan. P1 sequential editing closed at
-> `7f3d506`; earlier campaign files remain historical records.
+> Active plan: [`vibecad-visual-cad.md`](vibecad-visual-cad.md)
+>
+> The completed P2 and WorkBuddy closeout remains below as historical context.
+> Earlier campaign files remain historical records.
 
-## 1. Current product truth
+## 0. Active Visual CAD gate
+
+The approved design direction separates two product tracks:
+
+- Mechanical Parametric: dimensioned single/multi-view images produce true
+  Sketcher constraints and bounded PartDesign features;
+- Freeform: industrial surfaces use section/guide curves and Loft/Sweep/NURBS,
+  while sculpture-class outputs remain Mesh/SubD derived artifacts unless a
+  later durable artifact decision admits them.
+
+The complete architecture, slices, gates, privacy boundary, validation budget,
+and recovery point are in
+[`vibecad-visual-cad.md`](vibecad-visual-cad.md). VCAD-A01 is approved and work
+continues on `codex/visual-cad-m0` from `origin/main@d7ab6b7`. S10.1 froze the
+minimal ParametricDesignIR v1 with 22 focused tests, 405 existing-core
+regressions, clean package import, and clean independent review. The active
+slice is S10.2: compile its sketch subset into real Sketcher objects and expose
+bounded solver/DoF facts through the existing observation shape.
+Real vision providers, visual persistence, public product claims, Freeform, and
+publication remain behind A02–A06.
+
+## 1. Completed P2 product truth (historical)
 
 The completed P1 campaign delivered the sequential interaction slice:
 
@@ -280,7 +302,7 @@ The user's standing publication instruction permits intentional commits and
 branch pushes when a coherent verified slice is ready; scope must still be
 audited because the worktree contains unrelated untracked paths.
 
-## 6. Decision and next action
+## 6. P2 and WorkBuddy closeout (historical)
 
 The user approved the following product boundary on 2026-08-02:
 
