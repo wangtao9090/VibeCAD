@@ -493,6 +493,7 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                         result = {{"entities": [], "shape": {{}}}}
                     elif method == "session.observe":
                         result = {{
+                            "components": [],
                             "entities": [],
                             "shape": {{
                                 "area_mm2": 6,
@@ -2982,10 +2983,11 @@ def test_parent_revision_observe_lifecycle_uses_opaque_capabilities(
         )
         handle = worker.bind_revision(store=rig.store, revision=revision)
         session = worker.load_revision(handle)
-        shape, entities = worker.observe(session=session, capability=handle)
+        shape, entities, components = worker.observe(session=session, capability=handle)
         assert shape is not None
         assert shape.volume_mm3 == 1
         assert entities == ()
+        assert components == ()
         with pytest.raises(WorkerError) as still_bound:
             worker.release_revision(handle)
         assert still_bound.value.code is WorkerErrorCode.INVALID_HANDLE
@@ -4038,12 +4040,13 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
                 revision=baseline,
             )
             baseline_session = worker.load_revision(baseline_handle)
-            baseline_shape, baseline_entities = worker.observe(
+            baseline_shape, baseline_entities, baseline_components = worker.observe(
                 session=baseline_session,
                 capability=baseline_handle,
             )
             assert baseline_shape is None
             assert baseline_entities == ()
+            assert baseline_components == ()
             worker.close_session(baseline_session)
             worker.release_revision(baseline_handle)
 
@@ -4075,13 +4078,14 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
             shape = loaded_outcomes[0].result.value["shape"]
             assert shape["volume_mm3"] == pytest.approx(9_000)
             assert tuple(shape["bbox_mm"]) == pytest.approx((15, 20, 30))
-            observed_shape, observed_entities = worker.observe(
+            observed_shape, observed_entities, observed_components = worker.observe(
                 session=loaded,
                 capability=candidate,
             )
             assert observed_shape is not None
             assert observed_shape.volume_mm3 == pytest.approx(9_000)
             assert observed_entities
+            assert observed_components == ()
             worker.close_session(loaded)
             sessions = tuple(worker.load_fcstd(candidate) for _index in range(6))
             with pytest.raises(WorkerError) as capacity:
@@ -4152,13 +4156,14 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
                 revision=sealed,
             )
             revision_session = worker.load_revision(revision_handle)
-            revision_shape, revision_entities = worker.observe(
+            revision_shape, revision_entities, revision_components = worker.observe(
                 session=revision_session,
                 capability=revision_handle,
             )
             assert revision_shape is not None
             assert revision_shape.volume_mm3 == pytest.approx(9_000)
             assert revision_entities
+            assert revision_components == ()
             worker.close_session(revision_session)
             worker.release_revision(revision_handle)
         finally:

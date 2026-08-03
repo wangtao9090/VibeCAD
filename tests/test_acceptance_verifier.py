@@ -25,6 +25,7 @@ import vibecad.validation as validation_package
 from vibecad.validation import (
     ArtifactObservation,
     CompiledAcceptance,
+    ComponentObservation,
     EntityObservation,
     EntityParameterObservation,
     ObservationSnapshot,
@@ -123,6 +124,46 @@ def _entity(
     return EntityObservation(**values)  # type: ignore[arg-type]
 
 
+def _component(
+    *,
+    component_id: str = OBJECT_A,
+    member_object_ids: tuple[str, ...] = (OBJECT_B,),
+    **overrides: object,
+) -> ComponentObservation:
+    values: dict[str, object] = {
+        "component_id": component_id,
+        "object_type": "App::Part",
+        "provenance": {"source": "model", "operation_id": "create-component"},
+        "placement": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        "member_object_ids": member_object_ids,
+        "volume_mm3": 100.0,
+        "area_mm2": 160.0,
+        "bbox_mm": (10.0, 5.0, 2.0),
+        "center_of_mass_mm": (5.0, 2.5, 1.0),
+        "valid_shape": True,
+        "solid_count": 1,
+    }
+    values.update(overrides)
+    return ComponentObservation(**values)  # type: ignore[arg-type]
+
+
+def _component_entity(object_id: str = OBJECT_A) -> EntityObservation:
+    return _entity(
+        object_id=object_id,
+        feature_id=None,
+        object_type="App::Part",
+        semantic_role="part",
+        provenance={"source": "model", "operation_id": "create-component"},
+        parameters=(),
+        volume_mm3=None,
+        area_mm2=None,
+        bbox_mm=None,
+        center_of_mass_mm=None,
+        valid_shape=None,
+        solid_count=None,
+    )
+
+
 def _preservation(
     target: str = "modify",
     *,
@@ -144,6 +185,7 @@ def _snapshot(
     shapes: tuple[ShapeObservation, ...] | None = None,
     artifacts: tuple[ArtifactObservation, ...] | None = None,
     entities: tuple[EntityObservation, ...] = (),
+    components: tuple[ComponentObservation, ...] = (),
     preservations: tuple[PreservationObservation, ...] = (),
 ) -> ObservationSnapshot:
     return ObservationSnapshot(
@@ -151,6 +193,7 @@ def _snapshot(
         shapes=(_shape(),) if shapes is None else shapes,
         artifacts=(_artifact(),) if artifacts is None else artifacts,
         entities=entities,
+        components=components,
         preservations=preservations,
     )
 
@@ -360,6 +403,7 @@ def test_public_surface_is_closed_and_function_signatures_have_no_evidence_escap
     expected = {
         "ArtifactObservation",
         "CompiledAcceptance",
+        "ComponentObservation",
         "EntityObservation",
         "EntityParameterObservation",
         "ObservationSnapshot",
@@ -826,6 +870,60 @@ def test_snapshot_binds_sorted_per_entity_and_preservation_facts() -> None:
     assert changed_preservation.observation_digest != snapshot.observation_digest
 
 
+def test_snapshot_binds_explicit_component_membership_and_geometry() -> None:
+    component_entity = _component_entity()
+    member_entity = _entity(object_id=OBJECT_B)
+    component = _component()
+    snapshot = _snapshot(
+        entities=(component_entity, member_entity),
+        components=(component,),
+    )
+
+    mapping = snapshot.to_mapping()
+    assert mapping["components"] == [component.to_mapping()]
+    assert ObservationSnapshot.from_mapping(mapping) == snapshot
+    assert snapshot.observation_digest != _snapshot(
+        entities=(component_entity, member_entity),
+        components=(_component(volume_mm3=101.0),),
+    ).observation_digest
+
+
+@pytest.mark.parametrize(
+    ("entities", "components", "code", "path"),
+    (
+        (
+            (_entity(object_id=OBJECT_B),),
+            (_component(),),
+            ValidationErrorCode.INVALID_VALUE,
+            "/components",
+        ),
+        (
+            (_component_entity(), _entity(object_id=OBJECT_B)),
+            (_component(member_object_ids=(OBJECT_A,)),),
+            ValidationErrorCode.INVALID_VALUE,
+            "/components",
+        ),
+        (
+            (_component_entity(), _entity(object_id=OBJECT_B)),
+            (_component(member_object_ids=("object_cccccccccccccccccccccccccccccccc",)),),
+            ValidationErrorCode.INVALID_VALUE,
+            "/components",
+        ),
+    ),
+)
+def test_snapshot_rejects_invalid_component_membership(
+    entities: tuple[EntityObservation, ...],
+    components: tuple[ComponentObservation, ...],
+    code: ValidationErrorCode,
+    path: str,
+) -> None:
+    with pytest.raises(ValidationError) as caught:
+        _snapshot(entities=entities, components=components)
+
+    error = _assert_error(caught, code)
+    assert error.path == path
+
+
 def test_snapshot_reads_legacy_wire_digest_and_upgrades_new_digest_fields() -> None:
     current = _snapshot()
     legacy_payload = {
@@ -853,6 +951,7 @@ def test_snapshot_reads_legacy_wire_digest_and_upgrades_new_digest_fields() -> N
     assert parsed.observation_digest != legacy_digest
     assert parsed.to_mapping()["entities"] == []
     assert parsed.to_mapping()["preservations"] == []
+    assert "components" not in parsed.to_mapping()
 
     incomplete = current.to_mapping()
     del incomplete["preservations"]
@@ -2641,6 +2740,7 @@ def test_validation_modules_are_pure_closed_and_do_not_reference_execution_evide
             "vibecad.validation.contracts": {
                 "ArtifactObservation",
                 "CompiledAcceptance",
+                "ComponentObservation",
                 "EntityObservation",
                 "EntityParameterObservation",
                 "ObservationSnapshot",

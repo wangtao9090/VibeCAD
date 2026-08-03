@@ -38,6 +38,8 @@ _MAX_ERROR_PATH_LENGTH = 256
 _MAX_SHAPES = 128
 _MAX_ARTIFACTS = 128
 _MAX_ENTITIES = 128
+_MAX_COMPONENTS = 10
+_MAX_COMPONENT_MEMBERS = 128
 _MAX_PRESERVATIONS = 256
 _MAX_ENTITY_PARAMETERS = 128
 _MAX_CHANGED_FIELDS = 256
@@ -729,6 +731,156 @@ class EntityObservation:
         )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ComponentObservation:
+    """Canonical placement, membership, and global geometry for one component."""
+
+    component_id: str
+    object_type: str
+    provenance: Mapping[str, str | None]
+    placement: tuple[int | float, ...]
+    member_object_ids: tuple[str, ...] = ()
+    volume_mm3: int | float | None = None
+    area_mm2: int | float | None = None
+    bbox_mm: tuple[int | float, ...] | None = None
+    center_of_mass_mm: tuple[int | float, ...] | None = None
+    valid_shape: bool | None = None
+    solid_count: int | None = None
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "schema_version",
+            _validate_schema(self.schema_version, "/schema_version"),
+        )
+        object.__setattr__(
+            self,
+            "component_id",
+            _validate_entity_identifier(self.component_id, _OBJECT_RE, "/component_id"),
+        )
+        if self.object_type != "App::Part":
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/object_type")
+        object.__setattr__(self, "provenance", _provenance(self.provenance))
+        placement = _vector(self.placement, "/placement", length=7, nonnegative=False)
+        assert placement is not None
+        if all(component == 0 for component in placement[3:]):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/placement")
+        object.__setattr__(self, "placement", placement)
+        if type(self.member_object_ids) is not tuple:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/member_object_ids")
+        if len(self.member_object_ids) > _MAX_COMPONENT_MEMBERS:
+            _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED, "/member_object_ids")
+        members = tuple(
+            _validate_entity_identifier(item, _OBJECT_RE, "/member_object_ids")
+            for item in self.member_object_ids
+        )
+        if len(members) != len(set(members)):
+            _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/member_object_ids")
+        if members != tuple(sorted(members)):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/member_object_ids")
+        object.__setattr__(self, "member_object_ids", members)
+        object.__setattr__(
+            self,
+            "volume_mm3",
+            _optional_number(self.volume_mm3, "/volume_mm3", nonnegative=True),
+        )
+        object.__setattr__(
+            self,
+            "area_mm2",
+            _optional_number(self.area_mm2, "/area_mm2", nonnegative=True),
+        )
+        object.__setattr__(
+            self,
+            "bbox_mm",
+            _vector(self.bbox_mm, "/bbox_mm", length=3, nonnegative=True),
+        )
+        object.__setattr__(
+            self,
+            "center_of_mass_mm",
+            _vector(
+                self.center_of_mass_mm,
+                "/center_of_mass_mm",
+                length=3,
+                nonnegative=False,
+            ),
+        )
+        if self.valid_shape is not None and type(self.valid_shape) is not bool:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/valid_shape")
+        if self.solid_count is not None:
+            if type(self.solid_count) is not int:
+                _raise_validation(ValidationErrorCode.INVALID_TYPE, "/solid_count")
+            if self.solid_count < 0 or self.solid_count > MAX_SAFE_JSON_INTEGER:
+                _raise_validation(ValidationErrorCode.INVALID_VALUE, "/solid_count")
+
+    @property
+    def target(self) -> str:
+        return self.component_id
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "component_id": self.component_id,
+            "object_type": self.object_type,
+            "provenance": dict(self.provenance),
+            "placement": list(self.placement),
+            "member_object_ids": list(self.member_object_ids),
+            "volume_mm3": self.volume_mm3,
+            "area_mm2": self.area_mm2,
+            "bbox_mm": list(self.bbox_mm) if self.bbox_mm is not None else None,
+            "center_of_mass_mm": (
+                list(self.center_of_mass_mm) if self.center_of_mass_mm is not None else None
+            ),
+            "valid_shape": self.valid_shape,
+            "solid_count": self.solid_count,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        required = {
+            "schema_version",
+            "component_id",
+            "object_type",
+            "provenance",
+            "placement",
+            "member_object_ids",
+            "volume_mm3",
+            "area_mm2",
+            "bbox_mm",
+            "center_of_mass_mm",
+            "valid_shape",
+            "solid_count",
+        }
+        data = _fields(value, allowed=required, required=required)
+        if type(data["member_object_ids"]) is not list:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/member_object_ids")
+        if len(data["member_object_ids"]) > _MAX_COMPONENT_MEMBERS:
+            _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED, "/member_object_ids")
+        placement = _json_vector(data["placement"], "/placement")
+        if placement is None:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/placement")
+        return cls(
+            schema_version=data["schema_version"],
+            component_id=data["component_id"],
+            object_type=data["object_type"],
+            provenance=data["provenance"],
+            placement=placement,
+            member_object_ids=_json_text_tuple(
+                data["member_object_ids"],
+                "/member_object_ids",
+            ),
+            volume_mm3=data["volume_mm3"],
+            area_mm2=data["area_mm2"],
+            bbox_mm=_json_vector(data["bbox_mm"], "/bbox_mm"),
+            center_of_mass_mm=_json_vector(
+                data["center_of_mass_mm"],
+                "/center_of_mass_mm",
+            ),
+            valid_shape=data["valid_shape"],
+            solid_count=data["solid_count"],
+        )
+
+
 def _entity_observation_digest(value: EntityObservation) -> str:
     if type(value) is not EntityObservation:
         _raise_validation(ValidationErrorCode.INVALID_TYPE, "/entity")
@@ -889,6 +1041,7 @@ class ObservationSnapshot:
     shapes: tuple[ShapeObservation, ...] = ()
     artifacts: tuple[ArtifactObservation, ...] = ()
     entities: tuple[EntityObservation, ...] = ()
+    components: tuple[ComponentObservation, ...] = ()
     preservations: tuple[PreservationObservation, ...] = ()
     schema_version: int = SCHEMA_VERSION
     observation_digest: str = field(init=False)
@@ -932,6 +1085,16 @@ class ObservationSnapshot:
                     ValidationErrorCode.INVALID_TYPE,
                     join_json_pointer("/entities", str(index)),
                 )
+        if type(self.components) is not tuple:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/components")
+        if len(self.components) > _MAX_COMPONENTS:
+            _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED, "/components")
+        for index, component in enumerate(self.components):
+            if type(component) is not ComponentObservation:
+                _raise_validation(
+                    ValidationErrorCode.INVALID_TYPE,
+                    join_json_pointer("/components", str(index)),
+                )
         if type(self.preservations) is not tuple:
             _raise_validation(ValidationErrorCode.INVALID_TYPE, "/preservations")
         if len(self.preservations) > _MAX_PRESERVATIONS:
@@ -963,6 +1126,34 @@ class ObservationSnapshot:
         )
         if len(entity_feature_ids) != len(set(entity_feature_ids)):
             _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/entities")
+        component_ids = tuple(item.component_id for item in self.components)
+        if len(component_ids) != len(set(component_ids)):
+            _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/components")
+        if component_ids != tuple(sorted(component_ids)):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/components")
+        entities_by_id = {item.object_id: item for item in self.entities}
+        component_members: set[str] = set()
+        for component in self.components:
+            container = entities_by_id.get(component.component_id)
+            if (
+                container is None
+                or container.object_type != "App::Part"
+                or container.semantic_role != "part"
+                or container.feature_id is not None
+                or container.provenance != component.provenance
+                or container.placement != component.placement
+                or component.component_id in component.member_object_ids
+                or any(member not in entities_by_id for member in component.member_object_ids)
+                or any(member in component_members for member in component.member_object_ids)
+            ):
+                _raise_validation(ValidationErrorCode.INVALID_VALUE, "/components")
+            component_members.update(component.member_object_ids)
+        if self.components:
+            app_part_ids = {
+                item.object_id for item in self.entities if item.object_type == "App::Part"
+            }
+            if app_part_ids != set(component_ids):
+                _raise_validation(ValidationErrorCode.INVALID_VALUE, "/components")
         preservation_targets = tuple(item.target for item in self.preservations)
         if len(preservation_targets) != len(set(preservation_targets)):
             _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/preservations")
@@ -995,6 +1186,18 @@ class ObservationSnapshot:
             )
             facts += int(entity.valid_shape is not None)
             facts += int(entity.solid_count is not None)
+        for component in self.components:
+            facts += 4 + len(component.placement) + len(component.member_object_ids)
+            facts += int(component.volume_mm3 is not None)
+            facts += int(component.area_mm2 is not None)
+            facts += len(component.bbox_mm) if component.bbox_mm is not None else 0
+            facts += (
+                len(component.center_of_mass_mm)
+                if component.center_of_mass_mm is not None
+                else 0
+            )
+            facts += int(component.valid_shape is not None)
+            facts += int(component.solid_count is not None)
         for preservation in self.preservations:
             facts += 4 + len(preservation.changed_fields)
         if facts > _MAX_OBSERVATION_FACTS:
@@ -1007,7 +1210,7 @@ class ObservationSnapshot:
         object.__setattr__(self, "observation_digest", digest)
 
     def _digest_mapping(self) -> dict[str, object]:
-        return {
+        result = {
             "schema_version": self.schema_version,
             "candidate_revision": self.candidate_revision,
             "shapes": [item.to_mapping() for item in self.shapes],
@@ -1015,6 +1218,9 @@ class ObservationSnapshot:
             "entities": [item.to_mapping() for item in self.entities],
             "preservations": [item.to_mapping() for item in self.preservations],
         }
+        if self.components:
+            result["components"] = [item.to_mapping() for item in self.components]
+        return result
 
     def to_mapping(self) -> dict[str, object]:
         result = self._digest_mapping()
@@ -1030,13 +1236,15 @@ class ObservationSnapshot:
             "artifacts",
             "observation_digest",
         }
-        allowed = legacy_required | {"entities", "preservations"}
+        allowed = legacy_required | {"entities", "components", "preservations"}
         data = _fields(value, allowed=allowed, required=legacy_required)
         has_entities = "entities" in data
         has_preservations = "preservations" in data
         if has_entities != has_preservations:
             missing = "preservations" if has_entities else "entities"
             _raise_validation(ValidationErrorCode.MISSING_FIELD, f"/{missing}")
+        if "components" in data and not has_entities:
+            _raise_validation(ValidationErrorCode.MISSING_FIELD, "/entities")
         legacy = not has_entities
         if type(data["shapes"]) is not list:
             _raise_validation(ValidationErrorCode.INVALID_TYPE, "/shapes")
@@ -1087,6 +1295,26 @@ class ObservationSnapshot:
                 )
             assert parsed_entity is not None
             entities.append(parsed_entity)
+        raw_components = data.get("components", [])
+        if type(raw_components) is not list:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/components")
+        if len(raw_components) > _MAX_COMPONENTS:
+            _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED, "/components")
+        components: list[ComponentObservation] = []
+        for index, raw_component in enumerate(raw_components):
+            caught = None
+            try:
+                parsed_component = ComponentObservation.from_mapping(raw_component)
+            except ValidationError as error:
+                caught = error
+                parsed_component = None
+            if caught is not None:
+                raise _prefix_nested_error(
+                    caught,
+                    join_json_pointer("/components", str(index)),
+                )
+            assert parsed_component is not None
+            components.append(parsed_component)
         raw_preservations = data.get("preservations", [])
         if type(raw_preservations) is not list:
             _raise_validation(ValidationErrorCode.INVALID_TYPE, "/preservations")
@@ -1112,6 +1340,7 @@ class ObservationSnapshot:
             shapes=tuple(shapes),
             artifacts=tuple(artifacts),
             entities=tuple(entities),
+            components=tuple(components),
             preservations=tuple(preservations),
         )
         if supplied_digest != snapshot.observation_digest:
@@ -1140,6 +1369,7 @@ def _validated_snapshot(value: object) -> ObservationSnapshot:
         shapes = value.shapes
         artifacts = value.artifacts
         entities = value.entities
+        components = value.components
         preservations = value.preservations
         schema_version = value.schema_version
         supplied_digest = value.observation_digest
@@ -1149,6 +1379,7 @@ def _validated_snapshot(value: object) -> ObservationSnapshot:
         shapes = ()
         artifacts = ()
         entities = ()
+        components = ()
         preservations = ()
         schema_version = SCHEMA_VERSION
         supplied_digest = None
@@ -1161,6 +1392,7 @@ def _validated_snapshot(value: object) -> ObservationSnapshot:
             shapes=shapes,
             artifacts=artifacts,
             entities=entities,
+            components=components,
             preservations=preservations,
             schema_version=schema_version,
         )

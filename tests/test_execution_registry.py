@@ -277,6 +277,29 @@ def test_stage3_value_shapes_and_execution_profiles_are_closed():
     }
 
 
+def test_component_selector_shape_accepts_only_explicit_app_part_objects():
+    base = {
+        "schema_version": 1,
+        "project_id": "project_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision_id": "revision_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "entity_kind": "object",
+        "object_id": "object_cccccccccccccccccccccccccccccccc",
+        "feature_id": None,
+        "object_type": "App::Part",
+        "semantic_role": "part",
+        "provenance": {"source": "model", "operation_id": "create-component"},
+        "expected_cardinality": 1,
+    }
+
+    assert registry_module._matches_component_selector(base)
+    assert not registry_module._matches_component_selector(
+        {**base, "object_type": "Part::Box", "semantic_role": "primitive"}
+    )
+    assert not registry_module._matches_component_selector(
+        {**base, "feature_id": "feature_dddddddddddddddddddddddddddddddd"}
+    )
+
+
 @pytest.mark.parametrize(
     "profiles",
     [(), (ExecutionProfile.HEADLESS, ExecutionProfile.HEADLESS), ("headless",)],

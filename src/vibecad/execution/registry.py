@@ -16,7 +16,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Self
 
-from vibecad.execution.selectors import SelectorV1
+from vibecad.execution.selectors import EntityKind, SelectorV1, SemanticRole
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER, SCHEMA_VERSION
 
 _SNAKE_CASE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
@@ -234,6 +234,21 @@ def _matches_value_shape(
             return False
         return True
     return False
+
+
+def _matches_component_selector(value: object) -> bool:
+    """Match the private P2 component-target contract without expanding the public enum."""
+
+    try:
+        selector = SelectorV1.from_mapping(value)
+    except Exception:
+        return False
+    return (
+        selector.entity_kind is EntityKind.OBJECT
+        and selector.feature_id is None
+        and selector.object_type == "App::Part"
+        and selector.semantic_role is SemanticRole.PART
+    )
 
 
 class RegistryErrorCode(StrEnum):

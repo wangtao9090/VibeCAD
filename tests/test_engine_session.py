@@ -108,6 +108,8 @@ class _IdentityDoc(FakeDoc):
 
 _OBJECT_A = "object_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 _OBJECT_B = "object_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+_OBJECT_C = "object_cccccccccccccccccccccccccccccccc"
+_OBJECT_D = "object_dddddddddddddddddddddddddddddddd"
 _FEATURE_A = "feature_11111111111111111111111111111111"
 _FEATURE_B = "feature_22222222222222222222222222222222"
 
@@ -125,18 +127,101 @@ def _identity(
     object_type="Part::Box",
     source=ProvenanceSource.MODEL,
     operation_id="box",
+    semantic_role=SemanticRole.PRIMITIVE,
 ):
     return EntityIdentity(
         object_id=object_id,
         feature_id=feature_id,
         object_type=object_type,
-        semantic_role=SemanticRole.PRIMITIVE,
+        semantic_role=semantic_role,
         provenance=Provenance(source=source, operation_id=operation_id),
     )
 
 
 def _attach_a(session, obj):
     return session.attach_object_identity(obj, _identity())
+
+
+def _component_identity(*, object_id=_OBJECT_A, operation_id="component"):
+    return _identity(
+        object_id=object_id,
+        feature_id=None,
+        object_type="App::Part",
+        operation_id=operation_id,
+        semantic_role=SemanticRole.PART,
+    )
+
+
+def test_create_component_attaches_container_identity_without_implicit_migration(
+    monkeypatch,
+):
+    session = _identity_session()
+
+    def register(name):
+        container = _IdentityObject(f"VibePart{len(session.doc.Objects)}", type_id="App::Part")
+        container.Label = name
+        session.doc.Objects.append(container)
+        session.doc._objs[container.Name] = container
+        return container
+
+    monkeypatch.setattr(session, "_register_part_container", register)
+    identity = _component_identity()
+
+    result = session.create_component("Housing", identity)
+
+    assert result == {"component": "Housing", "object_id": _OBJECT_A}
+    assert session.part_names() == ["Housing"]
+    assert session.active_part == "Housing"
+    assert session.read_object_identity(session._parts["Housing"]["container"]) == identity
+
+
+def test_create_component_rejects_loose_geometry_before_mutation(monkeypatch):
+    loose = _IdentityObject("Loose")
+    session = _identity_session(loose)
+    monkeypatch.setattr(
+        session,
+        "_register_part_container",
+        lambda name: (_ for _ in ()).throw(AssertionError(name)),
+    )
+
+    with pytest.raises(ValueError, match="松散几何"):
+        session.create_component("Housing", _component_identity())
+
+    assert session.part_names() == []
+
+
+def test_component_identity_records_require_identified_members(monkeypatch):
+    session = _identity_session()
+
+    def register(name):
+        container = _IdentityObject(f"VibePart{len(session.doc.Objects)}", type_id="App::Part")
+        container.Label = name
+        session.doc.Objects.append(container)
+        session.doc._objs[container.Name] = container
+        return container
+
+    monkeypatch.setattr(session, "_register_part_container", register)
+    component = _component_identity()
+    session.create_component("Housing", component)
+    member = _IdentityObject("Box")
+    session.doc.Objects.append(member)
+    session.doc._objs[member.Name] = member
+    session._parts["Housing"]["objects"].add(member.Name)
+
+    with pytest.raises(ValueError, match="未识别成员"):
+        session.list_component_identity_records()
+
+    member_identity = _identity(object_id=_OBJECT_B)
+    session.attach_object_identity(member, member_identity)
+    records = session.list_component_identity_records()
+    assert records == (
+        (
+            "Housing",
+            session._parts["Housing"]["container"],
+            component,
+            ((member, member_identity),),
+        ),
+    )
 
 
 def test_session_starts_without_freecad():
@@ -604,3 +689,90 @@ def test_object_identity_survives_recompute_checkpoint_close_and_load(
     )
     assert result.returncode == 0, result.stderr
     assert "IDENTITY_PERSISTENCE_OK" in result.stdout
+
+
+@pytest.mark.slow
+def test_explicit_components_survive_real_freecad_save_reload_with_global_observations(
+    existing_managed_runtime_python,
+    tmp_path,
+):
+    code = (
+        status._PREP
+        + f"import sys; sys.path.insert(0, {_SRC!r})\n"
+        + "from pathlib import Path\n"
+        + "import FreeCAD\n"
+        + "from vibecad.engine.session import Session\n"
+        + "from vibecad.execution.executor import _component_observations, _shape_observation\n"
+        + "from vibecad.execution.selectors import (\n"
+        + "    EntityIdentity, Provenance, ProvenanceSource, SemanticRole,\n"
+        + ")\n"
+        + f"root = Path({str(tmp_path)!r})\n"
+        + "def identity(object_id, feature_id, object_type, role, operation):\n"
+        + "    return EntityIdentity(\n"
+        + "        object_id=object_id, feature_id=feature_id, object_type=object_type,\n"
+        + "        semantic_role=role, provenance=Provenance(\n"
+        + "            source=ProvenanceSource.MODEL, operation_id=operation),\n"
+        + "    )\n"
+        + "component_a = identity(\n"
+        + f"    {_OBJECT_A!r}, None, 'App::Part', SemanticRole.PART, 'component-a')\n"
+        + "component_b = identity(\n"
+        + f"    {_OBJECT_B!r}, None, 'App::Part', SemanticRole.PART, 'component-b')\n"
+        + "member_a = identity(\n"
+        + f"    {_OBJECT_C!r}, {_FEATURE_A!r}, 'Part::Box', "
+        + "SemanticRole.PRIMITIVE, 'box-a')\n"
+        + "member_b = identity(\n"
+        + f"    {_OBJECT_D!r}, {_FEATURE_B!r}, 'Part::Box', "
+        + "SemanticRole.PRIMITIVE, 'box-b')\n"
+        + "s = Session(checkpoint_dir=root)\n"
+        + "loaded = None\n"
+        + "try:\n"
+        + "    s.open_document('ExplicitComponents')\n"
+        + "    s.create_component('A', component_a)\n"
+        + "    s.create_component('B', component_b)\n"
+        + "    with s._transaction('seed-a', part='A'):\n"
+        + "        a = s.doc.addObject('Part::Box', 'BoxA')\n"
+        + "        a.Length, a.Width, a.Height = 10, 10, 10\n"
+        + "        s.attach_object_identity(a, member_a)\n"
+        + "        s.set_result_object(a, part='A')\n"
+        + "        s.doc.recompute()\n"
+        + "    with s._transaction('seed-b', part='B'):\n"
+        + "        b = s.doc.addObject('Part::Box', 'BoxB')\n"
+        + "        b.Length, b.Width, b.Height = 5, 10, 10\n"
+        + "        s.attach_object_identity(b, member_b)\n"
+        + "        s.set_result_object(b, part='B')\n"
+        + "        s.doc.recompute()\n"
+        + "    with s._transaction('place-b', claim_new_objects=False):\n"
+        + "        s._parts['B']['container'].Placement.Base = FreeCAD.Vector(100, 0, 0)\n"
+        + "        s.doc.recompute()\n"
+        + "    before = _component_observations(s)\n"
+        + "    assert tuple(item.component_id for item in before) == "
+        + "(component_a.object_id, component_b.object_id)\n"
+        + "    assert before[0].member_object_ids == (member_a.object_id,)\n"
+        + "    assert before[1].member_object_ids == (member_b.object_id,)\n"
+        + "    assert abs(before[0].center_of_mass_mm[0] - 5.0) < 1e-7\n"
+        + "    assert abs(before[1].center_of_mass_mm[0] - 102.5) < 1e-7\n"
+        + "    aggregate = _shape_observation(s)\n"
+        + "    assert abs(aggregate.volume_mm3 - 1500.0) < 1e-7\n"
+        + "    assert abs(aggregate.bbox_mm[0] - 105.0) < 1e-7\n"
+        + "    checkpoint = s._checkpoint()\n"
+        + "    s.close_document()\n"
+        + "    loaded = Session()\n"
+        + "    loaded.load_document(checkpoint)\n"
+        + "    after = _component_observations(loaded)\n"
+        + "    assert after == before\n"
+        + "    assert _shape_observation(loaded) == aggregate\n"
+        + "    print('EXPLICIT_COMPONENTS_OK')\n"
+        + "finally:\n"
+        + "    if loaded is not None and loaded.doc is not None:\n"
+        + "        loaded.close_document()\n"
+        + "    if s.doc is not None:\n"
+        + "        s.close_document()\n"
+    )
+    result = subprocess.run(
+        [existing_managed_runtime_python, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "EXPLICIT_COMPONENTS_OK" in result.stdout

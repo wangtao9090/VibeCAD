@@ -26,6 +26,7 @@ _IMPLICIT_PART = "Part1"
 # 旁车文件；旧项目没有该属性时仍可通过几何回退打开。
 _STATE_PROPERTY = "VibeCADState"
 _STATE_SCHEMA = 1
+_MAX_EXPLICIT_COMPONENTS = 10
 
 # Object-level identity lives on each FreeCAD DocumentObject.  These properties are the
 # persistence boundary: Session deliberately keeps no parallel identity registry that could
@@ -182,6 +183,109 @@ class Session:
             self._labels = labels_before
             raise
         return {"part": name, "implicit_part": implicit}
+
+    def create_component(self, name: str, identity: Any) -> dict[str, Any]:
+        """Create one explicitly identified ``App::Part`` component.
+
+        Unlike the legacy ``new_part`` helper, this boundary never infers a component from
+        existing loose geometry and never relies on the active component as public authority.
+        """
+
+        self._require_doc()
+        from vibecad.execution.selectors import EntityIdentity, SemanticRole  # noqa: PLC0415
+
+        if type(identity) is not EntityIdentity:
+            raise TypeError("identity 必须是 EntityIdentity")
+        if (
+            identity.object_type != "App::Part"
+            or identity.semantic_role is not SemanticRole.PART
+            or identity.feature_id is not None
+        ):
+            raise ValueError("组件 identity 必须是无 feature_id 的 App::Part/part")
+        if (
+            type(name) is not str
+            or not name.strip()
+            or name != name.strip()
+            or len(name.encode("utf-8")) > 256
+        ):
+            raise ValueError("name 必须是首尾无空白的非空字符串")
+        if name in self._parts:
+            raise ValueError(f"零件 {name!r} 已存在（已有零件：{list(self._parts)}）")
+        if len(self._parts) >= _MAX_EXPLICIT_COMPONENTS:
+            raise ValueError("显式组件数量超过上限")
+        if not self._parts and any(
+            getattr(obj, "TypeId", "") != "App::Part" for obj in self._doc.Objects
+        ):
+            raise ValueError("已有松散几何不能隐式升级为显式组件")
+
+        with self._transaction("create_component", claim_new_objects=False):
+            container = self._register_part_container(name)
+            attached = self.attach_object_identity(container, identity)
+            if attached != identity:
+                raise ValueError("组件 identity 写入后校验失败")
+            self._parts[name] = {"container": container, "objects": set()}
+            self._active_part = name
+        return {"component": name, "object_id": identity.object_id}
+
+    def list_component_identity_records(self) -> tuple[tuple[Any, ...], ...]:
+        """Return strict explicit component records in stable component-id order.
+
+        Each record is ``(part_name, container, identity, members)`` where ``members`` is a
+        tuple of ``(DocumentObject, EntityIdentity)`` pairs sorted by object identity.  Legacy
+        untagged ``App::Part`` assemblies return no records; partially managed assemblies fail.
+        """
+
+        self._require_doc()
+        if not self._parts:
+            return ()
+        from vibecad.execution.selectors import SemanticRole  # noqa: PLC0415
+
+        identified = self.list_object_identities()
+        by_name = {obj.Name: (obj, identity) for obj, identity in identified}
+        identified_containers = tuple(
+            (obj, identity)
+            for obj, identity in identified
+            if identity.object_type == "App::Part"
+        )
+        if not identified_containers:
+            return ()
+        if len(identified_containers) != len(self._parts):
+            raise ValueError("显式组件 identity 不完整")
+
+        claimed: set[str] = set()
+        records: list[tuple[Any, ...]] = []
+        for part_name, info in self._parts.items():
+            container = info["container"]
+            container_record = by_name.get(container.Name)
+            if container_record is None or container_record[0] is not container:
+                raise ValueError("组件容器 identity 缺失")
+            identity = container_record[1]
+            if (
+                identity.object_type != "App::Part"
+                or identity.semantic_role is not SemanticRole.PART
+                or identity.feature_id is not None
+            ):
+                raise ValueError("组件容器 identity 无效")
+            members: list[tuple[Any, Any]] = []
+            for object_name in info["objects"]:
+                if object_name in claimed:
+                    raise ValueError("组件成员归属重复")
+                member = by_name.get(object_name)
+                if member is None:
+                    raise ValueError("显式组件包含未识别成员")
+                if member[1].object_type == "App::Part":
+                    raise ValueError("显式组件不支持嵌套组件")
+                claimed.add(object_name)
+                members.append(member)
+            records.append(
+                (
+                    part_name,
+                    container,
+                    identity,
+                    tuple(sorted(members, key=lambda item: item[1].object_id)),
+                )
+            )
+        return tuple(sorted(records, key=lambda item: item[2].object_id))
 
     def set_active_part(self, name: str) -> None:
         if name not in self._parts:

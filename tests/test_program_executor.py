@@ -8,7 +8,7 @@ import os
 import sys
 import zipfile
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -1311,6 +1311,67 @@ def test_managed_aggregate_compounds_every_identified_primitive(
     assert observed is aggregate
     assert calls == [[entities[0].Shape, entities[1].Shape]]
     assert session.shape_calls == 0
+
+
+def test_explicit_component_observation_uses_container_global_placement() -> None:
+    global_shape = _FakeShape(
+        volume=600.0,
+        bbox=(10.0, 10.0, 6.0),
+        center=(30.0, 5.0, 3.0),
+    )
+
+    class LocalShape:
+        def transformed(self, matrix):
+            assert matrix == "component-matrix"
+            return global_shape
+
+    placement = _FakePlacement(25.0)
+    placement.toMatrix = lambda: "component-matrix"  # type: ignore[attr-defined]
+    container = SimpleNamespace(Name="VibePart", Placement=placement)
+    provenance = SimpleNamespace(
+        to_mapping=lambda: {"source": "model", "operation_id": "component-a"}
+    )
+    component_identity = SimpleNamespace(
+        object_id="object_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        object_type="App::Part",
+        provenance=provenance,
+    )
+    member_identity = SimpleNamespace(
+        object_id="object_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    )
+
+    class ComponentSession:
+        assembly = _FakeShape(volume=600.0)
+
+        @staticmethod
+        def list_component_identity_records():
+            return (
+                (
+                    "Housing",
+                    container,
+                    component_identity,
+                    ((object(), member_identity),),
+                ),
+            )
+
+        @staticmethod
+        def get_result_shape(part_name):
+            assert part_name == "Housing"
+            return LocalShape()
+
+        @classmethod
+        def get_assembly_shape(cls):
+            return cls.assembly
+
+    observations = executor_module._component_observations(ComponentSession())
+
+    assert len(observations) == 1
+    assert observations[0].component_id == component_identity.object_id
+    assert observations[0].member_object_ids == (member_identity.object_id,)
+    assert observations[0].placement == (25.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    assert observations[0].volume_mm3 == 600.0
+    assert observations[0].center_of_mass_mm == (30.0, 5.0, 3.0)
+    assert executor_module._managed_assembly_shape(ComponentSession()) is ComponentSession.assembly
 
 
 def test_compound_observation_derives_volume_weighted_center_of_mass() -> None:

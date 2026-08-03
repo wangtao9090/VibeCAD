@@ -20,6 +20,7 @@ from vibecad.execution.executor import (
     ExecutorError,
     ExecutorErrorCode,
     InProcessCadExecutor,
+    _component_observations,
     _entity_observations,
     _export_session_step,
     _shape_observation,
@@ -792,6 +793,7 @@ class WorkerService:
                 objects = tuple(session.value.doc.Objects)  # type: ignore[attr-defined]
                 shape = None if not objects else _shape_observation(session.value)
                 entities = _entity_observations(session.value)
+                components = _component_observations(session.value)
         except _ServiceError:
             raise
         except BaseException:
@@ -805,6 +807,7 @@ class WorkerService:
         return {
             "shape": None if shape is None else shape.to_mapping(),
             "entities": [item.to_mapping() for item in entities],
+            "components": [item.to_mapping() for item in components],
         }
 
     def _validation_directory(

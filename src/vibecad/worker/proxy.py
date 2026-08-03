@@ -26,7 +26,7 @@ from vibecad.interaction.cad import (
     ValidatedImportEvidence,
     ValidatedMaterializationEvidence,
 )
-from vibecad.validation import EntityObservation, ShapeObservation
+from vibecad.validation import ComponentObservation, EntityObservation, ShapeObservation
 from vibecad.worker.generation import (
     WorkerError,
     WorkerErrorCode,
@@ -1107,7 +1107,11 @@ class FreeCadWorker(_Opaque):
         *,
         session: WorkerSession,
         capability: WorkerCandidate | WorkerRevision,
-    ) -> tuple[ShapeObservation | None, tuple[EntityObservation, ...]]:
+    ) -> tuple[
+        ShapeObservation | None,
+        tuple[EntityObservation, ...],
+        tuple[ComponentObservation, ...],
+    ]:
         with self._operation_lock:
             self._ensure_process()
             session_state = self._session_state(session)
@@ -1140,9 +1144,10 @@ class FreeCadWorker(_Opaque):
             )
             try:
                 if (
-                    set(result) != {"shape", "entities"}
+                    set(result) != {"shape", "entities", "components"}
                     or (result["shape"] is not None and type(result["shape"]) is not dict)
                     or type(result["entities"]) is not list
+                    or type(result["components"]) is not list
                 ):
                     raise ValueError
                 shape = (
@@ -1153,10 +1158,19 @@ class FreeCadWorker(_Opaque):
                 entities = tuple(
                     EntityObservation.from_mapping(item) for item in result["entities"]
                 )
+                components = tuple(
+                    ComponentObservation.from_mapping(item)
+                    for item in result["components"]
+                )
                 object_ids = tuple(item.object_id for item in entities)
                 if object_ids != tuple(sorted(object_ids)) or len(object_ids) != len(
                     set(object_ids)
                 ):
+                    raise ValueError
+                component_ids = tuple(item.component_id for item in components)
+                if component_ids != tuple(sorted(component_ids)) or len(
+                    component_ids
+                ) != len(set(component_ids)):
                     raise ValueError
             except Exception:
                 self._protocol_loss()
@@ -1173,7 +1187,7 @@ class FreeCadWorker(_Opaque):
                         self._require_live_revision(revision_state)
                 except WorkerError:
                     self._protocol_loss()
-                return shape, entities
+                return shape, entities, components
 
     def _accept_artifact_result(
         self,

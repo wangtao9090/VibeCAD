@@ -73,6 +73,7 @@ from vibecad.tools.transform import move_part as _move_part
 from vibecad.tools.transform import rotate_part as _rotate_part
 from vibecad.validation import (
     ArtifactObservation,
+    ComponentObservation,
     EntityObservation,
     EntityParameterObservation,
     ObservationSnapshot,
@@ -351,6 +352,9 @@ def _managed_assembly_shape(session: object) -> object:
     existing result-root shape.  A real managed Session never falls back once identities exist.
     """
 
+    list_components = getattr(session, "list_component_identity_records", None)
+    if callable(list_components) and tuple(list_components()):
+        return session.get_assembly_shape()  # type: ignore[attr-defined]
     list_identities = getattr(session, "list_object_identities", None)
     if not callable(list_identities):
         return session.get_assembly_shape()  # type: ignore[attr-defined]
@@ -632,21 +636,60 @@ def _entity_observations(session: object) -> tuple[EntityObservation, ...]:
         raise _ObservationFailure from None
 
 
+def _component_observations(session: object) -> tuple[ComponentObservation, ...]:
+    """Observe strict explicit components in global assembly coordinates."""
+
+    list_records = getattr(session, "list_component_identity_records", None)
+    if not callable(list_records):
+        return ()
+    try:
+        observations = []
+        for part_name, container, identity, members in tuple(list_records()):
+            local_shape = session.get_result_shape(part_name)  # type: ignore[attr-defined]
+            shape = local_shape.transformed(container.Placement.toMatrix())
+            observations.append(
+                ComponentObservation(
+                    component_id=identity.object_id,
+                    object_type=identity.object_type,
+                    provenance=identity.provenance.to_mapping(),
+                    placement=_canonical_placement(container.Placement),
+                    member_object_ids=tuple(
+                        member_identity.object_id for _, member_identity in members
+                    ),
+                    **_entity_geometry(shape),
+                )
+            )
+        ordered = tuple(sorted(observations, key=lambda item: item.component_id))
+        if len({item.component_id for item in ordered}) != len(ordered):
+            raise _ObservationFailure
+        return ordered
+    except _ObservationFailure:
+        raise
+    except Exception:
+        raise _ObservationFailure from None
+
+
 def _reloaded_observations(
     path: Path,
     *,
     include_shape: bool,
-) -> tuple[ShapeObservation | None, tuple[EntityObservation, ...]]:
+) -> tuple[
+    ShapeObservation | None,
+    tuple[EntityObservation, ...],
+    tuple[ComponentObservation, ...],
+]:
     probe = None
     failed = False
     shape: ShapeObservation | None = None
     entities: tuple[EntityObservation, ...] = ()
+    components: tuple[ComponentObservation, ...] = ()
     try:
         probe = _Session()
         probe.load_document(path)
         if include_shape:
             shape = _shape_observation(probe)
         entities = _entity_observations(probe)
+        components = _component_observations(probe)
     except Exception:
         failed = True
     finally:
@@ -657,7 +700,7 @@ def _reloaded_observations(
                 failed = True
     if failed:
         raise _ObservationFailure
-    return shape, entities
+    return shape, entities, components
 
 
 def _preservation_observations(
@@ -2269,10 +2312,11 @@ class InProcessCadExecutor(CadExecutionPort):
         try:
             live_shape = _shape_observation(candidate.binding.session)
             live_entities = _entity_observations(candidate.binding.session)
+            live_components = _component_observations(candidate.binding.session)
         except _ObservationFailure:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
         try:
-            sealed_shape, entities = _reloaded_observations(
+            sealed_shape, entities, components = _reloaded_observations(
                 model_path,
                 include_shape=True,
             )
@@ -2290,7 +2334,12 @@ class InProcessCadExecutor(CadExecutionPort):
             or not _artifact_matches(step_after_reload, step_ref)
         ):
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
-        if sealed_shape is None or sealed_shape != live_shape or entities != live_entities:
+        if (
+            sealed_shape is None
+            or sealed_shape != live_shape
+            or entities != live_entities
+            or components != live_components
+        ):
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
 
         try:
@@ -2324,7 +2373,7 @@ class InProcessCadExecutor(CadExecutionPort):
             if not _artifact_matches(base_actual, base.model):
                 raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
             try:
-                _, before_entities = _reloaded_observations(
+                _, before_entities, _before_components = _reloaded_observations(
                     base_path,
                     include_shape=False,
                 )
@@ -2390,6 +2439,7 @@ class InProcessCadExecutor(CadExecutionPort):
                 ),
             ),
             entities=entities,
+            components=components,
             preservations=preservations,
         )
         artifacts = (

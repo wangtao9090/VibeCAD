@@ -3,6 +3,7 @@
 from vibecad.validation.contracts import (
     ArtifactObservation,
     CompiledAcceptance,
+    ComponentObservation,
     EntityObservation,
     EntityParameterObservation,
     ObservationSnapshot,
@@ -23,6 +24,7 @@ from vibecad.validation.engine import (
 __all__ = (
     "ArtifactObservation",
     "CompiledAcceptance",
+    "ComponentObservation",
     "EntityObservation",
     "EntityParameterObservation",
     "ObservationSnapshot",
