@@ -1260,7 +1260,7 @@ def _resource_program(
     ("field", "ceiling"),
     [
         ("max_runtime_ms", 30_000),
-        ("max_created_objects", 1),
+        ("max_created_objects", 16),
         ("max_result_bytes", 262_144),
     ],
 )

@@ -45,6 +45,7 @@ from vibecad.validation import (
     ArtifactObservation,
     ComponentObservation,
     EntityObservation,
+    InterferenceObservation,
     ObservationSnapshot,
     ShapeObservation,
     compare_entity_preservation,
@@ -720,6 +721,7 @@ class WorkerCadExecutionPort(CadExecutionPort):
         ShapeObservation | None,
         tuple[EntityObservation, ...],
         tuple[ComponentObservation, ...],
+        tuple[InterferenceObservation, ...],
     ]:
         session = self.open_revision(store=self._store, revision=revision)
         with self._lock:
@@ -727,7 +729,7 @@ class WorkerCadExecutionPort(CadExecutionPort):
         if state is None:
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
         try:
-            shape, entities, components = self._call(
+            shape, entities, components, interferences = self._call(
                 worker,
                 "observe",
                 session=session,
@@ -735,7 +737,7 @@ class WorkerCadExecutionPort(CadExecutionPort):
             )
             if not include_shape:
                 shape = None
-            return shape, entities, components
+            return shape, entities, components, interferences
         finally:
             self.close(session)
 
@@ -781,13 +783,18 @@ class WorkerCadExecutionPort(CadExecutionPort):
             "step",
         ):
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
-        live_shape, live_entities, live_components = self._call(
+        live_shape, live_entities, live_components, live_interferences = self._call(
             worker,
             "observe",
             session=candidate.binding.session,
             capability=state.value,
         )
-        reloaded_shape, reloaded_entities, reloaded_components = self._observe_revision(
+        (
+            reloaded_shape,
+            reloaded_entities,
+            reloaded_components,
+            reloaded_interferences,
+        ) = self._observe_revision(
             worker,
             durable,
             include_shape=True,
@@ -797,11 +804,17 @@ class WorkerCadExecutionPort(CadExecutionPort):
             or reloaded_shape != live_shape
             or reloaded_entities != live_entities
             or reloaded_components != live_components
+            or reloaded_interferences != live_interferences
         ):
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
         before_entities: tuple[EntityObservation, ...] = ()
         if base.model is not None:
-            _unused_shape, before_entities, _before_components = self._observe_revision(
+            (
+                _unused_shape,
+                before_entities,
+                _before_components,
+                _before_interferences,
+            ) = self._observe_revision(
                 worker,
                 base,
                 include_shape=False,
@@ -835,6 +848,7 @@ class WorkerCadExecutionPort(CadExecutionPort):
             ),
             entities=live_entities,
             components=live_components,
+            interferences=live_interferences,
             preservations=preservations,
         )
         artifacts = (

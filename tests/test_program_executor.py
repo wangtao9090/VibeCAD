@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -120,6 +121,30 @@ class _FakeShape:
             raise self.export_error
         Path(path).write_bytes(b"ISO-10303-21;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n")
 
+    def transformed(self, matrix):
+        x, y, z = matrix[:3]
+        return _FakeShape(
+            volume=self.Volume,
+            area=self.Area,
+            bbox=(self.BoundBox.XLength, self.BoundBox.YLength, self.BoundBox.ZLength),
+            center=(
+                self.CenterOfMass.x + x,
+                self.CenterOfMass.y + y,
+                self.CenterOfMass.z + z,
+            ),
+        )
+
+    def common(self, other):
+        bounds = []
+        for axis in ("X", "Y", "Z"):
+            low = max(getattr(self.BoundBox, f"{axis}Min"), getattr(other.BoundBox, f"{axis}Min"))
+            high = min(
+                getattr(self.BoundBox, f"{axis}Max"),
+                getattr(other.BoundBox, f"{axis}Max"),
+            )
+            bounds.append(max(0.0, high - low))
+        return SimpleNamespace(Volume=math.prod(bounds))
+
 
 class _FakeDocument:
     def __init__(self) -> None:
@@ -210,7 +235,8 @@ class _FakeSession:
         identities = index_entity_identities(self.doc.Objects)
         return tuple(zip(self.doc.Objects, identities, strict=True))
 
-    def set_result_object(self, obj: object) -> None:
+    def set_result_object(self, obj: object, part: str | None = None) -> None:
+        del part
         self.result_object = obj
 
 
@@ -231,6 +257,9 @@ class _FakePlacement:
         self.Base = _FakeVector(x, y, z)
         self.Rotation = _FakeRotation(q)
 
+    def toMatrix(self):  # noqa: N802 - FreeCAD API spelling
+        return (self.Base.x, self.Base.y, self.Base.z, *self.Rotation.Q)
+
 
 class _FakeEntity:
     def __init__(self, suffix: str, *, x: float, length: float) -> None:
@@ -246,6 +275,80 @@ class _FakeEntity:
         self.Shape = _FakeShape()
 
 
+class _FakeComponentSession(_FakeSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self._parts: dict[str, dict[str, object]] = {}
+        self._result_by_part: dict[str, object] = {}
+
+    def create_component(self, name: str, identity: object) -> dict[str, object]:
+        container = SimpleNamespace(
+            Name=f"VibePart{len(self._parts)}",
+            Label=name,
+            TypeId="App::Part",
+            Placement=_FakePlacement(0.0),
+        )
+        self.attach_object_identity(container, identity)
+        self._parts[name] = {"container": container, "objects": set()}
+        return {"component": name, "object_id": identity.object_id}
+
+    def list_component_identity_records(self):
+        identities = {obj.Name: identity for obj, identity in self.list_object_identities()}
+        records = []
+        for part_name, info in self._parts.items():
+            container = info["container"]
+            members = tuple(
+                sorted(
+                    ((self.get_object(name), identities[name]) for name in info["objects"]),
+                    key=lambda item: item[1].object_id,
+                )
+            )
+            records.append((part_name, container, identities[container.Name], members))
+        return tuple(sorted(records, key=lambda item: item[2].object_id))
+
+    def owner_of(self, object_name: str) -> str | None:
+        return next(
+            (
+                part_name
+                for part_name, info in self._parts.items()
+                if object_name in info["objects"]
+            ),
+            None,
+        )
+
+    def set_result_object(self, obj: object, part: str | None = None) -> None:
+        if part is None:
+            super().set_result_object(obj)
+            return
+        self._result_by_part[part] = obj
+
+    def get_result_shape(self, part_name: str):
+        return self._result_by_part[part_name].Shape
+
+    def get_assembly_shape(self):
+        shapes = [
+            self.get_result_shape(part_name).transformed(info["container"].Placement.toMatrix())
+            for part_name, info in self._parts.items()
+            if info["objects"]
+        ]
+        if not shapes:
+            raise RuntimeError("empty assembly")
+        mins = [min(getattr(shape.BoundBox, f"{axis}Min") for shape in shapes) for axis in "XYZ"]
+        maxs = [max(getattr(shape.BoundBox, f"{axis}Max") for shape in shapes) for axis in "XYZ"]
+        volume = sum(shape.Volume for shape in shapes)
+        center = tuple(
+            sum(shape.Volume * getattr(shape.CenterOfMass, axis) for shape in shapes) / volume
+            for axis in "xyz"
+        )
+        return _FakeShape(
+            volume=volume,
+            area=sum(shape.Area for shape in shapes),
+            bbox=tuple(high - low for low, high in zip(mins, maxs, strict=True)),
+            center=center,
+            bbox_center=tuple((low + high) / 2 for low, high in zip(mins, maxs, strict=True)),
+        )
+
+
 def _fake_add_box(
     session: _FakeSession,
     *,
@@ -253,6 +356,7 @@ def _fake_add_box(
     width: float,
     height: float,
     position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    part: str | None = None,
 ) -> object:
     obj = session.identity_object
     if any(current is obj for current in session.doc.Objects):
@@ -274,7 +378,9 @@ def _fake_add_box(
         ),
     )
     session.doc.Objects = (*session.doc.Objects, obj)
-    session.set_result_object(obj)
+    if part is not None:
+        session._parts[part]["objects"].add(obj.Name)  # type: ignore[attr-defined]
+    session.set_result_object(obj, part=part)
     return object()
 
 
@@ -285,6 +391,7 @@ def _fake_add_cylinder(
     height: float,
     position: tuple[float, float, float] = (0.0, 0.0, 0.0),
     axis: str = "z",
+    part: str | None = None,
 ) -> object:
     obj = type("ManagedCylinder", (), {})()
     obj.Name = "Cylinder"
@@ -318,7 +425,9 @@ def _fake_add_cylinder(
         ),
     )
     session.doc.Objects = (*session.doc.Objects, obj)
-    session.set_result_object(obj)
+    if part is not None:
+        session._parts[part]["objects"].add(obj.Name)  # type: ignore[attr-defined]
+    session.set_result_object(obj, part=part)
     return object()
 
 
@@ -631,6 +740,52 @@ def _six_operation_program() -> ModelProgram:
             ),
         ),
         acceptance=AcceptanceSpec(id="acceptance-executor-six", criteria=()),
+    )
+
+
+def _component_program(
+    *,
+    component_b_position: tuple[float, float, float] = (20, 0, 0),
+) -> ModelProgram:
+    return ModelProgram(
+        task_id="task-executor-components",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command("component_a", "create_component", args={"name": "A"}),
+            _command(
+                "box_a",
+                "create_box",
+                target={"component": {"command_id": "component_a", "slot": "component"}},
+                args={"length_mm": 10, "width_mm": 10, "height_mm": 10},
+                depends_on=("component_a",),
+            ),
+            _command(
+                "component_b",
+                "create_component",
+                args={"name": "B"},
+                depends_on=("box_a",),
+            ),
+            _command(
+                "box_b",
+                "create_box",
+                target={"component": {"command_id": "component_b", "slot": "component"}},
+                args={"length_mm": 5, "width_mm": 10, "height_mm": 10},
+                depends_on=("component_b",),
+            ),
+            _command(
+                "place_b",
+                "place_component",
+                target={"component": {"command_id": "component_b", "slot": "component"}},
+                args={
+                    "position_mm": component_b_position,
+                    "rotation_axis": "z",
+                    "angle_deg": 0,
+                },
+                depends_on=("box_b",),
+            ),
+            _command("inspect", "inspect_model", depends_on=("place_b",)),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-executor-components", criteria=()),
     )
 
 
@@ -1164,6 +1319,185 @@ def test_execute_program_runs_all_six_managed_operations_with_fixed_traces(
     assert values[1]["object_id"] == identities[1].object_id  # type: ignore[index]
 
 
+def test_execute_program_builds_places_and_inspects_explicit_components(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+
+    def place(
+        session: _FakeComponentSession,
+        *,
+        part_name: str,
+        position: tuple[float, float, float],
+        rotation_axis: str,
+        angle: float,
+    ) -> tuple[float, ...]:
+        quaternion = executor_module._axis_rotation(rotation_axis, angle)
+        session._parts[part_name]["container"].Placement = _FakePlacement(
+            *position,
+            q=quaternion,
+        )
+        return (*position, *quaternion)
+
+    monkeypatch.setattr(executor_module, "_set_absolute_component_placement", place)
+    session = _FakeComponentSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_component_program()),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [item.result.ok for item in outcomes] == [True] * 6
+    component_ids = [outcomes[index].result.value["component_id"] for index in (0, 2)]
+    assert len(set(component_ids)) == 2
+    assert outcomes[1].result.value["component_id"] == component_ids[0]
+    assert outcomes[3].result.value["component_id"] == component_ids[1]
+    assert outcomes[4].result.value["after"]["placement"][:3] == (20, 0, 0)
+    inspection = outcomes[5].result.value
+    assert len(inspection["components"]) == 2
+    assert len(inspection["interferences"]) == 1
+    observed = inspection["interferences"][0]
+    assert observed["component_a_id"] == min(component_ids)
+    assert observed["component_b_id"] == max(component_ids)
+    assert observed["common_volume_mm3"] == 0.0
+    assert observed["interfering"] is False
+
+
+def test_place_component_fails_closed_when_global_shapes_interfere(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+
+    def place(session, *, part_name, position, rotation_axis, angle):
+        quaternion = executor_module._axis_rotation(rotation_axis, angle)
+        session._parts[part_name]["container"].Placement = _FakePlacement(
+            *position,
+            q=quaternion,
+        )
+        return (*position, *quaternion)
+
+    monkeypatch.setattr(executor_module, "_set_absolute_component_placement", place)
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_component_program(component_b_position=(2, 0, 0))),
+        candidate=_active(_FakeComponentSession(), tmp_path),
+    )
+
+    assert [item.result.ok for item in outcomes[:4]] == [True] * 4
+    assert len(outcomes) == 5
+    assert outcomes[4].result.ok is False
+
+
+@pytest.mark.slow
+def test_real_freecad_component_program_checkpoints_reloads_and_exports_step(
+    tmp_path: Path,
+) -> None:
+    if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
+        pytest.skip("set VIBECAD_RUN_INTEGRATION=1 to run the real FreeCAD gate")
+    from vibecad.runtime import paths as runtime_paths
+    from vibecad.runtime import status as runtime_status
+
+    runtime_python = runtime_paths.active_runtime_python()
+    if not runtime_python.is_file() or not runtime_paths.ready_sentinel().is_file():
+        pytest.fail("an existing ready managed FreeCAD runtime is required")
+    if not runtime_status.engine_compatible(runtime_python):
+        pytest.fail("the existing managed FreeCAD runtime does not match current engine pins")
+    code = (
+        f"import sys; sys.path.insert(0, {str(Path(__file__).parents[1] / 'src')!r})\n"
+        + "from pathlib import Path\n"
+        + "from vibecad.execution.candidate import ActiveCandidate, SessionBinding\n"
+        + "from vibecad.execution.executor import (\n"
+        + "    InProcessCadExecutor, _component_observations, "
+        + "_export_session_step, _interference_observations, _shape_observation,\n"
+        + ")\n"
+        + "from vibecad.execution.revisions import LocalRevisionStore, ProjectHead\n"
+        + "from vibecad.workflow.contracts import (\n"
+        + "    AcceptanceSpec, ModelCommand, ModelProgram, ValueSource,\n"
+        + ")\n"
+        + f"root = Path({str(tmp_path)!r})\n"
+        + f"project_id = {PROJECT_ID!r}\n"
+        + f"base_revision = {BASE_REVISION!r}\n"
+        + f"candidate_revision = {CANDIDATE_REVISION!r}\n"
+        + "def command(identifier, operation, *, target=None, args=None, depends=()):\n"
+        + "    return ModelCommand(\n"
+        + "        id=identifier, op=operation, target=target or {}, args=args or {},\n"
+        + "        depends_on=depends, preserve=(), source=ValueSource.MODEL,\n"
+        + "    )\n"
+        + "program = ModelProgram(\n"
+        + "    task_id='task-real-components', base_revision=base_revision, operations=(\n"
+        + "        command('component_a', 'create_component', args={'name': 'A'}),\n"
+        + "        command('box_a', 'create_box',\n"
+        + "            target={'component': {'command_id': 'component_a', "
+        + "'slot': 'component'}},\n"
+        + "            args={'length_mm': 10, 'width_mm': 10, 'height_mm': 10},\n"
+        + "            depends=('component_a',)),\n"
+        + "        command('component_b', 'create_component', args={'name': 'B'},\n"
+        + "            depends=('box_a',)),\n"
+        + "        command('box_b', 'create_box',\n"
+        + "            target={'component': {'command_id': 'component_b', "
+        + "'slot': 'component'}},\n"
+        + "            args={'length_mm': 5, 'width_mm': 10, 'height_mm': 10},\n"
+        + "            depends=('component_b',)),\n"
+        + "        command('place_b', 'place_component',\n"
+        + "            target={'component': {'command_id': 'component_b', "
+        + "'slot': 'component'}},\n"
+        + "            args={'position_mm': [20, 0, 0], 'rotation_axis': 'z', "
+        + "'angle_deg': 0},\n"
+        + "            depends=('box_b',)),\n"
+        + "        command('inspect', 'inspect_model', depends=('place_b',)),\n"
+        + "    ), acceptance=AcceptanceSpec(id='accept-real-components', criteria=()),\n"
+        + ")\n"
+        + "store = object.__new__(LocalRevisionStore)\n"
+        + "executor = InProcessCadExecutor(store=store)\n"
+        + "session = executor.create_empty(revision_id=candidate_revision)\n"
+        + "loaded = None\n"
+        + "try:\n"
+        + "    head = ProjectHead(project_id=project_id, generation=0,\n"
+        + "        revision_id=base_revision, manifest_sha256='a' * 64)\n"
+        + "    candidate = ActiveCandidate(project_id=project_id, base_head=head,\n"
+        + "        binding=SessionBinding(project_id=project_id,\n"
+        + "            revision_id=candidate_revision, session=session),\n"
+        + "        model_path=root / 'model.FCStd', step_path=root / 'model.step')\n"
+        + "    outcomes = executor.execute_program(\n"
+        + "        program=executor.validate_program(program), candidate=candidate)\n"
+        + "    assert len(outcomes) == 6 and all(item.result.ok for item in outcomes), "
+        + "[item.result.to_mapping() for item in outcomes]\n"
+        + "    components = _component_observations(session)\n"
+        + "    interferences = _interference_observations(session)\n"
+        + "    shape = _shape_observation(session)\n"
+        + "    assert len(components) == 2 and len(interferences) == 1\n"
+        + "    assert interferences[0].interfering is False\n"
+        + "    assert abs(shape.volume_mm3 - 1500.0) < 1e-7\n"
+        + "    assert abs(shape.bbox_mm[0] - 25.0) < 1e-7\n"
+        + "    executor.checkpoint_fcstd(session, root / 'model.FCStd')\n"
+        + "    (root / 'model.step').touch(mode=0o600)\n"
+        + "    _export_session_step(session=session, model_path=root / 'model.FCStd',\n"
+        + "        step_path=root / 'model.step')\n"
+        + "    assert (root / 'model.step').stat().st_size > 0\n"
+        + "    loaded = executor.load_fcstd(root / 'model.FCStd')\n"
+        + "    assert _component_observations(loaded) == components\n"
+        + "    assert _interference_observations(loaded) == interferences\n"
+        + "    assert _shape_observation(loaded) == shape\n"
+        + "    print('REAL_COMPONENT_PROGRAM_OK')\n"
+        + "finally:\n"
+        + "    if loaded is not None:\n"
+        + "        loaded.close_document()\n"
+        + "    session.close_document()\n"
+    )
+    result = subprocess.run(
+        [str(runtime_python), "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "REAL_COMPONENT_PROGRAM_OK" in result.stdout
+
+
 def test_rotate_rejects_requested_quaternion_with_wrong_translation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1336,9 +1670,7 @@ def test_explicit_component_observation_uses_container_global_placement() -> Non
         object_type="App::Part",
         provenance=provenance,
     )
-    member_identity = SimpleNamespace(
-        object_id="object_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    )
+    member_identity = SimpleNamespace(object_id="object_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 
     class ComponentSession:
         assembly = _FakeShape(volume=600.0)
@@ -1372,6 +1704,34 @@ def test_explicit_component_observation_uses_container_global_placement() -> Non
     assert observations[0].volume_mm3 == 600.0
     assert observations[0].center_of_mass_mm == (30.0, 5.0, 3.0)
     assert executor_module._managed_assembly_shape(ComponentSession()) is ComponentSession.assembly
+
+
+def test_component_entity_observation_ignores_app_part_aggregate_shape() -> None:
+    container = SimpleNamespace(
+        TypeId="App::Part",
+        Placement=_FakePlacement(0.0),
+        Shape=object(),
+    )
+    identity = SimpleNamespace(
+        object_id="object_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        feature_id=None,
+        object_type="App::Part",
+        semantic_role=SimpleNamespace(value="part"),
+        provenance=SimpleNamespace(
+            to_mapping=lambda: {"source": "model", "operation_id": "component-a"}
+        ),
+    )
+
+    observation = executor_module._entity_observation(container, identity)
+
+    assert observation.object_type == "App::Part"
+    assert observation.placement == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    assert observation.volume_mm3 is None
+    assert observation.area_mm2 is None
+    assert observation.bbox_mm is None
+    assert observation.center_of_mass_mm is None
+    assert observation.valid_shape is None
+    assert observation.solid_count is None
 
 
 def test_compound_observation_derives_volume_weighted_center_of_mass() -> None:

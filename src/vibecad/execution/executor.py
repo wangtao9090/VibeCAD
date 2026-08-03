@@ -1,7 +1,7 @@
 """Trusted in-process CAD execution and sealed-observation boundary.
 
-The executor binds only the six operations in the default ModelProgram
-registry.  It never accepts a handler mapping, output path, observation, or
+The executor binds only operations in the default ModelProgram registry.  It
+never accepts a handler mapping, output path, observation, or
 retry policy from the program.  STEP export and verification evidence are
 derived from coordinator-owned candidate capabilities and the immutable local
 revision store.
@@ -76,6 +76,7 @@ from vibecad.validation import (
     ComponentObservation,
     EntityObservation,
     EntityParameterObservation,
+    InterferenceObservation,
     ObservationSnapshot,
     PreservationObservation,
     ShapeObservation,
@@ -573,7 +574,11 @@ def _entity_observation(obj: object, identity: EntityIdentity) -> EntityObservat
             for name, property_name, unit in _PARAMETER_FIELDS.get(identity.object_type, ())
         )
         placement = _canonical_placement(obj.Placement)  # type: ignore[attr-defined]
-        shape = getattr(obj, "Shape", None)
+        # ``App::Part`` starts exposing an aggregate Shape after its first member is
+        # added.  That aggregate belongs to the component-observation contract, not
+        # to the container's identity observation; treating it as entity geometry
+        # makes the same component change shape merely because membership changed.
+        shape = None if identity.object_type == "App::Part" else getattr(obj, "Shape", None)
         geometry = (
             {
                 "volume_mm3": None,
@@ -669,6 +674,45 @@ def _component_observations(session: object) -> tuple[ComponentObservation, ...]
         raise _ObservationFailure from None
 
 
+def _interference_observations(session: object) -> tuple[InterferenceObservation, ...]:
+    """Compute the complete ordered pairwise common-volume matrix."""
+
+    list_records = getattr(session, "list_component_identity_records", None)
+    if not callable(list_records):
+        return ()
+    try:
+        records = tuple(list_records())
+        global_shapes = {
+            identity.object_id: session.get_result_shape(part_name).transformed(  # type: ignore[attr-defined]
+                container.Placement.toMatrix()
+            )
+            for part_name, container, identity, _members in records
+        }
+        observations = []
+        with _silence_fd1():
+            for left in range(len(records)):
+                for right in range(left + 1, len(records)):
+                    left_id = records[left][2].object_id
+                    right_id = records[right][2].object_id
+                    volume = _finite_number(
+                        global_shapes[left_id].common(global_shapes[right_id]).Volume,
+                        nonnegative=True,
+                    )
+                    observations.append(
+                        InterferenceObservation(
+                            component_a_id=left_id,
+                            component_b_id=right_id,
+                            common_volume_mm3=volume,
+                            interfering=volume > 1e-6,
+                        )
+                    )
+        return tuple(observations)
+    except _ObservationFailure:
+        raise
+    except Exception:
+        raise _ObservationFailure from None
+
+
 def _reloaded_observations(
     path: Path,
     *,
@@ -677,12 +721,14 @@ def _reloaded_observations(
     ShapeObservation | None,
     tuple[EntityObservation, ...],
     tuple[ComponentObservation, ...],
+    tuple[InterferenceObservation, ...],
 ]:
     probe = None
     failed = False
     shape: ShapeObservation | None = None
     entities: tuple[EntityObservation, ...] = ()
     components: tuple[ComponentObservation, ...] = ()
+    interferences: tuple[InterferenceObservation, ...] = ()
     try:
         probe = _Session()
         probe.load_document(path)
@@ -690,6 +736,7 @@ def _reloaded_observations(
             shape = _shape_observation(probe)
         entities = _entity_observations(probe)
         components = _component_observations(probe)
+        interferences = _interference_observations(probe)
     except Exception:
         failed = True
     finally:
@@ -700,7 +747,7 @@ def _reloaded_observations(
                 failed = True
     if failed:
         raise _ObservationFailure
-    return shape, entities, components
+    return shape, entities, components, interferences
 
 
 def _preservation_observations(
@@ -981,6 +1028,9 @@ def _managed_create(
     *,
     leaf: Callable[..., object],
     expected_type: str,
+    project_id: str,
+    revision_id: str,
+    component: object | None = None,
     **kwargs: object,
 ) -> dict[str, object]:
     """Create one primitive, bind identity, and rebuild the result from live facts."""
@@ -988,11 +1038,23 @@ def _managed_create(
     if context.preserve:
         raise _operation_failure()
     before = _entity_observations(session)
+    part_name: str | None = None
+    component_identity: EntityIdentity | None = None
+    if component is not None:
+        _container, component_identity, part_name = _resolve_component_target(
+            session,
+            component,
+            project_id=project_id,
+            revision_id=revision_id,
+        )
     try:
         document_before = tuple(session.doc.Objects)  # type: ignore[attr-defined]
     except Exception:
         raise _operation_failure() from None
-    leaf(session, **kwargs)
+    if part_name is None:
+        leaf(session, **kwargs)
+    else:
+        leaf(session, part=part_name, **kwargs)
     attach = getattr(session, "attach_object_identity", None)
     read_identity = getattr(session, "read_object_identity", None)
     if not callable(attach) or not callable(read_identity):
@@ -1009,6 +1071,8 @@ def _managed_create(
         obj = added[0]
         object_type = obj.TypeId
         if object_type != expected_type:
+            raise ValueError
+        if part_name is not None and session.owner_of(obj.Name) != part_name:  # type: ignore[attr-defined]
             raise ValueError
         identity = EntityIdentity(
             object_id=f"object_{secrets.token_hex(16)}",
@@ -1138,7 +1202,7 @@ def _managed_create(
         or not _same_geometry_vector(created.center_of_mass_mm, expected_center)
     ):
         raise _operation_failure()
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "kind": "entity_created",
         "operation": context.operation,
@@ -1147,6 +1211,9 @@ def _managed_create(
         "after": created.to_mapping(),
         "preservation": [item.to_mapping() for item in comparisons],
     }
+    if component_identity is not None:
+        result["component_id"] = component_identity.object_id
+    return result
 
 
 def _resolve_entity_target(
@@ -1179,6 +1246,41 @@ def _resolve_entity_target(
         return obj, identity
     except Exception:
         raise _operation_failure() from None
+
+
+def _resolve_component_target(
+    session: object,
+    target: object,
+    *,
+    project_id: str,
+    revision_id: str,
+) -> tuple[object, EntityIdentity, str]:
+    obj, identity = _resolve_entity_target(
+        session,
+        target,
+        project_id=project_id,
+        revision_id=revision_id,
+    )
+    if (
+        identity.object_type != "App::Part"
+        or identity.semantic_role is not SemanticRole.PART
+        or identity.feature_id is not None
+    ):
+        raise _operation_failure()
+    list_records = getattr(session, "list_component_identity_records", None)
+    if not callable(list_records):
+        raise _operation_failure()
+    try:
+        matches = tuple(
+            (part_name, container, component_identity)
+            for part_name, container, component_identity, _members in list_records()
+            if container is obj and component_identity == identity
+        )
+    except Exception:
+        raise _operation_failure() from None
+    if len(matches) != 1:
+        raise _operation_failure()
+    return obj, identity, matches[0][0]
 
 
 def _parameter_value(observation: EntityObservation, name: str) -> int | float:
@@ -1349,9 +1451,17 @@ def _managed_inspect(
     if context.preserve:
         raise _operation_failure()
     before = _entity_observations(session)
+    components_before = _component_observations(session)
+    interferences_before = _interference_observations(session)
     shape = _shape_observation(session)
     after = _entity_observations(session)
-    if before != after:
+    components_after = _component_observations(session)
+    interferences_after = _interference_observations(session)
+    if (
+        before != after
+        or components_before != components_after
+        or interferences_before != interferences_after
+    ):
         raise _operation_failure()
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1359,6 +1469,215 @@ def _managed_inspect(
         "operation": context.operation,
         "shape": shape.to_mapping(),
         "entities": [item.to_mapping() for item in after],
+        "components": [item.to_mapping() for item in components_after],
+        "interferences": [item.to_mapping() for item in interferences_after],
+    }
+
+
+def _managed_create_component(
+    session: object,
+    context: _InvocationContext,
+    *,
+    name: object,
+) -> dict[str, object]:
+    if context.preserve or type(name) is not str:
+        raise _operation_failure()
+    before = _entity_observations(session)
+    before_by_id = _observation_map(before)
+    create = getattr(session, "create_component", None)
+    if not callable(create):
+        raise _operation_failure()
+    identity = EntityIdentity(
+        object_id=f"object_{secrets.token_hex(16)}",
+        feature_id=None,
+        object_type="App::Part",
+        semantic_role=SemanticRole.PART,
+        provenance=Provenance(
+            source=ProvenanceSource(context.source.value),
+            operation_id=context.operation_id,
+        ),
+    )
+    try:
+        result = create(name, identity)
+    except Exception:
+        raise _operation_failure() from None
+    if result != {"component": name, "object_id": identity.object_id}:
+        raise _operation_failure()
+    after = _entity_observations(session)
+    after_by_id = _observation_map(after)
+    if set(after_by_id) - set(before_by_id) != {identity.object_id}:
+        raise _operation_failure()
+    comparisons = _require_non_target_preservation(
+        before_by_id,
+        {key: value for key, value in after_by_id.items() if key != identity.object_id},
+        target=None,
+    )
+    created = after_by_id[identity.object_id]
+    if (
+        created.feature_id is not None
+        or created.object_type != "App::Part"
+        or created.semantic_role != "part"
+        or created.provenance != identity.provenance.to_mapping()
+        or any(
+            value is not None
+            for value in (
+                created.volume_mm3,
+                created.area_mm2,
+                created.bbox_mm,
+                created.center_of_mass_mm,
+                created.valid_shape,
+                created.solid_count,
+            )
+        )
+    ):
+        raise _operation_failure()
+    records = session.list_component_identity_records()  # type: ignore[attr-defined]
+    if not any(
+        part_name == name and component_identity == identity and not members
+        for part_name, _container, component_identity, members in records
+    ):
+        raise _operation_failure()
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "component_created",
+        "operation": context.operation,
+        "component_id": identity.object_id,
+        "name": name,
+        "after": created.to_mapping(),
+        "preservation": [item.to_mapping() for item in comparisons],
+    }
+
+
+def _set_absolute_component_placement(
+    session: object,
+    *,
+    part_name: str,
+    position: object,
+    rotation_axis: object,
+    angle: object,
+) -> tuple[int | float, ...]:
+    if (
+        type(position) is not tuple
+        or len(position) != 3
+        or type(rotation_axis) is not str
+        or rotation_axis not in {"x", "y", "z"}
+        or type(angle) not in {int, float}
+        or not math.isfinite(angle)
+        or not -360.0 < float(angle) < 360.0
+    ):
+        raise _operation_failure()
+    axes = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}
+    try:
+        with session._transaction(  # type: ignore[attr-defined]
+            "place_component",
+            claim_new_objects=False,
+        ):
+            with _silence_fd1():
+                import FreeCAD  # noqa: PLC0415
+
+                container = session._parts[part_name]["container"]  # type: ignore[attr-defined]
+                placement = FreeCAD.Placement(
+                    FreeCAD.Vector(*position),
+                    FreeCAD.Rotation(FreeCAD.Vector(*axes[rotation_axis]), float(angle)),
+                )
+                expected = _canonical_placement(placement)
+                if _canonical_placement(container.Placement) == expected:
+                    raise ValueError
+                container.Placement = placement
+                session.doc.recompute()  # type: ignore[attr-defined]
+                for component_name, info in session._parts.items():  # type: ignore[attr-defined]
+                    if info["objects"]:
+                        session.assert_valid_solid(  # type: ignore[attr-defined]
+                            session.get_result_shape(component_name)  # type: ignore[attr-defined]
+                        )
+                interferences = _interference_observations(session)
+                if any(item.interfering for item in interferences):
+                    raise ValueError
+        return expected
+    except ExecutorError:
+        raise
+    except Exception:
+        raise _operation_failure() from None
+
+
+def _managed_place_component(
+    session: object,
+    context: _InvocationContext,
+    *,
+    project_id: str,
+    revision_id: str,
+    target: object,
+    position: object,
+    rotation_axis: object,
+    angle: object,
+) -> dict[str, object]:
+    if context.preserve:
+        raise _operation_failure()
+    before_entities = _entity_observations(session)
+    before_by_id = _observation_map(before_entities)
+    before_components = {item.component_id: item for item in _component_observations(session)}
+    _container, identity, part_name = _resolve_component_target(
+        session,
+        target,
+        project_id=project_id,
+        revision_id=revision_id,
+    )
+    old_component = before_components.get(identity.object_id)
+    if old_component is None:
+        raise _operation_failure()
+    expected_placement = _set_absolute_component_placement(
+        session,
+        part_name=part_name,
+        position=position,
+        rotation_axis=rotation_axis,
+        angle=angle,
+    )
+    after_entities = _entity_observations(session)
+    after_by_id = _observation_map(after_entities)
+    comparisons = _require_non_target_preservation(
+        before_by_id,
+        after_by_id,
+        target=identity.object_id,
+    )
+    new_entity = after_by_id.get(identity.object_id)
+    if new_entity is None or new_entity.placement != expected_placement:
+        raise _operation_failure()
+    after_components = {item.component_id: item for item in _component_observations(session)}
+    new_component = after_components.get(identity.object_id)
+    if new_component is None or new_component.placement != expected_placement:
+        raise _operation_failure()
+    if set(before_components) != set(after_components) or any(
+        before_components[component_id] != after_components[component_id]
+        for component_id in before_components
+        if component_id != identity.object_id
+    ):
+        raise _operation_failure()
+    if (
+        old_component.component_id != new_component.component_id
+        or old_component.object_type != new_component.object_type
+        or old_component.provenance != new_component.provenance
+        or old_component.member_object_ids != new_component.member_object_ids
+        or not _same_geometry_number(
+            old_component.volume_mm3,
+            new_component.volume_mm3,
+        )
+        or not _same_geometry_number(old_component.area_mm2, new_component.area_mm2)
+        or old_component.valid_shape is not new_component.valid_shape
+        or old_component.solid_count != new_component.solid_count
+    ):
+        raise _operation_failure()
+    interferences = _interference_observations(session)
+    if any(item.interfering for item in interferences):
+        raise _operation_failure()
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "component_placed",
+        "operation": context.operation,
+        "component_id": identity.object_id,
+        "before": old_component.to_mapping(),
+        "after": new_component.to_mapping(),
+        "interferences": [item.to_mapping() for item in interferences],
+        "preservation": [item.to_mapping() for item in comparisons],
     }
 
 
@@ -2143,7 +2462,14 @@ class InProcessCadExecutor(CadExecutionPort):
                 for selector in selectors
             ):
                 raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
-            fixed_leaves = (_add_box, _add_cylinder, _modify_part, _move_part, _rotate_part)
+            fixed_leaves = (
+                _add_box,
+                _add_cylinder,
+                _modify_part,
+                _move_part,
+                _rotate_part,
+                _set_absolute_component_placement,
+            )
             if not all(callable(item) for item in fixed_leaves):
                 raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
             session = candidate.binding.session
@@ -2167,6 +2493,8 @@ class InProcessCadExecutor(CadExecutionPort):
                         session,
                         leaf=_add_box,
                         expected_type="Part::Box",
+                        project_id=project_id,
+                        revision_id=revision_id,
                     ),
                 ),
                 "create_cylinder": _queued_handler(
@@ -2176,6 +2504,8 @@ class InProcessCadExecutor(CadExecutionPort):
                         session,
                         leaf=_add_cylinder,
                         expected_type="Part::Cylinder",
+                        project_id=project_id,
+                        revision_id=revision_id,
                     ),
                 ),
                 "modify_parameter": _queued_handler(
@@ -2208,6 +2538,19 @@ class InProcessCadExecutor(CadExecutionPort):
                 "inspect_model": _queued_handler(
                     contexts.get("inspect_model", deque()),
                     partial(_managed_inspect, session),
+                ),
+                "create_component": _queued_handler(
+                    contexts.get("create_component", deque()),
+                    partial(_managed_create_component, session),
+                ),
+                "place_component": _queued_handler(
+                    contexts.get("place_component", deque()),
+                    partial(
+                        _managed_place_component,
+                        session,
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
                 ),
             }
         except ExecutorError:
@@ -2313,10 +2656,11 @@ class InProcessCadExecutor(CadExecutionPort):
             live_shape = _shape_observation(candidate.binding.session)
             live_entities = _entity_observations(candidate.binding.session)
             live_components = _component_observations(candidate.binding.session)
+            live_interferences = _interference_observations(candidate.binding.session)
         except _ObservationFailure:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
         try:
-            sealed_shape, entities, components = _reloaded_observations(
+            sealed_shape, entities, components, interferences = _reloaded_observations(
                 model_path,
                 include_shape=True,
             )
@@ -2339,6 +2683,7 @@ class InProcessCadExecutor(CadExecutionPort):
             or sealed_shape != live_shape
             or entities != live_entities
             or components != live_components
+            or interferences != live_interferences
         ):
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
 
@@ -2373,7 +2718,12 @@ class InProcessCadExecutor(CadExecutionPort):
             if not _artifact_matches(base_actual, base.model):
                 raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
             try:
-                _, before_entities, _before_components = _reloaded_observations(
+                (
+                    _,
+                    before_entities,
+                    _before_components,
+                    _before_interferences,
+                ) = _reloaded_observations(
                     base_path,
                     include_shape=False,
                 )
@@ -2440,6 +2790,7 @@ class InProcessCadExecutor(CadExecutionPort):
             ),
             entities=entities,
             components=components,
+            interferences=interferences,
             preservations=preservations,
         )
         artifacts = (

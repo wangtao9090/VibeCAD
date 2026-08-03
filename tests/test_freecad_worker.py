@@ -158,6 +158,67 @@ def _inspect_program(*, base_revision: str = _BASE_REVISION) -> ModelProgram:
     )
 
 
+def _component_program(*, base_revision: str = _BASE_REVISION) -> ModelProgram:
+    def command(
+        identifier: str,
+        operation: str,
+        *,
+        target: dict[str, object] | None = None,
+        args: dict[str, object] | None = None,
+        depends_on: tuple[str, ...] = (),
+    ) -> ModelCommand:
+        return ModelCommand(
+            id=identifier,
+            op=operation,
+            target={} if target is None else target,
+            args={} if args is None else args,
+            depends_on=depends_on,
+            preserve=(),
+            source=ValueSource.MODEL,
+        )
+
+    return ModelProgram(
+        task_id=_TASK_ID,
+        base_revision=base_revision,
+        operations=(
+            command("component-a", "create_component", args={"name": "A"}),
+            command(
+                "box-a",
+                "create_box",
+                target={"component": {"command_id": "component-a", "slot": "component"}},
+                args={"length_mm": 10, "width_mm": 10, "height_mm": 10},
+                depends_on=("component-a",),
+            ),
+            command(
+                "component-b",
+                "create_component",
+                args={"name": "B"},
+                depends_on=("box-a",),
+            ),
+            command(
+                "box-b",
+                "create_box",
+                target={"component": {"command_id": "component-b", "slot": "component"}},
+                args={"length_mm": 5, "width_mm": 10, "height_mm": 10},
+                depends_on=("component-b",),
+            ),
+            command(
+                "place-b",
+                "place_component",
+                target={"component": {"command_id": "component-b", "slot": "component"}},
+                args={
+                    "position_mm": (20, 0, 0),
+                    "rotation_axis": "z",
+                    "angle_deg": 0,
+                },
+                depends_on=("box-b",),
+            ),
+            command("inspect", "inspect_model", depends_on=("place-b",)),
+        ),
+        acceptance=_acceptance(),
+    )
+
+
 def _candidate_directory_at(candidate: Path) -> Path:
     candidate.mkdir(mode=0o700)
     candidate.chmod(0o700)
@@ -422,6 +483,7 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                 "export_replace",
                 "revision_observe",
                 "observe_bad",
+                "observe_bad_interferences",
                 "validation_idle",
                 "validation_bad_claim",
                 "validation_cross",
@@ -491,10 +553,24 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                         result = {{"session_id": "worker_session_" + "8" * 32}}
                     elif method == "session.observe" and mode == "observe_bad":
                         result = {{"entities": [], "shape": {{}}}}
+                    elif method == "session.observe" and mode == "observe_bad_interferences":
+                        result = {{
+                            "components": [],
+                            "entities": [],
+                            "interferences": [{{
+                                "schema_version": 1,
+                                "component_a_id": "object_" + "1" * 32,
+                                "component_b_id": "object_" + "2" * 32,
+                                "common_volume_mm3": 0,
+                                "interfering": False,
+                            }}],
+                            "shape": None,
+                        }}
                     elif method == "session.observe":
                         result = {{
                             "components": [],
                             "entities": [],
+                            "interferences": [],
                             "shape": {{
                                 "area_mm2": 6,
                                 "bbox_mm": [1, 1, 1],
@@ -2983,11 +3059,15 @@ def test_parent_revision_observe_lifecycle_uses_opaque_capabilities(
         )
         handle = worker.bind_revision(store=rig.store, revision=revision)
         session = worker.load_revision(handle)
-        shape, entities, components = worker.observe(session=session, capability=handle)
+        shape, entities, components, interferences = worker.observe(
+            session=session,
+            capability=handle,
+        )
         assert shape is not None
         assert shape.volume_mm3 == 1
         assert entities == ()
         assert components == ()
+        assert interferences == ()
         with pytest.raises(WorkerError) as still_bound:
             worker.release_revision(handle)
         assert still_bound.value.code is WorkerErrorCode.INVALID_HANDLE
@@ -2997,10 +3077,12 @@ def test_parent_revision_observe_lifecycle_uses_opaque_capabilities(
         worker.close()
 
 
+@pytest.mark.parametrize("mode", ("observe_bad", "observe_bad_interferences"))
 def test_malformed_observation_fences_the_entire_generation(
     tmp_path: Path,
+    mode: str,
 ) -> None:
-    process, _grandchild = _process(tmp_path, "observe_bad")
+    process, _grandchild = _process(tmp_path, mode)
     worker = FreeCadWorker(process)
     with _candidate_rig(tmp_path, suffix="observe-bad-store") as rig:
         revision = rig.store.load_revision(
@@ -4010,6 +4092,75 @@ def test_real_managed_daemon_fault_matrix_recovers_without_source_corruption(
 
 
 @pytest.mark.slow
+def test_real_managed_worker_preserves_component_observations_and_interference(
+    tmp_path: Path,
+) -> None:
+    python_raw = os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON")
+    if not python_raw:
+        pytest.skip("managed FreeCAD Python was not requested")
+    python = Path(python_raw)
+    if not python.is_file():
+        pytest.skip("managed FreeCAD Python is unavailable")
+
+    from vibecad.runtime import paths as runtime_paths
+    from vibecad.runtime.status import capture_runtime_generation_evidence
+
+    evidence = capture_runtime_generation_evidence(runtime_paths.active_runtime_prefix())
+    assert python.resolve() == evidence.python.resolve()
+
+    source_root = Path(__file__).parents[1] / "src"
+    with _candidate_rig(tmp_path, suffix="real-component-store") as rig:
+        worker = FreeCadWorker.start_managed(source_root=source_root)
+        candidate = None
+        try:
+            candidate = worker.bind_candidate(
+                store=rig.store,
+                lease=rig.lease,
+                base_head=rig.head,
+                revision_id=rig.revision_id,
+            )
+            session = worker.create_empty(candidate)
+            outcomes = worker.execute_program(
+                program=_component_program(base_revision=rig.head.revision_id),
+                candidate=candidate,
+                session=session,
+            )
+            assert [item.result.ok for item in outcomes] == [True] * 6
+            before = worker.observe(
+                session=session,
+                capability=candidate,
+            )
+            worker.checkpoint(session=session, candidate=candidate)
+            worker.export_step(session=session, candidate=candidate)
+            worker.close_session(session)
+
+            loaded = worker.load_fcstd(candidate)
+            after = worker.observe(
+                session=loaded,
+                capability=candidate,
+            )
+            assert after == before
+            shape, entities, components, interferences = after
+            assert shape is not None
+            assert shape.volume_mm3 == pytest.approx(1500.0)
+            assert shape.bbox_mm == pytest.approx((25.0, 10.0, 10.0))
+            assert len(entities) == 4
+            assert len(components) == 2
+            assert sorted(item.volume_mm3 for item in components) == pytest.approx([500.0, 1000.0])
+            assert len(interferences) == 1
+            assert interferences[0].interfering is False
+            assert interferences[0].common_volume_mm3 == pytest.approx(0.0)
+            worker.close_session(loaded)
+            assert (rig.directory / "model.FCStd").stat().st_size > 0
+            assert (rig.directory / "model.step").stat().st_size > 0
+        finally:
+            if candidate is not None and worker.state is WorkerGenerationState.READY:
+                with contextlib.suppress(WorkerError):
+                    worker.release_candidate(candidate)
+            worker.close()
+
+
+@pytest.mark.slow
 def test_real_managed_worker_load_modify_checkpoint_and_export(
     tmp_path: Path,
 ) -> None:
@@ -4040,13 +4191,19 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
                 revision=baseline,
             )
             baseline_session = worker.load_revision(baseline_handle)
-            baseline_shape, baseline_entities, baseline_components = worker.observe(
+            (
+                baseline_shape,
+                baseline_entities,
+                baseline_components,
+                baseline_interferences,
+            ) = worker.observe(
                 session=baseline_session,
                 capability=baseline_handle,
             )
             assert baseline_shape is None
             assert baseline_entities == ()
             assert baseline_components == ()
+            assert baseline_interferences == ()
             worker.close_session(baseline_session)
             worker.release_revision(baseline_handle)
 
@@ -4078,7 +4235,12 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
             shape = loaded_outcomes[0].result.value["shape"]
             assert shape["volume_mm3"] == pytest.approx(9_000)
             assert tuple(shape["bbox_mm"]) == pytest.approx((15, 20, 30))
-            observed_shape, observed_entities, observed_components = worker.observe(
+            (
+                observed_shape,
+                observed_entities,
+                observed_components,
+                observed_interferences,
+            ) = worker.observe(
                 session=loaded,
                 capability=candidate,
             )
@@ -4086,6 +4248,7 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
             assert observed_shape.volume_mm3 == pytest.approx(9_000)
             assert observed_entities
             assert observed_components == ()
+            assert observed_interferences == ()
             worker.close_session(loaded)
             sessions = tuple(worker.load_fcstd(candidate) for _index in range(6))
             with pytest.raises(WorkerError) as capacity:
@@ -4156,7 +4319,12 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
                 revision=sealed,
             )
             revision_session = worker.load_revision(revision_handle)
-            revision_shape, revision_entities, revision_components = worker.observe(
+            (
+                revision_shape,
+                revision_entities,
+                revision_components,
+                revision_interferences,
+            ) = worker.observe(
                 session=revision_session,
                 capability=revision_handle,
             )
@@ -4164,6 +4332,7 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
             assert revision_shape.volume_mm3 == pytest.approx(9_000)
             assert revision_entities
             assert revision_components == ()
+            assert revision_interferences == ()
             worker.close_session(revision_session)
             worker.release_revision(revision_handle)
         finally:

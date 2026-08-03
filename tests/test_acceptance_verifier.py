@@ -28,6 +28,7 @@ from vibecad.validation import (
     ComponentObservation,
     EntityObservation,
     EntityParameterObservation,
+    InterferenceObservation,
     ObservationSnapshot,
     PreservationObservation,
     ShapeObservation,
@@ -58,6 +59,8 @@ DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 VERIFICATION_ID_RE = re.compile(r"^verification_[0-9a-f]{32}$")
 OBJECT_A = "object_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 OBJECT_B = "object_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+OBJECT_C = "object_cccccccccccccccccccccccccccccccc"
+OBJECT_D = "object_dddddddddddddddddddddddddddddddd"
 FEATURE_A = "feature_11111111111111111111111111111111"
 FEATURE_B = "feature_22222222222222222222222222222222"
 
@@ -164,6 +167,20 @@ def _component_entity(object_id: str = OBJECT_A) -> EntityObservation:
     )
 
 
+def _interference(
+    *,
+    component_a_id: str = OBJECT_A,
+    component_b_id: str = OBJECT_B,
+    common_volume_mm3: float = 0.0,
+) -> InterferenceObservation:
+    return InterferenceObservation(
+        component_a_id=component_a_id,
+        component_b_id=component_b_id,
+        common_volume_mm3=common_volume_mm3,
+        interfering=common_volume_mm3 > 1e-6,
+    )
+
+
 def _preservation(
     target: str = "modify",
     *,
@@ -186,6 +203,7 @@ def _snapshot(
     artifacts: tuple[ArtifactObservation, ...] | None = None,
     entities: tuple[EntityObservation, ...] = (),
     components: tuple[ComponentObservation, ...] = (),
+    interferences: tuple[InterferenceObservation, ...] = (),
     preservations: tuple[PreservationObservation, ...] = (),
 ) -> ObservationSnapshot:
     return ObservationSnapshot(
@@ -194,7 +212,24 @@ def _snapshot(
         artifacts=(_artifact(),) if artifacts is None else artifacts,
         entities=entities,
         components=components,
+        interferences=interferences,
         preservations=preservations,
+    )
+
+
+def _assembly_snapshot(*, common_volume_mm3: float = 0.0) -> ObservationSnapshot:
+    return _snapshot(
+        entities=(
+            _component_entity(OBJECT_A),
+            _component_entity(OBJECT_B),
+            _entity(object_id=OBJECT_C),
+            _entity(object_id=OBJECT_D, feature_id=FEATURE_B),
+        ),
+        components=(
+            _component(component_id=OBJECT_A, member_object_ids=(OBJECT_C,)),
+            _component(component_id=OBJECT_B, member_object_ids=(OBJECT_D,)),
+        ),
+        interferences=(_interference(common_volume_mm3=common_volume_mm3),),
     )
 
 
@@ -406,6 +441,7 @@ def test_public_surface_is_closed_and_function_signatures_have_no_evidence_escap
         "ComponentObservation",
         "EntityObservation",
         "EntityParameterObservation",
+        "InterferenceObservation",
         "ObservationSnapshot",
         "PreservationObservation",
         "ShapeObservation",
@@ -862,9 +898,7 @@ def test_snapshot_binds_sorted_per_entity_and_preservation_facts() -> None:
         )
     )
     changed_preservation = _snapshot(
-        preservations=(
-            _preservation(preserved=False, changed_fields=("placement",)),
-        )
+        preservations=(_preservation(preserved=False, changed_fields=("placement",)),)
     )
     assert changed_entity.observation_digest != snapshot.observation_digest
     assert changed_preservation.observation_digest != snapshot.observation_digest
@@ -882,10 +916,74 @@ def test_snapshot_binds_explicit_component_membership_and_geometry() -> None:
     mapping = snapshot.to_mapping()
     assert mapping["components"] == [component.to_mapping()]
     assert ObservationSnapshot.from_mapping(mapping) == snapshot
-    assert snapshot.observation_digest != _snapshot(
-        entities=(component_entity, member_entity),
-        components=(_component(volume_mm3=101.0),),
-    ).observation_digest
+    assert (
+        snapshot.observation_digest
+        != _snapshot(
+            entities=(component_entity, member_entity),
+            components=(_component(volume_mm3=101.0),),
+        ).observation_digest
+    )
+
+
+def test_snapshot_binds_complete_ordered_component_interference_matrix() -> None:
+    entities = (
+        _component_entity(OBJECT_A),
+        _component_entity(OBJECT_B),
+        _entity(object_id=OBJECT_C),
+        _entity(object_id=OBJECT_D, feature_id=FEATURE_B),
+    )
+    components = (
+        _component(component_id=OBJECT_A, member_object_ids=(OBJECT_C,)),
+        _component(component_id=OBJECT_B, member_object_ids=(OBJECT_D,)),
+    )
+    snapshot = _snapshot(
+        entities=entities,
+        components=components,
+        interferences=(_interference(),),
+    )
+
+    mapping = snapshot.to_mapping()
+    assert mapping["interferences"] == [_interference().to_mapping()]
+    assert ObservationSnapshot.from_mapping(mapping) == snapshot
+
+    with pytest.raises(ValidationError) as caught:
+        _snapshot(
+            entities=entities,
+            components=components,
+            interferences=(_interference(component_a_id=OBJECT_A, component_b_id=OBJECT_C),),
+        )
+    error = _assert_error(caught, ValidationErrorCode.INVALID_VALUE)
+    assert error.path == "/interferences"
+
+
+def test_assembly_acceptance_checks_component_count_and_interference_policy() -> None:
+    compiled = compile_acceptance_spec(
+        _spec(
+            _criterion(
+                "components",
+                AcceptanceKind.ASSEMBLY,
+                "component_count",
+                target="assembly",
+                expected=2,
+            ),
+            _criterion(
+                "clearance",
+                AcceptanceKind.ASSEMBLY,
+                "interference_free",
+                target="assembly",
+                expected=True,
+            ),
+        )
+    )
+
+    passing = _verify(compiled, _assembly_snapshot())
+    colliding = _verify(compiled, _assembly_snapshot(common_volume_mm3=5.0))
+
+    assert passing.report.passed is True
+    assert [item.observed for item in passing.report.verdicts] == [2, True]
+    assert colliding.report.passed is False
+    assert colliding.report.verdicts[1].observed is False
+    assert colliding.report.verdicts[1].evidence == ("/interferences",)
 
 
 @pytest.mark.parametrize(
@@ -939,9 +1037,7 @@ def test_snapshot_reads_legacy_wire_digest_and_upgrades_new_digest_fields() -> N
         separators=(",", ":"),
         sort_keys=True,
     ).encode("ascii")
-    legacy_digest = hashlib.sha256(
-        b"vibecad-observation-snapshot-v1\0" + canonical
-    ).hexdigest()
+    legacy_digest = hashlib.sha256(b"vibecad-observation-snapshot-v1\0" + canonical).hexdigest()
     parsed = ObservationSnapshot.from_mapping(
         {**legacy_payload, "observation_digest": legacy_digest}
     )
@@ -952,6 +1048,7 @@ def test_snapshot_reads_legacy_wire_digest_and_upgrades_new_digest_fields() -> N
     assert parsed.to_mapping()["entities"] == []
     assert parsed.to_mapping()["preservations"] == []
     assert "components" not in parsed.to_mapping()
+    assert "interferences" not in parsed.to_mapping()
 
     incomplete = current.to_mapping()
     del incomplete["preservations"]
@@ -995,16 +1092,12 @@ def test_snapshot_reads_legacy_wire_digest_and_upgrades_new_digest_fields() -> N
             "/entities",
         ),
         (
-            lambda: _snapshot(
-                preservations=(_preservation("z"), _preservation("a"))
-            ),
+            lambda: _snapshot(preservations=(_preservation("z"), _preservation("a"))),
             ValidationErrorCode.INVALID_VALUE,
             "/preservations",
         ),
         (
-            lambda: _snapshot(
-                preservations=(_preservation("a"), _preservation("a"))
-            ),
+            lambda: _snapshot(preservations=(_preservation("a"), _preservation("a"))),
             ValidationErrorCode.DUPLICATE_TARGET,
             "/preservations",
         ),
@@ -2743,6 +2836,7 @@ def test_validation_modules_are_pure_closed_and_do_not_reference_execution_evide
                 "ComponentObservation",
                 "EntityObservation",
                 "EntityParameterObservation",
+                "InterferenceObservation",
                 "ObservationSnapshot",
                 "PreservationObservation",
                 "ShapeObservation",

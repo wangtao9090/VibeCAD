@@ -181,7 +181,7 @@ def test_nominal_port_extends_snapshot_port_and_reports_only_headless_verified()
         MAX_ADMITTED_RUNTIME_MS,
         MAX_ADMITTED_CREATED_OBJECTS,
         MAX_ADMITTED_RESULT_BYTES,
-    ) == (30_000, 1, 262_144)
+    ) == (30_000, 16, 262_144)
 
 
 def test_worker_port_is_one_lazy_immutable_freecad_runtime_adapter() -> None:

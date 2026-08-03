@@ -23,6 +23,7 @@ from vibecad.execution.executor import (
     _component_observations,
     _entity_observations,
     _export_session_step,
+    _interference_observations,
     _shape_observation,
 )
 from vibecad.execution.revisions import ProjectHead
@@ -794,6 +795,7 @@ class WorkerService:
                 shape = None if not objects else _shape_observation(session.value)
                 entities = _entity_observations(session.value)
                 components = _component_observations(session.value)
+                interferences = _interference_observations(session.value)
         except _ServiceError:
             raise
         except BaseException:
@@ -808,6 +810,7 @@ class WorkerService:
             "shape": None if shape is None else shape.to_mapping(),
             "entities": [item.to_mapping() for item in entities],
             "components": [item.to_mapping() for item in components],
+            "interferences": [item.to_mapping() for item in interferences],
         }
 
     def _validation_directory(

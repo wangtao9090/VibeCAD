@@ -26,7 +26,12 @@ from vibecad.interaction.cad import (
     ValidatedImportEvidence,
     ValidatedMaterializationEvidence,
 )
-from vibecad.validation import ComponentObservation, EntityObservation, ShapeObservation
+from vibecad.validation import (
+    ComponentObservation,
+    EntityObservation,
+    InterferenceObservation,
+    ShapeObservation,
+)
 from vibecad.worker.generation import (
     WorkerError,
     WorkerErrorCode,
@@ -1111,6 +1116,7 @@ class FreeCadWorker(_Opaque):
         ShapeObservation | None,
         tuple[EntityObservation, ...],
         tuple[ComponentObservation, ...],
+        tuple[InterferenceObservation, ...],
     ]:
         with self._operation_lock:
             self._ensure_process()
@@ -1144,10 +1150,11 @@ class FreeCadWorker(_Opaque):
             )
             try:
                 if (
-                    set(result) != {"shape", "entities", "components"}
+                    set(result) != {"shape", "entities", "components", "interferences"}
                     or (result["shape"] is not None and type(result["shape"]) is not dict)
                     or type(result["entities"]) is not list
                     or type(result["components"]) is not list
+                    or type(result["interferences"]) is not list
                 ):
                     raise ValueError
                 shape = (
@@ -1159,8 +1166,10 @@ class FreeCadWorker(_Opaque):
                     EntityObservation.from_mapping(item) for item in result["entities"]
                 )
                 components = tuple(
-                    ComponentObservation.from_mapping(item)
-                    for item in result["components"]
+                    ComponentObservation.from_mapping(item) for item in result["components"]
+                )
+                interferences = tuple(
+                    InterferenceObservation.from_mapping(item) for item in result["interferences"]
                 )
                 object_ids = tuple(item.object_id for item in entities)
                 if object_ids != tuple(sorted(object_ids)) or len(object_ids) != len(
@@ -1168,9 +1177,19 @@ class FreeCadWorker(_Opaque):
                 ):
                     raise ValueError
                 component_ids = tuple(item.component_id for item in components)
-                if component_ids != tuple(sorted(component_ids)) or len(
-                    component_ids
-                ) != len(set(component_ids)):
+                if component_ids != tuple(sorted(component_ids)) or len(component_ids) != len(
+                    set(component_ids)
+                ):
+                    raise ValueError
+                interference_pairs = tuple(
+                    (item.component_a_id, item.component_b_id) for item in interferences
+                )
+                expected_pairs = tuple(
+                    (component_ids[left], component_ids[right])
+                    for left in range(len(component_ids))
+                    for right in range(left + 1, len(component_ids))
+                )
+                if interference_pairs != expected_pairs:
                     raise ValueError
             except Exception:
                 self._protocol_loss()
@@ -1187,7 +1206,7 @@ class FreeCadWorker(_Opaque):
                         self._require_live_revision(revision_state)
                 except WorkerError:
                     self._protocol_loss()
-                return shape, entities, components
+                return shape, entities, components, interferences
 
     def _accept_artifact_result(
         self,

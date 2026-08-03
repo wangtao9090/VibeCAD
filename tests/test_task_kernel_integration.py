@@ -79,6 +79,22 @@ def current_managed_freecad_python() -> str:
     return str(python)
 
 
+@pytest.fixture(scope="session")
+def engine_compatible_managed_freecad_python() -> str:
+    """Use the existing managed engine while checkout server code is under development."""
+
+    if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
+        pytest.skip("set VIBECAD_RUN_INTEGRATION=1 to run the real FreeCAD gate")
+    from vibecad.runtime import paths
+
+    python = paths.active_runtime_python()
+    if not python.is_file() or not paths.ready_sentinel().is_file():
+        pytest.fail("an existing ready managed FreeCAD runtime is required")
+    if not runtime_status.engine_compatible(python):
+        pytest.fail("the existing managed FreeCAD runtime does not match current engine pins")
+    return str(python)
+
+
 _CHILD = r"""
 from __future__ import annotations
 
@@ -94,7 +110,12 @@ sys.path.insert(0, __SOURCE__)
 
 from vibecad.engine.session import Session
 from vibecad.execution.candidate import CandidateCoordinator, SessionBinding, SessionSlot
-from vibecad.execution.executor import InProcessCadExecutor
+from vibecad.execution.executor import (
+    InProcessCadExecutor,
+    _component_observations,
+    _interference_observations,
+    _managed_assembly_shape,
+)
 from vibecad.execution.revisions import (
     LocalRevisionStore,
     RevisionStoreError,
@@ -252,6 +273,30 @@ def acceptance(
     )
 
 
+def assembly_acceptance() -> AcceptanceSpec:
+    base = acceptance(1500.0, (25.0, 10.0, 10.0), 2)
+    return AcceptanceSpec(
+        id="acceptance-task-kernel-assembly",
+        criteria=(
+            *base.criteria,
+            criterion(
+                "component-count",
+                AcceptanceKind.ASSEMBLY,
+                "component_count",
+                "assembly",
+                2,
+            ),
+            criterion(
+                "interference-free",
+                AcceptanceKind.ASSEMBLY,
+                "interference_free",
+                "assembly",
+                True,
+            ),
+        ),
+    )
+
+
 def seed_identity(object_type: str = "Part::Box") -> EntityIdentity:
     return EntityIdentity(
         object_id=SEED_OBJECT_ID,
@@ -266,6 +311,54 @@ def seed_identity(object_type: str = "Part::Box") -> EntityIdentity:
 
 
 def program(base_revision: str, *, task_id: str = TASK_ID) -> ModelProgram:
+    if CASE == "assembly_review":
+        return ModelProgram(
+            task_id=task_id,
+            base_revision=base_revision,
+            operations=(
+                command("component-a", "create_component", args={"name": "A"}),
+                command(
+                    "box-a",
+                    "create_box",
+                    target={
+                        "component": {"command_id": "component-a", "slot": "component"}
+                    },
+                    args={"length_mm": 10, "width_mm": 10, "height_mm": 10},
+                    depends_on=("component-a",),
+                ),
+                command(
+                    "component-b",
+                    "create_component",
+                    args={"name": "B"},
+                    depends_on=("box-a",),
+                ),
+                command(
+                    "box-b",
+                    "create_box",
+                    target={
+                        "component": {"command_id": "component-b", "slot": "component"}
+                    },
+                    args={"length_mm": 5, "width_mm": 10, "height_mm": 10},
+                    depends_on=("component-b",),
+                ),
+                command(
+                    "place-b",
+                    "place_component",
+                    target={
+                        "component": {"command_id": "component-b", "slot": "component"}
+                    },
+                    args={
+                        "position_mm": (20, 0, 0),
+                        "rotation_axis": "z",
+                        "angle_deg": 0,
+                    },
+                    depends_on=("box-b",),
+                ),
+                command("inspect", "inspect_model", depends_on=("place-b",)),
+            ),
+            acceptance=assembly_acceptance(),
+        )
+
     if CASE == "partial_cylinder_rotation":
         selector = seed_identity("Part::Cylinder").to_selector(
             project_id=PROJECT_ID,
@@ -416,6 +509,8 @@ def shape_geometry(shape: object) -> dict[str, object]:
 
 
 def managed_shape(session: object) -> object:
+    if CASE == "assembly_review":
+        return _managed_assembly_shape(session)
     pairs = tuple(session.list_object_identities())
     shapes = tuple(
         obj.Shape
@@ -634,7 +729,7 @@ probe_session = None
 slot = None
 payload = {}
 try:
-    if CASE == "empty_success":
+    if CASE in {"empty_success", "assembly_review"}:
         with manager.acquire_project_write(PROJECT_ID) as lease:
             head_before = revision_store.initialize_empty_project(PROJECT_ID, lease)
         base_ref_before = revision_store.load_revision(PROJECT_ID, head_before.revision_id)
@@ -712,12 +807,26 @@ try:
         task_id=TASK_ID,
         project_id=PROJECT_ID,
         reasoning_owner=ReasoningOwner.EXTERNAL_PLAN,
-        review_policy=ReviewPolicy.AUTO_COMMIT,
+        review_policy=(
+            ReviewPolicy.REQUIRE_REVIEW
+            if CASE == "assembly_review"
+            else ReviewPolicy.AUTO_COMMIT
+        ),
     )
-    terminal = service.submit_model_program(
+    submitted = service.submit_model_program(
         task_id=TASK_ID,
         expected_generation=created.generation,
         program=program(head_before.revision_id),
+    )
+    review_draft = submitted.task_run.draft
+    terminal = (
+        service.accept_draft(
+            task_id=TASK_ID,
+            draft_id=review_draft.id,
+            expected_generation=submitted.generation,
+        )
+        if CASE == "assembly_review" and review_draft is not None
+        else submitted
     )
     durable = service.get_task(task_id=TASK_ID)
     task = terminal.task_run
@@ -778,12 +887,20 @@ try:
 
     reload_geometry = None
     reload_entities = None
+    reload_components = None
+    reload_interferences = None
     step_reload_geometry = None
     if candidate_ref is not None:
         candidate_model = revision_store.revision_model_path(PROJECT_ID, candidate_ref.id)
         probe_session = executor.load_fcstd(candidate_model)
         reload_geometry = geometry(probe_session)
         reload_entities = entity_facts(probe_session)
+        reload_components = [
+            item.to_mapping() for item in _component_observations(probe_session)
+        ]
+        reload_interferences = [
+            item.to_mapping() for item in _interference_observations(probe_session)
+        ]
         step_ref = next(
             artifact for artifact in candidate_ref.artifacts if artifact.format == "step"
         )
@@ -801,6 +918,16 @@ try:
     )
     slot_entities = (
         entity_facts(current_binding.session)
+        if task.status.value == "succeeded"
+        else None
+    )
+    slot_components = (
+        [item.to_mapping() for item in _component_observations(current_binding.session)]
+        if task.status.value == "succeeded"
+        else None
+    )
+    slot_interferences = (
+        [item.to_mapping() for item in _interference_observations(current_binding.session)]
         if task.status.value == "succeeded"
         else None
     )
@@ -858,6 +985,9 @@ try:
         "slot_session_open": current_binding.session.doc is not None,
         "slot_geometry": slot_geometry,
         "slot_entities": slot_entities,
+        "slot_components": slot_components,
+        "slot_interferences": slot_interferences,
+        "review_draft": None if review_draft is None else review_draft.to_mapping(),
         "baseline_usable": baseline_usable,
         "step_oks": [record.result.ok for record in task.steps],
         "step_operations": [record.result.operation_id for record in task.steps],
@@ -884,6 +1014,8 @@ try:
         "transitions": [record.event.value for record in task.transitions],
         "reload_geometry": reload_geometry,
         "reload_entities": reload_entities,
+        "reload_components": reload_components,
+        "reload_interferences": reload_interferences,
         "step_reload_geometry": step_reload_geometry,
         "layout": layout,
     }
@@ -3114,6 +3246,79 @@ def test_real_task_kernel_bootstraps_empty_project_and_resolves_result_ref(
     _assert_six_operation_geometry(payload["reload_geometry"])
     _assert_six_operation_geometry(payload["step_reload_geometry"])
     assert payload["transitions"][-1] == "commit"
+    _assert_layout(payload, journal_state="committed", manifest_count=2)
+
+
+@pytest.mark.slow
+def test_real_task_kernel_reviews_and_accepts_interference_free_assembly(
+    engine_compatible_managed_freecad_python: str,
+    tmp_path: Path,
+) -> None:
+    payload = _run_case(
+        engine_compatible_managed_freecad_python,
+        tmp_path,
+        "assembly_review",
+    )
+
+    assert payload["base_model_was_empty"] is True
+    assert payload["status"] == "succeeded"
+    assert payload["review_draft"] is not None
+    assert payload["candidate_revision"] == payload["committed_revision"]
+    assert payload["candidate_revision"] == payload["final_head"]["revision_id"]
+    assert payload["final_head"]["generation"] == payload["base_head"]["generation"] + 1
+    assert payload["slot_is_baseline"] is False
+    assert payload["step_oks"] == [True] * 6
+    assert payload["step_operations"] == [
+        "component-a",
+        "box-a",
+        "component-b",
+        "box-b",
+        "place-b",
+        "inspect",
+    ]
+
+    values = payload["step_values"]
+    component_a = values[0]["component_id"]
+    component_b = values[2]["component_id"]
+    assert component_a != component_b
+    assert values[1]["component_id"] == component_a
+    assert values[3]["component_id"] == component_b
+    assert values[4]["component_id"] == component_b
+    assert len(values[5]["components"]) == 2
+    assert values[5]["interferences"] == [
+        {
+            "schema_version": 1,
+            "component_a_id": min(component_a, component_b),
+            "component_b_id": max(component_a, component_b),
+            "common_volume_mm3": 0.0,
+            "interfering": False,
+        }
+    ]
+
+    for key in ("slot_components", "reload_components"):
+        components = payload[key]
+        assert len(components) == 2
+        assert {item["component_id"] for item in components} == {component_a, component_b}
+        assert sorted(item["volume_mm3"] for item in components) == pytest.approx([500.0, 1000.0])
+    assert payload["slot_interferences"] == payload["reload_interferences"]
+    assert payload["slot_interferences"][0]["interfering"] is False
+    assert payload["slot_interferences"][0]["common_volume_mm3"] == pytest.approx(0.0)
+
+    assert payload["report_passed"] == [True]
+    assert len(payload["verdicts"]) == 12
+    assert {item["outcome"] for item in payload["verdicts"]} == {"pass"}
+    _assert_artifact_lineage(payload)
+    assert payload["slot_geometry"]["volume"] == pytest.approx(1500.0)
+    assert payload["slot_geometry"]["bbox"] == pytest.approx([25.0, 10.0, 10.0])
+    assert payload["reload_geometry"] == payload["slot_geometry"]
+    assert payload["step_reload_geometry"]["volume"] == pytest.approx(1500.0)
+    assert payload["step_reload_geometry"]["bbox"] == pytest.approx([25.0, 10.0, 10.0])
+    assert payload["transitions"][-4:] == [
+        "prepare_review",
+        "publish_draft",
+        "accept_draft",
+        "commit",
+    ]
     _assert_layout(payload, journal_state="committed", manifest_count=2)
 
 

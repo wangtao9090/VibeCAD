@@ -114,7 +114,7 @@ def _operation(
     )
 
 
-def test_default_registry_exposes_exact_first_wave_six_operations():
+def test_default_registry_exposes_six_single_part_and_two_component_operations():
     assert tuple(DEFAULT_OPERATION_REGISTRY) == (
         "create_box",
         "create_cylinder",
@@ -122,8 +122,10 @@ def test_default_registry_exposes_exact_first_wave_six_operations():
         "move_part",
         "rotate_part",
         "inspect_model",
+        "create_component",
+        "place_component",
     )
-    assert len(DEFAULT_OPERATION_REGISTRY) == 6
+    assert len(DEFAULT_OPERATION_REGISTRY) == 8
     assert all(
         metadata.handler_name == operation
         for operation, metadata in DEFAULT_OPERATION_REGISTRY.operations.items()
@@ -147,6 +149,7 @@ def test_default_direct_descriptions_are_exact_and_projected_unchanged():
     metadata_descriptions = {
         name: DEFAULT_OPERATION_REGISTRY.lookup(name).description
         for name in DEFAULT_OPERATION_REGISTRY
+        if DEFAULT_OPERATION_REGISTRY.lookup(name).direct_exposed
     }
     projected_descriptions = {
         spec.name: spec.description
@@ -223,6 +226,8 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
         "move_part",
         "rotate_part",
         "inspect_model",
+        "create_component",
+        "place_component",
     )
 
     create_box = DEFAULT_OPERATION_REGISTRY.lookup("create_box")
@@ -241,7 +246,14 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
         assert operation.maximum_freecad_version_exclusive == (2, 0)
         assert operation.requires_gui_main_thread is False
         assert type(operation.resource_budget) is ResourceBudget
-        assert operation.direct_exposed is True
+    assert all(
+        DEFAULT_OPERATION_REGISTRY.lookup(name).direct_exposed
+        for name in tuple(DEFAULT_OPERATION_REGISTRY)[:6]
+    )
+    assert all(
+        not DEFAULT_OPERATION_REGISTRY.lookup(name).direct_exposed
+        for name in ("create_component", "place_component")
+    )
 
     modify = DEFAULT_OPERATION_REGISTRY.lookup("modify_parameter")
     assert modify.target_fields[0].value_shape is ValueShape.ENTITY_TARGET
@@ -423,6 +435,8 @@ def test_default_registry_has_exact_handler_risk_and_evidence_metadata():
         "move_part": ("move_part", RiskClass.MUTATING, True),
         "rotate_part": ("rotate_part", RiskClass.MUTATING, True),
         "inspect_model": ("inspect_model", RiskClass.READ_ONLY, False),
+        "create_component": ("create_component", RiskClass.MUTATING, True),
+        "place_component": ("place_component", RiskClass.MUTATING, True),
     }
 
     actual = {
@@ -439,7 +453,10 @@ def test_default_registry_has_exact_handler_risk_and_evidence_metadata():
 
 def test_default_registry_has_exact_field_shapes_and_bindings():
     create_box = DEFAULT_OPERATION_REGISTRY.lookup("create_box")
-    assert create_box.target_fields == ()
+    assert _fields(create_box.target_fields) == (
+        ("component", "component", ValueShape.ENTITY_TARGET, False),
+    )
+    assert create_box.target_fields[0].referenced_value_shape is ValueShape.OBJECT_ID
     assert _fields(create_box.argument_fields) == (
         ("length_mm", "length", ValueShape.POSITIVE_NUMBER, True),
         ("width_mm", "width", ValueShape.POSITIVE_NUMBER, True),
@@ -448,7 +465,10 @@ def test_default_registry_has_exact_field_shapes_and_bindings():
     )
 
     create_cylinder = DEFAULT_OPERATION_REGISTRY.lookup("create_cylinder")
-    assert create_cylinder.target_fields == ()
+    assert _fields(create_cylinder.target_fields) == (
+        ("component", "component", ValueShape.ENTITY_TARGET, False),
+    )
+    assert create_cylinder.target_fields[0].referenced_value_shape is ValueShape.OBJECT_ID
     assert _fields(create_cylinder.argument_fields) == (
         ("radius_mm", "radius", ValueShape.POSITIVE_NUMBER, True),
         ("height_mm", "height", ValueShape.POSITIVE_NUMBER, True),
@@ -496,6 +516,25 @@ def test_default_registry_has_exact_field_shapes_and_bindings():
     inspect_model = DEFAULT_OPERATION_REGISTRY.lookup("inspect_model")
     assert inspect_model.target_fields == ()
     assert inspect_model.argument_fields == ()
+
+    create_component = DEFAULT_OPERATION_REGISTRY.lookup("create_component")
+    assert create_component.target_fields == ()
+    assert _fields(create_component.argument_fields) == (
+        ("name", "name", ValueShape.NONBLANK_STRING, True),
+    )
+    assert create_component.resource_budget.max_created_objects == 16
+    assert create_component.result_slots[0].name == "component"
+
+    place_component = DEFAULT_OPERATION_REGISTRY.lookup("place_component")
+    assert _fields(place_component.target_fields) == (
+        ("component", "target", ValueShape.ENTITY_TARGET, True),
+    )
+    assert place_component.target_fields[0].referenced_value_shape is ValueShape.OBJECT_ID
+    assert _fields(place_component.argument_fields) == (
+        ("position_mm", "position", ValueShape.VECTOR3, True),
+        ("rotation_axis", "rotation_axis", ValueShape.ENUM, True),
+        ("angle_deg", "angle", ValueShape.FINITE_NUMBER, True),
+    )
 
 
 def test_only_entity_mutators_declare_the_closed_preservation_vocabulary():

@@ -1,10 +1,11 @@
 # VibeCAD Active Plan — P2 mechanical delivery
 
-> Status: **P2-A approved; P2-S01 complete; P2-S02 active**
+> Status: **P2-A approved; P2-S01 and P2-S02 complete; P2-S03 awaiting scope confirmation**
 >
 > Updated: 2026-08-02
 >
-> Repository anchor: `codex/agent-stage3@7f3d506`
+> Repository anchor: `codex/agent-stage3@d8ce61c` plus the verified P2-S02
+> candidate described below
 >
 > This is the only mutable orchestration plan. P1 sequential editing closed at
 > `7f3d506`; earlier campaign files remain historical records.
@@ -24,11 +25,13 @@ STEP/STL import, and mesh-to-faceted-BRep remain future work. Product documents
 must refer to the completed milestone as **P1 sequential editing / G2**, not as
 completion of the entire historical P1 capability inventory.
 
-The current public semantic operation registry still contains six operations:
-`create_box`, `create_cylinder`, `modify_parameter`, `move_part`, `rotate_part`,
-and `inspect_model`. It remains a single-part product surface.
+The public semantic operation registry now contains eight operations. The six
+existing direct operations remain direct-exposed. Two ModelProgram-only
+operations, `create_component` and `place_component`, establish the bounded
+assembly path; `create_box` and `create_cylinder` accept an optional explicit
+component target. The direct public tool count remains 28.
 
-The repository also contains a non-public legacy Round-8 assembly implementation
+The repository also contains a broader legacy Round-8 assembly implementation
 with real FreeCAD evidence for:
 
 - `App::Part` multi-part containment;
@@ -37,14 +40,15 @@ with real FreeCAD evidence for:
 - pairwise interference detection;
 - assembly-aware description, rendering, and STEP export.
 
-Those old Session/server semantics are deliberately excluded from the current
-Task Kernel public surface. They are reusable implementation evidence, not an
-alternative write authority and not a product capability until migrated through
-ModelProgram, candidate verification, Revision, review, and HEAD CAS.
+P2-S01/S02 migrated only explicit containment, absolute rigid placement, and
+pairwise interference through ModelProgram, candidate verification, Revision,
+review, and HEAD CAS. Legacy active-part selection, planar alignment, rendering,
+and other server semantics remain private implementation evidence rather than an
+alternative write authority or claimed product capability.
 
 ## 2. Recommended P2 product boundary
 
-Start with **P2-A: rigid multi-part delivery MVP**. This is the smallest slice
+**P2-A: rigid multi-part delivery MVP** is now complete. It is the smallest slice
 that turns proven internal assembly mechanics into a trustworthy product outcome.
 
 P2-A product story:
@@ -124,7 +128,7 @@ Evidence on 2026-08-02:
 
 ### P2-S02 — Rigid placement and interference vertical slice
 
-State: **active**.
+State: **complete at the current candidate boundary**.
 
 - add minimal component creation and explicit-target primitive operations;
 - add deterministic absolute component placement;
@@ -136,9 +140,31 @@ State: **active**.
 Gate: focused Task Kernel integration plus one real managed FreeCAD outcome.
 No new test controller or validation framework is admitted.
 
+Evidence on 2026-08-02:
+
+- the registry adds only `create_component` and `place_component`; both are
+  ModelProgram-only, while existing primitive creation gains an optional
+  explicit component target and the direct tool count remains unchanged;
+- absolute component placement preserves stable component/member identity and
+  rejects an interfering final pose transactionally;
+- sealed observations contain a deterministic complete pairwise common-volume
+  matrix, preserved across the in-process and Worker reload boundaries;
+- assembly acceptance supports bounded `component_count` and the explicit
+  `interference_free=true` product claim;
+- a real Task Kernel run created two components, exported FCStd/STEP, passed all
+  12 acceptance criteria, published a review draft, accepted it, and advanced
+  Revision/HEAD;
+- a separate real managed Worker run preserved shape, four entity records, two
+  component records, and the non-interfering pair across checkpoint, STEP
+  export, close, and FCStd reload;
+- the real in-process FreeCAD program independently passed checkpoint/reload and
+  STEP geometry checks;
+- full non-slow suite: `5583 passed, 114 deselected`; full Ruff and changed-file
+  format gates passed.
+
 ### P2-S03 — Flat BOM
 
-State: **pending after P2-S02**.
+State: **pending product-scope confirmation**.
 
 - add bounded part number, description, material/density, and quantity metadata;
 - derive a flat BOM from sealed component facts;
@@ -193,13 +219,13 @@ The user approved the following product boundary on 2026-08-02:
 > interference checks; defer native joints, cross-revision instances, BOM,
 > TechDraw, and release packaging to later P2 slices.
 
-The next action is P2-S02: add the smallest public vertical slice for explicit
-component creation, component-targeted primitive creation, absolute placement,
-and pairwise interference, all through the existing candidate/review/Revision
-authority. The public-surface fingerprint and runtime receipt may change only
-with the deliberate public operation addition.
+P2-S02 is complete. The next possible product slice is P2-S03 flat BOM: bounded
+part number, description, material/density, quantity, and a machine-readable BOM
+bound to the accepted Revision. Because that adds a new product contract rather
+than merely continuing the approved rigid-assembly implementation, its exact
+scope must be confirmed before executable work begins.
 
-Recovery boundary: P2 executable work is now authorized within P2-S02, as are
-intentional commits and branch pushes after declared gates pass. No durable
-schema migration, PR, release, or deployment is authorized. The P2 campaign
-start anchor remains `7f3d506`; preserve the unrelated untracked paths.
+Recovery boundary: P2-S01 and P2-S02 are authorized and complete. Intentional
+commit and branch push of the verified S02 slice are authorized. P2-S03 remains
+at a product-decision boundary; no durable schema migration, PR, release, or
+deployment is authorized. Preserve the unrelated untracked paths.

@@ -2129,10 +2129,12 @@ def test_capabilities_match_the_exact_sorted_public_projection():
     operations = result["operations"]
     assert [item["operation"] for item in operations] == [
         "create_box",
+        "create_component",
         "create_cylinder",
         "inspect_model",
         "modify_parameter",
         "move_part",
+        "place_component",
         "rotate_part",
     ]
     operation_keys = {

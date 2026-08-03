@@ -2483,7 +2483,11 @@ def _stable_annotations(name: str) -> ToolAnnotations:
 
 
 def _direct_annotations(metadata: OperationMetadata) -> ToolAnnotations:
-    destructive = metadata.risk_class is not RiskClass.READ_ONLY and bool(metadata.target_fields)
+    destructive = (
+        metadata.risk_class is not RiskClass.READ_ONLY
+        and bool(metadata.target_fields)
+        and metadata.operation not in {"create_box", "create_cylinder"}
+    )
     return ToolAnnotations(False, destructive, True, False)
 
 

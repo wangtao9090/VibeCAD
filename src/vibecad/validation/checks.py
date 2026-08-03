@@ -28,6 +28,8 @@ _SUPPORTED = frozenset(
         (AcceptanceKind.GEOMETRY, "center_of_mass"),
         (AcceptanceKind.TOPOLOGY, "valid_shape"),
         (AcceptanceKind.TOPOLOGY, "solid_count"),
+        (AcceptanceKind.ASSEMBLY, "component_count"),
+        (AcceptanceKind.ASSEMBLY, "interference_free"),
         (AcceptanceKind.ARTIFACT, "exists"),
         (AcceptanceKind.ARTIFACT, "non_empty"),
         (AcceptanceKind.ARTIFACT, "format"),
@@ -231,6 +233,26 @@ def _compile_supported(
         expected = _finite_number(criterion.expected, expected_path, nonnegative=True)
         tolerance = None
         family = "shape"
+    elif key == (AcceptanceKind.ASSEMBLY, "component_count"):
+        _empty_parameters(criterion, index)
+        _forbid_tolerance(criterion, index)
+        if target != "assembly" or type(criterion.expected) is not int:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, expected_path)
+        if not 2 <= criterion.expected <= 10:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, expected_path)
+        expected = criterion.expected
+        tolerance = None
+        family = "assembly"
+    elif key == (AcceptanceKind.ASSEMBLY, "interference_free"):
+        _empty_parameters(criterion, index)
+        _forbid_tolerance(criterion, index)
+        if target != "assembly" or type(criterion.expected) is not bool:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, expected_path)
+        if criterion.expected is not True:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, expected_path)
+        expected = True
+        tolerance = None
+        family = "assembly"
     elif key in {
         (AcceptanceKind.ARTIFACT, "exists"),
         (AcceptanceKind.ARTIFACT, "non_empty"),
@@ -378,6 +400,15 @@ def _artifact_value(artifact: ArtifactObservation, check: str) -> object:
     return artifact.format
 
 
+def _assembly_value(snapshot: ObservationSnapshot, check: str) -> object | None:
+    if check == "component_count":
+        return len(snapshot.components)
+    expected_pairs = len(snapshot.components) * (len(snapshot.components) - 1) // 2
+    if expected_pairs == 0 or len(snapshot.interferences) != expected_pairs:
+        return None
+    return not any(item.interfering for item in snapshot.interferences)
+
+
 def _unsupported_verdict(criterion: CompiledCriterion, *, missing: bool) -> CriterionVerdict:
     return CriterionVerdict(
         criterion_id=criterion.criterion_id,
@@ -418,6 +449,9 @@ def evaluate_criterion(
                 observed = _artifact_value(artifact, criterion.check)
                 evidence = f"/artifacts/{index}/{criterion.check}"
                 break
+    elif criterion.family == "assembly":
+        observed = _assembly_value(snapshot, criterion.check)
+        evidence = "/components" if criterion.check == "component_count" else "/interferences"
     else:
         for index, preservation in enumerate(snapshot.preservations):
             if preservation.target == criterion.target:

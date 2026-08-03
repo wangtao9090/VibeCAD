@@ -1000,6 +1000,15 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
             handler_name="create_box",
             risk_class=RiskClass.MUTATING,
             evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "component",
+                    "component",
+                    ValueShape.ENTITY_TARGET,
+                    required=False,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
             argument_fields=(
                 FieldMetadata("length_mm", "length", ValueShape.POSITIVE_NUMBER),
                 FieldMetadata("width_mm", "width", ValueShape.POSITIVE_NUMBER),
@@ -1026,6 +1035,15 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
             handler_name="create_cylinder",
             risk_class=RiskClass.MUTATING,
             evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "component",
+                    "component",
+                    ValueShape.ENTITY_TARGET,
+                    required=False,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
             argument_fields=(
                 FieldMetadata("radius_mm", "radius", ValueShape.POSITIVE_NUMBER),
                 FieldMetadata("height_mm", "height", ValueShape.POSITIVE_NUMBER),
@@ -1150,6 +1168,54 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
             ),
             direct_exposed=True,
             description="检查指定任务版本的模型事实",
+        ),
+        OperationMetadata(
+            operation="create_component",
+            handler_name="create_component",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            argument_fields=(FieldMetadata("name", "name", ValueShape.NONBLANK_STRING),),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=16,
+                max_result_bytes=65_536,
+            ),
+            result_slots=(
+                ResultSlotMetadata(
+                    "component",
+                    "component_id",
+                    ValueShape.OBJECT_ID,
+                ),
+            ),
+        ),
+        OperationMetadata(
+            operation="place_component",
+            handler_name="place_component",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "component",
+                    "target",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            argument_fields=(
+                FieldMetadata("position_mm", "position", ValueShape.VECTOR3),
+                FieldMetadata(
+                    "rotation_axis",
+                    "rotation_axis",
+                    ValueShape.ENUM,
+                    enum_values=("x", "y", "z"),
+                ),
+                FieldMetadata("angle_deg", "angle", ValueShape.FINITE_NUMBER),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=0,
+                max_result_bytes=65_536,
+            ),
         ),
     )
 )

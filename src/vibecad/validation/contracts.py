@@ -28,9 +28,7 @@ _MISSING_ENTITY_DOMAIN = b"vibecad-missing-entity-observation-v1\0"
 _REVISION_RE = re.compile(r"^revision_[0-9a-f]{32}$")
 _OBJECT_RE = re.compile(r"^object_[0-9a-f]{32}$")
 _FEATURE_RE = re.compile(r"^feature_[0-9a-f]{32}$")
-_TYPE_ID_RE = re.compile(
-    r"^[A-Za-z][A-Za-z0-9_]*(?:::[A-Za-z][A-Za-z0-9_]*)+$"
-)
+_TYPE_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:::[A-Za-z][A-Za-z0-9_]*)+$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_IDENTIFIER_BYTES = 256
 _MAX_OBJECT_TYPE_BYTES = 128
@@ -40,6 +38,7 @@ _MAX_ARTIFACTS = 128
 _MAX_ENTITIES = 128
 _MAX_COMPONENTS = 10
 _MAX_COMPONENT_MEMBERS = 128
+_MAX_INTERFERENCES = 45
 _MAX_PRESERVATIONS = 256
 _MAX_ENTITY_PARAMETERS = 128
 _MAX_CHANGED_FIELDS = 256
@@ -881,6 +880,80 @@ class ComponentObservation:
         )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InterferenceObservation:
+    """Deterministic common-volume result for one ordered component pair."""
+
+    component_a_id: str
+    component_b_id: str
+    common_volume_mm3: int | float
+    interfering: bool
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "schema_version",
+            _validate_schema(self.schema_version, "/schema_version"),
+        )
+        component_a = _validate_entity_identifier(
+            self.component_a_id,
+            _OBJECT_RE,
+            "/component_a_id",
+        )
+        component_b = _validate_entity_identifier(
+            self.component_b_id,
+            _OBJECT_RE,
+            "/component_b_id",
+        )
+        if component_a >= component_b:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/component_b_id")
+        if type(self.interfering) is not bool:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/interfering")
+        volume = _optional_number(
+            self.common_volume_mm3,
+            "/common_volume_mm3",
+            nonnegative=True,
+        )
+        assert volume is not None
+        if self.interfering != (volume > 1e-6):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/interfering")
+        object.__setattr__(self, "component_a_id", component_a)
+        object.__setattr__(self, "component_b_id", component_b)
+        object.__setattr__(self, "common_volume_mm3", volume)
+
+    @property
+    def target(self) -> str:
+        return f"{self.component_a_id}:{self.component_b_id}"
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "component_a_id": self.component_a_id,
+            "component_b_id": self.component_b_id,
+            "common_volume_mm3": self.common_volume_mm3,
+            "interfering": self.interfering,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        required = {
+            "schema_version",
+            "component_a_id",
+            "component_b_id",
+            "common_volume_mm3",
+            "interfering",
+        }
+        data = _fields(value, allowed=required, required=required)
+        return cls(
+            schema_version=data["schema_version"],
+            component_a_id=data["component_a_id"],
+            component_b_id=data["component_b_id"],
+            common_volume_mm3=data["common_volume_mm3"],
+            interfering=data["interfering"],
+        )
+
+
 def _entity_observation_digest(value: EntityObservation) -> str:
     if type(value) is not EntityObservation:
         _raise_validation(ValidationErrorCode.INVALID_TYPE, "/entity")
@@ -927,10 +1000,7 @@ class PreservationObservation:
             "after_digest",
             _validate_digest(self.after_digest, "/after_digest"),
         )
-        if (
-            type(self.changed_fields) is tuple
-            and len(self.changed_fields) > _MAX_CHANGED_FIELDS
-        ):
+        if type(self.changed_fields) is tuple and len(self.changed_fields) > _MAX_CHANGED_FIELDS:
             _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED, "/changed_fields")
         changed = _text_tuple(self.changed_fields, "/changed_fields")
         object.__setattr__(self, "changed_fields", changed)
@@ -1042,6 +1112,7 @@ class ObservationSnapshot:
     artifacts: tuple[ArtifactObservation, ...] = ()
     entities: tuple[EntityObservation, ...] = ()
     components: tuple[ComponentObservation, ...] = ()
+    interferences: tuple[InterferenceObservation, ...] = ()
     preservations: tuple[PreservationObservation, ...] = ()
     schema_version: int = SCHEMA_VERSION
     observation_digest: str = field(init=False)
@@ -1094,6 +1165,16 @@ class ObservationSnapshot:
                 _raise_validation(
                     ValidationErrorCode.INVALID_TYPE,
                     join_json_pointer("/components", str(index)),
+                )
+        if type(self.interferences) is not tuple:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/interferences")
+        if len(self.interferences) > _MAX_INTERFERENCES:
+            _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED, "/interferences")
+        for index, interference in enumerate(self.interferences):
+            if type(interference) is not InterferenceObservation:
+                _raise_validation(
+                    ValidationErrorCode.INVALID_TYPE,
+                    join_json_pointer("/interferences", str(index)),
                 )
         if type(self.preservations) is not tuple:
             _raise_validation(ValidationErrorCode.INVALID_TYPE, "/preservations")
@@ -1154,6 +1235,21 @@ class ObservationSnapshot:
             }
             if app_part_ids != set(component_ids):
                 _raise_validation(ValidationErrorCode.INVALID_VALUE, "/components")
+        interference_pairs = tuple(
+            (item.component_a_id, item.component_b_id) for item in self.interferences
+        )
+        if len(interference_pairs) != len(set(interference_pairs)):
+            _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/interferences")
+        if interference_pairs != tuple(sorted(interference_pairs)):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/interferences")
+        if self.interferences:
+            expected_pairs = tuple(
+                (component_ids[left], component_ids[right])
+                for left in range(len(component_ids))
+                for right in range(left + 1, len(component_ids))
+            )
+            if interference_pairs != expected_pairs:
+                _raise_validation(ValidationErrorCode.INVALID_VALUE, "/interferences")
         preservation_targets = tuple(item.target for item in self.preservations)
         if len(preservation_targets) != len(set(preservation_targets)):
             _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/preservations")
@@ -1179,11 +1275,7 @@ class ObservationSnapshot:
             facts += int(entity.volume_mm3 is not None)
             facts += int(entity.area_mm2 is not None)
             facts += len(entity.bbox_mm) if entity.bbox_mm is not None else 0
-            facts += (
-                len(entity.center_of_mass_mm)
-                if entity.center_of_mass_mm is not None
-                else 0
-            )
+            facts += len(entity.center_of_mass_mm) if entity.center_of_mass_mm is not None else 0
             facts += int(entity.valid_shape is not None)
             facts += int(entity.solid_count is not None)
         for component in self.components:
@@ -1192,12 +1284,12 @@ class ObservationSnapshot:
             facts += int(component.area_mm2 is not None)
             facts += len(component.bbox_mm) if component.bbox_mm is not None else 0
             facts += (
-                len(component.center_of_mass_mm)
-                if component.center_of_mass_mm is not None
-                else 0
+                len(component.center_of_mass_mm) if component.center_of_mass_mm is not None else 0
             )
             facts += int(component.valid_shape is not None)
             facts += int(component.solid_count is not None)
+        for _interference in self.interferences:
+            facts += 4
         for preservation in self.preservations:
             facts += 4 + len(preservation.changed_fields)
         if facts > _MAX_OBSERVATION_FACTS:
@@ -1220,6 +1312,8 @@ class ObservationSnapshot:
         }
         if self.components:
             result["components"] = [item.to_mapping() for item in self.components]
+        if self.interferences:
+            result["interferences"] = [item.to_mapping() for item in self.interferences]
         return result
 
     def to_mapping(self) -> dict[str, object]:
@@ -1236,7 +1330,12 @@ class ObservationSnapshot:
             "artifacts",
             "observation_digest",
         }
-        allowed = legacy_required | {"entities", "components", "preservations"}
+        allowed = legacy_required | {
+            "entities",
+            "components",
+            "interferences",
+            "preservations",
+        }
         data = _fields(value, allowed=allowed, required=legacy_required)
         has_entities = "entities" in data
         has_preservations = "preservations" in data
@@ -1245,6 +1344,8 @@ class ObservationSnapshot:
             _raise_validation(ValidationErrorCode.MISSING_FIELD, f"/{missing}")
         if "components" in data and not has_entities:
             _raise_validation(ValidationErrorCode.MISSING_FIELD, "/entities")
+        if "interferences" in data and "components" not in data:
+            _raise_validation(ValidationErrorCode.MISSING_FIELD, "/components")
         legacy = not has_entities
         if type(data["shapes"]) is not list:
             _raise_validation(ValidationErrorCode.INVALID_TYPE, "/shapes")
@@ -1315,6 +1416,26 @@ class ObservationSnapshot:
                 )
             assert parsed_component is not None
             components.append(parsed_component)
+        raw_interferences = data.get("interferences", [])
+        if type(raw_interferences) is not list:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/interferences")
+        if len(raw_interferences) > _MAX_INTERFERENCES:
+            _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED, "/interferences")
+        interferences: list[InterferenceObservation] = []
+        for index, raw_interference in enumerate(raw_interferences):
+            caught = None
+            try:
+                parsed_interference = InterferenceObservation.from_mapping(raw_interference)
+            except ValidationError as error:
+                caught = error
+                parsed_interference = None
+            if caught is not None:
+                raise _prefix_nested_error(
+                    caught,
+                    join_json_pointer("/interferences", str(index)),
+                )
+            assert parsed_interference is not None
+            interferences.append(parsed_interference)
         raw_preservations = data.get("preservations", [])
         if type(raw_preservations) is not list:
             _raise_validation(ValidationErrorCode.INVALID_TYPE, "/preservations")
@@ -1341,6 +1462,7 @@ class ObservationSnapshot:
             artifacts=tuple(artifacts),
             entities=tuple(entities),
             components=tuple(components),
+            interferences=tuple(interferences),
             preservations=tuple(preservations),
         )
         if supplied_digest != snapshot.observation_digest:
@@ -1370,6 +1492,7 @@ def _validated_snapshot(value: object) -> ObservationSnapshot:
         artifacts = value.artifacts
         entities = value.entities
         components = value.components
+        interferences = value.interferences
         preservations = value.preservations
         schema_version = value.schema_version
         supplied_digest = value.observation_digest
@@ -1380,6 +1503,7 @@ def _validated_snapshot(value: object) -> ObservationSnapshot:
         artifacts = ()
         entities = ()
         components = ()
+        interferences = ()
         preservations = ()
         schema_version = SCHEMA_VERSION
         supplied_digest = None
@@ -1393,6 +1517,7 @@ def _validated_snapshot(value: object) -> ObservationSnapshot:
             artifacts=artifacts,
             entities=entities,
             components=components,
+            interferences=interferences,
             preservations=preservations,
             schema_version=schema_version,
         )
