@@ -1,7 +1,7 @@
 # WorkBuddy compatibility and model-selection research
 
-> Status: VibeCAD stdio registration and connection confirmed; exact tool,
-> resource, recovery, and Release certification remains
+> Status: published VibeCAD 0.6.0 stdio connection confirmed; model-driven
+> tool, resource, recovery, and Release certification remains
 >
 > Evidence date: 2026-08-03
 >
@@ -33,13 +33,13 @@ capability rather than an unbounded Blob allocation.
 
 | Required behavior | Evidence | Current status |
 |---|---|---|
-| Local stdio MCP | WorkBuddy CLI 2.115.0 registered both the source candidate and an exact locally built `vibecad-0.6.0` wheel in isolated environments; both `mcp get` checks reported `Connected` | Confirmed through the exact wheel candidate; published package still pending |
+| Local stdio MCP | WorkBuddy CLI 2.115.0 registered the source candidate, the exact locally built wheel, and a fresh PyPI install of `vibecad==0.6.0` in isolated environments; every `mcp get` check reported `Connected` | Confirmed through the published package |
 | `tools/list` and strict input schema | The installed CLI is launched with strict MCP configuration and exposes tool-call-capable models | Host-ready; exact VibeCAD 31-tool discovery and invalid-input rejection pending |
-| ResourceLink and resource commands | WorkBuddy 5.3.5 contains ResourceLink handling and launches the CLI with `ListMcpResources` and `ReadMcpResource`; the changelog explicitly records MCP Resource support | Confirmed at host implementation level |
+| ResourceLink and resource commands | The installed 5.3.5 CLI bundle contains `resources/list`, `resources/templates/list`, and `resources/read` request paths, validates `ReadResourceResult`, and carries `resource_link` content blocks; the changelog also records MCP Resource support | Confirmed at host implementation level |
 | Binary Blob for PDF/ZIP | Blob handling exists in the installed client, but no official statement proves arbitrary MCP binary round-tripping | Must pass a real VibeCAD PDF and approved ZIP test |
 | `task_id`, `generation`, `next_action` | These are VibeCAD application semantics, not generic MCP host capabilities | Must be taught by the Skill and checked in a real multi-turn task |
 | Restart recovery | Official task documentation supports continuing interrupted tasks; the installed app persists sessions/tasks locally and the changelog records multiple recovery fixes | Host recovery confirmed; exact MCP subprocess and VibeCAD task recovery pending |
-| Release draft, digest approval, ZIP read | VibeCAD P2-S04 implements this surface | P2 exit gate passed; live WorkBuddy gate follows publication |
+| Release draft, digest approval, ZIP read | VibeCAD 0.6.0 implements and publishes this surface; its exact packed MCPB stdio/resource gate passed on the managed Darwin runtime | Product gate passed; live WorkBuddy model gate remains |
 
 Sources: [WorkBuddy connector documentation](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Connector),
 [WorkBuddy model configuration](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Model),
@@ -47,12 +47,25 @@ Sources: [WorkBuddy connector documentation](https://www.workbuddy.cn/docs/workb
 [WorkBuddy Skills](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Skills-Market),
 and [WorkBuddy changelog](https://www.workbuddy.cn/docs/workbuddy/Changelog).
 
-The live registrations used only an isolated project configuration under a
-private temporary directory. The wheel check used a dedicated Python 3.12
-environment and a private `VIBECAD_HOME`; it did not install or replace the
-managed VibeCAD runtime and did not invoke a model. WorkBuddy correctly
-required explicit approval before exposing the project-scoped server to a
-task; the remaining certification therefore starts at that approval boundary.
+The live registrations used only isolated project configurations under private
+temporary directories. The wheel and PyPI checks used dedicated Python 3.12
+environments and private `VIBECAD_HOME` roots; they did not install or replace
+the user's managed VibeCAD runtime and did not invoke a model. The fresh PyPI
+environment reported VibeCAD 0.6.0 with 31 public tools before WorkBuddy
+reported `Connected`. WorkBuddy correctly required explicit approval before
+exposing the project-scoped server to a task; the remaining certification
+therefore starts at that approval boundary.
+
+## Published baseline
+
+VibeCAD 0.6.0 is available on
+[PyPI](https://pypi.org/project/vibecad/0.6.0/) and as a
+[GitHub Release](https://github.com/wangtao9090/VibeCAD/releases/tag/v0.6.0).
+The published wheel SHA-256 is
+`10a0e80ac6420219d329f89f3819700c1ad0e767dd8ba1b99ae961d2083fb6d6`.
+The GitHub Release carries the gated `VibeCAD.mcpb` and standalone Agent Skill
+archive; the latter has SHA-256
+`f7e154aa6b8d2eafbd4f8a101aeb870199ff7bcad5ed04c9efd7748b4b97fca4`.
 
 ## Models available to the installed WorkBuddy account
 

@@ -1,11 +1,11 @@
-# VibeCAD Active Plan — P2 mechanical delivery
+# VibeCAD Active Plan — WorkBuddy host verification
 
-> Status: **P2-S01 through P2-S04 implemented and verified; publication pending**
+> Status: **P2-S01 through P2-S04 published as v0.6.0; WorkBuddy published-package connection confirmed**
 >
-> Updated: 2026-08-02
+> Updated: 2026-08-03
 >
-> Repository anchor: `codex/agent-stage3@5a1bb43` plus the verified P2-S04
-> publication candidate described below
+> Repository anchor: published tag `v0.6.0@d533da6`; publisher recovery fix
+> `codex/agent-stage3@5507a0b`
 >
 > This is the only mutable orchestration plan. P1 sequential editing closed at
 > `7f3d506`; earlier campaign files remain historical records.
@@ -243,11 +243,14 @@ Evidence on 2026-08-02:
   Release gate independently passed; Ruff, changed-file format, source compile,
   and diff-integrity gates passed.
 - the `v0.6.0` version guard, wheel/sdist metadata, clean MCPB allowlist,
-  deterministic Skill archive, cross-channel source parity, and fresh Python
-  3.12 wheel/sdist installs passed locally; the exact packed MCPB managed-runtime
-  gate remains delegated to tag CI because the installed local runtime was not
-  mutated to the candidate receipt, and both external publishers depend on that
-  gate.
+  deterministic Skill archive, cross-channel source parity, fresh Python 3.12
+  wheel/sdist installs, both real Darwin Agent gates, and the exact packed MCPB
+  stdio/resource gate passed;
+- PyPI 0.6.0 and the GitHub Release are published. The first GitHub Release job
+  lacked an explicit repository binding after deliberately omitting checkout;
+  the gated assets were recovered from the successful run and published without
+  rebuilding, and the workflow now passes `--repo "$GITHUB_REPOSITORY"` for
+  future releases.
 
 ## 5. Authority, controls, and gates
 
@@ -286,32 +289,22 @@ The user approved the following product boundary on 2026-08-02:
 > interference checks; defer native joints, cross-revision instances, BOM,
 > TechDraw, and release packaging to later P2 slices.
 
-P2-S04 has passed its real end-to-end product exit gate under the approved
-minimum boundary above. The user has authorized publishing the P2 product.
-Release preparation may proceed autonomously; the exact version, publication
-channel, target commit, and recovery boundary must be verified before the
-external publication effect.
-
-Recovery boundary: P2-S01 through P2-S03 are complete at `5a1bb43`; the verified
-P2-S04 publication candidate is the current intentional worktree slice. Commit
-and branch publication are authorized. No external product release, deployment,
-or installed-runtime mutation occurs until the exact release target is known.
-Preserve the unrelated untracked paths.
-
-After the P2 publication completes, start a separate WorkBuddy host-compatibility
-slice. Reuse the same local stdio MCP, Skill, daemon, Task/Revision/Review, and
-Release authority; add only the connection bundle or thin compatibility adapter
-that WorkBuddy actually requires. Completion requires a real WorkBuddy session
-covering tool discovery, one durable CAD task, ResourceLink/resources-read for
-the P2 delivery package, review/approval, and restart recovery. The existing
-`.workbuddy/` memory directory is not treated as connector configuration and
-remains user-owned.
+P2-S04 is published as VibeCAD 0.6.0 on PyPI and GitHub. The active slice is now
+WorkBuddy host compatibility. Reuse the same local stdio MCP, Skill, daemon,
+Task/Revision/Review, and Release authority; add only a connection bundle or
+thin compatibility adapter that real evidence requires. Completion requires a
+real WorkBuddy model session covering exact tool discovery and schema failure,
+one durable CAD task, ResourceLink/resources-read for the P2 delivery package,
+review/approval, and restart recovery. The existing `.workbuddy/` memory
+directory is not treated as connector configuration and remains user-owned.
 
 The read-only WorkBuddy 5.3.5 audit is recorded in
 `docs/WORKBUDDY_COMPATIBILITY_RESEARCH.md`. It confirms host-level local stdio,
 strict MCP startup, ResourceLink/list/read implementation, and current model
-availability, while leaving binary PDF/ZIP round-tripping and the exact VibeCAD
-restart workflow for the post-P2 live gate. The initial explicit-model matrix is
+availability. A fresh PyPI install of `vibecad==0.6.0` reports 31 tools and is
+`Connected` through WorkBuddy CLI 2.115.0 in an isolated project. Binary PDF/ZIP
+round-tripping and the exact VibeCAD restart workflow remain for the live model
+gate. The initial explicit-model matrix is
 GLM-5.2 (default candidate), Kimi-K3 (quality ceiling), MiniMax-M3
 (cost/performance), and DeepSeek-V4-Flash (fast/economy); `Auto` is excluded from
 certification because opaque routing is not reproducible.
