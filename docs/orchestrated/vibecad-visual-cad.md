@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S10 Parametric Core` 已完成；下一步为 `VCAD-S20.0` 合同设计**
+> 状态：**`VCAD-S20.0` 合同设计已完成；等待 `VCAD-A02` 批准**
 >
 > 更新：2026-08-03
 >
 > 产品基线：已发布 `v0.6.1@e7dd0c0`
 >
-> 当前里程碑：`VCAD-S20.0`
+> 当前里程碑：`VCAD-A02`
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -95,14 +95,14 @@ flowchart LR
 
 最少记录：
 
-- 每个输入的 artifact ID、SHA-256、MIME、像素尺寸和视图角色；
+- 每个输入的 visual-input ID、SHA-256、MIME、像素尺寸和视图角色；
 - `front/top/right/back/isometric/unknown` 视角声明；
 - 单位、显式尺寸、比例尺、相机/透视校准状态；
 - 多图是否属于同一物体、同一状态和同一尺度；
 - 原图与去 EXIF/归一化派生图之间的 provenance；
 - 本地处理或外部 Provider 授权状态。
 
-图片不是 Revision 原生 CAD payload。它作为 task-scoped immutable input/evidence 管理，因此
+图片不是 Revision 原生 CAD payload。它作为 reconstruction-scoped immutable input/evidence 管理，因此
 Mechanical V1 不受 Revision durable-v2 阻塞。
 
 ### 4.2 `VisualObservation`
@@ -148,6 +148,129 @@ IR-local stable ID 使用独立 `ir_*_<32 lowercase hex>` 命名空间。它不�
 S10.1 保持 `ObservationSnapshot v1`、`SelectorV1` 和 `AcceptanceSpec v1` 的 wire 与 digest 不变。
 新的 ModelProgram value shape、默认 operation、compiler 和 Worker handler 已在 S10.4 一次完整接入；
 该 operation 只进入 capabilities/ModelProgram，不作为 direct MCP 建模工具暴露。
+
+### 4.5 `S20.0` 冻结候选：`VCAD-A02` 审批包
+
+现有 `ReviewDraft` 只表示已经通过确定性验证、等待用户审核的 CAD candidate，不能复用为图片重建
+草稿；现有 `draft_*` ID 和 `draft_id` 字段也继续专属于该合同。新对象使用
+`reconstruction_<32 lowercase hex>` / `reconstruction_id`；ImageSet 使用
+`image_set_<32 lowercase hex>`，单图使用 `visual_input_<32 lowercase hex>`。ImageSet 与
+ReconstructionDraft durable record 都显式携带 `schema_version = 1`。图片不能进入 `TaskRun.artifacts`、
+CAD `artifacts/` store、Revision v1 或既有 `vibecad://artifact/...` URI；这些合同都要求已经存在的
+candidate Revision 和 FCStd/STEP payload。
+
+#### 持久化拓扑与兼容
+
+`A02` 建议批准两个新的 additive sibling roots：
+
+```text
+data_root/
+  visual_inputs/           # sealed ImageSet、原图、归一化派生图
+  reconstruction_drafts/   # lifecycle、observation、proposal、clarification
+```
+
+- 两个 root 都由 `ApplicationDataLayout` 以 `0700`、owner-only、captured identity 方式打开；内部读写
+  继续采用 descriptor/no-follow、single-link、size、MIME/magic 和 atomic-publish 模式；
+- 不移动、不重解释 `tasks/`、`projects/`、`artifacts/` 或 `releases/`，也不引入全局 layout-version
+  或迁移框架；现有旧版 opener 不枚举额外 sibling，因此兼容方案是由旧版忽略、新版本在首次启用时
+  纯加法创建；
+- V1 不跨 ImageSet 去重 blob，避免删除语义变成引用计数和共享所有权问题；
+- `RuntimeArtifact` / `RuntimeInvocation` / `RuntimeResult` 只复用为 provider-neutral 调用信封，仍不承担
+  durable storage；每个 root 的 record/count/total-byte 预算在 S20.1 固定且必须 fail closed。
+
+#### `ImageSet v1`
+
+对外只发布 sealed `ImageSet`；copy/hash/normalize 的 staging 是内部临时态，失败后不留下半发布对象。
+sealed manifest 至少包含 `schema_version = 1`、`image_set_id`、create-key digest、manifest digest，以及
+每张原图和归一化图的独立 `visual_input_id`、SHA-256、byte/pixel size、MIME、view role、normalization
+profile/version 和 provenance；还包含
+unit、显式尺寸、scale/calibration、`same_object`、`same_state`、`same_scale` 与 processing authorization。
+seal 后不能添加、替换或删除单张图片；输入变化创建新的 ImageSet。
+
+Mechanical V1 的推荐输入包络是：
+
+- 1–4 张，仅 JPEG/PNG；HEIC、PDF、TIFF 和视频后续单独扩展；
+- 每张最多 20 MiB / 40 MP，每组最多 64 MiB / 100 MP；同时按 encoded byte 与 decoded pixel
+  双重限额防止解压炸弹；
+- 应用 EXIF orientation 后转为 sRGB、剥离 metadata，并生成最长边不超过 4096 px 的 analysis
+  derivative；原图只保留在本地私有 store。
+
+上述数字属于 `A02` 产品决策；批准前不成为实现常量。
+
+#### `ReconstructionDraft v1`
+
+最小 durable record 包含：`schema_version = 1`、`reconstruction_id`、create-key digest、`generation`、
+project/base Revision/base HEAD generation、ImageSet ID/digest、status、immutable
+observation/proposal/clarification refs 与 digest、
+有界 append-only provider invocation records（runtime/model/version/invocation/budget/deadline/input/result
+digest）、adoption-key digest、
+`adopted_task_id` 和有界结构化 `last_error`。`next_action` 由状态确定性派生，不重复持久化。
+
+生命周期冻结为：
+
+```text
+sealed ImageSet -> ready -> observing -> needs_input -> ready
+                              |              (answer + new generation)
+                              +-----------> proposed -> adopting -> adopted
+                              +-----------> failed
+observing | adopting -------> recovery_required
+failed ---------------------> ready              (explicit retry)
+recovery_required ----------> ready/proposed/adopted/failed (reconcile first)
+ready | needs_input | proposed | failed --------> rejected
+ready | needs_input | proposed | failed | rejected | adopted -> deleted tombstone
+```
+
+- 每次转换都要求 `reconstruction_id + expected_generation` CAS；generation 不匹配即冲突，不合并；
+- provider/adoption intent 必须在外部效果前持久化，完成 receipt/digest 在效果后持久化；重启看到未知
+  outcome 时进入 `recovery_required`，绝不自动重复付费调用或重复采纳；
+- `needs_input` 的回答形成 immutable clarification 并推进新 generation；只有带确定失败 receipt 的
+  `failed` 可以显式 retry。`recovery_required` 必须先 reconcile 已有 intent/receipt，证明没有仍在进行或
+  已完成但未记录的效果后，才进入一个稳定状态；
+- `proposed` 只有在所有 `assumed` 已确认且没有 `unknown` 阻断项时才能进入 `adopting`；
+- `adopting` 使用由 reconstruction/proposal/base-HEAD digest 确定性派生的现有 Task create key，最终只
+  创建一个普通 `REQUIRE_REVIEW` CAD Task。Provider 没有 candidate、Accept、commit 或 HEAD 权威。
+
+#### 顺序所有权、保留与删除
+
+- 创建 ReconstructionDraft 时捕获 base Revision 与 HEAD generation；采纳时 HEAD 不一致直接
+  `conflict`，不自动 rebase、merge 或解决 FreeCAD/Agent 并发修改；
+- V1 不运行后台 TTL。活动和终态图片默认保留到用户显式删除，并在产品界面展示占用空间；
+- `observing`、`adopting` 或 `recovery_required` 存在未决 effect 时禁止 reject/delete；必须先完成或
+  reconcile。其它合法状态的删除可以移除该 reconstruction 独占的 image bytes、observation/proposal
+  和 draft record；tombstone 至少保留 schema、reconstruction ID、final generation、create-key digest
+  和可选 adoption-intent digest，但采纳前不保留图片 hash/路径；
+- 采纳后允许删除图片 bytes 和可重建明细，但随已采纳 CAD 项目的 durable lifetime 保留 bounded
+  source hash/provenance、proposal digest 与 `adopted_task_id`；删除视觉来源不回删已经接受的 CAD
+  Revision；
+- 若未来外部 Provider 已接收副本，本地删除不能撤回外部副本；该告知、外发授权和 Provider retention
+  仍属于 `A03`。
+
+#### Host-neutral public contract
+
+S20 的领域 API 只暴露 path-free、strict-schema 的逻辑动作：create/get/run/answer/adopt/reject/delete
+reconstruction。所有 mutation 都带 generation；响应只返回 bounded status、generation、derived
+`next_action`、questions/proposal summary 和可选 `adopted_task_id`。原图不通过 JSON/base64、现有 MCP
+frame 或既有 CAD Resource URI 传输，也不在 S20 初期开放原图 `ResourceLink/resources.read`。
+
+sealed ImageSet 由非 MCP、descriptor-bound ingress port 创建；`create_reconstruction` 只接收其
+`image_set_id + manifest digest`。图片 ingress 是 host adapter 的受控 locator/descriptor capability：
+CLI/Workbench 先安全复制并 seal；WorkBuddy 只有在附件 descriptor 行为被真实认证后才直接接入；
+否则使用薄本地导入适配。S20.5 才把
+这些逻辑动作投影成各宿主的最薄入口，但不得改变上述合同。若以后要向宿主重读图片，必须新增独立
+`vibecad://visual-input/...` URI 并单独批准，不能扩张既有 CAD artifact URI。
+
+`A02` 只批准 `local_only` processing authorization、上述 public/durable 合同和 deterministic fake
+provider 路径；其它 authorization 值在 A03 前 fail closed。任何
+真实图片外发、真实 Provider、费用或 provider-specific profile 仍等待 `A03`。
+
+#### `VCAD-A02` 一次性批准内容
+
+批准 `A02` 即同时确认：两个 additive roots；sealed-only ImageSet；1–4 张 JPEG/PNG 与上述 byte/pixel
+预算；无后台 TTL、显式删除及采纳后 bounded provenance；generation/CAS 与创建时绑定、采纳时 HEAD
+冲突即停止；七个 host-neutral reconstruction 逻辑动作；locator/descriptor ingress；以及只运行
+deterministic fake provider 的 S20.1–S20.5 实现范围。它不批准任何真实 Provider/VLM（无论本地或
+外部）、外部图片传输、真实模型费用、图片 Resource URI、
+Revision/TaskRun v2、Freeform、发布或 tag。
 
 ## 5. 分阶段执行计划
 
@@ -276,7 +399,8 @@ S10.5 closeout：
 - 五条真实 managed FreeCAD 门覆盖 adoption rollback、Sketcher-bound edit verifier rollback、精确 26 objects、
   Worker checkpoint/reload，以及 R1 create/Accept → R2 modify/Accept。最后一条证明 draft 不提前推进 HEAD、
   R1 tree 字节不变、Body/feature identities 不变、Pad 8→12 mm、旧新 FCStd 均可重开且新 STEP 可由
-  `Part.read` 导入为有效单实体；没有新增 runner/controller/scenario language。
+  `Part.read` 导入为有效单实体；完整非慢速回归为 5,673 passed / 119 deselected，静态、package、
+  isolated-wheel 与独立复审均通过；没有新增 runner/controller/scenario language。冻结提交为 `7dfddce`。
 
 ### VCAD-S20 — Visual Input 与提案合同
 
@@ -286,7 +410,7 @@ S10.5 closeout：
 顺序：
 
 1. `S20.0` 冻结 ReconstructionDraft lifecycle、image retention/delete、durable-root topology 和兼容方案，
-   进入 `VCAD-A02`；
+   形成 `VCAD-A02` 审批包（**complete；等待批准**）；
 2. `S20.1` 实现 ImageSet seal、大小/格式/数量预算和归一化 provenance；
 3. `S20.2` 实现 VisualObservation、ReconstructionProposal 和 clarification 状态；
 4. `S20.3` 在 generic runtime 之上实现 Visual Domain Service、result retrieval 和 provider
@@ -467,7 +591,7 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 | Gate | 决策 | 当前状态 |
 |---|---|---|
 | `VCAD-A01` | 批准本整体计划并开始 S10 可逆实现 | **已批准** |
-| `VCAD-A02` | 批准 ReconstructionDraft/image store、retention/delete、durable-root 与 public contract | 未到达 |
+| `VCAD-A02` | 批准 ReconstructionDraft/image store、retention/delete、durable-root 与 public contract | **审批包已就绪，待批准** |
 | `VCAD-A03` | 批准真实外部视觉 Provider、数据处理与费用边界 | 未到达 |
 | `VCAD-A04` | 根据 pilot 结果冻结公开支持包络和 V1 发布声明 | 未到达 |
 | `VCAD-A05` | 启动 Freeform，批准其输出类型与验收合同 | 未到达 |
@@ -487,9 +611,9 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 - 已发布的 `v0.6.1` 没有真正的 Sketcher/PartDesign 可编辑基座；当前 branch candidate 已完成 S10 原生
   Sketcher/PartDesign 创建、Accept 后参数修改和第二 Revision 纵切片，但尚未公开发布；
 - 当前没有 ImageSet、VisualObservation、ReconstructionProposal 或 reconstruction domain service；
-- Revision durable v1 仍固定 FCStd/STEP，但不阻塞 task-scoped image/proposal artifact；
-- 当前 durable-root 合同还必须把已存在的 `releases/` 与未来 `visual_inputs/reconstruction_drafts` 一并校正；
-  这不阻塞 S10，但阻塞 S20 的持久化写路径；
+- Revision durable v1、TaskRun artifacts 与 CAD artifact store 仍固定于 CAD candidate/FCStd/STEP；S20.0
+  因此选择独立的 `visual_inputs/` 与 `reconstruction_drafts/` additive roots，不重解释现有 durable v1；
+- `releases/` 保持现状；新增 root 只做 captured-identity 的纯加法兼容，不引入全局 migration framework；
 - 当前 WorkBuddy 只验证了 VibeCAD → WorkBuddy 的资源读取，尚未认证附件 → VibeCAD 的输入；
 - S10.1 已选择冻结 `ObservationSnapshot v1`、`SelectorV1` 和 `AcceptanceSpec v1`；有限的重开后
   parametric facts 在 S10.2 复用既有 entity parameter 容器，完整 feature/constraint observation 若
@@ -501,15 +625,14 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-执行 S20.0 的只读/合同设计：冻结 ReconstructionDraft lifecycle、ImageSet seal/retention/delete、未来
-durable-root topology 与 v1 compatibility 方案，形成 VCAD-A02 审批包。A02 批准前不实现图片持久写路径，
-不接真实视觉 Provider，不发送外部图片，也不改变 public/durable schema。保持 sequential ownership，
-不增加 GUI 并发 merge、第二控制面、测试 controller 或 runner。
+等待用户批准 VCAD-A02 审批包。批准后从 S20.1 开始实现 sealed ImageSet 与两个 additive roots；A02
+批准前不实现图片持久写路径、不接真实视觉 Provider、不发送外部图片，也不改变 public/durable schema。
+保持 sequential ownership，不增加 GUI 并发 merge、第二控制面、测试 controller 或 runner。
 ```
 
 执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
-为 `1c52d7a`，S10.4 anchor 为 `368ccf8`。S10.5 只扩展既有 ModelProgram/Task/Worker/identity seam；
-S20.0 只做合同设计，不运行真实 Provider，也不进入 S20 持久化写路径。
+为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。S20.0 只完成合同设计，
+未运行真实 Provider，也未进入 S20 持久化写路径。
 
 ## 11. Material event ledger
 
@@ -521,7 +644,8 @@ S20.0 只做合同设计，不运行真实 Provider，也不进入 S20 持久化
 | `VCAD-E03` | S10.2 compiler 与 managed FreeCAD outcome | 建立真实 Sketcher、参数表达式、稳定映射、有界 graph/solver gate 和 v1 entity parameter facts | 497 focused/core tests；真实 edit/save/reopen 与 fail-closed outcomes；独立 review clean；恢复动作是继续 S10.3 | feature/solid、identity adoption、Worker stabilization 和 Task Kernel 接入留在 S10.3/S10.4 |
 | `VCAD-E04` | S10.3 feature compiler 与 managed FreeCAD outcome | 建立闭合 profile → native single-solid feature chain、feature mapping/facts 与 fail-closed shape gate | 505 focused/core tests；真实 plate/hole/shaft edit/save/reopen、partial multi-cut rejection、rollback 和 tamper outcomes；独立 review clean；恢复动作是继续 S10.4 | ModelProgram/Task/Worker、EntityIdentity、Revision review 纵切片留在 S10.4/S10.5；multi-loop Pocket / multi-location Hole 留在 S35 |
 | `VCAD-E05` | S10.4 Task/Worker integration 与 managed FreeCAD outcomes | 完整 IR 经一个 hidden atomic operation 进入既有 Task Kernel；Body/feature identity、stabilization、review draft 与 HEAD authority 保持单一 | 3,405-node durable round-trip；精确 26-object/rollback/Worker reload/Task draft 四条真实门；full/static/package/isolated-wheel gate；双重独立 review clean；恢复动作是继续 S10.5 | Accept 后参数修改与第二 Revision 留在 S10.5；A02–A06 均未到达 |
-| `VCAD-E06` | S10.5 hidden edit operation 与 managed FreeCAD outcomes | 已接受 Revision 的公开 parameter 经同一 Task/Worker 权威原子修改，产生 identity-stable 的第二 Revision | 3,526-node durable modify TaskRun；五条真实门覆盖 rollback、R1/R2 Accept、FCStd/STEP reload 和旧 Revision 不变；full/static/package/review gate；恢复动作是 S20.0 合同设计 | 尚未公开发布；A02–A06 均未到达 |
+| `VCAD-E06` | S10.5 hidden edit operation 与 managed FreeCAD outcomes | 已接受 Revision 的公开 parameter 经同一 Task/Worker 权威原子修改，产生 identity-stable 的第二 Revision | `7dfddce`；3,526-node durable modify TaskRun；五条真实门覆盖 rollback、R1/R2 Accept、FCStd/STEP reload 和旧 Revision 不变；5,673 non-slow + static/package/review gate | 尚未公开发布；A02–A06 均未授权 |
+| `VCAD-E07` | `VCAD-A01` 授权的 S20.0 design-only slice | 冻结两个 additive roots、sealed ImageSet、ReconstructionDraft generation/CAS、sequential HEAD、显式删除和 host-neutral ingress 候选合同 | 本文件 §4.5；现有 durable/public seam 只读审计；恢复动作是等待 `VCAD-A02` | 未写图片、未改 schema、未调用 Provider；A02–A06 均未授权 |
 
 ## 12. 研究依据
 

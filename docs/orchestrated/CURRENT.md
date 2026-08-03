@@ -1,6 +1,6 @@
-# VibeCAD Active Plan — Visual CAD Parametric Core
+# VibeCAD Active Plan — Visual CAD
 
-> Status: **S10 Parametric Core is complete; S20.0 contract design is next**
+> Status: **S10 Parametric Core and S20.0 contract design are complete; VCAD-A02 approval is required**
 >
 > Updated: 2026-08-03
 >
@@ -46,6 +46,16 @@ authority; the MCP tool count remains 31.
 Real vision providers, visual persistence, public product claims, Freeform, and
 publication remain behind A02–A06.
 
+S20.0 has now produced the bounded A02 approval package. It keeps the existing
+CAD Task/Review/Revision authority unchanged and proposes two additive private
+roots, `visual_inputs/` and `reconstruction_drafts/`. ImageSet is published only
+after atomic seal; ReconstructionDraft uses generation/CAS, durable provider and
+adoption intents, sequential HEAD binding, explicit deletion, and a path-free
+host-neutral API. Existing ReviewDraft IDs, Task artifacts, CAD artifact storage,
+Revision v1, and CAD Resource URIs are not reused for images. No visual bytes,
+schema changes, or Provider calls have occurred. Implementation starts at S20.1
+only after A02 approval; real external image processing still requires A03.
+
 S10.4 closeout evidence is bounded to the product seam: a 3,405-node IR durable
 round-trip; four real managed-FreeCAD outcomes covering atomic rollback, the
 exact 26-object maximum, Worker checkpoint/STEP/reload, and Task review without
@@ -63,7 +73,9 @@ maximum, Worker reload, and the full R1 create/Accept → R2 modify/Accept flow.
 That final flow reopens both FCStd revisions, imports the new STEP with
 `Part.read`, preserves identities and the complete R1 tree, and proves the
 8→12 mm native Pad change. No new value shape or public MCP schema was added,
-so the public surface digest remains unchanged.
+so the public surface digest remains unchanged. The final gate was 5,673 passed
+/ 119 deselected, plus Ruff, compileall, diff/package/isolated-wheel
+checks and clean independent review; the pushed S10.5 anchor is `7dfddce`.
 
 ## 1. Completed P2 product truth (historical)
 
