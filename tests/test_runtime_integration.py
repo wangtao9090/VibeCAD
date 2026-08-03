@@ -1254,8 +1254,16 @@ def test_unpacked_mcpb_agent_first_stdio_acceptance(tmp_path):
         assert all("outputSchema" not in item for item in listed_tools)
         assert _rpc(proc, 2, "resources/list")["result"]["resources"] == []
         templates = _rpc(proc, 3, "resources/templates/list")["result"]["resourceTemplates"]
-        assert len(templates) == 1
-        assert templates[0]["uriTemplate"].startswith("vibecad://artifact/")
+        assert templates == [
+            {
+                "name": "artifact",
+                "uriTemplate": "vibecad://artifact/{materialization_id}/{artifact_id}",
+            },
+            {
+                "name": "release",
+                "uriTemplate": "vibecad://release/{release_id}/{file_name}",
+            },
+        ]
 
         # A fresh MCPB home binds the existing engine in a background installer,
         # then the bootstrap server exits and the supervisor transparently swaps
