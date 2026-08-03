@@ -1,6 +1,9 @@
 # mcpb pack 默认不排除虚拟环境/缓存——必须显式列（仓库 .venv 162MB）
 .venv/
 .claude/
+.codex/
+.agents/
+.workbuddy/
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -14,8 +17,8 @@ docs/
 .vibecad/
 .vibecad-test-runtime/
 dist/
-uv.lock
 .gitignore
 .python-version
 CLAUDE.md
+CAD_Theory_Course_*.md
 *.mcpb

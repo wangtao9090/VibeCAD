@@ -21,6 +21,9 @@ class _FakeShape:
     def isNull(self):
         return False
 
+    def isValid(self):
+        return True
+
 
 class _FakeSolidObj(_FakeObj):
     def __init__(self, name, type_id="Part::Box", volume=10.0):
@@ -41,6 +44,21 @@ class _FakeDoc:
 
     def abortTransaction(self):
         self.log.append(("abort",))
+
+
+class _StateDoc(_FakeDoc):
+    def __init__(self):
+        super().__init__()
+        self.PropertiesList = []
+
+    def addProperty(self, _type, name, _group, _doc):
+        self.PropertiesList.append(name)
+
+
+class _CommitFailDoc(_FakeDoc):
+    def commitTransaction(self):
+        super().commitTransaction()
+        raise RuntimeError("commit failed")
 
 
 class _FakePlacement:
@@ -86,6 +104,7 @@ def test_new_part_requires_document():
 
 def test_new_part_duplicate_rejected(monkeypatch):
     s = Session()
+    s._doc = _FakeDoc()
     monkeypatch.setattr(s, "_require_doc", lambda: None, raising=False)
     monkeypatch.setattr(s, "_register_part_container", lambda name: object(), raising=False)
     s._register_first_part_if_needed = lambda: None
@@ -100,6 +119,18 @@ def test_set_active_unknown_part():
         s.set_active_part("幽灵")
 
 
+def test_set_active_current_part_is_idempotent_and_not_dirty():
+    s = Session()
+    s._doc = _FakeDoc()
+    s._parts = {"A": _fake_part()}
+    s._active_part = "A"
+    s.mark_saved()
+    revision = s._revision_id
+    s.set_active_part("A")
+    assert s._revision_id == revision
+    assert s.is_dirty() is False
+
+
 def test_new_part_rejects_empty_name(monkeypatch):
     s = Session()
     monkeypatch.setattr(s, "_require_doc", lambda: None, raising=False)
@@ -109,6 +140,7 @@ def test_new_part_rejects_empty_name(monkeypatch):
 
 def test_new_part_sets_active_and_order(monkeypatch):
     s = Session()
+    s._doc = _FakeDoc()
     monkeypatch.setattr(s, "_require_doc", lambda: None, raising=False)
     monkeypatch.setattr(s, "_register_part_container", lambda name: _FakeContainer(),
                         raising=False)
@@ -122,9 +154,65 @@ def test_new_part_sets_active_and_order(monkeypatch):
     assert s.active_part == "底板"
 
 
+def test_new_part_does_not_claim_container_internal_objects(monkeypatch):
+    """App::Part 自动 Origin/轴/基准面不属于可建模对象，空零件必须保持 objects 空。"""
+    s = Session()
+    doc = _FakeDoc()
+    s._doc = doc
+    s._parts = {"A": _fake_part()}
+    s._active_part = "A"
+
+    def create_container(name):
+        doc.Objects.extend([
+            _FakeObj("VibePart001", "App::Part"),
+            _FakeObj("Origin001", "App::Origin"),
+            _FakeObj("X_Axis001", "App::Line"),
+        ])
+        return _FakeContainer()
+
+    monkeypatch.setattr(s, "_register_part_container", create_container)
+    s._register_first_part_if_needed = lambda: None
+    s.new_part("B")
+    assert s._parts["B"]["objects"] == set()
+
+
+def test_new_part_undo_redo_restores_active_part(monkeypatch):
+    """活动零件属于事务历史；redo 后不能误留在 undo 阶段的零件。"""
+    s = Session()
+    s._doc = _FakeDoc()
+    monkeypatch.setattr(s, "_register_part_container", lambda name: _FakeContainer())
+    s._register_first_part_if_needed = lambda: None
+    s.new_part("A")
+    s.new_part("B")
+    assert s.active_part == "B"
+    s.restore_roots_for_undo()
+    assert s.active_part == "A"
+    s.restore_roots_for_redo()
+    assert s.active_part == "B"
+
+
+def test_dirty_state_uses_full_session_snapshot_across_undo_redo():
+    """revision 回拨不能掩盖 active_part/result_roots 与已保存状态的差异。"""
+    s = Session()
+    s._doc = _FakeDoc()
+    s._parts = {"A": _fake_part(), "B": _fake_part()}
+    s._active_part = "A"
+    s.mark_saved()
+    with s._transaction("geometry"):
+        pass
+    s.set_active_part("B")
+    s.restore_roots_for_undo()
+    assert s.active_part == "A"
+    assert s.is_dirty() is False
+    s.restore_roots_for_redo()
+    assert s.active_part == "B"
+    assert s.is_dirty() is True
+
+
 def test_new_part_implicit_name_clash(monkeypatch):
     """单零件几何归入隐式 Part1 后，new_part("Part1") 撞名必须响亮拒绝。"""
     s = Session()
+    s._doc = _FakeDoc()
     monkeypatch.setattr(s, "_require_doc", lambda: None, raising=False)
     monkeypatch.setattr(s, "_register_part_container", lambda name: _FakeContainer(),
                         raising=False)
@@ -237,6 +325,94 @@ def test_get_result_object_single_mode_unchanged():
     assert s.get_result_object().Name == "BoxB"
     with pytest.raises(RuntimeError, match="无活动文档"):
         Session().get_result_object()
+
+
+def test_single_part_mode_rejects_explicit_part_without_mutating_saved_state():
+    s = Session()
+    doc = _FakeDoc()
+    box = _FakeSolidObj("Box")
+    doc.Objects.append(box)
+    s._doc = doc
+    s.set_result_object(box)
+    s.mark_saved()
+
+    with pytest.raises(ValueError, match="单零件模式"):
+        s.get_result_object("ghost")
+
+    assert s._result_roots == {"__single__": "Box"}
+    assert s.is_dirty() is False
+
+
+def test_result_fallback_rejects_invalid_positive_volume_shape():
+    class _InvalidShape(_FakeShape):
+        def isValid(self):
+            return False
+
+    s = Session()
+    doc = _FakeDoc()
+    s._doc = doc
+    invalid = _FakeSolidObj("Broken", type_id="Part::Cut")
+    invalid.Shape = _InvalidShape(volume=10)
+    valid = _FakeSolidObj("Valid")
+    doc.Objects += [valid, invalid]
+    assert s.get_result_object() is valid
+
+
+def test_explicit_result_root_overrides_legacy_type_heuristic():
+    """旧 heuristic 会永远优先 Cut；显式 root 必须允许新建 Box 成为当前结果。"""
+    s = Session()
+    doc = _FakeDoc()
+    s._doc = doc
+    cut = _FakeSolidObj("Cut", type_id="Part::Cut")
+    box = _FakeSolidObj("BoxAfterCut")
+    doc.Objects += [cut, box]
+    s.set_result_object(box)
+    assert s.get_result_object() is box
+
+
+def test_persisted_state_restores_explicit_root():
+    doc = _StateDoc()
+    box = _FakeSolidObj("Box")
+    doc.Objects.append(box)
+    writer = Session()
+    writer._doc = doc
+    writer.set_result_object(box)
+    writer.persist_state()
+
+    reader = Session()
+    reader._doc = doc
+    reader._restore_persisted_state()
+    reader._stabilize_result_roots()
+    reader.mark_saved()  # load_document 在状态恢复与 root 稳定后建立完整保存快照
+    assert reader.get_result_object() is box
+    assert reader.is_dirty() is False
+
+
+def test_result_roots_are_namespaced_per_part():
+    s = Session()
+    doc = _FakeDoc()
+    s._doc = doc
+    a1, a2, b = (_FakeSolidObj("A1"), _FakeSolidObj("A2"), _FakeSolidObj("B"))
+    doc.Objects += [a1, a2, b]
+    s._parts = {"A": _fake_part({"A1", "A2"}), "B": _fake_part({"B"})}
+    s._active_part = "A"
+    s.set_result_object(a1, part="A")
+    s.set_result_object(b, part="B")
+    assert s.get_result_object("A") is a1
+    assert s.get_result_object("B") is b
+
+
+def test_transaction_abort_restores_explicit_root():
+    s = Session()
+    doc = _FakeDoc()
+    s._doc = doc
+    old, new = _FakeSolidObj("Old"), _FakeSolidObj("New")
+    doc.Objects += [old, new]
+    s.set_result_object(old)
+    with pytest.raises(RuntimeError, match="boom"), s._transaction("failing"):
+        s.set_result_object(new)
+        raise RuntimeError("boom")
+    assert s.get_result_object() is old
 
 
 def test_get_result_object_scoped_to_part():
@@ -370,6 +546,42 @@ def test_claim_new_objects_success_registers_all():
     s._active_part = "A"
     s._claim_new_objects(before={"Old"})
     assert part["objects"] == {"Old", "New1", "New2"}
+
+
+def test_transaction_can_claim_new_objects_for_non_active_owner():
+    s = Session()
+    doc = _FakeDoc()
+    s._doc = doc
+    s._parts = {"A": _fake_part(), "B": _fake_part()}
+    s._active_part = "B"
+    with s._transaction("boolean", part="A"):
+        doc.Objects.append(_FakeObj("Fuse"))
+    assert s._parts["A"]["objects"] == {"Fuse"}
+    assert s._parts["B"]["objects"] == set()
+
+
+def test_commit_failure_restores_roots_revision_and_part_membership():
+    s = Session()
+    doc = _CommitFailDoc()
+    old, new = _FakeSolidObj("Old"), _FakeSolidObj("New")
+    doc.Objects.append(old)
+    s._doc = doc
+    s._parts = {"A": _fake_part({"Old"})}
+    s._active_part = "A"
+    s.set_result_object(old, part="A")
+    revision = s._revision_id
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        with s._transaction("failing-commit", part="A"):
+            doc.Objects.append(new)
+            s.set_result_object(new, part="A")
+            s._revision_id = "leaked-revision"
+
+    assert s._result_roots == {"A": "Old"}
+    assert s._revision_id == revision
+    assert s._parts["A"]["objects"] == {"Old"}
+    assert ("abort",) in doc.log
+    assert s._undo_result_roots == []
 
 
 # ---- owner_of：对象 → 零件反查（终审 C-D 守卫锚定的基石）----

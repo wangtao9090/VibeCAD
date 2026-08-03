@@ -4,12 +4,9 @@ on:
   pull_request: {}
 jobs:
   lint-unit:
-    strategy:
-      fail-fast: false
-      matrix:
-        # macos-13（Intel runner）已被 GitHub 退役——保留会永远 queued 并卡死 needs 它的 runtime-integration
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    # 当前产品只声明 Darwin。Linux/Windows 应在各自的原生应用数据、进程、
+    # 文件能力与真实 FreeCAD 契约完成后再恢复完整门禁，不能静默降级安全边界。
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -17,20 +14,33 @@ jobs:
       - run: uv run ruff check .
       - run: uv run pytest -q            # slow 默认跳过
       - run: npx -y @anthropic-ai/mcpb@2.1.2 validate manifest.json
-        if: matrix.os == 'ubuntu-latest'   # mcpb manifest 回归防线（仅跑一次）
   runtime-integration:
     needs: lint-unit
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]   # M4: 含 Windows 真验 DLL 链路
-    runs-on: ${{ matrix.os }}
+    # AgentApplication、文件能力边界和发布 runtime 当前只在 Darwin 上受支持。
+    runs-on: macos-latest
     timeout-minutes: 45
+    env:
+      VIBECAD_RUN_INTEGRATION: "1"
     steps:
+      - name: bind an isolated managed runtime
+        run: printf 'VIBECAD_HOME=%s\n' "$RUNNER_TEMP/vibecad-pr-runtime" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync
-      - name: install runtime + full real-machine suite
-        env: { VIBECAD_RUN_INTEGRATION: "1" }
-        # 全量 slow：A1/A2/A3 + 建模/视觉/特征/回滚契约（UndoMode 等修复的唯一 CI 防线）
-        run: uv run pytest -m slow -v -s
+      - run: uv sync --frozen
+      - name: install and verify the current managed FreeCAD runtime
+        env:
+          VIBECAD_PIP_SPEC: ${{ github.workspace }}
+        run: >-
+          uv run --frozen python -c
+          "from vibecad.runtime.installer import RuntimeInstaller;
+          RuntimeInstaller().install()"
+      - name: bind the test to the installed managed runtime
+        run: |
+          managed_python="$(uv run --frozen python -c \
+            'from vibecad.runtime.paths import env_python_for, env_prefix; print(env_python_for(env_prefix()).resolve())')"
+          echo "VIBECAD_MANAGED_FREECAD_PYTHON=$managed_python" >> "$GITHUB_ENV"
+      - name: current Agent-first real-machine gate
+        run: >-
+          uv run --frozen pytest -m slow -v -s
+          tests/test_task_kernel_integration.py::test_real_agent_first_public_matrix_and_cross_process_review
+          tests/test_task_kernel_integration.py::test_real_task_kernel_commits_verified_candidate

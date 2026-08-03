@@ -3,6 +3,7 @@
 Round 11 C 分支：原三态判断（在哪个 python 跑 server）迁入 supervisor._server_cmd，
 本模块只做进程入口的一次性事务；退出码 = server 真退出码，原样透传给宿主。
 纯 stdlib，禁 import mcp/FreeCAD 等重依赖。"""
+
 from __future__ import annotations
 
 import json
@@ -31,6 +32,18 @@ def _cli_uninstall() -> None:
 
 
 def main() -> None:
+    arguments = sys.argv[1:]
+    if "--freecad-app" in arguments:
+        from vibecad import freecad_external
+
+        raise SystemExit(freecad_external.handle_cli(arguments))
+    if "--freecad" in arguments:
+        if arguments != ["--freecad"]:
+            print("usage: vibecad --freecad", file=sys.stderr)
+            raise SystemExit(2)
+        from vibecad import freecad_launcher
+
+        raise SystemExit(freecad_launcher.launch())
     if "--uninstall" in sys.argv:
         _cli_uninstall()
         return

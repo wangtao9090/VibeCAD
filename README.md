@@ -1,135 +1,330 @@
-# Vibe CAD
+# VibeCAD
 
-[![CI](https://github.com/wangtao9090/VibeCAD/actions/workflows/ci.yml/badge.svg)](https://github.com/wangtao9090/VibeCAD/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/vibecad)](https://pypi.org/project/vibecad/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org)
+**[English](README.md)** | [简体中文](README.zh-CN.md)
 
-**AI-native conversational CAD — an open-source MCP connector for FreeCAD (chat-native, zero-install).**
+[![CI](https://github.com/wangtao9090/VibeCAD/actions/workflows/ci.yml/badge.svg)](https://github.com/wangtao9090/VibeCAD/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org)
 
-**AI 对话式 CAD —— FreeCAD MCP 连接器（Chat-native 零安装）**
+VibeCAD is a FreeCAD expert agent for host agents such as Claude, Codex, and WorkBuddy. It turns design
+intent into persistent projects, constrained CAD operations, reviewable drafts, and verified
+FCStd/STEP resources.
 
-给一年只设计几次东西的人：免费的 FreeCAD + 一个让你永远不用学 FreeCAD 的 AI。
-在任意 MCP 客户端（Claude Desktop / Cowork / OpenClaw / Cursor…）中，用自然语言完成
-中等复杂度的参数化设计与多零件装配，交付可制造文件（3D 打印 STL、CNC STEP、glTF 交互预览）。
+VibeCAD neither embeds nor resells a large language model. Reasoning uses the user's own host
+model and its subscription or API quota; VibeCAD is responsible for CAD contracts, isolated
+execution, deterministic verification, recovery, and delivery.
 
-> **状态**：R1 运行时 → R2 语义建模 → R3 视觉反馈 → R4 位置控制 → R5 可指代性 → R6a 工程图+每步回图 → R6b 参数修改 → R7 阵列/拉伸/重定位 → R8 装配 DSL（多零件/贴面对齐/干涉守卫）→ **R11 自动安装 + 零重连换芯 + 干净卸载**（当前 **0.3.0**）——已全部本机实跑验证。设计文档见
-> [`docs/superpowers/specs/2026-06-08-vibecad-design.md`](docs/superpowers/specs/2026-06-08-vibecad-design.md)。
+## What VibeCAD Delivers
 
-## 快速开始（用户）
+- An Agent-native path from design intent to persistent CAD projects and versioned results.
+- A real FreeCAD Workbench Alpha for project/task discovery, HEAD and draft preview, verdict,
+  Accept, and Reject.
+- Deterministic Task Kernel execution: isolated candidates, explicit review policy, verified
+  FCStd/STEP artifacts, recovery, and replay-safe request semantics.
+- A WorkBuddy 5.3.5 verified local-stdio path covering strict schemas, durable restart recovery,
+  exact Release approval, and native MCP Blob reads for PDF/ZIP delivery.
+- A VibeCAD-managed FreeCAD runtime, so users do not need to prepare a compatible system FreeCAD.
 
-**Claude Desktop / Cowork（推荐）**：去 [Releases 最新版](https://github.com/wangtao9090/VibeCAD/releases/latest) 下载 [`VibeCAD.mcpb`](https://github.com/wangtao9090/VibeCAD/releases/latest)，**双击安装**——Claude Desktop 弹出安装窗口后点安装即可，零终端、零配置文件、无需预装 uv/Python（宿主自动准备隔离 Python 环境）。**装好后直接开始说话即用**：第一次对话建模引擎就已经在后台自动下载（约 2-3GB，仅一次），装好后当场自动切换、无需重启对话，期间可随时问"装到哪了"。逐步图文教程见 **[用户手册](docs/USER_GUIDE.md)**。
+## Try the FreeCAD Workbench Alpha
 
-> 其他客户端（Claude Code / Cursor 等）走 stdio 方式：装好 [uv](https://docs.astral.sh/uv/) 后 `claude mcp add --transport stdio vibecad -- uvx vibecad`（已发布 [PyPI](https://pypi.org/project/vibecad/)），详见用户手册附录 A。
+The easiest installation path is to give your coding Agent this request:
 
-## 首发形态：Chat-native 零安装
+> Install and launch the VibeCAD FreeCAD Workbench Alpha from
+> https://github.com/wangtao9090/VibeCAD. Use tag `v0.6.1`, clone it into a persistent
+> directory, build its wheel, install it with `uv tool install --force`, keep
+> the checkout and built wheel, and run `vibecad --freecad`. Do not install or
+> fall back to a system copy of FreeCAD.
 
-用户无需自行安装 FreeCAD —— MCP server 首次运行会通过 micromamba 自动安装无头 FreeCAD 运行时。
-每个成功建模步骤回传结构化文本结果和 PNG 软渲染图/工程图；如需 glTF，可调用
-`export_part(fmt="gltf")` 或 `export_part(fmt="all")` 按需导出，再交给外部查看器使用。
-
-## 架构（方案 B：进程内自建）
-
-- **MCP 框架**：Python 官方 MCP SDK（FastMCP），stdio 起步
-- **几何引擎**：conda-forge FreeCAD 1.1+ 进程内 `import`
-- **运行时分发**：micromamba 自动安装（全平台矩阵）
-- **工具面**：纯语义工具（`add_hole`/`fillet_edges`/`new_part`/`place_part`/`align_parts`），每工具事务 + 几何断言 + 规则检查
-- **反馈**：每步结构化文本 + PNG 软渲染图/工程图；glTF 由 `export_part` 按需导出
-
-## 开发
+The Agent's reproducible procedure is:
 
 ```bash
-uv sync            # 安装 server 依赖（不含 FreeCAD）
-uv run vibecad     # 启动 MCP server（stdio，先跑纯 stdlib launcher）
-uv run pytest      # 跑单元测试（slow 集成测试默认跳过）
-uv run ruff check  # 静态检查
+git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
+git -C VibeCAD checkout v0.6.1
+cd VibeCAD
+uv build --wheel
+uv tool install --force dist/vibecad-0.6.1-py3-none-any.whl
+vibecad --freecad
 ```
 
-### FreeCAD 运行时（首次使用）
+Installation notes:
 
-server 启动即可握手；FreeCAD 运行时（约 2-3GB）按需后台获取，不阻塞握手：
+- Keep the persistent checkout and built wheel at the same path while this Alpha is installed.
+- Do not search `PATH`, `/Applications`, the normal FreeCAD `Mod` directory, or install a system
+  FreeCAD fallback. `vibecad --freecad` owns the verified managed runtime.
+- Allow the first launch to download approximately 2–3 GB of locked runtime files; later launches
+  reuse them.
+- Success means managed FreeCAD opens with the VibeCAD Workbench and review Dock active. On
+  failure, report the exact launcher error and stop instead of switching runtimes or inventing an
+  alternate installation path.
 
-1. 调用 `ensure_runtime` —— 未就绪则后台开始安装（micromamba → conda env `python=3.12 freecad=1.1.0` → pip 装 server → 冒烟），立即返回 `started`。`.mcpb` 扩展场景设了 `VIBECAD_AUTO_INSTALL=1`，server 启动即自动调用，无需显式触发。
-2. 轮询 `get_runtime_status` 至 `phase=ready`。
-3. 运行时就绪后监督进程（`vibecad.supervisor`）自动把子进程从引导解释器切到 conda 运行时解释器（"换芯"），**客户端零感知，不需要重连或重启对话**；切换完成后直接调用 `smoke_cad` —— 进程内造 10×10×10 Box、导出 STEP，返回体积/包围盒（证 A1/A3）。极少数不可换芯的场景（如裸 `python -m vibecad.server` 直跑、无监督进程）会诚实回退提示重连，非标准安装路径下才会遇到。
+The Dock can list projects and tasks, refresh selected state, open separate managed HEAD and
+draft preview documents, show the review verdict, capture exact whole-object or feature
+`SelectorV1` values, and Accept or Reject a fresh draft. Face/edge subelement selection is not
+claimed.
 
-环境变量：
-- `VIBECAD_HOME` —— 运行时落盘根目录（默认平台数据目录；卸载删除范围即此目录）
-- `VIBECAD_AUTO_INSTALL=1` —— server 启动即自动后台安装（默认需显式 `ensure_runtime`；`.mcpb` manifest 固定开启，手动 `uvx vibecad` 场景默认关闭）
-- `VIBECAD_FREECAD_ENV=<conda env 路径>` —— 复用现成的 FreeCAD env（只校验不自建）
-- `VIBECAD_PIP_SPEC=<本地源/包名>` —— 预发布期指向本地仓库源
-- 集成测试：`VIBECAD_RUN_INTEGRATION=1 uv run pytest -m slow`（真实下载 2-3GB）
+The current P1 source also provides a sequential manual-finish path after Agent review ends:
+**Open Editable HEAD** creates a non-authoritative working copy, normal **Save** stays local,
+**Checkpoint Edit** verifies and publishes a new Revision, and **Discard Edit** publishes nothing.
+Agent preview and editable HEAD are mutually exclusive; there is no automatic merge or rebase.
 
-> 陈旧安装锁：若安装异常中断，手动删除 `<VIBECAD_HOME>/.install.lock`。
-> FreeCAD 运行时由 `vibecad.runtime`（D4）按需获取，与本 venv 隔离。
-> 不再需要？调用 `uninstall_runtime`（两段式：先预览再 `confirm=true`）或命令行 `vibecad --uninstall`；详见下方「卸载」。
+The managed launcher above remains the default and fallback. One additional, deliberately narrow
+macOS pilot can install the same thin Workbench into an explicitly selected user FreeCAD:
 
-## 语义建模工具（Round 2）
+```bash
+vibecad --freecad-app /Applications/FreeCAD.app --doctor
+vibecad --freecad-app /Applications/FreeCAD.app --install-addon
+# reversible cleanup
+vibecad --freecad-app /Applications/FreeCAD.app --uninstall-addon
+```
 
-运行时就绪后（就绪即自动切入 conda 解释器，无需重连），用以下语义工具完成「自然语言 → 参数化单零件 → 可制造文件」：
+This is not general system-FreeCAD support. The current local evidence admits only the exact
+fingerprinted macOS FreeCAD 1.1.3 host with embedded CPython 3.11 and PySide6 6.8.3. The doctor
+fails closed for every other host. The installed addon holds no daemon secret and delegates
+selector construction and unique resolution to the managed Python bridge and the same Task
+Kernel used by managed mode.
 
-| 工具 | 作用 |
+## Current Agent-first Workflow
+
+```text
+User and host Agent
+  → get_capabilities reads the actual capabilities
+  → create_project creates an empty project or performs a controlled FCStd import
+  → create_task binds the project version and review policy
+  → call one direct operation, or submit a multi-step ModelProgram
+  → Task Kernel executes and verifies the candidate version in an isolated checkout
+  → auto_commit publishes, or require_review waits for Accept/Reject
+  → export_task_artifacts returns FCStd/STEP ResourceLinks
+  → resources/read reads and verifies the delivered resources
+```
+
+Direct operations and ModelPrograms are not separate execution systems. A direct operation
+simply compiles one explicit operation into a single-command ModelProgram. Both paths enter the
+same Task Kernel and share the same project lease, immutable base revision, candidate checkout,
+verification, draft, commit, reject, rollback, and recovery semantics.
+
+A project can currently begin only from an empty project or a single FCStd file. An FCStd import
+must be non-empty, and every object in it must be either `Part::Box` or `Part::Cylinder`. Mixed
+or other object types are rejected. General FCStd import belongs to P1; STEP/STL import, reverse
+engineering, and simulation are not yet integrated. Upstream engines for photo/video-to-mesh or
+STL conversion, 2D sketch recognition, and similar tasks may be connected later as external
+tools. VibeCAD focuses on the intermediate orchestration and verification of editable CAD.
+
+## Current Public Capabilities (0.6.1)
+
+The MCPB manifest and runtime project the same frozen contract, which currently exposes 31
+tools. Each tool has a concise description, a strict input schema, and side-effect annotations.
+A host should call `get_capabilities` first instead of inferring capabilities from the number of
+tools or from general model knowledge.
+
+| Category | Tools |
 |---|---|
-| `new_document(name)` | 新建单零件工作文档 |
-| `add_box(length, width, height, position=[x,y,z])` | 参数化长方体（Part::Box，mm）；`position` 放置位置（默认原点） |
-| `add_cylinder(radius, height, position=[x,y,z], axis="z")` | 参数化圆柱（Part::Cylinder，mm）；`position` 放置位置、`axis=x\|y\|z` 轴向（可贯穿不同面，配合居中 position 打正中孔） |
-| `boolean_cut(base_name, tool_name)` | 布尔差集（Part::Cut）：从 base 减去 tool |
-| `export_part(output_dir, fmt="both", split=False)` | 导出可制造文件 STEP/STL（fmt: step\|stl\|gltf\|both\|all；all 含 glTF）；`split=True` 装配体按零件拆分各导一份 |
-| `describe_part()` | 文本诊断：体积/包围盒/质心/实体数/有效性 |
-| `render_part(view="iso", annotate=None, edges_of=None, save_to=None)` | **PNG 预览图**（view: iso\|front\|top\|right\|back\|**multi**）。`view="multi"` 出**工程图三视图拼图**（线框+虚线隐藏线+尺寸+⌀+中心线 + 标注版 iso 格）；`annotate="faces"` 出**面标注图**（A/B/C 标签+尺寸线）+ 标签表；`annotate="edges"` 出边标注图（E1…，`edges_of="A"` 只画 A 面的边）；`save_to=<绝对路径>` 另存 PNG 到指定文件（每步建模自动落盘到 `view_file` 无需此参数，仅需要另存别处时才用） |
-| `add_hole(face, diameter, depth=None, offset=[u,v], pattern=None)` | **在指定面打圆孔**（face=面标签）；depth 省略=通孔；offset 面内偏移；`pattern={"type":"linear","count":4,"spacing":10}` 或 `{"type":"circular","count":6,"radius":12}` **孔阵列**（全有全无） |
-| `fillet_edges(edges, radius)` | **圆角**（edges=边标签列表，如 `["E1","E2"]`） |
-| `chamfer_edges(edges, size)` | **倒角**（边标签列表） |
-| `move_part(name, position)` | **移动图元**到绝对位置（孔刀具/基体；特征随依赖链重算，破坏孔完整性/封闭内腔的移动响亮拒绝） |
-| `rotate_part(name, axis, angle)` | **旋转图元**（绕自身包围盒中心；适用于无特征链对象，带特征整体旋转留装配轮） |
-| `extrude_profile(profile, height, face, offset, operation)` | **自由轮廓拉伸**：profile DSL（rect/circle/polygon/slot）在指定面 pad 加料/pocket 挖槽；体积双边核算（打穿/越界响亮拒绝） |
-| `new_part(name)` | **新建装配零件**并设为活动零件（既有工具默认作用于活动零件；首个零件自动命名 Part1） |
-| `place_part(part, position, rotation_axis, angle)` | **零件级位姿**：整个零件（含全部特征）移动/旋转——孔随零件走 |
-| `align_parts(moving_part, moving_face, target_part, target_face, offset, gap, allow_interference)` | **面贴面对齐**（跨零件面标签指代）；装配后自动干涉检查，重叠响亮拒绝（allow 显式豁免压配） |
-| `modify_part(name, parameter, value)` | **参数修改**（如 `("Box","length",45)`、`("HoleTool","radius",5)`）——FreeCAD 依赖链自动重算，工程图尺寸当场更新；可改对象与参数见每步返回的 `parts` 字段；带漂移/孔完整性/单实体几何断言，危险修改（吞件/孔变缺口/切两半）响亮拒绝并回滚 |
-| `uninstall_runtime(confirm=False)` | **卸载 CAD 引擎**（删除全部已下载运行时，约 2-3GB）：不带 `confirm` 仅预览路径与大小，`confirm=true` 才真正执行删除；删除在幕后自动完成，无需手动重启（详见「卸载」） |
+| Service and runtime | `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime` |
+| Capability discovery | `get_capabilities` |
+| Projects and versions | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
+| Tasks and drafts | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft` |
+| Delivery | `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release` |
+| Direct operations | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
 
-每个工具 = 参数校验 → 文档事务 → 参数化对象 → recompute → **几何断言**（`recompute()` 返回值不可信，几何断言是唯一可信成功判据）→ 结构化返回。所有工具守卫「运行时就绪 + 已切入 conda 解释器」，切换过程自动完成。
+A successful `export_task_artifacts` call returns a canonical result and two typed
+`ResourceLink` values:
 
-开发态集成测试复用持久 FreeCAD env：`VIBECAD_RUN_INTEGRATION=1 uv run pytest -m slow`（首次自动装到 `.vibecad-test-runtime/`，约 4 分钟，后续秒进）。
+- FCStd: `application/vnd.freecad.fcstd`;
+- STEP: `model/step`.
 
-### 视觉反馈（Round 3）
+The host can retrieve binary content only by calling `resources/read` with the returned URI, then
+checking its format, size, and SHA-256. The interface does not provide arbitrary-path export or
+arbitrary file reads.
 
-- `render_part` 回传 **PNG 软渲染图**（matplotlib Agg，无 GPU），作为 MCP `ImageContent` 在 Claude Desktop 等客户端**内联可见**——用户据此迭代式画图。
-- `export_part(fmt="gltf"/"all")` 导出 **glTF（.glb）工件**（逐面 primitive + 面级 extras），供未来会渲 glTF 的 App/客户端交互旋转拾取。
-- 注：当前为 MVP 级渲染（看清形状/朝向/比例，非照片级）；FreeCADGui 高质量离屏渲染留后续。
+For an accepted Revision, `create_release` generates a previewable A3 assembly PDF, flat BOM,
+manifest, validation report, and an immutable seven-file delivery ZIP. The host must present the
+exact ZIP SHA-256 before calling `approve_release`; only the approved Release exposes the ZIP
+ResourceLink. Release approval is separate from Revision acceptance and never changes project
+HEAD.
 
-### 可指代性：标注图 + 标签注册表（Round 5）
+## Why the Model Does Not Execute FreeCAD Python Directly
 
-没有鼠标拾取的对话式 CAD，靠**标注渲染图**让用户精确指代几何：
+FreeCAD is the geometry engine and execution environment, but “the code runs” does not mean “the
+design matches the intent.” The primary path accepts only versioned ModelPrograms with a bounded
+operation set and bounded budgets. It does not accept arbitrary Python/FreeCAD code generated by
+the model, nor does it use such code as a fallback channel after failure.
 
-- `render_part(annotate="faces")` → 图上可见面贴 **A/B/C 标签** + 包围盒尺寸线；同时返回**标签表**（`{"A": "顶面·平面 面积1200mm² …"}`）给 AI 读——用户说"顶面打孔"，AI 翻译成 `add_hole(face="A")`；不可见面注明在哪个视角可见（或"请直接用描述指代"）。
-- `render_part(annotate="edges")` → 边标 E1/E2…（背面边虚线+表注），供 `fillet_edges`/`chamfer_edges` 指边。
-- **标签过期保护（指纹校验）**：FreeCAD 的面/边索引在布尔后会重排——每次标注存几何指纹快照，特征工具执行前按指纹找回；几何已变对不上则**响亮报"标签已过期，请重新标注"，绝不静默猜面**。几何变更后的工具返回带 `labels_stale: true` 提示，引导刷新标注图。
-- 事务回滚：任何特征失败（孔落空、OCCT 圆角失败、标签过期）都完整回滚，不残留垃圾对象。
+The Task Kernel provides the following guarantees for every write:
 
-### 工程图三视图与每步回图（Round 6a）
+- Inputs pass strict schema, selector, budget, and AcceptanceSpec validation.
+- Execution occurs in an isolated candidate copy rather than modifying the user's source file in place.
+- Results are bound to the base revision, task generation, verification evidence, and an immutable revision.
+- `auto_commit` publishes only after verification succeeds and HEAD has not drifted.
+- `require_review` creates a persistent draft; Accept publishes it, while Reject leaves HEAD unchanged.
+- Delivery state, provenance, hashes, and sizes are verified again during export and read.
 
-- **每次建模/特征指令成功后自动附一张工程图拼图**（`add_box`/`add_cylinder`/`boolean_cut`/`add_hole`/`fillet_edges`/`chamfer_edges` 返回 `[结果, 图]`）——用户"说一句看一眼"，无需手动调渲染；标签表当场刷新（`labels` 字段），不再需要 stale 提示。
-- 拼图 2×2：**front/right/top 三格工程图**（FreeCAD TechDraw HLR 隐藏线消除：可见轮廓实线、隐藏轮廓虚线、圆孔红色点划中心线 + `⌀` 标注 + 定位尺寸、各视图总尺寸从投影自动推导）+ **iso 立体格**（面片渲染 + 面标签 + L/W/H 尺寸线）。
-- 附图失败不连坐：建模操作已成功提交时渲染异常只追加 `render_error` 字段，绝不把成功操作报成失败。
-- 每步返回还带 **`parts` 参数清单**（`{"Box": {"length": 40, …}, "HoleTool": {"radius": 4, …}}`）——AI 随时知道当前可改参数，"孔改大到 ⌀10"一步翻译成 `modify_part`。
+Before calling `create_task`, the host must generate and persist a `task_create_` request key. If
+the response outcome is unknown, replay `create_task` with exactly the same key, project, and
+review policy. The Task Kernel returns the current generation of the same task rather than
+creating a second task.
 
-### 装配（Round 8）
+The first `cancel_task` call must use the task generation that was just read. For an idle task in
+`created`, `needs_plan`, `program_ready`, or `needs_input`, it immediately persists `cancelled`
+with CAS. If the cancellation response is unknown, the exact same request can be replayed to
+obtain the same cancellation result. A running task persists its cancellation state. When the
+current task returns `next_action=reconcile`, the host must first read the task, then call
+`resume_task` once with the generation just returned. It must not guess whether the Worker has
+stopped or fabricate a future generation. A draft awaiting review must be handled with
+`reject_draft`.
 
-- **多零件**：当前共 23 个工具；其中建模工具经"活动零件"模型零感知工作（含 `set_active_part` 切换），单零件用户完全无变化。
-- **`align_parts` 面贴面**：跨零件用面标签指代（"盖板底面贴到底板顶面"），gap 控制间隙；装配后**自动干涉检查**——零件重叠响亮报干涉量并回滚（`allow_interference` 显式豁免压配）。
-- **守卫锚定被操作零件**：孔完整性/密封探针/单实体断言按对象所属零件计算（操作非活动零件同样受全套保护）。
-- 装配工程图：iso 格零件分色、被遮挡特征虚线；`export_part(split=True)` 按零件拆分 STEP。
+Idle cancellation changes only the task record. It does not start CAD/runtime, construct
+artifact/export components, acquire the project write lease, or modify project HEAD, source
+files, or the delivery directory. MCP `notifications/cancelled` cancels only one transport
+request; it is not persistent task cancellation.
 
-### 自动安装 + 零重连换芯 + 干净卸载（Round 11）
+Use paginated `list_projects` discovery only when the project id is unknown, then call
+`get_project` to read the current authoritative HEAD. `list_revisions` returns only committed
+ancestors of that project's current HEAD. Results are sorted by canonical revision id rather
+than by time; reconstruct the commit chain from the returned `head` by following
+`base_revision`. Draft, candidate, and abandoned revisions are not returned as committed
+history. If any paginated cursor returns `conflict`, discard the cursor and restart from the
+first page.
 
-- **`.mcpb` 扩展装完即用**：manifest 固定 `VIBECAD_AUTO_INSTALL=1`，server 启动（即用户第一次开口）就自动后台开始下载引擎，不需要调用 `ensure_runtime`；进度随时可用 `get_runtime_status` 查（带百分比）。手动 `uvx vibecad` 场景默认不设该变量，仍需显式调用 `ensure_runtime` 触发。
-- **零重连换芯**：运行时装好的瞬间，监督进程（`vibecad.supervisor`）自动把子进程从引导解释器切换到 conda 运行时解释器并重放握手，客户端全程无感知，**不需要重启对话或重连连接器**。仅极少数不可换芯的场景（裸 server 直跑、无监督进程）诚实回退提示手动重连。
-- **干净卸载**：`uninstall_runtime` 两段式（先预览路径/大小，`confirm=true` 才真正删除，删除同样在幕后自动完成）；命令行救援 `vibecad --uninstall`（`--yes` 跳过确认，用于脚本化场景）。删除范围固定是 `VIBECAD_HOME` 整个目录（运行时+日志+视图缓存，约 2-3GB），不影响扩展本体——移除扩展本体请走客户端「设置 → Extensions → Remove」。
-- **升级安全**：扩展升级（重装新版 `.mcpb`）只重建扩展目录本身，`VIBECAD_HOME` 默认不在扩展目录内，已下载的引擎不受影响，升级不用重新下载。
+`compare_revisions` revalidates the manifests and actual FCStd/STEP files of two committed
+revisions. It reports only lineage, file presence, and differences in identity, SHA-256, and
+size; semantic diffs for geometry, solids, and parameters are explicitly `unsupported`. Before
+delivery, call the read-only `get_artifact_manifest`. If a verified PUBLISHED delivery already
+exists, it directly returns two ResourceLinks. Otherwise it returns `materialized=false`
+without creating, copying, or cleaning any delivery file; only then should
+`export_task_artifacts` be called.
 
-## 文档
+## Installation: The MCP Service and Agent Skill Are Separate
 
-- **[用户手册](docs/USER_GUIDE.md)** —— 安装、Claude Cowork 配置、场景化用法、卸载、故障排查
-- **[验收测试方案](docs/ACCEPTANCE_TESTS.md)** —— 13 个对话场景清单 + Windows 手动验证
+The current MCPB product declaration covers only the verified macOS (Darwin) path. Installing
+`VibeCAD.mcpb` installs the MCP service, but the bundled Skill is archive content and is not
+activated automatically. The host must separately copy or link `skills/vibecad-agent/`, then
+restart or reload the host.
+
+Skill discovery paths are:
+
+| Host | User-level path | Project-level path |
+|---|---|---|
+| Current Codex installer path | `$CODEX_HOME/skills/vibecad-agent`; defaults to `$HOME/.codex/skills/vibecad-agent` when unset | — |
+| Published Codex discovery path | `$HOME/.agents/skills/vibecad-agent` | `.agents/skills/vibecad-agent` |
+| Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
+| WorkBuddy | — | `.codebuddy/skills/vibecad-agent` |
+
+The release asset `vibecad-agent-skill-0.6.1.zip` contains exactly one top-level
+`vibecad-agent/` directory after extraction. That directory can be copied as a whole to any path
+listed above. The Python wheel contains the server and the FreeCAD Workbench addon, while the
+managed runtime contains the matching server environment. Neither package activates the Agent
+Skill.
+
+### WorkBuddy (verified)
+
+Install the released CLI, copy the standalone Skill directory to
+`.codebuddy/skills/vibecad-agent`, and register the local stdio server in the
+project's `.mcp.json`. Use the absolute path returned by `command -v vibecad`
+for `command` so the GUI does not depend on an inherited shell `PATH`:
+
+```json
+{
+  "mcpServers": {
+    "vibecad": {
+      "command": "/absolute/path/to/vibecad",
+      "args": [],
+      "env": {"VIBECAD_AUTO_INSTALL": "1"}
+    }
+  }
+}
+```
+
+Approve that project-scoped server when WorkBuddy prompts, then start or resume
+the task after the runtime reports ready. WorkBuddy natively persists binary
+`resources/read` results into its project `.mcp-resources/` directory, so PDF
+and approved ZIP delivery need no filesystem adapter. GLM-5.2 passed the
+canonical multi-turn task, but remains a provisional default: keep runtime
+maintenance tools outside an autonomous CAD task's allowed-tool set and require
+explicit user confirmation for `uninstall_runtime`.
+
+On first launch, the extension needs network access to fetch locked Python packages and, when
+needed, install approximately 2–3 GB of FreeCAD runtime files. Later launches reuse the verified
+cache. The default macOS data root is typically:
+
+```text
+~/Library/Application Support/VibeCAD/
+```
+
+Runtime and project data are separate. `uninstall_runtime` first presents a preview and then
+requires explicit confirmation. It deletes only the managed runtime while preserving project,
+revision, draft, and artifact data. The host settings can then remove the extension itself.
+
+### Local Development
+
+```bash
+uv sync --frozen
+PYTHONPATH=src uv run --frozen pytest
+uv run --frozen ruff check .
+VIBECAD_AUTO_INSTALL=0 uv run --frozen python -m vibecad.server
+```
+
+FreeCAD is not a normal Python dependency; the runtime installer manages it separately. Real
+runtime integration tests must be enabled explicitly:
+
+```bash
+VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
+```
+
+## What “Host-ready” Means Precisely
+
+The 0.6.1 release has verified the MCP protocol, Skill package structure, FCStd/STEP and Release
+ResourceLinks, managed FreeCAD E2E, 31-tool discovery, and one real WorkBuddy/GLM-5.2 multi-turn
+delivery. It is therefore `host-verified` for the stated WorkBuddy 5.3.5 boundary. This is not a
+claim that every WorkBuddy model is certified; Kimi-K3, MiniMax-M3, and DeepSeek-V4-Flash remain
+comparison candidates.
+
+## Architectural Boundaries and Roadmap
+
+The current domain path is MCP transport/server → same-user authenticated local daemon → single
+Agent application → Task Kernel → CAD execution port → managed killable FreeCAD Worker. The
+public Workbench client likewise enters the Application/Task Kernel through the daemon. Runtime
+maintenance and stateless discovery remain local responsibilities of the MCP server and do not
+form a second domain-write path. The daemon provides same-user authentication and constrained,
+one-time file grants; it does not create a second commit system.
+
+S3-8, P0-B core, the package/managed-runtime closeout, bounded G1 Workbench Alpha, P1 sequential
+editing, P2 rigid mechanical delivery, and the first WorkBuddy host integration are complete for
+0.6.1:
+
+- **P0-B core (backend complete)**: task/project/version discovery, file-level comparison,
+  verified forward revert, cancellation/reconcile, authenticated daemon, file grants, source
+  liveness, and the managed killable FreeCAD Worker all enter the same Task Kernel;
+- **G1 (Alpha complete)**: preview, verdict, exact object/feature selector capture, and
+  Accept/Reject are available in the real FreeCAD Qt Workbench UI; one fingerprinted external
+  FreeCAD 1.1.3 pilot is evidenced, while managed mode remains the default;
+- **P1/G2 (complete boundary)**: the narrow sequential editable-HEAD/manual-checkpoint slice is implemented in the
+  current source; Sketcher/PartDesign, controlled import, and broader single-part production
+  capability remain;
+- **P2 (complete boundary)**: rigid 2–10 component assemblies, interference verification, flat
+  BOM, deterministic assembly PDF, immutable Release approval, and an exact delivery ZIP;
+  native joints, editable manufacturing drawings, GD&T, PLM, and enterprise delivery chains remain;
+- **WorkBuddy (verified)**: WorkBuddy 5.3.5 with GLM-5.2 completed strict local stdio tool use,
+  durable task/restart recovery, exact digest approval, and native PDF/ZIP Blob reads; the wider
+  model comparison remains future evidence, not a release blocker.
+
+The G1 Workbench Alpha packages the real FreeCAD Qt UI and its deterministic managed launcher. It
+includes one Workbench and Dock, daemon-backed refresh, separate HEAD/draft preview, verdict,
+exact object/feature selector capture, Accept/Reject, and asynchronous client/thread shutdown.
+The daemon is a reusable managed background service; update and uninstall retire it through the
+authenticated maintenance path. The thin external pilot reuses those state machines through one
+bounded managed-Python bridge and does not add a second write authority. Face/edge selection,
+STEP/STL import, photo reconstruction, and simulation are not currently supported.
+
+Further reading in the source repository:
+[User Guide](https://github.com/wangtao9090/VibeCAD/blob/main/docs/USER_GUIDE.md),
+[Acceptance Tests](https://github.com/wangtao9090/VibeCAD/blob/main/docs/ACCEPTANCE_TESTS.md),
+[Overall Architecture](https://github.com/wangtao9090/VibeCAD/blob/main/docs/ARCHITECTURE.md),
+[Agent Architecture](https://github.com/wangtao9090/VibeCAD/blob/main/docs/AGENT_ARCHITECTURE.md),
+and the
+[Product Capability Roadmap](https://github.com/wangtao9090/VibeCAD/blob/main/docs/PRODUCT_CAPABILITY_ROADMAP.md).
+See the
+[Integrated Product and Technical Strategy](https://github.com/wangtao9090/VibeCAD/blob/main/docs/PRODUCT_STRATEGY.md)
+for the unified decisions on product positioning, open-source strategy, multiple CAD backends,
+the AutoCAD/domestic CAD roadmap, and the evaluation framework.
 
 ## License
 

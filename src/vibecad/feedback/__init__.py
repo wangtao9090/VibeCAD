@@ -8,11 +8,13 @@
 
 子模块可独立导入，无需 FreeCAD/MCP 运行时。
 """
+
 from vibecad.feedback import (
     annotate,  # noqa: F401
     gltf,  # noqa: F401
     multiview,  # noqa: F401
     persist,  # noqa: F401
+    release_drawing,  # noqa: F401
     render,  # noqa: F401
     text,  # noqa: F401
 )

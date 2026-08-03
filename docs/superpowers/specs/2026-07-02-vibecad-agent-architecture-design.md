@@ -1,7 +1,9 @@
 # VibeCAD 自建 Agent 架构设计与关键考量
 
-> 状态：Proposed  
-> 日期：2026-07-02  
+> 状态：Superseded（历史方案，请勿按本文继续实现）
+> 日期：2026-07-02
+> 已由：`docs/AGENT_ARCHITECTURE.md`（Accepted，2026-07-16）取代。
+> 取代原因：当前定位改为 external plan / MCP Sampling / 用户 BYOK 三种推理来源，且短期明确不转售模型；本文默认“VibeCAD 自己调用模型”的二分法已不再成立。
 > 目标：帮助理解 agent 构建的核心知识，并把这些知识落到 VibeCAD 后续“自己调用模型、自己调度 CAD 工具”的长期架构上。  
 > 结论：短期继续打磨 MCP tools / skills；长期新增 VibeCAD Agent Orchestrator，复用现有 CAD 工具层、几何验证、渲染和评估资产。
 

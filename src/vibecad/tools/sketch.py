@@ -325,6 +325,8 @@ def extrude_profile(session: Session, profile, height: float,
                             "与几何不符），请检查参数")
                     assert_holes_intact(result_shape, hole_counts)
 
+            session.set_result_object(result_name)
+
     # ─── result dict ───
     return {
         "ok": True,
