@@ -19,11 +19,28 @@ jobs:
     # AgentApplication、文件能力边界和发布 runtime 当前只在 Darwin 上受支持。
     runs-on: macos-latest
     timeout-minutes: 45
+    env:
+      VIBECAD_RUN_INTEGRATION: "1"
     steps:
+      - name: bind an isolated managed runtime
+        run: printf 'VIBECAD_HOME=%s\n' "$RUNNER_TEMP/vibecad-pr-runtime" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync
-      - name: install runtime + full real-machine suite
-        env: { VIBECAD_RUN_INTEGRATION: "1" }
-        # 全量 slow：A1/A2/A3 + 建模/视觉/特征/回滚契约（UndoMode 等修复的唯一 CI 防线）
-        run: uv run pytest -m slow -v -s
+      - run: uv sync --frozen
+      - name: install and verify the current managed FreeCAD runtime
+        env:
+          VIBECAD_PIP_SPEC: ${{ github.workspace }}
+        run: >-
+          uv run --frozen python -c
+          "from vibecad.runtime.installer import RuntimeInstaller;
+          RuntimeInstaller().install()"
+      - name: bind the test to the installed managed runtime
+        run: |
+          managed_python="$(uv run --frozen python -c \
+            'from vibecad.runtime.paths import env_python_for, env_prefix; print(env_python_for(env_prefix()).resolve())')"
+          echo "VIBECAD_MANAGED_FREECAD_PYTHON=$managed_python" >> "$GITHUB_ENV"
+      - name: current Agent-first real-machine gate
+        run: >-
+          uv run --frozen pytest -m slow -v -s
+          tests/test_task_kernel_integration.py::test_real_agent_first_public_matrix_and_cross_process_review
+          tests/test_task_kernel_integration.py::test_real_task_kernel_commits_verified_candidate
