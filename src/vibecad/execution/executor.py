@@ -66,6 +66,7 @@ from vibecad.interaction.cad import (
     CadExecutionPort,
     CadProfileCapability,
     CandidateEvidence,
+    ReleaseCadEvidence,
     ValidatedImportEvidence,
     ValidatedMaterializationEvidence,
 )
@@ -2546,6 +2547,72 @@ class InProcessCadExecutor(CadExecutionPort):
             step_sha256=step_after.sha256,
             step_size_bytes=step_after.size_bytes,
         )
+
+    def render_release(self, *, revision: object) -> ReleaseCadEvidence:
+        """Derive a bounded assembly drawing and BOM without mutating a Revision."""
+
+        if type(revision) is not RevisionRef:
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+        try:
+            path = self._store.revision_model_path(revision.project_id, revision.id)
+            identity_before = _stat_identity(os.lstat(path))
+            artifact_before = _read_artifact(path, "fcstd")
+        except Exception:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        if (
+            artifact_before.sha256 != revision.model.sha256
+            or artifact_before.size_bytes != revision.model.size_bytes
+        ):
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        session = self.load_fcstd(path)
+        evidence = None
+        failed: ExecutorError | None = None
+        try:
+            try:
+                session.doc.recompute()
+                components = _component_observations(session)
+                bom = _bom_observation(session, components)
+                if bom is None or not bom.complete:
+                    raise _ObservationFailure
+                from vibecad.feedback.release_drawing import (  # noqa: PLC0415
+                    DRAWING_VIEWS,
+                    render_assembly_drawing,
+                )
+
+                drawing, balloon_items = render_assembly_drawing(
+                    session,
+                    bom=bom,
+                    project_id=revision.project_id,
+                    revision_id=revision.id,
+                )
+                evidence = ReleaseCadEvidence(
+                    revision_id=revision.id,
+                    bom=bom,
+                    drawing_pdf=drawing,
+                    view_names=DRAWING_VIEWS,
+                    balloon_items=balloon_items,
+                )
+            except Exception:
+                raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
+        except ExecutorError as error:
+            failed = error
+        finally:
+            try:
+                self.close(session)
+            except ExecutorError as close_error:
+                if failed is None:
+                    failed = close_error
+        if failed is not None:
+            raise failed
+        try:
+            identity_after = _stat_identity(os.lstat(path))
+            artifact_after = _read_artifact(path, "fcstd")
+        except Exception:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        if identity_after != identity_before or artifact_after != artifact_before:
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        assert evidence is not None
+        return evidence
 
     def create_empty(self, *, revision_id: str) -> object:
         """Create an isolated Session and trusted revision-owned document."""

@@ -5,8 +5,8 @@
 >
 > 日期：2026-08-01
 >
-> 当前基线：VibeCAD 0.6.0 / runtime epoch 4、`28-tool 公共 MCP、durable review`、首批六操作、
-> host-neutral skill 与 FCStd/STEP ResourceLink。P0-B 已交付 keyed replay/discovery、compare/revert、
+> 当前基线：VibeCAD 0.6.0 / runtime epoch 4、`31-tool 公共 MCP、durable review/release`、首批六操作、
+> host-neutral skill 与 FCStd/STEP/PDF/ZIP ResourceLink。P0-B 已交付 keyed replay/discovery、compare/revert、
 > read-only manifest、`durable active cancellation`、单 Application/shared Task Kernel、same-user
 > authenticated runnable daemon、session-bound file grants 和 managed killable Worker。G1 已交付
 > managed Workbench 的 HEAD/draft preview、verdict、精确 object/feature selector 与 Accept/Reject，
@@ -229,7 +229,7 @@ VibeCAD 接入的是**宿主产品表面**，不是抽象模型名称。Claude C
 |---|---|---|---|
 | 编程 Agent / 首批正式验收 | Codex 本地宿主、Claude Code | 与现有本地 MCP + Skill 架构最直接匹配 | 各完成同一 canonical task、review 和 artifact conformance |
 | 编程 Agent / 国内扩展 | Kimi Code；之后 Qwen Code、CodeBuddy/Trae | Kimi Code 已明确支持本地 `stdio` MCP、Skills 和插件；其余作为兼容扩展 | 证明 ResourceLink/resource read、长任务和 Skill 发现 |
-| 通用 Agent / 国内首批试点 | 腾讯 QClaw、WorkBuddy 个人版 | 用户形态最匹配低频个人 CAD；本地执行、Skill/MCP 能力有公开依据，但必须真机核对完整协议 | macOS 安装、28-tool discovery、resource read、审核和重启恢复全部通过 |
+| 通用 Agent / 国内首批试点 | 腾讯 QClaw、WorkBuddy 个人版 | 用户形态最匹配低频个人 CAD；WorkBuddy 5.3.5 已确认本地 stdio、strict MCP、Resource 命令和任务持久化，完整结论见 [WorkBuddy compatibility research](WORKBUDDY_COMPATIBILITY_RESEARCH.md) | 当前公共工具 discovery、二进制 resource read、审核和重启恢复全部通过 |
 | 通用 Agent / 开放基准 | OpenClaw 原版、QwenPaw（原 CoPaw） | OpenClaw 当前具备本地 stdio/HTTP MCP、Skill 和 resource utility；QwenPaw 可本地部署且开放 MCP/Skill | 形成可重复的自动化兼容矩阵，并证明不会绕过 Task Kernel |
 | 通用 Agent / 后续观察 | AutoClaw、LinClaw、Claude Desktop 本地扩展 | 产品方向合适，但扩展版本、Skill 激活或完整 Resource 行为尚未证明 | 用户需求达到试点阈值，并完成与上层相同的宿主验收 |
 | 当前暂缓 | Kimi Claw、ArkClaw、MaxClaw、Manus、ChatGPT Work Web、Claude Cowork 远程任务 | 默认在云端运行，不能直接托管当前用户 Mac 上的 `stdio` MCP/FreeCAD | 先有经批准的本地设备桥或远程认证 MCP 路线，再重新评审 |

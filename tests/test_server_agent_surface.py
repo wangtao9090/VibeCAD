@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import logging
@@ -74,6 +75,9 @@ STABLE_TOOL_NAMES = (
     "reject_draft",
     "get_artifact_manifest",
     "export_task_artifacts",
+    "create_release",
+    "get_release",
+    "approve_release",
 )
 
 
@@ -529,6 +533,9 @@ def test_public_annotations_match_the_independent_product_contract():
         "reject_draft": (False, True, True, False),
         "get_artifact_manifest": (True, False, True, False),
         "export_task_artifacts": (False, False, True, False),
+        "create_release": (False, False, True, False),
+        "get_release": (True, False, True, False),
+        "approve_release": (False, True, True, False),
         "create_box": (False, False, True, False),
         "create_cylinder": (False, False, True, False),
         "inspect_model": (False, False, True, False),
@@ -612,6 +619,21 @@ def test_every_public_schema_is_closed_complete_and_specialized():
             "expected_generation",
             "revision_id",
             "draft_id",
+        ),
+        "create_release": (
+            "schema_version",
+            "create_key",
+            "task_id",
+            "expected_generation",
+            "revision_id",
+        ),
+        "get_release": ("schema_version", "release_id"),
+        "approve_release": (
+            "schema_version",
+            "release_id",
+            "expected_generation",
+            "expected_package_sha256",
+            "approval_key",
         ),
     }
     for name in STABLE_TOOL_NAMES:
@@ -1273,7 +1295,7 @@ def test_low_level_tools_list_is_exact_sdk_projection_of_public_specs() -> None:
 def test_every_discovered_tool_has_a_nonempty_single_line_description() -> None:
     result = anyio.run(_server_module()._handle_list_tools)
 
-    assert len(result.tools) == 28
+    assert len(result.tools) == 31
     for tool in result.tools:
         assert type(tool.description) is str, tool.name
         assert tool.description == tool.description.strip(), tool.name
@@ -1303,7 +1325,7 @@ def test_owned_tools_list_fixed_frame_fits_the_discovery_budget() -> None:
         + b"\n"
     )
     assert response["id"] == 1
-    assert len(frame) == 23_789
+    assert len(frame) == 25_611
     assert len(frame) <= 32_768
 
 
@@ -1318,7 +1340,7 @@ def test_discovery_omits_optional_output_schema_from_every_tool() -> None:
     response = server._owned_dispatch_descriptor(descriptor)
     assert response is not None
     tools = response["result"]["tools"]
-    assert len(tools) == 28
+    assert len(tools) == 31
     assert all("outputSchema" not in tool for tool in tools)
 
 
@@ -2168,6 +2190,49 @@ def _artifact_manifest_envelope(*, materialized: bool) -> dict[str, object]:
     }
 
 
+def _successful_release_envelope(*, approved: bool) -> dict[str, object]:
+    release_id = "release_" + "7" * 32
+    base = f"vibecad://release/{release_id}"
+
+    def file_ref(name: str, media_type: str, size: int) -> dict[str, object]:
+        return {
+            "name": name,
+            "media_type": media_type,
+            "sha256": hashlib.sha256(name.encode("ascii")).hexdigest(),
+            "size_bytes": size,
+            "resource_uri": f"{base}/{name}",
+        }
+
+    return {
+        "schema_version": 1,
+        "ok": True,
+        "result": {
+            "release_id": release_id,
+            "status": "approved" if approved else "draft",
+            "generation": 1 if approved else 0,
+            "task_id": TASK_ID,
+            "task_generation": 19,
+            "project_id": PROJECT_ID,
+            "revision_id": BASE_REVISION,
+            "revision_manifest_sha256": "a" * 64,
+            "verification_id": "verification_" + "8" * 32,
+            "verification_digest": "b" * 64,
+            "observation_digest": "c" * 64,
+            "manifest": file_ref("manifest.json", "application/json", 401),
+            "drawing": file_ref("assembly-drawing.pdf", "application/pdf", 8_192),
+            "bom_json": file_ref("bom.json", "application/json", 501),
+            "bom_csv": file_ref("bom.csv", "text/csv", 301),
+            "validation_report_uri": f"{base}/validation-report.json",
+            "package": {
+                **file_ref("vibecad-release.zip", "application/zip", 16_384),
+                "resource_uri": f"{base}/vibecad-release.zip" if approved else None,
+            },
+            "approved_at_ms": 1_900_000_000_000 if approved else None,
+        },
+        "error": None,
+    }
+
+
 def test_successful_export_returns_text_and_exact_typed_resource_links(monkeypatch) -> None:
     from mcp import types
 
@@ -2219,6 +2284,59 @@ def test_successful_export_returns_text_and_exact_typed_resource_links(monkeypat
             "type": "resource_link",
         },
     ]
+
+
+@pytest.mark.parametrize("approved", [False, True])
+def test_release_tools_return_preview_and_approval_gated_package_links(
+    monkeypatch,
+    approved: bool,
+) -> None:
+    from mcp import types
+
+    server = _server_module()
+    envelope = _successful_release_envelope(approved=approved)
+    arguments = {
+        "schema_version": 1,
+        "create_key": "release_create_" + "9" * 32,
+        "task_id": TASK_ID,
+        "expected_generation": 19,
+        "revision_id": BASE_REVISION,
+    }
+    calls: list[dict[str, object]] = []
+
+    class ReleaseApplication:
+        def create_release_request(self, value):
+            calls.append(value)
+            return envelope
+
+    class ReadySlot:
+        def get(self):
+            return ReleaseApplication()
+
+    monkeypatch.setattr(server, "_application_slot", ReadySlot())
+    monkeypatch.setattr(server, "_application_runtime_guard", lambda: None)
+
+    result = anyio.run(server._handle_call_tool, "create_release", arguments)
+
+    assert result.isError is False
+    assert result.structuredContent == envelope
+    assert calls == [arguments]
+    assert type(result.content[0]) is types.TextContent
+    links = result.content[1:]
+    assert all(type(item) is types.ResourceLink for item in links)
+    expected_names = [
+        "assembly-drawing.pdf",
+        "bom.json",
+        "bom.csv",
+        "manifest.json",
+    ]
+    if approved:
+        expected_names.append("vibecad-release.zip")
+    expected_names.append("validation-report.json")
+    assert [item.name for item in links] == expected_names
+    assert [str(item.uri).rsplit("/", 1)[-1] for item in links] == expected_names
+    package_links = [item for item in links if item.name == "vibecad-release.zip"]
+    assert len(package_links) == int(approved)
 
 
 def test_materialized_manifest_returns_exact_typed_resource_links(monkeypatch) -> None:
@@ -2524,6 +2642,36 @@ def _model_program_for_server_surface() -> dict[str, object]:
                 "expected_generation": 0,
                 "revision_id": BASE_REVISION,
                 "draft_id": None,
+            },
+        ),
+        (
+            "create_release",
+            "create_release_request",
+            {
+                "schema_version": 1,
+                "create_key": "release_create_0123456789abcdef0123456789abcdef",
+                "task_id": TASK_ID,
+                "expected_generation": 0,
+                "revision_id": BASE_REVISION,
+            },
+        ),
+        (
+            "get_release",
+            "get_release_request",
+            {
+                "schema_version": 1,
+                "release_id": "release_0123456789abcdef0123456789abcdef",
+            },
+        ),
+        (
+            "approve_release",
+            "approve_release_request",
+            {
+                "schema_version": 1,
+                "release_id": "release_0123456789abcdef0123456789abcdef",
+                "expected_generation": 0,
+                "expected_package_sha256": "1" * 64,
+                "approval_key": "release_approve_0123456789abcdef0123456789abcdef",
             },
         ),
         ("create_box", "invoke_direct_operation_request", _request()),
@@ -2864,11 +3012,53 @@ def test_low_level_resource_handlers_return_exact_sdk_blob_and_use_app_once(monk
 
     assert type(templates) is types.ListResourceTemplatesResult
     assert [item.uriTemplate for item in templates.resourceTemplates] == [
-        "vibecad://artifact/{materialization_id}/{artifact_id}"
+        "vibecad://artifact/{materialization_id}/{artifact_id}",
+        "vibecad://release/{release_id}/{file_name}",
     ]
     assert type(result) is types.ReadResourceResult
     assert result.contents == [
         types.BlobResourceContents(uri=uri, blob="YWJj", mimeType="model/step")
+    ]
+    assert calls == [uri]
+
+
+def test_release_resource_handler_returns_exact_binary_blob_and_mime(monkeypatch) -> None:
+    import base64
+
+    from mcp import types
+
+    from vibecad.application.releases import ReleaseResource
+
+    server = _server_module()
+    uri = "vibecad://release/release_" + "1" * 32 + "/assembly-drawing.pdf"
+    raw = b"%PDF-1.4\nrelease-preview\n%%EOF\n"
+    calls: list[str] = []
+
+    class ReleaseApplication:
+        def read_release_resource(self, value):
+            calls.append(value)
+            return ReleaseResource(
+                uri=value,
+                name="assembly-drawing.pdf",
+                media_type="application/pdf",
+                data=raw,
+            )
+
+    class ReadySlot:
+        def get(self):
+            return ReleaseApplication()
+
+    monkeypatch.setattr(server, "_application_slot", ReadySlot())
+    monkeypatch.setattr(server, "_application_runtime_guard", lambda: None)
+
+    result = anyio.run(server._handle_read_resource, uri)
+
+    assert result.contents == [
+        types.BlobResourceContents(
+            uri=uri,
+            blob=base64.b64encode(raw).decode("ascii"),
+            mimeType="application/pdf",
+        )
     ]
     assert calls == [uri]
 
@@ -2923,6 +3113,51 @@ def test_artifact_resource_errors_have_complete_fixed_mapping(
         def read_artifact_resource(self, value):
             calls.append(value)
             raise ArtifactResourceError(getattr(ArtifactResourceErrorCode, code_name))
+
+    class ReadySlot:
+        def get(self):
+            return FailingApplication()
+
+    monkeypatch.setattr(server, "_application_slot", ReadySlot())
+    monkeypatch.setattr(server, "_application_runtime_guard", lambda: None)
+    with pytest.raises(McpError) as caught:
+        anyio.run(server._handle_read_resource, uri)
+
+    assert (caught.value.error.code, caught.value.error.message) == expected
+    assert calls == [uri]
+
+
+@pytest.mark.parametrize(
+    ("code_name", "expected"),
+    [
+        ("INVALID_INPUT", (-32602, "Artifact resource identifier is invalid.")),
+        ("NOT_FOUND", (-32002, "Artifact resource is unavailable.")),
+        ("INVALID_STATE", (-32002, "Artifact resource is unavailable.")),
+        ("CONFLICT", (-32603, "Artifact resource could not be read.")),
+        ("RESOURCE_EXHAUSTED", (-32001, "Artifact resource exceeds the read limit.")),
+        ("INTEGRITY_FAILURE", (-32603, "Artifact resource could not be read.")),
+        ("CAD_FAILURE", (-32603, "Artifact resource could not be read.")),
+        ("STORE_FAILURE", (-32603, "Artifact resource could not be read.")),
+        ("RECOVERY_REQUIRED", (-32603, "Artifact resource could not be read.")),
+    ],
+)
+def test_release_resource_errors_have_complete_fixed_mapping(
+    monkeypatch,
+    code_name: str,
+    expected: tuple[int, str],
+) -> None:
+    from mcp.shared.exceptions import McpError
+
+    from vibecad.application.releases import ReleaseError, ReleaseErrorCode
+
+    server = _server_module()
+    uri = "vibecad://release/release_" + "1" * 32 + "/vibecad-release.zip"
+    calls: list[str] = []
+
+    class FailingApplication:
+        def read_release_resource(self, value):
+            calls.append(value)
+            raise ReleaseError(getattr(ReleaseErrorCode, code_name))
 
     class ReadySlot:
         def get(self):

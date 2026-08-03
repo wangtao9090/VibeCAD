@@ -821,16 +821,19 @@ def test_c09_public_contract_is_closed_and_contains_no_grant_surface() -> None:
     assert daemon_api.ALLOWED_APPLICATION_OPERATIONS == frozenset(
         {
             "accept_draft",
+            "approve_release",
             "cancel_task",
             "compare_revisions",
             "create_box",
             "create_cylinder",
             "create_project",
+            "create_release",
             "create_task",
             "export_task_artifacts",
             "get_artifact_manifest",
             "get_capabilities",
             "get_project",
+            "get_release",
             "get_task",
             "get_task_events",
             "inspect_model",
@@ -2256,14 +2259,17 @@ def test_client_closes_socket_when_final_boot_state_check_fails(
 def test_static_facade_routes_all_literal_operations_to_fixed_application_methods() -> None:
     request_operations = {
         "accept_draft": "accept_draft_request",
+        "approve_release": "approve_release_request",
         "cancel_task": "cancel_task_request",
         "compare_revisions": "compare_revisions_request",
         "create_project": "create_project_request",
+        "create_release": "create_release_request",
         "create_task": "create_task_request",
         "export_task_artifacts": "export_task_artifacts_request",
         "get_artifact_manifest": "get_artifact_manifest_request",
         "get_capabilities": "get_capabilities_request",
         "get_project": "get_project_request",
+        "get_release": "get_release_request",
         "get_task": "get_task_request",
         "get_task_events": "get_task_events_request",
         "list_projects": "list_projects_request",
@@ -2384,10 +2390,10 @@ def test_client_eof_and_bad_secret_kill_only_connection_then_fresh_client_succee
         shutil.rmtree(base, ignore_errors=True)
 
 
-def test_c09_does_not_change_public_tool_count_or_protocol_method_set() -> None:
+def test_p2_release_tools_expand_public_count_without_file_grants() -> None:
     from vibecad.application.public_surface import public_tool_specs
 
-    assert len(public_tool_specs()) == 28
+    assert len(public_tool_specs()) == 31
     assert tuple(spec.name for spec in public_tool_specs())[-6:] == (
         "create_box",
         "create_cylinder",

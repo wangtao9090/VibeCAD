@@ -35,6 +35,7 @@ ALLOWED_APPLICATION_OPERATIONS = frozenset(
         "accept_draft",
         "cancel_task",
         "compare_revisions",
+        "create_release",
         "create_box",
         "create_cylinder",
         "create_project",
@@ -43,6 +44,7 @@ ALLOWED_APPLICATION_OPERATIONS = frozenset(
         "get_artifact_manifest",
         "get_capabilities",
         "get_project",
+        "get_release",
         "get_task",
         "get_task_events",
         "inspect_model",
@@ -56,6 +58,7 @@ ALLOWED_APPLICATION_OPERATIONS = frozenset(
         "revert_project",
         "rotate_part",
         "submit_model_program",
+        "approve_release",
     }
 )
 KERNEL_API_EPOCH = 1
@@ -208,6 +211,12 @@ class LocalKernelFacade:
             return self._application.get_artifact_manifest_request(request)
         if operation == "export_task_artifacts":
             return self._application.export_task_artifacts_request(request)
+        if operation == "create_release":
+            return self._application.create_release_request(request)
+        if operation == "get_release":
+            return self._application.get_release_request(request)
+        if operation == "approve_release":
+            return self._application.approve_release_request(request)
         if operation == "get_capabilities":
             return self._application.get_capabilities_request(request)
         if operation in _DIRECT_OPERATIONS:

@@ -294,8 +294,17 @@ def test_data_layout_creates_only_fixed_private_store_roots(tmp_path: Path):
             layout.bootstrap,
             layout.checkouts,
             layout.artifacts,
+            layout.releases,
         )
-    ) == ("locks", "tasks", "projects", "bootstrap", "checkouts", "artifacts")
+    ) == (
+        "locks",
+        "tasks",
+        "projects",
+        "bootstrap",
+        "checkouts",
+        "artifacts",
+        "releases",
+    )
     for path in (
         layout.root,
         layout.locks,
@@ -304,6 +313,7 @@ def test_data_layout_creates_only_fixed_private_store_roots(tmp_path: Path):
         layout.bootstrap,
         layout.checkouts,
         layout.artifacts,
+        layout.releases,
     ):
         value = path.lstat()
         assert stat.S_ISDIR(value.st_mode)
@@ -503,6 +513,7 @@ def test_captured_layout_composition_runs_recovery_between_full_identity_checks(
         layout.bootstrap,
         layout.checkouts,
         layout.artifacts,
+        layout.releases,
     )
     events: list[object] = []
     original_require_current = ApplicationDataLayout.require_current
@@ -528,10 +539,10 @@ def test_captured_layout_composition_runs_recovery_between_full_identity_checks(
     )
 
     recovery_index = events.index("recovery")
-    assert tuple(events[:7]) == expected
-    assert tuple(events[-7:]) == expected
-    assert recovery_index >= 7
-    assert recovery_index < len(events) - 7
+    assert tuple(events[:8]) == expected
+    assert tuple(events[-8:]) == expected
+    assert recovery_index >= 8
+    assert recovery_index < len(events) - 8
     app.close()
 
 

@@ -99,16 +99,19 @@ _CHILD = r"""
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
 import secrets
 import sys
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, __SOURCE__)
 
 from vibecad.engine.session import Session
+from vibecad.application.releases import ReleaseService, ReleaseStore
 from vibecad.execution.candidate import CandidateCoordinator, SessionBinding, SessionSlot
 from vibecad.execution.executor import (
     InProcessCadExecutor,
@@ -1004,6 +1007,66 @@ try:
         )
         slot_bom = None if observed_slot_bom is None else observed_slot_bom.to_mapping()
 
+    release_payload = None
+    if CASE == "assembly_review":
+        if candidate_ref is None:
+            raise AssertionError("accepted assembly revision is missing")
+        releases_root = secure_dir(ROOT / "releases")
+        release_root_stat = releases_root.lstat()
+        release_store = ReleaseStore(
+            root=releases_root,
+            expected_identity=(release_root_stat.st_dev, release_root_stat.st_ino),
+        )
+        release_service = ReleaseService(
+            store=release_store,
+            task_store=task_store,
+            revision_store=revision_store,
+            cad=executor,
+        )
+        release_draft = release_service.create_release(
+            create_key="release_create_0123456789abcdef0123456789abcdef",
+            task_id=TASK_ID,
+            expected_generation=terminal.generation,
+            revision_id=candidate_ref.id,
+        )
+        release_drawing = release_store.read_resource(
+            f"vibecad://release/{release_draft.release_id}/assembly-drawing.pdf"
+        )
+        release_approved = release_service.approve_release(
+            release_id=release_draft.release_id,
+            expected_generation=release_draft.generation,
+            expected_package_sha256=release_draft.package.sha256,
+            approval_key="release_approve_0123456789abcdef0123456789abcdef",
+        )
+        release_package = release_store.read_resource(
+            f"vibecad://release/{release_approved.release_id}/vibecad-release.zip"
+        )
+        with zipfile.ZipFile(io.BytesIO(release_package.data)) as archive:
+            package_names = archive.namelist()
+            release_manifest = json.loads(archive.read("manifest.json"))
+            packaged_model_sha256 = hashlib.sha256(archive.read("model.FCStd")).hexdigest()
+            packaged_step_sha256 = hashlib.sha256(archive.read("model.step")).hexdigest()
+        release_payload = {
+            "release_id": release_draft.release_id,
+            "draft_status": release_draft.status.value,
+            "approved_status": release_approved.status.value,
+            "approved_generation": release_approved.generation,
+            "approved_at_ms": release_approved.approved_at_ms,
+            "drawing_size": len(release_drawing.data),
+            "drawing_pdf": release_drawing.data.startswith(b"%PDF-"),
+            "drawing_eof": b"%%EOF" in release_drawing.data[-32:],
+            "package_sha256": hashlib.sha256(release_package.data).hexdigest(),
+            "expected_package_sha256": release_approved.package.sha256,
+            "package_names": package_names,
+            "manifest_revision": release_manifest["revision_id"],
+            "manifest_views": release_manifest["drawing"]["views"],
+            "manifest_balloon_items": release_manifest["drawing"]["balloon_items"],
+            "packaged_model_sha256": packaged_model_sha256,
+            "expected_model_sha256": candidate_ref.model.sha256,
+            "packaged_step_sha256": packaged_step_sha256,
+            "expected_step_sha256": candidate_ref.artifacts[0].sha256,
+        }
+
     baseline_usable = None
     if task.status.value == "failed":
         current_binding.session.doc.recompute()
@@ -1091,6 +1154,7 @@ try:
         "reload_interferences": reload_interferences,
         "reload_bom": reload_bom,
         "step_reload_geometry": step_reload_geometry,
+        "release": release_payload,
         "layout": layout,
     }
 finally:
@@ -3411,6 +3475,29 @@ def test_real_task_kernel_reviews_and_accepts_interference_free_assembly(
         "accept_draft",
         "commit",
     ]
+    release = payload["release"]
+    assert release["draft_status"] == "draft"
+    assert release["approved_status"] == "approved"
+    assert release["approved_generation"] == 1
+    assert 0 < release["approved_at_ms"] <= 9_007_199_254_740_991
+    assert release["drawing_pdf"] is True
+    assert release["drawing_eof"] is True
+    assert 0 < release["drawing_size"] <= 160_000
+    assert release["package_sha256"] == release["expected_package_sha256"]
+    assert release["package_names"] == [
+        "model.FCStd",
+        "model.step",
+        "bom.json",
+        "bom.csv",
+        "assembly-drawing.pdf",
+        "manifest.json",
+        "validation-report.json",
+    ]
+    assert release["manifest_revision"] == payload["committed_revision"]
+    assert release["manifest_views"] == ["front", "right", "top", "isometric"]
+    assert len(release["manifest_balloon_items"]) == 1
+    assert release["packaged_model_sha256"] == release["expected_model_sha256"]
+    assert release["packaged_step_sha256"] == release["expected_step_sha256"]
     _assert_layout(payload, journal_state="committed", manifest_count=2)
 
 

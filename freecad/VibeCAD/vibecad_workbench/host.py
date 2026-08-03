@@ -54,11 +54,22 @@ _EXPECTED_EVENTS = {
     "preview_close": "preview_closed",
     "edit_checkpoint": "edit_checkpointed",
     "review": "review",
+    "release_create": "release_created",
+    "release_get": "release_loaded",
+    "release_approve": "release_approved",
+    "release_save": "release_saved",
     "selector_resolve": "selector_resolved",
     "close": "closed",
 }
 _RESTRICTED_OPERATIONS = frozenset(
-    ("preview_close", "edit_checkpoint", "review", "selector_resolve", "close")
+    (
+        "preview_close",
+        "edit_checkpoint",
+        "review",
+        "release_save",
+        "selector_resolve",
+        "close",
+    )
 )
 
 
@@ -347,6 +358,9 @@ class _WorkbenchSession(QtCore.QObject):
             self.dock._bind_edit_host(
                 checkpoint_edit=self._request_edit_checkpoint,
                 discard_edit=self._discard_preview_binding,
+            )
+            self.dock._bind_release_host(
+                save_resource=self._request_release_save,
             )
             self.selection = ManagedSelectionObserver(
                 freecad_gui.Selection,
@@ -930,6 +944,7 @@ class _WorkbenchSession(QtCore.QObject):
             ("review", "review"),
             ("preview_close", "preview_closed"),
             ("edit_checkpoint", "edit_checkpointed"),
+            ("release_save", "release_saved"),
             ("selector_resolve", "selector_resolved"),
         }
         if (
@@ -1407,6 +1422,21 @@ class _WorkbenchSession(QtCore.QObject):
                     recovery_required=True,
                 )
             raise
+        return request_id
+
+    def _request_release_save(self, *, uri: str, destination: str) -> int:
+        if self.lifecycle != "active" or any(
+            pending[2] == "release_save" for pending in self._pending.values()
+        ):
+            raise ProjectionError("release save authority is unavailable")
+        request_id = self._reserve_private_normal_request(
+            "release_saved",
+            "release_save",
+            context=(uri, destination),
+            uri=uri,
+            destination=destination,
+        )
+        self._enqueue_request(request_id)
         return request_id
 
     def _request_edit_checkpoint(
@@ -2040,6 +2070,16 @@ class _WorkbenchSession(QtCore.QObject):
         dock = self.dock
         if operation == "selector_resolve":
             return self._receive_selector_resolution(event, request_id, pending)
+        if operation == "release_save":
+            if dock is None or not self._retire_pending(request_id, pending):
+                return False
+            try:
+                applied = dock._receive_host_release_save(event, pending[1])
+            except BaseException:
+                applied = False
+            if not applied:
+                dock.release_status_label.setText("Save outcome unknown")
+            return True
         if operation == "edit_checkpoint":
             context = pending[1]
             if (

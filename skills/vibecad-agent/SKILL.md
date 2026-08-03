@@ -5,19 +5,19 @@ description: Use VibeCAD's Agent-first MCP surface to create, inspect, modify, r
 
 # VibeCAD Agent
 
-Use the current 28-tool Agent-first surface. Treat VibeCAD's persisted project, task, revision, draft, evidence, and artifact records as authoritative. Never infer success from prose alone.
+Use the current 31-tool Agent-first surface. Treat VibeCAD's persisted project, task, revision, draft, evidence, artifact, and release records as authoritative. Never infer success from prose alone.
 
 ## Public tools
 
 Runtime and capability tools: `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime`, `get_capabilities`.
 
-Project and task control tools: `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project`, `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft`, `get_artifact_manifest`, `export_task_artifacts`.
+Project, task, and delivery tools: `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project`, `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft`, `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release`.
 
 Direct CAD tools: `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part`.
 
 Use a direct tool for one supported operation with explicit inputs. Use ModelProgram for an ordered multi-command change. Both direct and ModelProgram paths enter the same Task Kernel, so recovery, verification, review, and acceptance semantics stay identical.
 
-Project, task, revision, review, artifact, and CAD MCP calls plus the public Workbench client use one same-user authenticated local daemon and shared Task Kernel. Runtime maintenance and inert discovery remain local MCP server concerns. FreeCAD runs behind the kernel in a managed, killable Worker generation. This backend contract does not mean that the G1 FreeCAD Qt Workbench UI is available.
+Project, task, revision, review, artifact, release, and CAD MCP calls plus the public Workbench client use one same-user authenticated local daemon and shared Task Kernel. Runtime maintenance and inert discovery remain local MCP server concerns. FreeCAD runs behind the kernel in a managed, killable Worker generation. The G1 FreeCAD Workbench alpha uses this same authority for review and Release actions.
 
 ## Required workflow
 
@@ -72,7 +72,15 @@ Call `get_artifact_manifest` first with the exact task generation, revision, and
 
 Never request, expose, or read an arbitrary filesystem path. Artifact access must use the verified resource URI returned by VibeCAD.
 
-Never call a legacy 31-tool surface or reconstruct retired tool names. Use only the live 28-tool surface above.
+## Release delivery
+
+Create a Release only from a `succeeded` task's exact committed Revision and observed task generation. Call `create_release` with one retained `release_create_[0-9a-f]{32}` key, then inspect the returned drawing, BOM JSON/CSV, manifest, validation report, Revision digest, verification digest, and package digest. A draft exposes preview `ResourceLink` entries but never exposes the ZIP resource URI.
+
+Approval is a separate user decision. After the user approves the exact displayed package SHA-256, call `approve_release` with the draft generation, that unchanged digest, and one retained `release_approve_[0-9a-f]{32}` key. Only an approved Release exposes `vibecad-release.zip`; retrieve it with `resources/read`. Re-read with `get_release` after restart or an unknown response, and replay only the identical idempotency key and expected digest. Release approval never changes Revision or project HEAD.
+
+The current buffered Release resource ceiling is 64 MiB. If creation returns `resource_exhausted`, report that transport limit; do not bypass it with an arbitrary filesystem path or claim that a larger package was approved.
+
+Never reconstruct retired tool names. Use only the live 31-tool surface above.
 
 Never generate or execute arbitrary Python/FreeCAD code. FreeCAD is the bounded geometry engine behind VibeCAD, not an authorization to run model-generated code.
 

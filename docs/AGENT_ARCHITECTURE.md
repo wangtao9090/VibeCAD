@@ -41,7 +41,7 @@ OCCT 的事实独立验收，并原子提交或安全保留审核草案。
 | 照片/STL/仿真 Provider | 只有架构预留 | 不能 |
 | 任意 Python/FreeCAD 代码 Worker | 不存在，也不是主路径 | 不能 |
 
-所以准确说法是：**CAD 与任务内核已经打通，0.6.0 的 28-tool 公共协议、单 Kernel backend 和
+所以准确说法是：**CAD 与任务内核已经打通，0.6.0 的 31-tool 公共协议、单 Kernel backend 和
 分发合同也已经在本地做到 host-ready，让兼容宿主具备低成本发现、正确调用、跨进程恢复和取回
 文件的合同。** 真实 Claude/Codex 中的 skill 安装、reload 与 canonical workflow 仍是 residual，
 不能把 typed/raw client conformance 宣称成 host-verified；当前候选也尚未发布。
@@ -154,8 +154,8 @@ HEAD、源文件或交付目录。active CAD 状态会先持久化 `cancel_reque
 - 两者都产生 TaskRun、candidate/draft、verification report、revision 和 artifact；
 - 工具数量不是能力目标。稳定控制面保持小而稳定，CAD operation 可按准入门逐批扩展。
 
-当前 28 个公开工具中，只有 6 个是 direct CAD 工具；其余是 22 个
-service/runtime/project/revision/task/review/artifact facade。不能把“28 个公开工具”误写为“28 个
+当前 31 个公开工具中，只有 6 个是 direct CAD 工具；其余是 25 个
+service/runtime/project/revision/task/review/artifact/release facade。不能把“31 个公开工具”误写为“31 个
 CAD command”。
 
 每个新增 operation 必须同时具备：
@@ -396,16 +396,18 @@ Workbench 非第二权威、Provider 不自研底层引擎。MRG1-D01..D16 已�
   keyed/list/recover/compare/revert/manifest + durable active cancel/reconcile
   + single authenticated daemon/session file grant + source liveness/revocation
   + managed killable Worker/crash isolation
-→ [complete] 0.6.0 package/managed-runtime local candidate（尚未 tag/发布）
+→ [complete] 0.6.0 package/managed-runtime local candidate
 → [complete] MR0 multi-runtime foundation
   C01..C04 已实现 generic lifecycle、CAD capability/router、FreeCAD adapter 与 fake conformance。
   当前不增加公共 schema/operation 或第二 CAD；durable FCStd/STEP 保留到 MR1
 → [complete] G1 MVP（FreeCAD Qt Workbench Alpha）
   Workbench preview + verdict + stale/revoked rejection + Accept/Reject + object/feature selection
-→ P0-B hardening close
-  retention/GC + runner upgrade + observability/recovery gaps
-→ P1/G2
-  Sketcher + PartDesign + Selector Level B + controlled import/STL + fine interaction
+→ [complete] P1/G2 bounded sequential editing
+  explicit user checkpoint after small FreeCAD edits; no live merge
+→ [complete] P2 bounded rigid mechanical delivery
+  explicit components + interference + flat BOM + assembly PDF + immutable Release ZIP
+→ WorkBuddy host verification
+  local stdio + strict schemas + durable recovery + Release PDF/ZIP resources
 → P2
   assembly + BOM + TechDraw + release package
 ```

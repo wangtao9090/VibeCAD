@@ -108,9 +108,14 @@ def test_release_workflow_executes_the_exact_built_artifacts_before_publish():
     managed_body = managed.group("body")
 
     assert "Python sources are not byte-identical across release channels" in package_body
+    assert 'f"vibecad/_freecad/VibeCAD/' in package_body
+    assert 'name.startswith("freecad/VibeCAD/")' in package_body
+    assert "unexpected MCPB content" in package_body
+    assert '"skills/vibecad-agent/"' in package_body
+    assert '"src/vibecad/"' in package_body
     assert "fresh-install the exact wheel and sdist" in package_body
     assert 'uv pip install --python "$environment/bin/python" --no-deps "$artifact"' in package_body
-    assert "assert len(public_tool_specs()) == 28" in package_body
+    assert "assert len(public_tool_specs()) == 31" in package_body
 
     assert managed_body.count("actions/download-artifact@v4") == 2
     assert "name: python-distributions" in managed_body

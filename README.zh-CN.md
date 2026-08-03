@@ -94,9 +94,9 @@ direct operation 与 ModelProgram 不是两套执行系统。direct operation �
 导入、逆向工程和仿真 尚未接入。照片/视频到网格或 STL、2D 草图识别等前置引擎可以在以后作为
 外部工具连接，VibeCAD 聚焦可编辑 CAD 的中间编排与验证。
 
-## 当前公开能力（0.6.0 本地交付候选）
+## 当前公开能力（0.6.0）
 
-MCPB manifest 与运行时投影同一份冻结合同，当前公开 28 个工具。每个工具都有简短说明、严格输入
+MCPB manifest 与运行时投影同一份冻结合同，当前公开 31 个工具。每个工具都有简短说明、严格输入
 schema 与副作用标记；宿主应先调用 `get_capabilities`，不能根据工具数量或模型常识猜能力。
 
 | 类别 | 工具 |
@@ -105,7 +105,7 @@ schema 与副作用标记；宿主应先调用 `get_capabilities`，不能根据
 | 能力发现 | `get_capabilities` |
 | 项目与版本 | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
 | 任务与草案 | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft` |
-| 交付 | `get_artifact_manifest`, `export_task_artifacts` |
+| 交付 | `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release` |
 | direct operation | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
 
 一次成功的 `export_task_artifacts` 返回规范结果及两个有类型的 `ResourceLink`：
@@ -115,6 +115,11 @@ schema 与副作用标记；宿主应先调用 `get_capabilities`，不能根据
 
 宿主只能通过返回的 URI 调用 `resources/read` 获取二进制内容，并核对格式、大小与 SHA-256。接口不
 提供任意路径导出或任意文件读取。
+
+对于已经验收的 Revision，`create_release` 会生成可预览的 A3 装配 PDF、扁平 BOM、manifest、
+validation report 和不可变的七文件交付 ZIP。宿主必须先向用户展示精确 ZIP SHA-256，随后才能调用
+`approve_release`；只有批准后的 Release 才公开 ZIP ResourceLink。Release 批准独立于 Revision
+验收，且绝不改变项目 HEAD。
 
 ## 为什么不让模型直接执行 FreeCAD Python
 
@@ -201,10 +206,10 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 
 ## Host-ready 的准确含义
 
-0.6.0 本地交付候选已验证 MCP 协议、Skill 包结构、FCStd/STEP ResourceLink、受管 FreeCAD E2E 与
-28-tool discovery，因此可以称为 protocol/package `host-ready`。它仍是未发布候选；当前阶段没有消费
-用户的 Claude/Codex 外部模型配额执行第二宿主验收，所以不能称为
-`host-verified`；实际跨宿主模型调用仍是独立残项。
+0.6.0 已验证 MCP 协议、Skill 包结构、FCStd/STEP 与 Release ResourceLink、受管 FreeCAD E2E 与
+31-tool discovery，因此可以称为 protocol/package `host-ready`。当前阶段没有消费用户的外部模型
+配额执行 WorkBuddy 或其它第二宿主验收，所以还不能称为 `host-verified`；实际跨宿主模型调用仍是
+独立残项。
 
 ## 架构边界与路线
 
@@ -213,17 +218,20 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 daemon 进入该 Application/Task Kernel。运行时维护和无状态 discovery 仍由 MCP server 本地处理，不是
 第二条领域写入路径。daemon 提供同用户认证及受限的一次性 file grant，不形成第二套提交系统。
 
-S3-8、0.6.0 package/managed-runtime 本地候选收口与有界 G1 Workbench Alpha 均已完成；该候选
-尚未 tag 或发布。后续顺序为 P0-B hardening → P1/G2 → P2：
+S3-8、P0-B core、package/managed-runtime 收口、有界 G1 Workbench Alpha、P1 顺序编辑与 P2
+刚性机械交付都已在 0.6.0 完成。下一集成阶段是 WorkBuddy 宿主验收：
 
 - **P0-B core（后端完成）**：任务/项目/版本发现、文件级比较、verified forward revert、取消/reconcile、
   认证 daemon、file grant、source liveness 与受管可终止 FreeCAD Worker 都进入同一 Task Kernel；
 - **G1（Alpha 完成）**：真实 FreeCAD Qt Workbench UI 已具备 preview、verdict、精确
   object/feature selector 捕获与 Accept/Reject；一个指纹绑定的外部 FreeCAD 1.1.3 试点已有证据，
   受管模式仍是默认路径；
-- **P1/G2**：当前源码已实现窄范围的顺序 editable HEAD/手工 checkpoint；Sketcher/PartDesign、
+- **P1/G2（有界完成）**：当前源码已实现窄范围的顺序 editable HEAD/手工 checkpoint；Sketcher/PartDesign、
   受控导入和更广的单零件生产能力仍待后续完成；
-- **P2**：装配、BOM、TechDraw、制造发布与企业交付链。
+- **P2（有界完成）**：2–10 零件刚性装配、干涉验证、扁平 BOM、确定性装配 PDF、不可变 Release
+  批准与精确交付 ZIP；原生 joints、可编辑制造图、GD&T、PLM 与企业交付链仍待后续；
+- **WorkBuddy（下一阶段）**：验证本地 stdio MCP、严格 schema、持久任务恢复、Release PDF/ZIP
+  Resource，以及显式模型 Profile。
 
 G1 Workbench Alpha 已把真实 FreeCAD Qt UI 与确定性的受管启动器打入安装包。它具备恰好一个
 Workbench 与 Dock、daemon-backed refresh、相互独立的 HEAD/草案预览、verdict、精确

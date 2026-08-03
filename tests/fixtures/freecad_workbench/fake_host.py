@@ -283,6 +283,10 @@ class FakeLocalAgentClient:
         self.review_committed_revision: str | None = None
         self.review_project_generation = 2
         self.review_project_revision = "revision_" + "1" * 32
+        self.release_status = "draft"
+        self.release_generation = 0
+        self.release_approved_at_ms: int | None = None
+        self.release_bytes = b"VibeCAD release resource\n"
         self.last_tasks_response: dict[str, object] | None = None
         self.projects_response: dict[str, object] | None = None
         self.tasks_response: dict[str, object] | None = None
@@ -417,6 +421,56 @@ class FakeLocalAgentClient:
             status=self.review_task_status,
             committed_revision=None,
         )
+
+    def create_release_request(self, request: dict[str, object]) -> dict[str, object]:
+        self._record("create_release", request)
+        return _fake_release_envelope(
+            status=self.release_status,
+            generation=self.release_generation,
+            approved_at_ms=self.release_approved_at_ms,
+        )
+
+    def get_release_request(self, request: dict[str, object]) -> dict[str, object]:
+        self._record("get_release", request)
+        return _fake_release_envelope(
+            status=self.release_status,
+            generation=self.release_generation,
+            approved_at_ms=self.release_approved_at_ms,
+        )
+
+    def approve_release_request(self, request: dict[str, object]) -> dict[str, object]:
+        self._record("approve_release", request)
+        if (
+            request.get("expected_generation") != 0
+            or request.get("expected_package_sha256") != "9" * 64
+        ):
+            raise RuntimeError("synthetic release conflict")
+        self.release_status = "approved"
+        self.release_generation = 1
+        self.release_approved_at_ms = 1_000_000_000
+        return _fake_release_envelope(
+            status=self.release_status,
+            generation=self.release_generation,
+            approved_at_ms=self.release_approved_at_ms,
+        )
+
+    def save_release_resource(self, *, uri: str, destination: str) -> dict[str, object]:
+        self._record("save_release_resource", {"uri": uri, "destination": destination})
+        target = Path(destination)
+        target.write_bytes(self.release_bytes)
+        name = target.name
+        media_type = "application/pdf" if name.endswith(".pdf") else "application/zip"
+        return {
+            "schema_version": 1,
+            "uri": uri,
+            "destination": destination,
+            "name": "assembly-drawing.pdf"
+            if media_type == "application/pdf"
+            else "vibecad-release.zip",
+            "media_type": media_type,
+            "sha256": hashlib.sha256(self.release_bytes).hexdigest(),
+            "size_bytes": len(self.release_bytes),
+        }
 
     def open_checkout(
         self,
@@ -651,6 +705,63 @@ def _fake_task(digit: str, *, status: str) -> dict[str, object]:
         "candidate_revision": "revision_" + "4" * 32,
         "committed_revision": None,
         "draft_id": "draft_" + "4" * 32,
+    }
+
+
+def _fake_release_envelope(
+    *,
+    status: str,
+    generation: int,
+    approved_at_ms: int | None,
+) -> dict[str, object]:
+    release_id = "release_" + "8" * 32
+    base = f"vibecad://release/{release_id}"
+
+    def artifact(name: str, media_type: str, digest: str, uri: str | None) -> dict[str, object]:
+        return {
+            "name": name,
+            "media_type": media_type,
+            "sha256": digest,
+            "size_bytes": 23,
+            "resource_uri": uri,
+        }
+
+    return {
+        "schema_version": 1,
+        "ok": True,
+        "result": {
+            "release_id": release_id,
+            "status": status,
+            "generation": generation,
+            "task_id": "task_" + "1" * 32,
+            "task_generation": 3,
+            "project_id": "project_" + "1" * 32,
+            "revision_id": "revision_" + "4" * 32,
+            "revision_manifest_sha256": "4" * 64,
+            "verification_id": "verification_" + "5" * 32,
+            "verification_digest": "6" * 64,
+            "observation_digest": "7" * 64,
+            "manifest": artifact(
+                "manifest.json", "application/json", "1" * 64, f"{base}/manifest.json"
+            ),
+            "drawing": artifact(
+                "assembly-drawing.pdf",
+                "application/pdf",
+                "2" * 64,
+                f"{base}/assembly-drawing.pdf",
+            ),
+            "bom_json": artifact("bom.json", "application/json", "3" * 64, f"{base}/bom.json"),
+            "bom_csv": artifact("bom.csv", "text/csv", "4" * 64, f"{base}/bom.csv"),
+            "validation_report_uri": f"{base}/validation-report.json",
+            "package": artifact(
+                "vibecad-release.zip",
+                "application/zip",
+                "9" * 64,
+                f"{base}/vibecad-release.zip" if status == "approved" else None,
+            ),
+            "approved_at_ms": approved_at_ms,
+        },
+        "error": None,
     }
 
 
@@ -1030,6 +1141,25 @@ class _QApplication:
         return cls._clipboard
 
 
+class _QFileDialog:
+    next_result: tuple[str, str] = ("", "")
+    calls: list[tuple[object, str, str, str]] = []
+
+    @classmethod
+    def getSaveFileName(
+        cls,
+        parent: object,
+        title: str,
+        suggested_name: str,
+        file_filter: str,
+    ) -> tuple[str, str]:
+        _require_main_thread()
+        cls.calls.append((parent, title, suggested_name, file_filter))
+        result = cls.next_result
+        cls.next_result = ("", "")
+        return result
+
+
 class _ConnectionType:
     QueuedConnection = object()
 
@@ -1083,6 +1213,9 @@ def install_fake_pyside(
     module.QtWidgets.QLabel = _QLabel
     module.QtWidgets.QComboBox = _QComboBox
     module.QtWidgets.QPushButton = _QPushButton
+    _QFileDialog.next_result = ("", "")
+    _QFileDialog.calls = []
+    module.QtWidgets.QFileDialog = _QFileDialog
     _QApplication._clipboard = _Clipboard()
     module.QtWidgets.QApplication = _QApplication
     return module

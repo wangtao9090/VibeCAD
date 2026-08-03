@@ -43,6 +43,9 @@ PUBLIC_TOOL_NAMES = (
     "reject_draft",
     "get_artifact_manifest",
     "export_task_artifacts",
+    "create_release",
+    "get_release",
+    "approve_release",
     "create_box",
     "create_cylinder",
     "inspect_model",
@@ -207,12 +210,12 @@ def test_skill_has_canonical_files_and_minimal_trigger_frontmatter():
     assert "$vibecad-agent" in interface["default_prompt"]
 
 
-def test_skill_teaches_the_exact_twenty_eight_tool_agent_first_flow():
+def test_skill_teaches_the_exact_thirty_one_tool_agent_first_flow():
     _metadata, body = _skill_parts()
     code_tokens = _inline_code(body)
     assert set(PUBLIC_TOOL_NAMES) <= code_tokens
     assert LEGACY_TOOL_NAMES.isdisjoint(code_tokens)
-    assert re.search(r"\b28(?:-tool| tools?)\b|28\s*个", body, re.IGNORECASE)
+    assert re.search(r"\b31(?:-tool| tools?)\b|31\s*个", body, re.IGNORECASE)
 
     essential_order = (
         "get_capabilities",
@@ -333,8 +336,8 @@ def test_skill_teaches_resource_links_and_fail_closed_product_limits():
     assert path_rule is not None
     assert re.search(r"never|must not|禁止|不得|不能", path_rule, re.IGNORECASE)
 
-    legacy_rule = _paragraph_with(body, "legacy", "31")
-    assert re.search(r"never|must not|禁止|不得|不能", legacy_rule, re.IGNORECASE)
+    retired_rule = _paragraph_with(body, "retired", "31")
+    assert re.search(r"never|must not|禁止|不得|不能", retired_rule, re.IGNORECASE)
     code_rule = _paragraph_with(body, "Python", "FreeCAD", "code")
     assert re.search(r"never|must not|禁止|不得|不能", code_rule, re.IGNORECASE)
 
@@ -343,7 +346,6 @@ def test_skill_teaches_resource_links_and_fail_closed_product_limits():
     for claim in (
         "mcp_sampling",
         "byok",
-        "workbench",
         "face/edge",
         "stl",
         "photo",
@@ -480,7 +482,7 @@ def test_release_documents_project_the_0_6_backend_truth():
         )
     }
     for path, normalized in product_documents.items():
-        assert any(claim in normalized for claim in ("28-tool", "28 个工具", "28 个公开工具")), path
+        assert any(claim in normalized for claim in ("31-tool", "31 个工具", "31 个公开工具")), path
         assert "daemon" in normalized, path
         assert "task kernel" in normalized, path
 
@@ -502,22 +504,10 @@ def test_release_documents_project_the_0_6_backend_truth():
     assert "真实 freecad qt workbench alpha 已交付" in documents["docs/USER_GUIDE.md"]
     assert "g1 freecad qt workbench alpha 支持" in documents["docs/ACCEPTANCE_TESTS.md"]
 
-    assert any(
-        claim in english_readme
-        for claim in ("unpublished candidate", "has not been tagged or published")
-    )
-    for path in (
-        "README.zh-CN.md",
-        "docs/ARCHITECTURE.md",
-        "docs/AGENT_ARCHITECTURE.md",
-        "docs/PRODUCT_CAPABILITY_ROADMAP.md",
-        "docs/ACCEPTANCE_TESTS.md",
-    ):
-        normalized = documents[path]
-        assert any(
-            claim in normalized
-            for claim in ("未发布", "当前没有 tag 或 release", "不执行 tag 或发布")
-        ), path
+    assert "p2 (complete boundary)" in english_readme
+    assert "workbuddy (next)" in english_readme
+    assert "p2（有界完成）" in chinese_readme
+    assert "workbuddy（下一阶段）" in chinese_readme
 
 
 def test_release_publishers_consume_gated_archives_and_attach_the_skill_asset():

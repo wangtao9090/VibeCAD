@@ -8,8 +8,9 @@ honestly as planned and unavailable.
 
 from __future__ import annotations
 
+import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from vibecad.execution.candidate import (
 )
 from vibecad.execution.registry import ExecutionProfile
 from vibecad.execution.results import NormalizedToolOutcome
-from vibecad.validation import ObservationSnapshot
+from vibecad.validation import BomObservation, ObservationSnapshot
 from vibecad.workflow.contracts import ModelProgram
 from vibecad.workflow.lease import ProjectWriteLease
 from vibecad.workflow.program import ValidatedProgram
@@ -32,6 +33,9 @@ MAX_ADMITTED_CREATED_OBJECTS = 16
 MAX_ADMITTED_RESULT_BYTES = 262_144
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+_REVISION_PATTERN = re.compile(r"revision_[0-9a-f]{32}\Z")
+_RELEASE_DRAWING_VIEWS = ("front", "right", "top", "isometric")
+MAX_RELEASE_DRAWING_BYTES = 160_000
 
 
 class CadCapabilityStatus(StrEnum):
@@ -96,6 +100,48 @@ class ValidatedMaterializationEvidence:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ReleaseCadEvidence:
+    """Bounded PDF and BOM facts derived read-only from one immutable Revision."""
+
+    revision_id: str
+    bom: BomObservation
+    drawing_pdf: bytes = field(repr=False)
+    view_names: tuple[str, ...]
+    balloon_items: tuple[tuple[int, str], ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.revision_id) is not str
+            or _REVISION_PATTERN.fullmatch(self.revision_id) is None
+        ):
+            raise ValueError("release evidence revision is invalid")
+        if type(self.bom) is not BomObservation or not self.bom.complete or not self.bom.rows:
+            raise ValueError("release evidence requires a complete BOM")
+        if (
+            type(self.drawing_pdf) is not bytes
+            or not self.drawing_pdf.startswith(b"%PDF-")
+            or b"%%EOF" not in self.drawing_pdf[-32:]
+            or len(self.drawing_pdf) > MAX_RELEASE_DRAWING_BYTES
+        ):
+            raise ValueError("release drawing is invalid")
+        if self.view_names != _RELEASE_DRAWING_VIEWS:
+            raise ValueError("release drawing views are invalid")
+        expected_items = tuple(
+            (index, row.component_ids[0]) for index, row in enumerate(self.bom.rows, start=1)
+        )
+        if self.balloon_items != expected_items:
+            raise ValueError("release drawing balloons do not match the BOM")
+
+    @property
+    def drawing_sha256(self) -> str:
+        return hashlib.sha256(self.drawing_pdf).hexdigest()
+
+    @property
+    def drawing_size_bytes(self) -> int:
+        return len(self.drawing_pdf)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class CandidateEvidence:
     """Trusted sealed observations and path-free durable artifact references."""
 
@@ -146,6 +192,9 @@ class CadExecutionPort(CadSnapshotPort):
     ) -> ValidatedMaterializationEvidence:
         raise NotImplementedError("validate_materialization is not implemented")
 
+    def render_release(self, *, revision: object) -> ReleaseCadEvidence:
+        raise NotImplementedError("render_release is not implemented")
+
     def validate_program(self, program: ModelProgram) -> ValidatedProgram:
         raise NotImplementedError("validate_program is not implemented")
 
@@ -177,6 +226,7 @@ __all__ = (
     "CadProfileCapability",
     "ValidatedImportEvidence",
     "ValidatedMaterializationEvidence",
+    "ReleaseCadEvidence",
     "CandidateEvidence",
     "CadExecutionPort",
 )

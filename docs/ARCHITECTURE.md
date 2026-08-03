@@ -12,7 +12,7 @@
 >
 > MR0-C01..C04 已交付并验收内部通用 runtime 合同与 descriptor registry、backend-neutral CAD
 > registry/router、FreeCAD default composition 和 provider-free conformance。当前唯一接通和默认选择的
-> CAD adapter 仍是 FreeCAD，公共 28-tool、六 operation 与 `SelectorV1` 合同不变；durable
+> CAD adapter 仍是 FreeCAD，公共 31-tool、六 operation 与 `SelectorV1` 合同不变；durable
 > Revision/Candidate 仍固定使用 FCStd/STEP 布局，迁移只属于 MR1。
 >
 > G1 FreeCAD Workbench Alpha 已交付项目/任务发现、HEAD/draft preview、verdict、精确
@@ -181,7 +181,7 @@ macOS 默认根目录为 `~/Library/Application Support/VibeCAD`。Stage 3 的 d
 
 ## 5. 当前公共 MCP 面
 
-当前 `tools/list` 精确包含 28 个工具：22 个稳定控制/领域 facade，加 6 个 registry-derived 直接
+当前 `tools/list` 精确包含 31 个工具：25 个稳定控制/领域 facade，加 6 个 registry-derived 直接
 CAD 工具。
 
 | 组别 | 工具 |
@@ -191,7 +191,7 @@ CAD 工具。
 | 项目与版本 | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
 | 任务 | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task` |
 | 审核 | `accept_draft`, `reject_draft` |
-| 交付 | `get_artifact_manifest`, `export_task_artifacts` |
+| 交付 | `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release` |
 | Registry direct | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
 
 Manifest、运行时 discovery 和 receipt digest 都来自同一 public-surface 合同；S3-8 已门禁 manifest
@@ -214,10 +214,10 @@ JSON Schema；unknown field、错误类型、非有限数、重复 JSON key、�
 
 AR-1 发现 S3-7 discovery 缺少 tool description，而且重复广播完整 task output schema，使一次
 `tools/list` 约 350 KB。S3-8 已补齐描述、从宿主发现投影中省略可选 output schema，并继续在服务端
-保留完整输出验证；当前固定 28-tool SDK projection 为 21,438 bytes，SHA-256 为
-`5d7703a55dd7b20c21c487d6f4740fbfb894cf6867c840ccb30adf57de63efda`；完整 discovery frame 为
-21,483 bytes，SHA-256 为
-`22c903b05fc6e46868bd74380880cca5c915f312ac2ddf24f7e48896b8cdf826`，低于 32,768-byte 上限。
+保留完整输出验证；当前固定 31-tool SDK projection 为 25,566 bytes，SHA-256 为
+`a261def0bc0f51ec4d7d894589a4aee06654d78b6d15e750aa153ca52c2a3558`；完整 discovery frame 为
+25,611 bytes，SHA-256 为
+`93925478a5fdbeedd9417c212f69df5d9194c503e9e05714b7cb64c1621ba6c5`，低于 32,768-byte 上限。
 direct operation 与稳定工具重名会 fail closed。
 
 ## 6. Application 与 Task Kernel 分层
@@ -534,19 +534,19 @@ verifier 与 HEAD 权威。详见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VER
 
 当前 0.6.0 本地交付候选冻结：
 
-- source、manifest、lock 和 managed server receipt 的目标版本为 0.6.0；公开工具 28 个，MCP 1.27.2，
+- source、manifest、lock 和 managed server receipt 的目标版本为 0.6.0；公开工具 31 个，MCP 1.27.2，
   server epoch 4，FreeCAD 1.1.0；receipt public-surface digest 为
-  `ae495ba457af40a5837a03e77eef4b396b0a4209755878350bc341ac7de8bfd3`；
-- 固定 28-tool SDK projection 为 21,438 bytes，SHA-256 为
-  `5d7703a55dd7b20c21c487d6f4740fbfb894cf6867c840ccb30adf57de63efda`；完整 discovery frame 为
-  21,483 bytes，SHA-256 为
-  `22c903b05fc6e46868bd74380880cca5c915f312ac2ddf24f7e48896b8cdf826`。tool description 和 input
+  `d12e34b70ec448b415e5f525acc4eff66fae018e9395dd4812a5096d541ab17b`；
+- 固定 31-tool SDK projection 为 25,566 bytes，SHA-256 为
+  `a261def0bc0f51ec4d7d894589a4aee06654d78b6d15e750aa153ca52c2a3558`；完整 discovery frame 为
+  25,611 bytes，SHA-256 为
+  `93925478a5fdbeedd9417c212f69df5d9194c503e9e05714b7cb64c1621ba6c5`。tool description 和 input
   schema 对宿主可见，完整 output validation 保留在服务端；
 - canonical skill 位于 `skills/vibecad-agent/`；source、sdist、MCPB 和 standalone skill archive 携带
   同一 skill tree，wheel/受管 Python 环境刻意不携带 skill；
 - MCPB 只声明已验证的 Darwin 产品路径；`uv.lock` 随包，tests/docs/runtime/cache 不进入产品包；
 - C13 已证明 MCP 与 public Workbench client 经同一 Application/Task Kernel 共享 draft、verdict 和
-  HEAD，client EOF/重连不改变 durable truth；C14 负责把同一 28-tool/skill/package identity 刷新到
+  HEAD，client EOF/重连不改变 durable truth；P2 负责把同一 31-tool/skill/package identity 刷新到
   wheel、sdist、MCPB、fresh install 和 managed receipt。
 
 完成 C14 package gate 后，该候选仍只能称为本地 protocol/package `host-ready`。真实
@@ -571,7 +571,7 @@ release。
 | `src/vibecad/runtime/contracts.py`, `registry.py`, `conformance.py` | domain-neutral runtime immutable contracts、descriptor registry 与 transcript conformance |
 | `src/vibecad/runtime/` 其他模块 | 受管 Python/FreeCAD paths、receipt、installer、status、uninstall |
 | `src/vibecad/engine/`, `tools/`, `feedback/` | 内部 FreeCAD 能力库存；非公共 endpoint |
-| `manifest.json` | MCPB 平台、启动和 28-tool 静态声明 |
+| `manifest.json` | MCPB 平台、启动和 31-tool 静态声明 |
 | `tests/` | 纯契约、恢复/竞态、真实 FreeCAD、package/MCPB E2E |
 
 ## 14. 当前限制与下一步

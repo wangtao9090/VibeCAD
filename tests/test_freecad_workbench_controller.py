@@ -25,6 +25,7 @@ from tests.fixtures.freecad_workbench.fake_host import (
     FakeFreeCADGui,
     FakeLocalAgentClient,
     FakeWorkbench,
+    _fake_release_envelope,
     force_cleanup_workbench,
     install_fake_pyside,
     make_fake_freecad,
@@ -45,10 +46,13 @@ _STATE_PUBLIC_NAMES = (
     "ProjectPage",
     "TaskSummary",
     "TaskPage",
+    "ReleaseFileSummary",
+    "ReleaseSummary",
     "project_page_from_mapping",
     "project_summary_from_detail_mapping",
     "task_summary_from_detail_mapping",
     "task_page_from_mapping",
+    "release_summary_from_mapping",
 )
 _PROJECT_FIELDS = (
     "project_id",
@@ -68,6 +72,27 @@ _TASK_FIELDS = (
     "candidate_revision",
     "committed_revision",
     "draft_id",
+)
+_RELEASE_FILE_FIELDS = ("name", "media_type", "sha256", "size_bytes", "resource_uri")
+_RELEASE_FIELDS = (
+    "release_id",
+    "status",
+    "generation",
+    "task_id",
+    "task_generation",
+    "project_id",
+    "revision_id",
+    "revision_manifest_sha256",
+    "verification_id",
+    "verification_digest",
+    "observation_digest",
+    "manifest",
+    "drawing",
+    "bom_json",
+    "bom_csv",
+    "validation_report_uri",
+    "package",
+    "approved_at_ms",
 )
 
 
@@ -450,6 +475,8 @@ def test_state_module_import_boundary_excludes_freecad_qt_daemon_and_store(
         ("ProjectPage", ("projects", "next_cursor")),
         ("TaskSummary", _TASK_FIELDS),
         ("TaskPage", ("tasks", "next_cursor")),
+        ("ReleaseFileSummary", _RELEASE_FILE_FIELDS),
+        ("ReleaseSummary", _RELEASE_FIELDS),
     ):
         data_type = getattr(state, name)
         assert is_dataclass(data_type)
@@ -539,6 +566,155 @@ def test_task_page_from_mapping_projects_and_detaches_public_response(
     assert len(page.tasks) == 2
     assert page.next_cursor == "opaque:task:cursor"
     assert not hasattr(page, "__dict__")
+
+
+def test_release_projection_requires_exact_draft_and_approved_resource_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _load_state_module(monkeypatch)
+    draft_mapping = _fake_release_envelope(
+        status="draft",
+        generation=0,
+        approved_at_ms=None,
+    )
+
+    draft = state.release_summary_from_mapping(draft_mapping)
+
+    assert draft.status == "draft"
+    assert draft.generation == 0
+    assert draft.drawing.resource_uri.endswith("/assembly-drawing.pdf")
+    assert draft.package.resource_uri is None
+    approved_mapping = _fake_release_envelope(
+        status="approved",
+        generation=1,
+        approved_at_ms=1_000_000_000,
+    )
+    approved = state.release_summary_from_mapping(approved_mapping)
+    assert approved.status == "approved"
+    assert approved.package.resource_uri.endswith("/vibecad-release.zip")
+
+    approved_mapping["result"]["package"]["resource_uri"] = None
+    with pytest.raises(state.ProjectionError, match=r"^invalid public mapping$"):
+        state.release_summary_from_mapping(approved_mapping)
+
+
+def test_p2_release_dock_builds_exact_revision_then_approves_exact_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_pyside = install_fake_pyside()
+    monkeypatch.setitem(sys.modules, "PySide", fake_pyside)
+    monkeypatch.setitem(sys.modules, "PySide.QtCore", fake_pyside.QtCore)
+    monkeypatch.setitem(sys.modules, "PySide.QtWidgets", fake_pyside.QtWidgets)
+    dock_module = _load_workbench_module(monkeypatch, "dock")
+    dock = dock_module.ReviewDock()
+    emitted: list[dict[str, object]] = []
+    dock.request.connect(emitted.append)
+    project_id = "project_" + "1" * 32
+    task = _task_record(
+        "1",
+        generation=3,
+        candidate_revision="revision_" + "4" * 32,
+        committed_revision="revision_" + "4" * 32,
+        draft_id="draft_" + "4" * 32,
+    )
+    task["project_id"] = project_id
+    task["status"] = "succeeded"
+    task["next_action"] = "none"
+    dock._project_ids = [project_id]
+    dock.project_selector.addItem(project_id)
+    dock._task_ids = [task["task_id"]]
+    dock._tasks_by_id = {task["task_id"]: task}
+    dock.task_selector.addItem(task["task_id"])
+    dock._update_preview_actions()
+
+    assert dock.build_release_button.enabled
+    dock.build_release_button.click()
+    create = emitted[-1]
+    assert create["kind"] == "release_create"
+    assert create["task_id"] == task["task_id"]
+    assert create["expected_generation"] == 3
+    assert create["revision_id"] == "revision_" + "4" * 32
+    dock.handle_event(
+        {
+            "schema_version": 1,
+            "request_id": create["request_id"],
+            "kind": "release_created",
+            "response": _fake_release_envelope(status="draft", generation=0, approved_at_ms=None),
+        }
+    )
+    assert dock.release_status_label.text.startswith("Draft package ")
+    assert dock.approve_release_button.enabled
+
+    dock.approve_release_button.click()
+    approve = emitted[-1]
+    assert approve["kind"] == "release_approve"
+    assert approve["expected_generation"] == 0
+    assert approve["expected_package_sha256"] == "9" * 64
+    dock.handle_event(
+        {
+            "schema_version": 1,
+            "request_id": approve["request_id"],
+            "kind": "release_approved",
+            "response": _fake_release_envelope(
+                status="approved", generation=1, approved_at_ms=1_000_000_000
+            ),
+        }
+    )
+    assert dock.release_status_label.text.startswith("Approved package ")
+    assert dock.save_release_button.enabled
+
+
+def test_p2_gateway_release_save_requires_private_host_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    gateway_module = _load_workbench_module(monkeypatch, "gateway")
+    capability = object()
+    results: queue.Queue[tuple[object, object, FakeLocalAgentClient]] = queue.Queue()
+    destination = str((tmp_path / "assembly-drawing.pdf").resolve())
+    uri = "vibecad://release/release_" + "8" * 32 + "/assembly-drawing.pdf"
+
+    def worker() -> None:
+        client = FakeLocalAgentClient()
+        gateway = gateway_module.KernelGateway(
+            lambda: client,
+            wire_capability=capability,
+        )
+        gateway.handle({"schema_version": 1, "request_id": 0, "kind": "connect"})
+        public = gateway.handle(
+            {
+                "schema_version": 1,
+                "request_id": 1,
+                "kind": "release_save",
+                "uri": uri,
+                "destination": destination,
+            }
+        )
+        private = gateway.handle(
+            gateway_module._PrivateWireCommand(
+                {
+                    "schema_version": 1,
+                    "request_id": 2,
+                    "kind": "release_save",
+                    "uri": uri,
+                    "destination": destination,
+                },
+                capability,
+            )
+        )
+        results.put((public, private, client))
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(2)
+    assert not thread.is_alive()
+    public, private, client = results.get_nowait()
+    assert public["kind"] == "error"
+    assert public["code"] == "invalid_input"
+    assert private["kind"] == "release_saved"
+    assert private["response"]["destination"] == destination
+    assert Path(destination).read_bytes() == client.release_bytes
+    assert [call[0] for call in client.calls].count("save_release_resource") == 1
 
 
 def test_c03_detail_parsers_accept_real_fake_authority_and_reject_project_drift(

@@ -29,6 +29,9 @@ EXPECTED_PUBLIC_TOOLS = (
     "reject_draft",
     "get_artifact_manifest",
     "export_task_artifacts",
+    "create_release",
+    "get_release",
+    "approve_release",
     "create_box",
     "create_cylinder",
     "inspect_model",
@@ -69,6 +72,8 @@ def test_manifest_tools_match_server_registry():
         "读取任务版本的验证绑定、制品清单和现有交付资源"
     )
     assert descriptions["cancel_task"] == "请求取消指定任务并返回持久化状态"
+    assert descriptions["create_release"] == "为已验收版本生成可预览的机械交付包草稿"
+    assert descriptions["approve_release"] == "批准精确摘要绑定的不可变机械交付包"
 
 
 def test_manifest_tool_entries_are_unique_and_described():
@@ -174,6 +179,9 @@ def test_mcpbignore_excludes_heavy_dirs():
     for pattern in (
         ".venv",
         ".claude",
+        ".codex",
+        ".agents",
+        ".workbuddy",
         "__pycache__",
         ".pytest_cache",
         "tests/",
@@ -181,6 +189,7 @@ def test_mcpbignore_excludes_heavy_dirs():
         ".github/",
         ".vibecad",
         "dist/",
+        "CAD_Theory_Course_*.md",
     ):
         assert pattern in ignore, f".mcpbignore 缺 {pattern}"
 
@@ -209,7 +218,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "export_task_artifacts",
         "notifications/cancelled",
         "0.6.0",
-        "28 tools",
+        "31 tools",
         "daemon",
         "Task Kernel",
         "G1",
@@ -222,7 +231,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "Checkpoint Edit",
         "there is no automatic merge or rebase",
         "STEP/STL import, photo reconstruction, and simulation are not currently supported",
-        "unpublished candidate",
+        "WorkBuddy (next)",
     ):
         assert required in english_readme
 
@@ -239,7 +248,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "export_task_artifacts",
         "notifications/cancelled",
         "0.6.0",
-        "28 个工具",
+        "31 个工具",
         "daemon",
         "Task Kernel",
         "G1",
@@ -252,7 +261,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "Checkpoint Edit",
         "系统不做自动 merge 或 rebase",
         "当前仍不支持 face/edge 选择、STEP/STL import、照片重建或 simulation",
-        "未发布候选",
+        "WorkBuddy（下一阶段）",
     ):
         assert required in chinese_readme
     for removed_endpoint in (
@@ -274,7 +283,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
     normalized_roadmap = " ".join(roadmap.replace("\n> ", " ").split())
     for required in (
         "0.6.0",
-        "28-tool 公共 MCP、durable review",
+        "31-tool 公共 MCP、durable review/release",
         "host-neutral skill",
         "P0-B core backend（已完成）",
         "durable active cancellation",

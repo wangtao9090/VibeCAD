@@ -108,9 +108,9 @@ engineering, and simulation are not yet integrated. Upstream engines for photo/v
 STL conversion, 2D sketch recognition, and similar tasks may be connected later as external
 tools. VibeCAD focuses on the intermediate orchestration and verification of editable CAD.
 
-## Current Public Capabilities (0.6.0 Local Delivery Candidate)
+## Current Public Capabilities (0.6.0)
 
-The MCPB manifest and runtime project the same frozen contract, which currently exposes 28
+The MCPB manifest and runtime project the same frozen contract, which currently exposes 31
 tools. Each tool has a concise description, a strict input schema, and side-effect annotations.
 A host should call `get_capabilities` first instead of inferring capabilities from the number of
 tools or from general model knowledge.
@@ -121,7 +121,7 @@ tools or from general model knowledge.
 | Capability discovery | `get_capabilities` |
 | Projects and versions | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
 | Tasks and drafts | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft` |
-| Delivery | `get_artifact_manifest`, `export_task_artifacts` |
+| Delivery | `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release` |
 | Direct operations | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
 
 A successful `export_task_artifacts` call returns a canonical result and two typed
@@ -133,6 +133,12 @@ A successful `export_task_artifacts` call returns a canonical result and two typ
 The host can retrieve binary content only by calling `resources/read` with the returned URI, then
 checking its format, size, and SHA-256. The interface does not provide arbitrary-path export or
 arbitrary file reads.
+
+For an accepted Revision, `create_release` generates a previewable A3 assembly PDF, flat BOM,
+manifest, validation report, and an immutable seven-file delivery ZIP. The host must present the
+exact ZIP SHA-256 before calling `approve_release`; only the approved Release exposes the ZIP
+ResourceLink. Release approval is separate from Revision acceptance and never changes project
+HEAD.
 
 ## Why the Model Does Not Execute FreeCAD Python Directly
 
@@ -236,11 +242,11 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 
 ## What “Host-ready” Means Precisely
 
-The 0.6.0 local delivery candidate has verified the MCP protocol, Skill package structure,
-FCStd/STEP ResourceLinks, managed FreeCAD E2E, and 28-tool discovery, so it can be described as
-protocol/package `host-ready`. It is still an unpublished candidate. This phase has not consumed
-the user's Claude/Codex external-model quota to perform acceptance on a second host, so it cannot
-be described as `host-verified`; actual cross-host model calls remain a separate residual.
+The 0.6.0 release has verified the MCP protocol, Skill package structure, FCStd/STEP and Release
+ResourceLinks, managed FreeCAD E2E, and 31-tool discovery, so it can be described as
+protocol/package `host-ready`. This phase has not consumed the user's external-model quota to
+perform acceptance on WorkBuddy or another second host, so it cannot yet be described as
+`host-verified`; actual cross-host model calls remain a separate residual.
 
 ## Architectural Boundaries and Roadmap
 
@@ -251,9 +257,9 @@ maintenance and stateless discovery remain local responsibilities of the MCP ser
 form a second domain-write path. The daemon provides same-user authentication and constrained,
 one-time file grants; it does not create a second commit system.
 
-S3-8, the 0.6.0 package/managed-runtime local candidate closeout, and the bounded G1 Workbench
-Alpha are complete. The candidate has not been tagged or published. The remaining order is
-P0-B hardening → P1/G2 → P2:
+S3-8, P0-B core, the package/managed-runtime closeout, bounded G1 Workbench Alpha, P1 sequential
+editing, and P2 rigid mechanical delivery are complete for 0.6.0. The next integration slice is
+WorkBuddy host verification:
 
 - **P0-B core (backend complete)**: task/project/version discovery, file-level comparison,
   verified forward revert, cancellation/reconcile, authenticated daemon, file grants, source
@@ -261,10 +267,14 @@ P0-B hardening → P1/G2 → P2:
 - **G1 (Alpha complete)**: preview, verdict, exact object/feature selector capture, and
   Accept/Reject are available in the real FreeCAD Qt Workbench UI; one fingerprinted external
   FreeCAD 1.1.3 pilot is evidenced, while managed mode remains the default;
-- **P1/G2**: the narrow sequential editable-HEAD/manual-checkpoint slice is implemented in the
+- **P1/G2 (complete boundary)**: the narrow sequential editable-HEAD/manual-checkpoint slice is implemented in the
   current source; Sketcher/PartDesign, controlled import, and broader single-part production
   capability remain;
-- **P2**: assemblies, BOM, TechDraw, manufacturing release, and enterprise delivery chains.
+- **P2 (complete boundary)**: rigid 2–10 component assemblies, interference verification, flat
+  BOM, deterministic assembly PDF, immutable Release approval, and an exact delivery ZIP;
+  native joints, editable manufacturing drawings, GD&T, PLM, and enterprise delivery chains remain;
+- **WorkBuddy (next)**: certify local stdio MCP, strict schemas, durable task recovery, and
+  Release PDF/ZIP resources with explicit model profiles.
 
 The G1 Workbench Alpha packages the real FreeCAD Qt UI and its deterministic managed launcher. It
 includes one Workbench and Dock, daemon-backed refresh, separate HEAD/draft preview, verdict,

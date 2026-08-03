@@ -1095,6 +1095,9 @@ _TASK_LIST_CURSOR_PATTERN = r"^task_list_cursor_[0-9a-f]{64}$"
 _TASK_EVENT_CURSOR_PATTERN = r"^task_event_cursor_[0-9a-f]{64}$"
 _EXPORT_KEY_PATTERN = r"^export_[0-9a-f]{32}$"
 _MATERIALIZATION_PATTERN = r"^materialization_[0-9a-f]{64}$"
+_RELEASE_PATTERN = r"^release_[0-9a-f]{32}$"
+_RELEASE_CREATE_KEY_PATTERN = r"^release_create_[0-9a-f]{32}$"
+_RELEASE_APPROVE_KEY_PATTERN = r"^release_approve_[0-9a-f]{32}$"
 _FEATURE_PATTERN = r"^feature_[0-9a-f]{32}$"
 _OBJECT_TYPE_PATTERN = r"^[A-Za-z][A-Za-z0-9_]*(?:::[A-Za-z][A-Za-z0-9_]*)+$"
 _VERSION_PATTERN = r"^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$"
@@ -1122,6 +1125,9 @@ _STABLE_TOOL_NAMES = (
     "reject_draft",
     "get_artifact_manifest",
     "export_task_artifacts",
+    "create_release",
+    "get_release",
+    "approve_release",
 )
 
 _STABLE_TOOL_DESCRIPTIONS = MappingProxyType(
@@ -1148,6 +1154,9 @@ _STABLE_TOOL_DESCRIPTIONS = MappingProxyType(
         "reject_draft": "拒绝指定草案并保留审核记录",
         "get_artifact_manifest": "读取任务版本的验证绑定、制品清单和现有交付资源",
         "export_task_artifacts": "生成可验证的 FCStd 和 STEP 交付资源",
+        "create_release": "为已验收版本生成可预览的机械交付包草稿",
+        "get_release": "读取交付包草稿、摘要和批准状态",
+        "approve_release": "批准精确摘要绑定的不可变机械交付包",
     }
 )
 
@@ -1889,6 +1898,56 @@ def _artifact_manifest_result_schema() -> dict[str, object]:
     )
 
 
+def _release_file_schema(*, names: tuple[str, ...], nullable_uri: bool) -> dict[str, object]:
+    uri_schema = {
+        "type": "string",
+        "pattern": (
+            r"^vibecad://release/release_[0-9a-f]{32}/"
+            r"(?:assembly-drawing\.pdf|bom\.json|bom\.csv|manifest\.json|"
+            r"validation-report\.json|vibecad-release\.zip)$"
+        ),
+    }
+    return _closed_schema(
+        {
+            "name": {"type": "string", "enum": names},
+            "media_type": _bounded_text_schema(128),
+            "sha256": _id_schema(_DIGEST_PATTERN),
+            "size_bytes": _safe_integer_schema(minimum=1),
+            "resource_uri": _nullable(uri_schema) if nullable_uri else uri_schema,
+        }
+    )
+
+
+def _release_result_schema() -> dict[str, object]:
+    release_uri = (
+        r"^vibecad://release/release_[0-9a-f]{32}/"
+        r"(?:assembly-drawing\.pdf|bom\.json|bom\.csv|manifest\.json|"
+        r"validation-report\.json|vibecad-release\.zip)$"
+    )
+    return _closed_schema(
+        {
+            "release_id": _id_schema(_RELEASE_PATTERN),
+            "status": {"type": "string", "enum": ("draft", "approved")},
+            "generation": _safe_integer_schema(minimum=0, maximum=1),
+            "task_id": _id_schema(_TASK_ID.pattern),
+            "task_generation": _safe_integer_schema(minimum=0),
+            "project_id": _id_schema(_PROJECT_PATTERN),
+            "revision_id": _id_schema(_REVISION_PATTERN),
+            "revision_manifest_sha256": _id_schema(_DIGEST_PATTERN),
+            "verification_id": _id_schema(_VERIFICATION_PATTERN),
+            "verification_digest": _id_schema(_DIGEST_PATTERN),
+            "observation_digest": _id_schema(_DIGEST_PATTERN),
+            "manifest": _release_file_schema(names=("manifest.json",), nullable_uri=False),
+            "drawing": _release_file_schema(names=("assembly-drawing.pdf",), nullable_uri=False),
+            "bom_json": _release_file_schema(names=("bom.json",), nullable_uri=False),
+            "bom_csv": _release_file_schema(names=("bom.csv",), nullable_uri=False),
+            "validation_report_uri": {"type": "string", "pattern": release_uri},
+            "package": _release_file_schema(names=("vibecad-release.zip",), nullable_uri=True),
+            "approved_at_ms": _nullable(_safe_integer_schema(minimum=1)),
+        }
+    )
+
+
 def _acceptance_criterion_schema() -> dict[str, object]:
     return _closed_schema(
         {
@@ -2405,6 +2464,33 @@ def _stable_input_schema(name: str) -> dict[str, object]:
                 "draft_id": _nullable(_id_schema(_DRAFT_PATTERN)),
             }
         )
+    if name == "create_release":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "create_key": _id_schema(_RELEASE_CREATE_KEY_PATTERN),
+                "task_id": _id_schema(_TASK_ID.pattern),
+                "expected_generation": _safe_integer_schema(minimum=0),
+                "revision_id": _id_schema(_REVISION_PATTERN),
+            }
+        )
+    if name == "get_release":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "release_id": _id_schema(_RELEASE_PATTERN),
+            }
+        )
+    if name == "approve_release":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "release_id": _id_schema(_RELEASE_PATTERN),
+                "expected_generation": _safe_integer_schema(minimum=0, maximum=1),
+                "expected_package_sha256": _id_schema(_DIGEST_PATTERN),
+                "approval_key": _id_schema(_RELEASE_APPROVE_KEY_PATTERN),
+            }
+        )
     raise ValueError("unknown stable tool")
 
 
@@ -2448,6 +2534,8 @@ def _stable_result_schema(name: str) -> dict[str, object]:
         return _artifact_manifest_result_schema()
     if name == "export_task_artifacts":
         return _artifact_result_schema()
+    if name in {"create_release", "get_release", "approve_release"}:
+        return _release_result_schema()
     raise ValueError("unknown stable tool")
 
 
@@ -2475,6 +2563,9 @@ def _stable_annotations(name: str) -> ToolAnnotations:
         "reject_draft": (False, True, True, False),
         "get_artifact_manifest": (True, False, True, False),
         "export_task_artifacts": (False, False, True, False),
+        "create_release": (False, False, True, False),
+        "get_release": (True, False, True, False),
+        "approve_release": (False, True, True, False),
     }
     try:
         return ToolAnnotations(*values[name])

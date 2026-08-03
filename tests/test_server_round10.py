@@ -40,6 +40,9 @@ def test_tool_annotation_safety_mapping_is_independent_and_exact() -> None:
         "reject_draft": (False, True, True, False),
         "get_artifact_manifest": (True, False, True, False),
         "export_task_artifacts": (False, False, True, False),
+        "create_release": (False, False, True, False),
+        "get_release": (True, False, True, False),
+        "approve_release": (False, True, True, False),
         "create_box": (False, False, True, False),
         "create_cylinder": (False, False, True, False),
         "inspect_model": (False, False, True, False),
@@ -83,10 +86,10 @@ def test_live_sdk_projection_matches_independent_frozen_digest_and_has_no_extras
         sort_keys=True,
     ).encode("utf-8")
 
-    assert len(raw) == 23_744
+    assert len(raw) == 25_566
     assert len(raw) <= 32_768
     assert hashlib.sha256(raw).hexdigest() == (
-        "50858e927fe1c6875d71979f9316a252ab6906562abfae23f1f49e9a927e2dc7"
+        "a261def0bc0f51ec4d7d894589a4aee06654d78b6d15e750aa153ca52c2a3558"
     )
     for tool in tools:
         assert tool.title is None

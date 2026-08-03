@@ -257,6 +257,30 @@ jobs:
                       sdist_skill[member.name.removeprefix(prefix)] = stream.read()
 
           mcpb_files = zip_files(mcpb)
+          mcpb_top_level_files = {
+              "LICENSE",
+              "PRIVACY.md",
+              "README.md",
+              "README.zh-CN.md",
+              "icon.png",
+              "manifest.json",
+              "mcpb_entry.py",
+              "pyproject.toml",
+              "uv.lock",
+          }
+          mcpb_allowed_prefixes = (
+              "freecad/VibeCAD/",
+              "skills/vibecad-agent/",
+              "src/vibecad/",
+          )
+          unexpected_mcpb = sorted(
+              name
+              for name in mcpb_files
+              if name not in mcpb_top_level_files
+              and not name.startswith(mcpb_allowed_prefixes)
+          )
+          if unexpected_mcpb:
+              raise SystemExit(f"unexpected MCPB content: {unexpected_mcpb}")
           mcpb_skill = {
               name.removeprefix("skills/vibecad-agent/"): content
               for name, content in mcpb_files.items()
@@ -276,6 +300,12 @@ jobs:
               path.relative_to("src").as_posix(): path.read_bytes()
               for path in sorted(Path("src/vibecad").rglob("*.py"))
           }
+          source_python.update(
+              {
+                  f"vibecad/_freecad/VibeCAD/{path.relative_to('freecad/VibeCAD').as_posix()}": path.read_bytes()
+                  for path in sorted(Path("freecad/VibeCAD").rglob("*.py"))
+              }
+          )
           wheel_python = {
               name: content
               for name, content in wheel_files.items()
@@ -284,17 +314,35 @@ jobs:
           sdist_python = {}
           with tarfile.open(sdist, "r:gz") as archive:
               prefix = f"{root}/src/"
+              workbench_prefix = f"{root}/freecad/VibeCAD/"
               for member in archive.getmembers():
                   if member.isfile() and member.name.startswith(prefix) and member.name.endswith(".py"):
                       stream = archive.extractfile(member)
                       if stream is None:
                           raise SystemExit(f"cannot read sdist member: {member.name}")
                       sdist_python[member.name.removeprefix(prefix)] = stream.read()
+                  elif (
+                      member.isfile()
+                      and member.name.startswith(workbench_prefix)
+                      and member.name.endswith(".py")
+                  ):
+                      stream = archive.extractfile(member)
+                      if stream is None:
+                          raise SystemExit(f"cannot read sdist member: {member.name}")
+                      relative = member.name.removeprefix(workbench_prefix)
+                      sdist_python[f"vibecad/_freecad/VibeCAD/{relative}"] = stream.read()
           mcpb_python = {
               name.removeprefix("src/"): content
               for name, content in mcpb_files.items()
               if name.startswith("src/vibecad/") and name.endswith(".py")
           }
+          mcpb_python.update(
+              {
+                  f"vibecad/_freecad/{name.removeprefix('freecad/')}": content
+                  for name, content in mcpb_files.items()
+                  if name.startswith("freecad/VibeCAD/") and name.endswith(".py")
+              }
+          )
           if not (source_python == wheel_python == sdist_python == mcpb_python):
               raise SystemExit("Python sources are not byte-identical across release channels")
           PY
@@ -314,7 +362,7 @@ jobs:
             uv venv --python 3.12 "$environment"
             uv pip install --python "$environment/bin/python" --no-deps "$artifact"
             EXPECTED_ROOT="$environment" "$environment/bin/python" -I -c \
-              'import os,pathlib,vibecad; from vibecad.application.public_surface import public_tool_specs; from vibecad.runtime import spec; root=pathlib.Path(os.environ["EXPECTED_ROOT"]).resolve(); installed=pathlib.Path(vibecad.__file__).resolve(); assert installed.is_relative_to(root); assert vibecad.__version__ == "0.6.0"; assert spec.SERVER_PACKAGE_EPOCH == 4; assert spec.PUBLIC_SURFACE_SHA256 == "ae495ba457af40a5837a03e77eef4b396b0a4209755878350bc341ac7de8bfd3"; assert len(public_tool_specs()) == 28'
+              'import os,pathlib,vibecad; from vibecad.application.public_surface import public_tool_specs; from vibecad.runtime import spec; root=pathlib.Path(os.environ["EXPECTED_ROOT"]).resolve(); installed=pathlib.Path(vibecad.__file__).resolve(); assert installed.is_relative_to(root); assert vibecad.__version__ == "0.6.0"; assert spec.SERVER_PACKAGE_EPOCH == 4; assert spec.PUBLIC_SURFACE_SHA256 == "d12e34b70ec448b415e5f525acc4eff66fae018e9395dd4812a5096d541ab17b"; assert len(public_tool_specs()) == 31'
           done
       - name: upload gated Python distributions
         uses: actions/upload-artifact@v4

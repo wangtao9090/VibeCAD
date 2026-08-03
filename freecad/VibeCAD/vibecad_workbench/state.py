@@ -7,10 +7,13 @@ __all__ = (
     "ProjectPage",
     "TaskSummary",
     "TaskPage",
+    "ReleaseFileSummary",
+    "ReleaseSummary",
     "project_page_from_mapping",
     "project_summary_from_detail_mapping",
     "task_summary_from_detail_mapping",
     "task_page_from_mapping",
+    "release_summary_from_mapping",
 )
 
 _MAX_GENERATION = 9_007_199_254_740_991
@@ -21,6 +24,7 @@ _DRAFT_ID = re.compile(r"draft_[0-9a-f]{32}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _VERIFICATION_ID = re.compile(r"verification_[0-9a-f]{32}")
 _ARTIFACT_ID = re.compile(r"artifact_[0-9a-f]{32}")
+_RELEASE_ID = re.compile(r"release_[0-9a-f]{32}")
 _OUTER_KEYS = frozenset(("schema_version", "ok", "result", "error"))
 _PROJECT_RESULT_KEYS = frozenset(("schema_version", "projects", "next_cursor"))
 _PROJECT_KEYS = frozenset(
@@ -100,6 +104,36 @@ _DRAFT_KEYS = frozenset(
         "observation_digest",
     )
 )
+_RELEASE_KEYS = frozenset(
+    (
+        "release_id",
+        "status",
+        "generation",
+        "task_id",
+        "task_generation",
+        "project_id",
+        "revision_id",
+        "revision_manifest_sha256",
+        "verification_id",
+        "verification_digest",
+        "observation_digest",
+        "manifest",
+        "drawing",
+        "bom_json",
+        "bom_csv",
+        "validation_report_uri",
+        "package",
+        "approved_at_ms",
+    )
+)
+_RELEASE_FILE_KEYS = frozenset(("name", "media_type", "sha256", "size_bytes", "resource_uri"))
+_RELEASE_MEDIA_TYPES = {
+    "manifest.json": "application/json",
+    "assembly-drawing.pdf": "application/pdf",
+    "bom.json": "application/json",
+    "bom.csv": "text/csv",
+    "vibecad-release.zip": "application/zip",
+}
 
 
 class ProjectionError(ValueError):
@@ -139,6 +173,37 @@ class TaskSummary:
 class TaskPage:
     tasks: tuple[TaskSummary, ...]
     next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseFileSummary:
+    name: str
+    media_type: str
+    sha256: str
+    size_bytes: int
+    resource_uri: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseSummary:
+    release_id: str
+    status: str
+    generation: int
+    task_id: str
+    task_generation: int
+    project_id: str
+    revision_id: str
+    revision_manifest_sha256: str
+    verification_id: str
+    verification_digest: str
+    observation_digest: str
+    manifest: ReleaseFileSummary
+    drawing: ReleaseFileSummary
+    bom_json: ReleaseFileSummary
+    bom_csv: ReleaseFileSummary
+    validation_report_uri: str
+    package: ReleaseFileSummary
+    approved_at_ms: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,4 +448,92 @@ def task_summary_from_detail_mapping(mapping: object) -> TaskSummary:
         candidate_revision=candidate_revision,
         committed_revision=committed_revision,
         draft_id=draft_id,
+    )
+
+
+def _release_uri(value: object, release_id: str, name: str) -> str:
+    expected = f"vibecad://release/{release_id}/{name}"
+    if type(value) is not str or value != expected:
+        _invalid()
+    return value
+
+
+def _release_file(
+    value: object,
+    *,
+    release_id: str,
+    name: str,
+    nullable_uri: bool = False,
+) -> ReleaseFileSummary:
+    record = _plain_dict(value, _RELEASE_FILE_KEYS)
+    if (
+        record["name"] != name
+        or record["media_type"] != _RELEASE_MEDIA_TYPES[name]
+        or type(record["size_bytes"]) is not int
+        or not 0 < record["size_bytes"] <= _MAX_GENERATION
+    ):
+        _invalid()
+    uri = record["resource_uri"]
+    if uri is None:
+        if not nullable_uri:
+            _invalid()
+    else:
+        uri = _release_uri(uri, release_id, name)
+    return ReleaseFileSummary(
+        name=name,
+        media_type=_RELEASE_MEDIA_TYPES[name],
+        sha256=_identifier(record["sha256"], _DIGEST),
+        size_bytes=record["size_bytes"],
+        resource_uri=uri,
+    )
+
+
+def release_summary_from_mapping(mapping: object) -> ReleaseSummary:
+    result = _plain_dict(_result_from_outer(mapping), _RELEASE_KEYS)
+    release_id = _identifier(result["release_id"], _RELEASE_ID)
+    status = result["status"]
+    generation = _generation(result["generation"])
+    approved_at_ms = result["approved_at_ms"]
+    package = _release_file(
+        result["package"],
+        release_id=release_id,
+        name="vibecad-release.zip",
+        nullable_uri=True,
+    )
+    if status == "draft":
+        if generation != 0 or approved_at_ms is not None or package.resource_uri is not None:
+            _invalid()
+    elif status == "approved":
+        if (
+            generation != 1
+            or type(approved_at_ms) is not int
+            or not 0 < approved_at_ms <= _MAX_GENERATION
+            or package.resource_uri is None
+        ):
+            _invalid()
+    else:
+        _invalid()
+    return ReleaseSummary(
+        release_id=release_id,
+        status=status,
+        generation=generation,
+        task_id=_identifier(result["task_id"], _TASK_ID),
+        task_generation=_generation(result["task_generation"]),
+        project_id=_identifier(result["project_id"], _PROJECT_ID),
+        revision_id=_identifier(result["revision_id"], _REVISION_ID),
+        revision_manifest_sha256=_identifier(result["revision_manifest_sha256"], _DIGEST),
+        verification_id=_identifier(result["verification_id"], _VERIFICATION_ID),
+        verification_digest=_identifier(result["verification_digest"], _DIGEST),
+        observation_digest=_identifier(result["observation_digest"], _DIGEST),
+        manifest=_release_file(result["manifest"], release_id=release_id, name="manifest.json"),
+        drawing=_release_file(
+            result["drawing"], release_id=release_id, name="assembly-drawing.pdf"
+        ),
+        bom_json=_release_file(result["bom_json"], release_id=release_id, name="bom.json"),
+        bom_csv=_release_file(result["bom_csv"], release_id=release_id, name="bom.csv"),
+        validation_report_uri=_release_uri(
+            result["validation_report_uri"], release_id, "validation-report.json"
+        ),
+        package=package,
+        approved_at_ms=approved_at_ms,
     )

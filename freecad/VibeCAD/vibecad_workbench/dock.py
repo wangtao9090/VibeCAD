@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 
 from PySide import QtCore, QtWidgets
@@ -7,9 +8,11 @@ from PySide import QtCore, QtWidgets
 from .state import (
     PreviewProjection,
     ProjectionError,
+    ReleaseSummary,
     _preview_projection,
     project_page_from_mapping,
     project_summary_from_detail_mapping,
+    release_summary_from_mapping,
     task_page_from_mapping,
     task_summary_from_detail_mapping,
 )
@@ -20,7 +23,7 @@ _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _MAX_PENDING_REQUESTS = 1024
 _MAX_SELECTOR_TEXT_BYTES = 4096
 _HOSTED_RESTRICTED_COMMAND_KINDS = frozenset(
-    ("preview_close", "edit_checkpoint", "review", "close")
+    ("preview_close", "edit_checkpoint", "review", "release_save", "close")
 )
 _COMMAND_KINDS = frozenset(
     (
@@ -34,6 +37,10 @@ _COMMAND_KINDS = frozenset(
         "preview_close",
         "edit_checkpoint",
         "review",
+        "release_create",
+        "release_get",
+        "release_approve",
+        "release_save",
         "selector_resolve",
         "close",
     )
@@ -57,6 +64,10 @@ _EVENT_KEYS = {
     "preview_closed": frozenset(("schema_version", "request_id", "kind", "response")),
     "edit_checkpointed": frozenset(("schema_version", "request_id", "kind", "response")),
     "review": frozenset(("schema_version", "request_id", "kind", "response")),
+    "release_created": frozenset(("schema_version", "request_id", "kind", "response")),
+    "release_loaded": frozenset(("schema_version", "request_id", "kind", "response")),
+    "release_approved": frozenset(("schema_version", "request_id", "kind", "response")),
+    "release_saved": frozenset(("schema_version", "request_id", "kind", "response")),
     "selector_resolved": frozenset(("schema_version", "request_id", "kind", "response")),
     "closed": frozenset(("schema_version", "request_id", "kind")),
     "error": frozenset(
@@ -91,6 +102,10 @@ _EVENT_OPERATIONS = {
     "preview_closed": "preview_close",
     "edit_checkpointed": "edit_checkpoint",
     "review": "review",
+    "release_created": "release_create",
+    "release_loaded": "release_get",
+    "release_approved": "release_approve",
+    "release_saved": "release_save",
     "selector_resolved": "selector_resolve",
     "closed": "close",
 }
@@ -145,6 +160,10 @@ class ReviewDock(QtWidgets.QDockWidget):
         self._review_confirmation: dict[str, object] | None = None
         self._hosted_projection: tuple[int, str, object] | None = None
         self._selector_text: str | None = None
+        self._releases_by_task: dict[str, ReleaseSummary] = {}
+        self._release_create_keys: dict[tuple[str, int, str], str] = {}
+        self._release_approval_keys: dict[tuple[str, int, str], str] = {}
+        self._release_host_save: object | None = None
 
         container = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(container)
@@ -153,6 +172,7 @@ class ReviewDock(QtWidgets.QDockWidget):
         self.edit_status_label = QtWidgets.QLabel("Editable HEAD closed", container)
         self.ownership_status_label = QtWidgets.QLabel("No managed preview", container)
         self.review_status_label = QtWidgets.QLabel("No review decision", container)
+        self.release_status_label = QtWidgets.QLabel("No delivery package", container)
         self.selector_status_label = QtWidgets.QLabel(
             "Select a managed preview object",
             container,
@@ -169,6 +189,10 @@ class ReviewDock(QtWidgets.QDockWidget):
         self.accept_button = QtWidgets.QPushButton("Accept Draft", container)
         self.reject_button = QtWidgets.QPushButton("Reject Draft", container)
         self.copy_selector_button = QtWidgets.QPushButton("Copy Selector", container)
+        self.build_release_button = QtWidgets.QPushButton("Build Delivery Package", container)
+        self.save_drawing_button = QtWidgets.QPushButton("Save PDF Preview", container)
+        self.approve_release_button = QtWidgets.QPushButton("Approve Package", container)
+        self.save_release_button = QtWidgets.QPushButton("Save Approved ZIP", container)
         self.status_label.setObjectName("VibeCADConnectionStatus")
         self.ownership_status_label.setObjectName("VibeCADEditingOwnership")
         self.selector_status_label.setObjectName("VibeCADSelectorStatus")
@@ -184,12 +208,18 @@ class ReviewDock(QtWidgets.QDockWidget):
         self.accept_button.setObjectName("VibeCADAcceptDraft")
         self.reject_button.setObjectName("VibeCADRejectDraft")
         self.copy_selector_button.setObjectName("VibeCADCopySelector")
+        self.release_status_label.setObjectName("VibeCADReleaseStatus")
+        self.build_release_button.setObjectName("VibeCADBuildRelease")
+        self.save_drawing_button.setObjectName("VibeCADSaveDrawingPreview")
+        self.approve_release_button.setObjectName("VibeCADApproveRelease")
+        self.save_release_button.setObjectName("VibeCADSaveRelease")
         for widget in (
             self.status_label,
             self.preview_status_label,
             self.edit_status_label,
             self.ownership_status_label,
             self.review_status_label,
+            self.release_status_label,
             self.selector_status_label,
             self.selector_value_label,
             self.project_selector,
@@ -203,6 +233,10 @@ class ReviewDock(QtWidgets.QDockWidget):
             self.accept_button,
             self.reject_button,
             self.copy_selector_button,
+            self.build_release_button,
+            self.save_drawing_button,
+            self.approve_release_button,
+            self.save_release_button,
         ):
             layout.addWidget(widget)
         self.setWidget(container)
@@ -215,6 +249,10 @@ class ReviewDock(QtWidgets.QDockWidget):
         self.accept_button.clicked.connect(self.accept_draft)
         self.reject_button.clicked.connect(self.reject_draft)
         self.copy_selector_button.clicked.connect(self.copy_selector)
+        self.build_release_button.clicked.connect(self.build_release)
+        self.save_drawing_button.clicked.connect(self.save_drawing_preview)
+        self.approve_release_button.clicked.connect(self.approve_release)
+        self.save_release_button.clicked.connect(self.save_release_package)
         self.project_selector.currentIndexChanged.connect(self._project_changed)
         self.task_selector.currentIndexChanged.connect(self._task_changed)
         self._clear_selector()
@@ -255,6 +293,11 @@ class ReviewDock(QtWidgets.QDockWidget):
             raise RuntimeError("edit host callbacks are invalid")
         self._edit_host_checkpoint = checkpoint_edit
         self._edit_host_discard = discard_edit
+
+    def _bind_release_host(self, *, save_resource: object) -> None:
+        if self._release_host_save is not None or not callable(save_resource):
+            raise RuntimeError("release host is already bound or invalid")
+        self._release_host_save = save_resource
 
     def _clear_selector(self) -> None:
         self._selector_text = None
@@ -811,6 +854,36 @@ class ReviewDock(QtWidgets.QDockWidget):
         task_id = self.current_task_id()
         return None if task_id is None else self._tasks_by_id.get(task_id)
 
+    def _selected_release(self) -> ReleaseSummary | None:
+        task = self._selected_task()
+        task_id = self.current_task_id()
+        release = None if task_id is None else self._releases_by_task.get(task_id)
+        if (
+            release is None
+            or release.task_id != task_id
+            or release.project_id != self.current_project_id()
+            or release.task_generation != self._task_value(task, "generation")
+            or release.revision_id != self._task_value(task, "committed_revision")
+        ):
+            return None
+        return release
+
+    def _release_pending(self) -> bool:
+        return any(
+            expected in {"release_created", "release_loaded", "release_approved"}
+            for expected, _context in self._pending.values()
+        )
+
+    def _project_release_status(self, release: ReleaseSummary | None) -> None:
+        if release is None:
+            self.release_status_label.setText("No delivery package")
+        elif release.status == "draft":
+            self.release_status_label.setText(
+                f"Draft package {release.package.sha256[:12]} — approval required"
+            )
+        else:
+            self.release_status_label.setText(f"Approved package {release.package.sha256[:12]}")
+
     def _update_preview_actions(self) -> None:
         editing = "edit" in self._preview_checkouts or "edit" in self._preview_pending_sources
         preview_roles = {"head", "draft"} & (
@@ -869,6 +942,35 @@ class ReviewDock(QtWidgets.QDockWidget):
         review_ready = self._review_context() is not None
         self.accept_button.setEnabled(review_ready)
         self.reject_button.setEnabled(review_ready)
+        release = self._selected_release()
+        release_pending = self._release_pending()
+        release_source_ready = (
+            task is not None
+            and self._task_value(task, "status") == "succeeded"
+            and self._canonical_identifier(self._task_value(task, "task_id"), "task_")
+            and self._canonical_identifier(
+                self._task_value(task, "committed_revision"), "revision_"
+            )
+            and type(self._task_value(task, "generation")) is int
+        )
+        self.build_release_button.setEnabled(
+            release_source_ready and release is None and not release_pending
+        )
+        self.save_drawing_button.setEnabled(
+            release is not None
+            and type(release.drawing.resource_uri) is str
+            and not release_pending
+        )
+        self.approve_release_button.setEnabled(
+            release is not None and release.status == "draft" and not release_pending
+        )
+        self.save_release_button.setEnabled(
+            release is not None
+            and release.status == "approved"
+            and type(release.package.resource_uri) is str
+            and not release_pending
+        )
+        self._project_release_status(release)
 
     @staticmethod
     def _canonical_identifier(value: object, prefix: str) -> bool:
@@ -966,6 +1068,186 @@ class ReviewDock(QtWidgets.QDockWidget):
 
     def reject_draft(self) -> None:
         self._submit_decision("reject")
+
+    def build_release(self) -> None:
+        task = self._selected_task()
+        task_id = self._task_value(task, "task_id")
+        project_id = self._task_value(task, "project_id")
+        generation = self._task_value(task, "generation")
+        revision_id = self._task_value(task, "committed_revision")
+        if (
+            self._task_value(task, "status") != "succeeded"
+            or not self._canonical_identifier(task_id, "task_")
+            or project_id != self.current_project_id()
+            or type(generation) is not int
+            or not 0 <= generation <= _MAX_SAFE_INTEGER
+            or not self._canonical_identifier(revision_id, "revision_")
+            or self._release_pending()
+        ):
+            return
+        assert type(task_id) is str
+        assert type(revision_id) is str
+        key = (task_id, generation, revision_id)
+        create_key = self._release_create_keys.setdefault(
+            key, "release_create_" + secrets.token_hex(16)
+        )
+        self.release_status_label.setText("Building delivery package")
+        self._send(
+            "release_created",
+            "release_create",
+            context=(
+                "create",
+                task_id,
+                generation,
+                revision_id,
+                project_id,
+                create_key,
+                self._selection_epoch,
+                self._task_selection_epoch,
+            ),
+            create_key=create_key,
+            task_id=task_id,
+            expected_generation=generation,
+            revision_id=revision_id,
+        )
+        self._update_preview_actions()
+
+    def approve_release(self) -> None:
+        release = self._selected_release()
+        if release is None or release.status != "draft" or self._release_pending():
+            return
+        key = (release.release_id, release.generation, release.package.sha256)
+        approval_key = self._release_approval_keys.setdefault(
+            key, "release_approve_" + secrets.token_hex(16)
+        )
+        self.release_status_label.setText(f"Approving exact package {release.package.sha256[:12]}")
+        self._send(
+            "release_approved",
+            "release_approve",
+            context=(
+                "approve",
+                release.release_id,
+                release.generation,
+                release.package.sha256,
+                release.task_id,
+                release.project_id,
+                release.revision_id,
+                self._selection_epoch,
+                self._task_selection_epoch,
+            ),
+            release_id=release.release_id,
+            expected_generation=release.generation,
+            expected_package_sha256=release.package.sha256,
+            approval_key=approval_key,
+        )
+        self._update_preview_actions()
+
+    def _save_release_resource(
+        self,
+        *,
+        uri: str,
+        suggested_name: str,
+        title: str,
+        file_filter: str,
+    ) -> None:
+        save_resource = self._release_host_save
+        dialog = getattr(QtWidgets, "QFileDialog", None)
+        select = None if dialog is None else getattr(dialog, "getSaveFileName", None)
+        if not callable(save_resource) or not callable(select):
+            self.release_status_label.setText("Save dialog unavailable")
+            return
+        selected = select(self, title, suggested_name, file_filter)
+        destination = selected[0] if type(selected) is tuple and selected else selected
+        if destination in {None, ""}:
+            return
+        if (
+            type(destination) is not str
+            or not os.path.isabs(destination)
+            or ".." in destination.split(os.sep)
+            or not os.path.basename(destination)
+        ):
+            self.release_status_label.setText("Invalid save destination")
+            return
+        try:
+            request_id = save_resource(uri=uri, destination=destination)
+            if type(request_id) is not int or request_id < 0:
+                raise ProjectionError("invalid release save authority")
+        except BaseException:
+            self.release_status_label.setText("Save outcome unknown")
+            return
+        self.release_status_label.setText("Saving release resource")
+
+    def save_drawing_preview(self) -> None:
+        release = self._selected_release()
+        uri = None if release is None else release.drawing.resource_uri
+        if type(uri) is not str:
+            return
+        self._save_release_resource(
+            uri=uri,
+            suggested_name="assembly-drawing.pdf",
+            title="Save VibeCAD Drawing Preview",
+            file_filter="PDF files (*.pdf)",
+        )
+
+    def save_release_package(self) -> None:
+        release = self._selected_release()
+        uri = None if release is None else release.package.resource_uri
+        if release is None or release.status != "approved" or type(uri) is not str:
+            return
+        self._save_release_resource(
+            uri=uri,
+            suggested_name="vibecad-release.zip",
+            title="Save Approved VibeCAD Package",
+            file_filter="ZIP archives (*.zip)",
+        )
+
+    def _receive_host_release_save(self, event: object, context: object) -> bool:
+        if (
+            type(context) is not tuple
+            or len(context) != 2
+            or type(context[0]) is not str
+            or type(context[1]) is not str
+            or not self._valid_event(event)
+            or type(event) is not dict
+        ):
+            return False
+        if event["kind"] == "error":
+            self.release_status_label.setText(
+                "Save outcome unknown"
+                if event["outcome"] == "unknown_outcome"
+                else "Release resource save failed"
+            )
+            return True
+        if event["kind"] != "release_saved":
+            return False
+        response = event["response"]
+        expected_uri, expected_destination = context
+        if (
+            type(response) is not dict
+            or set(response)
+            != {
+                "schema_version",
+                "uri",
+                "destination",
+                "name",
+                "media_type",
+                "sha256",
+                "size_bytes",
+            }
+            or response.get("schema_version") != 1
+            or response.get("uri") != expected_uri
+            or response.get("destination") != expected_destination
+            or type(response.get("name")) is not str
+            or type(response.get("media_type")) is not str
+            or type(response.get("sha256")) is not str
+            or len(response["sha256"]) != 64
+            or any(character not in "0123456789abcdef" for character in response["sha256"])
+            or type(response.get("size_bytes")) is not int
+            or not 0 < response["size_bytes"] <= _MAX_SAFE_INTEGER
+        ):
+            return False
+        self.release_status_label.setText(f"Saved {response['name']}")
+        return True
 
     def _open_preview(
         self,
@@ -1409,6 +1691,18 @@ class ReviewDock(QtWidgets.QDockWidget):
                 pending = self._pending.pop(request_id, None)
                 if pending is not None:
                     self._retire_request_id(request_id)
+                if pending is not None and pending[0] in {
+                    "release_created",
+                    "release_loaded",
+                    "release_approved",
+                }:
+                    self._update_preview_actions()
+                    self.release_status_label.setText(
+                        "Release outcome unknown — retry to reconcile"
+                        if event["outcome"] == "unknown_outcome"
+                        else "Release operation failed"
+                    )
+                    return
                 if pending is not None and (
                     self._review_confirmation_context(pending[1], "task")
                     or self._review_confirmation_context(pending[1], "project")
@@ -1477,7 +1771,7 @@ class ReviewDock(QtWidgets.QDockWidget):
                     for task in page.tasks
                     if (
                         task.project_id == context[0]
-                        and task.status == "awaiting_user_review"
+                        and task.status in {"awaiting_user_review", "succeeded"}
                         and task.task_id not in self._invalidated_task_ids
                     )
                 ]
@@ -1559,7 +1853,7 @@ class ReviewDock(QtWidgets.QDockWidget):
                 if (
                     task.task_id != task_id
                     or task.project_id != context[0]
-                    or task.status != "awaiting_user_review"
+                    or task.status not in {"awaiting_user_review", "succeeded"}
                     or type(previous_generation) is not int
                     or task.generation < previous_generation
                     or (task.generation == previous_generation and task != previous)
@@ -1612,6 +1906,36 @@ class ReviewDock(QtWidgets.QDockWidget):
             elif kind == "review":
                 if not self._authenticated_ok(event["response"]):
                     self._fail()
+            elif kind in {"release_created", "release_loaded", "release_approved"}:
+                release = release_summary_from_mapping(event["response"])
+                if kind == "release_created":
+                    if (
+                        type(context) is not tuple
+                        or len(context) != 8
+                        or context[0] != "create"
+                        or release.task_id != context[1]
+                        or release.task_generation != context[2]
+                        or release.revision_id != context[3]
+                        or release.project_id != context[4]
+                        or release.status != "draft"
+                    ):
+                        raise ProjectionError("invalid public mapping")
+                elif kind == "release_approved":
+                    if (
+                        type(context) is not tuple
+                        or len(context) != 9
+                        or context[0] != "approve"
+                        or release.release_id != context[1]
+                        or release.generation != 1
+                        or release.package.sha256 != context[3]
+                        or release.task_id != context[4]
+                        or release.project_id != context[5]
+                        or release.revision_id != context[6]
+                        or release.status != "approved"
+                    ):
+                        raise ProjectionError("invalid public mapping")
+                self._releases_by_task[release.task_id] = release
+                self._update_preview_actions()
             elif kind == "closed":
                 self._clear_selector()
                 self.status_label.setText("Closed")

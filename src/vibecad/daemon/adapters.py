@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
+import secrets
 from enum import StrEnum
 from pathlib import Path
 
@@ -79,13 +81,14 @@ class LocalAgentClientError(RuntimeError):
 class LocalAgentClient:
     """One connection-bound client for MCP and FreeCAD Workbench adapters."""
 
-    __slots__ = ("_artifact_root", "_closed", "_kernel", "_pid")
+    __slots__ = ("_artifact_root", "_closed", "_kernel", "_pid", "_release_root")
 
     def __init__(
         self,
         kernel: object,
         *,
         artifact_root: object | None = None,
+        release_root: object | None = None,
     ) -> None:
         if not callable(getattr(kernel, "call", None)) or not callable(
             getattr(kernel, "close", None)
@@ -103,8 +106,21 @@ class LocalAgentClient:
             not canonical_artifact_root.is_absolute() or ".." in canonical_artifact_root.parts
         ):
             raise TypeError("artifact_root must be an absolute path")
+        if release_root is None:
+            canonical_release_root = None
+        elif type(release_root) is str:
+            canonical_release_root = Path(release_root)
+        elif type(release_root) is type(Path("/")):
+            canonical_release_root = release_root
+        else:
+            raise TypeError("release_root must be an absolute path")
+        if canonical_release_root is not None and (
+            not canonical_release_root.is_absolute() or ".." in canonical_release_root.parts
+        ):
+            raise TypeError("release_root must be an absolute path")
         self._kernel = kernel
         self._artifact_root = canonical_artifact_root
+        self._release_root = canonical_release_root
         self._closed = False
         self._pid = os.getpid()
 
@@ -113,6 +129,7 @@ class LocalAgentClient:
         client = cls(
             connect_or_start_local_kernel(),
             artifact_root=paths.data_root() / "artifacts",
+            release_root=paths.data_root() / "releases",
         )
         observed_daemon_id = client.daemon_id
         try:
@@ -127,6 +144,7 @@ class LocalAgentClient:
         replacement = cls(
             connect_or_start_local_kernel(),
             artifact_root=paths.data_root() / "artifacts",
+            release_root=paths.data_root() / "releases",
         )
         return replacement._verified()
 
@@ -136,10 +154,12 @@ class LocalAgentClient:
         run_root: object,
         *,
         artifact_root: object | None = None,
+        release_root: object | None = None,
     ) -> LocalAgentClient:
         client = cls(
             connect_existing_local_kernel(run_root),
             artifact_root=artifact_root,
+            release_root=release_root,
         )
         return client._verified()
 
@@ -289,6 +309,15 @@ class LocalAgentClient:
     def export_task_artifacts_request(self, request: object) -> dict[str, object]:
         return self._application_call("export_task_artifacts", request)
 
+    def create_release_request(self, request: object) -> dict[str, object]:
+        return self._application_call("create_release", request)
+
+    def get_release_request(self, request: object) -> dict[str, object]:
+        return self._application_call("get_release", request)
+
+    def approve_release_request(self, request: object) -> dict[str, object]:
+        return self._application_call("approve_release", request)
+
     def get_capabilities_request(self, request: object) -> dict[str, object]:
         return self._application_call("get_capabilities", request)
 
@@ -362,6 +391,74 @@ class LocalAgentClient:
                     close()
         except ImportError:
             raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE) from None
+
+    def read_release_resource(self, uri: object):
+        self._ensure_live()
+        if self._release_root is None:
+            raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE)
+        try:
+            from vibecad.application.releases import ReleaseStore
+
+            value = self._release_root.lstat()
+            return ReleaseStore(
+                root=self._release_root,
+                expected_identity=(value.st_dev, value.st_ino),
+            ).read_resource(uri)
+        except ImportError:
+            raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE) from None
+
+    def save_release_resource(self, *, uri: object, destination: object) -> dict[str, object]:
+        self._ensure_live()
+        if type(destination) is not str:
+            raise LocalAgentClientError(LocalAgentClientErrorCode.INVALID_INPUT)
+        target = Path(destination)
+        if not target.is_absolute() or ".." in target.parts or not target.name:
+            raise LocalAgentClientError(LocalAgentClientErrorCode.INVALID_INPUT)
+        resource = self.read_release_resource(uri)
+        temporary = target.parent / f".{target.name}.{secrets.token_hex(16)}.tmp"
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            remaining = memoryview(resource.data)
+            while remaining:
+                written = os.write(descriptor, remaining[: 1024 * 1024])
+                if written <= 0:
+                    raise OSError
+                remaining = remaining[written:]
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = -1
+            os.replace(temporary, target)
+            parent = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+        except OSError:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+            raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE) from None
+        finally:
+            if descriptor >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+        return {
+            "schema_version": 1,
+            "uri": resource.uri,
+            "destination": str(target),
+            "name": resource.name,
+            "media_type": resource.media_type,
+            "sha256": hashlib.sha256(resource.data).hexdigest(),
+            "size_bytes": len(resource.data),
+        }
 
     def close(self) -> None:
         if os.getpid() != self._pid:

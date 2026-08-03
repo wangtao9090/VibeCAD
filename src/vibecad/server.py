@@ -9,6 +9,7 @@ managed-runtime guard.  The daemon, never this MCP process, owns the concrete
 from __future__ import annotations
 
 import atexit
+import base64
 import importlib
 import json
 import logging
@@ -64,8 +65,15 @@ _ERROR_MESSAGES = {
 }
 
 _RESOURCE_TEMPLATE = "vibecad://artifact/{materialization_id}/{artifact_id}"
+_RELEASE_RESOURCE_TEMPLATE = "vibecad://release/{release_id}/{file_name}"
 _RESOURCE_URI = re.compile(
     r"^vibecad://artifact/materialization_[0-9a-f]{64}/artifact_[0-9a-f]{32}$",
+    re.ASCII,
+)
+_RELEASE_RESOURCE_URI = re.compile(
+    r"^vibecad://release/release_[0-9a-f]{32}/"
+    r"(?:assembly-drawing\.pdf|bom\.json|bom\.csv|manifest\.json|"
+    r"validation-report\.json|vibecad-release\.zip)$",
     re.ASCII,
 )
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$", re.ASCII)
@@ -197,6 +205,9 @@ _STABLE_DOMAIN_FACADES = {
     "reject_draft": "reject_draft_request",
     "get_artifact_manifest": "get_artifact_manifest_request",
     "export_task_artifacts": "export_task_artifacts_request",
+    "create_release": "create_release_request",
+    "get_release": "get_release_request",
+    "approve_release": "approve_release_request",
 }
 _CONTROL_NAMES = frozenset(
     {
@@ -228,8 +239,12 @@ _APPLICATION_METHODS = (
     "reject_draft_request",
     "get_artifact_manifest_request",
     "export_task_artifacts_request",
+    "create_release_request",
+    "get_release_request",
+    "approve_release_request",
     "invoke_direct_operation_request",
     "read_artifact_resource",
+    "read_release_resource",
 )
 
 
@@ -892,6 +907,63 @@ def _export_resource_links(envelope: dict[str, object]) -> list[types.ResourceLi
     return links
 
 
+def _release_resource_links(envelope: dict[str, object]) -> list[types.ResourceLink]:
+    result = envelope.get("result")
+    if type(result) is not dict:
+        raise TypeError("release result is invalid")
+    items = (
+        result.get("drawing"),
+        result.get("bom_json"),
+        result.get("bom_csv"),
+        result.get("manifest"),
+        result.get("package"),
+    )
+    links: list[types.ResourceLink] = []
+    seen: set[str] = set()
+    for item in items:
+        if type(item) is not dict:
+            raise TypeError("release file is invalid")
+        uri = item.get("resource_uri")
+        if uri is None:
+            continue
+        if (
+            type(uri) is not str
+            or _RELEASE_RESOURCE_URI.fullmatch(uri) is None
+            or uri in seen
+            or type(item.get("name")) is not str
+            or type(item.get("media_type")) is not str
+            or type(item.get("size_bytes")) is not int
+            or item["size_bytes"] <= 0
+        ):
+            raise TypeError("release file is invalid")
+        seen.add(uri)
+        links.append(
+            types.ResourceLink(
+                type="resource_link",
+                name=item["name"],
+                uri=uri,
+                mimeType=item["media_type"],
+                size=item["size_bytes"],
+            )
+        )
+    report_uri = result.get("validation_report_uri")
+    if (
+        type(report_uri) is not str
+        or _RELEASE_RESOURCE_URI.fullmatch(report_uri) is None
+        or report_uri in seen
+    ):
+        raise TypeError("release validation resource is invalid")
+    links.append(
+        types.ResourceLink(
+            type="resource_link",
+            name="validation-report.json",
+            uri=report_uri,
+            mimeType="application/json",
+        )
+    )
+    return links
+
+
 def _call_result(name: str, envelope: object) -> types.CallToolResult:
     try:
         if (
@@ -910,6 +982,8 @@ def _call_result(name: str, envelope: object) -> types.CallToolResult:
         ]
         if name == "export_task_artifacts" and envelope["ok"] is True:
             content.extend(_export_resource_links(envelope))
+        if name in {"create_release", "get_release", "approve_release"} and envelope["ok"] is True:
+            content.extend(_release_resource_links(envelope))
         if (
             name == "get_artifact_manifest"
             and envelope["ok"] is True
@@ -959,7 +1033,10 @@ async def _handle_list_resources() -> types.ListResourcesResult:
 
 async def _handle_list_resource_templates() -> types.ListResourceTemplatesResult:
     return types.ListResourceTemplatesResult(
-        resourceTemplates=[types.ResourceTemplate(name="artifact", uriTemplate=_RESOURCE_TEMPLATE)]
+        resourceTemplates=[
+            types.ResourceTemplate(name="artifact", uriTemplate=_RESOURCE_TEMPLATE),
+            types.ResourceTemplate(name="release", uriTemplate=_RELEASE_RESOURCE_TEMPLATE),
+        ]
     )
 
 
@@ -1003,41 +1080,80 @@ async def _handle_call_tool(
 
 
 async def _handle_read_resource(uri: object) -> types.ReadResourceResult:
-    if type(uri) is not str or _RESOURCE_URI.fullmatch(uri) is None:
+    if type(uri) is not str or not (
+        _RESOURCE_URI.fullmatch(uri) is not None or _RELEASE_RESOURCE_URI.fullmatch(uri) is not None
+    ):
         raise _mcp_error(_RESOURCE_INVALID_IDENTIFIER)
     guarded = _application_runtime_guard()
     if guarded is not None:
         raise _mcp_error(_RESOURCE_RUNTIME_UNAVAILABLE)
     if not _enter_application_effect():
         raise _mcp_error(_RESOURCE_RUNTIME_UNAVAILABLE)
+    is_release = _RELEASE_RESOURCE_URI.fullmatch(uri) is not None
     try:
-        artifact_module = importlib.import_module("vibecad.application.artifacts")
-        ArtifactResourceError = artifact_module.ArtifactResourceError
-        ArtifactResourceErrorCode = artifact_module.ArtifactResourceErrorCode
-        if not (
-            isinstance(ArtifactResourceError, type)
-            and issubclass(ArtifactResourceError, BaseException)
-        ):
-            raise TypeError("invalid artifact resource error type")
+        resource_module = importlib.import_module(
+            "vibecad.application.releases" if is_release else "vibecad.application.artifacts"
+        )
+        if is_release:
+            ResourceError = resource_module.ReleaseError
+            ResourceErrorCode = resource_module.ReleaseErrorCode
+            error_mapping = {
+                ResourceErrorCode.INVALID_INPUT: _RESOURCE_INVALID_IDENTIFIER,
+                ResourceErrorCode.NOT_FOUND: _RESOURCE_UNAVAILABLE,
+                ResourceErrorCode.INVALID_STATE: _RESOURCE_UNAVAILABLE,
+                ResourceErrorCode.CONFLICT: _RESOURCE_INTERNAL_ERROR,
+                ResourceErrorCode.RESOURCE_EXHAUSTED: _RESOURCE_READ_LIMIT,
+                ResourceErrorCode.INTEGRITY_FAILURE: _RESOURCE_INTERNAL_ERROR,
+                ResourceErrorCode.CAD_FAILURE: _RESOURCE_INTERNAL_ERROR,
+                ResourceErrorCode.STORE_FAILURE: _RESOURCE_INTERNAL_ERROR,
+                ResourceErrorCode.RECOVERY_REQUIRED: _RESOURCE_INTERNAL_ERROR,
+            }
+        else:
+            ResourceError = resource_module.ArtifactResourceError
+            ResourceErrorCode = resource_module.ArtifactResourceErrorCode
+            error_mapping = {
+                ResourceErrorCode.INVALID_IDENTIFIER: _RESOURCE_INVALID_IDENTIFIER,
+                ResourceErrorCode.UNAVAILABLE: _RESOURCE_UNAVAILABLE,
+                ResourceErrorCode.READ_LIMIT: _RESOURCE_READ_LIMIT,
+                ResourceErrorCode.RUNTIME_UNAVAILABLE: _RESOURCE_RUNTIME_UNAVAILABLE,
+                ResourceErrorCode.INTERNAL_ERROR: _RESOURCE_INTERNAL_ERROR,
+            }
+        if not isinstance(ResourceError, type) or not issubclass(ResourceError, BaseException):
+            raise TypeError("invalid resource error type")
     except BaseException:
         raise _mcp_error(_RESOURCE_INTERNAL_ERROR) from None
     try:
         application = _application_slot.get()
-        content = application.read_artifact_resource(uri)
-    except ArtifactResourceError as error:
-        mapped = {
-            ArtifactResourceErrorCode.INVALID_IDENTIFIER: _RESOURCE_INVALID_IDENTIFIER,
-            ArtifactResourceErrorCode.UNAVAILABLE: _RESOURCE_UNAVAILABLE,
-            ArtifactResourceErrorCode.READ_LIMIT: _RESOURCE_READ_LIMIT,
-            ArtifactResourceErrorCode.RUNTIME_UNAVAILABLE: _RESOURCE_RUNTIME_UNAVAILABLE,
-            ArtifactResourceErrorCode.INTERNAL_ERROR: _RESOURCE_INTERNAL_ERROR,
-        }.get(error.code, _RESOURCE_INTERNAL_ERROR)
-        raise _mcp_error(mapped) from None
+        content = (
+            application.read_release_resource(uri)
+            if is_release
+            else application.read_artifact_resource(uri)
+        )
+    except ResourceError as error:
+        raise _mcp_error(error_mapping.get(error.code, _RESOURCE_INTERNAL_ERROR)) from None
     except McpError:
         raise
     except BaseException:
-        raise _mcp_error(_RESOURCE_INTERNAL_ERROR) from None
+        raise _mcp_error(_RESOURCE_UNAVAILABLE) from None
     try:
+        if is_release:
+            if not (
+                type(getattr(content, "uri", None)) is str
+                and _RELEASE_RESOURCE_URI.fullmatch(content.uri) is not None
+                and content.uri == uri
+                and type(getattr(content, "data", None)) is bytes
+                and type(getattr(content, "media_type", None)) is str
+            ):
+                raise _mcp_error(_RESOURCE_INTERNAL_ERROR)
+            return types.ReadResourceResult(
+                contents=[
+                    types.BlobResourceContents(
+                        uri=content.uri,
+                        blob=base64.b64encode(content.data).decode("ascii"),
+                        mimeType=content.media_type,
+                    )
+                ]
+            )
         if not (
             type(getattr(content, "uri", None)) is str
             and _RESOURCE_URI.fullmatch(content.uri) is not None

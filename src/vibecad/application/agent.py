@@ -121,6 +121,7 @@ def _require_current_layout(layout: ApplicationDataLayout) -> None:
         layout.bootstrap,
         layout.checkouts,
         layout.artifacts,
+        layout.releases,
     ):
         layout.require_current(path)
 
@@ -206,6 +207,9 @@ class AgentApplication:
         "_lease_manager",
         "_project_api",
         "_project_service",
+        "_release_api",
+        "_release_service",
+        "_release_store",
         "_revision_store",
         "_runtime_factory",
         "_runtimes",
@@ -294,6 +298,9 @@ class AgentApplication:
         self._artifact_authority = None
         self._artifact_service = None
         self._artifact_api = None
+        self._release_store = None
+        self._release_service = None
+        self._release_api = None
 
     @classmethod
     def from_captured_layout(
@@ -467,6 +474,12 @@ class AgentApplication:
                     "validate_materialization",
                     fcstd=fcstd,
                     step=step,
+                )
+
+            def render_release(self, *, revision):
+                return self._application._invoke_validation_cad(
+                    "render_release",
+                    revision=revision,
                 )
 
         port = _LazyGatedCadExecutionPort(self)
@@ -649,6 +662,42 @@ class AgentApplication:
                 self._artifact_service = service
                 self._artifact_api = api
                 store = candidate_store
+            return api, service, store
+
+    def _release_bundle_for_request(self):
+        self._ensure_live()
+        api = self._release_api
+        service = self._release_service
+        store = self._release_store
+        if api is not None and service is not None and store is not None:
+            return api, service, store
+        with self._component_lock:
+            self._ensure_live()
+            api = self._release_api
+            service = self._release_service
+            store = self._release_store
+            if api is None or service is None or store is None:
+                from vibecad.application.releases import (
+                    ReleaseApi,
+                    ReleaseService,
+                    ReleaseStore,
+                )
+
+                cad = self._cad_validation_port_locked()
+                store = ReleaseStore(
+                    root=self._layout.releases,
+                    expected_identity=self._layout.identity_for(self._layout.releases),
+                )
+                service = ReleaseService(
+                    store=store,
+                    task_store=self._task_store,
+                    revision_store=self._revision_store,
+                    cad=cad,
+                )
+                api = ReleaseApi(service=service)
+                self._release_store = store
+                self._release_service = service
+                self._release_api = api
             return api, service, store
 
     def _artifact_authority_locked(self):
@@ -895,6 +944,30 @@ class AgentApplication:
     def read_artifact_resource(self, uri: object):
         self._ensure_live()
         _, _, store = self._artifact_bundle_for_request()
+        self._ensure_live()
+        return store.read_resource(uri)
+
+    def create_release_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        api, _, _ = self._release_bundle_for_request()
+        self._ensure_live()
+        return api.create_release(request)
+
+    def get_release_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        api, _, _ = self._release_bundle_for_request()
+        self._ensure_live()
+        return api.get_release(request)
+
+    def approve_release_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        api, _, _ = self._release_bundle_for_request()
+        self._ensure_live()
+        return api.approve_release(request)
+
+    def read_release_resource(self, uri: object):
+        self._ensure_live()
+        _, _, store = self._release_bundle_for_request()
         self._ensure_live()
         return store.read_resource(uri)
 

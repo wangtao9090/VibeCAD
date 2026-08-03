@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import os
@@ -23,6 +24,7 @@ from vibecad.execution.revisions import (
     _open_worker_revision,
 )
 from vibecad.interaction.cad import (
+    ReleaseCadEvidence,
     ValidatedImportEvidence,
     ValidatedMaterializationEvidence,
 )
@@ -1237,6 +1239,73 @@ class FreeCadWorker(_Opaque):
                 except WorkerError:
                     self._protocol_loss()
                 return shape, entities, components, interferences, bom
+
+    def render_release(
+        self,
+        *,
+        session: WorkerSession,
+        revision: WorkerRevision,
+    ) -> ReleaseCadEvidence:
+        with self._operation_lock:
+            self._ensure_process()
+            session_state = self._session_state(session)
+            revision_state = self._revision_state(revision)
+            if session_state.revision is not revision:
+                raise WorkerError(WorkerErrorCode.INVALID_HANDLE)
+            self._require_live_revision(revision_state)
+            result = self._request(
+                "session.render_release",
+                {
+                    "session_id": session.session_id,
+                    "revision_id": revision.capability_id,
+                },
+                timeout_ms=60_000,
+            )
+            try:
+                if set(result) != {
+                    "revision_id",
+                    "bom",
+                    "drawing_pdf_base64",
+                    "view_names",
+                    "balloon_items",
+                }:
+                    raise ValueError
+                if (
+                    type(result["bom"]) is not dict
+                    or type(result["drawing_pdf_base64"]) is not str
+                    or type(result["view_names"]) is not list
+                    or type(result["balloon_items"]) is not list
+                ):
+                    raise ValueError
+                drawing = base64.b64decode(
+                    result["drawing_pdf_base64"].encode("ascii"),
+                    validate=True,
+                )
+                bom = BomObservation.from_mapping(result["bom"])
+                view_names = tuple(result["view_names"])
+                balloon_items = tuple(
+                    tuple(item) if type(item) is list else () for item in result["balloon_items"]
+                )
+                evidence = ReleaseCadEvidence(
+                    revision_id=result["revision_id"],
+                    bom=bom,
+                    drawing_pdf=drawing,
+                    view_names=view_names,
+                    balloon_items=balloon_items,
+                )
+                if evidence.revision_id != revision_state.revision.id:
+                    raise ValueError
+            except Exception:
+                self._protocol_loss()
+            with self._lifecycle_lock:
+                self._ensure_process()
+                if self._session_state(session) is not session_state:
+                    self._protocol_loss()
+                try:
+                    self._require_live_revision(revision_state)
+                except WorkerError:
+                    self._protocol_loss()
+            return evidence
 
     def _accept_artifact_result(
         self,

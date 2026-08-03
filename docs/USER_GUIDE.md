@@ -1,8 +1,8 @@
 # VibeCAD 0.6.0 本地交付候选用户手册
 
 VibeCAD 是由 Claude、Codex 等宿主 Agent 调用的 FreeCAD 专家 Agent。你描述设计目标，宿主负责理解
-与规划，VibeCAD 负责把受支持的 CAD 操作放进可恢复、可审核、可验证的项目流程，并交付 FCStd 与
-STEP 资源。
+与规划，VibeCAD 负责把受支持的 CAD 操作放进可恢复、可审核、可验证的项目流程，并交付 FCStd、
+STEP 与经摘要批准的机械 Release 包。
 
 当前版本适合验证 Agent-first 主链和完成长方体、圆柱体的创建、检查、参数修改、移动与旋转。它
 还不是完整的机械 CAD 工作台，不能把任意照片、网格或复杂模型自动还原成参数化草图。
@@ -19,7 +19,7 @@ VibeCAD 不出售模型 token，也不会从 MCPB 中获得 Claude/Codex 的订�
 
 ## 2. 当前能做什么
 
-公开面固定为 28 个工具：
+公开面固定为 31 个工具：
 
 | 类别 | 工具 |
 |---|---|
@@ -28,7 +28,7 @@ VibeCAD 不出售模型 token，也不会从 MCPB 中获得 Claude/Codex 的订�
 | 项目与版本 | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
 | 任务 | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task` |
 | 审核 | `accept_draft`, `reject_draft` |
-| 交付 | `get_artifact_manifest`, `export_task_artifacts` |
+| 交付 | `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release` |
 | 单步 CAD | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
 
 工具名称不是能力说明书。宿主每次开始工作都应调用 `get_capabilities`，以返回的 operation、输入
@@ -64,7 +64,8 @@ macOS 默认数据根通常位于：
 
 默认方式是运行 `vibecad --freecad`。它只使用经过验证的受管运行时，打开一个带 VibeCAD Workbench
 与审核 Dock 的 FreeCAD。Dock 可以发现项目/任务，分别打开 HEAD 与 draft 预览，显示 verdict，捕获
-精确的 object/feature `SelectorV1`，并对新鲜 draft 执行 Accept 或 Reject。selector 的 project 与
+精确的 object/feature `SelectorV1`，对新鲜 draft 执行 Accept 或 Reject，并为成功任务创建、预览、
+按精确摘要批准和保存机械 Release。selector 的 project 与
 revision 来自当前 checkout 绑定，不能由对象 Label、Name 或界面文本猜测。
 
 一个额外的本机试点允许显式指定用户已安装的 FreeCAD：
@@ -331,4 +332,4 @@ STEP 等只适合作为 accepted Revision 的可选 Git LFS 快照；Git 不是 
 原生 CAD 文件。完整边界见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VERSIONING_RESEARCH.md)。
 
 当前外部 Claude/Codex 模型调用尚未纳入本地放行证据。要做宿主实测，必须单独授权相应模型/token
-消耗，并记录所用宿主版本、Skill hash、28-tool discovery 与完整任务结果。
+消耗，并记录所用宿主版本、Skill hash、31-tool discovery 与完整任务结果。

@@ -2028,6 +2028,8 @@ def test_default_replay_tool_set_matches_public_idempotence_contract() -> None:
     assert "create_task" in supervisor._DEFAULT_IDEMPOTENT_TOOLS
     assert "revert_project" in supervisor._DEFAULT_IDEMPOTENT_TOOLS
     assert "cancel_task" in supervisor._DEFAULT_IDEMPOTENT_TOOLS
+    assert "create_release" in supervisor._DEFAULT_IDEMPOTENT_TOOLS
+    assert "approve_release" in supervisor._DEFAULT_IDEMPOTENT_TOOLS
     assert {
         "list_projects",
         "list_revisions",

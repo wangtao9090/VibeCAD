@@ -1,11 +1,11 @@
 # VibeCAD Active Plan — P2 mechanical delivery
 
-> Status: **P2-A approved; P2-S01 through P2-S03 complete**
+> Status: **P2-S01 through P2-S04 implemented and verified; publication pending**
 >
 > Updated: 2026-08-02
 >
-> Repository anchor: `codex/agent-stage3@b223c34` plus the verified P2-S03
-> candidate described below
+> Repository anchor: `codex/agent-stage3@5a1bb43` plus the verified P2-S04
+> publication candidate described below
 >
 > This is the only mutable orchestration plan. P1 sequential editing closed at
 > `7f3d506`; earlier campaign files remain historical records.
@@ -29,8 +29,9 @@ The public semantic operation registry now contains nine operations. The six
 existing direct operations remain direct-exposed. Three ModelProgram-only
 operations, `create_component`, `place_component`, and `set_component_bom`,
 establish the bounded assembly and flat-BOM path; `create_box` and
-`create_cylinder` accept an optional explicit component target. The direct
-public tool count remains 28.
+`create_cylinder` accept an optional explicit component target. The MCP surface
+contains 31 tools: the prior 28 plus `create_release`, `get_release`, and
+`approve_release`.
 
 The repository also contains a broader legacy Round-8 assembly implementation
 with real FreeCAD evidence for:
@@ -87,13 +88,13 @@ This boundary deliberately does not claim FreeCAD Assembly solver semantics.
 - semantic face/edge connectors before Selector Level B is ready;
 - automatic conflict resolution or simultaneous Agent/user editing;
 - broad Sketcher/PartDesign/import work merely to make assembly demos richer;
-- structured BOM, TechDraw, release approval, and release package in the first
-  implementation slice; flat BOM is now delivered by P2-S03 as revision-bound
-  evidence, while physical files in a release package remain deferred;
+- structured BOM/PLM, editable TechDraw pages, manufacturing drawings, GD&T,
+  and multi-sheet/detail/section drawings; P2-S03/S04 deliver only the bounded
+  flat BOM, deterministic assembly PDF, immutable approval, and delivery ZIP;
 - a second CAD backend, durable schema migration, release/tag, or PR.
 
-The last four mechanical-delivery capabilities remain part of the P2 campaign,
-but enter only after the assembly authority and verifier foundation is proven.
+Native joints and the broader modeling inventory remain future product work;
+they are not implicit follow-ons to the completed P2 delivery slice.
 
 ## 4. Execution slices
 
@@ -195,7 +196,7 @@ Evidence on 2026-08-02:
 
 ### P2-S04 — TechDraw and release package
 
-State: **pending after P2-S03**.
+State: **implemented and verified at the publication candidate boundary**.
 
 - produce a bounded drawing template with assembly views, balloons, and revision
   identity;
@@ -203,8 +204,50 @@ State: **pending after P2-S03**.
   report;
 - distinguish an immutable VibeCAD Revision from a later release approval state.
 
+Approved minimum boundary on 2026-08-02:
+
+- generate one deterministic A3 landscape assembly PDF from TechDraw HLR with
+  front, right, top, and isometric views, a flat-BOM table, stable item numbers,
+  one representative balloon per BOM row, and exact Revision identity;
+- create one immutable delivery ZIP containing FCStd, STEP, BOM JSON/CSV,
+  assembly PDF, manifest, and the sealed validation report;
+- build only from an accepted Revision, review the exact package digest, and
+  record Release approval separately without changing the Revision or HEAD;
+- deliver generation, preview, approval, and download through the existing
+  application/Workbench boundary without a second generic workflow engine;
+- exclude native editable TechDraw pages, manufacturing drawings, GD&T,
+  multi-sheet/detail/section views, native joints, structured BOM/PLM, STL,
+  cloud upload, and automatic external publication from the S04 implementation.
+
 Native joints/DOF solving can be evaluated only after this rigid-delivery path
 is stable; it is not silently included in P2-S04.
+
+Evidence on 2026-08-02:
+
+- one accepted Revision produces an A3 landscape assembly PDF with deterministic
+  HLR front/right/top/isometric projections, title block, flat-BOM rows, stable
+  item numbers, representative balloons, and exact Revision identity;
+- one immutable Release draft seals FCStd, STEP, BOM JSON/CSV, drawing PDF,
+  manifest, and validation report into an exact seven-entry ZIP; approval binds
+  the reviewed SHA-256 digest without mutating Revision or HEAD;
+- Release source and package reads fail closed on replacement, symlink, mode,
+  owner, link-count, metadata-instability, or digest mismatch, and the buffered
+  MCP Resource boundary rejects artifacts or packages above 64 MiB;
+- application, daemon, 31-tool MCP surface, ResourceLink/resources-read Blob,
+  supervisor replay, and Workbench create/preview/approve/download paths share
+  the same Release authority and idempotency semantics;
+- the real managed FreeCAD Task Kernel flow created and accepted a two-component
+  interference-free assembly, generated the PDF, approved the exact package,
+  and verified the seven ZIP entries plus FCStd/STEP hashes after reload;
+- final full suite: `5622 passed, 114 deselected, 19 warnings`; the real FreeCAD
+  Release gate independently passed; Ruff, changed-file format, source compile,
+  and diff-integrity gates passed.
+- the `v0.6.0` version guard, wheel/sdist metadata, clean MCPB allowlist,
+  deterministic Skill archive, cross-channel source parity, and fresh Python
+  3.12 wheel/sdist installs passed locally; the exact packed MCPB managed-runtime
+  gate remains delegated to tag CI because the installed local runtime was not
+  mutated to the candidate receipt, and both external publishers depend on that
+  gate.
 
 ## 5. Authority, controls, and gates
 
@@ -224,7 +267,9 @@ Selected controls are intentionally small:
 - **Approval:** confirm the next product boundary before changing public component
   semantics or broadening the accepted model envelope.
 - **Gates:** G1 focused contracts for S01; G2 Task Kernel integration for S02;
-  G2 Task Kernel plus real managed FreeCAD revision/reload evidence for S03.
+  G2 Task Kernel plus real managed FreeCAD revision/reload evidence for S03;
+  full repository, real FreeCAD Release, MCP/resource, and Workbench gates for
+  S04.
 
 No delegation, independent-review ceremony, production ledger, background
 controller, new validation framework, PR, release, or deployment is selected.
@@ -241,13 +286,32 @@ The user approved the following product boundary on 2026-08-02:
 > interference checks; defer native joints, cross-revision instances, BOM,
 > TechDraw, and release packaging to later P2 slices.
 
-P2-S03 is complete. The next possible product slice is P2-S04 TechDraw and
-release packaging. It would add drawing layout, physical deliverable files, and
-release-state semantics, so its exact user-facing scope must be confirmed before
-executable work begins.
+P2-S04 has passed its real end-to-end product exit gate under the approved
+minimum boundary above. The user has authorized publishing the P2 product.
+Release preparation may proceed autonomously; the exact version, publication
+channel, target commit, and recovery boundary must be verified before the
+external publication effect.
 
-Recovery boundary: P2-S01 through P2-S03 are authorized and complete.
-Intentional commit and branch push of the verified S03 slice are authorized.
-P2-S04 remains at a product-decision boundary; no durable schema migration, PR,
-release, deployment, or installed-runtime mutation is authorized. Preserve the
-unrelated untracked paths.
+Recovery boundary: P2-S01 through P2-S03 are complete at `5a1bb43`; the verified
+P2-S04 publication candidate is the current intentional worktree slice. Commit
+and branch publication are authorized. No external product release, deployment,
+or installed-runtime mutation occurs until the exact release target is known.
+Preserve the unrelated untracked paths.
+
+After the P2 publication completes, start a separate WorkBuddy host-compatibility
+slice. Reuse the same local stdio MCP, Skill, daemon, Task/Revision/Review, and
+Release authority; add only the connection bundle or thin compatibility adapter
+that WorkBuddy actually requires. Completion requires a real WorkBuddy session
+covering tool discovery, one durable CAD task, ResourceLink/resources-read for
+the P2 delivery package, review/approval, and restart recovery. The existing
+`.workbuddy/` memory directory is not treated as connector configuration and
+remains user-owned.
+
+The read-only WorkBuddy 5.3.5 audit is recorded in
+`docs/WORKBUDDY_COMPATIBILITY_RESEARCH.md`. It confirms host-level local stdio,
+strict MCP startup, ResourceLink/list/read implementation, and current model
+availability, while leaving binary PDF/ZIP round-tripping and the exact VibeCAD
+restart workflow for the post-P2 live gate. The initial explicit-model matrix is
+GLM-5.2 (default candidate), Kimi-K3 (quality ceiling), MiniMax-M3
+(cost/performance), and DeepSeek-V4-Flash (fast/economy); `Auto` is excluded from
+certification because opaque routing is not reproducible.

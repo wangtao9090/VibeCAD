@@ -452,6 +452,21 @@ class ExternalBridgeClient:
     def reject_draft_request(self, request: object) -> dict[str, object]:
         return self._call("reject_draft", {"request": request})
 
+    def create_release_request(self, request: object) -> dict[str, object]:
+        return self._call("create_release", {"request": request})
+
+    def get_release_request(self, request: object) -> dict[str, object]:
+        return self._call("get_release", {"request": request})
+
+    def approve_release_request(self, request: object) -> dict[str, object]:
+        return self._call("approve_release", {"request": request})
+
+    def save_release_resource(self, *, uri: object, destination: object) -> dict[str, object]:
+        return self._call(
+            "save_release_resource",
+            {"uri": uri, "destination": destination},
+        )
+
     def open_checkout(self, *, open_key: object, source: object) -> dict[str, object]:
         return self._call("open_checkout", {"open_key": open_key, "source": source})
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import array
+import base64
 import contextlib
 import hashlib
 import os
@@ -816,6 +817,51 @@ class WorkerService:
             "bom": None if bom is None else bom.to_mapping(),
         }
 
+    def _render_release(self, params: object) -> dict[str, object]:
+        fields = _exact_mapping(params, {"session_id", "revision_id"})
+        session, capability = self._require_observation_pair(
+            session_id=fields["session_id"],
+            capability_kind="revision",
+            capability_id=fields["revision_id"],
+        )
+        if type(capability) is not _Revision or any(
+            item.session_id == session.session_id for item in self._programs.values()
+        ):
+            raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
+        before = _capture_revision_entries(capability)
+        if before != capability.entries:
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        try:
+            with _revision_cwd(capability):
+                components = _component_observations(session.value)
+                bom = _bom_observation(session.value, components)
+                if bom is None or not bom.complete:
+                    raise ValueError
+                from vibecad.feedback.release_drawing import (  # noqa: PLC0415
+                    DRAWING_VIEWS,
+                    render_assembly_drawing,
+                )
+
+                drawing, balloon_items = render_assembly_drawing(
+                    session.value,
+                    bom=bom,
+                    project_id=capability.project_id,
+                    revision_id=capability.store_revision_id,
+                )
+        except _ServiceError:
+            raise
+        except BaseException:
+            raise _ServiceError(WorkerWireErrorCode.CAD_FAILURE) from None
+        if _capture_revision_entries(capability) != before:
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        return {
+            "revision_id": capability.store_revision_id,
+            "bom": bom.to_mapping(),
+            "drawing_pdf_base64": base64.b64encode(drawing).decode("ascii"),
+            "view_names": list(DRAWING_VIEWS),
+            "balloon_items": [list(item) for item in balloon_items],
+        }
+
     def _validation_directory(
         self,
         descriptors: tuple[int, ...],
@@ -1096,6 +1142,7 @@ class WorkerService:
             "session.load_revision": self._load_revision,
             "session.checkpoint_fcstd": self._checkpoint,
             "session.observe": self._observe,
+            "session.render_release": self._render_release,
             "session.close": self._close_session,
             "program.begin": self._begin_program,
             "program.execute_command": self._execute_command,

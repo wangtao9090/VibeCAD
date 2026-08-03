@@ -30,6 +30,7 @@ _METHODS = frozenset(
         "session.load_revision",
         "session.checkpoint_fcstd",
         "session.observe",
+        "session.render_release",
         "session.close",
         "program.begin",
         "program.execute_command",

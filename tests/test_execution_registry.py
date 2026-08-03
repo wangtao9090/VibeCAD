@@ -48,6 +48,9 @@ _STABLE_PUBLIC_TOOL_NAMES = (
     "reject_draft",
     "get_artifact_manifest",
     "export_task_artifacts",
+    "create_release",
+    "get_release",
+    "approve_release",
 )
 
 _DEFAULT_DIRECT_DESCRIPTIONS = {
@@ -216,7 +219,7 @@ def test_public_tool_names_are_unique_across_stable_and_direct_surfaces():
     names = tuple(spec.name for spec in public_tool_specs())
 
     assert names[: len(_STABLE_PUBLIC_TOOL_NAMES)] == _STABLE_PUBLIC_TOOL_NAMES
-    assert len(names) == len(set(names)) == 28
+    assert len(names) == len(set(names)) == 31
 
 
 def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contracts():

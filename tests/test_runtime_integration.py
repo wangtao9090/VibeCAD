@@ -90,13 +90,19 @@ def _assert_fresh_unpacked_package(unpacked: Path) -> None:
         "LICENSE",
         "PRIVACY.md",
         "README.md",
+        "README.zh-CN.md",
         "icon.png",
         "manifest.json",
         "mcpb_entry.py",
         "pyproject.toml",
         "uv.lock",
     }
-    assert {path.name for path in unpacked.iterdir()} == {*fixed_files, "skills", "src"}
+    assert {path.name for path in unpacked.iterdir()} == {
+        *fixed_files,
+        "freecad",
+        "skills",
+        "src",
+    }
     source_root = unpacked / "src"
     package_root = source_root / "vibecad"
     assert source_root.is_dir() and not source_root.is_symlink()
@@ -138,6 +144,28 @@ def _assert_fresh_unpacked_package(unpacked: Path) -> None:
         assert path.is_file()
         packaged_skill[path.relative_to(packaged_skill_root).as_posix()] = _sha256_path(path)
     assert packaged_skill == checked_in_skill
+
+    checked_in_workbench_root = repository / "freecad" / "VibeCAD"
+    packaged_workbench_root = unpacked / "freecad" / "VibeCAD"
+    assert packaged_workbench_root.is_dir() and not packaged_workbench_root.is_symlink()
+    checked_in_workbench = {
+        path.relative_to(checked_in_workbench_root).as_posix(): _sha256_path(path)
+        for path in checked_in_workbench_root.rglob("*")
+        if path.is_file()
+        and not path.is_symlink()
+        and path.suffix != ".pyc"
+        and "__pycache__" not in path.parts
+    }
+    packaged_workbench: dict[str, str] = {}
+    for path in packaged_workbench_root.rglob("*"):
+        assert not path.is_symlink()
+        if path.is_dir():
+            continue
+        assert path.is_file()
+        packaged_workbench[path.relative_to(packaged_workbench_root).as_posix()] = _sha256_path(
+            path
+        )
+    assert packaged_workbench == checked_in_workbench
     assert not (unpacked / ".venv").exists(), "acceptance requires a newly unpacked package"
 
 
@@ -668,7 +696,7 @@ def test_installed_0_6_server_refresh_preserves_managed_engine_and_data(
         "epoch": 4,
         "mcp": "1.27.2",
         "surface": spec.PUBLIC_SURFACE_SHA256,
-        "tools": 28,
+        "tools": 31,
         "version": "0.6.0",
     }
 
@@ -1210,7 +1238,7 @@ def test_unpacked_mcpb_agent_first_stdio_acceptance(tmp_path):
         listed_tools = tools_response["result"]["tools"]
         expected_tools = _expected_tool_projection()
         assert tools_response["id"] == 1
-        assert len(listed_tools) == 28
+        assert len(listed_tools) == 31
         assert [item["name"] for item in listed_tools] == [
             item["name"] for item in manifest["tools"]
         ]

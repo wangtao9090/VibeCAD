@@ -28,6 +28,7 @@ from vibecad.interaction.cad import (
     CadExecutionPort,
     CadProfileCapability,
     CandidateEvidence,
+    ReleaseCadEvidence,
     ValidatedImportEvidence,
     ValidatedMaterializationEvidence,
 )
@@ -711,6 +712,29 @@ class WorkerCadExecutionPort(CadExecutionPort):
         if type(result) is not ValidatedMaterializationEvidence:
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
         return result
+
+    @_serialized
+    def render_release(self, *, revision: object) -> ReleaseCadEvidence:
+        if type(revision) is not RevisionRef:
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+        worker = self._start_worker()
+        session = self.open_revision(store=self._store, revision=revision)
+        with self._lock:
+            state = self._sessions.get(session)
+        if state is None or state.kind != "revision" or state.revision != revision:
+            raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+        try:
+            result = self._call(
+                worker,
+                "render_release",
+                session=session,
+                revision=state.value,
+            )
+            if type(result) is not ReleaseCadEvidence or result.revision_id != revision.id:
+                raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
+            return result
+        finally:
+            self.close(session)
 
     def _observe_revision(
         self,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import os
+import re
 import threading
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -23,6 +25,14 @@ _CHECKOUT_ID_PREFIX = "checkout_"
 _OPEN_KEY_PREFIX = "checkout_open_"
 _CHECKPOINT_KEY_PREFIX = "checkpoint_create_"
 _DAEMON_ID_PREFIX = "daemon_"
+_RELEASE_ID_PREFIX = "release_"
+_RELEASE_CREATE_KEY_PREFIX = "release_create_"
+_RELEASE_APPROVE_KEY_PREFIX = "release_approve_"
+_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_RELEASE_URI = re.compile(
+    r"vibecad://release/release_[0-9a-f]{32}/"
+    r"(?:assembly-drawing\.pdf|vibecad-release\.zip)\Z"
+)
 _REPLAY_CAPACITY = 64
 _MAX_CHECKOUT_AUTHORITIES = 8
 _UNBOUND_WIRE_CAPABILITY = object()
@@ -35,10 +45,20 @@ _PUBLIC_COMMAND_KINDS = frozenset(
         "refresh_task",
         "preview_open",
         "preview_refresh",
+        "release_create",
+        "release_get",
+        "release_approve",
     )
 )
 _RESTRICTED_COMMAND_KINDS = frozenset(
-    ("preview_close", "edit_checkpoint", "review", "selector_resolve", "close")
+    (
+        "preview_close",
+        "edit_checkpoint",
+        "review",
+        "release_save",
+        "selector_resolve",
+        "close",
+    )
 )
 _ERROR_CODES = frozenset(
     (
@@ -87,6 +107,30 @@ _COMMAND_KEYS = {
             "expected_generation",
         )
     ),
+    "release_create": frozenset(
+        (
+            "schema_version",
+            "request_id",
+            "kind",
+            "create_key",
+            "task_id",
+            "expected_generation",
+            "revision_id",
+        )
+    ),
+    "release_get": frozenset(("schema_version", "request_id", "kind", "release_id")),
+    "release_approve": frozenset(
+        (
+            "schema_version",
+            "request_id",
+            "kind",
+            "release_id",
+            "expected_generation",
+            "expected_package_sha256",
+            "approval_key",
+        )
+    ),
+    "release_save": frozenset(("schema_version", "request_id", "kind", "uri", "destination")),
     "selector_resolve": frozenset(("schema_version", "request_id", "kind", "request")),
     "close": frozenset(("schema_version", "request_id", "kind")),
 }
@@ -302,7 +346,7 @@ def _validate_command(command: object) -> dict[str, object]:
         _cursor(copied["cursor"])
     if kind == "refresh_project":
         _identifier(copied["project_id"], _PROJECT_ID_PREFIX)
-    if kind in {"refresh_task", "review"}:
+    if kind in {"refresh_task", "review", "release_create"}:
         _identifier(copied["task_id"], _TASK_ID_PREFIX)
     if kind == "preview_open":
         _preview_source(copied["source"])
@@ -317,9 +361,35 @@ def _validate_command(command: object) -> dict[str, object]:
     if kind == "review":
         if copied["decision"] not in ("accept", "reject"):
             raise _invalid_command()
-        _identifier(copied["draft_id"], _DRAFT_ID_PREFIX)
+    if kind == "release_create":
+        _identifier(copied["create_key"], _RELEASE_CREATE_KEY_PREFIX)
+        _identifier(copied["revision_id"], _REVISION_ID_PREFIX)
         generation = copied["expected_generation"]
         if type(generation) is not int or not 0 <= generation <= _MAX_SAFE_INTEGER:
+            raise _invalid_command()
+    if kind in {"release_get", "release_approve"}:
+        _identifier(copied["release_id"], _RELEASE_ID_PREFIX)
+    if kind == "release_approve":
+        _identifier(copied["approval_key"], _RELEASE_APPROVE_KEY_PREFIX)
+        generation = copied["expected_generation"]
+        if (
+            type(generation) is not int
+            or generation not in {0, 1}
+            or type(copied["expected_package_sha256"]) is not str
+            or _DIGEST.fullmatch(copied["expected_package_sha256"]) is None
+        ):
+            raise _invalid_command()
+    if kind == "release_save":
+        uri = copied["uri"]
+        destination = copied["destination"]
+        if (
+            type(uri) is not str
+            or _RELEASE_URI.fullmatch(uri) is None
+            or type(destination) is not str
+            or not os.path.isabs(destination)
+            or ".." in destination.split(os.sep)
+            or not os.path.basename(destination)
+        ):
             raise _invalid_command()
     if kind == "selector_resolve":
         _selector_request(copied["request"])
@@ -899,6 +969,39 @@ class KernelGateway:
                     {"schema_version": 1, "task_id": data["task_id"]}
                 )
                 return _event("task", request_id, response=response)
+            if kind == "release_create":
+                response = client.create_release_request(
+                    {
+                        "schema_version": 1,
+                        "create_key": data["create_key"],
+                        "task_id": data["task_id"],
+                        "expected_generation": data["expected_generation"],
+                        "revision_id": data["revision_id"],
+                    }
+                )
+                return _event("release_created", request_id, response=response)
+            if kind == "release_get":
+                response = client.get_release_request(
+                    {"schema_version": 1, "release_id": data["release_id"]}
+                )
+                return _event("release_loaded", request_id, response=response)
+            if kind == "release_approve":
+                response = client.approve_release_request(
+                    {
+                        "schema_version": 1,
+                        "release_id": data["release_id"],
+                        "expected_generation": data["expected_generation"],
+                        "expected_package_sha256": data["expected_package_sha256"],
+                        "approval_key": data["approval_key"],
+                    }
+                )
+                return _event("release_approved", request_id, response=response)
+            if kind == "release_save":
+                response = client.save_release_resource(
+                    uri=data["uri"],
+                    destination=data["destination"],
+                )
+                return _event("release_saved", request_id, response=response)
             if kind == "preview_open":
                 from .preview import PreviewCoordinator, PreviewError
 

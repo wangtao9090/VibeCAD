@@ -41,6 +41,10 @@ _METHOD_KEYS = {
     "get_task": frozenset({"request"}),
     "accept_draft": frozenset({"request"}),
     "reject_draft": frozenset({"request"}),
+    "create_release": frozenset({"request"}),
+    "get_release": frozenset({"request"}),
+    "approve_release": frozenset({"request"}),
+    "save_release_resource": frozenset({"uri", "destination"}),
     "open_checkout": frozenset({"open_key", "source"}),
     "get_checkout": frozenset({"checkout_id"}),
     "checkpoint_checkout": frozenset({"checkpoint_key", "checkout_id"}),
@@ -262,8 +266,16 @@ def _dispatch(client: object, method: str, params: dict[str, object]) -> dict[st
         "get_task",
         "accept_draft",
         "reject_draft",
+        "create_release",
+        "get_release",
+        "approve_release",
     }:
         result = getattr(client, f"{method}_request")(params["request"])
+    elif method == "save_release_resource":
+        result = client.save_release_resource(
+            uri=params["uri"],
+            destination=params["destination"],
+        )
     elif method == "open_checkout":
         result = client.open_checkout(open_key=params["open_key"], source=params["source"])
     elif method == "checkpoint_checkout":
