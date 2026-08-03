@@ -14,6 +14,7 @@ from vibecad.execution.selectors import (
     SemanticRole,
 )
 from vibecad.runtime import status
+from vibecad.validation import ComponentBomMetadata
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SRC = os.path.join(_REPO, "src")
@@ -75,15 +76,11 @@ class _IdentityObject:
     ):
         if name in self.PropertiesList:
             raise RuntimeError("duplicate property")
-        self.add_calls.append(
-            (type_id, name, group, doc, attr, read_only, hidden, locked)
-        )
+        self.add_calls.append((type_id, name, group, doc, attr, read_only, hidden, locked))
         self.PropertiesList.append(name)
         self._property_types[name] = type_id
         self._editor_modes[name] = [
-            value
-            for enabled, value in ((read_only, "ReadOnly"), (hidden, "Hidden"))
-            if enabled
+            value for enabled, value in ((read_only, "ReadOnly"), (hidden, "Hidden")) if enabled
         ]
         self._property_status[name] = ["LockDynamic"] if locked else []
         setattr(self, name, "")
@@ -226,6 +223,7 @@ def test_component_identity_records_require_identified_members(monkeypatch):
 
 def test_session_starts_without_freecad():
     import sys
+
     s = Session()
     assert s.doc is None
     assert "FreeCAD" not in sys.modules  # 构造不 import FreeCAD
@@ -469,6 +467,74 @@ def test_identity_read_rejects_object_not_owned_by_current_document():
     assert stale_proxy.PropertiesList == []
 
 
+def test_component_bom_metadata_uses_one_locked_canonical_document_property():
+    container = _IdentityObject("Component", type_id="App::Part")
+    session = _identity_session(container)
+    session._parts = {
+        "Bracket": {"container": container, "objects": set()},
+    }
+    metadata = ComponentBomMetadata(
+        part_number="BRACKET-001",
+        description="Mounting bracket",
+        material="Aluminum 6061",
+        density_kg_m3=2700,
+    )
+
+    assert session.read_component_bom_metadata("Bracket") is None
+    assert session.set_component_bom_metadata("Bracket", metadata) == metadata
+
+    bom_calls = [call for call in container.add_calls if call[1] == "VibeCADBomMetadata"]
+    assert len(bom_calls) == 1
+    assert bom_calls[0][0] == "App::PropertyString"
+    assert bom_calls[0][2] == "VibeCAD"
+    assert bom_calls[0][4:] == (0, True, True, True)
+    assert container.VibeCADBomMetadata == (
+        '{"density_kg_m3":2700,"description":"Mounting bracket",'
+        '"material":"Aluminum 6061","part_number":"BRACKET-001",'
+        '"schema_version":1}'
+    )
+    assert session.read_component_bom_metadata("Bracket") == metadata
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        lambda container: setattr(container, "VibeCADBomMetadata", '{"schema_version":1}'),
+        lambda container: setattr(
+            container,
+            "VibeCADBomMetadata",
+            '{"schema_version":1, "part_number":"BRACKET-001"}',
+        ),
+        lambda container: container._property_types.__setitem__(
+            "VibeCADBomMetadata",
+            "App::PropertyInteger",
+        ),
+        lambda container: container._editor_modes.__setitem__(
+            "VibeCADBomMetadata",
+            [],
+        ),
+    ),
+)
+def test_component_bom_metadata_tampering_fails_closed(tamper):
+    container = _IdentityObject("Component", type_id="App::Part")
+    session = _identity_session(container)
+    session._parts = {
+        "Bracket": {"container": container, "objects": set()},
+    }
+    metadata = ComponentBomMetadata(
+        part_number="BRACKET-001",
+        description="Mounting bracket",
+        material="Aluminum 6061",
+        density_kg_m3=2700,
+    )
+    session.set_component_bom_metadata("Bracket", metadata)
+
+    tamper(container)
+
+    with pytest.raises(ValueError):
+        session.read_component_bom_metadata("Bracket")
+
+
 class _LifecycleDoc:
     def __init__(self, name):
         self.Name = name
@@ -504,7 +570,8 @@ def test_close_document_failure_preserves_session_state(monkeypatch):
     s._labels = {"__single__": {"faces": {}}}
     revision = s._revision_id
     monkeypatch.setattr(
-        s, "_close_owned_document", lambda doc: (_ for _ in ()).throw(RuntimeError("busy")))
+        s, "_close_owned_document", lambda doc: (_ for _ in ()).throw(RuntimeError("busy"))
+    )
 
     with pytest.raises(RuntimeError, match="busy"):
         s.close_document()
@@ -525,7 +592,8 @@ def test_load_document_cleanup_failure_does_not_mask_load_error(monkeypatch, tmp
     monkeypatch.setattr(s, "_ensure_freecad", lambda: None)
     monkeypatch.setitem(sys.modules, "FreeCAD", SimpleNamespace(newDocument=lambda: candidate))
     monkeypatch.setattr(
-        s, "_close_owned_document", lambda doc: (_ for _ in ()).throw(RuntimeError("cleanup")))
+        s, "_close_owned_document", lambda doc: (_ for _ in ()).throw(RuntimeError("cleanup"))
+    )
 
     with pytest.raises(ValueError, match="invalid FCStd"):
         s.load_document(source)

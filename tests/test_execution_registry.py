@@ -114,7 +114,7 @@ def _operation(
     )
 
 
-def test_default_registry_exposes_six_single_part_and_two_component_operations():
+def test_default_registry_exposes_six_direct_and_three_component_operations():
     assert tuple(DEFAULT_OPERATION_REGISTRY) == (
         "create_box",
         "create_cylinder",
@@ -123,9 +123,10 @@ def test_default_registry_exposes_six_single_part_and_two_component_operations()
         "rotate_part",
         "inspect_model",
         "create_component",
+        "set_component_bom",
         "place_component",
     )
-    assert len(DEFAULT_OPERATION_REGISTRY) == 8
+    assert len(DEFAULT_OPERATION_REGISTRY) == 9
     assert all(
         metadata.handler_name == operation
         for operation, metadata in DEFAULT_OPERATION_REGISTRY.operations.items()
@@ -227,6 +228,7 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
         "rotate_part",
         "inspect_model",
         "create_component",
+        "set_component_bom",
         "place_component",
     )
 
@@ -252,7 +254,7 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
     )
     assert all(
         not DEFAULT_OPERATION_REGISTRY.lookup(name).direct_exposed
-        for name in ("create_component", "place_component")
+        for name in ("create_component", "set_component_bom", "place_component")
     )
 
     modify = DEFAULT_OPERATION_REGISTRY.lookup("modify_parameter")
@@ -436,6 +438,7 @@ def test_default_registry_has_exact_handler_risk_and_evidence_metadata():
         "rotate_part": ("rotate_part", RiskClass.MUTATING, True),
         "inspect_model": ("inspect_model", RiskClass.READ_ONLY, False),
         "create_component": ("create_component", RiskClass.MUTATING, True),
+        "set_component_bom": ("set_component_bom", RiskClass.MUTATING, True),
         "place_component": ("place_component", RiskClass.MUTATING, True),
     }
 
@@ -524,6 +527,19 @@ def test_default_registry_has_exact_field_shapes_and_bindings():
     )
     assert create_component.resource_budget.max_created_objects == 16
     assert create_component.result_slots[0].name == "component"
+
+    set_component_bom = DEFAULT_OPERATION_REGISTRY.lookup("set_component_bom")
+    assert _fields(set_component_bom.target_fields) == (
+        ("component", "target", ValueShape.ENTITY_TARGET, True),
+    )
+    assert set_component_bom.target_fields[0].referenced_value_shape is ValueShape.OBJECT_ID
+    assert _fields(set_component_bom.argument_fields) == (
+        ("part_number", "part_number", ValueShape.NONBLANK_STRING, True),
+        ("description", "description", ValueShape.NONBLANK_STRING, True),
+        ("material", "material", ValueShape.NONBLANK_STRING, True),
+        ("density_kg_m3", "density", ValueShape.POSITIVE_NUMBER, True),
+    )
+    assert set_component_bom.resource_budget.max_created_objects == 0
 
     place_component = DEFAULT_OPERATION_REGISTRY.lookup("place_component")
     assert _fields(place_component.target_fields) == (

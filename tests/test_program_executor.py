@@ -43,6 +43,7 @@ from vibecad.execution.revisions import (
     RevisionStoreErrorCode,
 )
 from vibecad.execution.selectors import index_entity_identities
+from vibecad.validation import ComponentBomMetadata
 from vibecad.workflow.contracts import AcceptanceSpec, ModelCommand, ModelProgram, ValueSource
 from vibecad.workflow.errors import SCHEMA_VERSION
 from vibecad.workflow.lease import ProjectWriteLease
@@ -280,6 +281,7 @@ class _FakeComponentSession(_FakeSession):
         super().__init__()
         self._parts: dict[str, dict[str, object]] = {}
         self._result_by_part: dict[str, object] = {}
+        self._bom_by_part: dict[str, ComponentBomMetadata] = {}
 
     def create_component(self, name: str, identity: object) -> dict[str, object]:
         container = SimpleNamespace(
@@ -324,6 +326,17 @@ class _FakeComponentSession(_FakeSession):
 
     def get_result_shape(self, part_name: str):
         return self._result_by_part[part_name].Shape
+
+    def read_component_bom_metadata(self, part_name: str) -> ComponentBomMetadata | None:
+        return self._bom_by_part.get(part_name)
+
+    def set_component_bom_metadata(
+        self,
+        part_name: str,
+        metadata: ComponentBomMetadata,
+    ) -> ComponentBomMetadata:
+        self._bom_by_part[part_name] = metadata
+        return metadata
 
     def get_assembly_shape(self):
         shapes = [
@@ -786,6 +799,77 @@ def _component_program(
             _command("inspect", "inspect_model", depends_on=("place_b",)),
         ),
         acceptance=AcceptanceSpec(id="acceptance-executor-components", criteria=()),
+    )
+
+
+def _component_bom_program(
+    *,
+    component_b_length: float = 10,
+    component_b_part_number: str = "BRACKET-001",
+) -> ModelProgram:
+    metadata = {
+        "part_number": "BRACKET-001",
+        "description": "Mounting bracket",
+        "material": "Aluminum 6061",
+        "density_kg_m3": 2700,
+    }
+    return ModelProgram(
+        task_id="task-executor-component-bom",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command("component_a", "create_component", args={"name": "A"}),
+            _command(
+                "box_a",
+                "create_box",
+                target={"component": {"command_id": "component_a", "slot": "component"}},
+                args={"length_mm": 10, "width_mm": 10, "height_mm": 10},
+                depends_on=("component_a",),
+            ),
+            _command(
+                "bom_a",
+                "set_component_bom",
+                target={"component": {"command_id": "component_a", "slot": "component"}},
+                args=metadata,
+                depends_on=("box_a",),
+            ),
+            _command(
+                "component_b",
+                "create_component",
+                args={"name": "B"},
+                depends_on=("bom_a",),
+            ),
+            _command(
+                "box_b",
+                "create_box",
+                target={"component": {"command_id": "component_b", "slot": "component"}},
+                args={
+                    "length_mm": component_b_length,
+                    "width_mm": 10,
+                    "height_mm": 10,
+                },
+                depends_on=("component_b",),
+            ),
+            _command(
+                "place_b",
+                "place_component",
+                target={"component": {"command_id": "component_b", "slot": "component"}},
+                args={
+                    "position_mm": (20, 0, 0),
+                    "rotation_axis": "z",
+                    "angle_deg": 0,
+                },
+                depends_on=("box_b",),
+            ),
+            _command(
+                "bom_b",
+                "set_component_bom",
+                target={"component": {"command_id": "component_b", "slot": "component"}},
+                args={**metadata, "part_number": component_b_part_number},
+                depends_on=("place_b",),
+            ),
+            _command("inspect", "inspect_model", depends_on=("bom_b",)),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-executor-component-bom", criteria=()),
     )
 
 
@@ -1363,6 +1447,112 @@ def test_execute_program_builds_places_and_inspects_explicit_components(
     assert observed["component_b_id"] == max(component_ids)
     assert observed["common_volume_mm3"] == 0.0
     assert observed["interfering"] is False
+    assert inspection["bom"]["schema_version"] == SCHEMA_VERSION
+    assert inspection["bom"]["component_count"] == 2
+    assert inspection["bom"]["rows"] == ()
+    assert inspection["bom"]["missing_component_ids"] == tuple(sorted(component_ids))
+    assert inspection["bom"]["conflicts"] == ()
+    assert inspection["bom"]["total_quantity"] == 0
+    assert inspection["bom"]["total_mass_kg"] == 0
+    assert inspection["bom"]["complete"] is False
+    assert inspection["bom_csv"] is None
+
+
+def test_component_bom_groups_equal_geometry_and_emits_revision_bound_csv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+
+    def place(session, *, part_name, position, rotation_axis, angle):
+        quaternion = executor_module._axis_rotation(rotation_axis, angle)
+        session._parts[part_name]["container"].Placement = _FakePlacement(
+            *position,
+            q=quaternion,
+        )
+        return (*position, *quaternion)
+
+    monkeypatch.setattr(executor_module, "_set_absolute_component_placement", place)
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_component_bom_program()),
+        candidate=_active(_FakeComponentSession(), tmp_path),
+    )
+
+    assert len(outcomes) == 8
+    assert all(item.result.ok for item in outcomes)
+    first_bom = outcomes[2].result.value
+    assert first_bom["kind"] == "component_bom_set"
+    assert first_bom["bom"]["complete"] is True
+    inspection = outcomes[-1].result.value
+    assert inspection["bom_revision_id"] == CANDIDATE_REVISION
+    bom = inspection["bom"]
+    assert bom["complete"] is True
+    assert bom["missing_component_ids"] == ()
+    assert bom["conflicts"] == ()
+    assert bom["total_quantity"] == 2
+    assert bom["total_mass_kg"] == pytest.approx(0.0054)
+    assert len(bom["rows"]) == 1
+    row = bom["rows"][0]
+    assert row["part_number"] == "BRACKET-001"
+    assert row["quantity"] == 2
+    assert row["unit_mass_kg"] == pytest.approx(0.0027)
+    assert len(row["component_ids"]) == 2
+    assert inspection["bom_csv"] == outcomes[6].result.value["bom_csv"]
+    assert inspection["bom_csv"].splitlines()[0] == (
+        "part_number,description,material,density_kg_m3,quantity,unit_mass_kg,"
+        "total_mass_kg,component_ids,geometry_digest"
+    )
+    assert (
+        inspection["bom_csv"]
+        .splitlines()[1]
+        .startswith("BRACKET-001,Mounting bracket,Aluminum 6061,2700,2,")
+    )
+
+
+def test_component_bom_reports_same_part_number_geometry_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+
+    def place(session, *, part_name, position, rotation_axis, angle):
+        quaternion = executor_module._axis_rotation(rotation_axis, angle)
+        session._parts[part_name]["container"].Placement = _FakePlacement(
+            *position,
+            q=quaternion,
+        )
+        return (*position, *quaternion)
+
+    monkeypatch.setattr(executor_module, "_set_absolute_component_placement", place)
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_component_bom_program(component_b_length=5)),
+        candidate=_active(_FakeComponentSession(), tmp_path),
+    )
+
+    assert all(item.result.ok for item in outcomes)
+    bom = outcomes[-1].result.value["bom"]
+    assert bom["complete"] is False
+    assert bom["rows"] == ()
+    assert bom["missing_component_ids"] == ()
+    assert bom["total_quantity"] == 0
+    assert bom["total_mass_kg"] == 0
+    assert len(bom["conflicts"]) == 1
+    conflict = bom["conflicts"][0]
+    assert conflict["schema_version"] == SCHEMA_VERSION
+    assert conflict["part_number"] == "BRACKET-001"
+    assert conflict["component_ids"] == tuple(
+        sorted(
+            (
+                outcomes[0].result.value["component_id"],
+                outcomes[3].result.value["component_id"],
+            )
+        )
+    )
+    assert outcomes[-1].result.value["bom_csv"] is None
 
 
 def test_place_component_fails_closed_when_global_shapes_interfere(

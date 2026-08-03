@@ -112,6 +112,7 @@ from vibecad.engine.session import Session
 from vibecad.execution.candidate import CandidateCoordinator, SessionBinding, SessionSlot
 from vibecad.execution.executor import (
     InProcessCadExecutor,
+    _bom_observation,
     _component_observations,
     _interference_observations,
     _managed_assembly_shape,
@@ -274,7 +275,7 @@ def acceptance(
 
 
 def assembly_acceptance() -> AcceptanceSpec:
-    base = acceptance(1500.0, (25.0, 10.0, 10.0), 2)
+    base = acceptance(2000.0, (30.0, 10.0, 10.0), 2)
     return AcceptanceSpec(
         id="acceptance-task-kernel-assembly",
         criteria=(
@@ -292,6 +293,36 @@ def assembly_acceptance() -> AcceptanceSpec:
                 "interference_free",
                 "assembly",
                 True,
+            ),
+            criterion(
+                "bom-complete",
+                AcceptanceKind.ASSEMBLY,
+                "bom_complete",
+                "bom",
+                True,
+            ),
+            criterion(
+                "bom-rows",
+                AcceptanceKind.ASSEMBLY,
+                "bom_row_count",
+                "bom",
+                1,
+            ),
+            criterion(
+                "bom-quantity",
+                AcceptanceKind.ASSEMBLY,
+                "bom_total_quantity",
+                "bom",
+                2,
+            ),
+            criterion(
+                "bom-mass",
+                AcceptanceKind.ASSEMBLY,
+                "bom_total_mass",
+                "bom",
+                0.0054,
+                tolerance=1e-12,
+                parameters={"unit": "kg"},
             ),
         ),
     )
@@ -327,10 +358,24 @@ def program(base_revision: str, *, task_id: str = TASK_ID) -> ModelProgram:
                     depends_on=("component-a",),
                 ),
                 command(
+                    "bom-a",
+                    "set_component_bom",
+                    target={
+                        "component": {"command_id": "component-a", "slot": "component"}
+                    },
+                    args={
+                        "part_number": "BRACKET-001",
+                        "description": "Mounting bracket",
+                        "material": "Aluminum 6061",
+                        "density_kg_m3": 2700,
+                    },
+                    depends_on=("box-a",),
+                ),
+                command(
                     "component-b",
                     "create_component",
                     args={"name": "B"},
-                    depends_on=("box-a",),
+                    depends_on=("bom-a",),
                 ),
                 command(
                     "box-b",
@@ -338,7 +383,7 @@ def program(base_revision: str, *, task_id: str = TASK_ID) -> ModelProgram:
                     target={
                         "component": {"command_id": "component-b", "slot": "component"}
                     },
-                    args={"length_mm": 5, "width_mm": 10, "height_mm": 10},
+                    args={"length_mm": 10, "width_mm": 10, "height_mm": 10},
                     depends_on=("component-b",),
                 ),
                 command(
@@ -354,7 +399,21 @@ def program(base_revision: str, *, task_id: str = TASK_ID) -> ModelProgram:
                     },
                     depends_on=("box-b",),
                 ),
-                command("inspect", "inspect_model", depends_on=("place-b",)),
+                command(
+                    "bom-b",
+                    "set_component_bom",
+                    target={
+                        "component": {"command_id": "component-b", "slot": "component"}
+                    },
+                    args={
+                        "part_number": "BRACKET-001",
+                        "description": "Mounting bracket",
+                        "material": "Aluminum 6061",
+                        "density_kg_m3": 2700,
+                    },
+                    depends_on=("place-b",),
+                ),
+                command("inspect", "inspect_model", depends_on=("bom-b",)),
             ),
             acceptance=assembly_acceptance(),
         )
@@ -889,6 +948,7 @@ try:
     reload_entities = None
     reload_components = None
     reload_interferences = None
+    reload_bom = None
     step_reload_geometry = None
     if candidate_ref is not None:
         candidate_model = revision_store.revision_model_path(PROJECT_ID, candidate_ref.id)
@@ -901,6 +961,11 @@ try:
         reload_interferences = [
             item.to_mapping() for item in _interference_observations(probe_session)
         ]
+        observed_reload_bom = _bom_observation(
+            probe_session,
+            tuple(_component_observations(probe_session)),
+        )
+        reload_bom = None if observed_reload_bom is None else observed_reload_bom.to_mapping()
         step_ref = next(
             artifact for artifact in candidate_ref.artifacts if artifact.format == "step"
         )
@@ -931,6 +996,13 @@ try:
         if task.status.value == "succeeded"
         else None
     )
+    slot_bom = None
+    if task.status.value == "succeeded":
+        observed_slot_bom = _bom_observation(
+            current_binding.session,
+            tuple(_component_observations(current_binding.session)),
+        )
+        slot_bom = None if observed_slot_bom is None else observed_slot_bom.to_mapping()
 
     baseline_usable = None
     if task.status.value == "failed":
@@ -987,6 +1059,7 @@ try:
         "slot_entities": slot_entities,
         "slot_components": slot_components,
         "slot_interferences": slot_interferences,
+        "slot_bom": slot_bom,
         "review_draft": None if review_draft is None else review_draft.to_mapping(),
         "baseline_usable": baseline_usable,
         "step_oks": [record.result.ok for record in task.steps],
@@ -1016,6 +1089,7 @@ try:
         "reload_entities": reload_entities,
         "reload_components": reload_components,
         "reload_interferences": reload_interferences,
+        "reload_bom": reload_bom,
         "step_reload_geometry": step_reload_geometry,
         "layout": layout,
     }
@@ -3267,25 +3341,29 @@ def test_real_task_kernel_reviews_and_accepts_interference_free_assembly(
     assert payload["candidate_revision"] == payload["final_head"]["revision_id"]
     assert payload["final_head"]["generation"] == payload["base_head"]["generation"] + 1
     assert payload["slot_is_baseline"] is False
-    assert payload["step_oks"] == [True] * 6
+    assert payload["step_oks"] == [True] * 8
     assert payload["step_operations"] == [
         "component-a",
         "box-a",
+        "bom-a",
         "component-b",
         "box-b",
         "place-b",
+        "bom-b",
         "inspect",
     ]
 
     values = payload["step_values"]
     component_a = values[0]["component_id"]
-    component_b = values[2]["component_id"]
+    component_b = values[3]["component_id"]
     assert component_a != component_b
     assert values[1]["component_id"] == component_a
-    assert values[3]["component_id"] == component_b
+    assert values[2]["component_id"] == component_a
     assert values[4]["component_id"] == component_b
-    assert len(values[5]["components"]) == 2
-    assert values[5]["interferences"] == [
+    assert values[5]["component_id"] == component_b
+    assert values[6]["component_id"] == component_b
+    assert len(values[7]["components"]) == 2
+    assert values[7]["interferences"] == [
         {
             "schema_version": 1,
             "component_a_id": min(component_a, component_b),
@@ -3294,25 +3372,39 @@ def test_real_task_kernel_reviews_and_accepts_interference_free_assembly(
             "interfering": False,
         }
     ]
+    inspect_bom = values[7]["bom"]
+    assert values[7]["bom_revision_id"] == payload["candidate_revision"]
+    assert inspect_bom["complete"] is True
+    assert inspect_bom["total_quantity"] == 2
+    assert inspect_bom["total_mass_kg"] == pytest.approx(0.0054)
+    assert len(inspect_bom["rows"]) == 1
+    assert inspect_bom["rows"][0]["part_number"] == "BRACKET-001"
+    assert inspect_bom["rows"][0]["quantity"] == 2
+    assert values[7]["bom_csv"] == values[6]["bom_csv"]
+    assert values[7]["bom_csv"].startswith(
+        "part_number,description,material,density_kg_m3,quantity,"
+    )
 
     for key in ("slot_components", "reload_components"):
         components = payload[key]
         assert len(components) == 2
         assert {item["component_id"] for item in components} == {component_a, component_b}
-        assert sorted(item["volume_mm3"] for item in components) == pytest.approx([500.0, 1000.0])
+        assert sorted(item["volume_mm3"] for item in components) == pytest.approx([1000.0, 1000.0])
+        assert {item["bom"]["part_number"] for item in components} == {"BRACKET-001"}
     assert payload["slot_interferences"] == payload["reload_interferences"]
     assert payload["slot_interferences"][0]["interfering"] is False
     assert payload["slot_interferences"][0]["common_volume_mm3"] == pytest.approx(0.0)
 
     assert payload["report_passed"] == [True]
-    assert len(payload["verdicts"]) == 12
+    assert payload["slot_bom"] == payload["reload_bom"] == inspect_bom
+    assert len(payload["verdicts"]) == 16
     assert {item["outcome"] for item in payload["verdicts"]} == {"pass"}
     _assert_artifact_lineage(payload)
-    assert payload["slot_geometry"]["volume"] == pytest.approx(1500.0)
-    assert payload["slot_geometry"]["bbox"] == pytest.approx([25.0, 10.0, 10.0])
+    assert payload["slot_geometry"]["volume"] == pytest.approx(2000.0)
+    assert payload["slot_geometry"]["bbox"] == pytest.approx([30.0, 10.0, 10.0])
     assert payload["reload_geometry"] == payload["slot_geometry"]
-    assert payload["step_reload_geometry"]["volume"] == pytest.approx(1500.0)
-    assert payload["step_reload_geometry"]["bbox"] == pytest.approx([25.0, 10.0, 10.0])
+    assert payload["step_reload_geometry"]["volume"] == pytest.approx(2000.0)
+    assert payload["step_reload_geometry"]["bbox"] == pytest.approx([30.0, 10.0, 10.0])
     assert payload["transitions"][-4:] == [
         "prepare_review",
         "publish_draft",

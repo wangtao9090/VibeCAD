@@ -43,6 +43,7 @@ from vibecad.runtime.contracts import RuntimeDescriptor, RuntimeIdentity
 from vibecad.runtime.spec import FREECAD_VERSION
 from vibecad.validation import (
     ArtifactObservation,
+    BomObservation,
     ComponentObservation,
     EntityObservation,
     InterferenceObservation,
@@ -722,6 +723,7 @@ class WorkerCadExecutionPort(CadExecutionPort):
         tuple[EntityObservation, ...],
         tuple[ComponentObservation, ...],
         tuple[InterferenceObservation, ...],
+        BomObservation | None,
     ]:
         session = self.open_revision(store=self._store, revision=revision)
         with self._lock:
@@ -729,7 +731,7 @@ class WorkerCadExecutionPort(CadExecutionPort):
         if state is None:
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
         try:
-            shape, entities, components, interferences = self._call(
+            shape, entities, components, interferences, bom = self._call(
                 worker,
                 "observe",
                 session=session,
@@ -737,7 +739,7 @@ class WorkerCadExecutionPort(CadExecutionPort):
             )
             if not include_shape:
                 shape = None
-            return shape, entities, components, interferences
+            return shape, entities, components, interferences, bom
         finally:
             self.close(session)
 
@@ -783,7 +785,13 @@ class WorkerCadExecutionPort(CadExecutionPort):
             "step",
         ):
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
-        live_shape, live_entities, live_components, live_interferences = self._call(
+        (
+            live_shape,
+            live_entities,
+            live_components,
+            live_interferences,
+            live_bom,
+        ) = self._call(
             worker,
             "observe",
             session=candidate.binding.session,
@@ -794,6 +802,7 @@ class WorkerCadExecutionPort(CadExecutionPort):
             reloaded_entities,
             reloaded_components,
             reloaded_interferences,
+            reloaded_bom,
         ) = self._observe_revision(
             worker,
             durable,
@@ -805,6 +814,7 @@ class WorkerCadExecutionPort(CadExecutionPort):
             or reloaded_entities != live_entities
             or reloaded_components != live_components
             or reloaded_interferences != live_interferences
+            or reloaded_bom != live_bom
         ):
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
         before_entities: tuple[EntityObservation, ...] = ()
@@ -814,6 +824,7 @@ class WorkerCadExecutionPort(CadExecutionPort):
                 before_entities,
                 _before_components,
                 _before_interferences,
+                _before_bom,
             ) = self._observe_revision(
                 worker,
                 base,
@@ -849,6 +860,7 @@ class WorkerCadExecutionPort(CadExecutionPort):
             entities=live_entities,
             components=live_components,
             interferences=live_interferences,
+            bom=live_bom,
             preservations=preservations,
         )
         artifacts = (

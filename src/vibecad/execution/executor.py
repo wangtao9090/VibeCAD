@@ -9,7 +9,10 @@ revision store.
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
+import json
 import math
 import os
 import re
@@ -18,7 +21,7 @@ import stat
 import zipfile
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
@@ -73,6 +76,10 @@ from vibecad.tools.transform import move_part as _move_part
 from vibecad.tools.transform import rotate_part as _rotate_part
 from vibecad.validation import (
     ArtifactObservation,
+    BomConflictObservation,
+    BomObservation,
+    BomRowObservation,
+    ComponentBomMetadata,
     ComponentObservation,
     EntityObservation,
     EntityParameterObservation,
@@ -647,6 +654,7 @@ def _component_observations(session: object) -> tuple[ComponentObservation, ...]
     list_records = getattr(session, "list_component_identity_records", None)
     if not callable(list_records):
         return ()
+    read_bom = getattr(session, "read_component_bom_metadata", None)
     try:
         observations = []
         for part_name, container, identity, members in tuple(list_records()):
@@ -661,6 +669,7 @@ def _component_observations(session: object) -> tuple[ComponentObservation, ...]
                     member_object_ids=tuple(
                         member_identity.object_id for _, member_identity in members
                     ),
+                    bom=(None if not callable(read_bom) else read_bom(part_name)),
                     **_entity_geometry(shape),
                 )
             )
@@ -713,6 +722,180 @@ def _interference_observations(session: object) -> tuple[InterferenceObservation
         raise _ObservationFailure from None
 
 
+def _component_geometry_digest(
+    session: object,
+    part_name: str,
+    members: tuple[tuple[object, EntityIdentity], ...],
+) -> str:
+    try:
+        local_geometry = _entity_geometry(session.get_result_shape(part_name))  # type: ignore[attr-defined]
+        member_facts = []
+        for obj, identity in members:
+            observation = _entity_observation(obj, identity)
+            member_facts.append(
+                {
+                    "object_type": observation.object_type,
+                    "semantic_role": observation.semantic_role,
+                    "placement": list(observation.placement),
+                    "parameters": [item.to_mapping() for item in observation.parameters],
+                    "volume_mm3": observation.volume_mm3,
+                    "area_mm2": observation.area_mm2,
+                    "bbox_mm": (None if observation.bbox_mm is None else list(observation.bbox_mm)),
+                    "center_of_mass_mm": (
+                        None
+                        if observation.center_of_mass_mm is None
+                        else list(observation.center_of_mass_mm)
+                    ),
+                    "valid_shape": observation.valid_shape,
+                    "solid_count": observation.solid_count,
+                }
+            )
+        member_facts.sort(
+            key=lambda value: json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "local_geometry": {
+                key: list(value) if type(value) is tuple else value
+                for key, value in local_geometry.items()
+            },
+            "members": member_facts,
+        }
+        raw = json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(b"vibecad-component-geometry-v1\0" + raw).hexdigest()
+    except _ObservationFailure:
+        raise
+    except Exception:
+        raise _ObservationFailure from None
+
+
+def _bom_observation(
+    session: object,
+    components: tuple[ComponentObservation, ...] | None = None,
+) -> BomObservation | None:
+    list_records = getattr(session, "list_component_identity_records", None)
+    if not callable(list_records):
+        return None
+    try:
+        records = tuple(list_records())
+        if not records:
+            return None
+        observed = _component_observations(session) if components is None else components
+        by_id = {item.component_id: item for item in observed}
+        claims: dict[str, list[tuple[ComponentObservation, str]]] = {}
+        missing = []
+        for part_name, _container, identity, members in records:
+            component = by_id.get(identity.object_id)
+            if component is None:
+                raise _ObservationFailure
+            metadata = component.bom
+            if metadata is None:
+                missing.append(component.component_id)
+                continue
+            digest = _component_geometry_digest(session, part_name, members)
+            claims.setdefault(metadata.part_number, []).append((component, digest))
+
+        rows = []
+        conflicts = []
+        for part_number in sorted(claims):
+            group = claims[part_number]
+            first_component, first_digest = group[0]
+            first_metadata = first_component.bom
+            assert first_metadata is not None
+            consistent = all(
+                component.bom == first_metadata and digest == first_digest
+                for component, digest in group
+            )
+            component_ids = tuple(sorted(component.component_id for component, _ in group))
+            if not consistent:
+                conflicts.append(
+                    BomConflictObservation(
+                        part_number=part_number,
+                        component_ids=component_ids,
+                    )
+                )
+                continue
+            volume = first_component.volume_mm3
+            if volume is None or volume <= 0:
+                raise _ObservationFailure
+            unit_mass = float(volume) * float(first_metadata.density_kg_m3) * 1e-9
+            rows.append(
+                BomRowObservation(
+                    part_number=part_number,
+                    description=first_metadata.description,
+                    material=first_metadata.material,
+                    density_kg_m3=first_metadata.density_kg_m3,
+                    quantity=len(component_ids),
+                    unit_mass_kg=unit_mass,
+                    total_mass_kg=unit_mass * len(component_ids),
+                    component_ids=component_ids,
+                    geometry_digest=first_digest,
+                )
+            )
+        total_quantity = sum(item.quantity for item in rows)
+        total_mass = sum(float(item.total_mass_kg) for item in rows)
+        return BomObservation(
+            component_count=len(records),
+            rows=tuple(rows),
+            missing_component_ids=tuple(sorted(missing)),
+            conflicts=tuple(conflicts),
+            total_quantity=total_quantity,
+            total_mass_kg=total_mass,
+            complete=not missing and not conflicts and total_quantity == len(records),
+        )
+    except _ObservationFailure:
+        raise
+    except Exception:
+        raise _ObservationFailure from None
+
+
+def _bom_csv(bom: BomObservation | None) -> str | None:
+    if bom is None or not bom.complete:
+        return None
+    stream = io.StringIO(newline="")
+    writer = csv.writer(stream, lineterminator="\n")
+    writer.writerow(
+        (
+            "part_number",
+            "description",
+            "material",
+            "density_kg_m3",
+            "quantity",
+            "unit_mass_kg",
+            "total_mass_kg",
+            "component_ids",
+            "geometry_digest",
+        )
+    )
+    for row in bom.rows:
+        writer.writerow(
+            (
+                row.part_number,
+                row.description,
+                row.material,
+                row.density_kg_m3,
+                row.quantity,
+                row.unit_mass_kg,
+                row.total_mass_kg,
+                ";".join(row.component_ids),
+                row.geometry_digest,
+            )
+        )
+    return stream.getvalue()
+
+
 def _reloaded_observations(
     path: Path,
     *,
@@ -722,6 +905,7 @@ def _reloaded_observations(
     tuple[EntityObservation, ...],
     tuple[ComponentObservation, ...],
     tuple[InterferenceObservation, ...],
+    BomObservation | None,
 ]:
     probe = None
     failed = False
@@ -729,6 +913,7 @@ def _reloaded_observations(
     entities: tuple[EntityObservation, ...] = ()
     components: tuple[ComponentObservation, ...] = ()
     interferences: tuple[InterferenceObservation, ...] = ()
+    bom: BomObservation | None = None
     try:
         probe = _Session()
         probe.load_document(path)
@@ -737,6 +922,7 @@ def _reloaded_observations(
         entities = _entity_observations(probe)
         components = _component_observations(probe)
         interferences = _interference_observations(probe)
+        bom = _bom_observation(probe, components)
     except Exception:
         failed = True
     finally:
@@ -747,7 +933,7 @@ def _reloaded_observations(
                 failed = True
     if failed:
         raise _ObservationFailure
-    return shape, entities, components, interferences
+    return shape, entities, components, interferences, bom
 
 
 def _preservation_observations(
@@ -1447,20 +1633,25 @@ def _managed_mutation(
 def _managed_inspect(
     session: object,
     context: _InvocationContext,
+    *,
+    revision_id: str,
 ) -> dict[str, object]:
     if context.preserve:
         raise _operation_failure()
     before = _entity_observations(session)
     components_before = _component_observations(session)
     interferences_before = _interference_observations(session)
+    bom_before = _bom_observation(session, components_before)
     shape = _shape_observation(session)
     after = _entity_observations(session)
     components_after = _component_observations(session)
     interferences_after = _interference_observations(session)
+    bom_after = _bom_observation(session, components_after)
     if (
         before != after
         or components_before != components_after
         or interferences_before != interferences_after
+        or bom_before != bom_after
     ):
         raise _operation_failure()
     return {
@@ -1471,6 +1662,9 @@ def _managed_inspect(
         "entities": [item.to_mapping() for item in after],
         "components": [item.to_mapping() for item in components_after],
         "interferences": [item.to_mapping() for item in interferences_after],
+        "bom_revision_id": revision_id,
+        "bom": None if bom_after is None else bom_after.to_mapping(),
+        "bom_csv": _bom_csv(bom_after),
     }
 
 
@@ -1598,6 +1792,81 @@ def _set_absolute_component_placement(
         raise
     except Exception:
         raise _operation_failure() from None
+
+
+def _managed_set_component_bom(
+    session: object,
+    context: _InvocationContext,
+    *,
+    project_id: str,
+    revision_id: str,
+    bom_revision_id: str,
+    target: object,
+    part_number: object,
+    description: object,
+    material: object,
+    density: object,
+) -> dict[str, object]:
+    if context.preserve:
+        raise _operation_failure()
+    try:
+        metadata = ComponentBomMetadata(
+            part_number=part_number,  # type: ignore[arg-type]
+            description=description,  # type: ignore[arg-type]
+            material=material,  # type: ignore[arg-type]
+            density_kg_m3=density,  # type: ignore[arg-type]
+        )
+    except Exception:
+        raise _operation_failure() from None
+    before_entities = _entity_observations(session)
+    before_components = _component_observations(session)
+    before_by_id = {item.component_id: item for item in before_components}
+    before_interferences = _interference_observations(session)
+    _container, identity, part_name = _resolve_component_target(
+        session,
+        target,
+        project_id=project_id,
+        revision_id=revision_id,
+    )
+    old_component = before_by_id.get(identity.object_id)
+    write_metadata = getattr(session, "set_component_bom_metadata", None)
+    if old_component is None or old_component.bom == metadata or not callable(write_metadata):
+        raise _operation_failure()
+    try:
+        observed_metadata = write_metadata(part_name, metadata)
+    except Exception:
+        raise _operation_failure() from None
+    if observed_metadata != metadata:
+        raise _operation_failure()
+    after_entities = _entity_observations(session)
+    after_components = _component_observations(session)
+    after_by_id = {item.component_id: item for item in after_components}
+    after_interferences = _interference_observations(session)
+    new_component = after_by_id.get(identity.object_id)
+    if (
+        before_entities != after_entities
+        or set(before_by_id) != set(after_by_id)
+        or before_interferences != after_interferences
+        or new_component != replace(old_component, bom=metadata)
+        or any(
+            before_by_id[component_id] != after_by_id[component_id]
+            for component_id in before_by_id
+            if component_id != identity.object_id
+        )
+    ):
+        raise _operation_failure()
+    bom = _bom_observation(session, after_components)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "component_bom_set",
+        "operation": context.operation,
+        "component_id": identity.object_id,
+        "before": None if old_component.bom is None else old_component.bom.to_mapping(),
+        "after": metadata.to_mapping(),
+        "bom_revision_id": bom_revision_id,
+        "bom": None if bom is None else bom.to_mapping(),
+        "bom_csv": _bom_csv(bom),
+    }
 
 
 def _managed_place_component(
@@ -2485,6 +2754,7 @@ class InProcessCadExecutor(CadExecutionPort):
                 )
             project_id = candidate.project_id
             revision_id = candidate.base_head.revision_id
+            candidate_revision_id = candidate.binding.revision_id
             handlers = {
                 "create_box": _queued_handler(
                     contexts.get("create_box", deque()),
@@ -2537,11 +2807,25 @@ class InProcessCadExecutor(CadExecutionPort):
                 ),
                 "inspect_model": _queued_handler(
                     contexts.get("inspect_model", deque()),
-                    partial(_managed_inspect, session),
+                    partial(
+                        _managed_inspect,
+                        session,
+                        revision_id=candidate_revision_id,
+                    ),
                 ),
                 "create_component": _queued_handler(
                     contexts.get("create_component", deque()),
                     partial(_managed_create_component, session),
+                ),
+                "set_component_bom": _queued_handler(
+                    contexts.get("set_component_bom", deque()),
+                    partial(
+                        _managed_set_component_bom,
+                        session,
+                        project_id=project_id,
+                        revision_id=revision_id,
+                        bom_revision_id=candidate_revision_id,
+                    ),
                 ),
                 "place_component": _queued_handler(
                     contexts.get("place_component", deque()),
@@ -2657,10 +2941,11 @@ class InProcessCadExecutor(CadExecutionPort):
             live_entities = _entity_observations(candidate.binding.session)
             live_components = _component_observations(candidate.binding.session)
             live_interferences = _interference_observations(candidate.binding.session)
+            live_bom = _bom_observation(candidate.binding.session, live_components)
         except _ObservationFailure:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
         try:
-            sealed_shape, entities, components, interferences = _reloaded_observations(
+            sealed_shape, entities, components, interferences, bom = _reloaded_observations(
                 model_path,
                 include_shape=True,
             )
@@ -2684,6 +2969,7 @@ class InProcessCadExecutor(CadExecutionPort):
             or entities != live_entities
             or components != live_components
             or interferences != live_interferences
+            or bom != live_bom
         ):
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
 
@@ -2723,6 +3009,7 @@ class InProcessCadExecutor(CadExecutionPort):
                     before_entities,
                     _before_components,
                     _before_interferences,
+                    _before_bom,
                 ) = _reloaded_observations(
                     base_path,
                     include_shape=False,
@@ -2791,6 +3078,7 @@ class InProcessCadExecutor(CadExecutionPort):
             entities=entities,
             components=components,
             interferences=interferences,
+            bom=bom,
             preservations=preservations,
         )
         artifacts = (

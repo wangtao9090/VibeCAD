@@ -1189,6 +1189,31 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
             ),
         ),
         OperationMetadata(
+            operation="set_component_bom",
+            handler_name="set_component_bom",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "component",
+                    "target",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            argument_fields=(
+                FieldMetadata("part_number", "part_number", ValueShape.NONBLANK_STRING),
+                FieldMetadata("description", "description", ValueShape.NONBLANK_STRING),
+                FieldMetadata("material", "material", ValueShape.NONBLANK_STRING),
+                FieldMetadata("density_kg_m3", "density", ValueShape.POSITIVE_NUMBER),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=0,
+                max_result_bytes=65_536,
+            ),
+        ),
+        OperationMetadata(
             operation="place_component",
             handler_name="place_component",
             risk_class=RiskClass.MUTATING,

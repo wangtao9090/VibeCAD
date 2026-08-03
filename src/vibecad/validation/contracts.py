@@ -222,6 +222,15 @@ def _validate_bounded_text(value: object, path: str) -> str:
     return value
 
 
+def _validate_bom_text(value: object, path: str, *, maximum_bytes: int) -> str:
+    text = _validate_bounded_text(value, path)
+    if text != text.strip():
+        _raise_validation(ValidationErrorCode.INVALID_VALUE, path)
+    if len(text.encode("utf-8")) > maximum_bytes:
+        _raise_validation(ValidationErrorCode.BUDGET_EXCEEDED, path)
+    return text
+
+
 def _finite_number(
     value: object,
     path: str,
@@ -731,6 +740,70 @@ class EntityObservation:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ComponentBomMetadata:
+    """Revision-persisted commercial metadata for one physical component."""
+
+    part_number: str
+    description: str
+    material: str
+    density_kg_m3: int | float
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "schema_version",
+            _validate_schema(self.schema_version, "/schema_version"),
+        )
+        object.__setattr__(
+            self,
+            "part_number",
+            _validate_bom_text(self.part_number, "/part_number", maximum_bytes=128),
+        )
+        object.__setattr__(
+            self,
+            "description",
+            _validate_bom_text(self.description, "/description", maximum_bytes=512),
+        )
+        object.__setattr__(
+            self,
+            "material",
+            _validate_bom_text(self.material, "/material", maximum_bytes=128),
+        )
+        density = _finite_number(self.density_kg_m3, "/density_kg_m3", nonnegative=True)
+        if density <= 0 or density > 100_000:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/density_kg_m3")
+        object.__setattr__(self, "density_kg_m3", density)
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "part_number": self.part_number,
+            "description": self.description,
+            "material": self.material,
+            "density_kg_m3": self.density_kg_m3,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        required = {
+            "schema_version",
+            "part_number",
+            "description",
+            "material",
+            "density_kg_m3",
+        }
+        data = _fields(value, allowed=required, required=required)
+        return cls(
+            schema_version=data["schema_version"],
+            part_number=data["part_number"],
+            description=data["description"],
+            material=data["material"],
+            density_kg_m3=data["density_kg_m3"],
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ComponentObservation:
     """Canonical placement, membership, and global geometry for one component."""
 
@@ -739,6 +812,7 @@ class ComponentObservation:
     provenance: Mapping[str, str | None]
     placement: tuple[int | float, ...]
     member_object_ids: tuple[str, ...] = ()
+    bom: ComponentBomMetadata | None = None
     volume_mm3: int | float | None = None
     area_mm2: int | float | None = None
     bbox_mm: tuple[int | float, ...] | None = None
@@ -779,6 +853,8 @@ class ComponentObservation:
         if members != tuple(sorted(members)):
             _raise_validation(ValidationErrorCode.INVALID_VALUE, "/member_object_ids")
         object.__setattr__(self, "member_object_ids", members)
+        if self.bom is not None and type(self.bom) is not ComponentBomMetadata:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/bom")
         object.__setattr__(
             self,
             "volume_mm3",
@@ -817,7 +893,7 @@ class ComponentObservation:
         return self.component_id
 
     def to_mapping(self) -> dict[str, object]:
-        return {
+        result = {
             "schema_version": self.schema_version,
             "component_id": self.component_id,
             "object_type": self.object_type,
@@ -833,6 +909,9 @@ class ComponentObservation:
             "valid_shape": self.valid_shape,
             "solid_count": self.solid_count,
         }
+        if self.bom is not None:
+            result["bom"] = self.bom.to_mapping()
+        return result
 
     @classmethod
     def from_mapping(cls, value: object) -> Self:
@@ -850,7 +929,7 @@ class ComponentObservation:
             "valid_shape",
             "solid_count",
         }
-        data = _fields(value, allowed=required, required=required)
+        data = _fields(value, allowed=required | {"bom"}, required=required)
         if type(data["member_object_ids"]) is not list:
             _raise_validation(ValidationErrorCode.INVALID_TYPE, "/member_object_ids")
         if len(data["member_object_ids"]) > _MAX_COMPONENT_MEMBERS:
@@ -858,6 +937,15 @@ class ComponentObservation:
         placement = _json_vector(data["placement"], "/placement")
         if placement is None:
             _raise_validation(ValidationErrorCode.INVALID_TYPE, "/placement")
+        parsed_bom = None
+        if "bom" in data:
+            caught = None
+            try:
+                parsed_bom = ComponentBomMetadata.from_mapping(data["bom"])
+            except ValidationError as error:
+                caught = error
+            if caught is not None:
+                raise _prefix_nested_error(caught, "/bom")
         return cls(
             schema_version=data["schema_version"],
             component_id=data["component_id"],
@@ -868,6 +956,7 @@ class ComponentObservation:
                 data["member_object_ids"],
                 "/member_object_ids",
             ),
+            bom=parsed_bom,
             volume_mm3=data["volume_mm3"],
             area_mm2=data["area_mm2"],
             bbox_mm=_json_vector(data["bbox_mm"], "/bbox_mm"),
@@ -951,6 +1040,340 @@ class InterferenceObservation:
             component_b_id=data["component_b_id"],
             common_volume_mm3=data["common_volume_mm3"],
             interfering=data["interfering"],
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BomRowObservation:
+    """One valid flat-BOM row derived from physical components."""
+
+    part_number: str
+    description: str
+    material: str
+    density_kg_m3: int | float
+    quantity: int
+    unit_mass_kg: int | float
+    total_mass_kg: int | float
+    component_ids: tuple[str, ...]
+    geometry_digest: str
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "schema_version",
+            _validate_schema(self.schema_version, "/schema_version"),
+        )
+        metadata = ComponentBomMetadata(
+            part_number=self.part_number,
+            description=self.description,
+            material=self.material,
+            density_kg_m3=self.density_kg_m3,
+        )
+        object.__setattr__(self, "part_number", metadata.part_number)
+        object.__setattr__(self, "description", metadata.description)
+        object.__setattr__(self, "material", metadata.material)
+        object.__setattr__(self, "density_kg_m3", metadata.density_kg_m3)
+        if type(self.component_ids) is not tuple:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/component_ids")
+        if not 1 <= len(self.component_ids) <= _MAX_COMPONENTS:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/component_ids")
+        component_ids = tuple(
+            _validate_entity_identifier(item, _OBJECT_RE, "/component_ids")
+            for item in self.component_ids
+        )
+        if component_ids != tuple(sorted(component_ids)):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/component_ids")
+        if len(component_ids) != len(set(component_ids)):
+            _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/component_ids")
+        object.__setattr__(self, "component_ids", component_ids)
+        if type(self.quantity) is not int:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/quantity")
+        if self.quantity != len(component_ids):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/quantity")
+        unit_mass = _finite_number(self.unit_mass_kg, "/unit_mass_kg", nonnegative=True)
+        total_mass = _finite_number(self.total_mass_kg, "/total_mass_kg", nonnegative=True)
+        if unit_mass <= 0 or not math.isclose(
+            float(total_mass),
+            float(unit_mass) * self.quantity,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/total_mass_kg")
+        object.__setattr__(self, "unit_mass_kg", unit_mass)
+        object.__setattr__(self, "total_mass_kg", total_mass)
+        object.__setattr__(
+            self,
+            "geometry_digest",
+            _validate_digest(self.geometry_digest, "/geometry_digest"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "part_number": self.part_number,
+            "description": self.description,
+            "material": self.material,
+            "density_kg_m3": self.density_kg_m3,
+            "quantity": self.quantity,
+            "unit_mass_kg": self.unit_mass_kg,
+            "total_mass_kg": self.total_mass_kg,
+            "component_ids": list(self.component_ids),
+            "geometry_digest": self.geometry_digest,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        required = {
+            "schema_version",
+            "part_number",
+            "description",
+            "material",
+            "density_kg_m3",
+            "quantity",
+            "unit_mass_kg",
+            "total_mass_kg",
+            "component_ids",
+            "geometry_digest",
+        }
+        data = _fields(value, allowed=required, required=required)
+        if type(data["component_ids"]) is not list:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/component_ids")
+        return cls(
+            schema_version=data["schema_version"],
+            part_number=data["part_number"],
+            description=data["description"],
+            material=data["material"],
+            density_kg_m3=data["density_kg_m3"],
+            quantity=data["quantity"],
+            unit_mass_kg=data["unit_mass_kg"],
+            total_mass_kg=data["total_mass_kg"],
+            component_ids=_json_text_tuple(data["component_ids"], "/component_ids"),
+            geometry_digest=data["geometry_digest"],
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BomConflictObservation:
+    """Components that claim one part number but disagree on BOM or geometry facts."""
+
+    part_number: str
+    component_ids: tuple[str, ...]
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "schema_version",
+            _validate_schema(self.schema_version, "/schema_version"),
+        )
+        object.__setattr__(
+            self,
+            "part_number",
+            _validate_bom_text(self.part_number, "/part_number", maximum_bytes=128),
+        )
+        if type(self.component_ids) is not tuple:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/component_ids")
+        if not 2 <= len(self.component_ids) <= _MAX_COMPONENTS:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/component_ids")
+        component_ids = tuple(
+            _validate_entity_identifier(item, _OBJECT_RE, "/component_ids")
+            for item in self.component_ids
+        )
+        if component_ids != tuple(sorted(component_ids)):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/component_ids")
+        if len(component_ids) != len(set(component_ids)):
+            _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/component_ids")
+        object.__setattr__(self, "component_ids", component_ids)
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "part_number": self.part_number,
+            "component_ids": list(self.component_ids),
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        required = {"schema_version", "part_number", "component_ids"}
+        data = _fields(value, allowed=required, required=required)
+        if type(data["component_ids"]) is not list:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/component_ids")
+        return cls(
+            schema_version=data["schema_version"],
+            part_number=data["part_number"],
+            component_ids=_json_text_tuple(data["component_ids"], "/component_ids"),
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BomObservation:
+    """Complete or diagnostic flat-BOM facts for one component assembly."""
+
+    component_count: int
+    rows: tuple[BomRowObservation, ...] = ()
+    missing_component_ids: tuple[str, ...] = ()
+    conflicts: tuple[BomConflictObservation, ...] = ()
+    total_quantity: int = 0
+    total_mass_kg: int | float = 0
+    complete: bool = False
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "schema_version",
+            _validate_schema(self.schema_version, "/schema_version"),
+        )
+        if type(self.component_count) is not int:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/component_count")
+        if not 1 <= self.component_count <= _MAX_COMPONENTS:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/component_count")
+        if type(self.rows) is not tuple:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/rows")
+        if len(self.rows) > _MAX_COMPONENTS or any(
+            type(item) is not BomRowObservation for item in self.rows
+        ):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/rows")
+        part_numbers = tuple(item.part_number for item in self.rows)
+        if part_numbers != tuple(sorted(part_numbers)) or len(part_numbers) != len(
+            set(part_numbers)
+        ):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/rows")
+        if type(self.missing_component_ids) is not tuple:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/missing_component_ids")
+        missing = tuple(
+            _validate_entity_identifier(item, _OBJECT_RE, "/missing_component_ids")
+            for item in self.missing_component_ids
+        )
+        if missing != tuple(sorted(missing)) or len(missing) != len(set(missing)):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/missing_component_ids")
+        object.__setattr__(self, "missing_component_ids", missing)
+        if type(self.conflicts) is not tuple:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/conflicts")
+        if len(self.conflicts) > _MAX_COMPONENTS or any(
+            type(item) is not BomConflictObservation for item in self.conflicts
+        ):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/conflicts")
+        conflict_numbers = tuple(item.part_number for item in self.conflicts)
+        if conflict_numbers != tuple(sorted(conflict_numbers)) or len(conflict_numbers) != len(
+            set(conflict_numbers)
+        ):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/conflicts")
+        if set(part_numbers) & set(conflict_numbers):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/conflicts")
+        accounted = [component_id for row in self.rows for component_id in row.component_ids]
+        accounted.extend(missing)
+        accounted.extend(
+            component_id for conflict in self.conflicts for component_id in conflict.component_ids
+        )
+        if len(accounted) != self.component_count or len(accounted) != len(set(accounted)):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/component_count")
+        expected_quantity = sum(item.quantity for item in self.rows)
+        if type(self.total_quantity) is not int:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/total_quantity")
+        if self.total_quantity != expected_quantity:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/total_quantity")
+        expected_mass = sum(float(item.total_mass_kg) for item in self.rows)
+        total_mass = _finite_number(self.total_mass_kg, "/total_mass_kg", nonnegative=True)
+        if not math.isclose(
+            float(total_mass),
+            expected_mass,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/total_mass_kg")
+        object.__setattr__(self, "total_mass_kg", total_mass)
+        if type(self.complete) is not bool:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/complete")
+        expected_complete = (
+            not missing and not self.conflicts and expected_quantity == self.component_count
+        )
+        if self.complete is not expected_complete:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/complete")
+
+    @property
+    def component_ids(self) -> tuple[str, ...]:
+        values = [component_id for row in self.rows for component_id in row.component_ids]
+        values.extend(self.missing_component_ids)
+        values.extend(
+            component_id for conflict in self.conflicts for component_id in conflict.component_ids
+        )
+        return tuple(sorted(values))
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "component_count": self.component_count,
+            "rows": [item.to_mapping() for item in self.rows],
+            "missing_component_ids": list(self.missing_component_ids),
+            "conflicts": [item.to_mapping() for item in self.conflicts],
+            "total_quantity": self.total_quantity,
+            "total_mass_kg": self.total_mass_kg,
+            "complete": self.complete,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        required = {
+            "schema_version",
+            "component_count",
+            "rows",
+            "missing_component_ids",
+            "conflicts",
+            "total_quantity",
+            "total_mass_kg",
+            "complete",
+        }
+        data = _fields(value, allowed=required, required=required)
+        if type(data["rows"]) is not list:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/rows")
+        if type(data["conflicts"]) is not list:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/conflicts")
+        if type(data["missing_component_ids"]) is not list:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/missing_component_ids")
+        rows = []
+        for index, raw in enumerate(data["rows"]):
+            caught = None
+            try:
+                parsed_row = BomRowObservation.from_mapping(raw)
+            except ValidationError as error:
+                caught = error
+                parsed_row = None
+            if caught is not None:
+                raise _prefix_nested_error(
+                    caught,
+                    join_json_pointer("/rows", str(index)),
+                )
+            assert parsed_row is not None
+            rows.append(parsed_row)
+        conflicts = []
+        for index, raw in enumerate(data["conflicts"]):
+            caught = None
+            try:
+                parsed_conflict = BomConflictObservation.from_mapping(raw)
+            except ValidationError as error:
+                caught = error
+                parsed_conflict = None
+            if caught is not None:
+                raise _prefix_nested_error(
+                    caught,
+                    join_json_pointer("/conflicts", str(index)),
+                )
+            assert parsed_conflict is not None
+            conflicts.append(parsed_conflict)
+        return cls(
+            schema_version=data["schema_version"],
+            component_count=data["component_count"],
+            rows=tuple(rows),
+            missing_component_ids=_json_text_tuple(
+                data["missing_component_ids"],
+                "/missing_component_ids",
+            ),
+            conflicts=tuple(conflicts),
+            total_quantity=data["total_quantity"],
+            total_mass_kg=data["total_mass_kg"],
+            complete=data["complete"],
         )
 
 
@@ -1113,6 +1536,7 @@ class ObservationSnapshot:
     entities: tuple[EntityObservation, ...] = ()
     components: tuple[ComponentObservation, ...] = ()
     interferences: tuple[InterferenceObservation, ...] = ()
+    bom: BomObservation | None = None
     preservations: tuple[PreservationObservation, ...] = ()
     schema_version: int = SCHEMA_VERSION
     observation_digest: str = field(init=False)
@@ -1176,6 +1600,8 @@ class ObservationSnapshot:
                     ValidationErrorCode.INVALID_TYPE,
                     join_json_pointer("/interferences", str(index)),
                 )
+        if self.bom is not None and type(self.bom) is not BomObservation:
+            _raise_validation(ValidationErrorCode.INVALID_TYPE, "/bom")
         if type(self.preservations) is not tuple:
             _raise_validation(ValidationErrorCode.INVALID_TYPE, "/preservations")
         if len(self.preservations) > _MAX_PRESERVATIONS:
@@ -1250,6 +1676,37 @@ class ObservationSnapshot:
             )
             if interference_pairs != expected_pairs:
                 _raise_validation(ValidationErrorCode.INVALID_VALUE, "/interferences")
+        if self.bom is not None and (
+            self.bom.component_count != len(component_ids)
+            or self.bom.component_ids != component_ids
+        ):
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, "/bom")
+        if self.bom is not None:
+            components_by_id = {item.component_id: item for item in self.components}
+            if any(
+                components_by_id[component_id].bom is not None
+                for component_id in self.bom.missing_component_ids
+            ):
+                _raise_validation(ValidationErrorCode.INVALID_VALUE, "/bom")
+            for row in self.bom.rows:
+                expected_metadata = ComponentBomMetadata(
+                    part_number=row.part_number,
+                    description=row.description,
+                    material=row.material,
+                    density_kg_m3=row.density_kg_m3,
+                )
+                if any(
+                    components_by_id[component_id].bom != expected_metadata
+                    for component_id in row.component_ids
+                ):
+                    _raise_validation(ValidationErrorCode.INVALID_VALUE, "/bom")
+            for conflict in self.bom.conflicts:
+                if any(
+                    components_by_id[component_id].bom is None
+                    or components_by_id[component_id].bom.part_number != conflict.part_number
+                    for component_id in conflict.component_ids
+                ):
+                    _raise_validation(ValidationErrorCode.INVALID_VALUE, "/bom")
         preservation_targets = tuple(item.target for item in self.preservations)
         if len(preservation_targets) != len(set(preservation_targets)):
             _raise_validation(ValidationErrorCode.DUPLICATE_TARGET, "/preservations")
@@ -1290,6 +1747,10 @@ class ObservationSnapshot:
             facts += int(component.solid_count is not None)
         for _interference in self.interferences:
             facts += 4
+        if self.bom is not None:
+            facts += 5 + len(self.bom.missing_component_ids)
+            facts += sum(9 + len(row.component_ids) for row in self.bom.rows)
+            facts += sum(2 + len(conflict.component_ids) for conflict in self.bom.conflicts)
         for preservation in self.preservations:
             facts += 4 + len(preservation.changed_fields)
         if facts > _MAX_OBSERVATION_FACTS:
@@ -1314,6 +1775,8 @@ class ObservationSnapshot:
             result["components"] = [item.to_mapping() for item in self.components]
         if self.interferences:
             result["interferences"] = [item.to_mapping() for item in self.interferences]
+        if self.bom is not None:
+            result["bom"] = self.bom.to_mapping()
         return result
 
     def to_mapping(self) -> dict[str, object]:
@@ -1334,6 +1797,7 @@ class ObservationSnapshot:
             "entities",
             "components",
             "interferences",
+            "bom",
             "preservations",
         }
         data = _fields(value, allowed=allowed, required=legacy_required)
@@ -1345,6 +1809,8 @@ class ObservationSnapshot:
         if "components" in data and not has_entities:
             _raise_validation(ValidationErrorCode.MISSING_FIELD, "/entities")
         if "interferences" in data and "components" not in data:
+            _raise_validation(ValidationErrorCode.MISSING_FIELD, "/components")
+        if "bom" in data and "components" not in data:
             _raise_validation(ValidationErrorCode.MISSING_FIELD, "/components")
         legacy = not has_entities
         if type(data["shapes"]) is not list:
@@ -1436,6 +1902,15 @@ class ObservationSnapshot:
                 )
             assert parsed_interference is not None
             interferences.append(parsed_interference)
+        parsed_bom = None
+        if "bom" in data:
+            caught = None
+            try:
+                parsed_bom = BomObservation.from_mapping(data["bom"])
+            except ValidationError as error:
+                caught = error
+            if caught is not None:
+                raise _prefix_nested_error(caught, "/bom")
         raw_preservations = data.get("preservations", [])
         if type(raw_preservations) is not list:
             _raise_validation(ValidationErrorCode.INVALID_TYPE, "/preservations")
@@ -1463,6 +1938,7 @@ class ObservationSnapshot:
             entities=tuple(entities),
             components=tuple(components),
             interferences=tuple(interferences),
+            bom=parsed_bom,
             preservations=tuple(preservations),
         )
         if supplied_digest != snapshot.observation_digest:
@@ -1493,6 +1969,7 @@ def _validated_snapshot(value: object) -> ObservationSnapshot:
         entities = value.entities
         components = value.components
         interferences = value.interferences
+        bom = value.bom
         preservations = value.preservations
         schema_version = value.schema_version
         supplied_digest = value.observation_digest
@@ -1504,6 +1981,7 @@ def _validated_snapshot(value: object) -> ObservationSnapshot:
         entities = ()
         components = ()
         interferences = ()
+        bom = None
         preservations = ()
         schema_version = SCHEMA_VERSION
         supplied_digest = None
@@ -1518,6 +1996,7 @@ def _validated_snapshot(value: object) -> ObservationSnapshot:
             entities=entities,
             components=components,
             interferences=interferences,
+            bom=bom,
             preservations=preservations,
             schema_version=schema_version,
         )

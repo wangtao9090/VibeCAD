@@ -24,7 +24,10 @@ import pytest
 import vibecad.validation as validation_package
 from vibecad.validation import (
     ArtifactObservation,
+    BomObservation,
+    BomRowObservation,
     CompiledAcceptance,
+    ComponentBomMetadata,
     ComponentObservation,
     EntityObservation,
     EntityParameterObservation,
@@ -204,6 +207,7 @@ def _snapshot(
     entities: tuple[EntityObservation, ...] = (),
     components: tuple[ComponentObservation, ...] = (),
     interferences: tuple[InterferenceObservation, ...] = (),
+    bom: BomObservation | None = None,
     preservations: tuple[PreservationObservation, ...] = (),
 ) -> ObservationSnapshot:
     return ObservationSnapshot(
@@ -213,6 +217,7 @@ def _snapshot(
         entities=entities,
         components=components,
         interferences=interferences,
+        bom=bom,
         preservations=preservations,
     )
 
@@ -230,6 +235,55 @@ def _assembly_snapshot(*, common_volume_mm3: float = 0.0) -> ObservationSnapshot
             _component(component_id=OBJECT_B, member_object_ids=(OBJECT_D,)),
         ),
         interferences=(_interference(common_volume_mm3=common_volume_mm3),),
+    )
+
+
+def _bom_snapshot() -> ObservationSnapshot:
+    metadata = ComponentBomMetadata(
+        part_number="BRACKET-001",
+        description="Mounting bracket",
+        material="Aluminum 6061",
+        density_kg_m3=2700,
+    )
+    return _snapshot(
+        entities=(
+            _component_entity(OBJECT_A),
+            _component_entity(OBJECT_B),
+            _entity(object_id=OBJECT_C),
+            _entity(object_id=OBJECT_D, feature_id=FEATURE_B),
+        ),
+        components=(
+            _component(
+                component_id=OBJECT_A,
+                member_object_ids=(OBJECT_C,),
+                bom=metadata,
+            ),
+            _component(
+                component_id=OBJECT_B,
+                member_object_ids=(OBJECT_D,),
+                bom=metadata,
+            ),
+        ),
+        interferences=(_interference(),),
+        bom=BomObservation(
+            component_count=2,
+            rows=(
+                BomRowObservation(
+                    part_number=metadata.part_number,
+                    description=metadata.description,
+                    material=metadata.material,
+                    density_kg_m3=metadata.density_kg_m3,
+                    quantity=2,
+                    unit_mass_kg=0.00027,
+                    total_mass_kg=0.00054,
+                    component_ids=(OBJECT_A, OBJECT_B),
+                    geometry_digest="a" * 64,
+                ),
+            ),
+            total_quantity=2,
+            total_mass_kg=0.00054,
+            complete=True,
+        ),
     )
 
 
@@ -437,7 +491,11 @@ def _assert_error(caught: pytest.ExceptionInfo[ValidationError], code: Validatio
 def test_public_surface_is_closed_and_function_signatures_have_no_evidence_escape_hatch() -> None:
     expected = {
         "ArtifactObservation",
+        "BomConflictObservation",
+        "BomObservation",
+        "BomRowObservation",
         "CompiledAcceptance",
+        "ComponentBomMetadata",
         "ComponentObservation",
         "EntityObservation",
         "EntityParameterObservation",
@@ -984,6 +1042,92 @@ def test_assembly_acceptance_checks_component_count_and_interference_policy() ->
     assert colliding.report.passed is False
     assert colliding.report.verdicts[1].observed is False
     assert colliding.report.verdicts[1].evidence == ("/interferences",)
+
+
+def test_bom_acceptance_checks_completeness_rows_quantity_and_mass() -> None:
+    compiled = compile_acceptance_spec(
+        _spec(
+            _criterion(
+                "bom-complete",
+                AcceptanceKind.ASSEMBLY,
+                "bom_complete",
+                target="bom",
+                expected=True,
+            ),
+            _criterion(
+                "bom-rows",
+                AcceptanceKind.ASSEMBLY,
+                "bom_row_count",
+                target="bom",
+                expected=1,
+            ),
+            _criterion(
+                "bom-quantity",
+                AcceptanceKind.ASSEMBLY,
+                "bom_total_quantity",
+                target="bom",
+                expected=2,
+            ),
+            _criterion(
+                "bom-mass",
+                AcceptanceKind.ASSEMBLY,
+                "bom_total_mass",
+                target="bom",
+                expected=0.00054,
+                tolerance=1e-12,
+                parameters={"unit": "kg"},
+            ),
+        )
+    )
+
+    result = _verify(compiled, _bom_snapshot())
+
+    assert result.report.passed is True
+    assert [item.observed for item in result.report.verdicts] == [
+        True,
+        1,
+        2,
+        0.00054,
+    ]
+    assert [item.evidence for item in result.report.verdicts] == [
+        ("/bom/complete",),
+        ("/bom/rows",),
+        ("/bom/total_quantity",),
+        ("/bom/total_mass_kg",),
+    ]
+
+
+def test_bom_observation_and_component_metadata_are_digest_bound_and_round_trip() -> None:
+    snapshot = _bom_snapshot()
+    mapping = snapshot.to_mapping()
+
+    assert mapping["bom"] == snapshot.bom.to_mapping()  # type: ignore[union-attr]
+    assert ObservationSnapshot.from_mapping(mapping) == snapshot
+    assert snapshot.components[0].bom == snapshot.components[1].bom
+
+    changed = _bom_snapshot().to_mapping()
+    changed["bom"]["total_mass_kg"] = 0.00055  # type: ignore[index]
+    with pytest.raises(ValidationError) as caught:
+        ObservationSnapshot.from_mapping(changed)
+    error = _assert_error(caught, ValidationErrorCode.INVALID_VALUE)
+    assert error.path == "/bom/total_mass_kg"
+
+    inconsistent = _bom_snapshot()
+    with pytest.raises(ValidationError) as caught:
+        ObservationSnapshot(
+            candidate_revision=REVISION,
+            shapes=inconsistent.shapes,
+            artifacts=inconsistent.artifacts,
+            entities=inconsistent.entities,
+            components=(
+                dataclasses.replace(inconsistent.components[0], bom=None),
+                inconsistent.components[1],
+            ),
+            interferences=inconsistent.interferences,
+            bom=inconsistent.bom,
+        )
+    error = _assert_error(caught, ValidationErrorCode.INVALID_VALUE)
+    assert error.path == "/bom"
 
 
 @pytest.mark.parametrize(
@@ -2832,7 +2976,11 @@ def test_validation_modules_are_pure_closed_and_do_not_reference_execution_evide
         "__init__.py": {
             "vibecad.validation.contracts": {
                 "ArtifactObservation",
+                "BomConflictObservation",
+                "BomObservation",
+                "BomRowObservation",
                 "CompiledAcceptance",
+                "ComponentBomMetadata",
                 "ComponentObservation",
                 "EntityObservation",
                 "EntityParameterObservation",

@@ -30,6 +30,10 @@ _SUPPORTED = frozenset(
         (AcceptanceKind.TOPOLOGY, "solid_count"),
         (AcceptanceKind.ASSEMBLY, "component_count"),
         (AcceptanceKind.ASSEMBLY, "interference_free"),
+        (AcceptanceKind.ASSEMBLY, "bom_complete"),
+        (AcceptanceKind.ASSEMBLY, "bom_row_count"),
+        (AcceptanceKind.ASSEMBLY, "bom_total_quantity"),
+        (AcceptanceKind.ASSEMBLY, "bom_total_mass"),
         (AcceptanceKind.ARTIFACT, "exists"),
         (AcceptanceKind.ARTIFACT, "non_empty"),
         (AcceptanceKind.ARTIFACT, "format"),
@@ -253,6 +257,34 @@ def _compile_supported(
         expected = True
         tolerance = None
         family = "assembly"
+    elif key == (AcceptanceKind.ASSEMBLY, "bom_complete"):
+        _empty_parameters(criterion, index)
+        _forbid_tolerance(criterion, index)
+        if target != "bom" or criterion.expected is not True:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, expected_path)
+        expected = True
+        tolerance = None
+        family = "bom"
+    elif key in {
+        (AcceptanceKind.ASSEMBLY, "bom_row_count"),
+        (AcceptanceKind.ASSEMBLY, "bom_total_quantity"),
+    }:
+        _empty_parameters(criterion, index)
+        _forbid_tolerance(criterion, index)
+        if target != "bom" or type(criterion.expected) is not int:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, expected_path)
+        if not 1 <= criterion.expected <= 10:
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, expected_path)
+        expected = criterion.expected
+        tolerance = None
+        family = "bom"
+    elif key == (AcceptanceKind.ASSEMBLY, "bom_total_mass"):
+        _unit_parameters(criterion, index, "kg")
+        if target != "bom":
+            _raise_validation(ValidationErrorCode.INVALID_VALUE, target_path)
+        expected = _numeric_expected(criterion, index, nonnegative=True)
+        tolerance = _numeric_tolerance(criterion, index)
+        family = "bom"
     elif key in {
         (AcceptanceKind.ARTIFACT, "exists"),
         (AcceptanceKind.ARTIFACT, "non_empty"),
@@ -409,6 +441,19 @@ def _assembly_value(snapshot: ObservationSnapshot, check: str) -> object | None:
     return not any(item.interfering for item in snapshot.interferences)
 
 
+def _bom_value(snapshot: ObservationSnapshot, check: str) -> object | None:
+    bom = snapshot.bom
+    if bom is None:
+        return None
+    if check == "bom_complete":
+        return bom.complete
+    if check == "bom_row_count":
+        return len(bom.rows)
+    if check == "bom_total_quantity":
+        return bom.total_quantity
+    return bom.total_mass_kg
+
+
 def _unsupported_verdict(criterion: CompiledCriterion, *, missing: bool) -> CriterionVerdict:
     return CriterionVerdict(
         criterion_id=criterion.criterion_id,
@@ -452,6 +497,14 @@ def evaluate_criterion(
     elif criterion.family == "assembly":
         observed = _assembly_value(snapshot, criterion.check)
         evidence = "/components" if criterion.check == "component_count" else "/interferences"
+    elif criterion.family == "bom":
+        observed = _bom_value(snapshot, criterion.check)
+        evidence = {
+            "bom_complete": "/bom/complete",
+            "bom_row_count": "/bom/rows",
+            "bom_total_quantity": "/bom/total_quantity",
+            "bom_total_mass": "/bom/total_mass_kg",
+        }[criterion.check]
     else:
         for index, preservation in enumerate(snapshot.preservations):
             if preservation.target == criterion.target:
@@ -463,7 +516,7 @@ def evaluate_criterion(
 
     delta: int | float | tuple[int | float, ...] | None = None
     tolerance: int | float | tuple[int | float, ...] | None = None
-    if criterion.check in {"volume", "area"}:
+    if criterion.check in {"volume", "area", "bom_total_mass"}:
         assert type(observed) in {int, float}
         assert type(criterion.expected) in {int, float}
         assert criterion.tolerance is not None

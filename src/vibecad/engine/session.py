@@ -6,6 +6,7 @@ import 延迟到 open_document（Task 3），在 silence_fd1() 内进行。
 Round 8：多零件注册表（App::Part 容器方案，Task 0 spike 选定）。
 铁律：`_parts` 为空（从未调 new_part）时一切行为与 R7 完全一致——单零件用户零感知。
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -44,6 +45,8 @@ _IDENTITY_PROPERTY_DOCS = {
     "VibeCADSemanticRole": "VibeCAD semantic object role",
     "VibeCADProvenance": "Canonical VibeCAD provenance JSON",
 }
+_BOM_PROPERTY = "VibeCADBomMetadata"
+_BOM_PROPERTY_DOC = "Canonical VibeCAD component BOM metadata JSON"
 
 
 class Session:
@@ -78,6 +81,7 @@ class Session:
     def _ensure_freecad(self) -> None:
         if not self._loaded:
             from vibecad.freecad_env import prepare_freecad_import
+
             prepare_freecad_import()
             self._loaded = True
 
@@ -87,22 +91,22 @@ class Session:
 
     @contextlib.contextmanager
     def _transaction(
-        self, label: str, part: str | None = None, *, claim_new_objects: bool = True,
+        self,
+        label: str,
+        part: str | None = None,
+        *,
+        claim_new_objects: bool = True,
     ):
         self._require_doc()
         # 差集法对象归属：多零件模式在事务入口记对象名快照，成功提交时把新增对象
         # 归入活动零件；_parts 空（单零件模式）不启动——零开销、行为与 R7 完全一致
-        before = (
-            {o.Name for o in self._doc.Objects}
-            if self._parts and claim_new_objects else None
-        )
+        before = {o.Name for o in self._doc.Objects} if self._parts and claim_new_objects else None
         roots_before = dict(self._result_roots)
         active_before = self._active_part
         revision_before = self._revision_id
         labels_before = copy.deepcopy(self._labels)
         parts_before = {
-            name: {**info, "objects": set(info["objects"])}
-            for name, info in self._parts.items()
+            name: {**info, "objects": set(info["objects"])} for name, info in self._parts.items()
         }
 
         def restore_python_state() -> None:
@@ -227,6 +231,92 @@ class Session:
             self._active_part = name
         return {"component": name, "object_id": identity.object_id}
 
+    @staticmethod
+    def _validate_component_bom_property(container: Any) -> bool:
+        try:
+            properties = set(container.PropertiesList)
+        except Exception as exc:
+            raise ValueError("组件 BOM 属性列表不可读取") from exc
+        if _BOM_PROPERTY not in properties:
+            return False
+        try:
+            property_type = container.getTypeIdOfProperty(_BOM_PROPERTY)
+            editor_modes = set(container.getEditorMode(_BOM_PROPERTY))
+            property_status = set(container.getPropertyStatus(_BOM_PROPERTY))
+        except Exception as exc:
+            raise ValueError("组件 BOM 属性元数据不可读取") from exc
+        if property_type != "App::PropertyString":
+            raise ValueError("组件 BOM 属性必须是 App::PropertyString")
+        if not {"ReadOnly", "Hidden"}.issubset(editor_modes):
+            raise ValueError("组件 BOM 属性 flags 缺少 ReadOnly/Hidden")
+        if "LockDynamic" not in property_status:
+            raise ValueError("组件 BOM 属性 flags 缺少 LockDynamic")
+        return True
+
+    def read_component_bom_metadata(self, part_name: str) -> Any | None:
+        self._require_doc()
+        if type(part_name) is not str or part_name not in self._parts:
+            raise ValueError("组件不存在")
+        container = self._parts[part_name]["container"]
+        if not self._validate_component_bom_property(container):
+            return None
+        try:
+            raw = getattr(container, _BOM_PROPERTY)
+            if type(raw) is not str or len(raw.encode("utf-8")) > 2048:
+                raise ValueError
+            mapping = json.loads(raw)
+        except Exception as exc:
+            raise ValueError("组件 BOM 属性内容无效") from exc
+        from vibecad.validation import ComponentBomMetadata  # noqa: PLC0415
+
+        metadata = ComponentBomMetadata.from_mapping(mapping)
+        canonical = json.dumps(
+            metadata.to_mapping(),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        if canonical != raw:
+            raise ValueError("组件 BOM 属性不是规范 JSON")
+        return metadata
+
+    def set_component_bom_metadata(self, part_name: str, metadata: Any) -> Any:
+        self._require_doc()
+        from vibecad.validation import ComponentBomMetadata  # noqa: PLC0415
+
+        if type(metadata) is not ComponentBomMetadata:
+            raise TypeError("metadata 必须是 ComponentBomMetadata")
+        if type(part_name) is not str or part_name not in self._parts:
+            raise ValueError("组件不存在")
+        container = self._parts[part_name]["container"]
+        encoded = json.dumps(
+            metadata.to_mapping(),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        if len(encoded.encode("utf-8")) > 2048:
+            raise ValueError("组件 BOM 属性超过上限")
+        with self._transaction("set_component_bom", claim_new_objects=False):
+            if not self._validate_component_bom_property(container):
+                container.addProperty(
+                    "App::PropertyString",
+                    _BOM_PROPERTY,
+                    _IDENTITY_GROUP,
+                    _BOM_PROPERTY_DOC,
+                    0,
+                    True,
+                    True,
+                    True,
+                )
+            setattr(container, _BOM_PROPERTY, encoded)
+            observed = self.read_component_bom_metadata(part_name)
+            if observed != metadata:
+                raise ValueError("组件 BOM 属性写入后校验失败")
+        return observed
+
     def list_component_identity_records(self) -> tuple[tuple[Any, ...], ...]:
         """Return strict explicit component records in stable component-id order.
 
@@ -243,9 +333,7 @@ class Session:
         identified = self.list_object_identities()
         by_name = {obj.Name: (obj, identity) for obj, identity in identified}
         identified_containers = tuple(
-            (obj, identity)
-            for obj, identity in identified
-            if identity.object_type == "App::Part"
+            (obj, identity) for obj, identity in identified if identity.object_type == "App::Part"
         )
         if not identified_containers:
             return ()
@@ -312,6 +400,7 @@ class Session:
         """新建 App::Part 容器：内部 Name 用 ASCII 前缀（FreeCAD 自动唯一化），
         用户零件名（可中文）存 Label。"""
         from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+
         with silence_fd1():
             container = self._doc.addObject("App::Part", "VibePart")
             container.Label = name
@@ -332,7 +421,9 @@ class Session:
         for obj in existing:
             container.addObject(obj)
         self._parts[_IMPLICIT_PART] = {
-            "container": container, "objects": {o.Name for o in existing}}
+            "container": container,
+            "objects": {o.Name for o in existing},
+        }
         if self._labels and _SINGLE in self._labels:
             self._labels[_IMPLICIT_PART] = self._labels.pop(_SINGLE)
         if _SINGLE in self._result_roots:
@@ -352,9 +443,11 @@ class Session:
         if owner not in self._parts:
             raise ValueError(f"零件 {owner!r} 不存在（已有零件：{list(self._parts)}）")
         info = self._parts[owner]
-        new_objs = [obj for obj in self._doc.Objects
-                    if obj.Name not in before
-                    and getattr(obj, "TypeId", "") != "App::Part"]
+        new_objs = [
+            obj
+            for obj in self._doc.Objects
+            if obj.Name not in before and getattr(obj, "TypeId", "") != "App::Part"
+        ]
         for obj in new_objs:  # 阶段一：容器隶属（失败上抛 → 事务 abort 整体回滚）
             info["container"].addObject(obj)
         # 阶段二：全部成功后一次性入册（集合无半更新状态可言）
@@ -367,7 +460,8 @@ class Session:
         # 那会绕过 RuntimeError/ValueError 契约把原始 OCC 错误泄漏给 server 层
         if shape.isNull():
             raise RuntimeError(
-                "几何断言失败：形状为 NULL（OCCT 未能产生几何——所选边/面可能不支持该操作）")
+                "几何断言失败：形状为 NULL（OCCT 未能产生几何——所选边/面可能不支持该操作）"
+            )
         if not shape.isValid():
             raise RuntimeError("几何断言失败：形状无效（isValid=False）")
         if shape.Volume <= 0:
@@ -557,8 +651,10 @@ class Session:
     def _close_owned_document(doc: Any) -> None:
         """只关闭仍由 FreeCAD 全局注册表指向同一代理的文档。"""
         from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+
         with silence_fd1():
             import FreeCAD  # noqa: PLC0415
+
             name = getattr(doc, "Name", None)
             if not isinstance(name, str) or not name:
                 raise RuntimeError("拒绝关闭没有有效 Name 的 FreeCAD 文档")
@@ -574,12 +670,20 @@ class Session:
         """原子切换活动文档：新文档成功获得后才关闭旧文档，避免打开失败丢会话。"""
         old = self._doc
         state_before = (
-            self._labels, self._parts, self._active_part, self._result_roots,
-            self._undo_result_roots, self._redo_result_roots,
-            self._undo_active_parts, self._redo_active_parts,
-            self._revision_id, self._saved_revision_id,
-            self._saved_active_part, self._saved_result_roots,
-            self._undo_revisions, self._redo_revisions,
+            self._labels,
+            self._parts,
+            self._active_part,
+            self._result_roots,
+            self._undo_result_roots,
+            self._redo_result_roots,
+            self._undo_active_parts,
+            self._redo_active_parts,
+            self._revision_id,
+            self._saved_revision_id,
+            self._saved_active_part,
+            self._saved_result_roots,
+            self._undo_revisions,
+            self._redo_revisions,
         )
         try:
             self._doc = doc
@@ -595,12 +699,20 @@ class Session:
         except BaseException:
             self._doc = old
             (
-                self._labels, self._parts, self._active_part, self._result_roots,
-                self._undo_result_roots, self._redo_result_roots,
-                self._undo_active_parts, self._redo_active_parts,
-                self._revision_id, self._saved_revision_id,
-                self._saved_active_part, self._saved_result_roots,
-                self._undo_revisions, self._redo_revisions,
+                self._labels,
+                self._parts,
+                self._active_part,
+                self._result_roots,
+                self._undo_result_roots,
+                self._redo_result_roots,
+                self._undo_active_parts,
+                self._redo_active_parts,
+                self._revision_id,
+                self._saved_revision_id,
+                self._saved_active_part,
+                self._saved_result_roots,
+                self._undo_revisions,
+                self._redo_revisions,
             ) = state_before
             if doc is not old:
                 with contextlib.suppress(Exception):
@@ -611,8 +723,10 @@ class Session:
     def open_document(self, name: str) -> Any:
         self._ensure_freecad()
         from vibecad.freecad_env import silence_fd1
+
         with silence_fd1():
             import FreeCAD  # noqa: PLC0415
+
             doc = FreeCAD.newDocument(name)
         # headless 默认 UndoMode=0，openTransaction/abort 是 no-op；必须显式开启。
         return self._replace_document(doc, restore_state=False)
@@ -626,8 +740,10 @@ class Session:
             raise ValueError(f"项目文件必须是 .FCStd（得到 {source.name!r}）")
         self._ensure_freecad()
         from vibecad.freecad_env import silence_fd1
+
         with silence_fd1():
             import FreeCAD  # noqa: PLC0415
+
             # 用独立 candidate.load，而不是 openDocument(path)：后者在同一路径已经
             # 打开时会复用旧 Document，导致 discard_unsaved=true 也无法真正从磁盘重载。
             # candidate 完整恢复成功后才替换旧会话；失败则清理 candidate，旧会话不动。
@@ -658,6 +774,7 @@ class Session:
         cp_dir.mkdir(parents=True, exist_ok=True)
         path = cp_dir / f"{self._doc.Name}.FCStd"
         from vibecad.freecad_env import silence_fd1
+
         with silence_fd1():
             self.persist_state()
             if hasattr(self._doc, "saveCopy"):
@@ -724,7 +841,8 @@ class Session:
             label = str(getattr(container, "Label", "") or container.Name)
             name = label if label not in parts else f"{label} ({container.Name})"
             members = {
-                obj.Name for obj in getattr(container, "Group", [])
+                obj.Name
+                for obj in getattr(container, "Group", [])
                 if getattr(obj, "TypeId", "") != "App::Part"
             }
             parts[name] = {"container": container, "objects": members}
@@ -734,17 +852,21 @@ class Session:
     def persist_state(self) -> None:
         """把活动零件和显式结果根写入 FCStd Document 动态属性。"""
         self._require_doc()
-        state = json.dumps({
-            "schema": _STATE_SCHEMA,
-            "active_part": self._active_part,
-            "result_roots": self._result_roots,
-            "revision_id": self._revision_id,
-        }, ensure_ascii=False, sort_keys=True)
+        state = json.dumps(
+            {
+                "schema": _STATE_SCHEMA,
+                "active_part": self._active_part,
+                "result_roots": self._result_roots,
+                "revision_id": self._revision_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         props = set(getattr(self._doc, "PropertiesList", []))
         if _STATE_PROPERTY not in props:
             self._doc.addProperty(
-                "App::PropertyString", _STATE_PROPERTY, "VibeCAD",
-                "VibeCAD 会话状态（由程序管理）")
+                "App::PropertyString", _STATE_PROPERTY, "VibeCAD", "VibeCAD 会话状态（由程序管理）"
+            )
         setattr(self._doc, _STATE_PROPERTY, state)
 
     def _restore_persisted_state(self) -> None:
@@ -758,7 +880,8 @@ class Session:
             roots = state.get("result_roots", {})
             if isinstance(roots, dict):
                 self._result_roots = {
-                    str(k): str(v) for k, v in roots.items()
+                    str(k): str(v)
+                    for k, v in roots.items()
                     if isinstance(k, str) and isinstance(v, str) and v
                 }
             active = state.get("active_part")
@@ -858,8 +981,7 @@ class Session:
         result_types = ("Part::Cut", "Part::Fuse", "Part::Common", "Part::Fillet", "Part::Chamfer")
         result = None
         for obj in candidates:
-            if (getattr(obj, "TypeId", "") in result_types
-                    and Session._is_result_candidate(obj)):
+            if getattr(obj, "TypeId", "") in result_types and Session._is_result_candidate(obj):
                 result = obj
         if result is None:
             for obj in candidates:
@@ -902,15 +1024,19 @@ class Session:
         if not self._parts:
             return self.get_result_shape()
         from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+
         with silence_fd1():
             import Part  # noqa: PLC0415
+
             shapes = [
                 self.get_result_shape(name).transformed(info["container"].Placement.toMatrix())
-                for name, info in self._parts.items() if info["objects"]
+                for name, info in self._parts.items()
+                if info["objects"]
             ]
             if not shapes:
                 raise RuntimeError(
-                    "装配中无任何零件有几何——请先用 add_box/extrude_profile 等创建几何")
+                    "装配中无任何零件有几何——请先用 add_box/extrude_profile 等创建几何"
+                )
             return Part.makeCompound(shapes)
 
     # ---- Round 5：标签注册表（标注快照 → 指纹解析）；Round 8：按零件分命名空间 ----
@@ -918,8 +1044,9 @@ class Session:
         """标签命名空间键：指定零件 > 活动零件 > 单零件哨兵（_parts 空时恒为后者）。"""
         return part if part is not None else (self._active_part or _SINGLE)
 
-    def set_labels(self, faces: dict, edges: dict, shown: set | None = None,
-                   part: str | None = None) -> None:
+    def set_labels(
+        self, faces: dict, edges: dict, shown: set | None = None, part: str | None = None
+    ) -> None:
         """存最近一次标注快照：{label: fingerprint}，按零件命名空间隔离（默认活动零件）。
 
         shown = 本次标签表实际向 AI 展示过的键集合（None 视为全部——内部/测试用法）。
@@ -970,25 +1097,31 @@ class Session:
         的全局面，零件容器 Placement 非单位时局部指纹永远对不上）；返回的索引因
         transformed 不重排子元素而与局部 shape.Faces 同序，消费方安全用于局部几何。"""
         from vibecad.engine import naming  # noqa: PLC0415
+
         snap = (self._labels or {}).get(self._label_key(part))
         if not snap or label not in snap["faces"]:
             raise naming.LabelExpiredError(
-                f"未知面标签 {label!r}——请先调用 render_part(annotate='faces') 获取标注")
+                f"未知面标签 {label!r}——请先调用 render_part(annotate='faces') 获取标注"
+            )
         if label not in snap["shown"]:
             raise naming.LabelExpiredError(
                 f"面标签 {label!r} 尚未在标注图中向你展示过"
-                "——请先调用 render_part(annotate='faces') 查看标注图再指认")
+                "——请先调用 render_part(annotate='faces') 查看标注图再指认"
+            )
         return naming.match_face(snap["faces"][label], self._match_shape(part).Faces)
 
     def resolve_edge(self, label: str, part: str | None = None) -> int:
         """边标签 → 边索引；坐标系纪律与 resolve_face 一致（见 _match_shape）。"""
         from vibecad.engine import naming  # noqa: PLC0415
+
         snap = (self._labels or {}).get(self._label_key(part))
         if not snap or label not in snap["edges"]:
             raise naming.LabelExpiredError(
-                f"未知边标签 {label!r}——请先调用 render_part(annotate='edges') 获取标注")
+                f"未知边标签 {label!r}——请先调用 render_part(annotate='edges') 获取标注"
+            )
         if label not in snap["shown"]:
             raise naming.LabelExpiredError(
                 f"边标签 {label!r} 尚未在标注图中向你展示过"
-                "——请先调用 render_part(annotate='edges') 查看标注图再指认")
+                "——请先调用 render_part(annotate='edges') 查看标注图再指认"
+            )
         return naming.match_edge(snap["edges"][label], self._match_shape(part).Edges)

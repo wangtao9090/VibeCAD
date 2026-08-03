@@ -2136,6 +2136,7 @@ def test_capabilities_match_the_exact_sorted_public_projection():
         "move_part",
         "place_component",
         "rotate_part",
+        "set_component_bom",
     ]
     operation_keys = {
         "operation",

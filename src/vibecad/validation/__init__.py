@@ -2,7 +2,11 @@
 
 from vibecad.validation.contracts import (
     ArtifactObservation,
+    BomConflictObservation,
+    BomObservation,
+    BomRowObservation,
     CompiledAcceptance,
+    ComponentBomMetadata,
     ComponentObservation,
     EntityObservation,
     EntityParameterObservation,
@@ -24,7 +28,11 @@ from vibecad.validation.engine import (
 
 __all__ = (
     "ArtifactObservation",
+    "BomConflictObservation",
+    "BomObservation",
+    "BomRowObservation",
     "CompiledAcceptance",
+    "ComponentBomMetadata",
     "ComponentObservation",
     "EntityObservation",
     "EntityParameterObservation",

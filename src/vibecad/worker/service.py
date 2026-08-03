@@ -20,6 +20,7 @@ from vibecad.execution.executor import (
     ExecutorError,
     ExecutorErrorCode,
     InProcessCadExecutor,
+    _bom_observation,
     _component_observations,
     _entity_observations,
     _export_session_step,
@@ -796,6 +797,7 @@ class WorkerService:
                 entities = _entity_observations(session.value)
                 components = _component_observations(session.value)
                 interferences = _interference_observations(session.value)
+                bom = _bom_observation(session.value, components)
         except _ServiceError:
             raise
         except BaseException:
@@ -811,6 +813,7 @@ class WorkerService:
             "entities": [item.to_mapping() for item in entities],
             "components": [item.to_mapping() for item in components],
             "interferences": [item.to_mapping() for item in interferences],
+            "bom": None if bom is None else bom.to_mapping(),
         }
 
     def _validation_directory(

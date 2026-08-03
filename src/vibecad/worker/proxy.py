@@ -27,6 +27,7 @@ from vibecad.interaction.cad import (
     ValidatedMaterializationEvidence,
 )
 from vibecad.validation import (
+    BomObservation,
     ComponentObservation,
     EntityObservation,
     InterferenceObservation,
@@ -1117,6 +1118,7 @@ class FreeCadWorker(_Opaque):
         tuple[EntityObservation, ...],
         tuple[ComponentObservation, ...],
         tuple[InterferenceObservation, ...],
+        BomObservation | None,
     ]:
         with self._operation_lock:
             self._ensure_process()
@@ -1150,8 +1152,9 @@ class FreeCadWorker(_Opaque):
             )
             try:
                 if (
-                    set(result) != {"shape", "entities", "components", "interferences"}
+                    set(result) != {"shape", "entities", "components", "interferences", "bom"}
                     or (result["shape"] is not None and type(result["shape"]) is not dict)
+                    or (result["bom"] is not None and type(result["bom"]) is not dict)
                     or type(result["entities"]) is not list
                     or type(result["components"]) is not list
                     or type(result["interferences"]) is not list
@@ -1171,6 +1174,7 @@ class FreeCadWorker(_Opaque):
                 interferences = tuple(
                     InterferenceObservation.from_mapping(item) for item in result["interferences"]
                 )
+                bom = None if result["bom"] is None else BomObservation.from_mapping(result["bom"])
                 object_ids = tuple(item.object_id for item in entities)
                 if object_ids != tuple(sorted(object_ids)) or len(object_ids) != len(
                     set(object_ids)
@@ -1191,6 +1195,32 @@ class FreeCadWorker(_Opaque):
                 )
                 if interference_pairs != expected_pairs:
                     raise ValueError
+                if bom is not None and bom.component_ids != component_ids:
+                    raise ValueError
+                if bom is not None:
+                    components_by_id = {item.component_id: item for item in components}
+                    if any(
+                        components_by_id[component_id].bom is not None
+                        for component_id in bom.missing_component_ids
+                    ):
+                        raise ValueError
+                    for row in bom.rows:
+                        if any(
+                            (metadata := components_by_id[component_id].bom) is None
+                            or metadata.part_number != row.part_number
+                            or metadata.description != row.description
+                            or metadata.material != row.material
+                            or metadata.density_kg_m3 != row.density_kg_m3
+                            for component_id in row.component_ids
+                        ):
+                            raise ValueError
+                    for conflict in bom.conflicts:
+                        if any(
+                            (metadata := components_by_id[component_id].bom) is None
+                            or metadata.part_number != conflict.part_number
+                            for component_id in conflict.component_ids
+                        ):
+                            raise ValueError
             except Exception:
                 self._protocol_loss()
             with self._lifecycle_lock:
@@ -1206,7 +1236,7 @@ class FreeCadWorker(_Opaque):
                         self._require_live_revision(revision_state)
                 except WorkerError:
                     self._protocol_loss()
-                return shape, entities, components, interferences
+                return shape, entities, components, interferences, bom
 
     def _accept_artifact_result(
         self,

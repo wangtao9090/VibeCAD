@@ -190,16 +190,28 @@ def _component_program(*, base_revision: str = _BASE_REVISION) -> ModelProgram:
                 depends_on=("component-a",),
             ),
             command(
+                "bom-a",
+                "set_component_bom",
+                target={"component": {"command_id": "component-a", "slot": "component"}},
+                args={
+                    "part_number": "BRACKET-001",
+                    "description": "Mounting bracket",
+                    "material": "Aluminum 6061",
+                    "density_kg_m3": 2700,
+                },
+                depends_on=("box-a",),
+            ),
+            command(
                 "component-b",
                 "create_component",
                 args={"name": "B"},
-                depends_on=("box-a",),
+                depends_on=("bom-a",),
             ),
             command(
                 "box-b",
                 "create_box",
                 target={"component": {"command_id": "component-b", "slot": "component"}},
-                args={"length_mm": 5, "width_mm": 10, "height_mm": 10},
+                args={"length_mm": 10, "width_mm": 10, "height_mm": 10},
                 depends_on=("component-b",),
             ),
             command(
@@ -213,7 +225,19 @@ def _component_program(*, base_revision: str = _BASE_REVISION) -> ModelProgram:
                 },
                 depends_on=("box-b",),
             ),
-            command("inspect", "inspect_model", depends_on=("place-b",)),
+            command(
+                "bom-b",
+                "set_component_bom",
+                target={"component": {"command_id": "component-b", "slot": "component"}},
+                args={
+                    "part_number": "BRACKET-001",
+                    "description": "Mounting bracket",
+                    "material": "Aluminum 6061",
+                    "density_kg_m3": 2700,
+                },
+                depends_on=("place-b",),
+            ),
+            command("inspect", "inspect_model", depends_on=("bom-b",)),
         ),
         acceptance=_acceptance(),
     )
@@ -483,6 +507,7 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                 "export_replace",
                 "revision_observe",
                 "observe_bad",
+                "observe_bad_bom",
                 "observe_bad_interferences",
                 "validation_idle",
                 "validation_bad_claim",
@@ -555,6 +580,7 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                         result = {{"entities": [], "shape": {{}}}}
                     elif method == "session.observe" and mode == "observe_bad_interferences":
                         result = {{
+                            "bom": None,
                             "components": [],
                             "entities": [],
                             "interferences": [{{
@@ -566,8 +592,50 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                             }}],
                             "shape": None,
                         }}
+                    elif method == "session.observe" and mode == "observe_bad_bom":
+                        component_id = "object_" + "1" * 32
+                        result = {{
+                            "bom": {{
+                                "schema_version": 1,
+                                "component_count": 1,
+                                "rows": [],
+                                "missing_component_ids": [component_id],
+                                "conflicts": [],
+                                "total_quantity": 0,
+                                "total_mass_kg": 0,
+                                "complete": False,
+                            }},
+                            "components": [{{
+                                "schema_version": 1,
+                                "component_id": component_id,
+                                "object_type": "App::Part",
+                                "provenance": {{
+                                    "source": "model",
+                                    "operation_id": "component-a",
+                                }},
+                                "placement": [0, 0, 0, 0, 0, 0, 1],
+                                "member_object_ids": [],
+                                "bom": {{
+                                    "schema_version": 1,
+                                    "part_number": "BRACKET-001",
+                                    "description": "Mounting bracket",
+                                    "material": "Aluminum 6061",
+                                    "density_kg_m3": 2700,
+                                }},
+                                "volume_mm3": 1,
+                                "area_mm2": 6,
+                                "bbox_mm": [1, 1, 1],
+                                "center_of_mass_mm": [0.5, 0.5, 0.5],
+                                "valid_shape": True,
+                                "solid_count": 1,
+                            }}],
+                            "entities": [],
+                            "interferences": [],
+                            "shape": None,
+                        }}
                     elif method == "session.observe":
                         result = {{
+                            "bom": None,
                             "components": [],
                             "entities": [],
                             "interferences": [],
@@ -2929,6 +2997,7 @@ def test_production_service_revision_sessions_are_read_only_and_exactly_bound(
             (),
         )
         assert observation["entities"] == []
+        assert observation["bom"] is None
         assert (observation["shape"] is None) is (not has_model)
         assert service.dispatch(
             "session.close",
@@ -3059,7 +3128,7 @@ def test_parent_revision_observe_lifecycle_uses_opaque_capabilities(
         )
         handle = worker.bind_revision(store=rig.store, revision=revision)
         session = worker.load_revision(handle)
-        shape, entities, components, interferences = worker.observe(
+        shape, entities, components, interferences, bom = worker.observe(
             session=session,
             capability=handle,
         )
@@ -3068,6 +3137,7 @@ def test_parent_revision_observe_lifecycle_uses_opaque_capabilities(
         assert entities == ()
         assert components == ()
         assert interferences == ()
+        assert bom is None
         with pytest.raises(WorkerError) as still_bound:
             worker.release_revision(handle)
         assert still_bound.value.code is WorkerErrorCode.INVALID_HANDLE
@@ -3077,7 +3147,10 @@ def test_parent_revision_observe_lifecycle_uses_opaque_capabilities(
         worker.close()
 
 
-@pytest.mark.parametrize("mode", ("observe_bad", "observe_bad_interferences"))
+@pytest.mark.parametrize(
+    "mode",
+    ("observe_bad", "observe_bad_interferences", "observe_bad_bom"),
+)
 def test_malformed_observation_fences_the_entire_generation(
     tmp_path: Path,
     mode: str,
@@ -4125,7 +4198,7 @@ def test_real_managed_worker_preserves_component_observations_and_interference(
                 candidate=candidate,
                 session=session,
             )
-            assert [item.result.ok for item in outcomes] == [True] * 6
+            assert [item.result.ok for item in outcomes] == [True] * 8
             before = worker.observe(
                 session=session,
                 capability=candidate,
@@ -4140,16 +4213,27 @@ def test_real_managed_worker_preserves_component_observations_and_interference(
                 capability=candidate,
             )
             assert after == before
-            shape, entities, components, interferences = after
+            shape, entities, components, interferences, bom = after
             assert shape is not None
-            assert shape.volume_mm3 == pytest.approx(1500.0)
-            assert shape.bbox_mm == pytest.approx((25.0, 10.0, 10.0))
+            assert shape.volume_mm3 == pytest.approx(2000.0)
+            assert shape.bbox_mm == pytest.approx((30.0, 10.0, 10.0))
             assert len(entities) == 4
             assert len(components) == 2
-            assert sorted(item.volume_mm3 for item in components) == pytest.approx([500.0, 1000.0])
+            assert sorted(item.volume_mm3 for item in components) == pytest.approx([1000.0, 1000.0])
             assert len(interferences) == 1
             assert interferences[0].interfering is False
             assert interferences[0].common_volume_mm3 == pytest.approx(0.0)
+            assert bom is not None
+            assert bom.complete is True
+            assert bom.total_quantity == 2
+            assert bom.total_mass_kg == pytest.approx(0.0054)
+            assert len(bom.rows) == 1
+            assert bom.rows[0].part_number == "BRACKET-001"
+            assert bom.rows[0].quantity == 2
+            inspection = outcomes[-1].result.value
+            assert inspection["bom_revision_id"] == rig.revision_id
+            assert inspection["bom"]["complete"] is True
+            assert inspection["bom_csv"] is not None
             worker.close_session(loaded)
             assert (rig.directory / "model.FCStd").stat().st_size > 0
             assert (rig.directory / "model.step").stat().st_size > 0
@@ -4196,6 +4280,7 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
                 baseline_entities,
                 baseline_components,
                 baseline_interferences,
+                baseline_bom,
             ) = worker.observe(
                 session=baseline_session,
                 capability=baseline_handle,
@@ -4204,6 +4289,7 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
             assert baseline_entities == ()
             assert baseline_components == ()
             assert baseline_interferences == ()
+            assert baseline_bom is None
             worker.close_session(baseline_session)
             worker.release_revision(baseline_handle)
 
@@ -4240,6 +4326,7 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
                 observed_entities,
                 observed_components,
                 observed_interferences,
+                observed_bom,
             ) = worker.observe(
                 session=loaded,
                 capability=candidate,
@@ -4249,6 +4336,7 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
             assert observed_entities
             assert observed_components == ()
             assert observed_interferences == ()
+            assert observed_bom is None
             worker.close_session(loaded)
             sessions = tuple(worker.load_fcstd(candidate) for _index in range(6))
             with pytest.raises(WorkerError) as capacity:
@@ -4324,6 +4412,7 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
                 revision_entities,
                 revision_components,
                 revision_interferences,
+                revision_bom,
             ) = worker.observe(
                 session=revision_session,
                 capability=revision_handle,
@@ -4333,6 +4422,7 @@ def test_real_managed_worker_load_modify_checkpoint_and_export(
             assert revision_entities
             assert revision_components == ()
             assert revision_interferences == ()
+            assert revision_bom is None
             worker.close_session(revision_session)
             worker.release_revision(revision_handle)
         finally:

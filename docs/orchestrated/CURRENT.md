@@ -1,10 +1,10 @@
 # VibeCAD Active Plan — P2 mechanical delivery
 
-> Status: **P2-A approved; P2-S01 and P2-S02 complete; P2-S03 awaiting scope confirmation**
+> Status: **P2-A approved; P2-S01 through P2-S03 complete**
 >
 > Updated: 2026-08-02
 >
-> Repository anchor: `codex/agent-stage3@d8ce61c` plus the verified P2-S02
+> Repository anchor: `codex/agent-stage3@b223c34` plus the verified P2-S03
 > candidate described below
 >
 > This is the only mutable orchestration plan. P1 sequential editing closed at
@@ -25,11 +25,12 @@ STEP/STL import, and mesh-to-faceted-BRep remain future work. Product documents
 must refer to the completed milestone as **P1 sequential editing / G2**, not as
 completion of the entire historical P1 capability inventory.
 
-The public semantic operation registry now contains eight operations. The six
-existing direct operations remain direct-exposed. Two ModelProgram-only
-operations, `create_component` and `place_component`, establish the bounded
-assembly path; `create_box` and `create_cylinder` accept an optional explicit
-component target. The direct public tool count remains 28.
+The public semantic operation registry now contains nine operations. The six
+existing direct operations remain direct-exposed. Three ModelProgram-only
+operations, `create_component`, `place_component`, and `set_component_bom`,
+establish the bounded assembly and flat-BOM path; `create_box` and
+`create_cylinder` accept an optional explicit component target. The direct
+public tool count remains 28.
 
 The repository also contains a broader legacy Round-8 assembly implementation
 with real FreeCAD evidence for:
@@ -86,8 +87,9 @@ This boundary deliberately does not claim FreeCAD Assembly solver semantics.
 - semantic face/edge connectors before Selector Level B is ready;
 - automatic conflict resolution or simultaneous Agent/user editing;
 - broad Sketcher/PartDesign/import work merely to make assembly demos richer;
-- flat/structured BOM, TechDraw, release approval, and release package in the
-  first implementation slice;
+- structured BOM, TechDraw, release approval, and release package in the first
+  implementation slice; flat BOM is now delivered by P2-S03 as revision-bound
+  evidence, while physical files in a release package remain deferred;
 - a second CAD backend, durable schema migration, release/tag, or PR.
 
 The last four mechanical-delivery capabilities remain part of the P2 campaign,
@@ -164,12 +166,32 @@ Evidence on 2026-08-02:
 
 ### P2-S03 — Flat BOM
 
-State: **pending product-scope confirmation**.
+State: **complete at the current candidate boundary**.
 
 - add bounded part number, description, material/density, and quantity metadata;
 - derive a flat BOM from sealed component facts;
 - bind BOM to the exact accepted Revision and include machine-readable output;
 - do not claim where-used, external part master, configurations, or PLM.
+
+Evidence on 2026-08-02:
+
+- `set_component_bom` persists canonical, bounded component metadata in the
+  FCStd itself without expanding the direct public tool surface;
+- quantity is derived from explicit component count; components sharing a part
+  number aggregate only when metadata and local-geometry digest match exactly,
+  otherwise the sealed observation reports a conflict and the BOM is incomplete;
+- unit and total mass are derived from sealed component volume and density;
+- canonical JSON and CSV are bound to the candidate Revision in operation output
+  and sealed task evidence; creating physical BOM files in a downloadable release
+  package remains P2-S04 work;
+- assembly acceptance supports `bom_complete`, `bom_row_count`,
+  `bom_total_quantity`, and tolerant `bom_total_mass` in kilograms;
+- a real Task Kernel run created two identical components, aggregated quantity
+  two, passed 16 acceptance criteria, published review, accepted it, and advanced
+  Revision/HEAD; a separate real managed Worker checkpoint/reload run preserved
+  the same BOM facts;
+- full non-slow suite: `5593 passed, 114 deselected, 19 warnings`; full Ruff,
+  changed-file format, and diff-integrity gates passed.
 
 ### P2-S04 — TechDraw and release package
 
@@ -199,10 +221,10 @@ Active product invariants remain unchanged:
 Selected controls are intentionally small:
 
 - **Continuity:** keep this compact current plan because P2 crosses sessions.
-- **Approval:** confirm the P2-A product boundary before changing public component
+- **Approval:** confirm the next product boundary before changing public component
   semantics or broadening the accepted model envelope.
 - **Gates:** G1 focused contracts for S01; G2 Task Kernel integration for S02;
-  one G3 real managed FreeCAD assembly outcome before calling P2-A complete.
+  G2 Task Kernel plus real managed FreeCAD revision/reload evidence for S03.
 
 No delegation, independent-review ceremony, production ledger, background
 controller, new validation framework, PR, release, or deployment is selected.
@@ -219,13 +241,13 @@ The user approved the following product boundary on 2026-08-02:
 > interference checks; defer native joints, cross-revision instances, BOM,
 > TechDraw, and release packaging to later P2 slices.
 
-P2-S02 is complete. The next possible product slice is P2-S03 flat BOM: bounded
-part number, description, material/density, quantity, and a machine-readable BOM
-bound to the accepted Revision. Because that adds a new product contract rather
-than merely continuing the approved rigid-assembly implementation, its exact
-scope must be confirmed before executable work begins.
+P2-S03 is complete. The next possible product slice is P2-S04 TechDraw and
+release packaging. It would add drawing layout, physical deliverable files, and
+release-state semantics, so its exact user-facing scope must be confirmed before
+executable work begins.
 
-Recovery boundary: P2-S01 and P2-S02 are authorized and complete. Intentional
-commit and branch push of the verified S02 slice are authorized. P2-S03 remains
-at a product-decision boundary; no durable schema migration, PR, release, or
-deployment is authorized. Preserve the unrelated untracked paths.
+Recovery boundary: P2-S01 through P2-S03 are authorized and complete.
+Intentional commit and branch push of the verified S03 slice are authorized.
+P2-S04 remains at a product-decision boundary; no durable schema migration, PR,
+release, deployment, or installed-runtime mutation is authorized. Preserve the
+unrelated untracked paths.
