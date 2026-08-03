@@ -1,12 +1,11 @@
 # VibeCAD Active Plan — WorkBuddy host verification
 
-> Status: **P2-S01 through P2-S04 published as v0.6.0; WorkBuddy real-model
-> integration passed and the v0.6.1 compatibility release is in progress**
+> Status: **P2-S01 through P2-S04 and the WorkBuddy compatibility patch are
+> published as v0.6.1; the GLM-5.2 real-model Profile is verified**
 >
 > Updated: 2026-08-03
 >
-> Repository anchor: published tag `v0.6.0@d533da6`; publisher recovery fix
-> `codex/agent-stage3@5507a0b`
+> Repository anchor: published tag `v0.6.1@e7dd0c0`
 >
 > This is the only mutable orchestration plan. P1 sequential editing closed at
 > `7f3d506`; earlier campaign files remain historical records.
@@ -290,8 +289,8 @@ The user approved the following product boundary on 2026-08-02:
 > interference checks; defer native joints, cross-revision instances, BOM,
 > TechDraw, and release packaging to later P2 slices.
 
-P2-S04 is published as VibeCAD 0.6.0 on PyPI and GitHub. WorkBuddy host
-compatibility is complete in the v0.6.1 source candidate. It reuses the same
+P2-S04 and the WorkBuddy compatibility patch are published as VibeCAD 0.6.1 on
+PyPI and GitHub. The integration reuses the same
 local stdio MCP, Skill, daemon, Task/Revision/Review, and Release authority; no
 second control plane or Blob/path adapter was added. The existing `.workbuddy/`
 memory directory was not treated as connector configuration and remains
@@ -322,3 +321,17 @@ version 0.6.1, recovered the approved Release, and re-read the identical ZIP
 Blob without repository `PYTHONPATH`. Local release evidence is 5,629 non-slow
 tests passed, 114 deselected, full Ruff, version guard, wheel/sdist Python 3.12
 fresh installs, Twine, MCPB validation/pack, and independent ZIP integrity.
+
+GitHub Actions run
+[`30805731339`](https://github.com/wangtao9090/VibeCAD/actions/runs/30805731339)
+passed version guard, quality, package gate, both real managed-agent scenarios,
+PyPI, and GitHub Release publication. The public
+[v0.6.1 Release](https://github.com/wangtao9090/VibeCAD/releases/tag/v0.6.1)
+contains MCPB SHA-256
+`faf15e15059e5f186b3c81ed85854a727914eacc9ffafb9ec0c15fa969d0a077`
+and Skill SHA-256
+`0c2b6c8d72b1654e67fbc12bb7234445c358da95bd4b870f165bc40082b96727`.
+The [PyPI 0.6.1](https://pypi.org/project/vibecad/0.6.1/) wheel SHA-256 is
+`f414ec955c3b89352cad6490000626c1dcfd34b742befe9b50774c6385fe3407`;
+a clean index install reported version 0.6.1, 31 tools, epoch 4, the frozen
+public-surface digest, and no local direct-url provenance.

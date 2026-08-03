@@ -120,6 +120,24 @@ The GitHub Release carries the gated `VibeCAD.mcpb` and standalone Agent Skill
 archive; the latter has SHA-256
 `f7e154aa6b8d2eafbd4f8a101aeb870199ff7bcad5ed04c9efd7748b4b97fca4`.
 
+## Published compatibility patch
+
+VibeCAD 0.6.1 is published on
+[PyPI](https://pypi.org/project/vibecad/0.6.1/) and as a
+[GitHub Release](https://github.com/wangtao9090/VibeCAD/releases/tag/v0.6.1).
+The published wheel and sdist SHA-256 values are respectively
+`f414ec955c3b89352cad6490000626c1dcfd34b742befe9b50774c6385fe3407`
+and `123e9b644f3283d25388533252a6898dcd4574b64dc70507d311c32f0e0c2781`.
+The GitHub Release MCPB and standalone Skill archive SHA-256 values are
+`faf15e15059e5f186b3c81ed85854a727914eacc9ffafb9ec0c15fa969d0a077`
+and `0c2b6c8d72b1654e67fbc12bb7234445c358da95bd4b870f165bc40082b96727`.
+
+The tag workflow passed version, Ruff, 5,629-test non-slow, package/fresh
+install, two real managed FreeCAD Agent, packed MCPB resource, PyPI, and GitHub
+Release jobs. A separate clean PyPI installation resolved no local
+`direct_url`, reported VibeCAD 0.6.1, 31 tools, runtime epoch 4, and the frozen
+public-surface digest.
+
 ## Models available to the installed WorkBuddy account
 
 The current cloud-resolved CLI allowlist contains these user-selectable models:
