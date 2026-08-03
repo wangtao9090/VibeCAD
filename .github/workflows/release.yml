@@ -363,7 +363,7 @@ jobs:
             uv venv --python 3.12 "$environment"
             uv pip install --python "$environment/bin/python" --no-deps "$artifact"
             EXPECTED_ROOT="$environment" "$environment/bin/python" -I -c \
-              'import os,pathlib,vibecad; from vibecad.application.public_surface import public_tool_specs; from vibecad.runtime import spec; root=pathlib.Path(os.environ["EXPECTED_ROOT"]).resolve(); installed=pathlib.Path(vibecad.__file__).resolve(); assert installed.is_relative_to(root); assert vibecad.__version__ == "0.6.0"; assert spec.SERVER_PACKAGE_EPOCH == 4; assert spec.PUBLIC_SURFACE_SHA256 == "d12e34b70ec448b415e5f525acc4eff66fae018e9395dd4812a5096d541ab17b"; assert len(public_tool_specs()) == 31'
+              'import os,pathlib,vibecad; from vibecad.application.public_surface import public_tool_specs; from vibecad.runtime import spec; root=pathlib.Path(os.environ["EXPECTED_ROOT"]).resolve(); installed=pathlib.Path(vibecad.__file__).resolve(); assert installed.is_relative_to(root); assert vibecad.__version__ == "0.6.1"; assert spec.SERVER_PACKAGE_EPOCH == 4; assert spec.PUBLIC_SURFACE_SHA256 == "d12e34b70ec448b415e5f525acc4eff66fae018e9395dd4812a5096d541ab17b"; assert len(public_tool_specs()) == 31'
           done
       - name: upload gated Python distributions
         uses: actions/upload-artifact@v4

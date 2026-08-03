@@ -4,7 +4,7 @@
 >
 > 调研对象：面向个人、Maker、产品设计师和机械工程师的可用 CAD Agent 产品，以及会直接改变其选择的传统 CAD 原生 Agent
 >
-> VibeCAD 基线：0.6.0 未发布的本地 `host-ready` 候选；真实 Claude/Codex 宿主尚未完成激活验收
+> VibeCAD 基线：0.6.1；WorkBuddy 5.3.5 + GLM-5.2 已 host-verified，Claude/Codex 尚未单独验收
 >
 > 证据说明：本文只把官方产品页、文档、代码仓库、定价页和论文作为“已公开证据”。“未见公开文档”不等于产品一定没有该能力；厂商营销声明也不等于已通过独立实测。
 >
@@ -312,6 +312,7 @@ VibeCAD 当前架构最有价值的是一条完整的可信修改链：
 | 只能有限导入 Box/Cylinder FCStd | “修改已有 CAD”价值尚未兑现 |
 | Workbench 未交付 | 用户无法在 CAD 画布里自然预览、选择和审核 |
 | 真实 Claude/Codex 尚未 host-verified | 核心宿主定位仍缺最后一公里证据 |
+| WorkBuddy 仅完成 GLM-5.2 单 Profile | 默认模型结论仍需 Kimi/MiniMax/DeepSeek 对比 |
 | 无自动 repair/replan | 首次失败后的体验依赖外部宿主自行理解 evidence |
 | FreeCAD 单 backend | 与原生 SOLIDWORKS/Fusion/NX 产品相比用户覆盖有限 |
 

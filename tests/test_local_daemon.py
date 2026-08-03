@@ -954,7 +954,7 @@ def test_real_client_authenticates_and_claims_one_path_bound_checkout_grant() ->
                 "epoch": 1,
             },
             "implementation": {
-                "package_version": "0.6.0",
+                "package_version": "0.6.1",
                 "build_id": "p1-s03.1",
             },
         }

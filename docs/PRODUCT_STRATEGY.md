@@ -2,7 +2,7 @@
 
 > 决策日期：2026-07-23
 >
-> 适用基线：VibeCAD 0.6.0 未发布的本地 `host-ready` 候选
+> 适用基线：VibeCAD 0.6.1 / WorkBuddy 5.3.5 + GLM-5.2 Profile 已验证
 >
 > 本文是产品调研、宿主 Agent 调研、多 CAD Backend 调研和当前代码架构的统一决策页。市场证据见
 > [`CAD_AGENT_PRODUCT_RESEARCH.md`](CAD_AGENT_PRODUCT_RESEARCH.md)，接口与 Backend 证据见
@@ -56,16 +56,16 @@ VibeCAD 当前最可信的差异不是模型更聪明或建模功能最多，而
 
 ### 2.1 当前产品基线
 
-VibeCAD 0.6.0 当前是未发布的本地 `host-ready` 候选，已经具备：
+VibeCAD 0.6.1 已具备：
 
-- 28-tool 公共 MCP 和 host-neutral Skill；
+- 31-tool 公共 MCP 和 host-neutral Skill；
 - 项目、任务、不可变 Revision 和 durable Draft；
 - Candidate 隔离、Accept/Reject、HEAD CAS 和恢复；
 - 同用户认证 daemon、session-bound file grant；
 - 受管、可终止的 FreeCAD Worker；
 - FCStd/STEP ResourceLink、重开验证和首批六个 object-level operation。
+- WorkBuddy 多轮任务恢复、摘要批准与 PDF/ZIP 原生 Blob 取回。
 
-`host-ready` 只表示协议、包和本地 E2E 已验证，不表示真实 Claude Code/Codex 安装激活已经完成。
 当前主要缺口是：
 
 | 缺口 | 对产品的影响 |

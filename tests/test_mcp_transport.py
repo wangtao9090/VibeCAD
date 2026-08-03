@@ -242,6 +242,20 @@ def test_prevalidator_accepts_only_the_supported_client_union() -> None:
     )
     assert called.params["name"] == "ping"
 
+    workbuddy_called = transport.prevalidate_client_message(
+        {
+            "jsonrpc": "2.0",
+            "id": "workbuddy-call",
+            "method": "tools/call",
+            "params": {
+                "name": "ping",
+                "arguments": {},
+                "_meta": {"__session": {"host": "workbuddy", "generation": 2}},
+            },
+        }
+    )
+    assert dict(workbuddy_called.params) == {"name": "ping", "arguments": {}}
+
     resource = transport.prevalidate_client_message(
         {
             "jsonrpc": "2.0",
@@ -479,6 +493,27 @@ def test_malformed_tools_call_container_has_its_own_fixed_error() -> None:
     assert caught.value.response == {
         "jsonrpc": "2.0",
         "id": 41,
+        "error": {"code": -32602, "message": "Tool request is invalid."},
+    }
+
+
+@pytest.mark.parametrize("metadata", ["session", [], 1, True])
+def test_tool_call_rejects_non_object_reserved_metadata(metadata: object) -> None:
+    transport = _transport()
+
+    with pytest.raises(transport.TransportProtocolError) as caught:
+        transport.prevalidate_client_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 42,
+                "method": "tools/call",
+                "params": {"name": "ping", "arguments": {}, "_meta": metadata},
+            }
+        )
+
+    assert caught.value.response == {
+        "jsonrpc": "2.0",
+        "id": 42,
         "error": {"code": -32602, "message": "Tool request is invalid."},
     }
 

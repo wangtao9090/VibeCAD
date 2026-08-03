@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org)
 
-VibeCAD is a FreeCAD expert agent for host agents such as Claude and Codex. It turns design
+VibeCAD is a FreeCAD expert agent for host agents such as Claude, Codex, and WorkBuddy. It turns design
 intent into persistent projects, constrained CAD operations, reviewable drafts, and verified
 FCStd/STEP resources.
 
@@ -21,6 +21,8 @@ execution, deterministic verification, recovery, and delivery.
   Accept, and Reject.
 - Deterministic Task Kernel execution: isolated candidates, explicit review policy, verified
   FCStd/STEP artifacts, recovery, and replay-safe request semantics.
+- A WorkBuddy 5.3.5 verified local-stdio path covering strict schemas, durable restart recovery,
+  exact Release approval, and native MCP Blob reads for PDF/ZIP delivery.
 - A VibeCAD-managed FreeCAD runtime, so users do not need to prepare a compatible system FreeCAD.
 
 ## Try the FreeCAD Workbench Alpha
@@ -28,8 +30,7 @@ execution, deterministic verification, recovery, and delivery.
 The easiest installation path is to give your coding Agent this request:
 
 > Install and launch the VibeCAD FreeCAD Workbench Alpha from
-> https://github.com/wangtao9090/VibeCAD. Use commit
-> `91c94f4a2761d19b878f92dc892130a920e7ba85`, clone it into a persistent
+> https://github.com/wangtao9090/VibeCAD. Use tag `v0.6.1`, clone it into a persistent
 > directory, build its wheel, install it with `uv tool install --force`, keep
 > the checkout and built wheel, and run `vibecad --freecad`. Do not install or
 > fall back to a system copy of FreeCAD.
@@ -38,10 +39,10 @@ The Agent's reproducible procedure is:
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout 91c94f4a2761d19b878f92dc892130a920e7ba85
+git -C VibeCAD checkout v0.6.1
 cd VibeCAD
 uv build --wheel
-uv tool install --force dist/vibecad-0.6.0-py3-none-any.whl
+uv tool install --force dist/vibecad-0.6.1-py3-none-any.whl
 vibecad --freecad
 ```
 
@@ -108,7 +109,7 @@ engineering, and simulation are not yet integrated. Upstream engines for photo/v
 STL conversion, 2D sketch recognition, and similar tasks may be connected later as external
 tools. VibeCAD focuses on the intermediate orchestration and verification of editable CAD.
 
-## Current Public Capabilities (0.6.0)
+## Current Public Capabilities (0.6.1)
 
 The MCPB manifest and runtime project the same frozen contract, which currently exposes 31
 tools. Each tool has a concise description, a strict input schema, and side-effect annotations.
@@ -205,12 +206,40 @@ Skill discovery paths are:
 | Current Codex installer path | `$CODEX_HOME/skills/vibecad-agent`; defaults to `$HOME/.codex/skills/vibecad-agent` when unset | — |
 | Published Codex discovery path | `$HOME/.agents/skills/vibecad-agent` | `.agents/skills/vibecad-agent` |
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
+| WorkBuddy | — | `.codebuddy/skills/vibecad-agent` |
 
-The release asset `vibecad-agent-skill-0.6.0.zip` contains exactly one top-level
+The release asset `vibecad-agent-skill-0.6.1.zip` contains exactly one top-level
 `vibecad-agent/` directory after extraction. That directory can be copied as a whole to any path
 listed above. The Python wheel contains the server and the FreeCAD Workbench addon, while the
 managed runtime contains the matching server environment. Neither package activates the Agent
 Skill.
+
+### WorkBuddy (verified)
+
+Install the released CLI, copy the standalone Skill directory to
+`.codebuddy/skills/vibecad-agent`, and register the local stdio server in the
+project's `.mcp.json`. Use the absolute path returned by `command -v vibecad`
+for `command` so the GUI does not depend on an inherited shell `PATH`:
+
+```json
+{
+  "mcpServers": {
+    "vibecad": {
+      "command": "/absolute/path/to/vibecad",
+      "args": [],
+      "env": {"VIBECAD_AUTO_INSTALL": "1"}
+    }
+  }
+}
+```
+
+Approve that project-scoped server when WorkBuddy prompts, then start or resume
+the task after the runtime reports ready. WorkBuddy natively persists binary
+`resources/read` results into its project `.mcp-resources/` directory, so PDF
+and approved ZIP delivery need no filesystem adapter. GLM-5.2 passed the
+canonical multi-turn task, but remains a provisional default: keep runtime
+maintenance tools outside an autonomous CAD task's allowed-tool set and require
+explicit user confirmation for `uninstall_runtime`.
 
 On first launch, the extension needs network access to fetch locked Python packages and, when
 needed, install approximately 2–3 GB of FreeCAD runtime files. Later launches reuse the verified
@@ -242,11 +271,11 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 
 ## What “Host-ready” Means Precisely
 
-The 0.6.0 release has verified the MCP protocol, Skill package structure, FCStd/STEP and Release
-ResourceLinks, managed FreeCAD E2E, and 31-tool discovery, so it can be described as
-protocol/package `host-ready`. This phase has not consumed the user's external-model quota to
-perform acceptance on WorkBuddy or another second host, so it cannot yet be described as
-`host-verified`; actual cross-host model calls remain a separate residual.
+The 0.6.1 release has verified the MCP protocol, Skill package structure, FCStd/STEP and Release
+ResourceLinks, managed FreeCAD E2E, 31-tool discovery, and one real WorkBuddy/GLM-5.2 multi-turn
+delivery. It is therefore `host-verified` for the stated WorkBuddy 5.3.5 boundary. This is not a
+claim that every WorkBuddy model is certified; Kimi-K3, MiniMax-M3, and DeepSeek-V4-Flash remain
+comparison candidates.
 
 ## Architectural Boundaries and Roadmap
 
@@ -258,8 +287,8 @@ form a second domain-write path. The daemon provides same-user authentication an
 one-time file grants; it does not create a second commit system.
 
 S3-8, P0-B core, the package/managed-runtime closeout, bounded G1 Workbench Alpha, P1 sequential
-editing, and P2 rigid mechanical delivery are complete for 0.6.0. The next integration slice is
-WorkBuddy host verification:
+editing, P2 rigid mechanical delivery, and the first WorkBuddy host integration are complete for
+0.6.1:
 
 - **P0-B core (backend complete)**: task/project/version discovery, file-level comparison,
   verified forward revert, cancellation/reconcile, authenticated daemon, file grants, source
@@ -273,8 +302,9 @@ WorkBuddy host verification:
 - **P2 (complete boundary)**: rigid 2–10 component assemblies, interference verification, flat
   BOM, deterministic assembly PDF, immutable Release approval, and an exact delivery ZIP;
   native joints, editable manufacturing drawings, GD&T, PLM, and enterprise delivery chains remain;
-- **WorkBuddy (next)**: certify local stdio MCP, strict schemas, durable task recovery, and
-  Release PDF/ZIP resources with explicit model profiles.
+- **WorkBuddy (verified)**: WorkBuddy 5.3.5 with GLM-5.2 completed strict local stdio tool use,
+  durable task/restart recovery, exact digest approval, and native PDF/ZIP Blob reads; the wider
+  model comparison remains future evidence, not a release blocker.
 
 The G1 Workbench Alpha packages the real FreeCAD Qt UI and its deterministic managed launcher. It
 includes one Workbench and Dock, daemon-backed refresh, separate HEAD/draft preview, verdict,

@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org)
 
-VibeCAD 是面向 Claude、Codex 等宿主 Agent 的 FreeCAD 专家 Agent。它把设计意图转换为持久化项目、
+VibeCAD 是面向 Claude、Codex、WorkBuddy 等宿主 Agent 的 FreeCAD 专家 Agent。它把设计意图转换为持久化项目、
 受约束的 CAD 操作、可审核草案，以及经过验证的 FCStd/STEP 资源。
 
 VibeCAD 不内置或转售大模型。推理使用用户自己的宿主模型及其订阅或 API 配额；VibeCAD 负责 CAD
@@ -18,6 +18,8 @@ VibeCAD 不内置或转售大模型。推理使用用户自己的宿主模型及
 - 可实际运行的 FreeCAD Workbench Alpha，支持项目/任务发现、HEAD 与草案预览、verdict、Accept
   和 Reject；
 - 确定性的 Task Kernel 执行：隔离候选、明确审核策略、经过验证的 FCStd/STEP 制品、恢复与安全重放；
+- 已验证的 WorkBuddy 5.3.5 本地 stdio 路径，覆盖严格 schema、重启恢复、精确 Release 批准以及
+  PDF/ZIP 的原生 MCP Blob 读取；
 - VibeCAD 自行管理 FreeCAD 运行时，用户无需预先配置兼容的系统 FreeCAD。
 
 ## 体验 FreeCAD Workbench Alpha
@@ -25,7 +27,7 @@ VibeCAD 不内置或转售大模型。推理使用用户自己的宿主模型及
 最简单的安装方式是把下面这句话交给编码 Agent：
 
 > 请从 https://github.com/wangtao9090/VibeCAD 安装并启动 VibeCAD FreeCAD
-> Workbench Alpha。使用 commit `91c94f4a2761d19b878f92dc892130a920e7ba85`，
+> Workbench Alpha。使用 tag `v0.6.1`，
 > 克隆到持久目录，构建 wheel，通过 `uv tool install --force` 安装，保留 checkout
 > 和构建出的 wheel，最后运行 `vibecad --freecad`。不要安装或回退到系统版 FreeCAD。
 
@@ -33,10 +35,10 @@ Agent 应执行以下可复现步骤：
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout 91c94f4a2761d19b878f92dc892130a920e7ba85
+git -C VibeCAD checkout v0.6.1
 cd VibeCAD
 uv build --wheel
-uv tool install --force dist/vibecad-0.6.0-py3-none-any.whl
+uv tool install --force dist/vibecad-0.6.1-py3-none-any.whl
 vibecad --freecad
 ```
 
@@ -94,7 +96,7 @@ direct operation 与 ModelProgram 不是两套执行系统。direct operation �
 导入、逆向工程和仿真 尚未接入。照片/视频到网格或 STL、2D 草图识别等前置引擎可以在以后作为
 外部工具连接，VibeCAD 聚焦可编辑 CAD 的中间编排与验证。
 
-## 当前公开能力（0.6.0）
+## 当前公开能力（0.6.1）
 
 MCPB manifest 与运行时投影同一份冻结合同，当前公开 31 个工具。每个工具都有简短说明、严格输入
 schema 与副作用标记；宿主应先调用 `get_capabilities`，不能根据工具数量或模型常识猜能力。
@@ -174,10 +176,34 @@ Skill 的发现路径如下：
 | Codex 当前安装器路径 | `$CODEX_HOME/skills/vibecad-agent`；未设置时默认 `$HOME/.codex/skills/vibecad-agent` | — |
 | Codex 已发布发现路径 | `$HOME/.agents/skills/vibecad-agent` | `.agents/skills/vibecad-agent` |
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
+| WorkBuddy | — | `.codebuddy/skills/vibecad-agent` |
 
-发布资产中的 `vibecad-agent-skill-0.6.0.zip` 解压后只有一个顶层 `vibecad-agent/` 目录，可整体复制
+发布资产中的 `vibecad-agent-skill-0.6.1.zip` 解压后只有一个顶层 `vibecad-agent/` 目录，可整体复制
 到上述任一路径。Python wheel 包含服务端和 FreeCAD Workbench 插件，受管运行时包含匹配的服务端
 环境；两者都不会自动激活 Agent Skill。
+
+### WorkBuddy（已验证）
+
+安装已发布 CLI，把独立 Skill 目录复制到 `.codebuddy/skills/vibecad-agent`，并在项目
+`.mcp.json` 中注册本地 stdio 服务。`command` 应使用 `command -v vibecad` 返回的绝对路径，避免
+GUI 依赖 shell 继承的 `PATH`：
+
+```json
+{
+  "mcpServers": {
+    "vibecad": {
+      "command": "/absolute/path/to/vibecad",
+      "args": [],
+      "env": {"VIBECAD_AUTO_INSTALL": "1"}
+    }
+  }
+}
+```
+
+WorkBuddy 提示时批准这个项目级服务，等待运行时 ready 后再开始或恢复任务。WorkBuddy 会把二进制
+`resources/read` 结果原生保存到项目 `.mcp-resources/`，因此 PDF 与批准后的 ZIP 不需要文件路径
+适配层。GLM-5.2 已通过标准多轮任务，但目前只是暂定默认模型：自主 CAD 任务的 allowed tools 应
+排除运行时维护工具，`uninstall_runtime` 必须保留显式用户确认。
 
 扩展首次启动需要联网获取锁定的 Python 包，并按需安装约 2–3 GB 的 FreeCAD 运行时；后续启动复用
 已验证缓存。macOS 默认数据根通常是：
@@ -206,10 +232,10 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 
 ## Host-ready 的准确含义
 
-0.6.0 已验证 MCP 协议、Skill 包结构、FCStd/STEP 与 Release ResourceLink、受管 FreeCAD E2E 与
-31-tool discovery，因此可以称为 protocol/package `host-ready`。当前阶段没有消费用户的外部模型
-配额执行 WorkBuddy 或其它第二宿主验收，所以还不能称为 `host-verified`；实际跨宿主模型调用仍是
-独立残项。
+0.6.1 已验证 MCP 协议、Skill 包结构、FCStd/STEP 与 Release ResourceLink、受管 FreeCAD E2E、
+31-tool discovery，以及一次真实 WorkBuddy/GLM-5.2 多轮交付。因此在声明的 WorkBuddy 5.3.5
+边界内可以称为 `host-verified`。这不等于所有 WorkBuddy 模型都已认证；Kimi-K3、MiniMax-M3 与
+DeepSeek-V4-Flash 仍是后续对比候选。
 
 ## 架构边界与路线
 
@@ -219,7 +245,7 @@ daemon 进入该 Application/Task Kernel。运行时维护和无状态 discovery
 第二条领域写入路径。daemon 提供同用户认证及受限的一次性 file grant，不形成第二套提交系统。
 
 S3-8、P0-B core、package/managed-runtime 收口、有界 G1 Workbench Alpha、P1 顺序编辑与 P2
-刚性机械交付都已在 0.6.0 完成。下一集成阶段是 WorkBuddy 宿主验收：
+刚性机械交付与首个 WorkBuddy 宿主集成都已在 0.6.1 完成：
 
 - **P0-B core（后端完成）**：任务/项目/版本发现、文件级比较、verified forward revert、取消/reconcile、
   认证 daemon、file grant、source liveness 与受管可终止 FreeCAD Worker 都进入同一 Task Kernel；
@@ -230,8 +256,8 @@ S3-8、P0-B core、package/managed-runtime 收口、有界 G1 Workbench Alpha、
   受控导入和更广的单零件生产能力仍待后续完成；
 - **P2（有界完成）**：2–10 零件刚性装配、干涉验证、扁平 BOM、确定性装配 PDF、不可变 Release
   批准与精确交付 ZIP；原生 joints、可编辑制造图、GD&T、PLM 与企业交付链仍待后续；
-- **WorkBuddy（下一阶段）**：验证本地 stdio MCP、严格 schema、持久任务恢复、Release PDF/ZIP
-  Resource，以及显式模型 Profile。
+- **WorkBuddy（已验证）**：WorkBuddy 5.3.5 + GLM-5.2 已完成严格本地 stdio 工具调用、持久任务/
+  重启恢复、精确摘要批准与原生 PDF/ZIP Blob 读取；更广模型对比属于后续证据，不阻塞本次发布。
 
 G1 Workbench Alpha 已把真实 FreeCAD Qt UI 与确定性的受管启动器打入安装包。它具备恰好一个
 Workbench 与 Dock、daemon-backed refresh、相互独立的 HEAD/草案预览、verdict、精确

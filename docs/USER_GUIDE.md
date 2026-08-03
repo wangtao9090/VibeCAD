@@ -1,4 +1,4 @@
-# VibeCAD 0.6.0 本地交付候选用户手册
+# VibeCAD 0.6.1 本地交付候选用户手册
 
 VibeCAD 是由 Claude、Codex 等宿主 Agent 调用的 FreeCAD 专家 Agent。你描述设计目标，宿主负责理解
 与规划，VibeCAD 负责把受支持的 CAD 操作放进可恢复、可审核、可验证的项目流程，并交付 FCStd、
@@ -86,7 +86,7 @@ FreeCAD.app、preferences、macro 或其他 addon；遇到外来或已变异的�
 ## 4. 单独安装 Agent Skill
 
 MCPB 内带有 Skill 的归档副本，但安装 MCPB **不等于激活 Skill**。把仓库中的
-`skills/vibecad-agent/` 或独立资产 `vibecad-agent-skill-0.6.0.zip` 解压得到的同名目录，整体复制
+`skills/vibecad-agent/` 或独立资产 `vibecad-agent-skill-0.6.1.zip` 解压得到的同名目录，整体复制
 或链接到一个宿主发现路径：
 
 | 宿主 | 用户级 | 项目级 |
@@ -94,12 +94,14 @@ MCPB 内带有 Skill 的归档副本，但安装 MCPB **不等于激活 Skill**�
 | Codex 当前测试安装路径 | `$CODEX_HOME/skills/vibecad-agent`，默认 `$HOME/.codex/skills/vibecad-agent` | — |
 | Codex 已发布发现路径 | `$HOME/.agents/skills/vibecad-agent` | `.agents/skills/vibecad-agent` |
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
+| WorkBuddy | — | `.codebuddy/skills/vibecad-agent` |
 
 复制后重启或重新加载宿主，让它重新发现 Skill。Python wheel 与受管 runtime 只提供服务端，不包含
 Skill，也不会替宿主修改 Skill 目录。
 
-当前本地证据证明协议、包和 Skill 结构 `host-ready`；尚未调用第二个 Claude/Codex 外部模型执行
-真实跨宿主验收，因此不要把当前状态描述成 `host-verified`。
+WorkBuddy 5.3.5 + GLM-5.2 已完成真实多轮、重启恢复、Release 摘要批准以及 PDF/ZIP Blob 取回，
+因此该精确 Profile 可以描述为 `host-verified`；不要把它扩展为 Claude/Codex 或所有 WorkBuddy
+模型都已认证。
 
 ## 5. 第一次设计：创建一个可审核盒子
 
@@ -261,7 +263,7 @@ FCStd 导入时只能使用用户明确授权给 `create_project` 的源文件�
 
 ## 11. 当前明确不支持的能力
 
-0.6.0 本地交付候选不支持：
+0.6.1 本地交付候选不支持：
 
 - STEP/STL import、STL 到 STEP、照片/视频重建和 2D 草图识别；
 - 通用 FCStd、Sketcher、PartDesign、孔、圆角、倒角、布尔、装配、BOM 与 TechDraw；

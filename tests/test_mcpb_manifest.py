@@ -217,7 +217,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "accept_draft",
         "export_task_artifacts",
         "notifications/cancelled",
-        "0.6.0",
+        "0.6.1",
         "31 tools",
         "daemon",
         "Task Kernel",
@@ -231,7 +231,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "Checkpoint Edit",
         "there is no automatic merge or rebase",
         "STEP/STL import, photo reconstruction, and simulation are not currently supported",
-        "WorkBuddy (next)",
+        "WorkBuddy (verified)",
     ):
         assert required in english_readme
 
@@ -247,7 +247,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "accept_draft",
         "export_task_artifacts",
         "notifications/cancelled",
-        "0.6.0",
+        "0.6.1",
         "31 个工具",
         "daemon",
         "Task Kernel",
@@ -261,7 +261,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "Checkpoint Edit",
         "系统不做自动 merge 或 rebase",
         "当前仍不支持 face/edge 选择、STEP/STL import、照片重建或 simulation",
-        "WorkBuddy（下一阶段）",
+        "WorkBuddy（已验证）",
     ):
         assert required in chinese_readme
     for removed_endpoint in (
@@ -282,7 +282,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
     roadmap = (ROOT / "docs/PRODUCT_CAPABILITY_ROADMAP.md").read_text(encoding="utf-8")
     normalized_roadmap = " ".join(roadmap.replace("\n> ", " ").split())
     for required in (
-        "0.6.0",
+        "0.6.1",
         "31-tool 公共 MCP、durable review/release",
         "host-neutral skill",
         "P0-B core backend（已完成）",

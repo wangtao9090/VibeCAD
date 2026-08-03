@@ -30,6 +30,7 @@ from vibecad.worker.codec import (
 )
 
 _VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\Z")
+MAX_WORKER_RPC_TIMEOUT_MS = 60_000
 _TERMINATION_LIMIT_SECONDS = 5.0
 _TERM_GRACE_SECONDS = 0.25
 _PATH_TYPE = type(Path())
@@ -933,7 +934,7 @@ class _WorkerProcess:
         if (
             type(timeout_ms) is not int
             or timeout_ms <= 0
-            or timeout_ms > 30_000
+            or timeout_ms > MAX_WORKER_RPC_TIMEOUT_MS
             or type(method) is not str
             or type(params) is not dict
         ):

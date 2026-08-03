@@ -1,17 +1,18 @@
 # VibeCAD 产品能力与企业化路线
 
-> 状态：AR-1 reviewed；P0-B core backend、MR0 internal foundation 与 G1 Workbench Alpha 已完成；
-> 0.6.0 仍是未发布的本地 host-ready 候选
+> 状态：AR-1 reviewed；P0-B、MR0、P1、P2 与首个 WorkBuddy Profile 已完成；
+> G1 Workbench Alpha 已完成；
+> 0.6.1 是 WorkBuddy 兼容补丁版本
 >
 > 日期：2026-08-01
 >
-> 当前基线：VibeCAD 0.6.0 / runtime epoch 4、`31-tool 公共 MCP、durable review/release`、首批六操作、
+> 当前基线：VibeCAD 0.6.1 / runtime epoch 4、`31-tool 公共 MCP、durable review/release`、首批六操作、
 > host-neutral skill 与 FCStd/STEP/PDF/ZIP ResourceLink。P0-B 已交付 keyed replay/discovery、compare/revert、
 > read-only manifest、`durable active cancellation`、单 Application/shared Task Kernel、same-user
 > authenticated runnable daemon、session-bound file grants 和 managed killable Worker。G1 已交付
 > managed Workbench 的 HEAD/draft preview、verdict、精确 object/feature selector 与 Accept/Reject，
-> 并完成一个指纹绑定的 macOS FreeCAD 1.1.3 外部 addon 试点。真实 Claude/Codex 主机尚未安装激活
-> 验收，当前没有 tag 或 release。
+> 并完成一个指纹绑定的 macOS FreeCAD 1.1.3 外部 addon 试点。WorkBuddy 5.3.5 + GLM-5.2 已完成
+> 真实多轮与 Release 资源验收；Claude/Codex 仍未单独认证。
 >
 > 产品定位、多 Backend 组合、AutoCAD/国产 DWG CAD 与统一评测决策见
 > [`PRODUCT_STRATEGY.md`](PRODUCT_STRATEGY.md)。本文继续作为当前 FreeCAD 交付主线，不因远期
@@ -74,7 +75,7 @@ Artifact 并返回 immutable artifact/proposal；任何设计变更必须由新�
 
 P0-B core backend 已关闭 verified forward revert、active CAD cancellation/Worker kill 与 reconcile、
 same-user authenticated daemon、session-bound file grant、source liveness/revocation 和最小
-crash/hang isolation。0.6.0 package/managed-runtime 本地候选与 G1 Workbench Alpha 也已完成收口但
+crash/hang isolation。0.6.1 package/managed-runtime 本地候选与 G1 Workbench Alpha 也已完成收口但
 尚未 tag 或发布。当前近期缺口是 P0-B hardening 的 retention/GC、runner migration 与完整运行观测，
 以及 P1/G2 的首个窄纵向能力切片。外部 FreeCAD 目前只是单一指纹试点，不是兼容矩阵。
 
@@ -97,7 +98,8 @@ Workbench draft 预览所需的权威语义。当前不应立刻扩大几何白�
    conformance；FreeCAD 仍是唯一连接 adapter；
 5. **[已完成] G1 Workbench Alpha** 交付 HEAD/draft 预览、verdict、stale/revoked 拒绝、
    Accept/Reject、object/feature 选择，以及一个有界 user-FreeCAD 外部桥接试点；
-6. P0-B hardening 与真实 host verification 继续推进；retention/GC、runner upgrade 和恢复
+6. **[已完成] 首个真实 host verification**：WorkBuddy 5.3.5 + GLM-5.2 覆盖严格 stdio、持久恢复、
+   Release 批准和 PDF/ZIP Blob；其他 Profile 继续独立评估；retention/GC、runner upgrade 和恢复
    缺口必须在 P1 交付前关闭；
 7. P1/G2 再扩 Selector Level B、Sketcher、PartDesign、受控导入和 STL 主流程。
 
@@ -370,8 +372,8 @@ P0 分成两个可连续实施的切片：
   liveness/revocation 和最小 crash isolation；
 - P0-B hardening：retention/GC、runner generation upgrade、可观测性和恢复矩阵收口。
 
-P0-B core backend 与 G1 FreeCAD Qt Workbench Alpha 已完成并进入 0.6.0 本地 host-ready 候选；
-真实 Claude/Codex 主机激活验证仍受 S3-RES-06 约束，且当前没有 tag 或 release。Workbench 默认
+P0-B core backend、G1 FreeCAD Qt Workbench Alpha 与首个 WorkBuddy Profile 已进入 0.6.1；
+真实 Claude/Codex 主机激活验证仍受 S3-RES-06 约束。Workbench 默认
 使用受管 FreeCAD；显式 user-FreeCAD 只覆盖一个指纹绑定的 1.1.3 本机试点。P1 作为可交付产品完成
 前仍必须关闭 P0-B hardening residual。
 

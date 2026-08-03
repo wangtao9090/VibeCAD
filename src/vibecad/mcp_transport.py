@@ -663,7 +663,7 @@ def _validate_params(method: str, params: dict[str, Any], request_id: int | str)
         if not _exact_keys(
             params,
             required=frozenset({"name"}),
-            optional=frozenset({"arguments"}),
+            optional=frozenset({"arguments", "_meta"}),
         ):
             _invalid(request_id=request_id, tool_request=True)
         if not _bounded_string(params["name"], maximum=MAX_JSON_KEY_BYTES):
@@ -672,6 +672,14 @@ def _validate_params(method: str, params: dict[str, Any], request_id: int | str)
             _invalid(request_id=request_id, tool_request=True)
         if "arguments" in params and params["arguments"] is not None:
             if _plain_object(params["arguments"]) is None:
+                _invalid(request_id=request_id, tool_request=True)
+        # MCP reserves ``_meta`` for client/server metadata. WorkBuddy uses it
+        # to carry an opaque host-session marker on every tool invocation. The
+        # lexical pass already bounds its complete JSON tree; admit only a
+        # plain object (or null), then discard it before SDK/application
+        # dispatch so host metadata can never affect a VibeCAD tool contract.
+        if "_meta" in params and params["_meta"] is not None:
+            if _plain_object(params["_meta"]) is None:
                 _invalid(request_id=request_id, tool_request=True)
         return
     if method == "resources/read":
@@ -748,10 +756,14 @@ def prevalidate_client_message(value: object) -> ClientMessageDescriptor:
             if not _bounded_string(params["reason"]):
                 _invalid()
 
+    admitted_params = dict(params)
+    if method == "tools/call":
+        admitted_params.pop("_meta", None)
+
     return ClientMessageDescriptor(
         method=method,
         request_id=request_id,
-        params=MappingProxyType(dict(params)),
+        params=MappingProxyType(admitted_params),
         is_notification=not has_id,
         is_cancellation=method == "notifications/cancelled",
         cancellation_target=cancellation_target,

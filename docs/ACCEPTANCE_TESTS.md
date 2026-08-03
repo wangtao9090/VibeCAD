@@ -1,4 +1,4 @@
-# VibeCAD 0.6.0 本地交付候选验收测试
+# VibeCAD 0.6.1 本地交付候选验收测试
 
 本清单验证当前 Agent-first 产品：持久化 Project/Task/Revision/Draft/Artifact/Release、31 个公开工具、
 direct operation 与 ModelProgram 的统一 Task Kernel，以及可验证的 FCStd/STEP/PDF/ZIP 资源交付。
@@ -6,19 +6,19 @@ direct operation 与 ModelProgram 的统一 Task Kernel，以及可验证的 FCS
 放行结论必须区分：
 
 - **protocol/package host-ready**：本地 raw/typed MCP、Skill 包、受管 FreeCAD 与打包后会话全部通过；
-- **host-verified**：真实 Claude/Codex 等第二宿主使用外部模型执行同一任务并通过。
+- **host-verified**：真实第二宿主使用外部模型执行同一任务并通过。
 
-0.6.0 本地交付候选的当前放行范围是前者。未授权外部模型/API 消耗，因此不能把本清单的本地模拟、测试
-double 或当前控制器执行写成 host-verified 证据。
+0.6.1 同时保留完整 protocol/package gate，并新增 WorkBuddy 5.3.5 + GLM-5.2 的真实 Profile
+证据。该结果不能扩展为 Claude/Codex 或其他 WorkBuddy 模型已认证。
 
 MR0-C01..C04 已交付并验收内部 multi-runtime foundation；本次 C05 只关闭 canonical 文档、证据与
-恢复记录，不改变本清单已有 PASS 范围或可执行产品声明。该内部 foundation 独立于 0.6.0
+恢复记录，不改变本清单已有 PASS 范围或可执行产品声明。该内部 foundation 独立于 0.6.1
 release、真实宿主和产品支持 gate。
 
 MR1-P00 已冻结
 [`Revision durable-v2 迁移合同`](orchestrated/vibecad-durable-v2.md)，但没有实现 Revision v2
 reader/writer、
-inventory、activation 或 migration。其 future acceptance 与当前 0.6.0 host-ready gate 分开，
+inventory、activation 或 migration。其 future acceptance 与当前 0.6.1 host-ready gate 分开，
 不得把文档合同或 managed-checkout 自己的 schema v2 写成 Revision durable-v2 PASS。
 
 ## 1. 冻结产品口径
@@ -86,7 +86,7 @@ artifact/proposal；设计采纳必须新建 reviewed CAD Task。
 [`调研报告`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)不提供任何 acceptance PASS，也不把其中的
 P1/P1.5/P2 建议变为当前承诺。
 
-### 1.4 MR0 foundation conformance（C01..C04 已验收，独立于 0.6.0 放行）
+### 1.4 MR0 foundation conformance（C01..C04 已验收，独立于 0.6.1 放行）
 
 | 合同 | C01..C04 已接受的证据 | 当前状态 | 不能据此宣称 |
 |---|---|---|---|
@@ -101,7 +101,7 @@ P1/P1.5/P2 建议变为当前承诺。
 上述 accepted evidence 落在 C04 commit
 `7c98e36c77ea748b2c33274d00d0f895ef3d8102`，其 exact conformance suite 为
 `97 passed`。实现与测试入口见
-[`CAD_RUNTIME_ADAPTER_GUIDE.md`](CAD_RUNTIME_ADAPTER_GUIDE.md)。本表不是 0.6.0 release matrix；
+[`CAD_RUNTIME_ADAPTER_GUIDE.md`](CAD_RUNTIME_ADAPTER_GUIDE.md)。本表不是 0.6.1 release matrix；
 MR0 conformance 不能关闭 §7 的真实第二宿主 residual，也不能产生 tag、release、G1 或 host-verified
 结论。
 
@@ -109,7 +109,7 @@ MR0 conformance 不能关闭 §7 的真实第二宿主 residual，也不能产�
 
 本节投影
 [`Revision durable-v2 迁移合同`](orchestrated/vibecad-durable-v2.md) 的 future gate；所有结果当前均为
-NOT RUN，不能加入 §2 的 0.6.0 放行 PASS：
+NOT RUN，不能加入 §2 的 0.6.1 放行 PASS：
 
 | ID | Future gate | 必须证明 | 当前状态 |
 |---|---|---|---|
@@ -144,14 +144,14 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 
 | ID | Gate | 通过标准 | 结果 |
 |---|---|---|---|
-| G01 | 版本与协议身份 | source/pyproject/manifest/package = 0.6.0；server epoch = 4；MCP/FreeCAD/Python pin 不漂移 | ☐ |
+| G01 | 版本与协议身份 | source/pyproject/manifest/package = 0.6.1；server epoch = 4；MCP/FreeCAD/Python pin 不漂移 | ☐ |
 | G02 | 公开面 | 精确 31 个唯一工具；说明与 manifest 完全一致；固定 discovery frame ≤ 32,768 bytes | ☐ |
 | G03 | 内部校验 | discovery 不发 output schema，但正常与异常 CallToolResult 仍受冻结 output validator 约束 | ☐ |
 | G04 | 命名空间 | direct 与稳定名称碰撞、direct 重名都在 schema/dispatch/effect 前 fail closed | ☐ |
 | G05 | Skill | canonical Skill 通过校验；示例、恢复表和限制与 live schema 一致 | ☐ |
 | G06 | 分发 | sdist/MCPB/Skill zip 含同一 Skill tree；wheel/installed Python 不含 Skill | ☐ |
 | G07 | 普通测试 | 全量 non-slow pytest、Ruff、changed-Python format/pycompile、offline lock、diff check 通过 | ☐ |
-| G08 | 受管 FreeCAD | Darwin slow matrix 通过；安装只同步 0.6.0/epoch 4，不重建现有引擎 | ☐ |
+| G08 | 受管 FreeCAD | Darwin slow matrix 通过；安装只同步 0.6.1/epoch 4，不重建现有引擎 | ☐ |
 | G09 | Agent E2E | empty/import、direct/program、review/cancel/restart/conflict、artifact/resource 与负例通过 | ☐ |
 | G10 | 数据保护 | runtime uninstall 与持久取消不删除/改写项目数据；执行和导出不污染源文件或暴露任意路径 | ☐ |
 | G11 | 打包后会话 | 从全新解包 MCPB 启动并复跑 discovery、真实 CAD 与资源读取 | ☐ |
@@ -164,7 +164,7 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 
 检查：
 
-1. `src/vibecad/__init__.py`、`pyproject.toml`、`manifest.json`、wheel/sdist metadata 都是 `0.6.0`；
+1. `src/vibecad/__init__.py`、`pyproject.toml`、`manifest.json`、wheel/sdist metadata 都是 `0.6.1`；
 2. runtime receipt、status 与 server handshake 使用同一 VibeCAD 版本；
 3. private server epoch 为 4，runtime receipt 的 public-surface digest 绑定 description、input/output
    enforcement schema 与 annotations；当前 SHA-256 为
@@ -186,7 +186,7 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 - 完整 UTF-8 tools/list frame 不超过 32,768 bytes；
 - `manifest.json` 的 `(name, description)` 与 PublicToolSpec 逐项完全一致。
 
-0.6.0 的固定 SDK projection 为 25,566 bytes，计入 JSON-RPC envelope 和末尾 LF 的完整 frame 为
+0.6.1 的固定 SDK projection 为 25,566 bytes，计入 JSON-RPC envelope 和末尾 LF 的完整 frame 为
 25,611 bytes；两者都必须低于 32,768 bytes，且其 SHA-256 必须由当前 public-surface contract 与
 自动化 gate 重新计算、逐字节核对，不能沿用旧版本记录。
 `cancel_task` 必须位于 `resume_task` 后、`accept_draft` 前，description 固定为
@@ -220,7 +220,7 @@ canonical source 是 `skills/vibecad-agent/`。执行 Skill validator，并检�
 - 安装路径覆盖 Codex 当前测试路径、Codex 已发布 user/repo 路径和 Claude Code user/repo 路径；
 - MCPB 内存在 Skill 不被描述成已经 activation，文档要求 restart/reload。
 
-从干净输出目录分别构建 wheel、sdist、MCPB 与 `vibecad-agent-skill-0.6.0.zip`。预期矩阵：
+从干净输出目录分别构建 wheel、sdist、MCPB 与 `vibecad-agent-skill-0.6.1.zip`。预期矩阵：
 
 | 渠道 | 包含 Skill | 规则 |
 |---|---:|---|
@@ -244,7 +244,7 @@ cache、runtime 和非预期文件没有混入；MCPB 中 README 和 Skill 是�
 4. 上传一次已经过 gate 的 archive。
 
 publisher 只能下载并发布已 gate 的 archive，不得重建。GitHub Release 同时附上 `VibeCAD.mcpb` 与
-`vibecad-agent-skill-0.6.0.zip`，且仍需要明确的 environment/tag 授权。本验收不执行 tag 或发布。
+`vibecad-agent-skill-0.6.1.zip`，且仍需要明确的 environment/tag 授权。本验收不执行 tag 或发布。
 
 ## 4. 真实受管 FreeCAD Agent Matrix
 
@@ -511,9 +511,16 @@ client，至少覆盖：
 资源。后两项必须分别如实拒绝未支持/任意 code 路径，以及用原 create key 安全重放
 unknown-outcome `create_task`，不得换 key 创建第二个任务。
 
-这项证明 Skill 指令可被当前控制器遵循，不等于外部 Claude/Codex host-verified。
+这项只证明 Skill 指令可被当前控制器遵循；WorkBuddy host-verified 证据来自下面独立的真实调用。
 
-## 7. 真实第二宿主验收（独立授权后执行）
+## 7. 真实第二宿主验收
+
+WorkBuddy 5.3.5 + GLM-5.2 已完成：31-tool 严格调用、generation 14 的持久任务、跨 CLI 进程恢复、
+两组件验收、Release generation 0→1 的精确摘要批准、22,372-byte PDF 与 45,559-byte ZIP 原生
+Blob 取回，以及 ZIP 七条目完整性校验。批准没有改变 Revision 或 HEAD。VibeCAD 侧修复了
+`tools/call._meta` 兼容和 60-second Release Worker deadline。
+
+Claude/Codex 与其他 WorkBuddy 模型仍按以下同一矩阵分别执行：
 
 若之后授权模型/token 消耗，在 Claude 与 Codex 中至少各选一个真实宿主：
 

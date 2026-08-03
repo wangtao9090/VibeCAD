@@ -3,13 +3,13 @@
 > 决策状态：AR-1 reviewed / 2026-07-21
 >
 > 当前实现：P0-B core backend 已完成；单 Application/shared Task Kernel、认证 daemon、file grant、
-> managed killable Worker、verified revert 和 active cancellation/reconcile 已进入未发布的 0.6.0
-> 分支候选；协议与分发包仍为本地 host-ready
+> managed killable Worker、verified revert 和 active cancellation/reconcile 已进入 0.6.1；
+> WorkBuddy 5.3.5 + GLM-5.2 已完成真实 host verification
 >
 > MR0 状态：C00 仅冻结通用 runtime lifecycle 与 CAD 多 runtime 边界；C01..C04 和 conformance gate
 > 尚未完成。FreeCAD 是唯一连接的 CAD adapter，固定 FCStd/STEP durable 布局保留到 MR1
 >
-> 发布边界：真实 Claude/Codex 主机尚未安装激活验收，当前没有 tag 或 release
+> 发布边界：0.6.0 已发布；0.6.1 是 WorkBuddy 兼容补丁。Claude/Codex 仍未单独认证
 >
 > 文档角色：Agent 定位、调用模式、信任边界和后续阶段的决策真源
 >
@@ -34,17 +34,16 @@ OCCT 的事实独立验收，并原子提交或安全保留审核草案。
 | Local Kernel | same-user authenticated daemon、单 Application、session-bound file grant 已实现 | MCP 与 public client 可用 |
 | Managed Worker | 可杀 generation、RPC watchdog、crash/hang recovery 与 active cancel reconcile 已实现 | 能 |
 | 多 runtime 基础 | C00 只有已批准架构口径；实现与 conformance 尚未完成 | 不能作为第二 CAD 支持；当前仅 FreeCAD |
-| Host-neutral skill | canonical skill 与分发合同已交付并通过包级验收 | host-ready；真实宿主尚未激活验证 |
+| Host-neutral skill | canonical skill 与分发合同已交付并通过包级验收 | WorkBuddy Profile 已验证；其他宿主分别验收 |
 | FreeCAD Workbench | G1 Qt UI、public client/checkout/file grant、object/feature selector 与 review 已实现 | Alpha；外部 FreeCAD 仅单一指纹试点 |
 | Sampling/BYOK | 只有 reasoning-owner 枚举，未有 backend | 不能 |
 | 自动 repair/replan | 当前零次语义重试 | 不能 |
 | 照片/STL/仿真 Provider | 只有架构预留 | 不能 |
 | 任意 Python/FreeCAD 代码 Worker | 不存在，也不是主路径 | 不能 |
 
-所以准确说法是：**CAD 与任务内核已经打通，0.6.0 的 31-tool 公共协议、单 Kernel backend 和
-分发合同也已经在本地做到 host-ready，让兼容宿主具备低成本发现、正确调用、跨进程恢复和取回
-文件的合同。** 真实 Claude/Codex 中的 skill 安装、reload 与 canonical workflow 仍是 residual，
-不能把 typed/raw client conformance 宣称成 host-verified；当前候选也尚未发布。
+所以准确说法是：**CAD 与任务内核已经打通，0.6.1 的 31-tool 公共协议、单 Kernel backend、
+分发合同和 WorkBuddy 5.3.5 + GLM-5.2 Profile 已通过真实多轮、跨进程恢复、Release 批准和 Blob
+取回。** 这份 host-verified 证据不自动覆盖 Claude/Codex 或其他 WorkBuddy 模型。
 
 ## 2. 三方职责
 
@@ -396,7 +395,7 @@ Workbench 非第二权威、Provider 不自研底层引擎。MRG1-D01..D16 已�
   keyed/list/recover/compare/revert/manifest + durable active cancel/reconcile
   + single authenticated daemon/session file grant + source liveness/revocation
   + managed killable Worker/crash isolation
-→ [complete] 0.6.0 package/managed-runtime local candidate
+→ [complete] 0.6.1 package/managed-runtime + WorkBuddy compatibility candidate
 → [complete] MR0 multi-runtime foundation
   C01..C04 已实现 generic lifecycle、CAD capability/router、FreeCAD adapter 与 fake conformance。
   当前不增加公共 schema/operation 或第二 CAD；durable FCStd/STEP 保留到 MR1
@@ -406,7 +405,7 @@ Workbench 非第二权威、Provider 不自研底层引擎。MRG1-D01..D16 已�
   explicit user checkpoint after small FreeCAD edits; no live merge
 → [complete] P2 bounded rigid mechanical delivery
   explicit components + interference + flat BOM + assembly PDF + immutable Release ZIP
-→ WorkBuddy host verification
+→ [complete] WorkBuddy host verification
   local stdio + strict schemas + durable recovery + Release PDF/ZIP resources
 → P2
   assembly + BOM + TechDraw + release package

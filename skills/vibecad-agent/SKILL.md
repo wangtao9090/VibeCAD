@@ -23,6 +23,12 @@ Project, task, revision, review, artifact, release, and CAD MCP calls plus the p
 
 Initialize or verify the runtime first. Once it is ready, call `get_capabilities` as the first business discovery tool instead of guessing CAD support or arguments. Keep every write attached to the returned project id, task id, generation, base revision, draft revision, and idempotency key.
 
+Runtime maintenance is never a schema-recovery or task-recovery mechanism. Call
+`ensure_runtime` only when `get_runtime_status` says the runtime is not ready.
+Never call `uninstall_runtime` unless the user explicitly asks to remove the
+runtime after reviewing its preview; a host's broad tool permission or an
+autonomous execution mode is not user confirmation.
+
 ```text
 get_runtime_status
   -> ensure_runtime only when the runtime is not ready
@@ -94,6 +100,14 @@ The calling host owns model selection, subscription or API token use, and every 
 
 The repository's canonical skill directory can be copied to a host-specific discovery path. The currently tested Codex installer target is `$CODEX_HOME/skills/vibecad-agent`, with `$HOME/.codex/skills/vibecad-agent` as the default when `$CODEX_HOME` is unset.
 
-Codex also has published discovery paths at `$HOME/.agents/skills/vibecad-agent` for a user and `.agents/skills/vibecad-agent` for a repository. Claude uses `$HOME/.claude/skills/vibecad-agent` for a user and `.claude/skills/vibecad-agent` for a repository.
+Codex also has published discovery paths at `$HOME/.agents/skills/vibecad-agent` for a user and `.agents/skills/vibecad-agent` for a repository. Claude uses `$HOME/.claude/skills/vibecad-agent` for a user and `.claude/skills/vibecad-agent` for a repository. WorkBuddy uses `.codebuddy/skills/vibecad-agent` at project scope.
+
+For WorkBuddy, register the released `vibecad` executable as a local stdio MCP
+server using its absolute path, approve that project-scoped server, and restart
+or resume the task after runtime readiness. WorkBuddy's native
+`ReadMcpResource` persists binary MCP Blob results and returns the saved path;
+consume the returned PDF/ZIP resource URI normally and do not invent an
+arbitrary-filesystem fallback. When the host supports an allowed-tool list,
+exclude runtime maintenance tools from an autonomous CAD task.
 
 Installing the MCPB server does not perform skill activation. Copy or link this skill into the chosen host path, then restart or reload the host so it can rediscover the skill; no package channel silently activates it.

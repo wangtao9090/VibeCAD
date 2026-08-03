@@ -1,14 +1,15 @@
 # VibeCAD 当前实施架构
 
-> 实现基线：P0-B core backend / VibeCAD 0.6.0 / runtime epoch 4 / MR0-C01..C04
+> 实现基线：P0-B core backend / VibeCAD 0.6.1 / runtime epoch 4 / MR0-C01..C04
 > internal foundation accepted
 >
 > 架构复审：AR-1 + P0-B C14 refresh + MR0-C05 refresh + G1 closeout / 2026-08-01
 >
 > S3-8 的宿主 skill、发现合同和 ResourceLink，以及 P0-B 的可恢复生命周期、单 Kernel daemon、
-> file grant 和可杀 Worker backend 已在本地交付。0.6.0 仍是未发布候选：尚未在真实
-> Claude/Codex 主机中安装激活并执行验收，当前没有 tag 或 release；protocol/package
-> `host-ready` 不能表述为 `host-verified`。
+> file grant 和可杀 Worker backend 已交付。0.6.1 还修复 WorkBuddy 的 MCP 保留 metadata 与
+> Release Worker deadline，并已在 WorkBuddy 5.3.5 + GLM-5.2 中完成真实多轮、重启恢复、摘要
+> 批准和 PDF/ZIP Blob 验收。该 Profile 可称为 `host-verified`；Claude/Codex 与其他 WorkBuddy
+> 模型仍需各自认证。
 >
 > MR0-C01..C04 已交付并验收内部通用 runtime 合同与 descriptor registry、backend-neutral CAD
 > registry/router、FreeCAD default composition 和 provider-free conformance。当前唯一接通和默认选择的
@@ -532,9 +533,9 @@ verifier 与 HEAD 权威。详见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VER
 
 ## 12. 打包与测试事实
 
-当前 0.6.0 本地交付候选冻结：
+当前 0.6.1 本地交付候选冻结：
 
-- source、manifest、lock 和 managed server receipt 的目标版本为 0.6.0；公开工具 31 个，MCP 1.27.2，
+- source、manifest、lock 和 managed server receipt 的目标版本为 0.6.1；公开工具 31 个，MCP 1.27.2，
   server epoch 4，FreeCAD 1.1.0；receipt public-surface digest 为
   `d12e34b70ec448b415e5f525acc4eff66fae018e9395dd4812a5096d541ab17b`；
 - 固定 31-tool SDK projection 为 25,566 bytes，SHA-256 为
@@ -549,9 +550,9 @@ verifier 与 HEAD 权威。详见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VER
   HEAD，client EOF/重连不改变 durable truth；P2 负责把同一 31-tool/skill/package identity 刷新到
   wheel、sdist、MCPB、fresh install 和 managed receipt。
 
-完成 C14 package gate 后，该候选仍只能称为本地 protocol/package `host-ready`。真实
-Claude/Codex 主机中的 skill 安装、reload、发现、长任务和文件取回尚未执行；当前没有 tag 或
-release。
+0.6.1 在既有 package gate 上增加真实 WorkBuddy Profile 验收：skill 发现、严格工具调用、长任务、
+跨 CLI 进程恢复、Release 摘要批准以及 PDF/ZIP Blob 取回均已执行。该证据不自动认证
+Claude/Codex 或其他 WorkBuddy 模型。
 
 ## 13. 源码地图
 
@@ -578,7 +579,7 @@ release。
 
 当前可可靠完成简单 object-level 单零件建模和尺寸/位置修改，但还没有：
 
-- 真实 Claude/Codex 主机中的 skill 激活、canonical workflow 与文件体验验收；
+- Claude/Codex 及 GLM-5.2 之外 WorkBuddy 模型的独立 Profile 验收；
 - 通用 user-installed FreeCAD 兼容性；当前仅有一个指纹绑定的 macOS FreeCAD 1.1.3 本机试点；
 - 第二 CAD adapter、第二 CAD 产品支持或面向产品的 runtime discovery；MR0 只交付了内部
   conformance-ready 基础和 FreeCAD-only default composition；
@@ -586,14 +587,12 @@ release。
   writer 仍固定为 FCStd/STEP v1；
 - retention/GC、private runner generation migration 和完整运行观测/恢复审计；
 - face/edge Selector Level B、可视/语义 diff、Sketcher/PartDesign；
-- STL/STEP 受控导入、mesh-to-faceted-BRep、装配、BOM、TechDraw；
+- STL/STEP 受控导入、mesh-to-faceted-BRep、原生 joints/DOF、可编辑制造图与 GD&T；
 - Sampling/BYOK backend、照片/视频重建 Provider 或仿真 Provider。
 
-0.6.0 package/managed-runtime 本地候选与 G1 Workbench Alpha 已完成收口但尚未 tag 或发布。
-MR0-C01..C04 的内部 foundation 已完成。后续 P0-B hardening、P1/G2、host verification 与 MR1
-都是独立 campaign；P0-B hardening 关闭前不能把
-P1/G2 称为可交付。机械详细设计、预检与仿真的
+0.6.1 已收口 package/managed-runtime、G1 Workbench Alpha、P1/G2 顺序编辑、P2 刚性交付与
+首个 WorkBuddy Profile。MR0-C01..C04 的内部 foundation 已完成；更广模型认证、建模能力与 MR1
+仍是独立 campaign。机械详细设计、预检与仿真的
 [`方向调研`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)不构成 MR0、P1/P1.5/P2 功能承诺。
-真实宿主激活验收作为 S3-RES-06 residual 单独
-关闭，不阻塞已完成的 protocol/package host-ready 定义。只有阶段需要改变专家
+Claude/Codex 等其他宿主验收作为独立 residual 保留，不否定已完成的 WorkBuddy Profile。只有阶段需要改变专家
 Agent、用户自带模型、单 Task Kernel 或 Workbench 非第二权威这些边界时，才需要新的产品决策。

@@ -1,6 +1,7 @@
 # VibeCAD Active Plan — WorkBuddy host verification
 
-> Status: **P2-S01 through P2-S04 published as v0.6.0; WorkBuddy published-package connection confirmed**
+> Status: **P2-S01 through P2-S04 published as v0.6.0; WorkBuddy real-model
+> integration passed and the v0.6.1 compatibility release is in progress**
 >
 > Updated: 2026-08-03
 >
@@ -289,22 +290,35 @@ The user approved the following product boundary on 2026-08-02:
 > interference checks; defer native joints, cross-revision instances, BOM,
 > TechDraw, and release packaging to later P2 slices.
 
-P2-S04 is published as VibeCAD 0.6.0 on PyPI and GitHub. The active slice is now
-WorkBuddy host compatibility. Reuse the same local stdio MCP, Skill, daemon,
-Task/Revision/Review, and Release authority; add only a connection bundle or
-thin compatibility adapter that real evidence requires. Completion requires a
-real WorkBuddy model session covering exact tool discovery and schema failure,
-one durable CAD task, ResourceLink/resources-read for the P2 delivery package,
-review/approval, and restart recovery. The existing `.workbuddy/` memory
-directory is not treated as connector configuration and remains user-owned.
+P2-S04 is published as VibeCAD 0.6.0 on PyPI and GitHub. WorkBuddy host
+compatibility is complete in the v0.6.1 source candidate. It reuses the same
+local stdio MCP, Skill, daemon, Task/Revision/Review, and Release authority; no
+second control plane or Blob/path adapter was added. The existing `.workbuddy/`
+memory directory was not treated as connector configuration and remains
+user-owned.
 
-The read-only WorkBuddy 5.3.5 audit is recorded in
+The WorkBuddy 5.3.5 audit and live evidence are recorded in
 `docs/WORKBUDDY_COMPATIBILITY_RESEARCH.md`. It confirms host-level local stdio,
-strict MCP startup, ResourceLink/list/read implementation, and current model
-availability. A fresh PyPI install of `vibecad==0.6.0` reports 31 tools and is
-`Connected` through WorkBuddy CLI 2.115.0 in an isolated project. Binary PDF/ZIP
-round-tripping and the exact VibeCAD restart workflow remain for the live model
-gate. The initial explicit-model matrix is
-GLM-5.2 (default candidate), Kimi-K3 (quality ceiling), MiniMax-M3
+strict MCP startup, the 31-tool surface, durable task/restart recovery, exact
+Release approval, and native PDF/ZIP Blob persistence. A fresh PyPI 0.6.0
+install connected, but the live run found two blockers: WorkBuddy's reserved
+`tools/call._meta` was rejected, and the Release drawing's 60-second deadline
+exceeded the generic Worker 30-second cap. The v0.6.1 candidate strips bounded
+host metadata before dispatch and admits the intended Release deadline.
+
+GLM-5.2 then created, verified, and committed a two-part assembly; resumed it
+across separate WorkBuddy processes; approved an exact 45,559-byte Release ZIP;
+and read both the 22,372-byte PDF and ZIP through native `ReadMcpResource`.
+Revision and HEAD remained unchanged by approval. GLM-5.2 is a provisional
+default only with exact task-tool scoping because the run exposed unsafe
+runtime-maintenance choices before those tools were excluded. The remaining
+comparison matrix is Kimi-K3 (quality ceiling), MiniMax-M3
 (cost/performance), and DeepSeek-V4-Flash (fast/economy); `Auto` is excluded from
 certification because opaque routing is not reproducible.
+
+The exact local 0.6.1 wheel candidate was then installed into both the isolated
+WorkBuddy launcher and managed runtime. A fresh WorkBuddy process reported
+version 0.6.1, recovered the approved Release, and re-read the identical ZIP
+Blob without repository `PYTHONPATH`. Local release evidence is 5,629 non-slow
+tests passed, 114 deselected, full Ruff, version guard, wheel/sdist Python 3.12
+fresh installs, Twine, MCPB validation/pack, and independent ZIP integrity.

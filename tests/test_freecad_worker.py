@@ -1450,6 +1450,24 @@ def test_exact_typed_worker_error_does_not_poison_generation(tmp_path: Path) -> 
         process.terminate()
 
 
+def test_release_rpc_deadline_is_admitted_but_larger_deadline_is_rejected(
+    tmp_path: Path,
+) -> None:
+    process, _grandchild = _process(tmp_path, "typed_error")
+    try:
+        with pytest.raises(WorkerError) as release:
+            process.request_for_test(timeout_ms=60_000)
+        assert release.value.code is WorkerErrorCode.CAD_FAILURE
+        assert process.state is WorkerGenerationState.READY
+
+        with pytest.raises(WorkerError) as oversized:
+            process.request_for_test(timeout_ms=60_001)
+        assert oversized.value.code is WorkerErrorCode.INVALID_INPUT
+        assert process.state is WorkerGenerationState.READY
+    finally:
+        process.terminate()
+
+
 def test_response_cannot_publish_after_generation_termination(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

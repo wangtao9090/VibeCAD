@@ -126,7 +126,7 @@ def test_install_is_owned_idempotent_and_clean_uninstall_is_reversible(
     assert receipt["host_app"] == str(app)
     assert config["python_path"] == str(bridge_python)
     assert config["python_target"] == str(bridge_target)
-    assert config["package_version"] == "0.6.0"
+    assert config["package_version"] == "0.6.1"
     assert not (target / "vibecad").exists()
 
     sibling = target.parent / "OtherAddon"
@@ -146,6 +146,7 @@ def test_install_upgrades_an_owned_older_package_receipt(
     user_data = (tmp_path / "user-data").resolve()
     bridge_python = Path(sys.executable).resolve(strict=True)
 
+    monkeypatch.setattr(freecad_external, "__version__", "0.6.0")
     first = freecad_external.install_addon(
         app,
         user_data_root=user_data,
