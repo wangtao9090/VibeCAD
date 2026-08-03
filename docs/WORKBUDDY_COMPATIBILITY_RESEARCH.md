@@ -33,7 +33,7 @@ capability rather than an unbounded Blob allocation.
 
 | Required behavior | Evidence | Current status |
 |---|---|---|
-| Local stdio MCP | WorkBuddy CLI 2.115.0 registered the source candidate in an isolated project configuration; `mcp get vibecad` reported `Connected` for the exact Python stdio command | Confirmed with VibeCAD; packed release candidate still pending |
+| Local stdio MCP | WorkBuddy CLI 2.115.0 registered both the source candidate and an exact locally built `vibecad-0.6.0` wheel in isolated environments; both `mcp get` checks reported `Connected` | Confirmed through the exact wheel candidate; published package still pending |
 | `tools/list` and strict input schema | The installed CLI is launched with strict MCP configuration and exposes tool-call-capable models | Host-ready; exact VibeCAD 31-tool discovery and invalid-input rejection pending |
 | ResourceLink and resource commands | WorkBuddy 5.3.5 contains ResourceLink handling and launches the CLI with `ListMcpResources` and `ReadMcpResource`; the changelog explicitly records MCP Resource support | Confirmed at host implementation level |
 | Binary Blob for PDF/ZIP | Blob handling exists in the installed client, but no official statement proves arbitrary MCP binary round-tripping | Must pass a real VibeCAD PDF and approved ZIP test |
@@ -47,11 +47,12 @@ Sources: [WorkBuddy connector documentation](https://www.workbuddy.cn/docs/workb
 [WorkBuddy Skills](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Skills-Market),
 and [WorkBuddy changelog](https://www.workbuddy.cn/docs/workbuddy/Changelog).
 
-The live registration used only an isolated project configuration under a
-private temporary directory. It did not install or replace the managed VibeCAD
-runtime and did not invoke a model. WorkBuddy correctly required explicit
-approval before exposing the project-scoped server to a task; the remaining
-certification therefore starts at that approval boundary.
+The live registrations used only an isolated project configuration under a
+private temporary directory. The wheel check used a dedicated Python 3.12
+environment and a private `VIBECAD_HOME`; it did not install or replace the
+managed VibeCAD runtime and did not invoke a model. WorkBuddy correctly
+required explicit approval before exposing the project-scoped server to a
+task; the remaining certification therefore starts at that approval boundary.
 
 ## Models available to the installed WorkBuddy account
 
