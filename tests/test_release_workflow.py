@@ -166,6 +166,8 @@ def test_release_workflow_uses_explicit_least_privilege_permissions():
     for publisher in (pypi.group("body"), mcpb.group("body")):
         assert "actions/download-artifact@v4" in publisher
         assert "actions/checkout@v4" not in publisher
+    assert 'gh release create "$GITHUB_REF_NAME"' in mcpb.group("body")
+    assert '--repo "$GITHUB_REPOSITORY"' in mcpb.group("body")
 
 
 def test_current_repository_versions_pass_release_guard():

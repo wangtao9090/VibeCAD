@@ -420,6 +420,7 @@ jobs:
             *rc*|*a[0-9]*|*b[0-9]*) extra+=(--prerelease) ;;
           esac
           gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
             release-assets/VibeCAD.mcpb \
             "release-assets/vibecad-agent-skill-${GITHUB_REF_NAME#v}.zip" \
             --title "VibeCAD $GITHUB_REF_NAME" \
