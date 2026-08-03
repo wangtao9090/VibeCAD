@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD Parametric Core
 
-> Status: **S10.2 Sketcher compiler is complete; S10.3 is in progress**
+> Status: **S10.3 native feature compiler is complete; S10.4 is in progress**
 >
 > Updated: 2026-08-03
 >
@@ -25,13 +25,15 @@ The complete architecture, slices, gates, privacy boundary, validation budget,
 and recovery point are in
 [`vibecad-visual-cad.md`](vibecad-visual-cad.md). VCAD-A01 is approved and work
 continues on `codex/visual-cad-m0` from `origin/main@d7ab6b7`. S10.1 froze the
-minimal ParametricDesignIR v1. S10.2 now compiles its supported sketch subset
-into real Sketcher objects, preserves named parameter expressions and stable
-IR/index metadata across FCStd reload, rejects unsafe solver outcomes, and
-projects bounded solver/DoF facts into the existing entity-parameter shape.
-The active slice is S10.3: compile closed profiles into bounded native
-PartDesign Pad/Pocket/Revolve features, then add Hole without changing the
-public operation surface yet.
+minimal ParametricDesignIR v1; S10.2 delivered native Sketcher objects and
+solver/DoF facts. S10.3 now compiles closed profiles into a strict single-body
+Pad/Pocket/Revolution/Hole chain, preserves feature parameter expressions and
+IR mappings across FCStd reload, and rejects invalid, multi-solid, stale, or
+no-op feature outcomes. This first compiler slice accepts exactly one live wire
+for each Pocket/Hole; multi-loop pockets and multi-location holes remain an
+explicit S35 extension. The active slice is S10.4: carry this complete IR
+through one atomic ModelProgram/Task/Worker path and adopt stable EntityIdentity
+without adding a second write authority.
 Real vision providers, visual persistence, public product claims, Freeform, and
 publication remain behind A02–A06.
 

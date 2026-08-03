@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S10.2 Sketcher compiler` 已完成；`VCAD-S10.3` 执行中**
+> 状态：**`VCAD-S10.3 native feature compiler` 已完成；`VCAD-S10.4` 执行中**
 >
 > 更新：2026-08-03
 >
 > 产品基线：已发布 `v0.6.1@e7dd0c0`
 >
-> 当前里程碑：`VCAD-S10.3`
+> 当前里程碑：`VCAD-S10.4`
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -171,8 +171,8 @@ S10.1 保持 `ObservationSnapshot v1`、`SelectorV1` 和 `AcceptanceSpec v1` 的
 
 1. `S10.1` 冻结 `ParametricDesignIR`、stable ID、单位、约束和 feature schema（**complete**）；
 2. `S10.2` 实现 Sketcher 编译、观察、DoF/冲突/冗余诊断（**complete**）；
-3. `S10.3` 实现 datum-plane Pad/Pocket/Revolve，随后补 Hole（**active**）；
-4. `S10.4` 把 IR 编译进现有 ModelProgram/Task Kernel；
+3. `S10.3` 实现 datum-plane Pad/Pocket/Revolve，随后补 Hole（**complete**）；
+4. `S10.4` 把 IR 编译进现有 ModelProgram/Task Kernel（**active**）；
 5. `S10.5` 完成“创建 → review → Accept → 修改参数 → 新 Revision”的真实 FreeCAD 纵切片。
 
 退出门：
@@ -216,8 +216,29 @@ S10.2 closeout：
   Ruff/format/source compile 和独立复审通过。未新增 runner、controller 或 observation v2；全局 Worker
   stabilization 延后到 S10.4，与 solid、EntityIdentity 和真实 Worker outcome 一次接入。
 
-S10.2 的 datum 语义是“显式正交 frame 编译为稳定 Placement”，不是生成面 attachment，也不宣称
-已经创建用户可见的 FreeCAD DatumPlane 对象。S10.3 必须保持这一边界或显式版本化扩展。
+S10.2/S10.3 的 datum 语义是“显式正交 frame 编译为稳定 Placement”，不是生成面 attachment，也不
+宣称已经创建用户可见的 FreeCAD DatumPlane 对象；S10.3 保持了这一边界。
+
+S10.3 closeout：
+
+- `compile_parametric_design` 在 S10.2 的同一事务内按 IR 顺序创建原生 Pad/Pocket/Revolution/Hole；
+  Length/Angle/Dimension/ThroughAll 使用 FreeCAD 1.1 的名称枚举，ThroughAll 不保留无效的 dormant
+  length/depth expression；Pad/Pocket 使用 `SideType`，Hole 固定为 plain-hole 常量；
+- 被消费的 profile 必须由全部非 construction curve 形成有效 closed wire；Revolution 支持 sketch X/Y
+  轴和 construction-line ordinal `AxisN`。S10.3 的 Pocket/Hole 明确只接受 exactly one live wire，避免
+  native 部分切除被误判成功；multi-loop Pocket 与 multi-location Hole 保留在 S35 扩展。每个 feature
+  重算后必须精确处于唯一 `Up-to-date`、状态为 `Valid`、有效且恰有一个 Solid；加材体积必须增加，
+  Pocket/Hole 体积必须减少，防止 native no-op 或 stale Shape 假成功；
+- 锁定 feature metadata 与 graph gate 校验 feature index/base chain、唯一 sketch consumption、Body Group/
+  Tip、Profile/ReferenceAxis、精确参数 binding、plain-hole 常量和 carrier 表达式；Body facts 新增 feature
+  count，feature facts包含 kind/index/extent/profile wire/solid validity 和当前参数值；
+- managed FreeCAD 1.1.0 outcome 证明三张全约束草图的 Pad→Pocket→Hole 单实体链、construction-axis
+  Revolution、FCStd 保存/重开、Pad 8→12 mm、Hole 6→8 mm 和 Revolution 360→270° 参数编辑；open
+  profile 与 no-op Pocket 均事务回滚，断开 Hole expression fail closed；
+- focused/core gate 为 505 passed、13 deselected，Ruff/format/compile/package wheel import 通过；独立复审
+  clean；没有新增
+  public operation、Worker hook、runner/controller、Observation v2 或视觉 Provider。Task/Worker、identity
+  adoption 与真实 Revision outcome 仍属于 S10.4/S10.5。
 
 ### VCAD-S20 — Visual Input 与提案合同
 
@@ -442,13 +463,14 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-执行 S10.3：复用 S10.2 的真实 Sketcher 对象和稳定参数绑定，先验证 profile closure，再编译
-Pad/Pocket/Revolve，随后补 Hole；以一个全约束安装板完成参数修改、recompute、保存和重开 outcome，
-不新增 public operation、Worker 控制面、测试 controller 或视觉 Provider。
+执行 S10.4：把完整 ParametricDesignIR 作为一个原子 ModelProgram value/operation 接入现有 Task Kernel
+与私有 FreeCAD Worker；编译后为最终 Body/feature 采用既有 EntityIdentity，并在 shape observation 前调用
+现有 bounded parametric stabilization。保持单一候选/Revision/review 权威，不提前公开逐草图元素 selector，
+不新增测试 controller 或视觉 Provider。
 ```
 
-执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`。S10.3 只扩展 native feature compiler
-与 feature facts；不运行真实 Provider，也不进入 S20 持久化写路径。
+执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`。S10.4 只接入
+既有 ModelProgram/Task/Worker/identity seam；不运行真实 Provider，也不进入 S20 持久化写路径。
 
 ## 11. Material event ledger
 
@@ -458,6 +480,7 @@ Pad/Pocket/Revolve，随后补 Hole；以一个全约束安装板完成参数修
 | `VCAD-E01` | 用户批准按整体计划执行 | `VCAD-A01` 生效；允许 S10 和 S20.0 范围内的本地可逆实现及既有授权内 commit/branch push | `origin/main@d7ab6b7`；`codex/visual-cad-m0`；恢复动作是继续 S10.1 | A02–A06 未授权，范围保持不变 |
 | `VCAD-E02` | `VCAD-A01` 与 S10.1 focused gate | 冻结 ParametricDesignIR v1；不改变现有公共/持久合同 | 22 focused + 405 core regression；Ruff/format/package import；独立 review clean；恢复动作是继续 S10.2 | profile closure/solver/DoF/recompute 由 S10.2/S10.3 真实 FreeCAD gate 证明 |
 | `VCAD-E03` | S10.2 compiler 与 managed FreeCAD outcome | 建立真实 Sketcher、参数表达式、稳定映射、有界 graph/solver gate 和 v1 entity parameter facts | 497 focused/core tests；真实 edit/save/reopen 与 fail-closed outcomes；独立 review clean；恢复动作是继续 S10.3 | feature/solid、identity adoption、Worker stabilization 和 Task Kernel 接入留在 S10.3/S10.4 |
+| `VCAD-E04` | S10.3 feature compiler 与 managed FreeCAD outcome | 建立闭合 profile → native single-solid feature chain、feature mapping/facts 与 fail-closed shape gate | 505 focused/core tests；真实 plate/hole/shaft edit/save/reopen、partial multi-cut rejection、rollback 和 tamper outcomes；独立 review clean；恢复动作是继续 S10.4 | ModelProgram/Task/Worker、EntityIdentity、Revision review 纵切片留在 S10.4/S10.5；multi-loop Pocket / multi-location Hole 留在 S35 |
 
 ## 12. 研究依据
 

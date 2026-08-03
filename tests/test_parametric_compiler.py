@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -219,6 +220,7 @@ def test_compiler_fails_closed_on_slot_before_cad_mutation() -> None:
 
     class EmptyDocument:
         Objects: tuple[object, ...] = ()
+        UndoMode = 1
 
     class EmptySession:
         doc = EmptyDocument()
@@ -237,6 +239,25 @@ def test_compiler_fails_closed_on_slot_before_cad_mutation() -> None:
     assert caught.value.code is ParametricCompileErrorCode.UNSUPPORTED
     assert caught.value.path == "/sketches/0/geometries/0/kind"
     assert session.transaction_started is False
+
+
+def test_compiler_rejects_a_session_without_atomic_undo() -> None:
+    class NonAtomicDocument:
+        Objects: tuple[object, ...] = ()
+        UndoMode = 0
+
+    class NonAtomicSession:
+        doc = NonAtomicDocument()
+
+        @contextmanager
+        def _transaction(self, _label: str, *, claim_new_objects: bool):
+            yield
+
+    with pytest.raises(ParametricCompileError) as caught:
+        compile_design_sketches(NonAtomicSession(), _rectangle_design())
+
+    assert caught.value.code is ParametricCompileErrorCode.INVALID_INPUT
+    assert caught.value.path == "/session"
 
 
 def test_point_whole_reference_maps_to_freecad_point_code() -> None:
@@ -272,6 +293,175 @@ def test_solver_diagnostic_indexes_are_one_based() -> None:
     assert compiler_module._diagnostic_indexes((1, 2), 2) == (1, 2)
     with pytest.raises(ParametricCompileError):
         compiler_module._diagnostic_indexes((0,), 2)
+
+
+def test_profile_closure_requires_every_compiled_edge_in_closed_wires() -> None:
+    closed_wire = SimpleNamespace(isClosed=lambda: True, Edges=(object(),) * 4)
+    closed_shape = SimpleNamespace(
+        Edges=(object(),) * 4,
+        Wires=(closed_wire,),
+        isNull=lambda: False,
+        isValid=lambda: True,
+    )
+
+    assert (
+        compiler_module._require_profile_closure(
+            SimpleNamespace(Shape=closed_shape),
+            expected_edge_count=4,
+        )
+        == 1
+    )
+
+    open_wire = SimpleNamespace(isClosed=lambda: False, Edges=(object(),) * 4)
+    with pytest.raises(ParametricCompileError) as caught:
+        compiler_module._require_profile_closure(
+            SimpleNamespace(
+                Shape=SimpleNamespace(
+                    Edges=(object(),) * 4,
+                    Wires=(open_wire,),
+                    isNull=lambda: False,
+                    isValid=lambda: True,
+                )
+            ),
+            expected_edge_count=4,
+        )
+
+    assert caught.value.code is ParametricCompileErrorCode.PROFILE_FAILURE
+
+
+def test_subtractive_profiles_reject_multiple_wires_until_each_cut_is_proven() -> None:
+    for kind in (FeatureKind.POCKET, FeatureKind.HOLE):
+        with pytest.raises(ParametricCompileError) as caught:
+            compiler_module._require_supported_feature_profile(
+                kind,
+                2,
+                path="/features/1",
+            )
+
+        assert caught.value.code is ParametricCompileErrorCode.UNSUPPORTED
+        assert caught.value.path == "/features/1"
+
+    compiler_module._require_supported_feature_profile(FeatureKind.PAD, 2)
+    compiler_module._require_supported_feature_profile(FeatureKind.REVOLVE, 2)
+    compiler_module._require_supported_feature_profile(FeatureKind.HOLE, 1)
+
+
+def test_revolution_axis_tokens_preserve_sketch_axes_and_construction_order() -> None:
+    sketch = _rectangle_design().sketches[0]
+    before = SketchGeometry(
+        id=_id("geometry", 0),
+        kind=GeometryKind.LINE,
+        dimensions={"x1_mm": 0, "y1_mm": -10, "x2_mm": 0, "y2_mm": 50},
+        construction=True,
+    )
+    target = SketchGeometry(
+        id=_id("geometry", 5),
+        kind=GeometryKind.LINE,
+        dimensions={"x1_mm": -10, "y1_mm": 0, "x2_mm": 70, "y2_mm": 0},
+        construction=True,
+    )
+    with_axes = replace(sketch, geometries=sketch.geometries + (target, before))
+
+    assert compiler_module._revolution_axis_token(with_axes, "@sketch_x") == "H_Axis"
+    assert compiler_module._revolution_axis_token(with_axes, "@sketch_y") == "V_Axis"
+    assert compiler_module._revolution_axis_token(with_axes, target.id) == "Axis1"
+
+
+def test_feature_parameter_bindings_exclude_dormant_through_all_dimensions() -> None:
+    pad = _rectangle_design().features[0]
+    pocket = PartDesignFeature(
+        id=_id("feature", 2),
+        name="Pocket",
+        kind=FeatureKind.POCKET,
+        sketch_id=SKETCH,
+        base_feature_id=pad.id,
+        parameters={},
+        evidence_ids=(EVIDENCE,),
+        extent=FeatureExtent.THROUGH_ALL,
+    )
+    hole = PartDesignFeature(
+        id=_id("feature", 3),
+        name="Hole",
+        kind=FeatureKind.HOLE,
+        sketch_id=SKETCH,
+        base_feature_id=pocket.id,
+        parameters={"diameter": WIDTH},
+        evidence_ids=(EVIDENCE,),
+        extent=FeatureExtent.THROUGH_ALL,
+        location_geometry_ids=(BOTTOM,),
+    )
+
+    assert compiler_module._feature_parameter_bindings(pad) == (("length", DEPTH, "Length"),)
+    assert compiler_module._feature_parameter_bindings(pocket) == ()
+    assert compiler_module._feature_parameter_bindings(hole) == (("diameter", WIDTH, "Diameter"),)
+
+
+def test_feature_parameter_bindings_allow_one_parameter_to_drive_two_targets() -> None:
+    pad = _rectangle_design().features[0]
+    hole = PartDesignFeature(
+        id=_id("feature", 3),
+        name="Hole",
+        kind=FeatureKind.HOLE,
+        sketch_id=SKETCH,
+        base_feature_id=pad.id,
+        parameters={"diameter": DEPTH, "depth": DEPTH},
+        evidence_ids=(EVIDENCE,),
+        extent=FeatureExtent.LENGTH,
+        location_geometry_ids=(BOTTOM,),
+    )
+
+    assert compiler_module._feature_parameter_bindings(hole) == (
+        ("diameter", DEPTH, "Diameter"),
+        ("depth", DEPTH, "Depth"),
+    )
+
+
+def test_subtractive_features_cannot_succeed_without_removing_material() -> None:
+    previous = SimpleNamespace(Shape=SimpleNamespace(Volume=100.0))
+    no_op = SimpleNamespace(
+        Shape=SimpleNamespace(
+            Solids=(object(),),
+            Volume=100.0,
+            isNull=lambda: False,
+            isValid=lambda: True,
+        ),
+        State=("Up-to-date",),
+        getStatusString=lambda: "Valid",
+    )
+
+    with pytest.raises(ParametricCompileError) as caught:
+        compiler_module._require_feature_shape(no_op, previous, FeatureKind.POCKET)
+
+    assert caught.value.code is ParametricCompileErrorCode.FEATURE_FAILURE
+
+
+def test_feature_shape_requires_explicit_exact_native_status() -> None:
+    shape = SimpleNamespace(
+        Solids=(object(),),
+        Volume=100.0,
+        isNull=lambda: False,
+        isValid=lambda: True,
+    )
+    valid = SimpleNamespace(
+        Shape=shape,
+        State=("Up-to-date",),
+        getStatusString=lambda: "Valid",
+    )
+
+    assert compiler_module._require_feature_shape(valid, None, FeatureKind.PAD) == 100.0
+
+    for invalid in (
+        SimpleNamespace(Shape=shape, State=("Up-to-date",)),
+        SimpleNamespace(
+            Shape=shape,
+            State=("Up-to-date", "Up-to-date"),
+            getStatusString=lambda: "Valid",
+        ),
+    ):
+        with pytest.raises(ParametricCompileError) as caught:
+            compiler_module._require_feature_shape(invalid, None, FeatureKind.PAD)
+
+        assert caught.value.code is ParametricCompileErrorCode.FEATURE_FAILURE
 
 
 def test_parametric_facts_join_entity_observation_without_changing_legacy_objects(
