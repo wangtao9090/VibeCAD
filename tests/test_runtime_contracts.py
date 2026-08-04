@@ -23,6 +23,7 @@ from vibecad.runtime.contracts import (
     RuntimeLifecycleState,
     RuntimeProvenance,
     RuntimeResult,
+    RuntimeResultPort,
     RuntimeStatus,
 )
 
@@ -602,3 +603,29 @@ def test_lifecycle_control_is_an_abstract_structural_authority():
         ("status", "invocation-001"),
         ("health", "cad/freecad@1.1.0"),
     ]
+
+
+def test_result_retrieval_is_a_separate_structural_authority():
+    expected = RuntimeResult(
+        invocation_id="invocation-001",
+        runtime=_identity(),
+        state=RuntimeLifecycleState.SUCCEEDED,
+        output={"proposal": "ready"},
+    )
+
+    class Results:
+        def get_result(self, invocation_id: str) -> RuntimeResult | None:
+            assert invocation_id == expected.invocation_id
+            return expected
+
+    results: RuntimeResultPort = Results()
+
+    assert results.get_result("invocation-001") is expected
+
+    class PendingResults:
+        def get_result(self, invocation_id: str) -> RuntimeResult | None:
+            assert invocation_id == "invocation-pending"
+            return None
+
+    pending: RuntimeResultPort = PendingResults()
+    assert pending.get_result("invocation-pending") is None

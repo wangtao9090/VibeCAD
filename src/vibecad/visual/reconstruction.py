@@ -624,6 +624,8 @@ def clarification_answer_for_question(
 
     if type(question) is not ClarificationQuestion:
         raise TypeError("question must be an exact ClarificationQuestion")
+    if question.kind is ClarificationKind.CONFIRM_ASSUMPTION and type(response) is not bool:
+        _fail(ReconstructionContractErrorCode.INVALID_INPUT, "/response")
     return ClarificationAnswer(
         question_id=question.id,
         claim_id=question.claim_id,

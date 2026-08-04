@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shutil
 import struct
 import zlib
 from concurrent.futures import ThreadPoolExecutor
@@ -642,3 +643,463 @@ def test_sealed_tamper_fails_closed_without_rewriting_evidence(
 
     assert caught.value.code is VisualInputStoreErrorCode.INTEGRITY_FAILURE
     assert path.read_bytes() == evidence
+
+
+def test_finalize_retires_id_without_manifest_and_permanently_blocks_reuse(
+    tmp_path: Path,
+) -> None:
+    root, store, manager = _parts(tmp_path)
+    source = tmp_path / "source.png"
+    _save_png(source)
+    request = _request((ImageMime.PNG, ViewRole.FRONT))
+    sealed = _seal_paths(store, request, (source,))
+    digest = sealed.manifest_sha256
+
+    assert store.delete_exact(sealed.id, digest) is None
+    marker = root / f".deleted_{sealed.id.removeprefix('image_set_')}.json"
+    assert marker.is_file()
+    assert marker.stat().st_mode & 0o777 == 0o600
+    with pytest.raises(VisualInputStoreError) as caught:
+        store.get(sealed.id)
+    assert caught.value.code is VisualInputStoreErrorCode.NOT_FOUND
+
+    reopened = VisualInputStore(
+        root=root,
+        expected_root_identity=(root.stat().st_dev, root.stat().st_ino),
+        lease_manager=manager,
+    )
+    assert reopened.delete_exact(sealed.id, digest) is None
+    with pytest.raises(VisualInputStoreError) as caught:
+        _seal_paths(reopened, request, (source,))
+    assert caught.value.code is VisualInputStoreErrorCode.CONFLICT
+    assert reopened.finalize_delete_exact(sealed.id, digest) is None
+    assert not marker.exists()
+    retired = root / f".retired_{sealed.id.removeprefix('image_set_')}.json"
+    retired_body = json.loads(retired.read_bytes())
+    assert set(retired_body) == {"schema_version", "image_set_id", "retired_sha256"}
+    assert retired_body["image_set_id"] == sealed.id
+    assert digest not in retired.read_text()
+    assert all(item.original.sha256 not in retired.read_text() for item in sealed.inputs)
+    assert reopened.finalize_delete_exact(sealed.id, digest) is None
+    with pytest.raises(VisualInputStoreError) as caught:
+        _seal_paths(reopened, request, (source,))
+    assert caught.value.code is VisualInputStoreErrorCode.CONFLICT
+    assert reopened.delete_exact(sealed.id, "f" * 64) is None
+
+
+def test_delete_exact_rejects_wrong_digest_but_missing_cleanup_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    root, store, _ = _parts(tmp_path)
+    source = tmp_path / "source.png"
+    _save_png(source)
+    request = _request((ImageMime.PNG, ViewRole.FRONT))
+    sealed = _seal_paths(store, request, (source,))
+
+    with pytest.raises(VisualInputStoreError) as caught:
+        store.delete_exact(sealed.id, "0" * 64)
+    assert caught.value.code is VisualInputStoreErrorCode.CONFLICT
+    assert store.get(sealed.id) == sealed
+
+    missing_id = image_set_identity(OTHER_CREATE_KEY)[0]
+    assert store.delete_exact(missing_id, "1" * 64) is None
+    assert store.finalize_delete_exact(missing_id, "1" * 64) is None
+    assert store.delete_exact(missing_id, "f" * 64) is None
+    assert {path.name for path in root.iterdir()} == {
+        sealed.id,
+        f".retired_{missing_id.removeprefix('image_set_')}.json",
+    }
+
+
+def test_finalize_delete_exact_rejects_wrong_digest_and_never_touches_reappeared_target(
+    tmp_path: Path,
+) -> None:
+    root, store, _ = _parts(tmp_path)
+    source = tmp_path / "source.png"
+    backup = tmp_path / "sealed-backup"
+    _save_png(source)
+    request = _request((ImageMime.PNG, ViewRole.FRONT))
+    sealed = _seal_paths(store, request, (source,))
+    shutil.copytree(root / sealed.id, backup)
+    store.delete_exact(sealed.id, sealed.manifest_sha256)
+    marker = root / f".deleted_{sealed.id.removeprefix('image_set_')}.json"
+
+    with pytest.raises(VisualInputStoreError) as caught:
+        store.finalize_delete_exact(sealed.id, "0" * 64)
+    assert caught.value.code is VisualInputStoreErrorCode.CONFLICT
+    assert marker.is_file()
+
+    assert store.finalize_delete_exact(sealed.id, sealed.manifest_sha256) is None
+    retired = root / f".retired_{sealed.id.removeprefix('image_set_')}.json"
+    assert retired.is_file()
+    assert not marker.exists()
+    os.rename(backup, root / sealed.id)
+    with pytest.raises(VisualInputStoreError) as caught:
+        store.finalize_delete_exact(sealed.id, sealed.manifest_sha256)
+    assert caught.value.code is VisualInputStoreErrorCode.INTEGRITY_FAILURE
+    assert store.get(sealed.id) == sealed
+    assert retired.is_file()
+
+
+def test_retired_ids_share_the_reconstruction_lifetime_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, store, _ = _parts(tmp_path)
+    source = tmp_path / "source.png"
+    _save_png(source)
+    monkeypatch.setattr(visual_inputs_module, "MAX_IMAGE_SETS", 2)
+
+    for index in range(2):
+        request = _request(
+            (ImageMime.PNG, ViewRole.FRONT),
+            create_key=f"image_set_create_{index + 1:032x}",
+        )
+        sealed = _seal_paths(store, request, (source,))
+        assert store.delete_exact(sealed.id, sealed.manifest_sha256) is None
+        assert store.finalize_delete_exact(sealed.id, sealed.manifest_sha256) is None
+    request = _request(
+        (ImageMime.PNG, ViewRole.FRONT),
+        create_key=f"image_set_create_{3:032x}",
+    )
+    with pytest.raises(VisualInputStoreError) as caught:
+        _seal_paths(store, request, (source,))
+    assert caught.value.code is VisualInputStoreErrorCode.BUDGET_EXCEEDED
+    assert len(list(root.iterdir())) == 2
+
+
+def test_missing_finalize_cannot_overrun_the_reconstruction_lifetime_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, store, _ = _parts(tmp_path)
+    monkeypatch.setattr(visual_inputs_module, "MAX_IMAGE_SETS", 2)
+    image_set_ids = tuple(
+        image_set_identity(f"image_set_create_{index:032x}")[0] for index in range(1, 4)
+    )
+
+    for index, image_set_id in enumerate(image_set_ids[:2], start=1):
+        assert store.finalize_delete_exact(image_set_id, f"{index}" * 64) is None
+
+    with pytest.raises(VisualInputStoreError) as caught:
+        store.finalize_delete_exact(image_set_ids[2], "3" * 64)
+
+    assert caught.value.code is VisualInputStoreErrorCode.BUDGET_EXCEEDED
+    assert {path.name for path in root.iterdir()} == {
+        f".retired_{image_set_id.removeprefix('image_set_')}.json"
+        for image_set_id in image_set_ids[:2]
+    }
+
+
+def test_delete_exact_fails_closed_on_tombstone_tamper(tmp_path: Path) -> None:
+    root, store, _ = _parts(tmp_path)
+    source = tmp_path / "source.png"
+    _save_png(source)
+    request = _request((ImageMime.PNG, ViewRole.FRONT))
+    sealed = _seal_paths(store, request, (source,))
+    digest = sealed.manifest_sha256
+    store.delete_exact(sealed.id, digest)
+    marker = root / f".deleted_{sealed.id.removeprefix('image_set_')}.json"
+    body = json.loads(marker.read_bytes())
+    body["manifest_sha256"] = "f" * 64
+    marker.write_bytes(_canonical(body))
+    os.chmod(marker, 0o600)
+
+    with pytest.raises(VisualInputStoreError) as caught:
+        store.delete_exact(sealed.id, digest)
+
+    assert caught.value.code is VisualInputStoreErrorCode.INTEGRITY_FAILURE
+    assert marker.read_bytes() == _canonical(body)
+
+
+@pytest.mark.parametrize("fault", ["before_rename", "after_rename", "partial_cleanup"])
+def test_delete_exact_recovers_after_durable_marker_fault(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    root, store, manager = _parts(tmp_path)
+    source = tmp_path / "source.png"
+    _save_png(source)
+    request = _request((ImageMime.PNG, ViewRole.FRONT))
+    sealed = _seal_paths(store, request, (source,))
+    digest = sealed.manifest_sha256
+
+    if fault == "before_rename":
+        original = visual_inputs_module._rename_directory_noreplace
+
+        def fail_directory_publish(parent_fd: int, source_name: str, destination: str) -> None:
+            if source_name == sealed.id:
+                os.mkdir(destination, 0o700, dir_fd=parent_fd)
+            original(parent_fd, source_name, destination)
+
+        monkeypatch.setattr(
+            visual_inputs_module,
+            "_rename_directory_noreplace",
+            fail_directory_publish,
+        )
+    elif fault == "after_rename":
+        original = VisualInputStore._remove_sealed_directory
+
+        def fail_cleanup(*args, **kwargs):
+            raise OSError(errno.EIO, "injected cleanup failure")
+
+        monkeypatch.setattr(VisualInputStore, "_remove_sealed_directory", fail_cleanup)
+    else:
+        original = visual_inputs_module.os.unlink
+        calls = 0
+
+        def fail_second_unlink(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError(errno.EIO, "injected partial cleanup failure")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(visual_inputs_module.os, "unlink", fail_second_unlink)
+
+    with pytest.raises(VisualInputStoreError) as caught:
+        store.delete_exact(sealed.id, digest)
+    assert caught.value.code is VisualInputStoreErrorCode.RECOVERY_REQUIRED
+
+    if fault == "before_rename":
+        assert (root / sealed.id).is_dir()
+        assert (root / f".delete_{sealed.id.removeprefix('image_set_')}").is_dir()
+        monkeypatch.setattr(visual_inputs_module, "_rename_directory_noreplace", original)
+    elif fault == "after_rename":
+        monkeypatch.setattr(VisualInputStore, "_remove_sealed_directory", original)
+    else:
+        monkeypatch.setattr(visual_inputs_module.os, "unlink", original)
+    reopened = VisualInputStore(
+        root=root,
+        expected_root_identity=(root.stat().st_dev, root.stat().st_ino),
+        lease_manager=manager,
+    )
+    assert reopened.delete_exact(sealed.id, digest) is None
+    assert tuple(path.name for path in root.iterdir()) == (
+        f".deleted_{sealed.id.removeprefix('image_set_')}.json",
+    )
+
+
+@pytest.mark.parametrize("fault", ["partial_write", "pre_publish"])
+def test_delete_marker_temporary_is_safely_recovered_before_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    root, store, manager = _parts(tmp_path)
+    source = tmp_path / "source.png"
+    _save_png(source)
+    request = _request((ImageMime.PNG, ViewRole.FRONT))
+    sealed = _seal_paths(store, request, (source,))
+    digest = sealed.manifest_sha256
+    temporary = root / f".delete_marker_{sealed.id.removeprefix('image_set_')}.tmp"
+    marker = root / f".deleted_{sealed.id.removeprefix('image_set_')}.json"
+
+    if fault == "partial_write":
+        original = visual_inputs_module._write_all
+
+        def partial_write(fd: int, raw: bytes) -> None:
+            os.write(fd, raw[: len(raw) // 2])
+            raise OSError(errno.EIO, "injected partial marker write")
+
+        monkeypatch.setattr(visual_inputs_module, "_write_all", partial_write)
+    else:
+        original = visual_inputs_module._rename_directory_noreplace
+
+        def fail_marker_publish(parent_fd: int, source_name: str, destination: str) -> None:
+            if source_name.startswith(".delete_marker_"):
+                raise OSError(errno.EIO, "injected pre-publish failure")
+            original(parent_fd, source_name, destination)
+
+        monkeypatch.setattr(
+            visual_inputs_module,
+            "_rename_directory_noreplace",
+            fail_marker_publish,
+        )
+
+    with pytest.raises(VisualInputStoreError) as caught:
+        store.delete_exact(sealed.id, digest)
+    assert caught.value.code is VisualInputStoreErrorCode.RECOVERY_REQUIRED
+    assert temporary.is_file()
+    assert not marker.exists()
+    assert store.get(sealed.id) == sealed
+
+    if fault == "partial_write":
+        monkeypatch.setattr(visual_inputs_module, "_write_all", original)
+    else:
+        monkeypatch.setattr(visual_inputs_module, "_rename_directory_noreplace", original)
+    reopened = VisualInputStore(
+        root=root,
+        expected_root_identity=(root.stat().st_dev, root.stat().st_ino),
+        lease_manager=manager,
+    )
+    assert reopened.delete_exact(sealed.id, digest) is None
+    assert not temporary.exists()
+    assert marker.is_file()
+
+
+def test_delete_marker_publish_does_not_overwrite_racing_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, store, _ = _parts(tmp_path)
+    source = tmp_path / "source.png"
+    _save_png(source)
+    request = _request((ImageMime.PNG, ViewRole.FRONT))
+    sealed = _seal_paths(store, request, (source,))
+    suffix = sealed.id.removeprefix("image_set_")
+    marker = root / f".deleted_{suffix}.json"
+    temporary = root / f".delete_marker_{suffix}.tmp"
+    competing_digest = "f" * 64
+    competing_raw = visual_inputs_module._delete_marker_raw(sealed.id, competing_digest)
+    original = visual_inputs_module._rename_directory_noreplace
+
+    def race_publish(parent_fd: int, source_name: str, destination: str) -> None:
+        if source_name == temporary.name:
+            marker.write_bytes(competing_raw)
+            os.chmod(marker, 0o600)
+        original(parent_fd, source_name, destination)
+
+    monkeypatch.setattr(
+        visual_inputs_module,
+        "_rename_directory_noreplace",
+        race_publish,
+    )
+
+    with pytest.raises(VisualInputStoreError) as caught:
+        store.delete_exact(sealed.id, sealed.manifest_sha256)
+
+    assert caught.value.code is VisualInputStoreErrorCode.CONFLICT
+    assert marker.read_bytes() == competing_raw
+    assert not temporary.exists()
+    assert store.get(sealed.id) == sealed
+
+
+@pytest.mark.parametrize("fault", ["retired_pre_publish", "before_exact_cleanup"])
+def test_finalize_delete_exact_recovers_retired_publication_faults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    root, store, manager = _parts(tmp_path)
+    source = tmp_path / "source.png"
+    _save_png(source)
+    sealed = _seal_paths(store, _request((ImageMime.PNG, ViewRole.FRONT)), (source,))
+    store.delete_exact(sealed.id, sealed.manifest_sha256)
+    suffix = sealed.id.removeprefix("image_set_")
+    exact = root / f".deleted_{suffix}.json"
+    retired = root / f".retired_{suffix}.json"
+    retired_temporary = root / f".retire_marker_{suffix}.tmp"
+
+    if fault == "retired_pre_publish":
+        original = visual_inputs_module._rename_directory_noreplace
+
+        def fail_retired_publish(parent_fd: int, source_name: str, destination: str) -> None:
+            if source_name == retired_temporary.name:
+                raise OSError(errno.EIO, "injected retired publish failure")
+            original(parent_fd, source_name, destination)
+
+        monkeypatch.setattr(
+            visual_inputs_module,
+            "_rename_directory_noreplace",
+            fail_retired_publish,
+        )
+    else:
+        original = VisualInputStore._remove_delete_marker
+
+        def fail_exact_cleanup(*args, **kwargs):
+            raise OSError(errno.EIO, "injected exact marker cleanup failure")
+
+        monkeypatch.setattr(VisualInputStore, "_remove_delete_marker", fail_exact_cleanup)
+
+    with pytest.raises(VisualInputStoreError) as caught:
+        store.finalize_delete_exact(sealed.id, sealed.manifest_sha256)
+    assert caught.value.code is VisualInputStoreErrorCode.RECOVERY_REQUIRED
+    assert exact.is_file()
+    if fault == "retired_pre_publish":
+        assert retired_temporary.is_file()
+        assert not retired.exists()
+        monkeypatch.setattr(visual_inputs_module, "_rename_directory_noreplace", original)
+    else:
+        assert retired.is_file()
+        monkeypatch.setattr(VisualInputStore, "_remove_delete_marker", original)
+
+    reopened = VisualInputStore(
+        root=root,
+        expected_root_identity=(root.stat().st_dev, root.stat().st_ino),
+        lease_manager=manager,
+    )
+    assert reopened.finalize_delete_exact(sealed.id, sealed.manifest_sha256) is None
+    assert retired.is_file()
+    assert not exact.exists()
+    assert not retired_temporary.exists()
+
+
+def test_retired_publish_does_not_overwrite_racing_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, store, _ = _parts(tmp_path)
+    source = tmp_path / "source.png"
+    _save_png(source)
+    sealed = _seal_paths(store, _request((ImageMime.PNG, ViewRole.FRONT)), (source,))
+    store.delete_exact(sealed.id, sealed.manifest_sha256)
+    suffix = sealed.id.removeprefix("image_set_")
+    retired = root / f".retired_{suffix}.json"
+    temporary = root / f".retire_marker_{suffix}.tmp"
+    racing_raw = visual_inputs_module._retired_marker_raw(sealed.id)
+    original = visual_inputs_module._rename_directory_noreplace
+    racing_inode: int | None = None
+
+    def race_publish(parent_fd: int, source_name: str, destination: str) -> None:
+        nonlocal racing_inode
+        if source_name == temporary.name:
+            retired.write_bytes(racing_raw)
+            os.chmod(retired, 0o600)
+            racing_inode = retired.stat().st_ino
+        original(parent_fd, source_name, destination)
+
+    monkeypatch.setattr(
+        visual_inputs_module,
+        "_rename_directory_noreplace",
+        race_publish,
+    )
+
+    assert store.finalize_delete_exact(sealed.id, sealed.manifest_sha256) is None
+    assert retired.read_bytes() == racing_raw
+    assert retired.stat().st_ino == racing_inode
+    assert not temporary.exists()
+
+
+@pytest.mark.parametrize("target_state", ["final_marker_present", "source_missing"])
+def test_delete_marker_temporary_is_only_recovered_for_an_intact_unmarked_source(
+    tmp_path: Path,
+    target_state: str,
+) -> None:
+    root, store, _ = _parts(tmp_path)
+    source = tmp_path / "source.png"
+    _save_png(source)
+    sealed = _seal_paths(store, _request((ImageMime.PNG, ViewRole.FRONT)), (source,))
+    suffix = sealed.id.removeprefix("image_set_")
+    temporary = root / f".delete_marker_{suffix}.tmp"
+    temporary.write_bytes(b"interrupted marker")
+    os.chmod(temporary, 0o600)
+
+    if target_state == "final_marker_present":
+        marker = root / f".deleted_{suffix}.json"
+        marker.write_bytes(
+            visual_inputs_module._delete_marker_raw(sealed.id, sealed.manifest_sha256)
+        )
+        os.chmod(marker, 0o600)
+    else:
+        directory = root / sealed.id
+        for child in directory.iterdir():
+            child.unlink()
+        directory.rmdir()
+
+    with pytest.raises(VisualInputStoreError) as caught:
+        store.delete_exact(sealed.id, sealed.manifest_sha256)
+
+    assert caught.value.code is VisualInputStoreErrorCode.INTEGRITY_FAILURE
+    assert temporary.read_bytes() == b"interrupted marker"

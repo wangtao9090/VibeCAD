@@ -68,7 +68,21 @@ _CATALOG_RESOURCE = "visual-input-catalog-v1"
 _LOCATOR_DOMAIN = b"vibecad-visual-input-locator-v1\0"
 _IMAGE_SET_ID = re.compile(r"^image_set_[0-9a-f]{32}$")
 _STAGE_NAME = re.compile(r"^\.stage_[0-9a-f]{32}$")
+_DELETE_STAGE_NAME = re.compile(r"^\.delete_[0-9a-f]{32}$")
+_DELETE_MARKER_NAME = re.compile(r"^\.deleted_[0-9a-f]{32}\.json$")
+_DELETE_MARKER_TEMP_NAME = re.compile(r"^\.delete_marker_[0-9a-f]{32}\.tmp$")
+_RETIRED_MARKER_NAME = re.compile(r"^\.retired_[0-9a-f]{32}\.json$")
+_RETIRED_MARKER_TEMP_NAME = re.compile(r"^\.retire_marker_[0-9a-f]{32}\.tmp$")
 _VISUAL_FILE_NAME = re.compile(r"^visual_input_[0-9a-f]{32}\.(?:jpg|png)$")
+_DELETE_MARKER_DOMAIN = b"vibecad-visual-input-delete-v1\0"
+_RETIRED_MARKER_DOMAIN = b"vibecad-visual-input-retired-v1\0"
+_DELETE_MARKER_FIELDS = {
+    "schema_version",
+    "image_set_id",
+    "manifest_sha256",
+    "marker_sha256",
+}
+_RETIRED_MARKER_FIELDS = {"schema_version", "image_set_id", "retired_sha256"}
 _LOCATOR_FIELDS = {
     "schema_version",
     "dev",
@@ -142,6 +156,36 @@ def _canonical_json(value: object) -> bytes:
     if len(raw) > MAX_IMAGE_SET_RECORD_BYTES:
         _raise(VisualInputStoreErrorCode.BUDGET_EXCEEDED)
     return raw
+
+
+def _delete_names(image_set_id: str) -> tuple[str, str]:
+    suffix = image_set_id.removeprefix("image_set_")
+    return f".deleted_{suffix}.json", f".delete_{suffix}"
+
+
+def _delete_marker_temp_name(image_set_id: str) -> str:
+    return f".delete_marker_{image_set_id.removeprefix('image_set_')}.tmp"
+
+
+def _delete_marker_raw(image_set_id: str, manifest_sha256: str) -> bytes:
+    body = {
+        "schema_version": VISUAL_SCHEMA_VERSION,
+        "image_set_id": image_set_id,
+        "manifest_sha256": manifest_sha256,
+    }
+    marker_sha256 = hashlib.sha256(_DELETE_MARKER_DOMAIN + _canonical_json(body)).hexdigest()
+    return _canonical_json(body | {"marker_sha256": marker_sha256})
+
+
+def _retired_names(image_set_id: str) -> tuple[str, str]:
+    suffix = image_set_id.removeprefix("image_set_")
+    return f".retired_{suffix}.json", f".retire_marker_{suffix}.tmp"
+
+
+def _retired_marker_raw(image_set_id: str) -> bytes:
+    body = {"schema_version": VISUAL_SCHEMA_VERSION, "image_set_id": image_set_id}
+    retired_sha256 = hashlib.sha256(_RETIRED_MARKER_DOMAIN + _canonical_json(body)).hexdigest()
+    return _canonical_json(body | {"retired_sha256": retired_sha256})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -500,6 +544,203 @@ class VisualInputStore:
         except (OSError, StorageFailure):
             _raise(VisualInputStoreErrorCode.STORE_FAILURE)
 
+    def delete_exact(self, image_set_id: object, manifest_sha256: object) -> None:
+        """Delete one exact sealed ImageSet and retain in-progress evidence."""
+
+        if type(image_set_id) is not str or _IMAGE_SET_ID.fullmatch(image_set_id) is None:
+            _raise(VisualInputStoreErrorCode.INVALID_INPUT)
+        if (
+            type(manifest_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None
+        ):
+            _raise(VisualInputStoreErrorCode.INVALID_INPUT)
+        lease = self._acquire_catalog()
+        primary: BaseException | None = None
+        try:
+            self._delete_exact_locked(image_set_id, manifest_sha256)
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            try:
+                lease.release(owner_token=lease.owner_token)
+            except BaseException:
+                if primary is None:
+                    _raise(VisualInputStoreErrorCode.RECOVERY_REQUIRED)
+
+    def finalize_delete_exact(self, image_set_id: object, manifest_sha256: object) -> None:
+        """Retire exact deletion evidence without touching a reappeared ImageSet."""
+
+        if type(image_set_id) is not str or _IMAGE_SET_ID.fullmatch(image_set_id) is None:
+            _raise(VisualInputStoreErrorCode.INVALID_INPUT)
+        if (
+            type(manifest_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None
+        ):
+            _raise(VisualInputStoreErrorCode.INVALID_INPUT)
+        lease = self._acquire_catalog()
+        primary: BaseException | None = None
+        try:
+            self._finalize_delete_exact_locked(image_set_id, manifest_sha256)
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            try:
+                lease.release(owner_token=lease.owner_token)
+            except BaseException:
+                if primary is None:
+                    _raise(VisualInputStoreErrorCode.RECOVERY_REQUIRED)
+
+    def _finalize_delete_exact_locked(
+        self,
+        image_set_id: str,
+        manifest_sha256: str,
+    ) -> None:
+        marker_name, delete_name = _delete_names(image_set_id)
+        temporary_name = _delete_marker_temp_name(image_set_id)
+        retired_name, retired_temporary_name = _retired_names(image_set_id)
+        root_fd = -1
+        mutation_started = False
+        try:
+            root_fd = self._root.open()
+            _, _, identity_count = self._inventory(root_fd, recover_stages=False)
+            if self._entry_exists(root_fd, image_set_id):
+                _raise(VisualInputStoreErrorCode.CONFLICT)
+            if self._entry_exists(root_fd, delete_name) or self._entry_exists(
+                root_fd, temporary_name
+            ):
+                _raise(VisualInputStoreErrorCode.RECOVERY_REQUIRED)
+            marker = self._read_delete_marker(root_fd, marker_name, missing_ok=True)
+            if marker is not None and marker != (image_set_id, manifest_sha256):
+                _raise(VisualInputStoreErrorCode.CONFLICT)
+            retired = self._read_retired_marker(root_fd, retired_name, missing_ok=True)
+            if retired is None and marker is None and identity_count >= MAX_IMAGE_SETS:
+                _raise(VisualInputStoreErrorCode.BUDGET_EXCEEDED)
+            if self._entry_exists(root_fd, retired_temporary_name):
+                temporary = os.stat(
+                    retired_temporary_name,
+                    dir_fd=root_fd,
+                    follow_symlinks=False,
+                )
+                mutation_started = True
+                self._remove_delete_marker_temporary(
+                    root_fd,
+                    retired_temporary_name,
+                    temporary,
+                )
+            if retired is None:
+                mutation_started = True
+                self._write_retired_marker(root_fd, retired_name, image_set_id)
+            elif retired != image_set_id:
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            if marker is not None:
+                entry = os.stat(marker_name, dir_fd=root_fd, follow_symlinks=False)
+                mutation_started = True
+                self._remove_delete_marker(
+                    root_fd,
+                    marker_name,
+                    entry,
+                    image_set_id,
+                    manifest_sha256,
+                )
+            os.fsync(root_fd)
+        except VisualInputStoreError:
+            raise
+        except (OSError, StorageFailure):
+            _raise(
+                VisualInputStoreErrorCode.RECOVERY_REQUIRED
+                if mutation_started
+                else VisualInputStoreErrorCode.STORE_FAILURE
+            )
+        finally:
+            if root_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(root_fd)
+
+    def _delete_exact_locked(self, image_set_id: str, manifest_sha256: str) -> None:
+        marker_name, delete_name = _delete_names(image_set_id)
+        retired_name, _ = _retired_names(image_set_id)
+        root_fd = -1
+        marker_published = False
+        try:
+            root_fd = self._root.open()
+            self._inventory(root_fd, recover_stages=True)
+            retired = self._read_retired_marker(root_fd, retired_name, missing_ok=True)
+            if retired is not None:
+                if self._entry_exists(root_fd, image_set_id) or self._entry_exists(
+                    root_fd, delete_name
+                ):
+                    _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+                os.fsync(root_fd)
+                return
+            marker = self._read_delete_marker(root_fd, marker_name, missing_ok=True)
+            if marker is not None:
+                marker_published = True
+                if marker != (image_set_id, manifest_sha256):
+                    _raise(VisualInputStoreErrorCode.CONFLICT)
+
+            target_exists = self._entry_exists(root_fd, image_set_id)
+            delete_exists = self._entry_exists(root_fd, delete_name)
+            if target_exists and delete_exists:
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            if not marker_published and not target_exists:
+                os.fsync(root_fd)
+                return
+
+            if target_exists:
+                record = self._read_sealed(root_fd, image_set_id)
+                if not hmac.compare_digest(record.manifest_sha256, manifest_sha256):
+                    _raise(VisualInputStoreErrorCode.CONFLICT)
+                entry = os.stat(image_set_id, dir_fd=root_fd, follow_symlinks=False)
+                if not marker_published:
+                    if (
+                        sum(
+                            _DELETE_MARKER_NAME.fullmatch(name) is not None
+                            for name in os.listdir(root_fd)
+                        )
+                        >= MAX_IMAGE_SETS
+                    ):
+                        _raise(VisualInputStoreErrorCode.BUDGET_EXCEEDED)
+                    marker_published = True
+                    self._write_delete_marker(
+                        root_fd,
+                        marker_name,
+                        image_set_id,
+                        manifest_sha256,
+                    )
+                current = os.stat(image_set_id, dir_fd=root_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (entry.st_dev, entry.st_ino):
+                    _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+                _rename_directory_noreplace(root_fd, image_set_id, delete_name)
+                os.fsync(root_fd)
+                delete_exists = True
+
+            if delete_exists:
+                record = self._read_delete_stage(
+                    root_fd,
+                    delete_name,
+                    image_set_id,
+                    manifest_sha256,
+                )
+                entry = os.stat(delete_name, dir_fd=root_fd, follow_symlinks=False)
+                self._remove_sealed_directory(root_fd, delete_name, entry, record)
+            else:
+                # The matching marker is durable proof that this exact deletion completed.
+                os.fsync(root_fd)
+        except VisualInputStoreError:
+            raise
+        except (OSError, StorageFailure):
+            _raise(
+                VisualInputStoreErrorCode.RECOVERY_REQUIRED
+                if marker_published
+                else VisualInputStoreErrorCode.STORE_FAILURE
+            )
+        finally:
+            if root_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(root_fd)
+
     def seal(
         self,
         request: object,
@@ -550,9 +791,15 @@ class VisualInputStore:
         root_fd = -1
         try:
             root_fd = self._root.open()
-            count, total = self._inventory(root_fd, recover_stages=True)
+            count, total, identity_count = self._inventory(root_fd, recover_stages=True)
             target_exists = self._entry_exists(root_fd, image_set_id)
-            if not target_exists and count >= MAX_IMAGE_SETS:
+            marker_name, _ = _delete_names(image_set_id)
+            if self._entry_exists(root_fd, marker_name):
+                _raise(VisualInputStoreErrorCode.CONFLICT)
+            retired_name, _ = _retired_names(image_set_id)
+            if self._entry_exists(root_fd, retired_name):
+                _raise(VisualInputStoreErrorCode.CONFLICT)
+            if not target_exists and identity_count >= MAX_IMAGE_SETS:
                 _raise(VisualInputStoreErrorCode.BUDGET_EXCEEDED)
             if target_exists:
                 existing = self._read_sealed(root_fd, image_set_id)
@@ -926,15 +1173,21 @@ class VisualInputStore:
             _raise(VisualInputStoreErrorCode.STORE_FAILURE)
         return True
 
-    def _inventory(self, root_fd: int, *, recover_stages: bool) -> tuple[int, int]:
+    def _inventory(self, root_fd: int, *, recover_stages: bool) -> tuple[int, int, int]:
         count = 0
         total = 0
         stages: list[tuple[str, os.stat_result]] = []
+        delete_stages: list[tuple[str, os.stat_result]] = []
+        marker_temporaries: list[tuple[str, os.stat_result]] = []
+        retired_temporaries: list[tuple[str, os.stat_result]] = []
+        markers: dict[str, tuple[str, str]] = {}
+        retired: set[str] = set()
+        sealed_ids: set[str] = set()
         try:
             names = os.listdir(root_fd)
         except OSError:
             _raise(VisualInputStoreErrorCode.STORE_FAILURE)
-        if len(names) > MAX_IMAGE_SETS + MAX_IMAGE_SET_TEMPORARIES:
+        if len(names) > MAX_IMAGE_SETS * 2 + MAX_IMAGE_SET_TEMPORARIES * 2:
             _raise(VisualInputStoreErrorCode.BUDGET_EXCEEDED)
         for name in names:
             try:
@@ -944,21 +1197,94 @@ class VisualInputStore:
             if _STAGE_NAME.fullmatch(name) is not None:
                 stages.append((name, info))
                 continue
+            if _DELETE_STAGE_NAME.fullmatch(name) is not None:
+                delete_stages.append((name, info))
+                continue
+            if _DELETE_MARKER_NAME.fullmatch(name) is not None:
+                marker = self._read_delete_marker(root_fd, name, missing_ok=False)
+                if marker is None:
+                    _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+                expected_name, _ = _delete_names(marker[0])
+                if expected_name != name or marker[0] in markers:
+                    _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+                markers[marker[0]] = marker
+                total += len(_delete_marker_raw(*marker))
+                continue
+            if _DELETE_MARKER_TEMP_NAME.fullmatch(name) is not None:
+                marker_temporaries.append((name, info))
+                continue
+            if _RETIRED_MARKER_NAME.fullmatch(name) is not None:
+                image_set_id = self._read_retired_marker(root_fd, name, missing_ok=False)
+                if image_set_id is None:
+                    _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+                expected_name, _ = _retired_names(image_set_id)
+                if expected_name != name or image_set_id in retired:
+                    _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+                retired.add(image_set_id)
+                total += len(_retired_marker_raw(image_set_id))
+                continue
+            if _RETIRED_MARKER_TEMP_NAME.fullmatch(name) is not None:
+                retired_temporaries.append((name, info))
+                continue
             if _IMAGE_SET_ID.fullmatch(name) is None:
                 _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
             record = self._read_sealed(root_fd, name)
+            sealed_ids.add(record.id)
             count += 1
             total += len(encode_image_set(record)) + sum(
                 item.original.size_bytes + item.normalized.size_bytes for item in record.inputs
             )
-        if len(stages) > MAX_IMAGE_SET_TEMPORARIES:
+        if (
+            len(stages) + len(delete_stages) + len(marker_temporaries) + len(retired_temporaries)
+            > MAX_IMAGE_SET_TEMPORARIES
+        ):
             _raise(VisualInputStoreErrorCode.BUDGET_EXCEEDED)
+        identities = sealed_ids | set(markers) | retired
+        if len(identities) > MAX_IMAGE_SETS:
+            _raise(VisualInputStoreErrorCode.BUDGET_EXCEEDED)
+        for name, _ in delete_stages:
+            image_set_id = "image_set_" + name.removeprefix(".delete_")
+            if image_set_id not in markers:
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            if image_set_id in retired:
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        if sealed_ids & retired:
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
         if recover_stages:
             for name, info in stages:
                 self._remove_stage(root_fd, name, info)
+            for name, info in marker_temporaries:
+                image_set_id = "image_set_" + name.removeprefix(".delete_marker_").removesuffix(
+                    ".tmp"
+                )
+                if image_set_id in markers or image_set_id not in sealed_ids:
+                    _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+                self._remove_delete_marker_temporary(root_fd, name, info)
+            for name, info in retired_temporaries:
+                image_set_id = "image_set_" + name.removeprefix(".retire_marker_").removesuffix(
+                    ".tmp"
+                )
+                _, delete_name = _delete_names(image_set_id)
+                if image_set_id in sealed_ids or any(
+                    stage_name == delete_name for stage_name, _ in delete_stages
+                ):
+                    _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+                self._remove_delete_marker_temporary(root_fd, name, info)
+            for name, info in delete_stages:
+                image_set_id = "image_set_" + name.removeprefix(".delete_")
+                marker = markers.get(image_set_id)
+                if marker is None:
+                    _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+                record = self._read_delete_stage(
+                    root_fd,
+                    name,
+                    image_set_id,
+                    marker[1],
+                )
+                self._remove_sealed_directory(root_fd, name, info, record)
         if count > MAX_IMAGE_SETS or total > MAX_VISUAL_INPUT_STORE_BYTES:
             _raise(VisualInputStoreErrorCode.BUDGET_EXCEEDED)
-        return count, total
+        return count, total, len(identities)
 
     def _remove_stage(self, root_fd: int, name: str, expected: os.stat_result) -> None:
         stage_fd, info = self._root.open_directory_at(
@@ -990,6 +1316,414 @@ class VisualInputStore:
             _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
         os.rmdir(name, dir_fd=root_fd)
         os.fsync(root_fd)
+
+    def _write_delete_marker(
+        self,
+        root_fd: int,
+        name: str,
+        image_set_id: str,
+        manifest_sha256: str,
+    ) -> None:
+        raw = _delete_marker_raw(image_set_id, manifest_sha256)
+        temporary_name = _delete_marker_temp_name(image_set_id)
+        fd = -1
+        try:
+            fd = os.open(
+                temporary_name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=root_fd,
+            )
+            _write_all(fd, raw)
+            os.fsync(fd)
+            info = os.fstat(fd)
+            if (
+                not self._root.regular_file(info, maximum=MAX_IMAGE_SET_RECORD_BYTES)
+                or info.st_size != len(raw)
+                or os.pread(fd, len(raw) + 1, 0) != raw
+            ):
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            self._root.verify_file_entry(
+                root_fd,
+                temporary_name,
+                expected=info,
+                maximum=MAX_IMAGE_SET_RECORD_BYTES,
+            )
+        finally:
+            if fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        try:
+            _rename_directory_noreplace(root_fd, temporary_name, name)
+        except FileExistsError:
+            existing = self._read_delete_marker(root_fd, name, missing_ok=False)
+            temporary = os.stat(temporary_name, dir_fd=root_fd, follow_symlinks=False)
+            self._remove_delete_marker_temporary(root_fd, temporary_name, temporary)
+            if existing != (image_set_id, manifest_sha256):
+                _raise(VisualInputStoreErrorCode.CONFLICT)
+        published = self._read_delete_marker(root_fd, name, missing_ok=False)
+        if published != (image_set_id, manifest_sha256):
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        os.fsync(root_fd)
+
+    def _write_retired_marker(self, root_fd: int, name: str, image_set_id: str) -> None:
+        raw = _retired_marker_raw(image_set_id)
+        _, temporary_name = _retired_names(image_set_id)
+        fd = -1
+        try:
+            fd = os.open(
+                temporary_name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=root_fd,
+            )
+            _write_all(fd, raw)
+            os.fsync(fd)
+            info = os.fstat(fd)
+            if (
+                not self._root.regular_file(info, maximum=MAX_IMAGE_SET_RECORD_BYTES)
+                or info.st_size != len(raw)
+                or os.pread(fd, len(raw) + 1, 0) != raw
+            ):
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            self._root.verify_file_entry(
+                root_fd,
+                temporary_name,
+                expected=info,
+                maximum=MAX_IMAGE_SET_RECORD_BYTES,
+            )
+        finally:
+            if fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        try:
+            _rename_directory_noreplace(root_fd, temporary_name, name)
+        except FileExistsError:
+            existing = self._read_retired_marker(root_fd, name, missing_ok=False)
+            temporary = os.stat(temporary_name, dir_fd=root_fd, follow_symlinks=False)
+            self._remove_delete_marker_temporary(root_fd, temporary_name, temporary)
+            if existing != image_set_id:
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        published = self._read_retired_marker(root_fd, name, missing_ok=False)
+        if published != image_set_id:
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        os.fsync(root_fd)
+
+    def _remove_delete_marker_temporary(
+        self,
+        root_fd: int,
+        name: str,
+        expected: os.stat_result,
+    ) -> None:
+        fd = -1
+        try:
+            fd = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=root_fd,
+            )
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (
+                expected.st_dev,
+                expected.st_ino,
+            ) or not self._root.regular_file(
+                opened,
+                maximum=MAX_IMAGE_SET_RECORD_BYTES,
+            ):
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            while os.read(fd, _COPY_CHUNK_BYTES):
+                pass
+            after = os.fstat(fd)
+            if (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+                opened.st_ctime_ns,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            ):
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            self._root.verify_file_entry(
+                root_fd,
+                name,
+                expected=after,
+                maximum=MAX_IMAGE_SET_RECORD_BYTES,
+            )
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        os.unlink(name, dir_fd=root_fd)
+        os.fsync(root_fd)
+
+    def _remove_delete_marker(
+        self,
+        root_fd: int,
+        name: str,
+        expected: os.stat_result,
+        image_set_id: str,
+        manifest_sha256: str,
+    ) -> None:
+        raw = _delete_marker_raw(image_set_id, manifest_sha256)
+        fd = -1
+        try:
+            fd = os.open(
+                name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=root_fd,
+            )
+            opened = os.fstat(fd)
+            if (
+                (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)
+                or not self._root.regular_file(
+                    opened,
+                    maximum=MAX_IMAGE_SET_RECORD_BYTES,
+                )
+                or opened.st_size != len(raw)
+                or os.pread(fd, len(raw) + 1, 0) != raw
+            ):
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            after = os.fstat(fd)
+            if (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+                opened.st_ctime_ns,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            ):
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            self._root.verify_file_entry(
+                root_fd,
+                name,
+                expected=after,
+                maximum=MAX_IMAGE_SET_RECORD_BYTES,
+            )
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        os.unlink(name, dir_fd=root_fd)
+        os.fsync(root_fd)
+
+    def _read_delete_marker(
+        self,
+        root_fd: int,
+        name: str,
+        *,
+        missing_ok: bool,
+    ) -> tuple[str, str] | None:
+        try:
+            os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        except OSError:
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        try:
+            raw, _ = self._root.read_file_at(
+                root_fd,
+                name,
+                maximum=MAX_IMAGE_SET_RECORD_BYTES,
+            )
+        except (OSError, StorageFailure):
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        try:
+            value = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeError):
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        if not isinstance(value, dict) or set(value) != _DELETE_MARKER_FIELDS:
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        if (
+            type(value["schema_version"]) is not int
+            or value["schema_version"] != VISUAL_SCHEMA_VERSION
+            or type(value["image_set_id"]) is not str
+            or _IMAGE_SET_ID.fullmatch(value["image_set_id"]) is None
+            or type(value["manifest_sha256"]) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", value["manifest_sha256"]) is None
+            or type(value["marker_sha256"]) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", value["marker_sha256"]) is None
+        ):
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        expected = _delete_marker_raw(value["image_set_id"], value["manifest_sha256"])
+        if raw != expected:
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        return value["image_set_id"], value["manifest_sha256"]
+
+    def _read_retired_marker(
+        self,
+        root_fd: int,
+        name: str,
+        *,
+        missing_ok: bool,
+    ) -> str | None:
+        try:
+            os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        except OSError:
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        try:
+            raw, _ = self._root.read_file_at(
+                root_fd,
+                name,
+                maximum=MAX_IMAGE_SET_RECORD_BYTES,
+            )
+        except (OSError, StorageFailure):
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        try:
+            value = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeError):
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        if not isinstance(value, dict) or set(value) != _RETIRED_MARKER_FIELDS:
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        if (
+            type(value["schema_version"]) is not int
+            or value["schema_version"] != VISUAL_SCHEMA_VERSION
+            or type(value["image_set_id"]) is not str
+            or _IMAGE_SET_ID.fullmatch(value["image_set_id"]) is None
+            or type(value["retired_sha256"]) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", value["retired_sha256"]) is None
+            or raw != _retired_marker_raw(value["image_set_id"])
+        ):
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        return value["image_set_id"]
+
+    def _remove_sealed_directory(
+        self,
+        root_fd: int,
+        name: str,
+        expected: os.stat_result,
+        record: ImageSet | None,
+    ) -> None:
+        directory_fd, opened = self._root.open_directory_at(
+            root_fd,
+            name,
+            expected_identity=(expected.st_dev, expected.st_ino),
+        )
+        try:
+            expected_files = self._sealed_file_evidence(record) if record is not None else {}
+            present = set(os.listdir(directory_fd))
+            if not present.issubset(expected_files):
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            for child in present:
+                digest, maximum = expected_files[child]
+                actual, _, _ = self._root.hash_open_file(
+                    directory_fd,
+                    child,
+                    maximum=maximum,
+                )
+                if not hmac.compare_digest(actual, digest):
+                    _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            for child in sorted(present - {"manifest.json"}):
+                os.unlink(child, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            if "manifest.json" in present:
+                os.unlink("manifest.json", dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        if (
+            (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+            or not stat.S_ISDIR(current.st_mode)
+            or current.st_uid != self._root.uid
+            or stat.S_IMODE(current.st_mode) != 0o700
+        ):
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        os.rmdir(name, dir_fd=root_fd)
+        os.fsync(root_fd)
+
+    @staticmethod
+    def _sealed_file_evidence(record: ImageSet) -> dict[str, tuple[str, int]]:
+        expected_files: dict[str, tuple[str, int]] = {
+            "manifest.json": (
+                hashlib.sha256(encode_image_set(record)).hexdigest(),
+                MAX_IMAGE_SET_RECORD_BYTES,
+            )
+        }
+        for item in record.inputs:
+            original_ext = ".jpg" if item.original.mime is ImageMime.JPEG else ".png"
+            expected_files[item.original.id + original_ext] = (
+                item.original.sha256,
+                MAX_IMAGE_SOURCE_BYTES,
+            )
+            expected_files[item.normalized.id + ".png"] = (
+                item.normalized.sha256,
+                MAX_NORMALIZED_IMAGE_BYTES,
+            )
+        return expected_files
+
+    def _read_delete_stage(
+        self,
+        root_fd: int,
+        directory_name: str,
+        image_set_id: str,
+        manifest_sha256: str,
+    ) -> ImageSet | None:
+        entry = os.stat(directory_name, dir_fd=root_fd, follow_symlinks=False)
+        directory_fd, opened = self._root.open_directory_at(
+            root_fd,
+            directory_name,
+            expected_identity=(entry.st_dev, entry.st_ino),
+        )
+        try:
+            names = set(os.listdir(directory_fd))
+            if not names:
+                self._root.verify_directory_entry(
+                    root_fd,
+                    directory_name,
+                    expected=opened,
+                )
+                return None
+            if "manifest.json" not in names:
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            raw, _ = self._root.read_file_at(
+                directory_fd,
+                "manifest.json",
+                maximum=MAX_IMAGE_SET_RECORD_BYTES,
+            )
+            try:
+                record = decode_image_set(raw)
+            except VisualContractError as error:
+                raise _contract_error(error) from None
+            if record.id != image_set_id or not hmac.compare_digest(
+                record.manifest_sha256, manifest_sha256
+            ):
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            expected_files = self._sealed_file_evidence(record)
+            if not names.issubset(expected_files):
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            for child in names:
+                digest, maximum = expected_files[child]
+                actual, _, _ = self._root.hash_open_file(
+                    directory_fd,
+                    child,
+                    maximum=maximum,
+                )
+                if not hmac.compare_digest(actual, digest):
+                    _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            self._root.verify_directory_entry(
+                root_fd,
+                directory_name,
+                expected=opened,
+            )
+            return record
+        except (OSError, StorageFailure):
+            _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+        finally:
+            os.close(directory_fd)
 
     def _read_sealed(self, root_fd: int, image_set_id: str) -> ImageSet:
         try:

@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-A02 is approved; S20.2 is complete and S20.3 is active**
+> Status: **VCAD-A02 is approved; S20.3 and S20.4 are complete, and S20.5 is active**
 >
 > Updated: 2026-08-03
 >
@@ -53,14 +53,26 @@ Visual persistence is approved under A02 and ImageSet sealing is implemented.
 Real vision providers, public product claims, Freeform, and publication remain
 behind A03–A06.
 
-S20.1 now seals descriptor-bound local JPEG/PNG ImageSets under the additive
+S20.1 seals descriptor-bound local JPEG/PNG ImageSets under the additive
 `visual_inputs/` root with provenance, byte/pixel budgets, normalization, and
 atomic no-replace publication. S20.2 adds provider-neutral visual claims,
 observations, clarification answers, evidence-complete reconstruction proposals,
 and deterministic lifecycle actions. It does not create a CAD candidate or give
-the Provider any Task, Accept, commit, or HEAD authority. S20.3 now owns the
-durable ReconstructionDraft service and generic-runtime composition. Real
-external image processing still requires A03.
+the Provider any Task, Accept, commit, or HEAD authority. S20.3 provides the
+identity-pinned ReconstructionDraft store, intent-before-start Visual Domain
+Service, separate result retrieval, deterministic fake-provider composition,
+and restart-safe reconcile-only recovery. S20.4 closes answer authority binding,
+explicit retry from FAILED, reject, and adoption through an application-owned
+trusted port into an ordinary `REQUIRE_REVIEW` CAD Task. Adoption restart recovery
+reconciles the durable intent and never replays an unknown create. Delete advances
+through three durable phases around source-byte removal, then replaces the
+transient exact marker with a permanent ID-only retired tombstone. That tombstone
+contains no manifest/source hash or path, permanently prevents reuse of the same
+ImageSet ID, and shares the 1,024-identity lifetime budget with ReconstructionDraft
+tombstones. The focused S20.3/S20.4 gate is `297 passed, 1 deselected`. S20.5 is now the active
+host/WorkBuddy interface slice. Real VLM/provider execution, external image
+transfer, and direct WorkBuddy attachment ingress still require later evidence
+and authorization.
 
 S10.4 closeout evidence is bounded to the product seam: a 3,405-node IR durable
 round-trip; four real managed-FreeCAD outcomes covering atomic rollback, the

@@ -668,3 +668,12 @@ class RuntimeControlPort(Protocol):
         """Return runtime health without starting or mutating an invocation."""
 
         ...
+
+
+class RuntimeResultPort(Protocol):
+    """Read an available terminal result without lifecycle-control authority."""
+
+    def get_result(self, invocation_id: str) -> RuntimeResult | None:
+        """Return one terminal result, or ``None`` without waiting or mutation."""
+
+        ...
