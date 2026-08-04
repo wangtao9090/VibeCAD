@@ -21,6 +21,7 @@ from vibecad.visual.adoption import (
     VisualAdoptionAbsenceReceipt,
     VisualAdoptionReceipt,
     VisualAdoptionRequest,
+    VisualAdoptionWithdrawalReceipt,
     visual_adoption_program_digest,
 )
 from vibecad.visual.drafts import (
@@ -62,6 +63,16 @@ def _absence_receipt(request: VisualAdoptionRequest) -> VisualAdoptionAbsenceRec
         adoption_intent_sha256=request.adoption_intent_sha256,
         base_head_sha256=request.base_head.sha256,
         program_sha256=request.program_sha256,
+    )
+
+
+def _withdrawal_receipt(request: VisualAdoptionRequest) -> VisualAdoptionWithdrawalReceipt:
+    return VisualAdoptionWithdrawalReceipt(
+        task_id=request.task_id,
+        adoption_intent_sha256=request.adoption_intent_sha256,
+        base_head_sha256=request.base_head.sha256,
+        program_sha256=request.program_sha256,
+        cancelled_generation=1,
     )
 
 
@@ -107,7 +118,12 @@ class _AdoptionProbe:
     def reconcile_review_task(
         self,
         request: VisualAdoptionRequest,
-    ) -> VisualAdoptionReceipt | VisualAdoptionAbsenceReceipt | None:
+    ) -> (
+        VisualAdoptionReceipt
+        | VisualAdoptionAbsenceReceipt
+        | VisualAdoptionWithdrawalReceipt
+        | None
+    ):
         durable = self._drafts.load(request.reconstruction_id)
         assert durable.status is ReconstructionStatus.RECOVERY_REQUIRED
         self.reconcile_calls.append(request)
@@ -119,6 +135,14 @@ class _AdoptionProbe:
             return dataclasses.replace(
                 _absence_receipt(request),
                 program_sha256="0" * 64,
+                receipt_sha256="",
+            )
+        if self._reconcile_result == "withdrawn":
+            return _withdrawal_receipt(request)
+        if self._reconcile_result == "wrong_withdrawn":
+            return dataclasses.replace(
+                _withdrawal_receipt(request),
+                adoption_intent_sha256="0" * 64,
                 receipt_sha256="",
             )
         return _receipt(request)
@@ -333,6 +357,66 @@ def test_mismatched_absence_receipt_remains_recovery_required(tmp_path: Path) ->
         proposed.reconstruction_id,
         expected_generation=proposed.generation,
     )
+    still_recovering = service.run(
+        recovery.reconstruction_id,
+        expected_generation=recovery.generation,
+    )
+
+    assert still_recovering.status is ReconstructionStatus.RECOVERY_REQUIRED
+    assert len(adoption.ensure_calls) == 1
+    assert len(adoption.reconcile_calls) == 1
+
+
+def test_exact_partial_withdrawal_returns_to_proposed_then_allows_reject_and_delete(
+    tmp_path: Path,
+) -> None:
+    inputs, drafts, _, provider, _, proposed, _ = _proposed(tmp_path)
+    adoption = _AdoptionProbe(
+        drafts=drafts,
+        ensure_result="none",
+        reconcile_result="withdrawn",
+    )
+    service = _service(inputs, drafts, provider, adoption)
+    recovery = service.adopt(
+        proposed.reconstruction_id,
+        expected_generation=proposed.generation,
+    )
+
+    withdrawn = service.run(
+        recovery.reconstruction_id,
+        expected_generation=recovery.generation,
+    )
+
+    assert withdrawn.status is ReconstructionStatus.PROPOSED
+    assert withdrawn.adoption_key_sha256 is None
+    assert withdrawn.adoption_intent_sha256 is None
+    assert withdrawn.adopted_task_id is None
+    assert withdrawn.last_error is None
+    rejected = service.reject(
+        withdrawn.reconstruction_id,
+        expected_generation=withdrawn.generation,
+    )
+    assert rejected.status is ReconstructionStatus.REJECTED
+    deleted = service.delete(
+        rejected.reconstruction_id,
+        expected_generation=rejected.generation,
+    )
+    assert deleted.status is ReconstructionStatus.DELETED
+
+
+def test_mismatched_withdrawal_receipt_remains_recovery_required(tmp_path: Path) -> None:
+    inputs, drafts, _, provider, _, proposed, _ = _proposed(tmp_path)
+    adoption = _AdoptionProbe(
+        drafts=drafts,
+        ensure_result="none",
+        reconcile_result="wrong_withdrawn",
+    )
+    service = _service(inputs, drafts, provider, adoption)
+    recovery = service.adopt(
+        proposed.reconstruction_id,
+        expected_generation=proposed.generation,
+    )
+
     still_recovering = service.run(
         recovery.reconstruction_id,
         expected_generation=recovery.generation,

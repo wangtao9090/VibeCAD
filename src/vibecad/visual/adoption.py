@@ -26,6 +26,7 @@ _TASK_ID = re.compile(r"^task_[0-9a-f]{32}$")
 _PROGRAM_DIGEST_DOMAIN = b"vibecad-visual-adoption-program-v1\0"
 _RECEIPT_DIGEST_DOMAIN = b"vibecad-visual-adoption-receipt-v1\0"
 _ABSENCE_RECEIPT_DIGEST_DOMAIN = b"vibecad-visual-adoption-absence-v1\0"
+_WITHDRAWAL_RECEIPT_DIGEST_DOMAIN = b"vibecad-visual-adoption-withdrawal-v1\0"
 _MAX_ADOPTION_BYTES = 512 * 1024
 
 
@@ -223,6 +224,43 @@ class VisualAdoptionAbsenceReceipt:
         object.__setattr__(self, "receipt_sha256", expected)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VisualAdoptionWithdrawalReceipt:
+    """Proof that an exact program-free partial Task was durably cancelled."""
+
+    task_id: str
+    adoption_intent_sha256: str
+    base_head_sha256: str
+    program_sha256: str
+    cancelled_generation: int
+    receipt_sha256: str = ""
+
+    def __post_init__(self) -> None:
+        if type(self.task_id) is not str or _TASK_ID.fullmatch(self.task_id) is None:
+            _fail()
+        for name in (
+            "adoption_intent_sha256",
+            "base_head_sha256",
+            "program_sha256",
+        ):
+            object.__setattr__(self, name, _digest(getattr(self, name)))
+        # Visual adoption creates one NEEDS_PLAN Task at generation zero.  The
+        # only admitted withdrawal is its single generation-pinned idle cancel.
+        if type(self.cancelled_generation) is not int or self.cancelled_generation != 1:
+            _fail()
+        body = {
+            "task_id": self.task_id,
+            "adoption_intent_sha256": self.adoption_intent_sha256,
+            "base_head_sha256": self.base_head_sha256,
+            "program_sha256": self.program_sha256,
+            "cancelled_generation": self.cancelled_generation,
+        }
+        expected = hashlib.sha256(_WITHDRAWAL_RECEIPT_DIGEST_DOMAIN + _canonical(body)).hexdigest()
+        if self.receipt_sha256 and not hmac.compare_digest(_digest(self.receipt_sha256), expected):
+            _fail()
+        object.__setattr__(self, "receipt_sha256", expected)
+
+
 def validate_visual_adoption_receipt(
     request: VisualAdoptionRequest,
     receipt: object,
@@ -260,6 +298,28 @@ def validate_visual_adoption_absence_receipt(
     return receipt
 
 
+def validate_visual_adoption_withdrawal_receipt(
+    request: VisualAdoptionRequest,
+    receipt: object,
+) -> VisualAdoptionWithdrawalReceipt:
+    """Validate a trusted proof that the exact partial Task was cancelled."""
+
+    if (
+        type(request) is not VisualAdoptionRequest
+        or type(receipt) is not VisualAdoptionWithdrawalReceipt
+    ):
+        _fail()
+    if (
+        receipt.task_id != request.task_id
+        or receipt.adoption_intent_sha256 != request.adoption_intent_sha256
+        or receipt.base_head_sha256 != request.base_head.sha256
+        or receipt.program_sha256 != request.program_sha256
+        or receipt.cancelled_generation != 1
+    ):
+        _fail()
+    return receipt
+
+
 @runtime_checkable
 class VisualAdoptionPort(Protocol):
     """Application-owned authority; intentionally separate from the provider."""
@@ -274,7 +334,12 @@ class VisualAdoptionPort(Protocol):
     def reconcile_review_task(
         self,
         request: VisualAdoptionRequest,
-    ) -> VisualAdoptionReceipt | VisualAdoptionAbsenceReceipt | None: ...
+    ) -> (
+        VisualAdoptionReceipt
+        | VisualAdoptionAbsenceReceipt
+        | VisualAdoptionWithdrawalReceipt
+        | None
+    ): ...
 
 
 __all__ = [
@@ -283,8 +348,10 @@ __all__ = [
     "VisualAdoptionPort",
     "VisualAdoptionReceipt",
     "VisualAdoptionRequest",
+    "VisualAdoptionWithdrawalReceipt",
     "build_visual_adoption_request",
-    "validate_visual_adoption_receipt",
     "validate_visual_adoption_absence_receipt",
+    "validate_visual_adoption_receipt",
+    "validate_visual_adoption_withdrawal_receipt",
     "visual_adoption_program_digest",
 ]

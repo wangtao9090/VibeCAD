@@ -51,6 +51,9 @@ PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
 OTHER_PROJECT_ID = "project_11111111111111111111111111111111"
 BASE_REVISION = "revision_0123456789abcdef0123456789abcdef"
 OTHER_REVISION = "revision_11111111111111111111111111111111"
+RECONSTRUCTION_ID = "reconstruction_0123456789abcdef0123456789abcdef"
+IMAGE_SET_ID = "image_set_0123456789abcdef0123456789abcdef"
+QUESTION_ID = "clarification_question_0123456789abcdef0123456789abcdef"
 
 STABLE_TOOL_NAMES = (
     "ping",
@@ -78,6 +81,13 @@ STABLE_TOOL_NAMES = (
     "create_release",
     "get_release",
     "approve_release",
+    "create_reconstruction",
+    "get_reconstruction",
+    "run_reconstruction",
+    "answer_reconstruction",
+    "adopt_reconstruction",
+    "reject_reconstruction",
+    "delete_reconstruction",
 )
 
 
@@ -536,6 +546,13 @@ def test_public_annotations_match_the_independent_product_contract():
         "create_release": (False, False, True, False),
         "get_release": (True, False, True, False),
         "approve_release": (False, True, True, False),
+        "create_reconstruction": (False, False, True, False),
+        "get_reconstruction": (True, False, True, False),
+        "run_reconstruction": (False, True, True, False),
+        "answer_reconstruction": (False, True, True, False),
+        "adopt_reconstruction": (False, True, True, False),
+        "reject_reconstruction": (False, True, True, False),
+        "delete_reconstruction": (False, True, True, False),
         "create_box": (False, False, True, False),
         "create_cylinder": (False, False, True, False),
         "inspect_model": (False, False, True, False),
@@ -635,6 +652,43 @@ def test_every_public_schema_is_closed_complete_and_specialized():
             "expected_package_sha256",
             "approval_key",
         ),
+        "create_reconstruction": (
+            "schema_version",
+            "create_key",
+            "project_id",
+            "image_set_id",
+            "image_set_manifest_sha256",
+        ),
+        "get_reconstruction": ("schema_version", "reconstruction_id"),
+        "run_reconstruction": (
+            "schema_version",
+            "reconstruction_id",
+            "expected_generation",
+            "budget",
+            "deadline_ms",
+        ),
+        "answer_reconstruction": (
+            "schema_version",
+            "reconstruction_id",
+            "expected_generation",
+            "question_id",
+            "response",
+        ),
+        "adopt_reconstruction": (
+            "schema_version",
+            "reconstruction_id",
+            "expected_generation",
+        ),
+        "reject_reconstruction": (
+            "schema_version",
+            "reconstruction_id",
+            "expected_generation",
+        ),
+        "delete_reconstruction": (
+            "schema_version",
+            "reconstruction_id",
+            "expected_generation",
+        ),
     }
     for name in STABLE_TOOL_NAMES:
         input_schema = specs[name].input_schema
@@ -679,6 +733,83 @@ def test_every_public_schema_is_closed_complete_and_specialized():
         "authoritative",
         "artifacts",
     }
+
+
+def test_visual_reconstruction_schemas_are_closed_path_free_and_bounded() -> None:
+    specs = _spec_by_name(_surface_module().public_tool_specs())
+    names = (
+        "create_reconstruction",
+        "get_reconstruction",
+        "run_reconstruction",
+        "answer_reconstruction",
+        "adopt_reconstruction",
+        "reject_reconstruction",
+        "delete_reconstruction",
+    )
+    for name in names:
+        assert specs[name].input_schema["additionalProperties"] is False
+        result = specs[name].output_schema["properties"]["result"]["anyOf"][0]
+        assert result["additionalProperties"] is False
+        assert result["required"] == (
+            "schema_version",
+            "reconstruction_id",
+            "status",
+            "generation",
+            "next_action",
+            "questions",
+            "proposal_summary",
+        )
+        assert tuple(result["properties"]) == (
+            "schema_version",
+            "reconstruction_id",
+            "status",
+            "generation",
+            "next_action",
+            "questions",
+            "proposal_summary",
+            "adopted_task_id",
+        )
+
+    create = specs["create_reconstruction"].input_schema
+    assert tuple(create["properties"]) == (
+        "schema_version",
+        "create_key",
+        "project_id",
+        "image_set_id",
+        "image_set_manifest_sha256",
+    )
+    serialized = repr(create).lower()
+    assert not any(
+        forbidden in serialized
+        for forbidden in ("path", "base64", "uri", "provider", "model", "base_head")
+    )
+
+    run = specs["run_reconstruction"].input_schema
+    assert run["required"] == (
+        "schema_version",
+        "reconstruction_id",
+        "expected_generation",
+        "budget",
+        "deadline_ms",
+    )
+    budget = run["properties"]["budget"]["anyOf"][0]
+    assert budget["additionalProperties"] is False
+    assert budget["required"] == (
+        "max_elapsed_ms",
+        "max_memory_bytes",
+        "max_output_bytes",
+    )
+    assert run["not"]["oneOf"] == (
+        {"properties": {"budget": {"type": "null"}}},
+        {"properties": {"deadline_ms": {"type": "null"}}},
+    )
+
+    answer = specs["answer_reconstruction"].input_schema["properties"]["response"]
+    assert tuple(item["type"] for item in answer["oneOf"]) == (
+        "boolean",
+        "number",
+        "string",
+    )
 
 
 @pytest.mark.parametrize(
@@ -1295,7 +1426,7 @@ def test_low_level_tools_list_is_exact_sdk_projection_of_public_specs() -> None:
 def test_every_discovered_tool_has_a_nonempty_single_line_description() -> None:
     result = anyio.run(_server_module()._handle_list_tools)
 
-    assert len(result.tools) == 31
+    assert len(result.tools) == 38
     for tool in result.tools:
         assert type(tool.description) is str, tool.name
         assert tool.description == tool.description.strip(), tool.name
@@ -1325,7 +1456,7 @@ def test_owned_tools_list_fixed_frame_fits_the_discovery_budget() -> None:
         + b"\n"
     )
     assert response["id"] == 1
-    assert len(frame) == 25_611
+    assert len(frame) == 30_415
     assert len(frame) <= 32_768
 
 
@@ -1340,7 +1471,7 @@ def test_discovery_omits_optional_output_schema_from_every_tool() -> None:
     response = server._owned_dispatch_descriptor(descriptor)
     assert response is not None
     tools = response["result"]["tools"]
-    assert len(tools) == 31
+    assert len(tools) == 38
     assert all("outputSchema" not in tool for tool in tools)
 
 
@@ -2674,6 +2805,75 @@ def _model_program_for_server_surface() -> dict[str, object]:
                 "approval_key": "release_approve_0123456789abcdef0123456789abcdef",
             },
         ),
+        (
+            "create_reconstruction",
+            "create_reconstruction_request",
+            {
+                "schema_version": 1,
+                "create_key": "reconstruction_create_0123456789abcdef0123456789abcdef",
+                "project_id": PROJECT_ID,
+                "image_set_id": IMAGE_SET_ID,
+                "image_set_manifest_sha256": "1" * 64,
+            },
+        ),
+        (
+            "get_reconstruction",
+            "get_reconstruction_request",
+            {"schema_version": 1, "reconstruction_id": RECONSTRUCTION_ID},
+        ),
+        (
+            "run_reconstruction",
+            "run_reconstruction_request",
+            {
+                "schema_version": 1,
+                "reconstruction_id": RECONSTRUCTION_ID,
+                "expected_generation": 0,
+                "budget": {
+                    "max_elapsed_ms": 1,
+                    "max_memory_bytes": 1,
+                    "max_output_bytes": 1,
+                },
+                "deadline_ms": 1,
+            },
+        ),
+        (
+            "answer_reconstruction",
+            "answer_reconstruction_request",
+            {
+                "schema_version": 1,
+                "reconstruction_id": RECONSTRUCTION_ID,
+                "expected_generation": 0,
+                "question_id": QUESTION_ID,
+                "response": True,
+            },
+        ),
+        (
+            "adopt_reconstruction",
+            "adopt_reconstruction_request",
+            {
+                "schema_version": 1,
+                "reconstruction_id": RECONSTRUCTION_ID,
+                "expected_generation": 0,
+            },
+        ),
+        (
+            "reject_reconstruction",
+            "reject_reconstruction_request",
+            {
+                "schema_version": 1,
+                "reconstruction_id": RECONSTRUCTION_ID,
+                "expected_generation": 0,
+            },
+        ),
+        (
+            "delete_reconstruction",
+            "delete_reconstruction_request",
+            {
+                "schema_version": 1,
+                "reconstruction_id": RECONSTRUCTION_ID,
+                "expected_generation": 0,
+            },
+        ),
         ("create_box", "invoke_direct_operation_request", _request()),
         (
             "create_cylinder",
@@ -2903,6 +3103,60 @@ def test_schema_pattern_and_utf8_budgets_fail_before_application_open(monkeypatc
         "path": "/source_path",
         "message": "The request exceeds a resource budget.",
     }
+    assert application_calls == []
+
+
+def test_visual_schema_rejects_forbidden_ingress_and_partial_run_before_open(
+    monkeypatch,
+) -> None:
+    server = _server_module()
+    application_calls: list[str] = []
+
+    class ClosedSlot:
+        def get(self):
+            application_calls.append("get")
+            raise AssertionError("application must remain unopened")
+
+    monkeypatch.setattr(server, "_application_slot", ClosedSlot())
+    create = {
+        "schema_version": 1,
+        "create_key": "reconstruction_create_0123456789abcdef0123456789abcdef",
+        "project_id": PROJECT_ID,
+        "image_set_id": IMAGE_SET_ID,
+        "image_set_manifest_sha256": "1" * 64,
+    }
+    run = {
+        "schema_version": 1,
+        "reconstruction_id": RECONSTRUCTION_ID,
+        "expected_generation": 0,
+        "budget": None,
+        "deadline_ms": None,
+    }
+
+    forbidden = anyio.run(
+        server._handle_call_tool,
+        "create_reconstruction",
+        {**create, "source_path": "/private/secret.png"},
+    )
+    missing = anyio.run(
+        server._handle_call_tool,
+        "run_reconstruction",
+        {key: value for key, value in run.items() if key != "budget"},
+    )
+    partial = anyio.run(
+        server._handle_call_tool,
+        "run_reconstruction",
+        {**run, "deadline_ms": 1},
+    )
+
+    assert forbidden.structuredContent["error"]["code"] == "unknown_field"
+    assert missing.structuredContent["error"] == {
+        "schema_version": 1,
+        "code": "missing_field",
+        "path": "/budget",
+        "message": "A required request field is missing.",
+    }
+    assert partial.structuredContent["error"]["code"] == "invalid_value"
     assert application_calls == []
 
 

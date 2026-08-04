@@ -1,8 +1,8 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-A02 is approved; S20.3 and S20.4 are complete, and S20.5 is active**
+> Status: **VCAD-A02 is approved; S20.1 through S20.5 are complete and interface-ready**
 >
-> Updated: 2026-08-03
+> Updated: 2026-08-04
 >
 > Repository anchor: published tag `v0.6.1@e7dd0c0`
 >
@@ -69,10 +69,16 @@ through three durable phases around source-byte removal, then replaces the
 transient exact marker with a permanent ID-only retired tombstone. That tombstone
 contains no manifest/source hash or path, permanently prevents reuse of the same
 ImageSet ID, and shares the 1,024-identity lifetime budget with ReconstructionDraft
-tombstones. The focused S20.3/S20.4 gate is `297 passed, 1 deselected`. S20.5 is now the active
-host/WorkBuddy interface slice. Real VLM/provider execution, external image
-transfer, and direct WorkBuddy attachment ingress still require later evidence
-and authorization.
+tombstones. The focused S20.3/S20.4 gate is `297 passed, 1 deselected`. S20.5 now exposes exactly
+seven strict, host-neutral reconstruction actions through the existing Agent application, daemon,
+and MCP authority; the current branch has 38 public tools. A separate non-MCP local host adapter
+seals one to four JPEG/PNG inputs through one authenticated staging-directory descriptor without
+placing paths, filenames, base64, or image bytes on the JSON wire. The integrated S20.5 gate is
+`488 passed, 2 deselected`; the isolated real worker and real four-image reconnect/restart replay
+gates are `1 passed` each; the final repository suite is `5,875 passed, 119 deselected`; static
+checks pass and independent review reports no P0/P1 findings. The fixed discovery frame is 30,415
+bytes. This remains deterministic-fake/interface-ready only: real VLM/provider execution and its
+data policy require `VCAD-A03`, and direct WorkBuddy attachment ingress remains unverified.
 
 S10.4 closeout evidence is bounded to the product seam: a 3,405-node IR durable
 round-trip; four real managed-FreeCAD outcomes covering atomic rollback, the
@@ -116,9 +122,10 @@ operations, `create_component`, `place_component`, `set_component_bom`, and
 `create_parametric_design` plus `modify_parametric_parameter`, establish the
 bounded assembly/flat-BOM path and native parametric creation/editing;
 `create_box` and
-`create_cylinder` accept an optional explicit component target. The MCP surface
-contains 31 tools: the prior 28 plus `create_release`, `get_release`, and
-`approve_release`.
+`create_cylinder` accept an optional explicit component target. The published `v0.6.1` MCP surface
+contains 31 tools: the prior 28 plus `create_release`, `get_release`, and `approve_release`. The
+current S20.5 branch adds seven reconstruction lifecycle tools for 38 total; this interface-ready
+branch has not been published as a new version.
 
 The repository also contains a broader legacy Round-8 assembly implementation
 with real FreeCAD evidence for:

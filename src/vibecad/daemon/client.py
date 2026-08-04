@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import array
 import contextlib
+import hashlib
 import os
 import secrets
 import socket
 import stat
 import sys
+import tempfile
 import threading
 import time
 
+from vibecad.application.visual_ingress import (
+    VisualIngressError,
+    bind_visual_staging_locator,
+    parse_seal_image_set_request,
+    validate_seal_result,
+)
 from vibecad.daemon.local_identity import LocalIdentityError, require_same_user_peer
 from vibecad.daemon.state import (
     DAEMON_ENDPOINT_NAME,
@@ -32,6 +40,7 @@ from vibecad.interaction.protocol_v2 import (
     bind_v2_import_locator,
     encode_v2_frame,
 )
+from vibecad.visual.contracts import MAX_IMAGE_SET_SOURCE_BYTES, MAX_IMAGE_SOURCE_BYTES
 
 _MAX_IMPORT_BYTES = 512 * 1024 * 1024
 _MAX_ANCILLARY_DESCRIPTORS = 8
@@ -47,6 +56,13 @@ class _ConnectionClosed(Exception):
 
 class LocalImportSourceError(DaemonError):
     """The local import descriptor was rejected before/after a known response."""
+
+    def __init__(self) -> None:
+        super().__init__(DaemonErrorCode.UNAVAILABLE)
+
+
+class LocalVisualSourceError(DaemonError):
+    """The local visual ingress was rejected without exposing source metadata."""
 
     def __init__(self) -> None:
         super().__init__(DaemonErrorCode.UNAVAILABLE)
@@ -654,6 +670,201 @@ class LocalKernelClient:
         finally:
             pinned.close()
 
+    def seal_visual_image_set(
+        self,
+        request: object,
+        *,
+        source_paths: object,
+        request_id: object | None = None,
+    ) -> V2Response:
+        """Seal 1-4 local images through one path-free staging-directory FD."""
+
+        self._ensure_live()
+        try:
+            canonical_request = parse_seal_image_set_request(request)
+        except VisualIngressError:
+            raise LocalVisualSourceError from None
+        if type(source_paths) not in {list, tuple} or any(
+            type(path) is not str for path in source_paths
+        ):
+            raise LocalVisualSourceError
+        paths = tuple(source_paths)
+        if len(paths) != len(canonical_request.inputs):
+            raise LocalVisualSourceError
+        try:
+            managed = os.stat(
+                self._boot_state.root.path.parent,
+                follow_symlinks=False,
+            )
+        except OSError:
+            raise DaemonError(DaemonErrorCode.UNAVAILABLE) from None
+
+        pinned_sources: list[_PinnedImportSource] = []
+        stage_path: str | None = None
+        stage_fd = -1
+        staged_names: list[str] = []
+        stage_identity: tuple[int, int] | None = None
+        try:
+            total_bytes = 0
+            identities: set[tuple[int, int]] = set()
+            for path in paths:
+                try:
+                    pinned = _open_import_source(
+                        path,
+                        managed_identity=(managed.st_dev, managed.st_ino),
+                    )
+                except DaemonError as error:
+                    if error.code is DaemonErrorCode.UNSUPPORTED_PLATFORM:
+                        raise
+                    raise LocalVisualSourceError from None
+                pinned_sources.append(pinned)
+                identity = (pinned.before.st_dev, pinned.before.st_ino)
+                if identity in identities or pinned.before.st_size > MAX_IMAGE_SOURCE_BYTES:
+                    raise LocalVisualSourceError
+                identities.add(identity)
+                total_bytes += pinned.before.st_size
+                if total_bytes > MAX_IMAGE_SET_SOURCE_BYTES:
+                    raise LocalVisualSourceError
+
+            try:
+                stage_path = tempfile.mkdtemp(prefix=".vibecad_visual_")
+                original_stage = os.stat(stage_path, follow_symlinks=False)
+                stage_identity = (original_stage.st_dev, original_stage.st_ino)
+                if (
+                    not stat.S_ISDIR(original_stage.st_mode)
+                    or original_stage.st_uid != os.geteuid()
+                    or stat.S_IMODE(original_stage.st_mode) != 0o700
+                ):
+                    raise LocalVisualSourceError
+                stage_fd = os.open(
+                    stage_path,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                )
+                stage_info = os.fstat(stage_fd)
+                if (
+                    (stage_info.st_dev, stage_info.st_ino) != stage_identity
+                    or not stat.S_ISDIR(stage_info.st_mode)
+                    or stage_info.st_uid != os.geteuid()
+                    or stat.S_IMODE(stage_info.st_mode) != 0o700
+                ):
+                    raise LocalVisualSourceError
+                staged_stats: list[os.stat_result] = []
+                source_digests: list[str] = []
+                for index, pinned in enumerate(pinned_sources):
+                    pinned.verify()
+                    name = f"source_{index}"
+                    staged_names.append(name)
+                    target = -1
+                    try:
+                        target = os.open(
+                            name,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                            0o600,
+                            dir_fd=stage_fd,
+                        )
+                        os.fchmod(target, 0o600)
+                        remaining = pinned.before.st_size
+                        offset = 0
+                        digest = hashlib.sha256()
+                        while remaining:
+                            chunk = os.pread(pinned.fd, min(64 * 1024, remaining), offset)
+                            if not chunk:
+                                raise LocalVisualSourceError
+                            digest.update(chunk)
+                            view = memoryview(chunk)
+                            while view:
+                                written = os.write(target, view)
+                                if written <= 0:
+                                    raise OSError
+                                view = view[written:]
+                            remaining -= len(chunk)
+                            offset += len(chunk)
+                        pinned.verify()
+                        os.fsync(target)
+                        staged = os.fstat(target)
+                        if (
+                            not stat.S_ISREG(staged.st_mode)
+                            or staged.st_uid != os.geteuid()
+                            or staged.st_nlink != 1
+                            or stat.S_IMODE(staged.st_mode) != 0o600
+                            or staged.st_size != pinned.before.st_size
+                        ):
+                            raise LocalVisualSourceError
+                        staged_stats.append(staged)
+                        source_digests.append(digest.hexdigest())
+                    finally:
+                        if target >= 0:
+                            with contextlib.suppress(OSError):
+                                os.close(target)
+                os.fsync(stage_fd)
+                observed_names = os.listdir(stage_fd)
+                if set(observed_names) != set(staged_names) or len(observed_names) != len(
+                    staged_names
+                ):
+                    raise LocalVisualSourceError
+                locator = bind_visual_staging_locator(
+                    canonical_request,
+                    os.fstat(stage_fd),
+                    tuple(staged_stats),
+                    tuple(source_digests),
+                )
+            except LocalVisualSourceError:
+                raise
+            except (OSError, VisualIngressError):
+                raise LocalVisualSourceError from None
+
+            response = self._call(
+                "visual_inputs.seal",
+                {
+                    "request": canonical_request.to_mapping(),
+                    "locator": locator,
+                },
+                request_id=request_id,
+                descriptor=stage_fd,
+            )
+            if response.error is None:
+                try:
+                    validate_seal_result(response.result)
+                except VisualIngressError:
+                    self.close()
+                    raise DaemonError(DaemonErrorCode.UNAVAILABLE) from None
+            return response
+        finally:
+            active_error = sys.exc_info()[0] is not None
+            cleanup_failed = False
+            for pinned in reversed(pinned_sources):
+                pinned.close()
+            if stage_fd >= 0:
+                for index in reversed(range(len(pinned_sources))):
+                    try:
+                        os.unlink(f"source_{index}", dir_fd=stage_fd)
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        cleanup_failed = True
+                try:
+                    remaining_names = os.listdir(stage_fd)
+                except OSError:
+                    cleanup_failed = True
+                else:
+                    if remaining_names:
+                        cleanup_failed = True
+                try:
+                    os.close(stage_fd)
+                except OSError:
+                    cleanup_failed = True
+            if stage_path is not None and stage_identity is not None:
+                try:
+                    path_info = os.stat(stage_path, follow_symlinks=False)
+                except OSError:
+                    pass
+                else:
+                    if (path_info.st_dev, path_info.st_ino) == stage_identity:
+                        with contextlib.suppress(OSError):
+                            os.rmdir(stage_path)
+            if cleanup_failed and not active_error:
+                raise DaemonError(DaemonErrorCode.UNAVAILABLE)
+
     def close(self) -> None:
         if os.getpid() != self._creator_pid:
             raise DaemonError(DaemonErrorCode.WRONG_PROCESS)
@@ -678,4 +889,8 @@ class LocalKernelClient:
         self.close()
 
 
-__all__ = ("LocalImportSourceError", "LocalKernelClient")
+__all__ = (
+    "LocalImportSourceError",
+    "LocalKernelClient",
+    "LocalVisualSourceError",
+)

@@ -93,12 +93,12 @@ direct operation 与 ModelProgram 不是两套执行系统。direct operation �
 
 当前只能从空项目或一个 FCStd 文件开始；其中 FCStd 导入必须非空，且其中每个对象都必须是
 `Part::Box` 或 `Part::Cylinder`。混合或其他对象类型会被拒绝。通用 FCStd 导入属于 P1；STEP/STL
-导入、逆向工程和仿真 尚未接入。照片/视频到网格或 STL、2D 草图识别等前置引擎可以在以后作为
-外部工具连接，VibeCAD 聚焦可编辑 CAD 的中间编排与验证。
+导入、逆向工程和仿真尚未接入。当前分支已通过 deterministic fake provider 提供有界的视觉重建
+接口与生命周期，但还不执行真实图片理解。VibeCAD 聚焦可编辑 CAD 的中间编排与验证。
 
-## 当前公开能力（0.6.1）
+## 当前公开能力（开发分支）
 
-MCPB manifest 与运行时投影同一份冻结合同，当前公开 31 个工具。每个工具都有简短说明、严格输入
+MCPB manifest 与运行时投影同一份冻结合同，当前公开 38 个工具。每个工具都有简短说明、严格输入
 schema 与副作用标记；宿主应先调用 `get_capabilities`，不能根据工具数量或模型常识猜能力。
 
 | 类别 | 工具 |
@@ -108,7 +108,14 @@ schema 与副作用标记；宿主应先调用 `get_capabilities`，不能根据
 | 项目与版本 | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
 | 任务与草案 | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft` |
 | 交付 | `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release` |
+| 视觉重建 | `create_reconstruction`, `get_reconstruction`, `run_reconstruction`, `answer_reconstruction`, `adopt_reconstruction`, `reject_reconstruction`, `delete_reconstruction` |
 | direct operation | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
+
+这七个视觉重建工具在 S20.5 只达到 interface-ready：它们通过 deterministic fake provider 验证
+sealed 本地 ImageSet、持久恢复、澄清问答，以及采纳为普通待审核 CAD Task 的完整生命周期。非 MCP
+本地主机适配器可通过一个已认证的 staging-directory descriptor 封存一至四张 JPEG/PNG；JSON wire
+不包含路径、文件名、base64 或图片字节。真实 VLM/provider 及其数据处理策略仍需 `VCAD-A03`；
+WorkBuddy 直接附件入口尚未验证，MCP 接口也不接受图片路径、base64 内容或 visual Resource URI。
 
 一次成功的 `export_task_artifacts` 返回规范结果及两个有类型的 `ResourceLink`：
 
@@ -263,8 +270,8 @@ G1 Workbench Alpha 已把真实 FreeCAD Qt UI 与确定性的受管启动器打�
 Workbench 与 Dock、daemon-backed refresh、相互独立的 HEAD/草案预览、verdict、精确
 object/feature selector 捕获、Accept/Reject 与异步 client/thread shutdown。daemon 是可复用的受管
 后台服务，更新与卸载会通过认证维护路径将其退休。薄外部试点通过一个有界受管 Python bridge 复用
-这些状态机，不增加第二写入权威。当前仍不支持 face/edge 选择、STEP/STL import、照片重建或
-simulation。
+这些状态机，不增加第二写入权威。当前仍不支持 face/edge 选择、STEP/STL import、
+真实 VLM 驱动的照片重建或 simulation；S20.5 只提供 deterministic-fake 接口与生命周期。
 
 进一步阅读（源代码仓库）：
 [用户手册](https://github.com/wangtao9090/VibeCAD/blob/main/docs/USER_GUIDE.md)、

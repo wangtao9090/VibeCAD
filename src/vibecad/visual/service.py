@@ -31,9 +31,11 @@ from vibecad.visual.adoption import (
     VisualAdoptionPort,
     VisualAdoptionReceipt,
     VisualAdoptionRequest,
+    VisualAdoptionWithdrawalReceipt,
     build_visual_adoption_request,
     validate_visual_adoption_absence_receipt,
     validate_visual_adoption_receipt,
+    validate_visual_adoption_withdrawal_receipt,
 )
 from vibecad.visual.contracts import ProcessingAuthorization
 from vibecad.visual.drafts import (
@@ -311,6 +313,44 @@ class VisualReconstructionService:
 
     def get(self, reconstruction_id: str) -> ReconstructionDraft:
         return self._drafts.load(reconstruction_id)
+
+    def load_presentation(
+        self,
+        draft: ReconstructionDraft,
+    ) -> tuple[VisualObservation | None, ReconstructionProposal | None]:
+        """Load the validated user-facing payloads for one exact draft snapshot.
+
+        The application API owns the final host-safe projection.  This method
+        only keeps payload-store access behind the domain service and returns
+        already validated domain values bound to the supplied immutable draft.
+        """
+
+        if type(draft) is not ReconstructionDraft:
+            raise TypeError("draft must be an exact ReconstructionDraft")
+        observation = None
+        if draft.observation_ref is not None:
+            payload = self._drafts.load_payload(
+                draft.reconstruction_id,
+                draft.observation_ref,
+            )
+            try:
+                observation = decode_visual_observation(payload.raw)
+            except (TypeError, ValueError):
+                _fail(VisualServiceErrorCode.INVALID_STATE)
+            if (
+                observation.digest != draft.observation_ref.contract_digest
+                or observation.reconstruction_id != draft.reconstruction_id
+                or observation.image_set_id != draft.image_set_id
+                or observation.image_set_manifest_sha256 != draft.image_set_manifest_sha256
+            ):
+                _fail(VisualServiceErrorCode.INVALID_STATE)
+
+        proposal = None
+        if draft.proposal_ref is not None:
+            proposal = self._load_proposal(draft)
+            if observation is None or proposal.observation.digest != observation.digest:
+                _fail(VisualServiceErrorCode.INVALID_STATE)
+        return observation, proposal
 
     def run(
         self,
@@ -668,25 +708,34 @@ class VisualReconstructionService:
             receipt = self._adoption.reconcile_review_task(request)
         except Exception:
             return self._publish_adoption_recovery(draft, phase="reconcile_task")
+        if type(receipt) is VisualAdoptionWithdrawalReceipt:
+            try:
+                validate_visual_adoption_withdrawal_receipt(request, receipt)
+            except Exception:
+                return self._publish_adoption_recovery(draft, phase="reconcile_task")
+            return self._return_adoption_to_proposed(draft)
         if type(receipt) is VisualAdoptionAbsenceReceipt:
             try:
                 validate_visual_adoption_absence_receipt(request, receipt)
             except Exception:
                 return self._publish_adoption_recovery(draft, phase="reconcile_task")
-            proposed = dataclasses.replace(
-                draft,
-                generation=draft.generation + 1,
-                status=ReconstructionStatus.PROPOSED,
-                adoption_key_sha256=None,
-                adoption_intent_sha256=None,
-                last_error=None,
-            )
-            return self._drafts.compare_and_set(
-                draft.reconstruction_id,
-                draft.generation,
-                proposed,
-            )
+            return self._return_adoption_to_proposed(draft)
         return self._complete_adoption(draft, request, receipt)
+
+    def _return_adoption_to_proposed(self, draft: ReconstructionDraft) -> ReconstructionDraft:
+        proposed = dataclasses.replace(
+            draft,
+            generation=draft.generation + 1,
+            status=ReconstructionStatus.PROPOSED,
+            adoption_key_sha256=None,
+            adoption_intent_sha256=None,
+            last_error=None,
+        )
+        return self._drafts.compare_and_set(
+            draft.reconstruction_id,
+            draft.generation,
+            proposed,
+        )
 
     def _publish_adoption_recovery(
         self,

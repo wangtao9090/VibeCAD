@@ -105,13 +105,14 @@ verification, draft, commit, reject, rollback, and recovery semantics.
 A project can currently begin only from an empty project or a single FCStd file. An FCStd import
 must be non-empty, and every object in it must be either `Part::Box` or `Part::Cylinder`. Mixed
 or other object types are rejected. General FCStd import belongs to P1; STEP/STL import, reverse
-engineering, and simulation are not yet integrated. Upstream engines for photo/video-to-mesh or
-STL conversion, 2D sketch recognition, and similar tasks may be connected later as external
-tools. VibeCAD focuses on the intermediate orchestration and verification of editable CAD.
+engineering, and simulation are not yet integrated. The current branch provides the bounded
+visual-reconstruction interface and lifecycle using a deterministic fake provider, but it does
+not yet perform real image understanding. VibeCAD focuses on the intermediate orchestration and
+verification of editable CAD.
 
-## Current Public Capabilities (0.6.1)
+## Current Public Capabilities (development branch)
 
-The MCPB manifest and runtime project the same frozen contract, which currently exposes 31
+The MCPB manifest and runtime project the same frozen contract, which currently exposes 38
 tools. Each tool has a concise description, a strict input schema, and side-effect annotations.
 A host should call `get_capabilities` first instead of inferring capabilities from the number of
 tools or from general model knowledge.
@@ -123,7 +124,16 @@ tools or from general model knowledge.
 | Projects and versions | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
 | Tasks and drafts | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft` |
 | Delivery | `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release` |
+| Visual reconstruction | `create_reconstruction`, `get_reconstruction`, `run_reconstruction`, `answer_reconstruction`, `adopt_reconstruction`, `reject_reconstruction`, `delete_reconstruction` |
 | Direct operations | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
+
+The seven visual-reconstruction tools are S20.5 interface-ready only. They exercise sealed local
+ImageSets, durable restart recovery, clarification, and adoption into an ordinary reviewed CAD
+Task through a deterministic fake provider. A non-MCP local host adapter can seal one to four
+JPEG/PNG inputs through one authenticated staging-directory descriptor; the JSON wire contains no
+path, filename, base64 payload, or image bytes. A real VLM/provider and its data-handling policy
+still require `VCAD-A03`; direct WorkBuddy attachment ingress has not been verified, and the MCP
+surface accepts no image path, base64 payload, or visual Resource URI.
 
 A successful `export_task_artifacts` call returns a canonical result and two typed
 `ResourceLink` values:
@@ -312,7 +322,8 @@ exact object/feature selector capture, Accept/Reject, and asynchronous client/th
 The daemon is a reusable managed background service; update and uninstall retire it through the
 authenticated maintenance path. The thin external pilot reuses those state machines through one
 bounded managed-Python bridge and does not add a second write authority. Face/edge selection,
-STEP/STL import, photo reconstruction, and simulation are not currently supported.
+STEP/STL import, real VLM-backed photo reconstruction, and simulation are not currently
+supported; S20.5 provides only the deterministic-fake interface and lifecycle.
 
 Further reading in the source repository:
 [User Guide](https://github.com/wangtao9090/VibeCAD/blob/main/docs/USER_GUIDE.md),

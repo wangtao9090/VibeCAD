@@ -208,6 +208,13 @@ _STABLE_DOMAIN_FACADES = {
     "create_release": "create_release_request",
     "get_release": "get_release_request",
     "approve_release": "approve_release_request",
+    "create_reconstruction": "create_reconstruction_request",
+    "get_reconstruction": "get_reconstruction_request",
+    "run_reconstruction": "run_reconstruction_request",
+    "answer_reconstruction": "answer_reconstruction_request",
+    "adopt_reconstruction": "adopt_reconstruction_request",
+    "reject_reconstruction": "reject_reconstruction_request",
+    "delete_reconstruction": "delete_reconstruction_request",
 }
 _CONTROL_NAMES = frozenset(
     {
@@ -242,6 +249,13 @@ _APPLICATION_METHODS = (
     "create_release_request",
     "get_release_request",
     "approve_release_request",
+    "create_reconstruction_request",
+    "get_reconstruction_request",
+    "run_reconstruction_request",
+    "answer_reconstruction_request",
+    "adopt_reconstruction_request",
+    "reject_reconstruction_request",
+    "delete_reconstruction_request",
     "invoke_direct_operation_request",
     "read_artifact_resource",
     "read_release_resource",

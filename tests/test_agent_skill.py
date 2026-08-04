@@ -46,6 +46,13 @@ PUBLIC_TOOL_NAMES = (
     "create_release",
     "get_release",
     "approve_release",
+    "create_reconstruction",
+    "get_reconstruction",
+    "run_reconstruction",
+    "answer_reconstruction",
+    "adopt_reconstruction",
+    "reject_reconstruction",
+    "delete_reconstruction",
     "create_box",
     "create_cylinder",
     "inspect_model",
@@ -210,12 +217,12 @@ def test_skill_has_canonical_files_and_minimal_trigger_frontmatter():
     assert "$vibecad-agent" in interface["default_prompt"]
 
 
-def test_skill_teaches_the_exact_thirty_one_tool_agent_first_flow():
+def test_skill_teaches_the_exact_thirty_eight_tool_agent_first_flow():
     _metadata, body = _skill_parts()
     code_tokens = _inline_code(body)
     assert set(PUBLIC_TOOL_NAMES) <= code_tokens
     assert LEGACY_TOOL_NAMES.isdisjoint(code_tokens)
-    assert re.search(r"\b31(?:-tool| tools?)\b|31\s*个", body, re.IGNORECASE)
+    assert re.search(r"\b38(?:-tool| tools?)\b|38\s*个", body, re.IGNORECASE)
 
     essential_order = (
         "get_capabilities",
@@ -227,6 +234,30 @@ def test_skill_teaches_the_exact_thirty_one_tool_agent_first_flow():
     )
     assert any(_contains_in_order(block, essential_order) for block in _fenced_blocks(body))
     _paragraph_with(body, "direct", "ModelProgram")
+
+
+def test_skill_routes_visual_reconstruction_without_claiming_attachment_ingress():
+    _metadata, body = _skill_parts()
+    visual = "\n".join(_sections(body, r"visual reconstruction|视觉重建"))
+    normalized = _normalized(visual)
+
+    assert {
+        "create_reconstruction",
+        "get_reconstruction",
+        "run_reconstruction",
+        "answer_reconstruction",
+        "adopt_reconstruction",
+        "reject_reconstruction",
+        "delete_reconstruction",
+        "image_set_id",
+        "image_set_manifest_sha256",
+    } <= _inline_code(visual)
+    assert "trusted local host adapter" in normalized
+    assert "workbuddy direct attachment" in normalized
+    assert re.search(r"not verified|unverified|未验证", visual, re.IGNORECASE)
+    for forbidden in ("path", "base64", "resource uri"):
+        assert forbidden in normalized
+    assert re.search(r"never|must not|禁止|不得|不能", visual, re.IGNORECASE)
 
 
 def test_skill_limits_project_import_to_the_verified_box_cylinder_envelope():
@@ -336,7 +367,7 @@ def test_skill_teaches_resource_links_and_fail_closed_product_limits():
     assert path_rule is not None
     assert re.search(r"never|must not|禁止|不得|不能", path_rule, re.IGNORECASE)
 
-    retired_rule = _paragraph_with(body, "retired", "31")
+    retired_rule = _paragraph_with(body, "retired", "38")
     assert re.search(r"never|must not|禁止|不得|不能", retired_rule, re.IGNORECASE)
     code_rule = _paragraph_with(body, "Python", "FreeCAD", "code")
     assert re.search(r"never|must not|禁止|不得|不能", code_rule, re.IGNORECASE)

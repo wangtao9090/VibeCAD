@@ -51,6 +51,13 @@ _STABLE_PUBLIC_TOOL_NAMES = (
     "create_release",
     "get_release",
     "approve_release",
+    "create_reconstruction",
+    "get_reconstruction",
+    "run_reconstruction",
+    "answer_reconstruction",
+    "adopt_reconstruction",
+    "reject_reconstruction",
+    "delete_reconstruction",
 )
 
 _DEFAULT_DIRECT_DESCRIPTIONS = {
@@ -221,7 +228,7 @@ def test_public_tool_names_are_unique_across_stable_and_direct_surfaces():
     names = tuple(spec.name for spec in public_tool_specs())
 
     assert names[: len(_STABLE_PUBLIC_TOOL_NAMES)] == _STABLE_PUBLIC_TOOL_NAMES
-    assert len(names) == len(set(names)) == 31
+    assert len(names) == len(set(names)) == 38
 
 
 def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contracts():

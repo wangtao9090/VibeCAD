@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-A02` 已批准；`VCAD-S20.3`、`VCAD-S20.4` 已完成，正在执行 `VCAD-S20.5`**
+> 状态：**`VCAD-A02` 已批准；`VCAD-S20.1`–`VCAD-S20.5` 已完成并达到 interface-ready**
 >
-> 更新：2026-08-03
+> 更新：2026-08-04
 >
 > 产品基线：已发布 `v0.6.1@e7dd0c0`
 >
-> 当前里程碑：`VCAD-S20.5`
+> 当前里程碑：`VCAD-S20` 完成；下一批准门为 `VCAD-A03`
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -262,8 +262,9 @@ frame 或既有 CAD Resource URI 传输，也不在 S20 初期开放原图 `Reso
 sealed ImageSet 由非 MCP、descriptor-bound ingress port 创建；`create_reconstruction` 只接收其
 `image_set_id + manifest digest`。图片 ingress 是 host adapter 的受控 locator/descriptor capability：
 CLI/Workbench 先安全复制并 seal；WorkBuddy 只有在附件 descriptor 行为被真实认证后才直接接入；
-否则使用薄本地导入适配。S20.5 才把
-这些逻辑动作投影成各宿主的最薄入口，但不得改变上述合同。若以后要向宿主重读图片，必须新增独立
+否则使用薄本地导入适配。S20.5 已把
+这些逻辑动作投影成严格、host-neutral 的公共入口，但不得改变上述合同。若以后要向宿主重读图片，
+必须新增独立
 `vibecad://visual-input/...` URI 并单独批准，不能扩张既有 CAD artifact URI。
 
 `A02` 只批准 `local_only` processing authorization、上述 public/durable 合同和 deterministic fake
@@ -424,8 +425,8 @@ S10.5 closeout：
    composition，不把它注册成 CAD adapter（**complete**）；
 5. `S20.4` 用 deterministic fake provider 打通 ReconstructionDraft 回答、显式重试、重启恢复、拒绝、
    采纳和删除路径（**complete**）；
-6. `S20.5` 为 WorkBuddy/Workbench/CLI 定义最薄 ingress adapter，协议仍保持 host-neutral
-   （**active**）。
+6. `S20.5` 把七个 reconstruction lifecycle 动作投影到既有 Agent application、daemon 与 MCP，
+   并提供非 MCP 的本地主机 descriptor ingress；协议保持严格、path-free、host-neutral（**complete**）。
 
 退出门：
 
@@ -604,7 +605,7 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 |---|---|---|
 | `VCAD-A01` | 批准本整体计划并开始 S10 可逆实现 | **已批准** |
 | `VCAD-A02` | 批准 ReconstructionDraft/image store、retention/delete、durable-root 与 public contract | **已批准** |
-| `VCAD-A03` | 批准真实外部视觉 Provider、数据处理与费用边界 | 未到达 |
+| `VCAD-A03` | 批准真实外部视觉 Provider、数据处理与费用边界 | **下一批准门；未批准** |
 | `VCAD-A04` | 根据 pilot 结果冻结公开支持包络和 V1 发布声明 | 未到达 |
 | `VCAD-A05` | 启动 Freeform，批准其输出类型与验收合同 | 未到达 |
 | `VCAD-A06` | tag/PyPI/GitHub Release 或其他公开发布 | 未到达 |
@@ -623,9 +624,15 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 - `v0.6.1` 已发布；Task/Revision/Review、RuntimeArtifact/Invocation 和 WorkBuddy MCP 路径可复用；
 - 已发布的 `v0.6.1` 没有真正的 Sketcher/PartDesign 可编辑基座；当前 branch candidate 已完成 S10 原生
   Sketcher/PartDesign 创建、Accept 后参数修改和第二 Revision 纵切片，但尚未公开发布；
-- branch candidate 已有 descriptor-bound、sealed-only ImageSet、additive captured roots，以及严格的
-  VisualClaim/VisualObservation/ReconstructionProposal/clarification 合同；当前尚无 reconstruction durable
-  store、Visual Domain Service 或 provider composition；
+- branch candidate 已完成 descriptor-bound、sealed-only ImageSet、additive captured roots、严格的
+  VisualClaim/VisualObservation/ReconstructionProposal/clarification 合同、identity-pinned durable store、
+  Visual Domain Service、deterministic fake-provider composition，以及回答/重试/采纳/拒绝/删除的持久
+  生命周期；
+- S20.5 已将七个严格 reconstruction 动作投影到同一 Agent application → authenticated daemon → MCP
+  写入权威；当前分支公开 38 个工具，采纳仍只创建普通 `REQUIRE_REVIEW` CAD Task；
+- CLI/Workbench/Python host 可经 `LocalAgentClient` 用一个 authenticated staging-directory FD 封存
+  一至四张 JPEG/PNG；固定 `openat`、no-follow/nonblock、owner/link/mode/identity、SHA-256 与完整目录
+  inventory gate 保证 JSON wire 不含路径、文件名、base64 或图片字节；
 - Revision durable v1、TaskRun artifacts 与 CAD artifact store 仍固定于 CAD candidate/FCStd/STEP；S20.0
   因此选择独立的 `visual_inputs/` 与 `reconstruction_drafts/` additive roots，不重解释现有 durable v1；
 - `releases/` 保持现状；新增 root 只做 captured-identity 的纯加法兼容，不引入全局 migration framework；
@@ -640,16 +647,16 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-执行 S20.5：在已完成的 durable store、Visual Domain Service 与 deterministic fake provider 之上，
-提供严格、host-neutral 的最薄主机/WorkBuddy 接口层，并保持现有 task/generation/next_action、重启恢复和
-`REQUIRE_REVIEW` CAD Task 权威边界。不得声称 WorkBuddy 直接附件入口已经认证，不得调用真实
-Provider/VLM、外发图片、添加图片 Resource URI、进入
-Freeform 或发布；保持 sequential ownership，不增加 GUI 并发 merge、第二 CAD 控制面或测试 runner。
+S20 已完成。下一产品门是准备并由用户批准 VCAD-A03，明确真实 VLM/provider、图片数据处理、
+retention、费用与失败包络后，才可运行真实图像理解。此前保持 deterministic-fake/interface-ready；
+不得声称 WorkBuddy 直接附件入口已认证，不得外发图片、添加图片 Resource URI、进入 Freeform 或
+发布，也不增加 GUI 并发 merge、第二 CAD 控制面或测试 runner。
 ```
 
 执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
-为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。S20.0 只完成合同设计，
-未运行真实 Provider，也未进入 S20 持久化写路径。
+为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。在 A02 获批时，S20.0 只完成
+合同设计；当前 S20.1–S20.5 已实现本地持久化和 deterministic fake/interface-ready 路径，但仍未运行
+真实 Provider/VLM。
 
 ## 11. Material event ledger
 
@@ -668,6 +675,7 @@ Freeform 或发布；保持 sequential ownership，不增加 GUI 并发 merge、
 | `VCAD-E10` | `VCAD-A02` 与 S20.2 focused gate | 建立 deterministic claim/observation/proposal/clarification identity、完整 IR evidence binding、assumption confirmation 与 status-derived next action；多视图事实必须绑定至少两个来源 | 21 visual-reconstruction + 19 visual-input tests；144 combined visual/parametric/workflow contract tests；Ruff/format/compile/diff 与独立审查问题闭合；恢复动作是执行 S20.3 | 尚无 durable ReconstructionDraft service 或 Provider 调用；真实模型与 visual Resource URI 仍等待后续 gate |
 | `VCAD-E11` | `VCAD-A02` 与 S20.3 focused gate | 建立 identity-pinned ReconstructionDraft CAS/store、独立 runtime result port、严格 fake-provider composition 与 intent-before-start Visual Domain Service；UNKNOWN、重启及缺失 result 只 reconcile，不重放调用 | 88 focused tests；compile/Ruff/format；独立复核无 must-fix；恢复动作是执行 S20.4 | 仅 deterministic fake；answer/adopt/reject/delete 尚由 S20.4 闭合，真实模型与图片外发仍等待 A03 |
 | `VCAD-E12` | `VCAD-A02` 与 S20.4 focused gate | 回答 digest 绑定 durable clarification authority；FAILED 仅经显式、generation-pinned retry；采纳通过 application-owned trusted port 生成普通 `REQUIRE_REVIEW` CAD Task，重启只 reconcile durable adoption intent；删除以三个 durable draft 阶段包围源字节删除，再将 transient exact marker 降级为永久 ID-only retired tombstone | 297 passed、1 deselected；retired tombstone 不含 manifest/source hash 或 path，永久阻止同 ImageSet ID 重用并与 ReconstructionDraft tombstone 共享 1,024 identity 生命周期预算；恢复动作是执行 S20.5 | 仍仅 deterministic fake；真实 Provider/VLM、外部图片传输、图片 Resource URI 与 WorkBuddy 直接附件入口均未认证，继续等待后续 gate |
+| `VCAD-E13` | `VCAD-A02` 与 S20.5 public/host-interface gate | 七个严格、host-neutral reconstruction 动作经 Agent application、authenticated daemon 和 MCP 投影；非 MCP host adapter 经单一 staging-directory FD 安全封存 1–4 张 JPEG/PNG；当前分支为 38 tools，采纳仍进入普通 `REQUIRE_REVIEW` CAD Task，private build ID 保证旧 daemon 不复用新路由 | integrated 488 passed、2 deselected；sandbox-external daemon worker 1 passed；真实四图、重连及 daemon restart replay 1 passed；full repository 5,875 passed、119 deselected；固定 discovery frame 30,415 bytes；Ruff/format/compile/diff/Skill validation 通过；独立复审 P0/P1 none；恢复动作是准备 `VCAD-A03` | 仍仅 deterministic fake/interface-ready；真实 VLM 与数据策略需 A03，WorkBuddy 直接附件入口尚未验证，无图片 Resource URI |
 
 ## 12. 研究依据
 

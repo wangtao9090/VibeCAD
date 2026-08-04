@@ -43,6 +43,13 @@ def test_tool_annotation_safety_mapping_is_independent_and_exact() -> None:
         "create_release": (False, False, True, False),
         "get_release": (True, False, True, False),
         "approve_release": (False, True, True, False),
+        "create_reconstruction": (False, False, True, False),
+        "get_reconstruction": (True, False, True, False),
+        "run_reconstruction": (False, True, True, False),
+        "answer_reconstruction": (False, True, True, False),
+        "adopt_reconstruction": (False, True, True, False),
+        "reject_reconstruction": (False, True, True, False),
+        "delete_reconstruction": (False, True, True, False),
         "create_box": (False, False, True, False),
         "create_cylinder": (False, False, True, False),
         "inspect_model": (False, False, True, False),
@@ -86,10 +93,10 @@ def test_live_sdk_projection_matches_independent_frozen_digest_and_has_no_extras
         sort_keys=True,
     ).encode("utf-8")
 
-    assert len(raw) == 25_566
+    assert len(raw) == 30_370
     assert len(raw) <= 32_768
     assert hashlib.sha256(raw).hexdigest() == (
-        "a261def0bc0f51ec4d7d894589a4aee06654d78b6d15e750aa153ca52c2a3558"
+        "65eddfcc6049a072eb8649c1adddde75f498622765dd85a39e1d1980925af183"
     )
     for tool in tools:
         assert tool.title is None

@@ -1098,6 +1098,10 @@ _MATERIALIZATION_PATTERN = r"^materialization_[0-9a-f]{64}$"
 _RELEASE_PATTERN = r"^release_[0-9a-f]{32}$"
 _RELEASE_CREATE_KEY_PATTERN = r"^release_create_[0-9a-f]{32}$"
 _RELEASE_APPROVE_KEY_PATTERN = r"^release_approve_[0-9a-f]{32}$"
+_RECONSTRUCTION_PATTERN = r"^reconstruction_[0-9a-f]{32}$"
+_RECONSTRUCTION_CREATE_KEY_PATTERN = r"^reconstruction_create_[0-9a-f]{32}$"
+_IMAGE_SET_PATTERN = r"^image_set_[0-9a-f]{32}$"
+_CLARIFICATION_QUESTION_PATTERN = r"^clarification_question_[0-9a-f]{32}$"
 _FEATURE_PATTERN = r"^feature_[0-9a-f]{32}$"
 _OBJECT_TYPE_PATTERN = r"^[A-Za-z][A-Za-z0-9_]*(?:::[A-Za-z][A-Za-z0-9_]*)+$"
 _VERSION_PATTERN = r"^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$"
@@ -1128,6 +1132,13 @@ _STABLE_TOOL_NAMES = (
     "create_release",
     "get_release",
     "approve_release",
+    "create_reconstruction",
+    "get_reconstruction",
+    "run_reconstruction",
+    "answer_reconstruction",
+    "adopt_reconstruction",
+    "reject_reconstruction",
+    "delete_reconstruction",
 )
 
 _STABLE_TOOL_DESCRIPTIONS = MappingProxyType(
@@ -1157,6 +1168,13 @@ _STABLE_TOOL_DESCRIPTIONS = MappingProxyType(
         "create_release": "为已验收版本生成可预览的机械交付包草稿",
         "get_release": "读取交付包草稿、摘要和批准状态",
         "approve_release": "批准精确摘要绑定的不可变机械交付包",
+        "create_reconstruction": "创建绑定已封存图像集与当前项目版本的可恢复 CAD 重建",
+        "get_reconstruction": "读取可恢复 CAD 重建的当前状态与下一动作",
+        "run_reconstruction": "启动或恢复本地 CAD 重建处理",
+        "answer_reconstruction": "回答重建过程中的一项有界澄清问题",
+        "adopt_reconstruction": "采纳重建提案并创建普通待审核 CAD 任务",
+        "reject_reconstruction": "拒绝重建提案并保留持久化记录",
+        "delete_reconstruction": "删除重建草稿及其绑定的本地图像源",
     }
 )
 
@@ -1412,6 +1430,7 @@ def _public_error_schema() -> dict[str, object]:
         "invalid_state",
         "not_found",
         "conflict",
+        "adoption_unavailable",
         "lease_unavailable",
         "resource_exhausted",
         "runtime_unavailable",
@@ -2302,6 +2321,88 @@ def _task_events_result_schema() -> dict[str, object]:
     )
 
 
+def _reconstruction_budget_schema() -> dict[str, object]:
+    return _closed_schema(
+        {
+            "max_elapsed_ms": _safe_integer_schema(minimum=1),
+            "max_memory_bytes": _safe_integer_schema(minimum=1),
+            "max_output_bytes": _safe_integer_schema(minimum=1),
+        }
+    )
+
+
+def _reconstruction_result_schema() -> dict[str, object]:
+    question = _closed_schema(
+        {
+            "question_id": _id_schema(_CLARIFICATION_QUESTION_PATTERN),
+            "kind": {
+                "type": "string",
+                "enum": (
+                    "confirm_assumption",
+                    "resolve_unknown",
+                    "resolve_conflict",
+                ),
+            },
+            "prompt": _bounded_text_schema(512),
+        }
+    )
+    proposal = _closed_schema(
+        {
+            "part_type": _bounded_text_schema(128),
+            "summary": _bounded_text_schema(2 * 1024),
+        }
+    )
+    return _closed_schema(
+        {
+            "schema_version": _version_schema(),
+            "reconstruction_id": _id_schema(_RECONSTRUCTION_PATTERN),
+            "status": {
+                "type": "string",
+                "enum": (
+                    "ready",
+                    "observing",
+                    "needs_input",
+                    "proposed",
+                    "adopting",
+                    "adopted",
+                    "failed",
+                    "recovery_required",
+                    "rejected",
+                    "deleted",
+                ),
+            },
+            "generation": _safe_integer_schema(minimum=0),
+            "next_action": {
+                "type": "string",
+                "enum": (
+                    "run",
+                    "wait",
+                    "answer",
+                    "adopt_or_reject",
+                    "review_task",
+                    "none",
+                ),
+            },
+            "questions": {
+                "type": "array",
+                "items": question,
+                "maxItems": 128,
+            },
+            "proposal_summary": _nullable(proposal),
+            "adopted_task_id": _nullable(_id_schema(_TASK_ID.pattern)),
+        },
+        required=(
+            "schema_version",
+            "reconstruction_id",
+            "status",
+            "generation",
+            "next_action",
+            "questions",
+            "proposal_summary",
+        ),
+    )
+
+
 def _stable_input_schema(name: str) -> dict[str, object]:
     if name in {"ping", "get_runtime_status", "ensure_runtime"}:
         return _empty_input_schema()
@@ -2491,6 +2592,68 @@ def _stable_input_schema(name: str) -> dict[str, object]:
                 "approval_key": _id_schema(_RELEASE_APPROVE_KEY_PATTERN),
             }
         )
+    if name == "create_reconstruction":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "create_key": _id_schema(_RECONSTRUCTION_CREATE_KEY_PATTERN),
+                "project_id": _id_schema(_PROJECT_PATTERN),
+                "image_set_id": _id_schema(_IMAGE_SET_PATTERN),
+                "image_set_manifest_sha256": _id_schema(_DIGEST_PATTERN),
+            }
+        )
+    if name == "get_reconstruction":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "reconstruction_id": _id_schema(_RECONSTRUCTION_PATTERN),
+            }
+        )
+    if name == "run_reconstruction":
+        schema = _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "reconstruction_id": _id_schema(_RECONSTRUCTION_PATTERN),
+                "expected_generation": _safe_integer_schema(minimum=0),
+                "budget": _nullable(_reconstruction_budget_schema()),
+                "deadline_ms": _nullable(_safe_integer_schema(minimum=1)),
+            }
+        )
+        schema["not"] = {
+            "oneOf": (
+                {"properties": {"budget": {"type": "null"}}},
+                {"properties": {"deadline_ms": {"type": "null"}}},
+            )
+        }
+        return schema
+    if name == "answer_reconstruction":
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "reconstruction_id": _id_schema(_RECONSTRUCTION_PATTERN),
+                "expected_generation": _safe_integer_schema(minimum=0),
+                "question_id": _id_schema(_CLARIFICATION_QUESTION_PATTERN),
+                "response": {
+                    "oneOf": (
+                        {"type": "boolean"},
+                        {"type": "number"},
+                        _bounded_text_schema(512),
+                    )
+                },
+            }
+        )
+    if name in {
+        "adopt_reconstruction",
+        "reject_reconstruction",
+        "delete_reconstruction",
+    }:
+        return _closed_schema(
+            {
+                "schema_version": _version_schema(),
+                "reconstruction_id": _id_schema(_RECONSTRUCTION_PATTERN),
+                "expected_generation": _safe_integer_schema(minimum=0),
+            }
+        )
     raise ValueError("unknown stable tool")
 
 
@@ -2536,6 +2699,16 @@ def _stable_result_schema(name: str) -> dict[str, object]:
         return _artifact_result_schema()
     if name in {"create_release", "get_release", "approve_release"}:
         return _release_result_schema()
+    if name in {
+        "create_reconstruction",
+        "get_reconstruction",
+        "run_reconstruction",
+        "answer_reconstruction",
+        "adopt_reconstruction",
+        "reject_reconstruction",
+        "delete_reconstruction",
+    }:
+        return _reconstruction_result_schema()
     raise ValueError("unknown stable tool")
 
 
@@ -2566,6 +2739,13 @@ def _stable_annotations(name: str) -> ToolAnnotations:
         "create_release": (False, False, True, False),
         "get_release": (True, False, True, False),
         "approve_release": (False, True, True, False),
+        "create_reconstruction": (False, False, True, False),
+        "get_reconstruction": (True, False, True, False),
+        "run_reconstruction": (False, True, True, False),
+        "answer_reconstruction": (False, True, True, False),
+        "adopt_reconstruction": (False, True, True, False),
+        "reject_reconstruction": (False, True, True, False),
+        "delete_reconstruction": (False, True, True, False),
     }
     try:
         return ToolAnnotations(*values[name])

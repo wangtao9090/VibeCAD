@@ -11,6 +11,13 @@ from vibecad.application.task_api import (
     TaskServicePortErrorCode,
     TaskServicePortFailure,
 )
+from vibecad.application.visual_ingress import (
+    VisualIngressError,
+    VisualIngressErrorCode,
+    open_visual_staging,
+    parse_seal_image_set_request,
+    validate_seal_result,
+)
 from vibecad.interaction.checkouts import (
     CheckoutError,
     CheckoutErrorCode,
@@ -28,6 +35,7 @@ from vibecad.interaction.protocol_v2 import (
     V2ErrorCode,
     V2ProtocolError,
 )
+from vibecad.visual.inputs import VisualInputStoreError, VisualInputStoreErrorCode
 from vibecad.workflow.store import StoredTaskRun
 
 ALLOWED_APPLICATION_OPERATIONS = frozenset(
@@ -59,11 +67,18 @@ ALLOWED_APPLICATION_OPERATIONS = frozenset(
         "rotate_part",
         "submit_model_program",
         "approve_release",
+        "create_reconstruction",
+        "get_reconstruction",
+        "run_reconstruction",
+        "answer_reconstruction",
+        "adopt_reconstruction",
+        "reject_reconstruction",
+        "delete_reconstruction",
     }
 )
 KERNEL_API_EPOCH = 1
 KERNEL_API_NAME = "vibecad.task-kernel"
-KERNEL_BUILD_ID = "p1-s03.1"
+KERNEL_BUILD_ID = "vcad-s20.5-host-ingress"
 
 _DIRECT_OPERATIONS = frozenset(
     {
@@ -102,6 +117,24 @@ def _checkpoint_failure(error: TaskServicePortFailure) -> V2ProtocolError:
     return V2ProtocolError(V2ErrorCode.UNAVAILABLE)
 
 
+def _visual_ingress_failure(error: BaseException) -> V2ProtocolError:
+    if type(error) is VisualIngressError:
+        if error.code is VisualIngressErrorCode.INVALID_INPUT:
+            return V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+        if error.code is VisualIngressErrorCode.BUDGET_EXCEEDED:
+            return V2ProtocolError(V2ErrorCode.RESOURCE_EXHAUSTED)
+        return V2ProtocolError(V2ErrorCode.UNAVAILABLE)
+    if type(error) is VisualInputStoreError:
+        if error.code in {
+            VisualInputStoreErrorCode.CONFLICT,
+            VisualInputStoreErrorCode.INVALID_INPUT,
+        }:
+            return V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+        if error.code is VisualInputStoreErrorCode.BUDGET_EXCEEDED:
+            return V2ProtocolError(V2ErrorCode.RESOURCE_EXHAUSTED)
+    return V2ProtocolError(V2ErrorCode.UNAVAILABLE)
+
+
 class LocalKernelFacade:
     """Literal application routing; wire strings never select Python attributes."""
 
@@ -127,6 +160,7 @@ class LocalKernelFacade:
             kernel_retire=self._kernel_retire,
             application_call=self._application_call,
             project_import=self._project_import,
+            visual_inputs_seal=self._visual_inputs_seal,
             checkout_open=partial(self._checkout_open, session_id),
             checkout_get=self._checkout_get,
             checkout_checkpoint=self._checkout_checkpoint,
@@ -217,6 +251,20 @@ class LocalKernelFacade:
             return self._application.get_release_request(request)
         if operation == "approve_release":
             return self._application.approve_release_request(request)
+        if operation == "create_reconstruction":
+            return self._application.create_reconstruction_request(request)
+        if operation == "get_reconstruction":
+            return self._application.get_reconstruction_request(request)
+        if operation == "run_reconstruction":
+            return self._application.run_reconstruction_request(request)
+        if operation == "answer_reconstruction":
+            return self._application.answer_reconstruction_request(request)
+        if operation == "adopt_reconstruction":
+            return self._application.adopt_reconstruction_request(request)
+        if operation == "reject_reconstruction":
+            return self._application.reject_reconstruction_request(request)
+        if operation == "delete_reconstruction":
+            return self._application.delete_reconstruction_request(request)
         if operation == "get_capabilities":
             return self._application.get_capabilities_request(request)
         if operation in _DIRECT_OPERATIONS:
@@ -262,6 +310,31 @@ class LocalKernelFacade:
             locator=locator,
         )
         return result
+
+    def _visual_inputs_seal(
+        self,
+        params: dict[str, object],
+        descriptor: int,
+    ) -> dict[str, object]:
+        try:
+            request = parse_seal_image_set_request(params["request"])
+            opened = open_visual_staging(request, descriptor, params["locator"])
+            try:
+                sealed = self._application.seal_visual_image_set(
+                    request=request,
+                    sources=opened.sources,
+                )
+            finally:
+                opened.close()
+        except (KeyError, VisualIngressError, VisualInputStoreError) as error:
+            raise _visual_ingress_failure(error) from None
+        return validate_seal_result(
+            {
+                "schema_version": 1,
+                "image_set_id": getattr(sealed, "id", None),
+                "image_set_manifest_sha256": getattr(sealed, "manifest_sha256", None),
+            }
+        )
 
     @staticmethod
     def _source(value: dict[str, object]) -> HeadCheckoutSource | DraftCheckoutSource:

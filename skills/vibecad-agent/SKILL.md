@@ -5,13 +5,15 @@ description: Use VibeCAD's Agent-first MCP surface to create, inspect, modify, r
 
 # VibeCAD Agent
 
-Use the current 31-tool Agent-first surface. Treat VibeCAD's persisted project, task, revision, draft, evidence, artifact, and release records as authoritative. Never infer success from prose alone.
+Use the current 38-tool Agent-first surface. Treat VibeCAD's persisted project, task, revision, draft, visual reconstruction, evidence, artifact, and release records as authoritative. Never infer success from prose alone.
 
 ## Public tools
 
 Runtime and capability tools: `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime`, `get_capabilities`.
 
 Project, task, and delivery tools: `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project`, `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft`, `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release`.
+
+Visual reconstruction tools: `create_reconstruction`, `get_reconstruction`, `run_reconstruction`, `answer_reconstruction`, `adopt_reconstruction`, `reject_reconstruction`, `delete_reconstruction`.
 
 Direct CAD tools: `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part`.
 
@@ -72,6 +74,14 @@ Use `revert_project` only with a source revision in that committed ancestry and 
 
 If the outcome of `create_task` is unknown and no task id or task_id was received, retry `create_task` with the exact same retained create key, project id, and review policy. The replay returns the same task's current generation; never generate a replacement key for recovery.
 
+## Visual reconstruction
+
+Use visual reconstruction only after a trusted local host adapter has sealed one to four JPEG/PNG inputs and returned the exact `image_set_id` and `image_set_manifest_sha256`. WorkBuddy direct attachment ingress is not verified. Never put a path, Base64 value, image bytes, filename, or Resource URI into a reconstruction MCP request, and never invent or alter either ImageSet binding.
+
+Create the draft with `create_reconstruction`, one retained key matching `reconstruction_create_[0-9a-f]{32}`, the target project, and the exact sealed ImageSet binding. Replay an unknown create outcome only with that identical request. Use `get_reconstruction` to recover the current generation and route only its persisted `next_action`: call `run_reconstruction` for `run`, answer the named bounded question with `answer_reconstruction` for `answer`, and present the proposal summary to the user for `adopt_or_reject`. Pass the exact observed generation to every mutation. A run must provide both its budget and deadline or set both to null.
+
+Call `adopt_reconstruction` only after the user chooses the displayed proposal. Adoption creates an ordinary `REQUIRE_REVIEW` CAD Task; it does not accept a draft or advance project HEAD. Continue that returned task through the normal task/review workflow. Use `reject_reconstruction` to retain a rejected record, or `delete_reconstruction` only when the user wants the draft and its bound local image source removed. Do not treat the deterministic S20.5 provider as real photo-to-CAD inference.
+
 ## Artifact delivery
 
 Call `get_artifact_manifest` first with the exact task generation, revision, and nullable draft binding. If it returns `materialized=true`, consume its typed `ResourceLink` entries and call `resources/read` for their URIs. If it returns `materialized=false`, call `export_task_artifacts` once with a retained export key, then consume its returned `ResourceLink` entries through `resources/read`. The manifest query is read-only: never expect it to create, copy, validate, or repair a delivery. Verify format, byte size, and SHA-256 evidence before handing off the FCStd and STEP files.
@@ -86,13 +96,13 @@ Approval is a separate user decision. After the user approves the exact displaye
 
 The current buffered Release resource ceiling is 64 MiB. If creation returns `resource_exhausted`, report that transport limit; do not bypass it with an arbitrary filesystem path or claim that a larger package was approved.
 
-Never reconstruct retired tool names. Use only the live 31-tool surface above.
+Never reconstruct retired tool names. Use only the live 38-tool surface above.
 
 Never generate or execute arbitrary Python/FreeCAD code. FreeCAD is the bounded geometry engine behind VibeCAD, not an authorization to run model-generated code.
 
 ## Unsupported and unavailable capabilities
 
-STEP and STL import unavailable in the verified current envelope; only FCStd Box/Cylinder import is supported. Do not claim `mcp_sampling`, `byok`, Workbench UI, `face/edge` selection, STL reconstruction, photo reconstruction, or simulation. Route those needs to later product stages or an explicitly approved external engine.
+STEP and STL import unavailable in the verified current envelope; only FCStd Box/Cylinder import is supported. Do not claim `mcp_sampling`, `byok`, Workbench UI, `face/edge` selection, STL reconstruction, real VLM-backed photo reconstruction, or simulation. S20.5 provides only sealed-image lifecycle handling through a deterministic fake provider. Route real photo-to-CAD needs to a later approved product stage or external engine.
 
 The calling host owns model selection, subscription or API token use, and every associated charge. VibeCAD does not provide a hidden model, Sampling backend, or BYOK billing service.
 

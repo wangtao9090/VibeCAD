@@ -17,17 +17,23 @@ from vibecad.application.project_api import (
     ProjectServicePortErrorCode,
     ProjectServicePortFailure,
 )
+from vibecad.application.visual_ingress import (
+    VisualIngressError,
+    parse_seal_image_set_request,
+    validate_seal_result,
+)
 from vibecad.daemon.bootstrap import (
     connect_existing_local_kernel,
     connect_or_start_local_kernel,
     retire_local_kernel,
 )
-from vibecad.daemon.client import LocalImportSourceError
+from vibecad.daemon.client import LocalImportSourceError, LocalVisualSourceError
 from vibecad.daemon.facade import (
     KERNEL_API_EPOCH,
     KERNEL_API_NAME,
     KERNEL_BUILD_ID,
 )
+from vibecad.daemon.state import DaemonError
 from vibecad.interaction.protocol_v2 import V2_VERSION
 from vibecad.runtime import paths
 
@@ -61,6 +67,7 @@ class _ProjectCreatePreflight:
 
 class LocalAgentClientErrorCode(StrEnum):
     INVALID_INPUT = "invalid_input"
+    RESOURCE_EXHAUSTED = "resource_exhausted"
     UNAVAILABLE = "unavailable"
     INTERNAL_ERROR = "internal_error"
     CLOSED = "closed"
@@ -317,6 +324,75 @@ class LocalAgentClient:
 
     def approve_release_request(self, request: object) -> dict[str, object]:
         return self._application_call("approve_release", request)
+
+    def create_reconstruction_request(self, request: object) -> dict[str, object]:
+        return self._application_call("create_reconstruction", request)
+
+    def get_reconstruction_request(self, request: object) -> dict[str, object]:
+        return self._application_call("get_reconstruction", request)
+
+    def run_reconstruction_request(self, request: object) -> dict[str, object]:
+        return self._application_call("run_reconstruction", request)
+
+    def answer_reconstruction_request(self, request: object) -> dict[str, object]:
+        return self._application_call("answer_reconstruction", request)
+
+    def adopt_reconstruction_request(self, request: object) -> dict[str, object]:
+        return self._application_call("adopt_reconstruction", request)
+
+    def reject_reconstruction_request(self, request: object) -> dict[str, object]:
+        return self._application_call("reject_reconstruction", request)
+
+    def delete_reconstruction_request(self, request: object) -> dict[str, object]:
+        return self._application_call("delete_reconstruction", request)
+
+    def seal_visual_image_set_request(
+        self,
+        request: object,
+        *,
+        source_paths: object,
+    ) -> dict[str, object]:
+        """Host-only local-image ingress; paths never enter MCP or the wire."""
+
+        self._ensure_live()
+        try:
+            canonical = parse_seal_image_set_request(request)
+        except VisualIngressError:
+            raise LocalAgentClientError(LocalAgentClientErrorCode.INVALID_INPUT) from None
+        if type(source_paths) not in {list, tuple} or any(
+            type(path) is not str for path in source_paths
+        ):
+            raise LocalAgentClientError(LocalAgentClientErrorCode.INVALID_INPUT)
+        paths = tuple(source_paths)
+        if len(paths) != len(canonical.inputs):
+            raise LocalAgentClientError(LocalAgentClientErrorCode.INVALID_INPUT)
+        seal = getattr(self._kernel, "seal_visual_image_set", None)
+        if not callable(seal):
+            raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE)
+        try:
+            response = seal(
+                canonical.to_mapping(),
+                source_paths=paths,
+            )
+        except LocalVisualSourceError:
+            raise LocalAgentClientError(LocalAgentClientErrorCode.INVALID_INPUT) from None
+        except DaemonError:
+            raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE) from None
+        result = getattr(response, "result", None)
+        error = getattr(response, "error", None)
+        if type(result) is dict and error is None:
+            try:
+                return validate_seal_result(result)
+            except VisualIngressError:
+                raise LocalAgentClientError(LocalAgentClientErrorCode.INTERNAL_ERROR) from None
+        if result is None and type(error) is dict and set(error) == {"code", "message"}:
+            code = error.get("code")
+            if code == "invalid_request":
+                raise LocalAgentClientError(LocalAgentClientErrorCode.INVALID_INPUT)
+            if code == "resource_exhausted":
+                raise LocalAgentClientError(LocalAgentClientErrorCode.RESOURCE_EXHAUSTED)
+            raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE)
+        raise LocalAgentClientError(LocalAgentClientErrorCode.INTERNAL_ERROR)
 
     def get_capabilities_request(self, request: object) -> dict[str, object]:
         return self._application_call("get_capabilities", request)
