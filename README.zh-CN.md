@@ -76,7 +76,9 @@ selector 构造与唯一解析由受管 Python bridge 和受管模式共用的�
 ## 当前 Agent-first 工作流
 
 ```text
-用户与宿主 Agent
+用户文本或图片与宿主多模态 Agent
+  → 宿主把可见事实区分为 confirmed、inferred 与 unknown
+  → 缺少绝对尺度等阻塞信息时先询问，不静默猜测
   → get_capabilities 读取实际能力
   → create_project 创建空项目或受控导入 FCStd
   → create_task 绑定项目版本与审核策略
@@ -93,8 +95,9 @@ direct operation 与 ModelProgram 不是两套执行系统。direct operation �
 
 当前只能从空项目或一个 FCStd 文件开始；其中 FCStd 导入必须非空，且其中每个对象都必须是
 `Part::Box` 或 `Part::Cylinder`。混合或其他对象类型会被拒绝。通用 FCStd 导入属于 P1；STEP/STL
-导入、逆向工程和仿真尚未接入。当前分支已通过 deterministic fake provider 提供有界的视觉重建
-接口与生命周期，但还不执行真实图片理解。VibeCAD 聚焦可编辑 CAD 的中间编排与验证。
+导入、逆向工程和仿真尚未接入。图片请求由 Codex、Claude、WorkBuddy 或其他宿主已有的多模态模型
+使用自己的订阅/API 授权完成理解，再把受控 ModelProgram 送入普通 Task Kernel。VibeCAD 不需要
+宿主模型凭据，也不会把同一图片再次上传给第二个模型。
 
 ## 当前公开能力（开发分支）
 
@@ -111,11 +114,12 @@ schema 与副作用标记；宿主应先调用 `get_capabilities`，不能根据
 | 视觉重建 | `create_reconstruction`, `get_reconstruction`, `run_reconstruction`, `answer_reconstruction`, `adopt_reconstruction`, `reject_reconstruction`, `delete_reconstruction` |
 | direct operation | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
 
-这七个视觉重建工具在 S20.5 只达到 interface-ready：它们通过 deterministic fake provider 验证
-sealed 本地 ImageSet、持久恢复、澄清问答，以及采纳为普通待审核 CAD Task 的完整生命周期。非 MCP
-本地主机适配器可通过一个已认证的 staging-directory descriptor 封存一至四张 JPEG/PNG；JSON wire
-不包含路径、文件名、base64 或图片字节。真实 VLM/provider 及其数据处理策略仍需 `VCAD-A03`；
-WorkBuddy 直接附件入口尚未验证，MCP 接口也不接受图片路径、base64 内容或 visual Resource URI。
+这七个视觉重建工具是可选的 VibeCAD-managed 生命周期，用于 sealed 本地 ImageSet、持久恢复、澄清
+问答，以及采纳为普通待审核 CAD Task；默认 composition 仍是 deterministic fake。非 MCP 本地主机
+适配器可通过一个已认证的 staging-directory descriptor 封存一至十六张 JPEG/PNG；JSON wire 不包含
+路径、文件名、base64 或图片字节。宿主多模态模型已经能看图时不需要这条 store/provider 路径。
+WorkBuddy 附件直接进入 VibeCAD sealed store 仍未验证，MCP 接口也不接受图片路径、base64 内容或
+visual Resource URI。
 
 一次成功的 `export_task_artifacts` 返回规范结果及两个有类型的 `ResourceLink`：
 
@@ -270,8 +274,9 @@ G1 Workbench Alpha 已把真实 FreeCAD Qt UI 与确定性的受管启动器打�
 Workbench 与 Dock、daemon-backed refresh、相互独立的 HEAD/草案预览、verdict、精确
 object/feature selector 捕获、Accept/Reject 与异步 client/thread shutdown。daemon 是可复用的受管
 后台服务，更新与卸载会通过认证维护路径将其退休。薄外部试点通过一个有界受管 Python bridge 复用
-这些状态机，不增加第二写入权威。当前仍不支持 face/edge 选择、STEP/STL import、
-真实 VLM 驱动的照片重建或 simulation；S20.5 只提供 deterministic-fake 接口与生命周期。
+这些状态机，不增加第二写入权威。当前仍不支持 face/edge 选择、STEP/STL import、普适照片重建或
+simulation。多模态宿主可通过普通待审核 Task 流程试点受控 image-to-CAD；独立的 VibeCAD-managed
+视觉生命周期仍默认使用 deterministic fake Provider，direct cloud transport 是可选非默认路径。
 
 进一步阅读（源代码仓库）：
 [用户手册](https://github.com/wangtao9090/VibeCAD/blob/main/docs/USER_GUIDE.md)、

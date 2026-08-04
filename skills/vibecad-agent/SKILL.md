@@ -1,11 +1,11 @@
 ---
 name: vibecad-agent
-description: Use VibeCAD's Agent-first MCP surface to create, inspect, modify, review, and export verified FreeCAD projects and tasks. Use for bounded CAD work that must remain recoverable, auditable, and deliver FCStd/STEP artifacts without executing arbitrary Python or FreeCAD code.
+description: Use VibeCAD's Agent-first MCP surface to turn text or host-visible image references into verified FreeCAD projects and tasks, then inspect, modify, review, and export FCStd/STEP artifacts. Use for bounded CAD work that must remain recoverable and auditable without executing arbitrary Python or FreeCAD code; image understanding stays with the calling multimodal host.
 ---
 
 # VibeCAD Agent
 
-Use the current 38-tool Agent-first surface. Treat VibeCAD's persisted project, task, revision, draft, visual reconstruction, evidence, artifact, and release records as authoritative. Never infer success from prose alone.
+Use the current 38-tool Agent-first surface. Treat VibeCAD's persisted project, task, revision, draft, visual reconstruction, evidence, artifact, and release records as authoritative. Keep model reasoning, image understanding, subscription, and credentials with the calling host. Never infer success from prose alone.
 
 ## Public tools
 
@@ -74,13 +74,27 @@ Use `revert_project` only with a source revision in that committed ancestry and 
 
 If the outcome of `create_task` is unknown and no task id or task_id was received, retry `create_task` with the exact same retained create key, project id, and review policy. The replay returns the same task's current generation; never generate a replacement key for recovery.
 
-## Visual reconstruction
+## Host-owned image-to-CAD
 
-Use visual reconstruction only after a trusted local host adapter has sealed one to four JPEG/PNG inputs and returned the exact `image_set_id` and `image_set_manifest_sha256`. WorkBuddy direct attachment ingress is not verified. Never put a path, Base64 value, image bytes, filename, or Resource URI into a reconstruction MCP request, and never invent or alter either ImageSet binding.
+When user images are already visible to the calling host's multimodal model, analyze them in the host and use the ordinary Task Kernel. Do not call `run_reconstruction`, request an `image_set_id`, or ask VibeCAD to upload the same images to another model. Do not pass an API key, API token, or provider credential to VibeCAD.
+
+Use clear, complementary views of the same object, state, and scale. Prefer a roughly 2,048-pixel overview plus source-resolution crops for dimension text, small holes, threads, and local boundaries when the host supports image preparation; do not assume that sending every available image improves the result. Classify reconstruction facts before creating CAD:
+
+- `confirmed`: directly readable dimensions, explicit scale evidence, counts, or geometry consistently visible across the supplied views;
+- `inferred`: plausible geometry not directly measured; require user confirmation when it changes the CAD result;
+- `unknown`: occluded, blurred, conflicting, or absent evidence; ask the user instead of inventing a value.
+
+Never infer an absolute dimension from an unscaled photo. Ask only for missing facts that block a safe parameterized model. Once the required dimensions and feature relationships are sufficient, call `get_capabilities`, create or select the project, call `create_task` with `require_review`, and submit the bounded construction through `submit_model_program`. Continue through the persisted task `next_action`, deterministic verification, draft review, and artifact workflow exactly as for a text request.
+
+The CAD task and ModelProgram become durable after submission; the host's original attachment does not automatically become VibeCAD durable evidence. If a host restart loses image or clarification context, ask the user to reattach or restate the missing evidence. Never reconstruct dimensions from a task id alone.
+
+## Optional sealed-image visual reconstruction
+
+Use the seven visual-reconstruction tools only when an explicitly selected VibeCAD-managed workflow needs a durable local ImageSet or optional Provider lifecycle. A trusted local host adapter must first seal one to sixteen JPEG/PNG inputs and return the exact `image_set_id` and `image_set_manifest_sha256`. WorkBuddy direct attachment ingress into that sealed store is not verified and is not required for host-owned image-to-CAD. Never put a path, Base64 value, image bytes, filename, or Resource URI into a reconstruction MCP request, and never invent or alter either ImageSet binding.
 
 Create the draft with `create_reconstruction`, one retained key matching `reconstruction_create_[0-9a-f]{32}`, the target project, and the exact sealed ImageSet binding. Replay an unknown create outcome only with that identical request. Use `get_reconstruction` to recover the current generation and route only its persisted `next_action`: call `run_reconstruction` for `run`, answer the named bounded question with `answer_reconstruction` for `answer`, and present the proposal summary to the user for `adopt_or_reject`. Pass the exact observed generation to every mutation. A run must provide both its budget and deadline or set both to null.
 
-Call `adopt_reconstruction` only after the user chooses the displayed proposal. Adoption creates an ordinary `REQUIRE_REVIEW` CAD Task; it does not accept a draft or advance project HEAD. Continue that returned task through the normal task/review workflow. Use `reject_reconstruction` to retain a rejected record, or `delete_reconstruction` only when the user wants the draft and its bound local image source removed. Do not treat the deterministic S20.5 provider as real photo-to-CAD inference.
+Call `adopt_reconstruction` only after the user chooses the displayed proposal. Adoption creates an ordinary `REQUIRE_REVIEW` CAD Task; it does not accept a draft or advance project HEAD. Continue that returned task through the normal task/review workflow. Use `reject_reconstruction` to retain a rejected record, or `delete_reconstruction` only when the user wants the draft and its bound local image source removed. Do not treat the deterministic default provider as real photo-to-CAD inference, and do not make this optional lifecycle the default when the host already sees the images.
 
 ## Artifact delivery
 
@@ -102,7 +116,7 @@ Never generate or execute arbitrary Python/FreeCAD code. FreeCAD is the bounded 
 
 ## Unsupported and unavailable capabilities
 
-STEP and STL import unavailable in the verified current envelope; only FCStd Box/Cylinder import is supported. Do not claim `mcp_sampling`, `byok`, Workbench UI, `face/edge` selection, STL reconstruction, real VLM-backed photo reconstruction, or simulation. S20.5 provides only sealed-image lifecycle handling through a deterministic fake provider. Route real photo-to-CAD needs to a later approved product stage or external engine.
+STEP and STL import unavailable in the verified current envelope; only FCStd Box/Cylinder import is supported. Do not claim `mcp_sampling`, `byok`, Workbench UI, `face/edge` selection, STL reconstruction, universal or release-verified photo reconstruction, or simulation. Host-owned image reasoning is verified only for bounded pilot fixtures when the calling multimodal host can actually see the attachments; VibeCAD-managed visual reconstruction still defaults to the deterministic fake provider, while direct cloud providers remain optional and non-default.
 
 The calling host owns model selection, subscription or API token use, and every associated charge. VibeCAD does not provide a hidden model, Sampling backend, or BYOK billing service.
 

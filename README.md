@@ -86,7 +86,9 @@ Kernel used by managed mode.
 ## Current Agent-first Workflow
 
 ```text
-User and host Agent
+User text or images and the host multimodal Agent
+  → host classifies visible facts as confirmed, inferred, or unknown
+  → host asks for blocking dimensions instead of inventing absolute scale
   → get_capabilities reads the actual capabilities
   → create_project creates an empty project or performs a controlled FCStd import
   → create_task binds the project version and review policy
@@ -105,10 +107,10 @@ verification, draft, commit, reject, rollback, and recovery semantics.
 A project can currently begin only from an empty project or a single FCStd file. An FCStd import
 must be non-empty, and every object in it must be either `Part::Box` or `Part::Cylinder`. Mixed
 or other object types are rejected. General FCStd import belongs to P1; STEP/STL import, reverse
-engineering, and simulation are not yet integrated. The current branch provides the bounded
-visual-reconstruction interface and lifecycle using a deterministic fake provider, but it does
-not yet perform real image understanding. VibeCAD focuses on the intermediate orchestration and
-verification of editable CAD.
+engineering, and simulation are not yet integrated. For an image request, the calling Codex,
+Claude, WorkBuddy, or other multimodal host performs image understanding with its own subscription
+or API authorization, then submits the resulting bounded ModelProgram through the ordinary Task
+Kernel. VibeCAD does not need the host's model credential or upload the same image to a second model.
 
 ## Current Public Capabilities (development branch)
 
@@ -127,13 +129,14 @@ tools or from general model knowledge.
 | Visual reconstruction | `create_reconstruction`, `get_reconstruction`, `run_reconstruction`, `answer_reconstruction`, `adopt_reconstruction`, `reject_reconstruction`, `delete_reconstruction` |
 | Direct operations | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
 
-The seven visual-reconstruction tools are S20.5 interface-ready only. They exercise sealed local
+The seven visual-reconstruction tools are an optional VibeCAD-managed lifecycle for sealed local
 ImageSets, durable restart recovery, clarification, and adoption into an ordinary reviewed CAD
-Task through a deterministic fake provider. A non-MCP local host adapter can seal one to four
-JPEG/PNG inputs through one authenticated staging-directory descriptor; the JSON wire contains no
-path, filename, base64 payload, or image bytes. A real VLM/provider and its data-handling policy
-still require `VCAD-A03`; direct WorkBuddy attachment ingress has not been verified, and the MCP
-surface accepts no image path, base64 payload, or visual Resource URI.
+Task. The default composition remains deterministic fake. A non-MCP local host adapter can seal
+one to sixteen JPEG/PNG inputs through one authenticated staging-directory descriptor; the JSON
+wire contains no path, filename, base64 payload, or image bytes. This optional store/provider path
+is not required when the calling multimodal host already sees the images. Direct WorkBuddy
+attachment ingress into VibeCAD's sealed store remains unverified, and the MCP surface accepts no
+image path, base64 payload, or visual Resource URI.
 
 A successful `export_task_artifacts` call returns a canonical result and two typed
 `ResourceLink` values:
@@ -322,8 +325,10 @@ exact object/feature selector capture, Accept/Reject, and asynchronous client/th
 The daemon is a reusable managed background service; update and uninstall retire it through the
 authenticated maintenance path. The thin external pilot reuses those state machines through one
 bounded managed-Python bridge and does not add a second write authority. Face/edge selection,
-STEP/STL import, real VLM-backed photo reconstruction, and simulation are not currently
-supported; S20.5 provides only the deterministic-fake interface and lifecycle.
+STEP/STL import, universal photo reconstruction, and simulation are not currently supported. A
+multimodal host can pilot bounded image-to-CAD through the ordinary reviewed Task flow; the separate
+VibeCAD-managed visual lifecycle still defaults to the deterministic fake Provider, with direct
+cloud transport optional and non-default.
 
 Further reading in the source repository:
 [User Guide](https://github.com/wangtao9090/VibeCAD/blob/main/docs/USER_GUIDE.md),

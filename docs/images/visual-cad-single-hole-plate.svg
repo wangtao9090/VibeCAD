@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto-start-reverse">
+      <path d="M 0 0 L 8 4 L 0 8 z" fill="#1f2937"/>
+    </marker>
+    <style>
+      .title { font: 700 28px sans-serif; fill: #111827; }
+      .label { font: 600 20px sans-serif; fill: #111827; }
+      .dimtext { font: 18px sans-serif; fill: #111827; }
+      .object { fill: #eef2f7; stroke: #111827; stroke-width: 3; }
+      .edge { fill: none; stroke: #111827; stroke-width: 3; }
+      .center { fill: none; stroke: #2563eb; stroke-width: 2; stroke-dasharray: 12 8 2 8; }
+      .dim { fill: none; stroke: #374151; stroke-width: 2; marker-start: url(#arrow); marker-end: url(#arrow); }
+      .ext { fill: none; stroke: #6b7280; stroke-width: 1.5; }
+      .leader { fill: none; stroke: #374151; stroke-width: 2; marker-end: url(#arrow); }
+      .note { font: 16px sans-serif; fill: #4b5563; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="800" fill="white"/>
+  <text x="600" y="48" text-anchor="middle" class="title">SINGLE-HOLE PLATE — ALL DIMENSIONS mm</text>
+
+  <text x="400" y="96" text-anchor="middle" class="label">TOP VIEW</text>
+  <rect x="160" y="120" width="480" height="300" class="object"/>
+  <circle cx="400" cy="270" r="30" fill="white" stroke="#111827" stroke-width="3"/>
+  <line x1="130" y1="270" x2="670" y2="270" class="center"/>
+  <line x1="400" y1="90" x2="400" y2="450" class="center"/>
+
+  <line x1="160" y1="420" x2="160" y2="490" class="ext"/>
+  <line x1="640" y1="420" x2="640" y2="490" class="ext"/>
+  <line x1="168" y1="474" x2="632" y2="474" class="dim"/>
+  <rect x="366" y="458" width="68" height="28" fill="white"/>
+  <text x="400" y="479" text-anchor="middle" class="dimtext">80</text>
+
+  <line x1="160" y1="120" x2="92" y2="120" class="ext"/>
+  <line x1="160" y1="420" x2="92" y2="420" class="ext"/>
+  <line x1="108" y1="128" x2="108" y2="412" class="dim"/>
+  <rect x="76" y="253" width="64" height="34" fill="white"/>
+  <text x="108" y="276" text-anchor="middle" class="dimtext">50</text>
+
+  <line x1="160" y1="120" x2="160" y2="82" class="ext"/>
+  <line x1="400" y1="120" x2="400" y2="82" class="ext"/>
+  <line x1="168" y1="92" x2="392" y2="92" class="dim"/>
+  <rect x="250" y="77" width="60" height="28" fill="white"/>
+  <text x="280" y="98" text-anchor="middle" class="dimtext">40</text>
+
+  <line x1="640" y1="120" x2="696" y2="120" class="ext"/>
+  <line x1="640" y1="270" x2="696" y2="270" class="ext"/>
+  <line x1="680" y1="128" x2="680" y2="262" class="dim"/>
+  <rect x="654" y="181" width="52" height="28" fill="white"/>
+  <text x="680" y="202" text-anchor="middle" class="dimtext">25</text>
+
+  <path d="M 535 180 L 445 238" class="leader"/>
+  <text x="542" y="174" class="label">Ø10 THRU</text>
+
+  <text x="400" y="554" text-anchor="middle" class="label">FRONT VIEW</text>
+  <rect x="160" y="590" width="480" height="48" class="object"/>
+  <line x1="400" y1="570" x2="400" y2="658" class="center"/>
+  <line x1="370" y1="590" x2="370" y2="638" stroke="#6b7280" stroke-width="2" stroke-dasharray="8 6"/>
+  <line x1="430" y1="590" x2="430" y2="638" stroke="#6b7280" stroke-width="2" stroke-dasharray="8 6"/>
+  <line x1="640" y1="590" x2="720" y2="590" class="ext"/>
+  <line x1="640" y1="638" x2="720" y2="638" class="ext"/>
+  <line x1="704" y1="598" x2="704" y2="630" class="dim"/>
+  <rect x="686" y="599" width="36" height="30" fill="white"/>
+  <text x="704" y="621" text-anchor="middle" class="dimtext">8</text>
+
+  <g transform="translate(760 150)">
+    <rect x="0" y="0" width="330" height="270" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="2"/>
+    <text x="165" y="42" text-anchor="middle" class="label">DESIGN INTENT</text>
+    <text x="32" y="90" class="dimtext">Overall: 80 × 50 × 8</text>
+    <text x="32" y="132" class="dimtext">Hole: Ø10 THRU</text>
+    <text x="32" y="174" class="dimtext">Hole center: 40 × 25</text>
+    <text x="32" y="216" class="dimtext">Count: 1</text>
+    <text x="32" y="250" class="note">Material unspecified</text>
+  </g>
+
+  <text x="600" y="760" text-anchor="middle" class="note">Ground truth: 80 × 50 × 8 mm | one centered Ø10 mm through-hole</text>
+</svg>

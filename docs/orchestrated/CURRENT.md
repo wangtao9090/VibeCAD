@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-A03 is approved; S30.1 adapter implementation is complete and the live pilot is pending credentials**
+> Status: **S30.1 optional adapter and S30.2 host-owned vision pilot are complete**
 >
 > Updated: 2026-08-04
 >
@@ -50,11 +50,14 @@ admits the result. R1 and R2 retain the same Body/feature identities while the
 old Revision remains byte-immutable. It adds no direct MCP tool or second write
 authority; the MCP tool count remains 31.
 Visual persistence is approved under A02 and ImageSet sealing is implemented.
-A03 now authorizes a provider-neutral real cloud-VLM pilot. The branch candidate
-implements the expansion to 1–16 source images, sealed read-only cloud access,
-adaptive metadata-free derivatives/crops, and one concrete OpenAI Responses
-transport. Public product claims, Freeform, and publication remain behind
-A04–A06.
+A03 authorized a provider-neutral cloud-VLM adapter, and the branch candidate
+implements 1–16 source images, sealed read-only cloud access, adaptive metadata-free
+derivatives/crops, and one concrete OpenAI Responses transport. The user has since
+reaffirmed the older Agent-first product boundary: Codex, Claude, WorkBuddy, or another
+calling host owns image understanding, model selection, subscription, and credentials;
+VibeCAD owns the CAD Task Kernel. The direct Provider path is therefore optional and
+non-default, not the primary image-to-CAD path or a release blocker. Public product
+claims, Freeform, and publication remain behind A04–A06.
 
 S20.1 seals descriptor-bound local JPEG/PNG ImageSets under the additive
 `visual_inputs/` root with provenance, byte/pixel budgets, normalization, and
@@ -75,14 +78,14 @@ ImageSet ID, and shares the 1,024-identity lifetime budget with ReconstructionDr
 tombstones. The focused S20.3/S20.4 gate is `297 passed, 1 deselected`. S20.5 now exposes exactly
 seven strict, host-neutral reconstruction actions through the existing Agent application, daemon,
 and MCP authority; the current branch has 38 public tools. A separate non-MCP local host adapter
-seals one to four JPEG/PNG inputs through one authenticated staging-directory descriptor without
+seals one to sixteen JPEG/PNG inputs through one authenticated staging-directory descriptor without
 placing paths, filenames, base64, or image bytes on the JSON wire. The integrated S20.5 gate is
 `488 passed, 2 deselected`; the isolated real worker and real four-image reconnect/restart replay
 gates are `1 passed` each; the final repository suite is `5,875 passed, 119 deselected`; static
 checks pass and independent review reports no P0/P1 findings. The fixed discovery frame is 30,415
-bytes. The landed S20.5 implementation remains deterministic-fake/interface-ready only: A03 now
-authorizes real VLM/provider work, but it does not become a runtime capability until the S30.1
-implementation and gate land. Direct WorkBuddy attachment ingress remains unverified.
+bytes. S20.5 landed as deterministic-fake/interface-ready; S30.1 later added an opt-in cloud
+Provider while the application default remains fake. Direct WorkBuddy attachment ingress into the
+sealed store remains unverified, but the primary host-owned image path does not require it.
 
 On 2026-08-04 the user approved `VCAD-A03`: cloud image transfer is allowed without a per-task
 confirmation; Provider retention is allowed under the selected personal or enterprise account
@@ -95,15 +98,16 @@ than a recursive retry loop. Originals remain sealed locally; Provider adapters 
 model-specific resized images and detail crops. Sixteen is an input ceiling, not a claim that
 duplicate, blurry, or contradictory views improve reconstruction. The S30.1 candidate now accepts
 1–16 images, but application default composition remains the deterministic fake Provider. The opt-in
-OpenAI transport is not a public product claim and has not yet made a live call because
-`OPENAI_API_KEY` is absent from this machine.
+OpenAI transport is not a public product claim and has not made a live API call. That missing
+direct-transport evidence is now optional: it does not block a host-owned vision pilot because the
+calling Agent already owns its multimodal inference channel.
 
 The S30.1 implementation keeps originals sealed locally and produces bounded PNG derivatives. The
 quality-first OpenAI pilot profile uses 2,048 px overview long edges, permits explicit detail crops,
 and caps a source set at 16 views; `original` detail preserves the controlled derivative rather than
 blindly transmitting every original-resolution image. The derivative API can preserve a
-caller-selected dimension, hole, thread, or
-boundary crop, but automatic crop selection is not yet wired into the Provider run; the current
+caller-selected dimension, hole, thread, or boundary crop, but automatic crop selection is not yet
+wired into the Provider run; the current
 OpenAI path sends overview derivatives only. One durable invocation causes at most one
 transport effect. Transport exceptions become `UNKNOWN`, reconciliation never replays the call, and
 definitive HTTP/contract failures become terminal results. Successful cloud results carry the
@@ -111,9 +115,15 @@ request, derivative-batch, response-ID, structured-output digests, actual return
 counts, data-policy profile, and finite timeout in provenance; credentials and raw provider IDs are
 not persisted. Offline evidence is 203 visual tests passed with one real-daemon test deselected, that
 real-daemon test passed separately, affected host regression is 369 passed/1 deselected, and the full
-repository gate is 5,897 passed/119 deselected. The remaining S30.1 gate is a bounded live run on
-self-authored synthetic CAD images, followed by the small candidate comparison; it is not replaced by
-the offline transport tests.
+repository gate is 5,897 passed/119 deselected. S30.2 now validates the actual product route: the
+calling multimodal Agent analyzes a self-authored CAD reference, classifies confirmed/inferred/unknown
+facts, asks only blocking questions, and then uses the existing `create_task` →
+`submit_model_program` → review flow. No VibeCAD API key or second model upload is part of that gate.
+The positive host-derived pilot produced an 80 × 50 × 8 mm plate with one centered Ø10 through
+hole as two fully constrained sketches and Pad/Hole features. A real managed-FreeCAD Task reached
+`awaiting_user_review` while HEAD stayed unchanged; volume `31371.681469282037 mm^3`, bounding box,
+valid-shape, and single-solid verdicts all passed, and 16,387-byte FCStd plus 8,311-byte STEP
+artifacts were materialized. The incomplete assembly image correctly stopped before Task creation.
 
 S10.4 closeout evidence is bounded to the product seam: a 3,405-node IR durable
 round-trip; four real managed-FreeCAD outcomes covering atomic rollback, the

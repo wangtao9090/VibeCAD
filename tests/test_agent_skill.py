@@ -260,6 +260,30 @@ def test_skill_routes_visual_reconstruction_without_claiming_attachment_ingress(
     assert re.search(r"never|must not|禁止|不得|不能", visual, re.IGNORECASE)
 
 
+def test_skill_routes_host_visible_images_through_the_existing_task_kernel():
+    metadata, body = _skill_parts()
+    assert "image" in metadata["description"].casefold()
+
+    host_vision = "\n".join(
+        _sections(body, r"host-owned image-to-cad|宿主.*图片.*cad|宿主.*图像.*cad")
+    )
+    normalized = _normalized(host_vision)
+    assert {"create_task", "submit_model_program", "run_reconstruction"} <= _inline_code(
+        host_vision
+    )
+    assert "multimodal" in normalized
+    assert "already visible" in normalized
+    assert re.search(
+        r"do not call.{0,48}`run_reconstruction`|不得.{0,48}`run_reconstruction`",
+        host_vision,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert all(term in normalized for term in ("confirmed", "inferred", "unknown"))
+    assert "absolute" in normalized and "scale" in normalized
+    assert "require_review" in normalized
+    assert re.search(r"api key|api token|provider credential", normalized)
+
+
 def test_skill_limits_project_import_to_the_verified_box_cylinder_envelope():
     _metadata, body = _skill_parts()
     paragraph = _paragraph_with(body, "import_fcstd", "Part::Box", "Part::Cylinder")

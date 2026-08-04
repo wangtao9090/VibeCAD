@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-A03` 已批准；`VCAD-S30.1` adapter 已实现，live pilot 等待凭据**
+> 状态：**`VCAD-S30.1` 可选 adapter 与 `VCAD-S30.2` 宿主多模态主链路 pilot 已完成**
 >
 > 更新：2026-08-04
 >
 > 产品基线：已发布 `v0.6.1@e7dd0c0`
 >
-> 当前里程碑：`VCAD-S30.1` 自有合成图真实多模态 pilot 与小规模候选比较
+> 当前里程碑：`VCAD-S30.3` 单张工程图 → 可编辑基础参数模型
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -60,33 +60,35 @@ artifact profile/durable 决策，不能由本计划暗含授权。
 
 ```mermaid
 flowchart LR
-    A["ImageSet<br/>图片、视角、单位、比例尺"] --> B["Image ingress<br/>归一化、hash、隐私"]
-    B --> V["ReconstructionDraft<br/>observe / needs_input / propose"]
-    V --> C["Vision Observer Provider"]
-    C --> D["VisualObservation<br/>事实、来源、不确定性"]
-    D --> E["ReconstructionProposal<br/>候选、问题、替代解释"]
-    E --> F{"信息足够且假设已确认？"}
-    F -- 否 --> G["用户澄清"]
-    G --> E
-    F -- 是 --> H["ParametricDesignIR"]
-    H --> I["编译为现有 ModelProgram"]
-    I --> J["VibeCAD Task Kernel"]
-    J --> K["FreeCAD Sketcher / PartDesign"]
-    K --> L["Candidate + deterministic verification"]
-    L --> M["用户 review"]
-    M --> N["Revision / HEAD"]
+    U["用户图片 / 工程图"] --> H["Codex / Claude / WorkBuddy<br/>宿主多模态 Agent"]
+    H --> O["host-owned 视觉事实<br/>confirmed / inferred / unknown"]
+    O --> F{"信息足够且假设已确认？"}
+    F -- 否 --> G["宿主向用户澄清"]
+    G --> O
+    F -- 是 --> P["ParametricDesignIR / ModelProgram"]
+    P --> T["VibeCAD Task Kernel"]
+    T --> C["FreeCAD Sketcher / PartDesign"]
+    C --> V["Candidate + deterministic verification"]
+    V --> R["用户 review"]
+    R --> N["Revision / HEAD"]
+    I["可选 sealed ImageSet"] -.-> D["可选 ReconstructionDraft / Provider"]
+    D -.-> O
 ```
 
 架构决定：
 
 - `ParametricDesignIR` 是严格、版本化、provider-neutral 的领域值，不允许任意 Python；
-- 图片分析由轻量 `ReconstructionDraft` 承载；它没有 CAD candidate、Revision 或 HEAD，proposal 被确认后才
-  创建普通 CAD Task；
+- 主路径由宿主 Agent 直接观察其已经可见的图片；宿主拥有模型选择、订阅/API 授权和费用，VibeCAD
+  不再次上传同一图片，也不需要宿主把模型凭据交给 VibeCAD；
+- 宿主确认信息足够后直接创建普通 `REQUIRE_REVIEW` CAD Task 并提交 ModelProgram；图片本身不会因为
+  Task 创建而自动成为 VibeCAD durable evidence，丢失宿主附件上下文时必须重新询问或重新附图；
+- `ReconstructionDraft`、sealed ImageSet 与直连 Provider 是需要本地图片留存或独立批处理时的可选生命周期，
+  不是 Agent-first 主线，也不拥有 CAD candidate、Revision 或 HEAD；
 - IR 通过一个 ModelProgram-only 的原子 operation 编译到现有 `ModelProgram`，不把每条线和约束
   扩张成几十个 MCP 工具，也不建立第二套 CAD Task/Revision 状态机；
-- Vision Observer 只产生 observation/proposal，CAD reasoning 只产生受控 IR；
-- 初期可以用同一个多模态模型承担观察与推理，但接口、证据和权限仍保持分离；
-- 主编排模型不必永久绑定多模态能力；视觉模型可以独立替换；
+- 宿主多模态模型可以同时承担观察与 CAD reasoning，但输出仍必须落为受控 IR/ModelProgram，并由
+  VibeCAD 确定性验证；
+- 可选 Vision Provider 只产生 observation/proposal，不能成为第二个 Agent 或 CAD 写入端；
 - WorkBuddy 是首个宿主适配对象，不是协议或模型架构的所有者。
 
 ## 4. 核心合同
@@ -477,10 +479,29 @@ size、MIME/magic 检查后复制到私有 immutable store。若 WorkBuddy 无�
 顺序：
 
 1. `S30.1` 用一组自有合成 CAD 参考图比较少量真实多模态候选，并完成第一个 provider-neutral adapter
-   纵切片，不先做大模型榜单（**active；A03 已批准**）；
-2. `S30.2` 锁定一个默认 Observer 和一个 fallback，但保持合同可替换；
+   纵切片，不先做大模型榜单（**adapter complete；已降级为可选路径**）；
+2. `S30.2` 更新 host-neutral skill，使宿主已能看图时直接分类证据、澄清缺失信息，并走现有
+   Task/ModelProgram；使用当前 Codex 对自有合成图执行首个真实 pilot（**complete**）；
 3. `S30.3` 交付单张带尺寸图 → constrained sketch → basic feature；
-4. `S30.4` 在 WorkBuddy 与 VibeCAD Workbench 各做一次真实用户路径。
+4. `S30.4` 在 WorkBuddy 与 Codex 各做一次真实宿主路径；Workbench 继续作为预览/审核薄客户端，
+   不充当第二个 Agent 或模型宿主。
+
+S30.2 首轮宿主视觉证据（2026-08-04）：
+
+| 输入 | 宿主观察 | 正确路由 |
+|---|---|---|
+| `docs/images/assembly-example.png` | 可读到若干外形尺寸和四个圆形特征，但单位、层厚、孔径/偏置、通孔/盲孔及单件/装配目标均不确定 | `SAFE_FAILURE`：提出 blocking questions，不创建 CAD Task |
+| `docs/images/visual-cad-single-hole-plate.png` | 明确为 mm；板 `80 × 50 × 8`；一个居中的 `Ø10 THRU` 孔；孔心 `40 × 25`；材料未指定但不阻塞几何 | 直接构造受控 ParametricDesignIR/ModelProgram，进入 `REQUIRE_REVIEW` Task |
+
+正例为本仓库自有的 1,200 × 1,200 合成工程图，标注在宿主视野内清晰可读，因此没有放大或额外裁剪；
+识别由当前 Codex 多模态会话完成，不需要 API key，也没有经 VibeCAD 再次上传图片。该证据只证明
+宿主对这两例的正确事实分流，不把单次视觉输出升级成普适重建质量声明。
+
+正例随后通过现有 Task Kernel 在真实受管 FreeCAD 中生成两个 `DoF=0` 的完全约束草图，以及 Pad +
+Through-All Hole。Task 停在 `awaiting_user_review` 且项目 HEAD 未推进；体积
+`31371.681469282037 mm^3`、`80 × 50 × 8 mm` 包围盒、有效 BRep 与单实体四项 verifier verdict 均为
+`pass`，候选产生 16,387-byte FCStd 和 8,311-byte STEP。该一次性 outcome 复用既有 integration rig，
+没有新增 benchmark runner 或视觉状态机。
 
 产品门：
 
@@ -621,16 +642,17 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 
 ## 8. 隐私、安全与模型策略
 
-- A03 已允许默认使用用户/企业选定的云端 Provider，不逐任务重复确认；企业训练与 retention 语义以
-  组织实际配置为准，不由 VibeCAD 推断；
-- 保留原图 hash；外发派生图去 EXIF，并按模型视觉分辨率选择整图与 detail crop，不以盲目压低分辨率
-  作为隐私门；
-- 不记录 API key，不把图片 byte 写进普通日志或模型 prompt transcript；
-- Provider identity、model/version、输入 artifact、实际 token/请求用量、transport deadline、输出 digest
-  全部进入 provenance；这些可观测字段不是用户费用预算；
-- WorkBuddy 能直接观察图片时，也必须输出同一严格 VisualObservation；若原图 byte/hash 无法
-  进入 VibeCAD，只能按“host-supplied structured intent”处理，不能宣称完整视觉 provenance；
-- 真实模型调用和用户图片外发不由 `VCAD-A01` 自动授权；当前授权来自 `VCAD-A03`。
+- 主路径沿用宿主已经获得的图片访问和模型授权；Codex、Claude、WorkBuddy 等宿主负责模型选择、
+  订阅/API 授权、费用、retention 与图片 prompt transcript，VibeCAD 不索取宿主 API key，也不重复
+  把同一图片外发给第二个模型；
+- 宿主直接观察图片时必须区分 confirmed/inferred/unknown，并把足够明确的结果收敛为严格
+  ParametricDesignIR/ModelProgram；若原图 byte/hash 未进入 VibeCAD，只能称为 host-supplied design
+  intent，不能宣称完整视觉 provenance；
+- 宿主若能控制图片准备，优先使用约 2,048 px overview，并为尺寸文字、小孔、螺纹和局部边界补充
+  原分辨率 crop；这属于识别质量/延迟策略，不要求 VibeCAD 接收图片；
+- A03 仍允许用户显式选择可选 VibeCAD-managed Provider。该路径保留原图 hash、去 EXIF derivative、
+  provider/model/version、输入/输出 digest、token 与 finite timeout provenance，不记录 API key；
+- 可选直连 Provider 的缺失 live API 证据不再阻塞 Agent-first 图片到 CAD 主线。
 
 ## 9. 批准门
 
@@ -676,10 +698,14 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 - OpenAI transport 使用严格 Structured Outputs 生成 `VisualObservation`，成功 provenance 记录 request、
   derivative batch、response ID/output digest、实际返回模型、token、data-policy profile 与 finite timeout，
   不持久化 API key、原始 response ID 或图片 byte；application default 仍为 deterministic fake；
+- canonical `vibecad-agent` skill 已把宿主多模态路径设为默认：宿主已能看图时不调用
+  `run_reconstruction`、不申请 ImageSet、不向 VibeCAD 传 API key，而是直接进入普通
+  `create_task` → `submit_model_program` → review；
 - Revision durable v1、TaskRun artifacts 与 CAD artifact store 仍固定于 CAD candidate/FCStd/STEP；S20.0
   因此选择独立的 `visual_inputs/` 与 `reconstruction_drafts/` additive roots，不重解释现有 durable v1；
 - `releases/` 保持现状；新增 root 只做 captured-identity 的纯加法兼容，不引入全局 migration framework；
-- 当前 WorkBuddy 只验证了 VibeCAD → WorkBuddy 的资源读取，尚未认证附件 → VibeCAD 的输入；
+- 当前 WorkBuddy 只验证了 VibeCAD → WorkBuddy 的资源读取；宿主主线不要求附件进入 VibeCAD，
+  但 WorkBuddy 附件 → 所选多模态模型的实际识别质量仍需 S30.4 单独验收；
 - S10.1 已选择冻结 `ObservationSnapshot v1`、`SelectorV1` 和 `AcceptanceSpec v1`；有限的重开后
   parametric facts 在 S10.2 复用既有 entity parameter 容器，完整 feature/constraint observation 若
   将来需要则走显式 v2；
@@ -690,18 +716,18 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-A03 已批准。S30.1 的 1–16 张来源图、provider capability profile、派生图/crop、有限网络调用、严格
-VisualObservation 与 OpenAI Responses 纵切片已经实现并通过离线/完整仓库门。下一动作是在不建立
-benchmark runner 的前提下，用自有合成 CAD 参考图执行一次 bounded live pilot，再比较少量真实多模态
-候选。当前机器没有 `OPENAI_API_KEY`，所以不得把离线 transport fixture 声称为真实模型结果。不得把
-模型直接输出当成 CAD truth，不得声称 WorkBuddy 直接附件入口已认证，不得添加图片 Resource URI、
-进入 Freeform 或发布，也不增加 GUI 并发 merge、第二 CAD 控制面或通用 benchmark runner。
+S30.1 可选 cloud adapter 与 S30.2 宿主多模态 pilot 已完成。执行 S30.3：把已验证的宿主
+confirmed/inferred/unknown 分流扩展到带孔安装板、阶梯轴、无尺度和尺寸冲突固定样例，并只通过现有
+create_task → submit_model_program → verifier → require_review 路径生成 CAD。不得要求 OPENAI_API_KEY，
+不得把宿主附件重复上传给另一个模型，不得把模型输出当成 CAD truth。不新增 observation ingress、
+图片 Resource URI、第二状态机或 benchmark runner；WorkBuddy 附件识别留到 S30.4 真实宿主验收。
+仍不进入 Freeform、发布或第二 CAD 控制面。
 ```
 
 执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
 为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。在 A02 获批时，S20.0 只完成
 合同设计；当前 S20.1–S20.5 已实现本地持久化和 deterministic fake/interface-ready 路径，S30.1 已
-实现 opt-in OpenAI transport，但仍未运行真实 Provider/VLM。
+实现 opt-in OpenAI transport，但不是产品主线；S30.2 由宿主现有多模态通道执行真实识别。
 
 ## 11. Material event ledger
 
@@ -723,6 +749,8 @@ benchmark runner 的前提下，用自有合成 CAD 参考图执行一次 bounde
 | `VCAD-E13` | `VCAD-A02` 与 S20.5 public/host-interface gate | 七个严格、host-neutral reconstruction 动作经 Agent application、authenticated daemon 和 MCP 投影；非 MCP host adapter 经单一 staging-directory FD 安全封存 1–4 张 JPEG/PNG；当前分支为 38 tools，采纳仍进入普通 `REQUIRE_REVIEW` CAD Task，private build ID 保证旧 daemon 不复用新路由 | integrated 488 passed、2 deselected；sandbox-external daemon worker 1 passed；真实四图、重连及 daemon restart replay 1 passed；full repository 5,875 passed、119 deselected；固定 discovery frame 30,415 bytes；Ruff/format/compile/diff/Skill validation 通过；独立复审 P0/P1 none；恢复动作是准备 `VCAD-A03` | 仍仅 deterministic fake/interface-ready；真实 VLM 与数据策略需 A03，WorkBuddy 直接附件入口尚未验证，无图片 Resource URI |
 | `VCAD-E14` | 用户批准 `VCAD-A03` 并确认数据/费用取向 | 允许默认向用户或企业选定的云端多模态 Provider 发送图片且不逐任务确认；允许 Provider retention，并接受本地删除不能撤回远端副本；不设用户可见费用、总调用次数或总任务时长预算；批准把来源图计划包络从当前 1–4 扩展到最多 16 张 | 2026-08-04 用户决策；OpenAI、Anthropic、Gemini 官方视觉输入限制复核；工程恢复动作是执行 S30.1 provider-neutral adapter/候选 pilot | 仍需有限 transport timeout、bounded payload/result、单 intent 单在途 effect 和无递归重试；当前代码在新 gate 落地前仍为 1–4 图 deterministic fake；WorkBuddy 直接附件、A04–A06 未批准 |
 | `VCAD-E15` | `VCAD-A03` 与 S30.1 implementation gate | 将 source envelope 扩展为 1–16；原图 sealed read-only，Provider 只收到 bounded metadata-free PNG overview/crop；cloud invocation 单 effect、异常为 UNKNOWN 且 reconcile 不重放；落地第一个 quality-first OpenAI Responses/Structured Outputs transport 与完整 execution provenance | 203 visual passed/1 deselected，real daemon 1 passed；affected host 369 passed/1 deselected；full 5,897 passed/119 deselected；Ruff/format/compile/diff gate；恢复动作是执行 bounded live pilot | 本机无 `OPENAI_API_KEY`，尚无真实模型 outcome；默认仍 deterministic fake；clarification answer 值、proposal/CAD translation、WorkBuddy 直接附件和 A04–A06 均未完成 |
+| `VCAD-E16` | 用户重申 VibeCAD 是 Codex/Claude/WorkBuddy 的 Agent-first CAD 能力层，并授权继续推进 | 宿主多模态理解成为图片到 CAD 主线；现有 Task/ModelProgram 是默认执行入口；OpenAI adapter 保留为可选、非默认、非发布阻塞路径；VibeCAD 不要求宿主 API key | canonical skill focused RED 后补齐 host-owned image workflow；恢复动作是用当前 Codex 分析 `docs/images/assembly-example.png`，再决定是否具备进入 CAD Task 的足够证据 | WorkBuddy 与 Codex 的正式 image-attachment host verification、A04–A06 尚未完成；宿主未把原图 byte/hash 提交给 VibeCAD 时不宣称完整视觉 provenance |
+| `VCAD-E17` | S30.2 host-owned vision outcome gate | 当前 Codex 对不完整装配图正确 SAFE_FAILURE，对自有单孔板工程图提取完整 confirmed facts；后者只经现有 Task/ModelProgram 进入真实受管 FreeCAD | 两个完全约束草图；Pad + Through-All Hole；Task=`awaiting_user_review` 且 HEAD 不变；体积、bbox、valid shape、solid count 全部通过；FCStd 16,387 bytes、STEP 8,311 bytes；34 focused/package tests passed、9 deselected，Skill validation、Ruff、format、diff gate 通过；恢复动作是执行 S30.3 固定样例集 | 仅证明当前两个 fixture；阶梯轴、无尺度/冲突固定例及 WorkBuddy attachment host outcome 尚待 S30.3/S30.4；未保存宿主原图 byte/hash 为 VibeCAD durable evidence |
 
 ## 12. 研究依据
 
