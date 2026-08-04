@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S20.0` 合同设计已完成；等待 `VCAD-A02` 批准**
+> 状态：**`VCAD-A02` 已批准；`VCAD-S20.1` 已完成，正在执行 `VCAD-S20.2`**
 >
 > 更新：2026-08-03
 >
 > 产品基线：已发布 `v0.6.1@e7dd0c0`
 >
-> 当前里程碑：`VCAD-A02`
+> 当前里程碑：`VCAD-S20.2`
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -149,7 +149,7 @@ S10.1 保持 `ObservationSnapshot v1`、`SelectorV1` 和 `AcceptanceSpec v1` 的
 新的 ModelProgram value shape、默认 operation、compiler 和 Worker handler 已在 S10.4 一次完整接入；
 该 operation 只进入 capabilities/ModelProgram，不作为 direct MCP 建模工具暴露。
 
-### 4.5 `S20.0` 冻结候选：`VCAD-A02` 审批包
+### 4.5 `S20.0` 冻结合同：`VCAD-A02` 已批准
 
 现有 `ReviewDraft` 只表示已经通过确定性验证、等待用户审核的 CAD candidate，不能复用为图片重建
 草稿；现有 `draft_*` ID 和 `draft_id` 字段也继续专属于该合同。新对象使用
@@ -161,7 +161,7 @@ candidate Revision 和 FCStd/STEP payload。
 
 #### 持久化拓扑与兼容
 
-`A02` 建议批准两个新的 additive sibling roots：
+`A02` 已批准两个新的 additive sibling roots：
 
 ```text
 data_root/
@@ -187,15 +187,22 @@ profile/version 和 provenance；还包含
 unit、显式尺寸、scale/calibration、`same_object`、`same_state`、`same_scale` 与 processing authorization。
 seal 后不能添加、替换或删除单张图片；输入变化创建新的 ImageSet。
 
-Mechanical V1 的推荐输入包络是：
+Mechanical V1 已批准的输入包络是：
 
 - 1–4 张，仅 JPEG/PNG；HEIC、PDF、TIFF 和视频后续单独扩展；
 - 每张最多 20 MiB / 40 MP，每组最多 64 MiB / 100 MP；同时按 encoded byte 与 decoded pixel
   双重限额防止解压炸弹；
 - 应用 EXIF orientation 后转为 sRGB、剥离 metadata，并生成最长边不超过 4096 px 的 analysis
   derivative；原图只保留在本地私有 store。
+- derivative 每张最多 72 MiB、单 ImageSet 原图与 derivative 合计最多 384 MiB；`visual_inputs/`
+  最多 8 GiB、1,024 个 sealed sets 与 8 个内部 temporary。manifest 最多 64 KiB；所有预算均
+  fail closed；
+- durable manifest 使用 `image_set_id` / `visual_input_id` 显式字段，归一化 profile 固定到
+  Pillow 12.2.0；幂等重放只复核 semantic request 与原图 descriptor/hash，不重新生成 derivative；
+- `explicit_scale` 与 `calibrated` 状态必须分别携带有界的 scale 或 camera-intrinsics evidence，
+  不能只记录一个无数据的状态标签。
 
-上述数字属于 `A02` 产品决策；批准前不成为实现常量。
+上述数字已由 `A02` 批准，可在 S20.1 成为实现常量。
 
 #### `ReconstructionDraft v1`
 
@@ -410,9 +417,9 @@ S10.5 closeout：
 顺序：
 
 1. `S20.0` 冻结 ReconstructionDraft lifecycle、image retention/delete、durable-root topology 和兼容方案，
-   形成 `VCAD-A02` 审批包（**complete；等待批准**）；
-2. `S20.1` 实现 ImageSet seal、大小/格式/数量预算和归一化 provenance；
-3. `S20.2` 实现 VisualObservation、ReconstructionProposal 和 clarification 状态；
+   形成 `VCAD-A02` 审批包（**complete；已批准**）；
+2. `S20.1` 实现 ImageSet seal、大小/格式/数量预算和归一化 provenance（**complete**）；
+3. `S20.2` 实现 VisualObservation、ReconstructionProposal 和 clarification 状态（**active**）；
 4. `S20.3` 在 generic runtime 之上实现 Visual Domain Service、result retrieval 和 provider
    composition，不把它注册成 CAD adapter；
 5. `S20.4` 用 deterministic fake provider 打通 ReconstructionDraft 重启、恢复、拒绝和采纳路径；
@@ -591,14 +598,15 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 | Gate | 决策 | 当前状态 |
 |---|---|---|
 | `VCAD-A01` | 批准本整体计划并开始 S10 可逆实现 | **已批准** |
-| `VCAD-A02` | 批准 ReconstructionDraft/image store、retention/delete、durable-root 与 public contract | **审批包已就绪，待批准** |
+| `VCAD-A02` | 批准 ReconstructionDraft/image store、retention/delete、durable-root 与 public contract | **已批准** |
 | `VCAD-A03` | 批准真实外部视觉 Provider、数据处理与费用边界 | 未到达 |
 | `VCAD-A04` | 根据 pilot 结果冻结公开支持包络和 V1 发布声明 | 未到达 |
 | `VCAD-A05` | 启动 Freeform，批准其输出类型与验收合同 | 未到达 |
 | `VCAD-A06` | tag/PyPI/GitHub Release 或其他公开发布 | 未到达 |
 
 `VCAD-A01` 批准后，S10 和 S20.0 合同设计范围内的本地可逆实现、必要测试、计划内文档更新，
-以及按既有授权进行的有意 commit/branch push 无需重复请求。S20 持久写路径仍等待 A02。
+以及按既有授权进行的有意 commit/branch push 无需重复请求。`VCAD-A02` 已进一步批准 S20.1–S20.5
+范围内的本地 visual 持久化、host-neutral contract 与 deterministic fake provider 实现。
 `VCAD-A01` 已覆盖本计划明确列出的 S10 ModelProgram-only IR value shape 与原子 operation；它不覆盖
 新增 direct MCP 建模工具、第二控制面或 durable schema。其它公开 schema 扩张、durable migration、
 外部图片传输、费用、发布或产品范围变化必须进入对应批准门。
@@ -610,7 +618,8 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 - `v0.6.1` 已发布；Task/Revision/Review、RuntimeArtifact/Invocation 和 WorkBuddy MCP 路径可复用；
 - 已发布的 `v0.6.1` 没有真正的 Sketcher/PartDesign 可编辑基座；当前 branch candidate 已完成 S10 原生
   Sketcher/PartDesign 创建、Accept 后参数修改和第二 Revision 纵切片，但尚未公开发布；
-- 当前没有 ImageSet、VisualObservation、ReconstructionProposal 或 reconstruction domain service；
+- branch candidate 已有 descriptor-bound、sealed-only ImageSet 与 additive captured roots；当前尚无
+  VisualObservation、ReconstructionProposal 或 reconstruction domain service；
 - Revision durable v1、TaskRun artifacts 与 CAD artifact store 仍固定于 CAD candidate/FCStd/STEP；S20.0
   因此选择独立的 `visual_inputs/` 与 `reconstruction_drafts/` additive roots，不重解释现有 durable v1；
 - `releases/` 保持现状；新增 root 只做 captured-identity 的纯加法兼容，不引入全局 migration framework；
@@ -625,9 +634,9 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-等待用户批准 VCAD-A02 审批包。批准后从 S20.1 开始实现 sealed ImageSet 与两个 additive roots；A02
-批准前不实现图片持久写路径、不接真实视觉 Provider、不发送外部图片，也不改变 public/durable schema。
-保持 sequential ownership，不增加 GUI 并发 merge、第二控制面、测试 controller 或 runner。
+执行 S20.2：建立 VisualObservation、ReconstructionProposal、claim/evidence binding 与 clarification
+状态合同；随后在相同 A02 边界内顺序推进 S20.3–S20.5。不得调用真实 Provider/VLM、外发图片、添加图片 Resource URI、进入
+Freeform 或发布；保持 sequential ownership，不增加 GUI 并发 merge、第二 CAD 控制面或测试 runner。
 ```
 
 执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
@@ -646,6 +655,8 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 | `VCAD-E05` | S10.4 Task/Worker integration 与 managed FreeCAD outcomes | 完整 IR 经一个 hidden atomic operation 进入既有 Task Kernel；Body/feature identity、stabilization、review draft 与 HEAD authority 保持单一 | 3,405-node durable round-trip；精确 26-object/rollback/Worker reload/Task draft 四条真实门；full/static/package/isolated-wheel gate；双重独立 review clean；恢复动作是继续 S10.5 | Accept 后参数修改与第二 Revision 留在 S10.5；A02–A06 均未到达 |
 | `VCAD-E06` | S10.5 hidden edit operation 与 managed FreeCAD outcomes | 已接受 Revision 的公开 parameter 经同一 Task/Worker 权威原子修改，产生 identity-stable 的第二 Revision | `7dfddce`；3,526-node durable modify TaskRun；五条真实门覆盖 rollback、R1/R2 Accept、FCStd/STEP reload 和旧 Revision 不变；5,673 non-slow + static/package/review gate | 尚未公开发布；A02–A06 均未授权 |
 | `VCAD-E07` | `VCAD-A01` 授权的 S20.0 design-only slice | 冻结两个 additive roots、sealed ImageSet、ReconstructionDraft generation/CAS、sequential HEAD、显式删除和 host-neutral ingress 候选合同 | 本文件 §4.5；现有 durable/public seam 只读审计；恢复动作是等待 `VCAD-A02` | 未写图片、未改 schema、未调用 Provider；A02–A06 均未授权 |
+| `VCAD-E08` | 用户批准 `VCAD-A02` | 授权 S20.1–S20.5 的两个 additive roots、sealed ImageSet、ReconstructionDraft durable/public contract、locator/descriptor ingress 与 deterministic fake provider 本地实现 | `8c9e5e6` 的 §4.5 审批包；恢复动作是执行 S20.1 | 真实 Provider/VLM、外部图片传输、图片 Resource URI、A03–A06 仍未授权 |
+| `VCAD-E09` | `VCAD-A02` 与 S20.1 focused gate | 纯加法建立两个 captured roots，并实现 descriptor-bound JPEG/PNG seal、结构化 calibration evidence、早期限幅归一化、原图 hash 重放与 atomic no-replace publish | 19 visual-input + 123 layout/application tests（142 combined）；Ruff/compile/package/lock gate；恢复动作是执行 S20.2 | 未调用 Provider、未外发图片；真实模型与 visual Resource URI 仍等待后续 gate |
 
 ## 12. 研究依据
 

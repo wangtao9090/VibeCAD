@@ -24,6 +24,7 @@ dependencies = [
     "hatchling==1.28.0",  # MCPB 的无隔离本地 wheel 构建必须来自同一冻结环境
     "pygltflib>=1.16.0",   # glTF 导出器，D6
     "numpy>=1.26",
+    "pillow==12.2.0",       # visual-input normalization profile v1
     "pyyaml>=6.0",         # 规则引擎 YAML，D2
     "matplotlib>=3.5",     # 软渲染（matplotlib Agg，无 GPU）；松约束让 conda 满足
 ]

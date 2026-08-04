@@ -295,6 +295,8 @@ def test_data_layout_creates_only_fixed_private_store_roots(tmp_path: Path):
             layout.checkouts,
             layout.artifacts,
             layout.releases,
+            layout.visual_inputs,
+            layout.reconstruction_drafts,
         )
     ) == (
         "locks",
@@ -304,6 +306,8 @@ def test_data_layout_creates_only_fixed_private_store_roots(tmp_path: Path):
         "checkouts",
         "artifacts",
         "releases",
+        "visual_inputs",
+        "reconstruction_drafts",
     )
     for path in (
         layout.root,
@@ -314,11 +318,36 @@ def test_data_layout_creates_only_fixed_private_store_roots(tmp_path: Path):
         layout.checkouts,
         layout.artifacts,
         layout.releases,
+        layout.visual_inputs,
+        layout.reconstruction_drafts,
     ):
         value = path.lstat()
         assert stat.S_ISDIR(value.st_mode)
         assert stat.S_IMODE(value.st_mode) == 0o700
         assert value.st_uid == os.geteuid()
+
+
+def test_data_layout_adds_visual_roots_without_replacing_legacy_siblings(tmp_path: Path):
+    data = _data_root(tmp_path)
+    data.mkdir(mode=0o700)
+    legacy_names = (
+        "locks",
+        "tasks",
+        "projects",
+        "bootstrap",
+        "checkouts",
+        "artifacts",
+        "releases",
+    )
+    for name in legacy_names:
+        (data / name).mkdir(mode=0o700)
+    before = {name: (data / name).stat().st_ino for name in legacy_names}
+
+    layout = ApplicationDataLayout.open(data)
+
+    assert {name: (data / name).stat().st_ino for name in legacy_names} == before
+    assert layout.visual_inputs.is_dir()
+    assert layout.reconstruction_drafts.is_dir()
 
 
 def test_data_layout_concurrent_first_open_validates_the_created_winner(
@@ -514,6 +543,8 @@ def test_captured_layout_composition_runs_recovery_between_full_identity_checks(
         layout.checkouts,
         layout.artifacts,
         layout.releases,
+        layout.visual_inputs,
+        layout.reconstruction_drafts,
     )
     events: list[object] = []
     original_require_current = ApplicationDataLayout.require_current
@@ -539,10 +570,11 @@ def test_captured_layout_composition_runs_recovery_between_full_identity_checks(
     )
 
     recovery_index = events.index("recovery")
-    assert tuple(events[:8]) == expected
-    assert tuple(events[-8:]) == expected
-    assert recovery_index >= 8
-    assert recovery_index < len(events) - 8
+    count = len(expected)
+    assert tuple(events[:count]) == expected
+    assert tuple(events[-count:]) == expected
+    assert recovery_index >= count
+    assert recovery_index < len(events) - count
     app.close()
 
 

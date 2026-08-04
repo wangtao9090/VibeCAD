@@ -53,6 +53,14 @@ def checkout_root() -> Path:
     return data_root() / "checkouts"
 
 
+def visual_input_root() -> Path:
+    return data_root() / "visual_inputs"
+
+
+def reconstruction_draft_root() -> Path:
+    return data_root() / "reconstruction_drafts"
+
+
 def mamba_root_prefix() -> Path:
     return runtime_root() / "mamba"
 

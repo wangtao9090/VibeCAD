@@ -122,6 +122,8 @@ def _require_current_layout(layout: ApplicationDataLayout) -> None:
         layout.checkouts,
         layout.artifacts,
         layout.releases,
+        layout.visual_inputs,
+        layout.reconstruction_drafts,
     ):
         layout.require_current(path)
 

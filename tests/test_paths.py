@@ -36,6 +36,8 @@ def test_durable_data_layout_is_sibling_of_replaceable_runtime(monkeypatch, tmp_
     assert paths.revision_store_root() == home / "data" / "projects"
     assert paths.bootstrap_root() == home / "data" / "bootstrap"
     assert paths.checkout_root() == home / "data" / "checkouts"
+    assert paths.visual_input_root() == home / "data" / "visual_inputs"
+    assert paths.reconstruction_draft_root() == home / "data" / "reconstruction_drafts"
     assert paths.legacy_env_prefix() == home / "mamba" / "envs" / "vibecad"
     assert paths.external_runtime_receipt() == home / "runtime" / "external-runtime.json"
 

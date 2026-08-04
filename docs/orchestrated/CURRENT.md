@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **S10 Parametric Core and S20.0 contract design are complete; VCAD-A02 approval is required**
+> Status: **VCAD-A02 is approved; S20.1 is complete and S20.2 contracts are active**
 >
 > Updated: 2026-08-03
 >
@@ -46,7 +46,7 @@ authority; the MCP tool count remains 31.
 Real vision providers, visual persistence, public product claims, Freeform, and
 publication remain behind A02–A06.
 
-S20.0 has now produced the bounded A02 approval package. It keeps the existing
+S20.0 produced the bounded A02 approval package, and the user approved it. It keeps the existing
 CAD Task/Review/Revision authority unchanged and proposes two additive private
 roots, `visual_inputs/` and `reconstruction_drafts/`. ImageSet is published only
 after atomic seal; ReconstructionDraft uses generation/CAS, durable provider and
@@ -54,7 +54,7 @@ adoption intents, sequential HEAD binding, explicit deletion, and a path-free
 host-neutral API. Existing ReviewDraft IDs, Task artifacts, CAD artifact storage,
 Revision v1, and CAD Resource URIs are not reused for images. No visual bytes,
 schema changes, or Provider calls have occurred. Implementation starts at S20.1
-only after A02 approval; real external image processing still requires A03.
+under the approved S20.1–S20.5 scope; real external image processing still requires A03.
 
 S10.4 closeout evidence is bounded to the product seam: a 3,405-node IR durable
 round-trip; four real managed-FreeCAD outcomes covering atomic rollback, the
