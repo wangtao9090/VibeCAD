@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-A02 is approved; S20.1 is complete and S20.2 contracts are active**
+> Status: **VCAD-A02 is approved; S20.2 is complete and S20.3 is active**
 >
 > Updated: 2026-08-03
 >
@@ -49,18 +49,18 @@ Sketcher/PartDesign consumer back before an in-transaction executor verifier
 admits the result. R1 and R2 retain the same Body/feature identities while the
 old Revision remains byte-immutable. It adds no direct MCP tool or second write
 authority; the MCP tool count remains 31.
-Real vision providers, visual persistence, public product claims, Freeform, and
-publication remain behind A02–A06.
+Visual persistence is approved under A02 and ImageSet sealing is implemented.
+Real vision providers, public product claims, Freeform, and publication remain
+behind A03–A06.
 
-S20.0 produced the bounded A02 approval package, and the user approved it. It keeps the existing
-CAD Task/Review/Revision authority unchanged and proposes two additive private
-roots, `visual_inputs/` and `reconstruction_drafts/`. ImageSet is published only
-after atomic seal; ReconstructionDraft uses generation/CAS, durable provider and
-adoption intents, sequential HEAD binding, explicit deletion, and a path-free
-host-neutral API. Existing ReviewDraft IDs, Task artifacts, CAD artifact storage,
-Revision v1, and CAD Resource URIs are not reused for images. No visual bytes,
-schema changes, or Provider calls have occurred. Implementation starts at S20.1
-under the approved S20.1–S20.5 scope; real external image processing still requires A03.
+S20.1 now seals descriptor-bound local JPEG/PNG ImageSets under the additive
+`visual_inputs/` root with provenance, byte/pixel budgets, normalization, and
+atomic no-replace publication. S20.2 adds provider-neutral visual claims,
+observations, clarification answers, evidence-complete reconstruction proposals,
+and deterministic lifecycle actions. It does not create a CAD candidate or give
+the Provider any Task, Accept, commit, or HEAD authority. S20.3 now owns the
+durable ReconstructionDraft service and generic-runtime composition. Real
+external image processing still requires A03.
 
 S10.4 closeout evidence is bounded to the product seam: a 3,405-node IR durable
 round-trip; four real managed-FreeCAD outcomes covering atomic rollback, the

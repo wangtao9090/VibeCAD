@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-A02` 已批准；`VCAD-S20.1` 已完成，正在执行 `VCAD-S20.2`**
+> 状态：**`VCAD-A02` 已批准；`VCAD-S20.2` 已完成，正在执行 `VCAD-S20.3`**
 >
 > 更新：2026-08-03
 >
 > 产品基线：已发布 `v0.6.1@e7dd0c0`
 >
-> 当前里程碑：`VCAD-S20.2`
+> 当前里程碑：`VCAD-S20.3`
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -419,9 +419,9 @@ S10.5 closeout：
 1. `S20.0` 冻结 ReconstructionDraft lifecycle、image retention/delete、durable-root topology 和兼容方案，
    形成 `VCAD-A02` 审批包（**complete；已批准**）；
 2. `S20.1` 实现 ImageSet seal、大小/格式/数量预算和归一化 provenance（**complete**）；
-3. `S20.2` 实现 VisualObservation、ReconstructionProposal 和 clarification 状态（**active**）；
+3. `S20.2` 实现 VisualObservation、ReconstructionProposal 和 clarification 状态（**complete**）；
 4. `S20.3` 在 generic runtime 之上实现 Visual Domain Service、result retrieval 和 provider
-   composition，不把它注册成 CAD adapter；
+   composition，不把它注册成 CAD adapter（**active**）；
 5. `S20.4` 用 deterministic fake provider 打通 ReconstructionDraft 重启、恢复、拒绝和采纳路径；
 6. `S20.5` 为 WorkBuddy/Workbench/CLI 定义最薄 ingress adapter，协议仍保持 host-neutral。
 
@@ -621,8 +621,9 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 - `v0.6.1` 已发布；Task/Revision/Review、RuntimeArtifact/Invocation 和 WorkBuddy MCP 路径可复用；
 - 已发布的 `v0.6.1` 没有真正的 Sketcher/PartDesign 可编辑基座；当前 branch candidate 已完成 S10 原生
   Sketcher/PartDesign 创建、Accept 后参数修改和第二 Revision 纵切片，但尚未公开发布；
-- branch candidate 已有 descriptor-bound、sealed-only ImageSet 与 additive captured roots；当前尚无
-  VisualObservation、ReconstructionProposal 或 reconstruction domain service；
+- branch candidate 已有 descriptor-bound、sealed-only ImageSet、additive captured roots，以及严格的
+  VisualClaim/VisualObservation/ReconstructionProposal/clarification 合同；当前尚无 reconstruction durable
+  store、Visual Domain Service 或 provider composition；
 - Revision durable v1、TaskRun artifacts 与 CAD artifact store 仍固定于 CAD candidate/FCStd/STEP；S20.0
   因此选择独立的 `visual_inputs/` 与 `reconstruction_drafts/` additive roots，不重解释现有 durable v1；
 - `releases/` 保持现状；新增 root 只做 captured-identity 的纯加法兼容，不引入全局 migration framework；
@@ -637,8 +638,8 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-执行 S20.2：建立 VisualObservation、ReconstructionProposal、claim/evidence binding 与 clarification
-状态合同；随后在相同 A02 边界内顺序推进 S20.3–S20.5。不得调用真实 Provider/VLM、外发图片、添加图片 Resource URI、进入
+执行 S20.3：在 generic runtime 信封之上建立 ReconstructionDraft durable store、Visual Domain Service、
+result retrieval 与 provider composition；随后在相同 A02 边界内顺序推进 S20.4–S20.5。不得调用真实 Provider/VLM、外发图片、添加图片 Resource URI、进入
 Freeform 或发布；保持 sequential ownership，不增加 GUI 并发 merge、第二 CAD 控制面或测试 runner。
 ```
 
@@ -660,6 +661,7 @@ Freeform 或发布；保持 sequential ownership，不增加 GUI 并发 merge、
 | `VCAD-E07` | `VCAD-A01` 授权的 S20.0 design-only slice | 冻结两个 additive roots、sealed ImageSet、ReconstructionDraft generation/CAS、sequential HEAD、显式删除和 host-neutral ingress 候选合同 | 本文件 §4.5；现有 durable/public seam 只读审计；恢复动作是等待 `VCAD-A02` | 未写图片、未改 schema、未调用 Provider；A02–A06 均未授权 |
 | `VCAD-E08` | 用户批准 `VCAD-A02` | 授权 S20.1–S20.5 的两个 additive roots、sealed ImageSet、ReconstructionDraft durable/public contract、locator/descriptor ingress 与 deterministic fake provider 本地实现 | `8c9e5e6` 的 §4.5 审批包；恢复动作是执行 S20.1 | 真实 Provider/VLM、外部图片传输、图片 Resource URI、A03–A06 仍未授权 |
 | `VCAD-E09` | `VCAD-A02` 与 S20.1 focused gate | 纯加法建立两个 captured roots，并实现 descriptor-bound JPEG/PNG seal、结构化 calibration evidence、早期限幅归一化、原图 hash 重放与 atomic no-replace publish | 19 visual-input + 123 layout/application tests（142 combined）；Ruff/compile/package/lock gate；恢复动作是执行 S20.2 | 未调用 Provider、未外发图片；真实模型与 visual Resource URI 仍等待后续 gate |
+| `VCAD-E10` | `VCAD-A02` 与 S20.2 focused gate | 建立 deterministic claim/observation/proposal/clarification identity、完整 IR evidence binding、assumption confirmation 与 status-derived next action；多视图事实必须绑定至少两个来源 | 21 visual-reconstruction + 19 visual-input tests；144 combined visual/parametric/workflow contract tests；Ruff/format/compile/diff 与独立审查问题闭合；恢复动作是执行 S20.3 | 尚无 durable ReconstructionDraft service 或 Provider 调用；真实模型与 visual Resource URI 仍等待后续 gate |
 
 ## 12. 研究依据
 
