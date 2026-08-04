@@ -34,10 +34,21 @@ from vibecad.runtime.contracts import (
     RuntimeDiagnostic,
     RuntimeHealth,
     RuntimeHealthState,
+    RuntimeIdentity,
     RuntimeLifecycleState,
     RuntimeStatus,
 )
-from vibecad.visual.contracts import CalibrationStatus, ImageMime, ViewRole
+from vibecad.visual.cloud_provider import (
+    CloudVisualOutcomeKind,
+    CloudVisualProvider,
+    CloudVisualTransportOutcome,
+)
+from vibecad.visual.contracts import (
+    CalibrationStatus,
+    ImageMime,
+    ProcessingAuthorization,
+    ViewRole,
+)
 from vibecad.visual.drafts import BaseHeadBinding
 from vibecad.visual.fake_provider import (
     DeterministicFakeVisualProvider,
@@ -55,10 +66,16 @@ from vibecad.visual.provider import (
     VISUAL_PROVIDER_DESCRIPTOR,
     VISUAL_PROVIDER_IDENTITY,
     VisualProviderBinding,
+    VisualProviderExecutionReceipt,
+    VisualProviderRuntimeProfile,
     build_visual_provider_failure_result,
     build_visual_provider_invocation,
     build_visual_provider_success_result,
     visual_provider_input_digest,
+)
+from vibecad.visual.provider_images import (
+    ProviderImageDetail,
+    VisualProviderCapabilityProfile,
 )
 from vibecad.visual.reconstruction import (
     ClarificationKind,
@@ -123,6 +140,7 @@ def _sealed_image_set(
     inputs: VisualInputStore,
     *,
     create_key: str = _IMAGE_CREATE_KEY,
+    processing_authorization: ProcessingAuthorization = ProcessingAuthorization.LOCAL_ONLY,
 ):
     source = tmp_path / "source.png"
     Image.new("RGB", (16, 12), (20, 80, 140)).save(source, format="PNG")
@@ -142,6 +160,7 @@ def _sealed_image_set(
         same_object=True,
         same_state=True,
         same_scale=True,
+        processing_authorization=processing_authorization,
     )
     fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
     try:
@@ -313,6 +332,91 @@ def _create(service: VisualReconstructionService, image_set):
         image_set_manifest_sha256=image_set.manifest_sha256,
         base_head=_head(),
     )
+
+
+class _CloudObservationTransport:
+    __slots__ = ("calls",)
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke(self, request, *, timeout_ms):
+        self.calls += 1
+        assert timeout_ms == 1_000
+        return CloudVisualTransportOutcome(
+            kind=CloudVisualOutcomeKind.SUCCEEDED,
+            value=_observation(request.invocation),
+            execution_receipt=VisualProviderExecutionReceipt(
+                request_sha256=request.request_sha256,
+                image_batch_sha256=request.image_batch.manifest_sha256,
+                response_id_sha256="1" * 64,
+                response_output_sha256="2" * 64,
+                response_model=request.image_batch.profile.model,
+                data_policy_profile=request.image_batch.profile.data_policy_profile,
+                input_tokens=100,
+                output_tokens=20,
+                total_tokens=120,
+                transport_timeout_ms=timeout_ms,
+            ),
+        )
+
+
+def test_cloud_authorization_selects_dynamic_provider_and_preserves_durable_identity(
+    tmp_path: Path,
+) -> None:
+    inputs, drafts = _stores(tmp_path)
+    image_set = _sealed_image_set(
+        tmp_path,
+        inputs,
+        processing_authorization=ProcessingAuthorization.CLOUD_PROVIDER,
+    )
+    runtime_profile = VisualProviderRuntimeProfile(
+        identity=RuntimeIdentity(family="visual", provider="candidate_cloud", version="1.0"),
+        model="vision-model",
+        model_version="2026-08-04",
+        execution_profile="cloud_provider",
+        network=True,
+    )
+    image_profile = VisualProviderCapabilityProfile(
+        provider="candidate_cloud",
+        model="vision-model",
+        model_version="2026-08-04",
+        data_policy_profile="personal-default",
+        max_source_images=16,
+        max_image_parts=20,
+        max_image_bytes=2 * 1024 * 1024,
+        max_batch_image_bytes=20 * 1024 * 1024,
+        preferred_long_edge=1568,
+        max_long_edge=2000,
+        detail=ProviderImageDetail.HIGH,
+        supports_detail_crops=True,
+        transport_timeout_ms=1_000,
+    )
+    transport = _CloudObservationTransport()
+    provider = CloudVisualProvider(
+        runtime_profile=runtime_profile,
+        image_profile=image_profile,
+        image_reader=inputs.read_provider_images_exact,
+        transport=transport,
+    )
+    service = _service(inputs, drafts, provider)
+    created = _create(service, image_set)
+
+    completed = service.run(
+        created.reconstruction_id,
+        expected_generation=created.generation,
+        budget=_budget(),
+        deadline_ms=2_000_000_000_000,
+    )
+
+    assert completed.status is ReconstructionStatus.READY
+    assert transport.calls == provider.transport_count == 1
+    assert len(completed.provider_invocations) == 1
+    intent = completed.provider_invocations[0]
+    assert intent.runtime == runtime_profile.identity
+    assert intent.model == runtime_profile.model
+    assert intent.model_version == runtime_profile.model_version
+    assert intent.lifecycle is RuntimeLifecycleState.SUCCEEDED
 
 
 class _PendingProbeProvider:

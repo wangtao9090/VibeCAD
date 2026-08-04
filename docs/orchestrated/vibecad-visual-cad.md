@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-A03` 已批准；`VCAD-S20` 已完成，`VCAD-S30.1` active**
+> 状态：**`VCAD-A03` 已批准；`VCAD-S30.1` adapter 已实现，live pilot 等待凭据**
 >
 > 更新：2026-08-04
 >
 > 产品基线：已发布 `v0.6.1@e7dd0c0`
 >
-> 当前里程碑：`VCAD-S30.1` 真实多模态候选与 Provider adapter 纵切片
+> 当前里程碑：`VCAD-S30.1` 自有合成图真实多模态 pilot 与小规模候选比较
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -666,8 +666,16 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 - S20.5 已将七个严格 reconstruction 动作投影到同一 Agent application → authenticated daemon → MCP
   写入权威；当前分支公开 38 个工具，采纳仍只创建普通 `REQUIRE_REVIEW` CAD Task；
 - CLI/Workbench/Python host 可经 `LocalAgentClient` 用一个 authenticated staging-directory FD 封存
-  一至四张 JPEG/PNG；固定 `openat`、no-follow/nonblock、owner/link/mode/identity、SHA-256 与完整目录
+  一至十六张 JPEG/PNG；固定 `openat`、no-follow/nonblock、owner/link/mode/identity、SHA-256 与完整目录
   inventory gate 保证 JSON wire 不含路径、文件名、base64 或图片字节；
+- S30.1 branch candidate 已实现 provider-neutral capability profile、无元数据 PNG overview/detail crop、
+  单 intent 单 transport effect 的 cloud adapter，以及第一个 OpenAI Responses transport；OpenAI pilot
+  profile 的 overview 目标长边为 2,048 px、最多 16 张来源图和 32 个派生 part，原图仍封存在本地；
+  detail-crop API 已能保留调用方指定的尺寸文字、小孔、螺纹或局部边界，但自动选择 crop 尚未接入
+  Provider run，当前 OpenAI 路径只发送 overview derivative；
+- OpenAI transport 使用严格 Structured Outputs 生成 `VisualObservation`，成功 provenance 记录 request、
+  derivative batch、response ID/output digest、实际返回模型、token、data-policy profile 与 finite timeout，
+  不持久化 API key、原始 response ID 或图片 byte；application default 仍为 deterministic fake；
 - Revision durable v1、TaskRun artifacts 与 CAD artifact store 仍固定于 CAD candidate/FCStd/STEP；S20.0
   因此选择独立的 `visual_inputs/` 与 `reconstruction_drafts/` additive roots，不重解释现有 durable v1；
 - `releases/` 保持现状；新增 root 只做 captured-identity 的纯加法兼容，不引入全局 migration framework；
@@ -682,17 +690,18 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-A03 已批准。执行 S30.1：先把 1–16 张来源图、provider capability profile、派生图/crop、有限网络调用
-和严格 VisualObservation 绑定设计成 provider-neutral 纵切片，再用自有合成 CAD 参考图比较少量真实
-多模态候选。不得把模型直接输出当成 CAD truth，不得声称 WorkBuddy 直接附件入口已认证，不得添加
-图片 Resource URI、进入 Freeform 或发布，也不增加 GUI 并发 merge、第二 CAD 控制面或通用 benchmark
-runner。
+A03 已批准。S30.1 的 1–16 张来源图、provider capability profile、派生图/crop、有限网络调用、严格
+VisualObservation 与 OpenAI Responses 纵切片已经实现并通过离线/完整仓库门。下一动作是在不建立
+benchmark runner 的前提下，用自有合成 CAD 参考图执行一次 bounded live pilot，再比较少量真实多模态
+候选。当前机器没有 `OPENAI_API_KEY`，所以不得把离线 transport fixture 声称为真实模型结果。不得把
+模型直接输出当成 CAD truth，不得声称 WorkBuddy 直接附件入口已认证，不得添加图片 Resource URI、
+进入 Freeform 或发布，也不增加 GUI 并发 merge、第二 CAD 控制面或通用 benchmark runner。
 ```
 
 执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
 为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。在 A02 获批时，S20.0 只完成
-合同设计；当前 S20.1–S20.5 已实现本地持久化和 deterministic fake/interface-ready 路径，但仍未运行
-真实 Provider/VLM。
+合同设计；当前 S20.1–S20.5 已实现本地持久化和 deterministic fake/interface-ready 路径，S30.1 已
+实现 opt-in OpenAI transport，但仍未运行真实 Provider/VLM。
 
 ## 11. Material event ledger
 
@@ -713,6 +722,7 @@ runner。
 | `VCAD-E12` | `VCAD-A02` 与 S20.4 focused gate | 回答 digest 绑定 durable clarification authority；FAILED 仅经显式、generation-pinned retry；采纳通过 application-owned trusted port 生成普通 `REQUIRE_REVIEW` CAD Task，重启只 reconcile durable adoption intent；删除以三个 durable draft 阶段包围源字节删除，再将 transient exact marker 降级为永久 ID-only retired tombstone | 297 passed、1 deselected；retired tombstone 不含 manifest/source hash 或 path，永久阻止同 ImageSet ID 重用并与 ReconstructionDraft tombstone 共享 1,024 identity 生命周期预算；恢复动作是执行 S20.5 | 仍仅 deterministic fake；真实 Provider/VLM、外部图片传输、图片 Resource URI 与 WorkBuddy 直接附件入口均未认证，继续等待后续 gate |
 | `VCAD-E13` | `VCAD-A02` 与 S20.5 public/host-interface gate | 七个严格、host-neutral reconstruction 动作经 Agent application、authenticated daemon 和 MCP 投影；非 MCP host adapter 经单一 staging-directory FD 安全封存 1–4 张 JPEG/PNG；当前分支为 38 tools，采纳仍进入普通 `REQUIRE_REVIEW` CAD Task，private build ID 保证旧 daemon 不复用新路由 | integrated 488 passed、2 deselected；sandbox-external daemon worker 1 passed；真实四图、重连及 daemon restart replay 1 passed；full repository 5,875 passed、119 deselected；固定 discovery frame 30,415 bytes；Ruff/format/compile/diff/Skill validation 通过；独立复审 P0/P1 none；恢复动作是准备 `VCAD-A03` | 仍仅 deterministic fake/interface-ready；真实 VLM 与数据策略需 A03，WorkBuddy 直接附件入口尚未验证，无图片 Resource URI |
 | `VCAD-E14` | 用户批准 `VCAD-A03` 并确认数据/费用取向 | 允许默认向用户或企业选定的云端多模态 Provider 发送图片且不逐任务确认；允许 Provider retention，并接受本地删除不能撤回远端副本；不设用户可见费用、总调用次数或总任务时长预算；批准把来源图计划包络从当前 1–4 扩展到最多 16 张 | 2026-08-04 用户决策；OpenAI、Anthropic、Gemini 官方视觉输入限制复核；工程恢复动作是执行 S30.1 provider-neutral adapter/候选 pilot | 仍需有限 transport timeout、bounded payload/result、单 intent 单在途 effect 和无递归重试；当前代码在新 gate 落地前仍为 1–4 图 deterministic fake；WorkBuddy 直接附件、A04–A06 未批准 |
+| `VCAD-E15` | `VCAD-A03` 与 S30.1 implementation gate | 将 source envelope 扩展为 1–16；原图 sealed read-only，Provider 只收到 bounded metadata-free PNG overview/crop；cloud invocation 单 effect、异常为 UNKNOWN 且 reconcile 不重放；落地第一个 quality-first OpenAI Responses/Structured Outputs transport 与完整 execution provenance | 203 visual passed/1 deselected，real daemon 1 passed；affected host 369 passed/1 deselected；full 5,897 passed/119 deselected；Ruff/format/compile/diff gate；恢复动作是执行 bounded live pilot | 本机无 `OPENAI_API_KEY`，尚无真实模型 outcome；默认仍 deterministic fake；clarification answer 值、proposal/CAD translation、WorkBuddy 直接附件和 A04–A06 均未完成 |
 
 ## 12. 研究依据
 
@@ -721,6 +731,8 @@ runner。
 - [HistCAD](https://arxiv.org/abs/2602.19171)：显式约束、编辑可达性和整体可编辑成功；
 - [Metric3D](https://arxiv.org/abs/2307.10984)：单目尺度/深度歧义；
 - [OpenAI Images and vision](https://developers.openai.com/api/docs/guides/images-vision)：图片请求总量、detail、patch 与 resize 行为；
+- [OpenAI Structured model outputs](https://developers.openai.com/api/docs/guides/structured-outputs)：Responses API 的 `text.format` JSON Schema 与 strict output；
+- [OpenAI GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol)：quality-first pilot 的当前模型、图像输入、Structured Outputs 与 Responses 支持；
 - [Claude Vision](https://platform.claude.com/docs/en/build-with-claude/vision)：多图数量、单图/请求大小、视觉分辨率与 token 行为；
 - [Gemini Image understanding](https://ai.google.dev/gemini-api/docs/image-understanding)：多图、inline/Files、tile 与 media-resolution 行为；
 - `docs/ARCHITECTURE.md`：Task/Revision/Provider 权限和 durable-v1 边界；

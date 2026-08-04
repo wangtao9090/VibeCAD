@@ -50,23 +50,15 @@ VISUAL_PROVIDER_IDENTITY = RuntimeIdentity(
     version="1.0",
 )
 VISUAL_OBSERVE_V1 = RuntimeCapability(name="visual.observe", version=1)
-VISUAL_PROVIDER_DESCRIPTOR = RuntimeDescriptor(
-    identity=VISUAL_PROVIDER_IDENTITY,
-    capabilities=(VISUAL_OBSERVE_V1,),
-    execution_profiles=(VISUAL_PROVIDER_EXECUTION_PROFILE,),
-    metadata={
-        "model": VISUAL_PROVIDER_MODEL,
-        "model_version": VISUAL_PROVIDER_MODEL_VERSION,
-        "network": False,
-        "correlation_semantics": VISUAL_INTERNAL_CORRELATION_SEMANTICS,
-    },
-)
 
 _INPUT_DIGEST_DOMAIN = b"vibecad-visual-provider-input-v1\0"
 _OUTPUT_DIGEST_DOMAIN = b"vibecad-visual-provider-output-v1\0"
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_PROFILE_NAME = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
+_MODEL_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]*$")
 _MAX_ANSWER_DIGESTS = 128
 _MAX_CANONICAL_BYTES = 1024 * 1024
+_MAX_SAFE_INTEGER = 2**53 - 1
 _CAMEL_ACRONYM_BOUNDARY = re.compile(r"([A-Z]+)([A-Z][a-z])")
 _CAMEL_WORD_BOUNDARY = re.compile(r"([a-z0-9])([A-Z])")
 _IDENTIFIER_TOKEN = re.compile(r"[A-Za-z0-9]+")
@@ -195,6 +187,187 @@ def _clarification_answer_digests(value: object) -> tuple[str, ...]:
     return tuple(sorted(result))
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VisualProviderRuntimeProfile:
+    """Strict runtime identity for either the local fake or one cloud adapter."""
+
+    identity: RuntimeIdentity
+    model: str
+    model_version: str
+    execution_profile: str
+    network: bool
+
+    def __post_init__(self) -> None:
+        if type(self.identity) is not RuntimeIdentity or self.identity.family != "visual":
+            _raise(VisualProviderErrorCode.INVALID_PROVIDER, "runtime_identity")
+        if type(self.model) is not str or _PROFILE_NAME.fullmatch(self.model) is None:
+            _raise(VisualProviderErrorCode.INVALID_PROVIDER, "model")
+        if (
+            type(self.model_version) is not str
+            or _MODEL_VERSION.fullmatch(self.model_version) is None
+        ):
+            _raise(VisualProviderErrorCode.INVALID_PROVIDER, "model_version")
+        if (
+            type(self.execution_profile) is not str
+            or _PROFILE_NAME.fullmatch(self.execution_profile) is None
+        ):
+            _raise(VisualProviderErrorCode.INVALID_PROVIDER, "execution_profile")
+        if type(self.network) is not bool:
+            _raise(VisualProviderErrorCode.INVALID_PROVIDER, "network")
+        expected_execution_profile = "cloud_provider" if self.network else "local_only"
+        if self.execution_profile != expected_execution_profile:
+            _raise(VisualProviderErrorCode.INVALID_PROVIDER, "execution_profile")
+        if self.network == (self.identity.provider == "deterministic_fake"):
+            _raise(VisualProviderErrorCode.INVALID_PROVIDER, "runtime_identity")
+
+    @property
+    def descriptor(self) -> RuntimeDescriptor:
+        return RuntimeDescriptor(
+            identity=self.identity,
+            capabilities=(VISUAL_OBSERVE_V1,),
+            execution_profiles=(self.execution_profile,),
+            metadata={
+                "model": self.model,
+                "model_version": self.model_version,
+                "network": self.network,
+                "correlation_semantics": VISUAL_INTERNAL_CORRELATION_SEMANTICS,
+            },
+        )
+
+    @classmethod
+    def from_descriptor(cls, value: object) -> VisualProviderRuntimeProfile:
+        if type(value) is not RuntimeDescriptor:
+            _raise(VisualProviderErrorCode.INVALID_PROVIDER, "runtime_descriptor")
+        metadata = value.metadata
+        if (
+            value.capabilities != (VISUAL_OBSERVE_V1,)
+            or len(value.execution_profiles) != 1
+            or set(metadata) != {"model", "model_version", "network", "correlation_semantics"}
+            or metadata.get("correlation_semantics") != VISUAL_INTERNAL_CORRELATION_SEMANTICS
+        ):
+            _raise(VisualProviderErrorCode.DESCRIPTOR_MISMATCH, "runtime_descriptor")
+        try:
+            profile = cls(
+                identity=value.identity,
+                model=metadata["model"],
+                model_version=metadata["model_version"],
+                execution_profile=value.execution_profiles[0],
+                network=metadata["network"],
+            )
+        except VisualProviderError:
+            _raise(VisualProviderErrorCode.DESCRIPTOR_MISMATCH, "runtime_descriptor")
+        except (TypeError, ValueError):
+            _raise(VisualProviderErrorCode.DESCRIPTOR_MISMATCH, "runtime_descriptor")
+        if profile.descriptor != value:
+            _raise(VisualProviderErrorCode.DESCRIPTOR_MISMATCH, "runtime_descriptor")
+        return profile
+
+
+VISUAL_PROVIDER_RUNTIME_PROFILE = VisualProviderRuntimeProfile(
+    identity=VISUAL_PROVIDER_IDENTITY,
+    model=VISUAL_PROVIDER_MODEL,
+    model_version=VISUAL_PROVIDER_MODEL_VERSION,
+    execution_profile=VISUAL_PROVIDER_EXECUTION_PROFILE,
+    network=False,
+)
+VISUAL_PROVIDER_DESCRIPTOR = VISUAL_PROVIDER_RUNTIME_PROFILE.descriptor
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VisualProviderExecutionReceipt:
+    """Bounded cloud execution evidence with no credential or raw provider ID."""
+
+    request_sha256: str
+    image_batch_sha256: str
+    response_id_sha256: str
+    response_output_sha256: str
+    response_model: str
+    data_policy_profile: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    transport_timeout_ms: int
+    schema_version: int = VISUAL_PROVIDER_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            _raise(VisualProviderErrorCode.INVALID_OUTPUT, "execution_schema")
+        for name in (
+            "request_sha256",
+            "image_batch_sha256",
+            "response_id_sha256",
+            "response_output_sha256",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _checked_digest(
+                    getattr(self, name),
+                    name,
+                    code=VisualProviderErrorCode.INVALID_OUTPUT,
+                ),
+            )
+        if (
+            type(self.response_model) is not str
+            or _PROFILE_NAME.fullmatch(self.response_model) is None
+        ):
+            _raise(VisualProviderErrorCode.INVALID_OUTPUT, "response_model")
+        if (
+            type(self.data_policy_profile) is not str
+            or _PROFILE_NAME.fullmatch(self.data_policy_profile) is None
+        ):
+            _raise(VisualProviderErrorCode.INVALID_OUTPUT, "data_policy_profile")
+        for name in ("input_tokens", "output_tokens", "total_tokens"):
+            value = getattr(self, name)
+            if type(value) is not int or not 0 <= value <= _MAX_SAFE_INTEGER:
+                _raise(VisualProviderErrorCode.INVALID_OUTPUT, name)
+        if self.total_tokens != self.input_tokens + self.output_tokens:
+            _raise(VisualProviderErrorCode.INVALID_OUTPUT, "total_tokens")
+        if (
+            type(self.transport_timeout_ms) is not int
+            or not 0 < self.transport_timeout_ms <= _MAX_SAFE_INTEGER
+        ):
+            _raise(VisualProviderErrorCode.INVALID_OUTPUT, "transport_timeout_ms")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "request_sha256": self.request_sha256,
+            "image_batch_sha256": self.image_batch_sha256,
+            "response_id_sha256": self.response_id_sha256,
+            "response_output_sha256": self.response_output_sha256,
+            "response_model": self.response_model,
+            "data_policy_profile": self.data_policy_profile,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "transport_timeout_ms": self.transport_timeout_ms,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> VisualProviderExecutionReceipt:
+        if not isinstance(value, Mapping) or set(value) != {
+            "schema_version",
+            "request_sha256",
+            "image_batch_sha256",
+            "response_id_sha256",
+            "response_output_sha256",
+            "response_model",
+            "data_policy_profile",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "transport_timeout_ms",
+        }:
+            _raise(VisualProviderErrorCode.INVALID_OUTPUT, "execution_fields")
+        try:
+            return cls(**value)
+        except VisualProviderError:
+            raise
+        except (TypeError, ValueError):
+            _raise(VisualProviderErrorCode.INVALID_OUTPUT, "execution_value")
+
+
 def visual_runtime_correlation_id(reconstruction_id: str, generation: int) -> str:
     """Return an explicit internal correlation value, never a CAD Task ID."""
 
@@ -215,23 +388,24 @@ def _input_body(
     clarification_answer_digests: tuple[str, ...],
     budget: RuntimeBudget,
     deadline_ms: int,
+    runtime_profile: VisualProviderRuntimeProfile,
 ) -> dict[str, object]:
     correlation_id = visual_runtime_correlation_id(reconstruction_id, generation)
     return {
         "schema_version": VISUAL_PROVIDER_SCHEMA_VERSION,
         "runtime": {
-            "family": VISUAL_PROVIDER_IDENTITY.family,
-            "provider": VISUAL_PROVIDER_IDENTITY.provider,
-            "version": VISUAL_PROVIDER_IDENTITY.version,
+            "family": runtime_profile.identity.family,
+            "provider": runtime_profile.identity.provider,
+            "version": runtime_profile.identity.version,
         },
         "capability": {
             "name": VISUAL_OBSERVE_V1.name,
             "version": VISUAL_OBSERVE_V1.version,
         },
-        "execution_profile": VISUAL_PROVIDER_EXECUTION_PROFILE,
-        "model": VISUAL_PROVIDER_MODEL,
-        "model_version": VISUAL_PROVIDER_MODEL_VERSION,
-        "network": False,
+        "execution_profile": runtime_profile.execution_profile,
+        "model": runtime_profile.model,
+        "model_version": runtime_profile.model_version,
+        "network": runtime_profile.network,
         "correlation_semantics": VISUAL_INTERNAL_CORRELATION_SEMANTICS,
         "correlation_id": correlation_id,
         "invocation_id": invocation_id,
@@ -253,17 +427,21 @@ def _input_digest(body: Mapping[str, object]) -> str:
     return hashlib.sha256(_INPUT_DIGEST_DOMAIN + _canonical_json(body)).hexdigest()
 
 
-def _image_set_artifact(image_set_id: str, manifest_sha256: str) -> RuntimeArtifact:
+def _image_set_artifact(
+    image_set_id: str,
+    manifest_sha256: str,
+    runtime_profile: VisualProviderRuntimeProfile,
+) -> RuntimeArtifact:
     return RuntimeArtifact(
         artifact_id=image_set_id,
         kind="visual_image_set_manifest",
         media_type="application/vnd.vibecad.image-set+json",
         digest=manifest_sha256,
-        runtime=VISUAL_PROVIDER_IDENTITY,
+        runtime=runtime_profile.identity,
         metadata={
             "schema_version": VISUAL_PROVIDER_SCHEMA_VERSION,
             "role": "sealed_image_set_manifest",
-            "network": False,
+            "network": runtime_profile.network,
         },
     )
 
@@ -277,10 +455,14 @@ def build_visual_provider_invocation(
     clarification_answer_digests: tuple[str, ...] = (),
     budget: RuntimeBudget,
     deadline_ms: int,
+    runtime_profile: VisualProviderRuntimeProfile = VISUAL_PROVIDER_RUNTIME_PROFILE,
 ) -> RuntimeInvocation:
-    """Build the one strict local visual invocation for a reconstruction generation."""
+    """Build one strict provider invocation for a reconstruction generation."""
 
-    if type(budget) is not RuntimeBudget:
+    if (
+        type(budget) is not RuntimeBudget
+        or type(runtime_profile) is not VisualProviderRuntimeProfile
+    ):
         _raise(VisualProviderErrorCode.INVALID_INVOCATION, "budget")
     answers = _clarification_answer_digests(clarification_answer_digests)
     manifest_digest = _checked_digest(image_set_manifest_sha256, "manifest_digest")
@@ -302,6 +484,7 @@ def build_visual_provider_invocation(
         clarification_answer_digests=answers,
         budget=budget,
         deadline_ms=deadline_ms,
+        runtime_profile=runtime_profile,
     )
     payload = body | {"input_digest": _input_digest(body)}
     try:
@@ -309,28 +492,35 @@ def build_visual_provider_invocation(
             invocation_id=invocation_id,
             owner_id=reconstruction_id,
             task_id=visual_runtime_correlation_id(reconstruction_id, generation),
-            runtime=VISUAL_PROVIDER_IDENTITY,
+            runtime=runtime_profile.identity,
             capability=VISUAL_OBSERVE_V1,
             budget=budget,
             deadline_ms=deadline_ms,
-            input_artifacts=(_image_set_artifact(image_set_id, manifest_digest),),
+            input_artifacts=(_image_set_artifact(image_set_id, manifest_digest, runtime_profile),),
             payload=payload,
-            execution_profile=VISUAL_PROVIDER_EXECUTION_PROFILE,
+            execution_profile=runtime_profile.execution_profile,
         )
     except (TypeError, ValueError):
         _raise(VisualProviderErrorCode.INVALID_INVOCATION, "runtime_invocation")
 
 
-def visual_provider_input_digest(value: object) -> str:
+def visual_provider_input_digest(
+    value: object,
+    *,
+    runtime_profile: VisualProviderRuntimeProfile = VISUAL_PROVIDER_RUNTIME_PROFILE,
+) -> str:
     """Validate one exact visual invocation and return its bound input digest."""
 
-    if type(value) is not RuntimeInvocation:
+    if (
+        type(value) is not RuntimeInvocation
+        or type(runtime_profile) is not VisualProviderRuntimeProfile
+    ):
         _raise(VisualProviderErrorCode.INVALID_INVOCATION, "invocation")
     invocation = value
     if (
-        invocation.runtime != VISUAL_PROVIDER_IDENTITY
+        invocation.runtime != runtime_profile.identity
         or invocation.capability != VISUAL_OBSERVE_V1
-        or invocation.execution_profile != VISUAL_PROVIDER_EXECUTION_PROFILE
+        or invocation.execution_profile != runtime_profile.execution_profile
         or invocation.input_revision is not None
         or len(invocation.input_artifacts) != 1
     ):
@@ -380,7 +570,11 @@ def visual_provider_input_digest(value: object) -> str:
     ):
         _raise(VisualProviderErrorCode.INVALID_INVOCATION, "correlation")
     try:
-        expected_artifact = _image_set_artifact(image_set_id, manifest_digest)
+        expected_artifact = _image_set_artifact(
+            image_set_id,
+            manifest_digest,
+            runtime_profile,
+        )
     except (TypeError, ValueError):
         _raise(VisualProviderErrorCode.INVALID_INVOCATION, "input_artifact")
     if invocation.input_artifacts != (expected_artifact,):
@@ -394,6 +588,7 @@ def visual_provider_input_digest(value: object) -> str:
         clarification_answer_digests=answers,
         budget=invocation.budget,
         deadline_ms=invocation.deadline_ms,
+        runtime_profile=runtime_profile,
     )
     supplied_digest = _checked_digest(payload["input_digest"], "input_digest")
     expected_digest = _input_digest(body)
@@ -508,15 +703,21 @@ def visual_provider_output_digest(value: object) -> str:
     return value.output_digest
 
 
-def _provenance_details(input_digest: str, output_digest: str | None) -> dict[str, object]:
+def _provenance_details(
+    input_digest: str,
+    output_digest: str | None,
+    runtime_profile: VisualProviderRuntimeProfile,
+    execution_receipt: VisualProviderExecutionReceipt | None,
+) -> dict[str, object]:
     return {
         "schema_version": VISUAL_PROVIDER_SCHEMA_VERSION,
         "input_digest": input_digest,
         "output_digest": output_digest,
-        "model": VISUAL_PROVIDER_MODEL,
-        "model_version": VISUAL_PROVIDER_MODEL_VERSION,
-        "network": False,
+        "model": runtime_profile.model,
+        "model_version": runtime_profile.model_version,
+        "network": runtime_profile.network,
         "correlation_semantics": VISUAL_INTERNAL_CORRELATION_SEMANTICS,
+        "execution": (None if execution_receipt is None else execution_receipt.to_mapping()),
     }
 
 
@@ -524,16 +725,26 @@ def _provenance(
     invocation: RuntimeInvocation,
     input_digest: str,
     output_digest: str | None,
+    runtime_profile: VisualProviderRuntimeProfile,
+    execution_receipt: VisualProviderExecutionReceipt | None = None,
 ) -> RuntimeProvenance:
     return RuntimeProvenance(
-        runtime=VISUAL_PROVIDER_IDENTITY,
+        runtime=runtime_profile.identity,
         invocation_id=invocation.invocation_id,
         input_artifact_ids=tuple(item.artifact_id for item in invocation.input_artifacts),
-        details=_provenance_details(input_digest, output_digest),
+        details=_provenance_details(
+            input_digest,
+            output_digest,
+            runtime_profile,
+            execution_receipt,
+        ),
     )
 
 
-def _output_artifact(output: VisualProviderOutput) -> RuntimeArtifact:
+def _output_artifact(
+    output: VisualProviderOutput,
+    runtime_profile: VisualProviderRuntimeProfile,
+) -> RuntimeArtifact:
     if type(output.value) is VisualObservation:
         kind = "visual_observation"
         media_type = "application/vnd.vibecad.visual-observation+json"
@@ -545,13 +756,13 @@ def _output_artifact(output: VisualProviderOutput) -> RuntimeArtifact:
         kind=kind,
         media_type=media_type,
         digest=output.output_digest,
-        runtime=VISUAL_PROVIDER_IDENTITY,
+        runtime=runtime_profile.identity,
         metadata={
             "schema_version": VISUAL_PROVIDER_SCHEMA_VERSION,
             "semantic_digest": output.value.digest,
-            "model": VISUAL_PROVIDER_MODEL,
-            "model_version": VISUAL_PROVIDER_MODEL_VERSION,
-            "network": False,
+            "model": runtime_profile.model,
+            "model_version": runtime_profile.model_version,
+            "network": runtime_profile.network,
         },
     )
 
@@ -581,20 +792,34 @@ def _validate_output_correlation(
 def build_visual_provider_success_result(
     invocation: RuntimeInvocation,
     value: VisualObservation | ReconstructionProposal,
+    *,
+    runtime_profile: VisualProviderRuntimeProfile = VISUAL_PROVIDER_RUNTIME_PROFILE,
+    execution_receipt: VisualProviderExecutionReceipt | None = None,
 ) -> RuntimeResult:
     """Build the canonical successful generic result for one strict visual value."""
 
-    input_digest = visual_provider_input_digest(invocation)
+    input_digest = visual_provider_input_digest(
+        invocation,
+        runtime_profile=runtime_profile,
+    )
     if type(value) not in {VisualObservation, ReconstructionProposal}:
         _raise(VisualProviderErrorCode.INVALID_OUTPUT, "value")
+    if runtime_profile.network != (type(execution_receipt) is VisualProviderExecutionReceipt):
+        _raise(VisualProviderErrorCode.INVALID_OUTPUT, "execution_receipt")
     _validate_output_correlation(invocation, value)
     output = VisualProviderOutput(input_digest=input_digest, value=value)
     return RuntimeResult(
         invocation_id=invocation.invocation_id,
-        runtime=VISUAL_PROVIDER_IDENTITY,
+        runtime=runtime_profile.identity,
         state=RuntimeLifecycleState.SUCCEEDED,
-        artifacts=(_output_artifact(output),),
-        provenance=_provenance(invocation, input_digest, output.output_digest),
+        artifacts=(_output_artifact(output, runtime_profile),),
+        provenance=_provenance(
+            invocation,
+            input_digest,
+            output.output_digest,
+            runtime_profile,
+            execution_receipt,
+        ),
         output=output.to_mapping(),
     )
 
@@ -602,22 +827,43 @@ def build_visual_provider_success_result(
 def validate_visual_provider_result(
     invocation: RuntimeInvocation,
     result: object,
+    *,
+    runtime_profile: VisualProviderRuntimeProfile = VISUAL_PROVIDER_RUNTIME_PROFILE,
 ) -> RuntimeResult:
     """Fail closed unless a terminal result is exactly bound to the invocation."""
 
-    input_digest = visual_provider_input_digest(invocation)
+    input_digest = visual_provider_input_digest(
+        invocation,
+        runtime_profile=runtime_profile,
+    )
     if type(result) is not RuntimeResult:
         _raise(VisualProviderErrorCode.RESULT_MISMATCH, "result")
     if (
         result.invocation_id != invocation.invocation_id
-        or result.runtime != VISUAL_PROVIDER_IDENTITY
+        or result.runtime != runtime_profile.identity
     ):
         _raise(VisualProviderErrorCode.RESULT_MISMATCH, "correlation")
     if result.state is RuntimeLifecycleState.SUCCEEDED:
         output = VisualProviderOutput.from_mapping(result.output)
         if output.input_digest != input_digest:
             _raise(VisualProviderErrorCode.RESULT_MISMATCH, "input_digest")
-        expected = build_visual_provider_success_result(invocation, output.value)
+        if result.provenance is None:
+            _raise(VisualProviderErrorCode.RESULT_MISMATCH, "provenance")
+        execution_value = result.provenance.details.get("execution")
+        try:
+            execution_receipt = (
+                None
+                if execution_value is None
+                else VisualProviderExecutionReceipt.from_mapping(execution_value)
+            )
+        except VisualProviderError:
+            _raise(VisualProviderErrorCode.RESULT_MISMATCH, "execution_receipt")
+        expected = build_visual_provider_success_result(
+            invocation,
+            output.value,
+            runtime_profile=runtime_profile,
+            execution_receipt=execution_receipt,
+        )
         if result != expected:
             _raise(VisualProviderErrorCode.RESULT_MISMATCH, "success_result")
         return result
@@ -627,7 +873,7 @@ def validate_visual_provider_result(
         result.artifacts
         or result.output
         or result.evidence
-        or result.provenance != _provenance(invocation, input_digest, None)
+        or result.provenance != _provenance(invocation, input_digest, None, runtime_profile)
         or (result.state is RuntimeLifecycleState.FAILED and not result.diagnostics)
     ):
         _raise(VisualProviderErrorCode.RESULT_MISMATCH, "terminal_result")
@@ -715,7 +961,9 @@ def _validate_provider_shape(provider: object) -> None:
             _raise(VisualProviderErrorCode.INVALID_PROVIDER, "provider_method")
 
 
-def _admit_provider(provider: object) -> tuple[RuntimeDescriptor, RuntimeRegistry]:
+def _admit_provider(
+    provider: object,
+) -> tuple[VisualProviderRuntimeProfile, RuntimeDescriptor, RuntimeRegistry]:
     # Authority is inspected statically before descriptor/property access.
     _validate_provider_authority(provider)
     _validate_provider_shape(provider)
@@ -723,26 +971,25 @@ def _admit_provider(provider: object) -> tuple[RuntimeDescriptor, RuntimeRegistr
         descriptor = object.__getattribute__(provider, "runtime_descriptor")
     except Exception:
         _raise(VisualProviderErrorCode.INVALID_PROVIDER, "runtime_descriptor")
-    if type(descriptor) is not RuntimeDescriptor or descriptor != VISUAL_PROVIDER_DESCRIPTOR:
-        _raise(VisualProviderErrorCode.DESCRIPTOR_MISMATCH, "runtime_descriptor")
-    if descriptor.identity.family == "cad" or descriptor.metadata.get("network") is not False:
-        _raise(VisualProviderErrorCode.DESCRIPTOR_MISMATCH, "runtime_descriptor")
+    profile = VisualProviderRuntimeProfile.from_descriptor(descriptor)
     registry = RuntimeRegistry((descriptor,))
-    if registry.lookup(VISUAL_PROVIDER_IDENTITY) != descriptor:
+    if registry.lookup(profile.identity) != descriptor:
         _raise(VisualProviderErrorCode.DESCRIPTOR_MISMATCH, "runtime_registry")
-    return descriptor, registry
+    return profile, descriptor, registry
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class VisualProviderBinding:
-    """One exact descriptor/control/result binding for local visual execution."""
+    """One exact descriptor/control/result binding for visual execution."""
 
     provider: VisualProviderPort
+    runtime_profile: VisualProviderRuntimeProfile = field(init=False)
     descriptor: RuntimeDescriptor = field(init=False)
     registry: RuntimeRegistry = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        descriptor, registry = _admit_provider(self.provider)
+        profile, descriptor, registry = _admit_provider(self.provider)
+        object.__setattr__(self, "runtime_profile", profile)
         object.__setattr__(self, "descriptor", descriptor)
         object.__setattr__(self, "registry", registry)
 
@@ -757,26 +1004,38 @@ class VisualProviderBinding:
     def retrieve_result(self, invocation: RuntimeInvocation) -> RuntimeResult | None:
         """Perform exactly one non-waiting result read and validate any result."""
 
-        visual_provider_input_digest(invocation)
+        visual_provider_input_digest(
+            invocation,
+            runtime_profile=self.runtime_profile,
+        )
         result = self.provider.get_result(invocation.invocation_id)
         if result is None:
             return None
-        return validate_visual_provider_result(invocation, result)
+        return validate_visual_provider_result(
+            invocation,
+            result,
+            runtime_profile=self.runtime_profile,
+        )
 
 
 def build_visual_provider_failure_result(
     invocation: RuntimeInvocation,
     diagnostic: RuntimeDiagnostic,
+    *,
+    runtime_profile: VisualProviderRuntimeProfile = VISUAL_PROVIDER_RUNTIME_PROFILE,
 ) -> RuntimeResult:
     """Build a definitive failed receipt without a visual output artifact."""
 
     if type(diagnostic) is not RuntimeDiagnostic:
         _raise(VisualProviderErrorCode.INVALID_OUTPUT, "diagnostic")
-    input_digest = visual_provider_input_digest(invocation)
+    input_digest = visual_provider_input_digest(
+        invocation,
+        runtime_profile=runtime_profile,
+    )
     return RuntimeResult(
         invocation_id=invocation.invocation_id,
-        runtime=VISUAL_PROVIDER_IDENTITY,
+        runtime=runtime_profile.identity,
         state=RuntimeLifecycleState.FAILED,
-        provenance=_provenance(invocation, input_digest, None),
+        provenance=_provenance(invocation, input_digest, None, runtime_profile),
         diagnostics=(diagnostic,),
     )

@@ -15,6 +15,7 @@ from vibecad.runtime.contracts import (
     RuntimeDiagnostic,
     RuntimeHealth,
     RuntimeHealthState,
+    RuntimeIdentity,
     RuntimeInvocation,
     RuntimeLifecycleState,
     RuntimeResult,
@@ -28,10 +29,13 @@ from vibecad.visual.provider import (
     VISUAL_PROVIDER_IDENTITY,
     VISUAL_PROVIDER_MODEL,
     VISUAL_PROVIDER_MODEL_VERSION,
+    VISUAL_PROVIDER_RUNTIME_PROFILE,
     VisualProviderBinding,
     VisualProviderError,
     VisualProviderErrorCode,
+    VisualProviderExecutionReceipt,
     VisualProviderOutput,
+    VisualProviderRuntimeProfile,
     build_visual_provider_failure_result,
     build_visual_provider_invocation,
     build_visual_provider_success_result,
@@ -91,6 +95,21 @@ def _observation(invocation: RuntimeInvocation) -> VisualObservation:
                 description="Fixture depth",
             ),
         ),
+    )
+
+
+def _execution_receipt() -> VisualProviderExecutionReceipt:
+    return VisualProviderExecutionReceipt(
+        request_sha256="1" * 64,
+        image_batch_sha256="2" * 64,
+        response_id_sha256="3" * 64,
+        response_output_sha256="4" * 64,
+        response_model="vision-model",
+        data_policy_profile="personal-default",
+        input_tokens=100,
+        output_tokens=20,
+        total_tokens=120,
+        transport_timeout_ms=120_000,
     )
 
 
@@ -177,6 +196,7 @@ def test_exact_descriptor_is_non_cad_local_model_and_generic_only() -> None:
 
     binding = VisualProviderBinding(provider=_Provider(None))
     assert binding.descriptor is descriptor
+    assert binding.runtime_profile == VISUAL_PROVIDER_RUNTIME_PROFILE
     assert binding.registry.identities == (VISUAL_PROVIDER_IDENTITY,)
     assert binding.control is binding.results is binding.provider
 
@@ -360,6 +380,70 @@ def test_descriptor_and_provider_shape_are_exact_and_fail_closed() -> None:
     assert caught.value.code is VisualProviderErrorCode.INVALID_PROVIDER
 
 
+def test_strict_cloud_runtime_profile_is_admitted_without_cad_authority() -> None:
+    profile = VisualProviderRuntimeProfile(
+        identity=RuntimeIdentity(family="visual", provider="candidate_cloud", version="1.0"),
+        model="vision-model",
+        model_version="2026-08-04",
+        execution_profile="cloud_provider",
+        network=True,
+    )
+
+    binding = VisualProviderBinding(provider=_Provider(None, profile.descriptor))
+
+    assert binding.runtime_profile == profile
+    assert binding.descriptor.metadata["network"] is True
+    assert binding.registry.identities == (profile.identity,)
+
+
+def test_cloud_success_requires_exact_execution_evidence_and_local_forbids_it() -> None:
+    profile = VisualProviderRuntimeProfile(
+        identity=RuntimeIdentity(family="visual", provider="candidate_cloud", version="1.0"),
+        model="vision-model",
+        model_version="2026-08-04",
+        execution_profile="cloud_provider",
+        network=True,
+    )
+    cloud_invocation = build_visual_provider_invocation(
+        reconstruction_id=_RECONSTRUCTION_ID,
+        generation=1,
+        image_set_id=_IMAGE_SET_ID,
+        image_set_manifest_sha256=_MANIFEST_DIGEST,
+        budget=_budget(),
+        deadline_ms=2_000,
+        runtime_profile=profile,
+    )
+    observation = _observation(cloud_invocation)
+
+    with pytest.raises(VisualProviderError):
+        build_visual_provider_success_result(
+            cloud_invocation,
+            observation,
+            runtime_profile=profile,
+        )
+    result = build_visual_provider_success_result(
+        cloud_invocation,
+        observation,
+        runtime_profile=profile,
+        execution_receipt=_execution_receipt(),
+    )
+    assert (
+        validate_visual_provider_result(
+            cloud_invocation,
+            result,
+            runtime_profile=profile,
+        )
+        is result
+    )
+
+    with pytest.raises(VisualProviderError):
+        build_visual_provider_success_result(
+            _invocation(),
+            _observation(_invocation()),
+            execution_receipt=_execution_receipt(),
+        )
+
+
 def test_provider_module_has_no_cad_adapter_storage_or_network_imports() -> None:
     import vibecad.visual.provider as provider_module
 
@@ -384,4 +468,5 @@ def test_provider_module_has_no_cad_adapter_storage_or_network_imports() -> None
         "clarification_answer_digests",
         "budget",
         "deadline_ms",
+        "runtime_profile",
     }

@@ -290,8 +290,15 @@ class SealImageSetRequest:
         for name in ("same_object", "same_state", "same_scale"):
             if type(getattr(self, name)) is not bool:
                 _raise(VisualInputStoreErrorCode.INVALID_INPUT)
-        if self.processing_authorization is not ProcessingAuthorization.LOCAL_ONLY:
-            _raise(VisualInputStoreErrorCode.INVALID_INPUT)
+        if type(self.processing_authorization) is not ProcessingAuthorization:
+            try:
+                object.__setattr__(
+                    self,
+                    "processing_authorization",
+                    ProcessingAuthorization(self.processing_authorization),
+                )
+            except (TypeError, ValueError):
+                _raise(VisualInputStoreErrorCode.INVALID_INPUT)
 
     def to_mapping(self) -> dict[str, object]:
         return {
@@ -543,6 +550,78 @@ class VisualInputStore:
             raise
         except (OSError, StorageFailure):
             _raise(VisualInputStoreErrorCode.STORE_FAILURE)
+
+    def read_provider_images_exact(
+        self,
+        image_set_id: object,
+        manifest_sha256: object,
+    ) -> tuple[ImageSet, tuple[bytes, ...]]:
+        """Read verified normalized bytes for one exact cloud-authorized ImageSet.
+
+        The provider edge receives bytes and immutable contract values only;
+        local paths and filesystem descriptors do not cross this method.
+        """
+
+        if type(image_set_id) is not str or _IMAGE_SET_ID.fullmatch(image_set_id) is None:
+            _raise(VisualInputStoreErrorCode.INVALID_INPUT)
+        if (
+            type(manifest_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None
+        ):
+            _raise(VisualInputStoreErrorCode.INVALID_INPUT)
+        root_fd = -1
+        directory_fd = -1
+        try:
+            root_fd = self._root.open()
+            record = self._read_sealed(root_fd, image_set_id)
+            if (
+                record.processing_authorization is not ProcessingAuthorization.CLOUD_PROVIDER
+                or not hmac.compare_digest(record.manifest_sha256, manifest_sha256)
+            ):
+                _raise(VisualInputStoreErrorCode.CONFLICT)
+            entry = os.stat(image_set_id, dir_fd=root_fd, follow_symlinks=False)
+            directory_fd, opened = self._root.open_directory_at(
+                root_fd,
+                image_set_id,
+                expected_identity=(entry.st_dev, entry.st_ino),
+            )
+            manifest, _ = self._root.read_file_at(
+                directory_fd,
+                "manifest.json",
+                maximum=MAX_IMAGE_SET_RECORD_BYTES,
+            )
+            if not hmac.compare_digest(manifest, encode_image_set(record)):
+                _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+            images: list[bytes] = []
+            for item in record.inputs:
+                raw, _ = self._root.read_file_at(
+                    directory_fd,
+                    item.normalized.id + ".png",
+                    maximum=MAX_NORMALIZED_IMAGE_BYTES,
+                )
+                if len(raw) != item.normalized.size_bytes or not hmac.compare_digest(
+                    hashlib.sha256(raw).hexdigest(),
+                    item.normalized.sha256,
+                ):
+                    _raise(VisualInputStoreErrorCode.INTEGRITY_FAILURE)
+                images.append(raw)
+            self._root.verify_directory_entry(
+                root_fd,
+                image_set_id,
+                expected=opened,
+            )
+            return record, tuple(images)
+        except VisualInputStoreError:
+            raise
+        except (OSError, StorageFailure):
+            _raise(VisualInputStoreErrorCode.STORE_FAILURE)
+        finally:
+            if directory_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(directory_fd)
+            if root_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(root_fd)
 
     def delete_exact(self, image_set_id: object, manifest_sha256: object) -> None:
         """Delete one exact sealed ImageSet and retain in-progress evidence."""

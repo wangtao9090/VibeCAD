@@ -55,9 +55,6 @@ from vibecad.visual.inputs import (
     VisualInputStoreErrorCode,
 )
 from vibecad.visual.provider import (
-    VISUAL_PROVIDER_IDENTITY,
-    VISUAL_PROVIDER_MODEL,
-    VISUAL_PROVIDER_MODEL_VERSION,
     VisualProviderBinding,
     VisualProviderOutput,
     build_visual_provider_invocation,
@@ -276,8 +273,13 @@ class VisualReconstructionService:
         except (TypeError, ValueError):
             _fail(VisualServiceErrorCode.INVALID_INPUT)
         image_set = self._inputs.get(image_set_id)
+        required_authorization = (
+            ProcessingAuthorization.CLOUD_PROVIDER
+            if self._provider.runtime_profile.network
+            else ProcessingAuthorization.LOCAL_ONLY
+        )
         if (
-            image_set.processing_authorization is not ProcessingAuthorization.LOCAL_ONLY
+            image_set.processing_authorization is not required_authorization
             or type(image_set_manifest_sha256) is not str
             or _DIGEST.fullmatch(image_set_manifest_sha256) is None
             or image_set.manifest_sha256 != image_set_manifest_sha256
@@ -376,6 +378,7 @@ class VisualReconstructionService:
                 ),
                 budget=budget,
                 deadline_ms=deadline_ms,
+                runtime_profile=self._provider.runtime_profile,
             )
             ready = dataclasses.replace(
                 draft,
@@ -401,16 +404,21 @@ class VisualReconstructionService:
                 ),
                 budget=budget,
                 deadline_ms=deadline_ms,
+                runtime_profile=self._provider.runtime_profile,
             )
+            runtime_profile = self._provider.runtime_profile
             intent = ProviderInvocationRecord(
                 invocation_id=invocation.invocation_id,
                 attempt_generation=draft.generation + 1,
-                runtime=VISUAL_PROVIDER_IDENTITY,
-                model=VISUAL_PROVIDER_MODEL,
-                model_version=VISUAL_PROVIDER_MODEL_VERSION,
+                runtime=runtime_profile.identity,
+                model=runtime_profile.model,
+                model_version=runtime_profile.model_version,
                 budget=budget,
                 deadline_ms=deadline_ms,
-                input_sha256=visual_provider_input_digest(invocation),
+                input_sha256=visual_provider_input_digest(
+                    invocation,
+                    runtime_profile=runtime_profile,
+                ),
             )
             observing = dataclasses.replace(
                 draft,
@@ -792,11 +800,12 @@ class VisualReconstructionService:
         if not draft.provider_invocations:
             _fail(VisualServiceErrorCode.INVALID_STATE)
         record = draft.provider_invocations[-1]
+        runtime_profile = self._provider.runtime_profile
         if (
             record.is_terminal
-            or record.runtime != VISUAL_PROVIDER_IDENTITY
-            or record.model != VISUAL_PROVIDER_MODEL
-            or record.model_version != VISUAL_PROVIDER_MODEL_VERSION
+            or record.runtime != runtime_profile.identity
+            or record.model != runtime_profile.model
+            or record.model_version != runtime_profile.model_version
         ):
             _fail(VisualServiceErrorCode.INVALID_STATE)
         invocation = build_visual_provider_invocation(
@@ -809,10 +818,15 @@ class VisualReconstructionService:
             ),
             budget=record.budget,
             deadline_ms=record.deadline_ms,
+            runtime_profile=runtime_profile,
         )
         if (
             invocation.invocation_id != record.invocation_id
-            or visual_provider_input_digest(invocation) != record.input_sha256
+            or visual_provider_input_digest(
+                invocation,
+                runtime_profile=runtime_profile,
+            )
+            != record.input_sha256
         ):
             _fail(VisualServiceErrorCode.INVALID_STATE)
         return invocation

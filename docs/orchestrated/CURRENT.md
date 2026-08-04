@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-A03 is approved; S20 is complete and S30.1 is active**
+> Status: **VCAD-A03 is approved; S30.1 adapter implementation is complete and the live pilot is pending credentials**
 >
 > Updated: 2026-08-04
 >
@@ -50,9 +50,10 @@ admits the result. R1 and R2 retain the same Body/feature identities while the
 old Revision remains byte-immutable. It adds no direct MCP tool or second write
 authority; the MCP tool count remains 31.
 Visual persistence is approved under A02 and ImageSet sealing is implemented.
-A03 now authorizes a provider-neutral real cloud-VLM pilot and the planned
-expansion from the currently implemented 1–4 image envelope to as many as 16
-source images. Public product claims, Freeform, and publication remain behind
+A03 now authorizes a provider-neutral real cloud-VLM pilot. The branch candidate
+implements the expansion to 1–16 source images, sealed read-only cloud access,
+adaptive metadata-free derivatives/crops, and one concrete OpenAI Responses
+transport. Public product claims, Freeform, and publication remain behind
 A04–A06.
 
 S20.1 seals descriptor-bound local JPEG/PNG ImageSets under the additive
@@ -92,8 +93,27 @@ in-flight Provider effect, transport has a finite timeout and bounded payload/re
 retry is allowed only when non-acceptance is proved, and an unknown outcome enters recovery rather
 than a recursive retry loop. Originals remain sealed locally; Provider adapters may create
 model-specific resized images and detail crops. Sixteen is an input ceiling, not a claim that
-duplicate, blurry, or contradictory views improve reconstruction. Until the S30 implementation and
-gate land, the running S20.5 code still accepts 1–4 images and uses the deterministic fake Provider.
+duplicate, blurry, or contradictory views improve reconstruction. The S30.1 candidate now accepts
+1–16 images, but application default composition remains the deterministic fake Provider. The opt-in
+OpenAI transport is not a public product claim and has not yet made a live call because
+`OPENAI_API_KEY` is absent from this machine.
+
+The S30.1 implementation keeps originals sealed locally and produces bounded PNG derivatives. The
+quality-first OpenAI pilot profile uses 2,048 px overview long edges, permits explicit detail crops,
+and caps a source set at 16 views; `original` detail preserves the controlled derivative rather than
+blindly transmitting every original-resolution image. The derivative API can preserve a
+caller-selected dimension, hole, thread, or
+boundary crop, but automatic crop selection is not yet wired into the Provider run; the current
+OpenAI path sends overview derivatives only. One durable invocation causes at most one
+transport effect. Transport exceptions become `UNKNOWN`, reconciliation never replays the call, and
+definitive HTTP/contract failures become terminal results. Successful cloud results carry the
+request, derivative-batch, response-ID, structured-output digests, actual returned model, token
+counts, data-policy profile, and finite timeout in provenance; credentials and raw provider IDs are
+not persisted. Offline evidence is 203 visual tests passed with one real-daemon test deselected, that
+real-daemon test passed separately, affected host regression is 369 passed/1 deselected, and the full
+repository gate is 5,897 passed/119 deselected. The remaining S30.1 gate is a bounded live run on
+self-authored synthetic CAD images, followed by the small candidate comparison; it is not replaced by
+the offline transport tests.
 
 S10.4 closeout evidence is bounded to the product seam: a 3,405-node IR durable
 round-trip; four real managed-FreeCAD outcomes covering atomic rollback, the

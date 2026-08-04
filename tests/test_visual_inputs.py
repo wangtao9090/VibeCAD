@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import shutil
@@ -77,6 +78,7 @@ def _parts(tmp_path: Path) -> tuple[Path, VisualInputStore, ResourceLeaseManager
 def _request(
     *items: tuple[ImageMime, ViewRole],
     create_key: str = CREATE_KEY,
+    processing_authorization: ProcessingAuthorization = ProcessingAuthorization.LOCAL_ONLY,
 ) -> SealImageSetRequest:
     return SealImageSetRequest(
         create_key=create_key,
@@ -94,6 +96,7 @@ def _request(
         same_object=True,
         same_state=True,
         same_scale=True,
+        processing_authorization=processing_authorization,
     )
 
 
@@ -280,6 +283,41 @@ def test_seal_get_and_reopen_preserve_jpeg_png_multiview_contract(tmp_path: Path
     with Image.open(normalized_top) as image:
         assert image.mode == "RGBA"
         assert "secret" not in image.info
+
+
+def test_cloud_provider_reader_returns_exact_normalized_bytes_without_paths(tmp_path: Path) -> None:
+    root, store, _ = _parts(tmp_path)
+    source = tmp_path / "cloud.png"
+    _save_png(source, metadata=True)
+    request = _request(
+        (ImageMime.PNG, ViewRole.FRONT),
+        processing_authorization=ProcessingAuthorization.CLOUD_PROVIDER,
+    )
+    sealed = _seal_paths(store, request, (source,))
+
+    record, images = store.read_provider_images_exact(sealed.id, sealed.manifest_sha256)
+
+    assert record == sealed
+    assert len(images) == 1
+    assert hashlib.sha256(images[0]).hexdigest() == sealed.inputs[0].normalized.sha256
+    assert images[0] == (root / sealed.id / f"{sealed.inputs[0].normalized.id}.png").read_bytes()
+    with pytest.raises(VisualInputStoreError) as caught:
+        store.read_provider_images_exact(sealed.id, "0" * 64)
+    assert caught.value.code is VisualInputStoreErrorCode.CONFLICT
+
+    local_source = tmp_path / "local.png"
+    _save_png(local_source)
+    local = _seal_paths(
+        store,
+        _request(
+            (ImageMime.PNG, ViewRole.TOP),
+            create_key=OTHER_CREATE_KEY,
+        ),
+        (local_source,),
+    )
+    with pytest.raises(VisualInputStoreError) as caught:
+        store.read_provider_images_exact(local.id, local.manifest_sha256)
+    assert caught.value.code is VisualInputStoreErrorCode.CONFLICT
 
 
 def test_normalization_applies_exif_orientation_caps_edge_and_strips_metadata(
@@ -546,7 +584,7 @@ def test_hardlinked_and_oversized_sources_are_rejected_before_ingress(tmp_path: 
     assert caught.value.code is VisualInputStoreErrorCode.INVALID_INPUT
 
 
-def test_image_count_budget_is_enforced_by_request_contract() -> None:
+def test_sixteen_image_ceiling_is_enforced_by_request_contract() -> None:
     ingress = ImageIngress(
         view_role=ViewRole.UNKNOWN,
         calibration_status=CalibrationStatus.UNKNOWN,
@@ -556,7 +594,7 @@ def test_image_count_budget_is_enforced_by_request_contract() -> None:
     with pytest.raises(VisualInputStoreError) as caught:
         SealImageSetRequest(
             create_key=CREATE_KEY,
-            inputs=(ingress,) * 5,
+            inputs=(ingress,) * 17,
             unit=None,
             dimension_hints=(),
             calibration_evidence=(),

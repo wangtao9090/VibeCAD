@@ -677,7 +677,7 @@ class LocalKernelClient:
         source_paths: object,
         request_id: object | None = None,
     ) -> V2Response:
-        """Seal 1-4 local images through one path-free staging-directory FD."""
+        """Seal 1-16 local images through one path-free staging-directory FD."""
 
         self._ensure_live()
         try:
