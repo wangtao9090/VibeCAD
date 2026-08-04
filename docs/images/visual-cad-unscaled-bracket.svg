@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <defs>
+    <style>
+      .title { font: 700 30px sans-serif; fill: #111827; }
+      .label { font: 600 22px sans-serif; fill: #111827; }
+      .note { font: 18px sans-serif; fill: #4b5563; }
+      .object { fill: #dbe4ee; stroke: #111827; stroke-width: 4; }
+      .hidden { fill: none; stroke: #64748b; stroke-width: 2; stroke-dasharray: 10 8; }
+    </style>
+  </defs>
+  <rect width="1200" height="1200" fill="white"/>
+  <text x="600" y="60" text-anchor="middle" class="title">REFERENCE IMAGE — L-BRACKET</text>
+  <text x="600" y="105" text-anchor="middle" class="note">Single perspective view</text>
+
+  <path d="M 250 760 L 250 360 L 520 230 L 850 380 L 850 640 L 590 790 Z" class="object"/>
+  <path d="M 250 360 L 590 510 L 850 380 M 590 510 L 590 790" fill="none" stroke="#111827" stroke-width="4"/>
+  <path d="M 395 615 L 395 425 L 520 365 L 690 440 L 690 555 L 545 635 Z" fill="white" stroke="#111827" stroke-width="4"/>
+  <ellipse cx="735" cy="520" rx="48" ry="27" transform="rotate(24 735 520)" fill="white" stroke="#111827" stroke-width="4"/>
+  <path d="M 700 505 C 718 465, 782 470, 790 522" class="hidden"/>
+
+  <g transform="translate(230 900)">
+    <rect x="0" y="0" width="740" height="170" rx="12" fill="#fff7ed" stroke="#fb923c" stroke-width="2"/>
+    <text x="370" y="48" text-anchor="middle" class="label">NO SCALE OR DIMENSIONS PROVIDED</text>
+    <text x="370" y="94" text-anchor="middle" class="note">Hole diameter, wall thickness, depth, and absolute size are unknown</text>
+    <text x="370" y="132" text-anchor="middle" class="note">Correct outcome: ask for blocking measurements; do not create a CAD Task</text>
+  </g>
+</svg>

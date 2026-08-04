@@ -98,6 +98,10 @@ direct operation 与 ModelProgram 不是两套执行系统。direct operation �
 导入、逆向工程和仿真尚未接入。图片请求由 Codex、Claude、WorkBuddy 或其他宿主已有的多模态模型
 使用自己的订阅/API 授权完成理解，再把受控 ModelProgram 送入普通 Task Kernel。VibeCAD 不需要
 宿主模型凭据，也不会把同一图片再次上传给第二个模型。
+当前受控 image-to-CAD alpha 已对完整标注的单孔板和 sharp-shoulder 阶梯轴完成 outcome 验证；无尺度
+透视图或互相矛盾的尺寸必须在创建 Task 前停下来澄清。canonical Agent skill 随附 portable
+`ParametricDesignIR v1` authoring reference，用于生成可编辑 Sketcher/PartDesign 结果；这不代表普适
+照片重建。
 
 ## 当前公开能力（开发分支）
 

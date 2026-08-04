@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SKILL_ROOT = ROOT / "skills" / "vibecad-agent"
 SKILL_FILE = SKILL_ROOT / "SKILL.md"
 OPENAI_YAML = SKILL_ROOT / "agents" / "openai.yaml"
+PARAMETRIC_REFERENCE = SKILL_ROOT / "references" / "parametric-design-ir-v1.md"
 
 PUBLIC_TOOL_NAMES = (
     "ping",
@@ -282,6 +283,32 @@ def test_skill_routes_host_visible_images_through_the_existing_task_kernel():
     assert "absolute" in normalized and "scale" in normalized
     assert "require_review" in normalized
     assert re.search(r"api key|api token|provider credential", normalized)
+
+
+def test_skill_carries_the_portable_parametric_ir_authoring_contract():
+    _metadata, body = _skill_parts()
+    assert "references/parametric-design-ir-v1.md" in body
+    assert PARAMETRIC_REFERENCE.is_file()
+    reference = PARAMETRIC_REFERENCE.read_text(encoding="utf-8")
+    normalized = _normalized(reference)
+    for required in (
+        "create_parametric_design",
+        "parametric_design_ir",
+        "confirmed",
+        "cross_view_derived",
+        "ir_<kind>_<32 lowercase hex>",
+        "schema_version: 1",
+        "hole_locations",
+        "through_all",
+        "revolve",
+        "dof=0",
+        "valid_shape: true",
+        "solid_count: 1",
+    ):
+        assert required in normalized
+    assert "inferred" in normalized and "outside the ir" in normalized
+    assert "unscaled image" in normalized and "absolute millimetres" in normalized
+    assert len(reference.encode("utf-8")) < 20_000
 
 
 def test_skill_limits_project_import_to_the_verified_box_cylinder_envelope():

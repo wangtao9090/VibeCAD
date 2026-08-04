@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **S30.1 optional adapter and S30.2 host-owned vision pilot are complete**
+> Status: **S30.1–S30.3 are complete; S30.4 real host-path verification is next**
 >
 > Updated: 2026-08-04
 >
@@ -124,6 +124,14 @@ hole as two fully constrained sketches and Pad/Hole features. A real managed-Fre
 `awaiting_user_review` while HEAD stayed unchanged; volume `31371.681469282037 mm^3`, bounding box,
 valid-shape, and single-solid verdicts all passed, and 16,387-byte FCStd plus 8,311-byte STEP
 artifacts were materialized. The incomplete assembly image correctly stopped before Task creation.
+S30.3 adds a portable `ParametricDesignIR v1` authoring reference inside the canonical skill because
+`get_capabilities` names the value shape but intentionally does not expand its nested wire contract.
+No new MCP tool or state machine was added. The fixed fixture set now has two positive and two
+SAFE_FAILURE outcomes. The stepped-shaft image produced a fully constrained 23-constraint half
+profile and 360-degree Revolution; a real Task reached `awaiting_user_review` with HEAD unchanged,
+and volume `28792.696670150453 mm^3`, `70 × 30 × 30 mm` bounding box, valid-shape, and single-solid
+verdicts all passed. The unscaled bracket and 80/75-mm conflicting plate correctly stopped before
+Task creation.
 
 S10.4 closeout evidence is bounded to the product seam: a 3,405-node IR durable
 round-trip; four real managed-FreeCAD outcomes covering atomic rollback, the

@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S30.1` 可选 adapter 与 `VCAD-S30.2` 宿主多模态主链路 pilot 已完成**
+> 状态：**`VCAD-S30.1`–`VCAD-S30.3` 已完成；`VCAD-S30.4` 真实宿主路径验收待执行**
 >
 > 更新：2026-08-04
 >
 > 产品基线：已发布 `v0.6.1@e7dd0c0`
 >
-> 当前里程碑：`VCAD-S30.3` 单张工程图 → 可编辑基础参数模型
+> 当前里程碑：`VCAD-S30.4` WorkBuddy / Codex 真实宿主路径
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -482,26 +482,36 @@ size、MIME/magic 检查后复制到私有 immutable store。若 WorkBuddy 无�
    纵切片，不先做大模型榜单（**adapter complete；已降级为可选路径**）；
 2. `S30.2` 更新 host-neutral skill，使宿主已能看图时直接分类证据、澄清缺失信息，并走现有
    Task/ModelProgram；使用当前 Codex 对自有合成图执行首个真实 pilot（**complete**）；
-3. `S30.3` 交付单张带尺寸图 → constrained sketch → basic feature；
-4. `S30.4` 在 WorkBuddy 与 Codex 各做一次真实宿主路径；Workbench 继续作为预览/审核薄客户端，
-   不充当第二个 Agent 或模型宿主。
+3. `S30.3` 交付单张带尺寸图 → constrained sketch → basic feature（**complete**）；
+4. `S30.4` 在 WorkBuddy 与 Codex 各做一次真实宿主路径（**next**）；Workbench 继续作为预览/审核
+   薄客户端，不充当第二个 Agent 或模型宿主。
 
-S30.2 首轮宿主视觉证据（2026-08-04）：
+S30.2/S30.3 宿主视觉证据（2026-08-04）：
 
 | 输入 | 宿主观察 | 正确路由 |
 |---|---|---|
 | `docs/images/assembly-example.png` | 可读到若干外形尺寸和四个圆形特征，但单位、层厚、孔径/偏置、通孔/盲孔及单件/装配目标均不确定 | `SAFE_FAILURE`：提出 blocking questions，不创建 CAD Task |
 | `docs/images/visual-cad-single-hole-plate.png` | 明确为 mm；板 `80 × 50 × 8`；一个居中的 `Ø10 THRU` 孔；孔心 `40 × 25`；材料未指定但不阻塞几何 | 直接构造受控 ParametricDesignIR/ModelProgram，进入 `REQUIRE_REVIEW` Task |
+| `docs/images/visual-cad-stepped-shaft.png` | 明确为 mm；总长 70；三段长度 25/30/15；同轴直径 Ø30/Ø20/Ø12；明确 sharp shoulders 且无圆角/倒角/螺纹 | 构造完全约束半剖面并 360° Revolve，进入 `REQUIRE_REVIEW` Task |
+| `docs/images/visual-cad-unscaled-bracket.png` | 可见 L 形与孔，但绝对尺寸、厚度、孔径/位置和深度均未知 | `SAFE_FAILURE`：请求 blocking measurements，不创建 CAD Task |
+| `docs/images/visual-cad-conflicting-plate.png` | 同一 overall edge 同时标注 80 mm 与 75 mm，且 3D 厚度未给出 | `SAFE_FAILURE`：要求解决尺寸冲突并补充厚度，不静默选值 |
 
 正例为本仓库自有的 1,200 × 1,200 合成工程图，标注在宿主视野内清晰可读，因此没有放大或额外裁剪；
 识别由当前 Codex 多模态会话完成，不需要 API key，也没有经 VibeCAD 再次上传图片。该证据只证明
-宿主对这两例的正确事实分流，不把单次视觉输出升级成普适重建质量声明。
+宿主对这些固定例的正确事实分流，不把单次视觉输出升级成普适重建质量声明。
 
 正例随后通过现有 Task Kernel 在真实受管 FreeCAD 中生成两个 `DoF=0` 的完全约束草图，以及 Pad +
 Through-All Hole。Task 停在 `awaiting_user_review` 且项目 HEAD 未推进；体积
 `31371.681469282037 mm^3`、`80 × 50 × 8 mm` 包围盒、有效 BRep 与单实体四项 verifier verdict 均为
 `pass`，候选产生 16,387-byte FCStd 和 8,311-byte STEP。该一次性 outcome 复用既有 integration rig，
 没有新增 benchmark runner 或视觉状态机。
+
+S30.3 阶梯轴正例通过 skill 内 portable `ParametricDesignIR v1` authoring reference 构造严格 IR；这是因为
+`get_capabilities` 会发现 `create_parametric_design`/`parametric_design_ir`，但不会展开 nested wire contract。
+该 reference 随 skill 分发，没有增加第 39 个工具。真实受管 FreeCAD 结果为一个 `DoF=0`、23 个无冲突
+约束的半剖面草图与 360° Revolution；Task=`awaiting_user_review`、HEAD 不变，体积
+`28792.696670150453 mm^3`、`70 × 30 × 30 mm` bbox、有效 BRep、单实体全部 `pass`，候选产生
+12,579-byte FCStd 与 6,722-byte STEP。无尺度和冲突两个负例均在 Task 创建前停止。
 
 产品门：
 
@@ -716,18 +726,17 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-S30.1 可选 cloud adapter 与 S30.2 宿主多模态 pilot 已完成。执行 S30.3：把已验证的宿主
-confirmed/inferred/unknown 分流扩展到带孔安装板、阶梯轴、无尺度和尺寸冲突固定样例，并只通过现有
-create_task → submit_model_program → verifier → require_review 路径生成 CAD。不得要求 OPENAI_API_KEY，
-不得把宿主附件重复上传给另一个模型，不得把模型输出当成 CAD truth。不新增 observation ingress、
-图片 Resource URI、第二状态机或 benchmark runner；WorkBuddy 附件识别留到 S30.4 真实宿主验收。
-仍不进入 Freeform、发布或第二 CAD 控制面。
+S30.1–S30.3 已完成。执行 S30.4：分别在 Codex 与本机 WorkBuddy 中，让宿主实际接收工程图附件、
+读取 canonical skill/reference、调用已安装的 VibeCAD stdio MCP，并验证正例停在 require_review、负例
+停在 Task 创建前。先检查项目 canonical skill 是否被两个宿主发现，以及 WorkBuddy 所选模型是否能读取
+图片；若宿主不能访问附件或 skill，再补最薄的安装/适配，不修改 Task Kernel、图片 Resource URI 或
+Provider 权威。不得要求 OPENAI_API_KEY，不进入 Freeform、发布或第二 CAD 控制面。
 ```
 
 执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
 为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。在 A02 获批时，S20.0 只完成
 合同设计；当前 S20.1–S20.5 已实现本地持久化和 deterministic fake/interface-ready 路径，S30.1 已
-实现 opt-in OpenAI transport，但不是产品主线；S30.2 由宿主现有多模态通道执行真实识别。
+实现 opt-in OpenAI transport，但不是产品主线；S30.2/S30.3 由宿主现有多模态通道执行固定样例。
 
 ## 11. Material event ledger
 
@@ -751,6 +760,7 @@ create_task → submit_model_program → verifier → require_review 路径生�
 | `VCAD-E15` | `VCAD-A03` 与 S30.1 implementation gate | 将 source envelope 扩展为 1–16；原图 sealed read-only，Provider 只收到 bounded metadata-free PNG overview/crop；cloud invocation 单 effect、异常为 UNKNOWN 且 reconcile 不重放；落地第一个 quality-first OpenAI Responses/Structured Outputs transport 与完整 execution provenance | 203 visual passed/1 deselected，real daemon 1 passed；affected host 369 passed/1 deselected；full 5,897 passed/119 deselected；Ruff/format/compile/diff gate；恢复动作是执行 bounded live pilot | 本机无 `OPENAI_API_KEY`，尚无真实模型 outcome；默认仍 deterministic fake；clarification answer 值、proposal/CAD translation、WorkBuddy 直接附件和 A04–A06 均未完成 |
 | `VCAD-E16` | 用户重申 VibeCAD 是 Codex/Claude/WorkBuddy 的 Agent-first CAD 能力层，并授权继续推进 | 宿主多模态理解成为图片到 CAD 主线；现有 Task/ModelProgram 是默认执行入口；OpenAI adapter 保留为可选、非默认、非发布阻塞路径；VibeCAD 不要求宿主 API key | canonical skill focused RED 后补齐 host-owned image workflow；恢复动作是用当前 Codex 分析 `docs/images/assembly-example.png`，再决定是否具备进入 CAD Task 的足够证据 | WorkBuddy 与 Codex 的正式 image-attachment host verification、A04–A06 尚未完成；宿主未把原图 byte/hash 提交给 VibeCAD 时不宣称完整视觉 provenance |
 | `VCAD-E17` | S30.2 host-owned vision outcome gate | 当前 Codex 对不完整装配图正确 SAFE_FAILURE，对自有单孔板工程图提取完整 confirmed facts；后者只经现有 Task/ModelProgram 进入真实受管 FreeCAD | 两个完全约束草图；Pad + Through-All Hole；Task=`awaiting_user_review` 且 HEAD 不变；体积、bbox、valid shape、solid count 全部通过；FCStd 16,387 bytes、STEP 8,311 bytes；34 focused/package tests passed、9 deselected，Skill validation、Ruff、format、diff gate 通过；恢复动作是执行 S30.3 固定样例集 | 仅证明当前两个 fixture；阶梯轴、无尺度/冲突固定例及 WorkBuddy attachment host outcome 尚待 S30.3/S30.4；未保存宿主原图 byte/hash 为 VibeCAD durable evidence |
+| `VCAD-E18` | S30.3 fixed-fixture outcome gate | canonical skill 增加 portable ParametricDesignIR v1 authoring reference，不改变 MCP 工具数；宿主完成阶梯轴正例与无尺度/冲突负例分流 | 阶梯轴：`DoF=0`、23 constraints、360° Revolution；Task=`awaiting_user_review` 且 HEAD 不变；四项 verifier 全 pass；FCStd 12,579 bytes、STEP 6,722 bytes；负例均未创建 Task；35 focused/package tests passed、9 deselected，Skill validation、Ruff、format、diff gate 通过；恢复动作是执行 S30.4 WorkBuddy/Codex public host path | 尚未证明 WorkBuddy/Codex 通过正式已安装 skill + stdio MCP 完整运行；直径输入在当前 IR 中以 evidence-derived 半径/shoulder offset 驱动，完整表达式参数关系留待后续 IR 版本 |
 
 ## 12. 研究依据
 

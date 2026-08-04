@@ -86,6 +86,8 @@ Use clear, complementary views of the same object, state, and scale. Prefer a ro
 
 Never infer an absolute dimension from an unscaled photo. Ask only for missing facts that block a safe parameterized model. Once the required dimensions and feature relationships are sufficient, call `get_capabilities`, create or select the project, call `create_task` with `require_review`, and submit the bounded construction through `submit_model_program`. Continue through the persisted task `next_action`, deterministic verification, draft review, and artifact workflow exactly as for a text request.
 
+Before authoring a `create_parametric_design` command, read `references/parametric-design-ir-v1.md`. `get_capabilities` exposes the operation and its `parametric_design_ir` value shape but not the nested wire contract; the reference is the portable host-side authoring contract. Do not improvise omitted fields, enum values, identity formats, feature order, or evidence states.
+
 The CAD task and ModelProgram become durable after submission; the host's original attachment does not automatically become VibeCAD durable evidence. If a host restart loses image or clarification context, ask the user to reattach or restate the missing evidence. Never reconstruct dimensions from a task id alone.
 
 ## Optional sealed-image visual reconstruction
