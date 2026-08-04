@@ -103,8 +103,14 @@ WorkBuddy 5.3.5 + GLM-5.2 已完成真实多轮、重启恢复、Release 摘要�
 因此该精确 Profile 可以描述为 `host-verified`；不要把它扩展为 Claude/Codex 或所有 WorkBuddy
 模型都已认证。
 
-当前 38-tool visual 开发分支还对 GLM-5V-Turbo 完成了一个完整尺寸单孔板 outcome。WorkBuddy
-手写大 ModelProgram 时，应按 canonical Skill 把完整对象写入四字段项目本地 JSON，再调用
+当前 38-tool visual 开发分支还对 GLM-5V-Turbo 完成了完整尺寸单孔板和三视图 L 型支架 outcome；
+L 型支架包含同平面两个 Ø6 通孔及另一平面一个 Ø6 通孔，最终 Task 停在
+`awaiting_user_review`，四项确定性验收通过且 HEAD 不变。缺拉伸深度与 50/45 mm 视图冲突两个
+只读负例均在 Task 创建前返回 `SAFE_FAILURE`。这次多视图运行也表明模型第一次手写的 IR 仍可能
+出现冗余约束、Hole 方向或信封错误，因此“看图事实正确”不等于“首轮 wire 一定正确”；adapter、
+compiler 和 verifier 必须继续 fail closed。
+
+WorkBuddy 手写大 ModelProgram 时，应按 canonical Skill 把完整对象写入四字段项目本地 JSON，再调用
 `vibecad --workbuddy-submit .vibecad-workbuddy-request-<name>.json`。该单文件适配只补足 WorkBuddy
 对严格错误路径的呈现；资源仍走 MCP ResourceLink/`resources/read`，Task Kernel 仍是唯一执行与
 提交权威。不要授予通用 Bash/Write，只允许一个 request file 与这一条 exact command。

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#243447"/></marker><style>.shape{fill:#e8f1f8;stroke:#13293d;stroke-width:5}.dim{fill:none;stroke:#243447;stroke-width:3;marker-start:url(#arrow);marker-end:url(#arrow)}.ext{stroke:#7b8794;stroke-width:2}.center{stroke:#c43d3d;stroke-width:2;stroke-dasharray:12 8}.t{font-family:Arial,sans-serif;fill:#13293d;font-size:30px}.title{font-size:38px;font-weight:bold}.note{font-size:25px}</style></defs>
+  <rect width="1200" height="900" fill="white"/>
+  <text x="60" y="70" class="t title">L-BRACKET — RIGHT VIEW (YZ)</text>
+  <text x="60" y="112" class="t note">ALL DIMENSIONS mm · SCALE 4:1 · SAME PART / STATE / SCALE</text>
+  <rect x="260" y="190" width="400" height="480" class="shape"/>
+  <rect x="260" y="574" width="400" height="96" fill="#c9d9e6" stroke="#13293d" stroke-width="3"/>
+  <circle cx="500" cy="430" r="30" fill="white" stroke="#13293d" stroke-width="5"/>
+  <path d="M455 430 H545 M500 385 V475" class="center" fill="none"/>
+  <line x1="220" y1="190" x2="160" y2="190" class="ext"/><line x1="220" y1="670" x2="160" y2="670" class="ext"/>
+  <line x1="180" y1="190" x2="180" y2="670" class="dim"/><text x="105" y="442" class="t">60</text>
+  <line x1="260" y1="715" x2="260" y2="775" class="ext"/><line x1="660" y1="715" x2="660" y2="775" class="ext"/>
+  <line x1="260" y1="755" x2="660" y2="755" class="dim"/><text x="440" y="744" class="t">40</text>
+  <line x1="700" y1="574" x2="700" y2="670" class="dim"/><text x="720" y="633" class="t">8</text>
+  <line x1="260" y1="700" x2="500" y2="700" class="dim"/><text x="350" y="692" class="t">Y = 24</text>
+  <line x1="745" y1="670" x2="745" y2="430" class="dim"/><text x="765" y="562" class="t">Z = 30</text>
+  <path d="M710 330 L530 410" stroke="#243447" stroke-width="3" marker-end="url(#arrow)"/><text x="725" y="325" class="t">Ø6 THRU</text>
+  <text x="60" y="815" class="t note">HOLE CENTER FROM LOWER-LEFT ORIGIN: (Y,Z)=(24,30)</text>
+  <text x="60" y="855" class="t note">View index 1 · right · vertical leg mounting hole</text>
+</svg>

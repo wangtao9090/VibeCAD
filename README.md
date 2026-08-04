@@ -111,11 +111,14 @@ engineering, and simulation are not yet integrated. For an image request, the ca
 Claude, WorkBuddy, or other multimodal host performs image understanding with its own subscription
 or API authorization, then submits the resulting bounded ModelProgram through the ordinary Task
 Kernel. VibeCAD does not need the host's model credential or upload the same image to a second model.
-The current bounded image-to-CAD alpha is outcome-verified for a fully dimensioned single-hole
-plate and a sharp-shoulder stepped shaft. An unscaled perspective image or contradictory dimensions
-must stop for clarification before Task creation. The canonical Agent skill carries the portable
-`ParametricDesignIR v1` authoring reference used for editable Sketcher/PartDesign output; this is not
-a claim of universal photo reconstruction.
+The current bounded image-to-CAD alpha covers one dimension-complete mechanical extruded or
+revolved part. It can reconcile two to sixteen clean complementary views of the same object, state,
+and scale, then produce editable Sketcher/PartDesign output. Outcome evidence now includes a
+single-hole plate, a sharp-shoulder stepped shaft, and a three-view L bracket with two grouped holes
+on one plane plus one hole on another. An unresolved extrusion depth, an unscaled perspective image,
+or contradictory dimensions must stop for clarification before Task creation. The canonical Agent
+skill carries the portable `ParametricDesignIR v1` authoring reference; this remains a bounded
+mechanical workflow, not a claim of universal photo reconstruction.
 
 ## Current Public Capabilities (development branch)
 

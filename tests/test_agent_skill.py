@@ -14,12 +14,22 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 import yaml
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILL_ROOT = ROOT / "skills" / "vibecad-agent"
 SKILL_FILE = SKILL_ROOT / "SKILL.md"
 OPENAI_YAML = SKILL_ROOT / "agents" / "openai.yaml"
 PARAMETRIC_REFERENCE = SKILL_ROOT / "references" / "parametric-design-ir-v1.md"
+S35_VISUAL_FIXTURES = (
+    "visual-cad-l-bracket-front",
+    "visual-cad-l-bracket-right",
+    "visual-cad-l-bracket-top",
+    "visual-cad-depth-ambiguous-front",
+    "visual-cad-depth-ambiguous-isometric",
+    "visual-cad-conflict-front-50",
+    "visual-cad-conflict-top-45",
+)
 
 PUBLIC_TOOL_NAMES = (
     "ping",
@@ -259,6 +269,64 @@ def test_skill_routes_visual_reconstruction_without_claiming_attachment_ingress(
     for forbidden in ("path", "base64", "resource uri"):
         assert forbidden in normalized
     assert re.search(r"never|must not|禁止|不得|不能", visual, re.IGNORECASE)
+
+
+def test_skill_freezes_the_multi_view_mechanical_envelope_and_safe_failures():
+    _metadata, body = _skill_parts()
+    visual = "\n".join(_sections(body, r"host-owned image-to-cad"))
+    normalized = _normalized(visual)
+
+    for required in (
+        "two to sixteen",
+        "same object, state, and scale",
+        "evidence matrix",
+        "cross_view_derived",
+        "distinct known view roles",
+        "stop before `create_task`",
+        "extrusion depth",
+        "disagree",
+        "at most 16",
+        "multi-loop pocket",
+    ):
+        assert required in normalized
+    _paragraph_with(visual, "multi-location", "same sketch plane", "location_geometry_ids")
+
+    reference = _normalized(_read(PARAMETRIC_REFERENCE))
+    assert "1–16 nonconstruction circles" in reference
+    assert "sequential one-wire pocket sketches" in reference
+    assert "material-removal point on every declared axis" in reference
+    assert "world -y" in reference
+    assert "same parameter id" in reference
+    assert "exactly four fields" in reference
+    skill = _normalized(body)
+    assert "independent constraint set" in skill
+    assert "axis: null" in skill
+    assert "separate radius parameter" in skill
+
+
+def test_s35_visual_fixtures_are_self_contained_metadata_free_png_and_svg_pairs():
+    image_root = ROOT / "docs" / "images"
+    for stem in S35_VISUAL_FIXTURES:
+        svg = image_root / f"{stem}.svg"
+        png = image_root / f"{stem}.png"
+        assert svg.is_file() and png.is_file()
+        raw = svg.read_text(encoding="utf-8")
+        assert raw.startswith('<svg xmlns="http://www.w3.org/2000/svg"')
+        assert 'viewBox="0 0 1200 1200"' in raw
+        with Image.open(png) as image:
+            assert image.format == "PNG"
+            assert image.size == (1200, 1200)
+            assert not image.getexif()
+            assert not image.info
+
+    positive = {
+        role: (image_root / f"visual-cad-l-bracket-{role}.svg").read_text(encoding="utf-8")
+        for role in ("front", "right", "top")
+    }
+    assert all("SCALE 4:1 · SAME PART / STATE / SCALE" in raw for raw in positive.values())
+    assert "(X1,Z1)=(22,18) · (X2,Z2)=(36,42)" in positive["front"]
+    assert "(Y,Z)=(24,30)" in positive["right"]
+    assert "constant L-section extruded 60 mm" in positive["top"]
 
 
 def test_skill_routes_host_visible_images_through_the_existing_task_kernel():

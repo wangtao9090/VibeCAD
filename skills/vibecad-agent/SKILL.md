@@ -91,6 +91,30 @@ Use clear, complementary views of the same object, state, and scale. Prefer a ro
 - `inferred`: plausible geometry not directly measured; require user confirmation when it changes the CAD result;
 - `unknown`: occluded, blurred, conflicting, or absent evidence; ask the user instead of inventing a value.
 
+Limit the verified public V1 envelope to one dimension-complete mechanical extruded or revolved
+part. Accept either one fully dimensioned view or two to sixteen clean complementary views. Use
+editable Sketcher geometry and only the bounded PartDesign feature chain described in the
+parametric reference. Do not present this as an arbitrary-photo or reverse-engineering promise.
+Before CAD creation, build a compact evidence
+matrix whose rows are the dimensions and feature relationships that affect geometry and whose
+columns name the exact source index and view role. Mark a fact `cross_view_derived` only when it
+uses at least two distinct known view roles from the same object, state, and scale. Do not treat
+duplicate views, detail crops of one source, or two unknown-role images as cross-view evidence
+merely because there is more than one file.
+
+Stop before `create_task` when two views disagree about the same dimension, when the available
+views share a silhouette but leave extrusion depth unresolved, or when a hidden feature changes
+the model without direct evidence. Ask one bounded clarification that names the conflicting or
+missing fact. Do not average conflicting dimensions, choose the more convenient view, estimate a
+depth from perspective, or submit alternative guesses as confirmed geometry.
+
+For a multi-location `hole`, group only circles on the same sketch plane that share one diameter,
+extent/depth, and direction; list every circle identity in `location_geometry_ids`. Rely on the
+compiler's separate material-removal proof for every declared hole axis, and put at most 16
+locations in one Hole feature. Use multiple sequential single-loop Pocket features when needed; do not submit a
+single multi-loop Pocket. Keep separate planes, diameters, depths, or directions as separate
+sketches and linear features.
+
 Never infer an absolute dimension from an unscaled photo. Ask only for missing facts that block a safe parameterized model. Once the required dimensions and feature relationships are sufficient, call `get_capabilities`, create or select the project, call `create_task` with `require_review`, and submit the bounded construction through `submit_model_program`. Continue through the persisted task `next_action`, deterministic verification, draft review, and artifact workflow exactly as for a text request.
 
 Before authoring a `create_parametric_design` command, read `references/parametric-design-ir-v1.md`. `get_capabilities` exposes the operation and its `parametric_design_ir` value shape but not the nested wire contract; the reference is the portable host-side authoring contract. Do not improvise omitted fields, enum values, identity formats, feature order, or evidence states.
@@ -125,7 +149,7 @@ Never generate or execute arbitrary Python/FreeCAD code. FreeCAD is the bounded 
 
 ## Unsupported and unavailable capabilities
 
-STEP and STL import unavailable in the verified current envelope; only FCStd Box/Cylinder import is supported. Do not claim `mcp_sampling`, `byok`, Workbench UI, `face/edge` selection, STL reconstruction, universal or release-verified photo reconstruction, or simulation. Host-owned image reasoning is verified only for bounded pilot fixtures when the calling multimodal host can actually see the attachments; VibeCAD-managed visual reconstruction still defaults to the deterministic fake provider, while direct cloud providers remain optional and non-default.
+STEP and STL import unavailable in the verified current envelope; only FCStd Box/Cylinder import is supported. Do not claim `mcp_sampling`, `byok`, Workbench UI, `face/edge` selection, STL reconstruction, universal or release-verified photo reconstruction, or simulation. Host-owned image reasoning is limited to the dimension-complete single-part V1 envelope when the calling multimodal host can actually see the attachments; ordinary unscaled photos remain outside this envelope. VibeCAD-managed visual reconstruction still defaults to the deterministic fake provider, while direct cloud providers remain optional and non-default.
 
 The calling host owns model selection, subscription or API token use, and every associated charge. VibeCAD does not provide a hidden model, Sampling backend, or BYOK billing service.
 
@@ -150,12 +174,18 @@ surface merely to make deferred discovery work.
 For WorkBuddy 5.3.5, keep project, task, read, review, ResourceLink, and
 `resources/read` operations on MCP, but submit a large handwritten ModelProgram
 through the released file adapter so strict contract failures are not collapsed
-to a generic `-32603`. Write one project-local file named
+to a generic `-32603`. This WorkBuddy-specific rule overrides the generic
+`submit_model_program` instruction above: do not try MCP submission first and do
+not fall back to it after writing the request file. Write one project-local file named
 `.vibecad-workbuddy-request.json` or
 `.vibecad-workbuddy-request-<name>.json` with exactly
 `schema_version`, `task_id`, `expected_generation`, and `program`; `program` is
-the complete ModelProgram object, not an escaped string. Then invoke only the
-released executable's bounded command:
+the complete ModelProgram object, not an escaped string. The file root is never
+the bare ModelProgram. Before writing, validate that each profile uses an
+independent constraint set, every non-Revolve feature has `axis: null`, and a
+Hole sketch's diameter constraints reuse the same parameter identity as the
+Hole feature's `diameter`; do not introduce a separate radius parameter. Then
+invoke only the released executable's bounded command:
 
 ```text
 vibecad --workbuddy-submit .vibecad-workbuddy-request-<name>.json

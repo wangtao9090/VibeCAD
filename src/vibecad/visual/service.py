@@ -37,7 +37,7 @@ from vibecad.visual.adoption import (
     validate_visual_adoption_receipt,
     validate_visual_adoption_withdrawal_receipt,
 )
-from vibecad.visual.contracts import ProcessingAuthorization
+from vibecad.visual.contracts import ImageSet, ProcessingAuthorization, ViewRole
 from vibecad.visual.drafts import (
     AdoptedSourceProvenance,
     BaseHeadBinding,
@@ -63,6 +63,7 @@ from vibecad.visual.provider import (
 from vibecad.visual.reconstruction import (
     ReconstructionProposal,
     ReconstructionStatus,
+    VisualClaimStatus,
     VisualObservation,
     clarification_answer_for_question,
     decode_reconstruction_proposal,
@@ -213,6 +214,40 @@ def _last_error(*, code: str, phase: str, digest: str | None = None) -> Reconstr
         retryable=False,
         diagnostic_digest=digest or _error_digest(code=code, phase=phase),
     )
+
+
+def _validate_provider_source_bindings(
+    image_set: ImageSet,
+    value: VisualObservation | ReconstructionProposal,
+) -> None:
+    """Bind provider source indexes and cross-view claims to the sealed ImageSet."""
+
+    if type(image_set) is not ImageSet or type(value) not in {
+        VisualObservation,
+        ReconstructionProposal,
+    }:
+        _fail(VisualServiceErrorCode.PROVIDER_RECEIPT_MISMATCH)
+    observation = value if type(value) is VisualObservation else value.observation
+    if (
+        observation.image_set_id != image_set.id
+        or observation.image_set_manifest_sha256 != image_set.manifest_sha256
+    ):
+        _fail(VisualServiceErrorCode.PROVIDER_RECEIPT_MISMATCH)
+    source_count = len(image_set.inputs)
+    for claim in observation.claims:
+        if any(index >= source_count for index in claim.source_indices):
+            _fail(VisualServiceErrorCode.PROVIDER_RECEIPT_MISMATCH)
+        if claim.status is not VisualClaimStatus.CROSS_VIEW_DERIVED:
+            continue
+        roles = {image_set.inputs[index].view_role for index in claim.source_indices}
+        if (
+            not image_set.same_object
+            or not image_set.same_state
+            or not image_set.same_scale
+            or ViewRole.UNKNOWN in roles
+            or len(roles) < 2
+        ):
+            _fail(VisualServiceErrorCode.PROVIDER_RECEIPT_MISMATCH)
 
 
 class VisualReconstructionService:
@@ -993,6 +1028,34 @@ class VisualReconstructionService:
         receipt = _result_digest(result)
         if result.state is RuntimeLifecycleState.SUCCEEDED:
             output = VisualProviderOutput.from_mapping(result.output)
+            try:
+                image_set = self._inputs.get(draft.image_set_id)
+                _validate_provider_source_bindings(image_set, output.value)
+            except (VisualInputStoreError, VisualServiceError):
+                updated = dataclasses.replace(
+                    record,
+                    lifecycle=RuntimeLifecycleState.FAILED,
+                    start_receipt_sha256=start_digest,
+                    result_sha256=receipt,
+                    output_sha256=None,
+                    diagnostic_digest=status_digest,
+                )
+                successor = dataclasses.replace(
+                    draft,
+                    generation=draft.generation + 1,
+                    status=ReconstructionStatus.FAILED,
+                    provider_invocations=draft.provider_invocations[:-1] + (updated,),
+                    last_error=_last_error(
+                        code="provider.source_binding_invalid",
+                        phase="result",
+                        digest=receipt,
+                    ),
+                )
+                return self._drafts.compare_and_set(
+                    draft.reconstruction_id,
+                    draft.generation,
+                    successor,
+                )
             payloads = ()
             if type(output.value) is VisualObservation:
                 observation = reconstruction_payload(output.value)

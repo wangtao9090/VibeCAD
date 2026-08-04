@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S30.1`–`VCAD-S30.3` 已完成；`VCAD-S30.4` 真实宿主路径验收待执行**
+> 状态：**`VCAD-S30.1`–`VCAD-S35` 已完成；S40 / Freeform / 发布未授权**
 >
 > 更新：2026-08-04
 >
 > 产品基线：已发布 `v0.6.1@e7dd0c0`
 >
-> 当前里程碑：`VCAD-S30.4` WorkBuddy / Codex 真实宿主路径
+> 当前里程碑：`VCAD-S35` Multi-view Mechanical V2 已完成
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -550,6 +550,29 @@ S30.4 使用本机 WorkBuddy 5.3.5 / GLM-5V-Turbo 完成同一单孔板正例。
 退出门：一个 L 形支架正例完成可编辑重建；“相同前视图但深度不同”和“互相矛盾视图”
 两个负例必须 SAFE_FAILURE 或进入澄清，隐藏结构不能静默升级为 confirmed。
 
+S35 outcome（2026-08-04）：
+
+- sealed/provider 结果的 `source_image_indices` 现在必须真实存在于绑定 ImageSet；
+  `cross_view_derived` 还要求 same-object/state/scale 和至少两个不同的已知 view role；
+- compiler 允许一个 Hole 在同平面共享直径、深度/extent 与方向的 1–16 个圆，并对每个声明轴分别
+  证明真实材料移除；multi-loop Pocket 继续 fail closed；
+- 三张自有 1,200 × 1,200 L 型支架正投影得到三个 `DoF=0` 草图、Pad、XZ 平面双孔与 YZ 平面单孔；
+  Task `task_d17e24e1cad5f4f67a4c4408975100a7` generation 9 为
+  `awaiting_user_review`，bbox `50 × 40 × 60 mm`、体积 `38681.4159868246 mm³`、valid BRep 与
+  single solid 均 pass，FCStd/STEP 分别为 24,051/13,715 bytes，HEAD 保持 base Revision；
+- 只读 GLM-5V-Turbo 对缺少拉伸深度和 front/top `50/45 mm` 冲突都返回 `SAFE_FAILURE`，问题分别为
+  “拉伸深度是多少 mm？”和“overall width 是 45 mm 还是 50 mm？”，没有 CAD 写权限；
+- 结案视觉审阅发现原正例夹具的印刷比例和孔位基准标注不够明确；当前三图已统一为 4:1，并显式
+  给出 lower-left-origin `(X,Z)` / `(Y,Z)` 坐标。新的无答案提示、只读 GLM-5V-Turbo 会话返回
+  `PASS`、全部精确尺寸/孔位、零冲突和零 blocking unknown；它只复核当前图片，不冒充第二次 CAD 写入；
+- WorkBuddy 的视觉事实提取正确，但第一次手写 IR 有 bare request envelope、Hole `axis`/方向和冗余
+  约束问题；strict adapter/compiler 拒绝后只做有界合同修正。因此本门证明固定 outcome，不声称
+  zero-repair agent authoring 或普通照片重建；
+- settled gate 为 57 focused、5,920 repository non-slow、2 个真实 managed-FreeCAD outcome，另有
+  repository-wide Ruff、changed-file format、compileall、diff、Skill validator、Twine、fresh-wheel
+  import 与 source/sdist/standalone-Skill byte parity。候选发行物仅保存在本地，未触发 tag/PyPI/
+  GitHub Release。
+
 ### VCAD-S40 — Guided Photo V3
 
 用户能力：上传带比例尺的普通实物照片，按系统指导补拍或回答隐藏结构问题，获得受限类别
@@ -686,7 +709,7 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 | `VCAD-A01` | 批准本整体计划并开始 S10 可逆实现 | **已批准** |
 | `VCAD-A02` | 批准 ReconstructionDraft/image store、retention/delete、durable-root 与 public contract | **已批准** |
 | `VCAD-A03` | 批准真实外部视觉 Provider、数据处理与费用边界 | **已批准；2026-08-04** |
-| `VCAD-A04` | 根据 pilot 结果冻结公开支持包络和 V1 发布声明 | **已到达；待用户批准** |
+| `VCAD-A04` | 根据 pilot 结果冻结公开支持包络和 V1 发布声明 | **已批准；2026-08-04** |
 | `VCAD-A05` | 启动 Freeform，批准其输出类型与验收合同 | 未到达 |
 | `VCAD-A06` | tag/PyPI/GitHub Release 或其他公开发布 | 未到达 |
 
@@ -742,17 +765,18 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-S30.1–S30.4 已完成。停止扩展当前 validator/host fixture，并请求 `VCAD-A04`：冻结公开 V1 支持包络
-为“有清晰单位和完整尺寸的单个机械拉伸件/回转件，输出可编辑 Sketcher + bounded PartDesign，所有
-confirmed 尺寸与 BRep/单实体必须经 deterministic verifier；无尺度、冲突、遮挡或隐藏结构必须澄清或
-SAFE_FAILURE”。A04 未批准前不启动 S35 多视图、新 public claim、Freeform 或发布。
+S35 已完成并停在批准边界：公开 V1 支持有清晰单位和完整尺寸的单个机械拉伸件/回转件，以及
+2–16 张同一物体/状态/尺度的干净互补视图；输出为可编辑 Sketcher + bounded PartDesign，confirmed
+尺寸、BRep 和单实体均经 deterministic verifier。无尺度、冲突、遮挡或隐藏结构必须澄清或
+SAFE_FAILURE。下一步需要新的产品决策：`VCAD-A05` 才能启动 Freeform，`VCAD-A06` 才能发布；
+普通照片 S40 也未授权。
 ```
 
 执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
 为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。在 A02 获批时，S20.0 只完成
 合同设计；当前 S20.1–S20.5 已实现本地持久化和 deterministic fake/interface-ready 路径，S30.1 已
-实现 opt-in OpenAI transport，但不是产品主线；S30.2–S30.4 已由 Codex/WorkBuddy 宿主多模态通道
-完成固定样例，下一产品门是 `VCAD-A04`。
+实现 opt-in OpenAI transport，但不是产品主线；S30.2–S35 已由 Codex/WorkBuddy 宿主多模态通道
+完成固定样例。下一产品门为 `VCAD-A05`（Freeform）或 `VCAD-A06`（发布）；S40 需另行授权。
 
 ## 11. Material event ledger
 
@@ -778,6 +802,8 @@ SAFE_FAILURE”。A04 未批准前不启动 S35 多视图、新 public claim、F
 | `VCAD-E17` | S30.2 host-owned vision outcome gate | 当前 Codex 对不完整装配图正确 SAFE_FAILURE，对自有单孔板工程图提取完整 confirmed facts；后者只经现有 Task/ModelProgram 进入真实受管 FreeCAD | 两个完全约束草图；Pad + Through-All Hole；Task=`awaiting_user_review` 且 HEAD 不变；体积、bbox、valid shape、solid count 全部通过；FCStd 16,387 bytes、STEP 8,311 bytes；34 focused/package tests passed、9 deselected，Skill validation、Ruff、format、diff gate 通过；恢复动作是执行 S30.3 固定样例集 | 仅证明当前两个 fixture；阶梯轴、无尺度/冲突固定例及 WorkBuddy attachment host outcome 尚待 S30.3/S30.4；未保存宿主原图 byte/hash 为 VibeCAD durable evidence |
 | `VCAD-E18` | S30.3 fixed-fixture outcome gate | canonical skill 增加 portable ParametricDesignIR v1 authoring reference，不改变 MCP 工具数；宿主完成阶梯轴正例与无尺度/冲突负例分流 | 阶梯轴：`DoF=0`、23 constraints、360° Revolution；Task=`awaiting_user_review` 且 HEAD 不变；四项 verifier 全 pass；FCStd 12,579 bytes、STEP 6,722 bytes；负例均未创建 Task；35 focused/package tests passed、9 deselected，Skill validation、Ruff、format、diff gate 通过；恢复动作是执行 S30.4 WorkBuddy/Codex public host path | 尚未证明 WorkBuddy/Codex 通过正式已安装 skill + stdio MCP 完整运行；直径输入在当前 IR 中以 evidence-derived 半径/shoulder offset 驱动，完整表达式参数关系留待后续 IR 版本 |
 | `VCAD-E19` | S30.4 WorkBuddy host-path gate | WorkBuddy 5.3.5 / GLM-5V-Turbo 读取真实 fixture 与 canonical skill/reference；raw stdio 排除大参数限制；新增单文件、no-follow、owner-bound 的 `--workbuddy-submit` 适配，仅复用现有 validator 与 LocalAgentClient，不增加 MCP/Task/CAD 权威 | Task `task_4a5520dd7e3b9289eacf873565f71dd4` generation 9、`awaiting_user_review`、HEAD 不变；80 × 50 × 8 bbox、31371.681469282037 mm³ volume、valid shape、one solid 全 pass；FCStd 16,337 bytes、STEP 8,311 bytes；真实权限限于 fixture/skill、一个 request file、一个 exact command 与六个 MCP 动作；恢复动作是完成回归并请求 `VCAD-A04` | 仅证明固定 dimensioned single-image fixture；普通照片、多视图、遮挡/隐藏结构、公开 V1 claim 与 S35 仍需 `VCAD-A04` |
+| `VCAD-E20` | 用户批准 `VCAD-A04` | 冻结公开 V1 支持包络并激活 S35 Multi-view Mechanical V2；允许 2–16 张同一物体/状态/尺度的干净互补视图进入既有 Agent-first 路径 | 恢复锚点 `a7bb34f`；当前分支 `codex/visual-cad-m0`；下一门是 L 形支架正例、深度歧义/冲突 SAFE_FAILURE、真实 FreeCAD/宿主结果 | S40 普通照片、Freeform、sculpture、发布与新的 durable/public authority 均未授权 |
+| `VCAD-E21` | `VCAD-A04` 与 S35 outcome/closure gate | 冻结多图 evidence binding、1–16 同规格多孔 Hole 的逐轴材料移除证明，以及 L 型支架/两类 SAFE_FAILURE 固定结果；不新增 MCP、durable schema 或写权限 | Task `task_d17e24e1cad5f4f67a4c4408975100a7` generation 9、HEAD 不变；当前清晰坐标夹具的 answer-free Read-only WorkBuddy replay 为 PASS；57 focused、5,920 non-slow、真实 FreeCAD 2 passed；Ruff/changed-format/compile/diff/Skill/Twine/fresh-wheel/parity 全 pass；wheel SHA-256 `c9e77bf7f3df47f5ffe2c542587202e96a3c1adb4a96800e6ecf1381c9af7e68`，Skill archive SHA-256 `5de52f9253d3c12619be5214b62a46e6c722924909b15627a9eacf5ca4d2ddda`；恢复动作是停在下一批准门 | WorkBuddy 首个严格 IR 需要有界机械修正，当前 replay 只复核视觉事实，不声称 zero-repair 或第二个 E2E Task；S40、Freeform、公开发布仍分别等待新范围决策、`VCAD-A05`、`VCAD-A06` |
 
 ## 12. 研究依据
 

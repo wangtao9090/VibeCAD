@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **S30.1–S30.4 are complete; S35 awaits VCAD-A04 product-envelope approval**
+> Status: **VCAD-A04 approved; S35 Multi-view Mechanical V2 outcome complete**
 >
 > Updated: 2026-08-04
 >
@@ -27,6 +27,36 @@ the first external sculpture-host candidate, Open3D is the preferred permissive
 algorithm library, and GPL PyMeshLab remains optional pending license review.
 This research does not expand `VCAD-A02`.
 
+On 2026-08-04 the user approved `VCAD-A04`. The public V1 envelope is now
+frozen to a single dimension-complete mechanical extruded or revolved part,
+with editable Sketcher plus bounded PartDesign output and deterministic
+dimension, BRep, and single-solid verification. Unscaled, conflicting,
+occluded, or hidden structure must clarify or stop as `SAFE_FAILURE`; it must
+not be promoted to confirmed geometry. This approval activates S35 for two to
+sixteen clean complementary views of the same object, state, and scale, but it
+does not activate ordinary-photo S40, Freeform, sculpture, or publication.
+
+S35 now closes that exact outcome: a three-view L bracket reached a verified
+review draft with three fully constrained sketches, one Pad, and three proven
+through-hole axes; two negative fixture sets stopped on missing extrusion depth
+and conflicting width. WorkBuddy extracted the correct visual facts but its
+first handwritten IR required bounded strict-contract corrections, so the
+evidence does not claim zero-repair authoring.
+
+Final visual QA found that the original positive fixture itself had a mismatched
+printed scale and ambiguous hole-coordinate baselines. The settled three-view
+fixture now uses one 4:1 scale and explicit lower-left-origin coordinates. A
+fresh, answer-free, Read-only GLM-5V-Turbo replay returned `PASS`, all exact
+dimensions and hole centers, no conflicts, and no blocking unknowns. It was a
+visual-evidence replay only; it did not create or mutate a CAD Task.
+
+The settled S35 candidate passes 57 focused tests, 5,920 repository non-slow
+tests, and both real managed-FreeCAD geometry tests. Repository-wide Ruff,
+changed-file formatting, compileall, diff integrity, Skill validation, Twine,
+fresh wheel import, and source/sdist/standalone-Skill byte parity also pass.
+The local wheel, sdist, and deterministic Skill archive remain unpublished;
+`VCAD-A06` is still required before any tag, PyPI upload, or GitHub Release.
+
 The complete architecture, slices, gates, privacy boundary, validation budget,
 and recovery point are in
 [`vibecad-visual-cad.md`](vibecad-visual-cad.md). VCAD-A01 is approved and work
@@ -35,9 +65,10 @@ minimal ParametricDesignIR v1; S10.2 delivered native Sketcher objects and
 solver/DoF facts. S10.3 now compiles closed profiles into a strict single-body
 Pad/Pocket/Revolution/Hole chain, preserves feature parameter expressions and
 IR mappings across FCStd reload, and rejects invalid, multi-solid, stale, or
-no-op feature outcomes. This first compiler slice accepts exactly one live wire
-for each Pocket/Hole; multi-loop pockets and multi-location holes remain an
-explicit S35 extension. S10.4 now carries this complete IR through one hidden,
+no-op feature outcomes. S35 keeps Pocket at exactly one live wire per feature
+and admits 1–16 same-plane Hole circles only when diameter, extent/depth, and
+direction are shared; every declared axis receives its own material-removal
+proof. S10.4 carries this complete IR through one hidden,
 atomic ModelProgram/Task/Worker operation. The compiler adopts stable
 Body/feature EntityIdentity inside the same FreeCAD transaction, stabilizes
 parametric state before observation/checkpoint/export, and produces an ordinary
@@ -56,8 +87,8 @@ derivatives/crops, and one concrete OpenAI Responses transport. The user has sin
 reaffirmed the older Agent-first product boundary: Codex, Claude, WorkBuddy, or another
 calling host owns image understanding, model selection, subscription, and credentials;
 VibeCAD owns the CAD Task Kernel. The direct Provider path is therefore optional and
-non-default, not the primary image-to-CAD path or a release blocker. Public product
-claims, Freeform, and publication remain behind A04–A06.
+non-default, not the primary image-to-CAD path or a release blocker. The A04 public
+mechanical envelope is frozen; S40, Freeform, and publication remain behind A05/A06.
 
 S20.1 seals descriptor-bound local JPEG/PNG ImageSets under the additive
 `visual_inputs/` root with provenance, byte/pixel budgets, normalization, and

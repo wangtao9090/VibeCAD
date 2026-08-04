@@ -1,7 +1,7 @@
 # WorkBuddy compatibility and model-selection research
 
-> Status: real GLM-5.2 multi-turn CAD/Release and GLM-5V-Turbo image-to-CAD
-> certification passed with the bounded compatibility fixes below
+> Status: real GLM-5.2 multi-turn CAD/Release and GLM-5V-Turbo single/multi-view
+> image-to-CAD outcome certification completed with the bounded fixes and caveats below
 >
 > Evidence date: 2026-08-04
 >
@@ -65,7 +65,7 @@ capability rather than an unbounded Blob allocation.
 | `task_id`, `generation`, `next_action` | The real task reached `succeeded` at generation 14 with `next_action=none`; Revision and HEAD stayed stable through Release approval | Passed |
 | Restart recovery | Separate CLI processes resumed one WorkBuddy session, recovered the durable task and draft Release, and did not replay CAD mutations | Passed |
 | Release draft, digest approval, ZIP read | Digest-bound approval advanced only Release generation 0 -> 1 and exposed the immutable ZIP | Passed with the 60-second Worker fix |
-| Host-visible image to editable CAD | GLM-5V-Turbo read the installed Skill/reference and 1,200 px dimensioned fixture, then created two sketches plus Pad/Through-All Hole through the bounded submit adapter | Passed for the frozen single-hole-plate fixture; not universal photo reconstruction |
+| Host-visible image to editable CAD | GLM-5V-Turbo read the installed Skill/reference and dimensioned fixtures, including three complementary orthographic L-bracket views; strict compilation produced editable Pad plus three Hole locations and rejected two ambiguous/conflicting sets before Task creation | Outcome-passed for the frozen single- and multi-view fixtures; the multi-view first handwritten IR needed bounded contract corrections, so this is not a zero-repair or universal-photo claim |
 
 Sources: [WorkBuddy connector documentation](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Connector),
 [WorkBuddy model configuration](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Model),
@@ -148,6 +148,56 @@ candidate Revision, draft, `review_draft` action, and null error without a
 mutation. This certifies the frozen
 dimensioned fixture and the WorkBuddy host path; it does not certify arbitrary
 photos, unknown scale, hidden geometry, or universal visual reconstruction.
+
+### S35 multi-view outcome and authoring caveat
+
+The S35 run gave GLM-5V-Turbo three repository-owned 1,200 × 1,200 orthographic
+views and the current canonical Skill/reference. It correctly reconciled the
+same-object/state/scale evidence into an L section with `50 × 40 × 60 mm`
+overall dimensions, `8 mm` legs, two `Ø6` through holes on the XZ plane, one
+`Ø6` through hole on the YZ plane, and expected volume `38681.42 mm³`.
+
+The first handwritten submission was not accepted as a clean host-authored IR.
+WorkBuddy first tried the large MCP submission and received the known generic
+`-32603`, then wrote the bare ModelProgram instead of the adapter's four-field
+request envelope. After mechanical envelope correction, the canonical adapter
+reported `/program/operations/0/args/design/features/1/axis`; later deterministic
+compilation exposed a redundant L-profile dimension set, a wrong XZ Hole
+direction, and a separate radius/diameter identity. Broad Bash/Write permission
+for an autonomous repair was denied; the controller changed only those bounded
+strict-contract fields and did not grant general shell access.
+
+The corrected request entered a fresh `REQUIRE_REVIEW` Task
+`task_d17e24e1cad5f4f67a4c4408975100a7`. At generation 9 it was
+`awaiting_user_review`, `next_action=review_draft`, `last_error=null`, with
+candidate `revision_a6677b34e81d32284369a3b99e3f7067`; project HEAD remained
+the empty base `revision_23bf0ca98a4a7258178ae436943a7e72`. All required
+verdicts passed: bbox `[50, 40, 60]`, volume `38681.4159868246 mm³`, valid BRep,
+and one solid. The unaccepted draft contains a 24,051-byte FCStd and a
+13,715-byte STEP artifact. A separate Read-only GLM-5V-Turbo run returned
+`SAFE_FAILURE` for both missing extrusion depth and a front/top `50/45 mm`
+width conflict, with the shortest correct clarification for each and no CAD
+authority.
+
+A final adversarial Read-only replay caught a fixture-quality issue that the
+first successful run had tolerated: the top image used a different printed
+scale and the front-view `22/36` dimensions did not name their coordinate
+origin clearly. The controller treated this as invalid positive-test evidence,
+not as permission for the model to guess. The settled images now use one 4:1
+scale and explicit lower-left-origin `(X,Z)` / `(Y,Z)` hole coordinates. A new
+GLM-5V-Turbo session, without expected facts in its prompt and with only `Read`,
+returned `PASS`, the exact `50 × 40 × 60 mm` envelope, 8 mm legs, all three Ø6
+hole centers, no conflicts, and no blocking unknowns. This replay validates the
+current image facts only; the verified CAD draft remains the earlier Task and
+is not misreported as a second end-to-end write.
+
+This closes the fixed S35 product outcome while preserving an important model
+quality distinction: WorkBuddy's visual fact extraction passed, but its first
+strict IR authoring attempt did not. The Skill now makes the independent
+constraint set, Hole `axis: null`, shared diameter identity, origin-plane
+direction, and four-field adapter envelope explicit. Deterministic compilation
+and review remain mandatory; this result does not support a zero-repair rate or
+ordinary-photo claim.
 
 ## Published baseline
 

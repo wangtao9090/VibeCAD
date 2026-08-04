@@ -142,15 +142,46 @@ Supported profiles:
 | kind | parameters | extent | other rules |
 |---|---|---|---|
 | `pad` | `{"length": parameter_id}` | `length` | first feature allowed |
-| `pocket` | `{}` or `{"length": parameter_id}` | `through_all` or `length` | profile sketch |
-| `hole` | `{"diameter": parameter_id}` plus `depth` only for length | `through_all` or `length` | `hole_locations` sketch; list every nonconstruction circle in `location_geometry_ids` |
+| `pocket` | `{}` or `{"length": parameter_id}` | `through_all` or `length` | profile sketch; exactly one closed live wire per Pocket feature |
+| `hole` | `{"diameter": parameter_id}` plus `depth` only for length | `through_all` or `length` | `hole_locations` sketch; 1–16 nonconstruction circles sharing one plane, diameter, extent/depth, and direction; list every circle in `location_geometry_ids` |
 | `revolve` | `{"angle": parameter_id}` | `null` | first feature allowed; axis is `@sketch_x`, `@sketch_y`, or a construction line |
 
 Features form one linear chain: the first base is null, and every later `base_feature_id` is the
 immediately previous feature. Each sketch is consumed once. A profile must close safely and each
-feature must produce one valid solid. For a positive-Z pad on the origin XY plane, the verified
-same-plane through-hole profile uses `reversed: true`; always verify subtractive direction through
-the deterministic shape checks.
+feature must produce one valid solid. `axis` is required only for Revolve and must be `null` for
+Pad, Pocket, and Hole. `location_geometry_ids` is populated only for Hole. For a positive-Z pad on
+the origin XY plane, the verified same-plane through-hole profile uses `reversed: true`; always
+verify subtractive direction through the deterministic shape checks.
+
+Origin planes use these local axes and normals:
+
+| origin plane | sketch local X | sketch local Y | positive normal |
+|---|---|---|---|
+| `xy` | world X | world Y | world +Z |
+| `xz` | world X | world Z | world -Y |
+| `yz` | world Y | world Z | world +X |
+
+For the current Hole backend, `reversed: true` cuts along the positive sketch normal and
+`reversed: false` cuts opposite it. Thus a solid extending from the origin toward world +Y uses
+`reversed: false` for an origin-XZ Hole, while a solid extending toward world +X uses
+`reversed: true` for an origin-YZ Hole. This is a direction rule, not permission to guess where
+material lies; required shape verification remains authoritative.
+
+Sketch geometry coordinates are only deterministic starting geometry. Constraints must form one
+independent system: dimension the minimum independent outer/thickness/position facts and let the
+solver derive inner lengths. Do not constrain an outer length and its already-derived inner length
+as if both were independent. For Hole circles, use `diameter` constraints backed by the exact same
+parameter ID as the consuming Hole feature's `parameters.diameter`; do not add a separate radius
+parameter for the same observed diameter.
+
+For multi-view work, one image count does not equal one evidence count. A `cross_view_derived`
+evidence record must refer to facts produced from at least two distinct known view roles belonging
+to the same object, state, and scale. Keep a dimension or relationship out of the IR when the views
+conflict or leave it unresolved. Multiple circles may share one Hole only under the common-plane,
+common-diameter, common-extent/depth, and common-direction rule above; the compiler verifies a real
+material-removal point on every declared axis. Use separate Hole features for different planes or
+hole specifications. Use sequential one-wire Pocket sketches for multiple cutouts; do not submit a
+single multi-loop Pocket.
 
 ## ModelProgram and acceptance
 
@@ -256,3 +287,12 @@ Before submission, check all of the following:
 6. Every feature forms one linear single-solid chain and every subtractive direction is verified.
 7. All four required acceptance criteria are present with evidence-derived expected values.
 8. The final `program_json` string is compact JSON rather than pretty-printed JSON.
+9. Every cross-view fact cites distinct known view roles from one object/state/scale, with no
+   unresolved depth, hidden geometry, or dimensional conflict promoted into the IR.
+10. Every grouped Hole contains at most 16 locations with one shared plane, diameter,
+    extent/depth, and direction; every Pocket sketch has exactly one live closed wire.
+11. Every sketch dimension set is independent, every non-Revolve feature has `axis: null`, and
+    every Hole circle reuses the Hole feature's diameter parameter through a `diameter` constraint.
+12. For WorkBuddy 5.3.5, the adapter request root has exactly four fields—`schema_version`,
+    `task_id`, `expected_generation`, and the complete ModelProgram under `program`—and the same
+    program is not first sent through MCP.

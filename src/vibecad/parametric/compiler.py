@@ -43,6 +43,7 @@ _METADATA_GROUP = "VibeCAD"
 _METADATA_DOC = "Canonical VibeCAD parametric IR/index mapping"
 _MAX_METADATA_BYTES = 128 * 1024
 _MAX_ERROR_PATH = 512
+_MAX_COMPILED_HOLE_LOCATIONS = 16
 _SOLVER_RESULTS = frozenset({0, -1, -2, -3, -4, -5})
 _HEX_32 = re.compile(r"[0-9a-f]{32}\Z")
 _HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -266,6 +267,15 @@ def _preflight(session: object, design: object) -> ParametricDesignIR:
                     ParametricCompileErrorCode.UNSUPPORTED,
                     f"/sketches/{sketch_index}/geometries/{source_index}/kind",
                 )
+    for feature_index, feature in enumerate(design.features):
+        if (
+            feature.kind is FeatureKind.HOLE
+            and len(feature.location_geometry_ids) > _MAX_COMPILED_HOLE_LOCATIONS
+        ):
+            _raise(
+                ParametricCompileErrorCode.UNSUPPORTED,
+                f"/features/{feature_index}/location_geometry_ids",
+            )
     return design
 
 
@@ -314,10 +324,125 @@ def _require_supported_feature_profile(
     *,
     path: str = "",
 ) -> None:
-    """Keep subtractive v1 outcomes unambiguous until per-wire proof exists."""
+    """Keep multi-loop pockets closed until every pocket loop has its own proof."""
 
-    if kind in {FeatureKind.POCKET, FeatureKind.HOLE} and wire_count != 1:
+    if kind is FeatureKind.POCKET and wire_count != 1:
         _raise(ParametricCompileErrorCode.UNSUPPORTED, path)
+
+
+def _require_hole_location_cuts(
+    FreeCAD: object,
+    sketch_object: object,
+    previous: object,
+    result: object,
+    *,
+    location_geometry_ids: tuple[str, ...],
+    depth_mm: float | None,
+    path: str = "",
+) -> None:
+    """Prove that every declared hole axis removes material from the prior solid.
+
+    A total volume decrease is insufficient for a multi-location Hole: one valid
+    bore could otherwise hide a missed location.  Probe a bounded set of points
+    along each declared sketch-normal axis and require at least one point that is
+    inside the previous solid and outside the resulting solid.
+    """
+
+    try:
+        before_shape = previous.Shape  # type: ignore[attr-defined]
+        after_shape = result.Shape  # type: ignore[attr-defined]
+        placement = sketch_object.Placement  # type: ignore[attr-defined]
+        normal = placement.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
+        normal_length = float(normal.Length)
+        span = float(before_shape.BoundBox.DiagonalLength)
+        sketch_metadata = _read_metadata(sketch_object, required=True)
+        geometry_entries = _sequence(sketch_metadata["geometries"], maximum=256)
+    except Exception:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE, path)
+    if (
+        not math.isfinite(normal_length)
+        or normal_length <= 0
+        or not math.isfinite(span)
+        or span <= 0
+    ):
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE, path)
+    try:
+        unit_normal = FreeCAD.Vector(
+            float(normal.x) / normal_length,
+            float(normal.y) / normal_length,
+            float(normal.z) / normal_length,
+        )
+    except Exception:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE, path)
+    geometry_index_by_id: dict[str, int] = {}
+    for entry in geometry_entries:
+        try:
+            data = _exact_mapping(entry, {"id", "indices", "type_ids", "construction"})
+            geometry_id = _text(data["id"], _IR_ID)
+            indices = _sequence(data["indices"], maximum=1)
+            type_ids = _sequence(data["type_ids"], maximum=1)
+            construction = _sequence(data["construction"], maximum=1)
+        except ParametricCompileError:
+            raise
+        except Exception:
+            _raise(ParametricCompileErrorCode.FEATURE_FAILURE, path)
+        if (
+            len(indices) == 1
+            and type(indices[0]) is int
+            and indices[0] >= 0
+            and type_ids == ["Part::GeomCircle"]
+            and construction == [False]
+        ):
+            geometry_index_by_id[geometry_id] = indices[0]
+    scan_offsets = tuple(-span + (2.0 * span * index / 64.0) for index in range(65))
+    near_plane_offsets = tuple(
+        sign * span * fraction
+        for sign in (-1.0, 1.0)
+        for fraction in (2e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 0.25, 0.5)
+    )
+    local_offsets: tuple[float, ...] = ()
+    if depth_mm is not None:
+        if not math.isfinite(depth_mm) or depth_mm <= 0:
+            _raise(ParametricCompileErrorCode.FEATURE_FAILURE, path)
+        local_offsets = tuple(
+            sign * depth_mm * fraction
+            for sign in (-1.0, 1.0)
+            for fraction in (0.001, 0.01, 0.1, 0.25, 0.5, 0.75, 0.999)
+        )
+    tolerance = max(1.0, span) * 1e-9
+
+    def probe(origin: object, offset: float) -> object:
+        return origin + FreeCAD.Vector(
+            float(unit_normal.x) * offset,
+            float(unit_normal.y) * offset,
+            float(unit_normal.z) * offset,
+        )
+
+    for location_index, geometry_id in enumerate(location_geometry_ids):
+        geometry_index = geometry_index_by_id.get(geometry_id)
+        if geometry_index is None:
+            _raise(
+                ParametricCompileErrorCode.FEATURE_FAILURE,
+                f"{path}/location_geometry_ids/{location_index}",
+            )
+        try:
+            local_center = sketch_object.Geometry[geometry_index].Center
+            center = placement.multVec(local_center)
+            removed = any(
+                before_shape.isInside(probe(center, offset), tolerance, False)
+                and not after_shape.isInside(probe(center, offset), tolerance, False)
+                for offset in (*local_offsets, *near_plane_offsets, *scan_offsets)
+            )
+        except Exception:
+            _raise(
+                ParametricCompileErrorCode.FEATURE_FAILURE,
+                f"{path}/location_geometry_ids/{location_index}",
+            )
+        if not removed:
+            _raise(
+                ParametricCompileErrorCode.FEATURE_FAILURE,
+                f"{path}/location_geometry_ids/{location_index}",
+            )
 
 
 def _revolution_axis_token(sketch: ParametricSketch, axis: str) -> str:
@@ -1180,6 +1305,27 @@ def _validate_feature_metadata(
     if _feature_expression_engine(obj, set(expected_expressions)) != expected_expressions:
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
 
+    if kind is FeatureKind.HOLE and len(locations) > 1:
+        if actual_base is None:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        try:
+            FreeCAD, _Part, _Sketcher = _load_freecad_modules()
+        except ParametricCompileError:
+            raise
+        except Exception:
+            _raise(ParametricCompileErrorCode.CAD_FAILURE)
+        _require_hole_location_cuts(
+            FreeCAD,
+            profile,
+            actual_base,
+            obj,
+            location_geometry_ids=locations,
+            depth_mm=(
+                _quantity_value(obj, "Depth") if extent == FeatureExtent.LENGTH.value else None
+            ),
+            path=f"/features/{feature_index}",
+        )
+
     facts = [
         ParametricEntityFact("parametric.feature.extent", "none" if extent is None else extent),
         ParametricEntityFact("parametric.feature.index", feature_index),
@@ -1188,6 +1334,8 @@ def _validate_feature_metadata(
         ParametricEntityFact("parametric.shape_valid", True),
         ParametricEntityFact("parametric.solid_count", 1),
     ]
+    if kind is FeatureKind.HOLE:
+        facts.append(ParametricEntityFact("parametric.hole.location_count", len(locations)))
     for name, _, _, target, _ in bindings:
         expected_type = "App::PropertyAngle" if target == "Angle" else "App::PropertyLength"
         try:

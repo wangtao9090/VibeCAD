@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from contextlib import contextmanager
 from dataclasses import replace
@@ -191,6 +192,355 @@ def _rectangle_design() -> ParametricDesignIR:
                 parameters={"length": DEPTH},
                 evidence_ids=(EVIDENCE,),
                 extent=FeatureExtent.LENGTH,
+            ),
+        ),
+    )
+
+
+def _multi_hole_design() -> ParametricDesignIR:
+    base = _rectangle_design()
+    diameter_id = _id("parameter", 20)
+    x_left_id = _id("parameter", 21)
+    x_right_id = _id("parameter", 22)
+    y_id = _id("parameter", 23)
+    location_ids = (_id("geometry", 20), _id("geometry", 21))
+    parameters = base.parameters + tuple(
+        DesignParameter(
+            id=parameter_id,
+            name=name,
+            kind=ParameterKind.LENGTH,
+            value=value,
+            unit=DesignUnit.MM,
+            evidence_ids=(EVIDENCE,),
+            minimum=0.1,
+            maximum=1_000,
+            public=public,
+        )
+        for parameter_id, name, value, public in (
+            (diameter_id, "Hole diameter", 6, True),
+            (x_left_id, "Left hole X", 15, True),
+            (x_right_id, "Right hole X", 45, True),
+            (y_id, "Hole Y", 20, True),
+        )
+    )
+    origin = _reference("@origin", ReferencePoint.CENTER)
+    constraints: list[SketchConstraint] = []
+    for index, (geometry_id, x_parameter_id) in enumerate(
+        zip(location_ids, (x_left_id, x_right_id), strict=True)
+    ):
+        center = _reference(geometry_id, ReferencePoint.CENTER)
+        constraints.extend(
+            (
+                SketchConstraint(
+                    id=_id("constraint", 30 + index * 3),
+                    kind=ConstraintKind.DIAMETER,
+                    references=(_reference(geometry_id, ReferencePoint.WHOLE),),
+                    parameter_id=diameter_id,
+                    evidence_ids=(EVIDENCE,),
+                ),
+                SketchConstraint(
+                    id=_id("constraint", 31 + index * 3),
+                    kind=ConstraintKind.DISTANCE_X,
+                    references=(origin, center),
+                    parameter_id=x_parameter_id,
+                    evidence_ids=(EVIDENCE,),
+                ),
+                SketchConstraint(
+                    id=_id("constraint", 32 + index * 3),
+                    kind=ConstraintKind.DISTANCE_Y,
+                    references=(origin, center),
+                    parameter_id=y_id,
+                    evidence_ids=(EVIDENCE,),
+                ),
+            )
+        )
+    hole_sketch = ParametricSketch(
+        id=_id("sketch", 20),
+        name="Two mounting holes",
+        role=SketchRole.HOLE_LOCATIONS,
+        plane=SketchPlane(kind=PlaneKind.ORIGIN, origin=OriginPlane.XY),
+        geometries=tuple(
+            SketchGeometry(
+                id=geometry_id,
+                kind=GeometryKind.CIRCLE,
+                dimensions={"cx_mm": x, "cy_mm": 20, "radius_mm": 3},
+                evidence_ids=(EVIDENCE,),
+            )
+            for geometry_id, x in zip(location_ids, (15, 45), strict=True)
+        ),
+        constraints=tuple(constraints),
+        evidence_ids=(EVIDENCE,),
+    )
+    hole = PartDesignFeature(
+        id=_id("feature", 20),
+        name="Two through holes",
+        kind=FeatureKind.HOLE,
+        sketch_id=hole_sketch.id,
+        base_feature_id=base.features[-1].id,
+        parameters={"diameter": diameter_id},
+        evidence_ids=(EVIDENCE,),
+        extent=FeatureExtent.THROUGH_ALL,
+        location_geometry_ids=location_ids,
+        reversed=True,
+    )
+    return replace(
+        base,
+        parameters=parameters,
+        sketches=base.sketches + (hole_sketch,),
+        features=base.features + (hole,),
+    )
+
+
+def _multi_view_l_bracket_design() -> ParametricDesignIR:
+    evidence_id = _id("evidence", 35)
+    parameter_specs = (
+        ("width", "Overall width", 50),
+        ("depth", "Overall depth", 40),
+        ("length", "Extrusion length", 60),
+        ("thickness", "Leg thickness", 8),
+        ("hole_diameter", "Hole diameter", 6),
+        ("hole_a_x", "Horizontal hole A X", 22),
+        ("hole_a_z", "Horizontal hole A Z", 18),
+        ("hole_b_x", "Horizontal hole B X", 36),
+        ("hole_b_z", "Horizontal hole B Z", 42),
+        ("hole_c_y", "Vertical hole Y", 24),
+        ("hole_c_z", "Vertical hole Z", 30),
+    )
+    parameter_ids = {
+        key: _id("parameter", 100 + index)
+        for index, (key, _name, _value) in enumerate(parameter_specs)
+    }
+    parameters = tuple(
+        DesignParameter(
+            id=parameter_ids[key],
+            name=name,
+            kind=ParameterKind.LENGTH,
+            value=value,
+            unit=DesignUnit.MM,
+            evidence_ids=(evidence_id,),
+            minimum=0.1,
+            maximum=1_000,
+        )
+        for key, name, value in parameter_specs
+    )
+
+    profile_ids = tuple(_id("geometry", 100 + index) for index in range(6))
+    profile_points = (
+        (0, 0, 50, 0),
+        (50, 0, 50, 8),
+        (50, 8, 8, 8),
+        (8, 8, 8, 40),
+        (8, 40, 0, 40),
+        (0, 40, 0, 0),
+    )
+    profile_geometry = tuple(
+        SketchGeometry(
+            id=geometry_id,
+            kind=GeometryKind.LINE,
+            dimensions={"x1_mm": x1, "y1_mm": y1, "x2_mm": x2, "y2_mm": y2},
+            evidence_ids=(evidence_id,),
+        )
+        for geometry_id, (x1, y1, x2, y2) in zip(profile_ids, profile_points, strict=True)
+    )
+    profile_constraints: list[SketchConstraint] = []
+
+    def add_constraint(
+        kind: ConstraintKind,
+        references: tuple[SketchReference, ...],
+        parameter_key: str | None = None,
+    ) -> None:
+        profile_constraints.append(
+            SketchConstraint(
+                id=_id("constraint", 100 + len(profile_constraints)),
+                kind=kind,
+                references=references,
+                parameter_id=(None if parameter_key is None else parameter_ids[parameter_key]),
+                evidence_ids=(evidence_id,),
+            )
+        )
+
+    for index, geometry_id in enumerate(profile_ids):
+        add_constraint(
+            ConstraintKind.COINCIDENT,
+            (
+                _reference(geometry_id, ReferencePoint.END),
+                _reference(profile_ids[(index + 1) % len(profile_ids)], ReferencePoint.START),
+            ),
+        )
+    for geometry_id in (profile_ids[0], profile_ids[2], profile_ids[4]):
+        add_constraint(
+            ConstraintKind.HORIZONTAL,
+            (_reference(geometry_id, ReferencePoint.WHOLE),),
+        )
+    for geometry_id in (profile_ids[1], profile_ids[3], profile_ids[5]):
+        add_constraint(
+            ConstraintKind.VERTICAL,
+            (_reference(geometry_id, ReferencePoint.WHOLE),),
+        )
+    add_constraint(
+        ConstraintKind.COINCIDENT,
+        (
+            _reference(profile_ids[0], ReferencePoint.START),
+            _reference("@origin", ReferencePoint.CENTER),
+        ),
+    )
+    for geometry_id, parameter_key in (
+        (profile_ids[0], "width"),
+        (profile_ids[5], "depth"),
+        (profile_ids[1], "thickness"),
+        (profile_ids[4], "thickness"),
+    ):
+        add_constraint(
+            ConstraintKind.LENGTH,
+            (_reference(geometry_id, ReferencePoint.WHOLE),),
+            parameter_key,
+        )
+    profile_sketch = ParametricSketch(
+        id=_id("sketch", 100),
+        name="L bracket profile",
+        role=SketchRole.PROFILE,
+        plane=SketchPlane(kind=PlaneKind.ORIGIN, origin=OriginPlane.XY),
+        geometries=profile_geometry,
+        constraints=tuple(profile_constraints),
+        evidence_ids=(evidence_id,),
+    )
+
+    def hole_sketch(
+        *,
+        sketch_number: int,
+        plane: OriginPlane,
+        name: str,
+        locations: tuple[tuple[str, str, str], ...],
+    ) -> tuple[ParametricSketch, tuple[str, ...]]:
+        geometries: list[SketchGeometry] = []
+        constraints: list[SketchConstraint] = []
+        location_ids: list[str] = []
+        origin = _reference("@origin", ReferencePoint.CENTER)
+        for index, (x_key, y_key, _label) in enumerate(locations):
+            geometry_id = _id("geometry", sketch_number * 10 + index)
+            location_ids.append(geometry_id)
+            geometries.append(
+                SketchGeometry(
+                    id=geometry_id,
+                    kind=GeometryKind.CIRCLE,
+                    dimensions={
+                        "cx_mm": next(
+                            value for key, _name, value in parameter_specs if key == x_key
+                        ),
+                        "cy_mm": next(
+                            value for key, _name, value in parameter_specs if key == y_key
+                        ),
+                        "radius_mm": 3,
+                    },
+                    evidence_ids=(evidence_id,),
+                )
+            )
+            center = _reference(geometry_id, ReferencePoint.CENTER)
+            for kind, references, parameter_key in (
+                (
+                    ConstraintKind.DIAMETER,
+                    (_reference(geometry_id, ReferencePoint.WHOLE),),
+                    "hole_diameter",
+                ),
+                (ConstraintKind.DISTANCE_X, (origin, center), x_key),
+                (ConstraintKind.DISTANCE_Y, (origin, center), y_key),
+            ):
+                constraints.append(
+                    SketchConstraint(
+                        id=_id(
+                            "constraint",
+                            sketch_number * 10 + index * 3 + len(constraints) % 3,
+                        ),
+                        kind=kind,
+                        references=references,
+                        parameter_id=parameter_ids[parameter_key],
+                        evidence_ids=(evidence_id,),
+                    )
+                )
+        return (
+            ParametricSketch(
+                id=_id("sketch", sketch_number),
+                name=name,
+                role=SketchRole.HOLE_LOCATIONS,
+                plane=SketchPlane(kind=PlaneKind.ORIGIN, origin=plane),
+                geometries=tuple(geometries),
+                constraints=tuple(constraints),
+                evidence_ids=(evidence_id,),
+            ),
+            tuple(location_ids),
+        )
+
+    horizontal_holes, horizontal_location_ids = hole_sketch(
+        sketch_number=110,
+        plane=OriginPlane.XZ,
+        name="Horizontal leg holes",
+        locations=(
+            ("hole_a_x", "hole_a_z", "A"),
+            ("hole_b_x", "hole_b_z", "B"),
+        ),
+    )
+    vertical_hole, vertical_location_ids = hole_sketch(
+        sketch_number=120,
+        plane=OriginPlane.YZ,
+        name="Vertical leg hole",
+        locations=(("hole_c_y", "hole_c_z", "C"),),
+    )
+    feature_ids = tuple(_id("feature", 100 + index) for index in range(3))
+    return ParametricDesignIR(
+        id=_id("design", 35),
+        name="Three-view L bracket",
+        units=UnitSystem(),
+        body=BodyDefinition(id=_id("body", 35), name="L bracket body"),
+        evidence=(
+            DesignEvidence(
+                id=evidence_id,
+                status=DesignEvidenceStatus.CROSS_VIEW_DERIVED,
+                origin=DesignEvidenceOrigin.MULTI_VIEW,
+                source_refs=(
+                    "fixture:visual-cad-l-bracket-front:0",
+                    "fixture:visual-cad-l-bracket-right:1",
+                    "fixture:visual-cad-l-bracket-top:2",
+                ),
+                description="Confirmed dimensions reconciled across three orthographic views.",
+            ),
+        ),
+        parameters=parameters,
+        datum_planes=(),
+        sketches=(profile_sketch, horizontal_holes, vertical_hole),
+        features=(
+            PartDesignFeature(
+                id=feature_ids[0],
+                name="L bracket pad",
+                kind=FeatureKind.PAD,
+                sketch_id=profile_sketch.id,
+                base_feature_id=None,
+                parameters={"length": parameter_ids["length"]},
+                evidence_ids=(evidence_id,),
+                extent=FeatureExtent.LENGTH,
+            ),
+            PartDesignFeature(
+                id=feature_ids[1],
+                name="Two horizontal through holes",
+                kind=FeatureKind.HOLE,
+                sketch_id=horizontal_holes.id,
+                base_feature_id=feature_ids[0],
+                parameters={"diameter": parameter_ids["hole_diameter"]},
+                evidence_ids=(evidence_id,),
+                extent=FeatureExtent.THROUGH_ALL,
+                location_geometry_ids=horizontal_location_ids,
+                reversed=False,
+            ),
+            PartDesignFeature(
+                id=feature_ids[2],
+                name="Vertical through hole",
+                kind=FeatureKind.HOLE,
+                sketch_id=vertical_hole.id,
+                base_feature_id=feature_ids[1],
+                parameters={"diameter": parameter_ids["hole_diameter"]},
+                evidence_ids=(evidence_id,),
+                extent=FeatureExtent.THROUGH_ALL,
+                location_geometry_ids=vertical_location_ids,
+                reversed=True,
             ),
         ),
     )
@@ -526,6 +876,110 @@ def test_real_compiler_rolls_back_geometry_identity_and_result_root_when_adoptio
 
 
 @pytest.mark.slow
+def test_real_multi_location_hole_compiles_and_proves_every_cut() -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    session = Session()
+    session.open_document("ParametricMultiHole")
+    try:
+        compiled = compiler_module.compile_parametric_design(
+            session,
+            _multi_hole_design(),
+        )
+        stabilize_parametric_session(session)
+
+        expected_volume = 60 * 40 * 8 - 2 * math.pi * 3**2 * 8
+        assert float(compiled.body.Shape.Volume) == pytest.approx(expected_volume, abs=1e-6)
+        facts = {
+            fact.name: fact.value
+            for fact in compiler_module.parametric_entity_facts(compiled.features[-1].object)
+        }
+        assert facts["parametric.profile.wire_count"] == 2
+        assert facts["parametric.hole.location_count"] == 2
+        assert facts["parametric.shape_valid"] is True
+        assert facts["parametric.solid_count"] == 1
+    finally:
+        session.close_document()
+
+
+def test_multi_view_l_bracket_ir_preserves_three_view_evidence_and_feature_order() -> None:
+    design = _multi_view_l_bracket_design()
+
+    assert ParametricDesignIR.from_mapping(design.to_mapping()) == design
+    assert design.evidence[0].status is DesignEvidenceStatus.CROSS_VIEW_DERIVED
+    assert design.evidence[0].origin is DesignEvidenceOrigin.MULTI_VIEW
+    assert len(design.evidence[0].source_refs) == 3
+    assert tuple(feature.kind for feature in design.features) == (
+        FeatureKind.PAD,
+        FeatureKind.HOLE,
+        FeatureKind.HOLE,
+    )
+    assert tuple(len(feature.location_geometry_ids) for feature in design.features) == (
+        0,
+        2,
+        1,
+    )
+
+
+@pytest.mark.slow
+def test_real_three_view_l_bracket_is_editable_and_dimension_complete() -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    design = _multi_view_l_bracket_design()
+    session = Session()
+    session.open_document("ParametricThreeViewLBracket")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        stabilize_parametric_session(session)
+
+        expected_volume = (50 * 8 + 8 * (40 - 8)) * 60 - 3 * math.pi * 3**2 * 8
+        assert float(compiled.body.Shape.Volume) == pytest.approx(expected_volume, abs=1e-6)
+        bounds = compiled.body.Shape.BoundBox
+        assert (float(bounds.XLength), float(bounds.YLength), float(bounds.ZLength)) == (
+            50,
+            40,
+            60,
+        )
+        assert all(binding.solver.fully_constrained for binding in compiled.sketches)
+        assert all(binding.solver.dof == 0 for binding in compiled.sketches)
+        assert tuple(
+            dict(
+                (fact.name, fact.value)
+                for fact in compiler_module.parametric_entity_facts(binding.object)
+            )["parametric.hole.location_count"]
+            for binding in compiled.features[1:]
+        ) == (2, 1)
+
+        diameter_id = next(
+            parameter.id for parameter in design.parameters if parameter.name == "Hole diameter"
+        )
+        edit = compiler_module.modify_parametric_parameter(
+            session,
+            design,
+            body=compiled.body,
+            parameter_id=diameter_id,
+            value=8,
+        )
+        assert edit.before_value == pytest.approx(6)
+        assert edit.after_value == pytest.approx(8)
+        expected_edited_volume = (50 * 8 + 8 * (40 - 8)) * 60 - 3 * math.pi * 4**2 * 8
+        assert float(compiled.body.Shape.Volume) == pytest.approx(
+            expected_edited_volume,
+            abs=1e-6,
+        )
+        assert compiled.body.Shape.isValid()
+        assert len(tuple(compiled.body.Shape.Solids)) == 1
+    finally:
+        session.close_document()
+
+
+@pytest.mark.slow
 def test_real_parametric_parameter_verifier_failure_rolls_back_same_transaction() -> None:
     if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
         pytest.skip("managed FreeCAD Python was not requested")
@@ -630,21 +1084,124 @@ def test_profile_closure_requires_every_compiled_edge_in_closed_wires() -> None:
     assert caught.value.code is ParametricCompileErrorCode.PROFILE_FAILURE
 
 
-def test_subtractive_profiles_reject_multiple_wires_until_each_cut_is_proven() -> None:
-    for kind in (FeatureKind.POCKET, FeatureKind.HOLE):
-        with pytest.raises(ParametricCompileError) as caught:
-            compiler_module._require_supported_feature_profile(
-                kind,
-                2,
-                path="/features/1",
-            )
+def test_multi_loop_pockets_remain_closed_while_holes_have_per_location_proof() -> None:
+    with pytest.raises(ParametricCompileError) as caught:
+        compiler_module._require_supported_feature_profile(
+            FeatureKind.POCKET,
+            2,
+            path="/features/1",
+        )
 
-        assert caught.value.code is ParametricCompileErrorCode.UNSUPPORTED
-        assert caught.value.path == "/features/1"
+    assert caught.value.code is ParametricCompileErrorCode.UNSUPPORTED
+    assert caught.value.path == "/features/1"
 
     compiler_module._require_supported_feature_profile(FeatureKind.PAD, 2)
     compiler_module._require_supported_feature_profile(FeatureKind.REVOLVE, 2)
     compiler_module._require_supported_feature_profile(FeatureKind.HOLE, 1)
+    compiler_module._require_supported_feature_profile(FeatureKind.HOLE, 16)
+
+
+def test_multi_hole_location_limit_fails_before_cad_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert compiler_module._MAX_COMPILED_HOLE_LOCATIONS == 16
+    monkeypatch.setattr(compiler_module, "_MAX_COMPILED_HOLE_LOCATIONS", 1)
+
+    class EmptySession:
+        doc = SimpleNamespace(Objects=(), UndoMode=1)
+        transaction_started = False
+
+        @contextmanager
+        def _transaction(self, _label: str, *, claim_new_objects: bool):
+            self.transaction_started = True
+            yield
+
+    session = EmptySession()
+    with pytest.raises(ParametricCompileError) as caught:
+        compiler_module.compile_parametric_design(session, _multi_hole_design())
+
+    assert caught.value.code is ParametricCompileErrorCode.UNSUPPORTED
+    assert caught.value.path == "/features/1/location_geometry_ids"
+    assert session.transaction_started is False
+
+
+def test_multi_hole_location_proof_rejects_a_declared_axis_without_removed_material(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Vector:
+        def __init__(self, x: float, y: float, z: float) -> None:
+            self.x = x
+            self.y = y
+            self.z = z
+
+        @property
+        def Length(self) -> float:
+            return (self.x**2 + self.y**2 + self.z**2) ** 0.5
+
+        def __add__(self, other: object) -> Vector:
+            assert isinstance(other, Vector)
+            return Vector(self.x + other.x, self.y + other.y, self.z + other.z)
+
+    class Shape:
+        BoundBox = SimpleNamespace(DiagonalLength=1_000.0)
+
+        def __init__(self, *, cut_x: tuple[float, ...]) -> None:
+            self.cut_x = cut_x
+
+        def isInside(self, point: Vector, _tolerance: float, _boundary: bool) -> bool:
+            # Exercise adaptive near-plane probes: the uniform 65-point scan has
+            # no interior sample for this deliberately thin solid.
+            inside_base = abs(point.x) <= 2 and abs(point.y) <= 2 and 0 < point.z < 0.01
+            return inside_base and not any(abs(point.x - value) < 0.1 for value in self.cut_x)
+
+    placement = SimpleNamespace(
+        Rotation=SimpleNamespace(multVec=lambda value: value),
+        multVec=lambda value: value,
+    )
+    sketch = SimpleNamespace(
+        Placement=placement,
+        Geometry=(
+            SimpleNamespace(Center=Vector(-1, 0, 0)),
+            SimpleNamespace(Center=Vector(1, 0, 0)),
+        ),
+    )
+    monkeypatch.setattr(
+        compiler_module,
+        "_read_metadata",
+        lambda _obj, *, required: {
+            "geometries": [
+                {
+                    "id": _id("geometry", 20),
+                    "indices": [0],
+                    "type_ids": ["Part::GeomCircle"],
+                    "construction": [False],
+                },
+                {
+                    "id": _id("geometry", 21),
+                    "indices": [1],
+                    "type_ids": ["Part::GeomCircle"],
+                    "construction": [False],
+                },
+            ]
+        },
+    )
+    FreeCAD = SimpleNamespace(Vector=Vector)
+    previous = SimpleNamespace(Shape=Shape(cut_x=()))
+    result = SimpleNamespace(Shape=Shape(cut_x=(-1,)))
+
+    with pytest.raises(ParametricCompileError) as caught:
+        compiler_module._require_hole_location_cuts(
+            FreeCAD,
+            sketch,
+            previous,
+            result,
+            location_geometry_ids=(_id("geometry", 20), _id("geometry", 21)),
+            depth_mm=None,
+            path="/features/1",
+        )
+
+    assert caught.value.code is ParametricCompileErrorCode.FEATURE_FAILURE
+    assert caught.value.path == "/features/1/location_geometry_ids/1"
 
 
 def test_revolution_axis_tokens_preserve_sketch_axes_and_construction_order() -> None:

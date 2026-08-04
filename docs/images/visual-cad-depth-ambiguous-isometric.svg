@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <style>.shape{fill:#edf3f7;stroke:#13293d;stroke-width:5;stroke-linejoin:round}.hidden{fill:none;stroke:#7b8794;stroke-width:3;stroke-dasharray:12 9}.t{font-family:Arial,sans-serif;fill:#13293d;font-size:31px}.title{font-size:38px;font-weight:bold}.warn{fill:#a12828;font-size:30px;font-weight:bold}</style>
+  <rect width="1200" height="900" fill="white"/><text x="60" y="70" class="t title">DEPTH-AMBIGUOUS PART — UNCALIBRATED ISOMETRIC</text><text x="60" y="112" class="t">SAME OBJECT · PERSPECTIVE VIEW · NO DEPTH DIMENSION OR SCALE</text>
+  <path d="M260 280 L700 200 L860 320 L420 400 Z M260 280 L260 610 L420 735 L420 400 M420 735 L860 650 L860 320" class="shape"/>
+  <ellipse cx="555" cy="310" rx="52" ry="28" fill="white" stroke="#13293d" stroke-width="5" transform="rotate(-10 555 310)"/><path d="M555 338 L555 665" class="hidden"/>
+  <text x="220" y="805" class="warn">PERSPECTIVE LENGTH IS NOT A MILLIMETRE MEASUREMENT</text><text x="60" y="855" class="t">View index 1 · isometric · must clarify depth before Task creation</text>
+</svg>

@@ -173,6 +173,54 @@ def _sealed_image_set(
         os.close(fd)
 
 
+def _sealed_multi_image_set(
+    tmp_path: Path,
+    inputs: VisualInputStore,
+    *,
+    view_roles: tuple[ViewRole, ...],
+    same_object: bool = True,
+    same_state: bool = True,
+    same_scale: bool = True,
+):
+    request = SealImageSetRequest(
+        create_key="image_set_create_" + "9" * 32,
+        inputs=tuple(
+            ImageIngress(
+                view_role=role,
+                calibration_status=CalibrationStatus.UNKNOWN,
+                declared_mime=ImageMime.PNG,
+            )
+            for role in view_roles
+        ),
+        unit="mm",
+        dimension_hints=(),
+        calibration_evidence=(),
+        same_object=same_object,
+        same_state=same_state,
+        same_scale=same_scale,
+        processing_authorization=ProcessingAuthorization.LOCAL_ONLY,
+    )
+    descriptors: list[DescriptorSource] = []
+    fds: list[int] = []
+    try:
+        for index, _role in enumerate(view_roles):
+            source = tmp_path / f"source-{index}.png"
+            Image.new("RGB", (16, 12), (20 + index, 80, 140)).save(source, format="PNG")
+            os.chmod(source, 0o600)
+            fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
+            fds.append(fd)
+            descriptors.append(
+                DescriptorSource(
+                    fd=fd,
+                    locator=bind_visual_input_locator(request, index, os.fstat(fd)),
+                )
+            )
+        return inputs.seal(request, tuple(descriptors))
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
 def _invocation(image_set, *, generation: int = 1):
     reconstruction_id, _ = reconstruction_identity(_RECONSTRUCTION_CREATE_KEY)
     return build_visual_provider_invocation(
@@ -891,3 +939,158 @@ def test_successful_proposal_publishes_both_immutable_payloads(tmp_path: Path) -
     assert completed.observation_ref.contract_digest == proposal.observation.digest
     assert completed.proposal_ref.contract_digest == proposal.digest
     assert completed.provider_invocations[-1].output_sha256 is not None
+
+
+def test_provider_source_index_must_exist_in_the_sealed_image_set(tmp_path: Path) -> None:
+    inputs, drafts = _stores(tmp_path)
+    image_set = _sealed_image_set(tmp_path, inputs)
+    invocation = _invocation(image_set)
+    observation = VisualObservation(
+        reconstruction_id=invocation.payload["reconstruction_id"],
+        generation=invocation.payload["generation"],
+        image_set_id=image_set.id,
+        image_set_manifest_sha256=image_set.manifest_sha256,
+        invocation_id=invocation.invocation_id,
+        claims=(
+            VisualClaim(
+                name="overall.depth",
+                status=VisualClaimStatus.CONFIRMED,
+                source_indices=(1,),
+                value=8,
+                unit=VisualClaimUnit.MM,
+            ),
+        ),
+    )
+    provider = DeterministicFakeVisualProvider(
+        {
+            visual_provider_input_digest(invocation): FakeVisualFixture(
+                kind=FakeVisualOutcomeKind.OBSERVATION,
+                value=observation,
+            )
+        }
+    )
+    service = _service(inputs, drafts, provider)
+    ready = _create(service, image_set)
+
+    completed = service.run(
+        ready.reconstruction_id,
+        expected_generation=ready.generation,
+        budget=_budget(),
+        deadline_ms=2_000_000_000_000,
+    )
+
+    assert completed.status is ReconstructionStatus.FAILED
+    assert completed.last_error.code == "provider.source_binding_invalid"
+    assert completed.observation_ref is None
+    assert completed.provider_invocations[-1].lifecycle is RuntimeLifecycleState.FAILED
+
+
+@pytest.mark.parametrize(
+    ("view_roles", "same_object", "same_state", "same_scale"),
+    [
+        ((ViewRole.FRONT, ViewRole.FRONT), True, True, True),
+        ((ViewRole.FRONT, ViewRole.RIGHT), False, True, True),
+        ((ViewRole.FRONT, ViewRole.RIGHT), True, False, True),
+        ((ViewRole.FRONT, ViewRole.RIGHT), True, True, False),
+        ((ViewRole.FRONT, ViewRole.UNKNOWN), True, True, True),
+    ],
+)
+def test_cross_view_claim_requires_distinct_known_roles_and_one_object_state_scale(
+    tmp_path: Path,
+    view_roles: tuple[ViewRole, ...],
+    same_object: bool,
+    same_state: bool,
+    same_scale: bool,
+) -> None:
+    inputs, drafts = _stores(tmp_path)
+    image_set = _sealed_multi_image_set(
+        tmp_path,
+        inputs,
+        view_roles=view_roles,
+        same_object=same_object,
+        same_state=same_state,
+        same_scale=same_scale,
+    )
+    invocation = _invocation(image_set)
+    observation = VisualObservation(
+        reconstruction_id=invocation.payload["reconstruction_id"],
+        generation=invocation.payload["generation"],
+        image_set_id=image_set.id,
+        image_set_manifest_sha256=image_set.manifest_sha256,
+        invocation_id=invocation.invocation_id,
+        claims=(
+            VisualClaim(
+                name="overall.depth",
+                status=VisualClaimStatus.CROSS_VIEW_DERIVED,
+                source_indices=(0, 1),
+                value=8,
+                unit=VisualClaimUnit.MM,
+            ),
+        ),
+    )
+    provider = DeterministicFakeVisualProvider(
+        {
+            visual_provider_input_digest(invocation): FakeVisualFixture(
+                kind=FakeVisualOutcomeKind.OBSERVATION,
+                value=observation,
+            )
+        }
+    )
+    service = _service(inputs, drafts, provider)
+    ready = _create(service, image_set)
+
+    completed = service.run(
+        ready.reconstruction_id,
+        expected_generation=ready.generation,
+        budget=_budget(),
+        deadline_ms=2_000_000_000_000,
+    )
+
+    assert completed.status is ReconstructionStatus.FAILED
+    assert completed.last_error.code == "provider.source_binding_invalid"
+
+
+def test_cross_view_claim_accepts_distinct_bound_complementary_views(tmp_path: Path) -> None:
+    inputs, drafts = _stores(tmp_path)
+    image_set = _sealed_multi_image_set(
+        tmp_path,
+        inputs,
+        view_roles=(ViewRole.FRONT, ViewRole.RIGHT),
+    )
+    invocation = _invocation(image_set)
+    observation = VisualObservation(
+        reconstruction_id=invocation.payload["reconstruction_id"],
+        generation=invocation.payload["generation"],
+        image_set_id=image_set.id,
+        image_set_manifest_sha256=image_set.manifest_sha256,
+        invocation_id=invocation.invocation_id,
+        claims=(
+            VisualClaim(
+                name="overall.depth",
+                status=VisualClaimStatus.CROSS_VIEW_DERIVED,
+                source_indices=(0, 1),
+                value=8,
+                unit=VisualClaimUnit.MM,
+            ),
+        ),
+    )
+    provider = DeterministicFakeVisualProvider(
+        {
+            visual_provider_input_digest(invocation): FakeVisualFixture(
+                kind=FakeVisualOutcomeKind.OBSERVATION,
+                value=observation,
+            )
+        }
+    )
+    service = _service(inputs, drafts, provider)
+    ready = _create(service, image_set)
+
+    completed = service.run(
+        ready.reconstruction_id,
+        expected_generation=ready.generation,
+        budget=_budget(),
+        deadline_ms=2_000_000_000_000,
+    )
+
+    assert completed.status is ReconstructionStatus.READY
+    assert completed.observation_ref.contract_digest == observation.digest

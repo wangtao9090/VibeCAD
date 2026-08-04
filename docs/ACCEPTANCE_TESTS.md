@@ -520,6 +520,17 @@ WorkBuddy 5.3.5 + GLM-5.2 已完成：31-tool 严格调用、generation 14 的�
 Blob 取回，以及 ZIP 七条目完整性校验。批准没有改变 Revision 或 HEAD。VibeCAD 侧修复了
 `tools/call._meta` 兼容和 60-second Release Worker deadline。
 
+同一安装的 GLM-5V-Turbo 还完成 S35 多视图 outcome gate：三张 1,200 × 1,200 正投影视图解析为
+50 × 40 × 60 mm、8 mm 双腿和三个 Ø6 通孔；经 strict adapter/compiler 修正首轮冗余约束与 Hole
+方向后，Task `task_d17e24e1cad5f4f67a4c4408975100a7` 在 generation 9 到达
+`awaiting_user_review`。bbox、`38681.4159868246 mm³` 体积、valid shape、single solid 全部
+`pass`，HEAD 保持 base Revision。另一个只授予 Read 的运行把缺少拉伸深度和 50/45 mm 尺寸冲突
+都分流为 `SAFE_FAILURE`，没有创建 Task。该证据证明固定多视图产品纵切片，但也明确说明
+WorkBuddy 的首轮手写 IR 仍须由严格合同 fail closed，不能声称零修正成功率或普适照片重建。
+结案前的独立只读复核还发现正例夹具原先的比例和孔位基准标注不够明确；修正为三图统一 4:1、
+显式 `(X,Z)` / `(Y,Z)` 原点坐标后，新的无答案提示 GLM-5V-Turbo 复核返回 `PASS`、零冲突、零
+blocking unknown。该复核只验证当前图片事实，不冒充新的 CAD 写入或第二个 end-to-end Task。
+
 Claude/Codex 与其他 WorkBuddy 模型仍按以下同一矩阵分别执行：
 
 若之后授权模型/token 消耗，在 Claude 与 Codex 中至少各选一个真实宿主：
