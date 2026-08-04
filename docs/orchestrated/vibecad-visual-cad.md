@@ -512,6 +512,9 @@ size、MIME/magic 检查后复制到私有 immutable store。若 WorkBuddy 无�
 
 这是 derived-artifact 产品，不与 S30/F10 使用同一个“全约束参数化 CAD”承诺。
 
+FreeCAD、Blender、Open3D/PyMeshLab、Houdini、Rhino、ZBrush/3DCoat 的能力、API、费用和许可证边界已记录在
+[`VISUAL_CAD_TOOLING_RESEARCH.md`](../VISUAL_CAD_TOOLING_RESEARCH.md)。当前方向是以 Blender 作为首个外部 DCC adapter 候选、Open3D 作为优先算法库，并把 GPL 的 PyMeshLab 保持为待许可证审查的可选外部工具；该结论不构成 F20 激活或依赖批准。
+
 在 current durable v1 下只交付带 provenance 的 Mesh/SubD artifact、预览和导出。只有在
 artifact profile、Revision payload 和恢复边界另行批准后，才允许把它纳入权威 Revision。
 

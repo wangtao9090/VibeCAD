@@ -21,6 +21,12 @@ The approved design direction separates two product tracks:
   while sculpture-class outputs remain Mesh/SubD derived artifacts unless a
   later durable artifact decision admits them.
 
+The DCC/mesh tooling research is now captured in
+[`VISUAL_CAD_TOOLING_RESEARCH.md`](../VISUAL_CAD_TOOLING_RESEARCH.md): Blender is
+the first external sculpture-host candidate, Open3D is the preferred permissive
+algorithm library, and GPL PyMeshLab remains optional pending license review.
+This research does not expand `VCAD-A02`.
+
 The complete architecture, slices, gates, privacy boundary, validation budget,
 and recovery point are in
 [`vibecad-visual-cad.md`](vibecad-visual-cad.md). VCAD-A01 is approved and work
