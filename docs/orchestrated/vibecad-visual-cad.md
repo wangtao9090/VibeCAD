@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-A02` 已批准；`VCAD-S20.1`–`VCAD-S20.5` 已完成并达到 interface-ready**
+> 状态：**`VCAD-A03` 已批准；`VCAD-S20` 已完成，`VCAD-S30.1` active**
 >
 > 更新：2026-08-04
 >
 > 产品基线：已发布 `v0.6.1@e7dd0c0`
 >
-> 当前里程碑：`VCAD-S20` 完成；下一批准门为 `VCAD-A03`
+> 当前里程碑：`VCAD-S30.1` 真实多模态候选与 Provider adapter 纵切片
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -249,8 +249,8 @@ ready | needs_input | proposed | failed | rejected | adopted -> deleted tombston
 - 采纳后允许删除图片 bytes 和可重建明细，但随已采纳 CAD 项目的 durable lifetime 保留 bounded
   source hash/provenance、proposal digest 与 `adopted_task_id`；删除视觉来源不回删已经接受的 CAD
   Revision；
-- 若未来外部 Provider 已接收副本，本地删除不能撤回外部副本；该告知、外发授权和 Provider retention
-  仍属于 `A03`。
+- 若外部 Provider 已接收副本，本地删除不能撤回外部副本；该告知、外发授权和 Provider retention
+  由已批准的 `A03` 边界管理。
 
 #### Host-neutral public contract
 
@@ -267,9 +267,9 @@ CLI/Workbench 先安全复制并 seal；WorkBuddy 只有在附件 descriptor 行
 必须新增独立
 `vibecad://visual-input/...` URI 并单独批准，不能扩张既有 CAD artifact URI。
 
-`A02` 只批准 `local_only` processing authorization、上述 public/durable 合同和 deterministic fake
-provider 路径；其它 authorization 值在 A03 前 fail closed。任何
-真实图片外发、真实 Provider、费用或 provider-specific profile 仍等待 `A03`。
+`A02` 当时只批准 `local_only` processing authorization、上述 public/durable 合同和 deterministic fake
+provider 路径；其它 authorization 值在 A03 批准前均 fail closed。A03 的批准不回写已交付的 S20
+运行能力；真实图片外发、真实 Provider 与 provider-specific profile 由 S30.1 实现和验证后才可用。
 
 #### `VCAD-A02` 一次性批准内容
 
@@ -279,6 +279,34 @@ provider 路径；其它 authorization 值在 A03 前 fail closed。任何
 deterministic fake provider 的 S20.1–S20.5 实现范围。它不批准任何真实 Provider/VLM（无论本地或
 外部）、外部图片传输、真实模型费用、图片 Resource URI、
 Revision/TaskRun v2、Freeform、发布或 tag。
+
+### 4.6 `VCAD-A03` 真实 Provider 边界：已批准
+
+用户于 2026-08-04 批准以下真实模型试点边界：
+
+- 允许向云端多模态 Provider 发送图片，不要求每个任务再次弹出外发确认；个人版遵循用户选择的
+  Provider 账户条款，企业版遵循企业模型/组织的数据策略，VibeCAD 不额外宣称所有 Provider 都不用于
+  训练；
+- 允许 Provider 按其账户与服务策略保留已发送图片；用户接受删除 VibeCAD 本地副本不能撤回已经外发
+  的 Provider 副本；Provider/model/version、传输对象 digest 与所用数据策略 profile 仍进入 provenance，
+  API key 不进入 durable record 或日志；
+- pilot 不设置用户可见的美元费用、总调用次数或任务总时长预算。这里不取消工程资源边界：单个 durable
+  intent 最多拥有一个在途 Provider effect；每个网络调用必须有有限 transport timeout、输入/输出大小上限
+  和可取消路径；只有已证明 Provider 未接受请求时才允许同 intent 的一次 transport retry，未知结果进入
+  `recovery_required`，绝不递归重试；
+- 授权把当前已实现的 1–4 张 JPEG/PNG 包络向前兼容扩展为最多 16 张来源图。16 是用户输入 ceiling，
+  不是“图片越多必然越好”的质量声明；只有清晰、互补且属于同一物体/状态/尺度的视图提供增量证据，
+  重复、模糊或冲突图必须被降权、请求澄清或安全失败；
+- VibeCAD 保留本地封存原图，Provider adapter 根据已认证模型能力生成 resize derivative 和局部 detail
+  crop。高分辨率原图不会被盲目原样塞进每次请求：多数模型会按 patch/tile 预算缩放，工程图尺寸文字和
+  小孔等细节应通过高细节模式或局部裁剪保真；
+- A03 只批准 Mechanical Parametric 的真实 Provider pilot 与必要的 provider-neutral adapter、16 图输入
+  扩展和测试；不批准公开质量声明、WorkBuddy 直接附件认证、Freeform、发布或 tag。
+
+官方能力基线说明 provider-neutral 适配的必要性：OpenAI 当前视觉 API 允许很高的请求总量，但不同
+detail/model family 有不同 patch/resize 行为；Claude API 的单图、请求总量、长边与 visual-token 上限按
+模型/平台变化；Gemini 对大图按 tile/media-resolution 处理，并区分 inline 与 Files API。实现不得把任一
+厂商当前上限写成 VibeCAD durable schema 的永恒事实。
 
 ## 5. 分阶段执行计划
 
@@ -448,7 +476,8 @@ size、MIME/magic 检查后复制到私有 immutable store。若 WorkBuddy 无�
 
 顺序：
 
-1. `S30.1` 用一组自有合成 CAD 参考图比较少量真实多模态候选，不先做大模型榜单；
+1. `S30.1` 用一组自有合成 CAD 参考图比较少量真实多模态候选，并完成第一个 provider-neutral adapter
+   纵切片，不先做大模型榜单（**active；A03 已批准**）；
 2. `S30.2` 锁定一个默认 Observer 和一个 fallback，但保持合同可替换；
 3. `S30.3` 交付单张带尺寸图 → constrained sketch → basic feature；
 4. `S30.4` 在 WorkBuddy 与 VibeCAD Workbench 各做一次真实用户路径。
@@ -466,7 +495,8 @@ size、MIME/magic 检查后复制到私有 immutable store。若 WorkBuddy 无�
 
 ### VCAD-S35 — Multi-view Mechanical V2
 
-用户能力：从 2–4 张属于同一物体、同一尺度的干净视图生成跨视图一致的 2.5D 参数模型。
+用户能力：从 2–16 张属于同一物体、同一状态和同一尺度的干净互补视图生成跨视图一致的 2.5D
+参数模型；Provider adapter 可以降权重复图或分批处理，但不能静默丢弃冲突证据。
 
 新增能力：视图归属、共享坐标和尺度、跨视图轮廓/尺寸一致性、冲突诊断，以及有限的多草图
 和多 Pocket/Hole 表达。
@@ -591,13 +621,16 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 
 ## 8. 隐私、安全与模型策略
 
-- 默认 local-first；外部 Provider 必须在 `VCAD-A03` 明确数据去向、成本和用户授权；
-- 保留原图 hash；外发派生图默认去 EXIF，并最小化分辨率和裁剪范围；
+- A03 已允许默认使用用户/企业选定的云端 Provider，不逐任务重复确认；企业训练与 retention 语义以
+  组织实际配置为准，不由 VibeCAD 推断；
+- 保留原图 hash；外发派生图去 EXIF，并按模型视觉分辨率选择整图与 detail crop，不以盲目压低分辨率
+  作为隐私门；
 - 不记录 API key，不把图片 byte 写进普通日志或模型 prompt transcript；
-- Provider identity、model/version、输入 artifact、预算、deadline、输出 digest 全部进入 provenance；
+- Provider identity、model/version、输入 artifact、实际 token/请求用量、transport deadline、输出 digest
+  全部进入 provenance；这些可观测字段不是用户费用预算；
 - WorkBuddy 能直接观察图片时，也必须输出同一严格 VisualObservation；若原图 byte/hash 无法
   进入 VibeCAD，只能按“host-supplied structured intent”处理，不能宣称完整视觉 provenance；
-- 真实模型调用、费用和用户图片外发都不由 `VCAD-A01` 自动授权。
+- 真实模型调用和用户图片外发不由 `VCAD-A01` 自动授权；当前授权来自 `VCAD-A03`。
 
 ## 9. 批准门
 
@@ -605,7 +638,7 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 |---|---|---|
 | `VCAD-A01` | 批准本整体计划并开始 S10 可逆实现 | **已批准** |
 | `VCAD-A02` | 批准 ReconstructionDraft/image store、retention/delete、durable-root 与 public contract | **已批准** |
-| `VCAD-A03` | 批准真实外部视觉 Provider、数据处理与费用边界 | **下一批准门；未批准** |
+| `VCAD-A03` | 批准真实外部视觉 Provider、数据处理与费用边界 | **已批准；2026-08-04** |
 | `VCAD-A04` | 根据 pilot 结果冻结公开支持包络和 V1 发布声明 | 未到达 |
 | `VCAD-A05` | 启动 Freeform，批准其输出类型与验收合同 | 未到达 |
 | `VCAD-A06` | tag/PyPI/GitHub Release 或其他公开发布 | 未到达 |
@@ -613,6 +646,8 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 `VCAD-A01` 批准后，S10 和 S20.0 合同设计范围内的本地可逆实现、必要测试、计划内文档更新，
 以及按既有授权进行的有意 commit/branch push 无需重复请求。`VCAD-A02` 已进一步批准 S20.1–S20.5
 范围内的本地 visual 持久化、host-neutral contract 与 deterministic fake provider 实现。
+`VCAD-A03` 进一步批准 provider-neutral 的真实云端 VLM pilot、默认图片外发、Provider retention、
+最多 16 张来源图的计划内扩展，以及无需用户级费用预算但必须有限调用/无递归重试的执行边界。
 `VCAD-A01` 已覆盖本计划明确列出的 S10 ModelProgram-only IR value shape 与原子 operation；它不覆盖
 新增 direct MCP 建模工具、第二控制面或 durable schema。其它公开 schema 扩张、durable migration、
 外部图片传输、费用、发布或产品范围变化必须进入对应批准门。
@@ -647,10 +682,11 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-S20 已完成。下一产品门是准备并由用户批准 VCAD-A03，明确真实 VLM/provider、图片数据处理、
-retention、费用与失败包络后，才可运行真实图像理解。此前保持 deterministic-fake/interface-ready；
-不得声称 WorkBuddy 直接附件入口已认证，不得外发图片、添加图片 Resource URI、进入 Freeform 或
-发布，也不增加 GUI 并发 merge、第二 CAD 控制面或测试 runner。
+A03 已批准。执行 S30.1：先把 1–16 张来源图、provider capability profile、派生图/crop、有限网络调用
+和严格 VisualObservation 绑定设计成 provider-neutral 纵切片，再用自有合成 CAD 参考图比较少量真实
+多模态候选。不得把模型直接输出当成 CAD truth，不得声称 WorkBuddy 直接附件入口已认证，不得添加
+图片 Resource URI、进入 Freeform 或发布，也不增加 GUI 并发 merge、第二 CAD 控制面或通用 benchmark
+runner。
 ```
 
 执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
@@ -676,6 +712,7 @@ retention、费用与失败包络后，才可运行真实图像理解。此前�
 | `VCAD-E11` | `VCAD-A02` 与 S20.3 focused gate | 建立 identity-pinned ReconstructionDraft CAS/store、独立 runtime result port、严格 fake-provider composition 与 intent-before-start Visual Domain Service；UNKNOWN、重启及缺失 result 只 reconcile，不重放调用 | 88 focused tests；compile/Ruff/format；独立复核无 must-fix；恢复动作是执行 S20.4 | 仅 deterministic fake；answer/adopt/reject/delete 尚由 S20.4 闭合，真实模型与图片外发仍等待 A03 |
 | `VCAD-E12` | `VCAD-A02` 与 S20.4 focused gate | 回答 digest 绑定 durable clarification authority；FAILED 仅经显式、generation-pinned retry；采纳通过 application-owned trusted port 生成普通 `REQUIRE_REVIEW` CAD Task，重启只 reconcile durable adoption intent；删除以三个 durable draft 阶段包围源字节删除，再将 transient exact marker 降级为永久 ID-only retired tombstone | 297 passed、1 deselected；retired tombstone 不含 manifest/source hash 或 path，永久阻止同 ImageSet ID 重用并与 ReconstructionDraft tombstone 共享 1,024 identity 生命周期预算；恢复动作是执行 S20.5 | 仍仅 deterministic fake；真实 Provider/VLM、外部图片传输、图片 Resource URI 与 WorkBuddy 直接附件入口均未认证，继续等待后续 gate |
 | `VCAD-E13` | `VCAD-A02` 与 S20.5 public/host-interface gate | 七个严格、host-neutral reconstruction 动作经 Agent application、authenticated daemon 和 MCP 投影；非 MCP host adapter 经单一 staging-directory FD 安全封存 1–4 张 JPEG/PNG；当前分支为 38 tools，采纳仍进入普通 `REQUIRE_REVIEW` CAD Task，private build ID 保证旧 daemon 不复用新路由 | integrated 488 passed、2 deselected；sandbox-external daemon worker 1 passed；真实四图、重连及 daemon restart replay 1 passed；full repository 5,875 passed、119 deselected；固定 discovery frame 30,415 bytes；Ruff/format/compile/diff/Skill validation 通过；独立复审 P0/P1 none；恢复动作是准备 `VCAD-A03` | 仍仅 deterministic fake/interface-ready；真实 VLM 与数据策略需 A03，WorkBuddy 直接附件入口尚未验证，无图片 Resource URI |
+| `VCAD-E14` | 用户批准 `VCAD-A03` 并确认数据/费用取向 | 允许默认向用户或企业选定的云端多模态 Provider 发送图片且不逐任务确认；允许 Provider retention，并接受本地删除不能撤回远端副本；不设用户可见费用、总调用次数或总任务时长预算；批准把来源图计划包络从当前 1–4 扩展到最多 16 张 | 2026-08-04 用户决策；OpenAI、Anthropic、Gemini 官方视觉输入限制复核；工程恢复动作是执行 S30.1 provider-neutral adapter/候选 pilot | 仍需有限 transport timeout、bounded payload/result、单 intent 单在途 effect 和无递归重试；当前代码在新 gate 落地前仍为 1–4 图 deterministic fake；WorkBuddy 直接附件、A04–A06 未批准 |
 
 ## 12. 研究依据
 
@@ -683,5 +720,8 @@ retention、费用与失败包络后，才可运行真实图像理解。此前�
 - [CAD-Coder](https://arxiv.org/abs/2505.14646)：视觉到可执行 CadQuery 的当前能力和真实照片泛化限制；
 - [HistCAD](https://arxiv.org/abs/2602.19171)：显式约束、编辑可达性和整体可编辑成功；
 - [Metric3D](https://arxiv.org/abs/2307.10984)：单目尺度/深度歧义；
+- [OpenAI Images and vision](https://developers.openai.com/api/docs/guides/images-vision)：图片请求总量、detail、patch 与 resize 行为；
+- [Claude Vision](https://platform.claude.com/docs/en/build-with-claude/vision)：多图数量、单图/请求大小、视觉分辨率与 token 行为；
+- [Gemini Image understanding](https://ai.google.dev/gemini-api/docs/image-understanding)：多图、inline/Files、tile 与 media-resolution 行为；
 - `docs/ARCHITECTURE.md`：Task/Revision/Provider 权限和 durable-v1 边界；
 - `docs/WORKBUDDY_COMPATIBILITY_RESEARCH.md`：视觉观察、CAD reasoning 和确定性提交权威分离。

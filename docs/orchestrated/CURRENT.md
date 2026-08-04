@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-A02 is approved; S20.1 through S20.5 are complete and interface-ready**
+> Status: **VCAD-A03 is approved; S20 is complete and S30.1 is active**
 >
 > Updated: 2026-08-04
 >
@@ -50,8 +50,10 @@ admits the result. R1 and R2 retain the same Body/feature identities while the
 old Revision remains byte-immutable. It adds no direct MCP tool or second write
 authority; the MCP tool count remains 31.
 Visual persistence is approved under A02 and ImageSet sealing is implemented.
-Real vision providers, public product claims, Freeform, and publication remain
-behind A03–A06.
+A03 now authorizes a provider-neutral real cloud-VLM pilot and the planned
+expansion from the currently implemented 1–4 image envelope to as many as 16
+source images. Public product claims, Freeform, and publication remain behind
+A04–A06.
 
 S20.1 seals descriptor-bound local JPEG/PNG ImageSets under the additive
 `visual_inputs/` root with provenance, byte/pixel budgets, normalization, and
@@ -77,8 +79,21 @@ placing paths, filenames, base64, or image bytes on the JSON wire. The integrate
 `488 passed, 2 deselected`; the isolated real worker and real four-image reconnect/restart replay
 gates are `1 passed` each; the final repository suite is `5,875 passed, 119 deselected`; static
 checks pass and independent review reports no P0/P1 findings. The fixed discovery frame is 30,415
-bytes. This remains deterministic-fake/interface-ready only: real VLM/provider execution and its
-data policy require `VCAD-A03`, and direct WorkBuddy attachment ingress remains unverified.
+bytes. The landed S20.5 implementation remains deterministic-fake/interface-ready only: A03 now
+authorizes real VLM/provider work, but it does not become a runtime capability until the S30.1
+implementation and gate land. Direct WorkBuddy attachment ingress remains unverified.
+
+On 2026-08-04 the user approved `VCAD-A03`: cloud image transfer is allowed without a per-task
+confirmation; Provider retention is allowed under the selected personal or enterprise account
+policy; local deletion is not expected to retract an already transmitted Provider copy; and no
+user-facing dollar, call-count, or wall-clock budget is required for the pilot. Engineering safety
+limits remain mandatory but are not a product spending policy: one durable intent owns at most one
+in-flight Provider effect, transport has a finite timeout and bounded payload/result, an automatic
+retry is allowed only when non-acceptance is proved, and an unknown outcome enters recovery rather
+than a recursive retry loop. Originals remain sealed locally; Provider adapters may create
+model-specific resized images and detail crops. Sixteen is an input ceiling, not a claim that
+duplicate, blurry, or contradictory views improve reconstruction. Until the S30 implementation and
+gate land, the running S20.5 code still accepts 1–4 images and uses the deterministic fake Provider.
 
 S10.4 closeout evidence is bounded to the product seam: a 3,405-node IR durable
 round-trip; four real managed-FreeCAD outcomes covering atomic rollback, the
