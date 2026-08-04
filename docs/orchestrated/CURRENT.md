@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **S30.1–S30.3 are complete; S30.4 real host-path verification is next**
+> Status: **S30.1–S30.4 are complete; S35 awaits VCAD-A04 product-envelope approval**
 >
 > Updated: 2026-08-04
 >
@@ -132,6 +132,26 @@ profile and 360-degree Revolution; a real Task reached `awaiting_user_review` wi
 and volume `28792.696670150453 mm^3`, `70 × 30 × 30 mm` bounding box, valid-shape, and single-solid
 verdicts all passed. The unscaled bracket and 80/75-mm conflicting plate correctly stopped before
 Task creation.
+
+S30.4 closes the real WorkBuddy host path. Transparent stdio capture proved
+that 9–11 KiB ModelProgram arguments reached VibeCAD intact; the failure was not
+an MCP payload limit. WorkBuddy 5.3.5 obscured/retried strict domain failures and
+one later application-backed submission surfaced only generic `-32603`, so the
+branch adds one bounded `vibecad --workbuddy-submit` file adapter. It accepts
+only one owned, non-symlink project-local JSON request, reuses the canonical
+ModelProgram/ParametricDesignIR contracts, and calls the existing same-user
+daemon; it adds no MCP tool, Task state, CAD operation, or second authority.
+
+With permissions restricted to the fixture/Skill reads, one request-file write,
+one exact adapter command, and six named MCP operations, GLM-5V-Turbo created
+Task `task_4a5520dd7e3b9289eacf873565f71dd4`. It reached generation 9 and
+`awaiting_user_review` with no error, while HEAD remained at base Revision
+`revision_7d20d63e0b628c77c2b2aad3091cdcfd`. Bbox `80 × 50 × 8 mm`, volume
+`31371.681469282037 mm^3`, valid shape, and one solid all passed; the unaccepted
+draft contains 16,337-byte FCStd and 8,311-byte STEP artifacts. A fresh
+read-only WorkBuddy process with only `get_task` permission recovered the exact
+generation, candidate, draft, next action, and null error. This completes
+the frozen single-image alpha envelope, not general photo reconstruction.
 
 S10.4 closeout evidence is bounded to the product seam: a 3,405-node IR durable
 round-trip; four real managed-FreeCAD outcomes covering atomic rollback, the

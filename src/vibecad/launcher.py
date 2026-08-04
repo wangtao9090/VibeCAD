@@ -33,6 +33,10 @@ def _cli_uninstall() -> None:
 
 def main() -> None:
     arguments = sys.argv[1:]
+    if "--workbuddy-submit" in arguments:
+        from vibecad import workbuddy_adapter
+
+        raise SystemExit(workbuddy_adapter.handle_cli(arguments))
     if "--freecad-app" in arguments:
         from vibecad import freecad_external
 

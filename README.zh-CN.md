@@ -220,6 +220,12 @@ WorkBuddy 提示时批准这个项目级服务，等待运行时 ready 后再开
 适配层。GLM-5.2 已通过标准多轮任务，但目前只是暂定默认模型：自主 CAD 任务的 allowed tools 应
 排除运行时维护工具，`uninstall_runtime` 必须保留显式用户确认。
 
+在当前 38-tool visual 开发 profile 中，WorkBuddy 5.3.5 应把手写 ModelProgram 放入 canonical skill
+规定的四字段项目本地请求，并只执行有界命令
+`vibecad --workbuddy-submit .vibecad-workbuddy-request-<name>.json`。这会保留可能被 WorkBuddy
+折叠为 `-32603` 的精确合同路径；它不是 artifact 适配或第二执行路径：ResourceLink/Blob 继续走
+原生 MCP，原 Task Kernel 仍会重新验证并执行同一个 program。
+
 扩展首次启动需要联网获取锁定的 Python 包，并按需安装约 2–3 GB 的 FreeCAD 运行时；后续启动复用
 已验证缓存。macOS 默认数据根通常是：
 
@@ -273,6 +279,8 @@ S3-8、P0-B core、package/managed-runtime 收口、有界 G1 Workbench Alpha、
   批准与精确交付 ZIP；原生 joints、可编辑制造图、GD&T、PLM 与企业交付链仍待后续；
 - **WorkBuddy（已验证）**：WorkBuddy 5.3.5 + GLM-5.2 已完成严格本地 stdio 工具调用、持久任务/
   重启恢复、精确摘要批准与原生 PDF/ZIP Blob 读取；更广模型对比属于后续证据，不阻塞本次发布。
+  当前 visual branch 上，GLM-5V-Turbo 还通过 bounded submit adapter 把冻结的完整尺寸单孔板 fixture
+  生成了 verifier 通过的可编辑 draft；这不代表普适照片重建。
 
 G1 Workbench Alpha 已把真实 FreeCAD Qt UI 与确定性的受管启动器打入安装包。它具备恰好一个
 Workbench 与 Dock、daemon-backed refresh、相互独立的 HEAD/草案预览、verdict、精确

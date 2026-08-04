@@ -483,7 +483,7 @@ size、MIME/magic 检查后复制到私有 immutable store。若 WorkBuddy 无�
 2. `S30.2` 更新 host-neutral skill，使宿主已能看图时直接分类证据、澄清缺失信息，并走现有
    Task/ModelProgram；使用当前 Codex 对自有合成图执行首个真实 pilot（**complete**）；
 3. `S30.3` 交付单张带尺寸图 → constrained sketch → basic feature（**complete**）；
-4. `S30.4` 在 WorkBuddy 与 Codex 各做一次真实宿主路径（**next**）；Workbench 继续作为预览/审核
+4. `S30.4` 在 WorkBuddy 与 Codex 各做一次真实宿主路径（**complete**）；Workbench 继续作为预览/审核
    薄客户端，不充当第二个 Agent 或模型宿主。
 
 S30.2/S30.3 宿主视觉证据（2026-08-04）：
@@ -512,6 +512,21 @@ S30.3 阶梯轴正例通过 skill 内 portable `ParametricDesignIR v1` authoring
 约束的半剖面草图与 360° Revolution；Task=`awaiting_user_review`、HEAD 不变，体积
 `28792.696670150453 mm^3`、`70 × 30 × 30 mm` bbox、有效 BRep、单实体全部 `pass`，候选产生
 12,579-byte FCStd 与 6,722-byte STEP。无尺度和冲突两个负例均在 Task 创建前停止。
+
+S30.4 使用本机 WorkBuddy 5.3.5 / GLM-5V-Turbo 完成同一单孔板正例。透明 stdio tap 证明
+9–11 KiB ModelProgram 参数完整到达 VibeCAD，排除了“大参数传输限制”；真实差异是 WorkBuddy 会在
+若干严格 domain failure 后只向模型暴露 generic `-32603`。因此增加一个
+`vibecad --workbuddy-submit` 薄适配：只读取当前项目中一个 bounded、owner-pinned、no-follow JSON，
+复用现有 ModelProgram/ParametricDesignIR validator，并经 `LocalAgentClient` 进入原 Task Kernel；
+不增加 MCP 工具、Task 状态、CAD operation 或第二控制面。
+
+真实宿主权限只包含 fixture/skill 读取、一个指定 request file 写入、一个 exact adapter command 与六个
+指定 MCP 动作。Task `task_4a5520dd7e3b9289eacf873565f71dd4` 到达 generation 9、
+`awaiting_user_review`、`last_error=null`，HEAD 保持 base Revision
+`revision_7d20d63e0b628c77c2b2aad3091cdcfd`。bbox、volume、valid shape、solid count 全部 pass；
+候选产生 16,337-byte FCStd 与 8,311-byte STEP；一个新的只读 WorkBuddy 进程仅凭 `get_task` 又恢复了
+相同 generation/candidate/draft/next_action，未发生 mutation。该结果闭合固定单图 V1，不升级为
+任意照片重建声明。
 
 产品门：
 
@@ -671,7 +686,7 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 | `VCAD-A01` | 批准本整体计划并开始 S10 可逆实现 | **已批准** |
 | `VCAD-A02` | 批准 ReconstructionDraft/image store、retention/delete、durable-root 与 public contract | **已批准** |
 | `VCAD-A03` | 批准真实外部视觉 Provider、数据处理与费用边界 | **已批准；2026-08-04** |
-| `VCAD-A04` | 根据 pilot 结果冻结公开支持包络和 V1 发布声明 | 未到达 |
+| `VCAD-A04` | 根据 pilot 结果冻结公开支持包络和 V1 发布声明 | **已到达；待用户批准** |
 | `VCAD-A05` | 启动 Freeform，批准其输出类型与验收合同 | 未到达 |
 | `VCAD-A06` | tag/PyPI/GitHub Release 或其他公开发布 | 未到达 |
 
@@ -714,8 +729,9 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 - Revision durable v1、TaskRun artifacts 与 CAD artifact store 仍固定于 CAD candidate/FCStd/STEP；S20.0
   因此选择独立的 `visual_inputs/` 与 `reconstruction_drafts/` additive roots，不重解释现有 durable v1；
 - `releases/` 保持现状；新增 root 只做 captured-identity 的纯加法兼容，不引入全局 migration framework；
-- 当前 WorkBuddy 只验证了 VibeCAD → WorkBuddy 的资源读取；宿主主线不要求附件进入 VibeCAD，
-  但 WorkBuddy 附件 → 所选多模态模型的实际识别质量仍需 S30.4 单独验收；
+- WorkBuddy 的 ResourceLink/Blob 读取沿用 native MCP；GLM-5V-Turbo 已读取项目 skill/reference 与固定
+  单孔板图片，并通过 bounded file-submit adapter 进入同一 Task Kernel，四项 deterministic verdict
+  全 pass；该证据不覆盖普通照片、多视图、遮挡或未知尺度；
 - S10.1 已选择冻结 `ObservationSnapshot v1`、`SelectorV1` 和 `AcceptanceSpec v1`；有限的重开后
   parametric facts 在 S10.2 复用既有 entity parameter 容器，完整 feature/constraint observation 若
   将来需要则走显式 v2；
@@ -726,17 +742,17 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-S30.1–S30.3 已完成。执行 S30.4：分别在 Codex 与本机 WorkBuddy 中，让宿主实际接收工程图附件、
-读取 canonical skill/reference、调用已安装的 VibeCAD stdio MCP，并验证正例停在 require_review、负例
-停在 Task 创建前。先检查项目 canonical skill 是否被两个宿主发现，以及 WorkBuddy 所选模型是否能读取
-图片；若宿主不能访问附件或 skill，再补最薄的安装/适配，不修改 Task Kernel、图片 Resource URI 或
-Provider 权威。不得要求 OPENAI_API_KEY，不进入 Freeform、发布或第二 CAD 控制面。
+S30.1–S30.4 已完成。停止扩展当前 validator/host fixture，并请求 `VCAD-A04`：冻结公开 V1 支持包络
+为“有清晰单位和完整尺寸的单个机械拉伸件/回转件，输出可编辑 Sketcher + bounded PartDesign，所有
+confirmed 尺寸与 BRep/单实体必须经 deterministic verifier；无尺度、冲突、遮挡或隐藏结构必须澄清或
+SAFE_FAILURE”。A04 未批准前不启动 S35 多视图、新 public claim、Freeform 或发布。
 ```
 
 执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
 为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。在 A02 获批时，S20.0 只完成
 合同设计；当前 S20.1–S20.5 已实现本地持久化和 deterministic fake/interface-ready 路径，S30.1 已
-实现 opt-in OpenAI transport，但不是产品主线；S30.2/S30.3 由宿主现有多模态通道执行固定样例。
+实现 opt-in OpenAI transport，但不是产品主线；S30.2–S30.4 已由 Codex/WorkBuddy 宿主多模态通道
+完成固定样例，下一产品门是 `VCAD-A04`。
 
 ## 11. Material event ledger
 
@@ -761,6 +777,7 @@ Provider 权威。不得要求 OPENAI_API_KEY，不进入 Freeform、发布或�
 | `VCAD-E16` | 用户重申 VibeCAD 是 Codex/Claude/WorkBuddy 的 Agent-first CAD 能力层，并授权继续推进 | 宿主多模态理解成为图片到 CAD 主线；现有 Task/ModelProgram 是默认执行入口；OpenAI adapter 保留为可选、非默认、非发布阻塞路径；VibeCAD 不要求宿主 API key | canonical skill focused RED 后补齐 host-owned image workflow；恢复动作是用当前 Codex 分析 `docs/images/assembly-example.png`，再决定是否具备进入 CAD Task 的足够证据 | WorkBuddy 与 Codex 的正式 image-attachment host verification、A04–A06 尚未完成；宿主未把原图 byte/hash 提交给 VibeCAD 时不宣称完整视觉 provenance |
 | `VCAD-E17` | S30.2 host-owned vision outcome gate | 当前 Codex 对不完整装配图正确 SAFE_FAILURE，对自有单孔板工程图提取完整 confirmed facts；后者只经现有 Task/ModelProgram 进入真实受管 FreeCAD | 两个完全约束草图；Pad + Through-All Hole；Task=`awaiting_user_review` 且 HEAD 不变；体积、bbox、valid shape、solid count 全部通过；FCStd 16,387 bytes、STEP 8,311 bytes；34 focused/package tests passed、9 deselected，Skill validation、Ruff、format、diff gate 通过；恢复动作是执行 S30.3 固定样例集 | 仅证明当前两个 fixture；阶梯轴、无尺度/冲突固定例及 WorkBuddy attachment host outcome 尚待 S30.3/S30.4；未保存宿主原图 byte/hash 为 VibeCAD durable evidence |
 | `VCAD-E18` | S30.3 fixed-fixture outcome gate | canonical skill 增加 portable ParametricDesignIR v1 authoring reference，不改变 MCP 工具数；宿主完成阶梯轴正例与无尺度/冲突负例分流 | 阶梯轴：`DoF=0`、23 constraints、360° Revolution；Task=`awaiting_user_review` 且 HEAD 不变；四项 verifier 全 pass；FCStd 12,579 bytes、STEP 6,722 bytes；负例均未创建 Task；35 focused/package tests passed、9 deselected，Skill validation、Ruff、format、diff gate 通过；恢复动作是执行 S30.4 WorkBuddy/Codex public host path | 尚未证明 WorkBuddy/Codex 通过正式已安装 skill + stdio MCP 完整运行；直径输入在当前 IR 中以 evidence-derived 半径/shoulder offset 驱动，完整表达式参数关系留待后续 IR 版本 |
+| `VCAD-E19` | S30.4 WorkBuddy host-path gate | WorkBuddy 5.3.5 / GLM-5V-Turbo 读取真实 fixture 与 canonical skill/reference；raw stdio 排除大参数限制；新增单文件、no-follow、owner-bound 的 `--workbuddy-submit` 适配，仅复用现有 validator 与 LocalAgentClient，不增加 MCP/Task/CAD 权威 | Task `task_4a5520dd7e3b9289eacf873565f71dd4` generation 9、`awaiting_user_review`、HEAD 不变；80 × 50 × 8 bbox、31371.681469282037 mm³ volume、valid shape、one solid 全 pass；FCStd 16,337 bytes、STEP 8,311 bytes；真实权限限于 fixture/skill、一个 request file、一个 exact command 与六个 MCP 动作；恢复动作是完成回归并请求 `VCAD-A04` | 仅证明固定 dimensioned single-image fixture；普通照片、多视图、遮挡/隐藏结构、公开 V1 claim 与 S35 仍需 `VCAD-A04` |
 
 ## 12. 研究依据
 

@@ -259,6 +259,14 @@ canonical multi-turn task, but remains a provisional default: keep runtime
 maintenance tools outside an autonomous CAD task's allowed-tool set and require
 explicit user confirmation for `uninstall_runtime`.
 
+For the current 38-tool visual development profile, WorkBuddy 5.3.5 should
+submit a handwritten ModelProgram through the bounded project-local command
+`vibecad --workbuddy-submit .vibecad-workbuddy-request-<name>.json`; the
+canonical Skill defines the exact four-field request. This preserves actionable
+contract paths that WorkBuddy may otherwise surface only as `-32603`. It is not
+an artifact adapter or second execution path: ResourceLink/Blob delivery stays
+native MCP, and the existing Task Kernel revalidates and executes the program.
+
 On first launch, the extension needs network access to fetch locked Python packages and, when
 needed, install approximately 2–3 GB of FreeCAD runtime files. Later launches reuse the verified
 cache. The default macOS data root is typically:
@@ -322,7 +330,9 @@ editing, P2 rigid mechanical delivery, and the first WorkBuddy host integration 
   native joints, editable manufacturing drawings, GD&T, PLM, and enterprise delivery chains remain;
 - **WorkBuddy (verified)**: WorkBuddy 5.3.5 with GLM-5.2 completed strict local stdio tool use,
   durable task/restart recovery, exact digest approval, and native PDF/ZIP Blob reads; the wider
-  model comparison remains future evidence, not a release blocker.
+  model comparison remains future evidence, not a release blocker. On the current visual branch,
+  GLM-5V-Turbo also turned the frozen dimensioned plate fixture into a verified editable draft via
+  the bounded submit adapter; this is not a claim of universal photo reconstruction.
 
 The G1 Workbench Alpha packages the real FreeCAD Qt UI and its deterministic managed launcher. It
 includes one Workbench and Dock, daemon-backed refresh, separate HEAD/draft preview, verdict,

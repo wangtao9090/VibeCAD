@@ -14,11 +14,31 @@ macros, expressions, or arbitrary operations.
   geometry. Do not submit an unscaled image as absolute millimetres.
 - Every mapping is strict: include every field shown below, including required `null`, `false`,
   and empty-list values. Do not add fields.
-- Every IR-local identity is `ir_<kind>_<32 lowercase hex>`, where kind is `design`, `body`,
-  `evidence`, `parameter`, `datum`, `sketch`, `geometry`, `constraint`, or `feature`. Identities are
-  unique across the complete design.
+- Every IR-local identity is `ir_<kind>_<32 lowercase hex>`. Use the full kind names in the table
+  below; abbreviations such as `ir_param_`, `ir_geom_`, `ir_const_`, and `ir_feat_` are invalid.
+  Identities are unique across the complete design.
 - Use `schema_version: 1` on the root and every nested object. Units are exactly millimetres and
   degrees.
+
+| object | required identity prefix |
+|---|---|
+| design | `ir_design_` |
+| body | `ir_body_` |
+| evidence | `ir_evidence_` |
+| parameter | `ir_parameter_` |
+| datum plane | `ir_datum_` |
+| sketch | `ir_sketch_` |
+| geometry | `ir_geometry_` |
+| constraint | `ir_constraint_` |
+| feature | `ir_feature_` |
+
+Generate suffixes mechanically as zero-padded counters, for example
+`ir_parameter_00000000000000000000000000000001`, then increment the counter. Do not hand-write
+mnemonic or repeating hexadecimal sequences: one extra pair makes the identity invalid. Check the
+suffix length before submission. Declare each identity once, then copy that exact declared string
+into every `*_id`, `evidence_ids`, constraint reference, and feature reference; never regenerate an
+identity while writing a reference. Before serialization, confirm that every non-null referenced IR
+identity is byte-for-byte present in the declarations and that no reference has 31 or 33 hex digits.
 
 ## Root and nested shapes
 
@@ -35,8 +55,13 @@ datum_planes, sketches, features
 Each evidence record contains:
 
 ```text
-schema_version, id, status, origin, source_refs[], description|null
+schema_version, id, status, origin, source_refs[1+], description|null
 ```
+
+`source_refs` must contain at least one nonempty, unique reference. A current user instruction may
+use a stable host-local label such as `user:current_request`; an image may use the host-visible
+attachment identifier. Prefer one evidence record with multiple real source refs over redundant
+records, and never create an evidence record with an empty `source_refs` array.
 
 Each parameter contains:
 
@@ -55,9 +80,11 @@ An origin sketch plane is:
 {"schema_version":1,"kind":"origin","origin":"xy","datum_id":null}
 ```
 
-`origin` may also be `xz` or `yz`. An explicit datum plane contains `schema_version`, `id`, `name`,
-`origin_mm[3]`, unit-length orthogonal `normal[3]` and `x_axis[3]`, and `evidence_ids[]`; its sketch
-plane uses `kind: "datum"`, `origin: null`, and the exact `datum_id`.
+`origin` may also be `xz` or `yz`. Use it directly when it is sufficient and keep `datum_planes`
+empty. Create an explicit datum only when a sketch actually references it. A datum contains
+`schema_version`, `id`, `name`, `origin_mm[3]`, unit-length orthogonal `normal[3]` and `x_axis[3]`,
+and at least one `evidence_ids` entry; its sketch plane uses `kind: "datum"`, `origin: null`, and the
+exact `datum_id`. Never add an unused convenience datum.
 
 Each sketch contains:
 
@@ -91,6 +118,17 @@ Constraint reference counts are: two for `coincident`, `parallel`, `perpendicula
 evidence-backed parameter; nondimensional kinds require `parameter_id: null`. Aim for solver
 `DoF=0` without redundant, conflicting, or malformed constraints.
 
+Initial coordinates are not constraints. A closed rectangle still needs endpoint coincidences,
+horizontal/vertical constraints, width and height dimensions, and an origin anchor. For example,
+anchor one corner with a nondimensional `coincident` constraint whose two references are the
+corner line's `start` and `{schema_version: 1, target: "@origin", point: "center"}`. A circle needs
+`radius` or `diameter`; if its center is not the origin, also constrain the center in X and Y from
+`@origin`. For both `distance_x` and `distance_y`, reference order is semantic: the first reference
+must be `{schema_version: 1, target: "@origin", point: "center"}` and the second must be the circle
+geometry's `center`. Do not reverse them; a positive dimension with reversed references moves the
+circle in the negative direction. Do not submit a sketch until every consumed sketch is expected
+to solve at `DoF=0`.
+
 Each feature contains every field below:
 
 ```text
@@ -116,23 +154,105 @@ the deterministic shape checks.
 
 ## ModelProgram and acceptance
 
-Submit the design only inside one ModelProgram command:
+The object below is the complete ModelProgram root. Submit this entire object as `program_json`;
+do not submit only the operation inside `operations`. Replace `TASK_ID`, `BASE_REVISION`, the empty
+`design`, the expected values, and tolerances with values justified by the current task and evidence.
+Keep every other field, including all explicit `null`, `true`, and empty arrays/objects.
+Serialize the final `program_json` compactly, without indentation or insignificant whitespace; this
+preserves the exact contract while avoiding unnecessary host/MCP argument growth.
 
 ```json
 {
   "schema_version": 1,
-  "id": "create-editable-design",
-  "op": "create_parametric_design",
-  "target": {},
-  "args": {"design": {}},
-  "depends_on": [],
-  "preserve": [],
-  "source": "model"
+  "task_id": "TASK_ID",
+  "base_revision": "BASE_REVISION",
+  "operations": [
+    {
+      "schema_version": 1,
+      "id": "create-editable-design",
+      "op": "create_parametric_design",
+      "target": {},
+      "args": {"design": {}},
+      "preserve": [],
+      "source": "model",
+      "depends_on": []
+    }
+  ],
+  "acceptance": {
+    "schema_version": 1,
+    "id": "accept-image-derived-design",
+    "criteria": [
+      {
+        "schema_version": 1,
+        "id": "expected-bounding-box",
+        "kind": "geometry",
+        "check": "bbox",
+        "target": "body",
+        "expected": [80, 50, 8],
+        "tolerance": 0.05,
+        "parameters": {"unit": "mm"},
+        "required": true
+      },
+      {
+        "schema_version": 1,
+        "id": "expected-volume",
+        "kind": "geometry",
+        "check": "volume",
+        "target": "body",
+        "expected": 31371.6814693,
+        "tolerance": 0.1,
+        "parameters": {"unit": "mm^3"},
+        "required": true
+      },
+      {
+        "schema_version": 1,
+        "id": "valid-shape",
+        "kind": "topology",
+        "check": "valid_shape",
+        "target": "body",
+        "expected": true,
+        "tolerance": null,
+        "parameters": {},
+        "required": true
+      },
+      {
+        "schema_version": 1,
+        "id": "one-solid",
+        "kind": "topology",
+        "check": "solid_count",
+        "target": "body",
+        "expected": 1,
+        "tolerance": null,
+        "parameters": {},
+        "required": true
+      }
+    ]
+  }
 }
 ```
 
-Replace the empty design with the complete strict IR. Bind the enclosing ModelProgram to the exact
-task id and current base revision. For image-derived mechanical parts, require at least geometry
-`bbox` and `volume` (with finite tolerances) plus topology `valid_shape: true` and `solid_count: 1`.
-Do not accept a draft merely because the operation returned `ok`; inspect all verifier verdicts and
-keep the project HEAD unchanged until explicit review acceptance.
+The operation object shown in `operations` is one ModelCommand, not a complete ModelProgram. The
+strict ModelProgram root has exactly `schema_version`, `task_id`, `base_revision`, `operations`, and
+`acceptance`. Its `task_id` and `base_revision` must exactly match the current persisted task. The
+strict acceptance root has exactly `schema_version`, `id`, and `criteria`; every criterion has
+exactly `schema_version`, `id`, `kind`, `check`, `target`, `expected`, `tolerance`, `parameters`, and
+`required`.
+
+For image-derived mechanical parts, require at least geometry `bbox` and `volume` with justified
+finite tolerances plus topology `valid_shape: true` and `solid_count: 1`. Compute volume from the
+confirmed design intent, including every subtractive feature; do not copy the sample numbers unless
+they are correct for the current part. Do not accept a draft merely because the operation returned
+`ok`; inspect all verifier verdicts and keep the project HEAD unchanged until explicit review
+acceptance.
+
+Before submission, check all of the following:
+
+1. The submitted object is the complete ModelProgram root, not a ModelCommand or bare IR.
+2. Every IR identity uses a full allowed prefix and 32 lowercase hexadecimal characters.
+3. Every evidence record has at least one source ref; every parameter, datum, dimensional constraint,
+   and feature has the required evidence binding.
+4. Every nested strict object includes its required fields, including explicit nulls and empties.
+5. Every sketch consumed by a feature is closed where required, fully constrained, and anchored.
+6. Every feature forms one linear single-solid chain and every subtractive direction is verified.
+7. All four required acceptance criteria are present with evidence-derived expected values.
+8. The final `program_json` string is compact JSON rather than pretty-printed JSON.

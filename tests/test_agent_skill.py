@@ -294,9 +294,27 @@ def test_skill_carries_the_portable_parametric_ir_authoring_contract():
     for required in (
         "create_parametric_design",
         "parametric_design_ir",
+        "the complete modelprogram root",
+        "modelcommand, not a complete modelprogram",
+        '"task_id": "task_id"',
+        '"base_revision": "base_revision"',
+        '"operations"',
+        '"acceptance"',
         "confirmed",
         "cross_view_derived",
         "ir_<kind>_<32 lowercase hex>",
+        "ir_parameter_",
+        "ir_geometry_",
+        "ir_constraint_",
+        "ir_feature_",
+        "zero-padded counters",
+        "copy that exact declared string",
+        "byte-for-byte present in the declarations",
+        "31 or 33 hex digits",
+        "source_refs[1+]",
+        "user:current_request",
+        "never add an unused convenience datum",
+        "serialize the final `program_json` compactly",
         "schema_version: 1",
         "hole_locations",
         "through_all",
@@ -308,7 +326,47 @@ def test_skill_carries_the_portable_parametric_ir_authoring_contract():
         assert required in normalized
     assert "inferred" in normalized and "outside the ir" in normalized
     assert "unscaled image" in normalized and "absolute millimetres" in normalized
+    for abbreviated_prefix in ("ir_param_", "ir_geom_", "ir_const_", "ir_feat_"):
+        assert abbreviated_prefix in normalized and "invalid" in normalized
+    assert all(
+        f'"check": "{check}"' in reference
+        for check in ("bbox", "volume", "valid_shape", "solid_count")
+    )
+    assert 'target: "@origin"' in reference and 'point: "center"' in reference
+    assert "reference order is semantic" in normalized
+    assert "the first reference" in normalized and "the second" in normalized
+    assert "do not reverse them" in normalized
+    assert "empty `source_refs` array" in reference
+    assert "without indentation or insignificant whitespace" in reference
     assert len(reference.encode("utf-8")) < 20_000
+
+
+def test_skill_documents_bounded_workbuddy_deferred_tool_permissions():
+    _metadata, body = _skill_parts()
+    installation = "\n".join(_sections(body, r"host installation|宿主安装"))
+    normalized = _normalized(installation)
+    assert {"ToolSearch", "DeferExecuteTool"} <= _inline_code(installation)
+    assert "headless" in normalized
+    assert "exact vibecad operations" in normalized
+    assert re.search(r"do not disable permission checks", installation, re.IGNORECASE)
+    assert "vibecad --workbuddy-submit" in installation
+    assert ".vibecad-workbuddy-request-<name>.json" in installation
+    assert {"schema_version", "task_id", "expected_generation", "program"} <= _inline_code(
+        installation
+    )
+    assert "not an escaped string" in normalized
+    assert "cannot bypass the task kernel" in normalized
+    assert "exact error path" in normalized
+    assert "unbounded repair loop" in normalized
+
+
+def test_skill_requires_exact_distinct_project_and_task_idempotency_keys():
+    _metadata, body = _skill_parts()
+    normalized = _normalized(body)
+    assert "project_create_[0-9a-f]{32}" in body
+    assert "task_create_[0-9a-f]{32}" in body
+    assert "a different fresh key" in normalized
+    assert "not labels encoded or padded by hand" in normalized
 
 
 def test_skill_limits_project_import_to_the_verified_box_cylinder_envelope():

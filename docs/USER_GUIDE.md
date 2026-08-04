@@ -103,6 +103,12 @@ WorkBuddy 5.3.5 + GLM-5.2 已完成真实多轮、重启恢复、Release 摘要�
 因此该精确 Profile 可以描述为 `host-verified`；不要把它扩展为 Claude/Codex 或所有 WorkBuddy
 模型都已认证。
 
+当前 38-tool visual 开发分支还对 GLM-5V-Turbo 完成了一个完整尺寸单孔板 outcome。WorkBuddy
+手写大 ModelProgram 时，应按 canonical Skill 把完整对象写入四字段项目本地 JSON，再调用
+`vibecad --workbuddy-submit .vibecad-workbuddy-request-<name>.json`。该单文件适配只补足 WorkBuddy
+对严格错误路径的呈现；资源仍走 MCP ResourceLink/`resources/read`，Task Kernel 仍是唯一执行与
+提交权威。不要授予通用 Bash/Write，只允许一个 request file 与这一条 exact command。
+
 ## 5. 第一次设计：创建一个可审核盒子
 
 在安装 MCP 服务和 Skill 后，可以向宿主表达：

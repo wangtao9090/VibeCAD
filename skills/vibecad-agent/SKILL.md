@@ -44,7 +44,14 @@ get_runtime_status
   -> resources/read for each returned resource URI
 ```
 
-Before `create_task`, generate and retain one fresh key matching `task_create_[0-9a-f]{32}`. Before another mutating call, read the current task when state may have advanced. After a mutating call, use the returned state and generation; do not replay merely because a response is slow. Accept only the named draft based on its evidence, or reject that exact draft explicitly.
+Before `create_project`, generate and retain one fresh key matching
+`project_create_[0-9a-f]{32}`. Before `create_task`, generate and retain a
+different fresh key matching `task_create_[0-9a-f]{32}`. These are exactly 32
+lowercase hexadecimal characters after the prefix, not labels encoded or
+padded by hand. Before another mutating call, read the current task when state
+may have advanced. After a mutating call, use the returned state and
+generation; do not replay merely because a response is slow. Accept only the
+named draft based on its evidence, or reject that exact draft explicitly.
 
 Use `cancel_task` first with the exact persisted generation. It immediately cancels idle `created`, `needs_plan`, `program_ready`, or `needs_input` tasks; for active work it durably records `cancel_requested`, fences the current Worker generation, advances through `cancelling`, and reconciles to a proved `cancelled`, committed, recovery, or cleanup result. If the response is unknown, replay the identical request instead of inventing a future generation. When the returned persisted `next_action` is `reconcile`, call `get_task`, then call `resume_task` at most once with that exact observed generation; never infer that the Worker generation stopped or that cancellation succeeded from elapsed time. A task already in `cancel_requested`, `cancelling`, or `cancelled` returns its current durable state. An awaiting review draft must use `reject_draft`. MCP `notifications/cancelled` only cancels one transport request and is not durable task cancellation.
 
@@ -134,6 +141,34 @@ or resume the task after runtime readiness. WorkBuddy's native
 `ReadMcpResource` persists binary MCP Blob results and returns the saved path;
 consume the returned PDF/ZIP resource URI normally and do not invent an
 arbitrary-filesystem fallback. When the host supports an allowed-tool list,
-exclude runtime maintenance tools from an autonomous CAD task.
+exclude runtime maintenance tools from an autonomous CAD task. WorkBuddy may
+defer a large MCP tool surface behind `ToolSearch` and `DeferExecuteTool`; in a
+headless run, grant those two host tools and only the exact VibeCAD operations
+needed by the task. Do not disable permission checks or grant the complete MCP
+surface merely to make deferred discovery work.
+
+For WorkBuddy 5.3.5, keep project, task, read, review, ResourceLink, and
+`resources/read` operations on MCP, but submit a large handwritten ModelProgram
+through the released file adapter so strict contract failures are not collapsed
+to a generic `-32603`. Write one project-local file named
+`.vibecad-workbuddy-request.json` or
+`.vibecad-workbuddy-request-<name>.json` with exactly
+`schema_version`, `task_id`, `expected_generation`, and `program`; `program` is
+the complete ModelProgram object, not an escaped string. Then invoke only the
+released executable's bounded command:
+
+```text
+vibecad --workbuddy-submit .vibecad-workbuddy-request-<name>.json
+```
+
+Use the absolute released executable path in an actual permission rule. The
+adapter accepts only a bounded, owned, non-symlink project-local request file,
+reuses the canonical ModelProgram and ParametricDesignIR validators, and returns
+the exact error path or a compact persisted task summary. It cannot bypass the
+Task Kernel: the Kernel revalidates and executes the same program. If preflight
+returns `ok:false`, correct only the named path and submit the current task
+generation again; never turn this into an unbounded repair loop. Do not use the
+adapter to read artifacts, images, credentials, or arbitrary paths, and do not
+grant a general shell merely because this one bounded command is needed.
 
 Installing the MCPB server does not perform skill activation. Copy or link this skill into the chosen host path, then restart or reload the host so it can rediscover the skill; no package channel silently activates it.
