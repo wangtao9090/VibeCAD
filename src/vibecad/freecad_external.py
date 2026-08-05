@@ -137,7 +137,23 @@ def _stable_digest(path: Path, *, allow_group_write: bool = False) -> str:
     before = _safe_regular(path, allow_group_write=allow_group_write)
     digest = _sha256(path)
     after = _safe_regular(path, allow_group_write=allow_group_write)
-    if before != after:
+    # Reading a file may legitimately advance atime on the GitHub macOS
+    # filesystem.  Keep the TOCTOU check bound to identity and mutation fields
+    # instead of comparing the complete stat_result, which also contains atime.
+    identity_fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_nlink",
+        "st_uid",
+        "st_gid",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    )
+    if tuple(getattr(before, field) for field in identity_fields) != tuple(
+        getattr(after, field) for field in identity_fields
+    ):
         raise ExternalFreeCADError("the FreeCAD pilot identity changed during inspection")
     return digest
 
