@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import plistlib
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -91,6 +93,61 @@ def test_doctor_admits_only_exact_pilot_without_executing_app(tmp_path: Path) ->
         freecad_external.doctor(wrong)
 
 
+def test_stable_digest_allows_read_atime_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "pilot"
+    target.write_bytes(b"pilot-freecad")
+    observed = target.lstat()
+    stable = {
+        field: getattr(observed, field)
+        for field in (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_nlink",
+            "st_uid",
+            "st_gid",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+    }
+    inspections = iter(
+        (
+            SimpleNamespace(**stable, st_atime_ns=observed.st_atime_ns),
+            SimpleNamespace(**stable, st_atime_ns=observed.st_atime_ns + 1_000_000_000),
+        )
+    )
+    monkeypatch.setattr(
+        freecad_external,
+        "_safe_regular",
+        lambda _path, *, allow_group_write=False: next(inspections),
+    )
+
+    assert freecad_external._stable_digest(target) == hashlib.sha256(b"pilot-freecad").hexdigest()
+
+
+def test_stable_digest_rejects_content_mutation_during_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "pilot"
+    target.write_bytes(b"pilot-freecad")
+    original_sha256 = freecad_external._sha256
+
+    def read_and_mutate(path: Path) -> str:
+        digest = original_sha256(path)
+        path.write_bytes(b"mutated-freecad")
+        return digest
+
+    monkeypatch.setattr(freecad_external, "_sha256", read_and_mutate)
+
+    with pytest.raises(freecad_external.ExternalFreeCADError, match="identity changed"):
+        freecad_external._stable_digest(target)
+
+
 def test_install_is_owned_idempotent_and_clean_uninstall_is_reversible(
     tmp_path: Path,
 ) -> None:
@@ -126,7 +183,7 @@ def test_install_is_owned_idempotent_and_clean_uninstall_is_reversible(
     assert receipt["host_app"] == str(app)
     assert config["python_path"] == str(bridge_python)
     assert config["python_target"] == str(bridge_target)
-    assert config["package_version"] == "0.6.1"
+    assert config["package_version"] == "0.7.0"
     assert not (target / "vibecad").exists()
 
     sibling = target.parent / "OtherAddon"
@@ -146,14 +203,14 @@ def test_install_upgrades_an_owned_older_package_receipt(
     user_data = (tmp_path / "user-data").resolve()
     bridge_python = Path(sys.executable).resolve(strict=True)
 
-    monkeypatch.setattr(freecad_external, "__version__", "0.6.0")
+    monkeypatch.setattr(freecad_external, "__version__", "0.6.1")
     first = freecad_external.install_addon(
         app,
         user_data_root=user_data,
         packaged_addon=_addon_source(),
         bridge_python=bridge_python,
     )
-    monkeypatch.setattr(freecad_external, "__version__", "0.6.1")
+    monkeypatch.setattr(freecad_external, "__version__", "0.7.0")
     upgraded = freecad_external.install_addon(
         app,
         user_data_root=user_data,
@@ -167,8 +224,8 @@ def test_install_upgrades_an_owned_older_package_receipt(
     assert first["status"] == "installed"
     assert upgraded["status"] == "upgraded"
     assert upgraded["receipt_id"] != first["receipt_id"]
-    assert receipt["package_version"] == "0.6.1"
-    assert config["package_version"] == "0.6.1"
+    assert receipt["package_version"] == "0.7.0"
+    assert config["package_version"] == "0.7.0"
 
 
 def test_install_and_uninstall_refuse_foreign_or_mutated_tree(tmp_path: Path) -> None:

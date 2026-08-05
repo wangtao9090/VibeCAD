@@ -77,6 +77,7 @@ _PROJECT_RE = re.compile(r"project_[0-9a-f]{32}\Z")
 _PROJECT_CREATE_RE = re.compile(r"project_create_[0-9a-f]{32}\Z")
 _TASK_RE = re.compile(r"task_[0-9a-f]{32}\Z")
 _DRAFT_RE = re.compile(r"draft_[0-9a-f]{32}\Z")
+_IMAGE_SET_RE = re.compile(r"image_set_[0-9a-f]{32}\Z")
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _OPERATION_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _TIMESTAMP_RE = re.compile(r"-?[0-9]{1,20}\Z")
@@ -104,6 +105,7 @@ _METHODS = (
     "kernel.retire",
     "application.call",
     "project.import",
+    "visual_inputs.seal",
     "checkout.open",
     "checkout.get",
     "checkout.checkpoint",
@@ -751,6 +753,11 @@ def _validate_dispatch_params(method: str, params: dict[str, object]) -> None:
         value = _exact(params, {"request", "locator"})
         _validate_import_locator(value["request"], value["locator"])
         return
+    if method == "visual_inputs.seal":
+        value = _exact(params, {"request", "locator"})
+        if type(value["request"]) is not dict or type(value["locator"]) is not dict:
+            raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+        return
     if method == "checkout.open":
         value = _exact(params, {"open_key", "source"})
         _identifier(value["open_key"], _OPEN_KEY_RE)
@@ -825,6 +832,21 @@ def _validate_success_result(
 ) -> dict[str, object]:
     if type(result) is not dict:
         raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+    if method == "visual_inputs.seal":
+        _walk(
+            result,
+            code=V2ErrorCode.INVALID_REQUEST,
+            forbid_capabilities=True,
+        )
+        value = _exact(
+            result,
+            {"schema_version", "image_set_id", "image_set_manifest_sha256"},
+        )
+        if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+            raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
+        _identifier(value["image_set_id"], _IMAGE_SET_RE)
+        _identifier(value["image_set_manifest_sha256"], _DIGEST_RE)
+        return value
     if method != "file_grant.claim":
         _walk(
             result,
@@ -873,6 +895,7 @@ class StaticV2Dispatcher:
     _kernel_retire: _Handler | None
     _application_call: _Handler | None
     _project_import: _DescriptorHandler | None
+    _visual_inputs_seal: _DescriptorHandler | None
     _checkout_open: _Handler | None
     _checkout_get: _Handler | None
     _checkout_checkpoint: _Handler | None
@@ -887,6 +910,7 @@ class StaticV2Dispatcher:
         kernel_retire: _Handler | None = None,
         application_call: _Handler | None = None,
         project_import: _DescriptorHandler | None = None,
+        visual_inputs_seal: _DescriptorHandler | None = None,
         checkout_open: _Handler | None = None,
         checkout_get: _Handler | None = None,
         checkout_checkpoint: _Handler | None = None,
@@ -899,6 +923,7 @@ class StaticV2Dispatcher:
             kernel_retire,
             application_call,
             project_import,
+            visual_inputs_seal,
             checkout_open,
             checkout_get,
             checkout_checkpoint,
@@ -920,6 +945,7 @@ class StaticV2Dispatcher:
         object.__setattr__(self, "_kernel_retire", kernel_retire)
         object.__setattr__(self, "_application_call", application_call)
         object.__setattr__(self, "_project_import", project_import)
+        object.__setattr__(self, "_visual_inputs_seal", visual_inputs_seal)
         object.__setattr__(self, "_checkout_open", checkout_open)
         object.__setattr__(self, "_checkout_get", checkout_get)
         object.__setattr__(self, "_checkout_checkpoint", checkout_checkpoint)
@@ -942,12 +968,17 @@ class StaticV2Dispatcher:
         _validate_dispatch_params(request.method, request.params)
         if descriptor is not None and (type(descriptor) is not int or descriptor < 0):
             raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
-        if request.method == "project.import":
-            if descriptor is None or self._project_import is None:
+        if request.method in {"project.import", "visual_inputs.seal"}:
+            handler = (
+                self._project_import
+                if request.method == "project.import"
+                else self._visual_inputs_seal
+            )
+            if descriptor is None or handler is None:
                 raise V2ProtocolError(
                     V2ErrorCode.INVALID_REQUEST if descriptor is None else V2ErrorCode.UNAVAILABLE
                 )
-            return self._project_import(dict(request.params), descriptor)
+            return handler(dict(request.params), descriptor)
         if descriptor is not None:
             raise V2ProtocolError(V2ErrorCode.INVALID_REQUEST)
         if request.method == "kernel.ping":

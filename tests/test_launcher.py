@@ -8,7 +8,7 @@ import types
 
 import pytest
 
-from vibecad import freecad_launcher, launcher
+from vibecad import freecad_launcher, launcher, workbuddy_adapter
 
 
 @pytest.fixture(autouse=True)
@@ -65,6 +65,27 @@ def test_main_runs_pending_uninstall_before_supervisor(monkeypatch, sup_stub):
         launcher.main()
 
     assert sup_stub["calls"] == ["run_pending_uninstall", "supervisor.run"]
+
+
+def test_workbuddy_submit_dispatches_without_starting_server(monkeypatch, sup_stub):
+    calls = []
+    monkeypatch.setattr(
+        workbuddy_adapter,
+        "handle_cli",
+        lambda arguments: calls.append(arguments) or 6,
+    )
+    monkeypatch.setattr(
+        launcher.sys,
+        "argv",
+        ["vibecad", "--workbuddy-submit", ".vibecad-workbuddy-request.json"],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        launcher.main()
+
+    assert exc.value.code == 6
+    assert calls == [["--workbuddy-submit", ".vibecad-workbuddy-request.json"]]
+    assert sup_stub["calls"] == []
 
 
 # --- packaged FreeCAD GUI entrypoint (G1 Integration) ---

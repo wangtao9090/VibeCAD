@@ -1,9 +1,9 @@
 # WorkBuddy compatibility and model-selection research
 
-> Status: real GLM-5.2 multi-turn CAD, recovery, Release approval, and
-> PDF/ZIP resource certification passed with the compatibility fixes below
+> Status: real GLM-5.2 multi-turn CAD/Release and GLM-5V-Turbo single/multi-view
+> image-to-CAD outcome certification completed with the bounded fixes and caveats below
 >
-> Evidence date: 2026-08-03
+> Evidence date: 2026-08-04
 >
 > Tested installation: WorkBuddy 5.3.5 on macOS
 
@@ -22,7 +22,19 @@ drive the strict VibeCAD tool schemas, retain `task_id`/`generation`/
 exact Release digest, and consume both PDF and ZIP MCP Blobs. WorkBuddy's native
 `ReadMcpResource` implementation persists binary Blob content under its
 project-scoped `.mcp-resources/` directory and returns that path; VibeCAD does
-not need a compatibility adapter.
+not need a Resource or arbitrary-path adapter.
+
+One narrow compatibility seam is required for large handwritten ModelPrograms.
+Raw stdio capture proved that WorkBuddy delivered 9–11 KiB arguments intact, so
+this is not a payload-size or MCP framing problem. Invalid submissions returned
+precise VibeCAD domain errors on the wire, but the WorkBuddy agent path retried
+them and a later application-backed submit surfaced only generic `-32603` while
+leaving the Task unchanged. The `vibecad --workbuddy-submit` adapter therefore
+reads exactly one bounded project-local JSON request, reuses the canonical
+ModelProgram/ParametricDesignIR validators, and submits through a fresh
+`LocalAgentClient`. The Task Kernel still revalidates and remains the only
+execution, verification, Revision, review, and HEAD authority. No MCP tool or
+second CAD control plane was added.
 
 The certification exposed two defects fixed after the published v0.6.0 tag:
 
@@ -47,12 +59,13 @@ capability rather than an unbounded Blob allocation.
 | Required behavior | Evidence | Current status |
 |---|---|---|
 | Local stdio MCP | WorkBuddy CLI 2.115.0 registered the source candidate, the exact locally built wheel, and a fresh PyPI install of `vibecad==0.6.0` in isolated environments; every `mcp get` check reported `Connected` | Confirmed through the published package |
-| `tools/list` and strict input schema | The isolated server exposed all 31 public tools; malformed ModelProgram attempts failed closed before corrected submission | Passed with the `_meta` compatibility fix |
+| `tools/list` and strict input schema | The published server exposed 31 tools and the current visual branch exposed 38; malformed ModelPrograms failed closed with exact paths before corrected submission | Passed with the `_meta` fix and bounded submit adapter |
 | ResourceLink and resource commands | Release preview resources were returned through the existing MCP surface and WorkBuddy read them by URI | Passed |
 | Binary Blob for PDF/ZIP | WorkBuddy persisted the 22,372-byte PDF and 45,559-byte ZIP; independent size and SHA-256 checks matched | Passed; no adapter required |
 | `task_id`, `generation`, `next_action` | The real task reached `succeeded` at generation 14 with `next_action=none`; Revision and HEAD stayed stable through Release approval | Passed |
 | Restart recovery | Separate CLI processes resumed one WorkBuddy session, recovered the durable task and draft Release, and did not replay CAD mutations | Passed |
 | Release draft, digest approval, ZIP read | Digest-bound approval advanced only Release generation 0 -> 1 and exposed the immutable ZIP | Passed with the 60-second Worker fix |
+| Host-visible image to editable CAD | GLM-5V-Turbo read the installed Skill/reference and dimensioned fixtures, including three complementary orthographic L-bracket views; strict compilation produced editable Pad plus three Hole locations and rejected two ambiguous/conflicting sets before Task creation | Outcome-passed for the frozen single- and multi-view fixtures; the multi-view first handwritten IR needed bounded contract corrections, so this is not a zero-repair or universal-photo claim |
 
 Sources: [WorkBuddy connector documentation](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Connector),
 [WorkBuddy model configuration](https://www.workbuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Model),
@@ -108,6 +121,83 @@ confirmed an isolated runtime-uninstall call despite instructions not to alter
 the runtime. Only the disposable private runtime was affected and durable task
 data survived. Until the wider model matrix is run, use GLM-5.2 only with an
 exact task-tool allowlist that excludes runtime maintenance tools.
+
+## Live GLM-5V-Turbo image-to-CAD evidence
+
+The visual certification used WorkBuddy 5.3.5, CLI 2.115.0, the project-scoped
+canonical Skill, a private `VIBECAD_HOME`, and the repository-owned 1,200 ×
+1,200 single-hole-plate drawing. Permissions were limited to the fixture and
+Skill reads, one exact request-file write, one exact adapter command, and six
+named MCP operations; broad Bash/Write and runtime-maintenance access were not
+granted.
+
+GLM-5V-Turbo correctly read the confirmed `80 × 50 × 8 mm`, centered `Ø10`
+through-hole intent and authored a strict ModelProgram with two editable
+sketches, Pad, and Through-All Hole. The bounded adapter submitted it to the
+ordinary Task Kernel. Task `task_4a5520dd7e3b9289eacf873565f71dd4`
+reached generation 9, `awaiting_user_review`, with `last_error=null`; project
+HEAD remained at base Revision `revision_7d20d63e0b628c77c2b2aad3091cdcfd`
+and the unaccepted candidate was
+`revision_d9fd05cc16963d48d080d2009cd395f9`.
+
+All deterministic verdicts passed: bounding box `80 × 50 × 8 mm`, volume
+`31371.681469282037 mm³`, valid BRep, and one solid. The draft contains a
+16,337-byte FCStd and 8,311-byte STEP artifact. A separate fresh WorkBuddy
+process with only `get_task` permission recovered the same generation 9,
+candidate Revision, draft, `review_draft` action, and null error without a
+mutation. This certifies the frozen
+dimensioned fixture and the WorkBuddy host path; it does not certify arbitrary
+photos, unknown scale, hidden geometry, or universal visual reconstruction.
+
+### S35 multi-view outcome and authoring caveat
+
+The S35 run gave GLM-5V-Turbo three repository-owned 1,200 × 1,200 orthographic
+views and the current canonical Skill/reference. It correctly reconciled the
+same-object/state/scale evidence into an L section with `50 × 40 × 60 mm`
+overall dimensions, `8 mm` legs, two `Ø6` through holes on the XZ plane, one
+`Ø6` through hole on the YZ plane, and expected volume `38681.42 mm³`.
+
+The first handwritten submission was not accepted as a clean host-authored IR.
+WorkBuddy first tried the large MCP submission and received the known generic
+`-32603`, then wrote the bare ModelProgram instead of the adapter's four-field
+request envelope. After mechanical envelope correction, the canonical adapter
+reported `/program/operations/0/args/design/features/1/axis`; later deterministic
+compilation exposed a redundant L-profile dimension set, a wrong XZ Hole
+direction, and a separate radius/diameter identity. Broad Bash/Write permission
+for an autonomous repair was denied; the controller changed only those bounded
+strict-contract fields and did not grant general shell access.
+
+The corrected request entered a fresh `REQUIRE_REVIEW` Task
+`task_d17e24e1cad5f4f67a4c4408975100a7`. At generation 9 it was
+`awaiting_user_review`, `next_action=review_draft`, `last_error=null`, with
+candidate `revision_a6677b34e81d32284369a3b99e3f7067`; project HEAD remained
+the empty base `revision_23bf0ca98a4a7258178ae436943a7e72`. All required
+verdicts passed: bbox `[50, 40, 60]`, volume `38681.4159868246 mm³`, valid BRep,
+and one solid. The unaccepted draft contains a 24,051-byte FCStd and a
+13,715-byte STEP artifact. A separate Read-only GLM-5V-Turbo run returned
+`SAFE_FAILURE` for both missing extrusion depth and a front/top `50/45 mm`
+width conflict, with the shortest correct clarification for each and no CAD
+authority.
+
+A final adversarial Read-only replay caught a fixture-quality issue that the
+first successful run had tolerated: the top image used a different printed
+scale and the front-view `22/36` dimensions did not name their coordinate
+origin clearly. The controller treated this as invalid positive-test evidence,
+not as permission for the model to guess. The settled images now use one 4:1
+scale and explicit lower-left-origin `(X,Z)` / `(Y,Z)` hole coordinates. A new
+GLM-5V-Turbo session, without expected facts in its prompt and with only `Read`,
+returned `PASS`, the exact `50 × 40 × 60 mm` envelope, 8 mm legs, all three Ø6
+hole centers, no conflicts, and no blocking unknowns. This replay validates the
+current image facts only; the verified CAD draft remains the earlier Task and
+is not misreported as a second end-to-end write.
+
+This closes the fixed S35 product outcome while preserving an important model
+quality distinction: WorkBuddy's visual fact extraction passed, but its first
+strict IR authoring attempt did not. The Skill now makes the independent
+constraint set, Hole `axis: null`, shared diameter identity, origin-plane
+direction, and four-field adapter envelope explicit. Deterministic compilation
+and review remain mandatory; this result does not support a zero-repair rate or
+ordinary-photo claim.
 
 ## Published baseline
 
@@ -168,7 +258,7 @@ public VibeCAD contract.
 | Cost/performance Agent | **MiniMax-M3** | Officially positioned for code and agent tasks, supports vision, and has a low listed multiplier | Long-run state and exact approval behavior remain unmeasured |
 | Fast/economy | **DeepSeek-V4-Flash** | 1M context, speed-first positioning, and the lowest listed non-free multiplier among the main candidates | Speed and context size do not by themselves prove reliable multi-step tool use |
 | Connector/debugging | **Kimi-K2.7-Code** | Multimodal and explicitly optimized for programming tasks | Better suited to integration diagnosis than the ordinary CAD-user default |
-| Visual diagnosis | **GLM-5V-Turbo** | Native multimodal model for screenshots and UI diagnosis | VibeCAD's normal workflow should rely on structured CAD evidence, not screenshot interpretation |
+| Visual image-to-CAD pilot | **GLM-5V-Turbo** | The real fixed-fixture run read the image and Skill, authored strict IR, and reached verified review | Proven for one dimensioned synthetic plate only; deterministic CAD evidence, not visual similarity, decides acceptance |
 
 `Auto` remains a convenience option for casual use, but not for the release
 certification matrix: an opaque router makes failures and regressions harder to

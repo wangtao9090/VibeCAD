@@ -2131,8 +2131,10 @@ def test_capabilities_match_the_exact_sorted_public_projection():
         "create_box",
         "create_component",
         "create_cylinder",
+        "create_parametric_design",
         "inspect_model",
         "modify_parameter",
+        "modify_parametric_parameter",
         "move_part",
         "place_component",
         "rotate_part",
@@ -2184,6 +2186,57 @@ def test_capabilities_match_the_exact_sorted_public_projection():
         "position_mm",
         "width_mm",
     ]
+    create_parametric_design = operations[3]
+    assert create_parametric_design["target_fields"] == []
+    assert create_parametric_design["argument_fields"] == [
+        {
+            "name": "design",
+            "value_shape": "parametric_design_ir",
+            "required": True,
+            "enum_values": [],
+            "allowed_units": [],
+            "referenced_value_shape": None,
+        }
+    ]
+    assert create_parametric_design["direct_exposed"] is False
+    assert create_parametric_design["resource_budget"] == {
+        "max_runtime_ms": 30_000,
+        "max_created_objects": 26,
+        "max_result_bytes": 65_536,
+    }
+    assert create_parametric_design["result_slots"] == [
+        {
+            "name": "body",
+            "value_shape": "object_id",
+            "enum_values": [],
+            "allowed_units": [],
+        }
+    ]
+
+    modify_parametric_parameter = next(
+        item for item in operations if item["operation"] == "modify_parametric_parameter"
+    )
+    assert [
+        (item["name"], item["value_shape"], item["referenced_value_shape"])
+        for item in modify_parametric_parameter["target_fields"]
+    ] == [("body", "object_selector", None)]
+    assert [
+        (item["name"], item["value_shape"])
+        for item in modify_parametric_parameter["argument_fields"]
+    ] == [
+        ("design", "parametric_design_ir"),
+        ("parameter_id", "nonblank_string"),
+        ("value", "finite_number"),
+    ]
+    assert all(
+        item["required"] and item["allowed_units"] == []
+        for group in ("target_fields", "argument_fields")
+        for item in modify_parametric_parameter[group]
+    )
+    assert modify_parametric_parameter["direct_exposed"] is False
+    assert modify_parametric_parameter["resource_budget"]["max_created_objects"] == 0
+    assert modify_parametric_parameter["result_slots"] == []
+    assert modify_parametric_parameter["preservation_fields"] == []
 
 
 def test_capability_projection_is_registry_order_independent_and_defensive():

@@ -1,7 +1,7 @@
 <package format="1">
   <name>VibeCAD</name>
   <description>Thin-client FreeCAD workbench for VibeCAD.</description>
-  <version>0.6.1</version>
+  <version>0.7.0</version>
   <maintainer email="wangtao9090@gmail.com">Wang Tao</maintainer>
   <license>MIT</license>
   <url type="repository">https://github.com/wangtao9090/VibeCAD</url>

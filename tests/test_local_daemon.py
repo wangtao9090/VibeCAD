@@ -822,18 +822,23 @@ def test_c09_public_contract_is_closed_and_contains_no_grant_surface() -> None:
         {
             "accept_draft",
             "approve_release",
+            "adopt_reconstruction",
+            "answer_reconstruction",
             "cancel_task",
             "compare_revisions",
             "create_box",
             "create_cylinder",
             "create_project",
             "create_release",
+            "create_reconstruction",
             "create_task",
+            "delete_reconstruction",
             "export_task_artifacts",
             "get_artifact_manifest",
             "get_capabilities",
             "get_project",
             "get_release",
+            "get_reconstruction",
             "get_task",
             "get_task_events",
             "inspect_model",
@@ -843,9 +848,11 @@ def test_c09_public_contract_is_closed_and_contains_no_grant_surface() -> None:
             "modify_parameter",
             "move_part",
             "reject_draft",
+            "reject_reconstruction",
             "resume_task",
             "revert_project",
             "rotate_part",
+            "run_reconstruction",
             "submit_model_program",
         }
     )
@@ -954,8 +961,8 @@ def test_real_client_authenticates_and_claims_one_path_bound_checkout_grant() ->
                 "epoch": 1,
             },
             "implementation": {
-                "package_version": "0.6.1",
-                "build_id": "p1-s03.1",
+                "package_version": "0.7.0",
+                "build_id": "vcad-s20.5-host-ingress",
             },
         }
         capabilities = client.call(
@@ -2260,24 +2267,31 @@ def test_static_facade_routes_all_literal_operations_to_fixed_application_method
     request_operations = {
         "accept_draft": "accept_draft_request",
         "approve_release": "approve_release_request",
+        "adopt_reconstruction": "adopt_reconstruction_request",
+        "answer_reconstruction": "answer_reconstruction_request",
         "cancel_task": "cancel_task_request",
         "compare_revisions": "compare_revisions_request",
         "create_project": "create_project_request",
         "create_release": "create_release_request",
+        "create_reconstruction": "create_reconstruction_request",
         "create_task": "create_task_request",
+        "delete_reconstruction": "delete_reconstruction_request",
         "export_task_artifacts": "export_task_artifacts_request",
         "get_artifact_manifest": "get_artifact_manifest_request",
         "get_capabilities": "get_capabilities_request",
         "get_project": "get_project_request",
         "get_release": "get_release_request",
+        "get_reconstruction": "get_reconstruction_request",
         "get_task": "get_task_request",
         "get_task_events": "get_task_events_request",
         "list_projects": "list_projects_request",
         "list_revisions": "list_revisions_request",
         "list_tasks": "list_tasks_request",
         "reject_draft": "reject_draft_request",
+        "reject_reconstruction": "reject_reconstruction_request",
         "resume_task": "resume_task_request",
         "revert_project": "revert_project_request",
+        "run_reconstruction": "run_reconstruction_request",
         "submit_model_program": "submit_model_program_request",
     }
     direct_operations = {
@@ -2320,6 +2334,33 @@ def test_static_facade_routes_all_literal_operations_to_fixed_application_method
             operation,
             request,
         )
+
+
+def test_local_agent_client_routes_all_seven_reconstruction_requests_literally() -> None:
+    kernel = Mock()
+    kernel.call.return_value = Mock(result={"ok": True}, error=None)
+    client = daemon_api.LocalAgentClient(kernel)
+    request = {"schema_version": 1}
+    names = (
+        "create_reconstruction",
+        "get_reconstruction",
+        "run_reconstruction",
+        "answer_reconstruction",
+        "adopt_reconstruction",
+        "reject_reconstruction",
+        "delete_reconstruction",
+    )
+
+    for name in names:
+        assert getattr(client, f"{name}_request")(request) == {"ok": True}
+        kernel.call.assert_called_with(
+            "application.call",
+            {"operation": name, "request": request},
+        )
+
+    assert kernel.call.call_count == len(names)
+    client.close()
+    kernel.close.assert_called_once_with()
 
 
 @DARWIN_ONLY
@@ -2390,10 +2431,10 @@ def test_client_eof_and_bad_secret_kill_only_connection_then_fresh_client_succee
         shutil.rmtree(base, ignore_errors=True)
 
 
-def test_p2_release_tools_expand_public_count_without_file_grants() -> None:
+def test_visual_tools_expand_public_count_without_file_grants() -> None:
     from vibecad.application.public_surface import public_tool_specs
 
-    assert len(public_tool_specs()) == 31
+    assert len(public_tool_specs()) == 38
     assert tuple(spec.name for spec in public_tool_specs())[-6:] == (
         "create_box",
         "create_cylinder",

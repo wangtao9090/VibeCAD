@@ -14,11 +14,22 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 import yaml
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILL_ROOT = ROOT / "skills" / "vibecad-agent"
 SKILL_FILE = SKILL_ROOT / "SKILL.md"
 OPENAI_YAML = SKILL_ROOT / "agents" / "openai.yaml"
+PARAMETRIC_REFERENCE = SKILL_ROOT / "references" / "parametric-design-ir-v1.md"
+S35_VISUAL_FIXTURES = (
+    "visual-cad-l-bracket-front",
+    "visual-cad-l-bracket-right",
+    "visual-cad-l-bracket-top",
+    "visual-cad-depth-ambiguous-front",
+    "visual-cad-depth-ambiguous-isometric",
+    "visual-cad-conflict-front-50",
+    "visual-cad-conflict-top-45",
+)
 
 PUBLIC_TOOL_NAMES = (
     "ping",
@@ -46,6 +57,13 @@ PUBLIC_TOOL_NAMES = (
     "create_release",
     "get_release",
     "approve_release",
+    "create_reconstruction",
+    "get_reconstruction",
+    "run_reconstruction",
+    "answer_reconstruction",
+    "adopt_reconstruction",
+    "reject_reconstruction",
+    "delete_reconstruction",
     "create_box",
     "create_cylinder",
     "inspect_model",
@@ -210,12 +228,12 @@ def test_skill_has_canonical_files_and_minimal_trigger_frontmatter():
     assert "$vibecad-agent" in interface["default_prompt"]
 
 
-def test_skill_teaches_the_exact_thirty_one_tool_agent_first_flow():
+def test_skill_teaches_the_exact_thirty_eight_tool_agent_first_flow():
     _metadata, body = _skill_parts()
     code_tokens = _inline_code(body)
     assert set(PUBLIC_TOOL_NAMES) <= code_tokens
     assert LEGACY_TOOL_NAMES.isdisjoint(code_tokens)
-    assert re.search(r"\b31(?:-tool| tools?)\b|31\s*个", body, re.IGNORECASE)
+    assert re.search(r"\b38(?:-tool| tools?)\b|38\s*个", body, re.IGNORECASE)
 
     essential_order = (
         "get_capabilities",
@@ -227,6 +245,196 @@ def test_skill_teaches_the_exact_thirty_one_tool_agent_first_flow():
     )
     assert any(_contains_in_order(block, essential_order) for block in _fenced_blocks(body))
     _paragraph_with(body, "direct", "ModelProgram")
+
+
+def test_skill_routes_visual_reconstruction_without_claiming_attachment_ingress():
+    _metadata, body = _skill_parts()
+    visual = "\n".join(_sections(body, r"visual reconstruction|视觉重建"))
+    normalized = _normalized(visual)
+
+    assert {
+        "create_reconstruction",
+        "get_reconstruction",
+        "run_reconstruction",
+        "answer_reconstruction",
+        "adopt_reconstruction",
+        "reject_reconstruction",
+        "delete_reconstruction",
+        "image_set_id",
+        "image_set_manifest_sha256",
+    } <= _inline_code(visual)
+    assert "trusted local host adapter" in normalized
+    assert "workbuddy direct attachment" in normalized
+    assert re.search(r"not verified|unverified|未验证", visual, re.IGNORECASE)
+    for forbidden in ("path", "base64", "resource uri"):
+        assert forbidden in normalized
+    assert re.search(r"never|must not|禁止|不得|不能", visual, re.IGNORECASE)
+
+
+def test_skill_freezes_the_multi_view_mechanical_envelope_and_safe_failures():
+    _metadata, body = _skill_parts()
+    visual = "\n".join(_sections(body, r"host-owned image-to-cad"))
+    normalized = _normalized(visual)
+
+    for required in (
+        "two to sixteen",
+        "same object, state, and scale",
+        "evidence matrix",
+        "cross_view_derived",
+        "distinct known view roles",
+        "stop before `create_task`",
+        "extrusion depth",
+        "disagree",
+        "at most 16",
+        "multi-loop pocket",
+    ):
+        assert required in normalized
+    _paragraph_with(visual, "multi-location", "same sketch plane", "location_geometry_ids")
+
+    reference = _normalized(_read(PARAMETRIC_REFERENCE))
+    assert "1–16 nonconstruction circles" in reference
+    assert "sequential one-wire pocket sketches" in reference
+    assert "material-removal point on every declared axis" in reference
+    assert "world -y" in reference
+    assert "same parameter id" in reference
+    assert "exactly four fields" in reference
+    skill = _normalized(body)
+    assert "independent constraint set" in skill
+    assert "axis: null" in skill
+    assert "separate radius parameter" in skill
+
+
+def test_s35_visual_fixtures_are_self_contained_metadata_free_png_and_svg_pairs():
+    image_root = ROOT / "docs" / "images"
+    for stem in S35_VISUAL_FIXTURES:
+        svg = image_root / f"{stem}.svg"
+        png = image_root / f"{stem}.png"
+        assert svg.is_file() and png.is_file()
+        raw = svg.read_text(encoding="utf-8")
+        assert raw.startswith('<svg xmlns="http://www.w3.org/2000/svg"')
+        assert 'viewBox="0 0 1200 1200"' in raw
+        with Image.open(png) as image:
+            assert image.format == "PNG"
+            assert image.size == (1200, 1200)
+            assert not image.getexif()
+            assert not image.info
+
+    positive = {
+        role: (image_root / f"visual-cad-l-bracket-{role}.svg").read_text(encoding="utf-8")
+        for role in ("front", "right", "top")
+    }
+    assert all("SCALE 4:1 · SAME PART / STATE / SCALE" in raw for raw in positive.values())
+    assert "(X1,Z1)=(22,18) · (X2,Z2)=(36,42)" in positive["front"]
+    assert "(Y,Z)=(24,30)" in positive["right"]
+    assert "constant L-section extruded 60 mm" in positive["top"]
+
+
+def test_skill_routes_host_visible_images_through_the_existing_task_kernel():
+    metadata, body = _skill_parts()
+    assert "image" in metadata["description"].casefold()
+
+    host_vision = "\n".join(
+        _sections(body, r"host-owned image-to-cad|宿主.*图片.*cad|宿主.*图像.*cad")
+    )
+    normalized = _normalized(host_vision)
+    assert {"create_task", "submit_model_program", "run_reconstruction"} <= _inline_code(
+        host_vision
+    )
+    assert "multimodal" in normalized
+    assert "already visible" in normalized
+    assert re.search(
+        r"do not call.{0,48}`run_reconstruction`|不得.{0,48}`run_reconstruction`",
+        host_vision,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert all(term in normalized for term in ("confirmed", "inferred", "unknown"))
+    assert "absolute" in normalized and "scale" in normalized
+    assert "require_review" in normalized
+    assert re.search(r"api key|api token|provider credential", normalized)
+
+
+def test_skill_carries_the_portable_parametric_ir_authoring_contract():
+    _metadata, body = _skill_parts()
+    assert "references/parametric-design-ir-v1.md" in body
+    assert PARAMETRIC_REFERENCE.is_file()
+    reference = PARAMETRIC_REFERENCE.read_text(encoding="utf-8")
+    normalized = _normalized(reference)
+    for required in (
+        "create_parametric_design",
+        "parametric_design_ir",
+        "the complete modelprogram root",
+        "modelcommand, not a complete modelprogram",
+        '"task_id": "task_id"',
+        '"base_revision": "base_revision"',
+        '"operations"',
+        '"acceptance"',
+        "confirmed",
+        "cross_view_derived",
+        "ir_<kind>_<32 lowercase hex>",
+        "ir_parameter_",
+        "ir_geometry_",
+        "ir_constraint_",
+        "ir_feature_",
+        "zero-padded counters",
+        "copy that exact declared string",
+        "byte-for-byte present in the declarations",
+        "31 or 33 hex digits",
+        "source_refs[1+]",
+        "user:current_request",
+        "never add an unused convenience datum",
+        "serialize the final `program_json` compactly",
+        "schema_version: 1",
+        "hole_locations",
+        "through_all",
+        "revolve",
+        "dof=0",
+        "valid_shape: true",
+        "solid_count: 1",
+    ):
+        assert required in normalized
+    assert "inferred" in normalized and "outside the ir" in normalized
+    assert "unscaled image" in normalized and "absolute millimetres" in normalized
+    for abbreviated_prefix in ("ir_param_", "ir_geom_", "ir_const_", "ir_feat_"):
+        assert abbreviated_prefix in normalized and "invalid" in normalized
+    assert all(
+        f'"check": "{check}"' in reference
+        for check in ("bbox", "volume", "valid_shape", "solid_count")
+    )
+    assert 'target: "@origin"' in reference and 'point: "center"' in reference
+    assert "reference order is semantic" in normalized
+    assert "the first reference" in normalized and "the second" in normalized
+    assert "do not reverse them" in normalized
+    assert "empty `source_refs` array" in reference
+    assert "without indentation or insignificant whitespace" in reference
+    assert len(reference.encode("utf-8")) < 20_000
+
+
+def test_skill_documents_bounded_workbuddy_deferred_tool_permissions():
+    _metadata, body = _skill_parts()
+    installation = "\n".join(_sections(body, r"host installation|宿主安装"))
+    normalized = _normalized(installation)
+    assert {"ToolSearch", "DeferExecuteTool"} <= _inline_code(installation)
+    assert "headless" in normalized
+    assert "exact vibecad operations" in normalized
+    assert re.search(r"do not disable permission checks", installation, re.IGNORECASE)
+    assert "vibecad --workbuddy-submit" in installation
+    assert ".vibecad-workbuddy-request-<name>.json" in installation
+    assert {"schema_version", "task_id", "expected_generation", "program"} <= _inline_code(
+        installation
+    )
+    assert "not an escaped string" in normalized
+    assert "cannot bypass the task kernel" in normalized
+    assert "exact error path" in normalized
+    assert "unbounded repair loop" in normalized
+
+
+def test_skill_requires_exact_distinct_project_and_task_idempotency_keys():
+    _metadata, body = _skill_parts()
+    normalized = _normalized(body)
+    assert "project_create_[0-9a-f]{32}" in body
+    assert "task_create_[0-9a-f]{32}" in body
+    assert "a different fresh key" in normalized
+    assert "not labels encoded or padded by hand" in normalized
 
 
 def test_skill_limits_project_import_to_the_verified_box_cylinder_envelope():
@@ -336,7 +544,7 @@ def test_skill_teaches_resource_links_and_fail_closed_product_limits():
     assert path_rule is not None
     assert re.search(r"never|must not|禁止|不得|不能", path_rule, re.IGNORECASE)
 
-    retired_rule = _paragraph_with(body, "retired", "31")
+    retired_rule = _paragraph_with(body, "retired", "38")
     assert re.search(r"never|must not|禁止|不得|不能", retired_rule, re.IGNORECASE)
     code_rule = _paragraph_with(body, "Python", "FreeCAD", "code")
     assert re.search(r"never|must not|禁止|不得|不能", code_rule, re.IGNORECASE)
@@ -425,7 +633,7 @@ def test_skill_distribution_channels_are_explicit_and_non_overlapping():
     assert not any(pattern.startswith("skills") for pattern in ignored)
 
 
-def test_manifest_projection_and_all_package_versions_target_0_6_1():
+def test_manifest_projection_and_all_package_versions_target_0_7_0():
     from vibecad.application.public_surface import public_tool_specs
     from vibecad.runtime import spec
 
@@ -444,12 +652,12 @@ def test_manifest_projection_and_all_package_versions_target_0_6_1():
     with (ROOT / "uv.lock").open("rb") as handle:
         lock = tomllib.load(handle)
     locked = [package["version"] for package in lock["package"] if package.get("name") == "vibecad"]
-    assert locked == ["0.6.1"]
-    assert manifest["version"] == project_version == source_version.group(1) == "0.6.1"
-    assert spec.VIBECAD_VERSION == "0.6.1"
+    assert locked == ["0.7.0"]
+    assert manifest["version"] == project_version == source_version.group(1) == "0.7.0"
+    assert spec.VIBECAD_VERSION == "0.7.0"
 
 
-def test_release_documents_project_the_0_6_1_backend_truth():
+def test_release_documents_project_the_0_7_0_backend_truth():
     documents = {
         path: _normalized(_read(ROOT / path))
         for path in (
@@ -465,7 +673,7 @@ def test_release_documents_project_the_0_6_1_backend_truth():
     }
     for path, normalized in documents.items():
         assert "0.5.0" not in normalized, path
-        assert "0.6.1" in normalized, path
+        assert "0.7.0" in normalized, path
         assert "27-tool" not in normalized, path
         assert "27 个工具" not in normalized, path
 
@@ -482,7 +690,7 @@ def test_release_documents_project_the_0_6_1_backend_truth():
         )
     }
     for path, normalized in product_documents.items():
-        assert any(claim in normalized for claim in ("31-tool", "31 个工具", "31 个公开工具")), path
+        assert any(claim in normalized for claim in ("38-tool", "38 个工具", "38 个公开工具")), path
         assert "daemon" in normalized, path
         assert "task kernel" in normalized, path
 

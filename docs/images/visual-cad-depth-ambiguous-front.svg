@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#243447"/></marker><style>.shape{fill:#edf3f7;stroke:#13293d;stroke-width:5}.dim{stroke:#243447;stroke-width:3;marker-start:url(#arrow);marker-end:url(#arrow)}.t{font-family:Arial,sans-serif;fill:#13293d;font-size:31px}.title{font-size:38px;font-weight:bold}.warn{fill:#a12828;font-size:30px;font-weight:bold}</style></defs>
+  <rect width="1200" height="900" fill="white"/><text x="60" y="70" class="t title">DEPTH-AMBIGUOUS PART — FRONT VIEW</text><text x="60" y="112" class="t">ALL SHOWN DIMENSIONS mm</text>
+  <rect x="250" y="210" width="500" height="400" class="shape"/><circle cx="500" cy="410" r="50" fill="white" stroke="#13293d" stroke-width="5"/>
+  <line x1="250" y1="690" x2="750" y2="690" class="dim"/><text x="475" y="678" class="t">50</text><line x1="820" y1="210" x2="820" y2="610" class="dim"/><text x="840" y="420" class="t">40</text>
+  <path d="M610 330 L535 380" stroke="#243447" stroke-width="3" marker-end="url(#arrow)"/><text x="625" y="325" class="t">Ø10 THRU?</text>
+  <text x="250" y="785" class="warn">DEPTH / EXTRUSION LENGTH NOT SPECIFIED</text><text x="60" y="855" class="t">View index 0 · front silhouette alone cannot establish depth</text>
+</svg>

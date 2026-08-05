@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto-start-reverse">
+      <path d="M 0 0 L 8 4 L 0 8 z" fill="#1f2937"/>
+    </marker>
+    <style>
+      .title { font: 700 30px sans-serif; fill: #111827; }
+      .label { font: 600 21px sans-serif; fill: #111827; }
+      .dimtext { font: 19px sans-serif; fill: #111827; }
+      .note { font: 17px sans-serif; fill: #4b5563; }
+      .object { fill: #eef2f7; stroke: #111827; stroke-width: 3; }
+      .center { fill: none; stroke: #2563eb; stroke-width: 2; stroke-dasharray: 12 8 2 8; }
+      .dim { fill: none; stroke: #374151; stroke-width: 2; marker-start: url(#arrow); marker-end: url(#arrow); }
+      .ext { fill: none; stroke: #6b7280; stroke-width: 1.5; }
+    </style>
+  </defs>
+  <rect width="1200" height="1200" fill="white"/>
+  <text x="600" y="58" text-anchor="middle" class="title">STEPPED SHAFT — ALL DIMENSIONS mm</text>
+  <text x="600" y="108" text-anchor="middle" class="label">SIDE VIEW — SHARP SHOULDERS</text>
+
+  <path d="M 150 370 L 400 370 L 400 420 L 700 420 L 700 460 L 850 460
+           L 850 580 L 700 580 L 700 620 L 400 620 L 400 670 L 150 670 Z" class="object"/>
+  <line x1="105" y1="520" x2="900" y2="520" class="center"/>
+
+  <line x1="150" y1="670" x2="150" y2="760" class="ext"/>
+  <line x1="400" y1="670" x2="400" y2="760" class="ext"/>
+  <line x1="700" y1="620" x2="700" y2="760" class="ext"/>
+  <line x1="850" y1="580" x2="850" y2="760" class="ext"/>
+  <line x1="158" y1="730" x2="392" y2="730" class="dim"/>
+  <line x1="408" y1="730" x2="692" y2="730" class="dim"/>
+  <line x1="708" y1="730" x2="842" y2="730" class="dim"/>
+  <rect x="246" y="714" width="58" height="30" fill="white"/><text x="275" y="736" text-anchor="middle" class="dimtext">25</text>
+  <rect x="521" y="714" width="58" height="30" fill="white"/><text x="550" y="736" text-anchor="middle" class="dimtext">30</text>
+  <rect x="746" y="714" width="58" height="30" fill="white"/><text x="775" y="736" text-anchor="middle" class="dimtext">15</text>
+
+  <line x1="150" y1="670" x2="150" y2="835" class="ext"/>
+  <line x1="850" y1="580" x2="850" y2="835" class="ext"/>
+  <line x1="158" y1="810" x2="842" y2="810" class="dim"/>
+  <rect x="565" y="794" width="70" height="30" fill="white"/><text x="600" y="816" text-anchor="middle" class="dimtext">70</text>
+
+  <line x1="150" y1="370" x2="82" y2="370" class="ext"/>
+  <line x1="150" y1="670" x2="82" y2="670" class="ext"/>
+  <line x1="98" y1="378" x2="98" y2="662" class="dim"/>
+  <rect x="53" y="503" width="90" height="34" fill="white"/><text x="98" y="527" text-anchor="middle" class="dimtext">Ø30</text>
+
+  <line x1="700" y1="420" x2="930" y2="420" class="ext"/>
+  <line x1="700" y1="620" x2="930" y2="620" class="ext"/>
+  <line x1="914" y1="428" x2="914" y2="612" class="dim"/>
+  <rect x="872" y="503" width="84" height="34" fill="white"/><text x="914" y="527" text-anchor="middle" class="dimtext">Ø20</text>
+
+  <line x1="850" y1="460" x2="1038" y2="460" class="ext"/>
+  <line x1="850" y1="580" x2="1038" y2="580" class="ext"/>
+  <line x1="1022" y1="468" x2="1022" y2="572" class="dim"/>
+  <rect x="982" y="503" width="80" height="34" fill="white"/><text x="1022" y="527" text-anchor="middle" class="dimtext">Ø12</text>
+
+  <g transform="translate(220 900)">
+    <rect x="0" y="0" width="760" height="190" rx="12" fill="#f8fafc" stroke="#94a3b8" stroke-width="2"/>
+    <text x="380" y="42" text-anchor="middle" class="label">DESIGN INTENT</text>
+    <text x="42" y="84" class="dimtext">Segments: 25 + 30 + 15 = 70</text>
+    <text x="42" y="124" class="dimtext">Diameters left-to-right: Ø30, Ø20, Ø12</text>
+    <text x="42" y="164" class="note">Concentric axis; no fillets, chamfers, threads, or material specified</text>
+  </g>
+</svg>

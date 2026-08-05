@@ -14,12 +14,19 @@ WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 
 def _write_version_fixture(root: Path, version: str = "0.4.0") -> None:
     (root / "src" / "vibecad").mkdir(parents=True)
+    (root / "freecad" / "VibeCAD").mkdir(parents=True)
     (root / "pyproject.toml").write_text(
         f'[project]\nname = "vibecad"\nversion = "{version}"\n', encoding="utf-8"
     )
     (root / "manifest.json").write_text(json.dumps({"version": version}), encoding="utf-8")
     (root / "src" / "vibecad" / "__init__.py").write_text(
         f'__version__ = "{version}"\n', encoding="utf-8"
+    )
+    (root / "freecad" / "VibeCAD" / "package.xml").write_text(
+        f"<package><version>{version}</version></package>\n", encoding="utf-8"
+    )
+    (root / "uv.lock").write_text(
+        f'[[package]]\nname = "vibecad"\nversion = "{version}"\n', encoding="utf-8"
     )
 
 
@@ -32,7 +39,7 @@ def _run_guard(root: Path, tag: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_release_version_guard_accepts_four_matching_versions(tmp_path):
+def test_release_version_guard_accepts_six_matching_versions(tmp_path):
     _write_version_fixture(tmp_path)
     result = _run_guard(tmp_path, "v0.4.0")
     assert result.returncode == 0, result.stderr
@@ -46,6 +53,8 @@ def test_release_version_guard_accepts_four_matching_versions(tmp_path):
         ("pyproject", 'version = "0.4.1"', "pyproject.toml=0.4.1"),
         ("manifest", "0.4.1", "manifest.json=0.4.1"),
         ("source", '__version__ = "0.4.1"\n', "vibecad.__version__=0.4.1"),
+        ("package_xml", "0.4.1", "freecad package.xml=0.4.1"),
+        ("lock", "0.4.1", "uv.lock=0.4.1"),
     ],
 )
 def test_release_version_guard_rejects_each_mismatch(
@@ -65,8 +74,16 @@ def test_release_version_guard_rejects_each_mismatch(
         (tmp_path / "manifest.json").write_text(
             json.dumps({"version": replacement}), encoding="utf-8"
         )
-    else:
+    elif location == "source":
         (tmp_path / "src" / "vibecad" / "__init__.py").write_text(replacement, encoding="utf-8")
+    elif location == "package_xml":
+        (tmp_path / "freecad" / "VibeCAD" / "package.xml").write_text(
+            f"<package><version>{replacement}</version></package>\n", encoding="utf-8"
+        )
+    else:
+        (tmp_path / "uv.lock").write_text(
+            f'[[package]]\nname = "vibecad"\nversion = "{replacement}"\n', encoding="utf-8"
+        )
 
     result = _run_guard(tmp_path, tag)
     assert result.returncode == 1
@@ -125,7 +142,8 @@ def test_release_workflow_executes_the_exact_built_artifacts_before_publish():
     assert '"src/vibecad/"' in package_body
     assert "fresh-install the exact wheel and sdist" in package_body
     assert 'uv pip install --python "$environment/bin/python" --no-deps "$artifact"' in package_body
-    assert "assert len(public_tool_specs()) == 31" in package_body
+    assert 'vibecad.__version__ == os.environ["EXPECTED_VERSION"]' in package_body
+    assert "assert len(public_tool_specs()) == 38" in package_body
 
     assert managed_body.count("actions/download-artifact@v4") == 2
     assert "name: python-distributions" in managed_body

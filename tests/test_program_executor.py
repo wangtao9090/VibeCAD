@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import os
@@ -1944,20 +1945,44 @@ def test_compound_observation_derives_volume_weighted_center_of_mass() -> None:
             return True
 
     class CompoundSession:
+        doc = SimpleNamespace(Objects=())
+
         @staticmethod
         def get_assembly_shape() -> object:
             return CompoundWithoutCenter()
 
     observation = executor_module._shape_observation(CompoundSession())
+    entity_geometry = executor_module._entity_geometry(CompoundWithoutCenter())
 
     assert observation.center_of_mass_mm == (20.0, 2.0, 4.0)
     assert observation.solid_count == 2
+    assert entity_geometry["center_of_mass_mm"] == (20.0, 2.0, 4.0)
+    assert entity_geometry["solid_count"] == 2
 
 
 def test_derived_geometry_tolerance_accepts_roundoff_but_rejects_material_error() -> None:
     reference = 11_650_984.713_924_531
     assert executor_module._same_geometry_number(reference, reference + 1.862_645e-9)
     assert not executor_module._same_geometry_number(reference, reference + 0.1)
+
+    shape = executor_module.ShapeObservation(
+        target="body",
+        volume_mm3=reference,
+        area_mm2=100.0,
+        bbox_mm=(10.0, 20.0, 30.0),
+        center_of_mass_mm=(5.0, 10.0, 15.0),
+        valid_shape=True,
+        solid_count=1,
+    )
+    roundoff = dataclasses.replace(
+        shape,
+        volume_mm3=reference + 1.862_645e-9,
+        center_of_mass_mm=(5.0 + 1e-12, 10.0, 15.0),
+    )
+    material_error = dataclasses.replace(shape, volume_mm3=reference + 0.1)
+
+    assert executor_module._same_shape_observation(shape, roundoff)
+    assert not executor_module._same_shape_observation(shape, material_error)
 
 
 def test_managed_create_attaches_fresh_typed_identity_before_success(

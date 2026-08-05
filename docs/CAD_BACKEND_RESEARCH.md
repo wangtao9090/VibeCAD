@@ -61,7 +61,8 @@ VibeCAD 应明确形成两种产品模式：
 - 云原生/云自动化：Onshape、Autodesk APS Automation、Rhino.Compute。
 - 企业高端机械 CAD：Siemens NX、CATIA V5/3DEXPERIENCE CATIA、Creo Parametric。
 
-Blender、Maya、3ds Max 等 DCC 工具不是 VibeCAD 当前“参数化、可制造机械 CAD”主范围。APS 的 3ds Max Python 能力只作为同平台对比，不进入推荐 backend 清单。
+Blender、Maya、3ds Max 等 DCC 工具不是 VibeCAD 当前“参数化、可制造机械 CAD”主范围。APS 的 3ds Max Python 能力只作为同平台对比，不进入推荐 backend 清单。它们在 Visual CAD 的 Mesh/SubD、雕塑与工业自由曲面支线中的角色另见
+[`VISUAL_CAD_TOOLING_RESEARCH.md`](VISUAL_CAD_TOOLING_RESEARCH.md)。
 
 ### 2.3 Python 支持等级
 

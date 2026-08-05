@@ -1,16 +1,221 @@
-# VibeCAD Active Plan — WorkBuddy host verification
+# VibeCAD Active Plan — Visual CAD
 
-> Status: **P2-S01 through P2-S04 and the WorkBuddy compatibility patch are
-> published as v0.6.1; the GLM-5.2 real-model Profile is verified**
+> Status: **VCAD-A06 approved; v0.7.0 release in progress**
 >
-> Updated: 2026-08-03
+> Updated: 2026-08-04
 >
 > Repository anchor: published tag `v0.6.1@e7dd0c0`
 >
-> This is the only mutable orchestration plan. P1 sequential editing closed at
-> `7f3d506`; earlier campaign files remain historical records.
+> Active plan: [`vibecad-visual-cad.md`](vibecad-visual-cad.md)
+>
+> The completed P2 and WorkBuddy closeout remains below as historical context.
+> Earlier campaign files remain historical records.
 
-## 1. Current product truth
+## 0. Active Visual CAD gate
+
+The approved design direction separates two product tracks:
+
+- Mechanical Parametric: dimensioned single/multi-view images produce true
+  Sketcher constraints and bounded PartDesign features;
+- Freeform: industrial surfaces use section/guide curves and Loft/Sweep/NURBS,
+  while sculpture-class outputs remain Mesh/SubD derived artifacts unless a
+  later durable artifact decision admits them.
+
+The DCC/mesh tooling research is now captured in
+[`VISUAL_CAD_TOOLING_RESEARCH.md`](../VISUAL_CAD_TOOLING_RESEARCH.md): Blender is
+the first external sculpture-host candidate, Open3D is the preferred permissive
+algorithm library, and GPL PyMeshLab remains optional pending license review.
+This research does not expand `VCAD-A02`.
+
+On 2026-08-04 the user approved `VCAD-A04`. The public V1 envelope is now
+frozen to a single dimension-complete mechanical extruded or revolved part,
+with editable Sketcher plus bounded PartDesign output and deterministic
+dimension, BRep, and single-solid verification. Unscaled, conflicting,
+occluded, or hidden structure must clarify or stop as `SAFE_FAILURE`; it must
+not be promoted to confirmed geometry. This approval activates S35 for two to
+sixteen clean complementary views of the same object, state, and scale, but it
+does not activate ordinary-photo S40, Freeform, sculpture, or publication.
+
+S35 now closes that exact outcome: a three-view L bracket reached a verified
+review draft with three fully constrained sketches, one Pad, and three proven
+through-hole axes; two negative fixture sets stopped on missing extrusion depth
+and conflicting width. WorkBuddy extracted the correct visual facts but its
+first handwritten IR required bounded strict-contract corrections, so the
+evidence does not claim zero-repair authoring.
+
+Final visual QA found that the original positive fixture itself had a mismatched
+printed scale and ambiguous hole-coordinate baselines. The settled three-view
+fixture now uses one 4:1 scale and explicit lower-left-origin coordinates. A
+fresh, answer-free, Read-only GLM-5V-Turbo replay returned `PASS`, all exact
+dimensions and hole centers, no conflicts, and no blocking unknowns. It was a
+visual-evidence replay only; it did not create or mutate a CAD Task.
+
+The v0.7.0 release candidate now passes 5,932 repository non-slow tests,
+the fresh-unpacked MCPB real-FreeCAD/resource gate, Ruff, changed-file format,
+compileall, version/diff integrity, MCPB manifest validation, Twine, fresh
+Python 3.12 wheel/sdist imports, and source/sdist/MCPB/standalone-Skill byte
+parity. Real Codex, Claude, and WorkBuddy fresh-process smokes each recovered a
+generation-9 review task, accepted it at generation 11, and read both FCStd and
+STEP resources. The Codex run exposed a bounded MCP compatibility gap:
+`tools/list` may carry `_meta.progressToken`; the transport now accepts and
+strips valid request/notification metadata while remaining strict for all
+other unknown fields. A GitHub macOS-only atime failure was also corrected
+without weakening dev/inode/mode/owner/size/mtime/ctime mutation checks; the
+rebuilt final MCPB passed the complete host-neutral packed gate. The artifacts
+remain unpublished while VCAD-A06 moves through PR/main merge, tag, GitHub
+Release, and PyPI verification.
+WorkBuddy alone retains its additional strict-error/bounded-submit compatibility
+gate; it does not substitute for either other host.
+
+The complete architecture, slices, gates, privacy boundary, validation budget,
+and recovery point are in
+[`vibecad-visual-cad.md`](vibecad-visual-cad.md). VCAD-A01 is approved and work
+continues on `codex/visual-cad-m0` from `origin/main@d7ab6b7`. S10.1 froze the
+minimal ParametricDesignIR v1; S10.2 delivered native Sketcher objects and
+solver/DoF facts. S10.3 now compiles closed profiles into a strict single-body
+Pad/Pocket/Revolution/Hole chain, preserves feature parameter expressions and
+IR mappings across FCStd reload, and rejects invalid, multi-solid, stale, or
+no-op feature outcomes. S35 keeps Pocket at exactly one live wire per feature
+and admits 1–16 same-plane Hole circles only when diameter, extent/depth, and
+direction are shared; every declared axis receives its own material-removal
+proof. S10.4 carries this complete IR through one hidden,
+atomic ModelProgram/Task/Worker operation. The compiler adopts stable
+Body/feature EntityIdentity inside the same FreeCAD transaction, stabilizes
+parametric state before observation/checkpoint/export, and produces an ordinary
+review draft without advancing HEAD. S10.5 adds one hidden
+`modify_parametric_parameter` operation: a revision-bound Body selector, the
+immutable source IR, parameter ID, and finite value drive one native carrier
+edit. The compiler revalidates the effective live IR and reads every affected
+Sketcher/PartDesign consumer back before an in-transaction executor verifier
+admits the result. R1 and R2 retain the same Body/feature identities while the
+old Revision remains byte-immutable. It adds no direct MCP tool or second write
+authority; the MCP tool count remains 31.
+Visual persistence is approved under A02 and ImageSet sealing is implemented.
+A03 authorized a provider-neutral cloud-VLM adapter, and the branch candidate
+implements 1–16 source images, sealed read-only cloud access, adaptive metadata-free
+derivatives/crops, and one concrete OpenAI Responses transport. The user has since
+reaffirmed the older Agent-first product boundary: Codex, Claude, WorkBuddy, or another
+calling host owns image understanding, model selection, subscription, and credentials;
+VibeCAD owns the CAD Task Kernel. The direct Provider path is therefore optional and
+non-default, not the primary image-to-CAD path or a release blocker. The A04 public
+mechanical envelope is frozen; S40, Freeform, and publication remain behind A05/A06.
+
+S20.1 seals descriptor-bound local JPEG/PNG ImageSets under the additive
+`visual_inputs/` root with provenance, byte/pixel budgets, normalization, and
+atomic no-replace publication. S20.2 adds provider-neutral visual claims,
+observations, clarification answers, evidence-complete reconstruction proposals,
+and deterministic lifecycle actions. It does not create a CAD candidate or give
+the Provider any Task, Accept, commit, or HEAD authority. S20.3 provides the
+identity-pinned ReconstructionDraft store, intent-before-start Visual Domain
+Service, separate result retrieval, deterministic fake-provider composition,
+and restart-safe reconcile-only recovery. S20.4 closes answer authority binding,
+explicit retry from FAILED, reject, and adoption through an application-owned
+trusted port into an ordinary `REQUIRE_REVIEW` CAD Task. Adoption restart recovery
+reconciles the durable intent and never replays an unknown create. Delete advances
+through three durable phases around source-byte removal, then replaces the
+transient exact marker with a permanent ID-only retired tombstone. That tombstone
+contains no manifest/source hash or path, permanently prevents reuse of the same
+ImageSet ID, and shares the 1,024-identity lifetime budget with ReconstructionDraft
+tombstones. The focused S20.3/S20.4 gate is `297 passed, 1 deselected`. S20.5 now exposes exactly
+seven strict, host-neutral reconstruction actions through the existing Agent application, daemon,
+and MCP authority; the current branch has 38 public tools. A separate non-MCP local host adapter
+seals one to sixteen JPEG/PNG inputs through one authenticated staging-directory descriptor without
+placing paths, filenames, base64, or image bytes on the JSON wire. The integrated S20.5 gate is
+`488 passed, 2 deselected`; the isolated real worker and real four-image reconnect/restart replay
+gates are `1 passed` each; the final repository suite is `5,875 passed, 119 deselected`; static
+checks pass and independent review reports no P0/P1 findings. The fixed discovery frame is 30,415
+bytes. S20.5 landed as deterministic-fake/interface-ready; S30.1 later added an opt-in cloud
+Provider while the application default remains fake. Direct WorkBuddy attachment ingress into the
+sealed store remains unverified, but the primary host-owned image path does not require it.
+
+On 2026-08-04 the user approved `VCAD-A03`: cloud image transfer is allowed without a per-task
+confirmation; Provider retention is allowed under the selected personal or enterprise account
+policy; local deletion is not expected to retract an already transmitted Provider copy; and no
+user-facing dollar, call-count, or wall-clock budget is required for the pilot. Engineering safety
+limits remain mandatory but are not a product spending policy: one durable intent owns at most one
+in-flight Provider effect, transport has a finite timeout and bounded payload/result, an automatic
+retry is allowed only when non-acceptance is proved, and an unknown outcome enters recovery rather
+than a recursive retry loop. Originals remain sealed locally; Provider adapters may create
+model-specific resized images and detail crops. Sixteen is an input ceiling, not a claim that
+duplicate, blurry, or contradictory views improve reconstruction. The S30.1 candidate now accepts
+1–16 images, but application default composition remains the deterministic fake Provider. The opt-in
+OpenAI transport is not a public product claim and has not made a live API call. That missing
+direct-transport evidence is now optional: it does not block a host-owned vision pilot because the
+calling Agent already owns its multimodal inference channel.
+
+The S30.1 implementation keeps originals sealed locally and produces bounded PNG derivatives. The
+quality-first OpenAI pilot profile uses 2,048 px overview long edges, permits explicit detail crops,
+and caps a source set at 16 views; `original` detail preserves the controlled derivative rather than
+blindly transmitting every original-resolution image. The derivative API can preserve a
+caller-selected dimension, hole, thread, or boundary crop, but automatic crop selection is not yet
+wired into the Provider run; the current
+OpenAI path sends overview derivatives only. One durable invocation causes at most one
+transport effect. Transport exceptions become `UNKNOWN`, reconciliation never replays the call, and
+definitive HTTP/contract failures become terminal results. Successful cloud results carry the
+request, derivative-batch, response-ID, structured-output digests, actual returned model, token
+counts, data-policy profile, and finite timeout in provenance; credentials and raw provider IDs are
+not persisted. Offline evidence is 203 visual tests passed with one real-daemon test deselected, that
+real-daemon test passed separately, affected host regression is 369 passed/1 deselected, and the full
+repository gate is 5,897 passed/119 deselected. S30.2 now validates the actual product route: the
+calling multimodal Agent analyzes a self-authored CAD reference, classifies confirmed/inferred/unknown
+facts, asks only blocking questions, and then uses the existing `create_task` →
+`submit_model_program` → review flow. No VibeCAD API key or second model upload is part of that gate.
+The positive host-derived pilot produced an 80 × 50 × 8 mm plate with one centered Ø10 through
+hole as two fully constrained sketches and Pad/Hole features. A real managed-FreeCAD Task reached
+`awaiting_user_review` while HEAD stayed unchanged; volume `31371.681469282037 mm^3`, bounding box,
+valid-shape, and single-solid verdicts all passed, and 16,387-byte FCStd plus 8,311-byte STEP
+artifacts were materialized. The incomplete assembly image correctly stopped before Task creation.
+S30.3 adds a portable `ParametricDesignIR v1` authoring reference inside the canonical skill because
+`get_capabilities` names the value shape but intentionally does not expand its nested wire contract.
+No new MCP tool or state machine was added. The fixed fixture set now has two positive and two
+SAFE_FAILURE outcomes. The stepped-shaft image produced a fully constrained 23-constraint half
+profile and 360-degree Revolution; a real Task reached `awaiting_user_review` with HEAD unchanged,
+and volume `28792.696670150453 mm^3`, `70 × 30 × 30 mm` bounding box, valid-shape, and single-solid
+verdicts all passed. The unscaled bracket and 80/75-mm conflicting plate correctly stopped before
+Task creation.
+
+S30.4 closes the real WorkBuddy host path. Transparent stdio capture proved
+that 9–11 KiB ModelProgram arguments reached VibeCAD intact; the failure was not
+an MCP payload limit. WorkBuddy 5.3.5 obscured/retried strict domain failures and
+one later application-backed submission surfaced only generic `-32603`, so the
+branch adds one bounded `vibecad --workbuddy-submit` file adapter. It accepts
+only one owned, non-symlink project-local JSON request, reuses the canonical
+ModelProgram/ParametricDesignIR contracts, and calls the existing same-user
+daemon; it adds no MCP tool, Task state, CAD operation, or second authority.
+
+With permissions restricted to the fixture/Skill reads, one request-file write,
+one exact adapter command, and six named MCP operations, GLM-5V-Turbo created
+Task `task_4a5520dd7e3b9289eacf873565f71dd4`. It reached generation 9 and
+`awaiting_user_review` with no error, while HEAD remained at base Revision
+`revision_7d20d63e0b628c77c2b2aad3091cdcfd`. Bbox `80 × 50 × 8 mm`, volume
+`31371.681469282037 mm^3`, valid shape, and one solid all passed; the unaccepted
+draft contains 16,337-byte FCStd and 8,311-byte STEP artifacts. A fresh
+read-only WorkBuddy process with only `get_task` permission recovered the exact
+generation, candidate, draft, next action, and null error. This completes
+the frozen single-image alpha envelope, not general photo reconstruction.
+
+S10.4 closeout evidence is bounded to the product seam: a 3,405-node IR durable
+round-trip; four real managed-FreeCAD outcomes covering atomic rollback, the
+exact 26-object maximum, Worker checkpoint/STEP/reload, and Task review without
+HEAD advance; `5,672 passed, 118 deselected` in the final non-slow suite plus
+static/package/isolated-wheel gates; and two clean independent reviews. The
+capability fingerprint changed with the new hidden
+operation, so stale runtime receipts fail closed through the existing surface
+digest while private epoch 4 and public version 0.6.1 remain unchanged.
+
+S10.5 closeout keeps the additional evidence at the product seam: the existing
+3,405-node IR produces a 3,526-node durable modify TaskRun without widening the
+4,096-node budget; five real managed-FreeCAD outcomes cover adoption rollback,
+edit-verifier rollback through a Sketcher-bound parameter, the exact 26-object
+maximum, Worker reload, and the full R1 create/Accept → R2 modify/Accept flow.
+That final flow reopens both FCStd revisions, imports the new STEP with
+`Part.read`, preserves identities and the complete R1 tree, and proves the
+8→12 mm native Pad change. No new value shape or public MCP schema was added,
+so the public surface digest remains unchanged. The final gate was 5,673 passed
+/ 119 deselected, plus Ruff, compileall, diff/package/isolated-wheel
+checks and clean independent review; the pushed S10.5 anchor is `7dfddce`.
+
+## 1. Completed P2 product truth (historical)
 
 The completed P1 campaign delivered the sequential interaction slice:
 
@@ -25,13 +230,16 @@ STEP/STL import, and mesh-to-faceted-BRep remain future work. Product documents
 must refer to the completed milestone as **P1 sequential editing / G2**, not as
 completion of the entire historical P1 capability inventory.
 
-The public semantic operation registry now contains nine operations. The six
-existing direct operations remain direct-exposed. Three ModelProgram-only
-operations, `create_component`, `place_component`, and `set_component_bom`,
-establish the bounded assembly and flat-BOM path; `create_box` and
-`create_cylinder` accept an optional explicit component target. The MCP surface
-contains 31 tools: the prior 28 plus `create_release`, `get_release`, and
-`approve_release`.
+The public semantic operation registry now contains eleven operations. The six
+existing direct operations remain direct-exposed. Five ModelProgram-only
+operations, `create_component`, `place_component`, `set_component_bom`, and
+`create_parametric_design` plus `modify_parametric_parameter`, establish the
+bounded assembly/flat-BOM path and native parametric creation/editing;
+`create_box` and
+`create_cylinder` accept an optional explicit component target. The published `v0.6.1` MCP surface
+contains 31 tools: the prior 28 plus `create_release`, `get_release`, and `approve_release`. The
+current S20.5 branch adds seven reconstruction lifecycle tools for 38 total; this interface-ready
+branch has not been published as a new version.
 
 The repository also contains a broader legacy Round-8 assembly implementation
 with real FreeCAD evidence for:
@@ -274,13 +482,14 @@ Selected controls are intentionally small:
   full repository, real FreeCAD Release, MCP/resource, and Workbench gates for
   S04.
 
-No delegation, independent-review ceremony, production ledger, background
-controller, new validation framework, PR, release, or deployment is selected.
+No production ledger, background controller, new validation framework, PR,
+release, or deployment is selected. Read-only independent review is limited to
+the coherent S10 closeout and creates no persistent validation machinery.
 The user's standing publication instruction permits intentional commits and
 branch pushes when a coherent verified slice is ready; scope must still be
 audited because the worktree contains unrelated untracked paths.
 
-## 6. Decision and next action
+## 6. P2 and WorkBuddy closeout (historical)
 
 The user approved the following product boundary on 2026-08-02:
 

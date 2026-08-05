@@ -29,7 +29,7 @@ from vibecad.workflow.program import ValidatedProgram
 from vibecad.workflow.state import TaskArtifactRef
 
 MAX_ADMITTED_RUNTIME_MS = 30_000
-MAX_ADMITTED_CREATED_OBJECTS = 16
+MAX_ADMITTED_CREATED_OBJECTS = 32
 MAX_ADMITTED_RESULT_BYTES = 262_144
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")

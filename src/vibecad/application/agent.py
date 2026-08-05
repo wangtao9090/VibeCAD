@@ -105,6 +105,14 @@ def _default_runtime_factory(**kwargs):
     return build_project_runtime(**kwargs)
 
 
+def _default_visual_provider_factory():
+    """Build the A02-only local provider without importing visual code at discovery."""
+
+    from vibecad.visual.fake_provider import DeterministicFakeVisualProvider
+
+    return DeterministicFakeVisualProvider({})
+
+
 def _close_runtime(runtime: object) -> bool:
     try:
         return runtime.close() is True
@@ -122,6 +130,8 @@ def _require_current_layout(layout: ApplicationDataLayout) -> None:
         layout.checkouts,
         layout.artifacts,
         layout.releases,
+        layout.visual_inputs,
+        layout.reconstruction_drafts,
     ):
         layout.require_current(path)
 
@@ -215,6 +225,13 @@ class AgentApplication:
         "_runtimes",
         "_task_api",
         "_task_store",
+        "_visual_adoption",
+        "_visual_api",
+        "_visual_drafts",
+        "_visual_gate",
+        "_visual_inputs",
+        "_visual_provider_factory",
+        "_visual_service",
     )
 
     def __init__(
@@ -226,6 +243,7 @@ class AgentApplication:
         revision_store: LocalRevisionStore,
         runtime_factory: Callable[..., object],
         cad_port_factory: Callable[..., object],
+        visual_provider_factory: Callable[[], object] = _default_visual_provider_factory,
     ) -> None:
         try:
             lock_identity = layout.identity_for(layout.locks)
@@ -242,6 +260,7 @@ class AgentApplication:
             and type(revision_store) is LocalRevisionStore
             and callable(runtime_factory)
             and callable(cad_port_factory)
+            and callable(visual_provider_factory)
             and getattr(task_store, "_lease_manager", None) is lease_manager
             and getattr(revision_store, "_lease_manager", None) is lease_manager
             and getattr(lease_manager, "_root_parts", None) == layout.locks.parts
@@ -275,6 +294,7 @@ class AgentApplication:
         self._checkouts = checkouts
         self._runtime_factory = runtime_factory
         self._cad_port_factory = cad_port_factory
+        self._visual_provider_factory = visual_provider_factory
         self._runtimes: OrderedDict[str, object] = OrderedDict()
         self._cad_gate = _PROCESS_CAD_GATE
         self._cad_task_admissions: dict[str, int] = {}
@@ -301,6 +321,12 @@ class AgentApplication:
         self._release_store = None
         self._release_service = None
         self._release_api = None
+        self._visual_inputs = None
+        self._visual_drafts = None
+        self._visual_adoption = None
+        self._visual_service = None
+        self._visual_api = None
+        self._visual_gate = threading.Lock()
 
     @classmethod
     def from_captured_layout(
@@ -310,12 +336,14 @@ class AgentApplication:
         lease_manager,
         runtime_factory: Callable[..., object] = _default_runtime_factory,
         cad_port_factory: Callable[..., object] = _default_cad_port_factory,
+        visual_provider_factory: Callable[[], object] = _default_visual_provider_factory,
     ) -> AgentApplication:
         if not (
             type(layout) is ApplicationDataLayout
             and type(lease_manager) is ResourceLeaseManager
             and callable(runtime_factory)
             and callable(cad_port_factory)
+            and callable(visual_provider_factory)
         ):
             raise TypeError("invalid AgentApplication composition")
         try:
@@ -364,6 +392,7 @@ class AgentApplication:
                 revision_store=revisions,
                 runtime_factory=runtime_factory,
                 cad_port_factory=cad_port_factory,
+                visual_provider_factory=visual_provider_factory,
             )
             if not (
                 type(application) is cls
@@ -373,6 +402,7 @@ class AgentApplication:
                 and application._revision_store is revisions
                 and application._runtime_factory is runtime_factory
                 and application._cad_port_factory is cad_port_factory
+                and application._visual_provider_factory is visual_provider_factory
             ):
                 raise TypeError("invalid AgentApplication composition")
             _require_current_layout(layout)
@@ -389,6 +419,7 @@ class AgentApplication:
         data_root: object,
         runtime_factory: Callable[..., object] = _default_runtime_factory,
         cad_port_factory: Callable[..., object] = _default_cad_port_factory,
+        visual_provider_factory: Callable[[], object] = _default_visual_provider_factory,
     ) -> AgentApplication:
         layout = ApplicationDataLayout.open(data_root)
         leases = ResourceLeaseManager(
@@ -400,6 +431,7 @@ class AgentApplication:
             lease_manager=leases,
             runtime_factory=runtime_factory,
             cad_port_factory=cad_port_factory,
+            visual_provider_factory=visual_provider_factory,
         )
 
     @staticmethod
@@ -556,6 +588,95 @@ class AgentApplication:
                 raise TypeError("CAD factory returned an invalid execution port")
             self._cad_execution_port = candidate
             return candidate
+
+    def _visual_inputs_for_ingress(self):
+        """Return the captured descriptor-only ImageSet ingress store."""
+
+        self._ensure_live()
+        store = self._visual_inputs
+        if store is not None:
+            return store
+        with self._component_lock:
+            self._ensure_live()
+            store = self._visual_inputs
+            if store is None:
+                from vibecad.visual.inputs import VisualInputStore
+
+                store = VisualInputStore(
+                    root=self._layout.visual_inputs,
+                    expected_root_identity=self._layout.identity_for(self._layout.visual_inputs),
+                    lease_manager=self._lease_manager,
+                )
+                self._visual_inputs = store
+            return store
+
+    def seal_visual_image_set(self, *, request: object, sources: object):
+        """Seal already-open local descriptors; no path or JSON ingress is accepted."""
+
+        self._ensure_live()
+        store = self._visual_inputs_for_ingress()
+        self._ensure_live()
+        return store.seal(request, sources)
+
+    def _visual_bundle_for_request(self):
+        """Lazily compose the A02 visual service behind the application authority."""
+
+        self._ensure_live()
+        api = self._visual_api
+        service = self._visual_service
+        if api is not None and service is not None:
+            return api, service
+        with self._component_lock:
+            self._ensure_live()
+            api = self._visual_api
+            service = self._visual_service
+            if api is None or service is None:
+                from vibecad.application.visual_adoption import (
+                    ApplicationVisualAdoptionPort,
+                )
+                from vibecad.application.visual_api import VisualApi
+                from vibecad.visual.inputs import VisualInputStore
+                from vibecad.visual.provider import VisualProviderBinding
+                from vibecad.visual.service import VisualReconstructionService
+                from vibecad.visual.store import ReconstructionDraftStore
+
+                inputs = self._visual_inputs
+                if inputs is None:
+                    inputs = VisualInputStore(
+                        root=self._layout.visual_inputs,
+                        expected_root_identity=self._layout.identity_for(
+                            self._layout.visual_inputs
+                        ),
+                        lease_manager=self._lease_manager,
+                    )
+                drafts = self._visual_drafts
+                if drafts is None:
+                    drafts = ReconstructionDraftStore(
+                        root=self._layout.reconstruction_drafts,
+                        expected_root_identity=self._layout.identity_for(
+                            self._layout.reconstruction_drafts
+                        ),
+                        lease_manager=self._lease_manager,
+                    )
+                adoption = self._visual_adoption
+                if adoption is None:
+                    adoption = ApplicationVisualAdoptionPort(application=self)
+                if service is None:
+                    provider = self._visual_provider_factory()
+                    service = VisualReconstructionService(
+                        inputs=inputs,
+                        drafts=drafts,
+                        provider=VisualProviderBinding(provider=provider),
+                        adoption=adoption,
+                    )
+                if api is None:
+                    api = VisualApi(service=service)
+                self._visual_inputs = inputs
+                self._visual_drafts = drafts
+                self._visual_adoption = adoption
+                self._visual_service = service
+                self._visual_api = api
+            return api, service
 
     def _project_api_for_request(self):
         self._ensure_live()
@@ -864,6 +985,180 @@ class AgentApplication:
         api = self._task_api_for_request()
         self._ensure_live()
         return api.create_task(request)
+
+    def create_reconstruction_request(self, request: object) -> dict[str, object]:
+        """Capture the current project HEAD before creating a visual draft."""
+
+        self._ensure_live()
+        with self._visual_gate:
+            self._ensure_live()
+            return self._create_reconstruction_request_locked(request)
+
+    def _create_reconstruction_request_locked(self, request: object) -> dict[str, object]:
+        """Create or replay one reconstruction under sequential ownership."""
+
+        from vibecad.application.project_api import (
+            ProjectCurrentResult,
+            ProjectServicePortErrorCode,
+            ProjectServicePortFailure,
+        )
+        from vibecad.application.visual_api import (
+            VisualApi,
+            VisualApiErrorCode,
+            VisualCreateIngressRequest,
+        )
+        from vibecad.visual.reconstruction import reconstruction_identity
+        from vibecad.visual.store import (
+            ReconstructionDraftStoreError,
+            ReconstructionDraftStoreErrorCode,
+        )
+
+        parsed = VisualApi.parse_create_request(request)
+        if type(parsed) is dict:
+            return parsed
+        if type(parsed) is not VisualCreateIngressRequest:
+            return VisualApi.failure(VisualApiErrorCode.INTERNAL_ERROR)
+
+        api, service = self._visual_bundle_for_request()
+        reconstruction_id, create_digest = reconstruction_identity(parsed.create_key)
+
+        def replay_existing() -> dict[str, object] | None:
+            try:
+                existing = service.get(reconstruction_id)
+            except ReconstructionDraftStoreError as error:
+                if error.code is ReconstructionDraftStoreErrorCode.NOT_FOUND:
+                    return None
+                return api.get_reconstruction(
+                    {
+                        "schema_version": 1,
+                        "reconstruction_id": reconstruction_id,
+                    }
+                )
+            except BaseException:
+                return VisualApi.failure(VisualApiErrorCode.INTERNAL_ERROR)
+            if (
+                existing.create_key_sha256 != create_digest
+                or existing.base_head is None
+                or existing.base_head.project_id != parsed.project_id
+                or existing.image_set_id != parsed.image_set_id
+                or existing.image_set_manifest_sha256 != parsed.image_set_manifest_sha256
+            ):
+                return VisualApi.failure(VisualApiErrorCode.CONFLICT)
+            return api.get_reconstruction(
+                {
+                    "schema_version": 1,
+                    "reconstruction_id": reconstruction_id,
+                }
+            )
+
+        replay = replay_existing()
+        if replay is not None:
+            return replay
+
+        project_id = parsed.project_id
+        try:
+            current = self.get_project(project_id=project_id)
+        except BaseException:
+            return VisualApi.failure(VisualApiErrorCode.INTERNAL_ERROR)
+        if type(current) is ProjectServicePortFailure:
+            mapped = {
+                ProjectServicePortErrorCode.INVALID_INPUT: VisualApiErrorCode.INVALID_INPUT,
+                ProjectServicePortErrorCode.NOT_FOUND: VisualApiErrorCode.NOT_FOUND,
+                ProjectServicePortErrorCode.CONFLICT: VisualApiErrorCode.CONFLICT,
+                ProjectServicePortErrorCode.LEASE_UNAVAILABLE: (
+                    VisualApiErrorCode.LEASE_UNAVAILABLE
+                ),
+                ProjectServicePortErrorCode.RESOURCE_EXHAUSTED: (
+                    VisualApiErrorCode.RESOURCE_EXHAUSTED
+                ),
+                ProjectServicePortErrorCode.INTEGRITY_FAILURE: (
+                    VisualApiErrorCode.INTEGRITY_FAILURE
+                ),
+                ProjectServicePortErrorCode.STORE_FAILURE: VisualApiErrorCode.STORE_FAILURE,
+                ProjectServicePortErrorCode.RECOVERY_REQUIRED: (
+                    VisualApiErrorCode.RECOVERY_REQUIRED
+                ),
+            }.get(current.code, VisualApiErrorCode.INTERNAL_ERROR)
+            return VisualApi.failure(mapped)
+        if type(current) is not ProjectCurrentResult:
+            return VisualApi.failure(VisualApiErrorCode.INTERNAL_ERROR)
+        head = current.head
+        revision = current.revision
+        if not (
+            current.project_id == project_id
+            and head.project_id == project_id
+            and revision.project_id == project_id
+            and head.revision_id == revision.id
+            and head.manifest_sha256 == revision.manifest_sha256
+        ):
+            return VisualApi.failure(VisualApiErrorCode.INTEGRITY_FAILURE)
+        self._ensure_live()
+        created = api.create_reconstruction(
+            {
+                "schema_version": 1,
+                "create_key": parsed.create_key,
+                "image_set_id": parsed.image_set_id,
+                "image_set_manifest_sha256": parsed.image_set_manifest_sha256,
+                "base_head": {
+                    "schema_version": 1,
+                    "project_id": head.project_id,
+                    "generation": head.generation,
+                    "revision_id": head.revision_id,
+                    "manifest_sha256": head.manifest_sha256,
+                },
+            }
+        )
+        if created.get("ok") is not True:
+            replay = replay_existing()
+            if replay is not None:
+                return replay
+        return created
+
+    def get_reconstruction_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        api, _ = self._visual_bundle_for_request()
+        self._ensure_live()
+        return api.get_reconstruction(request)
+
+    def run_reconstruction_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        with self._visual_gate:
+            self._ensure_live()
+            api, _ = self._visual_bundle_for_request()
+            self._ensure_live()
+            return api.run_reconstruction(request)
+
+    def answer_reconstruction_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        with self._visual_gate:
+            self._ensure_live()
+            api, _ = self._visual_bundle_for_request()
+            self._ensure_live()
+            return api.answer_reconstruction(request)
+
+    def adopt_reconstruction_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        with self._visual_gate:
+            self._ensure_live()
+            api, _ = self._visual_bundle_for_request()
+            self._ensure_live()
+            return api.adopt_reconstruction(request)
+
+    def reject_reconstruction_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        with self._visual_gate:
+            self._ensure_live()
+            api, _ = self._visual_bundle_for_request()
+            self._ensure_live()
+            return api.reject_reconstruction(request)
+
+    def delete_reconstruction_request(self, request: object) -> dict[str, object]:
+        self._ensure_live()
+        with self._visual_gate:
+            self._ensure_live()
+            api, _ = self._visual_bundle_for_request()
+            self._ensure_live()
+            return api.delete_reconstruction(request)
 
     def list_tasks_request(self, request: object) -> dict[str, object]:
         self._ensure_live()

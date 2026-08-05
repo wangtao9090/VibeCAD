@@ -18,8 +18,10 @@ VibeCAD 不内置或转售大模型。推理使用用户自己的宿主模型及
 - 可实际运行的 FreeCAD Workbench Alpha，支持项目/任务发现、HEAD 与草案预览、verdict、Accept
   和 Reject；
 - 确定性的 Task Kernel 执行：隔离候选、明确审核策略、经过验证的 FCStd/STEP 制品、恢复与安全重放；
-- 已验证的 WorkBuddy 5.3.5 本地 stdio 路径，覆盖严格 schema、重启恢复、精确 Release 批准以及
-  PDF/ZIP 的原生 MCP Blob 读取；
+- 面向 Codex、Claude、WorkBuddy 及其他兼容 Agent 的 host-neutral 38-tool MCP 与 Skill 合同；
+  每个真实宿主都用同一发布包 smoke 单独认证；
+- WorkBuddy 5.3.5 另有严格错误恢复、重启恢复、精确 Release 批准和 PDF/ZIP 原生 MCP Blob
+  读取的兼容性覆盖；
 - VibeCAD 自行管理 FreeCAD 运行时，用户无需预先配置兼容的系统 FreeCAD。
 
 ## 体验 FreeCAD Workbench Alpha
@@ -27,7 +29,7 @@ VibeCAD 不内置或转售大模型。推理使用用户自己的宿主模型及
 最简单的安装方式是把下面这句话交给编码 Agent：
 
 > 请从 https://github.com/wangtao9090/VibeCAD 安装并启动 VibeCAD FreeCAD
-> Workbench Alpha。使用 tag `v0.6.1`，
+> Workbench Alpha。使用 tag `v0.7.0`，
 > 克隆到持久目录，构建 wheel，通过 `uv tool install --force` 安装，保留 checkout
 > 和构建出的 wheel，最后运行 `vibecad --freecad`。不要安装或回退到系统版 FreeCAD。
 
@@ -35,10 +37,10 @@ Agent 应执行以下可复现步骤：
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout v0.6.1
+git -C VibeCAD checkout v0.7.0
 cd VibeCAD
 uv build --wheel
-uv tool install --force dist/vibecad-0.6.1-py3-none-any.whl
+uv tool install --force dist/vibecad-0.7.0-py3-none-any.whl
 vibecad --freecad
 ```
 
@@ -76,7 +78,9 @@ selector 构造与唯一解析由受管 Python bridge 和受管模式共用的�
 ## 当前 Agent-first 工作流
 
 ```text
-用户与宿主 Agent
+用户文本或图片与宿主多模态 Agent
+  → 宿主把可见事实区分为 confirmed、inferred 与 unknown
+  → 缺少绝对尺度等阻塞信息时先询问，不静默猜测
   → get_capabilities 读取实际能力
   → create_project 创建空项目或受控导入 FCStd
   → create_task 绑定项目版本与审核策略
@@ -93,12 +97,18 @@ direct operation 与 ModelProgram 不是两套执行系统。direct operation �
 
 当前只能从空项目或一个 FCStd 文件开始；其中 FCStd 导入必须非空，且其中每个对象都必须是
 `Part::Box` 或 `Part::Cylinder`。混合或其他对象类型会被拒绝。通用 FCStd 导入属于 P1；STEP/STL
-导入、逆向工程和仿真 尚未接入。照片/视频到网格或 STL、2D 草图识别等前置引擎可以在以后作为
-外部工具连接，VibeCAD 聚焦可编辑 CAD 的中间编排与验证。
+导入、逆向工程和仿真尚未接入。图片请求由 Codex、Claude、WorkBuddy 或其他宿主已有的多模态模型
+使用自己的订阅/API 授权完成理解，再把受控 ModelProgram 送入普通 Task Kernel。VibeCAD 不需要
+宿主模型凭据，也不会把同一图片再次上传给第二个模型。
+当前受控 image-to-CAD alpha 支持一个尺寸完整的机械拉伸件或回转件，可协调同一物体、状态和尺度的
+二至十六张干净互补视图，并输出可编辑 Sketcher/PartDesign。outcome 证据现已覆盖单孔板、
+sharp-shoulder 阶梯轴，以及一个三视图 L 型支架（同平面双孔加另一平面单孔）。拉伸深度未确定、无尺度
+透视图或互相矛盾的尺寸都必须在创建 Task 前停下来澄清。canonical Agent skill 随附 portable
+`ParametricDesignIR v1` authoring reference；这仍是受控机械工作流，不代表普适照片重建。
 
-## 当前公开能力（0.6.1）
+## 当前公开能力（开发分支）
 
-MCPB manifest 与运行时投影同一份冻结合同，当前公开 31 个工具。每个工具都有简短说明、严格输入
+MCPB manifest 与运行时投影同一份冻结合同，当前公开 38 个工具。每个工具都有简短说明、严格输入
 schema 与副作用标记；宿主应先调用 `get_capabilities`，不能根据工具数量或模型常识猜能力。
 
 | 类别 | 工具 |
@@ -108,7 +118,15 @@ schema 与副作用标记；宿主应先调用 `get_capabilities`，不能根据
 | 项目与版本 | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
 | 任务与草案 | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft` |
 | 交付 | `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release` |
+| 视觉重建 | `create_reconstruction`, `get_reconstruction`, `run_reconstruction`, `answer_reconstruction`, `adopt_reconstruction`, `reject_reconstruction`, `delete_reconstruction` |
 | direct operation | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
+
+这七个视觉重建工具是可选的 VibeCAD-managed 生命周期，用于 sealed 本地 ImageSet、持久恢复、澄清
+问答，以及采纳为普通待审核 CAD Task；默认 composition 仍是 deterministic fake。非 MCP 本地主机
+适配器可通过一个已认证的 staging-directory descriptor 封存一至十六张 JPEG/PNG；JSON wire 不包含
+路径、文件名、base64 或图片字节。宿主多模态模型已经能看图时不需要这条 store/provider 路径。
+WorkBuddy 附件直接进入 VibeCAD sealed store 仍未验证，MCP 接口也不接受图片路径、base64 内容或
+visual Resource URI。
 
 一次成功的 `export_task_artifacts` 返回规范结果及两个有类型的 `ResourceLink`：
 
@@ -178,7 +196,7 @@ Skill 的发现路径如下：
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
 | WorkBuddy | — | `.codebuddy/skills/vibecad-agent` |
 
-发布资产中的 `vibecad-agent-skill-0.6.1.zip` 解压后只有一个顶层 `vibecad-agent/` 目录，可整体复制
+发布资产中的 `vibecad-agent-skill-0.7.0.zip` 解压后只有一个顶层 `vibecad-agent/` 目录，可整体复制
 到上述任一路径。Python wheel 包含服务端和 FreeCAD Workbench 插件，受管运行时包含匹配的服务端
 环境；两者都不会自动激活 Agent Skill。
 
@@ -204,6 +222,12 @@ WorkBuddy 提示时批准这个项目级服务，等待运行时 ready 后再开
 `resources/read` 结果原生保存到项目 `.mcp-resources/`，因此 PDF 与批准后的 ZIP 不需要文件路径
 适配层。GLM-5.2 已通过标准多轮任务，但目前只是暂定默认模型：自主 CAD 任务的 allowed tools 应
 排除运行时维护工具，`uninstall_runtime` 必须保留显式用户确认。
+
+在当前 38-tool visual 开发 profile 中，WorkBuddy 5.3.5 应把手写 ModelProgram 放入 canonical skill
+规定的四字段项目本地请求，并只执行有界命令
+`vibecad --workbuddy-submit .vibecad-workbuddy-request-<name>.json`。这会保留可能被 WorkBuddy
+折叠为 `-32603` 的精确合同路径；它不是 artifact 适配或第二执行路径：ResourceLink/Blob 继续走
+原生 MCP，原 Task Kernel 仍会重新验证并执行同一个 program。
 
 扩展首次启动需要联网获取锁定的 Python 包，并按需安装约 2–3 GB 的 FreeCAD 运行时；后续启动复用
 已验证缓存。macOS 默认数据根通常是：
@@ -232,10 +256,9 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 
 ## Host-ready 的准确含义
 
-0.6.1 已验证 MCP 协议、Skill 包结构、FCStd/STEP 与 Release ResourceLink、受管 FreeCAD E2E、
-31-tool discovery，以及一次真实 WorkBuddy/GLM-5.2 多轮交付。因此在声明的 WorkBuddy 5.3.5
-边界内可以称为 `host-verified`。这不等于所有 WorkBuddy 模型都已认证；Kimi-K3、MiniMax-M3 与
-DeepSeek-V4-Flash 仍是后续对比候选。
+0.7.0 发布合同独立于宿主验证 MCP 协议、Skill 包结构、FCStd/STEP 与 Release ResourceLink、
+受管 FreeCAD E2E 和精确 38-tool discovery。Codex、Claude、WorkBuddy 的真实发布包 smoke 分别记录，
+任一宿主通过都不替代另外两个。WorkBuddy 另有上述兼容性覆盖，但不代表其中所有模型都已认证。
 
 ## 架构边界与路线
 
@@ -245,26 +268,31 @@ daemon 进入该 Application/Task Kernel。运行时维护和无状态 discovery
 第二条领域写入路径。daemon 提供同用户认证及受限的一次性 file grant，不形成第二套提交系统。
 
 S3-8、P0-B core、package/managed-runtime 收口、有界 G1 Workbench Alpha、P1 顺序编辑与 P2
-刚性机械交付与首个 WorkBuddy 宿主集成都已在 0.6.1 完成：
+刚性机械交付、受控图片机械 CAD 与宿主集成都纳入 0.7.0：
 
 - **P0-B core（后端完成）**：任务/项目/版本发现、文件级比较、verified forward revert、取消/reconcile、
   认证 daemon、file grant、source liveness 与受管可终止 FreeCAD Worker 都进入同一 Task Kernel；
 - **G1（Alpha 完成）**：真实 FreeCAD Qt Workbench UI 已具备 preview、verdict、精确
   object/feature selector 捕获与 Accept/Reject；一个指纹绑定的外部 FreeCAD 1.1.3 试点已有证据，
   受管模式仍是默认路径；
-- **P1/G2（有界完成）**：当前源码已实现窄范围的顺序 editable HEAD/手工 checkpoint；Sketcher/PartDesign、
-  受控导入和更广的单零件生产能力仍待后续完成；
+- **P1/G2（有界完成）**：当前源码已实现窄范围顺序 editable HEAD/手工 checkpoint，以及受控的
+  原生 Sketcher/PartDesign 参数编辑；通用受控导入和更广单零件生产能力仍待后续；
 - **P2（有界完成）**：2–10 零件刚性装配、干涉验证、扁平 BOM、确定性装配 PDF、不可变 Release
   批准与精确交付 ZIP；原生 joints、可编辑制造图、GD&T、PLM 与企业交付链仍待后续；
 - **WorkBuddy（已验证）**：WorkBuddy 5.3.5 + GLM-5.2 已完成严格本地 stdio 工具调用、持久任务/
   重启恢复、精确摘要批准与原生 PDF/ZIP Blob 读取；更广模型对比属于后续证据，不阻塞本次发布。
+  当前 visual branch 上，GLM-5V-Turbo 还通过 bounded submit adapter 把冻结的完整尺寸单孔板 fixture
+  生成了 verifier 通过的可编辑 draft；这不代表普适照片重建。
+- **Visual Mechanical V1**：一张尺寸完整视图，或 2–16 张同一物体/状态/尺度的干净互补视图，
+  可生成一个可编辑拉伸件或回转件；缺尺度/深度、视图冲突、遮挡或隐藏结构必须澄清或安全停止。
 
 G1 Workbench Alpha 已把真实 FreeCAD Qt UI 与确定性的受管启动器打入安装包。它具备恰好一个
 Workbench 与 Dock、daemon-backed refresh、相互独立的 HEAD/草案预览、verdict、精确
 object/feature selector 捕获、Accept/Reject 与异步 client/thread shutdown。daemon 是可复用的受管
 后台服务，更新与卸载会通过认证维护路径将其退休。薄外部试点通过一个有界受管 Python bridge 复用
-这些状态机，不增加第二写入权威。当前仍不支持 face/edge 选择、STEP/STL import、照片重建或
-simulation。
+这些状态机，不增加第二写入权威。当前仍不支持 face/edge 选择、STEP/STL import、普适照片重建或
+simulation。多模态宿主可通过普通待审核 Task 流程试点受控 image-to-CAD；独立的 VibeCAD-managed
+视觉生命周期仍默认使用 deterministic fake Provider，direct cloud transport 是可选非默认路径。
 
 进一步阅读（源代码仓库）：
 [用户手册](https://github.com/wangtao9090/VibeCAD/blob/main/docs/USER_GUIDE.md)、

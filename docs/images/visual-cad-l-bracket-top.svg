@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#243447"/></marker><style>.shape{fill:#e8f1f8;stroke:#13293d;stroke-width:5;stroke-linejoin:round}.dim{fill:none;stroke:#243447;stroke-width:3;marker-start:url(#arrow);marker-end:url(#arrow)}.ext{stroke:#7b8794;stroke-width:2}.hidden{fill:none;stroke:#7b8794;stroke-width:2;stroke-dasharray:10 8}.t{font-family:Arial,sans-serif;fill:#13293d;font-size:30px}.title{font-size:38px;font-weight:bold}.note{font-size:25px}</style></defs>
+  <rect width="1200" height="900" fill="white"/>
+  <text x="60" y="70" class="t title">L-BRACKET — TOP / CROSS-SECTION VIEW (XY)</text>
+  <text x="60" y="112" class="t note">ALL DIMENSIONS mm · SCALE 4:1 · SAME PART / STATE / SCALE</text>
+  <path d="M260 650 L760 650 L760 570 L340 570 L340 250 L260 250 Z" class="shape"/>
+  <path d="M450 570 V650 M590 570 V650 M260 410 H340" class="hidden"/>
+  <line x1="260" y1="700" x2="260" y2="765" class="ext"/><line x1="760" y1="700" x2="760" y2="765" class="ext"/>
+  <line x1="260" y1="745" x2="760" y2="745" class="dim"/><text x="490" y="734" class="t">50</text>
+  <line x1="220" y1="250" x2="155" y2="250" class="ext"/><line x1="220" y1="650" x2="155" y2="650" class="ext"/>
+  <line x1="180" y1="250" x2="180" y2="650" class="dim"/><text x="105" y="462" class="t">40</text>
+  <line x1="260" y1="210" x2="340" y2="210" class="dim"/><text x="282" y="198" class="t">8</text>
+  <line x1="800" y1="570" x2="800" y2="650" class="dim"/><text x="820" y="622" class="t">8</text>
+  <text x="60" y="855" class="t note">View index 2 · top · constant L-section extruded 60 mm</text>
+</svg>

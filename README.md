@@ -21,7 +21,9 @@ execution, deterministic verification, recovery, and delivery.
   Accept, and Reject.
 - Deterministic Task Kernel execution: isolated candidates, explicit review policy, verified
   FCStd/STEP artifacts, recovery, and replay-safe request semantics.
-- A WorkBuddy 5.3.5 verified local-stdio path covering strict schemas, durable restart recovery,
+- A host-neutral 38-tool MCP and Skill contract for Codex, Claude, WorkBuddy, and other compatible
+  agents; each real host profile is certified separately against the same package smoke.
+- Additional WorkBuddy 5.3.5 compatibility coverage for strict-error recovery, durable restart,
   exact Release approval, and native MCP Blob reads for PDF/ZIP delivery.
 - A VibeCAD-managed FreeCAD runtime, so users do not need to prepare a compatible system FreeCAD.
 
@@ -30,7 +32,7 @@ execution, deterministic verification, recovery, and delivery.
 The easiest installation path is to give your coding Agent this request:
 
 > Install and launch the VibeCAD FreeCAD Workbench Alpha from
-> https://github.com/wangtao9090/VibeCAD. Use tag `v0.6.1`, clone it into a persistent
+> https://github.com/wangtao9090/VibeCAD. Use tag `v0.7.0`, clone it into a persistent
 > directory, build its wheel, install it with `uv tool install --force`, keep
 > the checkout and built wheel, and run `vibecad --freecad`. Do not install or
 > fall back to a system copy of FreeCAD.
@@ -39,10 +41,10 @@ The Agent's reproducible procedure is:
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout v0.6.1
+git -C VibeCAD checkout v0.7.0
 cd VibeCAD
 uv build --wheel
-uv tool install --force dist/vibecad-0.6.1-py3-none-any.whl
+uv tool install --force dist/vibecad-0.7.0-py3-none-any.whl
 vibecad --freecad
 ```
 
@@ -86,7 +88,9 @@ Kernel used by managed mode.
 ## Current Agent-first Workflow
 
 ```text
-User and host Agent
+User text or images and the host multimodal Agent
+  → host classifies visible facts as confirmed, inferred, or unknown
+  → host asks for blocking dimensions instead of inventing absolute scale
   → get_capabilities reads the actual capabilities
   → create_project creates an empty project or performs a controlled FCStd import
   → create_task binds the project version and review policy
@@ -105,13 +109,22 @@ verification, draft, commit, reject, rollback, and recovery semantics.
 A project can currently begin only from an empty project or a single FCStd file. An FCStd import
 must be non-empty, and every object in it must be either `Part::Box` or `Part::Cylinder`. Mixed
 or other object types are rejected. General FCStd import belongs to P1; STEP/STL import, reverse
-engineering, and simulation are not yet integrated. Upstream engines for photo/video-to-mesh or
-STL conversion, 2D sketch recognition, and similar tasks may be connected later as external
-tools. VibeCAD focuses on the intermediate orchestration and verification of editable CAD.
+engineering, and simulation are not yet integrated. For an image request, the calling Codex,
+Claude, WorkBuddy, or other multimodal host performs image understanding with its own subscription
+or API authorization, then submits the resulting bounded ModelProgram through the ordinary Task
+Kernel. VibeCAD does not need the host's model credential or upload the same image to a second model.
+The current bounded image-to-CAD alpha covers one dimension-complete mechanical extruded or
+revolved part. It can reconcile two to sixteen clean complementary views of the same object, state,
+and scale, then produce editable Sketcher/PartDesign output. Outcome evidence now includes a
+single-hole plate, a sharp-shoulder stepped shaft, and a three-view L bracket with two grouped holes
+on one plane plus one hole on another. An unresolved extrusion depth, an unscaled perspective image,
+or contradictory dimensions must stop for clarification before Task creation. The canonical Agent
+skill carries the portable `ParametricDesignIR v1` authoring reference; this remains a bounded
+mechanical workflow, not a claim of universal photo reconstruction.
 
-## Current Public Capabilities (0.6.1)
+## Current Public Capabilities (development branch)
 
-The MCPB manifest and runtime project the same frozen contract, which currently exposes 31
+The MCPB manifest and runtime project the same frozen contract, which currently exposes 38
 tools. Each tool has a concise description, a strict input schema, and side-effect annotations.
 A host should call `get_capabilities` first instead of inferring capabilities from the number of
 tools or from general model knowledge.
@@ -123,7 +136,17 @@ tools or from general model knowledge.
 | Projects and versions | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
 | Tasks and drafts | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft` |
 | Delivery | `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release` |
+| Visual reconstruction | `create_reconstruction`, `get_reconstruction`, `run_reconstruction`, `answer_reconstruction`, `adopt_reconstruction`, `reject_reconstruction`, `delete_reconstruction` |
 | Direct operations | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
+
+The seven visual-reconstruction tools are an optional VibeCAD-managed lifecycle for sealed local
+ImageSets, durable restart recovery, clarification, and adoption into an ordinary reviewed CAD
+Task. The default composition remains deterministic fake. A non-MCP local host adapter can seal
+one to sixteen JPEG/PNG inputs through one authenticated staging-directory descriptor; the JSON
+wire contains no path, filename, base64 payload, or image bytes. This optional store/provider path
+is not required when the calling multimodal host already sees the images. Direct WorkBuddy
+attachment ingress into VibeCAD's sealed store remains unverified, and the MCP surface accepts no
+image path, base64 payload, or visual Resource URI.
 
 A successful `export_task_artifacts` call returns a canonical result and two typed
 `ResourceLink` values:
@@ -208,7 +231,7 @@ Skill discovery paths are:
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
 | WorkBuddy | — | `.codebuddy/skills/vibecad-agent` |
 
-The release asset `vibecad-agent-skill-0.6.1.zip` contains exactly one top-level
+The release asset `vibecad-agent-skill-0.7.0.zip` contains exactly one top-level
 `vibecad-agent/` directory after extraction. That directory can be copied as a whole to any path
 listed above. The Python wheel contains the server and the FreeCAD Workbench addon, while the
 managed runtime contains the matching server environment. Neither package activates the Agent
@@ -241,6 +264,14 @@ canonical multi-turn task, but remains a provisional default: keep runtime
 maintenance tools outside an autonomous CAD task's allowed-tool set and require
 explicit user confirmation for `uninstall_runtime`.
 
+For the current 38-tool visual development profile, WorkBuddy 5.3.5 should
+submit a handwritten ModelProgram through the bounded project-local command
+`vibecad --workbuddy-submit .vibecad-workbuddy-request-<name>.json`; the
+canonical Skill defines the exact four-field request. This preserves actionable
+contract paths that WorkBuddy may otherwise surface only as `-32603`. It is not
+an artifact adapter or second execution path: ResourceLink/Blob delivery stays
+native MCP, and the existing Task Kernel revalidates and executes the program.
+
 On first launch, the extension needs network access to fetch locked Python packages and, when
 needed, install approximately 2–3 GB of FreeCAD runtime files. Later launches reuse the verified
 cache. The default macOS data root is typically:
@@ -271,11 +302,11 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 
 ## What “Host-ready” Means Precisely
 
-The 0.6.1 release has verified the MCP protocol, Skill package structure, FCStd/STEP and Release
-ResourceLinks, managed FreeCAD E2E, 31-tool discovery, and one real WorkBuddy/GLM-5.2 multi-turn
-delivery. It is therefore `host-verified` for the stated WorkBuddy 5.3.5 boundary. This is not a
-claim that every WorkBuddy model is certified; Kimi-K3, MiniMax-M3, and DeepSeek-V4-Flash remain
-comparison candidates.
+The 0.7.0 release contract verifies the MCP protocol, Skill package structure, FCStd/STEP and
+Release ResourceLinks, managed FreeCAD E2E, and exact 38-tool discovery independently of any host.
+Real Codex, Claude, and WorkBuddy package smokes are recorded as separate host profiles; passing one
+never certifies the others. WorkBuddy additionally carries the compatibility coverage described
+above, and no result claims that every model available in a host is certified.
 
 ## Architectural Boundaries and Roadmap
 
@@ -287,8 +318,8 @@ form a second domain-write path. The daemon provides same-user authentication an
 one-time file grants; it does not create a second commit system.
 
 S3-8, P0-B core, the package/managed-runtime closeout, bounded G1 Workbench Alpha, P1 sequential
-editing, P2 rigid mechanical delivery, and the first WorkBuddy host integration are complete for
-0.6.1:
+editing, P2 rigid mechanical delivery, bounded visual mechanical CAD, and host integration are
+included in 0.7.0:
 
 - **P0-B core (backend complete)**: task/project/version discovery, file-level comparison,
   verified forward revert, cancellation/reconcile, authenticated daemon, file grants, source
@@ -296,15 +327,20 @@ editing, P2 rigid mechanical delivery, and the first WorkBuddy host integration 
 - **G1 (Alpha complete)**: preview, verdict, exact object/feature selector capture, and
   Accept/Reject are available in the real FreeCAD Qt Workbench UI; one fingerprinted external
   FreeCAD 1.1.3 pilot is evidenced, while managed mode remains the default;
-- **P1/G2 (complete boundary)**: the narrow sequential editable-HEAD/manual-checkpoint slice is implemented in the
-  current source; Sketcher/PartDesign, controlled import, and broader single-part production
-  capability remain;
+- **P1/G2 (complete boundary)**: the narrow sequential editable-HEAD/manual-checkpoint slice and
+  bounded native Sketcher/PartDesign parameter editing are implemented; controlled general import
+  and broader single-part production capability remain;
 - **P2 (complete boundary)**: rigid 2–10 component assemblies, interference verification, flat
   BOM, deterministic assembly PDF, immutable Release approval, and an exact delivery ZIP;
   native joints, editable manufacturing drawings, GD&T, PLM, and enterprise delivery chains remain;
 - **WorkBuddy (verified)**: WorkBuddy 5.3.5 with GLM-5.2 completed strict local stdio tool use,
   durable task/restart recovery, exact digest approval, and native PDF/ZIP Blob reads; the wider
-  model comparison remains future evidence, not a release blocker.
+  model comparison remains future evidence, not a release blocker. On the current visual branch,
+  GLM-5V-Turbo also turned the frozen dimensioned plate fixture into a verified editable draft via
+  the bounded submit adapter; this is not a claim of universal photo reconstruction.
+- **Visual Mechanical V1**: one fully dimensioned view, or 2–16 clean complementary views of the
+  same object/state/scale, can produce one editable extruded or revolved mechanical part. Missing
+  scale/depth, conflicting views, occlusion, and hidden structure must clarify or fail safely.
 
 The G1 Workbench Alpha packages the real FreeCAD Qt UI and its deterministic managed launcher. It
 includes one Workbench and Dock, daemon-backed refresh, separate HEAD/draft preview, verdict,
@@ -312,7 +348,10 @@ exact object/feature selector capture, Accept/Reject, and asynchronous client/th
 The daemon is a reusable managed background service; update and uninstall retire it through the
 authenticated maintenance path. The thin external pilot reuses those state machines through one
 bounded managed-Python bridge and does not add a second write authority. Face/edge selection,
-STEP/STL import, photo reconstruction, and simulation are not currently supported.
+STEP/STL import, universal photo reconstruction, and simulation are not currently supported. A
+multimodal host can pilot bounded image-to-CAD through the ordinary reviewed Task flow; the separate
+VibeCAD-managed visual lifecycle still defaults to the deterministic fake Provider, with direct
+cloud transport optional and non-default.
 
 Further reading in the source repository:
 [User Guide](https://github.com/wangtao9090/VibeCAD/blob/main/docs/USER_GUIDE.md),
