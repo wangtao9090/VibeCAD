@@ -1,10 +1,10 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S30.1`–`VCAD-S35` 已完成；`VCAD-A06` 已批准，v0.7.0 发布执行中**
+> 状态：**`VCAD-S30.1`–`VCAD-S35` 与 `VCAD-A06` 已完成；v0.7.0 已发布并验证**
 >
 > 更新：2026-08-04
 >
-> 产品基线：已发布 `v0.6.1@e7dd0c0`
+> 产品基线：已发布 `v0.7.0@6bcd934`
 >
 > 当前里程碑：`VCAD-S35` Multi-view Mechanical V2 已完成
 
@@ -711,7 +711,7 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 | `VCAD-A03` | 批准真实外部视觉 Provider、数据处理与费用边界 | **已批准；2026-08-04** |
 | `VCAD-A04` | 根据 pilot 结果冻结公开支持包络和 V1 发布声明 | **已批准；2026-08-04** |
 | `VCAD-A05` | 启动 Freeform，批准其输出类型与验收合同 | 未到达 |
-| `VCAD-A06` | tag/PyPI/GitHub Release 或其他公开发布 | **已批准；2026-08-04；目标 v0.7.0** |
+| `VCAD-A06` | tag/PyPI/GitHub Release 或其他公开发布 | **已完成；2026-08-04；v0.7.0** |
 
 `VCAD-A01` 批准后，S10 和 S20.0 合同设计范围内的本地可逆实现、必要测试、计划内文档更新，
 以及按既有授权进行的有意 commit/branch push 无需重复请求。`VCAD-A02` 已进一步批准 S20.1–S20.5
@@ -726,19 +726,18 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 
 当前事实：
 
-- `v0.6.1` 已发布；Task/Revision/Review、RuntimeArtifact/Invocation 和 WorkBuddy MCP 路径可复用；
-- 已发布的 `v0.6.1` 没有真正的 Sketcher/PartDesign 可编辑基座；当前 branch candidate 已完成 S10 原生
-  Sketcher/PartDesign 创建、Accept 后参数修改和第二 Revision 纵切片，但尚未公开发布；
-- branch candidate 已完成 descriptor-bound、sealed-only ImageSet、additive captured roots、严格的
+- `v0.7.0@6bcd934` 已发布；Task/Revision/Review、RuntimeArtifact/Invocation、WorkBuddy MCP 路径与
+  S10 原生 Sketcher/PartDesign 可编辑基座均进入公开版本；
+- v0.7.0 已包含 descriptor-bound、sealed-only ImageSet、additive captured roots、严格的
   VisualClaim/VisualObservation/ReconstructionProposal/clarification 合同、identity-pinned durable store、
   Visual Domain Service、deterministic fake-provider composition，以及回答/重试/采纳/拒绝/删除的持久
   生命周期；
 - S20.5 已将七个严格 reconstruction 动作投影到同一 Agent application → authenticated daemon → MCP
-  写入权威；当前分支公开 38 个工具，采纳仍只创建普通 `REQUIRE_REVIEW` CAD Task；
+  写入权威；v0.7.0 公开 38 个工具，采纳仍只创建普通 `REQUIRE_REVIEW` CAD Task；
 - CLI/Workbench/Python host 可经 `LocalAgentClient` 用一个 authenticated staging-directory FD 封存
   一至十六张 JPEG/PNG；固定 `openat`、no-follow/nonblock、owner/link/mode/identity、SHA-256 与完整目录
   inventory gate 保证 JSON wire 不含路径、文件名、base64 或图片字节；
-- S30.1 branch candidate 已实现 provider-neutral capability profile、无元数据 PNG overview/detail crop、
+- v0.7.0 的 S30.1 已实现 provider-neutral capability profile、无元数据 PNG overview/detail crop、
   单 intent 单 transport effect 的 cloud adapter，以及第一个 OpenAI Responses transport；OpenAI pilot
   profile 的 overview 目标长边为 2,048 px、最多 16 张来源图和 32 个派生 part，原图仍封存在本地；
   detail-crop API 已能保留调用方指定的尺寸文字、小孔、螺纹或局部边界，但自动选择 crop 尚未接入
@@ -765,19 +764,18 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-S35 已完成并进入已批准的 A06 发布阶段：公开 V1 支持有清晰单位和完整尺寸的单个机械拉伸件/回转件，以及
+S35 与 A06 已完成：公开 V1 支持有清晰单位和完整尺寸的单个机械拉伸件/回转件，以及
 2–16 张同一物体/状态/尺度的干净互补视图；输出为可编辑 Sketcher + bounded PartDesign，confirmed
 尺寸、BRep 和单实体均经 deterministic verifier。无尺度、冲突、遮挡或隐藏结构必须澄清或
-SAFE_FAILURE。当前下一步是完成 v0.7.0 六处版本一致性、发布包门、Codex/Claude/WorkBuddy 分宿主
-smoke、PR/main 合并、tag、PyPI/GitHub Release 和发布后安装验证。`VCAD-A05` Freeform 与普通照片
-S40 仍未授权，不进入本次发布。
+SAFE_FAILURE。v0.7.0 已经 Codex/Claude/WorkBuddy 分宿主 smoke、PR/main、tag、GitHub Release、
+PyPI 和公开安装验证。当前停在下一产品决策门：`VCAD-A05` Freeform 与普通照片 S40 仍未授权。
 ```
 
 执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
 为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。在 A02 获批时，S20.0 只完成
 合同设计；当前 S20.1–S20.5 已实现本地持久化和 deterministic fake/interface-ready 路径，S30.1 已
 实现 opt-in OpenAI transport，但不是产品主线；S30.2–S35 已由 Codex/WorkBuddy 宿主多模态通道
-完成固定样例。当前执行 `VCAD-A06`（v0.7.0 发布）；下一产品门仍为 `VCAD-A05`（Freeform），S40 需另行授权。
+完成固定样例。`VCAD-A06`（v0.7.0 发布）已完成；下一产品门仍为 `VCAD-A05`（Freeform），S40 需另行授权。
 
 ## 11. Material event ledger
 
@@ -808,6 +806,7 @@ S40 仍未授权，不进入本次发布。
 | `VCAD-E22` | 用户批准 `VCAD-A06`，并要求 Codex/Claude/WorkBuddy 不互相代替 | 授权以 `v0.7.0` 发布当前 S35 成果；宿主无关 CI 保留，三端使用同一发布包恢复/建模/资源读取合同分别验收，WorkBuddy 只额外覆盖自身兼容适配 | 起始锚点 `8a42e5d`；分支 `codex/visual-cad-m0`；恢复动作是完成版本/包门后创建 PR、merge main、tag 并观察单一 release workflow | `gh` 默认 CLI token 当前失效，GitHub connector 可处理 PR/merge；tag push 前必须重新确认可用认证；S40/Freeform 不在范围 |
 | `VCAD-E23` | `VCAD-A06` 三宿主与固定候选包 gate | 同一 `6fd8e63d...93620` host-profile MCPB 在 Codex、Claude、WorkBuddy 各经 fresh process 完成 generation 9 review 恢复、generation 11 Accept、HEAD/Revision 收敛和 FCStd/STEP native Resource read；Codex `_meta.progressToken` 兼容修复保持 unknown-field fail closed | 5,930 non-slow passed / 121 deselected；focused transport/server 194 passed；全新解包 MCPB real-FreeCAD/resource 1 passed；Ruff/changed-format/compile/version/diff/MCPB/Twine/fresh wheel+sdist/parity 全 pass；恢复动作是 commit/PR 后观察 CI | GitHub runner 尚未执行；测试 runtime 与临时宿主环境继续保留；S40/Freeform 不在范围 |
 | `VCAD-E24` | `VCAD-A06` PR #11 CI 与 final-candidate recovery | GitHub macOS runner 暴露读取文件会合法改变 atime；稳定 FreeCAD pilot 身份现在比较 dev/inode/mode/owner/size/mtime/ctime 并继续拒绝内容变化，不触及 MCP/Task/Resource/Skill/CAD 路径，因此 E23 三宿主 outcome 按未变化输入保留 | `83c1621`；focused 7 passed；final non-slow 5,932 passed / 121 deselected；重建 MCPB `a91552fa...e46447`，Twine/fresh wheel+sdist/parity 与全新解包 real-FreeCAD/resource 1 passed；PR lint-unit 已通过，runtime-integration 执行中 | 发布外部效果仍未发生；等待 PR CI 完成、merge/tag/release/post-install 后统一清理测试 runtime、Skill/MCP 配置、daemon 和临时目录 |
+| `VCAD-E25` | `VCAD-A06` publication、post-install 与 cleanup gate | PR #11 以 merge commit 合入 main，`v0.7.0` tag、GitHub Release 与 PyPI 公开；公开资产重新下载核验，Python 3.12 从官方索引全新安装成功；随后精确退役四个测试 daemon，并清理临时宿主 MCP/Skill、WorkBuddy 会话/trace、候选包和 VibeCAD-created FreeCAD runtime/cache | main/tag `6bcd93422d097e537d8580e086b662ce7ec898e3`；Actions [`30982172060`](https://github.com/wangtao9090/VibeCAD/actions/runs/30982172060) 全绿；Release MCPB `43bf79a3...e47a15`、Skill `5de52f92...d2ddda`；PyPI wheel `ddf0f7f9...e29fb`、sdist `74095e37...da503`；公开安装报告 0.7.0；runtime/bin/mamba 与 A06 temp/session/daemon 均无残留，19 个 durable data 文件及用户未跟踪文件保留 | A06 闭合；普通照片 S40 与 Freeform `VCAD-A05` 仍需新的产品范围授权 |
 
 ## 12. 研究依据
 

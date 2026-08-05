@@ -1,10 +1,10 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-A06 approved; v0.7.0 release in progress**
+> Status: **VCAD-A06 complete; v0.7.0 published and verified**
 >
 > Updated: 2026-08-04
 >
-> Repository anchor: published tag `v0.6.1@e7dd0c0`
+> Repository anchor: published tag `v0.7.0@6bcd934`
 >
 > Active plan: [`vibecad-visual-cad.md`](vibecad-visual-cad.md)
 >
@@ -50,7 +50,7 @@ fresh, answer-free, Read-only GLM-5V-Turbo replay returned `PASS`, all exact
 dimensions and hole centers, no conflicts, and no blocking unknowns. It was a
 visual-evidence replay only; it did not create or mutate a CAD Task.
 
-The v0.7.0 release candidate now passes 5,932 repository non-slow tests,
+The published v0.7.0 release passes 5,932 repository non-slow tests,
 the fresh-unpacked MCPB real-FreeCAD/resource gate, Ruff, changed-file format,
 compileall, version/diff integrity, MCPB manifest validation, Twine, fresh
 Python 3.12 wheel/sdist imports, and source/sdist/MCPB/standalone-Skill byte
@@ -61,9 +61,17 @@ STEP resources. The Codex run exposed a bounded MCP compatibility gap:
 strips valid request/notification metadata while remaining strict for all
 other unknown fields. A GitHub macOS-only atime failure was also corrected
 without weakening dev/inode/mode/owner/size/mtime/ctime mutation checks; the
-rebuilt final MCPB passed the complete host-neutral packed gate. The artifacts
-remain unpublished while VCAD-A06 moves through PR/main merge, tag, GitHub
-Release, and PyPI verification.
+rebuilt final MCPB passed the complete host-neutral packed gate. PR #11 merged
+as `6bcd934`; tag `v0.7.0` resolves to the same commit. GitHub Actions run
+[`30982172060`](https://github.com/wangtao9090/VibeCAD/actions/runs/30982172060)
+published the [v0.7.0 GitHub Release](https://github.com/wangtao9090/VibeCAD/releases/tag/v0.7.0)
+and [PyPI 0.7.0](https://pypi.org/project/vibecad/0.7.0/). Downloaded Release
+assets matched GitHub's SHA-256 metadata and unpacked cleanly; a fresh Python
+3.12 environment installed `vibecad==0.7.0` from the public PyPI index. The
+wheel and sdist hashes match the final local candidates exactly. All A06
+temporary host homes, MCP/Skill installs, WorkBuddy sessions/traces, four test
+daemons, package candidates, and both VibeCAD-created FreeCAD runtimes/caches
+were then removed while durable data and repository/user-owned files remained.
 WorkBuddy alone retains its additional strict-error/bounded-submit compatibility
 gate; it does not substitute for either other host.
 
@@ -91,14 +99,15 @@ admits the result. R1 and R2 retain the same Body/feature identities while the
 old Revision remains byte-immutable. It adds no direct MCP tool or second write
 authority; the MCP tool count remains 31.
 Visual persistence is approved under A02 and ImageSet sealing is implemented.
-A03 authorized a provider-neutral cloud-VLM adapter, and the branch candidate
-implements 1–16 source images, sealed read-only cloud access, adaptive metadata-free
+A03 authorized a provider-neutral cloud-VLM adapter, and v0.7.0 implements
+1–16 source images, sealed read-only cloud access, adaptive metadata-free
 derivatives/crops, and one concrete OpenAI Responses transport. The user has since
 reaffirmed the older Agent-first product boundary: Codex, Claude, WorkBuddy, or another
 calling host owns image understanding, model selection, subscription, and credentials;
 VibeCAD owns the CAD Task Kernel. The direct Provider path is therefore optional and
 non-default, not the primary image-to-CAD path or a release blocker. The A04 public
-mechanical envelope is frozen; S40, Freeform, and publication remain behind A05/A06.
+mechanical envelope is published; S40 and Freeform remain behind new scope
+authorization and A05 respectively.
 
 S20.1 seals descriptor-bound local JPEG/PNG ImageSets under the additive
 `visual_inputs/` root with provenance, byte/pixel budgets, normalization, and
@@ -118,7 +127,7 @@ contains no manifest/source hash or path, permanently prevents reuse of the same
 ImageSet ID, and shares the 1,024-identity lifetime budget with ReconstructionDraft
 tombstones. The focused S20.3/S20.4 gate is `297 passed, 1 deselected`. S20.5 now exposes exactly
 seven strict, host-neutral reconstruction actions through the existing Agent application, daemon,
-and MCP authority; the current branch has 38 public tools. A separate non-MCP local host adapter
+and MCP authority; v0.7.0 has 38 public tools. A separate non-MCP local host adapter
 seals one to sixteen JPEG/PNG inputs through one authenticated staging-directory descriptor without
 placing paths, filenames, base64, or image bytes on the JSON wire. The integrated S20.5 gate is
 `488 passed, 2 deselected`; the isolated real worker and real four-image reconnect/restart replay
