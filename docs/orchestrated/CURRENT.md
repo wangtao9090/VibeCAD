@@ -50,7 +50,7 @@ fresh, answer-free, Read-only GLM-5V-Turbo replay returned `PASS`, all exact
 dimensions and hole centers, no conflicts, and no blocking unknowns. It was a
 visual-evidence replay only; it did not create or mutate a CAD Task.
 
-The exact v0.7.0 release candidate now passes 5,930 repository non-slow tests,
+The v0.7.0 release candidate now passes 5,932 repository non-slow tests,
 the fresh-unpacked MCPB real-FreeCAD/resource gate, Ruff, changed-file format,
 compileall, version/diff integrity, MCPB manifest validation, Twine, fresh
 Python 3.12 wheel/sdist imports, and source/sdist/MCPB/standalone-Skill byte
@@ -59,8 +59,11 @@ generation-9 review task, accepted it at generation 11, and read both FCStd and
 STEP resources. The Codex run exposed a bounded MCP compatibility gap:
 `tools/list` may carry `_meta.progressToken`; the transport now accepts and
 strips valid request/notification metadata while remaining strict for all
-other unknown fields. The artifacts remain unpublished while VCAD-A06 moves
-through diff review, PR/main merge, tag, GitHub Release, and PyPI verification.
+other unknown fields. A GitHub macOS-only atime failure was also corrected
+without weakening dev/inode/mode/owner/size/mtime/ctime mutation checks; the
+rebuilt final MCPB passed the complete host-neutral packed gate. The artifacts
+remain unpublished while VCAD-A06 moves through PR/main merge, tag, GitHub
+Release, and PyPI verification.
 WorkBuddy alone retains its additional strict-error/bounded-submit compatibility
 gate; it does not substitute for either other host.
 

@@ -549,7 +549,7 @@ Codex、Claude、WorkBuddy 按以下同一矩阵分别执行；WorkBuddy 再增�
 
 ### 7.1 `VCAD-A06` v0.7.0 实际结果
 
-三端均从 SHA-256 为
+三端均从 host-profile 候选 SHA-256 为
 `6fd8e63db5d10181d81540339f7a2a9ca5622a5f11c2390db74a8d2540d93620` 的同一
 `VibeCAD.mcpb` 启动，使用同一受管 FreeCAD 1.1.0 runtime 和 38-tool surface。宿主订阅、模型选择
 与计费均由各宿主所有，未向 VibeCAD 提交 API key。
@@ -562,9 +562,13 @@ Codex、Claude、WorkBuddy 按以下同一矩阵分别执行；WorkBuddy 再增�
 
 真实 Codex discovery 还发现它会在 `tools/list` 请求参数中携带 `_meta.progressToken`。transport 现按
 MCP request/notification metadata 边界接受并剥离受限的 `_meta` 对象，同时继续拒绝其它未知字段；
-focused transport/server gate 为 194 passed，修复后的最终 non-slow repository gate 为
-`5,930 passed, 121 deselected`。全新解包 MCPB 的 discovery、真实 FreeCAD、导出和两个
-`resources/read` 集成门另为 `1 passed`。
+focused transport/server gate 为 194 passed。随后 GitHub macOS runner 证明读取临时 FreeCAD
+pilot 可执行文件会合法改变 atime；稳定身份比较现明确绑定 dev/inode/mode/owner/size/mtime/ctime，
+继续拒绝读取期间的内容变化，而不把 atime 当作篡改。该 delta 不触及 MCP、Task、Resource、Skill
+或 CAD 执行路径，因此三宿主 outcome 证据按恢复纪律保留，不重新消耗三次模型建模；delta 后的最终
+non-slow repository gate 为 `5,932 passed, 121 deselected`。从新 commit 重建的本地最终 MCPB
+SHA-256 为 `a91552fa3e17f623c9b4ac11144eb49f5f36d87e7765f4c7d4b234ccf4e46447`，其全新解包
+discovery、真实 FreeCAD、导出和两个 `resources/read` 集成门另为 `1 passed`。
 
 ## 8. 证据记录模板
 
