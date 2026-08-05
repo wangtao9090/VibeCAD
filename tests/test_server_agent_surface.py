@@ -2132,7 +2132,12 @@ def test_real_owned_stdio_initializes_lists_tools_and_never_calls_sdk_stdio() ->
     }
     requests = (
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
-        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {"_meta": {"progressToken": 0}},
+        },
         {"jsonrpc": "2.0", "id": 3, "method": "ping", "params": {}},
     )
     process = subprocess.Popen(

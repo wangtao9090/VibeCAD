@@ -663,7 +663,7 @@ def _validate_params(method: str, params: dict[str, Any], request_id: int | str)
         if not _exact_keys(
             params,
             required=frozenset({"name"}),
-            optional=frozenset({"arguments", "_meta"}),
+            optional=frozenset({"arguments"}),
         ):
             _invalid(request_id=request_id, tool_request=True)
         if not _bounded_string(params["name"], maximum=MAX_JSON_KEY_BYTES):
@@ -672,14 +672,6 @@ def _validate_params(method: str, params: dict[str, Any], request_id: int | str)
             _invalid(request_id=request_id, tool_request=True)
         if "arguments" in params and params["arguments"] is not None:
             if _plain_object(params["arguments"]) is None:
-                _invalid(request_id=request_id, tool_request=True)
-        # MCP reserves ``_meta`` for client/server metadata. WorkBuddy uses it
-        # to carry an opaque host-session marker on every tool invocation. The
-        # lexical pass already bounds its complete JSON tree; admit only a
-        # plain object (or null), then discard it before SDK/application
-        # dispatch so host metadata can never affect a VibeCAD tool contract.
-        if "_meta" in params and params["_meta"] is not None:
-            if _plain_object(params["_meta"]) is None:
                 _invalid(request_id=request_id, tool_request=True)
         return
     if method == "resources/read":
@@ -727,13 +719,29 @@ def prevalidate_client_message(value: object) -> ClientMessageDescriptor:
             _invalid(request_id=request_id)
     elif method not in _NOTIFICATION_METHODS:
         _invalid()
-    params = _plain_object(message.get("params", {}))
-    if params is None:
+    raw_params = _plain_object(message.get("params", {}))
+    if raw_params is None:
         _invalid(
             request_id=request_id,
             tool_request=method == "tools/call",
             resource_params=method == "resources/read",
         )
+
+    # MCP reserves ``_meta`` on every RequestParams/NotificationParams shape.
+    # Codex currently supplies a progress token during discovery, while
+    # WorkBuddy supplies a host-session marker during tool calls.  The lexical
+    # pass has already bounded the complete JSON tree; admit only a plain
+    # object (or null), then discard it before SDK/application dispatch so
+    # host metadata can never alter a VibeCAD contract.
+    params = dict(raw_params)
+    if "_meta" in params:
+        metadata = params.pop("_meta")
+        if metadata is not None and _plain_object(metadata) is None:
+            _invalid(
+                request_id=request_id,
+                tool_request=method == "tools/call",
+                resource_params=method == "resources/read",
+            )
 
     cancellation_target: int | str | None = None
     if has_id:
@@ -756,14 +764,10 @@ def prevalidate_client_message(value: object) -> ClientMessageDescriptor:
             if not _bounded_string(params["reason"]):
                 _invalid()
 
-    admitted_params = dict(params)
-    if method == "tools/call":
-        admitted_params.pop("_meta", None)
-
     return ClientMessageDescriptor(
         method=method,
         request_id=request_id,
-        params=MappingProxyType(admitted_params),
+        params=MappingProxyType(params),
         is_notification=not has_id,
         is_cancellation=method == "notifications/cancelled",
         cancellation_target=cancellation_target,

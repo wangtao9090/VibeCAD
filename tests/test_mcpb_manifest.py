@@ -139,14 +139,15 @@ def test_manifest_claims_only_verified_agent_surface_on_darwin():
         "ModelProgram",
         "FCStd",
         "STEP",
+        "Sketcher",
+        "PartDesign",
+        "2–16",
         "create_box",
         "rotate_part",
     ):
         assert required in claims
     for unsupported in (
-        "打孔",
         "圆角",
-        "三视图",
         "装配",
         "干涉",
         "STL",
@@ -224,7 +225,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "accept_draft",
         "export_task_artifacts",
         "notifications/cancelled",
-        "0.6.1",
+        "0.7.0",
         "38 tools",
         "daemon",
         "Task Kernel",
@@ -243,7 +244,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "defaults to the deterministic fake Provider",
         "create_reconstruction",
         "Direct WorkBuddy attachment ingress into VibeCAD's sealed store remains unverified",
-        "31-tool discovery",
+        "38-tool discovery",
         "WorkBuddy (verified)",
     ):
         assert required in english_readme
@@ -260,7 +261,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "accept_draft",
         "export_task_artifacts",
         "notifications/cancelled",
-        "0.6.1",
+        "0.7.0",
         "38 个工具",
         "daemon",
         "Task Kernel",
@@ -279,7 +280,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "默认使用 deterministic fake Provider",
         "create_reconstruction",
         "WorkBuddy 附件直接进入 VibeCAD sealed store 仍未验证",
-        "31-tool discovery",
+        "38-tool discovery",
         "WorkBuddy（已验证）",
     ):
         assert required in chinese_readme
@@ -301,8 +302,8 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
     roadmap = (ROOT / "docs/PRODUCT_CAPABILITY_ROADMAP.md").read_text(encoding="utf-8")
     normalized_roadmap = " ".join(roadmap.replace("\n> ", " ").split())
     for required in (
-        "0.6.1",
-        "31-tool 公共 MCP、durable review/release",
+        "0.7.0",
+        "38-tool 公共 MCP、durable review/release/visual",
         "host-neutral skill",
         "P0-B core backend（已完成）",
         "durable active cancellation",

@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-A04 approved; S35 Multi-view Mechanical V2 outcome complete**
+> Status: **VCAD-A06 approved; v0.7.0 release in progress**
 >
 > Updated: 2026-08-04
 >
@@ -50,12 +50,19 @@ fresh, answer-free, Read-only GLM-5V-Turbo replay returned `PASS`, all exact
 dimensions and hole centers, no conflicts, and no blocking unknowns. It was a
 visual-evidence replay only; it did not create or mutate a CAD Task.
 
-The settled S35 candidate passes 57 focused tests, 5,920 repository non-slow
-tests, and both real managed-FreeCAD geometry tests. Repository-wide Ruff,
-changed-file formatting, compileall, diff integrity, Skill validation, Twine,
-fresh wheel import, and source/sdist/standalone-Skill byte parity also pass.
-The local wheel, sdist, and deterministic Skill archive remain unpublished;
-`VCAD-A06` is still required before any tag, PyPI upload, or GitHub Release.
+The exact v0.7.0 release candidate now passes 5,930 repository non-slow tests,
+the fresh-unpacked MCPB real-FreeCAD/resource gate, Ruff, changed-file format,
+compileall, version/diff integrity, MCPB manifest validation, Twine, fresh
+Python 3.12 wheel/sdist imports, and source/sdist/MCPB/standalone-Skill byte
+parity. Real Codex, Claude, and WorkBuddy fresh-process smokes each recovered a
+generation-9 review task, accepted it at generation 11, and read both FCStd and
+STEP resources. The Codex run exposed a bounded MCP compatibility gap:
+`tools/list` may carry `_meta.progressToken`; the transport now accepts and
+strips valid request/notification metadata while remaining strict for all
+other unknown fields. The artifacts remain unpublished while VCAD-A06 moves
+through diff review, PR/main merge, tag, GitHub Release, and PyPI verification.
+WorkBuddy alone retains its additional strict-error/bounded-submit compatibility
+gate; it does not substitute for either other host.
 
 The complete architecture, slices, gates, privacy boundary, validation budget,
 and recovery point are in

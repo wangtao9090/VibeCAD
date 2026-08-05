@@ -1,6 +1,6 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S30.1`–`VCAD-S35` 已完成；S40 / Freeform / 发布未授权**
+> 状态：**`VCAD-S30.1`–`VCAD-S35` 已完成；`VCAD-A06` 已批准，v0.7.0 发布执行中**
 >
 > 更新：2026-08-04
 >
@@ -711,7 +711,7 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 | `VCAD-A03` | 批准真实外部视觉 Provider、数据处理与费用边界 | **已批准；2026-08-04** |
 | `VCAD-A04` | 根据 pilot 结果冻结公开支持包络和 V1 发布声明 | **已批准；2026-08-04** |
 | `VCAD-A05` | 启动 Freeform，批准其输出类型与验收合同 | 未到达 |
-| `VCAD-A06` | tag/PyPI/GitHub Release 或其他公开发布 | 未到达 |
+| `VCAD-A06` | tag/PyPI/GitHub Release 或其他公开发布 | **已批准；2026-08-04；目标 v0.7.0** |
 
 `VCAD-A01` 批准后，S10 和 S20.0 合同设计范围内的本地可逆实现、必要测试、计划内文档更新，
 以及按既有授权进行的有意 commit/branch push 无需重复请求。`VCAD-A02` 已进一步批准 S20.1–S20.5
@@ -765,18 +765,19 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-S35 已完成并停在批准边界：公开 V1 支持有清晰单位和完整尺寸的单个机械拉伸件/回转件，以及
+S35 已完成并进入已批准的 A06 发布阶段：公开 V1 支持有清晰单位和完整尺寸的单个机械拉伸件/回转件，以及
 2–16 张同一物体/状态/尺度的干净互补视图；输出为可编辑 Sketcher + bounded PartDesign，confirmed
 尺寸、BRep 和单实体均经 deterministic verifier。无尺度、冲突、遮挡或隐藏结构必须澄清或
-SAFE_FAILURE。下一步需要新的产品决策：`VCAD-A05` 才能启动 Freeform，`VCAD-A06` 才能发布；
-普通照片 S40 也未授权。
+SAFE_FAILURE。当前下一步是完成 v0.7.0 六处版本一致性、发布包门、Codex/Claude/WorkBuddy 分宿主
+smoke、PR/main 合并、tag、PyPI/GitHub Release 和发布后安装验证。`VCAD-A05` Freeform 与普通照片
+S40 仍未授权，不进入本次发布。
 ```
 
 执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
 为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。在 A02 获批时，S20.0 只完成
 合同设计；当前 S20.1–S20.5 已实现本地持久化和 deterministic fake/interface-ready 路径，S30.1 已
 实现 opt-in OpenAI transport，但不是产品主线；S30.2–S35 已由 Codex/WorkBuddy 宿主多模态通道
-完成固定样例。下一产品门为 `VCAD-A05`（Freeform）或 `VCAD-A06`（发布）；S40 需另行授权。
+完成固定样例。当前执行 `VCAD-A06`（v0.7.0 发布）；下一产品门仍为 `VCAD-A05`（Freeform），S40 需另行授权。
 
 ## 11. Material event ledger
 
@@ -804,6 +805,8 @@ SAFE_FAILURE。下一步需要新的产品决策：`VCAD-A05` 才能启动 Freef
 | `VCAD-E19` | S30.4 WorkBuddy host-path gate | WorkBuddy 5.3.5 / GLM-5V-Turbo 读取真实 fixture 与 canonical skill/reference；raw stdio 排除大参数限制；新增单文件、no-follow、owner-bound 的 `--workbuddy-submit` 适配，仅复用现有 validator 与 LocalAgentClient，不增加 MCP/Task/CAD 权威 | Task `task_4a5520dd7e3b9289eacf873565f71dd4` generation 9、`awaiting_user_review`、HEAD 不变；80 × 50 × 8 bbox、31371.681469282037 mm³ volume、valid shape、one solid 全 pass；FCStd 16,337 bytes、STEP 8,311 bytes；真实权限限于 fixture/skill、一个 request file、一个 exact command 与六个 MCP 动作；恢复动作是完成回归并请求 `VCAD-A04` | 仅证明固定 dimensioned single-image fixture；普通照片、多视图、遮挡/隐藏结构、公开 V1 claim 与 S35 仍需 `VCAD-A04` |
 | `VCAD-E20` | 用户批准 `VCAD-A04` | 冻结公开 V1 支持包络并激活 S35 Multi-view Mechanical V2；允许 2–16 张同一物体/状态/尺度的干净互补视图进入既有 Agent-first 路径 | 恢复锚点 `a7bb34f`；当前分支 `codex/visual-cad-m0`；下一门是 L 形支架正例、深度歧义/冲突 SAFE_FAILURE、真实 FreeCAD/宿主结果 | S40 普通照片、Freeform、sculpture、发布与新的 durable/public authority 均未授权 |
 | `VCAD-E21` | `VCAD-A04` 与 S35 outcome/closure gate | 冻结多图 evidence binding、1–16 同规格多孔 Hole 的逐轴材料移除证明，以及 L 型支架/两类 SAFE_FAILURE 固定结果；不新增 MCP、durable schema 或写权限 | Task `task_d17e24e1cad5f4f67a4c4408975100a7` generation 9、HEAD 不变；当前清晰坐标夹具的 answer-free Read-only WorkBuddy replay 为 PASS；57 focused、5,920 non-slow、真实 FreeCAD 2 passed；Ruff/changed-format/compile/diff/Skill/Twine/fresh-wheel/parity 全 pass；wheel SHA-256 `c9e77bf7f3df47f5ffe2c542587202e96a3c1adb4a96800e6ecf1381c9af7e68`，Skill archive SHA-256 `5de52f9253d3c12619be5214b62a46e6c722924909b15627a9eacf5ca4d2ddda`；恢复动作是停在下一批准门 | WorkBuddy 首个严格 IR 需要有界机械修正，当前 replay 只复核视觉事实，不声称 zero-repair 或第二个 E2E Task；S40、Freeform、公开发布仍分别等待新范围决策、`VCAD-A05`、`VCAD-A06` |
+| `VCAD-E22` | 用户批准 `VCAD-A06`，并要求 Codex/Claude/WorkBuddy 不互相代替 | 授权以 `v0.7.0` 发布当前 S35 成果；宿主无关 CI 保留，三端使用同一发布包恢复/建模/资源读取合同分别验收，WorkBuddy 只额外覆盖自身兼容适配 | 起始锚点 `8a42e5d`；分支 `codex/visual-cad-m0`；恢复动作是完成版本/包门后创建 PR、merge main、tag 并观察单一 release workflow | `gh` 默认 CLI token 当前失效，GitHub connector 可处理 PR/merge；tag push 前必须重新确认可用认证；S40/Freeform 不在范围 |
+| `VCAD-E23` | `VCAD-A06` 三宿主与固定候选包 gate | 同一 `6fd8e63d...93620` MCPB 在 Codex、Claude、WorkBuddy 各经 fresh process 完成 generation 9 review 恢复、generation 11 Accept、HEAD/Revision 收敛和 FCStd/STEP native Resource read；Codex `_meta.progressToken` 兼容修复保持 unknown-field fail closed | 5,930 non-slow passed / 121 deselected；focused transport/server 194 passed；全新解包 MCPB real-FreeCAD/resource 1 passed；Ruff/changed-format/compile/version/diff/MCPB/Twine/fresh wheel+sdist/parity 全 pass；恢复动作是 settled diff review 后 commit/PR/main/tag | 发布外部效果尚未发生；测试 runtime、临时宿主 Skill/MCP 配置、daemon 和候选目录在发布后验证前保留，随后按用户要求统一清理；S40/Freeform 不在范围 |
 
 ## 12. 研究依据
 

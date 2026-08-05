@@ -126,7 +126,7 @@ def test_install_is_owned_idempotent_and_clean_uninstall_is_reversible(
     assert receipt["host_app"] == str(app)
     assert config["python_path"] == str(bridge_python)
     assert config["python_target"] == str(bridge_target)
-    assert config["package_version"] == "0.6.1"
+    assert config["package_version"] == "0.7.0"
     assert not (target / "vibecad").exists()
 
     sibling = target.parent / "OtherAddon"
@@ -146,14 +146,14 @@ def test_install_upgrades_an_owned_older_package_receipt(
     user_data = (tmp_path / "user-data").resolve()
     bridge_python = Path(sys.executable).resolve(strict=True)
 
-    monkeypatch.setattr(freecad_external, "__version__", "0.6.0")
+    monkeypatch.setattr(freecad_external, "__version__", "0.6.1")
     first = freecad_external.install_addon(
         app,
         user_data_root=user_data,
         packaged_addon=_addon_source(),
         bridge_python=bridge_python,
     )
-    monkeypatch.setattr(freecad_external, "__version__", "0.6.1")
+    monkeypatch.setattr(freecad_external, "__version__", "0.7.0")
     upgraded = freecad_external.install_addon(
         app,
         user_data_root=user_data,
@@ -167,8 +167,8 @@ def test_install_upgrades_an_owned_older_package_receipt(
     assert first["status"] == "installed"
     assert upgraded["status"] == "upgraded"
     assert upgraded["receipt_id"] != first["receipt_id"]
-    assert receipt["package_version"] == "0.6.1"
-    assert config["package_version"] == "0.6.1"
+    assert receipt["package_version"] == "0.7.0"
+    assert config["package_version"] == "0.7.0"
 
 
 def test_install_and_uninstall_refuse_foreign_or_mutated_tree(tmp_path: Path) -> None:

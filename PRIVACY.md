@@ -2,7 +2,7 @@
 
 **VibeCAD** — AI-native conversational CAD (an open-source MCP connector for FreeCAD)
 
-Last updated: 2026-07-22
+Last updated: 2026-08-04
 
 ---
 
@@ -10,7 +10,7 @@ Last updated: 2026-07-22
 
 ### Summary
 
-The VibeCAD CAD backend runs on your own machine. It has no telemetry, account service, or VibeCAD-operated cloud storage, and it does not independently upload your design files. VibeCAD communicates tool requests and results to the MCP client you chose; that client and any model provider it uses are governed by their own configuration and privacy terms.
+The VibeCAD CAD backend runs on your own machine. It has no telemetry, account service, or VibeCAD-operated cloud storage. The default visual path uses the multimodal model already provided by your host Agent. VibeCAD 0.7.0 also contains an optional, non-default OpenAI visual transport; when you explicitly configure and select it, bounded metadata-free PNG derivatives of the selected images are sent to that provider under your account and its privacy terms.
 
 ### Local processing only
 
@@ -26,7 +26,7 @@ VibeCAD collects no telemetry, no usage statistics, and no account information.
 
 ### Network access
 
-VibeCAD's own direct outbound network access is limited to software installation: the runtime download described above and fetching VibeCAD's open-source dependencies from PyPI at install/update time. This statement does not cover network processing performed by your MCP client or its model provider. VibeCAD 0.6.1 does not call a model provider directly and does not implement MCP Sampling or BYOK model access. Its authenticated local daemon and managed FreeCAD Worker remain on your device; they do not add a cloud service or telemetry channel.
+VibeCAD's normal direct outbound access covers software installation: the runtime download described above and open-source dependencies from PyPI. If the optional OpenAI visual transport is explicitly configured and selected, it additionally sends bounded image derivatives and the strict reconstruction request to that provider; originals remain in VibeCAD's local sealed store, while deletion of the local copy cannot retract a provider-retained copy. This statement does not cover network processing performed independently by your MCP client or its model provider. VibeCAD does not implement MCP Sampling or operate a cloud service or telemetry channel; its authenticated local daemon and managed FreeCAD Worker remain on your device.
 
 ### Contact
 
@@ -39,7 +39,7 @@ VibeCAD's own direct outbound network access is limited to software installation
 
 ### 概要
 
-VibeCAD 的 CAD 后端在你自己的设备上运行。它没有遥测、账号服务或 VibeCAD 运营的云存储，也不会自行上传你的设计文件。VibeCAD 会与用户选择的 MCP 客户端交换工具请求和结果；该客户端及其使用的模型供应商受各自配置和隐私条款约束。
+VibeCAD 的 CAD 后端在你自己的设备上运行。它没有遥测、账号服务或 VibeCAD 运营的云存储。默认视觉路径使用宿主 Agent 已有的多模态模型。VibeCAD 0.7.0 还包含可选、非默认的 OpenAI 视觉 transport；只有在用户显式配置并选择它时，才会把选中图片的有界、去元数据 PNG 派生图发送到该账号下的 Provider，并受其隐私条款约束。
 
 ### 仅本地处理
 
@@ -55,7 +55,7 @@ VibeCAD 不收集遥测数据、不收集使用统计、不收集账号信息。
 
 ### 网络访问
 
-VibeCAD 自身主动发起的外部网络访问仅限于软件安装：上述运行时下载，以及安装/更新时从 PyPI 获取 VibeCAD 的开源依赖。此说明不涵盖 MCP 客户端或其模型供应商进行的网络处理。VibeCAD 0.6.1 不直接调用模型供应商，也尚未实现 MCP Sampling 或 BYOK 模型接入。认证本地 daemon 与受管 FreeCAD Worker 都留在你的设备上，不会新增云服务或遥测通道。
+VibeCAD 的常规主动网络访问用于软件安装：上述运行时下载，以及从 PyPI 获取开源依赖。若显式配置并选择可选 OpenAI 视觉 transport，它还会向该 Provider 发送有界图片派生图和严格重建请求；原图仍在本地 sealed store，本地删除不能撤回 Provider 已保留的副本。此说明不涵盖 MCP 客户端或其模型供应商独立进行的网络处理。VibeCAD 不实现 MCP Sampling，也不运营云服务或遥测通道；认证本地 daemon 与受管 FreeCAD Worker 都留在用户设备上。
 
 ### 联系方式
 

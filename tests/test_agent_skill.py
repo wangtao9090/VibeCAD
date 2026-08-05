@@ -633,7 +633,7 @@ def test_skill_distribution_channels_are_explicit_and_non_overlapping():
     assert not any(pattern.startswith("skills") for pattern in ignored)
 
 
-def test_manifest_projection_and_all_package_versions_target_0_6_1():
+def test_manifest_projection_and_all_package_versions_target_0_7_0():
     from vibecad.application.public_surface import public_tool_specs
     from vibecad.runtime import spec
 
@@ -652,12 +652,12 @@ def test_manifest_projection_and_all_package_versions_target_0_6_1():
     with (ROOT / "uv.lock").open("rb") as handle:
         lock = tomllib.load(handle)
     locked = [package["version"] for package in lock["package"] if package.get("name") == "vibecad"]
-    assert locked == ["0.6.1"]
-    assert manifest["version"] == project_version == source_version.group(1) == "0.6.1"
-    assert spec.VIBECAD_VERSION == "0.6.1"
+    assert locked == ["0.7.0"]
+    assert manifest["version"] == project_version == source_version.group(1) == "0.7.0"
+    assert spec.VIBECAD_VERSION == "0.7.0"
 
 
-def test_release_documents_project_the_0_6_1_backend_truth():
+def test_release_documents_project_the_0_7_0_backend_truth():
     documents = {
         path: _normalized(_read(ROOT / path))
         for path in (
@@ -673,7 +673,7 @@ def test_release_documents_project_the_0_6_1_backend_truth():
     }
     for path, normalized in documents.items():
         assert "0.5.0" not in normalized, path
-        assert "0.6.1" in normalized, path
+        assert "0.7.0" in normalized, path
         assert "27-tool" not in normalized, path
         assert "27 个工具" not in normalized, path
 
@@ -690,7 +690,7 @@ def test_release_documents_project_the_0_6_1_backend_truth():
         )
     }
     for path, normalized in product_documents.items():
-        assert any(claim in normalized for claim in ("31-tool", "31 个工具", "31 个公开工具")), path
+        assert any(claim in normalized for claim in ("38-tool", "38 个工具", "38 个公开工具")), path
         assert "daemon" in normalized, path
         assert "task kernel" in normalized, path
 

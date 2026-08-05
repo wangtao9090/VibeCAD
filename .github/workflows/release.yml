@@ -362,8 +362,9 @@ jobs:
             environment="${RUNNER_TEMP}/fresh-${channel}"
             uv venv --python 3.12 "$environment"
             uv pip install --python "$environment/bin/python" --no-deps "$artifact"
-            EXPECTED_ROOT="$environment" "$environment/bin/python" -I -c \
-              'import os,pathlib,vibecad; from vibecad.application.public_surface import public_tool_specs; from vibecad.runtime import spec; root=pathlib.Path(os.environ["EXPECTED_ROOT"]).resolve(); installed=pathlib.Path(vibecad.__file__).resolve(); assert installed.is_relative_to(root); assert vibecad.__version__ == "0.6.1"; assert spec.SERVER_PACKAGE_EPOCH == 4; assert spec.PUBLIC_SURFACE_SHA256 == "d12e34b70ec448b415e5f525acc4eff66fae018e9395dd4812a5096d541ab17b"; assert len(public_tool_specs()) == 31'
+          EXPECTED_VERSION="${GITHUB_REF_NAME#v}" EXPECTED_ROOT="$environment" \
+            "$environment/bin/python" -I -c \
+              'import os,pathlib,vibecad; from vibecad.application.public_surface import public_tool_specs; from vibecad.runtime import spec; root=pathlib.Path(os.environ["EXPECTED_ROOT"]).resolve(); installed=pathlib.Path(vibecad.__file__).resolve(); assert installed.is_relative_to(root); assert vibecad.__version__ == os.environ["EXPECTED_VERSION"]; assert spec.SERVER_PACKAGE_EPOCH == 4; assert spec.PUBLIC_SURFACE_SHA256 == "1353ab35c0dd1055890a9e0702a644a7e606719964831d583f6205679034fdbe"; assert len(public_tool_specs()) == 38'
           done
       - name: upload gated Python distributions
         uses: actions/upload-artifact@v4

@@ -1,6 +1,6 @@
 # VibeCAD 当前实施架构
 
-> 实现基线：P0-B core backend / VibeCAD 0.6.1 / runtime epoch 4 / MR0-C01..C04
+> 实现基线：VibeCAD 0.7.0 / runtime epoch 4 / 38-tool Agent-first + Visual Mechanical V1
 > internal foundation accepted
 >
 > 架构复审：AR-1 + P0-B C14 refresh + MR0-C05 refresh + G1 closeout / 2026-08-01
@@ -13,7 +13,7 @@
 >
 > MR0-C01..C04 已交付并验收内部通用 runtime 合同与 descriptor registry、backend-neutral CAD
 > registry/router、FreeCAD default composition 和 provider-free conformance。当前唯一接通和默认选择的
-> CAD adapter 仍是 FreeCAD，公共 31-tool、六 operation 与 `SelectorV1` 合同不变；durable
+> CAD adapter 仍是 FreeCAD，公共 38-tool、六 direct operation 与 `SelectorV1` 合同不变；durable
 > Revision/Candidate 仍固定使用 FCStd/STEP 布局，迁移只属于 MR1。
 >
 > G1 FreeCAD Workbench Alpha 已交付项目/任务发现、HEAD/draft preview、verdict、精确
@@ -182,7 +182,7 @@ macOS 默认根目录为 `~/Library/Application Support/VibeCAD`。Stage 3 的 d
 
 ## 5. 当前公共 MCP 面
 
-当前 `tools/list` 精确包含 31 个工具：25 个稳定控制/领域 facade，加 6 个 registry-derived 直接
+当前 `tools/list` 精确包含 38 个工具：32 个稳定控制/领域 facade，加 6 个 registry-derived 直接
 CAD 工具。
 
 | 组别 | 工具 |
@@ -193,6 +193,7 @@ CAD 工具。
 | 任务 | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task` |
 | 审核 | `accept_draft`, `reject_draft` |
 | 交付 | `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release` |
+| 图片重建生命周期 | `create_reconstruction`, `get_reconstruction`, `run_reconstruction`, `answer_reconstruction`, `adopt_reconstruction`, `reject_reconstruction`, `delete_reconstruction` |
 | Registry direct | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
 
 Manifest、运行时 discovery 和 receipt digest 都来自同一 public-surface 合同；S3-8 已门禁 manifest
@@ -215,11 +216,10 @@ JSON Schema；unknown field、错误类型、非有限数、重复 JSON key、�
 
 AR-1 发现 S3-7 discovery 缺少 tool description，而且重复广播完整 task output schema，使一次
 `tools/list` 约 350 KB。S3-8 已补齐描述、从宿主发现投影中省略可选 output schema，并继续在服务端
-保留完整输出验证；当前固定 31-tool SDK projection 为 25,566 bytes，SHA-256 为
-`a261def0bc0f51ec4d7d894589a4aee06654d78b6d15e750aa153ca52c2a3558`；完整 discovery frame 为
-25,611 bytes，SHA-256 为
-`93925478a5fdbeedd9417c212f69df5d9194c503e9e05714b7cb64c1621ba6c5`，低于 32,768-byte 上限。
-direct operation 与稳定工具重名会 fail closed。
+保留完整输出验证；当前固定 38-tool 完整 discovery frame 为 30,415 bytes，低于 32,768-byte
+上限；receipt 绑定的完整 public-surface digest 为
+`1353ab35c0dd1055890a9e0702a644a7e606719964831d583f6205679034fdbe`。direct operation 与稳定工具
+重名会 fail closed。
 
 ## 6. Application 与 Task Kernel 分层
 
@@ -533,26 +533,23 @@ verifier 与 HEAD 权威。详见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VER
 
 ## 12. 打包与测试事实
 
-当前 0.6.1 本地交付候选冻结：
+当前 0.7.0 发布候选冻结：
 
-- source、manifest、lock 和 managed server receipt 的目标版本为 0.6.1；公开工具 31 个，MCP 1.27.2，
+- tag、source、manifest、FreeCAD package、lock 和 managed server receipt 的目标版本为 0.7.0；公开工具 38 个，MCP 1.27.2，
   server epoch 4，FreeCAD 1.1.0；receipt public-surface digest 为
-  `d12e34b70ec448b415e5f525acc4eff66fae018e9395dd4812a5096d541ab17b`；
-- 固定 31-tool SDK projection 为 25,566 bytes，SHA-256 为
-  `a261def0bc0f51ec4d7d894589a4aee06654d78b6d15e750aa153ca52c2a3558`；完整 discovery frame 为
-  25,611 bytes，SHA-256 为
-  `93925478a5fdbeedd9417c212f69df5d9194c503e9e05714b7cb64c1621ba6c5`。tool description 和 input
+  `1353ab35c0dd1055890a9e0702a644a7e606719964831d583f6205679034fdbe`；
+- 固定 38-tool 完整 discovery frame 为 30,415 bytes。tool description 和 input
   schema 对宿主可见，完整 output validation 保留在服务端；
 - canonical skill 位于 `skills/vibecad-agent/`；source、sdist、MCPB 和 standalone skill archive 携带
   同一 skill tree，wheel/受管 Python 环境刻意不携带 skill；
 - MCPB 只声明已验证的 Darwin 产品路径；`uv.lock` 随包，tests/docs/runtime/cache 不进入产品包；
 - C13 已证明 MCP 与 public Workbench client 经同一 Application/Task Kernel 共享 draft、verdict 和
-  HEAD，client EOF/重连不改变 durable truth；P2 负责把同一 31-tool/skill/package identity 刷新到
+  HEAD，client EOF/重连不改变 durable truth；发布门把同一 38-tool/skill/package identity 刷新到
   wheel、sdist、MCPB、fresh install 和 managed receipt。
 
-0.6.1 在既有 package gate 上增加真实 WorkBuddy Profile 验收：skill 发现、严格工具调用、长任务、
-跨 CLI 进程恢复、Release 摘要批准以及 PDF/ZIP Blob 取回均已执行。该证据不自动认证
-Claude/Codex 或其他 WorkBuddy 模型。
+0.7.0 使用同一发布包 smoke 分别验收 Codex、Claude、WorkBuddy；WorkBuddy 另保留 skill 发现、
+严格错误恢复、跨 CLI 进程恢复、Release 摘要批准及 PDF/ZIP Blob 的专属兼容证据。任何一个宿主
+Profile 都不自动认证另一个宿主或其中其他模型。
 
 ## 13. 源码地图
 
@@ -572,27 +569,27 @@ Claude/Codex 或其他 WorkBuddy 模型。
 | `src/vibecad/runtime/contracts.py`, `registry.py`, `conformance.py` | domain-neutral runtime immutable contracts、descriptor registry 与 transcript conformance |
 | `src/vibecad/runtime/` 其他模块 | 受管 Python/FreeCAD paths、receipt、installer、status、uninstall |
 | `src/vibecad/engine/`, `tools/`, `feedback/` | 内部 FreeCAD 能力库存；非公共 endpoint |
-| `manifest.json` | MCPB 平台、启动和 31-tool 静态声明 |
+| `manifest.json` | MCPB 平台、启动和 38-tool 静态声明 |
 | `tests/` | 纯契约、恢复/竞态、真实 FreeCAD、package/MCPB E2E |
 
 ## 14. 当前限制与下一步
 
 当前可可靠完成简单 object-level 单零件建模和尺寸/位置修改，但还没有：
 
-- Claude/Codex 及 GLM-5.2 之外 WorkBuddy 模型的独立 Profile 验收；
+- 当前已记录 Profile 之外的宿主版本/模型组合认证；
 - 通用 user-installed FreeCAD 兼容性；当前仅有一个指纹绑定的 macOS FreeCAD 1.1.3 本机试点；
 - 第二 CAD adapter、第二 CAD 产品支持或面向产品的 runtime discovery；MR0 只交付了内部
   conformance-ready 基础和 FreeCAD-only default composition；
 - versioned durable artifact profile 实现与 activation；MR1-P00 只冻结迁移合同，Revision/Candidate
   writer 仍固定为 FCStd/STEP v1；
 - retention/GC、private runner generation migration 和完整运行观测/恢复审计；
-- face/edge Selector Level B、可视/语义 diff、Sketcher/PartDesign；
+- face/edge 子元素选择、通用可视/语义 diff，以及超出冻结 IR 的 Sketcher/PartDesign；
 - STL/STEP 受控导入、mesh-to-faceted-BRep、原生 joints/DOF、可编辑制造图与 GD&T；
-- Sampling/BYOK backend、照片/视频重建 Provider 或仿真 Provider。
+- Sampling/BYOK backend、普通照片/视频通用重建、Freeform/sculpture 或仿真 Provider。
 
-0.6.1 已收口 package/managed-runtime、G1 Workbench Alpha、P1/G2 顺序编辑、P2 刚性交付与
-首个 WorkBuddy Profile。MR0-C01..C04 的内部 foundation 已完成；更广模型认证、建模能力与 MR1
+0.7.0 收口 package/managed-runtime、G1 Workbench Alpha、P1/G2 顺序编辑、P2 刚性交付、
+Visual Mechanical V1 与三宿主发布包矩阵。MR0-C01..C04 的内部 foundation 已完成；更广模型认证、建模能力与 MR1
 仍是独立 campaign。机械详细设计、预检与仿真的
 [`方向调研`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)不构成 MR0、P1/P1.5/P2 功能承诺。
-Claude/Codex 等其他宿主验收作为独立 residual 保留，不否定已完成的 WorkBuddy Profile。只有阶段需要改变专家
+新的宿主/模型 Profile 作为独立证据继续扩展，不否定已完成的 Profile。只有阶段需要改变专家
 Agent、用户自带模型、单 Task Kernel 或 Workbench 非第二权威这些边界时，才需要新的产品决策。

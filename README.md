@@ -21,7 +21,9 @@ execution, deterministic verification, recovery, and delivery.
   Accept, and Reject.
 - Deterministic Task Kernel execution: isolated candidates, explicit review policy, verified
   FCStd/STEP artifacts, recovery, and replay-safe request semantics.
-- A WorkBuddy 5.3.5 verified local-stdio path covering strict schemas, durable restart recovery,
+- A host-neutral 38-tool MCP and Skill contract for Codex, Claude, WorkBuddy, and other compatible
+  agents; each real host profile is certified separately against the same package smoke.
+- Additional WorkBuddy 5.3.5 compatibility coverage for strict-error recovery, durable restart,
   exact Release approval, and native MCP Blob reads for PDF/ZIP delivery.
 - A VibeCAD-managed FreeCAD runtime, so users do not need to prepare a compatible system FreeCAD.
 
@@ -30,7 +32,7 @@ execution, deterministic verification, recovery, and delivery.
 The easiest installation path is to give your coding Agent this request:
 
 > Install and launch the VibeCAD FreeCAD Workbench Alpha from
-> https://github.com/wangtao9090/VibeCAD. Use tag `v0.6.1`, clone it into a persistent
+> https://github.com/wangtao9090/VibeCAD. Use tag `v0.7.0`, clone it into a persistent
 > directory, build its wheel, install it with `uv tool install --force`, keep
 > the checkout and built wheel, and run `vibecad --freecad`. Do not install or
 > fall back to a system copy of FreeCAD.
@@ -39,10 +41,10 @@ The Agent's reproducible procedure is:
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout v0.6.1
+git -C VibeCAD checkout v0.7.0
 cd VibeCAD
 uv build --wheel
-uv tool install --force dist/vibecad-0.6.1-py3-none-any.whl
+uv tool install --force dist/vibecad-0.7.0-py3-none-any.whl
 vibecad --freecad
 ```
 
@@ -229,7 +231,7 @@ Skill discovery paths are:
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
 | WorkBuddy | — | `.codebuddy/skills/vibecad-agent` |
 
-The release asset `vibecad-agent-skill-0.6.1.zip` contains exactly one top-level
+The release asset `vibecad-agent-skill-0.7.0.zip` contains exactly one top-level
 `vibecad-agent/` directory after extraction. That directory can be copied as a whole to any path
 listed above. The Python wheel contains the server and the FreeCAD Workbench addon, while the
 managed runtime contains the matching server environment. Neither package activates the Agent
@@ -300,11 +302,11 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 
 ## What “Host-ready” Means Precisely
 
-The 0.6.1 release has verified the MCP protocol, Skill package structure, FCStd/STEP and Release
-ResourceLinks, managed FreeCAD E2E, 31-tool discovery, and one real WorkBuddy/GLM-5.2 multi-turn
-delivery. It is therefore `host-verified` for the stated WorkBuddy 5.3.5 boundary. This is not a
-claim that every WorkBuddy model is certified; Kimi-K3, MiniMax-M3, and DeepSeek-V4-Flash remain
-comparison candidates.
+The 0.7.0 release contract verifies the MCP protocol, Skill package structure, FCStd/STEP and
+Release ResourceLinks, managed FreeCAD E2E, and exact 38-tool discovery independently of any host.
+Real Codex, Claude, and WorkBuddy package smokes are recorded as separate host profiles; passing one
+never certifies the others. WorkBuddy additionally carries the compatibility coverage described
+above, and no result claims that every model available in a host is certified.
 
 ## Architectural Boundaries and Roadmap
 
@@ -316,8 +318,8 @@ form a second domain-write path. The daemon provides same-user authentication an
 one-time file grants; it does not create a second commit system.
 
 S3-8, P0-B core, the package/managed-runtime closeout, bounded G1 Workbench Alpha, P1 sequential
-editing, P2 rigid mechanical delivery, and the first WorkBuddy host integration are complete for
-0.6.1:
+editing, P2 rigid mechanical delivery, bounded visual mechanical CAD, and host integration are
+included in 0.7.0:
 
 - **P0-B core (backend complete)**: task/project/version discovery, file-level comparison,
   verified forward revert, cancellation/reconcile, authenticated daemon, file grants, source
@@ -325,9 +327,9 @@ editing, P2 rigid mechanical delivery, and the first WorkBuddy host integration 
 - **G1 (Alpha complete)**: preview, verdict, exact object/feature selector capture, and
   Accept/Reject are available in the real FreeCAD Qt Workbench UI; one fingerprinted external
   FreeCAD 1.1.3 pilot is evidenced, while managed mode remains the default;
-- **P1/G2 (complete boundary)**: the narrow sequential editable-HEAD/manual-checkpoint slice is implemented in the
-  current source; Sketcher/PartDesign, controlled import, and broader single-part production
-  capability remain;
+- **P1/G2 (complete boundary)**: the narrow sequential editable-HEAD/manual-checkpoint slice and
+  bounded native Sketcher/PartDesign parameter editing are implemented; controlled general import
+  and broader single-part production capability remain;
 - **P2 (complete boundary)**: rigid 2–10 component assemblies, interference verification, flat
   BOM, deterministic assembly PDF, immutable Release approval, and an exact delivery ZIP;
   native joints, editable manufacturing drawings, GD&T, PLM, and enterprise delivery chains remain;
@@ -336,6 +338,9 @@ editing, P2 rigid mechanical delivery, and the first WorkBuddy host integration 
   model comparison remains future evidence, not a release blocker. On the current visual branch,
   GLM-5V-Turbo also turned the frozen dimensioned plate fixture into a verified editable draft via
   the bounded submit adapter; this is not a claim of universal photo reconstruction.
+- **Visual Mechanical V1**: one fully dimensioned view, or 2–16 clean complementary views of the
+  same object/state/scale, can produce one editable extruded or revolved mechanical part. Missing
+  scale/depth, conflicting views, occlusion, and hidden structure must clarify or fail safely.
 
 The G1 Workbench Alpha packages the real FreeCAD Qt UI and its deterministic managed launcher. It
 includes one Workbench and Dock, daemon-backed refresh, separate HEAD/draft preview, verdict,

@@ -1,11 +1,12 @@
-# VibeCAD 0.6.1 本地交付候选用户手册
+# VibeCAD 0.7.0 用户手册
 
 VibeCAD 是由 Claude、Codex 等宿主 Agent 调用的 FreeCAD 专家 Agent。你描述设计目标，宿主负责理解
 与规划，VibeCAD 负责把受支持的 CAD 操作放进可恢复、可审核、可验证的项目流程，并交付 FCStd、
 STEP 与经摘要批准的机械 Release 包。
 
-当前版本适合验证 Agent-first 主链和完成长方体、圆柱体的创建、检查、参数修改、移动与旋转。它
-还不是完整的机械 CAD 工作台，不能把任意照片、网格或复杂模型自动还原成参数化草图。
+当前版本除基础长方体/圆柱体操作外，还支持受控的原生 Sketcher/PartDesign 单零件、P2 刚性机械
+交付，以及由宿主多模态模型驱动的尺寸完整单视图/多视图机械零件。它仍不能把任意照片、网格、
+自由曲面或复杂装配自动还原成参数化模型。
 
 ## 1. 使用前先理解三个角色
 
@@ -19,7 +20,7 @@ VibeCAD 不出售模型 token，也不会从 MCPB 中获得 Claude/Codex 的订�
 
 ## 2. 当前能做什么
 
-公开面固定为 31 个工具：
+公开面固定为 38 个工具：
 
 | 类别 | 工具 |
 |---|---|
@@ -29,6 +30,7 @@ VibeCAD 不出售模型 token，也不会从 MCPB 中获得 Claude/Codex 的订�
 | 任务 | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task` |
 | 审核 | `accept_draft`, `reject_draft` |
 | 交付 | `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release` |
+| 图片重建生命周期 | `create_reconstruction`, `get_reconstruction`, `run_reconstruction`, `answer_reconstruction`, `adopt_reconstruction`, `reject_reconstruction`, `delete_reconstruction` |
 | 单步 CAD | `create_box`, `create_cylinder`, `inspect_model`, `modify_parameter`, `move_part`, `rotate_part` |
 
 工具名称不是能力说明书。宿主每次开始工作都应调用 `get_capabilities`，以返回的 operation、输入
@@ -86,7 +88,7 @@ FreeCAD.app、preferences、macro 或其他 addon；遇到外来或已变异的�
 ## 4. 单独安装 Agent Skill
 
 MCPB 内带有 Skill 的归档副本，但安装 MCPB **不等于激活 Skill**。把仓库中的
-`skills/vibecad-agent/` 或独立资产 `vibecad-agent-skill-0.6.1.zip` 解压得到的同名目录，整体复制
+`skills/vibecad-agent/` 或独立资产 `vibecad-agent-skill-0.7.0.zip` 解压得到的同名目录，整体复制
 或链接到一个宿主发现路径：
 
 | 宿主 | 用户级 | 项目级 |
@@ -275,11 +277,11 @@ FCStd 导入时只能使用用户明确授权给 `create_project` 的源文件�
 
 ## 11. 当前明确不支持的能力
 
-0.6.1 本地交付候选不支持：
+0.7.0 不支持：
 
-- STEP/STL import、STL 到 STEP、照片/视频重建和 2D 草图识别；
-- 通用 FCStd、Sketcher、PartDesign、孔、圆角、倒角、布尔、装配、BOM 与 TechDraw；
-- FreeCAD Qt Workbench UI、可视 preview 或 face/edge 交互选择；
+- 通用 STEP/STL import、STL 到 STEP、视频重建，以及任意普通照片的一键参数化恢复；
+- 超出冻结 IR 的通用 FCStd/Sketcher/PartDesign、自由曲面、雕塑、复杂装配与完整 TechDraw；
+- face/edge 子元素交互选择和实时多人/多 Agent CAD 合并；
 - simulation、碰撞求解或制造工艺验证；
 - MCP Sampling（`mcp_sampling`）或 VibeCAD 自营 BYOK 模型后端；
 - 模型生成并执行任意 Python/FreeCAD code。
@@ -345,5 +347,6 @@ FreeCAD 中完成小修改。普通 **Save** 只保存该受管工作副本，**
 STEP 等只适合作为 accepted Revision 的可选 Git LFS 快照；Git 不是 VibeCAD HEAD，也不能语义合并
 原生 CAD 文件。完整边界见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VERSIONING_RESEARCH.md)。
 
-当前外部 Claude/Codex 模型调用尚未纳入本地放行证据。要做宿主实测，必须单独授权相应模型/token
-消耗，并记录所用宿主版本、Skill hash、31-tool discovery 与完整任务结果。
+0.7.0 对 Codex、Claude、WorkBuddy 使用同一发布包 smoke 合同，并分别记录宿主版本、Skill/package
+hash、38-tool discovery、任务恢复、建模和 ResourceLink/`resources/read` 结果。WorkBuddy 另测其
+严格错误呈现与 bounded submit 兼容路径；任一宿主通过都不替代另外两个。

@@ -227,10 +227,11 @@ def test_prevalidator_accepts_only_the_supported_client_union() -> None:
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/list",
-            "params": {"cursor": "next"},
+            "params": {"cursor": "next", "_meta": {"progressToken": 0}},
         }
     )
     assert listed.method == "tools/list"
+    assert dict(listed.params) == {"cursor": "next"}
 
     called = transport.prevalidate_client_message(
         {
@@ -261,25 +262,35 @@ def test_prevalidator_accepts_only_the_supported_client_union() -> None:
             "jsonrpc": "2.0",
             "id": 3,
             "method": "resources/read",
-            "params": {"uri": artifact_uri},
+            "params": {"uri": artifact_uri, "_meta": {"progressToken": "resource"}},
         }
     )
     assert resource.is_resource_read is True
+    assert dict(resource.params) == {"uri": artifact_uri}
 
     cancelled = transport.prevalidate_client_message(
         {
             "jsonrpc": "2.0",
             "method": "notifications/cancelled",
-            "params": {"requestId": 2, "reason": "client request"},
+            "params": {
+                "requestId": 2,
+                "reason": "client request",
+                "_meta": {"host": "test"},
+            },
         }
     )
     assert cancelled.is_cancellation is True
     assert cancelled.cancellation_target == 2
 
     initialized = transport.prevalidate_client_message(
-        {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {"_meta": {"host": "test"}},
+        }
     )
     assert initialized.is_notification is True
+    assert dict(initialized.params) == {}
 
 
 def test_every_accepted_protocol_shape_survives_pinned_sdk_typed_validation() -> None:
@@ -497,8 +508,27 @@ def test_malformed_tools_call_container_has_its_own_fixed_error() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("method", "params", "code", "message"),
+    [
+        ("tools/list", {}, -32600, "Invalid Request"),
+        ("tools/call", {"name": "ping", "arguments": {}}, -32602, "Tool request is invalid."),
+        (
+            "resources/read",
+            {"uri": "vibecad://artifact/materialization_" + "a" * 64 + "/artifact_" + "b" * 32},
+            -32602,
+            "Invalid request parameters",
+        ),
+    ],
+)
 @pytest.mark.parametrize("metadata", ["session", [], 1, True])
-def test_tool_call_rejects_non_object_reserved_metadata(metadata: object) -> None:
+def test_request_rejects_non_object_reserved_metadata(
+    method: str,
+    params: dict[str, object],
+    code: int,
+    message: str,
+    metadata: object,
+) -> None:
     transport = _transport()
 
     with pytest.raises(transport.TransportProtocolError) as caught:
@@ -506,15 +536,15 @@ def test_tool_call_rejects_non_object_reserved_metadata(metadata: object) -> Non
             {
                 "jsonrpc": "2.0",
                 "id": 42,
-                "method": "tools/call",
-                "params": {"name": "ping", "arguments": {}, "_meta": metadata},
+                "method": method,
+                "params": {**params, "_meta": metadata},
             }
         )
 
     assert caught.value.response == {
         "jsonrpc": "2.0",
         "id": 42,
-        "error": {"code": -32602, "message": "Tool request is invalid."},
+        "error": {"code": code, "message": message},
     }
 
 
