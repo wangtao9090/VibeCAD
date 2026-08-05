@@ -1,8 +1,8 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-A06 complete; v0.7.0 published and verified**
+> Status: **VCAD-S40.1 complete; ground-truth photo intake is next**
 >
-> Updated: 2026-08-04
+> Updated: 2026-08-05
 >
 > Repository anchor: published tag `v0.7.0@6bcd934`
 >
@@ -75,10 +75,33 @@ were then removed while durable data and repository/user-owned files remained.
 WorkBuddy alone retains its additional strict-error/bounded-submit compatibility
 gate; it does not substitute for either other host.
 
+On 2026-08-05 the user selected ordinary-photo mechanical reconstruction as
+the next product track and approved S40. The first slice keeps the existing
+authority unchanged: the multimodal host screens capture quality, absolute
+scale, perspective, occlusion, and geometry completeness; VibeCAD still receives
+only one confirmed bounded ParametricDesignIR through the ordinary
+`REQUIRE_REVIEW` Task Kernel. It adds no MCP tool, durable status, CAD operation,
+or second write authority. The new host-local outcomes are `PHOTO_READY`,
+`NEEDS_CAPTURE`, and `OUT_OF_ENVELOPE`; only `PHOTO_READY` may reach
+`create_task`. Real-photo support remains a branch-candidate claim until three
+license-clear, EXIF-free, caliper-ground-truth samples and two negative cases
+pass the declared host and FreeCAD gates.
+
+S40.1 now closes the reusable guidance layer. The canonical Skill links one
+portable Guided Photo v1 reference covering the supported envelope, capture
+roles for extruded/revolved parts, coplanar scale rules, direct measurements,
+capture/scale/geometry-completeness gates, candidate-branch confirmation, and
+fresh replanning. The optional VibeCAD-managed Provider prompt uses the same
+recapture/measurement and coplanar-scale rules without gaining CAD authority.
+The affected deterministic gate is 254 passed, plus Skill validation, Ruff,
+and diff integrity. S40.2 cannot establish a real-photo product outcome until
+the declared physical fixtures and caliper truth exist; synthetic renders or
+web photos would not answer that decision.
+
 The complete architecture, slices, gates, privacy boundary, validation budget,
 and recovery point are in
-[`vibecad-visual-cad.md`](vibecad-visual-cad.md). VCAD-A01 is approved and work
-continues on `codex/visual-cad-m0` from `origin/main@d7ab6b7`. S10.1 froze the
+[`vibecad-visual-cad.md`](vibecad-visual-cad.md). VCAD-A07 is approved and S40
+continues on `codex/guided-photo-s40` from `origin/main@43ddc49`. S10.1 froze the
 minimal ParametricDesignIR v1; S10.2 delivered native Sketcher objects and
 solver/DoF facts. S10.3 now compiles closed profiles into a strict single-body
 Pad/Pocket/Revolution/Hole chain, preserves feature parameter expressions and
@@ -106,8 +129,8 @@ reaffirmed the older Agent-first product boundary: Codex, Claude, WorkBuddy, or 
 calling host owns image understanding, model selection, subscription, and credentials;
 VibeCAD owns the CAD Task Kernel. The direct Provider path is therefore optional and
 non-default, not the primary image-to-CAD path or a release blocker. The A04 public
-mechanical envelope is published; S40 and Freeform remain behind new scope
-authorization and A05 respectively.
+mechanical envelope is published; S40 is now active under VCAD-A07, while
+Freeform remains behind A05.
 
 S20.1 seals descriptor-bound local JPEG/PNG ImageSets under the additive
 `visual_inputs/` root with provenance, byte/pixel budgets, normalization, and

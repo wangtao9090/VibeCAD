@@ -121,6 +121,21 @@ Before authoring a `create_parametric_design` command, read `references/parametr
 
 The CAD task and ModelProgram become durable after submission; the host's original attachment does not automatically become VibeCAD durable evidence. If a host restart loses image or clarification context, ask the user to reattach or restate the missing evidence. Never reconstruct dimensions from a task id alone.
 
+## Guided ordinary photos
+
+For ordinary physical-part photos, read `references/guided-photo-v1.md` before deciding whether
+to create CAD. Keep the object inside the single rigid extruded/revolved mechanical envelope and
+classify the capture as `PHOTO_READY`, `NEEDS_CAPTURE`, or `OUT_OF_ENVELOPE`. Require direct user
+measurements or a scale reference on the same physical plane as the measured boundary; do not
+apply one pixel ratio across perspective depth.
+
+Check background separation, blur/glare, silhouette completeness, view roles, occlusion, and the
+geometry facts needed for the bounded ParametricDesignIR. Ask for one named recapture or
+measurement at a time. When hidden geometry has multiple plausible branches, present the bounded
+alternatives for confirmation, then discard the provisional plan and rebuild the evidence matrix
+from the original sources plus the user's answer. Stop before `create_task` unless every
+geometry-changing fact is confirmed and the capture is `PHOTO_READY`.
+
 ## Optional sealed-image visual reconstruction
 
 Use the seven visual-reconstruction tools only when an explicitly selected VibeCAD-managed workflow needs a durable local ImageSet or optional Provider lifecycle. A trusted local host adapter must first seal one to sixteen JPEG/PNG inputs and return the exact `image_set_id` and `image_set_manifest_sha256`. WorkBuddy direct attachment ingress into that sealed store is not verified and is not required for host-owned image-to-CAD. Never put a path, Base64 value, image bytes, filename, or Resource URI into a reconstruction MCP request, and never invent or alter either ImageSet binding.
@@ -149,7 +164,7 @@ Never generate or execute arbitrary Python/FreeCAD code. FreeCAD is the bounded 
 
 ## Unsupported and unavailable capabilities
 
-STEP and STL import unavailable in the verified current envelope; only FCStd Box/Cylinder import is supported. Do not claim `mcp_sampling`, `byok`, Workbench UI, `face/edge` selection, STL reconstruction, universal or release-verified photo reconstruction, or simulation. Host-owned image reasoning is limited to the dimension-complete single-part V1 envelope when the calling multimodal host can actually see the attachments; ordinary unscaled photos remain outside this envelope. VibeCAD-managed visual reconstruction still defaults to the deterministic fake provider, while direct cloud providers remain optional and non-default.
+STEP and STL import unavailable in the verified current envelope; only FCStd Box/Cylinder import is supported. Do not claim `mcp_sampling`, `byok`, Workbench UI, `face/edge` selection, STL reconstruction, universal or release-verified photo reconstruction, or simulation. Host-owned image reasoning is limited to the dimension-complete single-part mechanical envelope when the calling multimodal host can actually see the attachments; guided scale-backed photos must pass the Guided Photo contract, and ordinary unscaled photos remain outside the envelope. VibeCAD-managed visual reconstruction still defaults to the deterministic fake provider, while direct cloud providers remain optional and non-default.
 
 The calling host owns model selection, subscription or API token use, and every associated charge. VibeCAD does not provide a hidden model, Sampling backend, or BYOK billing service.
 

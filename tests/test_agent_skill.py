@@ -21,6 +21,7 @@ SKILL_ROOT = ROOT / "skills" / "vibecad-agent"
 SKILL_FILE = SKILL_ROOT / "SKILL.md"
 OPENAI_YAML = SKILL_ROOT / "agents" / "openai.yaml"
 PARAMETRIC_REFERENCE = SKILL_ROOT / "references" / "parametric-design-ir-v1.md"
+GUIDED_PHOTO_REFERENCE = SKILL_ROOT / "references" / "guided-photo-v1.md"
 S35_VISUAL_FIXTURES = (
     "visual-cad-l-bracket-front",
     "visual-cad-l-bracket-right",
@@ -351,6 +352,42 @@ def test_skill_routes_host_visible_images_through_the_existing_task_kernel():
     assert "absolute" in normalized and "scale" in normalized
     assert "require_review" in normalized
     assert re.search(r"api key|api token|provider credential", normalized)
+
+
+def test_skill_guides_scale_backed_photos_without_opening_a_premature_task():
+    _metadata, body = _skill_parts()
+    assert "references/guided-photo-v1.md" in body
+    assert GUIDED_PHOTO_REFERENCE.is_file()
+
+    guided = "\n".join(_sections(body, r"guided ordinary photos|guided photo"))
+    normalized = _normalized(guided)
+    for required in (
+        "photo_ready",
+        "needs_capture",
+        "out_of_envelope",
+        "same physical plane",
+        "discard the provisional plan",
+        "stop before `create_task`",
+    ):
+        assert required in normalized
+
+    reference = _normalized(_read(GUIDED_PHOTO_REFERENCE))
+    for required in (
+        "single rigid mechanical part",
+        "background separation",
+        "profile-normal",
+        "depth-normal",
+        "axis-normal",
+        "coplanar scale reference",
+        "direct user measurement",
+        "one concrete recapture or measurement request",
+        "geometry-completeness gate",
+        "rebuild the evidence matrix",
+        "require_review",
+        "do not create a proportional cad placeholder",
+    ):
+        assert required in reference
+    assert len(_read(GUIDED_PHOTO_REFERENCE).encode("utf-8")) < 16_000
 
 
 def test_skill_carries_the_portable_parametric_ir_authoring_contract():
