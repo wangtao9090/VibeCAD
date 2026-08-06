@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "host_visible": false,
+  "cases": {
+    "guided-photo-washer-ready": {
+      "reference_kind": "analytic",
+      "dimensions_mm": {
+        "outer_diameter": 20.0,
+        "inner_diameter": 10.5,
+        "depth": 2.0
+      },
+      "expected_bbox_mm": [
+        20.0,
+        20.0,
+        2.0
+      ],
+      "expected_volume_mm3": 455.1382356888213,
+      "volume_absolute_tolerance_mm3": 0.001
+    },
+    "guided-photo-fan-spacer-ready": {
+      "reference_kind": "public_mesh_digest_and_analytic_profile",
+      "reference_sha256": "2d81bf169d73ed0ed5c1444998a0434ea40b07fb501101416dc66b814aae6f8b",
+      "dimensions_mm": {
+        "outer_width": 120.0,
+        "outer_height": 120.0,
+        "depth": 5.0,
+        "outer_corner_radius": 8.0,
+        "aperture_width": 116.0,
+        "aperture_height": 116.0,
+        "aperture_corner_radius": 34.0,
+        "mount_hole_diameter": 5.0,
+        "mount_hole_spacing_x": 105.0,
+        "mount_hole_spacing_y": 105.0
+      },
+      "expected_bbox_mm": [
+        120.0,
+        120.0,
+        5.0
+      ],
+      "reference_volume_mm3": 9021.7705078125,
+      "volume_relative_tolerance": 0.015
+    },
+    "guided-photo-calibration-block-ready": {
+      "reference_kind": "public_mesh_digest_and_analytic_profile",
+      "reference_sha256": "2a703002174477daee65b6b39c31296ae460e0bf5b43b30299ec8ed8c58c6b35",
+      "dimensions_mm": {
+        "outer_width": 30.0,
+        "outer_height": 20.0,
+        "overall_depth": 10.0,
+        "pocket_width": 20.0,
+        "pocket_height": 10.0,
+        "pocket_depth": 7.0
+      },
+      "expected_bbox_mm": [
+        30.0,
+        20.0,
+        10.0
+      ],
+      "expected_volume_mm3": 4600.0,
+      "volume_absolute_tolerance_mm3": 0.001
+    }
+  },
+  "required_cad_checks": [
+    "fully_constrained_sketches",
+    "valid_brep",
+    "single_solid",
+    "confirmed_dimensions",
+    "parameter_edit_probe",
+    "head_unchanged_before_accept"
+  ]
+}

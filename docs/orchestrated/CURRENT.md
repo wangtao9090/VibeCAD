@@ -1,8 +1,8 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-S40.2 native slot upgrade complete; first private pilot is a review draft**
+> Status: **VCAD-S40 Guided Photo V3 outcome gate complete on the branch**
 >
-> Updated: 2026-08-05
+> Updated: 2026-08-06
 >
 > Repository anchor: published tag `v0.7.0@6bcd934`
 >
@@ -84,8 +84,8 @@ only one confirmed bounded ParametricDesignIR through the ordinary
 or second write authority. The new host-local outcomes are `PHOTO_READY`,
 `NEEDS_CAPTURE`, and `OUT_OF_ENVELOPE`; only `PHOTO_READY` may reach
 `create_task`. Real-photo support remains a branch-candidate claim until three
-license-clear, EXIF-free, caliper-ground-truth samples and two negative cases
-pass the declared host and FreeCAD gates.
+license-clear, metadata-free ordinary-photo samples with independently confirmed
+dimensions and two negative cases pass the declared host and FreeCAD gates.
 
 S40.1 now closes the reusable guidance layer. The canonical Skill links one
 portable Guided Photo v1 reference covering the supported envelope, capture
@@ -94,9 +94,10 @@ capture/scale/geometry-completeness gates, candidate-branch confirmation, and
 fresh replanning. The optional VibeCAD-managed Provider prompt uses the same
 recapture/measurement and coplanar-scale rules without gaining CAD authority.
 The affected deterministic gate is 254 passed, plus Skill validation, Ruff,
-and diff integrity. S40.2 cannot establish a real-photo product outcome until
-the declared physical fixtures and caliper truth exist; synthetic renders or
-web photos would not answer that decision.
+and diff integrity. S40.2 cannot establish a real-photo product outcome from
+synthetic renders alone. Public web photos are admissible only when their
+license and provenance are recorded and their dimensions come from independent
+confirmed facts or evaluator-only references rather than visual metrology.
 
 The first private S40.2 sample has eleven complementary ordinary photos and one
 user-supplied STEP reference. The reference remains evaluator-only: the host
@@ -119,8 +120,41 @@ all four deterministic verifiers passed and HEAD remained unchanged. Only
 after candidate completion, the isolated evaluator compared it with the hidden
 normalized reference and measured volume IoU `0.937880`. Exact 3D fillets and
 chamfers remain outside v1. This private pilot proves the implementation path
-but does not replace the license-clear, EXIF-free fixed three-positive and
+but does not replace the license-clear, metadata-free fixed three-positive and
 two-negative S40.2 gate.
+
+S40.2 and S40.3 now close that fixed gate. The committed public fixture set has
+three metadata-free ordinary-photo positives: an annular washer, a rounded-square
+120 mm fan spacer, and a calibration block with one blind pocket. Its two
+negatives reuse the washer without thickness (`NEEDS_CAPTURE`) and use a CC0
+multi-object clutter frame (`OUT_OF_ENVELOPE`); neither negative created a Task.
+Source pages, authors, licenses, original/normalized hashes, host-visible facts,
+expected routing, and evaluator-only truth are separated in the fixture tree.
+The public mesh references are recorded by digest but are not committed or shown
+to a host. The user's private blade photos, STEP, and candidate remain outside
+the repository.
+
+Fresh real-host runs each proved a distinct positive through the same stdio MCP
+and managed FreeCAD authority: Claude produced the 30 × 20 × 10 mm calibration
+block, WorkBuddy/GLM-5V-Turbo produced the 20 × 20 × 2 mm washer, and Codex
+produced the 120 × 120 × 5 mm fan spacer. All reached generation 9
+`awaiting_user_review`, left HEAD unchanged, passed bounding-box, volume,
+valid-BRep, and one-solid verification, and emitted FCStd plus STEP resources.
+Real FreeCAD also proved every sketch fully constrained and a depth edit changed
+the solid while preserving validity. The host runs exposed two bounded product
+defects now covered by regression tests: an idle authenticated daemon connection
+is reopened once and the exact request replayed once, and the complex but bounded
+fan program now fits a 128-parameter/8,192-node internal envelope. The canonical
+Skill's rounded-rectangle recipe now constrains arc centers and tangential
+endpoints without redundant radial constraints.
+The branch gate is 5,942 non-slow tests passed / 126 deselected, 10 real-FreeCAD
+slow outcomes passed, plus Ruff, changed-file format, compile, diff, and Skill
+validation.
+All three temporary daemons were authenticated-retired; the temporary
+Codex/Claude/WorkBuddy homes, copied Skills/MCP configuration, source downloads,
+diagnostics, and test-created FreeCAD runtime were then removed. The user's
+installed `/Applications/FreeCAD.app`, private source files, and unrelated
+untracked repository files were preserved.
 
 The complete architecture, slices, gates, privacy boundary, validation budget,
 and recovery point are in

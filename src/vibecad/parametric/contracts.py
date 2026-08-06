@@ -27,7 +27,7 @@ from vibecad.workflow.errors import (
 
 PARAMETRIC_SCHEMA_VERSION = 1
 MAX_DESIGN_EVIDENCE = 128
-MAX_DESIGN_PARAMETERS = 64
+MAX_DESIGN_PARAMETERS = 128
 MAX_DATUM_PLANES = 4
 MAX_DESIGN_SKETCHES = 8
 MAX_SKETCH_GEOMETRIES = 128
@@ -37,6 +37,7 @@ MAX_PARAMETRIC_IR_BYTES = 256 * 1024
 
 _MAX_TOTAL_GEOMETRIES = 256
 _MAX_TOTAL_CONSTRAINTS = 512
+_MAX_PARAMETRIC_IR_NODES = 8_192
 _MAX_EVIDENCE_REFS = 8
 _MAX_SOURCE_REFS = 8
 
@@ -1779,7 +1780,7 @@ class ParametricDesignIR:
                     _raise(ParametricErrorCode.INVALID_VALUE, f"/features/{index}/axis")
 
         mapping = self.to_mapping()
-        if _json_node_count(mapping) > 3_500:
+        if _json_node_count(mapping) > _MAX_PARAMETRIC_IR_NODES:
             _raise(ParametricErrorCode.BUDGET_EXCEEDED)
         if len(self.canonical_bytes) > MAX_PARAMETRIC_IR_BYTES:
             _raise(ParametricErrorCode.BUDGET_EXCEEDED)

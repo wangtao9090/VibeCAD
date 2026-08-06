@@ -17,6 +17,7 @@ from enum import StrEnum
 from types import MappingProxyType
 
 from vibecad.parametric.contracts import (
+    MAX_DESIGN_PARAMETERS,
     ConstraintKind,
     DesignParameter,
     DesignUnit,
@@ -1176,7 +1177,7 @@ def _validate_parameter_metadata(
 ) -> tuple[ParametricEntityFact, ...]:
     if getattr(obj, "TypeId", None) != "Part::Feature":
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
-    entries = _sequence(data["parameters"], maximum=64)
+    entries = _sequence(data["parameters"], maximum=MAX_DESIGN_PARAMETERS)
     seen_ids: set[str] = set()
     seen_properties: set[str] = set()
     facts: list[ParametricEntityFact] = []
@@ -1809,7 +1810,7 @@ def _validate_parametric_graph(
 
     parameter_pairs: set[tuple[str, str]] = set()
     parameter_units: dict[tuple[str, str], str] = {}
-    for raw in _sequence(carrier_data["parameters"], maximum=64):
+    for raw in _sequence(carrier_data["parameters"], maximum=MAX_DESIGN_PARAMETERS):
         entry = _exact_mapping(raw, {"id", "property", "unit"})
         pair = (_text(entry["id"], _IR_ID), _text(entry["property"], _PARAMETER_PROPERTY))
         if pair in parameter_pairs:
@@ -1969,7 +1970,7 @@ def _source_parameter_mapping(
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     entries = tuple(
         _exact_mapping(raw, {"id", "property", "unit"})
-        for raw in _sequence(carrier_data["parameters"], maximum=64)
+        for raw in _sequence(carrier_data["parameters"], maximum=MAX_DESIGN_PARAMETERS)
     )
     expected_entries = tuple(
         (item.id, _parameter_property(item), item.unit.value) for item in design.parameters
