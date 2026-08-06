@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-S40.1 complete; ground-truth photo intake is next**
+> Status: **VCAD-S40.2 native slot upgrade complete; first private pilot is a review draft**
 >
 > Updated: 2026-08-05
 >
@@ -97,6 +97,30 @@ The affected deterministic gate is 254 passed, plus Skill validation, Ruff,
 and diff integrity. S40.2 cannot establish a real-photo product outcome until
 the declared physical fixtures and caliper truth exist; synthetic renders or
 web photos would not answer that decision.
+
+The first private S40.2 sample has eleven complementary ordinary photos and one
+user-supplied STEP reference. The reference remains evaluator-only: the host
+photo-analysis prompt and generated candidate never receive the STEP geometry,
+topology, or file content. The STEP itself, detailed measurements, private
+photos, and generated private artifacts remain outside repository fixtures.
+The approved minimum correction is now implemented: one axis-aligned `slot`
+stays one IR geometry but compiles to two native lines, two semicircular arcs,
+and fourteen deterministic editable Sketcher constraints. Oblique slots and IR
+constraints that target an atomic slot fail before CAD mutation. The existing
+3,500-node IR and ModelProgram budgets are unchanged; the private six-feature
+candidate is 2,603 nodes instead of the hand-expanded prototype's roughly
+4,545 nodes. Real FreeCAD proved all six sketches fully constrained with
+`DoF=0`, four native edges and fourteen constraints per slot, and one valid
+solid. A FreeCAD-style native constraint edit changed the slot width from 6 mm
+to 8 mm; a subsequent public depth-parameter edit from 8 mm to 10 mm preserved
+that manual change and solver closure. The ordinary Task Kernel reached
+generation 9 `awaiting_user_review`;
+all four deterministic verifiers passed and HEAD remained unchanged. Only
+after candidate completion, the isolated evaluator compared it with the hidden
+normalized reference and measured volume IoU `0.937880`. Exact 3D fillets and
+chamfers remain outside v1. This private pilot proves the implementation path
+but does not replace the license-clear, EXIF-free fixed three-positive and
+two-negative S40.2 gate.
 
 The complete architecture, slices, gates, privacy boundary, validation budget,
 and recovery point are in

@@ -197,6 +197,39 @@ def _rectangle_design() -> ParametricDesignIR:
     )
 
 
+def _slot_design(*, vertical: bool = False) -> ParametricDesignIR:
+    base = _rectangle_design()
+    slot = SketchGeometry(
+        id=BOTTOM,
+        kind=GeometryKind.SLOT,
+        dimensions=(
+            {
+                "x1_mm": 30,
+                "y1_mm": 5,
+                "x2_mm": 30,
+                "y2_mm": 35,
+                "width_mm": 6,
+            }
+            if vertical
+            else {
+                "x1_mm": 15,
+                "y1_mm": 20,
+                "x2_mm": 45,
+                "y2_mm": 20,
+                "width_mm": 6,
+            }
+        ),
+        evidence_ids=(EVIDENCE,),
+    )
+    sketch = replace(
+        base.sketches[0],
+        name="Horizontal slot profile",
+        geometries=(slot,),
+        constraints=(),
+    )
+    return replace(base, name="Native slot", sketches=(sketch,))
+
+
 def _multi_hole_design() -> ParametricDesignIR:
     base = _rectangle_design()
     diameter_id = _id("parameter", 20)
@@ -684,7 +717,7 @@ def test_compiler_rejects_non_ir_before_loading_cad_runtime() -> None:
     assert caught.value.path == "/design"
 
 
-def test_compiler_fails_closed_on_slot_before_cad_mutation() -> None:
+def test_slot_profile_expands_to_four_native_edges() -> None:
     design = _rectangle_design()
     encoded = design.to_mapping()
     encoded["sketches"][0]["geometries"][0] = {
@@ -696,6 +729,30 @@ def test_compiler_fails_closed_on_slot_before_cad_mutation() -> None:
             "y1_mm": 0,
             "x2_mm": 60,
             "y2_mm": 0,
+            "width_mm": 5,
+        },
+        "construction": False,
+        "evidence_ids": [],
+    }
+    encoded["sketches"][0]["geometries"] = [encoded["sketches"][0]["geometries"][0]]
+    encoded["sketches"][0]["constraints"] = []
+    slot_design = ParametricDesignIR.from_mapping(encoded)
+
+    assert compiler_module._expected_profile_edge_count(slot_design.sketches[0]) == 4
+
+
+def test_compiler_fails_closed_on_oblique_slot_before_cad_mutation() -> None:
+    design = _rectangle_design()
+    encoded = design.to_mapping()
+    encoded["sketches"][0]["geometries"][0] = {
+        "schema_version": 1,
+        "id": BOTTOM,
+        "kind": "slot",
+        "dimensions": {
+            "x1_mm": 0,
+            "y1_mm": 0,
+            "x2_mm": 60,
+            "y2_mm": 10,
             "width_mm": 5,
         },
         "construction": False,
@@ -724,7 +781,42 @@ def test_compiler_fails_closed_on_slot_before_cad_mutation() -> None:
         compile_design_sketches(session, slot_design)
 
     assert caught.value.code is ParametricCompileErrorCode.UNSUPPORTED
-    assert caught.value.path == "/sketches/0/geometries/0/kind"
+    assert caught.value.path == "/sketches/0/geometries/0/dimensions"
+    assert session.transaction_started is False
+
+
+def test_compiler_rejects_ir_constraints_on_atomic_slot_before_cad_mutation() -> None:
+    design = _slot_design()
+    slot_constraint = SketchConstraint(
+        id=_id("constraint", 70),
+        kind=ConstraintKind.DISTANCE_X,
+        references=(
+            _reference("@origin", ReferencePoint.CENTER),
+            _reference(BOTTOM, ReferencePoint.CENTER),
+        ),
+        parameter_id=WIDTH,
+        evidence_ids=(EVIDENCE,),
+    )
+    design = replace(
+        design,
+        sketches=(replace(design.sketches[0], constraints=(slot_constraint,)),),
+    )
+
+    class EmptySession:
+        doc = SimpleNamespace(Objects=(), UndoMode=1)
+        transaction_started = False
+
+        @contextmanager
+        def _transaction(self, _label: str, *, claim_new_objects: bool):
+            self.transaction_started = True
+            yield
+
+    session = EmptySession()
+    with pytest.raises(ParametricCompileError) as caught:
+        compile_design_sketches(session, design)
+
+    assert caught.value.code is ParametricCompileErrorCode.UNSUPPORTED
+    assert caught.value.path == "/sketches/0/constraints/0/references/1/target"
     assert session.transaction_started is False
 
 
@@ -832,6 +924,73 @@ def test_stabilization_solves_all_sketches_before_recompute_and_shape_checks(
         "facts:parameters",
         "facts:feature",
     ]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("vertical", (False, True), ids=("horizontal", "vertical"))
+def test_real_slot_compiles_to_fully_constrained_editable_native_geometry(
+    vertical: bool,
+) -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    session = Session()
+    session.open_document(f"ParametricNativeSlot{'Vertical' if vertical else 'Horizontal'}")
+    try:
+        design = _slot_design(vertical=vertical)
+        compiled = compiler_module.compile_parametric_design(session, design)
+        stabilize_parametric_session(session)
+
+        sketch = compiled.sketches[0]
+        assert sketch.geometry_indices[BOTTOM] == (0, 1, 2, 3)
+        assert sketch.solver.geometry_count == 4
+        assert sketch.solver.constraint_count == 14
+        assert sketch.solver.dof == 0
+        assert sketch.solver.fully_constrained is True
+        assert tuple(item.TypeId for item in sketch.object.Geometry) == (
+            "Part::GeomLineSegment",
+            "Part::GeomArcOfCircle",
+            "Part::GeomLineSegment",
+            "Part::GeomArcOfCircle",
+        )
+        expected_area = 6 * 30 + math.pi * 3**2
+        assert float(compiled.body.Shape.Volume) == pytest.approx(expected_area * 8, abs=1e-6)
+
+        radius_constraint = next(
+            index
+            for index, constraint in enumerate(sketch.object.Constraints)
+            if constraint.Type == "Radius"
+        )
+        sketch.object.setDatum(radius_constraint, 4.0)
+        stabilize_parametric_session(session)
+        edited_slot_area = 8 * 30 + math.pi * 4**2
+        assert float(compiled.body.Shape.Volume) == pytest.approx(
+            edited_slot_area * 8,
+            abs=1e-6,
+        )
+
+        edit = compiler_module.modify_parametric_parameter(
+            session,
+            design,
+            body=compiled.body,
+            parameter_id=DEPTH,
+            value=10,
+        )
+        stabilize_parametric_session(session)
+        assert (edit.before_value, edit.after_value) == (8, 10)
+        assert float(compiled.body.Shape.Volume) == pytest.approx(
+            edited_slot_area * 10,
+            abs=1e-6,
+        )
+        slot_facts = {
+            fact.name: fact.value for fact in compiler_module.parametric_entity_facts(sketch.object)
+        }
+        assert slot_facts["parametric.dof"] == 0
+        assert slot_facts["parametric.fully_constrained"] is True
+    finally:
+        session.close_document()
 
 
 @pytest.mark.slow

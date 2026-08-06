@@ -101,8 +101,16 @@ schema_version, id, name, role, plane, geometries[], constraints[], evidence_ids
 | `line` | `x1_mm`, `y1_mm`, `x2_mm`, `y2_mm` |
 | `circle` | `cx_mm`, `cy_mm`, `radius_mm` |
 | `arc` | `cx_mm`, `cy_mm`, `radius_mm`, `start_angle_deg`, `sweep_angle_deg` |
+| `slot` | `x1_mm`, `y1_mm`, `x2_mm`, `y2_mm`, `width_mm` |
 
-Do not use `slot` in the current compiled envelope even though the value contract reserves it.
+For `slot`, the two `(x, y)` pairs are the end-cap centers and `width_mm` is the full slot
+width. The current compiler accepts only horizontal or vertical centerlines. It expands one
+atomic slot into two native lines, two native semicircular arcs, and deterministic native
+Sketcher constraints; the result is one closed, fully constrained, directly editable wire.
+Do not attach IR constraints to a slot in v1: its five geometry dimensions are authoritative
+and compile to editable numeric Sketcher constraints, not parameter-carrier expressions.
+Oblique slots fail closed. Because Pocket still accepts exactly one live wire, author each
+through-slot as its own profile sketch and Pocket feature.
 
 Each reference is `{schema_version, target, point}`. `target` is a geometry identity or `@origin`,
 `@x_axis`, `@y_axis`; `point` is `whole`, `start`, `end`, or `center` as appropriate. Each

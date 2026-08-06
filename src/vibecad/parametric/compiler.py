@@ -44,6 +44,12 @@ _METADATA_DOC = "Canonical VibeCAD parametric IR/index mapping"
 _MAX_METADATA_BYTES = 128 * 1024
 _MAX_ERROR_PATH = 512
 _MAX_COMPILED_HOLE_LOCATIONS = 16
+_MAX_COMPILED_CONSTRAINTS_PER_ENTRY = 16
+_MAX_COMPILED_SKETCH_CONSTRAINT_ENTRIES = 256
+_MAX_COMPILED_SKETCH_GEOMETRIES = 256
+_MAX_COMPILED_SKETCH_CONSTRAINTS = 1024
+_SLOT_NATIVE_GEOMETRY_COUNT = 4
+_SLOT_NATIVE_CONSTRAINT_COUNT = 14
 _SOLVER_RESULTS = frozenset({0, -1, -2, -3, -4, -5})
 _HEX_32 = re.compile(r"[0-9a-f]{32}\Z")
 _HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -54,6 +60,7 @@ _IR_ID = re.compile(
 _PARAMETER_PROPERTY = re.compile(r"P_[0-9a-f]{32}\Z")
 _CONSTRAINT_NAME = re.compile(r"C_[0-9a-f]{32}\Z")
 _METADATA_DOMAIN = b"vibecad-parametric-freecad-metadata-v1\0"
+_SLOT_CONSTRAINT_DOMAIN = b"vibecad-parametric-slot-constraint-v1\0"
 _FEATURE_TYPE_IDS = {
     FeatureKind.PAD: "PartDesign::Pad",
     FeatureKind.POCKET: "PartDesign::Pocket",
@@ -221,6 +228,17 @@ def _geometry_source_index(sketch: ParametricSketch, geometry: SketchGeometry) -
     return next(index for index, item in enumerate(sketch.geometries) if item.id == geometry.id)
 
 
+def _slot_axis(geometry: SketchGeometry) -> str | None:
+    if geometry.kind is not GeometryKind.SLOT:
+        return None
+    values = geometry.dimensions
+    if values["x1_mm"] == values["x2_mm"]:
+        return "vertical"
+    if values["y1_mm"] == values["y2_mm"]:
+        return "horizontal"
+    return None
+
+
 def _preflight(session: object, design: object) -> ParametricDesignIR:
     if type(design) is not ParametricDesignIR:
         _raise(ParametricCompileErrorCode.INVALID_INPUT, "/design")
@@ -240,12 +258,51 @@ def _preflight(session: object, design: object) -> ParametricDesignIR:
     ):
         _raise(ParametricCompileErrorCode.INVALID_INPUT, "/session")
     for sketch_index, sketch in enumerate(design.sketches):
+        geometry_by_id = {item.id: item for item in sketch.geometries}
+        declared_constraint_ids = {item.id for item in sketch.constraints}
+        generated_constraint_ids = {
+            _slot_constraint_id(geometry)
+            for geometry in sketch.geometries
+            if geometry.kind is GeometryKind.SLOT
+        }
+        if declared_constraint_ids & generated_constraint_ids:
+            _raise(
+                ParametricCompileErrorCode.INVALID_INPUT,
+                f"/sketches/{sketch_index}/constraints",
+            )
+        expanded_geometry_count = sum(
+            _SLOT_NATIVE_GEOMETRY_COUNT if geometry.kind is GeometryKind.SLOT else 1
+            for geometry in sketch.geometries
+        )
+        expanded_constraint_count = len(sketch.constraints) + sum(
+            _SLOT_NATIVE_CONSTRAINT_COUNT
+            for geometry in sketch.geometries
+            if geometry.kind is GeometryKind.SLOT
+        )
+        metadata_constraint_entry_count = len(sketch.constraints) + sum(
+            geometry.kind is GeometryKind.SLOT for geometry in sketch.geometries
+        )
+        if expanded_geometry_count > _MAX_COMPILED_SKETCH_GEOMETRIES:
+            _raise(
+                ParametricCompileErrorCode.UNSUPPORTED,
+                f"/sketches/{sketch_index}/geometries",
+            )
+        if expanded_constraint_count > _MAX_COMPILED_SKETCH_CONSTRAINTS:
+            _raise(
+                ParametricCompileErrorCode.UNSUPPORTED,
+                f"/sketches/{sketch_index}/constraints",
+            )
+        if metadata_constraint_entry_count > _MAX_COMPILED_SKETCH_CONSTRAINT_ENTRIES:
+            _raise(
+                ParametricCompileErrorCode.UNSUPPORTED,
+                f"/sketches/{sketch_index}/constraints",
+            )
         for geometry in sketch.geometries:
-            if geometry.kind is GeometryKind.SLOT:
+            if geometry.kind is GeometryKind.SLOT and _slot_axis(geometry) is None:
                 source_index = _geometry_source_index(sketch, geometry)
                 _raise(
                     ParametricCompileErrorCode.UNSUPPORTED,
-                    f"/sketches/{sketch_index}/geometries/{source_index}/kind",
+                    f"/sketches/{sketch_index}/geometries/{source_index}/dimensions",
                 )
             if (
                 not geometry.construction
@@ -267,6 +324,15 @@ def _preflight(session: object, design: object) -> ParametricDesignIR:
                     ParametricCompileErrorCode.UNSUPPORTED,
                     f"/sketches/{sketch_index}/geometries/{source_index}/kind",
                 )
+        for constraint_index, constraint in enumerate(sketch.constraints):
+            for reference_index, reference in enumerate(constraint.references):
+                geometry = geometry_by_id.get(reference.target)
+                if geometry is not None and geometry.kind is GeometryKind.SLOT:
+                    _raise(
+                        ParametricCompileErrorCode.UNSUPPORTED,
+                        f"/sketches/{sketch_index}/constraints/{constraint_index}"
+                        f"/references/{reference_index}/target",
+                    )
     for feature_index, feature in enumerate(design.features):
         if (
             feature.kind is FeatureKind.HOLE
@@ -281,8 +347,13 @@ def _preflight(session: object, design: object) -> ParametricDesignIR:
 
 def _expected_profile_edge_count(sketch: ParametricSketch) -> int:
     count = sum(
-        not geometry.construction
-        and geometry.kind in {GeometryKind.LINE, GeometryKind.CIRCLE, GeometryKind.ARC}
+        0
+        if geometry.construction
+        else _SLOT_NATIVE_GEOMETRY_COUNT
+        if geometry.kind is GeometryKind.SLOT
+        else 1
+        if geometry.kind in {GeometryKind.LINE, GeometryKind.CIRCLE, GeometryKind.ARC}
+        else 0
         for geometry in sketch.geometries
     )
     if count < 1:
@@ -712,28 +783,41 @@ def _apply_plane(FreeCAD: object, obj: object, basis: tuple[tuple[float, ...], .
         _raise(ParametricCompileErrorCode.CAD_FAILURE)
 
 
-def _geometry_value(FreeCAD: object, Part: object, geometry: SketchGeometry) -> tuple[object, str]:
+def _geometry_values(
+    FreeCAD: object,
+    Part: object,
+    geometry: SketchGeometry,
+) -> tuple[tuple[object, str], ...]:
     values = geometry.dimensions
     try:
         vector = FreeCAD.Vector  # type: ignore[attr-defined]
         if geometry.kind is GeometryKind.POINT:
-            return Part.Point(vector(values["x_mm"], values["y_mm"], 0)), "Part::GeomPoint"  # type: ignore[attr-defined]
+            return (
+                (
+                    Part.Point(vector(values["x_mm"], values["y_mm"], 0)),  # type: ignore[attr-defined]
+                    "Part::GeomPoint",
+                ),
+            )
         if geometry.kind is GeometryKind.LINE:
             return (
-                Part.LineSegment(  # type: ignore[attr-defined]
-                    vector(values["x1_mm"], values["y1_mm"], 0),
-                    vector(values["x2_mm"], values["y2_mm"], 0),
+                (
+                    Part.LineSegment(  # type: ignore[attr-defined]
+                        vector(values["x1_mm"], values["y1_mm"], 0),
+                        vector(values["x2_mm"], values["y2_mm"], 0),
+                    ),
+                    "Part::GeomLineSegment",
                 ),
-                "Part::GeomLineSegment",
             )
         if geometry.kind is GeometryKind.CIRCLE:
             return (
-                Part.Circle(  # type: ignore[attr-defined]
-                    vector(values["cx_mm"], values["cy_mm"], 0),
-                    vector(0, 0, 1),
-                    values["radius_mm"],
+                (
+                    Part.Circle(  # type: ignore[attr-defined]
+                        vector(values["cx_mm"], values["cy_mm"], 0),
+                        vector(0, 0, 1),
+                        values["radius_mm"],
+                    ),
+                    "Part::GeomCircle",
                 ),
-                "Part::GeomCircle",
             )
         if geometry.kind is GeometryKind.ARC:
             center_x = float(values["cx_mm"])
@@ -750,7 +834,165 @@ def _geometry_value(FreeCAD: object, Part: object, geometry: SketchGeometry) -> 
                     0,
                 )
 
-            return Part.Arc(point(start), point(middle), point(end)), "Part::GeomArcOfCircle"  # type: ignore[attr-defined]
+            return (
+                (
+                    Part.Arc(point(start), point(middle), point(end)),  # type: ignore[attr-defined]
+                    "Part::GeomArcOfCircle",
+                ),
+            )
+        if geometry.kind is GeometryKind.SLOT:
+            radius = float(values["width_mm"]) / 2.0
+            if _slot_axis(geometry) == "horizontal":
+                left = min(float(values["x1_mm"]), float(values["x2_mm"]))
+                right = max(float(values["x1_mm"]), float(values["x2_mm"]))
+                center_y = float(values["y1_mm"])
+                return (
+                    (
+                        Part.LineSegment(  # type: ignore[attr-defined]
+                            vector(left, center_y + radius, 0),
+                            vector(right, center_y + radius, 0),
+                        ),
+                        "Part::GeomLineSegment",
+                    ),
+                    (
+                        Part.Arc(  # type: ignore[attr-defined]
+                            vector(right, center_y + radius, 0),
+                            vector(right + radius, center_y, 0),
+                            vector(right, center_y - radius, 0),
+                        ),
+                        "Part::GeomArcOfCircle",
+                    ),
+                    (
+                        Part.LineSegment(  # type: ignore[attr-defined]
+                            vector(right, center_y - radius, 0),
+                            vector(left, center_y - radius, 0),
+                        ),
+                        "Part::GeomLineSegment",
+                    ),
+                    (
+                        Part.Arc(  # type: ignore[attr-defined]
+                            vector(left, center_y - radius, 0),
+                            vector(left - radius, center_y, 0),
+                            vector(left, center_y + radius, 0),
+                        ),
+                        "Part::GeomArcOfCircle",
+                    ),
+                )
+            if _slot_axis(geometry) == "vertical":
+                center_x = float(values["x1_mm"])
+                bottom = min(float(values["y1_mm"]), float(values["y2_mm"]))
+                top = max(float(values["y1_mm"]), float(values["y2_mm"]))
+                return (
+                    (
+                        Part.LineSegment(  # type: ignore[attr-defined]
+                            vector(center_x + radius, bottom, 0),
+                            vector(center_x + radius, top, 0),
+                        ),
+                        "Part::GeomLineSegment",
+                    ),
+                    (
+                        Part.Arc(  # type: ignore[attr-defined]
+                            vector(center_x + radius, top, 0),
+                            vector(center_x, top + radius, 0),
+                            vector(center_x - radius, top, 0),
+                        ),
+                        "Part::GeomArcOfCircle",
+                    ),
+                    (
+                        Part.LineSegment(  # type: ignore[attr-defined]
+                            vector(center_x - radius, top, 0),
+                            vector(center_x - radius, bottom, 0),
+                        ),
+                        "Part::GeomLineSegment",
+                    ),
+                    (
+                        Part.Arc(  # type: ignore[attr-defined]
+                            vector(center_x - radius, bottom, 0),
+                            vector(center_x, bottom - radius, 0),
+                            vector(center_x + radius, bottom, 0),
+                        ),
+                        "Part::GeomArcOfCircle",
+                    ),
+                )
+    except Exception:
+        _raise(ParametricCompileErrorCode.CAD_FAILURE)
+    _raise(ParametricCompileErrorCode.UNSUPPORTED)
+
+
+def _slot_constraint_id(geometry: SketchGeometry) -> str:
+    """Return the stable metadata identity for one compiler-derived slot group."""
+
+    digest = hashlib.sha256(
+        _SLOT_CONSTRAINT_DOMAIN + b"group\0" + geometry.id.encode("ascii")
+    ).hexdigest()[:32]
+    return f"ir_constraint_{digest}"
+
+
+def _slot_constraint_name(geometry: SketchGeometry, index: int) -> str:
+    """Name one native constraint without pretending it was declared in the IR."""
+
+    digest = hashlib.sha256(
+        _SLOT_CONSTRAINT_DOMAIN
+        + b"name\0"
+        + geometry.id.encode("ascii")
+        + b"\0"
+        + str(index).encode("ascii")
+    ).hexdigest()[:32]
+    return f"C_{digest}"
+
+
+def _slot_constraint_objects(
+    Sketcher: object,
+    geometry: SketchGeometry,
+    indexes: tuple[int, ...],
+) -> tuple[object, ...]:
+    """Fully constrain one axis-aligned capsule using editable native constraints."""
+
+    if len(indexes) != _SLOT_NATIVE_GEOMETRY_COUNT:
+        _raise(ParametricCompileErrorCode.CAD_FAILURE)
+    values = geometry.dimensions
+    radius = float(values["width_mm"]) / 2.0
+    first, second, third, fourth = indexes
+    try:
+        make = Sketcher.Constraint  # type: ignore[attr-defined]
+        closure = (
+            make("Coincident", first, 2, second, 1),
+            make("Coincident", second, 2, third, 1),
+            make("Coincident", third, 2, fourth, 1),
+            make("Coincident", fourth, 2, first, 1),
+        )
+        if _slot_axis(geometry) == "horizontal":
+            left = min(float(values["x1_mm"]), float(values["x2_mm"]))
+            right = max(float(values["x1_mm"]), float(values["x2_mm"]))
+            center_y = float(values["y1_mm"])
+            return closure + (
+                make("Horizontal", first),
+                make("Horizontal", third),
+                make("Radius", second, radius),
+                make("DistanceX", -1, 1, second, 3, right),
+                make("DistanceY", -1, 1, second, 3, center_y),
+                make("DistanceX", -1, 1, fourth, 3, left),
+                make("DistanceX", second, 3, second, 1, 0.0),
+                make("DistanceX", second, 3, second, 2, 0.0),
+                make("DistanceX", fourth, 3, fourth, 1, 0.0),
+                make("DistanceX", fourth, 3, fourth, 2, 0.0),
+            )
+        if _slot_axis(geometry) == "vertical":
+            center_x = float(values["x1_mm"])
+            bottom = min(float(values["y1_mm"]), float(values["y2_mm"]))
+            top = max(float(values["y1_mm"]), float(values["y2_mm"]))
+            return closure + (
+                make("Vertical", first),
+                make("Vertical", third),
+                make("Radius", second, radius),
+                make("DistanceX", -1, 1, second, 3, center_x),
+                make("DistanceY", -1, 1, second, 3, top),
+                make("DistanceY", -1, 1, fourth, 3, bottom),
+                make("DistanceY", second, 3, second, 1, 0.0),
+                make("DistanceY", second, 3, second, 2, 0.0),
+                make("DistanceY", fourth, 3, fourth, 1, 0.0),
+                make("DistanceY", fourth, 3, fourth, 2, 0.0),
+            )
     except Exception:
         _raise(ParametricCompileErrorCode.CAD_FAILURE)
     _raise(ParametricCompileErrorCode.UNSUPPORTED)
@@ -1395,10 +1637,10 @@ def _validate_sketch_metadata(obj: object, data: dict[str, object]) -> SketchSol
         constraint_id = _text(entry["id"], _IR_ID)
         if not constraint_id.startswith("ir_constraint_") or constraint_id in constraint_ids:
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
-        indices = _sequence(entry["indices"], maximum=8)
-        types = _sequence(entry["types"], maximum=8)
-        names = _sequence(entry["names"], maximum=8)
-        bindings = _sequence(entry["bindings"], maximum=8)
+        indices = _sequence(entry["indices"], maximum=_MAX_COMPILED_CONSTRAINTS_PER_ENTRY)
+        types = _sequence(entry["types"], maximum=_MAX_COMPILED_CONSTRAINTS_PER_ENTRY)
+        names = _sequence(entry["names"], maximum=_MAX_COMPILED_CONSTRAINTS_PER_ENTRY)
+        bindings = _sequence(entry["bindings"], maximum=_MAX_COMPILED_CONSTRAINTS_PER_ENTRY)
         if not indices or not (len(indices) == len(types) == len(names) == len(bindings)):
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
         for index, expected_type, expected_name, raw_binding in zip(
@@ -1577,7 +1819,9 @@ def _validate_parametric_graph(
     for _, sketch_data in sketches:
         for raw in _sequence(sketch_data["constraints"], maximum=256):
             entry = _exact_mapping(raw, {"id", "indices", "types", "names", "bindings"})
-            for raw_binding in _sequence(entry["bindings"], maximum=8):
+            for raw_binding in _sequence(
+                entry["bindings"], maximum=_MAX_COMPILED_CONSTRAINTS_PER_ENTRY
+            ):
                 binding = _constraint_binding(raw_binding)
                 if binding is None:
                     continue
@@ -1786,8 +2030,8 @@ def _require_parameter_consumer_values(
         if data["kind"] == "sketch":
             for raw in _sequence(data["constraints"], maximum=256):
                 entry = _exact_mapping(raw, {"id", "indices", "types", "names", "bindings"})
-                indices = _sequence(entry["indices"], maximum=8)
-                bindings = _sequence(entry["bindings"], maximum=8)
+                indices = _sequence(entry["indices"], maximum=_MAX_COMPILED_CONSTRAINTS_PER_ENTRY)
+                bindings = _sequence(entry["bindings"], maximum=_MAX_COMPILED_CONSTRAINTS_PER_ENTRY)
                 if len(indices) != len(bindings):
                     _raise(ParametricCompileErrorCode.METADATA_FAILURE)
                 for index, raw_binding in zip(indices, bindings, strict=True):
@@ -2073,27 +2317,68 @@ def compile_parametric_design(
                 geometry_indices: dict[str, tuple[int, ...]] = {}
                 geometry_entries: list[dict[str, object]] = []
                 for geometry in sketch.geometries:
-                    value, type_id = _geometry_value(FreeCAD, Part, geometry)
-                    index = sketch_object.addGeometry(value, geometry.construction)
-                    if type(index) is not int or index < 0:
-                        _raise(ParametricCompileErrorCode.CAD_FAILURE)
-                    try:
-                        if sketch_object.Geometry[index].TypeId != type_id:
-                            raise ValueError
-                    except Exception:
-                        _raise(ParametricCompileErrorCode.CAD_FAILURE)
-                    geometry_indices[geometry.id] = (index,)
+                    indexes: list[int] = []
+                    type_ids: list[str] = []
+                    for value, type_id in _geometry_values(FreeCAD, Part, geometry):
+                        index = sketch_object.addGeometry(value, geometry.construction)
+                        if type(index) is not int or index < 0:
+                            _raise(ParametricCompileErrorCode.CAD_FAILURE)
+                        try:
+                            if sketch_object.Geometry[index].TypeId != type_id:
+                                raise ValueError
+                        except Exception:
+                            _raise(ParametricCompileErrorCode.CAD_FAILURE)
+                        indexes.append(index)
+                        type_ids.append(type_id)
+                    geometry_indices[geometry.id] = tuple(indexes)
                     geometry_entries.append(
                         {
                             "id": geometry.id,
-                            "indices": [index],
-                            "type_ids": [type_id],
-                            "construction": [geometry.construction],
+                            "indices": indexes,
+                            "type_ids": type_ids,
+                            "construction": [geometry.construction] * len(indexes),
                         }
                     )
                 geometry_by_id = {item.id: item for item in sketch.geometries}
                 constraint_indices: dict[str, tuple[int, ...]] = {}
                 constraint_entries: list[dict[str, object]] = []
+                occupied_constraint_ids = {item.id for item in sketch.constraints}
+                for geometry in sketch.geometries:
+                    if geometry.kind is not GeometryKind.SLOT:
+                        continue
+                    generated_id = _slot_constraint_id(geometry)
+                    if generated_id in occupied_constraint_ids:
+                        _raise(ParametricCompileErrorCode.INVALID_INPUT)
+                    occupied_constraint_ids.add(generated_id)
+                    generated_indices: list[int] = []
+                    generated_types: list[str] = []
+                    generated_names: list[str] = []
+                    generated_values = _slot_constraint_objects(
+                        Sketcher,
+                        geometry,
+                        geometry_indices[geometry.id],
+                    )
+                    if len(generated_values) != _SLOT_NATIVE_CONSTRAINT_COUNT:
+                        _raise(ParametricCompileErrorCode.CAD_FAILURE)
+                    for generated_index, constraint_value in enumerate(generated_values):
+                        index = sketch_object.addConstraint(constraint_value)
+                        if type(index) is not int or index < 0:
+                            _raise(ParametricCompileErrorCode.CAD_FAILURE)
+                        name = _slot_constraint_name(geometry, generated_index)
+                        sketch_object.renameConstraint(index, name)
+                        actual = sketch_object.Constraints[index]
+                        generated_indices.append(index)
+                        generated_types.append(actual.Type)
+                        generated_names.append(name)
+                    constraint_entries.append(
+                        {
+                            "id": generated_id,
+                            "indices": generated_indices,
+                            "types": generated_types,
+                            "names": generated_names,
+                            "bindings": [None] * len(generated_indices),
+                        }
+                    )
                 for constraint in sketch.constraints:
                     references = tuple(
                         _resolve_reference(item, geometry_by_id, geometry_indices)
@@ -2139,6 +2424,7 @@ def compile_parametric_design(
                             "bindings": [binding],
                         }
                     )
+                constraint_entries.sort(key=lambda entry: str(entry["id"]))
                 _write_metadata(
                     sketch_object,
                     {
