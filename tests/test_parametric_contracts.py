@@ -24,6 +24,9 @@ from vibecad.parametric import (
     DesignEvidenceStatus,
     DesignParameter,
     DesignUnit,
+    EdgeTreatmentFeature,
+    EdgeTreatmentKind,
+    EdgeTreatmentTarget,
     FeatureExtent,
     FeatureKind,
     GeometryKind,
@@ -36,6 +39,8 @@ from vibecad.parametric import (
     PartDesignFeature,
     PlaneKind,
     ReferencePoint,
+    SemanticEdgeReference,
+    SemanticEdgeRole,
     SketchConstraint,
     SketchGeometry,
     SketchPlane,
@@ -83,6 +88,9 @@ LEFT = _id("geometry", 4)
 HORIZONTAL = _id("constraint", 1)
 WIDTH_CONSTRAINT = _id("constraint", 2)
 PAD = _id("feature", 1)
+FILLET = _id("feature", 2)
+FILLET_START = _id("parameter", 4)
+FILLET_END = _id("parameter", 5)
 
 
 def _line(
@@ -185,6 +193,39 @@ def _design() -> ParametricDesignIR:
     )
 
 
+def _design_with_fillet() -> ParametricDesignIR:
+    base = _design()
+    return dataclasses.replace(
+        base,
+        parameters=base.parameters
+        + (
+            _parameter(FILLET_START, "Fillet start", 2),
+            _parameter(FILLET_END, "Fillet end", 4),
+        ),
+        edge_treatments=(
+            EdgeTreatmentFeature(
+                id=FILLET,
+                name="Variable edge fillet",
+                kind=EdgeTreatmentKind.FILLET,
+                base_feature_id=PAD,
+                targets=(
+                    EdgeTreatmentTarget(
+                        edge=SemanticEdgeReference(
+                            source_feature_id=PAD,
+                            geometry_id=BOTTOM,
+                            role=SemanticEdgeRole.SWEEP,
+                            point=ReferencePoint.START,
+                        ),
+                        start_parameter_id=FILLET_START,
+                        end_parameter_id=FILLET_END,
+                    ),
+                ),
+                evidence_ids=(EVIDENCE,),
+            ),
+        ),
+    )
+
+
 def test_parametric_design_round_trips_and_has_a_stable_digest() -> None:
     design = _design()
 
@@ -207,6 +248,57 @@ def test_parametric_design_round_trips_and_has_a_stable_digest() -> None:
         "sketches",
         "features",
     }
+
+
+def test_edge_treatment_round_trips_without_changing_legacy_wire_shape() -> None:
+    legacy = _design()
+    design = _design_with_fillet()
+
+    assert "edge_treatments" not in legacy.to_mapping()
+    assert ParametricDesignIR.from_mapping(design.to_mapping()) == design
+    treatment = design.to_mapping()["edge_treatments"][0]
+    assert treatment["kind"] == "fillet"
+    assert treatment["targets"][0]["edge"] == {
+        "schema_version": 1,
+        "source_feature_id": PAD,
+        "geometry_id": BOTTOM,
+        "role": "sweep",
+        "point": "start",
+    }
+
+
+def test_chamfer_rejects_asymmetric_edge_distances_in_s42() -> None:
+    treatment = _design_with_fillet().edge_treatments[0]
+
+    with pytest.raises(ParametricContractError) as raised:
+        dataclasses.replace(treatment, kind=EdgeTreatmentKind.CHAMFER)
+
+    assert raised.value.code is ParametricErrorCode.INVALID_VALUE
+    assert raised.value.path == "/targets"
+
+
+def test_edge_treatment_accepts_sixteen_unique_targets_and_rejects_seventeen() -> None:
+    treatment = _design_with_fillet().edge_treatments[0]
+    targets = tuple(
+        EdgeTreatmentTarget(
+            edge=SemanticEdgeReference(
+                source_feature_id=PAD,
+                geometry_id=_id("geometry", 100 + index),
+                role=SemanticEdgeRole.SWEEP,
+                point=ReferencePoint.START,
+            ),
+            start_parameter_id=FILLET_START,
+            end_parameter_id=FILLET_END,
+        )
+        for index in range(17)
+    )
+
+    assert len(dataclasses.replace(treatment, targets=targets[:16]).targets) == 16
+    with pytest.raises(ParametricContractError) as raised:
+        dataclasses.replace(treatment, targets=targets)
+
+    assert raised.value.code is ParametricErrorCode.BUDGET_EXCEEDED
+    assert raised.value.path == "/targets"
 
 
 def test_derived_parameter_expression_round_trips_without_changing_legacy_shape() -> None:
@@ -523,10 +615,10 @@ def test_model_program_rejects_malformed_parametric_design_at_atomic_field(
     assert caught.value.path == "/operations/0/args/design"
 
 
-def test_managed_parametric_operation_adopts_body_and_features_without_echoing_ir(
+def test_managed_parametric_operation_adopts_body_and_edge_tail_without_echoing_ir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    design = _design()
+    design = _design_with_fillet()
     events: list[str] = []
     placement = SimpleNamespace(
         Base=SimpleNamespace(x=0.0, y=0.0, z=0.0),
@@ -550,6 +642,12 @@ def test_managed_parametric_operation_adopts_body_and_features_without_echoing_i
     feature = SimpleNamespace(
         Name="Pad",
         TypeId="PartDesign::Pad",
+        Placement=placement,
+        Shape=shape,
+    )
+    treatment = SimpleNamespace(
+        Name="Fillet",
+        TypeId="Part::Fillet",
         Placement=placement,
         Shape=shape,
     )
@@ -590,8 +688,12 @@ def test_managed_parametric_operation_adopts_body_and_features_without_echoing_i
             parameter_carrier=object(),
             sketches=(object(),),
             features=(SimpleNamespace(feature_id=design.features[0].id, object=feature),),
+            edge_treatments=(
+                SimpleNamespace(feature_id=design.edge_treatments[0].id, object=treatment),
+            ),
+            result_object=treatment,
         )
-        session.doc.Objects = (body, feature)
+        session.doc.Objects = (body, feature, treatment)
         adopt(compiled)
         events.append("compiled")
         return compiled
@@ -601,11 +703,20 @@ def test_managed_parametric_operation_adopts_body_and_features_without_echoing_i
         if obj is body:
             return common + (
                 ParametricEntityFact("parametric.feature_count", 1),
+                ParametricEntityFact("parametric.edge_treatment_count", 1),
                 ParametricEntityFact("parametric.sketch_count", 1),
             )
+        if obj is feature:
+            return common + (
+                ParametricEntityFact("parametric.feature.index", 0),
+                ParametricEntityFact("parametric.feature.kind", "pad"),
+                ParametricEntityFact("parametric.shape_valid", True),
+                ParametricEntityFact("parametric.solid_count", 1),
+            )
         return common + (
-            ParametricEntityFact("parametric.feature.index", 0),
-            ParametricEntityFact("parametric.feature.kind", "pad"),
+            ParametricEntityFact("parametric.edge_treatment.index", 0),
+            ParametricEntityFact("parametric.edge_treatment.kind", "fillet"),
+            ParametricEntityFact("parametric.edge_treatment.edge_count", 1),
             ParametricEntityFact("parametric.shape_valid", True),
             ParametricEntityFact("parametric.solid_count", 1),
         )
@@ -634,19 +745,22 @@ def test_managed_parametric_operation_adopts_body_and_features_without_echoing_i
         "compile",
         "adopt:PartDesign::Body",
         "adopt:PartDesign::Pad",
+        "adopt:Part::Fillet",
         "result",
         "compiled",
         "stabilize",
     ]
-    assert session.result is body
+    assert session.result is treatment
     assert [identity.semantic_role.value for _, identity in session.identities] == [
         "part",
+        "feature",
         "feature",
     ]
     assert session.identities[0][1].feature_id is None
     assert session.identities[1][1].feature_id.startswith("feature_")
     assert result["object_id"] == session.identities[0][1].object_id
-    assert result["tip_object_id"] == session.identities[1][1].object_id
+    assert result["tip_object_id"] == session.identities[2][1].object_id
+    assert len(result["feature_object_ids"]) == 2
     assert "design" not in result
 
 

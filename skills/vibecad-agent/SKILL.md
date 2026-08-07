@@ -115,6 +115,14 @@ locations in one Hole feature. Use multiple sequential single-loop Pocket featur
 single multi-loop Pocket. Keep separate planes, diameters, depths, or directions as separate
 sketches and linear features.
 
+When an explicitly evidenced generated edge needs a Fillet or Chamfer, author the optional
+`edge_treatments` tail from the parametric reference. Select only by source feature + source sketch
+geometry + `section_start`/`section_end`/`sweep` role; never write `EdgeN` or reuse a GUI edge
+label. Fillet supports a constant radius, independent per-edge radii, or one linear start-to-end
+radius law on an oriented nonclosed edge. Chamfer is symmetric per edge. Treat any ambiguous,
+missing, direction-flipped, or kernel-invalid resolution as a safe failure; do not substitute an
+imported STEP edge or an inferred tangent chain.
+
 Never infer an absolute dimension from an unscaled photo. Ask only for missing facts that block a safe parameterized model. Once the required dimensions and feature relationships are sufficient, call `get_capabilities`, create or select the project, call `create_task` with `require_review`, and submit the bounded construction through `submit_model_program`. Continue through the persisted task `next_action`, deterministic verification, draft review, and artifact workflow exactly as for a text request.
 
 Before authoring a `create_parametric_design` command, read `references/parametric-design-ir-v1.md`. `get_capabilities` exposes the operation and its `parametric_design_ir` value shape but not the nested wire contract; the reference is the portable host-side authoring contract. Do not improvise omitted fields, enum values, identity formats, feature order, or evidence states.

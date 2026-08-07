@@ -33,6 +33,8 @@ MAX_DESIGN_SKETCHES = 8
 MAX_SKETCH_GEOMETRIES = 128
 MAX_SKETCH_CONSTRAINTS = 256
 MAX_DESIGN_FEATURES = 8
+MAX_EDGE_TREATMENTS = 8
+MAX_TREATED_EDGES = 16
 MAX_PARAMETRIC_IR_BYTES = 256 * 1024
 
 _MAX_TOTAL_GEOMETRIES = 256
@@ -434,6 +436,19 @@ class FeatureKind(StrEnum):
 class FeatureExtent(StrEnum):
     LENGTH = "length"
     THROUGH_ALL = "through_all"
+
+
+class EdgeTreatmentKind(StrEnum):
+    FILLET = "fillet"
+    CHAMFER = "chamfer"
+
+
+class SemanticEdgeRole(StrEnum):
+    """One source-feature edge role independent of transient EdgeN indexes."""
+
+    SECTION_START = "section_start"
+    SECTION_END = "section_end"
+    SWEEP = "sweep"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1597,6 +1612,197 @@ class PartDesignFeature:
         )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SemanticEdgeReference:
+    """An oriented edge generated from one source sketch geometry."""
+
+    source_feature_id: str
+    geometry_id: str
+    role: SemanticEdgeRole
+    point: ReferencePoint = ReferencePoint.WHOLE
+    schema_version: int = PARAMETRIC_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "schema_version", _schema(self.schema_version))
+        object.__setattr__(
+            self,
+            "source_feature_id",
+            _local_id(self.source_feature_id, "/source_feature_id", "feature"),
+        )
+        object.__setattr__(
+            self, "geometry_id", _local_id(self.geometry_id, "/geometry_id", "geometry")
+        )
+        object.__setattr__(self, "role", _enum(self.role, SemanticEdgeRole, "/role"))
+        object.__setattr__(self, "point", _enum(self.point, ReferencePoint, "/point"))
+        if self.role is SemanticEdgeRole.SWEEP:
+            if self.point not in {ReferencePoint.START, ReferencePoint.END}:
+                _raise(ParametricErrorCode.INVALID_VALUE, "/point")
+        elif self.point is not ReferencePoint.WHOLE:
+            _raise(ParametricErrorCode.INVALID_VALUE, "/point")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "source_feature_id": self.source_feature_id,
+            "geometry_id": self.geometry_id,
+            "role": self.role.value,
+            "point": self.point.value,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        keys = {"schema_version", "source_feature_id", "geometry_id", "role", "point"}
+        data = _fields(value, allowed=keys, required=keys)
+        return cls(
+            schema_version=_schema(data["schema_version"]),
+            source_feature_id=data["source_feature_id"],
+            geometry_id=data["geometry_id"],
+            role=data["role"],
+            point=data["point"],
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EdgeTreatmentTarget:
+    """One semantic edge and its oriented start/end treatment parameters."""
+
+    edge: SemanticEdgeReference
+    start_parameter_id: str
+    end_parameter_id: str
+    schema_version: int = PARAMETRIC_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "schema_version", _schema(self.schema_version))
+        if not isinstance(self.edge, SemanticEdgeReference):
+            _raise(ParametricErrorCode.INVALID_TYPE, "/edge")
+        object.__setattr__(
+            self,
+            "start_parameter_id",
+            _local_id(self.start_parameter_id, "/start_parameter_id", "parameter"),
+        )
+        object.__setattr__(
+            self,
+            "end_parameter_id",
+            _local_id(self.end_parameter_id, "/end_parameter_id", "parameter"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "edge": self.edge.to_mapping(),
+            "start_parameter_id": self.start_parameter_id,
+            "end_parameter_id": self.end_parameter_id,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        keys = {"schema_version", "edge", "start_parameter_id", "end_parameter_id"}
+        data = _fields(value, allowed=keys, required=keys)
+        return cls(
+            schema_version=_schema(data["schema_version"]),
+            edge=_parse_nested(data["edge"], SemanticEdgeReference, "/edge"),
+            start_parameter_id=data["start_parameter_id"],
+            end_parameter_id=data["end_parameter_id"],
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EdgeTreatmentFeature:
+    """A bounded native Part Fillet/Chamfer tail after the PartDesign body."""
+
+    id: str
+    name: str
+    kind: EdgeTreatmentKind
+    base_feature_id: str
+    targets: tuple[EdgeTreatmentTarget, ...]
+    evidence_ids: tuple[str, ...]
+    schema_version: int = PARAMETRIC_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "schema_version", _schema(self.schema_version))
+        object.__setattr__(self, "id", _local_id(self.id, "/id", "feature"))
+        object.__setattr__(self, "name", _text(self.name, "/name"))
+        object.__setattr__(self, "kind", _enum(self.kind, EdgeTreatmentKind, "/kind"))
+        object.__setattr__(
+            self,
+            "base_feature_id",
+            _local_id(self.base_feature_id, "/base_feature_id", "feature"),
+        )
+        targets = _contract_tuple(
+            self.targets,
+            EdgeTreatmentTarget,
+            "/targets",
+            maximum=MAX_TREATED_EDGES,
+        )
+        if not targets:
+            _raise(ParametricErrorCode.INVALID_VALUE, "/targets")
+        keys = tuple(
+            (
+                target.edge.source_feature_id,
+                target.edge.geometry_id,
+                target.edge.role.value,
+                target.edge.point.value,
+            )
+            for target in targets
+        )
+        if len(set(keys)) != len(keys):
+            _raise(ParametricErrorCode.DUPLICATE_ID, "/targets")
+        if self.kind is EdgeTreatmentKind.CHAMFER and any(
+            target.start_parameter_id != target.end_parameter_id for target in targets
+        ):
+            _raise(ParametricErrorCode.INVALID_VALUE, "/targets")
+        object.__setattr__(self, "targets", targets)
+        object.__setattr__(
+            self,
+            "evidence_ids",
+            _local_id_tuple(
+                self.evidence_ids,
+                "/evidence_ids",
+                "evidence",
+                maximum=_MAX_EVIDENCE_REFS,
+                required=True,
+            ),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "id": self.id,
+            "name": self.name,
+            "kind": self.kind.value,
+            "base_feature_id": self.base_feature_id,
+            "targets": [item.to_mapping() for item in self.targets],
+            "evidence_ids": list(self.evidence_ids),
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        keys = {
+            "schema_version",
+            "id",
+            "name",
+            "kind",
+            "base_feature_id",
+            "targets",
+            "evidence_ids",
+        }
+        data = _fields(value, allowed=keys, required=keys)
+        return cls(
+            schema_version=_schema(data["schema_version"]),
+            id=data["id"],
+            name=data["name"],
+            kind=data["kind"],
+            base_feature_id=data["base_feature_id"],
+            targets=_parse_list(
+                data["targets"],
+                EdgeTreatmentTarget,
+                "/targets",
+                maximum=MAX_TREATED_EDGES,
+            ),
+            evidence_ids=data["evidence_ids"],
+        )
+
+
 def _json_node_count(value: object) -> int:
     if isinstance(value, Mapping):
         return 1 + sum(1 + _json_node_count(item) for item in value.values())
@@ -1618,6 +1824,7 @@ class ParametricDesignIR:
     datum_planes: tuple[DatumPlane, ...]
     sketches: tuple[ParametricSketch, ...]
     features: tuple[PartDesignFeature, ...]
+    edge_treatments: tuple[EdgeTreatmentFeature, ...] = ()
     schema_version: int = PARAMETRIC_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -1658,6 +1865,12 @@ class ParametricDesignIR:
             "/features",
             maximum=MAX_DESIGN_FEATURES,
         )
+        edge_treatments = _contract_tuple(
+            self.edge_treatments,
+            EdgeTreatmentFeature,
+            "/edge_treatments",
+            maximum=MAX_EDGE_TREATMENTS,
+        )
         if not evidence:
             _raise(ParametricErrorCode.INVALID_VALUE, "/evidence")
         if not parameters:
@@ -1666,6 +1879,8 @@ class ParametricDesignIR:
             _raise(ParametricErrorCode.INVALID_VALUE, "/sketches")
         if not features:
             _raise(ParametricErrorCode.INVALID_VALUE, "/features")
+        if len(features) + len(edge_treatments) > MAX_DESIGN_FEATURES:
+            _raise(ParametricErrorCode.BUDGET_EXCEEDED, "/edge_treatments")
         object.__setattr__(self, "evidence", tuple(sorted(evidence, key=lambda item: item.id)))
         object.__setattr__(
             self,
@@ -1679,6 +1894,7 @@ class ParametricDesignIR:
         )
         object.__setattr__(self, "sketches", tuple(sorted(sketches, key=lambda item: item.id)))
         object.__setattr__(self, "features", features)
+        object.__setattr__(self, "edge_treatments", edge_treatments)
 
         seen: set[str] = {self.id, self.body.id}
         evidence_ids: set[str] = set()
@@ -1907,6 +2123,55 @@ class ParametricDesignIR:
                 ):
                     _raise(ParametricErrorCode.INVALID_VALUE, f"/features/{index}/axis")
 
+        feature_by_id = {item.id: item for item in features}
+        for index, treatment in enumerate(edge_treatments):
+            path = f"/edge_treatments/{index}"
+            if treatment.id in seen:
+                _raise(ParametricErrorCode.DUPLICATE_ID, f"{path}/id")
+            seen.add(treatment.id)
+            expected_base = features[-1].id if index == 0 else edge_treatments[index - 1].id
+            if treatment.base_feature_id != expected_base:
+                _raise(ParametricErrorCode.INVALID_ORDER, f"{path}/base_feature_id")
+            require_evidence(treatment.evidence_ids, f"{path}/evidence_ids")
+            for target_index, target in enumerate(treatment.targets):
+                target_path = f"{path}/targets/{target_index}"
+                source_feature = feature_by_id.get(target.edge.source_feature_id)
+                if source_feature is None:
+                    _raise(
+                        ParametricErrorCode.UNKNOWN_REFERENCE,
+                        f"{target_path}/edge/source_feature_id",
+                    )
+                source_sketch = sketch_by_id[source_feature.sketch_id]
+                source_geometry = next(
+                    (
+                        geometry
+                        for geometry in source_sketch.geometries
+                        if geometry.id == target.edge.geometry_id
+                    ),
+                    None,
+                )
+                if source_geometry is None:
+                    _raise(
+                        ParametricErrorCode.UNKNOWN_REFERENCE,
+                        f"{target_path}/edge/geometry_id",
+                    )
+                if source_geometry.construction:
+                    _raise(ParametricErrorCode.INVALID_VALUE, f"{target_path}/edge/geometry_id")
+                if target.edge.role is SemanticEdgeRole.SWEEP and source_geometry.kind not in {
+                    GeometryKind.LINE,
+                    GeometryKind.ARC,
+                }:
+                    _raise(ParametricErrorCode.INVALID_VALUE, f"{target_path}/edge/geometry_id")
+                for name, parameter_id in (
+                    ("start_parameter_id", target.start_parameter_id),
+                    ("end_parameter_id", target.end_parameter_id),
+                ):
+                    parameter = parameter_by_id.get(parameter_id)
+                    if parameter is None:
+                        _raise(ParametricErrorCode.UNKNOWN_REFERENCE, f"{target_path}/{name}")
+                    if parameter.unit is not DesignUnit.MM or parameter.value <= 0:
+                        _raise(ParametricErrorCode.INVALID_VALUE, f"{target_path}/{name}")
+
         mapping = self.to_mapping()
         if _json_node_count(mapping) > _MAX_PARAMETRIC_IR_NODES:
             _raise(ParametricErrorCode.BUDGET_EXCEEDED)
@@ -1914,7 +2179,7 @@ class ParametricDesignIR:
             _raise(ParametricErrorCode.BUDGET_EXCEEDED)
 
     def to_mapping(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "schema_version": self.schema_version,
             "id": self.id,
             "name": self.name,
@@ -1926,6 +2191,9 @@ class ParametricDesignIR:
             "sketches": [item.to_mapping() for item in self.sketches],
             "features": [item.to_mapping() for item in self.features],
         }
+        if self.edge_treatments:
+            result["edge_treatments"] = [item.to_mapping() for item in self.edge_treatments]
+        return result
 
     @property
     def canonical_bytes(self) -> bytes:
@@ -1954,8 +2222,9 @@ class ParametricDesignIR:
             "datum_planes",
             "sketches",
             "features",
+            "edge_treatments",
         }
-        data = _fields(value, allowed=keys, required=keys)
+        data = _fields(value, allowed=keys, required=keys - {"edge_treatments"})
         return cls(
             schema_version=_schema(data["schema_version"]),
             id=data["id"],
@@ -1991,5 +2260,11 @@ class ParametricDesignIR:
                 PartDesignFeature,
                 "/features",
                 maximum=MAX_DESIGN_FEATURES,
+            ),
+            edge_treatments=_parse_list(
+                data.get("edge_treatments", []),
+                EdgeTreatmentFeature,
+                "/edge_treatments",
+                maximum=MAX_EDGE_TREATMENTS,
             ),
         )

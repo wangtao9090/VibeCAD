@@ -1468,13 +1468,24 @@ def _managed_create_parametric_design(
             raise ValueError
         try:
             compiled_features = tuple(compiled.features)  # type: ignore[attr-defined]
+            compiled_treatments = tuple(getattr(compiled, "edge_treatments", ()))
+            compiled_entities = compiled_features + compiled_treatments
+            compiled_result = getattr(compiled, "result_object", compiled.body)  # type: ignore[attr-defined]
             if (
                 compiled.design_id != checked.id  # type: ignore[attr-defined]
                 or compiled.design_digest != checked.digest  # type: ignore[attr-defined]
                 or getattr(compiled.body, "TypeId", None) != "PartDesign::Body"  # type: ignore[attr-defined]
                 or tuple(item.feature_id for item in compiled_features)
                 != tuple(item.id for item in checked.features)
+                or tuple(item.feature_id for item in compiled_treatments)
+                != tuple(item.id for item in checked.edge_treatments)
                 or len(tuple(compiled.sketches)) != len(checked.sketches)  # type: ignore[attr-defined]
+                or (
+                    compiled_result
+                    is not (
+                        compiled_treatments[-1].object if compiled_treatments else compiled.body  # type: ignore[attr-defined]
+                    )
+                )
             ):
                 raise ValueError
             attach = session.attach_object_identity  # type: ignore[attr-defined]
@@ -1497,14 +1508,14 @@ def _managed_create_parametric_design(
                     semantic_role=SemanticRole.FEATURE,
                     provenance=provenance,
                 )
-                for feature in compiled_features
+                for feature in compiled_entities
             )
             bindings = (
                 ((compiled.body, body_identity),)  # type: ignore[attr-defined]
                 + tuple(
                     (item.object, identity)
                     for item, identity in zip(
-                        compiled_features,
+                        compiled_entities,
                         feature_identities,
                         strict=True,
                     )
@@ -1513,7 +1524,7 @@ def _managed_create_parametric_design(
             for obj, identity in bindings:
                 if attach(obj, identity) != identity or read(obj) != identity:
                     raise ValueError
-            set_result(compiled.body)  # type: ignore[attr-defined]
+            set_result(compiled_result)
             adopted = compiled, body_identity, feature_identities
         except Exception:
             raise ValueError from None
@@ -1546,6 +1557,8 @@ def _managed_create_parametric_design(
         or body.provenance != provenance.to_mapping()
         or body_parameters.get("parametric.design_ir_digest") != checked.digest
         or body_parameters.get("parametric.feature_count") != len(checked.features)
+        or body_parameters.get("parametric.edge_treatment_count")
+        != (len(checked.edge_treatments) if checked.edge_treatments else None)
         or body_parameters.get("parametric.sketch_count") != len(checked.sketches)
         or body.valid_shape is not True
         or body.solid_count != 1
@@ -1555,8 +1568,14 @@ def _managed_create_parametric_design(
         raise _operation_failure()
 
     feature_observations = tuple(after_by_id[item.object_id] for item in feature_identities)
+    feature_identity_count = len(checked.features)
     for index, (feature, identity, observation) in enumerate(
-        zip(checked.features, feature_identities, feature_observations, strict=True)
+        zip(
+            checked.features,
+            feature_identities[:feature_identity_count],
+            feature_observations[:feature_identity_count],
+            strict=True,
+        )
     ):
         parameters = {item.name: item.value for item in observation.parameters}
         if (
@@ -1567,6 +1586,33 @@ def _managed_create_parametric_design(
             or parameters.get("parametric.design_ir_digest") != checked.digest
             or parameters.get("parametric.feature.index") != index
             or parameters.get("parametric.feature.kind") != feature.kind.value
+            or parameters.get("parametric.shape_valid") is not True
+            or parameters.get("parametric.solid_count") != 1
+            or observation.valid_shape is not True
+            or observation.solid_count != 1
+            or observation.volume_mm3 is None
+            or observation.volume_mm3 <= 0
+        ):
+            raise _operation_failure()
+
+    for index, (treatment, identity, observation) in enumerate(
+        zip(
+            checked.edge_treatments,
+            feature_identities[feature_identity_count:],
+            feature_observations[feature_identity_count:],
+            strict=True,
+        )
+    ):
+        parameters = {item.name: item.value for item in observation.parameters}
+        if (
+            observation.feature_id != identity.feature_id
+            or observation.object_type != identity.object_type
+            or observation.semantic_role != SemanticRole.FEATURE.value
+            or observation.provenance != provenance.to_mapping()
+            or parameters.get("parametric.design_ir_digest") != checked.digest
+            or parameters.get("parametric.edge_treatment.index") != index
+            or parameters.get("parametric.edge_treatment.kind") != treatment.kind.value
+            or parameters.get("parametric.edge_treatment.edge_count") != len(treatment.targets)
             or parameters.get("parametric.shape_valid") is not True
             or parameters.get("parametric.solid_count") != 1
             or observation.valid_shape is not True
@@ -1696,6 +1742,16 @@ def _managed_modify_parametric_parameter(
         )
         if names:
             feature_bindings[index] = names
+    treatment_bindings: dict[int, tuple[str, ...]] = {}
+    for treatment_index, treatment in enumerate(checked.edge_treatments):
+        names: list[str] = []
+        for target_index, treatment_target in enumerate(treatment.targets):
+            if treatment_target.start_parameter_id == parameter_id:
+                names.append(f"parametric.edge_treatment.target.{target_index}.start")
+            if treatment_target.end_parameter_id == parameter_id:
+                names.append(f"parametric.edge_treatment.target.{target_index}.end")
+        if names:
+            treatment_bindings[treatment_index] = tuple(sorted(names))
 
     try:
         raw_result_roots = session._result_roots  # type: ignore[attr-defined]
@@ -1735,6 +1791,7 @@ def _managed_modify_parametric_parameter(
 
         parametric_ids: set[str] = set()
         feature_object_ids: dict[int, str] = {}
+        treatment_object_ids: dict[int, str] = {}
         for object_id, old in before_by_id.items():
             old_parameters = {item.name: item.value for item in old.parameters}
             if old_parameters.get("parametric.design_ir_digest") != checked.digest:
@@ -1745,13 +1802,25 @@ def _managed_modify_parametric_parameter(
             mutable_parameters: dict[str, tuple[float, str]] = {}
             if old.semantic_role == SemanticRole.FEATURE.value:
                 feature_index = old_parameters.get("parametric.feature.index")
-                if type(feature_index) is not int or feature_index in feature_object_ids:
+                treatment_index = old_parameters.get("parametric.edge_treatment.index")
+                if type(feature_index) is int and treatment_index is None:
+                    if feature_index in feature_object_ids:
+                        raise _operation_failure()
+                    feature_object_ids[feature_index] = object_id
+                    mutable_parameters = {
+                        f"parametric.feature.parameter.{name}": (after_value, edit_unit)
+                        for name in feature_bindings.get(feature_index, ())
+                    }
+                elif type(treatment_index) is int and feature_index is None:
+                    if treatment_index in treatment_object_ids:
+                        raise _operation_failure()
+                    treatment_object_ids[treatment_index] = object_id
+                    mutable_parameters = {
+                        name: (after_value, edit_unit)
+                        for name in treatment_bindings.get(treatment_index, ())
+                    }
+                else:
                     raise _operation_failure()
-                feature_object_ids[feature_index] = object_id
-                mutable_parameters = {
-                    f"parametric.feature.parameter.{name}": (after_value, edit_unit)
-                    for name in feature_bindings.get(feature_index, ())
-                }
             if not _same_parametric_entity_envelope(
                 old,
                 after_by_id[object_id],
@@ -1759,19 +1828,19 @@ def _managed_modify_parametric_parameter(
             ):
                 raise _operation_failure()
         if (
-            len(parametric_ids) != len(checked.features) + 1
+            len(parametric_ids) != len(checked.features) + len(checked.edge_treatments) + 1
             or set(feature_object_ids) != set(range(len(checked.features)))
-            or _same_entity_geometry(old_body, new_body)
+            or set(treatment_object_ids) != set(range(len(checked.edge_treatments)))
         ):
             raise _operation_failure()
 
+        ordered_feature_object_ids = tuple(
+            feature_object_ids[index] for index in range(len(checked.features))
+        ) + tuple(treatment_object_ids[index] for index in range(len(checked.edge_treatments)))
         affected_feature_object_ids = tuple(
-            feature_object_ids[index]
-            for index in range(len(checked.features))
-            if not _same_entity_geometry(
-                before_by_id[feature_object_ids[index]],
-                after_by_id[feature_object_ids[index]],
-            )
+            object_id
+            for object_id in ordered_feature_object_ids
+            if not _same_entity_geometry(before_by_id[object_id], after_by_id[object_id])
         )
         if not affected_feature_object_ids:
             raise _operation_failure()

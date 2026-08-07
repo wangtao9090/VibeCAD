@@ -308,8 +308,11 @@ project_id + revision_id
 GUI 鼠标选中 `Face3` 并不能自动获得跨版本稳定语义。Level B 还需 mapped element、normalized subobject
 path、geometry/adjacency fingerprint、pick point、selection context 和 ambiguity candidates。
 
-所以 G1 首版可以安全捕获 object/feature；P1 才开放 hole/fillet/chamfer 等依赖 face/edge 的 Agent-safe
-operation。禁止为了赶 UI 把旧进程内标签或裸 `Face6/Edge8` 重新当作公共 selector。
+所以 G1 首版可以安全捕获 object/feature。当前 P1 的 ParametricDesignIR 已能在编译器内部把
+`source_feature_id + geometry_id + section/sweep role` 解析为有界 Fillet/Chamfer 尾特征，并在重算、
+重开、方向翻转或歧义时重新验证/拒绝；它没有把 subobject selector 加入公共 SelectorV1。GUI 任意
+选边、导入 STEP 任意边和通用 face/edge Level B 仍未开放。禁止为了赶 UI 把旧进程内标签或裸
+`Face6/Edge8` 重新当作公共 selector。
 
 MR0 的内部 adapter envelope 同时携带 revision-bound semantic `SelectorV1` 和可选、
 runtime-qualified `NativeLocator`。前者是 durable authority，后者只加强 native execution 与 evidence；

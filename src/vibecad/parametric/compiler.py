@@ -1,8 +1,9 @@
 """FreeCAD-bound compiler for the bounded editable single-body slice.
 
 The module is import-safe outside FreeCAD.  It creates native Sketcher and
-PartDesign objects plus locked IR/index metadata only; selector identity and
-Task authority remain with the execution layer that adopts the compiled body.
+PartDesign objects, an optional native Part Fillet/Chamfer tail, and locked
+IR/index metadata only; selector identity and Task authority remain with the
+execution layer that adopts the compiled result.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ from vibecad.parametric.contracts import (
     DerivedParameterExpression,
     DesignParameter,
     DesignUnit,
+    EdgeTreatmentFeature,
+    EdgeTreatmentKind,
     FeatureExtent,
     FeatureKind,
     GeometryKind,
@@ -31,6 +34,8 @@ from vibecad.parametric.contracts import (
     PartDesignFeature,
     PlaneKind,
     ReferencePoint,
+    SemanticEdgeReference,
+    SemanticEdgeRole,
     SketchConstraint,
     SketchGeometry,
     SketchReference,
@@ -68,6 +73,10 @@ _FEATURE_TYPE_IDS = {
     FeatureKind.POCKET: "PartDesign::Pocket",
     FeatureKind.REVOLVE: "PartDesign::Revolution",
     FeatureKind.HOLE: "PartDesign::Hole",
+}
+_EDGE_TREATMENT_TYPE_IDS = {
+    EdgeTreatmentKind.FILLET: "Part::Fillet",
+    EdgeTreatmentKind.CHAMFER: "Part::Chamfer",
 }
 
 
@@ -169,9 +178,11 @@ class CompiledParametricDesign:
     design_id: str
     design_digest: str
     body: object
+    result_object: object
     parameter_carrier: object
     sketches: tuple[CompiledSketchBinding, ...]
     features: tuple[CompiledFeatureBinding, ...] = ()
+    edge_treatments: tuple[CompiledFeatureBinding, ...] = ()
 
 
 CompiledSketchSet = CompiledParametricDesign
@@ -551,6 +562,28 @@ def _feature_parameter_bindings(
     return tuple(bindings)
 
 
+def _edge_treatment_metadata_targets(
+    treatment: EdgeTreatmentFeature,
+    parameter_properties: Mapping[str, str],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "edge": {
+                "source_feature_id": target.edge.source_feature_id,
+                "geometry_id": target.edge.geometry_id,
+                "role": target.edge.role.value,
+                "point": target.edge.point.value,
+            },
+            "start_parameter_id": target.start_parameter_id,
+            "start_property": parameter_properties[target.start_parameter_id],
+            "end_parameter_id": target.end_parameter_id,
+            "end_property": parameter_properties[target.end_parameter_id],
+            "forward": None,
+        }
+        for target in treatment.targets
+    ]
+
+
 def _require_feature_shape(
     obj: object,
     previous: object | None,
@@ -591,6 +624,492 @@ def _require_feature_shape(
         if not changed:
             _raise(ParametricCompileErrorCode.FEATURE_FAILURE, path)
     return volume
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedSemanticEdge:
+    index: int
+    forward: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedTreatmentEdge:
+    index: int
+    start: float
+    end: float
+    forward: bool | None
+
+    @property
+    def native(self) -> tuple[int, float, float]:
+        return self.index, self.start, self.end
+
+
+def _point_tuple(value: object) -> tuple[float, float, float]:
+    try:
+        point = (float(value.x), float(value.y), float(value.z))  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if not all(math.isfinite(item) for item in point):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    return point
+
+
+def _distance_squared(left: object, right: object) -> float:
+    a = _point_tuple(left)
+    b = _point_tuple(right)
+    return math.fsum((a[index] - b[index]) ** 2 for index in range(3))
+
+
+def _edge_vertices(edge: object) -> tuple[object, ...]:
+    try:
+        vertices = tuple(edge.Vertexes)  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if not 1 <= len(vertices) <= 2:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    return vertices
+
+
+def _edge_center(edge: object) -> object:
+    try:
+        return edge.CenterOfMass  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+
+def _shape_edges(obj: object) -> tuple[object, ...]:
+    try:
+        edges = tuple(obj.Shape.Edges)  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if not 1 <= len(edges) <= 4096:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    return edges
+
+
+def _element_history(obj: object, element_name: str) -> tuple[tuple[object, str], ...]:
+    try:
+        raw = obj.getElementHistory(element_name)  # type: ignore[attr-defined]
+        entries = tuple(raw)
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    result: list[tuple[object, str]] = []
+    for entry in entries:
+        if type(entry) not in {list, tuple} or len(entry) < 2 or type(entry[1]) is not str:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        result.append((entry[0], entry[1]))
+        if len(entry) >= 3:
+            children = entry[2]
+            if type(children) not in {list, tuple} or any(
+                type(name) is not str for name in children
+            ):
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            result.extend((entry[0], name) for name in children)
+    return tuple(result)
+
+
+def _history_contains(
+    history: tuple[tuple[object, str], ...],
+    obj: object,
+    token: str,
+) -> bool:
+    return any(item is obj and name == token for item, name in history)
+
+
+def _geometry_native_index(sketch_data: dict[str, object], geometry_id: str) -> int:
+    matches: list[int] = []
+    for raw in _sequence(sketch_data["geometries"], maximum=128):
+        entry = _exact_mapping(raw, {"id", "indices", "type_ids", "construction"})
+        if entry["id"] != geometry_id:
+            continue
+        indices = _sequence(entry["indices"], maximum=8)
+        if len(indices) != 1 or type(indices[0]) is not int or indices[0] < 0:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        matches.append(indices[0])
+    if len(matches) != 1:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    return matches[0]
+
+
+def _edge_candidates(
+    obj: object,
+    *,
+    sketch: object | None = None,
+    sketch_token: str | None = None,
+    source_mapped_name: str | None = None,
+) -> tuple[int, ...]:
+    result: list[int] = []
+    for index, _edge in enumerate(_shape_edges(obj), 1):
+        history = _element_history(obj, f"Edge{index}")
+        if sketch_token is not None and (
+            sketch is None or not _history_contains(history, sketch, sketch_token)
+        ):
+            continue
+        if source_mapped_name is not None and not any(
+            name == source_mapped_name for _item, name in history
+        ):
+            continue
+        result.append(index)
+    return tuple(result)
+
+
+def _same_edge_candidates(obj: object, source_edge: object) -> tuple[int, ...]:
+    matches: list[int] = []
+    for index, edge in enumerate(_shape_edges(obj), 1):
+        try:
+            same = bool(edge.isSame(source_edge))  # type: ignore[attr-defined]
+        except Exception:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        if same:
+            matches.append(index)
+    return tuple(matches)
+
+
+def _history_has_profile_section(
+    history: tuple[tuple[object, str], ...],
+    sketch: object,
+) -> bool:
+    return any(
+        item is sketch and re.fullmatch(r"g[1-9][0-9]*;SKT", name) is not None
+        for item, name in history
+    )
+
+
+def _sweep_source_edge(
+    source_feature: object,
+    sketch: object,
+    feature_data: dict[str, object],
+    geometry_index: int,
+    point: ReferencePoint,
+) -> int:
+    """Resolve one generated sweep edge from live geometry, not transient EdgeN names.
+
+    OCCT may canonicalize a shared sketch vertex under either adjacent profile
+    geometry after an otherwise harmless recompute.  The generated edge itself
+    remains the unique edge through the selected sketch endpoint and, for linear
+    operations, parallel to the feature direction.
+    """
+
+    start, end = _original_geometry_points(sketch, geometry_index)
+    origin = start if point is ReferencePoint.START else end
+    try:
+        kind = FeatureKind(_text(feature_data["feature_kind"]))
+    except ValueError:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    direction = (
+        None
+        if kind is FeatureKind.REVOLVE
+        else _linear_feature_direction(
+            sketch,
+            feature_data,
+        )
+    )
+    candidates: list[int] = []
+    for index, edge in enumerate(_shape_edges(source_feature), 1):
+        vertices = _edge_vertices(edge)
+        if direction is None:
+            try:
+                _FreeCAD, Part, _Sketcher = _load_freecad_modules()
+                distance = float(edge.distToShape(Part.Vertex(origin))[0])  # type: ignore[attr-defined]
+            except Exception:
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            if distance > 1e-7:
+                continue
+        else:
+            if len(vertices) != 2:
+                continue
+            try:
+                delta = vertices[1].Point - vertices[0].Point  # type: ignore[attr-defined]
+                offset = origin - vertices[0].Point  # type: ignore[attr-defined]
+                length_squared = float(delta.dot(delta))
+                direction_length_squared = float(direction.dot(direction))
+                if length_squared <= 1e-18 or direction_length_squared <= 1e-18:
+                    continue
+                alignment = abs(float(delta.dot(direction))) / math.sqrt(
+                    length_squared * direction_length_squared
+                )
+                projection = float(offset.dot(delta)) / length_squared
+                residual = offset - delta * projection
+                distance = float(residual.Length)
+            except Exception:
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            if (
+                not math.isclose(alignment, 1.0, rel_tol=0.0, abs_tol=1e-7)
+                or not -1e-7 <= projection <= 1.0 + 1e-7
+                or distance > 1e-7
+            ):
+                continue
+        history = _element_history(source_feature, f"Edge{index}")
+        if _history_has_profile_section(history, sketch):
+            continue
+        candidates.append(index)
+    if len(candidates) != 1:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    return candidates[0]
+
+
+def _linear_feature_direction(sketch: object, feature_data: dict[str, object]) -> object:
+    try:
+        base = sketch.Placement.Base  # type: ignore[attr-defined]
+        vector_type = type(base)
+        normal = sketch.Placement.Rotation.multVec(vector_type(0, 0, 1))  # type: ignore[attr-defined]
+        if feature_data["reversed"]:
+            normal = normal * -1
+        if float(normal.Length) <= 1e-12:
+            raise ValueError
+        return normal
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+
+def _unique_extreme(
+    values: tuple[tuple[int, float], ...],
+    *,
+    maximum: bool,
+) -> int:
+    if not values:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    ordered = sorted(values, key=lambda item: item[1], reverse=maximum)
+    if len(ordered) > 1 and math.isclose(
+        ordered[0][1],
+        ordered[1][1],
+        rel_tol=0.0,
+        abs_tol=1e-7,
+    ):
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    return ordered[0][0]
+
+
+def _original_geometry_points(
+    sketch: object,
+    geometry_index: int,
+) -> tuple[object, object]:
+    try:
+        geometry = sketch.Geometry[geometry_index]  # type: ignore[attr-defined]
+        start = sketch.Placement.multVec(geometry.StartPoint)  # type: ignore[attr-defined]
+        end = sketch.Placement.multVec(geometry.EndPoint)  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    return start, end
+
+
+def _section_source_edge(
+    source_feature: object,
+    sketch: object,
+    feature_data: dict[str, object],
+    geometry_index: int,
+    candidates: tuple[int, ...],
+    role: SemanticEdgeRole,
+) -> int:
+    if len(candidates) < 2:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    try:
+        kind = FeatureKind(_text(feature_data["feature_kind"]))
+    except ValueError:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    edges = _shape_edges(source_feature)
+    if kind is FeatureKind.REVOLVE:
+        if len(candidates) != 2:
+            _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+        start, end = _original_geometry_points(sketch, geometry_index)
+        scores: list[tuple[int, float]] = []
+        for index in candidates:
+            vertices = _edge_vertices(edges[index - 1])
+            if len(vertices) != 2:
+                _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+            direct = _distance_squared(vertices[0].Point, start) + _distance_squared(  # type: ignore[attr-defined]
+                vertices[1].Point,
+                end,  # type: ignore[attr-defined]
+            )
+            crossed = _distance_squared(vertices[0].Point, end) + _distance_squared(  # type: ignore[attr-defined]
+                vertices[1].Point,
+                start,  # type: ignore[attr-defined]
+            )
+            scores.append((index, min(direct, crossed)))
+        selected_start = _unique_extreme(tuple(scores), maximum=False)
+        selected_end = next(index for index in candidates if index != selected_start)
+        return selected_start if role is SemanticEdgeRole.SECTION_START else selected_end
+
+    direction = _linear_feature_direction(sketch, feature_data)
+    values = tuple(
+        (index, float(_edge_center(edges[index - 1]).dot(direction)))  # type: ignore[attr-defined]
+        for index in candidates
+    )
+    return _unique_extreme(values, maximum=role is SemanticEdgeRole.SECTION_END)
+
+
+def _mapped_name(obj: object, edge_index: int) -> str:
+    try:
+        name = obj.Shape.getElementMappedName(f"Edge{edge_index}")  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    return _text(name)
+
+
+def _same_edge_orientation(current: object, source: object) -> bool:
+    current_vertices = _edge_vertices(current)
+    source_vertices = _edge_vertices(source)
+    if len(current_vertices) != 2 or len(source_vertices) != 2:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    direct = _distance_squared(
+        current_vertices[0].Point,
+        source_vertices[0].Point,  # type: ignore[attr-defined]
+    ) + _distance_squared(
+        current_vertices[1].Point,
+        source_vertices[1].Point,  # type: ignore[attr-defined]
+    )
+    crossed = _distance_squared(
+        current_vertices[0].Point,
+        source_vertices[1].Point,  # type: ignore[attr-defined]
+    ) + _distance_squared(
+        current_vertices[1].Point,
+        source_vertices[0].Point,  # type: ignore[attr-defined]
+    )
+    if math.isclose(direct, crossed, rel_tol=0.0, abs_tol=1e-12):
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    return direct < crossed
+
+
+def _section_source_forward(
+    source_feature: object,
+    sketch: object,
+    geometry_index: int,
+    edge_index: int,
+) -> bool:
+    edge = _shape_edges(source_feature)[edge_index - 1]
+    vertices = _edge_vertices(edge)
+    if len(vertices) != 2:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    expected = (f"g{geometry_index + 1}v11;SKT", f"g{geometry_index + 1}v22;SKT")
+    actual: list[str] = []
+    try:
+        shape_vertices = tuple(source_feature.Shape.Vertexes)  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    for endpoint in vertices:
+        indexes = tuple(
+            index
+            for index, vertex in enumerate(shape_vertices, 1)
+            if bool(endpoint.isSame(vertex))  # type: ignore[attr-defined]
+        )
+        if len(indexes) != 1:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        history = _element_history(source_feature, f"Vertex{indexes[0]}")
+        tokens = tuple(token for token in expected if _history_contains(history, sketch, token))
+        if len(tokens) != 1:
+            _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+        actual.append(tokens[0])
+    if tuple(actual) == expected:
+        return True
+    if tuple(reversed(actual)) == expected:
+        return False
+    _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+
+
+def _sweep_forward(
+    edge: object,
+    sketch: object,
+    feature_data: dict[str, object],
+    geometry_index: int,
+    point: ReferencePoint,
+) -> bool:
+    vertices = _edge_vertices(edge)
+    if len(vertices) != 2:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    try:
+        kind = FeatureKind(_text(feature_data["feature_kind"]))
+    except ValueError:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if kind is not FeatureKind.REVOLVE:
+        direction = _linear_feature_direction(sketch, feature_data)
+        delta = vertices[1].Point - vertices[0].Point  # type: ignore[attr-defined]
+        score = float(delta.dot(direction))
+        if math.isclose(score, 0.0, rel_tol=0.0, abs_tol=1e-9):
+            _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+        return score > 0
+    start, end = _original_geometry_points(sketch, geometry_index)
+    origin = start if point is ReferencePoint.START else end
+    distances = tuple(_distance_squared(vertex.Point, origin) for vertex in vertices)  # type: ignore[attr-defined]
+    if math.isclose(distances[0], distances[1], rel_tol=0.0, abs_tol=1e-12):
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    return distances[0] < distances[1]
+
+
+def _resolve_semantic_edge(
+    base: object,
+    *,
+    source_feature: object,
+    sketch: object,
+    feature_data: dict[str, object],
+    sketch_data: dict[str, object],
+    reference: SemanticEdgeReference,
+    require_orientation: bool,
+) -> _ResolvedSemanticEdge:
+    geometry_index = _geometry_native_index(sketch_data, reference.geometry_id)
+    if reference.role is SemanticEdgeRole.SWEEP:
+        sketch_token = None
+        source_index = _sweep_source_edge(
+            source_feature,
+            sketch,
+            feature_data,
+            geometry_index,
+            reference.point,
+        )
+    else:
+        sketch_token = f"g{geometry_index + 1};SKT"
+        source_candidates = _edge_candidates(
+            source_feature,
+            sketch=sketch,
+            sketch_token=sketch_token,
+        )
+        source_index = _section_source_edge(
+            source_feature,
+            sketch,
+            feature_data,
+            geometry_index,
+            source_candidates,
+            reference.role,
+        )
+    source_mapped_name = _mapped_name(source_feature, source_index)
+    matches = _edge_candidates(
+        base,
+        sketch=sketch,
+        sketch_token=sketch_token,
+        source_mapped_name=source_mapped_name,
+    )
+    if len(matches) != 1:
+        matches = _same_edge_candidates(
+            base,
+            _shape_edges(source_feature)[source_index - 1],
+        )
+    if len(matches) != 1:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    current_index = matches[0]
+    if not require_orientation:
+        return _ResolvedSemanticEdge(index=current_index, forward=True)
+    current_edge = _shape_edges(base)[current_index - 1]
+    source_edge = _shape_edges(source_feature)[source_index - 1]
+    if reference.role is SemanticEdgeRole.SWEEP:
+        forward = _sweep_forward(
+            current_edge,
+            sketch,
+            feature_data,
+            geometry_index,
+            reference.point,
+        )
+    else:
+        source_forward = _section_source_forward(
+            source_feature,
+            sketch,
+            geometry_index,
+            source_index,
+        )
+        forward = (
+            source_forward
+            if _same_edge_orientation(current_edge, source_edge)
+            else not source_forward
+        )
+    return _ResolvedSemanticEdge(index=current_index, forward=forward)
 
 
 def _parameter_property(parameter: DesignParameter) -> str:
@@ -724,7 +1243,7 @@ def _validate_common_metadata(data: dict[str, object]) -> str:
     if data["schema"] != _METADATA_SCHEMA:
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     kind = _text(data["kind"])
-    if kind not in {"body", "feature", "parameters", "sketch"}:
+    if kind not in {"body", "edge_treatment", "feature", "parameters", "sketch"}:
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     design_id = _text(data["design_id"], _IR_ID)
     if not design_id.startswith("ir_design_"):
@@ -751,7 +1270,10 @@ def _read_metadata(obj: object, *, required: bool = False) -> dict[str, object] 
     kind = parsed.get("kind")
     common = {"schema", "kind", "design_id", "design_digest", "ir_id"}
     if kind == "body":
-        data = _exact_mapping(parsed, common | {"feature_ids", "sketch_ids"})
+        allowed = common | {"edge_treatment_ids", "feature_ids", "sketch_ids"}
+        if not set(parsed) <= allowed or not common | {"feature_ids", "sketch_ids"} <= set(parsed):
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        data = parsed
     elif kind == "parameters":
         data = _exact_mapping(parsed, common | {"parameters"})
     elif kind == "sketch":
@@ -772,6 +1294,17 @@ def _read_metadata(obj: object, *, required: bool = False) -> dict[str, object] 
                 "reversed",
                 "sketch_id",
                 "symmetric",
+            },
+        )
+    elif kind == "edge_treatment":
+        data = _exact_mapping(
+            parsed,
+            common
+            | {
+                "base_feature_id",
+                "targets",
+                "treatment_index",
+                "treatment_kind",
             },
         )
     else:
@@ -1712,6 +2245,266 @@ def _validate_feature_metadata(
     return tuple(facts)
 
 
+def _edge_treatment_target(
+    value: object,
+) -> tuple[SemanticEdgeReference, str, str, str, str, bool | None]:
+    entry = _exact_mapping(
+        value,
+        {
+            "edge",
+            "end_parameter_id",
+            "end_property",
+            "forward",
+            "start_parameter_id",
+            "start_property",
+        },
+    )
+    edge = _exact_mapping(
+        entry["edge"],
+        {"geometry_id", "point", "role", "source_feature_id"},
+    )
+    try:
+        reference = SemanticEdgeReference(
+            source_feature_id=_text(edge["source_feature_id"], _IR_ID),
+            geometry_id=_text(edge["geometry_id"], _IR_ID),
+            role=_text(edge["role"]),
+            point=_text(edge["point"]),
+        )
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    start_parameter_id = _text(entry["start_parameter_id"], _IR_ID)
+    end_parameter_id = _text(entry["end_parameter_id"], _IR_ID)
+    start_property = _text(entry["start_property"], _PARAMETER_PROPERTY)
+    end_property = _text(entry["end_property"], _PARAMETER_PROPERTY)
+    forward = entry["forward"]
+    if forward is not None and type(forward) is not bool:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if not start_parameter_id.startswith("ir_parameter_") or not end_parameter_id.startswith(
+        "ir_parameter_"
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    return (
+        reference,
+        start_parameter_id,
+        start_property,
+        end_parameter_id,
+        end_property,
+        forward,
+    )
+
+
+def _native_treatment_edges(obj: object) -> tuple[tuple[int, float, float], ...]:
+    try:
+        raw_edges = tuple(obj.Edges)  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    result: list[tuple[int, float, float]] = []
+    for raw in raw_edges:
+        if type(raw) not in {list, tuple} or len(raw) != 3 or type(raw[0]) is not int:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        try:
+            first = float(raw[1])
+            second = float(raw[2])
+        except Exception:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        if raw[0] < 1 or not all(math.isfinite(item) and item > 0 for item in (first, second)):
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        result.append((raw[0], first, second))
+    if not 1 <= len(result) <= 16 or len({item[0] for item in result}) != len(result):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    return tuple(result)
+
+
+def _validate_edge_treatment_metadata(
+    obj: object,
+    data: dict[str, object],
+) -> tuple[ParametricEntityFact, ...]:
+    try:
+        kind = EdgeTreatmentKind(_text(data["treatment_kind"]))
+    except ValueError:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if getattr(obj, "TypeId", None) != _EDGE_TREATMENT_TYPE_IDS[kind]:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    treatment_id = _text(data["ir_id"], _IR_ID)
+    base_feature_id = _text(data["base_feature_id"], _IR_ID)
+    if not treatment_id.startswith("ir_feature_") or not base_feature_id.startswith("ir_feature_"):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    treatment_index = _integer(data["treatment_index"], maximum=7)
+    targets = tuple(_edge_treatment_target(item) for item in _sequence(data["targets"], maximum=16))
+    if not targets:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if kind is EdgeTreatmentKind.CHAMFER and any(
+        start_id != end_id for _, start_id, _, end_id, _, _ in targets
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    native_edges = _native_treatment_edges(obj)
+    if len(native_edges) != len(targets):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    try:
+        base = obj.Base  # type: ignore[attr-defined]
+        edge_link_base, edge_link_names = obj.EdgeLinks  # type: ignore[attr-defined]
+        shape = obj.Shape  # type: ignore[attr-defined]
+        solids = tuple(shape.Solids)
+        volume = float(shape.Volume)
+        base_volume = float(base.Shape.Volume)
+        state = tuple(obj.State)  # type: ignore[attr-defined]
+        status = obj.getStatusString()  # type: ignore[attr-defined]
+        valid = not shape.isNull() and shape.isValid()
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    expected_names = tuple(f"Edge{item[0]}" for item in native_edges)
+    tolerance = max(1.0, abs(volume), abs(base_volume)) * 1e-9
+    if (
+        edge_link_base is not base
+        or tuple(edge_link_names) != expected_names
+        or not valid
+        or len(solids) != 1
+        or not math.isfinite(volume)
+        or volume <= 0
+        or not math.isfinite(base_volume)
+        or base_volume <= 0
+        or math.isclose(volume, base_volume, rel_tol=0.0, abs_tol=tolerance)
+        or state != ("Up-to-date",)
+        or status != "Valid"
+    ):
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    facts = [
+        ParametricEntityFact("parametric.edge_treatment.edge_count", len(targets)),
+        ParametricEntityFact("parametric.edge_treatment.index", treatment_index),
+        ParametricEntityFact("parametric.edge_treatment.kind", kind.value),
+        ParametricEntityFact(
+            "parametric.edge_treatment.variable_edge_count",
+            sum(start_id != end_id for _, start_id, _, end_id, _, _ in targets),
+        ),
+        ParametricEntityFact("parametric.shape_valid", True),
+        ParametricEntityFact("parametric.solid_count", 1),
+    ]
+    for index, (
+        _reference,
+        _start_id,
+        start_property,
+        _end_id,
+        end_property,
+        _forward,
+    ) in enumerate(targets):
+        facts.extend(
+            (
+                ParametricEntityFact(
+                    f"parametric.edge_treatment.target.{index}.start",
+                    _quantity_value(_edge_treatment_carrier(obj), start_property),
+                    "mm",
+                ),
+                ParametricEntityFact(
+                    f"parametric.edge_treatment.target.{index}.end",
+                    _quantity_value(_edge_treatment_carrier(obj), end_property),
+                    "mm",
+                ),
+            )
+        )
+    return tuple(facts)
+
+
+def _edge_treatment_carrier(obj: object) -> object:
+    try:
+        document = obj.Document  # type: ignore[attr-defined]
+        records = _parametric_records(document)
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    carriers = tuple(item for item, data in records if data["kind"] == "parameters")
+    if len(carriers) != 1:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    return carriers[0]
+
+
+def _resolved_treatment_edges(
+    base: object,
+    treatment_data: dict[str, object],
+    by_ir_id: Mapping[str, tuple[object, dict[str, object]]],
+    carrier: object,
+    *,
+    validate_orientation: bool = True,
+) -> tuple[_ResolvedTreatmentEdge, ...]:
+    result: list[_ResolvedTreatmentEdge] = []
+    for raw in _sequence(treatment_data["targets"], maximum=16):
+        (
+            reference,
+            start_id,
+            start_property,
+            end_id,
+            end_property,
+            stored_forward,
+        ) = _edge_treatment_target(raw)
+        source_record = by_ir_id.get(reference.source_feature_id)
+        if source_record is None or source_record[1]["kind"] != "feature":
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        source_feature, source_data = source_record
+        sketch_id = _text(source_data["sketch_id"], _IR_ID)
+        sketch_record = by_ir_id.get(sketch_id)
+        if sketch_record is None or sketch_record[1]["kind"] != "sketch":
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        sketch, sketch_data = sketch_record
+        start = _quantity_value(carrier, start_property)
+        end = _quantity_value(carrier, end_property)
+        if start <= 0 or end <= 0:
+            _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+        require_orientation = start_id != end_id
+        resolved = _resolve_semantic_edge(
+            base,
+            source_feature=source_feature,
+            sketch=sketch,
+            feature_data=source_data,
+            sketch_data=sketch_data,
+            reference=reference,
+            require_orientation=require_orientation,
+        )
+        if validate_orientation:
+            if require_orientation:
+                if stored_forward is None or stored_forward is not resolved.forward:
+                    _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+            elif stored_forward is not None:
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        first, second = (start, end) if resolved.forward else (end, start)
+        result.append(
+            _ResolvedTreatmentEdge(
+                index=resolved.index,
+                start=first,
+                end=second,
+                forward=resolved.forward if require_orientation else None,
+            )
+        )
+    if len({item.index for item in result}) != len(result):
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    return tuple(result)
+
+
+def _validate_treatment_resolution(
+    obj: object,
+    data: dict[str, object],
+    *,
+    base: object,
+    by_ir_id: Mapping[str, tuple[object, dict[str, object]]],
+    carrier: object,
+) -> None:
+    try:
+        if obj.Base is not base:  # type: ignore[attr-defined]
+            raise ValueError
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    expected = _resolved_treatment_edges(base, data, by_ir_id, carrier)
+    actual = _native_treatment_edges(obj)
+    if len(expected) != len(actual) or any(
+        expected.index != actual_index
+        or not math.isclose(expected.start, actual_start, rel_tol=0.0, abs_tol=1e-8)
+        or not math.isclose(expected.end, actual_end, rel_tol=0.0, abs_tol=1e-8)
+        for expected, (
+            actual_index,
+            actual_start,
+            actual_end,
+        ) in zip(expected, actual, strict=True)
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+
 def _validate_sketch_metadata(obj: object, data: dict[str, object]) -> SketchSolverFacts:
     if getattr(obj, "TypeId", None) != "Sketcher::SketchObject":
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
@@ -1821,11 +2614,14 @@ def _validate_parametric_graph(
     carriers = tuple(item for item in records if item[1]["kind"] == "parameters")
     sketches = tuple(item for item in records if item[1]["kind"] == "sketch")
     features = tuple(item for item in records if item[1]["kind"] == "feature")
+    edge_treatments = tuple(item for item in records if item[1]["kind"] == "edge_treatment")
     if (
         len(bodies) != 1
         or len(carriers) != 1
         or not 1 <= len(sketches) <= 8
         or not 1 <= len(features) <= 8
+        or len(edge_treatments) > 8
+        or len(features) + len(edge_treatments) > 8
     ):
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
 
@@ -1870,6 +2666,27 @@ def _validate_parametric_graph(
         expected_feature_ids != actual_feature_ids
         or actual_feature_indexes != tuple(range(len(indexed_features)))
         or any(not item.startswith("ir_feature_") for item in actual_feature_ids)
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+    expected_treatment_ids = tuple(
+        _text(item, _IR_ID)
+        for item in _sequence(body_data.get("edge_treatment_ids", []), maximum=8)
+    )
+    indexed_treatments = tuple(
+        sorted(
+            edge_treatments,
+            key=lambda item: _integer(item[1]["treatment_index"], maximum=7),
+        )
+    )
+    actual_treatment_ids = tuple(_text(data["ir_id"], _IR_ID) for _, data in indexed_treatments)
+    actual_treatment_indexes = tuple(
+        _integer(data["treatment_index"], maximum=7) for _, data in indexed_treatments
+    )
+    if (
+        expected_treatment_ids != actual_treatment_ids
+        or actual_treatment_indexes != tuple(range(len(indexed_treatments)))
+        or any(not item.startswith("ir_feature_") for item in actual_treatment_ids)
     ):
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
 
@@ -1923,6 +2740,26 @@ def _validate_parametric_graph(
         )
         consumed_sketch_ids.add(sketch_id)
         previous_feature = feature_obj
+
+    by_ir_id = {_text(data["ir_id"], _IR_ID): (obj, data) for obj, data in records}
+    previous_treatment: object = body
+    for treatment_index, (treatment_obj, treatment_data) in enumerate(indexed_treatments):
+        _validate_edge_treatment_metadata(treatment_obj, treatment_data)
+        expected_base_id = (
+            actual_feature_ids[-1]
+            if treatment_index == 0
+            else actual_treatment_ids[treatment_index - 1]
+        )
+        if treatment_data["base_feature_id"] != expected_base_id:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        _validate_treatment_resolution(
+            treatment_obj,
+            treatment_data,
+            base=previous_treatment,
+            by_ir_id=by_ir_id,
+            carrier=carrier,
+        )
+        previous_treatment = treatment_obj
 
     parameter_pairs: set[tuple[str, str]] = set()
     parameter_units: dict[tuple[str, str], str] = {}
@@ -2002,6 +2839,31 @@ def _validate_parametric_graph(
                 or parameter_units[pair] != ("deg" if target == "Angle" else "mm")
             ):
                 _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    for _, treatment_data in edge_treatments:
+        try:
+            treatment_kind = EdgeTreatmentKind(_text(treatment_data["treatment_kind"]))
+        except ValueError:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        for raw_target in _sequence(treatment_data["targets"], maximum=16):
+            (
+                _reference,
+                start_parameter_id,
+                start_property,
+                end_parameter_id,
+                end_property,
+                _forward,
+            ) = _edge_treatment_target(raw_target)
+            for parameter_id, property_name in (
+                (start_parameter_id, start_property),
+                (end_parameter_id, end_property),
+            ):
+                pair = (parameter_id, property_name)
+                if pair not in parameter_pairs or parameter_units[pair] != "mm":
+                    _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            if treatment_kind is EdgeTreatmentKind.CHAMFER and (
+                start_parameter_id != end_parameter_id or start_property != end_property
+            ):
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
 
 
 def parametric_entity_facts(obj: object) -> tuple[ParametricEntityFact, ...]:
@@ -2024,11 +2886,15 @@ def parametric_entity_facts(obj: object) -> tuple[ParametricEntityFact, ...]:
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
         sketch_ids = _sequence(data["sketch_ids"], maximum=8)
         feature_ids = _sequence(data["feature_ids"], maximum=8)
+        edge_treatment_ids = _sequence(data.get("edge_treatment_ids", []), maximum=8)
         if (
             any(not _text(item, _IR_ID).startswith("ir_sketch_") for item in sketch_ids)
             or sketch_ids != sorted(set(sketch_ids))
             or any(not _text(item, _IR_ID).startswith("ir_feature_") for item in feature_ids)
             or len(feature_ids) != len(set(feature_ids))
+            or any(not _text(item, _IR_ID).startswith("ir_feature_") for item in edge_treatment_ids)
+            or len(edge_treatment_ids) != len(set(edge_treatment_ids))
+            or set(feature_ids) & set(edge_treatment_ids)
         ):
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
         facts.extend(
@@ -2037,6 +2903,10 @@ def parametric_entity_facts(obj: object) -> tuple[ParametricEntityFact, ...]:
                 ParametricEntityFact("parametric.sketch_count", len(sketch_ids)),
             )
         )
+        if "edge_treatment_ids" in data:
+            facts.append(
+                ParametricEntityFact("parametric.edge_treatment_count", len(edge_treatment_ids))
+            )
     elif kind == "parameters":
         facts.extend(_validate_parameter_metadata(obj, data))
     elif kind == "sketch":
@@ -2064,6 +2934,8 @@ def parametric_entity_facts(obj: object) -> tuple[ParametricEntityFact, ...]:
         )
     elif kind == "feature":
         facts.extend(_validate_feature_metadata(obj, data))
+    elif kind == "edge_treatment":
+        facts.extend(_validate_edge_treatment_metadata(obj, data))
     else:  # pragma: no cover - _read_metadata closes this enum
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     return tuple(sorted(facts, key=lambda item: item.name))
@@ -2103,8 +2975,11 @@ def _source_parameter_mapping(
         design.body.id,
         *(item.id for item in design.sketches),
         *(item.id for item in design.features),
+        *(item.id for item in design.edge_treatments),
     }
-    if len(records) != 2 + len(design.sketches) + len(design.features):
+    if len(records) != 2 + len(design.sketches) + len(design.features) + len(
+        design.edge_treatments
+    ):
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     by_ir_id: dict[str, tuple[object, dict[str, object]]] = {}
     for obj, data in records:
@@ -2122,6 +2997,7 @@ def _source_parameter_mapping(
         body_data["kind"] != "body"
         or body_data["feature_ids"] != [item.id for item in design.features]
         or body_data["sketch_ids"] != [item.id for item in design.sketches]
+        or body_data.get("edge_treatment_ids", []) != [item.id for item in design.edge_treatments]
     ):
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
 
@@ -2135,6 +3011,37 @@ def _source_parameter_mapping(
         assert type(raw) is dict
         entries.append(raw)
     properties = {item.id: _parameter_property(item) for item in design.parameters}
+    for index, treatment in enumerate(design.edge_treatments):
+        _, treatment_data = by_ir_id[treatment.id]
+        expected_base = (
+            design.features[-1].id if index == 0 else design.edge_treatments[index - 1].id
+        )
+        actual_targets = _sequence(treatment_data["targets"], maximum=16)
+        expected_targets = _edge_treatment_metadata_targets(treatment, properties)
+        targets_match = len(actual_targets) == len(expected_targets)
+        if targets_match:
+            for actual, expected, target in zip(
+                actual_targets,
+                expected_targets,
+                treatment.targets,
+                strict=True,
+            ):
+                parsed = _edge_treatment_target(actual)
+                expected["forward"] = parsed[-1]
+                if actual != expected or (
+                    (target.start_parameter_id != target.end_parameter_id)
+                    != (type(parsed[-1]) is bool)
+                ):
+                    targets_match = False
+                    break
+        if (
+            treatment_data["kind"] != "edge_treatment"
+            or treatment_data["base_feature_id"] != expected_base
+            or treatment_data["treatment_index"] != index
+            or treatment_data["treatment_kind"] != treatment.kind.value
+            or not targets_match
+        ):
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     expected_entries: list[dict[str, object]] = []
     for item in design.parameters:
         expected: dict[str, object] = {
@@ -2238,6 +3145,33 @@ def _require_parameter_consumer_values(
                 ):
                     _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
                 actual_consumers.add(_text(data["ir_id"], _IR_ID))
+        elif data["kind"] == "edge_treatment":
+            matched = False
+            for raw_target in _sequence(data["targets"], maximum=16):
+                (
+                    _reference,
+                    start_id,
+                    start_property,
+                    end_id,
+                    end_property,
+                    _forward,
+                ) = _edge_treatment_target(raw_target)
+                for bound_id, property_name in (
+                    (start_id, start_property),
+                    (end_id, end_property),
+                ):
+                    if bound_id != parameter_id:
+                        continue
+                    if not math.isclose(
+                        _quantity_value(_edge_treatment_carrier(obj), property_name),
+                        expected,
+                        rel_tol=0.0,
+                        abs_tol=1e-8,
+                    ):
+                        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+                    matched = True
+            if matched:
+                actual_consumers.add(_text(data["ir_id"], _IR_ID))
     if tuple(sorted(actual_consumers)) != consumer_ids:
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
 
@@ -2260,6 +3194,14 @@ def _direct_parameter_consumer_ids(
                     feature.id
                     for feature in design.features
                     if parameter_id in feature.parameters.values()
+                ),
+                *(
+                    treatment.id
+                    for treatment in design.edge_treatments
+                    if any(
+                        parameter_id in {target.start_parameter_id, target.end_parameter_id}
+                        for target in treatment.targets
+                    )
                 ),
             }
         )
@@ -2321,6 +3263,50 @@ def _resolved_live_parameter_values(
     for parameter in design.parameters:
         resolve(parameter.id)
     return resolved
+
+
+def _refresh_edge_treatment_tail(
+    document: object,
+    records: tuple[tuple[object, dict[str, object]], ...],
+) -> None:
+    treatments = tuple(
+        sorted(
+            (item for item in records if item[1]["kind"] == "edge_treatment"),
+            key=lambda item: _integer(item[1]["treatment_index"], maximum=7),
+        )
+    )
+    if not treatments:
+        document.recompute()  # type: ignore[attr-defined]
+        return
+    bodies = tuple(item for item in records if item[1]["kind"] == "body")
+    carriers = tuple(item for item in records if item[1]["kind"] == "parameters")
+    if len(bodies) != 1 or len(carriers) != 1:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    by_ir_id = {_text(data["ir_id"], _IR_ID): (obj, data) for obj, data in records}
+    carrier = carriers[0][0]
+    base = bodies[0][0]
+    try:
+        document.recompute()  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.CAD_FAILURE)
+    for obj, data in treatments:
+        expected = _resolved_treatment_edges(base, data, by_ir_id, carrier)
+        try:
+            if obj.Base is not base:  # type: ignore[attr-defined]
+                raise ValueError
+            obj.Edges = [item.native for item in expected]  # type: ignore[attr-defined]
+            document.recompute()  # type: ignore[attr-defined]
+        except Exception:
+            _raise(ParametricCompileErrorCode.CAD_FAILURE)
+        _validate_edge_treatment_metadata(obj, data)
+        _validate_treatment_resolution(
+            obj,
+            data,
+            base=base,
+            by_ir_id=by_ir_id,
+            carrier=carrier,
+        )
+        base = obj
 
 
 def modify_parametric_parameter(
@@ -2439,6 +3425,7 @@ def modify_parametric_parameter(
     try:
         with transaction("modify_parametric_parameter", claim_new_objects=False):
             setattr(carrier, expected_property, value)
+            _refresh_edge_treatment_tail(document, records)
             stabilize_parametric_session(session)
             objects_after = tuple(document.Objects)
             if len(objects_after) != len(objects_before) or any(
@@ -2718,18 +3705,18 @@ def compile_parametric_design(
                     },
                 )
                 pending.append((sketch, sketch_object, geometry_indices, constraint_indices))
-            _write_metadata(
-                body,
-                {
-                    "schema": _METADATA_SCHEMA,
-                    "kind": "body",
-                    "design_id": checked.id,
-                    "design_digest": checked.digest,
-                    "ir_id": checked.body.id,
-                    "feature_ids": [item.id for item in checked.features],
-                    "sketch_ids": [item.id for item in checked.sketches],
-                },
-            )
+            body_metadata: dict[str, object] = {
+                "schema": _METADATA_SCHEMA,
+                "kind": "body",
+                "design_id": checked.id,
+                "design_digest": checked.digest,
+                "ir_id": checked.body.id,
+                "feature_ids": [item.id for item in checked.features],
+                "sketch_ids": [item.id for item in checked.sketches],
+            }
+            if checked.edge_treatments:
+                body_metadata["edge_treatment_ids"] = [item.id for item in checked.edge_treatments]
+            _write_metadata(body, body_metadata)
             document.recompute()
             bindings = tuple(
                 CompiledSketchBinding(
@@ -2876,17 +3863,86 @@ def compile_parametric_design(
                 )
                 previous_feature = feature_object
 
+            compiled_treatments: list[CompiledFeatureBinding] = []
+            result_object: object = body
+            by_ir_id = {
+                _text(data["ir_id"], _IR_ID): (obj, data)
+                for obj, data in _parametric_records(document)
+            }
+            for treatment_index, treatment in enumerate(checked.edge_treatments):
+                treatment_object = document.addObject(  # type: ignore[attr-defined]
+                    _EDGE_TREATMENT_TYPE_IDS[treatment.kind],
+                    f"VibeCADEdgeTreatment_{_suffix(treatment.id)}",
+                )
+                treatment_object.Label = treatment.name
+                treatment_object.Base = result_object
+                treatment_metadata = {
+                    "schema": _METADATA_SCHEMA,
+                    "kind": "edge_treatment",
+                    "design_id": checked.id,
+                    "design_digest": checked.digest,
+                    "ir_id": treatment.id,
+                    "base_feature_id": treatment.base_feature_id,
+                    "targets": _edge_treatment_metadata_targets(
+                        treatment,
+                        parameter_properties,
+                    ),
+                    "treatment_index": treatment_index,
+                    "treatment_kind": treatment.kind.value,
+                }
+                resolved_edges = _resolved_treatment_edges(
+                    result_object,
+                    treatment_metadata,
+                    by_ir_id,
+                    carrier,
+                    validate_orientation=False,
+                )
+                for target, resolved in zip(
+                    treatment_metadata["targets"],
+                    resolved_edges,
+                    strict=True,
+                ):
+                    target["forward"] = resolved.forward
+                _write_metadata(treatment_object, treatment_metadata)
+                by_ir_id[treatment.id] = (
+                    treatment_object,
+                    _read_metadata(treatment_object, required=True),  # type: ignore[arg-type]
+                )
+                treatment_object.Edges = [  # type: ignore[attr-defined]
+                    item.native for item in resolved_edges
+                ]
+                document.recompute()
+                _validate_edge_treatment_metadata(treatment_object, treatment_metadata)
+                _validate_treatment_resolution(
+                    treatment_object,
+                    treatment_metadata,
+                    base=result_object,
+                    by_ir_id=by_ir_id,
+                    carrier=carrier,
+                )
+                compiled_treatments.append(
+                    CompiledFeatureBinding(
+                        feature_id=treatment.id,
+                        object=treatment_object,
+                    )
+                )
+                result_object = treatment_object
+
             document.recompute()
             parametric_entity_facts(carrier)
             parametric_entity_facts(body)
+            for treatment in compiled_treatments:
+                parametric_entity_facts(treatment.object)
             _validate_parametric_graph(_parametric_records(document))
             compiled = CompiledParametricDesign(
                 design_id=checked.id,
                 design_digest=checked.digest,
                 body=body,
+                result_object=result_object,
                 parameter_carrier=carrier,
                 sketches=bindings,
                 features=tuple(compiled_features),
+                edge_treatments=tuple(compiled_treatments),
             )
             if adopt is not None:
                 adopt(compiled)
