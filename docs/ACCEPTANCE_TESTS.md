@@ -1,4 +1,4 @@
-# VibeCAD 0.8.0 发布验收测试
+# VibeCAD 0.9.0 发布验收测试
 
 本清单验证当前 Agent-first 产品：持久化 Project/Task/Revision/Draft/Artifact/Release、38 个公开工具、
 direct operation 与 ModelProgram 的统一 Task Kernel，以及可验证的 FCStd/STEP/PDF/ZIP 资源交付。
@@ -8,19 +8,19 @@ direct operation 与 ModelProgram 的统一 Task Kernel，以及可验证的 FCS
 - **protocol/package host-ready**：本地 raw/typed MCP、Skill 包、受管 FreeCAD 与打包后会话全部通过；
 - **host-verified**：真实第二宿主使用外部模型执行同一任务并通过。
 
-0.8.0 保留完整 protocol/package gate，并要求 Codex、Claude、WorkBuddy 分别执行同一发布包 smoke。
+0.9.0 保留完整 protocol/package gate，并要求 Codex、Claude、WorkBuddy 分别执行同一发布包 smoke。
 WorkBuddy 的既有 GLM-5.2/GLM-5V-Turbo 证据只增加其专属兼容路径覆盖，不能替代另外两个宿主。
-本次新增的 Guided Photo V3 只覆盖通过拍摄/尺度/完整性门且独立确认关键尺寸的受限机械零件；
-Task 前安全停止和可编辑参数探针与正例同为放行门。
+0.8.0 已交付的 Guided Photo V3 继续作为回归门：它只覆盖通过拍摄/尺度/完整性门且独立确认关键
+尺寸的受限机械零件，Task 前安全停止和可编辑参数探针与正例同样必须通过。0.9.0 的新增门是
+S41 派生参数联动与 S42 语义 Fillet/Chamfer，包括重开验证、参数修改和原子失败回滚。
 
-MR0-C01..C04 已交付并验收内部 multi-runtime foundation；本次 C05 只关闭 canonical 文档、证据与
-恢复记录，不改变本清单已有 PASS 范围或可执行产品声明。该内部 foundation 独立于 0.6.1
-release、真实宿主和产品支持 gate。
+MR0-C01..C04 已交付并验收内部 multi-runtime foundation；它继续作为 0.9.0 的架构回归，不扩大
+当前 FreeCAD-only 产品支持或公共 runtime schema。
 
 MR1-P00 已冻结
 [`Revision durable-v2 迁移合同`](orchestrated/vibecad-durable-v2.md)，但没有实现 Revision v2
 reader/writer、
-inventory、activation 或 migration。其 future acceptance 与当前 0.6.1 host-ready gate 分开，
+inventory、activation 或 migration。其 future acceptance 与当前 0.9.0 host-ready gate 分开，
 不得把文档合同或 managed-checkout 自己的 schema v2 写成 Revision durable-v2 PASS。
 
 ## 1. 冻结产品口径
@@ -70,11 +70,16 @@ artifact/proposal；设计采纳必须新建 reviewed CAD Task。
 
 - 项目可以是 `empty`，或导入非空、对象全为 `Part::Box` / `Part::Cylinder` 的
   `import_fcstd` envelope；
-- 当前只验证 headless execution profile；
-- 成功交付只有 FCStd 与 STEP；
+- `empty` 项目可通过严格 ParametricDesignIR 创建全约束 Sketcher 与 Pad/Pocket/Hole/Revolve，
+  并使用派生参数、原生 slot 和语义 Fillet/Chamfer；
+- 宿主多模态路径支持冻结的单视图、多视图和 Guided Photo V3 包络；尺度、遮挡、冲突或隐藏结构
+  不足时必须在 Task 前澄清或安全停止；
+- CAD Worker 验证 headless profile；FreeCAD Workbench Alpha 另有 interactive profile；
+- CAD candidate 交付 FCStd 与 STEP；已接受 Revision 还能生成 PDF、BOM、manifest、验证报告和
+  摘要批准的 Release ZIP；
 - FreeCAD 是唯一连接的 CAD adapter；fake runtime/adapter 只能作为 conformance fixture，不能进入
   capability/product support 声明；
-- MR0 内部 runtime/artifact/selector contract 不改变 28 tools、六 operations 或公开 `SelectorV1`；
+- MR0 内部 runtime/artifact/selector contract 不改变 38 tools、六个 direct operations 或公开 `SelectorV1`；
   durable Revision/Candidate/manifest/recovery writer 仍固定 FCStd/STEP v1；MR1-P00 只冻结 future
   migration contract，不创建 v2 byte；
 - active cancellation 由受管、可终止 FreeCAD Worker 和持久化 `reconcile` 路径收口；空闲取消仍不得启动
@@ -83,7 +88,8 @@ artifact/proposal；设计采纳必须新建 reviewed CAD Task。
   Accept/Reject；默认路径是受管 FreeCAD，user-FreeCAD 只覆盖一个指纹绑定的 macOS FreeCAD 1.1.3
   本机试点；
 - 当前不支持通用 FCStd、STEP/STL import、任意 Python/FreeCAD code、通用 user-FreeCAD 兼容性、
-  face/edge selector、photo/video reconstruction 或 simulation。
+  交互式 face/edge selector、视频重建或 simulation；普通照片只支持 Guided Photo V3 的冻结包络，
+  不宣称纯照片精密测量、隐藏结构恢复或普适逆向工程。
 
 机械详细设计、预检与仿真的
 [`调研报告`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)不提供任何 acceptance PASS，也不把其中的
@@ -147,14 +153,14 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 
 | ID | Gate | 通过标准 | 结果 |
 |---|---|---|---|
-| G01 | 版本与协议身份 | tag/source/pyproject/manifest/FreeCAD package/lock = 0.8.0；server epoch = 4；MCP/FreeCAD/Python pin 不漂移 | ☐ |
+| G01 | 版本与协议身份 | tag/source/pyproject/manifest/FreeCAD package/lock = 0.9.0；server epoch = 4；MCP/FreeCAD/Python pin 不漂移 | ☐ |
 | G02 | 公开面 | 精确 38 个唯一工具；说明与 manifest 完全一致；固定 discovery frame ≤ 32,768 bytes | ☐ |
 | G03 | 内部校验 | discovery 不发 output schema，但正常与异常 CallToolResult 仍受冻结 output validator 约束 | ☐ |
 | G04 | 命名空间 | direct 与稳定名称碰撞、direct 重名都在 schema/dispatch/effect 前 fail closed | ☐ |
 | G05 | Skill | canonical Skill 通过校验；示例、恢复表和限制与 live schema 一致 | ☐ |
 | G06 | 分发 | sdist/MCPB/Skill zip 含同一 Skill tree；wheel/installed Python 不含 Skill | ☐ |
 | G07 | 普通测试 | 全量 non-slow pytest、Ruff、changed-Python format/pycompile、offline lock、diff check 通过 | ☐ |
-| G08 | 受管 FreeCAD | Darwin slow matrix 通过；安装只同步 0.8.0/epoch 4，不重建现有引擎 | ☐ |
+| G08 | 受管 FreeCAD | Darwin slow matrix 通过；安装只同步 0.9.0/epoch 4，不重建现有引擎 | ☐ |
 | G09 | Agent E2E | empty/import、direct/program、review/cancel/restart/conflict、artifact/resource 与负例通过 | ☐ |
 | G10 | 数据保护 | runtime uninstall 与持久取消不删除/改写项目数据；执行和导出不污染源文件或暴露任意路径 | ☐ |
 | G11 | 打包后会话 | 从全新解包 MCPB 启动并复跑 discovery、真实 CAD 与资源读取 | ☐ |
@@ -162,6 +168,7 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 | G13 | Workbench Alpha | managed Workbench 完成 preview/selector/review；指纹绑定 user-FreeCAD 试点经薄 bridge 完成同一非空 Reject 或 Accept 流程 | ☐ |
 | G14 | 三宿主发布包 | Codex、Claude、WorkBuddy 分别完成恢复、建模和 ResourceLink/资源读取；WorkBuddy 另过兼容适配门 | ☐ |
 | G15 | Guided Photo V3 | 三个公开正例各形成可编辑 review draft；缺尺寸和多物体负例均在 Task 前停止；真实 FreeCAD 证明 DoF、BRep、单实体和参数修改 | ☐ |
+| G16 | 参数联动与边处理 | 派生仿射表达式和语义 Fillet/Chamfer 通过 focused、完整回归、重开编辑及真实 FreeCAD runtime 门；歧义与无效几何原子失败 | ☐ |
 
 ## 3. 自动化与打包 Gate
 
@@ -170,7 +177,7 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 检查：
 
 1. tag、`src/vibecad/__init__.py`、`pyproject.toml`、`manifest.json`、FreeCAD `package.xml`、
-   `uv.lock` 与 wheel/sdist metadata 都是 `0.8.0`；
+   `uv.lock` 与 wheel/sdist metadata 都是 `0.9.0`；
 2. runtime receipt、status 与 server handshake 使用同一 VibeCAD 版本；
 3. private server epoch 为 4，runtime receipt 的 public-surface digest 绑定 description、input/output
    enforcement schema 与 annotations；当前 SHA-256 为
@@ -192,7 +199,7 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 - 完整 UTF-8 tools/list frame 不超过 32,768 bytes；
 - `manifest.json` 的 `(name, description)` 与 PublicToolSpec 逐项完全一致。
 
-0.8.0 计入 JSON-RPC envelope 和末尾 LF 的完整固定 frame 为 30,415 bytes，低于 32,768-byte
+0.9.0 计入 JSON-RPC envelope 和末尾 LF 的完整固定 frame 必须低于 32,768-byte
 上限；其 contract digest 和完整 frame 必须由当前 public-surface contract 与自动化 gate 重新计算、
 逐字节核对，不能沿用旧版本记录。
 `cancel_task` 必须位于 `resume_task` 后、`accept_draft` 前，description 固定为
@@ -226,7 +233,7 @@ canonical source 是 `skills/vibecad-agent/`。执行 Skill validator，并检�
 - 安装路径覆盖 Codex 当前测试路径、Codex 已发布 user/repo 路径和 Claude Code user/repo 路径；
 - MCPB 内存在 Skill 不被描述成已经 activation，文档要求 restart/reload。
 
-从干净输出目录分别构建 wheel、sdist、MCPB 与 `vibecad-agent-skill-0.8.0.zip`。预期矩阵：
+从干净输出目录分别构建 wheel、sdist、MCPB 与 `vibecad-agent-skill-0.9.0.zip`。预期矩阵：
 
 | 渠道 | 包含 Skill | 规则 |
 |---|---:|---|
@@ -250,7 +257,7 @@ cache、runtime 和非预期文件没有混入；MCPB 中 README 和 Skill 是�
 4. 上传一次已经过 gate 的 archive。
 
 publisher 只能下载并发布已 gate 的 archive，不得重建。GitHub Release 同时附上 `VibeCAD.mcpb` 与
-`vibecad-agent-skill-0.8.0.zip`，且仍需要明确的 environment/tag 授权；`VCAD-A08` 已提供本次授权。
+`vibecad-agent-skill-0.9.0.zip`，且仍需要明确的 environment/tag 授权；`VCAD-A09` 已提供本次授权。
 
 ## 4. 真实受管 FreeCAD Agent Matrix
 

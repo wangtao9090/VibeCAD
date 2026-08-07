@@ -100,7 +100,7 @@ def test_package_xml_declares_local_vibecad_workbench() -> None:
     ]
     assert root.findtext("name") == "VibeCAD"
     assert root.findtext("description") == "Thin-client FreeCAD workbench for VibeCAD."
-    assert root.findtext("version") == "0.8.0"
+    assert root.findtext("version") == "0.9.0"
     maintainer = root.find("maintainer")
     assert maintainer is not None
     assert maintainer.attrib == {"email": "wangtao9090@gmail.com"}

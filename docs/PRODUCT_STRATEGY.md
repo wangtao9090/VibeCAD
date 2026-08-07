@@ -2,7 +2,7 @@
 
 > 决策日期：2026-07-23
 >
-> 适用基线：VibeCAD 0.8.0 候选 / 38-tool host-neutral MCP / Codex、Claude、WorkBuddy 分 Profile 验证
+> 适用基线：VibeCAD 0.9.0 候选 / 38-tool host-neutral MCP / Codex、Claude、WorkBuddy 分 Profile 验证
 >
 > 本文是产品调研、宿主 Agent 调研、多 CAD Backend 调研和当前代码架构的统一决策页。市场证据见
 > [`CAD_AGENT_PRODUCT_RESEARCH.md`](CAD_AGENT_PRODUCT_RESEARCH.md)，接口与 Backend 证据见
@@ -50,13 +50,13 @@ VibeCAD 当前最可信的差异不是模型更聪明或建模功能最多，而
 | AutoCAD 是否接入 | 接，但定位为 Drafting2D/DWG 市场扩展；同时规划 ZWCAD、GstarCAD |
 | AutoCAD 是否推翻架构 | 不推翻 Task Kernel；需要泛化 Artifact、Execution、Observation、Verification |
 | 未来第二真实 Backend | 市场优先看 DWG，架构中立性验证可用 Onshape；两者均未连接、未承诺 |
-| 当前先做什么 | 先完成 MR0 internal foundation；再推进真实宿主验收、G1/P0-B hardening 与 Mechanical3D |
+| 当前先做什么 | 推进已授权的 S43/S44、F10、M10、F20，并持续关闭 P0-B hardening 缺口 |
 
 ## 2. 目标用户与产品边界
 
 ### 2.1 当前产品基线
 
-VibeCAD 0.8.0 候选已具备：
+VibeCAD 0.9.0 候选已具备：
 
 - 38-tool 公共 MCP 和 host-neutral Skill；
 - 项目、任务、不可变 Revision 和 durable Draft；
@@ -64,23 +64,24 @@ VibeCAD 0.8.0 候选已具备：
 - 同用户认证 daemon、session-bound file grant；
 - 受管、可终止的 FreeCAD Worker；
 - FCStd/STEP ResourceLink、重开验证和首批六个 object-level operation。
+- 有界派生参数表达式、语义 Fillet/Chamfer 和线性变半径圆角。
 - WorkBuddy 多轮任务恢复、摘要批准与 PDF/ZIP 原生 Blob 取回。
 
 当前主要缺口是：
 
 | 缺口 | 对产品的影响 |
 |---|---|
-| 真实 Claude Code/Codex 尚未 `host-verified` | 核心外部宿主定位缺最后一公里证据 |
-| G1 FreeCAD Workbench 尚未交付 | 用户不能在 CAD 画布中自然预览、选择和审核 |
-| 只有六个 object-level operation | 尚不足以完成大多数真实机械任务 |
-| Sketcher/PartDesign/装配/TechDraw 不完整 | 与成熟代码式 CAD Agent 和原生 CAD 助手有明显能力差距 |
+| 当前 Profile 之外的宿主/模型组合尚未认证 | 不能把 Codex、Claude、WorkBuddy 的已验证 Profile 外推到所有模型 |
+| Workbench 仍是 Alpha | 已能预览、审核和顺序 checkpoint，但交互式特征编辑与兼容矩阵仍有限 |
+| 只有六个 object-level direct operation | 更广能力主要通过严格 ModelProgram 暴露，直接交互面仍窄 |
+| Pattern/Shell/Draft/Freeform/原生装配/完整 TechDraw 尚未交付 | 与成熟原生 CAD 助手仍有明显能力差距 |
 | 存量模型修改范围有限 | “不会破坏已有工程资产”的价值还未充分兑现 |
 | Artifact/Worker/Verifier 深度绑定 FCStd/STEP | 还不能直接增加 AutoCAD 等 Backend |
-| MR0 多 runtime 合同尚未实现/验收 | C00 只是架构口径；fake conformance 不等于第二 CAD 支持 |
+| MR1 durable artifact profile 尚未实现 | MR0 已完成内部 runtime foundation，但仍不能持久化第二 native CAD/Mesh 权威格式 |
 
 因此现阶段应诚实描述为：
 
-> **可信事务内核已经成立，建模广度、真实宿主体验和 CAD 内用户表面仍处于早期。**
+> **可信事务内核和有界机械交付已经成立，下一阶段扩展建模广度、视觉测量、自由曲面与派生产物。**
 
 ### 2.2 当前首要用户
 
@@ -760,7 +761,7 @@ format 或第二 CAD support 都必须 fail closed。
 11. 模型永远不能提交任意动态源码；商业 CAD Adapter 也只能执行固定、可审计 binding。
 12. Workbench 始终是 client，Provider 始终只读 sealed 输入；二者都不能复制 Task/Revision/Accept 权威。
 13. MR0 继续使用固定 FCStd/STEP durable layout；只有 MR1 迁移后才能持久化第二 native CAD。
-14. 机械验证报告是方向研究；当前近期优先级仍是 G1、P0-B hardening、真实宿主验收和 Mechanical3D。
+14. 机械验证报告是方向研究；当前近期优先级是 S43/S44、F10、M10、F20 与持续的 P0-B hardening。
 
 ## 12. 最终判断
 

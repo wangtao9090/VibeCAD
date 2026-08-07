@@ -1,4 +1,4 @@
-# VibeCAD 0.8.0 用户手册
+# VibeCAD 0.9.0 用户手册
 
 VibeCAD 是由 Claude、Codex 等宿主 Agent 调用的 FreeCAD 专家 Agent。你描述设计目标，宿主负责理解
 与规划，VibeCAD 负责把受支持的 CAD 操作放进可恢复、可审核、可验证的项目流程，并交付 FCStd、
@@ -88,7 +88,7 @@ FreeCAD.app、preferences、macro 或其他 addon；遇到外来或已变异的�
 ## 4. 单独安装 Agent Skill
 
 MCPB 内带有 Skill 的归档副本，但安装 MCPB **不等于激活 Skill**。把仓库中的
-`skills/vibecad-agent/` 或独立资产 `vibecad-agent-skill-0.8.0.zip` 解压得到的同名目录，整体复制
+`skills/vibecad-agent/` 或独立资产 `vibecad-agent-skill-0.9.0.zip` 解压得到的同名目录，整体复制
 或链接到一个宿主发现路径：
 
 | 宿主 | 用户级 | 项目级 |
@@ -133,7 +133,8 @@ WorkBuddy 手写大 ModelProgram 时，应按 canonical Skill 把完整对象写
 
 当前公开正例覆盖垫圈、圆角方形风扇垫片和带盲袋标定块；负例覆盖缺厚度和多物体杂乱场景。
 成功候选仍必须验证完全约束草图、关键尺寸、有效 BRep、单实体、参数编辑和 FCStd/STEP 资源，并等待
-用户审核。若照片或用户尺寸明确证明了生成边，宿主可在 IR 中追加有界 Fillet/Chamfer：圆角支持常量、
+用户审核。照片可以证明生成边存在及其拓扑角色，但圆角/倒角尺寸仍须图纸、测量或用户确认；满足
+这一条件后，宿主可在 IR 中追加有界 Fillet/Chamfer：圆角支持常量、
 逐边独立参数和同一非闭合边的线性起止半径，倒角支持逐边独立的对称尺寸。选择依据是源特征、源草图
 几何和 section/sweep 角色，不是临时 `EdgeN`。此能力仍不声明从照片自动猜测圆角/倒角、纯照片精密
 测量、任意逆向工程或自由曲面恢复。
@@ -303,7 +304,7 @@ FCStd 导入时只能使用用户明确授权给 `create_project` 的源文件�
 
 ## 11. 当前明确不支持的能力
 
-0.8.0 不支持：
+0.9.0 不支持：
 
 - 通用 STEP/STL import、STL 到 STEP、视频重建，以及没有独立尺寸真值的纯照片一键参数化恢复；
 - 超出冻结 IR 的通用 FCStd/Sketcher/PartDesign、自由曲面、雕塑、复杂装配与完整 TechDraw；
@@ -373,6 +374,6 @@ FreeCAD 中完成小修改。普通 **Save** 只保存该受管工作副本，**
 STEP 等只适合作为 accepted Revision 的可选 Git LFS 快照；Git 不是 VibeCAD HEAD，也不能语义合并
 原生 CAD 文件。完整边界见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VERSIONING_RESEARCH.md)。
 
-0.8.0 对 Codex、Claude、WorkBuddy 使用同一发布包 smoke 合同，并分别记录宿主版本、Skill/package
+0.9.0 对 Codex、Claude、WorkBuddy 使用同一发布包 smoke 合同，并分别记录宿主版本、Skill/package
 hash、38-tool discovery、任务恢复、建模和 ResourceLink/`resources/read` 结果。WorkBuddy 另测其
 严格错误呈现与 bounded submit 兼容路径；任一宿主通过都不替代另外两个。
