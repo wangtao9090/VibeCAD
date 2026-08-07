@@ -11,7 +11,7 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Self
@@ -29,6 +29,10 @@ MAX_FREEFORM_IR_BYTES = 256 * 1024
 _MAX_TEXT_BYTES = 256
 _MAX_ABSOLUTE_VALUE = 1_000_000_000
 _MAX_CURVE_KNOT_VALUES = MAX_CURVE_CONTROL_POINTS + 6
+_MAX_JSON_DEPTH = 8
+_MAX_JSON_FIELDS = 16
+_MAX_JSON_NODES = 8_192
+_MAX_JSON_SEQUENCE_ITEMS = MAX_TOTAL_CONTROL_POINTS
 _ID = re.compile(r"^freeform_(?:design|curve|feature)_[0-9a-f]{32}$")
 _DIGEST_DOMAIN = b"vibecad-freeform-design-v1\0"
 
@@ -88,8 +92,10 @@ def _safe_path(parent: str, name: str) -> str:
 
 
 def _fields(value: object, *, allowed: set[str], required: set[str], path: str) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
+    if type(value) is not dict:
         _raise(FreeformErrorCode.INVALID_TYPE, path)
+    if len(value) > _MAX_JSON_FIELDS:
+        _raise(FreeformErrorCode.BUDGET_EXCEEDED, path)
     if not all(type(key) is str for key in value):
         _raise(FreeformErrorCode.INVALID_TYPE, path)
     unknown = sorted(set(value) - allowed)
@@ -150,17 +156,83 @@ def _boolean(value: object, path: str) -> bool:
 
 
 def _sequence(value: object, path: str, *, maximum: int) -> Sequence[Any]:
-    if not isinstance(value, (list, tuple)):
+    if type(value) not in {list, tuple}:
         _raise(FreeformErrorCode.INVALID_TYPE, path)
     if len(value) > maximum:
         _raise(FreeformErrorCode.BUDGET_EXCEEDED, path)
     return value
 
 
-def _ensure_ir_size_budget(value: object) -> None:
-    """Bound encoded input before any nested contract objects are created."""
+def _validate_exact_json(
+    value: object,
+    *,
+    path: str,
+    depth: int,
+    active: set[int],
+    node_count: list[int],
+) -> None:
+    node_count[0] += 1
+    if node_count[0] > _MAX_JSON_NODES:
+        _raise(FreeformErrorCode.BUDGET_EXCEEDED, path)
+    if depth > _MAX_JSON_DEPTH:
+        _raise(FreeformErrorCode.BUDGET_EXCEEDED, path)
+    value_type = type(value)
+    if value_type is dict:
+        if len(value) > _MAX_JSON_FIELDS:
+            _raise(FreeformErrorCode.BUDGET_EXCEEDED, path)
+        identity = id(value)
+        if identity in active:
+            _raise(FreeformErrorCode.INVALID_VALUE, path)
+        active.add(identity)
+        try:
+            for key, item in value.items():
+                if type(key) is not str:
+                    _raise(FreeformErrorCode.INVALID_TYPE, path)
+                child_path = _safe_path(path, key)
+                _validate_exact_json(
+                    item,
+                    path=child_path,
+                    depth=depth + 1,
+                    active=active,
+                    node_count=node_count,
+                )
+        finally:
+            active.remove(identity)
+        return
+    if value_type in {list, tuple}:
+        if len(value) > _MAX_JSON_SEQUENCE_ITEMS:
+            _raise(FreeformErrorCode.BUDGET_EXCEEDED, path)
+        identity = id(value)
+        if identity in active:
+            _raise(FreeformErrorCode.INVALID_VALUE, path)
+        active.add(identity)
+        try:
+            for index, item in enumerate(value):
+                _validate_exact_json(
+                    item,
+                    path=f"{path}/{index}",
+                    depth=depth + 1,
+                    active=active,
+                    node_count=node_count,
+                )
+        finally:
+            active.remove(identity)
+        return
+    if value_type is str:
+        if len(value) > MAX_FREEFORM_IR_BYTES:
+            _raise(FreeformErrorCode.BUDGET_EXCEEDED, path)
+        return
+    if value_type in {bool, float, int, type(None)}:
+        return
+    _raise(FreeformErrorCode.INVALID_TYPE, path)
 
-    encoder = json.JSONEncoder(allow_nan=False, ensure_ascii=False, separators=(",", ":"))
+
+def _ensure_ir_size_budget(value: object, path: str = "") -> None:
+    """Validate exact JSON shape and bound bytes before contract materialization."""
+
+    _validate_exact_json(value, path=path, depth=0, active=set(), node_count=[0])
+
+    encoder = json.JSONEncoder(allow_nan=True, ensure_ascii=False, separators=(",", ":"))
     total = 0
     try:
         for chunk in encoder.iterencode(value):
@@ -170,8 +242,7 @@ def _ensure_ir_size_budget(value: object) -> None:
     except FreeformContractError:
         raise
     except (RecursionError, TypeError, UnicodeError, ValueError):
-        # Semantic validation below owns malformed or non-JSON-compatible values.
-        return
+        _raise(FreeformErrorCode.INVALID_VALUE, path)
 
 
 def _preflight_curve_parse_budget(raw_curves: Sequence[Any]) -> None:
@@ -179,10 +250,10 @@ def _preflight_curve_parse_budget(raw_curves: Sequence[Any]) -> None:
 
     total = 0
     for index, raw_curve in enumerate(raw_curves):
-        if not isinstance(raw_curve, Mapping):
+        if type(raw_curve) is not dict:
             continue
         raw_points = raw_curve.get("control_points")
-        if not isinstance(raw_points, (list, tuple)):
+        if type(raw_points) not in {list, tuple}:
             continue
         if len(raw_points) > MAX_CURVE_CONTROL_POINTS:
             _raise(FreeformErrorCode.BUDGET_EXCEEDED, f"/curves/{index}/control_points")
@@ -233,6 +304,7 @@ class Point3D:
 
     @classmethod
     def from_mapping(cls, value: object, path: str = "") -> Self:
+        _ensure_ir_size_budget(value, path)
         fields = _fields(
             value,
             allowed={"x_mm", "y_mm", "z_mm"},
@@ -328,6 +400,7 @@ class SplineCurve:
 
     @classmethod
     def from_mapping(cls, value: object, path: str = "") -> Self:
+        _ensure_ir_size_budget(value, path)
         fields = _fields(
             value,
             allowed={
@@ -431,6 +504,7 @@ class FreeformFeature:
 
     @classmethod
     def from_mapping(cls, value: object, path: str = "") -> Self:
+        _ensure_ir_size_budget(value, path)
         fields = _fields(
             value,
             allowed={"id", "name", "kind", "section_ids", "guide_ids", "solid"},

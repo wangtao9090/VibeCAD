@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 
 import pytest
 
@@ -20,6 +21,36 @@ from vibecad.freeform.contracts import (
     SplineCurve,
     SplineKind,
 )
+
+
+class _ExplosiveMapping(Mapping):
+    def __getitem__(self, key):
+        raise AssertionError("custom mapping must not be accessed")
+
+    def __iter__(self):
+        raise AssertionError("custom mapping must not be iterated")
+
+    def __len__(self):
+        raise AssertionError("custom mapping length must not be read")
+
+
+class _ExplosiveDict(dict):
+    def __iter__(self):
+        raise AssertionError("dict subclass must not be iterated")
+
+    def __len__(self):
+        raise AssertionError("dict subclass length must not be read")
+
+    def items(self):
+        raise AssertionError("dict subclass items must not be read")
+
+
+class _ExplosiveList(list):
+    def __iter__(self):
+        raise AssertionError("list subclass must not be iterated")
+
+    def __len__(self):
+        raise AssertionError("list subclass length must not be read")
 
 
 def _curve(
@@ -257,4 +288,70 @@ def test_encoded_ir_budget_precedes_nested_contract_parsing() -> None:
         FreeformDesign.from_mapping(mapping)
 
     assert raised.value.code is FreeformErrorCode.BUDGET_EXCEEDED
+    assert raised.value.path == "/name"
+
+
+@pytest.mark.parametrize(
+    "parser",
+    (
+        Point3D.from_mapping,
+        SplineCurve.from_mapping,
+        FreeformFeature.from_mapping,
+        FreeformDesign.from_mapping,
+    ),
+)
+@pytest.mark.parametrize("value", (_ExplosiveMapping(), _ExplosiveDict()))
+def test_custom_mappings_are_rejected_without_access(parser, value) -> None:
+    with pytest.raises(FreeformContractError) as raised:
+        parser(value)
+
+    assert raised.value.code is FreeformErrorCode.INVALID_TYPE
     assert raised.value.path == ""
+
+
+def test_nested_custom_mapping_is_rejected_without_access() -> None:
+    mapping = _design().to_mapping()
+    mapping["curves"] = [_ExplosiveMapping()]
+
+    with pytest.raises(FreeformContractError) as raised:
+        FreeformDesign.from_mapping(mapping)
+
+    assert raised.value.code is FreeformErrorCode.INVALID_TYPE
+    assert raised.value.path == "/curves/0"
+
+
+def test_custom_sequence_is_rejected_before_length_or_iteration() -> None:
+    mapping = _curve("a", 0).to_mapping()
+    mapping["control_points"] = _ExplosiveList()
+
+    with pytest.raises(FreeformContractError) as raised:
+        SplineCurve.from_mapping(mapping)
+
+    assert raised.value.code is FreeformErrorCode.INVALID_TYPE
+    assert raised.value.path == "/control_points"
+
+
+@pytest.mark.parametrize(
+    ("parser", "mapping", "path"),
+    (
+        (
+            SplineCurve.from_mapping,
+            {**_curve("a", 0).to_mapping(), "name": "x" * (MAX_FREEFORM_IR_BYTES + 1)},
+            "/name",
+        ),
+        (
+            FreeformFeature.from_mapping,
+            {
+                **_design().feature.to_mapping(),
+                "name": "x" * (MAX_FREEFORM_IR_BYTES + 1),
+            },
+            "/name",
+        ),
+    ),
+)
+def test_direct_nested_parsers_apply_encoded_size_preflight(parser, mapping, path) -> None:
+    with pytest.raises(FreeformContractError) as raised:
+        parser(mapping)
+
+    assert raised.value.code is FreeformErrorCode.BUDGET_EXCEEDED
+    assert raised.value.path == path
