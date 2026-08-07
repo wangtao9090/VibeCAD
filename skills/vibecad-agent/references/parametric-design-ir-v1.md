@@ -2,9 +2,8 @@
 
 Read this reference only when `get_capabilities` reports the ModelProgram operation
 `create_parametric_design` with argument value shape `parametric_design_ir`. It is a strict JSON
-wire contract for one editable PartDesign Body; it is not permission to run Python, FreeCAD code,
-macros, raw FreeCAD expressions, or arbitrary operations. The only expression input is the bounded
-structured affine parameter shape defined below.
+wire contract for one editable PartDesign Body with optional Fillet/Chamfer tail. It permits no
+Python, macros, FreeCAD code/strings, or arbitrary operations.
 
 ## Admission boundary
 
@@ -43,12 +42,14 @@ identity is byte-for-byte present in the declarations and that no reference has 
 
 ## Root and nested shapes
 
-The root contains exactly:
+Without edge treatments, the root contains exactly:
 
 ```text
 schema_version, id, name, units, body, evidence, parameters,
 datum_planes, sketches, features
 ```
+
+Add `edge_treatments` only when nonempty; never send `"edge_treatments": []`.
 
 `units` is `{schema_version, length: "mm", angle: "deg"}`. `body` is
 `{schema_version, id, name}`.
@@ -210,6 +211,26 @@ feature must produce one valid solid. `axis` is required only for Revolve and mu
 Pad, Pocket, and Hole. `location_geometry_ids` is populated only for Hole. For a positive-Z pad on
 the origin XY plane, the verified same-plane through-hole profile uses `reversed: true`; always
 verify subtractive direction through the deterministic shape checks.
+
+### Semantic Fillet/Chamfer tail
+
+Treatment shape: `{schema_version, id, name, kind, base_feature_id, targets, evidence_ids}`.
+`kind` is `fillet|chamfer`; IDs remain `ir_feature_`. Treatments follow PartDesign features;
+the combined total is at most eight. The final treatment is the result root.
+
+Each has 1–16 unique `{schema_version, edge, start_parameter_id, end_parameter_id}` targets.
+`edge` is `{schema_version, source_feature_id, geometry_id, role, point}` naming a
+Pad/Pocket/Hole/Revolve and nonconstruction geometry. Never use `EdgeN`, `FaceN`, labels, or indexes.
+
+Use `sweep` + `start|end` for a line/arc endpoint's swept edge. Use
+`section_start|section_end` + `whole` for a profile edge at either feature-direction end.
+
+Parameters are positive mm lengths. Equal IDs mean constant Fillet; different IDs mean a linear
+radius law on an oriented nonclosed edge. Targets may differ. Chamfer requires equal IDs. Variable
+Chamfer, multi-point laws, tangent chains, and STEP edges are unsupported.
+
+Edit/reload re-resolves targets; missing, ambiguous, duplicate, direction-flipped, invalid, or
+kernel-failed results roll back atomically.
 
 Origin planes use these local axes and normals:
 

@@ -26,6 +26,9 @@ from vibecad.parametric import (
     DesignEvidenceStatus,
     DesignParameter,
     DesignUnit,
+    EdgeTreatmentFeature,
+    EdgeTreatmentKind,
+    EdgeTreatmentTarget,
     FeatureExtent,
     FeatureKind,
     GeometryKind,
@@ -36,6 +39,8 @@ from vibecad.parametric import (
     PartDesignFeature,
     PlaneKind,
     ReferencePoint,
+    SemanticEdgeReference,
+    SemanticEdgeRole,
     SketchConstraint,
     SketchGeometry,
     SketchPlane,
@@ -194,6 +199,183 @@ def _rectangle_design() -> ParametricDesignIR:
                 extent=FeatureExtent.LENGTH,
             ),
         ),
+    )
+
+
+def _edge_treatment_design(
+    kind: EdgeTreatmentKind = EdgeTreatmentKind.FILLET,
+) -> ParametricDesignIR:
+    base = _rectangle_design()
+    start_id = _id("parameter", 20)
+    end_id = start_id if kind is EdgeTreatmentKind.CHAMFER else _id("parameter", 21)
+    extra_parameters = (
+        DesignParameter(
+            id=start_id,
+            name="Edge treatment start",
+            kind=ParameterKind.LENGTH,
+            value=1,
+            unit=DesignUnit.MM,
+            evidence_ids=(EVIDENCE,),
+            minimum=0.1,
+            maximum=100,
+        ),
+    )
+    if end_id != start_id:
+        extra_parameters += (
+            DesignParameter(
+                id=end_id,
+                name="Edge treatment end",
+                kind=ParameterKind.LENGTH,
+                value=3,
+                unit=DesignUnit.MM,
+                evidence_ids=(EVIDENCE,),
+                minimum=0.1,
+                maximum=100,
+            ),
+        )
+    return replace(
+        base,
+        parameters=base.parameters + extra_parameters,
+        edge_treatments=(
+            EdgeTreatmentFeature(
+                id=_id("feature", 2),
+                name="Edge treatment",
+                kind=kind,
+                base_feature_id=base.features[-1].id,
+                targets=(
+                    EdgeTreatmentTarget(
+                        edge=SemanticEdgeReference(
+                            source_feature_id=base.features[-1].id,
+                            geometry_id=BOTTOM,
+                            role=SemanticEdgeRole.SWEEP,
+                            point=ReferencePoint.START,
+                        ),
+                        start_parameter_id=start_id,
+                        end_parameter_id=end_id,
+                    ),
+                ),
+                evidence_ids=(EVIDENCE,),
+            ),
+        ),
+    )
+
+
+def _with_constant_fillet(
+    base: ParametricDesignIR,
+    *,
+    geometry_id: str,
+    role: SemanticEdgeRole,
+    point: ReferencePoint,
+) -> ParametricDesignIR:
+    radius_id = _id("parameter", 90)
+    source_feature = base.features[-1]
+    return replace(
+        base,
+        parameters=base.parameters
+        + (
+            DesignParameter(
+                id=radius_id,
+                name="Constant fillet radius",
+                kind=ParameterKind.LENGTH,
+                value=1,
+                unit=DesignUnit.MM,
+                evidence_ids=(base.evidence[0].id,),
+                minimum=0.1,
+                maximum=100,
+            ),
+        ),
+        edge_treatments=(
+            EdgeTreatmentFeature(
+                id=_id("feature", 90),
+                name="Constant fillet",
+                kind=EdgeTreatmentKind.FILLET,
+                base_feature_id=source_feature.id,
+                targets=(
+                    EdgeTreatmentTarget(
+                        edge=SemanticEdgeReference(
+                            source_feature_id=source_feature.id,
+                            geometry_id=geometry_id,
+                            role=role,
+                            point=point,
+                        ),
+                        start_parameter_id=radius_id,
+                        end_parameter_id=radius_id,
+                    ),
+                ),
+                evidence_ids=(base.evidence[0].id,),
+            ),
+        ),
+    )
+
+
+def _multi_edge_fillet_design() -> ParametricDesignIR:
+    base = _edge_treatment_design()
+    radius_id = _id("parameter", 22)
+    parameter = DesignParameter(
+        id=radius_id,
+        name="Second edge radius",
+        kind=ParameterKind.LENGTH,
+        value=2,
+        unit=DesignUnit.MM,
+        evidence_ids=(EVIDENCE,),
+        minimum=0.1,
+        maximum=100,
+    )
+    treatment = base.edge_treatments[0]
+    return replace(
+        base,
+        parameters=base.parameters + (parameter,),
+        edge_treatments=(
+            replace(
+                treatment,
+                targets=treatment.targets
+                + (
+                    EdgeTreatmentTarget(
+                        edge=SemanticEdgeReference(
+                            source_feature_id=base.features[-1].id,
+                            geometry_id=BOTTOM,
+                            role=SemanticEdgeRole.SWEEP,
+                            point=ReferencePoint.END,
+                        ),
+                        start_parameter_id=radius_id,
+                        end_parameter_id=radius_id,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def _revolve_edge_treatment_design() -> ParametricDesignIR:
+    base = _rectangle_design()
+    parameters = tuple(
+        replace(
+            parameter,
+            name="Revolve angle",
+            kind=ParameterKind.ANGLE,
+            value=360,
+            unit=DesignUnit.DEG,
+            minimum=1,
+            maximum=360,
+        )
+        if parameter.id == DEPTH
+        else parameter
+        for parameter in base.parameters
+    )
+    feature = replace(
+        base.features[0],
+        name="Revolve",
+        kind=FeatureKind.REVOLVE,
+        parameters={"angle": DEPTH},
+        extent=None,
+        axis="@sketch_y",
+    )
+    revolved = replace(base, parameters=parameters, features=(feature,))
+    return _with_constant_fillet(
+        revolved,
+        geometry_id=BOTTOM,
+        role=SemanticEdgeRole.SWEEP,
+        point=ReferencePoint.END,
     )
 
 
@@ -989,6 +1171,199 @@ def test_real_slot_compiles_to_fully_constrained_editable_native_geometry(
         }
         assert slot_facts["parametric.dof"] == 0
         assert slot_facts["parametric.fully_constrained"] is True
+    finally:
+        session.close_document()
+
+
+@pytest.mark.slow
+def test_real_variable_fillet_survives_parameter_edits_rollback_and_reopen(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    design = _edge_treatment_design()
+    end_parameter_id = _id("parameter", 21)
+    path = tmp_path / "s42-variable-fillet.FCStd"
+    session = Session()
+    session.open_document("S42VariableFillet")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        stabilize_parametric_session(session)
+
+        assert compiled.result_object is compiled.edge_treatments[-1].object
+        assert compiled.result_object.TypeId == "Part::Fillet"
+        assert len(tuple(compiled.result_object.Edges)) == 1
+        assert tuple(compiled.result_object.Edges[0][1:]) == pytest.approx((1, 3))
+        initial_volume = float(compiled.result_object.Shape.Volume)
+
+        radius_edit = compiler_module.modify_parametric_parameter(
+            session,
+            design,
+            body=compiled.body,
+            parameter_id=end_parameter_id,
+            value=4,
+        )
+        assert (radius_edit.before_value, radius_edit.after_value) == (3, 4)
+        assert tuple(compiled.result_object.Edges[0][1:]) == pytest.approx((1, 4))
+        assert float(compiled.result_object.Shape.Volume) != pytest.approx(initial_volume)
+
+        depth_edit = compiler_module.modify_parametric_parameter(
+            session,
+            design,
+            body=compiled.body,
+            parameter_id=DEPTH,
+            value=10,
+        )
+        assert (depth_edit.before_value, depth_edit.after_value) == (8, 10)
+        assert tuple(compiled.result_object.Edges[0][1:]) == pytest.approx((1, 4))
+        valid_volume = float(compiled.result_object.Shape.Volume)
+
+        sweep_forward = compiler_module._sweep_forward
+        monkeypatch.setattr(
+            compiler_module,
+            "_sweep_forward",
+            lambda *args, **kwargs: not sweep_forward(*args, **kwargs),
+        )
+        with pytest.raises(ParametricCompileError):
+            compiler_module.modify_parametric_parameter(
+                session,
+                design,
+                body=compiled.body,
+                parameter_id=end_parameter_id,
+                value=5,
+            )
+        monkeypatch.setattr(compiler_module, "_sweep_forward", sweep_forward)
+        stabilize_parametric_session(session)
+        assert tuple(compiled.result_object.Edges[0][1:]) == pytest.approx((1, 4))
+        assert float(compiled.result_object.Shape.Volume) == pytest.approx(valid_volume)
+
+        with pytest.raises(ParametricCompileError):
+            compiler_module.modify_parametric_parameter(
+                session,
+                design,
+                body=compiled.body,
+                parameter_id=end_parameter_id,
+                value=101,
+            )
+        stabilize_parametric_session(session)
+        assert tuple(compiled.result_object.Edges[0][1:]) == pytest.approx((1, 4))
+        assert float(compiled.result_object.Shape.Volume) == pytest.approx(valid_volume)
+
+        session.doc.saveAs(str(path))
+    finally:
+        session.close_document()
+
+    reopened = Session()
+    try:
+        reopened.load_document(path)
+        stabilize_parametric_session(reopened)
+        fillets = tuple(obj for obj in reopened.doc.Objects if obj.TypeId == "Part::Fillet")
+        assert len(fillets) == 1
+        assert tuple(fillets[0].Edges[0][1:]) == pytest.approx((1, 4))
+        assert fillets[0].Shape.isValid()
+        assert len(tuple(fillets[0].Shape.Solids)) == 1
+    finally:
+        reopened.close_document()
+
+
+@pytest.mark.slow
+def test_real_symmetric_chamfer_compiles_as_native_tail() -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    session = Session()
+    session.open_document("S42SymmetricChamfer")
+    try:
+        compiled = compiler_module.compile_parametric_design(
+            session,
+            _edge_treatment_design(EdgeTreatmentKind.CHAMFER),
+        )
+        stabilize_parametric_session(session)
+        assert compiled.result_object.TypeId == "Part::Chamfer"
+        assert tuple(compiled.result_object.Edges[0][1:]) == pytest.approx((1, 1))
+        assert compiled.result_object.Shape.isValid()
+        assert len(tuple(compiled.result_object.Shape.Solids)) == 1
+    finally:
+        session.close_document()
+
+
+@pytest.mark.slow
+def test_real_multi_edge_fillet_preserves_independent_parameters() -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    design = _multi_edge_fillet_design()
+    session = Session()
+    session.open_document("S42MultiEdgeFillet")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        stabilize_parametric_session(session)
+        before = tuple(tuple(item[1:]) for item in compiled.result_object.Edges)
+        assert before[0] == pytest.approx((1, 3))
+        assert before[1] == pytest.approx((2, 2))
+
+        edit = compiler_module.modify_parametric_parameter(
+            session,
+            design,
+            body=compiled.body,
+            parameter_id=_id("parameter", 22),
+            value=2.5,
+        )
+        assert (edit.before_value, edit.after_value) == (2, 2.5)
+        after = tuple(tuple(item[1:]) for item in compiled.result_object.Edges)
+        assert after[0] == pytest.approx((1, 3))
+        assert after[1] == pytest.approx((2.5, 2.5))
+    finally:
+        session.close_document()
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("source_kind", ("pocket", "hole", "revolve"))
+def test_real_constant_fillet_compiles_after_supported_partdesign_features(
+    source_kind: str,
+) -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    if source_kind == "pocket":
+        from tests.guided_photo_designs import calibration_block_target
+
+        base = calibration_block_target().design
+        design = _with_constant_fillet(
+            base,
+            geometry_id=base.sketches[-1].geometries[0].id,
+            role=SemanticEdgeRole.SECTION_END,
+            point=ReferencePoint.WHOLE,
+        )
+    elif source_kind == "hole":
+        base = _multi_hole_design()
+        design = _with_constant_fillet(
+            base,
+            geometry_id=base.sketches[-1].geometries[0].id,
+            role=SemanticEdgeRole.SECTION_END,
+            point=ReferencePoint.WHOLE,
+        )
+    else:
+        design = _revolve_edge_treatment_design()
+
+    from vibecad.engine.session import Session
+
+    session = Session()
+    session.open_document(f"S42{source_kind.title()}Fillet")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        stabilize_parametric_session(session)
+        assert compiled.result_object.TypeId == "Part::Fillet"
+        assert compiled.result_object.Shape.isValid()
+        assert len(tuple(compiled.result_object.Shape.Solids)) == 1
     finally:
         session.close_document()
 

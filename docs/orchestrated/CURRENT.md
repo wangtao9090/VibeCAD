@@ -1,10 +1,10 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **v0.8.0 published; S41 merged and complete**
+> Status: **v0.8.0 published; S41 complete; S42 implementation and local gates complete**
 >
-> Updated: 2026-08-06
+> Updated: 2026-08-07
 >
-> Repository anchor: `main@3199c61`; published tag `v0.8.0@6ee230f`
+> Repository anchor: `main@c67ba15`; published tag `v0.8.0@6ee230f`
 >
 > Active plan: [`vibecad-visual-cad.md`](vibecad-visual-cad.md)
 >
@@ -26,6 +26,19 @@ The DCC/mesh tooling research is now captured in
 the first external sculpture-host candidate, Open3D is the preferred permissive
 algorithm library, and GPL PyMeshLab remains optional pending license review.
 This research does not expand `VCAD-A02`.
+
+On 2026-08-07 the user approved S42's bounded semantic edge-treatment slice.
+The public MCP, Task, Revision, HEAD, durable schema, runtime epoch, and
+SelectorV1 contracts stay unchanged. ParametricDesignIR v1 gains one optional
+Fillet/Chamfer tail after its PartDesign Body: one to sixteen semantic targets
+per treatment, at most eight combined PartDesign/treatment nodes, constant and
+per-edge Fillet, one linear start/end Fillet law on an oriented nonclosed edge,
+and symmetric per-edge Chamfer. Selection is reconstructed from source feature,
+source sketch geometry, and section/sweep role; no transient EdgeN is durable or
+public. Ambiguity, missing topology, variable-edge direction reversal, or invalid
+kernel geometry fails the whole transaction closed. Arbitrary imported STEP
+edges, tangent-chain propagation, variable Chamfer, multi-point radius laws,
+complex blends, semantic merge, and manual-topology repair remain outside S42.
 
 On 2026-08-04 the user approved `VCAD-A04`. The public V1 envelope is now
 frozen to a single dimension-complete mechanical extruded or revolved part,
