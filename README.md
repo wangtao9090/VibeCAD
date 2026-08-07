@@ -21,6 +21,8 @@ execution, deterministic verification, recovery, and delivery.
   Accept, and Reject.
 - Deterministic Task Kernel execution: isolated candidates, explicit review policy, verified
   FCStd/STEP artifacts, recovery, and replay-safe request semantics.
+- Editable parametric designs with bounded derived-parameter linkage and semantic Fillet/Chamfer
+  treatments, including one linear start-to-end variable-radius fillet on an oriented edge.
 - A host-neutral 38-tool MCP and Skill contract for Codex, Claude, WorkBuddy, and other compatible
   agents; each real host profile is certified separately against the same package smoke.
 - Additional WorkBuddy 5.3.5 compatibility coverage for strict-error recovery, durable restart,
@@ -32,7 +34,7 @@ execution, deterministic verification, recovery, and delivery.
 The easiest installation path is to give your coding Agent this request:
 
 > Install and launch the VibeCAD FreeCAD Workbench Alpha from
-> https://github.com/wangtao9090/VibeCAD. Use tag `v0.8.0`, clone it into a persistent
+> https://github.com/wangtao9090/VibeCAD. Use tag `v0.9.0`, clone it into a persistent
 > directory, build its wheel, install it with `uv tool install --force`, keep
 > the checkout and built wheel, and run `vibecad --freecad`. Do not install or
 > fall back to a system copy of FreeCAD.
@@ -41,10 +43,10 @@ The Agent's reproducible procedure is:
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout v0.8.0
+git -C VibeCAD checkout v0.9.0
 cd VibeCAD
 uv build --wheel
-uv tool install --force dist/vibecad-0.8.0-py3-none-any.whl
+uv tool install --force dist/vibecad-0.9.0-py3-none-any.whl
 vibecad --freecad
 ```
 
@@ -233,7 +235,7 @@ Skill discovery paths are:
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
 | WorkBuddy | — | `.codebuddy/skills/vibecad-agent` |
 
-The release asset `vibecad-agent-skill-0.8.0.zip` contains exactly one top-level
+The release asset `vibecad-agent-skill-0.9.0.zip` contains exactly one top-level
 `vibecad-agent/` directory after extraction. That directory can be copied as a whole to any path
 listed above. The Python wheel contains the server and the FreeCAD Workbench addon, while the
 managed runtime contains the matching server environment. Neither package activates the Agent
@@ -304,7 +306,7 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 
 ## What “Host-ready” Means Precisely
 
-The 0.8.0 release contract verifies the MCP protocol, Skill package structure, FCStd/STEP and
+The 0.9.0 release contract verifies the MCP protocol, Skill package structure, FCStd/STEP and
 Release ResourceLinks, managed FreeCAD E2E, and exact 38-tool discovery independently of any host.
 Real Codex, Claude, and WorkBuddy package smokes are recorded as separate host profiles; passing one
 never certifies the others. WorkBuddy additionally carries the compatibility coverage described
@@ -321,7 +323,7 @@ one-time file grants; it does not create a second commit system.
 
 S3-8, P0-B core, the package/managed-runtime closeout, bounded G1 Workbench Alpha, P1 sequential
 editing, P2 rigid mechanical delivery, bounded visual mechanical CAD, and host integration are
-included in 0.8.0:
+included in 0.9.0:
 
 - **P0-B core (backend complete)**: task/project/version discovery, file-level comparison,
   verified forward revert, cancellation/reconcile, authenticated daemon, file grants, source
@@ -337,16 +339,23 @@ included in 0.8.0:
   native joints, editable manufacturing drawings, GD&T, PLM, and enterprise delivery chains remain;
 - **WorkBuddy (verified)**: WorkBuddy 5.3.5 with GLM-5.2 completed strict local stdio tool use,
   durable task/restart recovery, exact digest approval, and native PDF/ZIP Blob reads; the wider
-  model comparison remains future evidence, not a release blocker. On the current visual branch,
-  GLM-5V-Turbo also turned the frozen dimensioned plate fixture into a verified editable draft via
-  the bounded submit adapter; this is not a claim of universal photo reconstruction.
+  model comparison remains future evidence, not a release blocker. In the recorded v0.7.0 Visual
+  Mechanical host evidence, GLM-5V-Turbo also turned the frozen dimensioned plate fixture into a
+  verified editable draft via the bounded submit adapter; this is not a claim of universal photo
+  reconstruction.
 - **Visual Mechanical V1**: one fully dimensioned view, or 2–16 clean complementary views of the
   same object/state/scale, can produce one editable extruded or revolved mechanical part. Missing
   scale/depth, conflicting views, occlusion, and hidden structure must clarify or fail safely.
 - **Guided Photo V3**: bounded ordinary-photo parts may use capture/scale/completeness screening,
   native editable slots, and independently confirmed critical dimensions before entering the same
   reviewed Task Kernel. Three public positives and two pre-Task safe failures define the claim;
-  arbitrary photo metrology, hidden geometry recovery, Fillet/Chamfer, and freeform remain excluded.
+  arbitrary photo metrology, hidden geometry recovery, and freeform remain excluded. Confirmed
+  generated edges may use bounded semantic Fillet/Chamfer treatments; the system does not infer
+  those treatments from photographs alone.
+- **Parametric linkage and edge treatments**: structured affine derived parameters drive native
+  FreeCAD expressions, while stable source-feature/sketch-role semantics select generated edges for
+  constant, per-edge, or linear variable-radius Fillet and symmetric Chamfer operations. Ambiguity,
+  invalid geometry, and direction reversal fail the whole candidate transaction closed.
 
 The G1 Workbench Alpha packages the real FreeCAD Qt UI and its deterministic managed launcher. It
 includes one Workbench and Dock, daemon-backed refresh, separate HEAD/draft preview, verdict,

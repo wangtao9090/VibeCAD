@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S30.1`–`VCAD-S41` 与 `VCAD-A08` 已完成**
+> 状态：**`VCAD-S30.1`–`VCAD-S42` 已完成；`VCAD-A09` 发布与四路线冲刺进行中**
 >
-> 更新：2026-08-06
+> 更新：2026-08-07
 >
-> 产品基线：已发布 `v0.8.0@6ee230f`
+> 产品基线：已发布 `v0.8.0@6ee230f`；v0.9.0 候选锚点 `main@0361aff`
 >
-> 当前里程碑：`VCAD-S41` Derived Expression Linkage 已合入 `main`
+> 当前里程碑：`VCAD-S42` Semantic Edge Treatments 已合入 `main`
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -660,6 +660,18 @@ Skill 约束配方；未增加 MCP tool、Task 状态、CAD operation 或第二�
 保持不变。focused contract/fixture/Skill 门为 `75 passed, 11 deselected`；PR #16 的 `lint-unit` 与
 `runtime-integration` 分别在 2m21s 和 1m55s 通过，并以 merge commit `3199c61` 合入 `main`。
 
+### VCAD-S42 — Semantic Edge Treatments
+
+用户能力：对 VibeCAD 生成的 Pad、Pocket、Hole、Revolve 使用稳定语义选择创建恒定、逐边或同一
+有向边线性起止半径的 Fillet，以及逐边对称 Chamfer；参数修改、保存重开和导出后继续验证。
+
+合同边界：选择持久化源特征、源草图几何和 section/sweep 角色，不持久化 `EdgeN`；任意歧义、
+缺失、重复、方向翻转或 kernel 失败都使整个事务回滚。导入 STEP 任意边、切线链传播、变量
+Chamfer、多点半径律、复杂 blend 和拓扑自动修复不在 S42。
+
+PR #18 已以 merge commit `5950da2` 合入，完整回归为 `5,950 passed, 133 deselected`，真实受管
+FreeCAD 慢速门为 13 passed；CI 的 lint/unit 与 runtime-integration 均通过。S42 完成。
+
 ### VCAD-F10 — Industrial Freeform Alpha
 
 启动条件：S35 稳定，并经 `VCAD-A05` 单独批准自由曲面输出和验收合同。
@@ -778,10 +790,11 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 | `VCAD-A02` | 批准 ReconstructionDraft/image store、retention/delete、durable-root 与 public contract | **已批准** |
 | `VCAD-A03` | 批准真实外部视觉 Provider、数据处理与费用边界 | **已批准；2026-08-04** |
 | `VCAD-A04` | 根据 pilot 结果冻结公开支持包络和 V1 发布声明 | **已批准；2026-08-04** |
-| `VCAD-A05` | 启动 Freeform，批准其输出类型与验收合同 | 未到达 |
+| `VCAD-A05` | 启动 Freeform，批准其输出类型与验收合同 | **已批准；2026-08-07** |
 | `VCAD-A06` | tag/PyPI/GitHub Release 或其他公开发布 | **已完成；2026-08-04；v0.7.0** |
 | `VCAD-A07` | 启动 S40 Guided Photo V3 普通照片机械重建 | **已批准；2026-08-05** |
 | `VCAD-A08` | 将 S40 作为 v0.8.0 发布，并在发布后启动 S41 派生表达式联动 | **已完成；2026-08-06；v0.8.0** |
+| `VCAD-A09` | 将 S41/S42 发布为 v0.9.0，并启动 Mechanical、F10、M10、F20 四路线 20 小时冲刺 | **已批准；2026-08-07；执行中** |
 
 `VCAD-A01` 批准后，S10 和 S20.0 合同设计范围内的本地可逆实现、必要测试、计划内文档更新，
 以及按既有授权进行的有意 commit/branch push 无需重复请求。`VCAD-A02` 已进一步批准 S20.1–S20.5
@@ -835,16 +848,13 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 当前下一动作：
 
 ```text
-S35、A06 与 A08 已完成；S40 Guided Photo V3 的 capture contract、原生 slot、私有 hidden-evaluator pilot、
-公开固定三正两负和 Codex/Claude/WorkBuddy outcome gate 已作为 v0.8.0 发布。当前版本支持有清晰单位和完整尺寸的单个机械拉伸件/回转件，以及
-2–16 张同一物体/状态/尺度的干净互补视图；输出为可编辑 Sketcher + bounded PartDesign，confirmed
-尺寸、BRep 和单实体均经 deterministic verifier。无尺度、冲突、遮挡或隐藏结构必须澄清或
-SAFE_FAILURE。v0.8.0 已经 Codex/Claude/WorkBuddy 双进程恢复/审核/资源门、PR/main、tag、GitHub
-Release、PyPI 和公开安装验证。当前私有样例未进入仓库 fixture；S40 候选、宿主配置、Resource blob、
-测试记录和 VibeCAD 创建的 FreeCAD runtime 已精确清理。S41 已从 `main@9d39547` 完成有界派生表达式
-联动、传递 consumer 验证、真实 FreeCAD 顺序修改与 fail-before-mutation 门，并由 PR #16 以
-`3199c61` 合入 `main`。下一动作停在新的产品范围确认；Freeform 仍停在
-`VCAD-A05`。
+v0.8.0 已发布 Guided Photo V3。S41 派生表达式与 S42 语义 Fillet/Chamfer 已完成并合入
+`main@0361aff`，公共 MCP、Task/Revision durable schema、runtime epoch 与单一写入权威均未改变。
+VCAD-A09 已批准从该内容准备 v0.9.0，并在公开发布锚点完成后从同一 tag/merge commit 创建四个
+隔离 worktree：Mechanical S43（之后串行 S44）、F10 Freeform、M10 planar metrology、F20 Mesh/SubD。
+首个并行切片分别限制在现有机械 compiler、新建 freeform 模块、无持久化的本地 metrology kernel、
+以及非权威 derived-artifact contracts/fake adapter；跨路线接线、durable v2、纯曲面 Revision 和
+Mesh/SubD 权威 payload 仍由后续显式集成门处理。
 ```
 
 S41 实现分支为 `codex/s41-derived-expressions`，起始锚点为 `main@9d39547`，已由 PR #16 合入
@@ -856,8 +866,9 @@ S41 实现分支为 `codex/s41-derived-expressions`，起始锚点为 `main@9d39
 和第一组私有 pilot 的编译器、真实 FreeCAD、Task review draft 及隐藏比较门已闭合；公开三正两负、
 三宿主 outcome 和真实 FreeCAD editability gate 也已闭合，整库回归与精确清理完成。`VCAD-A08`
 已完成 v0.8.0 的版本面、发布候选、PR/main、tag、GitHub Release、PyPI、公开安装与精确清理；
-S41 的结构化仿射合同、原生 FreeCAD expression carrier、圆角矩形联动、完整回归和 runtime 清理
-均已闭合并合入 `main@3199c61`；下一恢复动作是冻结新的产品功能范围。Freeform 仍需 `VCAD-A05`。
+S41 的结构化仿射合同与 S42 的语义边处理均已闭合；PR #18 合入 `main@5950da2`，收口记录由
+PR #19 合入 `main@0361aff`。当前恢复动作是完成 v0.9.0 same-candidate 发布，然后按 VCAD-A09
+创建四个隔离实现 worktree。`VCAD-A05` 已批准。
 
 ## 11. Material event ledger
 

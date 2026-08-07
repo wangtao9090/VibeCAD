@@ -3,17 +3,18 @@
 > 状态：AR-1 reviewed；P0-B、MR0、P1、P2 与首个 WorkBuddy Profile 已完成；
 > G1 Workbench Alpha 已完成；
 > 0.6.1 是已发布的 WorkBuddy 兼容补丁；0.7.0 是 38-tool 参数化/视觉机械能力版本；
-> 0.8.0 增加通过拍摄/尺度/完整性门禁的 Guided Photo V3 与原生可编辑 slot
+> 0.8.0 增加通过拍摄/尺度/完整性门禁的 Guided Photo V3 与原生可编辑 slot；
+> 0.9.0 增加派生参数联动与语义 Fillet/Chamfer
 >
 > 日期：2026-08-01
 >
-> 当前基线：VibeCAD 0.8.0 候选 / runtime epoch 4、`38-tool 公共 MCP、durable review/release/visual`、首批六操作、
+> 当前基线：VibeCAD 0.9.0 候选 / runtime epoch 4、`38-tool 公共 MCP、durable review/release/visual`、首批六操作、
 > host-neutral skill 与 FCStd/STEP/PDF/ZIP ResourceLink。P0-B 已交付 keyed replay/discovery、compare/revert、
 > read-only manifest、`durable active cancellation`、单 Application/shared Task Kernel、same-user
 > authenticated runnable daemon、session-bound file grants 和 managed killable Worker。G1 已交付
 > managed Workbench 的 HEAD/draft preview、verdict、精确 object/feature selector 与 Accept/Reject，
 > 并完成一个指纹绑定的 macOS FreeCAD 1.1.3 外部 addon 试点。WorkBuddy 5.3.5 + GLM-5.2 已完成
-> 真实多轮与 Release 资源验收；0.8.0 继续用同一发布包 smoke 分别认证 Codex、Claude、WorkBuddy。
+> 真实多轮与 Release 资源验收；0.9.0 继续用同一发布包 smoke 分别认证 Codex、Claude、WorkBuddy。
 >
 > 产品定位、多 Backend 组合、AutoCAD/国产 DWG CAD 与统一评测决策见
 > [`PRODUCT_STRATEGY.md`](PRODUCT_STRATEGY.md)。本文继续作为当前 FreeCAD 交付主线，不因远期
@@ -76,9 +77,10 @@ Artifact 并返回 immutable artifact/proposal；任何设计变更必须由新�
 
 P0-B core backend 已关闭 verified forward revert、active CAD cancellation/Worker kill 与 reconcile、
 same-user authenticated daemon、session-bound file grant、source liveness/revocation 和最小
-crash/hang isolation。0.6.1 package/managed-runtime 与 G1 Workbench Alpha 已发布，0.8.0 发布候选
-再加入 P1/P2 与 Visual Mechanical V1。当前近期缺口是 P0-B hardening 的 retention/GC、runner migration 与完整运行观测，
-以及 P1/G2 的首个窄纵向能力切片。外部 FreeCAD 目前只是单一指纹试点，不是兼容矩阵。
+crash/hang isolation。0.6.1 已发布 package/managed-runtime 与 G1 Workbench Alpha；0.7.0 发布
+P1/P2、Visual Mechanical V1 和三宿主矩阵；0.8.0 发布 Guided Photo V3；0.9.0 候选加入 S41
+派生参数和 S42 语义边处理。当前近期缺口是 P0-B hardening，以及 S43/S44、F10、M10、F20
+四条已授权路线。外部 FreeCAD 目前仍是单一指纹试点，不是兼容矩阵。
 
 ### 2.3 AR-1 的阶段裁决
 
@@ -92,8 +94,8 @@ Workbench draft 预览所需的权威语义。当前不应立刻扩大几何白�
    comparison、verified forward revert、read-only manifest、durable active cancellation、
    single authenticated daemon/file grant、checkout source liveness/revocation 和 managed killable
    Worker crash/hang isolation；
-3. **[已完成] C14 本地候选** 统一 0.6.0、28-tool、Skill、wheel/sdist/MCPB、fresh install 与 managed
-   receipt；候选尚未 tag 或发布；
+3. **[历史完成] C14 本地候选** 曾统一 0.6.0、28-tool、Skill、wheel/sdist/MCPB、fresh install 与
+   managed receipt；该未发布候选后来由已发布的 0.6.1 取代；
 4. **[已完成] MR0 internal multi-runtime foundation** 建立 generic lifecycle、CAD
    capability/router、runtime-qualified artifact/selector contract、FreeCAD adapter 和 fake
    conformance；FreeCAD 仍是唯一连接 adapter；

@@ -686,7 +686,7 @@ def test_skill_distribution_channels_are_explicit_and_non_overlapping():
     assert not any(pattern.startswith("skills") for pattern in ignored)
 
 
-def test_manifest_projection_and_all_package_versions_target_0_8_0():
+def test_manifest_projection_and_all_package_versions_target_0_9_0():
     from vibecad.application.public_surface import public_tool_specs
     from vibecad.runtime import spec
 
@@ -705,12 +705,12 @@ def test_manifest_projection_and_all_package_versions_target_0_8_0():
     with (ROOT / "uv.lock").open("rb") as handle:
         lock = tomllib.load(handle)
     locked = [package["version"] for package in lock["package"] if package.get("name") == "vibecad"]
-    assert locked == ["0.8.0"]
-    assert manifest["version"] == project_version == source_version.group(1) == "0.8.0"
-    assert spec.VIBECAD_VERSION == "0.8.0"
+    assert locked == ["0.9.0"]
+    assert manifest["version"] == project_version == source_version.group(1) == "0.9.0"
+    assert spec.VIBECAD_VERSION == "0.9.0"
 
 
-def test_release_documents_project_the_0_8_0_backend_truth():
+def test_release_documents_project_the_0_9_0_backend_truth():
     documents = {
         path: _normalized(_read(ROOT / path))
         for path in (
@@ -726,7 +726,7 @@ def test_release_documents_project_the_0_8_0_backend_truth():
     }
     for path, normalized in documents.items():
         assert "0.5.0" not in normalized, path
-        assert "0.8.0" in normalized, path
+        assert "0.9.0" in normalized, path
         assert "27-tool" not in normalized, path
         assert "27 个工具" not in normalized, path
 
@@ -769,6 +769,37 @@ def test_release_documents_project_the_0_8_0_backend_truth():
     assert "workbuddy (verified)" in english_readme
     assert "p2（有界完成）" in chinese_readme
     assert "workbuddy（已验证）" in chinese_readme
+
+    acceptance = documents["docs/ACCEPTANCE_TESTS.md"]
+    assert "0.8.0 已交付的 guided photo v3 继续作为回归门" in acceptance
+    assert "0.9.0 的新增门是 s41 派生参数联动与 s42 语义 fillet/chamfer" in acceptance
+    assert "本次新增的 guided photo v3" not in acceptance
+
+    product_strategy = _normalized(_read(ROOT / "docs" / "PRODUCT_STRATEGY.md"))
+    assert "g1 freecad workbench 尚未交付" not in product_strategy
+    assert "mr0 多 runtime 合同尚未实现" not in product_strategy
+    assert "真实 claude code/codex 尚未" not in product_strategy
+    assert "先完成 mr0 internal foundation" not in product_strategy
+
+    assert "on the current visual branch" not in english_readme
+    assert "当前 visual branch" not in chinese_readme
+
+    release_notes = _normalized(_read(ROOT / "docs" / "releases" / "v0.9.0.md"))
+    assert release_notes.startswith("# vibecad v0.9.0 ")
+    assert "## highlights" in release_notes
+    assert "derived design parameter" in release_notes
+    assert "fillet or chamfer" in release_notes
+    assert "linear start-to-end radius law" in release_notes
+    assert "## boundaries" in release_notes
+    assert "arbitrary imported step edge treatment" in release_notes
+    assert "freeform surfaces" in release_notes
+    assert "sculpture" in release_notes
+    assert "general step/stl import" in release_notes
+    assert "## upgrade" in release_notes
+    assert "vibecad==0.9.0" in release_notes
+    assert "vibecad-agent-skill-0.9.0.zip" in release_notes
+    assert "epoch stays at 4" in release_notes
+    assert "tool count stays at 38" in release_notes
 
 
 def test_release_publishers_consume_gated_archives_and_attach_the_skill_asset():

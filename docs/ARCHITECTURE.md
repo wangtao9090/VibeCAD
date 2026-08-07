@@ -1,6 +1,6 @@
 # VibeCAD 当前实施架构
 
-> 实现基线：VibeCAD 0.8.0 候选 / runtime epoch 4 / 38-tool Agent-first + Visual Mechanical V1 + Guided Photo V3
+> 实现基线：VibeCAD 0.9.0 候选 / runtime epoch 4 / 38-tool Agent-first + Visual Mechanical V1 + Guided Photo V3 + derived parameters + semantic edge treatments
 > internal foundation accepted
 >
 > 架构复审：AR-1 + P0-B C14 refresh + MR0-C05 refresh + G1 closeout / 2026-08-01
@@ -533,9 +533,9 @@ verifier 与 HEAD 权威。详见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VER
 
 ## 12. 打包与测试事实
 
-当前 0.8.0 发布候选冻结：
+当前 0.9.0 发布候选冻结：
 
-- tag、source、manifest、FreeCAD package、lock 和 managed server receipt 的目标版本为 0.8.0；公开工具 38 个，MCP 1.27.2，
+- tag、source、manifest、FreeCAD package、lock 和 managed server receipt 的目标版本为 0.9.0；公开工具 38 个，MCP 1.27.2，
   server epoch 4，FreeCAD 1.1.0；receipt public-surface digest 为
   `1353ab35c0dd1055890a9e0702a644a7e606719964831d583f6205679034fdbe`；
 - 固定 38-tool 完整 discovery frame 为 30,415 bytes。tool description 和 input
@@ -547,7 +547,7 @@ verifier 与 HEAD 权威。详见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VER
   HEAD，client EOF/重连不改变 durable truth；发布门把同一 38-tool/skill/package identity 刷新到
   wheel、sdist、MCPB、fresh install 和 managed receipt。
 
-0.8.0 使用同一发布包 smoke 分别验收 Codex、Claude、WorkBuddy；WorkBuddy 另保留 skill 发现、
+0.9.0 使用同一发布包 smoke 分别验收 Codex、Claude、WorkBuddy；WorkBuddy 另保留 skill 发现、
 严格错误恢复、跨 CLI 进程恢复、Release 摘要批准及 PDF/ZIP Blob 的专属兼容证据。任何一个宿主
 Profile 都不自动认证另一个宿主或其中其他模型。
 
@@ -589,7 +589,7 @@ Profile 都不自动认证另一个宿主或其中其他模型。
 
 0.7.0 收口 package/managed-runtime、G1 Workbench Alpha、P1/G2 顺序编辑、P2 刚性交付、
 Visual Mechanical V1 与三宿主发布包矩阵；0.8.0 增加 Guided Photo V3、原生可编辑 slot 与普通照片
-Task 前安全停止合同。MR0-C01..C04 的内部 foundation 已完成；更广模型认证、建模能力与 MR1
+Task 前安全停止合同；0.9.0 增加派生参数联动和语义 Fillet/Chamfer。MR0-C01..C04 的内部 foundation 已完成；更广模型认证、建模能力与 MR1
 仍是独立 campaign。机械详细设计、预检与仿真的
 [`方向调研`](MECHANICAL_DESIGN_VALIDATION_RESEARCH.md)不构成 MR0、P1/P1.5/P2 功能承诺。
 新的宿主/模型 Profile 作为独立证据继续扩展，不否定已完成的 Profile。只有阶段需要改变专家

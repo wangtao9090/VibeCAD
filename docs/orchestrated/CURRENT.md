@@ -1,10 +1,10 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **v0.8.0 published; S41 and S42 complete**
+> Status: **v0.9.0 release candidate in progress; four-route sprint active**
 >
 > Updated: 2026-08-07
 >
-> Repository anchor: `main@5950da2`; published tag `v0.8.0@6ee230f`
+> Repository anchor: `main@0361aff`; published tag `v0.8.0@6ee230f`
 >
 > Active plan: [`vibecad-visual-cad.md`](vibecad-visual-cad.md)
 >
@@ -44,6 +44,17 @@ PR #18 merged this slice as `5950da2a852b3f3b1fa530b6bf06de9f7504d32b` after
 `lint-unit` and `runtime-integration` passed in Actions run `31173378976`.
 The isolated test runtime, caches, and probes were removed; the user FreeCAD app
 and unrelated untracked files remain untouched. S42 is complete.
+
+On 2026-08-07 the user approved `VCAD-A09`: publish the already merged S41/S42
+content as v0.9.0, then run a 20-hour parallel sprint across four product routes.
+The Mechanical lane executes S43 Pattern/Mirror followed by the already approved
+S44 Shell/Thickness/Draft; `VCAD-A05` is now approved and activates F10 Industrial
+Freeform; M10 starts as an authority-free local visual-metrology/calibration kernel;
+F20 starts as a Mesh/SubD derived-artifact adapter path. The first parallel slices
+must keep public MCP, Task/Revision durable schema, HEAD, and write authority
+unchanged. Any later pure-surface Revision profile, durable metrology v2, or
+authoritative Mesh/SubD payload remains an explicit integration decision instead
+of being smuggled into an independent module.
 
 On 2026-08-04 the user approved `VCAD-A04`. The public V1 envelope is now
 frozen to a single dimension-complete mechanical extruded or revolved part,
@@ -262,9 +273,10 @@ reaffirmed the older Agent-first product boundary: Codex, Claude, WorkBuddy, or 
 calling host owns image understanding, model selection, subscription, and credentials;
 VibeCAD owns the CAD Task Kernel. The direct Provider path is therefore optional and
 non-default, not the primary image-to-CAD path or a release blocker. The A04 public
-mechanical envelope is published; S40 is complete under VCAD-A07 and is entering v0.8.0 under
-VCAD-A08, while
-Freeform remains behind A05.
+mechanical envelope and S40 are published in v0.8.0. S41 and S42 are complete on
+`main@0361aff`; `VCAD-A09` authorizes their v0.9.0 publication and the four-route sprint. A05 is
+now approved: Mechanical S43/S44, F10 Freeform, M10 planar metrology, and F20 Mesh/SubD first
+slices may proceed in isolated worktrees after the v0.9.0 release anchor is final.
 
 S20.1 seals descriptor-bound local JPEG/PNG ImageSets under the additive
 `visual_inputs/` root with provenance, byte/pixel budgets, normalization, and
