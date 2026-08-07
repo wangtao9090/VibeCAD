@@ -2,17 +2,18 @@
 
 > 状态：AR-1 reviewed；P0-B、MR0、P1、P2 与首个 WorkBuddy Profile 已完成；
 > G1 Workbench Alpha 已完成；
-> 0.6.1 是已发布的 WorkBuddy 兼容补丁；0.7.0 是 38-tool 参数化/视觉机械能力版本
+> 0.6.1 是已发布的 WorkBuddy 兼容补丁；0.7.0 是 38-tool 参数化/视觉机械能力版本；
+> 0.8.0 增加通过拍摄/尺度/完整性门禁的 Guided Photo V3 与原生可编辑 slot
 >
 > 日期：2026-08-01
 >
-> 当前基线：VibeCAD 0.7.0 / runtime epoch 4、`38-tool 公共 MCP、durable review/release/visual`、首批六操作、
+> 当前基线：VibeCAD 0.8.0 候选 / runtime epoch 4、`38-tool 公共 MCP、durable review/release/visual`、首批六操作、
 > host-neutral skill 与 FCStd/STEP/PDF/ZIP ResourceLink。P0-B 已交付 keyed replay/discovery、compare/revert、
 > read-only manifest、`durable active cancellation`、单 Application/shared Task Kernel、same-user
 > authenticated runnable daemon、session-bound file grants 和 managed killable Worker。G1 已交付
 > managed Workbench 的 HEAD/draft preview、verdict、精确 object/feature selector 与 Accept/Reject，
 > 并完成一个指纹绑定的 macOS FreeCAD 1.1.3 外部 addon 试点。WorkBuddy 5.3.5 + GLM-5.2 已完成
-> 真实多轮与 Release 资源验收；0.7.0 用同一发布包 smoke 分别认证 Codex、Claude、WorkBuddy。
+> 真实多轮与 Release 资源验收；0.8.0 继续用同一发布包 smoke 分别认证 Codex、Claude、WorkBuddy。
 >
 > 产品定位、多 Backend 组合、AutoCAD/国产 DWG CAD 与统一评测决策见
 > [`PRODUCT_STRATEGY.md`](PRODUCT_STRATEGY.md)。本文继续作为当前 FreeCAD 交付主线，不因远期
@@ -75,7 +76,7 @@ Artifact 并返回 immutable artifact/proposal；任何设计变更必须由新�
 
 P0-B core backend 已关闭 verified forward revert、active CAD cancellation/Worker kill 与 reconcile、
 same-user authenticated daemon、session-bound file grant、source liveness/revocation 和最小
-crash/hang isolation。0.6.1 package/managed-runtime 与 G1 Workbench Alpha 已发布，0.7.0 发布候选
+crash/hang isolation。0.6.1 package/managed-runtime 与 G1 Workbench Alpha 已发布，0.8.0 发布候选
 再加入 P1/P2 与 Visual Mechanical V1。当前近期缺口是 P0-B hardening 的 retention/GC、runner migration 与完整运行观测，
 以及 P1/G2 的首个窄纵向能力切片。外部 FreeCAD 目前只是单一指纹试点，不是兼容矩阵。
 
@@ -373,7 +374,7 @@ P0 分成两个可连续实施的切片：
 - P0-B hardening：retention/GC、runner generation upgrade、可观测性和恢复矩阵收口。
 
 P0-B core backend、G1 FreeCAD Qt Workbench Alpha 与首个 WorkBuddy Profile 已进入 0.6.1；P1/P2、
-Visual Mechanical V1 与三宿主发布包矩阵进入 0.7.0。Workbench 默认
+Visual Mechanical V1 与三宿主发布包矩阵进入 0.7.0；Guided Photo V3 进入 0.8.0。Workbench 默认
 使用受管 FreeCAD；显式 user-FreeCAD 只覆盖一个指纹绑定的 1.1.3 本机试点。P1 作为可交付产品完成
 前仍必须关闭 P0-B hardening residual。
 

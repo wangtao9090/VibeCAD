@@ -4,12 +4,12 @@
 >
 > 当前实现：P0-B core backend 已完成；单 Application/shared Task Kernel、认证 daemon、file grant、
 > managed killable Worker、verified revert、active cancellation/reconcile、P1/P2 与 Visual
-> Mechanical V1 已进入 0.7.0；三宿主发布包 Profile 分别验收
+> Mechanical V1 已进入 0.7.0；Guided Photo V3 进入 0.8.0；三宿主发布包 Profile 分别验收
 >
 > MR0 状态：C00 仅冻结通用 runtime lifecycle 与 CAD 多 runtime 边界；C01..C04 和 conformance gate
 > 尚未完成。FreeCAD 是唯一连接的 CAD adapter，固定 FCStd/STEP durable 布局保留到 MR1
 >
-> 发布边界：0.6.1 已发布；0.7.0 是 38-tool 参数化/视觉机械能力版本
+> 发布边界：0.7.0 已发布；0.8.0 是 Guided Photo V3 普通照片机械重建版本
 >
 > 文档角色：Agent 定位、调用模式、信任边界和后续阶段的决策真源
 >
@@ -39,11 +39,11 @@ OCCT 的事实独立验收，并原子提交或安全保留审核草案。
 | FreeCAD Workbench | G1 Qt UI、public client/checkout/file grant、object/feature selector 与 review 已实现 | Alpha；外部 FreeCAD 仅单一指纹试点 |
 | Sampling/BYOK | 只有 reasoning-owner 枚举，未有 backend | 不能 |
 | 自动 repair/replan | 当前零次语义重试 | 不能 |
-| 普通照片/Freeform/STL/仿真 Provider | 只有受控视觉机械纵切片，其余架构预留 | 不能宣称通用支持 |
+| Guided Photo V3 / Freeform/STL/仿真 Provider | 受限普通照片可经拍摄/尺度/完整性门进入同一 Task Kernel；其余架构预留 | 可声明固定包络，不可宣称通用逆向工程 |
 | 任意 Python/FreeCAD 代码 Worker | 不存在，也不是主路径 | 不能 |
 
-所以准确说法是：**CAD 与任务内核已经打通，0.7.0 的 38-tool 公共协议、单 Kernel backend、
-受控参数化/视觉机械能力和分发合同已完成；Codex、Claude、WorkBuddy 用同一发布包 smoke 分别认证，
+所以准确说法是：**CAD 与任务内核已经打通，0.8.0 的 38-tool 公共协议、单 Kernel backend、
+受控参数化/视觉机械/Guided Photo V3 能力和分发合同已完成；Codex、Claude、WorkBuddy 用同一发布包 smoke 分别认证，
 WorkBuddy 再增加跨进程恢复、Release 批准、Blob 取回和 strict-error 兼容证据。**
 
 ## 2. 三方职责
@@ -240,7 +240,7 @@ installer 的首要实测路径是 `$CODEX_HOME/skills/vibecad-agent`（默认
 `$HOME/.codex/skills/vibecad-agent`）；Codex 公开 authoring/discovery 的兼容路径是用户级
 `$HOME/.agents/skills/vibecad-agent` 或项目级 `.agents/skills/vibecad-agent`。Claude Code 对应
 `$HOME/.claude/skills/vibecad-agent` 或 `.claude/skills/vibecad-agent`。S3-8 已在包级合同中验证这些
-安装目标与发现语义；0.7.0 发布门再启动真实 Claude/Codex 主机。source、sdist、MCPB 和 standalone archive
+安装目标与发现语义；0.8.0 发布门继续启动真实 Claude/Codex 主机。source、sdist、MCPB 和 standalone archive
 携带同一 skill tree，Python wheel/managed runtime 刻意只携带 server。无论哪种包，只有复制/安装到
 宿主识别目录并完成 reload 后才算激活；包内存在不等于
 宿主已使用。
@@ -377,7 +377,7 @@ AR-1 回答了五个问题：
 
 | 问题 | 结论 |
 |---|---|
-| Claude/Codex 能否创建、修改、看证据、安全提交 | 内核/协议能；0.7.0 以同一发布包分别执行真实宿主 smoke，结果不跨宿主外推 |
+| Claude/Codex 能否创建、修改、看证据、安全提交 | 内核/协议能；0.8.0 以同一发布包分别执行真实宿主 smoke，结果不跨宿主外推 |
 | Direct 是否薄适配 | 是；构造单命令 ModelProgram 并只调用 TaskApi，无 legacy public writer |
 | Durable review 是否支持插件 | 是；Workbench Alpha 已通过 secure daemon/file grant 完成 immutable draft 预览/Accept/Reject |
 | Selector/observation/verifier 是否达到 G1 前置 | 达到 object/feature G0；未达到 face/edge、semantic diff 和 PartDesign |
@@ -410,8 +410,10 @@ Workbench 非第二权威、Provider 不自研底层引擎。MRG1-D01..D16 已�
   local stdio + strict schemas + durable recovery + Release PDF/ZIP resources
 → [complete] Visual Mechanical V1
   bounded single/multi-view → editable Sketcher/PartDesign + safe failure
-→ 0.7.0 release
+→ [complete] 0.7.0 release
   exact package gates + separate Codex/Claude/WorkBuddy package profiles
+→ 0.8.0 release
+  Guided Photo V3 + native slot + same-candidate three-host package profiles
 ```
 
 P0-B hardening 可以与 G1 UI 原型并行，但进入 P1 产品交付前必须关闭。P3 再补远程 Worker/queue、

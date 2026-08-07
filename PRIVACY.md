@@ -10,7 +10,7 @@ Last updated: 2026-08-04
 
 ### Summary
 
-The VibeCAD CAD backend runs on your own machine. It has no telemetry, account service, or VibeCAD-operated cloud storage. The default visual path uses the multimodal model already provided by your host Agent. VibeCAD 0.7.0 also contains an optional, non-default OpenAI visual transport; when you explicitly configure and select it, bounded metadata-free PNG derivatives of the selected images are sent to that provider under your account and its privacy terms.
+The VibeCAD CAD backend runs on your own machine. It has no telemetry, account service, or VibeCAD-operated cloud storage. The default visual path uses the multimodal model already provided by your host Agent. VibeCAD 0.8.0 also contains an optional, non-default OpenAI visual transport; when you explicitly configure and select it, bounded metadata-free PNG derivatives of the selected images are sent to that provider under your account and its privacy terms.
 
 ### Local processing only
 
@@ -39,7 +39,7 @@ VibeCAD's normal direct outbound access covers software installation: the runtim
 
 ### 概要
 
-VibeCAD 的 CAD 后端在你自己的设备上运行。它没有遥测、账号服务或 VibeCAD 运营的云存储。默认视觉路径使用宿主 Agent 已有的多模态模型。VibeCAD 0.7.0 还包含可选、非默认的 OpenAI 视觉 transport；只有在用户显式配置并选择它时，才会把选中图片的有界、去元数据 PNG 派生图发送到该账号下的 Provider，并受其隐私条款约束。
+VibeCAD 的 CAD 后端在你自己的设备上运行。它没有遥测、账号服务或 VibeCAD 运营的云存储。默认视觉路径使用宿主 Agent 已有的多模态模型。VibeCAD 0.8.0 还包含可选、非默认的 OpenAI 视觉 transport；只有在用户显式配置并选择它时，才会把选中图片的有界、去元数据 PNG 派生图发送到该账号下的 Provider，并受其隐私条款约束。
 
 ### 仅本地处理
 

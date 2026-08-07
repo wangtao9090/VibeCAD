@@ -1,12 +1,12 @@
-# VibeCAD 0.7.0 用户手册
+# VibeCAD 0.8.0 用户手册
 
 VibeCAD 是由 Claude、Codex 等宿主 Agent 调用的 FreeCAD 专家 Agent。你描述设计目标，宿主负责理解
 与规划，VibeCAD 负责把受支持的 CAD 操作放进可恢复、可审核、可验证的项目流程，并交付 FCStd、
 STEP 与经摘要批准的机械 Release 包。
 
 当前版本除基础长方体/圆柱体操作外，还支持受控的原生 Sketcher/PartDesign 单零件、P2 刚性机械
-交付，以及由宿主多模态模型驱动的尺寸完整单视图/多视图机械零件。它仍不能把任意照片、网格、
-自由曲面或复杂装配自动还原成参数化模型。
+交付，以及由宿主多模态模型驱动的尺寸完整单视图、多视图和通过引导门禁的普通照片机械零件。
+普通照片仍需独立确认关键尺寸；它不能把任意照片、网格、自由曲面或复杂装配自动还原成参数化模型。
 
 ## 1. 使用前先理解三个角色
 
@@ -88,7 +88,7 @@ FreeCAD.app、preferences、macro 或其他 addon；遇到外来或已变异的�
 ## 4. 单独安装 Agent Skill
 
 MCPB 内带有 Skill 的归档副本，但安装 MCPB **不等于激活 Skill**。把仓库中的
-`skills/vibecad-agent/` 或独立资产 `vibecad-agent-skill-0.7.0.zip` 解压得到的同名目录，整体复制
+`skills/vibecad-agent/` 或独立资产 `vibecad-agent-skill-0.8.0.zip` 解压得到的同名目录，整体复制
 或链接到一个宿主发现路径：
 
 | 宿主 | 用户级 | 项目级 |
@@ -116,6 +116,24 @@ WorkBuddy 手写大 ModelProgram 时，应按 canonical Skill 把完整对象写
 `vibecad --workbuddy-submit .vibecad-workbuddy-request-<name>.json`。该单文件适配只补足 WorkBuddy
 对严格错误路径的呈现；资源仍走 MCP ResourceLink/`resources/read`，Task Kernel 仍是唯一执行与
 提交权威。不要授予通用 Bash/Write，只允许一个 request file 与这一条 exact command。
+
+### 4.1 从普通照片开始
+
+普通照片不是自动量具。宿主应先按 canonical Skill 的 `Guided Photo v1` 检查：单个刚性机械零件、
+背景可分离、关键轮廓可见、视角互补、比例尺与目标表面共面，并且拉伸深度、回转轴向长度、孔/槽
+尺寸等阻塞量已经由标尺、卡尺、图纸标注或用户明确值确认。照片可以帮助识别拓扑和关系，但不能
+单独确认绝对尺寸或被遮挡结构。
+
+宿主只允许得到三类结果：
+
+- `PHOTO_READY`：事实和关键尺寸足够，重新从当前 evidence matrix 生成受限 IR，再创建
+  `require_review` Task；
+- `NEEDS_CAPTURE`：只请求一项最有价值的补拍或测量，收到后丢弃旧 provisional plan 并重新规划；
+- `OUT_OF_ENVELOPE`：多物体、明显遮挡、自由曲面/雕塑或隐藏结构主导时，在 Task 创建前停止。
+
+当前公开正例覆盖垫圈、圆角方形风扇垫片和带盲袋标定块；负例覆盖缺厚度和多物体杂乱场景。
+成功候选仍必须验证完全约束草图、关键尺寸、有效 BRep、单实体、参数编辑和 FCStd/STEP 资源，并等待
+用户审核。此能力不声明纯照片精密测量、任意逆向工程、Fillet/Chamfer 或自由曲面恢复。
 
 ## 5. 第一次设计：创建一个可审核盒子
 
@@ -277,9 +295,9 @@ FCStd 导入时只能使用用户明确授权给 `create_project` 的源文件�
 
 ## 11. 当前明确不支持的能力
 
-0.7.0 不支持：
+0.8.0 不支持：
 
-- 通用 STEP/STL import、STL 到 STEP、视频重建，以及任意普通照片的一键参数化恢复；
+- 通用 STEP/STL import、STL 到 STEP、视频重建，以及没有独立尺寸真值的纯照片一键参数化恢复；
 - 超出冻结 IR 的通用 FCStd/Sketcher/PartDesign、自由曲面、雕塑、复杂装配与完整 TechDraw；
 - face/edge 子元素交互选择和实时多人/多 Agent CAD 合并；
 - simulation、碰撞求解或制造工艺验证；
@@ -347,6 +365,6 @@ FreeCAD 中完成小修改。普通 **Save** 只保存该受管工作副本，**
 STEP 等只适合作为 accepted Revision 的可选 Git LFS 快照；Git 不是 VibeCAD HEAD，也不能语义合并
 原生 CAD 文件。完整边界见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VERSIONING_RESEARCH.md)。
 
-0.7.0 对 Codex、Claude、WorkBuddy 使用同一发布包 smoke 合同，并分别记录宿主版本、Skill/package
+0.8.0 对 Codex、Claude、WorkBuddy 使用同一发布包 smoke 合同，并分别记录宿主版本、Skill/package
 hash、38-tool discovery、任务恢复、建模和 ResourceLink/`resources/read` 结果。WorkBuddy 另测其
 严格错误呈现与 bounded submit 兼容路径；任一宿主通过都不替代另外两个。
