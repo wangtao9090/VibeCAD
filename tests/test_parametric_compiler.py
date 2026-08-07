@@ -19,6 +19,7 @@ from vibecad.execution.selectors import (
     SemanticRole,
 )
 from vibecad.parametric import (
+    MAX_PATTERN_INSTANCES,
     BodyDefinition,
     ConstraintKind,
     DesignEvidence,
@@ -715,6 +716,103 @@ def _native_pattern_design(kind: FeatureKind) -> ParametricDesignIR:
     )
 
 
+def _additive_non_immediate_pattern_design() -> ParametricDesignIR:
+    base = _native_pattern_design(FeatureKind.LINEAR_PATTERN)
+    pad, source_pocket, pattern = base.features
+    pattern = replace(
+        pattern,
+        source_feature_id=pad.id,
+        occurrences=2,
+    )
+    x_parameter = DesignParameter(
+        id=_id("parameter", 50),
+        name="Private continuing pocket X",
+        kind=ParameterKind.LENGTH,
+        value=75,
+        unit=DesignUnit.MM,
+        evidence_ids=(EVIDENCE,),
+        minimum=-1_000,
+        maximum=1_000,
+        public=False,
+    )
+    y_parameter = DesignParameter(
+        id=_id("parameter", 51),
+        name="Private continuing pocket Y",
+        kind=ParameterKind.LENGTH,
+        value=8,
+        unit=DesignUnit.MM,
+        evidence_ids=(EVIDENCE,),
+        minimum=-1_000,
+        maximum=1_000,
+        public=False,
+    )
+    diameter_parameter = next(
+        item for item in base.parameters if item.name == "Pattern hole diameter"
+    )
+    geometry_id = _id("geometry", 50)
+    continuing_sketch = ParametricSketch(
+        id=_id("sketch", 50),
+        name="Pocket after additive pattern",
+        role=SketchRole.PROFILE,
+        plane=SketchPlane(kind=PlaneKind.ORIGIN, origin=OriginPlane.XY),
+        geometries=(
+            SketchGeometry(
+                id=geometry_id,
+                kind=GeometryKind.CIRCLE,
+                dimensions={"cx_mm": 75, "cy_mm": 8, "radius_mm": 3},
+                evidence_ids=(EVIDENCE,),
+            ),
+        ),
+        constraints=(
+            SketchConstraint(
+                id=_id("constraint", 50),
+                kind=ConstraintKind.DIAMETER,
+                references=(_reference(geometry_id, ReferencePoint.WHOLE),),
+                parameter_id=diameter_parameter.id,
+                evidence_ids=(EVIDENCE,),
+            ),
+            SketchConstraint(
+                id=_id("constraint", 51),
+                kind=ConstraintKind.DISTANCE_X,
+                references=(
+                    _reference("@origin", ReferencePoint.CENTER),
+                    _reference(geometry_id, ReferencePoint.CENTER),
+                ),
+                parameter_id=x_parameter.id,
+                evidence_ids=(EVIDENCE,),
+            ),
+            SketchConstraint(
+                id=_id("constraint", 52),
+                kind=ConstraintKind.DISTANCE_Y,
+                references=(
+                    _reference("@origin", ReferencePoint.CENTER),
+                    _reference(geometry_id, ReferencePoint.CENTER),
+                ),
+                parameter_id=y_parameter.id,
+                evidence_ids=(EVIDENCE,),
+            ),
+        ),
+        evidence_ids=(EVIDENCE,),
+    )
+    continuing_pocket = PartDesignFeature(
+        id=_id("feature", 50),
+        name="Pocket after additive pattern",
+        kind=FeatureKind.POCKET,
+        sketch_id=continuing_sketch.id,
+        base_feature_id=pattern.id,
+        parameters={},
+        evidence_ids=(EVIDENCE,),
+        extent=FeatureExtent.THROUGH_ALL,
+        reversed=True,
+    )
+    return replace(
+        base,
+        parameters=base.parameters + (x_parameter, y_parameter),
+        sketches=base.sketches + (continuing_sketch,),
+        features=(pad, source_pocket, pattern, continuing_pocket),
+    )
+
+
 @pytest.mark.parametrize(
     "kind",
     (FeatureKind.LINEAR_PATTERN, FeatureKind.CIRCULAR_PATTERN, FeatureKind.MIRROR),
@@ -1329,6 +1427,68 @@ def test_stabilization_solves_all_sketches_before_recompute_and_shape_checks(
     ]
 
 
+@pytest.mark.parametrize(
+    "pattern_specs",
+    (
+        ((FeatureKind.MIRROR, None),) * 5,
+        (
+            (FeatureKind.LINEAR_PATTERN, 11),
+            (FeatureKind.CIRCULAR_PATTERN, 11),
+            (FeatureKind.LINEAR_PATTERN, 11),
+        ),
+    ),
+    ids=("feature-count", "total-instances"),
+)
+def test_persisted_graph_replays_global_pattern_budgets(
+    monkeypatch: pytest.MonkeyPatch,
+    pattern_specs: tuple[tuple[FeatureKind, int | None], ...],
+) -> None:
+    design_id = _id("design", 80)
+    body_id = _id("body", 80)
+    sketch_id = _id("sketch", 80)
+    digest = "a" * 64
+    feature_specs = ((FeatureKind.PAD, None),) + pattern_specs
+    feature_ids = tuple(_id("feature", 80 + index) for index in range(len(feature_specs)))
+    common = {"design_id": design_id, "design_digest": digest}
+    body = SimpleNamespace()
+    carrier = SimpleNamespace()
+    sketch = SimpleNamespace()
+    records: list[tuple[object, dict[str, object]]] = [
+        (
+            body,
+            {
+                **common,
+                "kind": "body",
+                "ir_id": body_id,
+                "sketch_ids": [sketch_id],
+                "feature_ids": list(feature_ids),
+            },
+        ),
+        (carrier, {**common, "kind": "parameters", "ir_id": design_id}),
+        (sketch, {**common, "kind": "sketch", "ir_id": sketch_id}),
+    ]
+    for index, ((kind, occurrences), feature_id) in enumerate(
+        zip(feature_specs, feature_ids, strict=True)
+    ):
+        data: dict[str, object] = {
+            **common,
+            "kind": "feature",
+            "ir_id": feature_id,
+            "feature_index": index,
+            "feature_kind": kind.value,
+        }
+        if occurrences is not None:
+            data["occurrences"] = occurrences
+        records.append((SimpleNamespace(), data))
+
+    monkeypatch.setattr(compiler_module, "_validate_parameter_metadata", lambda *_args: ())
+
+    with pytest.raises(ParametricCompileError) as caught:
+        compiler_module._validate_parametric_graph(tuple(records))
+
+    assert caught.value.code is ParametricCompileErrorCode.METADATA_FAILURE
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("vertical", (False, True), ids=("horizontal", "vertical"))
 def test_real_slot_compiles_to_fully_constrained_editable_native_geometry(
@@ -1462,6 +1622,105 @@ def test_real_native_pattern_features_compile_edit_and_reopen(
         assert len(patterns) == 1
         assert patterns[0].Shape.isValid()
         assert len(tuple(patterns[0].Shape.Solids)) == 1
+    finally:
+        reopened.close_document()
+
+
+@pytest.mark.slow
+def test_real_additive_non_immediate_pattern_can_continue_modeling(tmp_path) -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    design = _additive_non_immediate_pattern_design()
+    path = tmp_path / "s43-additive-continuing.FCStd"
+    session = Session()
+    session.open_document("S43AdditiveContinuing")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        stabilize_parametric_session(session)
+
+        pad, source_pocket, pattern, continuing_pocket = (item.object for item in compiled.features)
+        assert tuple(pattern.Originals) == (pad,)
+        assert pattern.BaseFeature is source_pocket
+        assert continuing_pocket.BaseFeature is pattern
+        assert compiled.body.Tip is continuing_pocket
+        expected_volume = (60 + 30) * 40 * 8 - 2 * math.pi * 3**2 * 8
+        assert float(compiled.body.Shape.Volume) == pytest.approx(expected_volume, abs=1e-6)
+
+        parameter_id = design.features[2].parameters["length"]
+        edit = compiler_module.modify_parametric_parameter(
+            session,
+            design,
+            body=compiled.body,
+            parameter_id=parameter_id,
+            value=24,
+        )
+        stabilize_parametric_session(session)
+        assert edit.consumer_ids == (design.features[2].id,)
+        edited_volume = (60 + 24) * 40 * 8 - 2 * math.pi * 3**2 * 8
+        assert float(compiled.body.Shape.Volume) == pytest.approx(edited_volume, abs=1e-6)
+        session.doc.saveAs(str(path))
+    finally:
+        session.close_document()
+
+    reopened = Session()
+    try:
+        reopened.load_document(path)
+        stabilize_parametric_session(reopened)
+        body = next(obj for obj in reopened.doc.Objects if obj.TypeId == "PartDesign::Body")
+        pattern = next(
+            obj for obj in reopened.doc.Objects if obj.TypeId == "PartDesign::LinearPattern"
+        )
+        final_pocket = next(
+            obj
+            for obj in reopened.doc.Objects
+            if obj.TypeId == "PartDesign::Pocket"
+            and compiler_module._read_metadata(obj, required=True)["feature_index"] == 3
+        )
+        assert tuple(pattern.Originals)[0].TypeId == "PartDesign::Pad"
+        assert final_pocket.BaseFeature is pattern
+        assert body.Tip is final_pocket
+    finally:
+        reopened.close_document()
+
+
+@pytest.mark.slow
+def test_real_reopen_rejects_forged_global_pattern_budget(tmp_path) -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    design = _native_pattern_design(FeatureKind.LINEAR_PATTERN)
+    path = tmp_path / "s43-forged-pattern-budget.FCStd"
+    session = Session()
+    session.open_document("S43ForgedPatternBudget")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        pattern = compiled.features[-1].object
+        metadata = compiler_module._read_metadata(pattern, required=True)
+        assert metadata is not None
+        metadata["occurrences"] = MAX_PATTERN_INSTANCES + 1
+        pattern.setEditorMode(compiler_module.PARAMETRIC_METADATA_PROPERTY, 0)
+        setattr(
+            pattern,
+            compiler_module.PARAMETRIC_METADATA_PROPERTY,
+            compiler_module._canonical(metadata),
+        )
+        pattern.setEditorMode(compiler_module.PARAMETRIC_METADATA_PROPERTY, 3)
+        session.doc.saveAs(str(path))
+    finally:
+        session.close_document()
+
+    reopened = Session()
+    try:
+        reopened.load_document(path)
+        with pytest.raises(ParametricCompileError) as caught:
+            stabilize_parametric_session(reopened)
+
+        assert caught.value.code is ParametricCompileErrorCode.METADATA_FAILURE
     finally:
         reopened.close_document()
 

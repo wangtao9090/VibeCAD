@@ -19,6 +19,9 @@ from types import MappingProxyType
 
 from vibecad.parametric.contracts import (
     MAX_DESIGN_PARAMETERS,
+    MAX_PATTERN_FEATURES,
+    MAX_PATTERN_INSTANCES,
+    MAX_PATTERN_OCCURRENCES,
     ConstraintKind,
     DerivedParameterExpression,
     DesignParameter,
@@ -2154,7 +2157,7 @@ def _validate_pattern_feature_metadata(
             or mirror_plane_token is not None
         ):
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
-        expected_occurrences = _integer(occurrences, maximum=16)
+        expected_occurrences = _integer(occurrences, maximum=MAX_PATTERN_OCCURRENCES)
         if expected_occurrences < 2:
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
         try:
@@ -2185,7 +2188,7 @@ def _validate_pattern_feature_metadata(
             or mirror_plane_token is not None
         ):
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
-        expected_occurrences = _integer(occurrences, maximum=16)
+        expected_occurrences = _integer(occurrences, maximum=MAX_PATTERN_OCCURRENCES)
         if expected_occurrences < 2:
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
         try:
@@ -2931,6 +2934,31 @@ def _validate_parametric_graph(
         expected_feature_ids != actual_feature_ids
         or actual_feature_indexes != tuple(range(len(indexed_features)))
         or any(not item.startswith("ir_feature_") for item in actual_feature_ids)
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    pattern_feature_count = 0
+    pattern_instance_count = 0
+    for _, feature_data in indexed_features:
+        try:
+            feature_kind = FeatureKind(_text(feature_data["feature_kind"]))
+        except ValueError:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        if feature_kind not in _PATTERN_KINDS:
+            continue
+        pattern_feature_count += 1
+        if feature_kind is FeatureKind.MIRROR:
+            pattern_instance_count += 2
+        else:
+            occurrences = _integer(
+                feature_data["occurrences"],
+                maximum=MAX_PATTERN_OCCURRENCES,
+            )
+            if occurrences < 2:
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            pattern_instance_count += occurrences
+    if (
+        pattern_feature_count > MAX_PATTERN_FEATURES
+        or pattern_instance_count > MAX_PATTERN_INSTANCES
     ):
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
 
