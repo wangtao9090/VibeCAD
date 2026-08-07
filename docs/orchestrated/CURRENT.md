@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-A08 approved; v0.8.0 release candidate in progress**
+> Status: **VCAD-A08 approved; v0.8.0 candidate gates passed; PR next**
 >
 > Updated: 2026-08-06
 >
@@ -164,6 +164,19 @@ appeared in the working tree; those files remain user-owned and untouched. After
 the exact package gates, Codex, Claude, and WorkBuddy must each consume the same candidate identity.
 PyPI version identity is immutable, so a failure after publication starts is recovered by observing
 or forward-fixing the workflow, never by overwriting a published artifact.
+
+The tracked-content candidate is now frozen at `codex/v0.8.0-release@67a662b`. Its MCPB SHA-256 is
+`8c3d804a8e7bc153d45040a885cd2de8a7183e0f4109533af3683594319ac7b6`; the wheel and sdist are
+`badc8f57ff7d69efd16e905424f05b7ff186cb2b99f01d3d198e08ac4f435826` and
+`3436216c45055c38e52cc01cf71956caae37340bcaec6de709d8552ed04ad1dc`. The isolated full gate is
+`5,942 passed, 126 deselected`, and the exact unpacked candidate passed the package, managed-runtime,
+real-FreeCAD, release-workflow, and Guided Photo gates. Fresh Codex, Claude, and WorkBuddy processes
+each created a 60 x 40 x 10 mm review task, observed all four deterministic checks pass at generation
+9 with unchanged HEAD, restarted, accepted at generation 11, exported FCStd/STEP, and read both MCP
+binary resources. WorkBuddy additionally proved deferred `ToolSearch` schema discovery and native
+`ReadMcpResource` blob persistence; local byte counts and SHA-256 recomputation matched its manifest.
+The next recoverable action is to push this branch and open the v0.8.0 release PR. No tag or immutable
+publication has started.
 
 The complete architecture, slices, gates, privacy boundary, validation budget,
 and recovery point are in
