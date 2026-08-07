@@ -32,7 +32,7 @@ execution, deterministic verification, recovery, and delivery.
 The easiest installation path is to give your coding Agent this request:
 
 > Install and launch the VibeCAD FreeCAD Workbench Alpha from
-> https://github.com/wangtao9090/VibeCAD. Use tag `v0.7.0`, clone it into a persistent
+> https://github.com/wangtao9090/VibeCAD. Use tag `v0.8.0`, clone it into a persistent
 > directory, build its wheel, install it with `uv tool install --force`, keep
 > the checkout and built wheel, and run `vibecad --freecad`. Do not install or
 > fall back to a system copy of FreeCAD.
@@ -41,10 +41,10 @@ The Agent's reproducible procedure is:
 
 ```bash
 git clone https://github.com/wangtao9090/VibeCAD.git VibeCAD
-git -C VibeCAD checkout v0.7.0
+git -C VibeCAD checkout v0.8.0
 cd VibeCAD
 uv build --wheel
-uv tool install --force dist/vibecad-0.7.0-py3-none-any.whl
+uv tool install --force dist/vibecad-0.8.0-py3-none-any.whl
 vibecad --freecad
 ```
 
@@ -113,14 +113,16 @@ engineering, and simulation are not yet integrated. For an image request, the ca
 Claude, WorkBuddy, or other multimodal host performs image understanding with its own subscription
 or API authorization, then submits the resulting bounded ModelProgram through the ordinary Task
 Kernel. VibeCAD does not need the host's model credential or upload the same image to a second model.
-The current bounded image-to-CAD alpha covers one dimension-complete mechanical extruded or
-revolved part. It can reconcile two to sixteen clean complementary views of the same object, state,
-and scale, then produce editable Sketcher/PartDesign output. Outcome evidence now includes a
-single-hole plate, a sharp-shoulder stepped shaft, and a three-view L bracket with two grouped holes
-on one plane plus one hole on another. An unresolved extrusion depth, an unscaled perspective image,
-or contradictory dimensions must stop for clarification before Task creation. The canonical Agent
-skill carries the portable `ParametricDesignIR v1` authoring reference; this remains a bounded
-mechanical workflow, not a claim of universal photo reconstruction.
+The current bounded image-to-CAD alpha covers one mechanical extruded or revolved part. It accepts
+a dimension-complete view, two to sixteen clean complementary views, or ordinary photos that pass
+the guided capture, scale, occlusion, and geometry-completeness gates and have the blocking dimensions
+confirmed independently. The result is editable Sketcher/PartDesign output. Public outcome evidence
+includes a single-hole plate, a sharp-shoulder stepped shaft, a three-view L bracket, an annular
+washer, a rounded-square fan spacer, and a calibration block with one blind pocket. Missing scale or
+depth, contradictory dimensions, multiple objects, material occlusion, or hidden structure must ask
+for one bounded recapture/measurement or stop before Task creation. The canonical Agent skill carries
+portable `ParametricDesignIR v1` and `Guided Photo v1` references; this is not photo-only metrology or
+a claim of arbitrary reverse engineering.
 
 ## Current Public Capabilities (development branch)
 
@@ -231,7 +233,7 @@ Skill discovery paths are:
 | Claude Code | `$HOME/.claude/skills/vibecad-agent` | `.claude/skills/vibecad-agent` |
 | WorkBuddy | — | `.codebuddy/skills/vibecad-agent` |
 
-The release asset `vibecad-agent-skill-0.7.0.zip` contains exactly one top-level
+The release asset `vibecad-agent-skill-0.8.0.zip` contains exactly one top-level
 `vibecad-agent/` directory after extraction. That directory can be copied as a whole to any path
 listed above. The Python wheel contains the server and the FreeCAD Workbench addon, while the
 managed runtime contains the matching server environment. Neither package activates the Agent
@@ -302,7 +304,7 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 
 ## What “Host-ready” Means Precisely
 
-The 0.7.0 release contract verifies the MCP protocol, Skill package structure, FCStd/STEP and
+The 0.8.0 release contract verifies the MCP protocol, Skill package structure, FCStd/STEP and
 Release ResourceLinks, managed FreeCAD E2E, and exact 38-tool discovery independently of any host.
 Real Codex, Claude, and WorkBuddy package smokes are recorded as separate host profiles; passing one
 never certifies the others. WorkBuddy additionally carries the compatibility coverage described
@@ -319,7 +321,7 @@ one-time file grants; it does not create a second commit system.
 
 S3-8, P0-B core, the package/managed-runtime closeout, bounded G1 Workbench Alpha, P1 sequential
 editing, P2 rigid mechanical delivery, bounded visual mechanical CAD, and host integration are
-included in 0.7.0:
+included in 0.8.0:
 
 - **P0-B core (backend complete)**: task/project/version discovery, file-level comparison,
   verified forward revert, cancellation/reconcile, authenticated daemon, file grants, source
@@ -341,6 +343,10 @@ included in 0.7.0:
 - **Visual Mechanical V1**: one fully dimensioned view, or 2–16 clean complementary views of the
   same object/state/scale, can produce one editable extruded or revolved mechanical part. Missing
   scale/depth, conflicting views, occlusion, and hidden structure must clarify or fail safely.
+- **Guided Photo V3**: bounded ordinary-photo parts may use capture/scale/completeness screening,
+  native editable slots, and independently confirmed critical dimensions before entering the same
+  reviewed Task Kernel. Three public positives and two pre-Task safe failures define the claim;
+  arbitrary photo metrology, hidden geometry recovery, Fillet/Chamfer, and freeform remain excluded.
 
 The G1 Workbench Alpha packages the real FreeCAD Qt UI and its deterministic managed launcher. It
 includes one Workbench and Dock, daemon-backed refresh, separate HEAD/draft preview, verdict,

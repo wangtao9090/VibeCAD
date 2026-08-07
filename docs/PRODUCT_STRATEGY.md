@@ -2,7 +2,7 @@
 
 > 决策日期：2026-07-23
 >
-> 适用基线：VibeCAD 0.7.0 / 38-tool host-neutral MCP / Codex、Claude、WorkBuddy 分 Profile 验证
+> 适用基线：VibeCAD 0.8.0 候选 / 38-tool host-neutral MCP / Codex、Claude、WorkBuddy 分 Profile 验证
 >
 > 本文是产品调研、宿主 Agent 调研、多 CAD Backend 调研和当前代码架构的统一决策页。市场证据见
 > [`CAD_AGENT_PRODUCT_RESEARCH.md`](CAD_AGENT_PRODUCT_RESEARCH.md)，接口与 Backend 证据见
@@ -56,7 +56,7 @@ VibeCAD 当前最可信的差异不是模型更聪明或建模功能最多，而
 
 ### 2.1 当前产品基线
 
-VibeCAD 0.7.0 已具备：
+VibeCAD 0.8.0 候选已具备：
 
 - 38-tool 公共 MCP 和 host-neutral Skill；
 - 项目、任务、不可变 Revision 和 durable Draft；

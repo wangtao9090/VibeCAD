@@ -225,7 +225,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "accept_draft",
         "export_task_artifacts",
         "notifications/cancelled",
-        "0.7.0",
+        "0.8.0",
         "38 tools",
         "daemon",
         "Task Kernel",
@@ -261,7 +261,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
         "accept_draft",
         "export_task_artifacts",
         "notifications/cancelled",
-        "0.7.0",
+        "0.8.0",
         "38 个工具",
         "daemon",
         "Task Kernel",
@@ -302,7 +302,7 @@ def test_packaged_readme_describes_the_current_agent_first_surface():
     roadmap = (ROOT / "docs/PRODUCT_CAPABILITY_ROADMAP.md").read_text(encoding="utf-8")
     normalized_roadmap = " ".join(roadmap.replace("\n> ", " ").split())
     for required in (
-        "0.7.0",
+        "0.8.0",
         "38-tool 公共 MCP、durable review/release/visual",
         "host-neutral skill",
         "P0-B core backend（已完成）",

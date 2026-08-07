@@ -961,7 +961,7 @@ def test_real_client_authenticates_and_claims_one_path_bound_checkout_grant() ->
                 "epoch": 1,
             },
             "implementation": {
-                "package_version": "0.7.0",
+                "package_version": "0.8.0",
                 "build_id": "vcad-s20.5-host-ingress",
             },
         }

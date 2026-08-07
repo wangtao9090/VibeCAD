@@ -1,6 +1,6 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-S40 Guided Photo V3 outcome gate complete on the branch**
+> Status: **VCAD-A08 approved; v0.8.0 release candidate in progress**
 >
 > Updated: 2026-08-06
 >
@@ -156,10 +156,19 @@ diagnostics, and test-created FreeCAD runtime were then removed. The user's
 installed `/Applications/FreeCAD.app`, private source files, and unrelated
 untracked repository files were preserved.
 
+On 2026-08-06 the user approved the next plan: publish the completed S40 boundary as v0.8.0,
+then begin S41 derived-expression parameter linkage. `VCAD-A08` authorizes the release branch,
+PR/merge, `v0.8.0` tag, GitHub Release and PyPI publication. The release candidate must be built
+from tracked committed content in an isolated checkout because unrelated untracked duplicate files
+appeared in the working tree; those files remain user-owned and untouched. After the candidate passes
+the exact package gates, Codex, Claude, and WorkBuddy must each consume the same candidate identity.
+PyPI version identity is immutable, so a failure after publication starts is recovered by observing
+or forward-fixing the workflow, never by overwriting a published artifact.
+
 The complete architecture, slices, gates, privacy boundary, validation budget,
 and recovery point are in
-[`vibecad-visual-cad.md`](vibecad-visual-cad.md). VCAD-A07 is approved and S40
-continues on `codex/guided-photo-s40` from `origin/main@43ddc49`. S10.1 froze the
+[`vibecad-visual-cad.md`](vibecad-visual-cad.md). VCAD-A07 completed S40 and VCAD-A08
+continues publication on `codex/v0.8.0-release` from `main@314b335`. S10.1 froze the
 minimal ParametricDesignIR v1; S10.2 delivered native Sketcher objects and
 solver/DoF facts. S10.3 now compiles closed profiles into a strict single-body
 Pad/Pocket/Revolution/Hole chain, preserves feature parameter expressions and
@@ -178,7 +187,7 @@ edit. The compiler revalidates the effective live IR and reads every affected
 Sketcher/PartDesign consumer back before an in-transaction executor verifier
 admits the result. R1 and R2 retain the same Body/feature identities while the
 old Revision remains byte-immutable. It adds no direct MCP tool or second write
-authority; the MCP tool count remains 31.
+authority; the MCP tool count remains 38.
 Visual persistence is approved under A02 and ImageSet sealing is implemented.
 A03 authorized a provider-neutral cloud-VLM adapter, and v0.7.0 implements
 1–16 source images, sealed read-only cloud access, adaptive metadata-free
@@ -187,7 +196,8 @@ reaffirmed the older Agent-first product boundary: Codex, Claude, WorkBuddy, or 
 calling host owns image understanding, model selection, subscription, and credentials;
 VibeCAD owns the CAD Task Kernel. The direct Provider path is therefore optional and
 non-default, not the primary image-to-CAD path or a release blocker. The A04 public
-mechanical envelope is published; S40 is now active under VCAD-A07, while
+mechanical envelope is published; S40 is complete under VCAD-A07 and is entering v0.8.0 under
+VCAD-A08, while
 Freeform remains behind A05.
 
 S20.1 seals descriptor-bound local JPEG/PNG ImageSets under the additive

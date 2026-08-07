@@ -754,6 +754,7 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 | `VCAD-A05` | 启动 Freeform，批准其输出类型与验收合同 | 未到达 |
 | `VCAD-A06` | tag/PyPI/GitHub Release 或其他公开发布 | **已完成；2026-08-04；v0.7.0** |
 | `VCAD-A07` | 启动 S40 Guided Photo V3 普通照片机械重建 | **已批准；2026-08-05** |
+| `VCAD-A08` | 将 S40 作为 v0.8.0 发布，并在发布后启动 S41 派生表达式联动 | **已批准；2026-08-06** |
 
 `VCAD-A01` 批准后，S10 和 S20.0 合同设计范围内的本地可逆实现、必要测试、计划内文档更新，
 以及按既有授权进行的有意 commit/branch push 无需重复请求。`VCAD-A02` 已进一步批准 S20.1–S20.5
@@ -808,22 +809,25 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 
 ```text
 S35 与 A06 已完成；S40 Guided Photo V3 的 capture contract、原生 slot、私有 hidden-evaluator pilot、
-公开固定三正两负和 Codex/Claude/WorkBuddy outcome gate 均已闭合。公开 v0.7.0 支持有清晰单位和完整尺寸的单个机械拉伸件/回转件，以及
+公开固定三正两负和 Codex/Claude/WorkBuddy outcome gate 均已闭合。已发布 v0.7.0 支持有清晰单位和完整尺寸的单个机械拉伸件/回转件，以及
 2–16 张同一物体/状态/尺度的干净互补视图；输出为可编辑 Sketcher + bounded PartDesign，confirmed
 尺寸、BRep 和单实体均经 deterministic verifier。无尺度、冲突、遮挡或隐藏结构必须澄清或
 SAFE_FAILURE。v0.7.0 已经 Codex/Claude/WorkBuddy 分宿主 smoke、PR/main、tag、GitHub Release、
 PyPI 和公开安装验证。当前私有样例不会进入仓库 fixture；S40 分支候选的整库回归与临时环境清理均已
-完成，下一步是 commit/push 后再决定发布。Freeform 仍停在 `VCAD-A05`。
+完成。`VCAD-A08` 已授权从 `main@314b335` 准备 v0.8.0，同一候选通过本地包门和三宿主门后再
+PR/merge/tag，并观察唯一 Release workflow 完成 GitHub Release/PyPI；随后启动 S41。Freeform 仍停在
+`VCAD-A05`。
 ```
 
 执行分支为 `codex/guided-photo-s40`，起始锚点为 `origin/main@43ddc49`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
 为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。在 A02 获批时，S20.0 只完成
 合同设计；当前 S20.1–S20.5 已实现本地持久化和 deterministic fake/interface-ready 路径，S30.1 已
 实现 opt-in OpenAI transport，但不是产品主线；S30.2–S35 已由 Codex/WorkBuddy 宿主多模态通道
-完成固定样例。`VCAD-A06`（v0.7.0 发布）已完成；`VCAD-A07` 已激活 S40，S40.1 已完成；native slot
+完成固定样例。`VCAD-A06`（v0.7.0 发布）已完成；`VCAD-A07` 已完成 S40；native slot
 和第一组私有 pilot 的编译器、真实 FreeCAD、Task review draft 及隐藏比较门已闭合；公开三正两负、
-三宿主 outcome 和真实 FreeCAD editability gate 也已闭合，整库回归与精确清理完成。下一恢复动作是
-commit/push；Freeform 仍需 `VCAD-A05`。
+三宿主 outcome 和真实 FreeCAD editability gate 也已闭合，整库回归与精确清理完成。`VCAD-A08`
+已授权 v0.8.0 的版本面、发布候选、PR/main、tag、GitHub Release 与 PyPI；下一恢复动作是从当前
+发布分支完成版本/包门。Freeform 仍需 `VCAD-A05`。
 
 ## 11. Material event ledger
 
@@ -861,6 +865,7 @@ commit/push；Freeform 仍需 `VCAD-A05`。
 | `VCAD-E29` | 用户批准第一组样例的最小产品升级 | 允许已保留的 `slot` IR geometry 编译为 native Sketcher 两线两弧及派生约束；保持现有 IR/ModelProgram 总预算，不加入 Fillet/Chamfer，隐藏 STEP 继续只在 evaluator 侧 | focused RED 必须证明 1 个 slot 对应 4 个 profile edge；真实 FreeCAD gate 必须证明水平/垂直 slot 的闭合、`DoF=0`、严格元数据和单实体特征；恢复动作是完成实现与候选比较 | slot 的数值维度在 v1 中编译为可手工编辑的 Sketcher 约束，不新增 parameter-carrier 绑定；精确 3D 圆角仍是已知残差 |
 | `VCAD-E30` | `VCAD-A07`、`VCAD-E29` 与第一组私有 pilot outcome gate | 已保留的 axis-aligned `slot` 编译为两线两弧及十四个 deterministic native constraints；oblique slot/slot-targeting IR constraint preflight fail closed；不扩张既有 3,500 IR/ModelProgram 预算、MCP 或 Task 权威 | 六特征 IR 2,603 nodes；真实 FreeCAD 六 sketch 全部 `DoF=0`/fully constrained、valid one solid；水平/垂直槽的 native width 6→8 mm 手工约束编辑生效，随后公开 depth 8→10 mm 参数修改仍保留该编辑和 solver closure；Task `task_44444444444444444444444444444444` generation 9、`awaiting_user_review`、四 verifier pass、HEAD unchanged；候选完成后的 isolated hidden evaluator volume IoU `0.937880`；69 parametric/Skill、431 Task/Worker、177 package tests 及 2 real-slot cases pass，Ruff/format/compile/diff/Skill validation pass | 私有照片、STEP、候选和探针未进仓库；slot 尺寸为可手工编辑的 native numeric constraint、不绑定 parameter carrier；Fillet/Chamfer 仍不支持；固定三正两负和三宿主 outcome 尚待闭合；本轮受管 runtime、Task roots、私有候选和探针已精确清理 |
 | `VCAD-E31` | `VCAD-A07` 与 S40.2/S40.3 public fixture/host outcome gate | 许可清晰的公开普通照片可在 provenance 与独立尺寸真值分权后成为固定 fixture；Codex、Claude、WorkBuddy 各完成一个真实正例，缺厚度与多物体负例在 Task 前停止；daemon idle 仅单次重连/replay；复杂圆角矩形采用非冗余 arc-center/tangent endpoint 配方，并将内部程序包络有界统一为 128 parameters/8,192 nodes | washer 20 × 20 × 2、block 30 × 20 × 10、fan 120 × 120 × 5；三者 generation 9 `awaiting_user_review`、HEAD unchanged、bbox/volume/valid BRep/one solid 与 FCStd/STEP 全 pass；真实 FreeCAD 全 sketch `DoF=0` 且 depth edit 生效；负例 `NEEDS_CAPTURE`/`OUT_OF_ENVELOPE` 均无 Task；5,942 non-slow passed / 126 deselected，10 real-FreeCAD slow passed，Ruff/changed-file format/compile/diff/Skill validation pass；三个 daemon 认证退役，临时宿主/Skill/MCP/下载/runtime 精确清理；恢复动作是 commit/push | 这是受限机械参数化普通照片重建，不是 photo-only metrology、任意遮挡逆向工程或 CAD 语义 merge；Fillet/Chamfer、圆角矩形派生尺寸的单参数表达式联动与 Freeform 仍不在 S40 包络；本轮只证明代表性 depth edit |
+| `VCAD-E32` | 用户批准 `VCAD-A08` 与 v0.8.0 发布计划 | 授权把 S40 公开边界冻结为 v0.8.0，使用同一候选完成 Codex/Claude/WorkBuddy 分宿主验收后 PR/merge/tag，并由唯一 tag workflow 发布 GitHub Release/PyPI；发布后直接进入 S41 | 起始锚点 `main@314b335`；发布分支 `codex/v0.8.0-release`；候选在仅含 tracked content 的隔离 checkout 构建，避免工作区新增未跟踪副本污染；tag 前可恢复到分支/PR，PyPI 启动后只观察或 forward-fix | 工具数、runtime epoch、Task/Revision/Review/Release 权威不变；Freeform/Fillet/Chamfer/通用逆向工程不进入 v0.8.0；同候选包、发布后公开安装与临时环境清理尚待闭合 |
 
 ## 12. 研究依据
 
