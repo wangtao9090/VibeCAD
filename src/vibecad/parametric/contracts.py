@@ -40,6 +40,7 @@ _MAX_TOTAL_CONSTRAINTS = 512
 _MAX_PARAMETRIC_IR_NODES = 8_192
 _MAX_EVIDENCE_REFS = 8
 _MAX_SOURCE_REFS = 8
+_MAX_DERIVED_PARAMETER_TERMS = 8
 
 _MAX_TEXT_BYTES = 256
 _MAX_ERROR_PATH_LENGTH = 512
@@ -558,6 +559,65 @@ class DesignEvidence:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class DerivedParameterExpression:
+    """A bounded affine expression over same-unit design parameters."""
+
+    terms: Mapping[str, int | float]
+    constant: int | float = 0
+    schema_version: int = PARAMETRIC_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "schema_version", _schema(self.schema_version))
+        if not isinstance(self.terms, Mapping):
+            _raise(ParametricErrorCode.INVALID_TYPE, "/terms")
+        try:
+            terms = dict(self.terms)
+        except Exception:
+            _raise(ParametricErrorCode.INVALID_VALUE, "/terms")
+        if not terms:
+            _raise(ParametricErrorCode.INVALID_VALUE, "/terms")
+        if len(terms) > _MAX_DERIVED_PARAMETER_TERMS:
+            _raise(ParametricErrorCode.BUDGET_EXCEEDED, "/terms")
+        frozen: dict[str, int | float] = {}
+        for parameter_id in sorted(terms):
+            path = _safe_path("/terms", parameter_id)
+            checked_id = _local_id(parameter_id, path, "parameter")
+            coefficient = _number(terms[parameter_id], path)
+            assert coefficient is not None
+            if coefficient == 0:
+                _raise(ParametricErrorCode.INVALID_VALUE, path)
+            frozen[checked_id] = coefficient
+        object.__setattr__(self, "terms", MappingProxyType(frozen))
+        constant = _number(self.constant, "/constant")
+        assert constant is not None
+        object.__setattr__(self, "constant", constant)
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "constant": self.constant,
+            "terms": dict(self.terms),
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        keys = {"schema_version", "constant", "terms"}
+        data = _fields(value, allowed=keys, required=keys)
+        terms = data["terms"]
+        if not isinstance(terms, Mapping):
+            _raise(ParametricErrorCode.INVALID_TYPE, "/terms")
+        try:
+            copied_terms = dict(terms)
+        except Exception:
+            _raise(ParametricErrorCode.INVALID_VALUE, "/terms")
+        return cls(
+            schema_version=_schema(data["schema_version"]),
+            constant=data["constant"],
+            terms=copied_terms,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class DesignParameter:
     """A named, bounded parameter whose value is evidence-backed."""
 
@@ -570,6 +630,7 @@ class DesignParameter:
     minimum: int | float | None = None
     maximum: int | float | None = None
     public: bool = True
+    expression: DerivedParameterExpression | None = None
     schema_version: int = PARAMETRIC_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -596,6 +657,10 @@ class DesignParameter:
         object.__setattr__(self, "minimum", _number(self.minimum, "/minimum", optional=True))
         object.__setattr__(self, "maximum", _number(self.maximum, "/maximum", optional=True))
         object.__setattr__(self, "public", _boolean(self.public, "/public"))
+        if self.expression is not None and not isinstance(
+            self.expression, DerivedParameterExpression
+        ):
+            _raise(ParametricErrorCode.INVALID_TYPE, "/expression")
         if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
             _raise(ParametricErrorCode.INVALID_VALUE, "/minimum")
         if self.minimum is not None and self.value < self.minimum:
@@ -604,7 +669,7 @@ class DesignParameter:
             _raise(ParametricErrorCode.INVALID_VALUE, "/value")
 
     def to_mapping(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "schema_version": self.schema_version,
             "id": self.id,
             "name": self.name,
@@ -616,6 +681,9 @@ class DesignParameter:
             "maximum": self.maximum,
             "public": self.public,
         }
+        if self.expression is not None:
+            result["expression"] = self.expression.to_mapping()
+        return result
 
     @classmethod
     def from_mapping(cls, value: object) -> Self:
@@ -630,8 +698,9 @@ class DesignParameter:
             "minimum",
             "maximum",
             "public",
+            "expression",
         }
-        data = _fields(value, allowed=keys, required=keys)
+        data = _fields(value, allowed=keys, required=keys - {"expression"})
         return cls(
             schema_version=_schema(data["schema_version"]),
             id=data["id"],
@@ -643,6 +712,15 @@ class DesignParameter:
             minimum=data["minimum"],
             maximum=data["maximum"],
             public=data["public"],
+            expression=(
+                None
+                if "expression" not in data
+                else _parse_nested(
+                    data["expression"],
+                    DerivedParameterExpression,
+                    "/expression",
+                )
+            ),
         )
 
 
@@ -1619,18 +1697,68 @@ class ParametricDesignIR:
                     )
 
         parameter_by_id: dict[str, DesignParameter] = {}
+        parameter_indexes: dict[str, int] = {}
         public_names: set[str] = set()
         for index, parameter in enumerate(parameters):
             if parameter.id in seen:
                 _raise(ParametricErrorCode.DUPLICATE_ID, f"/parameters/{index}/id")
             seen.add(parameter.id)
             parameter_by_id[parameter.id] = parameter
+            parameter_indexes[parameter.id] = index
             require_evidence(parameter.evidence_ids, f"/parameters/{index}/evidence_ids")
             if parameter.public:
                 canonical_name = parameter.name.casefold()
                 if canonical_name in public_names:
                     _raise(ParametricErrorCode.DUPLICATE_ID, f"/parameters/{index}/name")
                 public_names.add(canonical_name)
+
+        resolved_parameter_values: dict[str, float] = {}
+        resolving_parameters: set[str] = set()
+
+        def resolve_parameter(parameter_id: str) -> float:
+            resolved = resolved_parameter_values.get(parameter_id)
+            if resolved is not None:
+                return resolved
+            parameter = parameter_by_id[parameter_id]
+            parameter_index = parameter_indexes[parameter_id]
+            expression = parameter.expression
+            if expression is None:
+                result = float(parameter.value)
+            else:
+                expression_path = f"/parameters/{parameter_index}/expression"
+                if parameter.public:
+                    _raise(ParametricErrorCode.INVALID_VALUE, f"{expression_path}/terms")
+                if parameter_id in resolving_parameters:
+                    _raise(ParametricErrorCode.INVALID_ORDER, expression_path)
+                resolving_parameters.add(parameter_id)
+                values = [float(expression.constant)]
+                for source_id, coefficient in expression.terms.items():
+                    source_path = _safe_path(f"{expression_path}/terms", source_id)
+                    source = parameter_by_id.get(source_id)
+                    if source is None:
+                        _raise(ParametricErrorCode.UNKNOWN_REFERENCE, source_path)
+                    if source.unit is not parameter.unit:
+                        _raise(ParametricErrorCode.INVALID_VALUE, source_path)
+                    values.append(float(coefficient) * resolve_parameter(source_id))
+                resolving_parameters.remove(parameter_id)
+                result = math.fsum(values)
+                if not math.isfinite(result) or abs(result) > _MAX_ABSOLUTE_VALUE:
+                    _raise(ParametricErrorCode.INVALID_VALUE, expression_path)
+                if not math.isclose(
+                    result,
+                    float(parameter.value),
+                    rel_tol=1e-12,
+                    abs_tol=1e-9,
+                ):
+                    _raise(
+                        ParametricErrorCode.INVALID_VALUE,
+                        f"/parameters/{parameter_index}/value",
+                    )
+            resolved_parameter_values[parameter_id] = result
+            return result
+
+        for parameter in parameters:
+            resolve_parameter(parameter.id)
 
         datum_by_id: dict[str, DatumPlane] = {}
         for index, datum in enumerate(datum_planes):

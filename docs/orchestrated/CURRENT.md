@@ -1,10 +1,10 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **v0.8.0 published; S41 derived-expression linkage next**
+> Status: **v0.8.0 published; S41 derived-expression implementation gate complete**
 >
 > Updated: 2026-08-06
 >
-> Repository anchor: published tag `v0.8.0@6ee230f`
+> Repository anchor: `main@9d39547`; published tag `v0.8.0@6ee230f`
 >
 > Active plan: [`vibecad-visual-cad.md`](vibecad-visual-cad.md)
 >
@@ -193,10 +193,28 @@ VibeCAD-created runtime, candidate/public-install roots, host-local Skill/MCP co
 blobs, and exact Codex/Claude/WorkBuddy test records were removed. The user-owned FreeCAD app and all
 untracked repository files remain. `VCAD-A08` is complete; the next implementation action is S41.
 
+S41 now implements the bounded derived-expression linkage approved after v0.8.0. A parameter may
+optionally carry a structured affine expression with one to eight same-unit source terms and a finite
+constant. Derived parameters are private, acyclic, and must declare an initial value that matches the
+expression; legacy independent parameters retain their exact serialized shape. The compiler installs
+these relationships as native FreeCAD `ExpressionEngine` bindings on the existing parameter carrier,
+authenticates strict expression metadata on reopen, follows transitive consumers, and rejects invalid
+live derived values before starting CAD mutation. It does not add raw expression strings, an MCP tool,
+a durable schema, a Task state, a CAD authority, or a version bump.
+
+The rounded-square fan fixture now derives straight lengths and arc/edge coordinates from public
+width, height, radius, and private origins. Real managed FreeCAD proved sequential width `120 -> 130`
+and radius `8 -> 10` edits: derived straight width changed `104 -> 114 -> 110`, the solid remained a
+valid single BRep with `130 x 120 x 5 mm` bounds, and the affected consumer stayed the outer sketch.
+An invalid width of `10 mm` failed before mutation and preserved the prior volume. The isolated tracked
+suite is `5,947 passed, 127 deselected`; focused contract/fixture tests, Ruff, format, compile, diff, and
+Skill validation form the remaining branch gate. User-owned duplicate files and
+`/Applications/FreeCAD.app` remain untouched; the temporary managed runtime was removed.
+
 The complete architecture, slices, gates, privacy boundary, validation budget,
 and recovery point are in
 [`vibecad-visual-cad.md`](vibecad-visual-cad.md). VCAD-A07 completed S40 and VCAD-A08
-published it as v0.8.0; S41 starts from `main@6ee230f`. S10.1 froze the
+published it as v0.8.0; S41 starts from the post-release closeout anchor `main@9d39547`. S10.1 froze the
 minimal ParametricDesignIR v1; S10.2 delivered native Sketcher objects and
 solver/DoF facts. S10.3 now compiles closed profiles into a strict single-body
 Pad/Pocket/Revolution/Hole chain, preserves feature parameter expressions and

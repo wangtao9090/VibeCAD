@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from vibecad.parametric import (
     BodyDefinition,
     ConstraintKind,
+    DerivedParameterExpression,
     DesignEvidence,
     DesignEvidenceOrigin,
     DesignEvidenceStatus,
@@ -67,6 +68,7 @@ class _DesignBuilder:
         public: bool = True,
         minimum: float = -1_000.0,
         maximum: float = 1_000.0,
+        expression: DerivedParameterExpression | None = None,
     ) -> str:
         parameter_id = _id(self.case_id, "parameter", token)
         self.parameters.append(
@@ -80,6 +82,7 @@ class _DesignBuilder:
                 minimum=minimum,
                 maximum=maximum,
                 public=public,
+                expression=expression,
             )
         )
         return parameter_id
@@ -382,79 +385,147 @@ def _rounded_rectangle_sketch(
             evidence_ids=(builder.evidence_id,),
         ),
     )
-    coordinate_ids: dict[float, str] = {}
+    coordinate_ids: dict[tuple[float, tuple[tuple[str, float], ...]], str] = {}
 
-    def coordinate(value: float) -> str:
-        canonical = float(value)
-        if canonical not in coordinate_ids:
-            label = str(canonical).replace("-", "neg-").replace(".", "-")
-            coordinate_ids[canonical] = builder.parameter(
+    def derived(
+        label: str,
+        value: float,
+        terms: dict[str, float],
+        *,
+        constant: float = 0,
+    ) -> str:
+        key = (
+            float(constant),
+            tuple(sorted((item, float(scale)) for item, scale in terms.items())),
+        )
+        if key not in coordinate_ids:
+            coordinate_ids[key] = builder.parameter(
                 f"{token}-derived-{label}",
-                f"{name} derived coordinate {canonical:g}",
-                canonical,
+                f"{name} derived {label.replace('-', ' ')}",
+                value,
                 public=False,
+                expression=DerivedParameterExpression(
+                    constant=constant,
+                    terms=terms,
+                ),
             )
-        return coordinate_ids[canonical]
+        return coordinate_ids[key]
+
+    offset_x_id = builder.parameter(
+        f"{token}-origin-x",
+        f"{name} origin X",
+        offset_x,
+        public=False,
+    )
+    offset_y_id = builder.parameter(
+        f"{token}-origin-y",
+        f"{name} origin Y",
+        offset_y,
+        public=False,
+    )
+    straight_width_id = derived(
+        "straight-width",
+        straight_width,
+        {width_id: 1, radius_id: -2},
+    )
+    straight_height_id = derived(
+        "straight-height",
+        straight_height,
+        {height_id: 1, radius_id: -2},
+    )
+    left_arc_x_id = derived(
+        "left-arc-x",
+        left_arc_x,
+        {offset_x_id: 1, radius_id: 1},
+    )
+    right_arc_x_id = derived(
+        "right-arc-x",
+        right_arc_x,
+        {offset_x_id: 1, width_id: 1, radius_id: -1},
+    )
+    bottom_arc_y_id = derived(
+        "bottom-arc-y",
+        bottom_arc_y,
+        {offset_y_id: 1, radius_id: 1},
+    )
+    top_arc_y_id = derived(
+        "top-arc-y",
+        top_arc_y,
+        {offset_y_id: 1, height_id: 1, radius_id: -1},
+    )
+    right_x_id = derived(
+        "right-x",
+        right_x,
+        {offset_x_id: 1, width_id: 1},
+    )
+    top_y_id = derived(
+        "top-y",
+        top_y,
+        {offset_y_id: 1, height_id: 1},
+    )
 
     origin = _ref("@origin", ReferencePoint.CENTER)
     line_specs = {
-        "bottom": (ConstraintKind.HORIZONTAL, straight_width, left_arc_x, offset_y),
-        "right": (ConstraintKind.VERTICAL, straight_height, right_x, bottom_arc_y),
-        "top": (ConstraintKind.HORIZONTAL, straight_width, right_arc_x, top_y),
-        "left": (ConstraintKind.VERTICAL, straight_height, offset_x, top_arc_y),
+        "bottom": (ConstraintKind.HORIZONTAL, straight_width_id, left_arc_x_id, offset_y_id),
+        "right": (ConstraintKind.VERTICAL, straight_height_id, right_x_id, bottom_arc_y_id),
+        "top": (ConstraintKind.HORIZONTAL, straight_width_id, right_arc_x_id, top_y_id),
+        "left": (ConstraintKind.VERTICAL, straight_height_id, offset_x_id, top_arc_y_id),
     }
     constraints: list[SketchConstraint] = []
-    for line, (orientation, length, start_x, start_y) in line_specs.items():
+    for line, (orientation, length_id, start_x_id, start_y_id) in line_specs.items():
         whole = _ref(geometry_ids[line], ReferencePoint.WHOLE)
         start = _ref(geometry_ids[line], ReferencePoint.START)
         constraints.extend(
             (
                 builder.constraint(token, orientation, (whole,)),
-                builder.constraint(token, ConstraintKind.LENGTH, (whole,), coordinate(length)),
-                builder.constraint(
-                    token, ConstraintKind.DISTANCE_X, (origin, start), coordinate(start_x)
-                ),
-                builder.constraint(
-                    token, ConstraintKind.DISTANCE_Y, (origin, start), coordinate(start_y)
-                ),
+                builder.constraint(token, ConstraintKind.LENGTH, (whole,), length_id),
+                builder.constraint(token, ConstraintKind.DISTANCE_X, (origin, start), start_x_id),
+                builder.constraint(token, ConstraintKind.DISTANCE_Y, (origin, start), start_y_id),
             )
         )
 
     arc_specs = {
         "br": (
-            right_arc_x,
-            bottom_arc_y,
+            right_arc_x_id,
+            bottom_arc_y_id,
             ConstraintKind.DISTANCE_X,
-            right_arc_x,
+            right_arc_x_id,
             ConstraintKind.DISTANCE_Y,
-            bottom_arc_y,
+            bottom_arc_y_id,
         ),
         "tr": (
-            right_arc_x,
-            top_arc_y,
+            right_arc_x_id,
+            top_arc_y_id,
             ConstraintKind.DISTANCE_Y,
-            top_arc_y,
+            top_arc_y_id,
             ConstraintKind.DISTANCE_X,
-            right_arc_x,
+            right_arc_x_id,
         ),
         "tl": (
-            left_arc_x,
-            top_arc_y,
+            left_arc_x_id,
+            top_arc_y_id,
             ConstraintKind.DISTANCE_X,
-            left_arc_x,
+            left_arc_x_id,
             ConstraintKind.DISTANCE_Y,
-            top_arc_y,
+            top_arc_y_id,
         ),
         "bl": (
-            left_arc_x,
-            bottom_arc_y,
+            left_arc_x_id,
+            bottom_arc_y_id,
             ConstraintKind.DISTANCE_Y,
-            bottom_arc_y,
+            bottom_arc_y_id,
             ConstraintKind.DISTANCE_X,
-            left_arc_x,
+            left_arc_x_id,
         ),
     }
-    for arc, (cx, cy, start_kind, start_value, end_kind, end_value) in arc_specs.items():
+    for arc, (
+        _cx_id,
+        _cy_id,
+        start_kind,
+        start_parameter_id,
+        end_kind,
+        end_parameter_id,
+    ) in arc_specs.items():
         whole = _ref(geometry_ids[arc], ReferencePoint.WHOLE)
         center = _ref(geometry_ids[arc], ReferencePoint.CENTER)
         start = _ref(geometry_ids[arc], ReferencePoint.START)
@@ -462,14 +533,10 @@ def _rounded_rectangle_sketch(
         constraints.extend(
             (
                 builder.constraint(token, ConstraintKind.RADIUS, (whole,), radius_id),
-                builder.constraint(
-                    token, ConstraintKind.DISTANCE_X, (origin, center), coordinate(cx)
-                ),
-                builder.constraint(
-                    token, ConstraintKind.DISTANCE_Y, (origin, center), coordinate(cy)
-                ),
-                builder.constraint(token, start_kind, (origin, start), coordinate(start_value)),
-                builder.constraint(token, end_kind, (origin, end), coordinate(end_value)),
+                builder.constraint(token, ConstraintKind.DISTANCE_X, (origin, center), _cx_id),
+                builder.constraint(token, ConstraintKind.DISTANCE_Y, (origin, center), _cy_id),
+                builder.constraint(token, start_kind, (origin, start), start_parameter_id),
+                builder.constraint(token, end_kind, (origin, end), end_parameter_id),
             )
         )
     return ParametricSketch(
