@@ -19,9 +19,12 @@ from types import MappingProxyType
 
 from vibecad.parametric.contracts import (
     MAX_DESIGN_PARAMETERS,
+    MAX_DRAFT_FACES,
     MAX_PATTERN_FEATURES,
     MAX_PATTERN_INSTANCES,
     MAX_PATTERN_OCCURRENCES,
+    MAX_SURFACE_MODIFIERS,
+    MAX_THICKNESS_FACES,
     ConstraintKind,
     DerivedParameterExpression,
     DesignParameter,
@@ -41,6 +44,8 @@ from vibecad.parametric.contracts import (
     ReferencePoint,
     SemanticEdgeReference,
     SemanticEdgeRole,
+    SemanticFaceReference,
+    SemanticFaceRole,
     SketchConstraint,
     SketchGeometry,
     SketchReference,
@@ -81,6 +86,8 @@ _FEATURE_TYPE_IDS = {
     FeatureKind.LINEAR_PATTERN: "PartDesign::LinearPattern",
     FeatureKind.CIRCULAR_PATTERN: "PartDesign::PolarPattern",
     FeatureKind.MIRROR: "PartDesign::Mirrored",
+    FeatureKind.THICKNESS: "PartDesign::Thickness",
+    FeatureKind.DRAFT: "PartDesign::Draft",
 }
 _EDGE_TREATMENT_TYPE_IDS = {
     EdgeTreatmentKind.FILLET: "Part::Fillet",
@@ -89,6 +96,8 @@ _EDGE_TREATMENT_TYPE_IDS = {
 _PATTERN_KINDS = frozenset(
     {FeatureKind.LINEAR_PATTERN, FeatureKind.CIRCULAR_PATTERN, FeatureKind.MIRROR}
 )
+_SURFACE_MODIFIER_KINDS = frozenset({FeatureKind.THICKNESS, FeatureKind.DRAFT})
+_SKETCHLESS_FEATURE_KINDS = _PATTERN_KINDS | _SURFACE_MODIFIER_KINDS
 _PROFILE_FEATURE_KINDS = frozenset(
     {FeatureKind.PAD, FeatureKind.POCKET, FeatureKind.REVOLVE, FeatureKind.HOLE}
 )
@@ -106,6 +115,16 @@ _MIRROR_PLANE_OBJECTS = {
     MirrorPlane.XY_PLANE: "XY_Plane",
     MirrorPlane.XZ_PLANE: "XZ_Plane",
     MirrorPlane.YZ_PLANE: "YZ_Plane",
+}
+_ORIGIN_PLANE_OBJECTS = {
+    OriginPlane.XY: "XY_Plane",
+    OriginPlane.XZ: "XZ_Plane",
+    OriginPlane.YZ: "YZ_Plane",
+}
+_ORIGIN_PLANE_PULL_DIRECTIONS = {
+    OriginPlane.XY: "Z_Axis",
+    OriginPlane.XZ: "Y_Axis",
+    OriginPlane.YZ: "X_Axis",
 }
 
 
@@ -591,6 +610,10 @@ def _feature_parameter_bindings(
         return (("angle", feature.parameters["angle"], "Angle"),)
     if feature.kind is FeatureKind.MIRROR:
         return ()
+    if feature.kind is FeatureKind.THICKNESS:
+        return (("thickness", feature.parameters["thickness"], "Value"),)
+    if feature.kind is FeatureKind.DRAFT:
+        return (("angle", feature.parameters["angle"], "Angle"),)
     bindings = [("diameter", feature.parameters["diameter"], "Diameter")]
     if feature.extent is FeatureExtent.LENGTH:
         bindings.append(("depth", feature.parameters["depth"], "Depth"))
@@ -616,6 +639,19 @@ def _edge_treatment_metadata_targets(
             "forward": None,
         }
         for target in treatment.targets
+    ]
+
+
+def _surface_modifier_metadata_targets(
+    feature: PartDesignFeature,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "source_feature_id": target.source_feature_id,
+            "role": target.role.value,
+            "geometry_id": target.geometry_id,
+        }
+        for target in feature.face_targets
     ]
 
 
@@ -653,12 +689,15 @@ def _require_feature_shape(
         if not math.isfinite(previous_volume) or previous_volume <= 0:
             _raise(ParametricCompileErrorCode.FEATURE_FAILURE, path)
         tolerance = max(1.0, abs(previous_volume), abs(volume)) * 1e-9
-        if additive is None:
-            additive = kind in {FeatureKind.PAD, FeatureKind.REVOLVE}
-        if additive:
-            changed = volume > previous_volume + tolerance
+        if kind in _SURFACE_MODIFIER_KINDS:
+            changed = not math.isclose(volume, previous_volume, rel_tol=0.0, abs_tol=tolerance)
         else:
-            changed = volume < previous_volume - tolerance
+            if additive is None:
+                additive = kind in {FeatureKind.PAD, FeatureKind.REVOLVE}
+            if additive:
+                changed = volume > previous_volume + tolerance
+            else:
+                changed = volume < previous_volume - tolerance
         if not changed:
             _raise(ParametricCompileErrorCode.FEATURE_FAILURE, path)
     return volume
@@ -704,6 +743,15 @@ class _ResolvedTreatmentEdge:
         return self.index, self.start, self.end
 
 
+@dataclass(frozen=True, slots=True)
+class _ResolvedSemanticFace:
+    index: int
+
+    @property
+    def native(self) -> str:
+        return f"Face{self.index}"
+
+
 def _point_tuple(value: object) -> tuple[float, float, float]:
     try:
         point = (float(value.x), float(value.y), float(value.z))  # type: ignore[attr-defined]
@@ -745,6 +793,47 @@ def _shape_edges(obj: object) -> tuple[object, ...]:
     if not 1 <= len(edges) <= 4096:
         _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
     return edges
+
+
+def _shape_faces(obj: object) -> tuple[object, ...]:
+    try:
+        faces = tuple(obj.Shape.Faces)  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if not 1 <= len(faces) <= 4096:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    return faces
+
+
+def _face_normal(face: object) -> object:
+    try:
+        if face.Surface.TypeId != "Part::GeomPlane":  # type: ignore[attr-defined]
+            raise ValueError
+        u_min, u_max, v_min, v_max = face.ParameterRange  # type: ignore[attr-defined]
+        normal = face.normalAt(  # type: ignore[attr-defined]
+            (float(u_min) + float(u_max)) / 2,
+            (float(v_min) + float(v_max)) / 2,
+        )
+        length = float(normal.Length)
+    except Exception:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    if not math.isfinite(length) or length <= 1e-12:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    return normal * (1.0 / length)
+
+
+def _face_is_planar(face: object) -> bool:
+    try:
+        return face.Surface.TypeId == "Part::GeomPlane"  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+
+def _face_center(face: object) -> object:
+    try:
+        return face.CenterOfMass  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
 
 
 def _element_history(obj: object, element_name: str) -> tuple[tuple[object, str], ...]:
@@ -1172,6 +1261,174 @@ def _resolve_semantic_edge(
     return _ResolvedSemanticEdge(index=current_index, forward=forward)
 
 
+def _face_candidates(
+    obj: object,
+    *,
+    source_mapped_name: str,
+) -> tuple[int, ...]:
+    result: list[int] = []
+    for index, _face in enumerate(_shape_faces(obj), 1):
+        history = _element_history(obj, f"Face{index}")
+        if any(name == source_mapped_name for _item, name in history):
+            result.append(index)
+    return tuple(result)
+
+
+def _same_face_candidates(obj: object, source_face: object) -> tuple[int, ...]:
+    matches: list[int] = []
+    for index, face in enumerate(_shape_faces(obj), 1):
+        try:
+            same = bool(face.isSame(source_face))  # type: ignore[attr-defined]
+        except Exception:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        if same:
+            matches.append(index)
+    return tuple(matches)
+
+
+def _source_semantic_face(
+    source_feature: object,
+    *,
+    sketch: object,
+    feature_data: dict[str, object],
+    sketch_data: dict[str, object],
+    reference: SemanticFaceReference,
+) -> int:
+    try:
+        if FeatureKind(_text(feature_data["feature_kind"])) is not FeatureKind.PAD:
+            raise ValueError
+    except ValueError:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    direction = _linear_feature_direction(sketch, feature_data)
+    try:
+        direction = direction * (1.0 / float(direction.Length))
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    faces = _shape_faces(source_feature)
+    if reference.role is SemanticFaceRole.SWEEP:
+        if reference.geometry_id is None:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        geometry_index = _geometry_native_index(sketch_data, reference.geometry_id)
+        sketch_token = f"g{geometry_index + 1};SKT"
+        candidates: list[int] = []
+        for index, face in enumerate(faces, 1):
+            history = _element_history(source_feature, f"Face{index}")
+            if not _history_contains(history, sketch, sketch_token):
+                continue
+            alignment = abs(float(_face_normal(face).dot(direction)))  # type: ignore[attr-defined]
+            if math.isclose(alignment, 0.0, rel_tol=0.0, abs_tol=1e-7):
+                candidates.append(index)
+        if len(candidates) != 1:
+            _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+        return candidates[0]
+
+    values: list[tuple[int, float]] = []
+    for index, face in enumerate(faces, 1):
+        if not _face_is_planar(face):
+            continue
+        normal = _face_normal(face)
+        alignment = abs(float(normal.dot(direction)))  # type: ignore[attr-defined]
+        if not math.isclose(alignment, 1.0, rel_tol=0.0, abs_tol=1e-7):
+            continue
+        values.append((index, float(_face_center(face).dot(direction))))  # type: ignore[attr-defined]
+    return _unique_extreme(
+        tuple(values),
+        maximum=reference.role is SemanticFaceRole.SECTION_END,
+    )
+
+
+def _resolve_semantic_face(
+    base: object,
+    *,
+    source_feature: object,
+    sketch: object,
+    feature_data: dict[str, object],
+    sketch_data: dict[str, object],
+    reference: SemanticFaceReference,
+    require_planar: bool,
+) -> _ResolvedSemanticFace:
+    source_index = _source_semantic_face(
+        source_feature,
+        sketch=sketch,
+        feature_data=feature_data,
+        sketch_data=sketch_data,
+        reference=reference,
+    )
+    source_face = _shape_faces(source_feature)[source_index - 1]
+    try:
+        source_mapped_name = _text(
+            source_feature.Shape.getElementMappedName(  # type: ignore[attr-defined]
+                f"Face{source_index}"
+            )
+        )
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    matches = _face_candidates(base, source_mapped_name=source_mapped_name)
+    if len(matches) != 1:
+        matches = _same_face_candidates(base, source_face)
+    if len(matches) != 1:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    current_index = matches[0]
+    if require_planar:
+        _face_normal(_shape_faces(base)[current_index - 1])
+    return _ResolvedSemanticFace(index=current_index)
+
+
+def _surface_face_target(value: object) -> SemanticFaceReference:
+    entry = _exact_mapping(value, {"source_feature_id", "role", "geometry_id"})
+    try:
+        return SemanticFaceReference(
+            source_feature_id=_text(entry["source_feature_id"], _IR_ID),
+            role=_text(entry["role"]),
+            geometry_id=(
+                None if entry["geometry_id"] is None else _text(entry["geometry_id"], _IR_ID)
+            ),
+        )
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+
+def _resolved_surface_faces(
+    base: object,
+    data: dict[str, object],
+    by_ir_id: Mapping[str, tuple[object, dict[str, object]]],
+) -> tuple[_ResolvedSemanticFace, ...]:
+    try:
+        kind = FeatureKind(_text(data["feature_kind"]))
+    except ValueError:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    maximum = MAX_THICKNESS_FACES if kind is FeatureKind.THICKNESS else MAX_DRAFT_FACES
+    references = tuple(
+        _surface_face_target(item) for item in _sequence(data["face_targets"], maximum=maximum)
+    )
+    if not references or len({item.source_feature_id for item in references}) != 1:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    source_record = by_ir_id.get(references[0].source_feature_id)
+    if source_record is None or source_record[1]["kind"] != "feature":
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    source_feature, source_data = source_record
+    sketch_id = _text(source_data["sketch_id"], _IR_ID)
+    sketch_record = by_ir_id.get(sketch_id)
+    if sketch_record is None or sketch_record[1]["kind"] != "sketch":
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    sketch, sketch_data = sketch_record
+    resolved = tuple(
+        _resolve_semantic_face(
+            base,
+            source_feature=source_feature,
+            sketch=sketch,
+            feature_data=source_data,
+            sketch_data=sketch_data,
+            reference=reference,
+            require_planar=kind is FeatureKind.DRAFT,
+        )
+        for reference in references
+    )
+    if len({item.index for item in resolved}) != len(resolved):
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    return resolved
+
+
 def _parameter_property(parameter: DesignParameter) -> str:
     return f"P_{_suffix(parameter.id)}"
 
@@ -1360,8 +1617,20 @@ def _read_metadata(obj: object, *, required: bool = False) -> dict[str, object] 
             "occurrences",
             "source_feature_id",
         }
+        surface_keys = {
+            "face_targets",
+            "neutral_plane",
+            "neutral_plane_token",
+            "pull_direction_token",
+            "refine",
+            "thickness_intersection",
+            "thickness_join",
+            "thickness_mode",
+        }
         if parsed.get("feature_kind") in {item.value for item in _PATTERN_KINDS}:
             data = _exact_mapping(parsed, feature_keys | pattern_keys)
+        elif parsed.get("feature_kind") in {item.value for item in _SURFACE_MODIFIER_KINDS}:
+            data = _exact_mapping(parsed, feature_keys | surface_keys)
         else:
             data = _exact_mapping(parsed, feature_keys)
     elif kind == "edge_treatment":
@@ -1972,14 +2241,14 @@ def _feature_binding(value: object) -> tuple[str, str, str, str, str]:
         {"expression", "name", "parameter_id", "property", "target"},
     )
     name = _text(data["name"])
-    if name not in {"angle", "depth", "diameter", "length"}:
+    if name not in {"angle", "depth", "diameter", "length", "thickness"}:
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     parameter_id = _text(data["parameter_id"], _IR_ID)
     if not parameter_id.startswith("ir_parameter_"):
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     property_name = _text(data["property"], _PARAMETER_PROPERTY)
     target = _text(data["target"])
-    if target not in {"Angle", "Depth", "Diameter", "Length"}:
+    if target not in {"Angle", "Depth", "Diameter", "Length", "Value"}:
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     expression = _text(data["expression"])
     return name, parameter_id, property_name, target, expression
@@ -2101,6 +2370,7 @@ def _validate_pattern_feature_metadata(
         or data["sketch_id"] is not None
         or data["extent"] is not None
         or data["location_geometry_ids"] != []
+        or data["refine"] is not True
         or type(data["reversed"]) is not bool
         or data["symmetric"] is not False
     ):
@@ -2270,6 +2540,198 @@ def _validate_pattern_feature_metadata(
     return tuple(facts)
 
 
+def _native_surface_faces(obj: object, *, maximum: int) -> tuple[object, tuple[int, ...]]:
+    try:
+        raw = obj.Base  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if type(raw) not in {list, tuple} or len(raw) != 2:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    base, names = raw
+    if type(names) not in {list, tuple} or not 1 <= len(names) <= maximum:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    indexes: list[int] = []
+    for name in names:
+        if type(name) is not str or re.fullmatch(r"Face([1-9][0-9]{0,3})", name) is None:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        indexes.append(int(name.removeprefix("Face")))
+    if len(set(indexes)) != len(indexes):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    return base, tuple(indexes)
+
+
+def _source_thickness_limit(source: object) -> float:
+    try:
+        box = source.Shape.BoundBox  # type: ignore[attr-defined]
+        lengths = (float(box.XLength), float(box.YLength), float(box.ZLength))
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if not all(math.isfinite(item) and item > 1e-9 for item in lengths):
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    return min(lengths) * 0.25
+
+
+def _validate_surface_modifier_metadata(
+    obj: object,
+    data: dict[str, object],
+    kind: FeatureKind,
+) -> tuple[ParametricEntityFact, ...]:
+    feature_index = _integer(data["feature_index"], maximum=7)
+    feature_id = _text(data["ir_id"], _IR_ID)
+    base_feature_id = _text(data["base_feature_id"], _IR_ID)
+    maximum = MAX_THICKNESS_FACES if kind is FeatureKind.THICKNESS else MAX_DRAFT_FACES
+    targets = tuple(
+        _surface_face_target(item) for item in _sequence(data["face_targets"], maximum=maximum)
+    )
+    if (
+        not feature_id.startswith("ir_feature_")
+        or not base_feature_id.startswith("ir_feature_")
+        or not targets
+        or len({item.source_feature_id for item in targets}) != 1
+        or len({(item.role.value, item.geometry_id) for item in targets}) != len(targets)
+        or data["sketch_id"] is not None
+        or data["extent"] is not None
+        or data["axis"] is not None
+        or data["axis_token"] is not None
+        or data["location_geometry_ids"] != []
+        or type(data["reversed"]) is not bool
+        or data["symmetric"] is not False
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+    records = _parametric_records(obj.Document)  # type: ignore[attr-defined]
+    by_ir_id = {_text(item[1]["ir_id"], _IR_ID): item for item in records}
+    source_id = targets[0].source_feature_id
+    source_record = by_ir_id.get(source_id)
+    if source_record is None or source_record[1]["kind"] != "feature":
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    source, source_data = source_record
+    try:
+        source_kind = FeatureKind(_text(source_data["feature_kind"]))
+    except ValueError:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if source_kind is not FeatureKind.PAD:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+    base, native_indexes = _native_surface_faces(obj, maximum=maximum)
+    base_data = _read_metadata(base, required=True)
+    try:
+        base_feature = obj.BaseFeature  # type: ignore[attr-defined]
+        refine = bool(obj.Refine)  # type: ignore[attr-defined]
+        reversed_value = bool(obj.Reversed)  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if (
+        base_data is None
+        or base_data["kind"] != "feature"
+        or base_data["ir_id"] != base_feature_id
+        or base_feature is not base
+        or refine is not True
+        or reversed_value is not data["reversed"]
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    resolved = _resolved_surface_faces(base, data, by_ir_id)
+    if native_indexes != tuple(item.index for item in resolved):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+    bindings = tuple(_feature_binding(item) for item in _sequence(data["bindings"], maximum=4))
+    if tuple(item[0] for item in bindings) != tuple(sorted(item[0] for item in bindings)):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    binding_shape = tuple((item[0], item[3]) for item in bindings)
+    expected_expressions = {item[3]: item[4] for item in bindings}
+    if len(expected_expressions) != len(bindings):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+    reference_fact: ParametricEntityFact
+    if kind is FeatureKind.THICKNESS:
+        if (
+            data["neutral_plane"] is not None
+            or data["neutral_plane_token"] is not None
+            or data["pull_direction_token"] is not None
+            or data["thickness_mode"] != "Skin"
+            or data["thickness_join"] != "Arc"
+            or data["thickness_intersection"] is not False
+            or binding_shape != (("thickness", "Value"),)
+        ):
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        try:
+            if (
+                obj.Mode != "Skin"  # type: ignore[attr-defined]
+                or obj.Join != "Arc"  # type: ignore[attr-defined]
+                or bool(obj.Intersection) is not False  # type: ignore[attr-defined]
+            ):
+                raise ValueError
+        except Exception:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        thickness = _quantity_value(obj, "Value")
+        if thickness <= 0 or thickness > _source_thickness_limit(source) + 1e-9:
+            _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+        reference_fact = ParametricEntityFact(
+            "parametric.surface_modifier.thickness_limit",
+            _source_thickness_limit(source),
+            "mm",
+        )
+    else:
+        if (
+            data["thickness_mode"] is not None
+            or data["thickness_join"] is not None
+            or data["thickness_intersection"] is not None
+            or binding_shape != (("angle", "Angle"),)
+            or source_data["symmetric"] is not False
+            or any(item.role is not SemanticFaceRole.SWEEP for item in targets)
+        ):
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        try:
+            plane = OriginPlane(_text(data["neutral_plane"]))
+        except ValueError:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        plane_token = _ORIGIN_PLANE_OBJECTS[plane]
+        direction_token = _ORIGIN_PLANE_PULL_DIRECTIONS[plane]
+        if (
+            data["neutral_plane_token"] != plane_token
+            or data["pull_direction_token"] != direction_token
+        ):
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        _pattern_link_reference(obj, "NeutralPlane", plane_token)
+        _pattern_link_reference(obj, "PullDirection", direction_token)
+        angle = _quantity_value(obj, "Angle")
+        if not 0 < angle <= 30:
+            _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+        reference_fact = ParametricEntityFact(
+            "parametric.surface_modifier.neutral_plane",
+            plane.value,
+        )
+
+    if _feature_expression_engine(obj, set(expected_expressions)) != expected_expressions:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    facts = [
+        ParametricEntityFact("parametric.feature.extent", "none"),
+        ParametricEntityFact("parametric.feature.index", feature_index),
+        ParametricEntityFact("parametric.feature.kind", kind.value),
+        ParametricEntityFact("parametric.surface_modifier.face_count", len(targets)),
+        ParametricEntityFact("parametric.surface_modifier.source_feature_id", source_id),
+        reference_fact,
+        ParametricEntityFact("parametric.shape_valid", True),
+        ParametricEntityFact("parametric.solid_count", 1),
+    ]
+    for name, _, _, target, _ in bindings:
+        expected_type = "App::PropertyAngle" if target == "Angle" else "App::PropertyLength"
+        try:
+            if obj.getTypeIdOfProperty(target) != expected_type:  # type: ignore[attr-defined]
+                raise ValueError
+        except Exception:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        facts.append(
+            ParametricEntityFact(
+                f"parametric.feature.parameter.{name}",
+                _quantity_value(obj, target),
+                "deg" if target == "Angle" else "mm",
+            )
+        )
+    _require_feature_shape(obj, base, kind, path=f"/features/{feature_index}")
+    return tuple(facts)
+
+
 def _validate_feature_metadata(
     obj: object,
     data: dict[str, object],
@@ -2282,6 +2744,8 @@ def _validate_feature_metadata(
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     if kind in _PATTERN_KINDS:
         return _validate_pattern_feature_metadata(obj, data, kind)
+    if kind in _SURFACE_MODIFIER_KINDS:
+        return _validate_surface_modifier_metadata(obj, data, kind)
     feature_id = _text(data["ir_id"], _IR_ID)
     if not feature_id.startswith("ir_feature_"):
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
@@ -2938,11 +3402,16 @@ def _validate_parametric_graph(
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     pattern_feature_count = 0
     pattern_instance_count = 0
+    surface_kinds: list[FeatureKind] = []
+    all_feature_kinds: list[FeatureKind] = []
     for _, feature_data in indexed_features:
         try:
             feature_kind = FeatureKind(_text(feature_data["feature_kind"]))
         except ValueError:
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        all_feature_kinds.append(feature_kind)
+        if feature_kind in _SURFACE_MODIFIER_KINDS:
+            surface_kinds.append(feature_kind)
         if feature_kind not in _PATTERN_KINDS:
             continue
         pattern_feature_count += 1
@@ -2960,6 +3429,18 @@ def _validate_parametric_graph(
         pattern_feature_count > MAX_PATTERN_FEATURES
         or pattern_instance_count > MAX_PATTERN_INSTANCES
     ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if (
+        len(surface_kinds) > MAX_SURFACE_MODIFIERS
+        or surface_kinds.count(FeatureKind.THICKNESS) > 1
+        or surface_kinds.count(FeatureKind.DRAFT) > 1
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if surface_kinds and tuple(all_feature_kinds) not in {
+        (FeatureKind.PAD, FeatureKind.DRAFT),
+        (FeatureKind.PAD, FeatureKind.THICKNESS),
+        (FeatureKind.PAD, FeatureKind.DRAFT, FeatureKind.THICKNESS),
+    }:
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
 
     expected_treatment_ids = tuple(
@@ -3033,6 +3514,27 @@ def _validate_parametric_graph(
             if source_index >= feature_index or source_kind not in _PROFILE_FEATURE_KINDS:
                 _raise(ParametricCompileErrorCode.METADATA_FAILURE)
             additive = source_kind in {FeatureKind.PAD, FeatureKind.REVOLVE}
+        elif feature_kind in _SURFACE_MODIFIER_KINDS:
+            maximum = (
+                MAX_THICKNESS_FACES if feature_kind is FeatureKind.THICKNESS else MAX_DRAFT_FACES
+            )
+            targets = tuple(
+                _surface_face_target(item)
+                for item in _sequence(feature_data["face_targets"], maximum=maximum)
+            )
+            if not targets or len({item.source_feature_id for item in targets}) != 1:
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            source_feature_id = targets[0].source_feature_id
+            source_entry = indexed_feature_by_id.get(source_feature_id)
+            if source_entry is None:
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            try:
+                source_kind = FeatureKind(_text(source_entry[1]["feature_kind"]))
+                source_index = actual_feature_ids.index(source_feature_id)
+            except (ValueError, TypeError):
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            if source_index >= feature_index or source_kind is not FeatureKind.PAD:
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
         else:
             sketch_id = _text(feature_data["sketch_id"], _IR_ID)
             if (
@@ -3325,6 +3827,54 @@ def _source_parameter_mapping(
         assert type(raw) is dict
         entries.append(raw)
     properties = {item.id: _parameter_property(item) for item in design.parameters}
+    for index, feature in enumerate(design.features):
+        if feature.kind not in _SURFACE_MODIFIER_KINDS:
+            continue
+        _, feature_data = by_ir_id[feature.id]
+        expected_bindings = []
+        for name, parameter_id, target in sorted(
+            _feature_parameter_bindings(feature),
+            key=lambda item: item[0],
+        ):
+            property_name = properties[parameter_id]
+            expected_bindings.append(
+                {
+                    "name": name,
+                    "parameter_id": parameter_id,
+                    "property": property_name,
+                    "target": target,
+                    "expression": f"{carrier.Name}.{property_name}",  # type: ignore[attr-defined]
+                }
+            )
+        expected_plane_token = (
+            None if feature.neutral_plane is None else _ORIGIN_PLANE_OBJECTS[feature.neutral_plane]
+        )
+        expected_direction_token = (
+            None
+            if feature.neutral_plane is None
+            else _ORIGIN_PLANE_PULL_DIRECTIONS[feature.neutral_plane]
+        )
+        expected_intersection = False if feature.kind is FeatureKind.THICKNESS else None
+        if (
+            feature_data["kind"] != "feature"
+            or feature_data["feature_index"] != index
+            or feature_data["feature_kind"] != feature.kind.value
+            or feature_data["base_feature_id"] != feature.base_feature_id
+            or feature_data["bindings"] != expected_bindings
+            or feature_data["face_targets"] != _surface_modifier_metadata_targets(feature)
+            or feature_data["neutral_plane"]
+            != (None if feature.neutral_plane is None else feature.neutral_plane.value)
+            or feature_data["neutral_plane_token"] != expected_plane_token
+            or feature_data["pull_direction_token"] != expected_direction_token
+            or feature_data["refine"] is not True
+            or feature_data["reversed"] is not feature.reversed
+            or feature_data["thickness_mode"]
+            != ("Skin" if feature.kind is FeatureKind.THICKNESS else None)
+            or feature_data["thickness_join"]
+            != ("Arc" if feature.kind is FeatureKind.THICKNESS else None)
+            or feature_data["thickness_intersection"] is not expected_intersection
+        ):
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     for index, treatment in enumerate(design.edge_treatments):
         _, treatment_data = by_ir_id[treatment.id]
         expected_base = (
@@ -4051,7 +4601,7 @@ def compile_parametric_design(
             sketch_bindings = {item.sketch_id: item for item in bindings}
             sketches_by_id = {item.id: item for item in checked.sketches}
             for feature_index, feature in enumerate(checked.features):
-                if feature.kind in _PATTERN_KINDS:
+                if feature.kind in _SKETCHLESS_FEATURE_KINDS:
                     continue
                 if feature.sketch_id is None:
                     _raise(ParametricCompileErrorCode.INVALID_INPUT)
@@ -4083,6 +4633,11 @@ def compile_parametric_design(
                 axis_token: str | None = None
                 direction_token: str | None = None
                 mirror_plane_token: str | None = None
+                neutral_plane_token: str | None = None
+                pull_direction_token: str | None = None
+                thickness_mode: str | None = None
+                thickness_join: str | None = None
+                thickness_intersection: bool | None = None
                 if feature.kind in _PATTERN_KINDS:
                     if feature.source_feature_id is None:
                         _raise(ParametricCompileErrorCode.INVALID_INPUT)
@@ -4122,6 +4677,49 @@ def compile_parametric_design(
                     # feature as the Body tip.  Reassert the new native
                     # pattern before recompute so its shape is active and the
                     # next PartDesign feature receives it as ``BaseFeature``.
+                    body.Tip = feature_object
+                elif feature.kind in _SURFACE_MODIFIER_KINDS:
+                    if previous_feature is None:
+                        _raise(ParametricCompileErrorCode.INVALID_INPUT)
+                    face_targets = _surface_modifier_metadata_targets(feature)
+                    by_ir_id = {
+                        _text(data["ir_id"], _IR_ID): (obj, data)
+                        for obj, data in _parametric_records(document)
+                    }
+                    resolved_faces = _resolved_surface_faces(
+                        previous_feature,
+                        {
+                            "feature_kind": feature.kind.value,
+                            "face_targets": face_targets,
+                        },
+                        by_ir_id,
+                    )
+                    feature_object.Base = (
+                        previous_feature,
+                        [item.native for item in resolved_faces],
+                    )
+                    feature_object.Refine = True
+                    feature_object.Reversed = feature.reversed
+                    if feature.kind is FeatureKind.THICKNESS:
+                        thickness_mode = "Skin"
+                        thickness_join = "Arc"
+                        thickness_intersection = False
+                        feature_object.Mode = thickness_mode
+                        feature_object.Join = thickness_join
+                        feature_object.Intersection = thickness_intersection
+                    else:
+                        if feature.neutral_plane is None:
+                            _raise(ParametricCompileErrorCode.INVALID_INPUT)
+                        neutral_plane_token = _ORIGIN_PLANE_OBJECTS[feature.neutral_plane]
+                        pull_direction_token = _ORIGIN_PLANE_PULL_DIRECTIONS[feature.neutral_plane]
+                        feature_object.NeutralPlane = (
+                            _origin_reference(document, neutral_plane_token),
+                            [""],
+                        )
+                        feature_object.PullDirection = (
+                            _origin_reference(document, pull_direction_token),
+                            [""],
+                        )
                     body.Tip = feature_object
                 else:
                     if feature.sketch_id is None:
@@ -4224,6 +4822,23 @@ def compile_parametric_design(
                             "mirror_plane_token": mirror_plane_token,
                             "occurrences": feature.occurrences,
                             "source_feature_id": feature.source_feature_id,
+                        }
+                    )
+                elif feature.kind in _SURFACE_MODIFIER_KINDS:
+                    feature_metadata.update(
+                        {
+                            "face_targets": _surface_modifier_metadata_targets(feature),
+                            "neutral_plane": (
+                                None
+                                if feature.neutral_plane is None
+                                else feature.neutral_plane.value
+                            ),
+                            "neutral_plane_token": neutral_plane_token,
+                            "pull_direction_token": pull_direction_token,
+                            "refine": True,
+                            "thickness_intersection": thickness_intersection,
+                            "thickness_join": thickness_join,
+                            "thickness_mode": thickness_mode,
                         }
                     )
                 _write_metadata(feature_object, feature_metadata)

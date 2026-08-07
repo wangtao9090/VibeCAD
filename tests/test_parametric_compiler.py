@@ -45,6 +45,8 @@ from vibecad.parametric import (
     ReferencePoint,
     SemanticEdgeReference,
     SemanticEdgeRole,
+    SemanticFaceReference,
+    SemanticFaceRole,
     SketchConstraint,
     SketchGeometry,
     SketchPlane,
@@ -828,6 +830,72 @@ def _additive_non_immediate_pattern_design() -> ParametricDesignIR:
     )
 
 
+def _surface_modifier_design(*kinds: FeatureKind) -> ParametricDesignIR:
+    base = _rectangle_design()
+    parameters = list(base.parameters)
+    features = list(base.features)
+    for index, kind in enumerate(kinds):
+        parameter_id = _id("parameter", 60 + index)
+        if kind is FeatureKind.DRAFT:
+            parameter = DesignParameter(
+                id=parameter_id,
+                name="Draft angle",
+                kind=ParameterKind.ANGLE,
+                value=5,
+                unit=DesignUnit.DEG,
+                evidence_ids=(EVIDENCE,),
+                minimum=0.1,
+                maximum=30,
+            )
+            feature = PartDesignFeature(
+                id=_id("feature", 60 + index),
+                name="Native draft",
+                kind=kind,
+                sketch_id=None,
+                base_feature_id=features[-1].id,
+                parameters={"angle": parameter.id},
+                evidence_ids=(EVIDENCE,),
+                face_targets=(
+                    SemanticFaceReference(
+                        source_feature_id=base.features[0].id,
+                        role=SemanticFaceRole.SWEEP,
+                        geometry_id=BOTTOM,
+                    ),
+                ),
+                neutral_plane=OriginPlane.XY,
+            )
+        else:
+            parameter = DesignParameter(
+                id=parameter_id,
+                name="Wall thickness",
+                kind=ParameterKind.LENGTH,
+                value=1,
+                unit=DesignUnit.MM,
+                evidence_ids=(EVIDENCE,),
+                minimum=0.1,
+                maximum=2,
+            )
+            feature = PartDesignFeature(
+                id=_id("feature", 60 + index),
+                name="Native thickness",
+                kind=kind,
+                sketch_id=None,
+                base_feature_id=features[-1].id,
+                parameters={"thickness": parameter.id},
+                evidence_ids=(EVIDENCE,),
+                face_targets=(
+                    SemanticFaceReference(
+                        source_feature_id=base.features[0].id,
+                        role=SemanticFaceRole.SECTION_END,
+                    ),
+                ),
+                reversed=False,
+            )
+        parameters.append(parameter)
+        features.append(feature)
+    return replace(base, parameters=tuple(parameters), features=tuple(features))
+
+
 @pytest.mark.parametrize(
     "kind",
     (FeatureKind.LINEAR_PATTERN, FeatureKind.CIRCULAR_PATTERN, FeatureKind.MIRROR),
@@ -1504,6 +1572,60 @@ def test_persisted_graph_replays_global_pattern_budgets(
     assert caught.value.code is ParametricCompileErrorCode.METADATA_FAILURE
 
 
+@pytest.mark.parametrize(
+    "surface_kinds",
+    (
+        (FeatureKind.DRAFT, FeatureKind.THICKNESS, FeatureKind.DRAFT),
+        (FeatureKind.THICKNESS, FeatureKind.DRAFT),
+    ),
+    ids=("count", "order"),
+)
+def test_persisted_graph_replays_surface_modifier_budgets_and_order(
+    monkeypatch: pytest.MonkeyPatch,
+    surface_kinds: tuple[FeatureKind, ...],
+) -> None:
+    design_id = _id("design", 90)
+    body_id = _id("body", 90)
+    sketch_id = _id("sketch", 90)
+    digest = "b" * 64
+    kinds = (FeatureKind.PAD,) + surface_kinds
+    feature_ids = tuple(_id("feature", 90 + index) for index in range(len(kinds)))
+    common = {"design_id": design_id, "design_digest": digest}
+    records: list[tuple[object, dict[str, object]]] = [
+        (
+            SimpleNamespace(),
+            {
+                **common,
+                "kind": "body",
+                "ir_id": body_id,
+                "sketch_ids": [sketch_id],
+                "feature_ids": list(feature_ids),
+            },
+        ),
+        (SimpleNamespace(), {**common, "kind": "parameters", "ir_id": design_id}),
+        (SimpleNamespace(), {**common, "kind": "sketch", "ir_id": sketch_id}),
+    ]
+    records.extend(
+        (
+            SimpleNamespace(),
+            {
+                **common,
+                "kind": "feature",
+                "ir_id": feature_id,
+                "feature_index": index,
+                "feature_kind": kind.value,
+            },
+        )
+        for index, (kind, feature_id) in enumerate(zip(kinds, feature_ids, strict=True))
+    )
+    monkeypatch.setattr(compiler_module, "_validate_parameter_metadata", lambda *_args: ())
+
+    with pytest.raises(ParametricCompileError) as caught:
+        compiler_module._validate_parametric_graph(tuple(records))
+
+    assert caught.value.code is ParametricCompileErrorCode.METADATA_FAILURE
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("vertical", (False, True), ids=("horizontal", "vertical"))
 def test_real_slot_compiles_to_fully_constrained_editable_native_geometry(
@@ -1736,6 +1858,203 @@ def test_real_reopen_rejects_forged_global_pattern_budget(tmp_path) -> None:
             stabilize_parametric_session(reopened)
 
         assert caught.value.code is ParametricCompileErrorCode.METADATA_FAILURE
+    finally:
+        reopened.close_document()
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("kinds", "type_ids"),
+    (
+        ((FeatureKind.DRAFT,), ("PartDesign::Draft",)),
+        ((FeatureKind.THICKNESS,), ("PartDesign::Thickness",)),
+        (
+            (FeatureKind.DRAFT, FeatureKind.THICKNESS),
+            ("PartDesign::Draft", "PartDesign::Thickness"),
+        ),
+    ),
+    ids=("draft", "thickness", "draft-thickness"),
+)
+def test_real_native_surface_modifiers_compile_edit_and_reopen(
+    kinds: tuple[FeatureKind, ...],
+    type_ids: tuple[str, ...],
+    tmp_path,
+) -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    design = _surface_modifier_design(*kinds)
+    path = tmp_path / f"s44-{'-'.join(item.value for item in kinds)}.FCStd"
+    session = Session()
+    session.open_document("S44SurfaceModifiers")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        stabilize_parametric_session(session)
+
+        modifiers = tuple(item.object for item in compiled.features[1:])
+        assert tuple(item.TypeId for item in modifiers) == type_ids
+        assert compiled.body.Tip is modifiers[-1]
+        previous = compiled.features[0].object
+        for modifier_index, modifier in enumerate(modifiers, 1):
+            assert modifier.BaseFeature is previous
+            base, names = modifier.Base
+            assert base is previous
+            assert 1 <= len(tuple(names)) <= 4
+            metadata = compiler_module._read_metadata(modifier, required=True)
+            assert metadata is not None
+            assert "Face" not in repr(metadata["face_targets"])
+            assert metadata["refine"] is True
+            assert metadata["reversed"] is design.features[modifier_index].reversed
+            assert modifier.Refine is True
+            assert modifier.Reversed is design.features[modifier_index].reversed
+            if modifier.TypeId == "PartDesign::Thickness":
+                assert (modifier.Mode, modifier.Join, modifier.Intersection) == (
+                    "Skin",
+                    "Arc",
+                    False,
+                )
+            else:
+                assert metadata["neutral_plane_token"] == "XY_Plane"
+                assert metadata["pull_direction_token"] == "Z_Axis"
+            facts = {
+                fact.name: fact.value for fact in compiler_module.parametric_entity_facts(modifier)
+            }
+            assert facts["parametric.shape_valid"] is True
+            assert facts["parametric.solid_count"] == 1
+            previous = modifier
+
+        parameter_id = design.features[1].parameters[
+            "angle" if kinds[0] is FeatureKind.DRAFT else "thickness"
+        ]
+        before_volume = float(compiled.body.Shape.Volume)
+        edit = compiler_module.modify_parametric_parameter(
+            session,
+            design,
+            body=compiled.body,
+            parameter_id=parameter_id,
+            value=7 if kinds[0] is FeatureKind.DRAFT else 0.75,
+        )
+        stabilize_parametric_session(session)
+        assert edit.consumer_ids == (design.features[1].id,)
+        assert not math.isclose(
+            float(compiled.body.Shape.Volume),
+            before_volume,
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        )
+        session.doc.saveAs(str(path))
+    finally:
+        session.close_document()
+
+    reopened = Session()
+    try:
+        reopened.load_document(path)
+        stabilize_parametric_session(reopened)
+        body = next(obj for obj in reopened.doc.Objects if obj.TypeId == "PartDesign::Body")
+        modifiers = tuple(
+            obj
+            for obj in body.Group
+            if obj.TypeId in {"PartDesign::Draft", "PartDesign::Thickness"}
+        )
+        assert tuple(item.TypeId for item in modifiers) == type_ids
+        assert body.Tip is modifiers[-1]
+    finally:
+        reopened.close_document()
+
+
+@pytest.mark.slow
+def test_real_reopen_rejects_forged_surface_face_metadata(tmp_path) -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    design = _surface_modifier_design(FeatureKind.DRAFT)
+    path = tmp_path / "s44-forged-surface-face.FCStd"
+    session = Session()
+    session.open_document("S44ForgedSurfaceFace")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        draft = compiled.features[-1].object
+        metadata = compiler_module._read_metadata(draft, required=True)
+        assert metadata is not None
+        metadata["face_targets"][0]["geometry_id"] = RIGHT
+        draft.setEditorMode(compiler_module.PARAMETRIC_METADATA_PROPERTY, 0)
+        setattr(
+            draft,
+            compiler_module.PARAMETRIC_METADATA_PROPERTY,
+            compiler_module._canonical(metadata),
+        )
+        session.doc.saveAs(str(path))
+    finally:
+        session.close_document()
+
+    reopened = Session()
+    try:
+        reopened.load_document(path)
+        with pytest.raises(ParametricCompileError) as caught:
+            stabilize_parametric_session(reopened)
+        assert caught.value.code in {
+            ParametricCompileErrorCode.FEATURE_FAILURE,
+            ParametricCompileErrorCode.METADATA_FAILURE,
+        }
+    finally:
+        reopened.close_document()
+
+
+@pytest.mark.slow
+def test_real_surface_modifier_limits_and_forged_reopen_budget_fail_closed(tmp_path) -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    excessive = _surface_modifier_design(FeatureKind.THICKNESS)
+    thickness_id = excessive.features[-1].parameters["thickness"]
+    excessive = replace(
+        excessive,
+        parameters=tuple(
+            replace(parameter, value=2.1, maximum=3) if parameter.id == thickness_id else parameter
+            for parameter in excessive.parameters
+        ),
+    )
+    session = Session()
+    session.open_document("S44ExcessiveThickness")
+    try:
+        with pytest.raises(ParametricCompileError) as too_thick:
+            compiler_module.compile_parametric_design(session, excessive)
+        assert too_thick.value.code is ParametricCompileErrorCode.FEATURE_FAILURE
+    finally:
+        session.close_document()
+
+    design = _surface_modifier_design(FeatureKind.DRAFT, FeatureKind.THICKNESS)
+    path = tmp_path / "s44-forged-surface-budget.FCStd"
+    session = Session()
+    session.open_document("S44ForgedSurfaceBudget")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        draft = compiled.features[1].object
+        metadata = compiler_module._read_metadata(draft, required=True)
+        assert metadata is not None
+        metadata["feature_kind"] = FeatureKind.THICKNESS.value
+        draft.setEditorMode(compiler_module.PARAMETRIC_METADATA_PROPERTY, 0)
+        setattr(
+            draft,
+            compiler_module.PARAMETRIC_METADATA_PROPERTY,
+            compiler_module._canonical(metadata),
+        )
+        session.doc.saveAs(str(path))
+    finally:
+        session.close_document()
+
+    reopened = Session()
+    try:
+        reopened.load_document(path)
+        with pytest.raises(ParametricCompileError) as forged:
+            stabilize_parametric_session(reopened)
+        assert forged.value.code is ParametricCompileErrorCode.METADATA_FAILURE
     finally:
         reopened.close_document()
 
@@ -2450,6 +2769,48 @@ def test_pattern_shape_delta_uses_source_additive_or_subtractive_semantics() -> 
             FeatureKind.CIRCULAR_PATTERN,
             additive=False,
         )
+
+
+def test_surface_modifier_shape_delta_accepts_either_direction_but_rejects_no_op() -> None:
+    previous = SimpleNamespace(Shape=SimpleNamespace(Volume=100.0))
+
+    def feature(volume: float) -> SimpleNamespace:
+        return SimpleNamespace(
+            Shape=SimpleNamespace(
+                Solids=(object(),),
+                Volume=volume,
+                isNull=lambda: False,
+                isValid=lambda: True,
+            ),
+            State=("Up-to-date",),
+            getStatusString=lambda: "Valid",
+        )
+
+    assert compiler_module._require_feature_shape(
+        feature(120), previous, FeatureKind.DRAFT
+    ) == pytest.approx(120)
+    assert compiler_module._require_feature_shape(
+        feature(80), previous, FeatureKind.THICKNESS
+    ) == pytest.approx(80)
+    with pytest.raises(ParametricCompileError) as no_op:
+        compiler_module._require_feature_shape(
+            feature(100),
+            previous,
+            FeatureKind.THICKNESS,
+        )
+    assert no_op.value.code is ParametricCompileErrorCode.FEATURE_FAILURE
+
+
+def test_surface_modifier_parameter_bindings_target_native_properties() -> None:
+    draft = _surface_modifier_design(FeatureKind.DRAFT).features[-1]
+    thickness = _surface_modifier_design(FeatureKind.THICKNESS).features[-1]
+
+    assert compiler_module._feature_parameter_bindings(draft) == (
+        ("angle", draft.parameters["angle"], "Angle"),
+    )
+    assert compiler_module._feature_parameter_bindings(thickness) == (
+        ("thickness", thickness.parameters["thickness"], "Value"),
+    )
 
 
 def test_feature_parameter_bindings_allow_one_parameter_to_drive_two_targets() -> None:

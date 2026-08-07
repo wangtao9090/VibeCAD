@@ -55,3 +55,6 @@ jobs:
           tests/test_parametric_compiler.py::test_real_native_pattern_features_compile_edit_and_reopen
           tests/test_parametric_compiler.py::test_real_additive_non_immediate_pattern_can_continue_modeling
           tests/test_parametric_compiler.py::test_real_reopen_rejects_forged_global_pattern_budget
+          tests/test_parametric_compiler.py::test_real_native_surface_modifiers_compile_edit_and_reopen
+          tests/test_parametric_compiler.py::test_real_reopen_rejects_forged_surface_face_metadata
+          tests/test_parametric_compiler.py::test_real_surface_modifier_limits_and_forged_reopen_budget_fail_closed
