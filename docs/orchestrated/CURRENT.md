@@ -1,10 +1,10 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **VCAD-A08 approved; v0.8.0 candidate gates passed; PR next**
+> Status: **v0.8.0 published; S41 derived-expression linkage next**
 >
 > Updated: 2026-08-06
 >
-> Repository anchor: published tag `v0.7.0@6bcd934`
+> Repository anchor: published tag `v0.8.0@6ee230f`
 >
 > Active plan: [`vibecad-visual-cad.md`](vibecad-visual-cad.md)
 >
@@ -175,13 +175,28 @@ each created a 60 x 40 x 10 mm review task, observed all four deterministic chec
 9 with unchanged HEAD, restarted, accepted at generation 11, exported FCStd/STEP, and read both MCP
 binary resources. WorkBuddy additionally proved deferred `ToolSearch` schema discovery and native
 `ReadMcpResource` blob persistence; local byte counts and SHA-256 recomputation matched its manifest.
-The next recoverable action is to push this branch and open the v0.8.0 release PR. No tag or immutable
-publication has started.
+The local MCPB archive digest above is build-instance-specific because the upstream MCPB packer records
+pack time. The public archive is `eb044e0c14455e482d3cd99f3746ceffe1b0cc7657accb2761b03bf713820313`;
+both archives have the same 1,006,247-byte size and the same 152 unpacked files byte-for-byte, with a
+normalized relative-file manifest digest of
+`b285cded13f7a11d8bc5d80ae4c717ff0695d79c5baaca1e12b903677c1dffdd`. The release workflow also
+ran its packed MCPB stdio/resource gate on the public archive itself.
+
+PR #14 merged as `6ee230f13dc63120cbc59f5bd1e5ff72a6ca6542`, and tag `v0.8.0` points to
+that exact merge commit. GitHub Actions run `31145385088` passed the version, full quality, package,
+two managed-Agent, packed MCPB resource, PyPI, and GitHub Release jobs. The published wheel/sdist
+hashes exactly match the local candidates; the standalone Skill is
+`155be4fb8d73b241d60bc90d3b7cfaffb88d0b1ec49787e8bf6853924d6bceda`. A fresh isolated Python
+3.12 environment installed `vibecad==0.8.0` from the public PyPI index and exposed the expected 38
+tools from `site-packages`. Four test daemons/workers then exited, and approximately 4.7 GB of
+VibeCAD-created runtime, candidate/public-install roots, host-local Skill/MCP configuration, Resource
+blobs, and exact Codex/Claude/WorkBuddy test records were removed. The user-owned FreeCAD app and all
+untracked repository files remain. `VCAD-A08` is complete; the next implementation action is S41.
 
 The complete architecture, slices, gates, privacy boundary, validation budget,
 and recovery point are in
 [`vibecad-visual-cad.md`](vibecad-visual-cad.md). VCAD-A07 completed S40 and VCAD-A08
-continues publication on `codex/v0.8.0-release` from `main@314b335`. S10.1 froze the
+published it as v0.8.0; S41 starts from `main@6ee230f`. S10.1 froze the
 minimal ParametricDesignIR v1; S10.2 delivered native Sketcher objects and
 solver/DoF facts. S10.3 now compiles closed profiles into a strict single-body
 Pad/Pocket/Revolution/Hole chain, preserves feature parameter expressions and
