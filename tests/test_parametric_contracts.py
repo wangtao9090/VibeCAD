@@ -18,6 +18,7 @@ from vibecad.parametric import (
     BodyDefinition,
     ConstraintKind,
     DatumPlane,
+    DerivedParameterExpression,
     DesignEvidence,
     DesignEvidenceOrigin,
     DesignEvidenceStatus,
@@ -206,6 +207,117 @@ def test_parametric_design_round_trips_and_has_a_stable_digest() -> None:
         "sketches",
         "features",
     }
+
+
+def test_derived_parameter_expression_round_trips_without_changing_legacy_shape() -> None:
+    base = _design()
+    derived = DesignParameter(
+        id=_id("parameter", 4),
+        name="Derived straight width",
+        kind=ParameterKind.LENGTH,
+        value=40,
+        unit=DesignUnit.MM,
+        evidence_ids=(EVIDENCE,),
+        minimum=0.1,
+        maximum=1_000,
+        public=False,
+        expression=DerivedParameterExpression(
+            constant=-20,
+            terms={WIDTH: 1},
+        ),
+    )
+    design = dataclasses.replace(base, parameters=(*base.parameters, derived))
+
+    encoded = design.to_mapping()
+    reconstructed = ParametricDesignIR.from_mapping(encoded)
+
+    assert reconstructed == design
+    by_id = {item["id"]: item for item in encoded["parameters"]}
+    assert "expression" not in by_id[WIDTH]
+    assert by_id[derived.id]["expression"] == {
+        "schema_version": 1,
+        "constant": -20,
+        "terms": {WIDTH: 1},
+    }
+
+
+@pytest.mark.parametrize(
+    ("expression", "value", "public", "expected_code"),
+    (
+        (
+            DerivedParameterExpression(terms={_id("parameter", 99): 1}),
+            40,
+            False,
+            ParametricErrorCode.UNKNOWN_REFERENCE,
+        ),
+        (
+            DerivedParameterExpression(terms={WIDTH: 1}),
+            41,
+            False,
+            ParametricErrorCode.INVALID_VALUE,
+        ),
+        (
+            DerivedParameterExpression(constant=-20, terms={WIDTH: 1}),
+            40,
+            True,
+            ParametricErrorCode.INVALID_VALUE,
+        ),
+    ),
+)
+def test_derived_parameter_expression_fails_closed(
+    expression: DerivedParameterExpression,
+    value: int,
+    public: bool,
+    expected_code: ParametricErrorCode,
+) -> None:
+    base = _design()
+    derived = DesignParameter(
+        id=_id("parameter", 4),
+        name="Derived straight width",
+        kind=ParameterKind.LENGTH,
+        value=value,
+        unit=DesignUnit.MM,
+        evidence_ids=(EVIDENCE,),
+        minimum=0.1,
+        maximum=1_000,
+        public=public,
+        expression=expression,
+    )
+
+    with pytest.raises(ParametricContractError) as caught:
+        dataclasses.replace(base, parameters=(*base.parameters, derived))
+
+    assert caught.value.code is expected_code
+
+
+def test_derived_parameter_expression_cycle_fails_closed() -> None:
+    base = _design()
+    derived_id = _id("parameter", 4)
+    source = dataclasses.replace(
+        base.parameters[0],
+        public=False,
+        expression=DerivedParameterExpression(terms={derived_id: 1}),
+    )
+    derived = DesignParameter(
+        id=derived_id,
+        name="Cyclic derived width",
+        kind=ParameterKind.LENGTH,
+        value=60,
+        unit=DesignUnit.MM,
+        evidence_ids=(EVIDENCE,),
+        minimum=0.1,
+        maximum=1_000,
+        public=False,
+        expression=DerivedParameterExpression(terms={WIDTH: 1}),
+    )
+
+    with pytest.raises(ParametricContractError) as caught:
+        dataclasses.replace(
+            base,
+            parameters=(source, *base.parameters[1:], derived),
+        )
+
+    assert caught.value.code is ParametricErrorCode.INVALID_ORDER
 
 
 def _program_for_design(

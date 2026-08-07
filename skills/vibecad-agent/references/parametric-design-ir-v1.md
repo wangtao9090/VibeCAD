@@ -3,7 +3,8 @@
 Read this reference only when `get_capabilities` reports the ModelProgram operation
 `create_parametric_design` with argument value shape `parametric_design_ir`. It is a strict JSON
 wire contract for one editable PartDesign Body; it is not permission to run Python, FreeCAD code,
-macros, expressions, or arbitrary operations.
+macros, raw FreeCAD expressions, or arbitrary operations. The only expression input is the bounded
+structured affine parameter shape defined below.
 
 ## Admission boundary
 
@@ -63,7 +64,7 @@ use a stable host-local label such as `user:current_request`; an image may use t
 attachment identifier. Prefer one evidence record with multiple real source refs over redundant
 records, and never create an evidence record with an empty `source_refs` array.
 
-Each parameter contains:
+Each independent parameter contains:
 
 ```text
 schema_version, id, name, kind, value, unit, evidence_ids[],
@@ -72,8 +73,30 @@ minimum|null, maximum|null, public
 
 `kind` is `length` with unit `mm` or `angle` with unit `deg`. A dimensional constraint and every
 feature parameter reference a parameter identity. Prefer user-meaningful confirmed dimensions as
-`public: true`; derived construction offsets may be false. The complete design may contain at most
-128 parameters. Count every public dimension and every private coordinate parameter before
+`public: true`; private independent construction origins use `public: false`. Do not include an
+`expression` key on an independent parameter.
+
+A derived parameter adds exactly this optional field to the independent shape:
+
+```json
+{
+  "expression": {
+    "schema_version": 1,
+    "constant": 0,
+    "terms": {
+      "ir_parameter_00000000000000000000000000000001": 1,
+      "ir_parameter_00000000000000000000000000000002": -2
+    }
+  }
+}
+```
+
+This means `constant + sum(coefficient * source_parameter)`. It is not a string and cannot contain
+functions or arbitrary FreeCAD syntax. A derived parameter must use `public: false`, contain one to
+eight unique same-unit source parameters with finite nonzero coefficients, be acyclic, and declare
+an initial `value` exactly matching the evaluated expression. Omit `expression` for an independent
+parameter; do not send `expression: null`. The complete design may contain at most 128 parameters.
+Count every public dimension and every private independent or derived coordinate parameter before
 submission; do not retry a design that exceeds this limit without reducing redundant dimensions.
 
 An origin sketch plane is:
@@ -154,10 +177,15 @@ and `end_y = center_y`; top-right `start_y = center_y` and `end_x = center_x`; t
 the radial extreme coordinates such as bottom-right `start_y = center_y - radius` or
 `end_x = center_x + radius`; FreeCAD treats those as redundant once center and radius are fixed.
 This produces 16 independent line constraints plus 20 independent arc constraints. Bind every
-derived coordinate to a private evidence-backed length parameter, make the coordinates meet
-exactly, and add no `coincident`, `tangent`, or `equal` constraints to that rounded-rectangle
-sketch. Use this recipe for both outer profiles and rounded rectangular cutouts, then require
-`DoF=0` before submission.
+derived coordinate to a private evidence-backed length parameter with the structured expression
+above; do not freeze it as an unrelated numeric parameter. For width `W`, height `H`, corner radius
+`R`, and private independent origins `OX`/`OY`, use `straight_width = W - 2*R`,
+`straight_height = H - 2*R`, `left_arc_x = OX + R`, `right_arc_x = OX + W - R`,
+`bottom_arc_y = OY + R`, `top_arc_y = OY + H - R`, `right_x = OX + W`, and
+`top_y = OY + H`. Reuse those derived parameter identities wherever the same coordinate occurs.
+Make the coordinates meet exactly, and add no `coincident`, `tangent`, or `equal` constraints to
+that rounded-rectangle sketch. Use this recipe for both outer profiles and rounded rectangular
+cutouts, then require `DoF=0` before submission.
 
 Each feature contains every field below:
 
@@ -324,7 +352,8 @@ Before submission, check all of the following:
 11. Every sketch dimension set is independent, every non-Revolve feature has `axis: null`, and
     every Hole circle reuses the Hole feature's diameter parameter through a `diameter` constraint.
 12. The complete design contains no more than 128 parameters, including private derived-coordinate
-    parameters used to fully constrain rounded rectangles.
+    parameters used to fully constrain rounded rectangles; each derived parameter uses the bounded
+    affine object, is private, same-unit, acyclic, and has a matching initial value.
 13. For WorkBuddy 5.3.5, the adapter request root has exactly four fields—`schema_version`,
     `task_id`, `expected_generation`, and the complete ModelProgram under `program`—and the same
     program is not first sent through MCP.

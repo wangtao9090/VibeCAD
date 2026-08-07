@@ -19,6 +19,7 @@ from types import MappingProxyType
 from vibecad.parametric.contracts import (
     MAX_DESIGN_PARAMETERS,
     ConstraintKind,
+    DerivedParameterExpression,
     DesignParameter,
     DesignUnit,
     FeatureExtent,
@@ -594,6 +595,43 @@ def _require_feature_shape(
 
 def _parameter_property(parameter: DesignParameter) -> str:
     return f"P_{_suffix(parameter.id)}"
+
+
+def _compiled_parameter_expression(
+    expression: DerivedParameterExpression,
+    parameter_properties: Mapping[str, str],
+    unit: DesignUnit,
+) -> str:
+    terms: list[str] = []
+    for parameter_id, coefficient in expression.terms.items():
+        property_name = parameter_properties.get(parameter_id)
+        if property_name is None:
+            _raise(ParametricCompileErrorCode.INVALID_INPUT)
+        terms.append(f"{_canonical(coefficient)} * {property_name}")
+    if expression.constant != 0:
+        terms.append(f"{_canonical(expression.constant)} {unit.value}")
+    if not terms:
+        _raise(ParametricCompileErrorCode.INVALID_INPUT)
+    return " + ".join(terms)
+
+
+def _parameter_expression_metadata(
+    expression: DerivedParameterExpression,
+    parameter_properties: Mapping[str, str],
+    unit: DesignUnit,
+) -> dict[str, object]:
+    return {
+        "compiled": _compiled_parameter_expression(expression, parameter_properties, unit),
+        "constant": expression.constant,
+        "terms": [
+            {
+                "coefficient": coefficient,
+                "parameter_id": parameter_id,
+                "property": parameter_properties[parameter_id],
+            }
+            for parameter_id, coefficient in expression.terms.items()
+        ],
+    }
 
 
 def _constraint_name(constraint: SketchConstraint) -> str:
@@ -1172,6 +1210,82 @@ def _require_solver_success(facts: SketchSolverFacts) -> None:
         _raise(ParametricCompileErrorCode.SOLVER_FAILURE)
 
 
+def _metadata_number(value: object) -> int | float:
+    if type(value) not in {int, float} or not math.isfinite(float(value)):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    result = float(value)
+    if abs(result) > 1_000_000_000_000:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    return value
+
+
+def _parameter_expression_binding(
+    value: object,
+) -> tuple[int | float, str, tuple[tuple[str, str, int | float], ...]]:
+    data = _exact_mapping(value, {"compiled", "constant", "terms"})
+    compiled = _text(data["compiled"])
+    constant = _metadata_number(data["constant"])
+    terms: list[tuple[str, str, int | float]] = []
+    for raw in _sequence(data["terms"], maximum=8):
+        term = _exact_mapping(raw, {"coefficient", "parameter_id", "property"})
+        parameter_id = _text(term["parameter_id"], _IR_ID)
+        if not parameter_id.startswith("ir_parameter_"):
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        property_name = _text(term["property"], _PARAMETER_PROPERTY)
+        coefficient = _metadata_number(term["coefficient"])
+        if coefficient == 0:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        terms.append((parameter_id, property_name, coefficient))
+    if not terms or tuple(item[0] for item in terms) != tuple(sorted({item[0] for item in terms})):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    return constant, compiled, tuple(terms)
+
+
+def _parameter_metadata_entry(
+    value: object,
+) -> tuple[
+    str,
+    str,
+    str,
+    tuple[int | float, str, tuple[tuple[str, str, int | float], ...]] | None,
+]:
+    if type(value) is not dict:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    keys = set(value)
+    base_keys = {"id", "property", "unit"}
+    if keys != base_keys and keys != base_keys | {"expression"}:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    parameter_id = _text(value["id"], _IR_ID)
+    if not parameter_id.startswith("ir_parameter_"):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    property_name = _text(value["property"], _PARAMETER_PROPERTY)
+    unit = _text(value["unit"])
+    if unit not in {"mm", "deg"}:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    expression = (
+        None if "expression" not in value else _parameter_expression_binding(value["expression"])
+    )
+    return parameter_id, property_name, unit, expression
+
+
+def _parameter_expression_engine(obj: object) -> dict[str, str]:
+    try:
+        entries = tuple(obj.ExpressionEngine)  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    result: dict[str, str] = {}
+    for raw in entries:
+        if type(raw) not in {list, tuple} or len(raw) != 2:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        path = _text(raw[0])
+        if path.startswith("."):
+            path = path[1:]
+        if _PARAMETER_PROPERTY.fullmatch(path) is None or path in result:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        result[path] = _text(raw[1])
+    return result
+
+
 def _validate_parameter_metadata(
     obj: object, data: dict[str, object]
 ) -> tuple[ParametricEntityFact, ...]:
@@ -1180,19 +1294,16 @@ def _validate_parameter_metadata(
     entries = _sequence(data["parameters"], maximum=MAX_DESIGN_PARAMETERS)
     seen_ids: set[str] = set()
     seen_properties: set[str] = set()
+    expected_expressions: dict[str, str] = {}
     facts: list[ParametricEntityFact] = []
     for raw in entries:
-        entry = _exact_mapping(raw, {"id", "property", "unit"})
-        parameter_id = _text(entry["id"], _IR_ID)
-        if not parameter_id.startswith("ir_parameter_") or parameter_id in seen_ids:
+        parameter_id, property_name, unit, expression = _parameter_metadata_entry(raw)
+        if parameter_id in seen_ids:
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
-        property_name = _text(entry["property"], _PARAMETER_PROPERTY)
         if property_name in seen_properties:
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
-        unit = _text(entry["unit"])
         expected_type = {"mm": "App::PropertyLength", "deg": "App::PropertyAngle"}.get(unit)
-        if expected_type is None:
-            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        assert expected_type is not None
         try:
             if obj.getTypeIdOfProperty(property_name) != expected_type:  # type: ignore[attr-defined]
                 raise ValueError
@@ -1211,7 +1322,11 @@ def _validate_parameter_metadata(
         )
         seen_ids.add(parameter_id)
         seen_properties.add(property_name)
-    if tuple(entry["id"] for entry in entries) != tuple(sorted(seen_ids)):
+        if expression is not None:
+            expected_expressions[property_name] = expression[1]
+    if tuple(_parameter_metadata_entry(entry)[0] for entry in entries) != tuple(sorted(seen_ids)):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if _parameter_expression_engine(obj) != expected_expressions:
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     return tuple(facts)
 
@@ -1722,6 +1837,7 @@ def _validate_parametric_graph(
 
     body, body_data = bodies[0]
     carrier, carrier_data = carriers[0]
+    _validate_parameter_metadata(carrier, carrier_data)
     design_id = next(iter(design_ids))
     body_id = _text(body_data["ir_id"], _IR_ID)
     carrier_id = _text(carrier_data["ir_id"], _IR_ID)
@@ -1810,13 +1926,57 @@ def _validate_parametric_graph(
 
     parameter_pairs: set[tuple[str, str]] = set()
     parameter_units: dict[tuple[str, str], str] = {}
+    parameter_properties: dict[str, str] = {}
+    parameter_expressions: dict[
+        str, tuple[int | float, str, tuple[tuple[str, str, int | float], ...]]
+    ] = {}
     for raw in _sequence(carrier_data["parameters"], maximum=MAX_DESIGN_PARAMETERS):
-        entry = _exact_mapping(raw, {"id", "property", "unit"})
-        pair = (_text(entry["id"], _IR_ID), _text(entry["property"], _PARAMETER_PROPERTY))
-        if pair in parameter_pairs:
+        parameter_id, property_name, unit, expression = _parameter_metadata_entry(raw)
+        pair = (parameter_id, property_name)
+        if pair in parameter_pairs or parameter_id in parameter_properties:
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
         parameter_pairs.add(pair)
-        parameter_units[pair] = _text(entry["unit"])
+        parameter_units[pair] = unit
+        parameter_properties[parameter_id] = property_name
+        if expression is not None:
+            parameter_expressions[parameter_id] = expression
+    for parameter_id, (constant, compiled, terms) in parameter_expressions.items():
+        target_pair = (parameter_id, parameter_properties[parameter_id])
+        target_unit = parameter_units[target_pair]
+        expected_parts: list[str] = []
+        for source_id, source_property, coefficient in terms:
+            registered_property = parameter_properties.get(source_id)
+            source_pair = (source_id, source_property)
+            if (
+                registered_property != source_property
+                or source_pair not in parameter_pairs
+                or parameter_units[source_pair] != target_unit
+            ):
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            expected_parts.append(f"{_canonical(coefficient)} * {source_property}")
+        if constant != 0:
+            expected_parts.append(f"{_canonical(constant)} {target_unit}")
+        if compiled != " + ".join(expected_parts):
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+    visited_parameters: set[str] = set()
+    visiting_parameters: set[str] = set()
+
+    def visit_parameter(parameter_id: str) -> None:
+        if parameter_id in visited_parameters:
+            return
+        if parameter_id in visiting_parameters:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        visiting_parameters.add(parameter_id)
+        expression = parameter_expressions.get(parameter_id)
+        if expression is not None:
+            for source_id, _, _ in expression[2]:
+                visit_parameter(source_id)
+        visiting_parameters.remove(parameter_id)
+        visited_parameters.add(parameter_id)
+
+    for parameter_id in parameter_properties:
+        visit_parameter(parameter_id)
     for _, sketch_data in sketches:
         for raw in _sequence(sketch_data["constraints"], maximum=256):
             entry = _exact_mapping(raw, {"id", "indices", "types", "names", "bindings"})
@@ -1968,20 +2128,30 @@ def _source_parameter_mapping(
     carrier, carrier_data = by_ir_id[design.id]
     if carrier_data["kind"] != "parameters":
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
-    entries = tuple(
-        _exact_mapping(raw, {"id", "property", "unit"})
-        for raw in _sequence(carrier_data["parameters"], maximum=MAX_DESIGN_PARAMETERS)
-    )
-    expected_entries = tuple(
-        (item.id, _parameter_property(item), item.unit.value) for item in design.parameters
-    )
-    actual_entries = tuple(
-        (_text(item["id"], _IR_ID), _text(item["property"], _PARAMETER_PROPERTY), item["unit"])
-        for item in entries
-    )
-    if actual_entries != expected_entries:
+    raw_entries = _sequence(carrier_data["parameters"], maximum=MAX_DESIGN_PARAMETERS)
+    entries: list[dict[str, object]] = []
+    for raw in raw_entries:
+        _parameter_metadata_entry(raw)
+        assert type(raw) is dict
+        entries.append(raw)
+    properties = {item.id: _parameter_property(item) for item in design.parameters}
+    expected_entries: list[dict[str, object]] = []
+    for item in design.parameters:
+        expected: dict[str, object] = {
+            "id": item.id,
+            "property": properties[item.id],
+            "unit": item.unit.value,
+        }
+        if item.expression is not None:
+            expected["expression"] = _parameter_expression_metadata(
+                item.expression,
+                properties,
+                item.unit,
+            )
+        expected_entries.append(expected)
+    if entries != expected_entries:
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
-    return carrier, entries
+    return carrier, tuple(entries)
 
 
 def _placement_snapshot(obj: object) -> tuple[float, ...]:
@@ -2072,6 +2242,87 @@ def _require_parameter_consumer_values(
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
 
 
+def _direct_parameter_consumer_ids(
+    design: ParametricDesignIR,
+    parameter_id: str,
+) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                *(
+                    sketch.id
+                    for sketch in design.sketches
+                    if any(
+                        constraint.parameter_id == parameter_id for constraint in sketch.constraints
+                    )
+                ),
+                *(
+                    feature.id
+                    for feature in design.features
+                    if parameter_id in feature.parameters.values()
+                ),
+            }
+        )
+    )
+
+
+def _affected_parameter_ids(
+    design: ParametricDesignIR,
+    source_parameter_id: str,
+) -> tuple[str, ...]:
+    affected = {source_parameter_id}
+    changed = True
+    while changed:
+        changed = False
+        for parameter in design.parameters:
+            expression = parameter.expression
+            if (
+                parameter.id not in affected
+                and expression is not None
+                and any(source_id in affected for source_id in expression.terms)
+            ):
+                affected.add(parameter.id)
+                changed = True
+    return tuple(sorted(affected))
+
+
+def _resolved_live_parameter_values(
+    design: ParametricDesignIR,
+    source_values: Mapping[str, float],
+) -> dict[str, float]:
+    parameters = {item.id: item for item in design.parameters}
+    resolved: dict[str, float] = {}
+
+    def resolve(parameter_id: str) -> float:
+        if parameter_id in resolved:
+            return resolved[parameter_id]
+        parameter = parameters[parameter_id]
+        expression = parameter.expression
+        if expression is None:
+            try:
+                value = float(source_values[parameter_id])
+            except (KeyError, TypeError, ValueError):
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        else:
+            value = math.fsum(
+                (
+                    float(expression.constant),
+                    *(
+                        float(coefficient) * resolve(source_id)
+                        for source_id, coefficient in expression.terms.items()
+                    ),
+                )
+            )
+        if not math.isfinite(value) or abs(value) > 1_000_000_000_000:
+            _raise(ParametricCompileErrorCode.INVALID_INPUT, "/value")
+        resolved[parameter_id] = value
+        return value
+
+    for parameter in design.parameters:
+        resolve(parameter.id)
+    return resolved
+
+
 def modify_parametric_parameter(
     session: object,
     design: object,
@@ -2096,21 +2347,17 @@ def modify_parametric_parameter(
     parameter = next((item for item in design.parameters if item.id == parameter_id), None)
     if parameter is None or not parameter.public:
         _raise(ParametricCompileErrorCode.INVALID_INPUT, "/parameter_id")
+    affected_parameter_ids = _affected_parameter_ids(design, parameter_id)
+    direct_consumers = {
+        affected_id: _direct_parameter_consumer_ids(design, affected_id)
+        for affected_id in affected_parameter_ids
+    }
     consumer_ids = tuple(
         sorted(
             {
-                *(
-                    sketch.id
-                    for sketch in design.sketches
-                    if any(
-                        constraint.parameter_id == parameter_id for constraint in sketch.constraints
-                    )
-                ),
-                *(
-                    feature.id
-                    for feature in design.features
-                    if parameter_id in feature.parameters.values()
-                ),
+                consumer_id
+                for affected_id in affected_parameter_ids
+                for consumer_id in direct_consumers[affected_id]
             }
         )
     )
@@ -2157,19 +2404,29 @@ def modify_parametric_parameter(
     before_values = {
         item.id: _quantity_value(carrier, _parameter_property(item)) for item in design.parameters
     }
+    resolved_before_values = _resolved_live_parameter_values(design, before_values)
+    if any(
+        not math.isclose(
+            before_values[item.id],
+            resolved_before_values[item.id],
+            rel_tol=0.0,
+            abs_tol=1e-8,
+        )
+        for item in design.parameters
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     before_value = before_values[parameter.id]
     if math.isclose(before_value, float(value), rel_tol=0.0, abs_tol=1e-9):
         _raise(ParametricCompileErrorCode.INVALID_INPUT, "/value")
 
+    requested_source_values = dict(before_values)
+    requested_source_values[parameter.id] = float(value)
+    after_values = _resolved_live_parameter_values(design, requested_source_values)
     try:
         replace(
             design,
             parameters=tuple(
-                replace(
-                    item,
-                    value=float(value) if item.id == parameter.id else before_values[item.id],
-                )
-                for item in design.parameters
+                replace(item, value=after_values[item.id]) for item in design.parameters
             ),
         )
     except Exception:
@@ -2194,7 +2451,7 @@ def modify_parametric_parameter(
                 _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
             for item in design.parameters:
                 actual = _quantity_value(carrier, _parameter_property(item))
-                expected = float(value) if item.id == parameter.id else before_values[item.id]
+                expected = after_values[item.id]
                 if not math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-9):
                     _raise(ParametricCompileErrorCode.METADATA_FAILURE)
             if any(
@@ -2209,13 +2466,18 @@ def modify_parametric_parameter(
                 _raise(ParametricCompileErrorCode.METADATA_FAILURE)
             current_records = _parametric_records(document)
             _source_parameter_mapping(current_records, design)
-            _require_parameter_consumer_values(
-                current_records,
-                parameter_id=parameter.id,
-                unit=expected_unit,
-                expected=after_value,
-                consumer_ids=consumer_ids,
-            )
+            parameters_by_id = {item.id: item for item in design.parameters}
+            for affected_id in affected_parameter_ids:
+                affected_consumers = direct_consumers[affected_id]
+                if not affected_consumers:
+                    continue
+                _require_parameter_consumer_values(
+                    current_records,
+                    parameter_id=affected_id,
+                    unit=parameters_by_id[affected_id].unit.value,
+                    expected=after_values[affected_id],
+                    consumer_ids=affected_consumers,
+                )
             edit = ParametricParameterEdit(
                 design_id=design.id,
                 design_digest=design.digest,
@@ -2283,13 +2545,30 @@ def compile_parametric_design(
                 setattr(carrier, property_name, parameter.value)
                 if not parameter.public:
                     carrier.setEditorMode(property_name, 2)  # type: ignore[attr-defined]
-                parameter_entries.append(
-                    {
-                        "id": parameter.id,
-                        "property": property_name,
-                        "unit": parameter.unit.value,
-                    }
+                entry: dict[str, object] = {
+                    "id": parameter.id,
+                    "property": property_name,
+                    "unit": parameter.unit.value,
+                }
+                if parameter.expression is not None:
+                    entry["expression"] = _parameter_expression_metadata(
+                        parameter.expression,
+                        parameter_properties,
+                        parameter.unit,
+                    )
+                parameter_entries.append(entry)
+            for parameter in checked.parameters:
+                if parameter.expression is None:
+                    continue
+                carrier.setExpression(  # type: ignore[attr-defined]
+                    parameter_properties[parameter.id],
+                    _compiled_parameter_expression(
+                        parameter.expression,
+                        parameter_properties,
+                        parameter.unit,
+                    ),
                 )
+            document.recompute()
             _write_metadata(
                 carrier,
                 {
