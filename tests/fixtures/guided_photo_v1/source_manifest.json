@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "normalization_profile": "pillow-12.2.0-exif-transpose-rgb-png-long-edge-1600-no-metadata",
+  "images": [
+    {
+      "fixture": "images/washer_outer.png",
+      "source_page": "https://commons.wikimedia.org/wiki/File:Calibro_con_rondella_1.jpg",
+      "author": "Cav",
+      "license": "Public Domain",
+      "license_url": "https://creativecommons.org/publicdomain/mark/1.0/",
+      "original_media_type": "image/jpeg",
+      "original_size_px": [
+        1992,
+        726
+      ],
+      "original_sha256": "fe40f7e8211d1af4707cad923b35064aab30f789c47129d5222d7bc5c4d2e378",
+      "normalized_size_px": [
+        1600,
+        583
+      ],
+      "normalized_sha256": "a815a44747dce65a63575bf8eb7b532e2bdc8ad612d8773d1411e93ce018bc37"
+    },
+    {
+      "fixture": "images/washer_inner.png",
+      "source_page": "https://commons.wikimedia.org/wiki/File:Calibro_con_rondella_3.jpg",
+      "author": "Cav",
+      "license": "Public Domain",
+      "license_url": "https://creativecommons.org/publicdomain/mark/1.0/",
+      "original_media_type": "image/jpeg",
+      "original_size_px": [
+        1874,
+        1210
+      ],
+      "original_sha256": "c74a89d04bd70d8ddab8a8bc09c8bd07c57f48004996fd94cd3533215bc56982",
+      "normalized_size_px": [
+        1600,
+        1033
+      ],
+      "normalized_sha256": "3719f5a93dd1a2d9f1273aac5a01f847457c8b23b387971e272efcb2d33bd015"
+    },
+    {
+      "fixture": "images/fan_spacer.png",
+      "source_page": "https://www.printables.com/model/933678-simple-120mm-pc-fan-spacer-1-2-3-5-10-and-20mm-ver",
+      "source_image_id": "3306584",
+      "author": "Diarx",
+      "license": "Creative Commons — Attribution",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "original_media_type": "image/webp",
+      "original_size_px": [
+        756,
+        625
+      ],
+      "original_sha256": "416b81de44a35925bcf9c94f01b08711212a341602981a2636147039a080bc72",
+      "normalized_size_px": [
+        756,
+        625
+      ],
+      "normalized_sha256": "6cdae037f74bfc9eb4175ac6f365e426bf3ccad2404a8d89c9af1b2f1dd846b4"
+    },
+    {
+      "fixture": "images/calibration_block.png",
+      "source_page": "https://www.printables.com/model/182018-simple-tiny-calibration-block",
+      "source_image_id": "836946",
+      "author": "Andy",
+      "license": "Creative Commons — Public Domain",
+      "license_url": "https://creativecommons.org/publicdomain/mark/1.0/",
+      "original_media_type": "image/jpeg",
+      "original_size_px": [
+        1024,
+        680
+      ],
+      "original_sha256": "c95b8a0c08f2b077207f05d38407b657031ebc6ac0a5e2f58024b5f3965ad30e",
+      "normalized_size_px": [
+        1024,
+        680
+      ],
+      "normalized_sha256": "65260446e8ff63346a9d788af1922c91e3fcc9693b1f59268f96262ddb347896"
+    },
+    {
+      "fixture": "images/clutter.png",
+      "source_page": "https://bop.felk.cvut.cz/datasets/",
+      "source_archive": "https://huggingface.co/datasets/bop-benchmark/hb/resolve/main/hb_test_primesense_bop19.zip",
+      "source_member": "test_primesense/000005/rgb/000680.png",
+      "author": "HomebrewedDB authors",
+      "license": "CC0 1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "source_archive_sha256": "22d0754cd7ea651c0f7ad8d0f244352050fa1329607375dd4ddd7c281d9bbf7a",
+      "original_media_type": "image/png",
+      "original_size_px": [
+        640,
+        480
+      ],
+      "original_sha256": "3b8f7312c91be2ffda4dc5b29ead855daee8cfbfb495b7e32483b304c31ecc66",
+      "normalized_size_px": [
+        640,
+        480
+      ],
+      "normalized_sha256": "3132598e9c98db4eb53083ff6bcc893dacfc33ca5114bf88f31f2af8f78504a3"
+    }
+  ],
+  "evaluator_references": [
+    {
+      "case_id": "guided-photo-fan-spacer-ready",
+      "source_page": "https://www.printables.com/model/933678-simple-120mm-pc-fan-spacer-1-2-3-5-10-and-20mm-ver",
+      "source_file_id": "6304626",
+      "source_file_name": "120mm fan spacer 5mm.stl",
+      "license": "Creative Commons — Attribution",
+      "sha256": "2d81bf169d73ed0ed5c1444998a0434ea40b07fb501101416dc66b814aae6f8b",
+      "committed": false
+    },
+    {
+      "case_id": "guided-photo-calibration-block-ready",
+      "source_page": "https://www.printables.com/model/182018-simple-tiny-calibration-block",
+      "source_file_id": "769515",
+      "source_file_name": "simple-tiny-calibration-block.stl",
+      "license": "Creative Commons — Public Domain",
+      "sha256": "2a703002174477daee65b6b39c31296ae460e0bf5b43b30299ec8ed8c58c6b35",
+      "committed": false
+    }
+  ]
+}

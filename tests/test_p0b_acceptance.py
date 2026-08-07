@@ -1641,6 +1641,87 @@ def test_public_local_agent_client_is_a_thin_exact_application_adapter() -> None
     assert kernel.closed is True
 
 
+def test_public_open_reconnects_once_after_an_idle_kernel_connection_expires(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import vibecad.daemon.adapters as adapters
+    from vibecad.daemon.state import DaemonError, DaemonErrorCode
+
+    class Kernel(_RecordingKernelClient):
+        @property
+        def daemon_id(self) -> str:
+            return "daemon_" + "1" * 32
+
+        def call(
+            self,
+            method: object,
+            params: object,
+            *,
+            request_id: object | None = None,
+        ) -> V2Response:
+            if method != "kernel.ping":
+                return super().call(method, params, request_id=request_id)
+            self.calls.append((method, params))
+            return V2Response(
+                request_id="request_" + "5" * 32,
+                sequence=len(self.calls),
+                result={
+                    "schema_version": 1,
+                    "daemon_id": self.daemon_id,
+                    "status": "ready",
+                    "protocol": {"major": 2, "minor": 0},
+                    "api": {
+                        "name": adapters.KERNEL_API_NAME,
+                        "epoch": adapters.KERNEL_API_EPOCH,
+                    },
+                    "implementation": {
+                        "package_version": adapters.__version__,
+                        "build_id": adapters.KERNEL_BUILD_ID,
+                    },
+                },
+                error=None,
+            )
+
+    class StaleKernel(Kernel):
+        def call(
+            self,
+            method: object,
+            params: object,
+            *,
+            request_id: object | None = None,
+        ) -> V2Response:
+            if method == "application.call":
+                self.calls.append((method, params))
+                raise DaemonError(DaemonErrorCode.UNAVAILABLE)
+            return super().call(method, params, request_id=request_id)
+
+    stale = StaleKernel()
+    replacement = Kernel()
+    kernels = iter((stale, replacement))
+    monkeypatch.setattr(adapters, "connect_or_start_local_kernel", lambda: next(kernels))
+    monkeypatch.setattr(adapters.paths, "data_root", lambda: tmp_path / "data")
+
+    client = adapters.LocalAgentClient.open()
+    request = {"schema_version": 1, "task_id": "task_" + "6" * 32}
+
+    assert client.get_task_request(request) == {
+        "schema_version": 1,
+        "ok": True,
+        "result": {"operation": "get_task", "request": request},
+        "error": None,
+    }
+    assert stale.closed is True
+    assert [name for name, _params in stale.calls] == ["kernel.ping", "application.call"]
+    assert [name for name, _params in replacement.calls] == [
+        "kernel.ping",
+        "application.call",
+    ]
+
+    client.close()
+    assert replacement.closed is True
+
+
 def test_public_local_agent_client_exposes_only_session_bound_workbench_file_claims() -> None:
     from vibecad.daemon import LocalAgentClient
 

@@ -220,6 +220,9 @@ def test_success_builds_one_strict_response_call_and_execution_receipt() -> None
     assert wire["text"]["format"]["strict"] is True
     content = wire["input"][0]["content"]
     assert "Never infer absolute size from an unscaled photo" in content[0]["text"]
+    assert "coplanar" in content[0]["text"]
+    assert "recapture or measurement" in content[0]["text"]
+    assert "replan" in content[0]["text"]
     assert content[2]["type"] == "input_image"
     assert content[2]["image_url"].startswith("data:image/png;base64,")
     assert "sk-test-value" not in sender.body.decode("utf-8")

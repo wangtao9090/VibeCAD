@@ -72,7 +72,9 @@ minimum|null, maximum|null, public
 
 `kind` is `length` with unit `mm` or `angle` with unit `deg`. A dimensional constraint and every
 feature parameter reference a parameter identity. Prefer user-meaningful confirmed dimensions as
-`public: true`; derived construction offsets may be false.
+`public: true`; derived construction offsets may be false. The complete design may contain at most
+128 parameters. Count every public dimension and every private coordinate parameter before
+submission; do not retry a design that exceeds this limit without reducing redundant dimensions.
 
 An origin sketch plane is:
 
@@ -101,8 +103,16 @@ schema_version, id, name, role, plane, geometries[], constraints[], evidence_ids
 | `line` | `x1_mm`, `y1_mm`, `x2_mm`, `y2_mm` |
 | `circle` | `cx_mm`, `cy_mm`, `radius_mm` |
 | `arc` | `cx_mm`, `cy_mm`, `radius_mm`, `start_angle_deg`, `sweep_angle_deg` |
+| `slot` | `x1_mm`, `y1_mm`, `x2_mm`, `y2_mm`, `width_mm` |
 
-Do not use `slot` in the current compiled envelope even though the value contract reserves it.
+For `slot`, the two `(x, y)` pairs are the end-cap centers and `width_mm` is the full slot
+width. The current compiler accepts only horizontal or vertical centerlines. It expands one
+atomic slot into two native lines, two native semicircular arcs, and deterministic native
+Sketcher constraints; the result is one closed, fully constrained, directly editable wire.
+Do not attach IR constraints to a slot in v1: its five geometry dimensions are authoritative
+and compile to editable numeric Sketcher constraints, not parameter-carrier expressions.
+Oblique slots fail closed. Because Pocket still accepts exactly one live wire, author each
+through-slot as its own profile sketch and Pocket feature.
 
 Each reference is `{schema_version, target, point}`. `target` is a geometry identity or `@origin`,
 `@x_axis`, `@y_axis`; `point` is `whole`, `start`, `end`, or `center` as appropriate. Each
@@ -128,6 +138,26 @@ must be `{schema_version: 1, target: "@origin", point: "center"}` and the second
 geometry's `center`. Do not reverse them; a positive dimension with reversed references moves the
 circle in the negative direction. Do not submit a sketch until every consumed sketch is expected
 to solve at `DoF=0`.
+
+Use the verified independent-coordinate recipe for an eight-edge rounded rectangle; do not use a
+minimal `coincident` + `tangent` + `equal` relationship system for this profile. That mathematically
+plausible system is not a verified VibeCAD authoring pattern and can fail the FreeCAD solver. Give
+each of the four lines its `horizontal` or `vertical` constraint, a `length`, and positive
+`distance_x` plus `distance_y` constraints from `@origin` to the line `start`. Give each quarter
+arc its own shared public `radius`, private center X/Y parameters, and two private endpoint-coordinate
+parameters: constrain the arc center in X/Y and constrain one start-axis coordinate plus the
+orthogonal end-axis coordinate selected for that quadrant. With counter-clockwise quarter arcs at
+start angles 270, 0, 90, and 180 degrees, use this exact mapping: bottom-right `start_x = center_x`
+and `end_y = center_y`; top-right `start_y = center_y` and `end_x = center_x`; top-left
+`start_x = center_x` and `end_y = center_y`; bottom-left `start_y = center_y` and
+`end_x = center_x`. These are the tangent coordinates that locate the arc angles. Never constrain
+the radial extreme coordinates such as bottom-right `start_y = center_y - radius` or
+`end_x = center_x + radius`; FreeCAD treats those as redundant once center and radius are fixed.
+This produces 16 independent line constraints plus 20 independent arc constraints. Bind every
+derived coordinate to a private evidence-backed length parameter, make the coordinates meet
+exactly, and add no `coincident`, `tangent`, or `equal` constraints to that rounded-rectangle
+sketch. Use this recipe for both outer profiles and rounded rectangular cutouts, then require
+`DoF=0` before submission.
 
 Each feature contains every field below:
 
@@ -293,6 +323,8 @@ Before submission, check all of the following:
     extent/depth, and direction; every Pocket sketch has exactly one live closed wire.
 11. Every sketch dimension set is independent, every non-Revolve feature has `axis: null`, and
     every Hole circle reuses the Hole feature's diameter parameter through a `diameter` constraint.
-12. For WorkBuddy 5.3.5, the adapter request root has exactly four fields—`schema_version`,
+12. The complete design contains no more than 128 parameters, including private derived-coordinate
+    parameters used to fully constrain rounded rectangles.
+13. For WorkBuddy 5.3.5, the adapter request root has exactly four fields—`schema_version`,
     `task_id`, `expected_generation`, and the complete ModelProgram under `program`—and the same
     program is not first sent through MCP.

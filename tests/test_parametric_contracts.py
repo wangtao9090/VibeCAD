@@ -1004,6 +1004,26 @@ def test_duplicate_ids_and_contract_budgets_fail_closed() -> None:
     assert caught.value.code is ParametricErrorCode.DUPLICATE_ID
     assert caught.value.path == "/parameters/3/id"
 
+    common_multi_profile_parameters = tuple(
+        DesignParameter(
+            id=_id("parameter", index + 100),
+            name=f"Derived{index}",
+            kind=ParameterKind.LENGTH,
+            value=1,
+            unit=DesignUnit.MM,
+            evidence_ids=(EVIDENCE,),
+        )
+        for index in range(70)
+    )
+    near_boundary = _near_boundary_design()
+    supported = dataclasses.replace(
+        near_boundary,
+        parameters=(*near_boundary.parameters, *common_multi_profile_parameters[:50]),
+    )
+    assert len(supported.parameters) == 73
+    assert 3_500 < _json_node_count(supported.to_mapping()) < 8_192
+    assert ParametricDesignIR.from_mapping(supported.to_mapping()) == supported
+
     parameters = tuple(
         DesignParameter(
             id=_id("parameter", index + 100),

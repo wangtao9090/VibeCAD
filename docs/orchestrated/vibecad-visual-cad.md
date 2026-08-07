@@ -1,8 +1,8 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S30.1`–`VCAD-S35` 与 `VCAD-A06` 已完成；v0.7.0 已发布并验证**
+> 状态：**`VCAD-S30.1`–`VCAD-S35` 与 `VCAD-A06` 已完成；`VCAD-S40` 已批准并执行中**
 >
-> 更新：2026-08-04
+> 更新：2026-08-05
 >
 > 产品基线：已发布 `v0.7.0@6bcd934`
 >
@@ -352,7 +352,8 @@ S10.1 closeout：
 - 新增 runtime-neutral、严格版本化且 canonical 的 `ParametricDesignIR v1`，覆盖 evidence、named
   parameter、origin/datum plane、五类草图 primitive、十五类约束和 Pad/Pocket/Hole/Revolve；
 - IR ID 使用独立 `ir_*_<32 lowercase hex>` 命名空间，输入顺序不影响 digest，同时拒绝路径仍指向
-  原始 wire index；设计结构预算为 3,500 JSON nodes、256 KiB canonical byte；
+  原始 wire index；S10.1 当时的设计结构预算为 3,500 JSON nodes、256 KiB canonical byte，S40.3 后将
+  node 上限有界提升到 8,192 以容纳独立坐标约束的多圆角矩形；
 - profile closure、Sketcher solve、DoF/冲突、PartDesign recompute 和 edit probe 明确保留为 compiler/
   execution invariant，不伪装成纯合同层已经证明的几何事实；
 - `ObservationSnapshot v1`、`SelectorV1`、`AcceptanceSpec v1`、operation registry 和现有 transport
@@ -590,8 +591,48 @@ S35 outcome（2026-08-04）：
 退出门：在冻结的支持包络内通过真实照片样例；包络外必须明确降级为比例提案、请求更多
 证据或拒绝。不得把“视觉上大致相似”宣传为精密逆向工程。
 
-最小固定样例：三个自有、许可清晰且有卡尺真值的简单零件；无尺度和明显遮挡两个负例。
-这些图片必须去 EXIF，用户私人图片不得进入仓库 fixture。
+最小固定样例：三个许可清晰、metadata-free 且有独立确认尺寸/隐藏 evaluator truth 的普通照片简单
+零件；无尺度和明显超出单物体包络两个负例。公开网页照片只有在来源、许可证、原始/归一化 hash
+可审计且不把视觉估值冒充尺寸真值时才可使用；用户私人图片不得进入仓库 fixture。
+
+S40 授权与切片（2026-08-05）：
+
+- 用户选择普通照片机械重建作为下一主线，`VCAD-A07` 生效；授权 S40 范围内的可逆设计、实现、
+  确定性测试、真实宿主/FreeCAD pilot 和既有授权内的有意 commit/push；
+- S40 不新增 MCP tool、Task 状态、durable/public schema、CAD operation 或第二控制面；宿主负责看图与
+  引导拍摄，VibeCAD 只接收已确认的 bounded ParametricDesignIR，并继续走 `REQUIRE_REVIEW`；
+- `S40.1 Guided Capture Contract`：冻结 `PHOTO_READY`、`NEEDS_CAPTURE`、`OUT_OF_ENVELOPE` 三个 host-local
+  判定，拍摄角色、同平面比例尺、直接测量、遮挡/透视与 geometry-completeness gate；补充照片后必须
+  丢弃 provisional plan、重建 evidence matrix，不在旧 candidate 上静默修补；
+- `S40.2 Ground-truth Photo Set`：加入三个许可清晰、无 metadata、有独立确认尺寸或 evaluator-only
+  truth 的普通照片简单零件和两个负例；图片及真值进入仓库前单独做许可证/隐私/metadata gate，
+  不使用用户私人图片；
+- 私有 pilot 可以使用用户给出的 CAD 作为 evaluator-only hidden reference：生成端只看照片和经允许的
+  最小测量值，不读取、导入或渲染参考 CAD；参考文件只在本地提取标定统计、归一化物理实体并对最终
+  候选做几何比较，不进入 prompt、VisualJob、ParametricDesignIR source refs 或仓库 fixture；
+- `S40.3 Host + CAD Outcome`：Codex、Claude、WorkBuddy 各自只在实际可见附件的宿主路径验证；三个
+  正例生成可编辑 Sketcher + bounded PartDesign review draft，两个负例停在 Task 创建前；真实 FreeCAD
+  验证 confirmed dimensions、DoF、BRep、single solid 和 parameter edit probe。
+
+S40.1 已完成；S40.2 第一组私有实物照片和 evaluator-only STEP pilot 已到达 review draft。批准的最小
+产品修正已完成：`slot` 仍是一个 IR 原子几何，轴对齐时编译为两条原生直线、两段半圆弧和十四个确定性
+Sketcher 约束；斜槽及直接引用原子槽的 IR constraint 在 CAD mutation 前 fail closed。IR/ModelProgram
+总预算保持不变，六特征候选从手工展开的约 4,545 节点降到 2,603 节点。真实 FreeCAD 证明六个 sketch
+均 `DoF=0`/fully constrained，单实体、参数修改和严格 metadata 均通过；普通 Task Kernel 到 generation 9
+`awaiting_user_review`，四项 verifier 全 pass 且 HEAD 未改变。候选完成后，隔离 evaluator 才读取隐藏
+参考并得到 volume IoU `0.937880`。精确 3D Fillet/Chamfer 仍不在 v1；该私有 pilot 也不替代三个许可
+清晰、无 metadata 的公开固定正例与两个负例。
+
+S40.2/S40.3 固定门现已闭合。仓库固定三正例为 Public Domain 卡尺垫圈、CC BY 120 mm 风扇垫片和
+Public Domain 盲袋标定块；两个负例为缺少厚度的同一垫圈与 CC0 多物体杂乱场景。fixture 将
+host-visible 输入、期望路由、evaluator-only truth 和许可证/归一化 provenance 分离；公开 STL 仅记录
+digest，不提交、不进入宿主上下文。Codex、Claude、WorkBuddy/GLM-5V-Turbo 分别完成风扇垫片、标定块、
+垫圈真实 stdio MCP 正例；三个 Task 均到 generation 9 `awaiting_user_review`，HEAD 未变，bbox/volume/
+valid-BRep/one-solid 全 pass，并产生 FCStd/STEP。两个负例分别返回 `NEEDS_CAPTURE` 和
+`OUT_OF_ENVELOPE`，均未创建 Task。真实 FreeCAD 对三个正例证明全部 sketch `DoF=0`，且 depth edit
+改变实体后仍保持有效单实体。门禁同时收敛了 daemon idle 后单次安全重连/原请求单次 replay、复杂圆角
+矩形的 128 parameters/8,192 IR nodes 有界容量，以及不冗余的圆角矩形 arc-center/tangent endpoint
+Skill 约束配方；未增加 MCP tool、Task 状态、CAD operation 或第二权威。
 
 ### VCAD-F10 — Industrial Freeform Alpha
 
@@ -712,6 +753,7 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 | `VCAD-A04` | 根据 pilot 结果冻结公开支持包络和 V1 发布声明 | **已批准；2026-08-04** |
 | `VCAD-A05` | 启动 Freeform，批准其输出类型与验收合同 | 未到达 |
 | `VCAD-A06` | tag/PyPI/GitHub Release 或其他公开发布 | **已完成；2026-08-04；v0.7.0** |
+| `VCAD-A07` | 启动 S40 Guided Photo V3 普通照片机械重建 | **已批准；2026-08-05** |
 
 `VCAD-A01` 批准后，S10 和 S20.0 合同设计范围内的本地可逆实现、必要测试、计划内文档更新，
 以及按既有授权进行的有意 commit/branch push 无需重复请求。`VCAD-A02` 已进一步批准 S20.1–S20.5
@@ -757,25 +799,31 @@ profile 的离线认证中运行，不进入日常 pytest；首次 alpha 逐例�
 - S10.1 已选择冻结 `ObservationSnapshot v1`、`SelectorV1` 和 `AcceptanceSpec v1`；有限的重开后
   parametric facts 在 S10.2 复用既有 entity parameter 容器，完整 feature/constraint observation 若
   将来需要则走显式 v2；
-- 当前 Task API `program_json` 上限为 512 KiB，durable TaskRun 的 nested preflight 上限为 4,096
-  nodes；IR 的 3,500-node 上限保持不变，3,405-node fixture 已通过原子 program/durable TaskRun round-trip；
+- 当前 Task API `program_json` 上限为 512 KiB、program JSON 与 IR node 上限均为 8,192；原有
+  3,405-node fixture 以及 S40.3 的 4,427-node host-authored fan IR 均已通过普通 program/durable TaskRun
+  round-trip，参数总数上限为 128；
 - `.workbuddy/` 与两份 CAD 课程文档均为用户所有，不在本计划范围。
 
 当前下一动作：
 
 ```text
-S35 与 A06 已完成：公开 V1 支持有清晰单位和完整尺寸的单个机械拉伸件/回转件，以及
+S35 与 A06 已完成；S40 Guided Photo V3 的 capture contract、原生 slot、私有 hidden-evaluator pilot、
+公开固定三正两负和 Codex/Claude/WorkBuddy outcome gate 均已闭合。公开 v0.7.0 支持有清晰单位和完整尺寸的单个机械拉伸件/回转件，以及
 2–16 张同一物体/状态/尺度的干净互补视图；输出为可编辑 Sketcher + bounded PartDesign，confirmed
 尺寸、BRep 和单实体均经 deterministic verifier。无尺度、冲突、遮挡或隐藏结构必须澄清或
 SAFE_FAILURE。v0.7.0 已经 Codex/Claude/WorkBuddy 分宿主 smoke、PR/main、tag、GitHub Release、
-PyPI 和公开安装验证。当前停在下一产品决策门：`VCAD-A05` Freeform 与普通照片 S40 仍未授权。
+PyPI 和公开安装验证。当前私有样例不会进入仓库 fixture；S40 分支候选的整库回归与临时环境清理均已
+完成，下一步是 commit/push 后再决定发布。Freeform 仍停在 `VCAD-A05`。
 ```
 
-执行分支为 `codex/visual-cad-m0`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
+执行分支为 `codex/guided-photo-s40`，起始锚点为 `origin/main@43ddc49`；S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
 为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。在 A02 获批时，S20.0 只完成
 合同设计；当前 S20.1–S20.5 已实现本地持久化和 deterministic fake/interface-ready 路径，S30.1 已
 实现 opt-in OpenAI transport，但不是产品主线；S30.2–S35 已由 Codex/WorkBuddy 宿主多模态通道
-完成固定样例。`VCAD-A06`（v0.7.0 发布）已完成；下一产品门仍为 `VCAD-A05`（Freeform），S40 需另行授权。
+完成固定样例。`VCAD-A06`（v0.7.0 发布）已完成；`VCAD-A07` 已激活 S40，S40.1 已完成；native slot
+和第一组私有 pilot 的编译器、真实 FreeCAD、Task review draft 及隐藏比较门已闭合；公开三正两负、
+三宿主 outcome 和真实 FreeCAD editability gate 也已闭合，整库回归与精确清理完成。下一恢复动作是
+commit/push；Freeform 仍需 `VCAD-A05`。
 
 ## 11. Material event ledger
 
@@ -807,6 +855,12 @@ PyPI 和公开安装验证。当前停在下一产品决策门：`VCAD-A05` Free
 | `VCAD-E23` | `VCAD-A06` 三宿主与固定候选包 gate | 同一 `6fd8e63d...93620` host-profile MCPB 在 Codex、Claude、WorkBuddy 各经 fresh process 完成 generation 9 review 恢复、generation 11 Accept、HEAD/Revision 收敛和 FCStd/STEP native Resource read；Codex `_meta.progressToken` 兼容修复保持 unknown-field fail closed | 5,930 non-slow passed / 121 deselected；focused transport/server 194 passed；全新解包 MCPB real-FreeCAD/resource 1 passed；Ruff/changed-format/compile/version/diff/MCPB/Twine/fresh wheel+sdist/parity 全 pass；恢复动作是 commit/PR 后观察 CI | GitHub runner 尚未执行；测试 runtime 与临时宿主环境继续保留；S40/Freeform 不在范围 |
 | `VCAD-E24` | `VCAD-A06` PR #11 CI 与 final-candidate recovery | GitHub macOS runner 暴露读取文件会合法改变 atime；稳定 FreeCAD pilot 身份现在比较 dev/inode/mode/owner/size/mtime/ctime 并继续拒绝内容变化，不触及 MCP/Task/Resource/Skill/CAD 路径，因此 E23 三宿主 outcome 按未变化输入保留 | `83c1621`；focused 7 passed；final non-slow 5,932 passed / 121 deselected；重建 MCPB `a91552fa...e46447`，Twine/fresh wheel+sdist/parity 与全新解包 real-FreeCAD/resource 1 passed；PR lint-unit 已通过，runtime-integration 执行中 | 发布外部效果仍未发生；等待 PR CI 完成、merge/tag/release/post-install 后统一清理测试 runtime、Skill/MCP 配置、daemon 和临时目录 |
 | `VCAD-E25` | `VCAD-A06` publication、post-install 与 cleanup gate | PR #11 以 merge commit 合入 main，`v0.7.0` tag、GitHub Release 与 PyPI 公开；公开资产重新下载核验，Python 3.12 从官方索引全新安装成功；随后精确退役四个测试 daemon，并清理临时宿主 MCP/Skill、WorkBuddy 会话/trace、候选包和 VibeCAD-created FreeCAD runtime/cache | main/tag `6bcd93422d097e537d8580e086b662ce7ec898e3`；Actions [`30982172060`](https://github.com/wangtao9090/VibeCAD/actions/runs/30982172060) 全绿；Release MCPB `43bf79a3...e47a15`、Skill `5de52f92...d2ddda`；PyPI wheel `ddf0f7f9...e29fb`、sdist `74095e37...da503`；公开安装报告 0.7.0；runtime/bin/mamba 与 A06 temp/session/daemon 均无残留，19 个 durable data 文件及用户未跟踪文件保留 | A06 闭合；普通照片 S40 与 Freeform `VCAD-A05` 仍需新的产品范围授权 |
+| `VCAD-E26` | 用户选择先做普通照片机械重建，批准 `VCAD-A07` | 激活 S40 Guided Photo V3；保持现有 Agent-first/Task Kernel 权威，先实现 host-local capture/scale/perspective/occlusion/completeness gate 与 correction replan，不扩张 MCP、durable schema 或 CAD operation | 起始锚点 `origin/main@43ddc49`；分支 `codex/guided-photo-s40`；恢复动作是完成 S40.1 Skill/reference/optional-provider prompt focused gate | 三个真实自有照片正例、卡尺真值和两个负例留在 S40.2；未通过前不宣称 ordinary-photo outcome；Freeform 仍等待 `VCAD-A05` |
+| `VCAD-E27` | `VCAD-A07` 与 S40.1 Guided Capture Contract gate | canonical Skill 增加 portable Guided Photo v1；普通照片先经 `PHOTO_READY`/`NEEDS_CAPTURE`/`OUT_OF_ENVELOPE`、capture/scale/completeness 与 correction-replan，再复用现有 ParametricDesignIR/Task Kernel；optional Provider prompt 同步同平面比例尺和单一补拍/测量规则 | focused RED 2 项按预期失败后闭合；28 focused passed；254 affected Visual/Skill/MCPB/Release tests passed；Skill quick validation、Ruff、diff check 全 pass；恢复动作是 S40.2 fixture intake | 真实照片 outcome 尚未证明；需要三个自有无 EXIF 正例、卡尺真值、无尺度与明显遮挡负例；不得用合成渲染或网页图片替代该门 |
+| `VCAD-E28` | 用户提供第一组真实照片和 STEP，并允许取尺寸/最终比较但禁止把详细图纸放入生成上下文 | 建立 evaluator-only hidden-reference 边界：生成端只使用照片与允许的最小测量值；STEP 不进入 prompt、VisualJob、IR source refs 或 candidate，参考侧只做本地统计、物理实体归一化和最终比较 | 私有 STEP SHA-256 `264f87c3…87a6f`；FreeCAD 1.1.3 只读探针证明 valid/closed，9→1 solid；宽 U 槽/无背面沉槽分支 volume IoU `0.956`，四矩形筋可编辑核心 `0.938`；36 geometry/114 constraint/6 feature IR 为约 4,545 nodes，超过 v1 的 3,500；尚未创建 Task | 需要用户确认更小简化，或另批 native slot、Fillet/Chamfer 与相关 IR/ModelProgram budget 扩张；私人文件未进仓库，固定三正两负仍未闭合 |
+| `VCAD-E29` | 用户批准第一组样例的最小产品升级 | 允许已保留的 `slot` IR geometry 编译为 native Sketcher 两线两弧及派生约束；保持现有 IR/ModelProgram 总预算，不加入 Fillet/Chamfer，隐藏 STEP 继续只在 evaluator 侧 | focused RED 必须证明 1 个 slot 对应 4 个 profile edge；真实 FreeCAD gate 必须证明水平/垂直 slot 的闭合、`DoF=0`、严格元数据和单实体特征；恢复动作是完成实现与候选比较 | slot 的数值维度在 v1 中编译为可手工编辑的 Sketcher 约束，不新增 parameter-carrier 绑定；精确 3D 圆角仍是已知残差 |
+| `VCAD-E30` | `VCAD-A07`、`VCAD-E29` 与第一组私有 pilot outcome gate | 已保留的 axis-aligned `slot` 编译为两线两弧及十四个 deterministic native constraints；oblique slot/slot-targeting IR constraint preflight fail closed；不扩张既有 3,500 IR/ModelProgram 预算、MCP 或 Task 权威 | 六特征 IR 2,603 nodes；真实 FreeCAD 六 sketch 全部 `DoF=0`/fully constrained、valid one solid；水平/垂直槽的 native width 6→8 mm 手工约束编辑生效，随后公开 depth 8→10 mm 参数修改仍保留该编辑和 solver closure；Task `task_44444444444444444444444444444444` generation 9、`awaiting_user_review`、四 verifier pass、HEAD unchanged；候选完成后的 isolated hidden evaluator volume IoU `0.937880`；69 parametric/Skill、431 Task/Worker、177 package tests 及 2 real-slot cases pass，Ruff/format/compile/diff/Skill validation pass | 私有照片、STEP、候选和探针未进仓库；slot 尺寸为可手工编辑的 native numeric constraint、不绑定 parameter carrier；Fillet/Chamfer 仍不支持；固定三正两负和三宿主 outcome 尚待闭合；本轮受管 runtime、Task roots、私有候选和探针已精确清理 |
+| `VCAD-E31` | `VCAD-A07` 与 S40.2/S40.3 public fixture/host outcome gate | 许可清晰的公开普通照片可在 provenance 与独立尺寸真值分权后成为固定 fixture；Codex、Claude、WorkBuddy 各完成一个真实正例，缺厚度与多物体负例在 Task 前停止；daemon idle 仅单次重连/replay；复杂圆角矩形采用非冗余 arc-center/tangent endpoint 配方，并将内部程序包络有界统一为 128 parameters/8,192 nodes | washer 20 × 20 × 2、block 30 × 20 × 10、fan 120 × 120 × 5；三者 generation 9 `awaiting_user_review`、HEAD unchanged、bbox/volume/valid BRep/one solid 与 FCStd/STEP 全 pass；真实 FreeCAD 全 sketch `DoF=0` 且 depth edit 生效；负例 `NEEDS_CAPTURE`/`OUT_OF_ENVELOPE` 均无 Task；5,942 non-slow passed / 126 deselected，10 real-FreeCAD slow passed，Ruff/changed-file format/compile/diff/Skill validation pass；三个 daemon 认证退役，临时宿主/Skill/MCP/下载/runtime 精确清理；恢复动作是 commit/push | 这是受限机械参数化普通照片重建，不是 photo-only metrology、任意遮挡逆向工程或 CAD 语义 merge；Fillet/Chamfer、圆角矩形派生尺寸的单参数表达式联动与 Freeform 仍不在 S40 包络；本轮只证明代表性 depth edit |
 
 ## 12. 研究依据
 

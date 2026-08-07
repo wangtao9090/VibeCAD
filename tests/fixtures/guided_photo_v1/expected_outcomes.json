@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "cases": {
+    "guided-photo-washer-ready": {
+      "readiness": "PHOTO_READY",
+      "task_expected": true,
+      "required_feature_kinds": [
+        "pad",
+        "hole"
+      ],
+      "review_policy": "require_review"
+    },
+    "guided-photo-fan-spacer-ready": {
+      "readiness": "PHOTO_READY",
+      "task_expected": true,
+      "required_feature_kinds": [
+        "pad",
+        "pocket",
+        "hole"
+      ],
+      "review_policy": "require_review"
+    },
+    "guided-photo-calibration-block-ready": {
+      "readiness": "PHOTO_READY",
+      "task_expected": true,
+      "required_feature_kinds": [
+        "pad",
+        "pocket"
+      ],
+      "review_policy": "require_review"
+    },
+    "guided-photo-washer-missing-thickness": {
+      "readiness": "NEEDS_CAPTURE",
+      "task_expected": false,
+      "blocking_fact": "thickness_mm",
+      "request_kind": "single_direct_measurement",
+      "request": "Measure the washer thickness in millimetres, preferably with the caliper square to the edge."
+    },
+    "guided-photo-clutter-out-of-envelope": {
+      "readiness": "OUT_OF_ENVELOPE",
+      "task_expected": false,
+      "reason": "multiple_dissimilar_objects_no_single_rigid_part"
+    }
+  }
+}

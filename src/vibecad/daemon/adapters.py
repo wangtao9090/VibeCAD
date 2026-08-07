@@ -7,6 +7,7 @@ import hashlib
 import os
 import re
 import secrets
+import threading
 from enum import StrEnum
 from pathlib import Path
 
@@ -88,7 +89,15 @@ class LocalAgentClientError(RuntimeError):
 class LocalAgentClient:
     """One connection-bound client for MCP and FreeCAD Workbench adapters."""
 
-    __slots__ = ("_artifact_root", "_closed", "_kernel", "_pid", "_release_root")
+    __slots__ = (
+        "_artifact_root",
+        "_closed",
+        "_kernel",
+        "_kernel_lock",
+        "_pid",
+        "_reconnectable",
+        "_release_root",
+    )
 
     def __init__(
         self,
@@ -96,6 +105,7 @@ class LocalAgentClient:
         *,
         artifact_root: object | None = None,
         release_root: object | None = None,
+        reconnectable: bool = False,
     ) -> None:
         if not callable(getattr(kernel, "call", None)) or not callable(
             getattr(kernel, "close", None)
@@ -125,7 +135,11 @@ class LocalAgentClient:
             not canonical_release_root.is_absolute() or ".." in canonical_release_root.parts
         ):
             raise TypeError("release_root must be an absolute path")
+        if type(reconnectable) is not bool:
+            raise TypeError("reconnectable must be a bool")
         self._kernel = kernel
+        self._kernel_lock = threading.RLock()
+        self._reconnectable = reconnectable
         self._artifact_root = canonical_artifact_root
         self._release_root = canonical_release_root
         self._closed = False
@@ -137,6 +151,7 @@ class LocalAgentClient:
             connect_or_start_local_kernel(),
             artifact_root=paths.data_root() / "artifacts",
             release_root=paths.data_root() / "releases",
+            reconnectable=True,
         )
         observed_daemon_id = client.daemon_id
         try:
@@ -152,6 +167,7 @@ class LocalAgentClient:
             connect_or_start_local_kernel(),
             artifact_root=paths.data_root() / "artifacts",
             release_root=paths.data_root() / "releases",
+            reconnectable=True,
         )
         return replacement._verified()
 
@@ -229,18 +245,33 @@ class LocalAgentClient:
         operation: str,
         request: object,
     ) -> dict[str, object]:
-        self._ensure_live()
         if type(request) is not dict:
             raise LocalAgentClientError(LocalAgentClientErrorCode.INVALID_INPUT)
-        return self._result(
-            self._kernel.call(
-                "application.call",
-                {
-                    "operation": operation,
-                    "request": request,
-                },
-            )
-        )
+        params = {
+            "operation": operation,
+            "request": request,
+        }
+        with self._kernel_lock:
+            self._ensure_live()
+            try:
+                response = self._kernel.call("application.call", params)
+            except DaemonError:
+                if not self._reconnectable:
+                    raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE) from None
+                old_kernel = self._kernel
+                try:
+                    replacement = type(self).open()
+                except (DaemonError, LocalAgentClientError):
+                    raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE) from None
+                self._kernel = replacement._kernel
+                replacement._closed = True
+                with contextlib.suppress(BaseException):
+                    old_kernel.close()
+                try:
+                    response = self._kernel.call("application.call", params)
+                except DaemonError:
+                    raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE) from None
+            return self._result(response)
 
     def create_project_request(self, request: object) -> dict[str, object]:
         preflight = _ProjectCreatePreflight()
@@ -537,15 +568,16 @@ class LocalAgentClient:
         }
 
     def close(self) -> None:
-        if os.getpid() != self._pid:
-            raise LocalAgentClientError(LocalAgentClientErrorCode.WRONG_PROCESS)
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self._kernel.close()
-        except BaseException:
-            raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE) from None
+        with self._kernel_lock:
+            if os.getpid() != self._pid:
+                raise LocalAgentClientError(LocalAgentClientErrorCode.WRONG_PROCESS)
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self._kernel.close()
+            except BaseException:
+                raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE) from None
 
     def __enter__(self) -> LocalAgentClient:
         self._ensure_live()

@@ -1,0 +1,234 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "guided-photo-washer-ready",
+      "images": [
+        "images/washer_outer.png",
+        "images/washer_inner.png"
+      ],
+      "image_roles": [
+        "profile_with_outer_caliper",
+        "profile_with_inner_caliper"
+      ],
+      "user_request": "Reconstruct this washer as one editable, fully constrained parametric part.",
+      "confirmed_facts": [
+        {
+          "name": "outer_diameter_mm",
+          "value": 20.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "inner_diameter_mm",
+          "value": 10.5,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "thickness_mm",
+          "value": 2.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "bore_termination",
+          "value": "through_all",
+          "evidence": "direct_user_confirmation"
+        },
+        {
+          "name": "concentric",
+          "value": true,
+          "evidence": "direct_user_confirmation"
+        }
+      ],
+      "source_refs": [
+        "fixture:guided-photo-washer-outer:0",
+        "fixture:guided-photo-washer-inner:1",
+        "user:confirmed-measurements"
+      ]
+    },
+    {
+      "case_id": "guided-photo-fan-spacer-ready",
+      "images": [
+        "images/fan_spacer.png"
+      ],
+      "image_roles": [
+        "oblique_profile_and_depth"
+      ],
+      "user_request": "Reconstruct this 120 mm fan spacer as one editable, fully constrained parametric part.",
+      "confirmed_facts": [
+        {
+          "name": "outer_width_mm",
+          "value": 120.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "outer_height_mm",
+          "value": 120.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "depth_mm",
+          "value": 5.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "outer_corner_radius_mm",
+          "value": 8.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "aperture_width_mm",
+          "value": 116.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "aperture_height_mm",
+          "value": 116.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "aperture_corner_radius_mm",
+          "value": 34.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "mount_hole_diameter_mm",
+          "value": 5.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "mount_hole_spacing_x_mm",
+          "value": 105.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "mount_hole_spacing_y_mm",
+          "value": 105.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "aperture_and_hole_termination",
+          "value": "through_all",
+          "evidence": "direct_user_confirmation"
+        },
+        {
+          "name": "all_profiles_centered_and_symmetric",
+          "value": true,
+          "evidence": "direct_user_confirmation"
+        }
+      ],
+      "source_refs": [
+        "fixture:guided-photo-fan-spacer:0",
+        "user:confirmed-measurements"
+      ]
+    },
+    {
+      "case_id": "guided-photo-calibration-block-ready",
+      "images": [
+        "images/calibration_block.png"
+      ],
+      "image_roles": [
+        "oblique_profile_depth_and_pocket"
+      ],
+      "user_request": "Reconstruct this calibration block as one editable, fully constrained parametric part.",
+      "confirmed_facts": [
+        {
+          "name": "outer_width_mm",
+          "value": 30.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "outer_height_mm",
+          "value": 20.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "overall_depth_mm",
+          "value": 10.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "pocket_width_mm",
+          "value": 20.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "pocket_height_mm",
+          "value": 10.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "pocket_depth_mm",
+          "value": 7.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "pocket_centered",
+          "value": true,
+          "evidence": "direct_user_confirmation"
+        },
+        {
+          "name": "pocket_termination",
+          "value": "blind",
+          "evidence": "direct_user_confirmation"
+        }
+      ],
+      "source_refs": [
+        "fixture:guided-photo-calibration-block:0",
+        "user:confirmed-measurements"
+      ]
+    },
+    {
+      "case_id": "guided-photo-washer-missing-thickness",
+      "images": [
+        "images/washer_outer.png",
+        "images/washer_inner.png"
+      ],
+      "image_roles": [
+        "profile_with_outer_caliper",
+        "profile_with_inner_caliper"
+      ],
+      "user_request": "Reconstruct this washer as one editable parametric part.",
+      "confirmed_facts": [
+        {
+          "name": "outer_diameter_mm",
+          "value": 20.0,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "inner_diameter_mm",
+          "value": 10.5,
+          "evidence": "direct_user_measurement"
+        },
+        {
+          "name": "bore_termination",
+          "value": "through_all",
+          "evidence": "direct_user_confirmation"
+        },
+        {
+          "name": "concentric",
+          "value": true,
+          "evidence": "direct_user_confirmation"
+        }
+      ],
+      "source_refs": [
+        "fixture:guided-photo-washer-outer:0",
+        "fixture:guided-photo-washer-inner:1",
+        "user:confirmed-measurements"
+      ]
+    },
+    {
+      "case_id": "guided-photo-clutter-out-of-envelope",
+      "images": [
+        "images/clutter.png"
+      ],
+      "image_roles": [
+        "unscoped_cluttered_scene"
+      ],
+      "user_request": "Reconstruct this entire scene as one editable mechanical part.",
+      "confirmed_facts": [],
+      "source_refs": [
+        "fixture:guided-photo-hb-clutter:0"
+      ]
+    }
+  ]
+}
