@@ -35,6 +35,9 @@ MAX_SKETCH_CONSTRAINTS = 256
 MAX_DESIGN_FEATURES = 8
 MAX_EDGE_TREATMENTS = 8
 MAX_TREATED_EDGES = 16
+MAX_PATTERN_FEATURES = 4
+MAX_PATTERN_OCCURRENCES = 16
+MAX_PATTERN_INSTANCES = 32
 MAX_PARAMETRIC_IR_BYTES = 256 * 1024
 
 _MAX_TOTAL_GEOMETRIES = 256
@@ -431,6 +434,9 @@ class FeatureKind(StrEnum):
     POCKET = "pocket"
     REVOLVE = "revolve"
     HOLE = "hole"
+    LINEAR_PATTERN = "linear_pattern"
+    CIRCULAR_PATTERN = "circular_pattern"
+    MIRROR = "mirror"
 
 
 class FeatureExtent(StrEnum):
@@ -441,6 +447,30 @@ class FeatureExtent(StrEnum):
 class EdgeTreatmentKind(StrEnum):
     FILLET = "fillet"
     CHAMFER = "chamfer"
+
+
+class PatternDirection(StrEnum):
+    """Stable Body-origin axes for native PartDesign patterns."""
+
+    X_AXIS = "x_axis"
+    Y_AXIS = "y_axis"
+    Z_AXIS = "z_axis"
+
+
+class MirrorPlane(StrEnum):
+    """Stable Body-origin planes for native PartDesign Mirror."""
+
+    XY_PLANE = "xy_plane"
+    XZ_PLANE = "xz_plane"
+    YZ_PLANE = "yz_plane"
+
+
+_PATTERN_KINDS = frozenset(
+    {FeatureKind.LINEAR_PATTERN, FeatureKind.CIRCULAR_PATTERN, FeatureKind.MIRROR}
+)
+_PROFILE_FEATURE_KINDS = frozenset(
+    {FeatureKind.PAD, FeatureKind.POCKET, FeatureKind.REVOLVE, FeatureKind.HOLE}
+)
 
 
 class SemanticEdgeRole(StrEnum):
@@ -1456,7 +1486,7 @@ class PartDesignFeature:
     id: str
     name: str
     kind: FeatureKind
-    sketch_id: str
+    sketch_id: str | None
     base_feature_id: str | None
     parameters: Mapping[str, str]
     evidence_ids: tuple[str, ...]
@@ -1465,6 +1495,10 @@ class PartDesignFeature:
     location_geometry_ids: tuple[str, ...] = ()
     reversed: bool = False
     symmetric: bool = False
+    source_feature_id: str | None = None
+    direction: PatternDirection | None = None
+    mirror_plane: MirrorPlane | None = None
+    occurrences: int | None = None
     schema_version: int = PARAMETRIC_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -1472,7 +1506,17 @@ class PartDesignFeature:
         object.__setattr__(self, "id", _local_id(self.id, "/id", "feature"))
         object.__setattr__(self, "name", _text(self.name, "/name"))
         object.__setattr__(self, "kind", _enum(self.kind, FeatureKind, "/kind"))
-        object.__setattr__(self, "sketch_id", _local_id(self.sketch_id, "/sketch_id", "sketch"))
+        if self.sketch_id is None:
+            if self.kind not in _PATTERN_KINDS:
+                _raise(ParametricErrorCode.INVALID_VALUE, "/sketch_id")
+        else:
+            object.__setattr__(
+                self,
+                "sketch_id",
+                _local_id(self.sketch_id, "/sketch_id", "sketch"),
+            )
+            if self.kind in _PATTERN_KINDS:
+                _raise(ParametricErrorCode.INVALID_VALUE, "/sketch_id")
         if self.base_feature_id is not None:
             object.__setattr__(
                 self,
@@ -1505,8 +1549,20 @@ class PartDesignFeature:
             expected_parameters = {"diameter": DesignUnit.MM}
             if extent is FeatureExtent.LENGTH:
                 expected_parameters["depth"] = DesignUnit.MM
-        else:
+        elif self.kind is FeatureKind.REVOLVE:
             expected_parameters = {"angle": DesignUnit.DEG}
+            if extent is not None:
+                _raise(ParametricErrorCode.INVALID_VALUE, "/extent")
+        elif self.kind is FeatureKind.LINEAR_PATTERN:
+            expected_parameters = {"length": DesignUnit.MM}
+            if extent is not None:
+                _raise(ParametricErrorCode.INVALID_VALUE, "/extent")
+        elif self.kind is FeatureKind.CIRCULAR_PATTERN:
+            expected_parameters = {"angle": DesignUnit.DEG}
+            if extent is not None:
+                _raise(ParametricErrorCode.INVALID_VALUE, "/extent")
+        else:
+            expected_parameters = {}
             if extent is not None:
                 _raise(ParametricErrorCode.INVALID_VALUE, "/extent")
         if set(parameters) != set(expected_parameters):
@@ -1523,6 +1579,9 @@ class PartDesignFeature:
                 if self.axis is None:
                     _raise(ParametricErrorCode.INVALID_VALUE, "/axis")
                 object.__setattr__(self, "axis", _local_id(self.axis, "/axis", "geometry"))
+        elif self.kind is FeatureKind.CIRCULAR_PATTERN:
+            if self.axis not in {"@body_x", "@body_y", "@body_z"}:
+                _raise(ParametricErrorCode.INVALID_VALUE, "/axis")
         elif self.axis is not None:
             _raise(ParametricErrorCode.INVALID_VALUE, "/axis")
         locations = _local_id_tuple(
@@ -1552,9 +1611,50 @@ class PartDesignFeature:
             _raise(ParametricErrorCode.INVALID_VALUE, "/symmetric")
         if self.kind is FeatureKind.REVOLVE and self.axis is None:
             _raise(ParametricErrorCode.INVALID_VALUE, "/axis")
+        if self.kind in _PATTERN_KINDS:
+            if self.source_feature_id is None:
+                _raise(ParametricErrorCode.INVALID_VALUE, "/source_feature_id")
+            object.__setattr__(
+                self,
+                "source_feature_id",
+                _local_id(self.source_feature_id, "/source_feature_id", "feature"),
+            )
+        elif self.source_feature_id is not None:
+            _raise(ParametricErrorCode.INVALID_VALUE, "/source_feature_id")
+        direction = None
+        if self.direction is not None:
+            direction = _enum(self.direction, PatternDirection, "/direction")
+        if self.kind is FeatureKind.LINEAR_PATTERN:
+            if direction is None:
+                _raise(ParametricErrorCode.INVALID_VALUE, "/direction")
+        elif direction is not None:
+            _raise(ParametricErrorCode.INVALID_VALUE, "/direction")
+        object.__setattr__(self, "direction", direction)
+        mirror_plane = None
+        if self.mirror_plane is not None:
+            mirror_plane = _enum(self.mirror_plane, MirrorPlane, "/mirror_plane")
+        if self.kind is FeatureKind.MIRROR:
+            if mirror_plane is None:
+                _raise(ParametricErrorCode.INVALID_VALUE, "/mirror_plane")
+        elif mirror_plane is not None:
+            _raise(ParametricErrorCode.INVALID_VALUE, "/mirror_plane")
+        object.__setattr__(self, "mirror_plane", mirror_plane)
+        if self.kind in {FeatureKind.LINEAR_PATTERN, FeatureKind.CIRCULAR_PATTERN}:
+            if self.occurrences is None:
+                _raise(ParametricErrorCode.INVALID_VALUE, "/occurrences")
+            occurrences = _integer(self.occurrences, "/occurrences", minimum=2)
+            if occurrences > MAX_PATTERN_OCCURRENCES:
+                _raise(ParametricErrorCode.BUDGET_EXCEEDED, "/occurrences")
+            object.__setattr__(self, "occurrences", occurrences)
+        elif self.occurrences is not None:
+            _raise(ParametricErrorCode.INVALID_VALUE, "/occurrences")
+        if self.kind in _PATTERN_KINDS and self.symmetric:
+            _raise(ParametricErrorCode.INVALID_VALUE, "/symmetric")
+        if self.kind is FeatureKind.MIRROR and self.reversed:
+            _raise(ParametricErrorCode.INVALID_VALUE, "/reversed")
 
     def to_mapping(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "schema_version": self.schema_version,
             "id": self.id,
             "name": self.name,
@@ -1569,6 +1669,18 @@ class PartDesignFeature:
             "reversed": self.reversed,
             "symmetric": self.symmetric,
         }
+        if self.kind in _PATTERN_KINDS:
+            result.update(
+                {
+                    "source_feature_id": self.source_feature_id,
+                    "direction": None if self.direction is None else self.direction.value,
+                    "mirror_plane": (
+                        None if self.mirror_plane is None else self.mirror_plane.value
+                    ),
+                    "occurrences": self.occurrences,
+                }
+            )
+        return result
 
     @classmethod
     def from_mapping(cls, value: object) -> Self:
@@ -1586,8 +1698,21 @@ class PartDesignFeature:
             "location_geometry_ids",
             "reversed",
             "symmetric",
+            "source_feature_id",
+            "direction",
+            "mirror_plane",
+            "occurrences",
         }
-        data = _fields(value, allowed=keys, required=keys)
+        pattern_keys = {"source_feature_id", "direction", "mirror_plane", "occurrences"}
+        data = _fields(value, allowed=keys, required=keys - pattern_keys)
+        parsed_kind = _enum(data["kind"], FeatureKind, "/kind")
+        if parsed_kind in _PATTERN_KINDS:
+            missing = sorted(pattern_keys - set(data))
+            if missing:
+                _raise(ParametricErrorCode.MISSING_FIELD, join_json_pointer("", missing[0]))
+        elif pattern_keys & set(data):
+            unsupported = sorted(pattern_keys & set(data))[0]
+            _raise(ParametricErrorCode.UNKNOWN_FIELD, join_json_pointer("", unsupported))
         parameters = data["parameters"]
         if not isinstance(parameters, Mapping):
             _raise(ParametricErrorCode.INVALID_TYPE, "/parameters")
@@ -1609,6 +1734,10 @@ class PartDesignFeature:
             location_geometry_ids=data["location_geometry_ids"],
             reversed=data["reversed"],
             symmetric=data["symmetric"],
+            source_feature_id=data.get("source_feature_id"),
+            direction=data.get("direction"),
+            mirror_plane=data.get("mirror_plane"),
+            occurrences=data.get("occurrences"),
         )
 
 
@@ -1881,6 +2010,15 @@ class ParametricDesignIR:
             _raise(ParametricErrorCode.INVALID_VALUE, "/features")
         if len(features) + len(edge_treatments) > MAX_DESIGN_FEATURES:
             _raise(ParametricErrorCode.BUDGET_EXCEEDED, "/edge_treatments")
+        pattern_features = tuple(item for item in features if item.kind in _PATTERN_KINDS)
+        if len(pattern_features) > MAX_PATTERN_FEATURES:
+            _raise(ParametricErrorCode.BUDGET_EXCEEDED, "/features")
+        pattern_instances = sum(
+            2 if item.kind is FeatureKind.MIRROR else item.occurrences or 0
+            for item in pattern_features
+        )
+        if pattern_instances > MAX_PATTERN_INSTANCES:
+            _raise(ParametricErrorCode.BUDGET_EXCEEDED, "/features")
         object.__setattr__(self, "evidence", tuple(sorted(evidence, key=lambda item: item.id)))
         object.__setattr__(
             self,
@@ -2052,6 +2190,7 @@ class ParametricDesignIR:
         if features[0].kind not in {FeatureKind.PAD, FeatureKind.REVOLVE}:
             _raise(ParametricErrorCode.INVALID_ORDER, "/features/0/kind")
         consumed_sketches: set[str] = set()
+        declared_features: dict[str, PartDesignFeature] = {}
         for index, feature in enumerate(features):
             if feature.id in seen:
                 _raise(ParametricErrorCode.DUPLICATE_ID, f"/features/{index}/id")
@@ -2059,7 +2198,32 @@ class ParametricDesignIR:
             expected_base = None if index == 0 else features[index - 1].id
             if feature.base_feature_id != expected_base:
                 _raise(ParametricErrorCode.INVALID_ORDER, f"/features/{index}/base_feature_id")
-            sketch = sketch_by_id.get(feature.sketch_id)
+            if feature.kind in _PATTERN_KINDS:
+                source = declared_features.get(feature.source_feature_id or "")
+                if source is None:
+                    _raise(
+                        ParametricErrorCode.UNKNOWN_REFERENCE,
+                        f"/features/{index}/source_feature_id",
+                    )
+                if source.kind not in _PROFILE_FEATURE_KINDS:
+                    _raise(
+                        ParametricErrorCode.INVALID_ORDER,
+                        f"/features/{index}/source_feature_id",
+                    )
+                require_evidence(feature.evidence_ids, f"/features/{index}/evidence_ids")
+                for name, parameter_id in feature.parameters.items():
+                    parameter = parameter_by_id.get(parameter_id)
+                    path = f"/features/{index}/parameters/{name}"
+                    if parameter is None:
+                        _raise(ParametricErrorCode.UNKNOWN_REFERENCE, path)
+                    expected_unit = DesignUnit.DEG if name == "angle" else DesignUnit.MM
+                    if parameter.unit is not expected_unit or parameter.value <= 0:
+                        _raise(ParametricErrorCode.INVALID_VALUE, path)
+                    if name == "angle" and parameter.value > 360:
+                        _raise(ParametricErrorCode.INVALID_VALUE, path)
+                declared_features[feature.id] = feature
+                continue
+            sketch = sketch_by_id.get(feature.sketch_id or "")
             if sketch is None:
                 _raise(ParametricErrorCode.UNKNOWN_REFERENCE, f"/features/{index}/sketch_id")
             expected_role = (
@@ -2122,6 +2286,7 @@ class ParametricDesignIR:
                     or not axis_geometry.construction
                 ):
                     _raise(ParametricErrorCode.INVALID_VALUE, f"/features/{index}/axis")
+            declared_features[feature.id] = feature
 
         feature_by_id = {item.id: item for item in features}
         for index, treatment in enumerate(edge_treatments):
@@ -2139,6 +2304,11 @@ class ParametricDesignIR:
                 if source_feature is None:
                     _raise(
                         ParametricErrorCode.UNKNOWN_REFERENCE,
+                        f"{target_path}/edge/source_feature_id",
+                    )
+                if source_feature.kind not in _PROFILE_FEATURE_KINDS:
+                    _raise(
+                        ParametricErrorCode.INVALID_VALUE,
                         f"{target_path}/edge/source_feature_id",
                     )
                 source_sketch = sketch_by_id[source_feature.sketch_id]

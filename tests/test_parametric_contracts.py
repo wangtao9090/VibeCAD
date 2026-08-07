@@ -15,6 +15,8 @@ from vibecad.execution.selectors import SelectorV1, SemanticRole
 from vibecad.parametric import (
     MAX_DESIGN_EVIDENCE,
     MAX_DESIGN_PARAMETERS,
+    MAX_PATTERN_FEATURES,
+    MAX_PATTERN_INSTANCES,
     BodyDefinition,
     ConstraintKind,
     DatumPlane,
@@ -30,6 +32,7 @@ from vibecad.parametric import (
     FeatureExtent,
     FeatureKind,
     GeometryKind,
+    MirrorPlane,
     OriginPlane,
     ParameterKind,
     ParametricContractError,
@@ -37,6 +40,7 @@ from vibecad.parametric import (
     ParametricErrorCode,
     ParametricSketch,
     PartDesignFeature,
+    PatternDirection,
     PlaneKind,
     ReferencePoint,
     SemanticEdgeReference,
@@ -91,6 +95,8 @@ PAD = _id("feature", 1)
 FILLET = _id("feature", 2)
 FILLET_START = _id("parameter", 4)
 FILLET_END = _id("parameter", 5)
+PATTERN_LENGTH = _id("parameter", 6)
+PATTERN_ANGLE = _id("parameter", 7)
 
 
 def _line(
@@ -226,6 +232,62 @@ def _design_with_fillet() -> ParametricDesignIR:
     )
 
 
+def _design_with_pattern(kind: FeatureKind) -> ParametricDesignIR:
+    base = _design()
+    if kind is FeatureKind.LINEAR_PATTERN:
+        parameter = _parameter(PATTERN_LENGTH, "Pattern length", 30)
+        feature = PartDesignFeature(
+            id=_id("feature", 10),
+            name="Linear pattern",
+            kind=kind,
+            sketch_id=None,
+            base_feature_id=PAD,
+            parameters={"length": parameter.id},
+            evidence_ids=(EVIDENCE,),
+            source_feature_id=PAD,
+            direction=PatternDirection.X_AXIS,
+            occurrences=3,
+        )
+    elif kind is FeatureKind.CIRCULAR_PATTERN:
+        parameter = _parameter(
+            PATTERN_ANGLE,
+            "Pattern angle",
+            180,
+            kind=ParameterKind.ANGLE,
+            unit=DesignUnit.DEG,
+        )
+        feature = PartDesignFeature(
+            id=_id("feature", 10),
+            name="Circular pattern",
+            kind=kind,
+            sketch_id=None,
+            base_feature_id=PAD,
+            parameters={"angle": parameter.id},
+            evidence_ids=(EVIDENCE,),
+            source_feature_id=PAD,
+            axis="@body_z",
+            occurrences=4,
+        )
+    else:
+        parameter = None
+        feature = PartDesignFeature(
+            id=_id("feature", 10),
+            name="Mirror",
+            kind=kind,
+            sketch_id=None,
+            base_feature_id=PAD,
+            parameters={},
+            evidence_ids=(EVIDENCE,),
+            source_feature_id=PAD,
+            mirror_plane=MirrorPlane.YZ_PLANE,
+        )
+    return dataclasses.replace(
+        base,
+        parameters=base.parameters + (() if parameter is None else (parameter,)),
+        features=base.features + (feature,),
+    )
+
+
 def test_parametric_design_round_trips_and_has_a_stable_digest() -> None:
     design = _design()
 
@@ -265,6 +327,125 @@ def test_edge_treatment_round_trips_without_changing_legacy_wire_shape() -> None
         "role": "sweep",
         "point": "start",
     }
+
+
+@pytest.mark.parametrize(
+    ("kind", "semantic_field", "semantic_value"),
+    (
+        (FeatureKind.LINEAR_PATTERN, "direction", "x_axis"),
+        (FeatureKind.CIRCULAR_PATTERN, "axis", "@body_z"),
+        (FeatureKind.MIRROR, "mirror_plane", "yz_plane"),
+    ),
+)
+def test_native_pattern_features_round_trip_with_stable_semantic_references(
+    kind: FeatureKind,
+    semantic_field: str,
+    semantic_value: str,
+) -> None:
+    legacy = _design()
+    design = _design_with_pattern(kind)
+    encoded = design.to_mapping()
+    pattern = encoded["features"][-1]
+
+    assert ParametricDesignIR.from_mapping(encoded) == design
+    assert set(legacy.to_mapping()["features"][0]) == {
+        "schema_version",
+        "id",
+        "name",
+        "kind",
+        "sketch_id",
+        "base_feature_id",
+        "parameters",
+        "evidence_ids",
+        "extent",
+        "axis",
+        "location_geometry_ids",
+        "reversed",
+        "symmetric",
+    }
+    assert pattern["source_feature_id"] == PAD
+    assert pattern[semantic_field] == semantic_value
+    assert set(pattern) - set(legacy.to_mapping()["features"][0]) == {
+        "source_feature_id",
+        "direction",
+        "mirror_plane",
+        "occurrences",
+    }
+
+
+def test_pattern_contract_rejects_forward_pattern_sources_and_missing_wire_fields() -> None:
+    design = _design_with_pattern(FeatureKind.LINEAR_PATTERN)
+    encoded = design.to_mapping()
+    encoded["features"][-1].pop("direction")
+
+    with pytest.raises(ParametricContractError) as missing:
+        ParametricDesignIR.from_mapping(encoded)
+
+    assert missing.value.code is ParametricErrorCode.MISSING_FIELD
+    assert missing.value.path == "/features/1/direction"
+
+    legacy = _design().to_mapping()
+    legacy["features"][0]["source_feature_id"] = PAD
+    with pytest.raises(ParametricContractError) as extra:
+        ParametricDesignIR.from_mapping(legacy)
+
+    assert extra.value.code is ParametricErrorCode.UNKNOWN_FIELD
+    assert extra.value.path == "/features/0/source_feature_id"
+
+    pattern = design.features[-1]
+    second = dataclasses.replace(
+        pattern,
+        id=_id("feature", 11),
+        base_feature_id=pattern.id,
+        source_feature_id=pattern.id,
+    )
+    with pytest.raises(ParametricContractError) as chained:
+        dataclasses.replace(design, features=design.features + (second,))
+
+    assert chained.value.code is ParametricErrorCode.INVALID_ORDER
+    assert chained.value.path == "/features/2/source_feature_id"
+
+
+def test_pattern_occurrence_and_total_feature_budgets_fail_closed() -> None:
+    pattern = _design_with_pattern(FeatureKind.LINEAR_PATTERN).features[-1]
+    with pytest.raises(ParametricContractError) as occurrence:
+        dataclasses.replace(pattern, occurrences=17)
+
+    assert occurrence.value.code is ParametricErrorCode.BUDGET_EXCEEDED
+    assert occurrence.value.path == "/occurrences"
+
+    design = _design_with_pattern(FeatureKind.MIRROR)
+    features = [design.features[0]]
+    for index in range(MAX_PATTERN_FEATURES + 1):
+        features.append(
+            dataclasses.replace(
+                design.features[-1],
+                id=_id("feature", 20 + index),
+                base_feature_id=features[-1].id,
+            )
+        )
+    with pytest.raises(ParametricContractError) as budget:
+        dataclasses.replace(design, features=tuple(features))
+
+    assert budget.value.code is ParametricErrorCode.BUDGET_EXCEEDED
+    assert budget.value.path == "/features"
+
+    design = _design_with_pattern(FeatureKind.LINEAR_PATTERN)
+    features = [design.features[0]]
+    for index in range(MAX_PATTERN_FEATURES):
+        features.append(
+            dataclasses.replace(
+                design.features[-1],
+                id=_id("feature", 30 + index),
+                base_feature_id=features[-1].id,
+                occurrences=MAX_PATTERN_INSTANCES // MAX_PATTERN_FEATURES + 1,
+            )
+        )
+    with pytest.raises(ParametricContractError) as instances:
+        dataclasses.replace(design, features=tuple(features))
+
+    assert instances.value.code is ParametricErrorCode.BUDGET_EXCEEDED
+    assert instances.value.path == "/features"
 
 
 def test_chamfer_rejects_asymmetric_edge_distances_in_s42() -> None:

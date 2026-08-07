@@ -28,10 +28,12 @@ from vibecad.parametric.contracts import (
     FeatureExtent,
     FeatureKind,
     GeometryKind,
+    MirrorPlane,
     OriginPlane,
     ParametricDesignIR,
     ParametricSketch,
     PartDesignFeature,
+    PatternDirection,
     PlaneKind,
     ReferencePoint,
     SemanticEdgeReference,
@@ -73,10 +75,34 @@ _FEATURE_TYPE_IDS = {
     FeatureKind.POCKET: "PartDesign::Pocket",
     FeatureKind.REVOLVE: "PartDesign::Revolution",
     FeatureKind.HOLE: "PartDesign::Hole",
+    FeatureKind.LINEAR_PATTERN: "PartDesign::LinearPattern",
+    FeatureKind.CIRCULAR_PATTERN: "PartDesign::PolarPattern",
+    FeatureKind.MIRROR: "PartDesign::Mirrored",
 }
 _EDGE_TREATMENT_TYPE_IDS = {
     EdgeTreatmentKind.FILLET: "Part::Fillet",
     EdgeTreatmentKind.CHAMFER: "Part::Chamfer",
+}
+_PATTERN_KINDS = frozenset(
+    {FeatureKind.LINEAR_PATTERN, FeatureKind.CIRCULAR_PATTERN, FeatureKind.MIRROR}
+)
+_PROFILE_FEATURE_KINDS = frozenset(
+    {FeatureKind.PAD, FeatureKind.POCKET, FeatureKind.REVOLVE, FeatureKind.HOLE}
+)
+_PATTERN_AXIS_OBJECTS = {
+    "@body_x": "X_Axis",
+    "@body_y": "Y_Axis",
+    "@body_z": "Z_Axis",
+}
+_PATTERN_DIRECTION_OBJECTS = {
+    PatternDirection.X_AXIS: "X_Axis",
+    PatternDirection.Y_AXIS: "Y_Axis",
+    PatternDirection.Z_AXIS: "Z_Axis",
+}
+_MIRROR_PLANE_OBJECTS = {
+    MirrorPlane.XY_PLANE: "XY_Plane",
+    MirrorPlane.XZ_PLANE: "XZ_Plane",
+    MirrorPlane.YZ_PLANE: "YZ_Plane",
 }
 
 
@@ -556,6 +582,12 @@ def _feature_parameter_bindings(
         return (("length", feature.parameters["length"], "Length"),)
     if feature.kind is FeatureKind.REVOLVE:
         return (("angle", feature.parameters["angle"], "Angle"),)
+    if feature.kind is FeatureKind.LINEAR_PATTERN:
+        return (("length", feature.parameters["length"], "Length"),)
+    if feature.kind is FeatureKind.CIRCULAR_PATTERN:
+        return (("angle", feature.parameters["angle"], "Angle"),)
+    if feature.kind is FeatureKind.MIRROR:
+        return ()
     bindings = [("diameter", feature.parameters["diameter"], "Diameter")]
     if feature.extent is FeatureExtent.LENGTH:
         bindings.append(("depth", feature.parameters["depth"], "Depth"))
@@ -589,6 +621,7 @@ def _require_feature_shape(
     previous: object | None,
     kind: FeatureKind,
     *,
+    additive: bool | None = None,
     path: str = "",
 ) -> float:
     try:
@@ -617,13 +650,37 @@ def _require_feature_shape(
         if not math.isfinite(previous_volume) or previous_volume <= 0:
             _raise(ParametricCompileErrorCode.FEATURE_FAILURE, path)
         tolerance = max(1.0, abs(previous_volume), abs(volume)) * 1e-9
-        if kind in {FeatureKind.PAD, FeatureKind.REVOLVE}:
+        if additive is None:
+            additive = kind in {FeatureKind.PAD, FeatureKind.REVOLVE}
+        if additive:
             changed = volume > previous_volume + tolerance
         else:
             changed = volume < previous_volume - tolerance
         if not changed:
             _raise(ParametricCompileErrorCode.FEATURE_FAILURE, path)
     return volume
+
+
+def _pattern_is_additive(
+    feature: PartDesignFeature,
+    feature_by_id: Mapping[str, PartDesignFeature],
+) -> bool:
+    if feature.kind not in _PATTERN_KINDS or feature.source_feature_id is None:
+        _raise(ParametricCompileErrorCode.INVALID_INPUT)
+    source = feature_by_id.get(feature.source_feature_id)
+    if source is None or source.kind not in _PROFILE_FEATURE_KINDS:
+        _raise(ParametricCompileErrorCode.INVALID_INPUT)
+    return source.kind in {FeatureKind.PAD, FeatureKind.REVOLVE}
+
+
+def _origin_reference(document: object, name: str) -> object:
+    try:
+        reference = document.getObject(name)  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.CAD_FAILURE)
+    if reference is None:
+        _raise(ParametricCompileErrorCode.CAD_FAILURE)
+    return reference
 
 
 @dataclass(frozen=True, slots=True)
@@ -1279,23 +1336,31 @@ def _read_metadata(obj: object, *, required: bool = False) -> dict[str, object] 
     elif kind == "sketch":
         data = _exact_mapping(parsed, common | {"geometries", "constraints"})
     elif kind == "feature":
-        data = _exact_mapping(
-            parsed,
-            common
-            | {
-                "axis",
-                "axis_token",
-                "base_feature_id",
-                "bindings",
-                "extent",
-                "feature_index",
-                "feature_kind",
-                "location_geometry_ids",
-                "reversed",
-                "sketch_id",
-                "symmetric",
-            },
-        )
+        feature_keys = common | {
+            "axis",
+            "axis_token",
+            "base_feature_id",
+            "bindings",
+            "extent",
+            "feature_index",
+            "feature_kind",
+            "location_geometry_ids",
+            "reversed",
+            "sketch_id",
+            "symmetric",
+        }
+        pattern_keys = {
+            "direction",
+            "direction_token",
+            "mirror_plane",
+            "mirror_plane_token",
+            "occurrences",
+            "source_feature_id",
+        }
+        if parsed.get("feature_kind") in {item.value for item in _PATTERN_KINDS}:
+            data = _exact_mapping(parsed, feature_keys | pattern_keys)
+        else:
+            data = _exact_mapping(parsed, feature_keys)
     elif kind == "edge_treatment":
         data = _exact_mapping(
             parsed,
@@ -2004,6 +2069,204 @@ def _construction_axis_tokens(data: dict[str, object]) -> dict[str, str]:
     return result
 
 
+def _pattern_link_reference(obj: object, property_name: str, expected_name: str) -> None:
+    try:
+        reference, subelements = getattr(obj, property_name)
+        expected = obj.Document.getObject(expected_name)  # type: ignore[attr-defined]
+        subelement_tuple = tuple(subelements)
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if reference is not expected or subelement_tuple not in {(), ("",)}:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+
+def _validate_pattern_feature_metadata(
+    obj: object,
+    data: dict[str, object],
+    kind: FeatureKind,
+) -> tuple[ParametricEntityFact, ...]:
+    feature_index = _integer(data["feature_index"], maximum=7)
+    feature_id = _text(data["ir_id"], _IR_ID)
+    source_feature_id = _text(data["source_feature_id"], _IR_ID)
+    base_feature_id = data["base_feature_id"]
+    if base_feature_id is not None:
+        base_feature_id = _text(base_feature_id, _IR_ID)
+    if (
+        not feature_id.startswith("ir_feature_")
+        or not source_feature_id.startswith("ir_feature_")
+        or (base_feature_id is not None and not base_feature_id.startswith("ir_feature_"))
+        or data["sketch_id"] is not None
+        or data["extent"] is not None
+        or data["location_geometry_ids"] != []
+        or type(data["reversed"]) is not bool
+        or data["symmetric"] is not False
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    try:
+        originals = tuple(obj.Originals)  # type: ignore[attr-defined]
+        actual_base = obj.BaseFeature  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if len(originals) != 1:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    source_data = _read_metadata(originals[0], required=True)
+    if source_data is None or source_data["kind"] != "feature":
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    try:
+        source_kind = FeatureKind(_text(source_data["feature_kind"]))
+    except ValueError:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if source_data["ir_id"] != source_feature_id or source_kind not in _PROFILE_FEATURE_KINDS:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if base_feature_id is None:
+        if actual_base is not None:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    else:
+        base_data = _read_metadata(actual_base, required=True)
+        if (
+            base_data is None
+            or base_data["kind"] != "feature"
+            or base_data["ir_id"] != base_feature_id
+        ):
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+    direction = data["direction"]
+    direction_token = data["direction_token"]
+    axis = data["axis"]
+    axis_token = data["axis_token"]
+    mirror_plane = data["mirror_plane"]
+    mirror_plane_token = data["mirror_plane_token"]
+    occurrences = data["occurrences"]
+    expected_binding_shape: tuple[tuple[str, str], ...]
+    expected_occurrences: int | None = None
+    reference_fact: ParametricEntityFact
+    if kind is FeatureKind.LINEAR_PATTERN:
+        try:
+            checked_direction = PatternDirection(_text(direction))
+        except ValueError:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        expected_token = _PATTERN_DIRECTION_OBJECTS[checked_direction]
+        if (
+            direction_token != expected_token
+            or axis is not None
+            or axis_token is not None
+            or mirror_plane is not None
+            or mirror_plane_token is not None
+        ):
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        expected_occurrences = _integer(occurrences, maximum=16)
+        if expected_occurrences < 2:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        try:
+            if (
+                int(obj.Occurrences) != expected_occurrences
+                or bool(obj.Reversed)
+                is not data[  # type: ignore[attr-defined]
+                    "reversed"
+                ]
+            ):
+                raise ValueError
+        except Exception:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        _pattern_link_reference(obj, "Direction", expected_token)
+        expected_binding_shape = (("length", "Length"),)
+        reference_fact = ParametricEntityFact(
+            "parametric.pattern.direction", checked_direction.value
+        )
+    elif kind is FeatureKind.CIRCULAR_PATTERN:
+        checked_axis = _text(axis)
+        expected_token = _PATTERN_AXIS_OBJECTS.get(checked_axis)
+        if (
+            expected_token is None
+            or axis_token != expected_token
+            or direction is not None
+            or direction_token is not None
+            or mirror_plane is not None
+            or mirror_plane_token is not None
+        ):
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        expected_occurrences = _integer(occurrences, maximum=16)
+        if expected_occurrences < 2:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        try:
+            if (
+                int(obj.Occurrences) != expected_occurrences
+                or bool(obj.Reversed)
+                is not data[  # type: ignore[attr-defined]
+                    "reversed"
+                ]
+            ):
+                raise ValueError
+        except Exception:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        _pattern_link_reference(obj, "Axis", expected_token)
+        expected_binding_shape = (("angle", "Angle"),)
+        reference_fact = ParametricEntityFact("parametric.pattern.axis", checked_axis)
+    elif kind is FeatureKind.MIRROR:
+        try:
+            checked_plane = MirrorPlane(_text(mirror_plane))
+        except ValueError:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        expected_token = _MIRROR_PLANE_OBJECTS[checked_plane]
+        if (
+            mirror_plane_token != expected_token
+            or direction is not None
+            or direction_token is not None
+            or axis is not None
+            or axis_token is not None
+            or occurrences is not None
+            or data["reversed"] is not False
+        ):
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        _pattern_link_reference(obj, "MirrorPlane", expected_token)
+        expected_binding_shape = ()
+        reference_fact = ParametricEntityFact(
+            "parametric.pattern.mirror_plane", checked_plane.value
+        )
+    else:  # pragma: no cover - caller closes the enum
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+    bindings = tuple(_feature_binding(item) for item in _sequence(data["bindings"], maximum=4))
+    if tuple(item[0] for item in bindings) != tuple(sorted(item[0] for item in bindings)):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    binding_shape = tuple((item[0], item[3]) for item in bindings)
+    expected_expressions = {item[3]: item[4] for item in bindings}
+    if (
+        binding_shape != expected_binding_shape
+        or len(expected_expressions) != len(bindings)
+        or _feature_expression_engine(obj, set(expected_expressions)) != expected_expressions
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+
+    facts = [
+        ParametricEntityFact("parametric.feature.extent", "none"),
+        ParametricEntityFact("parametric.feature.index", feature_index),
+        ParametricEntityFact("parametric.feature.kind", kind.value),
+        ParametricEntityFact("parametric.pattern.source_feature_id", source_feature_id),
+        reference_fact,
+        ParametricEntityFact("parametric.shape_valid", True),
+        ParametricEntityFact("parametric.solid_count", 1),
+    ]
+    if expected_occurrences is not None:
+        facts.append(ParametricEntityFact("parametric.pattern.occurrences", expected_occurrences))
+    for name, _, _, target, _ in bindings:
+        expected_type = "App::PropertyAngle" if target == "Angle" else "App::PropertyLength"
+        try:
+            if obj.getTypeIdOfProperty(target) != expected_type:  # type: ignore[attr-defined]
+                raise ValueError
+        except Exception:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        facts.append(
+            ParametricEntityFact(
+                f"parametric.feature.parameter.{name}",
+                _quantity_value(obj, target),
+                "deg" if target == "Angle" else "mm",
+            )
+        )
+    _require_feature_shape(obj, None, kind, path=f"/features/{feature_index}")
+    return tuple(facts)
+
+
 def _validate_feature_metadata(
     obj: object,
     data: dict[str, object],
@@ -2014,6 +2277,8 @@ def _validate_feature_metadata(
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
     if getattr(obj, "TypeId", None) != _FEATURE_TYPE_IDS[kind]:
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if kind in _PATTERN_KINDS:
+        return _validate_pattern_feature_metadata(obj, data, kind)
     feature_id = _text(data["ir_id"], _IR_ID)
     if not feature_id.startswith("ir_feature_"):
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
@@ -2707,26 +2972,47 @@ def _validate_parametric_graph(
         _raise(ParametricCompileErrorCode.METADATA_FAILURE)
 
     sketch_objects = {obj for obj, _ in sketches}
+    indexed_feature_by_id = {
+        _text(data["ir_id"], _IR_ID): (obj, data) for obj, data in indexed_features
+    }
     previous_feature: object | None = None
     consumed_sketch_ids: set[str] = set()
     for feature_index, (feature_obj, feature_data) in enumerate(indexed_features):
         _validate_feature_metadata(feature_obj, feature_data)
-        if _profile_object(feature_obj) not in sketch_objects:
-            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
         try:
             feature_kind = FeatureKind(_text(feature_data["feature_kind"]))
         except ValueError:
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
         feature_id = _text(feature_data["ir_id"], _IR_ID)
-        sketch_id = _text(feature_data["sketch_id"], _IR_ID)
         expected_base_id = None if feature_index == 0 else actual_feature_ids[feature_index - 1]
         if (
             feature_data["base_feature_id"] != expected_base_id
             or (feature_index == 0 and feature_kind not in {FeatureKind.PAD, FeatureKind.REVOLVE})
-            or sketch_id in consumed_sketch_ids
             or feature_id != actual_feature_ids[feature_index]
         ):
             _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        additive: bool | None = None
+        if feature_kind in _PATTERN_KINDS:
+            source_feature_id = _text(feature_data["source_feature_id"], _IR_ID)
+            source_entry = indexed_feature_by_id.get(source_feature_id)
+            if source_entry is None:
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            try:
+                source_kind = FeatureKind(_text(source_entry[1]["feature_kind"]))
+                source_index = actual_feature_ids.index(source_feature_id)
+            except (ValueError, TypeError):
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            if source_index >= feature_index or source_kind not in _PROFILE_FEATURE_KINDS:
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            additive = source_kind in {FeatureKind.PAD, FeatureKind.REVOLVE}
+        else:
+            sketch_id = _text(feature_data["sketch_id"], _IR_ID)
+            if (
+                sketch_id in consumed_sketch_ids
+                or _profile_object(feature_obj) not in sketch_objects
+            ):
+                _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+            consumed_sketch_ids.add(sketch_id)
         try:
             if feature_obj.BaseFeature is not previous_feature:  # type: ignore[attr-defined]
                 raise ValueError
@@ -2736,9 +3022,9 @@ def _validate_parametric_graph(
             feature_obj,
             previous_feature,
             feature_kind,
+            additive=additive,
             path=f"/features/{feature_index}",
         )
-        consumed_sketch_ids.add(sketch_id)
         previous_feature = feature_obj
 
     by_ir_id = {_text(data["ir_id"], _IR_ID): (obj, data) for obj, data in records}
@@ -3737,6 +4023,10 @@ def compile_parametric_design(
             sketch_bindings = {item.sketch_id: item for item in bindings}
             sketches_by_id = {item.id: item for item in checked.sketches}
             for feature_index, feature in enumerate(checked.features):
+                if feature.kind in _PATTERN_KINDS:
+                    continue
+                if feature.sketch_id is None:
+                    _raise(ParametricCompileErrorCode.INVALID_INPUT)
                 wire_count = _require_profile_closure(
                     sketch_bindings[feature.sketch_id].object,
                     expected_edge_count=_expected_profile_edge_count(
@@ -3751,60 +4041,104 @@ def compile_parametric_design(
                 )
 
             compiled_features: list[CompiledFeatureBinding] = []
+            feature_contracts_by_id = {item.id: item for item in checked.features}
+            feature_objects_by_id: dict[str, object] = {}
             previous_feature: object | None = None
             for feature_index, feature in enumerate(checked.features):
-                sketch = sketches_by_id[feature.sketch_id]
-                sketch_object = sketch_bindings[feature.sketch_id].object
                 feature_object = body.newObject(  # type: ignore[attr-defined]
                     _FEATURE_TYPE_IDS[feature.kind],
                     f"VibeCADFeature_{_suffix(feature.id)}",
                 )
                 feature_object.Label = feature.name
-                feature_object.Profile = sketch_object
-                feature_object.Reversed = feature.reversed
-                feature_object.Refine = True
-                if feature.kind in {FeatureKind.PAD, FeatureKind.POCKET}:
-                    feature_object.SideType = "Symmetric" if feature.symmetric else "One side"
-                    feature_object.AlongSketchNormal = True
-                    feature_object.UseCustomVector = False
-                    feature_object.Offset = 0
-                    feature_object.Offset2 = 0
-                    feature_object.TaperAngle = 0
-                    feature_object.TaperAngle2 = 0
-                else:
-                    feature_object.Midplane = feature.symmetric
-
+                sketch: ParametricSketch | None = None
+                sketch_object: object | None = None
                 axis_token: str | None = None
-                if feature.kind is FeatureKind.PAD:
-                    feature_object.Type = "Length"
-                elif feature.kind is FeatureKind.POCKET:
-                    feature_object.Type = (
-                        "Length" if feature.extent is FeatureExtent.LENGTH else "ThroughAll"
-                    )
-                elif feature.kind is FeatureKind.REVOLVE:
-                    feature_object.Type = "Angle"
-                    axis_token = _revolution_axis_token(sketch, feature.axis or "")
-                    if axis_token.startswith("Axis"):
-                        try:
-                            axis_index = int(axis_token.removeprefix("Axis"))
-                            if not 0 <= axis_index < int(sketch_object.AxisCount):
-                                raise ValueError
-                        except Exception:
-                            _raise(ParametricCompileErrorCode.CAD_FAILURE)
-                    feature_object.ReferenceAxis = (sketch_object, [axis_token])
+                direction_token: str | None = None
+                mirror_plane_token: str | None = None
+                if feature.kind in _PATTERN_KINDS:
+                    if feature.source_feature_id is None:
+                        _raise(ParametricCompileErrorCode.INVALID_INPUT)
+                    source_object = feature_objects_by_id.get(feature.source_feature_id)
+                    if source_object is None:
+                        _raise(ParametricCompileErrorCode.INVALID_INPUT)
+                    feature_object.Originals = [source_object]
+                    if feature.kind is FeatureKind.LINEAR_PATTERN:
+                        if feature.direction is None or feature.occurrences is None:
+                            _raise(ParametricCompileErrorCode.INVALID_INPUT)
+                        direction_token = _PATTERN_DIRECTION_OBJECTS[feature.direction]
+                        feature_object.Direction = (
+                            _origin_reference(document, direction_token),
+                            [""],
+                        )
+                        feature_object.Occurrences = feature.occurrences
+                        feature_object.Reversed = feature.reversed
+                    elif feature.kind is FeatureKind.CIRCULAR_PATTERN:
+                        if feature.axis is None or feature.occurrences is None:
+                            _raise(ParametricCompileErrorCode.INVALID_INPUT)
+                        axis_token = _PATTERN_AXIS_OBJECTS[feature.axis]
+                        feature_object.Axis = (
+                            _origin_reference(document, axis_token),
+                            [""],
+                        )
+                        feature_object.Occurrences = feature.occurrences
+                        feature_object.Reversed = feature.reversed
+                    else:
+                        if feature.mirror_plane is None:
+                            _raise(ParametricCompileErrorCode.INVALID_INPUT)
+                        mirror_plane_token = _MIRROR_PLANE_OBJECTS[feature.mirror_plane]
+                        feature_object.MirrorPlane = (
+                            _origin_reference(document, mirror_plane_token),
+                            [""],
+                        )
                 else:
-                    feature_object.DepthType = (
-                        "Dimension" if feature.extent is FeatureExtent.LENGTH else "ThroughAll"
-                    )
-                    feature_object.HoleCutType = "None"
-                    feature_object.HoleCutCustomValues = False
-                    feature_object.ThreadType = "None"
-                    feature_object.Threaded = False
-                    feature_object.ModelThread = False
-                    feature_object.Tapered = False
-                    feature_object.DrillPoint = "Flat"
-                    feature_object.DrillForDepth = False
-                    feature_object.UseCustomThreadClearance = False
+                    if feature.sketch_id is None:
+                        _raise(ParametricCompileErrorCode.INVALID_INPUT)
+                    sketch = sketches_by_id[feature.sketch_id]
+                    sketch_object = sketch_bindings[feature.sketch_id].object
+                    feature_object.Profile = sketch_object
+                    feature_object.Reversed = feature.reversed
+                    feature_object.Refine = True
+                    if feature.kind in {FeatureKind.PAD, FeatureKind.POCKET}:
+                        feature_object.SideType = "Symmetric" if feature.symmetric else "One side"
+                        feature_object.AlongSketchNormal = True
+                        feature_object.UseCustomVector = False
+                        feature_object.Offset = 0
+                        feature_object.Offset2 = 0
+                        feature_object.TaperAngle = 0
+                        feature_object.TaperAngle2 = 0
+                    else:
+                        feature_object.Midplane = feature.symmetric
+
+                    if feature.kind is FeatureKind.PAD:
+                        feature_object.Type = "Length"
+                    elif feature.kind is FeatureKind.POCKET:
+                        feature_object.Type = (
+                            "Length" if feature.extent is FeatureExtent.LENGTH else "ThroughAll"
+                        )
+                    elif feature.kind is FeatureKind.REVOLVE:
+                        feature_object.Type = "Angle"
+                        axis_token = _revolution_axis_token(sketch, feature.axis or "")
+                        if axis_token.startswith("Axis"):
+                            try:
+                                axis_index = int(axis_token.removeprefix("Axis"))
+                                if not 0 <= axis_index < int(sketch_object.AxisCount):  # type: ignore[attr-defined]
+                                    raise ValueError
+                            except Exception:
+                                _raise(ParametricCompileErrorCode.CAD_FAILURE)
+                        feature_object.ReferenceAxis = (sketch_object, [axis_token])
+                    else:
+                        feature_object.DepthType = (
+                            "Dimension" if feature.extent is FeatureExtent.LENGTH else "ThroughAll"
+                        )
+                        feature_object.HoleCutType = "None"
+                        feature_object.HoleCutCustomValues = False
+                        feature_object.ThreadType = "None"
+                        feature_object.Threaded = False
+                        feature_object.ModelThread = False
+                        feature_object.Tapered = False
+                        feature_object.DrillPoint = "Flat"
+                        feature_object.DrillForDepth = False
+                        feature_object.UseCustomThreadClearance = False
 
                 feature_binding_entries: list[dict[str, object]] = []
                 for name, parameter_id, target in sorted(
@@ -3826,27 +4160,40 @@ def compile_parametric_design(
                         }
                     )
 
-                _write_metadata(
-                    feature_object,
-                    {
-                        "schema": _METADATA_SCHEMA,
-                        "kind": "feature",
-                        "design_id": checked.id,
-                        "design_digest": checked.digest,
-                        "ir_id": feature.id,
-                        "axis": feature.axis,
-                        "axis_token": axis_token,
-                        "base_feature_id": feature.base_feature_id,
-                        "bindings": feature_binding_entries,
-                        "extent": None if feature.extent is None else feature.extent.value,
-                        "feature_index": feature_index,
-                        "feature_kind": feature.kind.value,
-                        "location_geometry_ids": list(feature.location_geometry_ids),
-                        "reversed": feature.reversed,
-                        "sketch_id": feature.sketch_id,
-                        "symmetric": feature.symmetric,
-                    },
-                )
+                feature_metadata: dict[str, object] = {
+                    "schema": _METADATA_SCHEMA,
+                    "kind": "feature",
+                    "design_id": checked.id,
+                    "design_digest": checked.digest,
+                    "ir_id": feature.id,
+                    "axis": feature.axis,
+                    "axis_token": axis_token,
+                    "base_feature_id": feature.base_feature_id,
+                    "bindings": feature_binding_entries,
+                    "extent": None if feature.extent is None else feature.extent.value,
+                    "feature_index": feature_index,
+                    "feature_kind": feature.kind.value,
+                    "location_geometry_ids": list(feature.location_geometry_ids),
+                    "reversed": feature.reversed,
+                    "sketch_id": feature.sketch_id,
+                    "symmetric": feature.symmetric,
+                }
+                if feature.kind in _PATTERN_KINDS:
+                    feature_metadata.update(
+                        {
+                            "direction": (
+                                None if feature.direction is None else feature.direction.value
+                            ),
+                            "direction_token": direction_token,
+                            "mirror_plane": (
+                                None if feature.mirror_plane is None else feature.mirror_plane.value
+                            ),
+                            "mirror_plane_token": mirror_plane_token,
+                            "occurrences": feature.occurrences,
+                            "source_feature_id": feature.source_feature_id,
+                        }
+                    )
+                _write_metadata(feature_object, feature_metadata)
                 document.recompute()
                 _validate_feature_metadata(
                     feature_object,
@@ -3856,11 +4203,17 @@ def compile_parametric_design(
                     feature_object,
                     previous_feature,
                     feature.kind,
+                    additive=(
+                        _pattern_is_additive(feature, feature_contracts_by_id)
+                        if feature.kind in _PATTERN_KINDS
+                        else None
+                    ),
                     path=f"/features/{feature_index}",
                 )
                 compiled_features.append(
                     CompiledFeatureBinding(feature_id=feature.id, object=feature_object)
                 )
+                feature_objects_by_id[feature.id] = feature_object
                 previous_feature = feature_object
 
             compiled_treatments: list[CompiledFeatureBinding] = []
