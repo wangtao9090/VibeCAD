@@ -4118,6 +4118,11 @@ def compile_parametric_design(
                             _origin_reference(document, mirror_plane_token),
                             [""],
                         )
+                    # Assigning ``Originals`` makes FreeCAD restore the source
+                    # feature as the Body tip.  Reassert the new native
+                    # pattern before recompute so its shape is active and the
+                    # next PartDesign feature receives it as ``BaseFeature``.
+                    body.Tip = feature_object
                 else:
                     if feature.sketch_id is None:
                         _raise(ParametricCompileErrorCode.INVALID_INPUT)

@@ -22,6 +22,7 @@ from vibecad.parametric import (
     MAX_PATTERN_INSTANCES,
     BodyDefinition,
     ConstraintKind,
+    DatumPlane,
     DesignEvidence,
     DesignEvidenceOrigin,
     DesignEvidenceStatus,
@@ -646,6 +647,7 @@ def _native_pattern_design(kind: FeatureKind) -> ParametricDesignIR:
         extent=FeatureExtent.THROUGH_ALL,
         reversed=True,
     )
+    datum_planes: tuple[DatumPlane, ...] = ()
     if kind is FeatureKind.LINEAR_PATTERN:
         pattern_parameter = DesignParameter(
             id=pattern_parameter_id,
@@ -693,6 +695,18 @@ def _native_pattern_design(kind: FeatureKind) -> ParametricDesignIR:
             occurrences=3,
         )
     else:
+        centered_datum = DatumPlane(
+            id=_id("datum", 40),
+            name="Centered XY plane",
+            origin_mm=(0, -20, 0),
+            normal=(0, 0, 1),
+            x_axis=(1, 0, 0),
+            evidence_ids=(EVIDENCE,),
+        )
+        centered_plane = SketchPlane(kind=PlaneKind.DATUM, datum_id=centered_datum.id)
+        anchored_sketch = replace(anchored_sketch, plane=centered_plane)
+        hole_sketch = replace(hole_sketch, plane=centered_plane)
+        datum_planes = (centered_datum,)
         pattern_parameter = None
         pattern = PartDesignFeature(
             id=_id("feature", 41),
@@ -713,6 +727,7 @@ def _native_pattern_design(kind: FeatureKind) -> ParametricDesignIR:
         + (() if pattern_parameter is None else (pattern_parameter,)),
         sketches=(anchored_sketch, hole_sketch),
         features=(pad, pocket, pattern),
+        datum_planes=datum_planes,
     )
 
 
