@@ -2,7 +2,8 @@
 
 Read this reference only when `get_capabilities` reports the ModelProgram operation
 `create_parametric_design` with argument value shape `parametric_design_ir`. It is a strict JSON
-wire contract for one editable PartDesign Body with optional Fillet/Chamfer tail. It permits no
+wire contract for one editable PartDesign Body with optional native Pattern/Mirror nodes and
+Fillet/Chamfer tail. It permits no
 Python, macros, FreeCAD code/strings, or arbitrary operations.
 
 ## Admission boundary
@@ -33,12 +34,9 @@ Python, macros, FreeCAD code/strings, or arbitrary operations.
 | feature | `ir_feature_` |
 
 Generate suffixes mechanically as zero-padded counters, for example
-`ir_parameter_00000000000000000000000000000001`, then increment the counter. Do not hand-write
-mnemonic or repeating hexadecimal sequences: one extra pair makes the identity invalid. Check the
-suffix length before submission. Declare each identity once, then copy that exact declared string
-into every `*_id`, `evidence_ids`, constraint reference, and feature reference; never regenerate an
-identity while writing a reference. Before serialization, confirm that every non-null referenced IR
-identity is byte-for-byte present in the declarations and that no reference has 31 or 33 hex digits.
+`ir_parameter_00000000000000000000000000000001`. Mnemonic/repeating hex is unsafe. Declare each ID
+once, then copy that exact declared string into every reference. Before serialization, ensure every
+referenced ID is byte-for-byte present in the declarations and none has 31 or 33 hex digits.
 
 ## Root and nested shapes
 
@@ -129,14 +127,10 @@ schema_version, id, name, role, plane, geometries[], constraints[], evidence_ids
 | `arc` | `cx_mm`, `cy_mm`, `radius_mm`, `start_angle_deg`, `sweep_angle_deg` |
 | `slot` | `x1_mm`, `y1_mm`, `x2_mm`, `y2_mm`, `width_mm` |
 
-For `slot`, the two `(x, y)` pairs are the end-cap centers and `width_mm` is the full slot
-width. The current compiler accepts only horizontal or vertical centerlines. It expands one
-atomic slot into two native lines, two native semicircular arcs, and deterministic native
-Sketcher constraints; the result is one closed, fully constrained, directly editable wire.
-Do not attach IR constraints to a slot in v1: its five geometry dimensions are authoritative
-and compile to editable numeric Sketcher constraints, not parameter-carrier expressions.
-Oblique slots fail closed. Because Pocket still accepts exactly one live wire, author each
-through-slot as its own profile sketch and Pocket feature.
+For `slot`, the two pairs are end-cap centers and `width_mm` is full width. Only horizontal or
+vertical centerlines compile: one slot becomes two native lines, two native semicircular arcs, and
+a closed editable wire. Do not attach IR constraints to a slot; its five dimensions are
+authoritative. Oblique slots fail closed. Use one profile sketch and Pocket per through-slot.
 
 Each reference is `{schema_version, target, point}`. `target` is a geometry identity or `@origin`,
 `@x_axis`, `@y_axis`; `point` is `whole`, `start`, `end`, or `center` as appropriate. Each
@@ -152,41 +146,25 @@ Constraint reference counts are: two for `coincident`, `parallel`, `perpendicula
 evidence-backed parameter; nondimensional kinds require `parameter_id: null`. Aim for solver
 `DoF=0` without redundant, conflicting, or malformed constraints.
 
-Initial coordinates are not constraints. A closed rectangle still needs endpoint coincidences,
-horizontal/vertical constraints, width and height dimensions, and an origin anchor. For example,
-anchor one corner with a nondimensional `coincident` constraint whose two references are the
-corner line's `start` and `{schema_version: 1, target: "@origin", point: "center"}`. A circle needs
-`radius` or `diameter`; if its center is not the origin, also constrain the center in X and Y from
-`@origin`. For both `distance_x` and `distance_y`, reference order is semantic: the first reference
-must be `{schema_version: 1, target: "@origin", point: "center"}` and the second must be the circle
-geometry's `center`. Do not reverse them; a positive dimension with reversed references moves the
-circle in the negative direction. Do not submit a sketch until every consumed sketch is expected
-to solve at `DoF=0`.
+Initial coordinates are not constraints. A rectangle needs endpoint coincidences, orientation,
+width/height, and an origin anchor such as line `start` coincident with
+`{schema_version: 1, target: "@origin", point: "center"}`. A circle needs radius/diameter and, when
+off-origin, center X/Y. For `distance_x|distance_y`, reference order is semantic: the first
+reference is `@origin` center and the second the circle center. Do not reverse them. Require
+`DoF=0` before submission.
 
-Use the verified independent-coordinate recipe for an eight-edge rounded rectangle; do not use a
-minimal `coincident` + `tangent` + `equal` relationship system for this profile. That mathematically
-plausible system is not a verified VibeCAD authoring pattern and can fail the FreeCAD solver. Give
-each of the four lines its `horizontal` or `vertical` constraint, a `length`, and positive
-`distance_x` plus `distance_y` constraints from `@origin` to the line `start`. Give each quarter
-arc its own shared public `radius`, private center X/Y parameters, and two private endpoint-coordinate
-parameters: constrain the arc center in X/Y and constrain one start-axis coordinate plus the
-orthogonal end-axis coordinate selected for that quadrant. With counter-clockwise quarter arcs at
-start angles 270, 0, 90, and 180 degrees, use this exact mapping: bottom-right `start_x = center_x`
-and `end_y = center_y`; top-right `start_y = center_y` and `end_x = center_x`; top-left
-`start_x = center_x` and `end_y = center_y`; bottom-left `start_y = center_y` and
-`end_x = center_x`. These are the tangent coordinates that locate the arc angles. Never constrain
-the radial extreme coordinates such as bottom-right `start_y = center_y - radius` or
-`end_x = center_x + radius`; FreeCAD treats those as redundant once center and radius are fixed.
-This produces 16 independent line constraints plus 20 independent arc constraints. Bind every
-derived coordinate to a private evidence-backed length parameter with the structured expression
-above; do not freeze it as an unrelated numeric parameter. For width `W`, height `H`, corner radius
-`R`, and private independent origins `OX`/`OY`, use `straight_width = W - 2*R`,
-`straight_height = H - 2*R`, `left_arc_x = OX + R`, `right_arc_x = OX + W - R`,
-`bottom_arc_y = OY + R`, `top_arc_y = OY + H - R`, `right_x = OX + W`, and
-`top_y = OY + H`. Reuse those derived parameter identities wherever the same coordinate occurs.
-Make the coordinates meet exactly, and add no `coincident`, `tangent`, or `equal` constraints to
-that rounded-rectangle sketch. Use this recipe for both outer profiles and rounded rectangular
-cutouts, then require `DoF=0` before submission.
+Use the verified independent-coordinate recipe for an eight-edge rounded rectangle; relationship-
+only solving is unreliable. Each line gets orientation, length, and positive X/Y distances from
+`@origin` to its start. Each quarter arc gets shared public radius, private center X/Y, and two
+endpoint coordinates. For CCW arcs starting at 270/0/90/180 degrees use, respectively:
+bottom-right `start_x = center_x`, `end_y = center_y`; top-right `start_y = center_y`,
+`end_x = center_x`; top-left the bottom-right pair; bottom-left the top-right pair. Never constrain
+the radial extreme coordinates. This yields 16 independent line constraints and 20 independent arc
+constraints. For width `W`, height `H`, radius `R`, origins `OX/OY`, derive
+`straight_width=W-2R`, `straight_height=H-2R`, `left/right_arc_x=OX+R/OX+W-R`,
+`bottom/top_arc_y=OY+R/OY+H-R`, `right_x=OX+W`, and `top_y=OY+H`. Use private
+evidence-backed expression parameters, reuse equal coordinates, add no `coincident`, `tangent`, or
+`equal` constraints, and require `DoF=0`.
 
 Each feature contains every field below:
 
@@ -204,13 +182,43 @@ Supported profiles:
 | `pocket` | `{}` or `{"length": parameter_id}` | `through_all` or `length` | profile sketch; exactly one closed live wire per Pocket feature |
 | `hole` | `{"diameter": parameter_id}` plus `depth` only for length | `through_all` or `length` | `hole_locations` sketch; 1–16 nonconstruction circles sharing one plane, diameter, extent/depth, and direction; list every circle in `location_geometry_ids` |
 | `revolve` | `{"angle": parameter_id}` | `null` | first feature allowed; axis is `@sketch_x`, `@sketch_y`, or a construction line |
+| `linear_pattern` | `{"length": parameter_id}` | `null` | no sketch; `direction` is `x_axis|y_axis|z_axis`; 2–16 occurrences |
+| `circular_pattern` | `{"angle": parameter_id}` | `null` | no sketch; `axis` is `@body_x|@body_y|@body_z`; 2–16 occurrences |
+| `mirror` | `{}` | `null` | no sketch; `mirror_plane` is `xy_plane|xz_plane|yz_plane` |
 
 Features form one linear chain: the first base is null, and every later `base_feature_id` is the
 immediately previous feature. Each sketch is consumed once. A profile must close safely and each
-feature must produce one valid solid. `axis` is required only for Revolve and must be `null` for
-Pad, Pocket, and Hole. `location_geometry_ids` is populated only for Hole. For a positive-Z pad on
+feature must produce one valid solid. Among primitive features, `axis` is required only for Revolve
+and must be `null` for Pad, Pocket, and Hole. `location_geometry_ids` is populated only for Hole.
+For a positive-Z pad on
 the origin XY plane, the verified same-plane through-hole profile uses `reversed: true`; always
 verify subtractive direction through the deterministic shape checks.
+
+### Native Pattern/Mirror nodes
+
+They remain `ir_feature_` records, set `sketch_id: null`, and add exactly:
+
+```text
+source_feature_id, direction|null, mirror_plane|null, occurrences|null
+```
+
+`source_feature_id` names one earlier Pad/Pocket/Hole/Revolve, never a pattern, future/treatment
+node, FreeCAD name, or index. `base_feature_id` still names the immediately previous chain node.
+
+- Linear: positive mm `length`, body-axis `direction`, `axis/mirror_plane: null`, 2–16
+  `occurrences`; `reversed` allowed.
+- Circular: positive `angle` <=360 deg, body-origin `axis`, `direction/mirror_plane: null`, 2–16
+  `occurrences`; `reversed` allowed.
+- Mirror: empty parameters, one body-origin `mirror_plane`, other selectors and `occurrences: null`,
+  `reversed: false`.
+
+All require `extent: null`, empty locations, and `symmetric: false`. Only the table's Body-origin
+tokens are allowed; they compile to native `PartDesign::LinearPattern`, `PartDesign::PolarPattern`,
+or `PartDesign::Mirrored`.
+
+Budget: four pattern/mirror nodes, 16 occurrences each, 32 total declared instances (Mirror counts
+two), and eight combined feature/treatment nodes. Every node must yield one valid changed solid;
+disconnected, missing-material, no-op, ambiguous-reference, or kernel failures reject atomically.
 
 ### Semantic Fillet/Chamfer tail
 

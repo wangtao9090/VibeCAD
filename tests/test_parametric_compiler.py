@@ -19,8 +19,10 @@ from vibecad.execution.selectors import (
     SemanticRole,
 )
 from vibecad.parametric import (
+    MAX_PATTERN_INSTANCES,
     BodyDefinition,
     ConstraintKind,
+    DatumPlane,
     DesignEvidence,
     DesignEvidenceOrigin,
     DesignEvidenceStatus,
@@ -32,11 +34,13 @@ from vibecad.parametric import (
     FeatureExtent,
     FeatureKind,
     GeometryKind,
+    MirrorPlane,
     OriginPlane,
     ParameterKind,
     ParametricDesignIR,
     ParametricSketch,
     PartDesignFeature,
+    PatternDirection,
     PlaneKind,
     ReferencePoint,
     SemanticEdgeReference,
@@ -504,6 +508,336 @@ def _multi_hole_design() -> ParametricDesignIR:
         sketches=base.sketches + (hole_sketch,),
         features=base.features + (hole,),
     )
+
+
+def _native_pattern_design(kind: FeatureKind) -> ParametricDesignIR:
+    base = _rectangle_design()
+    anchor_x_id = _id("parameter", 40)
+    anchor_y_id = _id("parameter", 41)
+    diameter_id = _id("parameter", 42)
+    hole_x_id = _id("parameter", 43)
+    hole_y_id = _id("parameter", 44)
+    pattern_parameter_id = _id("parameter", 45)
+    anchor_parameters = (
+        DesignParameter(
+            id=anchor_x_id,
+            name="Private base X",
+            kind=ParameterKind.LENGTH,
+            value=1,
+            unit=DesignUnit.MM,
+            evidence_ids=(EVIDENCE,),
+            minimum=-1_000,
+            maximum=1_000,
+            public=False,
+        ),
+        DesignParameter(
+            id=anchor_y_id,
+            name="Private base Y",
+            kind=ParameterKind.LENGTH,
+            value=-20,
+            unit=DesignUnit.MM,
+            evidence_ids=(EVIDENCE,),
+            minimum=-1_000,
+            maximum=1_000,
+            public=False,
+        ),
+    )
+    translated = tuple(
+        replace(
+            geometry,
+            dimensions={
+                "x1_mm": geometry.dimensions["x1_mm"] + 1,
+                "y1_mm": geometry.dimensions["y1_mm"] - 20,
+                "x2_mm": geometry.dimensions["x2_mm"] + 1,
+                "y2_mm": geometry.dimensions["y2_mm"] - 20,
+            },
+        )
+        for geometry in base.sketches[0].geometries
+    )
+    base_constraints = base.sketches[0].constraints[:-1]
+    start = _reference(BOTTOM, ReferencePoint.START)
+    origin = _reference("@origin", ReferencePoint.CENTER)
+    anchored_sketch = replace(
+        base.sketches[0],
+        geometries=translated,
+        constraints=base_constraints
+        + (
+            SketchConstraint(
+                id=_id("constraint", 40),
+                kind=ConstraintKind.DISTANCE_X,
+                references=(origin, start),
+                parameter_id=anchor_x_id,
+                evidence_ids=(EVIDENCE,),
+            ),
+            SketchConstraint(
+                id=_id("constraint", 41),
+                kind=ConstraintKind.DISTANCE_Y,
+                references=(origin, start),
+                parameter_id=anchor_y_id,
+                evidence_ids=(EVIDENCE,),
+            ),
+        ),
+    )
+    hole_parameters = tuple(
+        DesignParameter(
+            id=parameter_id,
+            name=name,
+            kind=ParameterKind.LENGTH,
+            value=value,
+            unit=DesignUnit.MM,
+            evidence_ids=(EVIDENCE,),
+            minimum=0.1,
+            maximum=1_000,
+        )
+        for parameter_id, name, value in (
+            (diameter_id, "Pattern hole diameter", 6),
+            (hole_x_id, "Pattern hole X", 20),
+            (hole_y_id, "Pattern hole Y", 8),
+        )
+    )
+    hole_geometry_id = _id("geometry", 40)
+    center = _reference(hole_geometry_id, ReferencePoint.CENTER)
+    hole_sketch = ParametricSketch(
+        id=_id("sketch", 40),
+        name="Pattern source hole",
+        role=SketchRole.PROFILE,
+        plane=SketchPlane(kind=PlaneKind.ORIGIN, origin=OriginPlane.XY),
+        geometries=(
+            SketchGeometry(
+                id=hole_geometry_id,
+                kind=GeometryKind.CIRCLE,
+                dimensions={"cx_mm": 20, "cy_mm": 8, "radius_mm": 3},
+                evidence_ids=(EVIDENCE,),
+            ),
+        ),
+        constraints=(
+            SketchConstraint(
+                id=_id("constraint", 42),
+                kind=ConstraintKind.DIAMETER,
+                references=(_reference(hole_geometry_id, ReferencePoint.WHOLE),),
+                parameter_id=diameter_id,
+                evidence_ids=(EVIDENCE,),
+            ),
+            SketchConstraint(
+                id=_id("constraint", 43),
+                kind=ConstraintKind.DISTANCE_X,
+                references=(origin, center),
+                parameter_id=hole_x_id,
+                evidence_ids=(EVIDENCE,),
+            ),
+            SketchConstraint(
+                id=_id("constraint", 44),
+                kind=ConstraintKind.DISTANCE_Y,
+                references=(origin, center),
+                parameter_id=hole_y_id,
+                evidence_ids=(EVIDENCE,),
+            ),
+        ),
+        evidence_ids=(EVIDENCE,),
+    )
+    pad = base.features[0]
+    pocket = PartDesignFeature(
+        id=_id("feature", 40),
+        name="Pattern source pocket",
+        kind=FeatureKind.POCKET,
+        sketch_id=hole_sketch.id,
+        base_feature_id=pad.id,
+        parameters={},
+        evidence_ids=(EVIDENCE,),
+        extent=FeatureExtent.THROUGH_ALL,
+        reversed=True,
+    )
+    datum_planes: tuple[DatumPlane, ...] = ()
+    if kind is FeatureKind.LINEAR_PATTERN:
+        pattern_parameter = DesignParameter(
+            id=pattern_parameter_id,
+            name="Linear pattern length",
+            kind=ParameterKind.LENGTH,
+            value=30,
+            unit=DesignUnit.MM,
+            evidence_ids=(EVIDENCE,),
+            minimum=1,
+            maximum=100,
+        )
+        pattern = PartDesignFeature(
+            id=_id("feature", 41),
+            name="Native linear pattern",
+            kind=kind,
+            sketch_id=None,
+            base_feature_id=pocket.id,
+            parameters={"length": pattern_parameter.id},
+            evidence_ids=(EVIDENCE,),
+            source_feature_id=pocket.id,
+            direction=PatternDirection.X_AXIS,
+            occurrences=3,
+        )
+    elif kind is FeatureKind.CIRCULAR_PATTERN:
+        pattern_parameter = DesignParameter(
+            id=pattern_parameter_id,
+            name="Circular pattern angle",
+            kind=ParameterKind.ANGLE,
+            value=45,
+            unit=DesignUnit.DEG,
+            evidence_ids=(EVIDENCE,),
+            minimum=1,
+            maximum=180,
+        )
+        pattern = PartDesignFeature(
+            id=_id("feature", 41),
+            name="Native circular pattern",
+            kind=kind,
+            sketch_id=None,
+            base_feature_id=pocket.id,
+            parameters={"angle": pattern_parameter.id},
+            evidence_ids=(EVIDENCE,),
+            source_feature_id=pocket.id,
+            axis="@body_z",
+            occurrences=3,
+        )
+    else:
+        centered_datum = DatumPlane(
+            id=_id("datum", 40),
+            name="Centered XY plane",
+            origin_mm=(0, -20, 0),
+            normal=(0, 0, 1),
+            x_axis=(1, 0, 0),
+            evidence_ids=(EVIDENCE,),
+        )
+        centered_plane = SketchPlane(kind=PlaneKind.DATUM, datum_id=centered_datum.id)
+        anchored_sketch = replace(anchored_sketch, plane=centered_plane)
+        hole_sketch = replace(hole_sketch, plane=centered_plane)
+        datum_planes = (centered_datum,)
+        pattern_parameter = None
+        pattern = PartDesignFeature(
+            id=_id("feature", 41),
+            name="Native mirror",
+            kind=kind,
+            sketch_id=None,
+            base_feature_id=pocket.id,
+            parameters={},
+            evidence_ids=(EVIDENCE,),
+            source_feature_id=pocket.id,
+            mirror_plane=MirrorPlane.XZ_PLANE,
+        )
+    return replace(
+        base,
+        parameters=base.parameters
+        + anchor_parameters
+        + hole_parameters
+        + (() if pattern_parameter is None else (pattern_parameter,)),
+        sketches=(anchored_sketch, hole_sketch),
+        features=(pad, pocket, pattern),
+        datum_planes=datum_planes,
+    )
+
+
+def _additive_non_immediate_pattern_design() -> ParametricDesignIR:
+    base = _native_pattern_design(FeatureKind.LINEAR_PATTERN)
+    pad, source_pocket, pattern = base.features
+    pattern = replace(
+        pattern,
+        source_feature_id=pad.id,
+        occurrences=2,
+    )
+    x_parameter = DesignParameter(
+        id=_id("parameter", 50),
+        name="Private continuing pocket X",
+        kind=ParameterKind.LENGTH,
+        value=75,
+        unit=DesignUnit.MM,
+        evidence_ids=(EVIDENCE,),
+        minimum=-1_000,
+        maximum=1_000,
+        public=False,
+    )
+    y_parameter = DesignParameter(
+        id=_id("parameter", 51),
+        name="Private continuing pocket Y",
+        kind=ParameterKind.LENGTH,
+        value=8,
+        unit=DesignUnit.MM,
+        evidence_ids=(EVIDENCE,),
+        minimum=-1_000,
+        maximum=1_000,
+        public=False,
+    )
+    diameter_parameter = next(
+        item for item in base.parameters if item.name == "Pattern hole diameter"
+    )
+    geometry_id = _id("geometry", 50)
+    continuing_sketch = ParametricSketch(
+        id=_id("sketch", 50),
+        name="Pocket after additive pattern",
+        role=SketchRole.PROFILE,
+        plane=SketchPlane(kind=PlaneKind.ORIGIN, origin=OriginPlane.XY),
+        geometries=(
+            SketchGeometry(
+                id=geometry_id,
+                kind=GeometryKind.CIRCLE,
+                dimensions={"cx_mm": 75, "cy_mm": 8, "radius_mm": 3},
+                evidence_ids=(EVIDENCE,),
+            ),
+        ),
+        constraints=(
+            SketchConstraint(
+                id=_id("constraint", 50),
+                kind=ConstraintKind.DIAMETER,
+                references=(_reference(geometry_id, ReferencePoint.WHOLE),),
+                parameter_id=diameter_parameter.id,
+                evidence_ids=(EVIDENCE,),
+            ),
+            SketchConstraint(
+                id=_id("constraint", 51),
+                kind=ConstraintKind.DISTANCE_X,
+                references=(
+                    _reference("@origin", ReferencePoint.CENTER),
+                    _reference(geometry_id, ReferencePoint.CENTER),
+                ),
+                parameter_id=x_parameter.id,
+                evidence_ids=(EVIDENCE,),
+            ),
+            SketchConstraint(
+                id=_id("constraint", 52),
+                kind=ConstraintKind.DISTANCE_Y,
+                references=(
+                    _reference("@origin", ReferencePoint.CENTER),
+                    _reference(geometry_id, ReferencePoint.CENTER),
+                ),
+                parameter_id=y_parameter.id,
+                evidence_ids=(EVIDENCE,),
+            ),
+        ),
+        evidence_ids=(EVIDENCE,),
+    )
+    continuing_pocket = PartDesignFeature(
+        id=_id("feature", 50),
+        name="Pocket after additive pattern",
+        kind=FeatureKind.POCKET,
+        sketch_id=continuing_sketch.id,
+        base_feature_id=pattern.id,
+        parameters={},
+        evidence_ids=(EVIDENCE,),
+        extent=FeatureExtent.THROUGH_ALL,
+        reversed=True,
+    )
+    return replace(
+        base,
+        parameters=base.parameters + (x_parameter, y_parameter),
+        sketches=base.sketches + (continuing_sketch,),
+        features=(pad, source_pocket, pattern, continuing_pocket),
+    )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (FeatureKind.LINEAR_PATTERN, FeatureKind.CIRCULAR_PATTERN, FeatureKind.MIRROR),
+)
+def test_native_pattern_design_contract_is_round_trip_safe(kind: FeatureKind) -> None:
+    design = _native_pattern_design(kind)
+
+    assert ParametricDesignIR.from_mapping(design.to_mapping()) == design
+    assert design.features[-1].source_feature_id == design.features[1].id
+    assert design.features[-1].sketch_id is None
 
 
 def _multi_view_l_bracket_design() -> ParametricDesignIR:
@@ -1108,6 +1442,68 @@ def test_stabilization_solves_all_sketches_before_recompute_and_shape_checks(
     ]
 
 
+@pytest.mark.parametrize(
+    "pattern_specs",
+    (
+        ((FeatureKind.MIRROR, None),) * 5,
+        (
+            (FeatureKind.LINEAR_PATTERN, 11),
+            (FeatureKind.CIRCULAR_PATTERN, 11),
+            (FeatureKind.LINEAR_PATTERN, 11),
+        ),
+    ),
+    ids=("feature-count", "total-instances"),
+)
+def test_persisted_graph_replays_global_pattern_budgets(
+    monkeypatch: pytest.MonkeyPatch,
+    pattern_specs: tuple[tuple[FeatureKind, int | None], ...],
+) -> None:
+    design_id = _id("design", 80)
+    body_id = _id("body", 80)
+    sketch_id = _id("sketch", 80)
+    digest = "a" * 64
+    feature_specs = ((FeatureKind.PAD, None),) + pattern_specs
+    feature_ids = tuple(_id("feature", 80 + index) for index in range(len(feature_specs)))
+    common = {"design_id": design_id, "design_digest": digest}
+    body = SimpleNamespace()
+    carrier = SimpleNamespace()
+    sketch = SimpleNamespace()
+    records: list[tuple[object, dict[str, object]]] = [
+        (
+            body,
+            {
+                **common,
+                "kind": "body",
+                "ir_id": body_id,
+                "sketch_ids": [sketch_id],
+                "feature_ids": list(feature_ids),
+            },
+        ),
+        (carrier, {**common, "kind": "parameters", "ir_id": design_id}),
+        (sketch, {**common, "kind": "sketch", "ir_id": sketch_id}),
+    ]
+    for index, ((kind, occurrences), feature_id) in enumerate(
+        zip(feature_specs, feature_ids, strict=True)
+    ):
+        data: dict[str, object] = {
+            **common,
+            "kind": "feature",
+            "ir_id": feature_id,
+            "feature_index": index,
+            "feature_kind": kind.value,
+        }
+        if occurrences is not None:
+            data["occurrences"] = occurrences
+        records.append((SimpleNamespace(), data))
+
+    monkeypatch.setattr(compiler_module, "_validate_parameter_metadata", lambda *_args: ())
+
+    with pytest.raises(ParametricCompileError) as caught:
+        compiler_module._validate_parametric_graph(tuple(records))
+
+    assert caught.value.code is ParametricCompileErrorCode.METADATA_FAILURE
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("vertical", (False, True), ids=("horizontal", "vertical"))
 def test_real_slot_compiles_to_fully_constrained_editable_native_geometry(
@@ -1173,6 +1569,175 @@ def test_real_slot_compiles_to_fully_constrained_editable_native_geometry(
         assert slot_facts["parametric.fully_constrained"] is True
     finally:
         session.close_document()
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("kind", "type_id", "instance_count"),
+    (
+        (FeatureKind.LINEAR_PATTERN, "PartDesign::LinearPattern", 3),
+        (FeatureKind.CIRCULAR_PATTERN, "PartDesign::PolarPattern", 3),
+        (FeatureKind.MIRROR, "PartDesign::Mirrored", 2),
+    ),
+)
+def test_real_native_pattern_features_compile_edit_and_reopen(
+    kind: FeatureKind,
+    type_id: str,
+    instance_count: int,
+    tmp_path,
+) -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    design = _native_pattern_design(kind)
+    path = tmp_path / f"s43-{kind.value}.FCStd"
+    session = Session()
+    session.open_document(f"S43{kind.value.title()}")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        stabilize_parametric_session(session)
+
+        pattern = compiled.features[-1].object
+        expected_volume = 60 * 40 * 8 - instance_count * math.pi * 3**2 * 8
+        assert pattern.TypeId == type_id
+        assert compiled.body.Tip is pattern
+        assert float(pattern.Shape.Volume) == pytest.approx(expected_volume, abs=1e-6)
+        facts = {fact.name: fact.value for fact in compiler_module.parametric_entity_facts(pattern)}
+        assert facts["parametric.feature.kind"] == kind.value
+        assert facts["parametric.pattern.source_feature_id"] == design.features[1].id
+        assert facts["parametric.shape_valid"] is True
+        assert facts["parametric.solid_count"] == 1
+
+        if kind is not FeatureKind.MIRROR:
+            parameter_id = design.features[-1].parameters[
+                "length" if kind is FeatureKind.LINEAR_PATTERN else "angle"
+            ]
+            edit = compiler_module.modify_parametric_parameter(
+                session,
+                design,
+                body=compiled.body,
+                parameter_id=parameter_id,
+                value=24 if kind is FeatureKind.LINEAR_PATTERN else 30,
+            )
+            assert edit.consumer_ids == (design.features[-1].id,)
+            assert pattern.Shape.isValid()
+            assert len(tuple(pattern.Shape.Solids)) == 1
+
+        session.doc.saveAs(str(path))
+    finally:
+        session.close_document()
+
+    reopened = Session()
+    try:
+        reopened.load_document(path)
+        stabilize_parametric_session(reopened)
+        patterns = tuple(obj for obj in reopened.doc.Objects if obj.TypeId == type_id)
+        assert len(patterns) == 1
+        assert patterns[0].Shape.isValid()
+        assert len(tuple(patterns[0].Shape.Solids)) == 1
+    finally:
+        reopened.close_document()
+
+
+@pytest.mark.slow
+def test_real_additive_non_immediate_pattern_can_continue_modeling(tmp_path) -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    design = _additive_non_immediate_pattern_design()
+    path = tmp_path / "s43-additive-continuing.FCStd"
+    session = Session()
+    session.open_document("S43AdditiveContinuing")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        stabilize_parametric_session(session)
+
+        pad, source_pocket, pattern, continuing_pocket = (item.object for item in compiled.features)
+        assert tuple(pattern.Originals) == (pad,)
+        assert pattern.BaseFeature is source_pocket
+        assert continuing_pocket.BaseFeature is pattern
+        assert compiled.body.Tip is continuing_pocket
+        expected_volume = (60 + 30) * 40 * 8 - 2 * math.pi * 3**2 * 8
+        assert float(compiled.body.Shape.Volume) == pytest.approx(expected_volume, abs=1e-6)
+
+        parameter_id = design.features[2].parameters["length"]
+        edit = compiler_module.modify_parametric_parameter(
+            session,
+            design,
+            body=compiled.body,
+            parameter_id=parameter_id,
+            value=24,
+        )
+        stabilize_parametric_session(session)
+        assert edit.consumer_ids == (design.features[2].id,)
+        edited_volume = (60 + 24) * 40 * 8 - 2 * math.pi * 3**2 * 8
+        assert float(compiled.body.Shape.Volume) == pytest.approx(edited_volume, abs=1e-6)
+        session.doc.saveAs(str(path))
+    finally:
+        session.close_document()
+
+    reopened = Session()
+    try:
+        reopened.load_document(path)
+        stabilize_parametric_session(reopened)
+        body = next(obj for obj in reopened.doc.Objects if obj.TypeId == "PartDesign::Body")
+        pattern = next(
+            obj for obj in reopened.doc.Objects if obj.TypeId == "PartDesign::LinearPattern"
+        )
+        final_pocket = next(
+            obj
+            for obj in reopened.doc.Objects
+            if obj.TypeId == "PartDesign::Pocket"
+            and compiler_module._read_metadata(obj, required=True)["feature_index"] == 3
+        )
+        assert tuple(pattern.Originals)[0].TypeId == "PartDesign::Pad"
+        assert final_pocket.BaseFeature is pattern
+        assert body.Tip is final_pocket
+    finally:
+        reopened.close_document()
+
+
+@pytest.mark.slow
+def test_real_reopen_rejects_forged_global_pattern_budget(tmp_path) -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    design = _native_pattern_design(FeatureKind.LINEAR_PATTERN)
+    path = tmp_path / "s43-forged-pattern-budget.FCStd"
+    session = Session()
+    session.open_document("S43ForgedPatternBudget")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        pattern = compiled.features[-1].object
+        metadata = compiler_module._read_metadata(pattern, required=True)
+        assert metadata is not None
+        metadata["occurrences"] = MAX_PATTERN_INSTANCES + 1
+        pattern.setEditorMode(compiler_module.PARAMETRIC_METADATA_PROPERTY, 0)
+        setattr(
+            pattern,
+            compiler_module.PARAMETRIC_METADATA_PROPERTY,
+            compiler_module._canonical(metadata),
+        )
+        pattern.setEditorMode(compiler_module.PARAMETRIC_METADATA_PROPERTY, 3)
+        session.doc.saveAs(str(path))
+    finally:
+        session.close_document()
+
+    reopened = Session()
+    try:
+        reopened.load_document(path)
+        with pytest.raises(ParametricCompileError) as caught:
+            stabilize_parametric_session(reopened)
+
+        assert caught.value.code is ParametricCompileErrorCode.METADATA_FAILURE
+    finally:
+        reopened.close_document()
 
 
 @pytest.mark.slow
@@ -1786,6 +2351,105 @@ def test_feature_parameter_bindings_exclude_dormant_through_all_dimensions() -> 
     assert compiler_module._feature_parameter_bindings(pad) == (("length", DEPTH, "Length"),)
     assert compiler_module._feature_parameter_bindings(pocket) == ()
     assert compiler_module._feature_parameter_bindings(hole) == (("diameter", WIDTH, "Diameter"),)
+
+
+def test_native_pattern_bindings_and_source_polarity_are_explicit() -> None:
+    pad = _rectangle_design().features[0]
+    pocket = PartDesignFeature(
+        id=_id("feature", 2),
+        name="Pocket",
+        kind=FeatureKind.POCKET,
+        sketch_id=SKETCH,
+        base_feature_id=pad.id,
+        parameters={},
+        evidence_ids=(EVIDENCE,),
+        extent=FeatureExtent.THROUGH_ALL,
+    )
+    linear = PartDesignFeature(
+        id=_id("feature", 3),
+        name="Linear pattern",
+        kind=FeatureKind.LINEAR_PATTERN,
+        sketch_id=None,
+        base_feature_id=pocket.id,
+        parameters={"length": DEPTH},
+        evidence_ids=(EVIDENCE,),
+        source_feature_id=pocket.id,
+        direction=PatternDirection.X_AXIS,
+        occurrences=3,
+    )
+    circular = PartDesignFeature(
+        id=_id("feature", 4),
+        name="Circular pattern",
+        kind=FeatureKind.CIRCULAR_PATTERN,
+        sketch_id=None,
+        base_feature_id=linear.id,
+        parameters={"angle": DEPTH},
+        evidence_ids=(EVIDENCE,),
+        source_feature_id=pad.id,
+        axis="@body_z",
+        occurrences=4,
+    )
+    mirror = PartDesignFeature(
+        id=_id("feature", 5),
+        name="Mirror",
+        kind=FeatureKind.MIRROR,
+        sketch_id=None,
+        base_feature_id=circular.id,
+        parameters={},
+        evidence_ids=(EVIDENCE,),
+        source_feature_id=pocket.id,
+        mirror_plane=MirrorPlane.YZ_PLANE,
+    )
+    by_id = {item.id: item for item in (pad, pocket, linear, circular, mirror)}
+
+    assert compiler_module._feature_parameter_bindings(linear) == (("length", DEPTH, "Length"),)
+    assert compiler_module._feature_parameter_bindings(circular) == (("angle", DEPTH, "Angle"),)
+    assert compiler_module._feature_parameter_bindings(mirror) == ()
+    assert compiler_module._pattern_is_additive(linear, by_id) is False
+    assert compiler_module._pattern_is_additive(circular, by_id) is True
+    assert compiler_module._pattern_is_additive(mirror, by_id) is False
+
+
+def test_pattern_shape_delta_uses_source_additive_or_subtractive_semantics() -> None:
+    previous = SimpleNamespace(Shape=SimpleNamespace(Volume=100.0))
+
+    def feature(volume: float) -> SimpleNamespace:
+        return SimpleNamespace(
+            Shape=SimpleNamespace(
+                Solids=(object(),),
+                Volume=volume,
+                isNull=lambda: False,
+                isValid=lambda: True,
+            ),
+            State=("Up-to-date",),
+            getStatusString=lambda: "Valid",
+        )
+
+    assert (
+        compiler_module._require_feature_shape(
+            feature(120),
+            previous,
+            FeatureKind.LINEAR_PATTERN,
+            additive=True,
+        )
+        == 120
+    )
+    assert (
+        compiler_module._require_feature_shape(
+            feature(80),
+            previous,
+            FeatureKind.MIRROR,
+            additive=False,
+        )
+        == 80
+    )
+    with pytest.raises(ParametricCompileError):
+        compiler_module._require_feature_shape(
+            feature(120),
+            previous,
+            FeatureKind.CIRCULAR_PATTERN,
+            additive=False,
+        )
 
 
 def test_feature_parameter_bindings_allow_one_parameter_to_drive_two_targets() -> None:

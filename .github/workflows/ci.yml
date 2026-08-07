@@ -44,3 +44,14 @@ jobs:
           uv run --frozen pytest -m slow -v -s
           tests/test_task_kernel_integration.py::test_real_agent_first_public_matrix_and_cross_process_review
           tests/test_task_kernel_integration.py::test_real_task_kernel_commits_verified_candidate
+      - name: install the managed-runtime test runner
+        run: >-
+          uv pip install
+          --python "$VIBECAD_MANAGED_FREECAD_PYTHON"
+          pytest==9.0.3
+      - name: current parametric FreeCAD gate
+        run: >-
+          "$VIBECAD_MANAGED_FREECAD_PYTHON" -m pytest -m slow -v -s
+          tests/test_parametric_compiler.py::test_real_native_pattern_features_compile_edit_and_reopen
+          tests/test_parametric_compiler.py::test_real_additive_non_immediate_pattern_can_continue_modeling
+          tests/test_parametric_compiler.py::test_real_reopen_rejects_forged_global_pattern_budget
