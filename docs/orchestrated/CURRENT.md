@@ -1,10 +1,10 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **v0.8.0 published; S41 complete; S42 implementation and local gates complete**
+> Status: **v0.8.0 published; S41 and S42 complete**
 >
 > Updated: 2026-08-07
 >
-> Repository anchor: `main@c67ba15`; published tag `v0.8.0@6ee230f`
+> Repository anchor: `main@5950da2`; published tag `v0.8.0@6ee230f`
 >
 > Active plan: [`vibecad-visual-cad.md`](vibecad-visual-cad.md)
 >
@@ -39,6 +39,11 @@ public. Ambiguity, missing topology, variable-edge direction reversal, or invali
 kernel geometry fails the whole transaction closed. Arbitrary imported STEP
 edges, tangent-chain propagation, variable Chamfer, multi-point radius laws,
 complex blends, semantic merge, and manual-topology repair remain outside S42.
+
+PR #18 merged this slice as `5950da2a852b3f3b1fa530b6bf06de9f7504d32b` after
+`lint-unit` and `runtime-integration` passed in Actions run `31173378976`.
+The isolated test runtime, caches, and probes were removed; the user FreeCAD app
+and unrelated untracked files remain untouched. S42 is complete.
 
 On 2026-08-04 the user approved `VCAD-A04`. The public V1 envelope is now
 frozen to a single dimension-complete mechanical extruded or revolved part,
