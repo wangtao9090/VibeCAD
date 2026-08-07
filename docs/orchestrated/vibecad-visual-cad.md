@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S30.1`–`VCAD-S40` 与 `VCAD-A08` 已完成；`VCAD-S41` 实现门已闭合**
+> 状态：**`VCAD-S30.1`–`VCAD-S41` 与 `VCAD-A08` 已完成**
 >
 > 更新：2026-08-06
 >
 > 产品基线：已发布 `v0.8.0@6ee230f`
 >
-> 当前里程碑：`VCAD-S41` Derived Expression Linkage 实现门已完成
+> 当前里程碑：`VCAD-S41` Derived Expression Linkage 已合入 `main`
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -657,7 +657,8 @@ Skill 约束配方；未增加 MCP tool、Task 状态、CAD operation 或第二�
 长度为 `104 -> 114 -> 110 mm`，bbox 为 `130 × 120 × 5 mm`，BRep 有效且为单实体，传递 consumer
 保持为 outer sketch；非法 `width = 10 mm` 在 mutation 前拒绝并保持原 volume。隔离 tracked-content
 完整门为 `5,947 passed, 127 deselected`；临时 runtime 已精确删除，用户安装的 FreeCAD 与未跟踪文件
-保持不变。
+保持不变。focused contract/fixture/Skill 门为 `75 passed, 11 deselected`；PR #16 的 `lint-unit` 与
+`runtime-integration` 分别在 2m21s 和 1m55s 通过，并以 merge commit `3199c61` 合入 `main`。
 
 ### VCAD-F10 — Industrial Freeform Alpha
 
@@ -841,13 +842,13 @@ S35、A06 与 A08 已完成；S40 Guided Photo V3 的 capture contract、原生 
 SAFE_FAILURE。v0.8.0 已经 Codex/Claude/WorkBuddy 双进程恢复/审核/资源门、PR/main、tag、GitHub
 Release、PyPI 和公开安装验证。当前私有样例未进入仓库 fixture；S40 候选、宿主配置、Resource blob、
 测试记录和 VibeCAD 创建的 FreeCAD runtime 已精确清理。S41 已从 `main@9d39547` 完成有界派生表达式
-联动、传递 consumer 验证、真实 FreeCAD 顺序修改与 fail-before-mutation 门；下一动作是提交、PR 和 CI。
-Freeform 仍停在
+联动、传递 consumer 验证、真实 FreeCAD 顺序修改与 fail-before-mutation 门，并由 PR #16 以
+`3199c61` 合入 `main`。下一动作停在新的产品范围确认；Freeform 仍停在
 `VCAD-A05`。
 ```
 
-当前执行分支为 `codex/s41-derived-expressions`，起始锚点为 `main@9d39547`；S40 历史分支为
-`codex/guided-photo-s40`。S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
+S41 实现分支为 `codex/s41-derived-expressions`，起始锚点为 `main@9d39547`，已由 PR #16 合入
+`main@3199c61`；S40 历史分支为 `codex/guided-photo-s40`。S10.1 anchor 为 `3835da7`，S10.2 anchor 为 `882e665`，S10.3 anchor
 为 `1c52d7a`，S10.4 anchor 为 `368ccf8`，S10.5 anchor 为 `7dfddce`。在 A02 获批时，S20.0 只完成
 合同设计；当前 S20.1–S20.5 已实现本地持久化和 deterministic fake/interface-ready 路径，S30.1 已
 实现 opt-in OpenAI transport，但不是产品主线；S30.2–S35 已由 Codex/WorkBuddy 宿主多模态通道
@@ -856,7 +857,7 @@ Freeform 仍停在
 三宿主 outcome 和真实 FreeCAD editability gate 也已闭合，整库回归与精确清理完成。`VCAD-A08`
 已完成 v0.8.0 的版本面、发布候选、PR/main、tag、GitHub Release、PyPI、公开安装与精确清理；
 S41 的结构化仿射合同、原生 FreeCAD expression carrier、圆角矩形联动、完整回归和 runtime 清理
-均已闭合；下一恢复动作是提交当前分支并执行 PR/CI。Freeform 仍需 `VCAD-A05`。
+均已闭合并合入 `main@3199c61`；下一恢复动作是冻结新的产品功能范围。Freeform 仍需 `VCAD-A05`。
 
 ## 11. Material event ledger
 
@@ -897,7 +898,8 @@ S41 的结构化仿射合同、原生 FreeCAD expression carrier、圆角矩形�
 | `VCAD-E32` | 用户批准 `VCAD-A08` 与 v0.8.0 发布计划 | 授权把 S40 公开边界冻结为 v0.8.0，使用同一候选完成 Codex/Claude/WorkBuddy 分宿主验收后 PR/merge/tag，并由唯一 tag workflow 发布 GitHub Release/PyPI；发布后直接进入 S41 | 起始锚点 `main@314b335`；发布分支 `codex/v0.8.0-release`；候选在仅含 tracked content 的隔离 checkout 构建，避免工作区新增未跟踪副本污染；tag 前可恢复到分支/PR，PyPI 启动后只观察或 forward-fix | 工具数、runtime epoch、Task/Revision/Review/Release 权威不变；Freeform/Fillet/Chamfer/通用逆向工程不进入 v0.8.0；同候选包、发布后公开安装与临时环境清理尚待闭合 |
 | `VCAD-E33` | `VCAD-A08` 与 v0.8.0 same-candidate package/host gates | 冻结 `67a662b` 的 v0.8.0 候选；版本、静态、完整回归、wheel/sdist/MCPB/Skill、managed runtime、真实 FreeCAD 与三宿主 fresh-process 门全部闭合；Codex、Claude、WorkBuddy 均在 generation 9 恢复 `require_review` 草案、四项验证通过且 HEAD 未变，并由第二进程接受到 generation 11、导出和读取 FCStd/STEP Resource Blob | MCPB `8c3d804a8e7bc153d45040a885cd2de8a7183e0f4109533af3683594319ac7b6`，wheel `badc8f57ff7d69efd16e905424f05b7ff186cb2b99f01d3d198e08ac4f435826`，sdist `3436216c45055c38e52cc01cf71956caae37340bcaec6de709d8552ed04ad1dc`；隔离 full gate `5,942 passed, 126 deselected`；WorkBuddy deferred `ToolSearch` 返回严格 schema，native `ReadMcpResource` 落盘 FCStd 2,957 bytes / `8cb1348d...f612` 与 STEP 6,854 bytes / `955f11de...4fb1`，独立本地复算与 manifest 一致；恢复动作是 push/PR | tag 与不可变发布尚未开始；合并后必须确认 tag 指向 merge commit，并仅由 tag workflow 发布；临时候选、宿主 home、Skill/MCP 配置、Resource blob、runtime 和 WorkBuddy 测试记录在公开安装验证后精确清理 |
 | `VCAD-E34` | `VCAD-A08` publication、public-install 与 cleanup gate | PR #14 以 merge commit 合入 main；`v0.8.0` tag、GitHub Release 与 PyPI 公开；公开资产与说明核验、Python 3.12 官方索引全新安装和 38-tool import 通过；随后精确退役四个测试 daemon/worker，并移除本轮 runtime、候选/公开安装环境、三宿主 Skill/MCP 配置、Resource blob 与 exact session/trace | main/tag `6ee230f13dc63120cbc59f5bd1e5ff72a6ca6542`；Actions [`31145385088`](https://github.com/wangtao9090/VibeCAD/actions/runs/31145385088) 全绿；Release MCPB `eb044e0c...20313`、Skill `155be4fb...bceda`；PyPI wheel `badc8f57...5826`、sdist `3436216c...1dc`；本地/公开 MCPB 仅 ZIP pack timestamp 不同，1,006,247 bytes、152 个 unpacked file 全部 byte-identical，归一化 manifest `b285cded...ffdd`；公开安装报告 0.8.0/38 tools；约 4.7 GB 本轮临时环境无残留，用户 FreeCAD app 与未跟踪文件保留 | `VCAD-A08` 闭合；下一动作是 S41 派生表达式联动；Freeform 继续等待 `VCAD-A05`；MCPB packer 的归档 hash 不是跨构建可复现身份，后续 same-candidate 以 tag + unpacked file manifest + workflow artifact digest 三者绑定 |
-| `VCAD-E35` | `VCAD-A08` 后续 S41 derived-expression implementation gate | 在 additive `DesignParameter.expression` 中冻结最多八项、同单位、private、无环、值一致的结构化仿射关系；编译为现有 FreeCAD carrier 的原生表达式，严格验证 metadata 和传递 consumer；不新增 raw string、MCP、durable、Task 或 CAD authority | 起始锚点 `main@9d39547`；fan width `120 -> 130`、radius `8 -> 10` 使 straight width `104 -> 114 -> 110`，bbox `130 × 120 × 5`、valid BRep、one solid；非法 width 10 在 mutation 前拒绝并保持 volume；隔离完整门 `5,947 passed, 127 deselected`，真实 managed FreeCAD 顺序修改通过，临时 runtime 已删除 | 原子 slot 仍为可手工编辑的 numeric constraint；Fillet/Chamfer/Freeform 不在范围；下一恢复动作是提交 `codex/s41-derived-expressions` 并执行 PR/CI |
+| `VCAD-E35` | `VCAD-A08` 后续 S41 derived-expression implementation gate | 在 additive `DesignParameter.expression` 中冻结最多八项、同单位、private、无环、值一致的结构化仿射关系；编译为现有 FreeCAD carrier 的原生表达式，严格验证 metadata 和传递 consumer；不新增 raw string、MCP、durable、Task 或 CAD authority | 起始锚点 `main@9d39547`；fan width `120 -> 130`、radius `8 -> 10` 使 straight width `104 -> 114 -> 110`，bbox `130 × 120 × 5`、valid BRep、one solid；非法 width 10 在 mutation 前拒绝并保持 volume；隔离完整门 `5,947 passed, 127 deselected`，真实 managed FreeCAD 顺序修改通过，临时 runtime 已删除 | 原子 slot 仍为可手工编辑的 numeric constraint；Fillet/Chamfer/Freeform 不在范围；实现分支进入 PR #16 |
+| `VCAD-E36` | S41 PR/CI/merge closeout | PR #16 从 draft 转为 ready，在无评论、无 review blocker、`CLEAN` 状态下以 merge commit 合入 main | `lint-unit` 2m21s、`runtime-integration` 1m55s；main `3199c61a727a7ed20827ee6372187d2434bc773d`；本地 focused `75 passed, 11 deselected`；完整回归与真实 FreeCAD 证据沿用 E35 | S41 完成；下一动作停在新的产品范围确认，Freeform 仍等待 `VCAD-A05` |
 
 ## 12. 研究依据
 
