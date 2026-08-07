@@ -160,6 +160,106 @@ def _basis_functions(
     return values
 
 
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    if denominator == 0:
+        if numerator == 0:
+            return 0.0
+        raise ValueError("curve derivative is undefined")
+    result = numerator / denominator
+    if not math.isfinite(result):
+        raise ValueError("curve derivative is not finite")
+    return result
+
+
+def _basis_derivatives(
+    span: int,
+    parameter: float,
+    degree: int,
+    knots: tuple[float, ...],
+    *,
+    order: int,
+) -> tuple[tuple[float, ...], ...]:
+    """Evaluate nonzero basis functions and exact derivatives through *order*."""
+
+    derivative_order = min(order, degree)
+    ndu = [[0.0] * (degree + 1) for _ in range(degree + 1)]
+    left = [0.0] * (degree + 1)
+    right = [0.0] * (degree + 1)
+    ndu[0][0] = 1.0
+    for column in range(1, degree + 1):
+        left[column] = parameter - knots[span + 1 - column]
+        right[column] = knots[span + column] - parameter
+        saved = 0.0
+        for row in range(column):
+            ndu[column][row] = right[row + 1] + left[column - row]
+            term = _safe_ratio(ndu[row][column - 1], ndu[column][row])
+            ndu[row][column] = saved + right[row + 1] * term
+            saved = left[column - row] * term
+        ndu[column][column] = saved
+
+    derivatives = [[0.0] * (degree + 1) for _ in range(derivative_order + 1)]
+    for index in range(degree + 1):
+        derivatives[0][index] = ndu[index][degree]
+
+    work = [[0.0] * (degree + 1) for _ in range(2)]
+    for row in range(degree + 1):
+        first_row = 0
+        second_row = 1
+        work[0][0] = 1.0
+        for derivative in range(1, derivative_order + 1):
+            value = 0.0
+            shifted_row = row - derivative
+            reduced_degree = degree - derivative
+            if row >= derivative:
+                work[second_row][0] = _safe_ratio(
+                    work[first_row][0], ndu[reduced_degree + 1][shifted_row]
+                )
+                value = work[second_row][0] * ndu[shifted_row][reduced_degree]
+            lower = 1 if shifted_row >= -1 else -shifted_row
+            upper = derivative - 1 if row - 1 <= reduced_degree else degree - row
+            for index in range(lower, upper + 1):
+                work[second_row][index] = _safe_ratio(
+                    work[first_row][index] - work[first_row][index - 1],
+                    ndu[reduced_degree + 1][shifted_row + index],
+                )
+                value += work[second_row][index] * ndu[shifted_row + index][reduced_degree]
+            if row <= reduced_degree:
+                work[second_row][derivative] = _safe_ratio(
+                    -work[first_row][derivative - 1], ndu[reduced_degree + 1][row]
+                )
+                value += work[second_row][derivative] * ndu[row][reduced_degree]
+            derivatives[derivative][row] = value
+            first_row, second_row = second_row, first_row
+
+    factor = degree
+    for derivative in range(1, derivative_order + 1):
+        for index in range(degree + 1):
+            derivatives[derivative][index] *= factor
+        factor *= degree - derivative
+    while len(derivatives) <= order:
+        derivatives.append([0.0] * (degree + 1))
+    return tuple(tuple(row) for row in derivatives)
+
+
+def _find_span(curve: SplineCurve, parameter: float, knots: tuple[float, ...]) -> int:
+    degree = curve.degree
+    last_pole = len(curve.control_points) - 1
+    if parameter >= knots[last_pole + 1]:
+        return last_pole
+    if parameter <= knots[degree]:
+        return degree
+    low = degree
+    high = last_pole + 1
+    span = (low + high) // 2
+    while parameter < knots[span] or parameter >= knots[span + 1]:
+        if parameter < knots[span]:
+            high = span
+        else:
+            low = span
+        span = (low + high) // 2
+    return span
+
+
 def evaluate_curve(curve: SplineCurve, parameter_fraction: float) -> Point3D:
     """Evaluate a validated non-periodic B-spline/NURBS at a [0, 1] fraction."""
 
@@ -171,21 +271,9 @@ def evaluate_curve(curve: SplineCurve, parameter_fraction: float) -> Point3D:
         raise ValueError("parameter_fraction must be in [0, 1]")
     knots = _expanded_knots(curve)
     degree = curve.degree
-    last_pole = len(curve.control_points) - 1
     start, end = curve.parameter_range
     parameter = start + float(parameter_fraction) * (end - start)
-    if parameter_fraction == 1:
-        span = last_pole
-    else:
-        low = degree
-        high = last_pole + 1
-        span = (low + high) // 2
-        while parameter < knots[span] or parameter >= knots[span + 1]:
-            if parameter < knots[span]:
-                high = span
-            else:
-                low = span
-            span = (low + high) // 2
+    span = _find_span(curve, parameter, knots)
     basis = _basis_functions(span, parameter, degree, knots)
     numerator = (0.0, 0.0, 0.0)
     denominator = 0.0
@@ -201,32 +289,39 @@ def evaluate_curve(curve: SplineCurve, parameter_fraction: float) -> Point3D:
 
 
 def _derivatives(curve: SplineCurve, fraction: float) -> tuple[Vector, Vector, Vector]:
-    step = 1e-4
-    value = _vector(evaluate_curve(curve, fraction))
-    if fraction <= step:
-        p1 = _vector(evaluate_curve(curve, fraction + step))
-        p2 = _vector(evaluate_curve(curve, fraction + 2 * step))
-        p3 = _vector(evaluate_curve(curve, fraction + 3 * step))
-        first = _scale(_add(_add(_scale(value, -3), _scale(p1, 4)), _scale(p2, -1)), 1 / (2 * step))
-        second = _scale(
-            _add(_add(_add(_scale(value, 2), _scale(p1, -5)), _scale(p2, 4)), _scale(p3, -1)),
-            1 / (step * step),
-        )
-    elif fraction >= 1 - step:
-        p1 = _vector(evaluate_curve(curve, fraction - step))
-        p2 = _vector(evaluate_curve(curve, fraction - 2 * step))
-        p3 = _vector(evaluate_curve(curve, fraction - 3 * step))
-        first = _scale(_add(_add(_scale(value, 3), _scale(p1, -4)), p2), 1 / (2 * step))
-        second = _scale(
-            _add(_add(_add(_scale(value, 2), _scale(p1, -5)), _scale(p2, 4)), _scale(p3, -1)),
-            1 / (step * step),
-        )
-    else:
-        before = _vector(evaluate_curve(curve, fraction - step))
-        after = _vector(evaluate_curve(curve, fraction + step))
-        first = _scale(_sub(after, before), 1 / (2 * step))
-        second = _scale(_add(_sub(after, _scale(value, 2)), before), 1 / (step * step))
-    return value, first, second
+    if type(curve) is not SplineCurve:
+        raise TypeError("curve must be SplineCurve")
+    if type(fraction) not in {int, float} or not math.isfinite(fraction):
+        raise TypeError("parameter_fraction must be finite")
+    if not 0 <= fraction <= 1:
+        raise ValueError("parameter_fraction must be in [0, 1]")
+    knots = _expanded_knots(curve)
+    start, end = curve.parameter_range
+    parameter = start + fraction * (end - start)
+    span = _find_span(curve, parameter, knots)
+    basis = _basis_derivatives(span, parameter, curve.degree, knots, order=2)
+    homogeneous = []
+    for point_index, point in enumerate(curve.control_points):
+        weight = curve.weights[point_index] if curve.kind is SplineKind.NURBS else 1.0
+        homogeneous.append((point.x_mm * weight, point.y_mm * weight, point.z_mm * weight, weight))
+    jets = [[0.0, 0.0, 0.0, 0.0] for _ in range(3)]
+    for derivative in range(3):
+        for local_index, basis_value in enumerate(basis[derivative]):
+            pole_index = span - curve.degree + local_index
+            for coordinate in range(4):
+                jets[derivative][coordinate] += basis_value * homogeneous[pole_index][coordinate]
+    weight = jets[0][3]
+    if weight <= 1e-14 or not math.isfinite(weight):
+        raise ValueError("curve evaluation produced a zero rational denominator")
+    value = tuple(component / weight for component in jets[0][:3])
+    first = tuple((jets[1][index] - jets[1][3] * value[index]) / weight for index in range(3))
+    second = tuple(
+        (jets[2][index] - 2 * jets[1][3] * first[index] - jets[2][3] * value[index]) / weight
+        for index in range(3)
+    )
+    if not all(math.isfinite(item) for vector in (value, first, second) for item in vector):
+        raise ValueError("curve derivative is not finite")
+    return value, first, second  # type: ignore[return-value]
 
 
 def curve_jet(curve: SplineCurve, parameter_fraction: float) -> CurveJet:

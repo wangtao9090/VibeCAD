@@ -5,6 +5,11 @@ import copy
 import pytest
 
 from vibecad.freeform.contracts import (
+    MAX_CURVE_CONTROL_POINTS,
+    MAX_FREEFORM_CURVES,
+    MAX_FREEFORM_GUIDES,
+    MAX_FREEFORM_IR_BYTES,
+    MAX_FREEFORM_SECTIONS,
     CurveRole,
     FreeformContractError,
     FreeformDesign,
@@ -173,3 +178,83 @@ def test_hostile_unknown_field_names_still_return_bounded_contract_error() -> No
 
     assert raised.value.code is FreeformErrorCode.UNKNOWN_FIELD
     assert raised.value.path == "/__unknown__"
+
+
+@pytest.mark.parametrize(
+    ("field", "values", "path"),
+    (
+        ("control_points", [{}] * (MAX_CURVE_CONTROL_POINTS + 1), "/curves/0/control_points"),
+        ("weights", [1] * (MAX_CURVE_CONTROL_POINTS + 1), "/curves/0/weights"),
+        ("knots", [0] * (MAX_CURVE_CONTROL_POINTS + 7), "/curves/0/knots"),
+        (
+            "multiplicities",
+            [1] * (MAX_CURVE_CONTROL_POINTS + 7),
+            "/curves/0/multiplicities",
+        ),
+    ),
+)
+def test_curve_sequences_reject_budget_before_nested_parsing(field, values, path) -> None:
+    mapping = _curve("a", 0).to_mapping()
+    mapping[field] = values
+
+    with pytest.raises(FreeformContractError) as raised:
+        SplineCurve.from_mapping(mapping, "/curves/0")
+
+    assert raised.value.code is FreeformErrorCode.BUDGET_EXCEEDED
+    assert raised.value.path == path
+
+
+@pytest.mark.parametrize(
+    ("kind", "field", "count", "path"),
+    (
+        ("loft", "section_ids", MAX_FREEFORM_SECTIONS + 1, "/feature/section_ids"),
+        ("sweep", "guide_ids", MAX_FREEFORM_GUIDES + 1, "/feature/guide_ids"),
+    ),
+)
+def test_feature_reference_sequences_are_bounded_before_tuple_creation(
+    kind, field, count, path
+) -> None:
+    mapping = _design().feature.to_mapping()
+    mapping["kind"] = kind
+    mapping[field] = [f"freeform_curve_{'a' * 32}"] * count
+
+    with pytest.raises(FreeformContractError) as raised:
+        FreeformFeature.from_mapping(mapping, "/feature")
+
+    assert raised.value.code is FreeformErrorCode.BUDGET_EXCEEDED
+    assert raised.value.path == path
+
+
+def test_curve_count_budget_precedes_curve_object_parsing() -> None:
+    mapping = _design().to_mapping()
+    mapping["curves"] = [None] * (MAX_FREEFORM_CURVES + 1)
+
+    with pytest.raises(FreeformContractError) as raised:
+        FreeformDesign.from_mapping(mapping)
+
+    assert raised.value.code is FreeformErrorCode.BUDGET_EXCEEDED
+    assert raised.value.path == "/curves"
+
+
+def test_total_control_point_budget_precedes_point_object_parsing() -> None:
+    mapping = _design().to_mapping()
+    raw_curve = _curve("a", 0).to_mapping()
+    raw_curve["control_points"] = [{}] * MAX_CURVE_CONTROL_POINTS
+    mapping["curves"] = [copy.deepcopy(raw_curve) for _ in range(9)]
+
+    with pytest.raises(FreeformContractError) as raised:
+        FreeformDesign.from_mapping(mapping)
+
+    assert raised.value.code is FreeformErrorCode.BUDGET_EXCEEDED
+    assert raised.value.path == "/curves"
+
+
+def test_encoded_ir_budget_precedes_nested_contract_parsing() -> None:
+    mapping = _design().to_mapping()
+    mapping["name"] = "x" * (MAX_FREEFORM_IR_BYTES + 1)
+
+    with pytest.raises(FreeformContractError) as raised:
+        FreeformDesign.from_mapping(mapping)
+
+    assert raised.value.code is FreeformErrorCode.BUDGET_EXCEEDED
+    assert raised.value.path == ""

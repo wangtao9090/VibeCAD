@@ -28,6 +28,7 @@ MAX_FREEFORM_IR_BYTES = 256 * 1024
 
 _MAX_TEXT_BYTES = 256
 _MAX_ABSOLUTE_VALUE = 1_000_000_000
+_MAX_CURVE_KNOT_VALUES = MAX_CURVE_CONTROL_POINTS + 6
 _ID = re.compile(r"^freeform_(?:design|curve|feature)_[0-9a-f]{32}$")
 _DIGEST_DOMAIN = b"vibecad-freeform-design-v1\0"
 
@@ -148,10 +149,46 @@ def _boolean(value: object, path: str) -> bool:
     return value
 
 
-def _sequence(value: object, path: str) -> Sequence[Any]:
+def _sequence(value: object, path: str, *, maximum: int) -> Sequence[Any]:
     if not isinstance(value, (list, tuple)):
         _raise(FreeformErrorCode.INVALID_TYPE, path)
+    if len(value) > maximum:
+        _raise(FreeformErrorCode.BUDGET_EXCEEDED, path)
     return value
+
+
+def _ensure_ir_size_budget(value: object) -> None:
+    """Bound encoded input before any nested contract objects are created."""
+
+    encoder = json.JSONEncoder(allow_nan=False, ensure_ascii=False, separators=(",", ":"))
+    total = 0
+    try:
+        for chunk in encoder.iterencode(value):
+            total += len(chunk.encode("utf-8"))
+            if total > MAX_FREEFORM_IR_BYTES:
+                _raise(FreeformErrorCode.BUDGET_EXCEEDED)
+    except FreeformContractError:
+        raise
+    except (RecursionError, TypeError, UnicodeError, ValueError):
+        # Semantic validation below owns malformed or non-JSON-compatible values.
+        return
+
+
+def _preflight_curve_parse_budget(raw_curves: Sequence[Any]) -> None:
+    """Reject per-curve and aggregate point budgets before Point3D parsing."""
+
+    total = 0
+    for index, raw_curve in enumerate(raw_curves):
+        if not isinstance(raw_curve, Mapping):
+            continue
+        raw_points = raw_curve.get("control_points")
+        if not isinstance(raw_points, (list, tuple)):
+            continue
+        if len(raw_points) > MAX_CURVE_CONTROL_POINTS:
+            _raise(FreeformErrorCode.BUDGET_EXCEEDED, f"/curves/{index}/control_points")
+        total += len(raw_points)
+        if total > MAX_TOTAL_CONTROL_POINTS:
+            _raise(FreeformErrorCode.BUDGET_EXCEEDED, "/curves")
 
 
 class SplineKind(StrEnum):
@@ -318,10 +355,20 @@ class SplineCurve:
             },
             path=path,
         )
-        raw_points = _sequence(fields["control_points"], f"{path}/control_points")
-        raw_knots = _sequence(fields["knots"], f"{path}/knots")
-        raw_mults = _sequence(fields["multiplicities"], f"{path}/multiplicities")
-        raw_weights = _sequence(fields.get("weights", ()), f"{path}/weights")
+        raw_points = _sequence(
+            fields["control_points"],
+            f"{path}/control_points",
+            maximum=MAX_CURVE_CONTROL_POINTS,
+        )
+        raw_knots = _sequence(fields["knots"], f"{path}/knots", maximum=_MAX_CURVE_KNOT_VALUES)
+        raw_mults = _sequence(
+            fields["multiplicities"],
+            f"{path}/multiplicities",
+            maximum=_MAX_CURVE_KNOT_VALUES,
+        )
+        raw_weights = _sequence(
+            fields.get("weights", ()), f"{path}/weights", maximum=MAX_CURVE_CONTROL_POINTS
+        )
         return cls(
             fields["id"],
             fields["name"],
@@ -394,8 +441,20 @@ class FreeformFeature:
             fields["id"],
             fields["name"],
             fields["kind"],
-            tuple(_sequence(fields["section_ids"], f"{path}/section_ids")),
-            tuple(_sequence(fields.get("guide_ids", ()), f"{path}/guide_ids")),
+            tuple(
+                _sequence(
+                    fields["section_ids"],
+                    f"{path}/section_ids",
+                    maximum=MAX_FREEFORM_SECTIONS,
+                )
+            ),
+            tuple(
+                _sequence(
+                    fields.get("guide_ids", ()),
+                    f"{path}/guide_ids",
+                    maximum=MAX_FREEFORM_GUIDES,
+                )
+            ),
             fields["solid"],
         )
 
@@ -477,13 +536,15 @@ class FreeformDesign:
 
     @classmethod
     def from_mapping(cls, value: object) -> Self:
+        _ensure_ir_size_budget(value)
         fields = _fields(
             value,
             allowed={"schema_version", "id", "name", "curves", "feature"},
             required={"schema_version", "id", "name", "curves", "feature"},
             path="",
         )
-        raw_curves = _sequence(fields["curves"], "/curves")
+        raw_curves = _sequence(fields["curves"], "/curves", maximum=MAX_FREEFORM_CURVES)
+        _preflight_curve_parse_budget(raw_curves)
         return cls(
             fields["id"],
             fields["name"],
