@@ -23,6 +23,13 @@ from vibecad.freeform.contracts import (
 
 _HEX_32 = re.compile(r"[0-9a-f]{32}\Z")
 _SCRIPT_RESULT_NAME = "VIBECAD_FREEFORM_RESULT"
+_METADATA_GROUP = "VibeCAD Freeform"
+_METADATA_PROPERTIES = (
+    ("App::PropertyInteger", "VibeCADFreeformSchemaVersion"),
+    ("App::PropertyString", "VibeCADFreeformDesignId"),
+    ("App::PropertyString", "VibeCADFreeformDesignDigest"),
+    ("App::PropertyString", "VibeCADFreeformDesignJson"),
+)
 
 
 class FreeformCompileErrorCode(StrEnum):
@@ -186,6 +193,34 @@ def _validate_solid(shape: object) -> None:
         _raise(FreeformCompileErrorCode.SOLID_FAILURE)
 
 
+def _metadata_values(design: FreeformDesign) -> dict[str, object]:
+    return {
+        "VibeCADFreeformSchemaVersion": design.schema_version,
+        "VibeCADFreeformDesignId": design.id,
+        "VibeCADFreeformDesignDigest": design.digest,
+        "VibeCADFreeformDesignJson": design.to_canonical_json(),
+    }
+
+
+def _bind_result_metadata(result: object, design: FreeformDesign) -> None:
+    try:
+        for property_type, property_name in _METADATA_PROPERTIES:
+            result.addProperty(property_type, property_name, _METADATA_GROUP)  # type: ignore[attr-defined]
+        for property_name, value in _metadata_values(design).items():
+            setattr(result, property_name, value)
+    except Exception:
+        _raise(FreeformCompileErrorCode.DOCUMENT_FAILURE)
+
+
+def _validate_result_metadata(result: object, design: FreeformDesign) -> None:
+    try:
+        actual = {name: getattr(result, name) for name in _metadata_values(design)}
+    except Exception:
+        _raise(FreeformCompileErrorCode.DOCUMENT_FAILURE)
+    if actual != _metadata_values(design):
+        _raise(FreeformCompileErrorCode.DOCUMENT_FAILURE)
+
+
 def compile_freeform(
     design: FreeformDesign,
     *,
@@ -218,8 +253,10 @@ def compile_freeform(
         )
         result.Label = design.feature.name
         result.Shape = shape
+        _bind_result_metadata(result, design)
         document.recompute()  # type: ignore[attr-defined]
         _validate_solid(result.Shape)
+        _validate_result_metadata(result, design)
     except FreeformCompileError:
         if created_document:
             _close_document(freecad, document)

@@ -7,6 +7,13 @@ from enum import StrEnum
 
 from vibecad.execution.revisions import LocalRevisionStore, ProjectHead
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER
+from vibecad.workflow.freeform_create import (
+    BoundFreeformCreate,
+    FreeformCreateError,
+    FreeformCreateErrorCode,
+    build_freeform_create_binding,
+    parse_bound_freeform_create_task,
+)
 from vibecad.workflow.manual_checkpoint import (
     BoundManualCheckpoint,
     ManualCheckpointError,
@@ -431,18 +438,43 @@ class TaskCatalogService:
             )
         return self._create_bound_task_with_disposition(binding)
 
+    def create_freeform_task(
+        self,
+        *,
+        create_key: str,
+        project_id: str,
+        expected_head: object,
+        empty_revision: object,
+        design: object,
+    ) -> StoredTaskRun:
+        try:
+            binding = build_freeform_create_binding(
+                create_key=create_key,
+                project_id=project_id,
+                expected_head=expected_head,
+                empty_revision=empty_revision,
+                design=design,
+            )
+        except FreeformCreateError as error:
+            _raise(
+                TaskCatalogErrorCode.RESOURCE_EXHAUSTED
+                if error.code is FreeformCreateErrorCode.BUDGET_EXCEEDED
+                else TaskCatalogErrorCode.INVALID_INPUT
+            )
+        return self._create_bound_task(binding)
+
     def _create_bound_task(
         self,
-        binding: BoundRevert | BoundManualCheckpoint,
+        binding: BoundRevert | BoundManualCheckpoint | BoundFreeformCreate,
     ) -> StoredTaskRun:
         stored, _created_here = self._create_bound_task_with_disposition(binding)
         return stored
 
     def _create_bound_task_with_disposition(
         self,
-        binding: BoundRevert | BoundManualCheckpoint,
+        binding: BoundRevert | BoundManualCheckpoint | BoundFreeformCreate,
     ) -> tuple[StoredTaskRun, bool]:
-        if type(binding) is BoundRevert:
+        if type(binding) in {BoundRevert, BoundFreeformCreate}:
             review_policy = ReviewPolicy.REQUIRE_REVIEW
         elif type(binding) is BoundManualCheckpoint:
             review_policy = ReviewPolicy.AUTO_COMMIT
@@ -513,12 +545,14 @@ class TaskCatalogService:
     @staticmethod
     def _replay_bound_or_conflict(
         stored: StoredTaskRun,
-        binding: BoundRevert | BoundManualCheckpoint,
+        binding: BoundRevert | BoundManualCheckpoint | BoundFreeformCreate,
     ) -> StoredTaskRun:
         if type(binding) is BoundRevert:
             parsed = parse_bound_revert_task(stored)
         elif type(binding) is BoundManualCheckpoint:
             parsed = parse_bound_manual_checkpoint_task(stored)
+        elif type(binding) is BoundFreeformCreate:
+            parsed = parse_bound_freeform_create_task(stored)
         else:
             _raise(TaskCatalogErrorCode.INVALID_INPUT)
         if parsed != binding:

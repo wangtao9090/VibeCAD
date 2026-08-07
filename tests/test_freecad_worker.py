@@ -2806,6 +2806,7 @@ def test_parent_importing_worker_supervision_does_not_import_freecad() -> None:
         "revision.bind",
         "revision.release",
         "session.load_revision",
+        "session.compile_freeform",
         "session.observe",
         "validation.validate_import",
         "validation.revalidate_import",
@@ -2823,6 +2824,76 @@ def test_worker_codec_admits_only_declared_private_capability_methods(method: st
         }
     )
     assert decode_worker_request(raw)["method"] == method
+
+
+def test_worker_private_freeform_compile_revalidates_digest_and_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vibecad.worker.service as worker_service_module
+    from tests.test_freeform_workflow import _design
+    from vibecad.worker.service import _Candidate, _Session
+
+    design = _design()
+    document = SimpleNamespace()
+    session_value = SimpleNamespace(doc=document)
+    result_object = SimpleNamespace(
+        Name="FreeformResult_test",
+        VibeCADFreeformSchemaVersion=design.schema_version,
+        VibeCADFreeformDesignId=design.id,
+        VibeCADFreeformDesignDigest=design.digest,
+        VibeCADFreeformDesignJson=design.to_canonical_json(),
+    )
+    calls = []
+
+    def fake_compile(value, *, document):
+        calls.append((value, document))
+        return SimpleNamespace(
+            document=document,
+            design_id=value.id,
+            design_digest=value.digest,
+            created_document=False,
+            result_object=result_object,
+        )
+
+    monkeypatch.setattr(worker_service_module, "compile_freeform", fake_compile)
+    service = WorkerService(_GENERATION)
+    candidate_id = "worker_candidate_" + "8" * 32
+    session_id = "worker_session_" + "9" * 32
+    service._candidates[candidate_id] = _Candidate(  # type: ignore[arg-type]
+        candidate_id=candidate_id,
+        project_id=_PROJECT_ID,
+        revision_id=_CANDIDATE_REVISION,
+        base_revision_id=_BASE_REVISION,
+        directory_fd=-1,
+        directory_identity=None,
+        model_identity=None,
+        step_identity=None,
+    )
+    service._sessions[session_id] = _Session(
+        session_id=session_id,
+        capability_kind="candidate",
+        capability_id=candidate_id,
+        value=session_value,
+    )
+
+    response = service.dispatch(
+        "session.compile_freeform",
+        {
+            "session_id": session_id,
+            "candidate_id": candidate_id,
+            "design": design.to_mapping(),
+            "design_sha256": design.digest,
+        },
+        (),
+    )
+
+    assert response == {
+        "design_id": design.id,
+        "design_sha256": design.digest,
+        "result_name": result_object.Name,
+    }
+    assert calls == [(design, document)]
+    assert service._sessions[session_id].freeform_design_json == design.to_canonical_json()
 
 
 def test_worker_revision_is_an_opaque_generation_capability() -> None:

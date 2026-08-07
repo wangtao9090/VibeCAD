@@ -1041,6 +1041,8 @@ class _Executor(InProcessCadExecutor):
         self.outcomes: tuple[NormalizedToolOutcome, ...] | None = None
         self.failure_stage: str | None = None
         self.evidence_override: CandidateEvidence | None = None
+        self.freeform_design = None
+        self.freeform_digest: str | None = None
 
     def _maybe_fail(self, stage: str) -> None:
         if self.failure_stage == stage:
@@ -1068,6 +1070,19 @@ class _Executor(InProcessCadExecutor):
             )
             for index, command in enumerate(program.commands)
         )
+
+    def compile_freeform_design(
+        self,
+        *,
+        design: object,
+        design_digest: str,
+        candidate: object,
+    ) -> None:
+        del candidate
+        self.log.append("executor.compile_freeform")
+        self._maybe_fail("compile_freeform")
+        self.freeform_design = design
+        self.freeform_digest = design_digest
 
     def export_step(self, *, candidate: object, lease: object) -> None:
         del candidate, lease
@@ -1149,6 +1164,34 @@ def _configured_revert_rig() -> _Rig:
     return rig
 
 
+def _configured_freeform_rig() -> _Rig:
+    rig = _Rig()
+    empty = _generation_zero_source()
+    rig.revisions.revisions[empty.id] = empty
+    rig.revisions.head = ProjectHead(
+        project_id=PROJECT_ID,
+        generation=0,
+        revision_id=empty.id,
+        manifest_sha256=empty.manifest_sha256,
+    )
+    candidate = _revision()
+    rig.coordinator.next_revision = RevisionRef(
+        id=candidate.id,
+        project_id=PROJECT_ID,
+        base_revision=empty.id,
+        manifest_sha256=candidate.manifest_sha256,
+        model=candidate.model,
+        artifacts=candidate.artifacts,
+    )
+    rig.coordinator.review_live_binding = SessionBinding(
+        project_id=PROJECT_ID,
+        revision_id=empty.id,
+        session=object(),
+    )
+    rig.refresh_runtime()
+    return rig
+
+
 def _real_task_store_rig(tmp_path: Path) -> SimpleNamespace:
     log: list[str] = []
     lock_root = tmp_path / "locks"
@@ -1201,6 +1244,89 @@ def _failed_outcomes() -> tuple[NormalizedToolOutcome, ...]:
             )
         ),
     )
+
+
+def test_private_freeform_creation_reaches_review_without_advancing_head() -> None:
+    from tests.test_freeform_workflow import CREATE_KEY, _design
+    from vibecad.workflow.freeform_create import parse_bound_freeform_create_task
+
+    rig = _configured_freeform_rig()
+    head_before = rig.revisions.head
+
+    stored = rig.service.create_freeform_design(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        design=_design(),
+    )
+
+    assert stored.task_run.status is TaskStatus.AWAITING_USER_REVIEW
+    assert stored.task_run.review_policy is ReviewPolicy.REQUIRE_REVIEW
+    assert stored.task_run.draft is not None
+    assert stored.task_run.draft.base_generation == 0
+    assert rig.revisions.head == head_before
+    assert rig.coordinator.commit_calls == 0
+    assert rig.executor.freeform_design == _design()
+    assert rig.executor.freeform_digest == _design().digest
+    assert parse_bound_freeform_create_task(stored) is not None
+    assert "executor.compile_freeform" in rig.log
+    assert "candidate.publish_review" in rig.log
+
+
+def test_private_freeform_creation_is_exactly_replayed_without_reexecution() -> None:
+    from tests.test_freeform_workflow import CREATE_KEY, _design
+
+    rig = _configured_freeform_rig()
+    first = rig.service.create_freeform_design(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        design=_design(),
+    )
+    compile_count = rig.log.count("executor.compile_freeform")
+
+    replay = rig.service.create_freeform_design(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        design=_design(),
+    )
+
+    assert replay == first
+    assert rig.log.count("executor.compile_freeform") == compile_count
+
+
+def test_private_freeform_creation_rejects_a_nonempty_project_before_task_creation() -> None:
+    from tests.test_freeform_workflow import CREATE_KEY, _design
+
+    rig = _Rig()
+
+    with pytest.raises(TaskServiceError) as caught:
+        rig.service.create_freeform_design(
+            create_key=CREATE_KEY,
+            project_id=PROJECT_ID,
+            design=_design(),
+        )
+
+    assert caught.value.code is TaskServiceErrorCode.INVALID_INPUT
+    assert rig.tasks.records == {}
+    assert "executor.compile_freeform" not in rig.log
+
+
+def test_private_freeform_compile_failure_rolls_back_without_advancing_head() -> None:
+    from tests.test_freeform_workflow import CREATE_KEY, _design
+
+    rig = _configured_freeform_rig()
+    head_before = rig.revisions.head
+    rig.executor.failure_stage = "compile_freeform"
+
+    stored = rig.service.create_freeform_design(
+        create_key=CREATE_KEY,
+        project_id=PROJECT_ID,
+        design=_design(),
+    )
+
+    assert stored.task_run.status is TaskStatus.FAILED
+    assert rig.revisions.head == head_before
+    assert rig.coordinator.commit_calls == 0
+    assert rig.coordinator.rollback_invocations == 1
 
 
 def _store_executing(rig: _Rig) -> StoredTaskRun:

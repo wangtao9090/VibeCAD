@@ -23,6 +23,7 @@ from vibecad.execution.revisions import (
     ProjectHead,
     RevisionRef,
 )
+from vibecad.freeform.contracts import FreeformDesign
 from vibecad.interaction.cad import (
     CadCapabilityStatus,
     CadExecutionPort,
@@ -602,6 +603,41 @@ class WorkerCadExecutionPort(CadExecutionPort):
         ):
             raise _fixed_error(ExecutorErrorCode.INTEGRITY_FAILURE)
         return result
+
+    @_serialized
+    def compile_freeform_design(
+        self,
+        *,
+        design: FreeformDesign,
+        design_digest: str,
+        candidate: ActiveCandidate,
+    ) -> None:
+        if (
+            type(design) is not FreeformDesign
+            or type(design_digest) is not str
+            or design.digest != design_digest
+            or type(candidate) is not ActiveCandidate
+        ):
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+        with self._lock:
+            state = self._sessions.get(candidate.binding.session)
+            worker = self._worker
+        if (
+            state is None
+            or state.kind != "candidate"
+            or worker is None
+            or state.key != (candidate.project_id, candidate.binding.revision_id)
+            or state.base_head != candidate.base_head
+        ):
+            raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
+        self._call(
+            worker,
+            "compile_freeform_design",
+            design=design,
+            design_digest=design_digest,
+            candidate=state.value,
+            session=candidate.binding.session,
+        )
 
     @_serialized
     def export_step(

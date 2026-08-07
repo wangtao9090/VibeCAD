@@ -161,6 +161,12 @@ class _Result:
     Label = ""
     Shape = None
 
+    def __init__(self):
+        self.properties = []
+
+    def addProperty(self, property_type: str, name: str, group: str) -> None:
+        self.properties.append((property_type, name, group))
+
 
 class _Document:
     Name = "FakeDocument"
@@ -228,6 +234,9 @@ def test_compile_builds_one_checked_solid_and_result_object() -> None:
     assert len(result.curves) == 2
     assert freecad.document.recomputed
     assert not freecad.closed
+    assert freecad.document.result.VibeCADFreeformDesignId == _design().id
+    assert freecad.document.result.VibeCADFreeformDesignDigest == _design().digest
+    assert freecad.document.result.VibeCADFreeformDesignJson == _design().to_canonical_json()
 
 
 def test_compile_supports_one_section_one_guide_nurbs_sweep() -> None:

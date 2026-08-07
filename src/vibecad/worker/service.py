@@ -30,6 +30,8 @@ from vibecad.execution.executor import (
 )
 from vibecad.execution.revisions import ProjectHead
 from vibecad.freecad_env import prepare_freecad_import
+from vibecad.freeform.compiler import FreeformCompileError, compile_freeform
+from vibecad.freeform.contracts import FreeformContractError, FreeformDesign
 from vibecad.interaction.cad import (
     ValidatedImportEvidence,
     ValidatedMaterializationEvidence,
@@ -137,6 +139,10 @@ class _Session:
     capability_kind: str
     capability_id: str
     value: object
+    freeform_digest: str | None = None
+    freeform_design_id: str | None = None
+    freeform_design_json: str | None = None
+    freeform_schema_version: int | None = None
 
 
 @dataclass(slots=True)
@@ -748,11 +754,83 @@ class WorkerService:
                 digest, size, hashed = _hash_relative("model.FCStd")
                 if hashed != model:
                     raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+                if session.freeform_digest is not None:
+                    reloaded = self._engine.load_fcstd(Path("model.FCStd"))
+                    try:
+                        matches = tuple(
+                            item
+                            for item in reloaded.doc.Objects
+                            if getattr(item, "VibeCADFreeformDesignDigest", None)
+                            == session.freeform_digest
+                        )
+                        if (
+                            len(matches) != 1
+                            or getattr(matches[0], "VibeCADFreeformSchemaVersion", None)
+                            != session.freeform_schema_version
+                            or getattr(matches[0], "VibeCADFreeformDesignId", None)
+                            != session.freeform_design_id
+                            or getattr(matches[0], "VibeCADFreeformDesignJson", None)
+                            != session.freeform_design_json
+                        ):
+                            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+                    finally:
+                        self._engine.close(reloaded)
             except BaseException:
                 raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
         candidate.model_identity = model
         candidate.step_identity = step
         return {"sha256": digest, "size_bytes": size}
+
+    def _compile_freeform(self, params: object) -> dict[str, object]:
+        fields = _exact_mapping(
+            params,
+            {"session_id", "candidate_id", "design", "design_sha256"},
+        )
+        session, _candidate = self._require_pair(
+            session_id=fields["session_id"],
+            candidate_id=fields["candidate_id"],
+        )
+        if session.freeform_digest is not None or any(
+            item.session_id == session.session_id for item in self._programs.values()
+        ):
+            raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
+        try:
+            design = FreeformDesign.from_mapping(fields["design"])
+            digest = fields["design_sha256"]
+            if type(digest) is not str or _DIGEST.fullmatch(digest) is None:
+                raise ValueError
+            if digest != design.digest:
+                raise ValueError
+        except (FreeformContractError, ValueError, TypeError):
+            raise _ServiceError(WorkerWireErrorCode.INVALID_INPUT) from None
+        try:
+            compiled = compile_freeform(design, document=session.value.doc)
+        except FreeformCompileError:
+            raise _ServiceError(WorkerWireErrorCode.CAD_FAILURE) from None
+        except BaseException:
+            raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
+        if not (
+            compiled.document is session.value.doc
+            and compiled.design_id == design.id
+            and compiled.design_digest == digest
+            and compiled.created_document is False
+            and getattr(compiled.result_object, "VibeCADFreeformSchemaVersion", None)
+            == design.schema_version
+            and getattr(compiled.result_object, "VibeCADFreeformDesignId", None) == design.id
+            and getattr(compiled.result_object, "VibeCADFreeformDesignDigest", None) == digest
+            and getattr(compiled.result_object, "VibeCADFreeformDesignJson", None)
+            == design.to_canonical_json()
+        ):
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        session.freeform_digest = digest
+        session.freeform_design_id = design.id
+        session.freeform_design_json = design.to_canonical_json()
+        session.freeform_schema_version = design.schema_version
+        return {
+            "design_id": design.id,
+            "design_sha256": digest,
+            "result_name": compiled.result_object.Name,
+        }
 
     def _close_session(self, params: object) -> dict[str, object]:
         fields = _exact_mapping(params, {"session_id"})
@@ -969,6 +1047,8 @@ class WorkerService:
         )
         if any(item.session_id == session.session_id for item in self._programs.values()):
             raise _ServiceError(WorkerWireErrorCode.RESOURCE_EXHAUSTED)
+        if session.freeform_digest is not None:
+            raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
         try:
             source = ModelProgram.from_mapping(fields["program"])
             validated = self._engine.validate_program(source)
@@ -1141,6 +1221,7 @@ class WorkerService:
             "session.load_fcstd": self._load,
             "session.load_revision": self._load_revision,
             "session.checkpoint_fcstd": self._checkpoint,
+            "session.compile_freeform": self._compile_freeform,
             "session.observe": self._observe,
             "session.render_release": self._render_release,
             "session.close": self._close_session,

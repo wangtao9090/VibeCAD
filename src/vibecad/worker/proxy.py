@@ -23,6 +23,7 @@ from vibecad.execution.revisions import (
     _open_worker_candidate_staging,
     _open_worker_revision,
 )
+from vibecad.freeform.contracts import FreeformDesign
 from vibecad.interaction.cad import (
     ReleaseCadEvidence,
     ValidatedImportEvidence,
@@ -1055,6 +1056,51 @@ class FreeCadWorker(_Opaque):
                 except WorkerError:
                     self._protocol_loss()
                 return tuple(outcomes)
+
+    def compile_freeform_design(
+        self,
+        *,
+        design: FreeformDesign,
+        design_digest: str,
+        candidate: WorkerCandidate,
+        session: WorkerSession,
+    ) -> None:
+        if (
+            type(design) is not FreeformDesign
+            or type(design_digest) is not str
+            or _DIGEST.fullmatch(design_digest) is None
+            or design.digest != design_digest
+        ):
+            raise WorkerError(WorkerErrorCode.INVALID_INPUT)
+        with self._operation_lock:
+            self._ensure_process()
+            _session_state, candidate_state = self._require_pair(
+                session=session,
+                candidate=candidate,
+            )
+            self._require_live_candidate(candidate_state)
+            result = self._request(
+                "session.compile_freeform",
+                {
+                    "session_id": session.session_id,
+                    "candidate_id": candidate.candidate_id,
+                    "design": design.to_mapping(),
+                    "design_sha256": design_digest,
+                },
+                timeout_ms=30_000,
+            )
+            if (
+                set(result) != {"design_id", "design_sha256", "result_name"}
+                or result["design_id"] != design.id
+                or result["design_sha256"] != design_digest
+                or type(result["result_name"]) is not str
+                or not result["result_name"]
+            ):
+                self._protocol_loss()
+            try:
+                self._require_live_candidate(candidate_state)
+            except WorkerError:
+                self._protocol_loss()
 
     def checkpoint(
         self,
