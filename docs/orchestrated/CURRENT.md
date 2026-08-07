@@ -1,10 +1,10 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **v0.8.0 published; S41 derived-expression implementation gate complete**
+> Status: **v0.8.0 published; S41 merged and complete**
 >
 > Updated: 2026-08-06
 >
-> Repository anchor: `main@9d39547`; published tag `v0.8.0@6ee230f`
+> Repository anchor: `main@3199c61`; published tag `v0.8.0@6ee230f`
 >
 > Active plan: [`vibecad-visual-cad.md`](vibecad-visual-cad.md)
 >
@@ -207,8 +207,10 @@ width, height, radius, and private origins. Real managed FreeCAD proved sequenti
 and radius `8 -> 10` edits: derived straight width changed `104 -> 114 -> 110`, the solid remained a
 valid single BRep with `130 x 120 x 5 mm` bounds, and the affected consumer stayed the outer sketch.
 An invalid width of `10 mm` failed before mutation and preserved the prior volume. The isolated tracked
-suite is `5,947 passed, 127 deselected`; focused contract/fixture tests, Ruff, format, compile, diff, and
-Skill validation form the remaining branch gate. User-owned duplicate files and
+suite is `5,947 passed, 127 deselected`; the focused contract/fixture/Skill gate is `75 passed, 11
+deselected`, with Ruff, format, compile, diff, and Skill validation also green. PR #16 merged as
+`3199c61a727a7ed20827ee6372187d2434bc773d`; GitHub CI `lint-unit` and `runtime-integration` passed in
+2m21s and 1m55s. User-owned duplicate files and
 `/Applications/FreeCAD.app` remain untouched; the temporary managed runtime was removed.
 
 The complete architecture, slices, gates, privacy boundary, validation budget,
