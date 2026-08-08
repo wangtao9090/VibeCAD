@@ -3000,6 +3000,74 @@ def test_surface_modifier_parameter_bindings_target_native_properties() -> None:
     )
 
 
+def test_surface_modifier_edge_resolution_accepts_one_authenticated_mapped_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = object()
+    source = object()
+    sketch = object()
+    calls: list[tuple[object, dict[str, object]]] = []
+
+    def edge_candidates(obj: object, **kwargs: object) -> tuple[int, ...]:
+        calls.append((obj, kwargs))
+        if obj is source:
+            return (1, 2)
+        if kwargs.get("sketch_token") is not None:
+            return ()
+        return (7,)
+
+    monkeypatch.setattr(compiler_module, "_geometry_native_index", lambda *_args: 0)
+    monkeypatch.setattr(compiler_module, "_edge_candidates", edge_candidates)
+    monkeypatch.setattr(compiler_module, "_section_source_edge", lambda *_args: 2)
+    monkeypatch.setattr(compiler_module, "_mapped_name", lambda *_args: "PadMappedEdge")
+    monkeypatch.setattr(
+        compiler_module,
+        "_same_edge_candidates",
+        lambda *_args: pytest.fail("unique mapped-name resolution must precede shape fallback"),
+    )
+
+    resolved = compiler_module._resolve_semantic_edge(
+        base,
+        source_feature=source,
+        sketch=sketch,
+        feature_data={"feature_kind": FeatureKind.PAD.value},
+        sketch_data={},
+        reference=SemanticEdgeReference(
+            source_feature_id=_id("feature", 1),
+            geometry_id=BOTTOM,
+            role=SemanticEdgeRole.SECTION_START,
+            point=ReferencePoint.WHOLE,
+        ),
+        require_orientation=False,
+    )
+
+    assert resolved.index == 7
+    assert calls[-1] == (base, {"source_mapped_name": "PadMappedEdge"})
+
+
+def test_pattern_metadata_validation_does_not_require_surface_policy_fields() -> None:
+    data = {
+        "feature_index": 1,
+        "ir_id": _id("feature", 2),
+        "source_feature_id": _id("feature", 1),
+        "base_feature_id": _id("feature", 1),
+        "sketch_id": None,
+        "extent": None,
+        "location_geometry_ids": [],
+        "reversed": False,
+        "symmetric": False,
+    }
+
+    with pytest.raises(ParametricCompileError) as caught:
+        compiler_module._validate_pattern_feature_metadata(
+            SimpleNamespace(Originals=(), BaseFeature=None),
+            data,
+            FeatureKind.LINEAR_PATTERN,
+        )
+
+    assert caught.value.code is ParametricCompileErrorCode.METADATA_FAILURE
+
+
 def test_feature_parameter_bindings_allow_one_parameter_to_drive_two_targets() -> None:
     pad = _rectangle_design().features[0]
     hole = PartDesignFeature(

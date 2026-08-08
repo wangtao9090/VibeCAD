@@ -1227,6 +1227,12 @@ def _resolve_semantic_edge(
         source_mapped_name=source_mapped_name,
     )
     if len(matches) != 1:
+        # Native surface modifiers retain the source Pad's mapped-edge
+        # identity, but may drop the direct Sketcher history token.  The
+        # mapped name is still compiler-derived from the authenticated source
+        # edge; accept it only when it resolves uniquely in the current base.
+        matches = _edge_candidates(base, source_mapped_name=source_mapped_name)
+    if len(matches) != 1:
         matches = _same_edge_candidates(
             base,
             _shape_edges(source_feature)[source_index - 1],
@@ -2370,7 +2376,6 @@ def _validate_pattern_feature_metadata(
         or data["sketch_id"] is not None
         or data["extent"] is not None
         or data["location_geometry_ids"] != []
-        or data["refine"] is not True
         or type(data["reversed"]) is not bool
         or data["symmetric"] is not False
     ):
@@ -2594,6 +2599,7 @@ def _validate_surface_modifier_metadata(
         or data["axis"] is not None
         or data["axis_token"] is not None
         or data["location_geometry_ids"] != []
+        or data["refine"] is not True
         or type(data["reversed"]) is not bool
         or data["symmetric"] is not False
     ):
