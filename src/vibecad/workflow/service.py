@@ -51,7 +51,14 @@ from vibecad.workflow.catalog import (
     TaskCatalogErrorCode,
     TaskCatalogService,
 )
-from vibecad.workflow.contracts import ErrorCategory, ModelProgram, StepError
+from vibecad.workflow.contracts import ErrorCategory, ModelProgram, StepError, StepResult
+from vibecad.workflow.freeform_create import (
+    BoundFreeformCreate,
+    FreeformCreateError,
+    FreeformCreateErrorCode,
+    build_freeform_create_binding,
+    parse_bound_freeform_create_task,
+)
 from vibecad.workflow.lease import LeaseError, ResourceLeaseManager
 from vibecad.workflow.manual_checkpoint import (
     BoundManualCheckpoint,
@@ -81,6 +88,7 @@ from vibecad.workflow.state import (
     append_artifact,
     append_step_result,
     append_verification,
+    task_creation_identity,
     transition_task,
 )
 from vibecad.workflow.store import (
@@ -551,6 +559,95 @@ class TaskService:
     def get_task(self, *, task_id: str) -> StoredTaskRun:
         return _catalog_call(lambda: self._catalog.get_task(task_id=task_id))
 
+    def create_freeform_design(
+        self,
+        *,
+        create_key: str,
+        project_id: str,
+        design: object,
+    ) -> StoredTaskRun:
+        """Create one private freeform review Task from an empty project."""
+
+        try:
+            task_id, _creation_digest = task_creation_identity(create_key)
+        except Exception:
+            _raise(TaskServiceErrorCode.INVALID_INPUT)
+        try:
+            existing = self._catalog.get_task(task_id=task_id)
+        except TaskCatalogError as error:
+            if error.code is not TaskCatalogErrorCode.NOT_FOUND:
+                raise TaskServiceError(_CATALOG_ERROR_MAP[error.code]) from None
+            existing = None
+        if existing is not None:
+            binding = parse_bound_freeform_create_task(existing)
+            if not (
+                binding is not None
+                and binding.create_key == create_key
+                and binding.project_id == project_id
+                and binding.design == design
+            ):
+                _raise(TaskServiceErrorCode.CONFLICT)
+            if existing.task_run.status is not TaskStatus.PROGRAM_READY:
+                return self._publish_review_if_prepared(existing)
+            return self._continue_bound_freeform(existing, binding)
+
+        lease = self._acquire(project_id)
+        result: StoredTaskRun | None = None
+        caught: TaskServiceError | None = None
+        try:
+            try:
+                head = self._guard_runtime_head(project_id)
+                empty_revision = self._revision_store.load_revision(
+                    project_id,
+                    head.revision_id,
+                )
+                try:
+                    binding = build_freeform_create_binding(
+                        create_key=create_key,
+                        project_id=project_id,
+                        expected_head=head,
+                        empty_revision=empty_revision,
+                        design=design,
+                    )
+                except FreeformCreateError as error:
+                    _raise(
+                        TaskServiceErrorCode.RESOURCE_EXHAUSTED
+                        if error.code is FreeformCreateErrorCode.BUDGET_EXCEEDED
+                        else TaskServiceErrorCode.INVALID_INPUT
+                    )
+                stored = _catalog_call(
+                    lambda: self._catalog.create_freeform_task(
+                        create_key=create_key,
+                        project_id=project_id,
+                        expected_head=head,
+                        empty_revision=empty_revision,
+                        design=design,
+                    )
+                )
+                if parse_bound_freeform_create_task(stored) != binding:
+                    _raise(TaskServiceErrorCode.CONFLICT)
+                if stored.task_run.status is TaskStatus.PROGRAM_READY:
+                    result = self._continue_bound_freeform_with_lease(
+                        stored,
+                        binding,
+                        lease,
+                    )
+                else:
+                    result = stored
+            except TaskServiceError as error:
+                caught = error
+            except Exception:
+                caught = TaskServiceError(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        finally:
+            release_failed = self._release(lease)
+        if release_failed:
+            _raise(TaskServiceErrorCode.LEASE_UNAVAILABLE)
+        if caught is not None:
+            raise caught from None
+        if result is None:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        return self._publish_review_if_prepared(result)
+
     def revert_project(
         self,
         *,
@@ -990,6 +1087,9 @@ class TaskService:
         binding = parse_bound_revert_task(stored)
         if binding is not None:
             return self._continue_bound_revert(stored, binding)
+        freeform_binding = parse_bound_freeform_create_task(stored)
+        if freeform_binding is not None:
+            return self._continue_bound_freeform(stored, freeform_binding)
         if parse_bound_manual_checkpoint_task(stored) is not None:
             _raise(TaskServiceErrorCode.INVALID_STATE)
         preflight = self._preflight(program)
@@ -1009,6 +1109,31 @@ class TaskService:
         try:
             try:
                 result = self._continue_bound_revert_with_lease(stored, binding, lease)
+            except TaskServiceError as error:
+                caught = error
+            except Exception:
+                caught = TaskServiceError(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        finally:
+            release_failed = self._release(lease)
+        if release_failed:
+            _raise(TaskServiceErrorCode.LEASE_UNAVAILABLE)
+        if caught is not None:
+            raise caught from None
+        if result is None:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        return self._publish_review_if_prepared(result)
+
+    def _continue_bound_freeform(
+        self,
+        stored: StoredTaskRun,
+        binding: BoundFreeformCreate,
+    ) -> StoredTaskRun:
+        lease = self._acquire(binding.project_id)
+        result: StoredTaskRun | None = None
+        caught: TaskServiceError | None = None
+        try:
+            try:
+                result = self._continue_bound_freeform_with_lease(stored, binding, lease)
             except TaskServiceError as error:
                 caught = error
             except Exception:
@@ -1079,6 +1204,69 @@ class TaskService:
             validating,
             binding,
             source,
+            compiled,
+            lease,
+            head,
+            revision_id=revision_id,
+        )
+
+    def _continue_bound_freeform_with_lease(
+        self,
+        stored: StoredTaskRun,
+        binding: BoundFreeformCreate,
+        lease: object,
+    ) -> StoredTaskRun:
+        if (
+            stored.task_run.status is not TaskStatus.PROGRAM_READY
+            or parse_bound_freeform_create_task(stored) != binding
+        ):
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        head = self._guard_runtime_head(binding.project_id)
+        if head != binding.expected_head:
+            _raise(TaskServiceErrorCode.CONFLICT)
+        try:
+            empty_revision = self._revision_store.load_revision(
+                binding.project_id,
+                head.revision_id,
+            )
+        except Exception:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        if empty_revision != binding.empty_revision:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        try:
+            compiled = compile_acceptance_spec(binding.program.acceptance)
+        except Exception:
+            _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+        revision_id = self._reserve_candidate(
+            project_id=binding.project_id,
+            expected_head=head,
+            reservation_key=binding.reservation_key,
+            lease=lease,
+        )
+        try:
+            validating = self._cas(
+                stored,
+                transition_task(stored.task_run, TaskEvent.START_VALIDATION),
+            )
+        except (TaskServiceError, TaskStateError) as error:
+            clean = self._cancel_unused_reservation(
+                project_id=binding.project_id,
+                expected_head=head,
+                revision_id=revision_id,
+                reservation_key=binding.reservation_key,
+                lease=lease,
+            )
+            if not clean:
+                _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+            if isinstance(error, TaskServiceError):
+                cancellation = self._concurrent_cancellation(stored)
+                if cancellation is not None:
+                    return cancellation
+                raise error
+            _raise(TaskServiceErrorCode.INVALID_STATE)
+        return self._run_bound_freeform_with_lease(
+            validating,
+            binding,
             compiled,
             lease,
             head,
@@ -1200,6 +1388,8 @@ class TaskService:
             try:
                 if task.candidate_revision is None:
                     binding = parse_bound_revert_task(task)
+                    if binding is None:
+                        binding = parse_bound_freeform_create_task(task)
                     reservation_key = binding.reservation_key if binding is not None else task.id
                     reconciliation = revision_store.reconcile_candidate_reservation(
                         task.project_id,
@@ -2934,6 +3124,208 @@ class TaskService:
         except Exception:
             return self._post_receipt_attention(committing)
         return self._finish_commit(committing, current_candidate, commit_result)
+
+    def _run_bound_freeform_with_lease(
+        self,
+        validating: StoredTaskRun,
+        binding: BoundFreeformCreate,
+        compiled: CompiledAcceptance,
+        lease: object,
+        head: ProjectHead,
+        *,
+        revision_id: str,
+    ) -> StoredTaskRun:
+        task = validating.task_run
+        if (
+            parse_bound_freeform_create_task(task) != binding
+            or head != binding.expected_head
+            or task.review_policy is not ReviewPolicy.REQUIRE_REVIEW
+        ):
+            if not self._cancel_unused_reservation(
+                project_id=task.project_id,
+                expected_head=head,
+                revision_id=revision_id,
+                reservation_key=binding.reservation_key,
+                lease=lease,
+            ):
+                _raise(TaskServiceErrorCode.RECOVERY_REQUIRED)
+            return self._reject_pre_candidate(validating, _PRE_CANDIDATE_CONFLICT)
+
+        try:
+            active = self._coordinator.begin_reserved(
+                project_id=task.project_id,
+                expected_head=head,
+                revision_id=revision_id,
+                reservation_key=binding.reservation_key,
+                lease=lease,
+            )
+        except CandidateError as error:
+            event = _attention_event(error)
+            if event is not None:
+                return self._persist_attention(validating, event)
+            if error.code is CandidateErrorCode.CONFLICT:
+                return self._reject_pre_candidate(validating, _PRE_CANDIDATE_CONFLICT)
+            if error.code is CandidateErrorCode.RESOURCE_EXHAUSTED:
+                _raise(TaskServiceErrorCode.RESOURCE_EXHAUSTED)
+            return self._reject_pre_candidate(validating, _BEGIN_FAILURE)
+        except Exception:
+            return self._reject_pre_candidate(validating, _BEGIN_FAILURE)
+
+        try:
+            executing = self._cas(
+                validating,
+                transition_task(
+                    validating.task_run,
+                    TaskEvent.VALIDATE_PROGRAM,
+                    candidate_revision=active.binding.revision_id,
+                ),
+            )
+        except (TaskServiceError, TaskStateError) as error:
+            return self._abort_unpublished(validating, active, lease, error)
+
+        current = executing
+        current_candidate = active
+        try:
+            compile_method = getattr(self._executor, "compile_freeform_design", None)
+            if not callable(compile_method):
+                raise TypeError
+            result = compile_method(
+                design=binding.design,
+                design_digest=binding.design_digest,
+                candidate=current_candidate,
+            )
+            if result is not None:
+                raise TypeError
+            current = self._cas(
+                current,
+                append_step_result(
+                    current.task_run,
+                    StepResult(
+                        ok=True,
+                        value={
+                            "design_id": binding.design.id,
+                            "design_sha256": binding.design_digest,
+                        },
+                        elapsed_ms=0,
+                        operation_id=binding.program.operations[0].id,
+                        revision=current_candidate.binding.revision_id,
+                    ),
+                ),
+            )
+            current_candidate = self._coordinator.checkpoint(
+                candidate=current_candidate,
+                lease=lease,
+            )
+            with _candidate_file_limit(self._revision_store):
+                self._executor.export_step(candidate=current_candidate, lease=lease)
+            current_candidate = self._coordinator.seal(
+                candidate=current_candidate,
+                lease=lease,
+            )
+            evidence = self._executor.collect_evidence(candidate=current_candidate)
+            if type(evidence) is not CandidateEvidence:
+                raise TypeError
+            for artifact in evidence.artifacts:
+                current = self._cas(current, append_artifact(current.task_run, artifact))
+            current = self._cas(
+                current,
+                transition_task(current.task_run, TaskEvent.COMPLETE_EXECUTION),
+            )
+        except Exception as error:
+            return self._fail_published(
+                current,
+                current_candidate,
+                lease,
+                _EXECUTION_FAILURE,
+                error,
+            )
+
+        try:
+            verification = verify_acceptance(
+                compiled,
+                evidence.snapshot,
+                candidate_revision=current_candidate.revision.id,
+                manifest_sha256=current_candidate.revision.manifest_sha256,
+            )
+            if type(verification) is not VerificationResult:
+                raise TypeError
+        except Exception as error:
+            return self._fail_published(
+                current,
+                current_candidate,
+                lease,
+                _VERIFICATION_FAILURE,
+                error,
+            )
+        if not verification.report.passed:
+            try:
+                current = self._cas(
+                    current,
+                    append_verification(current.task_run, verification.report),
+                )
+            except (TaskServiceError, TaskStateError) as error:
+                return self._fail_published(
+                    current,
+                    current_candidate,
+                    lease,
+                    _VERIFICATION_FAILURE,
+                    error,
+                )
+            return self._fail_published(
+                current,
+                current_candidate,
+                lease,
+                _VERIFICATION_FAILURE,
+                _VERIFICATION_FAILURE,
+            )
+
+        revision = current_candidate.revision
+        draft = ReviewDraft(
+            id=f"draft_{revision.id.removeprefix('revision_')}",
+            task_id=current.task_run.id,
+            project_id=current.task_run.project_id,
+            base_revision=head.revision_id,
+            base_generation=head.generation,
+            base_manifest_sha256=head.manifest_sha256,
+            revision_id=revision.id,
+            manifest_sha256=revision.manifest_sha256,
+            verification_id=verification.report.id,
+            acceptance_id=verification.report.acceptance_id,
+            observation_digest=verification.report.observation_digest,
+        )
+        try:
+            preparing = self._cas(
+                current,
+                transition_task(
+                    current.task_run,
+                    TaskEvent.PREPARE_REVIEW,
+                    verification=verification.report,
+                    draft=draft,
+                ),
+            )
+        except (TaskServiceError, TaskStateError) as error:
+            return self._fail_published(
+                current,
+                current_candidate,
+                lease,
+                _VERIFICATION_FAILURE,
+                error,
+            )
+        try:
+            published = self._coordinator.publish_review(
+                candidate=current_candidate,
+                receipt=verification.receipt,
+                compiled=compiled,
+                snapshot=evidence.snapshot,
+                lease=lease,
+            )
+        except Exception as error:
+            event = _attention_event(error) or TaskEvent.REQUIRE_RECOVERY
+            return self._review_attention(preparing, event)
+        if not self._review_is_durably_detached(preparing.task_run, draft, published):
+            event = _attention_event(published) or TaskEvent.REQUIRE_RECOVERY
+            return self._review_attention(preparing, event)
+        return preparing
 
     def _reject_pre_candidate(
         self,
