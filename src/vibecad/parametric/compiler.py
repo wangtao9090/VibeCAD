@@ -1237,6 +1237,18 @@ def _resolve_semantic_edge(
             base,
             _shape_edges(source_feature)[source_index - 1],
         )
+    if len(matches) != 1 and reference.role in {
+        SemanticEdgeRole.SECTION_START,
+        SemanticEdgeRole.SECTION_END,
+    }:
+        matches = _semantic_section_edge_candidates(
+            base,
+            source_feature=source_feature,
+            sketch=sketch,
+            feature_data=feature_data,
+            sketch_data=sketch_data,
+            reference=reference,
+        )
     if len(matches) != 1:
         _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
     current_index = matches[0]
@@ -1378,6 +1390,85 @@ def _resolve_semantic_face(
     if require_planar:
         _face_normal(_shape_faces(base)[current_index - 1])
     return _ResolvedSemanticFace(index=current_index)
+
+
+def _shared_face_edge_candidates(
+    base: object,
+    first_face_index: int,
+    second_face_index: int,
+) -> tuple[int, ...]:
+    faces = _shape_faces(base)
+    if not (
+        1 <= first_face_index <= len(faces)
+        and 1 <= second_face_index <= len(faces)
+        and first_face_index != second_face_index
+    ):
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    try:
+        first_edges = tuple(faces[first_face_index - 1].Edges)  # type: ignore[attr-defined]
+        second_edges = tuple(faces[second_face_index - 1].Edges)  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if not first_edges or not second_edges:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+
+    matches: list[int] = []
+    for index, edge in enumerate(_shape_edges(base), 1):
+        try:
+            belongs_to_first = any(
+                bool(edge.isSame(candidate))
+                for candidate in first_edges  # type: ignore[attr-defined]
+            )
+            belongs_to_second = any(
+                bool(edge.isSame(candidate))
+                for candidate in second_edges  # type: ignore[attr-defined]
+            )
+        except Exception:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        if belongs_to_first and belongs_to_second:
+            matches.append(index)
+    return tuple(matches)
+
+
+def _semantic_section_edge_candidates(
+    base: object,
+    *,
+    source_feature: object,
+    sketch: object,
+    feature_data: dict[str, object],
+    sketch_data: dict[str, object],
+    reference: SemanticEdgeReference,
+) -> tuple[int, ...]:
+    try:
+        section_role = SemanticFaceRole(reference.role.value)
+    except ValueError:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    sweep = _resolve_semantic_face(
+        base,
+        source_feature=source_feature,
+        sketch=sketch,
+        feature_data=feature_data,
+        sketch_data=sketch_data,
+        reference=SemanticFaceReference(
+            source_feature_id=reference.source_feature_id,
+            role=SemanticFaceRole.SWEEP,
+            geometry_id=reference.geometry_id,
+        ),
+        require_planar=False,
+    )
+    section = _resolve_semantic_face(
+        base,
+        source_feature=source_feature,
+        sketch=sketch,
+        feature_data=feature_data,
+        sketch_data=sketch_data,
+        reference=SemanticFaceReference(
+            source_feature_id=reference.source_feature_id,
+            role=section_role,
+        ),
+        require_planar=True,
+    )
+    return _shared_face_edge_candidates(base, sweep.index, section.index)
 
 
 def _surface_face_target(value: object) -> SemanticFaceReference:

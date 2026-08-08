@@ -3045,6 +3045,75 @@ def test_surface_modifier_edge_resolution_accepts_one_authenticated_mapped_name(
     assert calls[-1] == (base, {"source_mapped_name": "PadMappedEdge"})
 
 
+def test_shared_face_edge_candidates_requires_one_global_intersection() -> None:
+    class Edge:
+        def __init__(self, token: str) -> None:
+            self.token = token
+
+        def isSame(self, other: object) -> bool:  # noqa: N802 - FreeCAD API spelling
+            return isinstance(other, Edge) and self.token == other.token
+
+    edges = tuple(Edge(token) for token in ("left", "shared", "right"))
+    base = SimpleNamespace(
+        Shape=SimpleNamespace(
+            Edges=edges,
+            Faces=(
+                SimpleNamespace(Edges=(Edge("left"), Edge("shared"))),
+                SimpleNamespace(Edges=(Edge("shared"), Edge("right"))),
+            ),
+        )
+    )
+
+    assert compiler_module._shared_face_edge_candidates(base, 1, 2) == (2,)
+
+
+def test_surface_modifier_section_edge_resolution_uses_semantic_face_intersection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = object()
+    source = object()
+    sketch = object()
+    reference = SemanticEdgeReference(
+        source_feature_id=_id("feature", 1),
+        geometry_id=BOTTOM,
+        role=SemanticEdgeRole.SECTION_START,
+        point=ReferencePoint.WHOLE,
+    )
+    semantic_calls: list[SemanticEdgeReference] = []
+
+    def edge_candidates(obj: object, **_kwargs: object) -> tuple[int, ...]:
+        return (1, 2) if obj is source else ()
+
+    def semantic_candidates(*_args: object, **kwargs: object) -> tuple[int, ...]:
+        semantic_calls.append(kwargs["reference"])  # type: ignore[arg-type]
+        return (9,)
+
+    monkeypatch.setattr(compiler_module, "_geometry_native_index", lambda *_args: 0)
+    monkeypatch.setattr(compiler_module, "_edge_candidates", edge_candidates)
+    monkeypatch.setattr(compiler_module, "_section_source_edge", lambda *_args: 2)
+    monkeypatch.setattr(compiler_module, "_mapped_name", lambda *_args: "PadMappedEdge")
+    monkeypatch.setattr(compiler_module, "_shape_edges", lambda *_args: (object(), object()))
+    monkeypatch.setattr(compiler_module, "_same_edge_candidates", lambda *_args: ())
+    monkeypatch.setattr(
+        compiler_module,
+        "_semantic_section_edge_candidates",
+        semantic_candidates,
+    )
+
+    resolved = compiler_module._resolve_semantic_edge(
+        base,
+        source_feature=source,
+        sketch=sketch,
+        feature_data={"feature_kind": FeatureKind.PAD.value},
+        sketch_data={},
+        reference=reference,
+        require_orientation=False,
+    )
+
+    assert resolved.index == 9
+    assert semantic_calls == [reference]
+
+
 def test_pattern_metadata_validation_does_not_require_surface_policy_fields() -> None:
     data = {
         "feature_index": 1,
