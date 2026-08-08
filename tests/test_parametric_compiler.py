@@ -3067,6 +3067,88 @@ def test_shared_face_edge_candidates_requires_one_global_intersection() -> None:
     assert compiler_module._shared_face_edge_candidates(base, 1, 2) == (2,)
 
 
+def test_coincident_edge_candidates_require_matching_endpoint_center_and_length() -> None:
+    def point(x: float, y: float, z: float) -> SimpleNamespace:
+        return SimpleNamespace(x=x, y=y, z=z)
+
+    def edge(
+        start: tuple[float, float, float],
+        end: tuple[float, float, float],
+        *,
+        length: float = 10,
+    ) -> SimpleNamespace:
+        start_point = point(*start)
+        end_point = point(*end)
+        return SimpleNamespace(
+            Vertexes=(
+                SimpleNamespace(Point=start_point),
+                SimpleNamespace(Point=end_point),
+            ),
+            CenterOfMass=point(
+                (start[0] + end[0]) / 2,
+                (start[1] + end[1]) / 2,
+                (start[2] + end[2]) / 2,
+            ),
+            Length=length,
+        )
+
+    source = edge((0, 0, 0), (10, 0, 0))
+    base = SimpleNamespace(
+        Shape=SimpleNamespace(
+            Edges=(
+                edge((0, 0, 0), (10, 0, 0), length=11),
+                edge((10, 0, 0), (0, 0, 0)),
+                edge((0, 0, 1), (10, 0, 1)),
+            )
+        )
+    )
+
+    assert compiler_module._coincident_edge_candidates(base, source) == (2,)
+
+
+def test_surface_modifier_section_edge_resolution_accepts_unique_coincident_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = object()
+    source = object()
+    sketch = object()
+
+    def edge_candidates(obj: object, **_kwargs: object) -> tuple[int, ...]:
+        return (1, 2) if obj is source else ()
+
+    monkeypatch.setattr(compiler_module, "_geometry_native_index", lambda *_args: 0)
+    monkeypatch.setattr(compiler_module, "_edge_candidates", edge_candidates)
+    monkeypatch.setattr(compiler_module, "_section_source_edge", lambda *_args: 2)
+    monkeypatch.setattr(compiler_module, "_mapped_name", lambda *_args: "PadMappedEdge")
+    monkeypatch.setattr(compiler_module, "_shape_edges", lambda *_args: (object(), object()))
+    monkeypatch.setattr(compiler_module, "_same_edge_candidates", lambda *_args: ())
+    monkeypatch.setattr(compiler_module, "_coincident_edge_candidates", lambda *_args: (8,))
+    monkeypatch.setattr(
+        compiler_module,
+        "_semantic_section_edge_candidates",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unique coincident geometry must precede semantic face fallback"
+        ),
+    )
+
+    resolved = compiler_module._resolve_semantic_edge(
+        base,
+        source_feature=source,
+        sketch=sketch,
+        feature_data={"feature_kind": FeatureKind.PAD.value},
+        sketch_data={},
+        reference=SemanticEdgeReference(
+            source_feature_id=_id("feature", 1),
+            geometry_id=BOTTOM,
+            role=SemanticEdgeRole.SECTION_START,
+            point=ReferencePoint.WHOLE,
+        ),
+        require_orientation=False,
+    )
+
+    assert resolved.index == 8
+
+
 def test_surface_modifier_section_edge_resolution_uses_semantic_face_intersection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3094,6 +3176,7 @@ def test_surface_modifier_section_edge_resolution_uses_semantic_face_intersectio
     monkeypatch.setattr(compiler_module, "_mapped_name", lambda *_args: "PadMappedEdge")
     monkeypatch.setattr(compiler_module, "_shape_edges", lambda *_args: (object(), object()))
     monkeypatch.setattr(compiler_module, "_same_edge_candidates", lambda *_args: ())
+    monkeypatch.setattr(compiler_module, "_coincident_edge_candidates", lambda *_args: ())
     monkeypatch.setattr(
         compiler_module,
         "_semantic_section_edge_candidates",

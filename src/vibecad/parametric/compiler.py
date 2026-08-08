@@ -914,6 +914,56 @@ def _same_edge_candidates(obj: object, source_edge: object) -> tuple[int, ...]:
     return tuple(matches)
 
 
+def _coincident_edge_candidates(obj: object, source_edge: object) -> tuple[int, ...]:
+    source_vertices = _edge_vertices(source_edge)
+    if len(source_vertices) != 2:
+        return ()
+    try:
+        source_length = float(source_edge.Length)  # type: ignore[attr-defined]
+    except Exception:
+        _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+    if not math.isfinite(source_length) or source_length <= 1e-12:
+        _raise(ParametricCompileErrorCode.FEATURE_FAILURE)
+    source_center = _edge_center(source_edge)
+
+    matches: list[int] = []
+    for index, edge in enumerate(_shape_edges(obj), 1):
+        vertices = _edge_vertices(edge)
+        if len(vertices) != 2:
+            continue
+        try:
+            length = float(edge.Length)  # type: ignore[attr-defined]
+        except Exception:
+            _raise(ParametricCompileErrorCode.METADATA_FAILURE)
+        if not math.isfinite(length) or not math.isclose(
+            length,
+            source_length,
+            rel_tol=0.0,
+            abs_tol=1e-7,
+        ):
+            continue
+        direct = _distance_squared(
+            vertices[0].Point,  # type: ignore[attr-defined]
+            source_vertices[0].Point,  # type: ignore[attr-defined]
+        ) + _distance_squared(
+            vertices[1].Point,  # type: ignore[attr-defined]
+            source_vertices[1].Point,  # type: ignore[attr-defined]
+        )
+        crossed = _distance_squared(
+            vertices[0].Point,  # type: ignore[attr-defined]
+            source_vertices[1].Point,  # type: ignore[attr-defined]
+        ) + _distance_squared(
+            vertices[1].Point,  # type: ignore[attr-defined]
+            source_vertices[0].Point,  # type: ignore[attr-defined]
+        )
+        if min(direct, crossed) > 1e-12:
+            continue
+        if _distance_squared(_edge_center(edge), source_center) > 1e-12:
+            continue
+        matches.append(index)
+    return tuple(matches)
+
+
 def _history_has_profile_section(
     history: tuple[tuple[object, str], ...],
     sketch: object,
@@ -1234,6 +1284,19 @@ def _resolve_semantic_edge(
         matches = _edge_candidates(base, source_mapped_name=source_mapped_name)
     if len(matches) != 1:
         matches = _same_edge_candidates(
+            base,
+            _shape_edges(source_feature)[source_index - 1],
+        )
+    if len(matches) != 1 and reference.role in {
+        SemanticEdgeRole.SECTION_START,
+        SemanticEdgeRole.SECTION_END,
+    }:
+        # Draft and Thickness can rebuild an otherwise unchanged Pad boundary,
+        # dropping both history and OCCT TShape identity.  The source edge is
+        # still compiler-authenticated from the sketch semantic reference, so
+        # accept its geometry only when endpoints, centroid, and length select
+        # exactly one current edge.
+        matches = _coincident_edge_candidates(
             base,
             _shape_edges(source_feature)[source_index - 1],
         )
