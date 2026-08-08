@@ -45,6 +45,8 @@ from vibecad.parametric import (
     ReferencePoint,
     SemanticEdgeReference,
     SemanticEdgeRole,
+    SemanticFaceReference,
+    SemanticFaceRole,
     SketchConstraint,
     SketchGeometry,
     SketchPlane,
@@ -97,6 +99,8 @@ FILLET_START = _id("parameter", 4)
 FILLET_END = _id("parameter", 5)
 PATTERN_LENGTH = _id("parameter", 6)
 PATTERN_ANGLE = _id("parameter", 7)
+THICKNESS_VALUE = _id("parameter", 8)
+DRAFT_ANGLE = _id("parameter", 9)
 
 
 def _line(
@@ -288,6 +292,59 @@ def _design_with_pattern(kind: FeatureKind) -> ParametricDesignIR:
     )
 
 
+def _design_with_surface_modifiers(*kinds: FeatureKind) -> ParametricDesignIR:
+    base = _design()
+    parameters = list(base.parameters)
+    features = list(base.features)
+    for index, kind in enumerate(kinds, 1):
+        if kind is FeatureKind.DRAFT:
+            parameter = _parameter(
+                DRAFT_ANGLE,
+                "Draft angle",
+                5,
+                kind=ParameterKind.ANGLE,
+                unit=DesignUnit.DEG,
+            )
+            feature = PartDesignFeature(
+                id=_id("feature", 40 + index),
+                name="Native draft",
+                kind=kind,
+                sketch_id=None,
+                base_feature_id=features[-1].id,
+                parameters={"angle": parameter.id},
+                evidence_ids=(EVIDENCE,),
+                face_targets=(
+                    SemanticFaceReference(
+                        source_feature_id=PAD,
+                        role=SemanticFaceRole.SWEEP,
+                        geometry_id=BOTTOM,
+                    ),
+                ),
+                neutral_plane=OriginPlane.XY,
+            )
+        else:
+            parameter = _parameter(THICKNESS_VALUE, "Wall thickness", 1)
+            feature = PartDesignFeature(
+                id=_id("feature", 40 + index),
+                name="Native thickness",
+                kind=kind,
+                sketch_id=None,
+                base_feature_id=features[-1].id,
+                parameters={"thickness": parameter.id},
+                evidence_ids=(EVIDENCE,),
+                face_targets=(
+                    SemanticFaceReference(
+                        source_feature_id=PAD,
+                        role=SemanticFaceRole.SECTION_END,
+                    ),
+                ),
+                reversed=False,
+            )
+        parameters.append(parameter)
+        features.append(feature)
+    return dataclasses.replace(base, parameters=tuple(parameters), features=tuple(features))
+
+
 def test_parametric_design_round_trips_and_has_a_stable_digest() -> None:
     design = _design()
 
@@ -446,6 +503,149 @@ def test_pattern_occurrence_and_total_feature_budgets_fail_closed() -> None:
 
     assert instances.value.code is ParametricErrorCode.BUDGET_EXCEEDED
     assert instances.value.path == "/features"
+
+
+@pytest.mark.parametrize(
+    ("kinds", "last_kind"),
+    (
+        ((FeatureKind.DRAFT,), "draft"),
+        ((FeatureKind.THICKNESS,), "thickness"),
+        ((FeatureKind.DRAFT, FeatureKind.THICKNESS), "thickness"),
+    ),
+)
+def test_surface_modifiers_round_trip_with_semantic_faces_and_legacy_shape(
+    kinds: tuple[FeatureKind, ...],
+    last_kind: str,
+) -> None:
+    legacy = _design()
+    design = _design_with_surface_modifiers(*kinds)
+    encoded = design.to_mapping()
+    modifier = encoded["features"][-1]
+
+    assert ParametricDesignIR.from_mapping(encoded) == design
+    assert set(legacy.to_mapping()["features"][0]) == {
+        "schema_version",
+        "id",
+        "name",
+        "kind",
+        "sketch_id",
+        "base_feature_id",
+        "parameters",
+        "evidence_ids",
+        "extent",
+        "axis",
+        "location_geometry_ids",
+        "reversed",
+        "symmetric",
+    }
+    assert modifier["kind"] == last_kind
+    assert set(modifier) - set(legacy.to_mapping()["features"][0]) == {
+        "face_targets",
+        "neutral_plane",
+    }
+    assert modifier["face_targets"][0]["source_feature_id"] == PAD
+    assert "Face" not in repr(modifier)
+
+
+def test_surface_modifier_face_contracts_reject_ambiguous_or_unsupported_targets() -> None:
+    thickness = _design_with_surface_modifiers(FeatureKind.THICKNESS).features[-1]
+
+    with pytest.raises(ParametricContractError) as missing_geometry:
+        SemanticFaceReference(source_feature_id=PAD, role=SemanticFaceRole.SWEEP)
+    assert missing_geometry.value.code is ParametricErrorCode.INVALID_VALUE
+    assert missing_geometry.value.path == "/geometry_id"
+
+    with pytest.raises(ParametricContractError) as section_geometry:
+        SemanticFaceReference(
+            source_feature_id=PAD,
+            role=SemanticFaceRole.SECTION_END,
+            geometry_id=TOP,
+        )
+    assert section_geometry.value.code is ParametricErrorCode.INVALID_VALUE
+    assert section_geometry.value.path == "/geometry_id"
+
+    duplicate = thickness.face_targets[0]
+    with pytest.raises(ParametricContractError) as duplicate_target:
+        dataclasses.replace(thickness, face_targets=(duplicate, duplicate))
+    assert duplicate_target.value.code is ParametricErrorCode.DUPLICATE_ID
+    assert duplicate_target.value.path == "/face_targets"
+
+    with pytest.raises(ParametricContractError) as draft_section:
+        dataclasses.replace(
+            _design_with_surface_modifiers(FeatureKind.DRAFT).features[-1],
+            face_targets=(
+                SemanticFaceReference(
+                    source_feature_id=PAD,
+                    role=SemanticFaceRole.SECTION_START,
+                ),
+            ),
+        )
+    assert draft_section.value.code is ParametricErrorCode.INVALID_VALUE
+    assert draft_section.value.path == "/face_targets"
+
+
+def test_surface_modifier_budgets_and_tail_order_fail_closed() -> None:
+    draft = _design_with_surface_modifiers(FeatureKind.DRAFT)
+    with pytest.raises(ParametricContractError) as excessive_angle:
+        dataclasses.replace(
+            draft,
+            parameters=tuple(
+                dataclasses.replace(item, value=31) if item.id == DRAFT_ANGLE else item
+                for item in draft.parameters
+            ),
+        )
+    assert excessive_angle.value.code is ParametricErrorCode.INVALID_VALUE
+    assert excessive_angle.value.path == "/features/1/parameters/angle"
+
+    thickness = _design_with_surface_modifiers(FeatureKind.THICKNESS)
+    targets = tuple(
+        SemanticFaceReference(
+            source_feature_id=PAD,
+            role=SemanticFaceRole.SWEEP,
+            geometry_id=_id("geometry", 100 + index),
+        )
+        for index in range(5)
+    )
+    with pytest.raises(ParametricContractError) as face_budget:
+        dataclasses.replace(thickness.features[-1], face_targets=targets)
+    assert face_budget.value.code is ParametricErrorCode.BUDGET_EXCEEDED
+    assert face_budget.value.path == "/face_targets"
+
+    pattern = _design_with_pattern(FeatureKind.MIRROR).features[-1]
+    with pytest.raises(ParametricContractError) as interleaved:
+        dataclasses.replace(
+            thickness,
+            features=(
+                thickness.features[0],
+                dataclasses.replace(pattern, base_feature_id=PAD),
+                dataclasses.replace(
+                    thickness.features[-1],
+                    base_feature_id=pattern.id,
+                ),
+            ),
+        )
+    assert interleaved.value.code is ParametricErrorCode.INVALID_ORDER
+    assert interleaved.value.path == "/features/2/kind"
+
+    draft_then_thickness = _design_with_surface_modifiers(
+        FeatureKind.DRAFT,
+        FeatureKind.THICKNESS,
+    )
+    reversed_order = (
+        draft_then_thickness.features[0],
+        dataclasses.replace(
+            draft_then_thickness.features[2],
+            base_feature_id=PAD,
+        ),
+        dataclasses.replace(
+            draft_then_thickness.features[1],
+            base_feature_id=draft_then_thickness.features[2].id,
+        ),
+    )
+    with pytest.raises(ParametricContractError) as order:
+        dataclasses.replace(draft_then_thickness, features=reversed_order)
+    assert order.value.code is ParametricErrorCode.INVALID_ORDER
+    assert order.value.path == "/features/1/kind"
 
 
 def test_chamfer_rejects_asymmetric_edge_distances_in_s42() -> None:
