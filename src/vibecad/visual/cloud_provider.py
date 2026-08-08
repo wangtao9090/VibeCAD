@@ -31,6 +31,13 @@ from vibecad.runtime.contracts import (
     RuntimeStatus,
 )
 from vibecad.visual.contracts import ImageSet
+from vibecad.visual.evidence import (
+    MAX_EVIDENCE_FEATURES,
+    MAX_EVIDENCE_TOTAL_POINTS,
+    BoundVisualEvidence,
+    ProviderFeatureEvidence,
+    bind_visual_evidence,
+)
 from vibecad.visual.provider import (
     VisualProviderExecutionReceipt,
     VisualProviderRuntimeProfile,
@@ -119,9 +126,18 @@ class CloudVisualTransportOutcome:
     value: VisualObservation | ReconstructionProposal | None = None
     diagnostic: RuntimeDiagnostic | None = None
     execution_receipt: VisualProviderExecutionReceipt | None = None
+    feature_evidence: tuple[ProviderFeatureEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.kind) is not CloudVisualOutcomeKind:
+            _fail(CloudVisualProviderErrorCode.INVALID_TRANSPORT)
+        if type(self.feature_evidence) is not tuple:
+            _fail(CloudVisualProviderErrorCode.INVALID_TRANSPORT)
+        if len(self.feature_evidence) > MAX_EVIDENCE_FEATURES or any(
+            type(item) is not ProviderFeatureEvidence for item in self.feature_evidence
+        ):
+            _fail(CloudVisualProviderErrorCode.INVALID_TRANSPORT)
+        if sum(len(item.points) for item in self.feature_evidence) > MAX_EVIDENCE_TOTAL_POINTS:
             _fail(CloudVisualProviderErrorCode.INVALID_TRANSPORT)
         if self.kind is CloudVisualOutcomeKind.SUCCEEDED:
             valid = type(self.value) in {VisualObservation, ReconstructionProposal}
@@ -135,10 +151,14 @@ class CloudVisualTransportOutcome:
                 self.value is None
                 and type(self.diagnostic) is RuntimeDiagnostic
                 and self.execution_receipt is None
+                and not self.feature_evidence
             )
         else:
             valid = (
-                self.value is None and self.diagnostic is None and self.execution_receipt is None
+                self.value is None
+                and self.diagnostic is None
+                and self.execution_receipt is None
+                and not self.feature_evidence
             )
         if not valid:
             _fail(CloudVisualProviderErrorCode.INVALID_TRANSPORT)
@@ -231,6 +251,7 @@ class CloudVisualProvider:
     __slots__ = (
         "_image_profile",
         "_image_reader",
+        "_bound_evidence",
         "_input_digests",
         "_results",
         "_runtime_profile",
@@ -262,6 +283,7 @@ class CloudVisualProvider:
         self._image_profile = image_profile
         self._image_reader = image_reader
         self._transport = transport
+        self._bound_evidence: dict[str, BoundVisualEvidence | None] = {}
         self._input_digests: dict[str, str] = {}
         self._statuses: dict[str, RuntimeStatus] = {}
         self._results: dict[str, RuntimeResult | None] = {}
@@ -281,10 +303,12 @@ class CloudVisualProvider:
         input_digest: str,
         status: RuntimeStatus,
         result: RuntimeResult | None,
+        bound_evidence: BoundVisualEvidence | None = None,
     ) -> RuntimeStatus:
         self._input_digests[invocation_id] = input_digest
         self._statuses[invocation_id] = status
         self._results[invocation_id] = result
+        self._bound_evidence[invocation_id] = bound_evidence
         return status
 
     def _local_failure(
@@ -380,6 +404,26 @@ class CloudVisualProvider:
                 state = RuntimeLifecycleState.FAILED
             else:
                 assert outcome.value is not None
+                assert outcome.execution_receipt is not None
+                if not hmac.compare_digest(
+                    outcome.execution_receipt.request_sha256,
+                    request.request_sha256,
+                ) or not hmac.compare_digest(
+                    outcome.execution_receipt.image_batch_sha256,
+                    batch.manifest_sha256,
+                ):
+                    raise ValueError
+                observation = (
+                    outcome.value
+                    if type(outcome.value) is VisualObservation
+                    else outcome.value.observation
+                )
+                bound_evidence = bind_visual_evidence(
+                    observation=observation,
+                    image_set=image_set,
+                    image_batch=batch,
+                    features=outcome.feature_evidence,
+                )
                 result = build_visual_provider_success_result(
                     invocation,
                     outcome.value,
@@ -404,6 +448,7 @@ class CloudVisualProvider:
                 diagnostics=result.diagnostics,
             ),
             result,
+            bound_evidence if state is RuntimeLifecycleState.SUCCEEDED else None,
         )
 
     def get_status(self, invocation_id: str) -> RuntimeStatus:
@@ -441,6 +486,11 @@ class CloudVisualProvider:
 
     def get_result(self, invocation_id: str) -> RuntimeResult | None:
         return self._results.get(_checked_invocation_id(invocation_id))
+
+    def get_bound_evidence(self, invocation_id: str) -> BoundVisualEvidence | None:
+        """Return process-local advisory evidence without replaying the provider."""
+
+        return self._bound_evidence.get(_checked_invocation_id(invocation_id))
 
 
 __all__ = [

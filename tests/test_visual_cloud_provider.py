@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 
+import pytest
 from PIL import Image
 
 from vibecad.runtime.contracts import (
@@ -32,6 +34,13 @@ from vibecad.visual.contracts import (
     image_set_identity,
     visual_input_identity,
 )
+from vibecad.visual.evidence import NormalizedEvidencePoint, ProviderFeatureEvidence
+from vibecad.visual.evidence_provider import (
+    VisualEvidenceProviderBinding,
+    VisualEvidenceProviderError,
+    VisualEvidenceProviderErrorCode,
+)
+from vibecad.visual.geometry_fit import PrimitiveFamily
 from vibecad.visual.provider import (
     VisualProviderBinding,
     VisualProviderExecutionReceipt,
@@ -165,10 +174,14 @@ def _observation(invocation) -> VisualObservation:
     )
 
 
-def _execution_receipt() -> VisualProviderExecutionReceipt:
+def _execution_receipt(
+    *,
+    request_sha256: str = "1" * 64,
+    image_batch_sha256: str = "2" * 64,
+) -> VisualProviderExecutionReceipt:
     return VisualProviderExecutionReceipt(
-        request_sha256="1" * 64,
-        image_batch_sha256="2" * 64,
+        request_sha256=request_sha256,
+        image_batch_sha256=image_batch_sha256,
         response_id_sha256="3" * 64,
         response_output_sha256="4" * 64,
         response_model="vision-model",
@@ -181,11 +194,18 @@ def _execution_receipt() -> VisualProviderExecutionReceipt:
 
 
 class _Transport:
-    __slots__ = ("_outcome", "calls", "last_request", "raise_error")
+    __slots__ = ("_outcome", "bind_receipt", "calls", "last_request", "raise_error")
 
-    def __init__(self, outcome=None, *, raise_error: bool = False) -> None:
+    def __init__(
+        self,
+        outcome=None,
+        *,
+        raise_error: bool = False,
+        bind_receipt: bool = True,
+    ) -> None:
         self._outcome = outcome
         self.raise_error = raise_error
+        self.bind_receipt = bind_receipt
         self.calls = 0
         self.last_request = None
 
@@ -196,7 +216,55 @@ class _Transport:
         self.last_request = request
         if self.raise_error:
             raise TimeoutError
+        if (
+            self.bind_receipt
+            and type(self._outcome) is CloudVisualTransportOutcome
+            and self._outcome.kind is CloudVisualOutcomeKind.SUCCEEDED
+        ):
+            assert self._outcome.execution_receipt is not None
+            return dataclasses.replace(
+                self._outcome,
+                execution_receipt=dataclasses.replace(
+                    self._outcome.execution_receipt,
+                    request_sha256=request.request_sha256,
+                    image_batch_sha256=request.image_batch.manifest_sha256,
+                ),
+            )
         return self._outcome
+
+
+class _FeatureTransport:
+    __slots__ = ("calls",)
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke(self, request, *, timeout_ms):
+        self.calls += 1
+        assert timeout_ms == 120_000
+        observation = _observation(request.invocation)
+        return CloudVisualTransportOutcome(
+            kind=CloudVisualOutcomeKind.SUCCEEDED,
+            value=observation,
+            execution_receipt=_execution_receipt(
+                request_sha256=request.request_sha256,
+                image_batch_sha256=request.image_batch.manifest_sha256,
+            ),
+            feature_evidence=(
+                ProviderFeatureEvidence(
+                    local_feature_id="outer_width_edge",
+                    source_index=0,
+                    provider_image_id=request.image_batch.parts[0].id,
+                    family=PrimitiveFamily.LINE,
+                    points=(
+                        NormalizedEvidencePoint(x=0.2, y=0.4),
+                        NormalizedEvidencePoint(x=0.8, y=0.4),
+                    ),
+                    localization_uncertainty_norm=0.01,
+                    claim_ids=(observation.claims[0].id,),
+                ),
+            ),
+        )
 
 
 def _provider(transport: _Transport):
@@ -245,6 +313,80 @@ def test_success_is_one_transport_effect_and_returns_strict_visual_result() -> N
     assert binding.runtime_profile == runtime
 
 
+def test_success_binds_feature_evidence_and_exposes_it_through_narrow_reader() -> None:
+    transport = _FeatureTransport()
+    image_set, runtime, provider = _provider(transport)
+    invocation = _invocation(runtime, image_set)
+    provider_binding = VisualProviderBinding(provider=provider)
+    evidence_binding = VisualEvidenceProviderBinding(provider_binding=provider_binding)
+
+    status = provider_binding.control.start(invocation)
+    result = provider_binding.retrieve_result(invocation)
+    assert result is not None
+    output = VisualProviderOutput.from_mapping(result.output)
+    observation = output.value
+    assert type(observation) is VisualObservation
+    evidence = evidence_binding.retrieve(invocation, result)
+
+    assert status.state is RuntimeLifecycleState.SUCCEEDED
+    assert evidence is not None
+    assert evidence.image_set_id == image_set.id
+    assert evidence.observation_id == observation.id
+    assert evidence.features[0].local_feature_id == "outer_width_edge"
+    assert evidence.features[0].pixel_points[0].x_px == pytest.approx(12.6)
+    assert evidence.features[0].pixel_points[1].x_px == pytest.approx(50.4)
+    assert transport.calls == 1
+
+    provider._bound_evidence[invocation.invocation_id] = dataclasses.replace(
+        evidence,
+        image_batch_manifest_sha256="f" * 64,
+    )
+    with pytest.raises(VisualEvidenceProviderError) as raised:
+        evidence_binding.retrieve(invocation, result)
+    assert raised.value.code is VisualEvidenceProviderErrorCode.RESULT_MISMATCH
+
+
+def test_process_restart_makes_optional_evidence_unknown_without_provider_replay() -> None:
+    transport = _FeatureTransport()
+    image_set, runtime, provider = _provider(transport)
+    invocation = _invocation(runtime, image_set)
+    binding = VisualProviderBinding(provider=provider)
+    binding.control.start(invocation)
+    result = binding.retrieve_result(invocation)
+    assert result is not None
+    observation = VisualProviderOutput.from_mapping(result.output).value
+    assert type(observation) is VisualObservation
+
+    fresh_transport = _FeatureTransport()
+    _, _, fresh_provider = _provider(fresh_transport)
+    fresh_binding = VisualEvidenceProviderBinding(
+        provider_binding=VisualProviderBinding(provider=fresh_provider)
+    )
+
+    assert fresh_binding.retrieve(invocation, result) is None
+    assert fresh_transport.calls == 0
+
+
+def test_mismatched_request_or_image_receipt_fails_closed_without_replay() -> None:
+    transport = _Transport(bind_receipt=False)
+    image_set, runtime, provider = _provider(transport)
+    invocation = _invocation(runtime, image_set)
+    transport._outcome = CloudVisualTransportOutcome(
+        kind=CloudVisualOutcomeKind.SUCCEEDED,
+        value=_observation(invocation),
+        execution_receipt=_execution_receipt(),
+    )
+
+    first = provider.start(invocation)
+    replay = provider.start(invocation)
+
+    assert first == replay
+    assert first.state is RuntimeLifecycleState.UNKNOWN
+    assert provider.get_result(invocation.invocation_id) is None
+    assert provider.get_bound_evidence(invocation.invocation_id) is None
+    assert transport.calls == 1
+
+
 def test_transport_exception_is_unknown_and_never_replayed_by_reconcile_or_start() -> None:
     transport = _Transport(raise_error=True)
     image_set, runtime, provider = _provider(transport)
@@ -281,3 +423,30 @@ def test_definitive_provider_rejection_is_failed_without_automatic_retry() -> No
     assert result is not None and result.state is RuntimeLifecycleState.FAILED
     assert provider.reconcile(invocation.invocation_id) == status
     assert transport.calls == 1
+
+
+def test_non_success_transport_outcomes_cannot_smuggle_feature_evidence() -> None:
+    image_set, runtime, _provider_value = _provider(_Transport())
+    invocation = _invocation(runtime, image_set)
+    observation = _observation(invocation)
+    feature = ProviderFeatureEvidence(
+        local_feature_id="edge",
+        source_index=0,
+        provider_image_id="provider_image_" + "1" * 32,
+        family=PrimitiveFamily.LINE,
+        points=(NormalizedEvidencePoint(x=0.1, y=0.2),),
+        localization_uncertainty_norm=0.01,
+        claim_ids=(observation.claims[0].id,),
+    )
+
+    with pytest.raises(ValueError):
+        CloudVisualTransportOutcome(
+            kind=CloudVisualOutcomeKind.UNKNOWN,
+            feature_evidence=(feature,),
+        )
+    with pytest.raises(ValueError):
+        CloudVisualTransportOutcome(
+            kind=CloudVisualOutcomeKind.DEFINITIVE_FAILURE,
+            diagnostic=RuntimeDiagnostic(code="provider.failed", message="Failed."),
+            feature_evidence=(feature,),
+        )
