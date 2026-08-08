@@ -132,6 +132,7 @@ def _require_current_layout(layout: ApplicationDataLayout) -> None:
         layout.releases,
         layout.visual_inputs,
         layout.reconstruction_drafts,
+        layout.visual_reviews,
     ):
         layout.require_current(path)
 
@@ -231,6 +232,7 @@ class AgentApplication:
         "_visual_gate",
         "_visual_inputs",
         "_visual_provider_factory",
+        "_visual_reviews",
         "_visual_service",
     )
 
@@ -323,6 +325,7 @@ class AgentApplication:
         self._release_api = None
         self._visual_inputs = None
         self._visual_drafts = None
+        self._visual_reviews = None
         self._visual_adoption = None
         self._visual_service = None
         self._visual_api = None
@@ -677,6 +680,113 @@ class AgentApplication:
                 self._visual_service = service
                 self._visual_api = api
             return api, service
+
+    def _visual_reviews_for_request(self):
+        """Return the captured immutable advisory-review store."""
+
+        self._ensure_live()
+        store = self._visual_reviews
+        if store is not None:
+            return store
+        with self._component_lock:
+            self._ensure_live()
+            store = self._visual_reviews
+            if store is None:
+                from vibecad.visual.review_store import VisualReviewArtifactStore
+
+                store = VisualReviewArtifactStore(
+                    root=self._layout.visual_reviews,
+                    expected_root_identity=self._layout.identity_for(self._layout.visual_reviews),
+                    lease_manager=self._lease_manager,
+                )
+                self._visual_reviews = store
+            return store
+
+    def publish_visual_review_artifact(self, artifact: object):
+        """Publish one exact internal review overlay without CAD authority."""
+
+        self._ensure_live()
+        store = self._visual_reviews_for_request()
+        self._ensure_live()
+        return store.publish(artifact)
+
+    def read_visual_review_resource(self, uri: object):
+        """Read one exact advisory PNG through the captured application root."""
+
+        self._ensure_live()
+        store = self._visual_reviews_for_request()
+        self._ensure_live()
+        return store.read_resource(uri)
+
+    def _attach_visual_review_resources(
+        self,
+        envelope: dict[str, object],
+        service: object,
+    ) -> dict[str, object]:
+        """Add bounded read-only links to a successful reconstruction result."""
+
+        if envelope.get("ok") is not True:
+            return envelope
+        result = envelope.get("result")
+        if type(result) is not dict or type(result.get("reconstruction_id")) is not str:
+            from vibecad.application.visual_api import VisualApi, VisualApiErrorCode
+
+            return VisualApi.failure(VisualApiErrorCode.INTERNAL_ERROR)
+        reconstruction_id = result["reconstruction_id"]
+        try:
+            draft = service.get(reconstruction_id)
+            observation, _proposal = service.load_presentation(draft)
+            records = (
+                ()
+                if observation is None
+                else self._visual_reviews_for_request().list_exact(
+                    observation.id,
+                    observation.digest,
+                )
+            )
+        except BaseException as error:
+            from vibecad.application.visual_api import VisualApi, VisualApiErrorCode
+            from vibecad.visual.review_store import (
+                VisualReviewStoreError,
+                VisualReviewStoreErrorCode,
+            )
+
+            if not isinstance(error, VisualReviewStoreError):
+                return VisualApi.failure(VisualApiErrorCode.INTERNAL_ERROR)
+            mapped = {
+                VisualReviewStoreErrorCode.INVALID_INPUT: VisualApiErrorCode.INTERNAL_ERROR,
+                VisualReviewStoreErrorCode.NOT_FOUND: VisualApiErrorCode.NOT_FOUND,
+                VisualReviewStoreErrorCode.CONFLICT: VisualApiErrorCode.INTEGRITY_FAILURE,
+                VisualReviewStoreErrorCode.DELETED: VisualApiErrorCode.INVALID_STATE,
+                VisualReviewStoreErrorCode.BUDGET_EXCEEDED: (VisualApiErrorCode.RESOURCE_EXHAUSTED),
+                VisualReviewStoreErrorCode.INTEGRITY_FAILURE: (
+                    VisualApiErrorCode.INTEGRITY_FAILURE
+                ),
+                VisualReviewStoreErrorCode.STORE_FAILURE: VisualApiErrorCode.STORE_FAILURE,
+                VisualReviewStoreErrorCode.LEASE_UNAVAILABLE: (
+                    VisualApiErrorCode.LEASE_UNAVAILABLE
+                ),
+                VisualReviewStoreErrorCode.RECOVERY_REQUIRED: (
+                    VisualApiErrorCode.RECOVERY_REQUIRED
+                ),
+                VisualReviewStoreErrorCode.DURABILITY_UNCERTAIN: (
+                    VisualApiErrorCode.RECOVERY_REQUIRED
+                ),
+            }[error.code]
+            return VisualApi.failure(mapped)
+        projected = [
+            {
+                "source_index": item.source_index,
+                "observation_id": item.observation_id,
+                "observation_digest": item.observation_digest,
+                "resource_uri": item.resource_uri,
+                "media_type": "image/png",
+                "sha256": item.overlay.png_sha256,
+                "size_bytes": item.overlay.png_size_bytes,
+            }
+            for item in records
+        ]
+        return {**envelope, "result": {**result, "review_resources": projected}}
 
     def _project_api_for_request(self):
         self._ensure_live()
@@ -1053,7 +1163,7 @@ class AgentApplication:
 
         replay = replay_existing()
         if replay is not None:
-            return replay
+            return self._attach_visual_review_resources(replay, service)
 
         project_id = parsed.project_id
         try:
@@ -1111,46 +1221,61 @@ class AgentApplication:
         if created.get("ok") is not True:
             replay = replay_existing()
             if replay is not None:
-                return replay
-        return created
+                return self._attach_visual_review_resources(replay, service)
+        return self._attach_visual_review_resources(created, service)
 
     def get_reconstruction_request(self, request: object) -> dict[str, object]:
         self._ensure_live()
-        api, _ = self._visual_bundle_for_request()
+        api, service = self._visual_bundle_for_request()
         self._ensure_live()
-        return api.get_reconstruction(request)
+        return self._attach_visual_review_resources(
+            api.get_reconstruction(request),
+            service,
+        )
 
     def run_reconstruction_request(self, request: object) -> dict[str, object]:
         self._ensure_live()
         with self._visual_gate:
             self._ensure_live()
-            api, _ = self._visual_bundle_for_request()
+            api, service = self._visual_bundle_for_request()
             self._ensure_live()
-            return api.run_reconstruction(request)
+            return self._attach_visual_review_resources(
+                api.run_reconstruction(request),
+                service,
+            )
 
     def answer_reconstruction_request(self, request: object) -> dict[str, object]:
         self._ensure_live()
         with self._visual_gate:
             self._ensure_live()
-            api, _ = self._visual_bundle_for_request()
+            api, service = self._visual_bundle_for_request()
             self._ensure_live()
-            return api.answer_reconstruction(request)
+            return self._attach_visual_review_resources(
+                api.answer_reconstruction(request),
+                service,
+            )
 
     def adopt_reconstruction_request(self, request: object) -> dict[str, object]:
         self._ensure_live()
         with self._visual_gate:
             self._ensure_live()
-            api, _ = self._visual_bundle_for_request()
+            api, service = self._visual_bundle_for_request()
             self._ensure_live()
-            return api.adopt_reconstruction(request)
+            return self._attach_visual_review_resources(
+                api.adopt_reconstruction(request),
+                service,
+            )
 
     def reject_reconstruction_request(self, request: object) -> dict[str, object]:
         self._ensure_live()
         with self._visual_gate:
             self._ensure_live()
-            api, _ = self._visual_bundle_for_request()
+            api, service = self._visual_bundle_for_request()
             self._ensure_live()
-            return api.reject_reconstruction(request)
+            return self._attach_visual_review_resources(
+                api.reject_reconstruction(request),
+                service,
+            )
 
     def delete_reconstruction_request(self, request: object) -> dict[str, object]:
         self._ensure_live()

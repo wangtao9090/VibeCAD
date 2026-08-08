@@ -1263,6 +1263,10 @@ def test_unpacked_mcpb_agent_first_stdio_acceptance(tmp_path):
                 "name": "release",
                 "uriTemplate": "vibecad://release/{release_id}/{file_name}",
             },
+            {
+                "name": "visual-review",
+                "uriTemplate": "vibecad://visual-review/{observation_id}/{source_index}.png",
+            },
         ]
 
         # A fresh MCPB home binds the existing engine in a background installer,

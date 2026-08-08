@@ -1101,6 +1101,7 @@ _RELEASE_APPROVE_KEY_PATTERN = r"^release_approve_[0-9a-f]{32}$"
 _RECONSTRUCTION_PATTERN = r"^reconstruction_[0-9a-f]{32}$"
 _RECONSTRUCTION_CREATE_KEY_PATTERN = r"^reconstruction_create_[0-9a-f]{32}$"
 _IMAGE_SET_PATTERN = r"^image_set_[0-9a-f]{32}$"
+_VISUAL_OBSERVATION_PATTERN = r"^visual_observation_[0-9a-f]{32}$"
 _CLARIFICATION_QUESTION_PATTERN = r"^clarification_question_[0-9a-f]{32}$"
 _FEATURE_PATTERN = r"^feature_[0-9a-f]{32}$"
 _OBJECT_TYPE_PATTERN = r"^[A-Za-z][A-Za-z0-9_]*(?:::[A-Za-z][A-Za-z0-9_]*)+$"
@@ -2352,6 +2353,23 @@ def _reconstruction_result_schema() -> dict[str, object]:
             "summary": _bounded_text_schema(2 * 1024),
         }
     )
+    review_resource = _closed_schema(
+        {
+            "source_index": _safe_integer_schema(minimum=0, maximum=15),
+            "observation_id": _id_schema(_VISUAL_OBSERVATION_PATTERN),
+            "observation_digest": _id_schema(_DIGEST_PATTERN),
+            "resource_uri": {
+                "type": "string",
+                "pattern": (
+                    r"^vibecad://visual-review/visual_observation_[0-9a-f]{32}/"
+                    r"(?:0|[1-9]|1[0-5])\.png$"
+                ),
+            },
+            "media_type": {"type": "string", "const": "image/png"},
+            "sha256": _id_schema(_DIGEST_PATTERN),
+            "size_bytes": _safe_integer_schema(minimum=1),
+        }
+    )
     return _closed_schema(
         {
             "schema_version": _version_schema(),
@@ -2390,6 +2408,11 @@ def _reconstruction_result_schema() -> dict[str, object]:
             },
             "proposal_summary": _nullable(proposal),
             "adopted_task_id": _nullable(_id_schema(_TASK_ID.pattern)),
+            "review_resources": {
+                "type": "array",
+                "items": review_resource,
+                "maxItems": 16,
+            },
         },
         required=(
             "schema_version",

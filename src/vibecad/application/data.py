@@ -178,6 +178,7 @@ class ApplicationDataLayout:
     releases: Path
     visual_inputs: Path
     reconstruction_drafts: Path
+    visual_reviews: Path
     _identities: tuple[tuple[int, int], ...]
 
     def identity_for(self, path: object) -> tuple[int, int]:
@@ -196,6 +197,7 @@ class ApplicationDataLayout:
             self.releases,
             self.visual_inputs,
             self.reconstruction_drafts,
+            self.visual_reviews,
         )
         if (
             type(self._identities) is not tuple
@@ -254,6 +256,7 @@ class ApplicationDataLayout:
             "releases",
             "visual_inputs",
             "reconstruction_drafts",
+            "visual_reviews",
         )
         child_fds = []
         child_identities: list[tuple[int, int]] = []

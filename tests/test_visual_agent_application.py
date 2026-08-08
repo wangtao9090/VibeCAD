@@ -3,9 +3,11 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 from PIL import Image
 
+from tests.test_visual_review_artifacts import _artifact
 from vibecad.application.agent import AgentApplication
 from vibecad.visual.contracts import CalibrationStatus, ImageMime, ViewRole
 from vibecad.visual.fake_provider import DeterministicFakeVisualProvider
@@ -116,6 +118,7 @@ def test_create_captures_current_head_replays_after_head_change_and_survives_res
         "next_action": "run",
         "questions": [],
         "proposal_summary": None,
+        "review_resources": [],
     }
     draft = application._visual_service.get(result["reconstruction_id"])
     assert draft.base_head.project_id == bootstrap.head.project_id
@@ -197,6 +200,63 @@ def test_create_reuses_strict_parser_before_visual_composition(tmp_path: Path) -
         "message": "The request contains an unknown field.",
     }
     assert provider_calls == 0
+
+
+def test_captured_application_publishes_and_replays_visual_review_png(tmp_path: Path) -> None:
+    data_root = _data_root(tmp_path)
+    artifact = _artifact()
+    application = AgentApplication.open(data_root=data_root)
+    try:
+        assert application.publish_visual_review_artifact(artifact) == artifact
+        first = application.read_visual_review_resource(artifact.resource_uri)
+        assert first.data == artifact.overlay.png_bytes
+        assert first.media_type == "image/png"
+
+        class ReviewService:
+            def get(self, reconstruction_id: str):
+                assert reconstruction_id == artifact.reconstruction_id
+                return object()
+
+            def load_presentation(self, _draft):
+                return (
+                    SimpleNamespace(
+                        id=artifact.observation_id,
+                        digest=artifact.observation_digest,
+                    ),
+                    None,
+                )
+
+        attached = application._attach_visual_review_resources(  # noqa: SLF001
+            {
+                "schema_version": 1,
+                "ok": True,
+                "result": {"reconstruction_id": artifact.reconstruction_id},
+                "error": None,
+            },
+            ReviewService(),
+        )
+        assert attached["result"]["review_resources"] == [
+            {
+                "source_index": artifact.source_index,
+                "observation_id": artifact.observation_id,
+                "observation_digest": artifact.observation_digest,
+                "resource_uri": artifact.resource_uri,
+                "media_type": "image/png",
+                "sha256": artifact.overlay.png_sha256,
+                "size_bytes": artifact.overlay.png_size_bytes,
+            }
+        ]
+    finally:
+        application.close()
+
+    restarted = AgentApplication.open(data_root=data_root)
+    try:
+        replay = restarted.read_visual_review_resource(artifact.resource_uri)
+    finally:
+        restarted.close()
+
+    assert replay.uri == artifact.resource_uri
+    assert replay.data == artifact.overlay.png_bytes
 
 
 def test_visual_mutations_are_sequential_across_daemon_threads(tmp_path: Path) -> None:

@@ -150,6 +150,14 @@ Use the seven visual-reconstruction tools only when an explicitly selected VibeC
 
 Create the draft with `create_reconstruction`, one retained key matching `reconstruction_create_[0-9a-f]{32}`, the target project, and the exact sealed ImageSet binding. Replay an unknown create outcome only with that identical request. Use `get_reconstruction` to recover the current generation and route only its persisted `next_action`: call `run_reconstruction` for `run`, answer the named bounded question with `answer_reconstruction` for `answer`, and present the proposal summary to the user for `adopt_or_reject`. Pass the exact observed generation to every mutation. A run must provide both its budget and deadline or set both to null.
 
+When a successful reconstruction result includes `review_resources`, consume the accompanying
+standard `ResourceLink` entries with `resources/read`. Each resource is an immutable local PNG
+bound to the exact observation, source index, byte size, and SHA-256. Verify those fields before
+displaying it. The overlay is `advisory_only`: it helps the user review landmarks, fitted
+primitives, and uncertainty, but it cannot accept a CAD draft, change Task/Revision/HEAD, or turn
+an uncalibrated image into dimensional truth. An empty list is valid before review evidence has
+been rendered; never fabricate a URI or fall back to an arbitrary local path.
+
 Call `adopt_reconstruction` only after the user chooses the displayed proposal. Adoption creates an ordinary `REQUIRE_REVIEW` CAD Task; it does not accept a draft or advance project HEAD. Continue that returned task through the normal task/review workflow. Use `reject_reconstruction` to retain a rejected record, or `delete_reconstruction` only when the user wants the draft and its bound local image source removed. Do not treat the deterministic default provider as real photo-to-CAD inference, and do not make this optional lifecycle the default when the host already sees the images.
 
 ## Artifact delivery
@@ -186,7 +194,7 @@ For WorkBuddy, register the released `vibecad` executable as a local stdio MCP
 server using its absolute path, approve that project-scoped server, and restart
 or resume the task after runtime readiness. WorkBuddy's native
 `ReadMcpResource` persists binary MCP Blob results and returns the saved path;
-consume the returned PDF/ZIP resource URI normally and do not invent an
+consume returned PNG/PDF/ZIP resource URIs normally and do not invent an
 arbitrary-filesystem fallback. When the host supports an allowed-tool list,
 exclude runtime maintenance tools from an autonomous CAD task. WorkBuddy may
 defer a large MCP tool surface behind `ToolSearch` and `DeferExecuteTool`; in a

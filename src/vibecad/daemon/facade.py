@@ -78,7 +78,7 @@ ALLOWED_APPLICATION_OPERATIONS = frozenset(
 )
 KERNEL_API_EPOCH = 1
 KERNEL_API_NAME = "vibecad.task-kernel"
-KERNEL_BUILD_ID = "vcad-s20.5-host-ingress"
+KERNEL_BUILD_ID = "vcad-a10-visual-review-mcp"
 
 _DIRECT_OPERATIONS = frozenset(
     {

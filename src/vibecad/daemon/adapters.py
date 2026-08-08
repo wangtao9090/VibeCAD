@@ -97,6 +97,7 @@ class LocalAgentClient:
         "_pid",
         "_reconnectable",
         "_release_root",
+        "_visual_review_root",
     )
 
     def __init__(
@@ -105,6 +106,7 @@ class LocalAgentClient:
         *,
         artifact_root: object | None = None,
         release_root: object | None = None,
+        visual_review_root: object | None = None,
         reconnectable: bool = False,
     ) -> None:
         if not callable(getattr(kernel, "call", None)) or not callable(
@@ -135,6 +137,19 @@ class LocalAgentClient:
             not canonical_release_root.is_absolute() or ".." in canonical_release_root.parts
         ):
             raise TypeError("release_root must be an absolute path")
+        if visual_review_root is None:
+            canonical_visual_review_root = None
+        elif type(visual_review_root) is str:
+            canonical_visual_review_root = Path(visual_review_root)
+        elif type(visual_review_root) is type(Path("/")):
+            canonical_visual_review_root = visual_review_root
+        else:
+            raise TypeError("visual_review_root must be an absolute path")
+        if canonical_visual_review_root is not None and (
+            not canonical_visual_review_root.is_absolute()
+            or ".." in canonical_visual_review_root.parts
+        ):
+            raise TypeError("visual_review_root must be an absolute path")
         if type(reconnectable) is not bool:
             raise TypeError("reconnectable must be a bool")
         self._kernel = kernel
@@ -142,6 +157,7 @@ class LocalAgentClient:
         self._reconnectable = reconnectable
         self._artifact_root = canonical_artifact_root
         self._release_root = canonical_release_root
+        self._visual_review_root = canonical_visual_review_root
         self._closed = False
         self._pid = os.getpid()
 
@@ -151,6 +167,7 @@ class LocalAgentClient:
             connect_or_start_local_kernel(),
             artifact_root=paths.data_root() / "artifacts",
             release_root=paths.data_root() / "releases",
+            visual_review_root=paths.visual_review_root(),
             reconnectable=True,
         )
         observed_daemon_id = client.daemon_id
@@ -167,6 +184,7 @@ class LocalAgentClient:
             connect_or_start_local_kernel(),
             artifact_root=paths.data_root() / "artifacts",
             release_root=paths.data_root() / "releases",
+            visual_review_root=paths.visual_review_root(),
             reconnectable=True,
         )
         return replacement._verified()
@@ -178,11 +196,13 @@ class LocalAgentClient:
         *,
         artifact_root: object | None = None,
         release_root: object | None = None,
+        visual_review_root: object | None = None,
     ) -> LocalAgentClient:
         client = cls(
             connect_existing_local_kernel(run_root),
             artifact_root=artifact_root,
             release_root=release_root,
+            visual_review_root=visual_review_root,
         )
         return client._verified()
 
@@ -510,6 +530,27 @@ class LocalAgentClient:
             return ReleaseStore(
                 root=self._release_root,
                 expected_identity=(value.st_dev, value.st_ino),
+            ).read_resource(uri)
+        except ImportError:
+            raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE) from None
+
+    def read_visual_review_resource(self, uri: object):
+        self._ensure_live()
+        if self._visual_review_root is None:
+            raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE)
+        try:
+            from vibecad.visual.review_store import VisualReviewArtifactStore
+            from vibecad.workflow.lease import LeaseRootTrust, ResourceLeaseManager
+
+            value = self._visual_review_root.lstat()
+            lock_root = self._visual_review_root.parent / "locks"
+            return VisualReviewArtifactStore(
+                root=self._visual_review_root,
+                expected_root_identity=(value.st_dev, value.st_ino),
+                lease_manager=ResourceLeaseManager(
+                    lock_root,
+                    trust=LeaseRootTrust.TRUSTED_LOCAL,
+                ),
             ).read_resource(uri)
         except ImportError:
             raise LocalAgentClientError(LocalAgentClientErrorCode.UNAVAILABLE) from None

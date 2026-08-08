@@ -218,7 +218,7 @@ AR-1 发现 S3-7 discovery 缺少 tool description，而且重复广播完整 ta
 `tools/list` 约 350 KB。S3-8 已补齐描述、从宿主发现投影中省略可选 output schema，并继续在服务端
 保留完整输出验证；当前固定 38-tool 完整 discovery frame 为 30,415 bytes，低于 32,768-byte
 上限；receipt 绑定的完整 public-surface digest 为
-`1353ab35c0dd1055890a9e0702a644a7e606719964831d583f6205679034fdbe`。direct operation 与稳定工具
+`6c1f226119f272e4bfcabd7364c3aa5c52c1f150a98387ba52443ddd26a7e689`。direct operation 与稳定工具
 重名会 fail closed。
 
 ## 6. Application 与 Task Kernel 分层
@@ -483,6 +483,17 @@ result 中返回带精确 MIME type 的 FCStd/STEP 标准 ResourceLink，并用 
 验证两个资源的发现、读取与保存。真实 Claude/Codex 文件体验仍未在主机中激活验收，不能用任意
 用户路径 copy-out 绕过 ArtifactStore，也不能把协议/包层结果升级为 host-verified 声明。
 
+视觉审核 PNG 使用独立 captured `visual_reviews/` 根和 URI：
+
+```text
+vibecad://visual-review/<visual_observation_id>/<source_index>.png
+```
+
+只有 successful reconstruction result 中已经绑定 observation digest、source index、PNG SHA-256 和
+byte size 的记录才会投影为标准 ResourceLink；`resources/read` 返回 `image/png` Blob。读取本地审核
+证据不启动 FreeCAD runtime。记录固定为 `advisory_only`，与 Artifact/Release 资源一样不泄露任意
+文件路径，但与 FCStd/STEP 不同，它不具备 CAD、Task、Revision 或 HEAD 权威。
+
 ## 10. Managed checkout 与 Workbench 接入缝
 
 `ManagedCheckoutStore` 可以从 HEAD 或 durable draft 创建只读来源绑定的私有 FCStd 副本，记录 source
@@ -537,7 +548,7 @@ verifier 与 HEAD 权威。详见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VER
 
 - tag、source、manifest、FreeCAD package、lock 和 managed server receipt 的目标版本为 0.9.0；公开工具 38 个，MCP 1.27.2，
   server epoch 4，FreeCAD 1.1.0；receipt public-surface digest 为
-  `1353ab35c0dd1055890a9e0702a644a7e606719964831d583f6205679034fdbe`；
+  `6c1f226119f272e4bfcabd7364c3aa5c52c1f150a98387ba52443ddd26a7e689`；
 - 固定 38-tool 完整 discovery frame 为 30,415 bytes。tool description 和 input
   schema 对宿主可见，完整 output validation 保留在服务端；
 - canonical skill 位于 `skills/vibecad-agent/`；source、sdist、MCPB 和 standalone skill archive 携带

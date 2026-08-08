@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from tests.test_visual_review_artifacts import _artifact
+from vibecad.daemon.adapters import LocalAgentClient
 from vibecad.visual.review_artifacts import encode_visual_review_artifact
 from vibecad.visual.review_store import (
     VisualReviewArtifactStore,
@@ -69,6 +70,29 @@ def test_publish_load_list_resource_and_restart_replay(tmp_path: Path) -> None:
         "review_" + first.observation_id.removeprefix("visual_observation_") + "_00.bin",
         "review_" + first.observation_id.removeprefix("visual_observation_") + "_01.bin",
     )
+
+
+def test_local_agent_client_reads_visual_review_from_captured_root(tmp_path: Path) -> None:
+    store, root, _locks = _store(tmp_path)
+    artifact = _artifact()
+    store.publish(artifact)
+
+    class Kernel:
+        def call(self, *_args, **_kwargs):
+            raise AssertionError("review resource reads must stay off the daemon protocol")
+
+        def close(self) -> None:
+            pass
+
+    client = LocalAgentClient(Kernel(), visual_review_root=root)
+    try:
+        resource = client.read_visual_review_resource(artifact.resource_uri)
+    finally:
+        client.close()
+
+    assert resource.uri == artifact.resource_uri
+    assert resource.data == artifact.overlay.png_bytes
+    assert resource.media_type == "image/png"
 
 
 def test_publish_same_identity_with_different_record_is_conflict(tmp_path: Path) -> None:

@@ -66,6 +66,7 @@ _ERROR_MESSAGES = {
 
 _RESOURCE_TEMPLATE = "vibecad://artifact/{materialization_id}/{artifact_id}"
 _RELEASE_RESOURCE_TEMPLATE = "vibecad://release/{release_id}/{file_name}"
+_VISUAL_REVIEW_RESOURCE_TEMPLATE = "vibecad://visual-review/{observation_id}/{source_index}.png"
 _RESOURCE_URI = re.compile(
     r"^vibecad://artifact/materialization_[0-9a-f]{64}/artifact_[0-9a-f]{32}$",
     re.ASCII,
@@ -74,6 +75,11 @@ _RELEASE_RESOURCE_URI = re.compile(
     r"^vibecad://release/release_[0-9a-f]{32}/"
     r"(?:assembly-drawing\.pdf|bom\.json|bom\.csv|manifest\.json|"
     r"validation-report\.json|vibecad-release\.zip)$",
+    re.ASCII,
+)
+_VISUAL_REVIEW_RESOURCE_URI = re.compile(
+    r"^vibecad://visual-review/visual_observation_[0-9a-f]{32}/"
+    r"(?:0|[1-9]|1[0-5])\.png$",
     re.ASCII,
 )
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$", re.ASCII)
@@ -259,6 +265,7 @@ _APPLICATION_METHODS = (
     "invoke_direct_operation_request",
     "read_artifact_resource",
     "read_release_resource",
+    "read_visual_review_resource",
 )
 
 
@@ -978,6 +985,56 @@ def _release_resource_links(envelope: dict[str, object]) -> list[types.ResourceL
     return links
 
 
+def _visual_review_resource_links(envelope: dict[str, object]) -> list[types.ResourceLink]:
+    result = envelope.get("result")
+    if type(result) is not dict:
+        raise TypeError("visual reconstruction result is invalid")
+    resources = result.get("review_resources")
+    if type(resources) is not list or len(resources) > 16:
+        raise TypeError("visual review resources are invalid")
+    fields = {
+        "source_index",
+        "observation_id",
+        "observation_digest",
+        "resource_uri",
+        "media_type",
+        "sha256",
+        "size_bytes",
+    }
+    links: list[types.ResourceLink] = []
+    seen: set[str] = set()
+    for item in resources:
+        if type(item) is not dict or set(item) != fields:
+            raise TypeError("visual review resource is invalid")
+        source_index = item["source_index"]
+        observation_id = item["observation_id"]
+        uri = item["resource_uri"]
+        if (
+            type(source_index) is not int
+            or not 0 <= source_index < 16
+            or type(observation_id) is not str
+            or type(uri) is not str
+            or uri != f"vibecad://visual-review/{observation_id}/{source_index}.png"
+            or _VISUAL_REVIEW_RESOURCE_URI.fullmatch(uri) is None
+            or uri in seen
+            or item["media_type"] != "image/png"
+            or type(item["size_bytes"]) is not int
+            or item["size_bytes"] <= 0
+        ):
+            raise TypeError("visual review resource is invalid")
+        seen.add(uri)
+        links.append(
+            types.ResourceLink(
+                type="resource_link",
+                name=f"visual-review-{source_index:02d}.png",
+                uri=uri,
+                mimeType="image/png",
+                size=item["size_bytes"],
+            )
+        )
+    return links
+
+
 def _call_result(name: str, envelope: object) -> types.CallToolResult:
     try:
         if (
@@ -1004,6 +1061,20 @@ def _call_result(name: str, envelope: object) -> types.CallToolResult:
             and envelope["result"]["materialized"] is True
         ):
             content.extend(_export_resource_links(envelope))
+        if (
+            name
+            in {
+                "create_reconstruction",
+                "get_reconstruction",
+                "run_reconstruction",
+                "answer_reconstruction",
+                "adopt_reconstruction",
+                "reject_reconstruction",
+            }
+            and envelope["ok"] is True
+            and "review_resources" in envelope["result"]
+        ):
+            content.extend(_visual_review_resource_links(envelope))
     except McpError:
         raise
     except BaseException:
@@ -1050,6 +1121,10 @@ async def _handle_list_resource_templates() -> types.ListResourceTemplatesResult
         resourceTemplates=[
             types.ResourceTemplate(name="artifact", uriTemplate=_RESOURCE_TEMPLATE),
             types.ResourceTemplate(name="release", uriTemplate=_RELEASE_RESOURCE_TEMPLATE),
+            types.ResourceTemplate(
+                name="visual-review",
+                uriTemplate=_VISUAL_REVIEW_RESOURCE_TEMPLATE,
+            ),
         ]
     )
 
@@ -1095,20 +1170,41 @@ async def _handle_call_tool(
 
 async def _handle_read_resource(uri: object) -> types.ReadResourceResult:
     if type(uri) is not str or not (
-        _RESOURCE_URI.fullmatch(uri) is not None or _RELEASE_RESOURCE_URI.fullmatch(uri) is not None
+        _RESOURCE_URI.fullmatch(uri) is not None
+        or _RELEASE_RESOURCE_URI.fullmatch(uri) is not None
+        or _VISUAL_REVIEW_RESOURCE_URI.fullmatch(uri) is not None
     ):
         raise _mcp_error(_RESOURCE_INVALID_IDENTIFIER)
-    guarded = _application_runtime_guard()
-    if guarded is not None:
-        raise _mcp_error(_RESOURCE_RUNTIME_UNAVAILABLE)
+    is_visual_review = _VISUAL_REVIEW_RESOURCE_URI.fullmatch(uri) is not None
+    if not is_visual_review:
+        guarded = _application_runtime_guard()
+        if guarded is not None:
+            raise _mcp_error(_RESOURCE_RUNTIME_UNAVAILABLE)
     if not _enter_application_effect():
         raise _mcp_error(_RESOURCE_RUNTIME_UNAVAILABLE)
     is_release = _RELEASE_RESOURCE_URI.fullmatch(uri) is not None
     try:
         resource_module = importlib.import_module(
-            "vibecad.application.releases" if is_release else "vibecad.application.artifacts"
+            "vibecad.visual.review_store"
+            if is_visual_review
+            else ("vibecad.application.releases" if is_release else "vibecad.application.artifacts")
         )
-        if is_release:
+        if is_visual_review:
+            ResourceError = resource_module.VisualReviewStoreError
+            ResourceErrorCode = resource_module.VisualReviewStoreErrorCode
+            error_mapping = {
+                ResourceErrorCode.INVALID_INPUT: _RESOURCE_INVALID_IDENTIFIER,
+                ResourceErrorCode.NOT_FOUND: _RESOURCE_UNAVAILABLE,
+                ResourceErrorCode.CONFLICT: _RESOURCE_INTERNAL_ERROR,
+                ResourceErrorCode.DELETED: _RESOURCE_UNAVAILABLE,
+                ResourceErrorCode.BUDGET_EXCEEDED: _RESOURCE_READ_LIMIT,
+                ResourceErrorCode.INTEGRITY_FAILURE: _RESOURCE_INTERNAL_ERROR,
+                ResourceErrorCode.STORE_FAILURE: _RESOURCE_INTERNAL_ERROR,
+                ResourceErrorCode.LEASE_UNAVAILABLE: _RESOURCE_INTERNAL_ERROR,
+                ResourceErrorCode.RECOVERY_REQUIRED: _RESOURCE_INTERNAL_ERROR,
+                ResourceErrorCode.DURABILITY_UNCERTAIN: _RESOURCE_INTERNAL_ERROR,
+            }
+        elif is_release:
             ResourceError = resource_module.ReleaseError
             ResourceErrorCode = resource_module.ReleaseErrorCode
             error_mapping = {
@@ -1139,9 +1235,13 @@ async def _handle_read_resource(uri: object) -> types.ReadResourceResult:
     try:
         application = _application_slot.get()
         content = (
-            application.read_release_resource(uri)
-            if is_release
-            else application.read_artifact_resource(uri)
+            application.read_visual_review_resource(uri)
+            if is_visual_review
+            else (
+                application.read_release_resource(uri)
+                if is_release
+                else application.read_artifact_resource(uri)
+            )
         )
     except ResourceError as error:
         raise _mcp_error(error_mapping.get(error.code, _RESOURCE_INTERNAL_ERROR)) from None
@@ -1150,13 +1250,19 @@ async def _handle_read_resource(uri: object) -> types.ReadResourceResult:
     except BaseException:
         raise _mcp_error(_RESOURCE_UNAVAILABLE) from None
     try:
-        if is_release:
+        if is_release or is_visual_review:
             if not (
                 type(getattr(content, "uri", None)) is str
-                and _RELEASE_RESOURCE_URI.fullmatch(content.uri) is not None
+                and (
+                    _VISUAL_REVIEW_RESOURCE_URI.fullmatch(content.uri)
+                    if is_visual_review
+                    else _RELEASE_RESOURCE_URI.fullmatch(content.uri)
+                )
+                is not None
                 and content.uri == uri
                 and type(getattr(content, "data", None)) is bytes
                 and type(getattr(content, "media_type", None)) is str
+                and (not is_visual_review or content.media_type == "image/png")
             ):
                 raise _mcp_error(_RESOURCE_INTERNAL_ERROR)
             return types.ReadResourceResult(
