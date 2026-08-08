@@ -119,7 +119,11 @@ def _request() -> CloudVisualRequest:
     )
 
 
-def _response_body(*, claim: dict[str, object] | None = None) -> bytes:
+def _response_body(
+    *,
+    claim: dict[str, object] | None = None,
+    features: list[dict[str, object]] | None = None,
+) -> bytes:
     selected = claim or {
         "name": "overall.width",
         "status": "confirmed",
@@ -130,7 +134,10 @@ def _response_body(*, claim: dict[str, object] | None = None) -> bytes:
         "description": "Readable dimension annotation.",
         "question": None,
     }
-    output_text = json.dumps({"claims": [selected]}, separators=(",", ":"))
+    output_text = json.dumps(
+        {"claims": [selected], "features": features or []},
+        separators=(",", ":"),
+    )
     return json.dumps(
         {
             "id": "resp_fixture_123",
@@ -205,6 +212,7 @@ def test_success_builds_one_strict_response_call_and_execution_receipt() -> None
     assert outcome.execution_receipt.request_sha256 == request.request_sha256
     assert outcome.execution_receipt.image_batch_sha256 == request.image_batch.manifest_sha256
     assert outcome.execution_receipt.total_tokens == 580
+    assert outcome.feature_evidence == ()
     assert sender.calls == 1
     assert sender.timeout_ms == 180_000
     assert sender.headers == {
@@ -218,6 +226,7 @@ def test_success_builds_one_strict_response_call_and_execution_receipt() -> None
     assert wire["reasoning"] == {"effort": "medium"}
     assert wire["text"]["format"]["type"] == "json_schema"
     assert wire["text"]["format"]["strict"] is True
+    assert wire["text"]["format"]["name"] == "vibecad_visual_observation_with_evidence_v1"
     content = wire["input"][0]["content"]
     assert "Never infer absolute size from an unscaled photo" in content[0]["text"]
     assert "coplanar" in content[0]["text"]
@@ -225,9 +234,100 @@ def test_success_builds_one_strict_response_call_and_execution_receipt() -> None
     assert "replan" in content[0]["text"]
     assert content[2]["type"] == "input_image"
     assert content[2]["image_url"].startswith("data:image/png;base64,")
+    assert "endpoint-inclusive normalized image positions" in content[0]["text"]
     assert "sk-test-value" not in sender.body.decode("utf-8")
     assert "sk-test-value" not in repr(transport)
     assert "sk-test-value" not in repr(outcome.execution_receipt)
+
+
+def test_success_parses_bounded_overview_feature_evidence() -> None:
+    request = _request()
+    feature = {
+        "local_feature_id": "outer_width_edge",
+        "source_index": 0,
+        "family": "line",
+        "points": [{"x": 0.2, "y": 0.4}, {"x": 0.8, "y": 0.4}],
+        "localization_uncertainty_norm": 0.01,
+        "claim_names": ["overall.width"],
+    }
+    sender = _Sender(OpenAIHttpResponse(status=200, body=_response_body(features=[feature])))
+
+    outcome = OpenAIResponsesVisualTransport("sk-test", sender=sender).invoke(
+        request,
+        timeout_ms=180_000,
+    )
+
+    assert outcome.kind is CloudVisualOutcomeKind.SUCCEEDED
+    assert outcome.value is not None
+    assert len(outcome.feature_evidence) == 1
+    evidence = outcome.feature_evidence[0]
+    assert evidence.local_feature_id == "outer_width_edge"
+    assert evidence.provider_image_id == request.image_batch.parts[0].id
+    assert evidence.claim_ids == (outcome.value.claims[0].id,)
+    assert tuple((point.x, point.y) for point in evidence.points) == (
+        (0.2, 0.4),
+        (0.8, 0.4),
+    )
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        {"source_index": 1},
+        {"local_feature_id": "bad feature id"},
+        {"points": []},
+        {"points": [{"x": 1.1, "y": 0.4}]},
+        {"localization_uncertainty_norm": 0},
+        {"claim_names": ["missing.claim"]},
+        {"claim_names": ["overall.width", "overall.width"]},
+    ),
+)
+def test_invalid_feature_evidence_fails_definitively_without_retry(replacement) -> None:
+    feature = {
+        "local_feature_id": "outer_width_edge",
+        "source_index": 0,
+        "family": "line",
+        "points": [{"x": 0.2, "y": 0.4}, {"x": 0.8, "y": 0.4}],
+        "localization_uncertainty_norm": 0.01,
+        "claim_names": ["overall.width"],
+    }
+    feature.update(replacement)
+    sender = _Sender(OpenAIHttpResponse(status=200, body=_response_body(features=[feature])))
+
+    outcome = OpenAIResponsesVisualTransport("sk-test", sender=sender).invoke(
+        _request(),
+        timeout_ms=180_000,
+    )
+
+    assert outcome.kind is CloudVisualOutcomeKind.DEFINITIVE_FAILURE
+    assert outcome.value is None
+    assert outcome.feature_evidence == ()
+    assert sender.calls == 1
+
+
+def test_duplicate_local_feature_key_is_rejected() -> None:
+    feature = {
+        "local_feature_id": "outer_width_edge",
+        "source_index": 0,
+        "family": "line",
+        "points": [{"x": 0.2, "y": 0.4}, {"x": 0.8, "y": 0.4}],
+        "localization_uncertainty_norm": 0.01,
+        "claim_names": ["overall.width"],
+    }
+    sender = _Sender(
+        OpenAIHttpResponse(
+            status=200,
+            body=_response_body(features=[feature, dict(feature)]),
+        )
+    )
+
+    outcome = OpenAIResponsesVisualTransport("sk-test", sender=sender).invoke(
+        _request(),
+        timeout_ms=180_000,
+    )
+
+    assert outcome.kind is CloudVisualOutcomeKind.DEFINITIVE_FAILURE
+    assert sender.calls == 1
 
 
 def test_blocking_unknown_becomes_a_bound_clarification_question() -> None:

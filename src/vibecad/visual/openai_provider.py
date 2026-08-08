@@ -2,8 +2,9 @@
 
 The transport owns only an in-memory API key and one HTTPS sender.  It turns a
 bounded provider-image batch into one Responses API call, accepts one strict
-JSON observation payload, and returns provider-neutral domain values.  It has
-no CAD, Task, revision, review, or durable-storage authority.
+JSON observation-and-feature payload, and returns provider-neutral domain
+values.  Coordinate features remain advisory and process-local.  The transport
+has no CAD, Task, revision, review, or durable-storage authority.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import base64
 import hashlib
 import http.client
 import json
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -24,6 +26,8 @@ from vibecad.visual.cloud_provider import (
     CloudVisualRequest,
     CloudVisualTransportOutcome,
 )
+from vibecad.visual.evidence import NormalizedEvidencePoint, ProviderFeatureEvidence
+from vibecad.visual.geometry_fit import PrimitiveFamily
 from vibecad.visual.provider import (
     VisualProviderExecutionReceipt,
     VisualProviderRuntimeProfile,
@@ -116,6 +120,15 @@ def _token_count(value: object) -> int:
     if type(value) is not int or not 0 <= value <= _MAX_SAFE_INTEGER:
         raise ValueError
     return value
+
+
+def _fraction(value: object, *, positive: bool = False) -> float:
+    if type(value) not in {int, float}:
+        raise ValueError
+    result = float(value)
+    if not math.isfinite(result) or not 0.0 <= result <= 1.0 or (positive and result <= 0.0):
+        raise ValueError
+    return result
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -220,9 +233,58 @@ _OBSERVATION_SCHEMA: dict[str, object] = {
                 ],
                 "additionalProperties": False,
             },
-        }
+        },
+        "features": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "local_feature_id": {"type": "string"},
+                    "source_index": {"type": "integer"},
+                    "family": {
+                        "type": "string",
+                        "enum": [item.value for item in PrimitiveFamily],
+                    },
+                    "points": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 64,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "x": {"type": "number", "minimum": 0, "maximum": 1},
+                                "y": {"type": "number", "minimum": 0, "maximum": 1},
+                            },
+                            "required": ["x", "y"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "localization_uncertainty_norm": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": 1,
+                    },
+                    "claim_names": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": [
+                    "local_feature_id",
+                    "source_index",
+                    "family",
+                    "points",
+                    "localization_uncertainty_norm",
+                    "claim_names",
+                ],
+                "additionalProperties": False,
+            },
+        },
     },
-    "required": ["claims"],
+    "required": ["claims", "features"],
     "additionalProperties": False,
 }
 
@@ -251,7 +313,15 @@ def _prompt(request: CloudVisualRequest) -> str:
         "concrete recapture or measurement. After a user resolves a hidden-geometry branch, replan "
         "from the complete evidence rather than silently patching an old candidate. "
         "Do not invent hidden geometry, do not propose CAD operations, and do not claim certainty "
-        "from blur, occlusion, or duplicate views. Emit at least one claim."
+        "from blur, occlusion, or duplicate views. Emit at least one claim. For visible planar "
+        "line, circle, ordered arc, or rotated-rectangle evidence, optionally emit feature points "
+        "on the full overview only. Coordinates are endpoint-inclusive normalized image "
+        "positions: top-left is (0,0), bottom-right is (1,1). Use two or more points for a line, "
+        "three or more "
+        "ordered boundary points for a circle or arc, and exactly four ordered corners for a "
+        "rotated rectangle. Link every feature to existing claim names. Do not emit feature "
+        "coordinates from a detail crop or for an occluded or ambiguous boundary. An empty "
+        "features array is valid and preferable to invented localization."
     )
 
 
@@ -280,7 +350,7 @@ def _request_body(request: CloudVisualRequest) -> bytes:
         "text": {
             "format": {
                 "type": "json_schema",
-                "name": "vibecad_visual_observation_v1",
+                "name": "vibecad_visual_observation_with_evidence_v1",
                 "strict": True,
                 "schema": _OBSERVATION_SCHEMA,
             }
@@ -315,9 +385,12 @@ def _output_text(response: dict[str, object]) -> str:
     return texts[0]
 
 
-def _observation(request: CloudVisualRequest, output_text: str) -> VisualObservation:
+def _visual_output(
+    request: CloudVisualRequest,
+    output_text: str,
+) -> tuple[VisualObservation, tuple[ProviderFeatureEvidence, ...]]:
     decoded = _object(_decode_json(output_text.encode("utf-8"), maximum=_MAX_OUTPUT_TEXT_BYTES))
-    if set(decoded) != {"claims"}:
+    if set(decoded) != {"claims", "features"}:
         raise ValueError
     source_count = len(
         {
@@ -367,7 +440,7 @@ def _observation(request: CloudVisualRequest, output_text: str) -> VisualObserva
             raise ValueError
         claims.append(claim)
     payload = request.invocation.payload
-    return VisualObservation(
+    observation = VisualObservation(
         reconstruction_id=payload["reconstruction_id"],
         generation=payload["generation"],
         image_set_id=payload["image_set_id"],
@@ -376,6 +449,78 @@ def _observation(request: CloudVisualRequest, output_text: str) -> VisualObserva
         claims=tuple(claims),
         questions=tuple(questions),
     )
+    claims_by_name = {claim.name: claim for claim in observation.claims}
+    overview_by_source = {
+        part.source_index: part
+        for part in request.image_parts
+        if part.kind is ProviderImagePartKind.OVERVIEW
+    }
+    features: list[ProviderFeatureEvidence] = []
+    feature_keys: set[tuple[int, str]] = set()
+    total_points = 0
+    for item in _list(decoded["features"], maximum=64):
+        feature_value = _object(item)
+        if set(feature_value) != {
+            "local_feature_id",
+            "source_index",
+            "family",
+            "points",
+            "localization_uncertainty_norm",
+            "claim_names",
+        }:
+            raise ValueError
+        source_index = feature_value["source_index"]
+        if type(source_index) is not int or source_index not in overview_by_source:
+            raise ValueError
+        raw_points = _list(feature_value["points"], maximum=64)
+        if not raw_points:
+            raise ValueError
+        points: list[NormalizedEvidencePoint] = []
+        for raw_point in raw_points:
+            point = _object(raw_point)
+            if set(point) != {"x", "y"}:
+                raise ValueError
+            points.append(
+                NormalizedEvidencePoint(
+                    x=_fraction(point["x"]),
+                    y=_fraction(point["y"]),
+                )
+            )
+        total_points += len(points)
+        if total_points > 512:
+            raise ValueError
+        raw_names = _list(feature_value["claim_names"], maximum=8)
+        if not raw_names:
+            raise ValueError
+        names = tuple(_text(name, maximum=128) for name in raw_names)
+        if len(names) != len(set(names)):
+            raise ValueError
+        try:
+            linked_claims = tuple(claims_by_name[name] for name in names)
+        except KeyError:
+            raise ValueError from None
+        if any(source_index not in claim.source_indices for claim in linked_claims):
+            raise ValueError
+        local_feature_id = _text(feature_value["local_feature_id"], maximum=64)
+        key = (source_index, local_feature_id)
+        if key in feature_keys:
+            raise ValueError
+        feature_keys.add(key)
+        features.append(
+            ProviderFeatureEvidence(
+                local_feature_id=local_feature_id,
+                source_index=source_index,
+                provider_image_id=overview_by_source[source_index].id,
+                family=PrimitiveFamily(feature_value["family"]),
+                points=tuple(points),
+                localization_uncertainty_norm=_fraction(
+                    feature_value["localization_uncertainty_norm"],
+                    positive=True,
+                ),
+                claim_ids=tuple(claim.id for claim in linked_claims),
+            )
+        )
+    return observation, tuple(features)
 
 
 def _diagnostic(code: str, message: str, *, retryable: bool = False) -> RuntimeDiagnostic:
@@ -470,7 +615,7 @@ class OpenAIResponsesVisualTransport:
             if total_tokens != input_tokens + output_tokens:
                 raise ValueError
             text = _output_text(decoded)
-            value = _observation(request, text)
+            value, feature_evidence = _visual_output(request, text)
             receipt = VisualProviderExecutionReceipt(
                 request_sha256=request.request_sha256,
                 image_batch_sha256=request.image_batch.manifest_sha256,
@@ -495,6 +640,7 @@ class OpenAIResponsesVisualTransport:
             kind=CloudVisualOutcomeKind.SUCCEEDED,
             value=value,
             execution_receipt=receipt,
+            feature_evidence=feature_evidence,
         )
 
 
