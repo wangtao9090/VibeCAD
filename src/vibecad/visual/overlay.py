@@ -9,12 +9,15 @@ their order is already semantic in the evidence contract.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 
-from vibecad.visual.contracts import ImageSet
+from vibecad.visual.contracts import MAX_IMAGE_SET_ITEMS, ImageSet
 from vibecad.visual.evidence import (
+    MAX_EVIDENCE_CLAIMS_PER_FEATURE,
     MAX_EVIDENCE_FEATURES,
+    MAX_EVIDENCE_POINTS_PER_FEATURE,
     MAX_EVIDENCE_TOTAL_POINTS,
     BoundFeatureEvidence,
     BoundVisualEvidence,
@@ -25,6 +28,12 @@ from vibecad.visual.geometry_fit import PrimitiveFamily
 VISUAL_OVERLAY_SCHEMA_VERSION = 1
 MAX_OVERLAY_ITEMS = MAX_EVIDENCE_FEATURES
 MAX_OVERLAY_TOTAL_POINTS = MAX_EVIDENCE_TOTAL_POINTS
+
+_LOCAL_FEATURE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_CLAIM_ID = re.compile(r"^visual_claim_[0-9a-f]{32}$")
+_IMAGE_SET_ID = re.compile(r"^image_set_[0-9a-f]{32}$")
+_OBSERVATION_ID = re.compile(r"^visual_observation_[0-9a-f]{32}$")
+_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 
 class VisualOverlayErrorCode(StrEnum):
@@ -78,6 +87,46 @@ class EvidenceOverlayItem:
     points: tuple[NormalizedEvidencePoint, ...]
     uncertainty_radius_norm: float
 
+    def __post_init__(self) -> None:
+        if type(self.source_index) is not int or not 0 <= self.source_index < MAX_IMAGE_SET_ITEMS:
+            _fail(VisualOverlayErrorCode.INVALID_INPUT, "/source_index")
+        if (
+            type(self.local_feature_id) is not str
+            or _LOCAL_FEATURE_ID.fullmatch(self.local_feature_id) is None
+        ):
+            _fail(VisualOverlayErrorCode.INVALID_INPUT, "/local_feature_id")
+        if type(self.family) is not PrimitiveFamily:
+            _fail(VisualOverlayErrorCode.INVALID_INPUT, "/family")
+        if (
+            type(self.geometry_kind) is not OverlayGeometryKind
+            or self.geometry_kind is not _geometry_kind(self.family)
+            or self.evidence_status is not OverlayEvidenceStatus.PROVIDER_PROPOSED
+        ):
+            _fail(VisualOverlayErrorCode.INVALID_INPUT, "/geometry_kind")
+        if (
+            type(self.claim_ids) is not tuple
+            or not 1 <= len(self.claim_ids) <= MAX_EVIDENCE_CLAIMS_PER_FEATURE
+            or len(set(self.claim_ids)) != len(self.claim_ids)
+            or any(
+                type(item) is not str or _CLAIM_ID.fullmatch(item) is None
+                for item in self.claim_ids
+            )
+        ):
+            _fail(VisualOverlayErrorCode.INVALID_INPUT, "/claim_ids")
+        object.__setattr__(self, "claim_ids", tuple(sorted(self.claim_ids)))
+        if (
+            type(self.points) is not tuple
+            or not 1 <= len(self.points) <= MAX_EVIDENCE_POINTS_PER_FEATURE
+            or any(type(item) is not NormalizedEvidencePoint for item in self.points)
+        ):
+            _fail(VisualOverlayErrorCode.INVALID_INPUT, "/points")
+        if type(self.uncertainty_radius_norm) not in {int, float}:
+            _fail(VisualOverlayErrorCode.INVALID_INPUT, "/uncertainty_radius_norm")
+        uncertainty = float(self.uncertainty_radius_norm)
+        if not math.isfinite(uncertainty) or not 0.0 < uncertainty <= 1.0:
+            _fail(VisualOverlayErrorCode.INVALID_INPUT, "/uncertainty_radius_norm")
+        object.__setattr__(self, "uncertainty_radius_norm", uncertainty)
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class VisualOverlayPlan:
@@ -88,6 +137,43 @@ class VisualOverlayPlan:
     observation_digest: str
     items: tuple[EvidenceOverlayItem, ...]
     schema_version: int = VISUAL_OVERLAY_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != VISUAL_OVERLAY_SCHEMA_VERSION
+        ):
+            _fail(VisualOverlayErrorCode.INVALID_INPUT, "/schema_version")
+        if type(self.image_set_id) is not str or _IMAGE_SET_ID.fullmatch(self.image_set_id) is None:
+            _fail(VisualOverlayErrorCode.INVALID_INPUT, "/image_set_id")
+        if (
+            type(self.observation_id) is not str
+            or _OBSERVATION_ID.fullmatch(self.observation_id) is None
+        ):
+            _fail(VisualOverlayErrorCode.INVALID_INPUT, "/observation_id")
+        for name in (
+            "image_set_manifest_sha256",
+            "image_batch_manifest_sha256",
+            "observation_digest",
+        ):
+            value = getattr(self, name)
+            if type(value) is not str or _DIGEST.fullmatch(value) is None:
+                _fail(VisualOverlayErrorCode.INVALID_INPUT, f"/{name}")
+        if (
+            type(self.items) is not tuple
+            or len(self.items) > MAX_OVERLAY_ITEMS
+            or any(type(item) is not EvidenceOverlayItem for item in self.items)
+            or sum(len(item.points) for item in self.items) > MAX_OVERLAY_TOTAL_POINTS
+        ):
+            _fail(VisualOverlayErrorCode.INVALID_INPUT, "/items")
+        keys = tuple((item.source_index, item.local_feature_id) for item in self.items)
+        if len(set(keys)) != len(keys):
+            _fail(VisualOverlayErrorCode.INVALID_INPUT, "/items")
+        object.__setattr__(
+            self,
+            "items",
+            tuple(sorted(self.items, key=lambda item: (item.source_index, item.local_feature_id))),
+        )
 
 
 def _geometry_kind(family: PrimitiveFamily) -> OverlayGeometryKind:

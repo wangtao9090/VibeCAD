@@ -1,12 +1,12 @@
 # VibeCAD Visual CAD 整体计划
 
-> 状态：**`VCAD-S30.1`–`VCAD-S42` 已完成；`VCAD-A09` 发布与四路线冲刺进行中**
+> 状态：**`v0.9.0` 已发布；A09 首批四路线能力已合入；视觉审核集成进行中**
 >
-> 更新：2026-08-07
+> 更新：2026-08-08
 >
-> 产品基线：已发布 `v0.8.0@6ee230f`；v0.9.0 候选锚点 `main@0361aff`
+> 产品基线：已发布 `v0.9.0@900ca1a`；当前锚点 `main@a8e6b94`
 >
-> 当前里程碑：`VCAD-S42` Semantic Edge Treatments 已合入 `main`
+> 当前里程碑：S43/S44、F10、M10、F20 首批能力已合入；继续闭合视觉 review workflow
 
 本文件是“单张/多张图片 → 可编辑 CAD 草图/参数化模型”能力线的短期活动真源。
 既有 Stage 3、P0-B、MRG1 和 P2 编排文件保持历史只读，不在其中继续追加命令、重试、
@@ -671,6 +671,29 @@ Chamfer、多点半径律、复杂 blend 和拓扑自动修复不在 S42。
 
 PR #18 已以 merge commit `5950da2` 合入，完整回归为 `5,950 passed, 133 deselected`，真实受管
 FreeCAD 慢速门为 13 passed；CI 的 lint/unit 与 runtime-integration 均通过。S42 完成。
+
+### VCAD-M10 — Planar Metrology and Review Evidence
+
+用户能力：对同一平面上的可见特征建立有来源、可审阅的测量与拟合证据；在进入 CAD Task 前看到
+Provider 提议的关键点、误差范围和局部几何，而不是只收到不可解释的最终参数。
+
+当前已完成的无权威内核包括：有界 DLT 平面标定、像素/平面双向映射、保守尺寸区间、最多 16 视图的
+一致/冲突/未知裁决；同一 plane-frame 下的跨视图绑定；确定性的清晰度、曝光、尺寸和近重复预检；以及
+调用方明确指定 primitive family 后的 line/circle/arc/rotated-rectangle 有界拟合。可选 Provider 路径在
+同一次调用中返回 claims 与 overview-normalized points，并把它们绑定到 ImageSet、派生图片 batch、
+VisualObservation 和 receipt；重启后没有 process-local evidence 时返回未知，不重新调用 Provider。
+
+视觉审核层现已包含严格的 normalized vector overlay plan，并增加本地 PNG 字节渲染：固定 family 颜色，
+仅 arc/rectangle 连接已声明为有序的点，line/circle 只显示 landmarks，同时显示定位不确定度。渲染输入
+必须与封存 normalized PNG 的尺寸、字节数和 SHA-256 完全一致；输出重新绑定 ImageSet、observation、
+source index、visual input id 和 PNG 摘要。该 PNG 只是 host-local resource 候选，不是 durable truth，
+目前尚未注册公共 MCP Resource，也不改变 ReconstructionDraft、Task、Revision/HEAD 或 CAD write
+authority。没有满足 exact eligible calibration 时，平面拟合继续返回 UNKNOWN；不得把 Provider 自报
+误差静默降为零来绕过门禁。
+
+候选完整视觉门为 306 passed（包含沙箱外 authenticated local-daemon 用例）。下一串行工作是把渲染
+字节接入一个只读 host-local resource，再冻结 advisory calibration 的持久化边界和 photo-to-CAD review
+workflow；真实图片端到端验收仍需用户重新附加已失效的临时照片路径。
 
 ### VCAD-F10 — Industrial Freeform Alpha
 

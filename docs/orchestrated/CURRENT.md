@@ -1,10 +1,10 @@
 # VibeCAD Active Plan — Visual CAD
 
-> Status: **v0.9.0 release candidate in progress; four-route sprint active**
+> Status: **v0.9.0 published; A09 first slices landed; Visual review integration active**
 >
-> Updated: 2026-08-07
+> Updated: 2026-08-08
 >
-> Repository anchor: `main@0361aff`; published tag `v0.8.0@6ee230f`
+> Repository anchor: `main@a8e6b94`; published tag `v0.9.0@900ca1a`
 >
 > Active plan: [`vibecad-visual-cad.md`](vibecad-visual-cad.md)
 >
@@ -55,6 +55,19 @@ must keep public MCP, Task/Revision durable schema, HEAD, and write authority
 unchanged. Any later pure-surface Revision profile, durable metrology v2, or
 authoritative Mesh/SubD payload remains an explicit integration decision instead
 of being smuggled into an independent module.
+
+The first A09 slices are now on `main`: S43 Pattern/Mirror, S44 native
+Draft/Thickness with edge-treatment tails, F10 freeform contracts plus reviewed
+Task integration, M10 planar metrology and cross-view fusion, and the F20
+crash-safe derived-artifact store. Q10 capture-quality preflight and G10 bounded
+line/circle/arc/rotated-rectangle fitting have also landed. The optional Provider
+path can now bind overview-normalized feature points to the exact ImageSet,
+derivative batch, observation, and receipt; exact eligible planar calibration can
+map those points into bounded primitive fits. The current follow-on adds a local
+PNG renderer for the bound evidence overlay. These results remain advisory: they
+do not mutate a Task, adopt a candidate, or advance HEAD. Host-resource exposure,
+durable calibration policy, and the final photo-to-CAD review workflow remain the
+next integration slices.
 
 On 2026-08-04 the user approved `VCAD-A04`. The public V1 envelope is now
 frozen to a single dimension-complete mechanical extruded or revolved part,
