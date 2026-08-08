@@ -49,6 +49,11 @@ from vibecad.visual.drafts import (
     derive_adoption_identity,
     reconstruction_payload,
 )
+from vibecad.visual.evidence_provider import (
+    VisualEvidenceProviderBinding,
+    VisualEvidenceProviderError,
+    VisualEvidenceProviderErrorCode,
+)
 from vibecad.visual.inputs import (
     VisualInputStore,
     VisualInputStoreError,
@@ -69,6 +74,10 @@ from vibecad.visual.reconstruction import (
     decode_reconstruction_proposal,
     decode_visual_observation,
     reconstruction_identity,
+)
+from vibecad.visual.review_workflow import (
+    VisualReviewCleanupPort,
+    VisualReviewRenderInput,
 )
 from vibecad.visual.store import ReconstructionDraftStore
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER
@@ -253,7 +262,7 @@ def _validate_provider_source_bindings(
 class VisualReconstructionService:
     """Coordinate the recoverable, provider-only portion of reconstruction."""
 
-    __slots__ = ("_adoption", "_drafts", "_inputs", "_provider")
+    __slots__ = ("_adoption", "_drafts", "_inputs", "_provider", "_review_cleanup")
 
     def __init__(
         self,
@@ -262,18 +271,24 @@ class VisualReconstructionService:
         drafts: ReconstructionDraftStore,
         provider: VisualProviderBinding,
         adoption: VisualAdoptionPort | None = None,
+        review_cleanup: VisualReviewCleanupPort | None = None,
     ) -> None:
         if (
             type(inputs) is not VisualInputStore
             or type(drafts) is not ReconstructionDraftStore
             or type(provider) is not VisualProviderBinding
             or (adoption is not None and not isinstance(adoption, VisualAdoptionPort))
+            or (
+                review_cleanup is not None
+                and not isinstance(review_cleanup, VisualReviewCleanupPort)
+            )
         ):
             raise TypeError("invalid visual reconstruction service composition")
         self._inputs = inputs
         self._drafts = drafts
         self._provider = provider
         self._adoption = adoption
+        self._review_cleanup = review_cleanup
 
     def _load_expected(
         self,
@@ -388,6 +403,50 @@ class VisualReconstructionService:
             if observation is None or proposal.observation.digest != observation.digest:
                 _fail(VisualServiceErrorCode.INVALID_STATE)
         return observation, proposal
+
+    def load_process_local_review_input(
+        self,
+        draft: ReconstructionDraft,
+    ) -> VisualReviewRenderInput | None:
+        """Return exact review inputs without replaying a lost Provider call."""
+
+        if type(draft) is not ReconstructionDraft:
+            raise TypeError("draft must be an exact ReconstructionDraft")
+        if not draft.provider_invocations or draft.observation_ref is None:
+            return None
+        record = draft.provider_invocations[-1]
+        if record.lifecycle is not RuntimeLifecycleState.SUCCEEDED or not record.is_terminal:
+            return None
+        invocation = self._invocation_for_record(draft, record, require_active=False)
+        result = self._provider.retrieve_result(invocation)
+        if result is None:
+            return None
+        try:
+            evidence_reader = VisualEvidenceProviderBinding(provider_binding=self._provider)
+        except VisualEvidenceProviderError as error:
+            if error.code is VisualEvidenceProviderErrorCode.INVALID_COMPOSITION:
+                return None
+            raise
+        evidence = evidence_reader.retrieve(invocation, result)
+        if evidence is None or not evidence.features:
+            return None
+        observation, _proposal = self.load_presentation(draft)
+        if (
+            observation is None
+            or observation.id != evidence.observation_id
+            or observation.digest != evidence.observation_digest
+            or observation.generation != evidence.generation
+        ):
+            _fail(VisualServiceErrorCode.PROVIDER_RECEIPT_MISMATCH)
+        image_set, normalized_images = self._inputs.read_provider_images_exact(
+            draft.image_set_id,
+            draft.image_set_manifest_sha256,
+        )
+        return VisualReviewRenderInput(
+            evidence=evidence,
+            image_set=image_set,
+            normalized_images=normalized_images,
+        )
 
     def run(
         self,
@@ -597,6 +656,12 @@ class VisualReconstructionService:
                 ReconstructionStatus.ADOPTED,
             }:
                 _fail(VisualServiceErrorCode.INVALID_STATE)
+            observation, _proposal = self.load_presentation(draft)
+            if self._review_cleanup is not None and observation is not None:
+                self._review_cleanup.delete_observation_exact(
+                    observation.id,
+                    observation.digest,
+                )
             cleanup = DeleteCleanup(
                 image_set_id=draft.image_set_id,
                 image_set_manifest_sha256=draft.image_set_manifest_sha256,
@@ -831,13 +896,16 @@ class VisualReconstructionService:
             successor,
         )
 
-    def _reconstruct_invocation(self, draft: ReconstructionDraft) -> RuntimeInvocation:
-        if not draft.provider_invocations:
-            _fail(VisualServiceErrorCode.INVALID_STATE)
-        record = draft.provider_invocations[-1]
+    def _invocation_for_record(
+        self,
+        draft: ReconstructionDraft,
+        record: ProviderInvocationRecord,
+        *,
+        require_active: bool,
+    ) -> RuntimeInvocation:
         runtime_profile = self._provider.runtime_profile
         if (
-            record.is_terminal
+            (require_active and record.is_terminal)
             or record.runtime != runtime_profile.identity
             or record.model != runtime_profile.model
             or record.model_version != runtime_profile.model_version
@@ -865,6 +933,15 @@ class VisualReconstructionService:
         ):
             _fail(VisualServiceErrorCode.INVALID_STATE)
         return invocation
+
+    def _reconstruct_invocation(self, draft: ReconstructionDraft) -> RuntimeInvocation:
+        if not draft.provider_invocations:
+            _fail(VisualServiceErrorCode.INVALID_STATE)
+        return self._invocation_for_record(
+            draft,
+            draft.provider_invocations[-1],
+            require_active=True,
+        )
 
     def _recover_after_exception(
         self,

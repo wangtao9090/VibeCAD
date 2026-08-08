@@ -32,6 +32,10 @@ from vibecad.visual.reconstruction import (
     VisualObservation,
     reconstruction_identity,
 )
+from vibecad.visual.review_store import (
+    VisualReviewStoreError,
+    VisualReviewStoreErrorCode,
+)
 from vibecad.visual.service import (
     VisualReconstructionService,
     VisualServiceError,
@@ -147,6 +151,18 @@ _DRAFT_ERROR_MAP = {
     ReconstructionDraftErrorCode.INTEGRITY_FAILURE: VisualApiErrorCode.INTEGRITY_FAILURE,
     ReconstructionDraftErrorCode.BUDGET_EXCEEDED: VisualApiErrorCode.RESOURCE_EXHAUSTED,
     ReconstructionDraftErrorCode.INVALID_TRANSITION: VisualApiErrorCode.INVALID_STATE,
+}
+_REVIEW_STORE_ERROR_MAP = {
+    VisualReviewStoreErrorCode.INVALID_INPUT: VisualApiErrorCode.INTERNAL_ERROR,
+    VisualReviewStoreErrorCode.NOT_FOUND: VisualApiErrorCode.NOT_FOUND,
+    VisualReviewStoreErrorCode.CONFLICT: VisualApiErrorCode.INTEGRITY_FAILURE,
+    VisualReviewStoreErrorCode.DELETED: VisualApiErrorCode.INVALID_STATE,
+    VisualReviewStoreErrorCode.BUDGET_EXCEEDED: VisualApiErrorCode.RESOURCE_EXHAUSTED,
+    VisualReviewStoreErrorCode.INTEGRITY_FAILURE: VisualApiErrorCode.INTEGRITY_FAILURE,
+    VisualReviewStoreErrorCode.STORE_FAILURE: VisualApiErrorCode.STORE_FAILURE,
+    VisualReviewStoreErrorCode.LEASE_UNAVAILABLE: VisualApiErrorCode.LEASE_UNAVAILABLE,
+    VisualReviewStoreErrorCode.RECOVERY_REQUIRED: VisualApiErrorCode.RECOVERY_REQUIRED,
+    VisualReviewStoreErrorCode.DURABILITY_UNCERTAIN: VisualApiErrorCode.RECOVERY_REQUIRED,
 }
 
 
@@ -539,6 +555,8 @@ class VisualApi:
             return _failure(_ApiFailure(_SERVICE_ERROR_MAP[error.code]))
         except VisualInputStoreError as error:
             return _failure(_ApiFailure(_INPUT_ERROR_MAP[error.code]))
+        except VisualReviewStoreError as error:
+            return _failure(_ApiFailure(_REVIEW_STORE_ERROR_MAP[error.code]))
         except ReconstructionDraftStoreError as error:
             return _failure(_ApiFailure(_DRAFT_STORE_ERROR_MAP[error.code]))
         except ReconstructionDraftError as error:

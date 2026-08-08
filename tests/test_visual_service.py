@@ -50,11 +50,13 @@ from vibecad.visual.contracts import (
     ViewRole,
 )
 from vibecad.visual.drafts import BaseHeadBinding
+from vibecad.visual.evidence import NormalizedEvidencePoint, ProviderFeatureEvidence
 from vibecad.visual.fake_provider import (
     DeterministicFakeVisualProvider,
     FakeVisualFixture,
     FakeVisualOutcomeKind,
 )
+from vibecad.visual.geometry_fit import PrimitiveFamily
 from vibecad.visual.inputs import (
     DescriptorSource,
     ImageIngress,
@@ -407,6 +409,130 @@ class _CloudObservationTransport:
                 transport_timeout_ms=timeout_ms,
             ),
         )
+
+
+class _CloudFeatureTransport:
+    __slots__ = ("calls",)
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke(self, request, *, timeout_ms):
+        self.calls += 1
+        assert timeout_ms == 1_000
+        observation = _observation(request.invocation)
+        return CloudVisualTransportOutcome(
+            kind=CloudVisualOutcomeKind.SUCCEEDED,
+            value=observation,
+            execution_receipt=VisualProviderExecutionReceipt(
+                request_sha256=request.request_sha256,
+                image_batch_sha256=request.image_batch.manifest_sha256,
+                response_id_sha256="1" * 64,
+                response_output_sha256="2" * 64,
+                response_model=request.image_batch.profile.model,
+                data_policy_profile=request.image_batch.profile.data_policy_profile,
+                input_tokens=100,
+                output_tokens=20,
+                total_tokens=120,
+                transport_timeout_ms=timeout_ms,
+            ),
+            feature_evidence=(
+                ProviderFeatureEvidence(
+                    local_feature_id="overall.depth.edge",
+                    source_index=0,
+                    provider_image_id=request.image_batch.parts[0].id,
+                    family=PrimitiveFamily.LINE,
+                    points=(
+                        NormalizedEvidencePoint(x=0.2, y=0.4),
+                        NormalizedEvidencePoint(x=0.8, y=0.4),
+                    ),
+                    localization_uncertainty_norm=0.01,
+                    claim_ids=(observation.claims[0].id,),
+                ),
+            ),
+        )
+
+
+def _cloud_profiles():
+    runtime_profile = VisualProviderRuntimeProfile(
+        identity=RuntimeIdentity(family="visual", provider="candidate_cloud", version="1.0"),
+        model="vision-model",
+        model_version="2026-08-04",
+        execution_profile="cloud_provider",
+        network=True,
+    )
+    image_profile = VisualProviderCapabilityProfile(
+        provider="candidate_cloud",
+        model="vision-model",
+        model_version="2026-08-04",
+        data_policy_profile="personal-default",
+        max_source_images=16,
+        max_image_parts=20,
+        max_image_bytes=2 * 1024 * 1024,
+        max_batch_image_bytes=20 * 1024 * 1024,
+        preferred_long_edge=1568,
+        max_long_edge=2000,
+        detail=ProviderImageDetail.HIGH,
+        supports_detail_crops=True,
+        transport_timeout_ms=1_000,
+    )
+    return runtime_profile, image_profile
+
+
+def test_process_local_review_input_uses_exact_sealed_bytes_without_provider_replay(
+    tmp_path: Path,
+) -> None:
+    inputs, drafts = _stores(tmp_path)
+    image_set = _sealed_image_set(
+        tmp_path,
+        inputs,
+        processing_authorization=ProcessingAuthorization.CLOUD_PROVIDER,
+    )
+    runtime_profile, image_profile = _cloud_profiles()
+    transport = _CloudFeatureTransport()
+    provider = CloudVisualProvider(
+        runtime_profile=runtime_profile,
+        image_profile=image_profile,
+        image_reader=inputs.read_provider_images_exact,
+        transport=transport,
+    )
+    service = _service(inputs, drafts, provider)
+    created = _create(service, image_set)
+    completed = service.run(
+        created.reconstruction_id,
+        expected_generation=created.generation,
+        budget=_budget(),
+        deadline_ms=2_000_000_000_000,
+    )
+
+    value = service.load_process_local_review_input(completed)
+
+    assert value is not None
+    assert value.image_set == image_set
+    assert (
+        value.normalized_images
+        == inputs.read_provider_images_exact(
+            image_set.id,
+            image_set.manifest_sha256,
+        )[1]
+    )
+    assert value.evidence.observation_id == completed.observation_ref.id
+    assert value.evidence.features[0].local_feature_id == "overall.depth.edge"
+    assert transport.calls == provider.transport_count == 1
+
+    fresh_transport = _CloudFeatureTransport()
+    fresh_service = _service(
+        inputs,
+        drafts,
+        CloudVisualProvider(
+            runtime_profile=runtime_profile,
+            image_profile=image_profile,
+            image_reader=inputs.read_provider_images_exact,
+            transport=fresh_transport,
+        ),
+    )
+    assert fresh_service.load_process_local_review_input(completed) is None
+    assert fresh_transport.calls == 0
 
 
 def test_cloud_authorization_selects_dynamic_provider_and_preserves_durable_identity(

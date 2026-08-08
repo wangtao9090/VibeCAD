@@ -232,6 +232,7 @@ class AgentApplication:
         "_visual_gate",
         "_visual_inputs",
         "_visual_provider_factory",
+        "_visual_review_port",
         "_visual_reviews",
         "_visual_service",
     )
@@ -325,6 +326,7 @@ class AgentApplication:
         self._release_api = None
         self._visual_inputs = None
         self._visual_drafts = None
+        self._visual_review_port = None
         self._visual_reviews = None
         self._visual_adoption = None
         self._visual_service = None
@@ -638,8 +640,10 @@ class AgentApplication:
                     ApplicationVisualAdoptionPort,
                 )
                 from vibecad.application.visual_api import VisualApi
+                from vibecad.application.visual_review import ApplicationVisualReviewPort
                 from vibecad.visual.inputs import VisualInputStore
                 from vibecad.visual.provider import VisualProviderBinding
+                from vibecad.visual.review_store import VisualReviewArtifactStore
                 from vibecad.visual.service import VisualReconstructionService
                 from vibecad.visual.store import ReconstructionDraftStore
 
@@ -664,6 +668,18 @@ class AgentApplication:
                 adoption = self._visual_adoption
                 if adoption is None:
                     adoption = ApplicationVisualAdoptionPort(application=self)
+                review_store = self._visual_reviews
+                if review_store is None:
+                    review_store = VisualReviewArtifactStore(
+                        root=self._layout.visual_reviews,
+                        expected_root_identity=self._layout.identity_for(
+                            self._layout.visual_reviews
+                        ),
+                        lease_manager=self._lease_manager,
+                    )
+                review_port = self._visual_review_port
+                if review_port is None:
+                    review_port = ApplicationVisualReviewPort(store=review_store)
                 if service is None:
                     provider = self._visual_provider_factory()
                     service = VisualReconstructionService(
@@ -671,12 +687,15 @@ class AgentApplication:
                         drafts=drafts,
                         provider=VisualProviderBinding(provider=provider),
                         adoption=adoption,
+                        review_cleanup=review_port,
                     )
                 if api is None:
                     api = VisualApi(service=service)
                 self._visual_inputs = inputs
                 self._visual_drafts = drafts
                 self._visual_adoption = adoption
+                self._visual_reviews = review_store
+                self._visual_review_port = review_port
                 self._visual_service = service
                 self._visual_api = api
             return api, service
@@ -736,6 +755,39 @@ class AgentApplication:
         try:
             draft = service.get(reconstruction_id)
             observation, _proposal = service.load_presentation(draft)
+            if observation is not None:
+                from vibecad.application.visual_review import ApplicationVisualReviewPort
+                from vibecad.visual.evidence import VisualEvidenceError
+                from vibecad.visual.evidence_provider import VisualEvidenceProviderError
+                from vibecad.visual.inputs import VisualInputStoreError
+                from vibecad.visual.overlay import VisualOverlayError
+                from vibecad.visual.overlay_render import OverlayRenderError
+                from vibecad.visual.review_artifacts import VisualReviewArtifactError
+                from vibecad.visual.review_store import VisualReviewStoreError
+                from vibecad.visual.service import VisualReconstructionService
+
+                review_port = self._visual_review_port
+                if (
+                    type(service) is VisualReconstructionService
+                    and type(review_port) is ApplicationVisualReviewPort
+                ):
+                    try:
+                        review_port.publish_process_local_evidence(
+                            service=service,
+                            draft=draft,
+                        )
+                    except (
+                        VisualEvidenceError,
+                        VisualEvidenceProviderError,
+                        VisualInputStoreError,
+                        VisualOverlayError,
+                        OverlayRenderError,
+                        VisualReviewArtifactError,
+                        VisualReviewStoreError,
+                    ):
+                        # Review images are advisory.  Existing durable records
+                        # remain readable even if same-process publication fails.
+                        pass
             records = (
                 ()
                 if observation is None

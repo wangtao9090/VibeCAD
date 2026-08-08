@@ -693,12 +693,18 @@ ReconstructionDraft、Task、Revision/HEAD 或 CAD write authority，也不会�
 exact eligible calibration 时，平面拟合继续返回 UNKNOWN；不得把 Provider 自报误差静默降为零来绕过
 门禁。
 
-Application/MCP 切片现已实现：captured `visual_reviews/` 根属于 application data layout；成功的
-reconstruction result 可带至多 16 个严格 `review_resources` 并投影为标准 PNG ResourceLink；
-`resources/read` 返回 binary Blob，且纯本地审核读取不会启动 FreeCAD。Codex、Claude 与 WorkBuddy
-共享同一 URI/schema，不增加宿主专用公开工具。当前候选仍不自动从 Provider evidence 生成并发布记录，
-也尚未把 review 删除串入 reconstruction 删除事务；这两项由下一 photo-to-CAD review workflow 切片闭合，
-因此不得把本候选单独宣称为普通照片端到端产品能力。
+Application/MCP 切片已由 PR #36 合入 `main@b0d229f`：captured `visual_reviews/` 根属于 application
+data layout；成功的 reconstruction result 可带至多 16 个严格 `review_resources` 并投影为标准 PNG
+ResourceLink；`resources/read` 返回 binary Blob，且纯本地审核读取不会启动 FreeCAD。Codex、Claude 与
+WorkBuddy 共享同一 URI/schema，不增加宿主专用公开工具。
+
+当前 follow-on 候选把该资源面闭合为应用工作流：只有 durable observation/proposal 提交完成后，才从同一
+进程中已绑定到 exact invocation/result/receipt 的 Provider evidence 读取坐标，并用封存 normalized PNG
+生成、幂等发布审核图；进程重启后若 evidence 不在内存中，则只返回既有记录，绝不重放 Provider 调用。
+reconstruction 删除会先通过 application-owned cleanup port 发布 observation 永久墓碑，再提交 draft
+tombstone 和删除源图，因此中途失败可按同一 generation 重试。该候选不新增 MCP tool、public/durable
+schema、Task/Revision/HEAD 权威或 CAD 写能力；完成代码门也仍不能单独宣称真实照片端到端结果，后者等待
+用户重新附图后的受控 E2E gate。
 
 ### VCAD-F10 — Industrial Freeform Alpha
 

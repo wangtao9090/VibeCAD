@@ -4,7 +4,7 @@
 >
 > Updated: 2026-08-08
 >
-> Repository anchor: `main@78f4904`; published tag `v0.9.0@900ca1a`
+> Repository anchor: `main@b0d229f`; published tag `v0.9.0@900ca1a`
 >
 > Active plan: [`vibecad-visual-cad.md`](vibecad-visual-cad.md)
 >
@@ -64,14 +64,16 @@ line/circle/arc/rotated-rectangle fitting have also landed. The optional Provide
 path can now bind overview-normalized feature points to the exact ImageSet,
 derivative batch, observation, and receipt; exact eligible planar calibration can
 map those points into bounded primitive fits. A local renderer now seals
-deterministic PNG review overlays on `main`. The active follow-on stores each
-overlay as an immutable, self-checking advisory record with restart recovery and
-observation-level deletion; it deliberately does not reuse Task/Revision/HEAD
-authority. The active candidate adds an application-owned `visual_reviews/` root,
-strict reconstruction-result resource metadata, standard PNG ResourceLinks, and
-`resources/read` Blob delivery without starting FreeCAD. Automatic evidence render/
-publish, reconstruction-delete cleanup, durable calibration policy, and the final
-photo-to-CAD review workflow remain the next integration slices.
+deterministic PNG review overlays on `main`. Each overlay is stored as an immutable,
+self-checking advisory record with restart recovery and observation-level deletion;
+it deliberately does not reuse Task/Revision/HEAD authority. PR #36 added the
+application-owned `visual_reviews/` root, strict reconstruction-result resource
+metadata, standard PNG ResourceLinks, and `resources/read` Blob delivery without
+starting FreeCAD. The active follow-on candidate now generates and publishes those
+records from exact process-local Provider evidence after the durable observation is
+committed, never replays a lost Provider call after restart, and tombstones review
+records before reconstruction source deletion. Durable calibration policy and the
+final real-photo-to-CAD review outcome remain later integration gates.
 
 On 2026-08-04 the user approved `VCAD-A04`. The public V1 envelope is now
 frozen to a single dimension-complete mechanical extruded or revolved part,
