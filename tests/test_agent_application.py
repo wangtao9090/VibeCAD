@@ -297,6 +297,7 @@ def test_data_layout_creates_only_fixed_private_store_roots(tmp_path: Path):
             layout.releases,
             layout.visual_inputs,
             layout.reconstruction_drafts,
+            layout.visual_reviews,
         )
     ) == (
         "locks",
@@ -308,6 +309,7 @@ def test_data_layout_creates_only_fixed_private_store_roots(tmp_path: Path):
         "releases",
         "visual_inputs",
         "reconstruction_drafts",
+        "visual_reviews",
     )
     for path in (
         layout.root,
@@ -320,6 +322,7 @@ def test_data_layout_creates_only_fixed_private_store_roots(tmp_path: Path):
         layout.releases,
         layout.visual_inputs,
         layout.reconstruction_drafts,
+        layout.visual_reviews,
     ):
         value = path.lstat()
         assert stat.S_ISDIR(value.st_mode)
@@ -348,6 +351,7 @@ def test_data_layout_adds_visual_roots_without_replacing_legacy_siblings(tmp_pat
     assert {name: (data / name).stat().st_ino for name in legacy_names} == before
     assert layout.visual_inputs.is_dir()
     assert layout.reconstruction_drafts.is_dir()
+    assert layout.visual_reviews.is_dir()
 
 
 def test_data_layout_concurrent_first_open_validates_the_created_winner(
@@ -545,6 +549,7 @@ def test_captured_layout_composition_runs_recovery_between_full_identity_checks(
         layout.releases,
         layout.visual_inputs,
         layout.reconstruction_drafts,
+        layout.visual_reviews,
     )
     events: list[object] = []
     original_require_current = ApplicationDataLayout.require_current

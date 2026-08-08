@@ -768,6 +768,7 @@ def test_visual_reconstruction_schemas_are_closed_path_free_and_bounded() -> Non
             "questions",
             "proposal_summary",
             "adopted_task_id",
+            "review_resources",
         )
 
     create = specs["create_reconstruction"].input_schema
@@ -2422,6 +2423,75 @@ def test_successful_export_returns_text_and_exact_typed_resource_links(monkeypat
     ]
 
 
+def test_visual_reconstruction_returns_exact_png_resource_links(monkeypatch) -> None:
+    from mcp import types
+
+    server = _server_module()
+    reconstruction_id = "reconstruction_" + "1" * 32
+    observation_id = "visual_observation_" + "2" * 32
+    uri = f"vibecad://visual-review/{observation_id}/0.png"
+    envelope = {
+        "schema_version": 1,
+        "ok": True,
+        "result": {
+            "schema_version": 1,
+            "reconstruction_id": reconstruction_id,
+            "status": "proposed",
+            "generation": 2,
+            "next_action": "adopt_or_reject",
+            "questions": [],
+            "proposal_summary": {
+                "part_type": "mechanical bracket",
+                "summary": "Calibrated advisory reconstruction.",
+            },
+            "review_resources": [
+                {
+                    "source_index": 0,
+                    "observation_id": observation_id,
+                    "observation_digest": "3" * 64,
+                    "resource_uri": uri,
+                    "media_type": "image/png",
+                    "sha256": "4" * 64,
+                    "size_bytes": 321,
+                }
+            ],
+        },
+        "error": None,
+    }
+    arguments = {"schema_version": 1, "reconstruction_id": reconstruction_id}
+    calls: list[dict[str, object]] = []
+
+    class VisualApplication:
+        def get_reconstruction_request(self, value):
+            calls.append(value)
+            return envelope
+
+    class ReadySlot:
+        def get(self):
+            return VisualApplication()
+
+    monkeypatch.setattr(server, "_application_slot", ReadySlot())
+    monkeypatch.setattr(server, "_application_runtime_guard", lambda: None)
+
+    result = anyio.run(server._handle_call_tool, "get_reconstruction", arguments)
+
+    assert calls == [arguments]
+    assert result.structuredContent == envelope
+    assert [type(item) for item in result.content] == [types.TextContent, types.ResourceLink]
+    assert result.content[1].model_dump(by_alias=True, exclude_none=True, mode="json") == {
+        "name": "visual-review-00.png",
+        "uri": uri,
+        "mimeType": "image/png",
+        "size": 321,
+        "type": "resource_link",
+    }
+    replayed_create = server._call_result("create_reconstruction", envelope)
+    assert [type(item) for item in replayed_create.content] == [
+        types.TextContent,
+        types.ResourceLink,
+    ]
+
+
 @pytest.mark.parametrize("approved", [False, True])
 def test_release_tools_return_preview_and_approval_gated_package_links(
     monkeypatch,
@@ -3273,6 +3343,7 @@ def test_low_level_resource_handlers_return_exact_sdk_blob_and_use_app_once(monk
     assert [item.uriTemplate for item in templates.resourceTemplates] == [
         "vibecad://artifact/{materialization_id}/{artifact_id}",
         "vibecad://release/{release_id}/{file_name}",
+        "vibecad://visual-review/{observation_id}/{source_index}.png",
     ]
     assert type(result) is types.ReadResourceResult
     assert result.contents == [
@@ -3317,6 +3388,46 @@ def test_release_resource_handler_returns_exact_binary_blob_and_mime(monkeypatch
             uri=uri,
             blob=base64.b64encode(raw).decode("ascii"),
             mimeType="application/pdf",
+        )
+    ]
+    assert calls == [uri]
+
+
+def test_visual_review_resource_returns_png_blob_without_cad_runtime_guard(monkeypatch) -> None:
+    import base64
+
+    from mcp import types
+
+    from vibecad.visual.review_artifacts import VisualReviewResource
+
+    server = _server_module()
+    uri = "vibecad://visual-review/visual_observation_" + "1" * 32 + "/0.png"
+    raw = b"\x89PNG\r\n\x1a\nreview-evidence"
+    calls: list[str] = []
+
+    class VisualApplication:
+        def read_visual_review_resource(self, value):
+            calls.append(value)
+            return VisualReviewResource(uri=value, data=raw)
+
+    class ReadySlot:
+        def get(self):
+            return VisualApplication()
+
+    monkeypatch.setattr(server, "_application_slot", ReadySlot())
+    monkeypatch.setattr(
+        server,
+        "_application_runtime_guard",
+        lambda: (_ for _ in ()).throw(AssertionError("visual PNG must not start FreeCAD")),
+    )
+
+    result = anyio.run(server._handle_read_resource, uri)
+
+    assert result.contents == [
+        types.BlobResourceContents(
+            uri=uri,
+            blob=base64.b64encode(raw).decode("ascii"),
+            mimeType="image/png",
         )
     ]
     assert calls == [uri]
@@ -3424,6 +3535,59 @@ def test_release_resource_errors_have_complete_fixed_mapping(
 
     monkeypatch.setattr(server, "_application_slot", ReadySlot())
     monkeypatch.setattr(server, "_application_runtime_guard", lambda: None)
+    with pytest.raises(McpError) as caught:
+        anyio.run(server._handle_read_resource, uri)
+
+    assert (caught.value.error.code, caught.value.error.message) == expected
+    assert calls == [uri]
+
+
+@pytest.mark.parametrize(
+    ("code_name", "expected"),
+    [
+        ("INVALID_INPUT", (-32602, "Artifact resource identifier is invalid.")),
+        ("NOT_FOUND", (-32002, "Artifact resource is unavailable.")),
+        ("CONFLICT", (-32603, "Artifact resource could not be read.")),
+        ("DELETED", (-32002, "Artifact resource is unavailable.")),
+        ("BUDGET_EXCEEDED", (-32001, "Artifact resource exceeds the read limit.")),
+        ("INTEGRITY_FAILURE", (-32603, "Artifact resource could not be read.")),
+        ("STORE_FAILURE", (-32603, "Artifact resource could not be read.")),
+        ("LEASE_UNAVAILABLE", (-32603, "Artifact resource could not be read.")),
+        ("RECOVERY_REQUIRED", (-32603, "Artifact resource could not be read.")),
+        ("DURABILITY_UNCERTAIN", (-32603, "Artifact resource could not be read.")),
+    ],
+)
+def test_visual_review_resource_errors_have_complete_fixed_mapping(
+    monkeypatch,
+    code_name: str,
+    expected: tuple[int, str],
+) -> None:
+    from mcp.shared.exceptions import McpError
+
+    from vibecad.visual.review_store import (
+        VisualReviewStoreError,
+        VisualReviewStoreErrorCode,
+    )
+
+    server = _server_module()
+    uri = "vibecad://visual-review/visual_observation_" + "1" * 32 + "/0.png"
+    calls: list[str] = []
+
+    class FailingApplication:
+        def read_visual_review_resource(self, value):
+            calls.append(value)
+            raise VisualReviewStoreError(getattr(VisualReviewStoreErrorCode, code_name))
+
+    class ReadySlot:
+        def get(self):
+            return FailingApplication()
+
+    monkeypatch.setattr(server, "_application_slot", ReadySlot())
+    monkeypatch.setattr(
+        server,
+        "_application_runtime_guard",
+        lambda: (_ for _ in ()).throw(AssertionError("visual PNG must not start FreeCAD")),
+    )
     with pytest.raises(McpError) as caught:
         anyio.run(server._handle_read_resource, uri)
 

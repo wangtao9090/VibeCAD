@@ -689,14 +689,16 @@ VisualObservation 和 receipt；重启后没有 process-local evidence 时返回
 source index、visual input id 和 PNG 摘要。当前持久化切片把每个视图封装为一个 immutable、canonical、
 self-checking record，并使用 observation-level 永久墓碑完成显式删除；首次读取会先完成有界 stage/delete
 恢复，错误 observation digest 不能发布删除意图。记录权威固定为 `advisory_only`，不会改变
-ReconstructionDraft、Task、Revision/HEAD 或 CAD write authority，也不会把 PNG 当作几何真值。当前仍未
-注册公共 MCP Resource。没有满足 exact eligible calibration 时，平面拟合继续返回 UNKNOWN；不得把
-Provider 自报误差静默降为零来绕过门禁。
+ReconstructionDraft、Task、Revision/HEAD 或 CAD write authority，也不会把 PNG 当作几何真值。没有满足
+exact eligible calibration 时，平面拟合继续返回 UNKNOWN；不得把 Provider 自报误差静默降为零来绕过
+门禁。
 
-当前完整视觉门为 344 passed（包含沙箱外 authenticated local-daemon 用例）；持久化 focused/overlay 门为
-40 passed。下一串行工作是把已封存 PNG 接入 application-owned read-only Resource 并投影为 MCP
-`resources/read`，再冻结 advisory calibration 的持久化边界和 photo-to-CAD review workflow；真实图片
-端到端验收仍需用户重新附加已失效的临时照片路径。
+Application/MCP 切片现已实现：captured `visual_reviews/` 根属于 application data layout；成功的
+reconstruction result 可带至多 16 个严格 `review_resources` 并投影为标准 PNG ResourceLink；
+`resources/read` 返回 binary Blob，且纯本地审核读取不会启动 FreeCAD。Codex、Claude 与 WorkBuddy
+共享同一 URI/schema，不增加宿主专用公开工具。当前候选仍不自动从 Provider evidence 生成并发布记录，
+也尚未把 review 删除串入 reconstruction 删除事务；这两项由下一 photo-to-CAD review workflow 切片闭合，
+因此不得把本候选单独宣称为普通照片端到端产品能力。
 
 ### VCAD-F10 — Industrial Freeform Alpha
 

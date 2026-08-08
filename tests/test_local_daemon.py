@@ -962,7 +962,7 @@ def test_real_client_authenticates_and_claims_one_path_bound_checkout_grant() ->
             },
             "implementation": {
                 "package_version": "0.9.0",
-                "build_id": "vcad-s20.5-host-ingress",
+                "build_id": "vcad-a10-visual-review-mcp",
             },
         }
         capabilities = client.call(

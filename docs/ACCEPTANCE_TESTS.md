@@ -181,7 +181,7 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 2. runtime receipt、status 与 server handshake 使用同一 VibeCAD 版本；
 3. private server epoch 为 4，runtime receipt 的 public-surface digest 绑定 description、input/output
    enforcement schema 与 annotations；当前 SHA-256 为
-   `1353ab35c0dd1055890a9e0702a644a7e606719964831d583f6205679034fdbe`；
+   `6c1f226119f272e4bfcabd7364c3aa5c52c1f150a98387ba52443ddd26a7e689`；
 4. MCP 保持 1.27.2、Python 保持 3.12、FreeCAD 保持 1.1.0；
 5. `uv lock --offline` 不产生非预期差异。
 

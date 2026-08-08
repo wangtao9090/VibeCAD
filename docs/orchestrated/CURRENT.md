@@ -67,7 +67,10 @@ map those points into bounded primitive fits. A local renderer now seals
 deterministic PNG review overlays on `main`. The active follow-on stores each
 overlay as an immutable, self-checking advisory record with restart recovery and
 observation-level deletion; it deliberately does not reuse Task/Revision/HEAD
-authority. Public MCP Resource exposure, durable calibration policy, and the final
+authority. The active candidate adds an application-owned `visual_reviews/` root,
+strict reconstruction-result resource metadata, standard PNG ResourceLinks, and
+`resources/read` Blob delivery without starting FreeCAD. Automatic evidence render/
+publish, reconstruction-delete cleanup, durable calibration policy, and the final
 photo-to-CAD review workflow remain the next integration slices.
 
 On 2026-08-04 the user approved `VCAD-A04`. The public V1 envelope is now

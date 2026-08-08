@@ -580,10 +580,27 @@ def test_skill_distinguishes_durable_task_cancel_from_transport_cancellation():
 
 def test_skill_teaches_resource_links_and_fail_closed_product_limits():
     _metadata, body = _skill_parts()
-    resource = _paragraph_with(body, "ResourceLink", "resources/read")
+    resource = _paragraph_with(
+        body,
+        "ResourceLink",
+        "resources/read",
+        "export_task_artifacts",
+    )
     resource_normalized = _normalized(resource)
     assert "export_task_artifacts" in resource_normalized
     assert any(token in resource_normalized for token in ("hash", "sha256", "sha-256"))
+
+    review_resource = _paragraph_with(
+        body,
+        "review_resources",
+        "ResourceLink",
+        "resources/read",
+    )
+    review_normalized = _normalized(review_resource)
+    assert "advisory_only" in review_normalized
+    assert "png" in review_normalized
+    assert "sha-256" in review_normalized
+    assert re.search(r"cannot|never|must not|禁止|不得|不能", review_resource, re.IGNORECASE)
 
     path_rule = next(
         (

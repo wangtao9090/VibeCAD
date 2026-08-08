@@ -61,6 +61,10 @@ def reconstruction_draft_root() -> Path:
     return data_root() / "reconstruction_drafts"
 
 
+def visual_review_root() -> Path:
+    return data_root() / "visual_reviews"
+
+
 def mamba_root_prefix() -> Path:
     return runtime_root() / "mamba"
 
