@@ -962,7 +962,7 @@ def test_real_client_authenticates_and_claims_one_path_bound_checkout_grant() ->
             },
             "implementation": {
                 "package_version": "0.9.0",
-                "build_id": "vcad-a10-visual-review-mcp",
+                "build_id": "vcad-a10-visual-review-workflow",
             },
         }
         capabilities = client.call(

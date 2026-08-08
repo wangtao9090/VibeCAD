@@ -28,6 +28,7 @@ from vibecad.visual.fake_provider import (
     FakeVisualOutcomeKind,
 )
 from vibecad.visual.provider import VisualProviderBinding, visual_provider_input_digest
+from vibecad.visual.review_store import VisualReviewStoreError, VisualReviewStoreErrorCode
 from vibecad.visual.service import VisualReconstructionService
 
 _CREATE_KEY = "reconstruction_create_" + "1" * 32
@@ -166,6 +167,13 @@ def test_create_get_reject_and_delete_return_only_host_safe_fields(tmp_path: Pat
         "provider",
     ):
         assert forbidden not in rendered
+
+
+def test_review_cleanup_store_failure_maps_to_bounded_public_error() -> None:
+    def fail():
+        raise VisualReviewStoreError(VisualReviewStoreErrorCode.DURABILITY_UNCERTAIN)
+
+    _error(VisualApi._guard(fail), "recovery_required")  # noqa: SLF001
 
 
 def test_run_and_answer_project_only_bounded_actionable_question(tmp_path: Path) -> None:

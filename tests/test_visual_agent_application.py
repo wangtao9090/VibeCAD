@@ -5,11 +5,20 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from PIL import Image
 
 from tests.test_visual_review_artifacts import _artifact
+from tests.test_visual_service import _budget, _cloud_profiles, _CloudFeatureTransport
 from vibecad.application.agent import AgentApplication
-from vibecad.visual.contracts import CalibrationStatus, ImageMime, ViewRole
+from vibecad.application.visual_review import ApplicationVisualReviewPort
+from vibecad.visual.cloud_provider import CloudVisualProvider
+from vibecad.visual.contracts import (
+    CalibrationStatus,
+    ImageMime,
+    ProcessingAuthorization,
+    ViewRole,
+)
 from vibecad.visual.fake_provider import DeterministicFakeVisualProvider
 from vibecad.visual.inputs import (
     DescriptorSource,
@@ -17,6 +26,7 @@ from vibecad.visual.inputs import (
     SealImageSetRequest,
     bind_visual_input_locator,
 )
+from vibecad.visual.review_store import VisualReviewStoreError, VisualReviewStoreErrorCode
 
 
 def _data_root(tmp_path: Path) -> Path:
@@ -25,7 +35,12 @@ def _data_root(tmp_path: Path) -> Path:
     return home / "data"
 
 
-def _seal(application: AgentApplication, tmp_path: Path):
+def _seal(
+    application: AgentApplication,
+    tmp_path: Path,
+    *,
+    processing_authorization: ProcessingAuthorization = ProcessingAuthorization.LOCAL_ONLY,
+):
     source = tmp_path / "front.png"
     Image.new("RGB", (16, 12), (20, 80, 140)).save(source, format="PNG")
     os.chmod(source, 0o600)
@@ -44,6 +59,7 @@ def _seal(application: AgentApplication, tmp_path: Path):
         same_object=True,
         same_state=True,
         same_scale=True,
+        processing_authorization=processing_authorization,
     )
     descriptor = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
     try:
@@ -80,6 +96,111 @@ def test_descriptor_ingress_seals_without_starting_a_visual_provider(tmp_path: P
     assert sealed.id.startswith("image_set_")
     assert sealed.manifest_sha256
     assert provider_calls == 0
+
+
+def test_visual_service_composes_application_owned_review_cleanup(tmp_path: Path) -> None:
+    application = AgentApplication.open(data_root=_data_root(tmp_path))
+    try:
+        _api, service = application._visual_bundle_for_request()  # noqa: SLF001
+
+        assert type(application._visual_review_port) is ApplicationVisualReviewPort  # noqa: SLF001
+        assert service._review_cleanup is application._visual_review_port  # noqa: SLF001
+        assert application._visual_review_port.store is application._visual_reviews  # noqa: SLF001
+    finally:
+        application.close()
+
+
+def test_cloud_run_automatically_publishes_review_png_and_restart_only_replays_it(
+    tmp_path: Path,
+) -> None:
+    data_root = _data_root(tmp_path)
+    transport = _CloudFeatureTransport()
+    runtime_profile, image_profile = _cloud_profiles()
+    application = AgentApplication.open(data_root=data_root)
+    bootstrap = application.bootstrap_empty()
+    sealed = _seal(
+        application,
+        tmp_path,
+        processing_authorization=ProcessingAuthorization.CLOUD_PROVIDER,
+    )
+
+    def provider_factory():
+        return CloudVisualProvider(
+            runtime_profile=runtime_profile,
+            image_profile=image_profile,
+            image_reader=application._visual_inputs.read_provider_images_exact,  # noqa: SLF001
+            transport=transport,
+        )
+
+    application._visual_provider_factory = provider_factory  # noqa: SLF001
+    created = application.create_reconstruction_request(
+        {
+            "schema_version": 1,
+            "create_key": "reconstruction_create_" + "8" * 32,
+            "project_id": bootstrap.head.project_id,
+            "image_set_id": sealed.id,
+            "image_set_manifest_sha256": sealed.manifest_sha256,
+        }
+    )
+    assert created["ok"] is True
+    budget = _budget()
+    completed = application.run_reconstruction_request(
+        {
+            "schema_version": 1,
+            "reconstruction_id": created["result"]["reconstruction_id"],
+            "expected_generation": created["result"]["generation"],
+            "budget": {
+                "max_elapsed_ms": budget.max_elapsed_ms,
+                "max_memory_bytes": budget.max_memory_bytes,
+                "max_output_bytes": budget.max_output_bytes,
+            },
+            "deadline_ms": 2_000_000_000_000,
+        }
+    )
+    assert completed["ok"] is True
+    resources = completed["result"]["review_resources"]
+    assert len(resources) == 1
+    assert resources[0]["source_index"] == 0
+    assert transport.calls == 1
+    first_resource = application.read_visual_review_resource(resources[0]["resource_uri"])
+    application.close()
+
+    restarted = AgentApplication.open(data_root=data_root)
+    restarted_inputs = restarted._visual_inputs_for_ingress()  # noqa: SLF001
+    fresh_transport = _CloudFeatureTransport()
+    restarted._visual_provider_factory = lambda: CloudVisualProvider(  # noqa: SLF001
+        runtime_profile=runtime_profile,
+        image_profile=image_profile,
+        image_reader=restarted_inputs.read_provider_images_exact,
+        transport=fresh_transport,
+    )
+    try:
+        replayed = restarted.get_reconstruction_request(
+            {
+                "schema_version": 1,
+                "reconstruction_id": created["result"]["reconstruction_id"],
+            }
+        )
+        replay_resource = restarted.read_visual_review_resource(resources[0]["resource_uri"])
+        deleted = restarted.delete_reconstruction_request(
+            {
+                "schema_version": 1,
+                "reconstruction_id": created["result"]["reconstruction_id"],
+                "expected_generation": replayed["result"]["generation"],
+            }
+        )
+        with pytest.raises(VisualReviewStoreError) as removed:
+            restarted.read_visual_review_resource(resources[0]["resource_uri"])
+    finally:
+        restarted.close()
+
+    assert replayed["result"]["review_resources"] == resources
+    assert replay_resource.data == first_resource.data
+    assert deleted["result"]["status"] == "deleted"
+    assert "review_resources" not in deleted["result"]
+    assert removed.value.code is VisualReviewStoreErrorCode.DELETED
+    assert transport.calls == 1
+    assert fresh_transport.calls == 0
 
 
 def test_create_captures_current_head_replays_after_head_change_and_survives_restart(

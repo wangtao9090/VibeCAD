@@ -26,13 +26,101 @@ from vibecad.visual.inputs import (
     VisualInputStoreError,
     VisualInputStoreErrorCode,
 )
-from vibecad.visual.provider import visual_provider_input_digest
+from vibecad.visual.provider import VisualProviderBinding, visual_provider_input_digest
 from vibecad.visual.reconstruction import ReconstructionStatus, reconstruction_identity
-from vibecad.visual.service import VisualServiceError, VisualServiceErrorCode
+from vibecad.visual.review_store import VisualReviewStoreError, VisualReviewStoreErrorCode
+from vibecad.visual.service import (
+    VisualReconstructionService,
+    VisualServiceError,
+    VisualServiceErrorCode,
+)
+
+
+class _ReviewCleanupProbe:
+    __slots__ = ("calls", "fail")
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.fail = fail
+
+    def delete_observation_exact(self, observation_id: str, observation_digest: str) -> int:
+        self.calls.append((observation_id, observation_digest))
+        if self.fail:
+            raise VisualReviewStoreError(VisualReviewStoreErrorCode.STORE_FAILURE)
+        return 1
 
 
 def _empty_provider() -> DeterministicFakeVisualProvider:
     return DeterministicFakeVisualProvider({})
+
+
+def test_delete_tombstones_review_before_draft_and_source_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs, drafts, image_set, provider, _, proposed, proposal = _proposed(tmp_path)
+    cleanup = _ReviewCleanupProbe()
+    service = VisualReconstructionService(
+        inputs=inputs,
+        drafts=drafts,
+        provider=VisualProviderBinding(provider=provider),
+        review_cleanup=cleanup,
+    )
+    original_delete = VisualInputStore.delete_exact
+
+    def observe_source_cleanup(store, image_set_id, manifest_sha256):
+        assert cleanup.calls == [(proposal.observation.id, proposal.observation.digest)]
+        durable = drafts.load(proposed.reconstruction_id)
+        assert durable.status is ReconstructionStatus.DELETED
+        return original_delete(store, image_set_id, manifest_sha256)
+
+    monkeypatch.setattr(VisualInputStore, "delete_exact", observe_source_cleanup)
+
+    deleted = service.delete(
+        proposed.reconstruction_id,
+        expected_generation=proposed.generation,
+    )
+
+    assert deleted.status is ReconstructionStatus.DELETED
+    assert deleted.delete_cleanup is None
+    assert cleanup.calls == [(proposal.observation.id, proposal.observation.digest)]
+    with pytest.raises(VisualInputStoreError) as missing:
+        inputs.get(image_set.id)
+    assert missing.value.code is VisualInputStoreErrorCode.NOT_FOUND
+
+
+def test_review_cleanup_failure_preserves_draft_and_source_for_exact_retry(
+    tmp_path: Path,
+) -> None:
+    inputs, drafts, image_set, provider, _, proposed, proposal = _proposed(tmp_path)
+    cleanup = _ReviewCleanupProbe(fail=True)
+    service = VisualReconstructionService(
+        inputs=inputs,
+        drafts=drafts,
+        provider=VisualProviderBinding(provider=provider),
+        review_cleanup=cleanup,
+    )
+
+    with pytest.raises(VisualReviewStoreError) as caught:
+        service.delete(
+            proposed.reconstruction_id,
+            expected_generation=proposed.generation,
+        )
+
+    assert caught.value.code is VisualReviewStoreErrorCode.STORE_FAILURE
+    assert drafts.load(proposed.reconstruction_id) == proposed
+    assert inputs.get(image_set.id) == image_set
+
+    cleanup.fail = False
+    deleted = service.delete(
+        proposed.reconstruction_id,
+        expected_generation=proposed.generation,
+    )
+    assert deleted.status is ReconstructionStatus.DELETED
+    assert cleanup.calls == [
+        (proposal.observation.id, proposal.observation.digest),
+        (proposal.observation.id, proposal.observation.digest),
+    ]
 
 
 def test_delete_publishes_tombstone_before_source_cleanup_then_is_finally_idempotent(
