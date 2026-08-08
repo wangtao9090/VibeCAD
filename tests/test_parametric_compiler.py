@@ -896,6 +896,69 @@ def _surface_modifier_design(*kinds: FeatureKind) -> ParametricDesignIR:
     return replace(base, parameters=tuple(parameters), features=tuple(features))
 
 
+def _surface_modifier_edge_treatment_design(
+    modifier_kind: FeatureKind,
+    treatment_kind: EdgeTreatmentKind,
+) -> ParametricDesignIR:
+    base = _surface_modifier_design(modifier_kind)
+    size_id = _id("parameter", 90)
+    return replace(
+        base,
+        parameters=base.parameters
+        + (
+            DesignParameter(
+                id=size_id,
+                name="Surface modifier edge treatment size",
+                kind=ParameterKind.LENGTH,
+                value=0.25,
+                unit=DesignUnit.MM,
+                evidence_ids=(EVIDENCE,),
+                minimum=0.05,
+                maximum=2,
+            ),
+        ),
+        edge_treatments=(
+            EdgeTreatmentFeature(
+                id=_id("feature", 90),
+                name=f"Post-{modifier_kind.value} {treatment_kind.value}",
+                kind=treatment_kind,
+                base_feature_id=base.features[-1].id,
+                targets=(
+                    EdgeTreatmentTarget(
+                        edge=SemanticEdgeReference(
+                            source_feature_id=base.features[0].id,
+                            geometry_id=BOTTOM,
+                            role=SemanticEdgeRole.SECTION_START,
+                            point=ReferencePoint.WHOLE,
+                        ),
+                        start_parameter_id=size_id,
+                        end_parameter_id=size_id,
+                    ),
+                ),
+                evidence_ids=(EVIDENCE,),
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("modifier_kind", "treatment_kind"),
+    (
+        (FeatureKind.DRAFT, EdgeTreatmentKind.FILLET),
+        (FeatureKind.THICKNESS, EdgeTreatmentKind.CHAMFER),
+    ),
+)
+def test_surface_modifier_edge_treatment_design_contract_is_round_trip_safe(
+    modifier_kind: FeatureKind,
+    treatment_kind: EdgeTreatmentKind,
+) -> None:
+    design = _surface_modifier_edge_treatment_design(modifier_kind, treatment_kind)
+
+    assert ParametricDesignIR.from_mapping(design.to_mapping()) == design
+    assert design.edge_treatments[0].base_feature_id == design.features[-1].id
+    assert design.edge_treatments[0].targets[0].edge.source_feature_id == design.features[0].id
+
+
 @pytest.mark.parametrize(
     "kind",
     (FeatureKind.LINEAR_PATTERN, FeatureKind.CIRCULAR_PATTERN, FeatureKind.MIRROR),
@@ -1960,6 +2023,130 @@ def test_real_native_surface_modifiers_compile_edit_and_reopen(
         )
         assert tuple(item.TypeId for item in modifiers) == type_ids
         assert body.Tip is modifiers[-1]
+    finally:
+        reopened.close_document()
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("modifier_kind", "treatment_kind", "treatment_type_id"),
+    (
+        (FeatureKind.DRAFT, EdgeTreatmentKind.FILLET, "Part::Fillet"),
+        (FeatureKind.THICKNESS, EdgeTreatmentKind.CHAMFER, "Part::Chamfer"),
+    ),
+    ids=("draft-fillet", "thickness-chamfer"),
+)
+def test_real_surface_modifier_can_feed_part_edge_treatment_and_refresh(
+    modifier_kind: FeatureKind,
+    treatment_kind: EdgeTreatmentKind,
+    treatment_type_id: str,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    if not os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON"):
+        pytest.skip("managed FreeCAD Python was not requested")
+
+    from vibecad.engine.session import Session
+
+    design = _surface_modifier_edge_treatment_design(modifier_kind, treatment_kind)
+    modifier_contract = design.features[-1]
+    parameter_name = "angle" if modifier_kind is FeatureKind.DRAFT else "thickness"
+    parameter_id = modifier_contract.parameters[parameter_name]
+    edited_value = 7 if modifier_kind is FeatureKind.DRAFT else 0.75
+    path = tmp_path / f"s44-{modifier_kind.value}-{treatment_kind.value}.FCStd"
+    refresh_calls = 0
+    original_refresh = compiler_module._refresh_edge_treatment_tail
+
+    def tracked_refresh(document: object, records: object) -> None:
+        nonlocal refresh_calls
+        original_refresh(document, records)
+        refresh_calls += 1
+
+    monkeypatch.setattr(compiler_module, "_refresh_edge_treatment_tail", tracked_refresh)
+    session = Session()
+    session.open_document("S44SurfaceModifierEdgeTreatment")
+    try:
+        compiled = compiler_module.compile_parametric_design(session, design)
+        stabilize_parametric_session(session)
+
+        modifier = compiled.features[-1].object
+        treatment = compiled.edge_treatments[-1].object
+        assert compiled.body.Tip is modifier
+        assert treatment.Base is compiled.body
+        assert compiled.result_object is treatment
+        assert treatment.TypeId == treatment_type_id
+        assert treatment.Shape.isValid()
+        assert len(tuple(treatment.Shape.Solids)) == 1
+        modifier_volume = float(modifier.Shape.Volume)
+        result_volume = float(treatment.Shape.Volume)
+        assert not math.isclose(result_volume, modifier_volume, rel_tol=0.0, abs_tol=1e-6)
+        treatment_metadata = compiler_module._read_metadata(treatment, required=True)
+        assert treatment_metadata is not None
+        assert (
+            treatment_metadata["targets"][0]["edge"]["source_feature_id"] == design.features[0].id
+        )
+        assert "Edge" not in repr(treatment_metadata["targets"])
+
+        edit = compiler_module.modify_parametric_parameter(
+            session,
+            design,
+            body=compiled.body,
+            parameter_id=parameter_id,
+            value=edited_value,
+        )
+        stabilize_parametric_session(session)
+        assert refresh_calls == 1
+        assert edit.consumer_ids == (modifier_contract.id,)
+        assert compiled.body.Tip is modifier
+        assert treatment.Base is compiled.body
+        assert compiled.result_object is treatment
+        assert not math.isclose(
+            float(modifier.Shape.Volume),
+            modifier_volume,
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        )
+        assert not math.isclose(
+            float(treatment.Shape.Volume),
+            result_volume,
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        )
+
+        records = compiler_module._parametric_records(session.doc)
+        by_ir_id = {data["ir_id"]: (obj, data) for obj, data in records}
+        carrier = next(obj for obj, data in records if data["kind"] == "parameters")
+        expected_edges = compiler_module._resolved_treatment_edges(
+            compiled.body,
+            treatment_metadata,
+            by_ir_id,
+            carrier,
+        )
+        actual_edges = tuple(tuple(item) for item in treatment.Edges)
+        assert len(actual_edges) == len(expected_edges)
+        for actual, expected in zip(actual_edges, expected_edges, strict=True):
+            assert actual[0] == expected.index
+            assert actual[1:] == pytest.approx((expected.start, expected.end))
+        edited_result_volume = float(treatment.Shape.Volume)
+        session.doc.saveAs(str(path))
+    finally:
+        session.close_document()
+
+    reopened = Session()
+    try:
+        reopened.load_document(path)
+        stabilize_parametric_session(reopened)
+        body = next(obj for obj in reopened.doc.Objects if obj.TypeId == "PartDesign::Body")
+        treatments = tuple(obj for obj in reopened.doc.Objects if obj.TypeId == treatment_type_id)
+        assert len(treatments) == 1
+        assert body.Tip.TypeId == compiler_module._FEATURE_TYPE_IDS[modifier_kind]
+        assert treatments[0].Base is body
+        assert treatments[0].Shape.isValid()
+        assert len(tuple(treatments[0].Shape.Solids)) == 1
+        assert float(treatments[0].Shape.Volume) == pytest.approx(
+            edited_result_volume,
+            abs=1e-6,
+        )
     finally:
         reopened.close_document()
 
