@@ -152,6 +152,8 @@ class RenderedEvidenceOverlay:
             _fail(OverlayRenderErrorCode.INVALID_INPUT, "/png_size_bytes")
         if not hmac.compare_digest(hashlib.sha256(self.png_bytes).hexdigest(), self.png_sha256):
             _fail(OverlayRenderErrorCode.INTEGRITY_FAILURE, "/png_sha256")
+        validated = _decode_source(self.png_bytes, width=self.width, height=self.height)
+        validated.close()
 
 
 def _decode_source(raw: bytes, *, width: int, height: int) -> Image.Image:

@@ -686,14 +686,17 @@ VisualObservation 和 receipt；重启后没有 process-local evidence 时返回
 视觉审核层现已包含严格的 normalized vector overlay plan，并增加本地 PNG 字节渲染：固定 family 颜色，
 仅 arc/rectangle 连接已声明为有序的点，line/circle 只显示 landmarks，同时显示定位不确定度。渲染输入
 必须与封存 normalized PNG 的尺寸、字节数和 SHA-256 完全一致；输出重新绑定 ImageSet、observation、
-source index、visual input id 和 PNG 摘要。该 PNG 只是 host-local resource 候选，不是 durable truth，
-目前尚未注册公共 MCP Resource，也不改变 ReconstructionDraft、Task、Revision/HEAD 或 CAD write
-authority。没有满足 exact eligible calibration 时，平面拟合继续返回 UNKNOWN；不得把 Provider 自报
-误差静默降为零来绕过门禁。
+source index、visual input id 和 PNG 摘要。当前持久化切片把每个视图封装为一个 immutable、canonical、
+self-checking record，并使用 observation-level 永久墓碑完成显式删除；首次读取会先完成有界 stage/delete
+恢复，错误 observation digest 不能发布删除意图。记录权威固定为 `advisory_only`，不会改变
+ReconstructionDraft、Task、Revision/HEAD 或 CAD write authority，也不会把 PNG 当作几何真值。当前仍未
+注册公共 MCP Resource。没有满足 exact eligible calibration 时，平面拟合继续返回 UNKNOWN；不得把
+Provider 自报误差静默降为零来绕过门禁。
 
-候选完整视觉门为 306 passed（包含沙箱外 authenticated local-daemon 用例）。下一串行工作是把渲染
-字节接入一个只读 host-local resource，再冻结 advisory calibration 的持久化边界和 photo-to-CAD review
-workflow；真实图片端到端验收仍需用户重新附加已失效的临时照片路径。
+当前完整视觉门为 344 passed（包含沙箱外 authenticated local-daemon 用例）；持久化 focused/overlay 门为
+40 passed。下一串行工作是把已封存 PNG 接入 application-owned read-only Resource 并投影为 MCP
+`resources/read`，再冻结 advisory calibration 的持久化边界和 photo-to-CAD review workflow；真实图片
+端到端验收仍需用户重新附加已失效的临时照片路径。
 
 ### VCAD-F10 — Industrial Freeform Alpha
 
