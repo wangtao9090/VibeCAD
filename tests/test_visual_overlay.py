@@ -17,10 +17,12 @@ from vibecad.visual.evidence import (
 from vibecad.visual.geometry_fit import PrimitiveFamily
 from vibecad.visual.metrology import PixelPoint
 from vibecad.visual.overlay import (
+    EvidenceOverlayItem,
     OverlayEvidenceStatus,
     OverlayGeometryKind,
     VisualOverlayError,
     VisualOverlayErrorCode,
+    VisualOverlayPlan,
     build_evidence_overlay,
 )
 
@@ -161,3 +163,39 @@ def test_forged_overlay_budget_and_types_fail_before_item_work(monkeypatch) -> N
     with pytest.raises(VisualOverlayError) as wrong_type:
         build_evidence_overlay(object(), image_set)  # type: ignore[arg-type]
     assert wrong_type.value.code is VisualOverlayErrorCode.INVALID_INPUT
+
+
+def test_overlay_value_objects_reject_forged_geometry_and_bindings() -> None:
+    image_set, _raws = _image_set((96, 64))
+    item = build_evidence_overlay(
+        _evidence(image_set, (_feature(PrimitiveFamily.LINE, "edge"),)),
+        image_set,
+    ).items[0]
+
+    with pytest.raises(VisualOverlayError) as geometry:
+        dataclasses.replace(item, geometry_kind=OverlayGeometryKind.CLOSED_POLYGON)
+    assert geometry.value.code is VisualOverlayErrorCode.INVALID_INPUT
+
+    with pytest.raises(VisualOverlayError) as invalid_claim:
+        EvidenceOverlayItem(
+            source_index=item.source_index,
+            local_feature_id=item.local_feature_id,
+            family=item.family,
+            geometry_kind=item.geometry_kind,
+            evidence_status=item.evidence_status,
+            claim_ids=("invalid",),
+            points=item.points,
+            uncertainty_radius_norm=item.uncertainty_radius_norm,
+        )
+    assert invalid_claim.value.code is VisualOverlayErrorCode.INVALID_INPUT
+
+    with pytest.raises(VisualOverlayError) as invalid_plan:
+        VisualOverlayPlan(
+            image_set_id=image_set.id,
+            image_set_manifest_sha256=image_set.manifest_sha256,
+            image_batch_manifest_sha256="4" * 64,
+            observation_id="not-an-observation",
+            observation_digest="6" * 64,
+            items=(item,),
+        )
+    assert invalid_plan.value.code is VisualOverlayErrorCode.INVALID_INPUT
