@@ -116,6 +116,22 @@ and Task admission remain separate gates. The combined candidate passed 6,300
 non-slow tests with one expected integration skip; it added no public export, MCP
 tool, durable schema, Provider call, CAD operation, Task, Revision, or HEAD path.
 
+The authority-free evaluator now closes the next in-process gate. Its only
+inputs are an exact Proposal, a sealed `VisualInputStore`, one Provider image
+batch, raw Provider feature points, and confirmed planar landmarks/frame. The
+application rereads the sealed PNG bytes, recomputes capture quality, rebuilds
+the no-crop Provider batch byte-for-byte, derives calibration, binds raw
+evidence, applies fixed fit policies, reruns geometry fitting, and derives the
+coverage plan internally. It accepts no caller capture/evidence/fit/receipt,
+plan, requirements, policy, tolerance, or clarification override. Rectangle
+Pad and optional 1/3/16-hole cases can reach an authority-free `COMPLETE`;
+blank capture, shifted/collapsed features, alternate batches, missing explicit
+confirmation, high uncertainty, and LINE-only profiles cannot. Complete
+canonical capture/evidence/fit records are included in the sealed report
+digest, while `task_adoption_eligible` remains false. Independent review closed
+four P1 findings, and the final candidate passed 6,312 non-slow tests with one
+expected integration skip. Durable admission and Task creation remain closed.
+
 The latest private blade outcome is additional A11 evidence, not a public fixture.
 Eleven ordinary photos were sealed and analyzed before the user-supplied STEP was
 opened. The STEP content and topology never entered the visual/model context; it

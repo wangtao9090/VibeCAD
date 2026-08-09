@@ -917,6 +917,16 @@ process-local integrity/checklist artifact；confirmation authenticity、evidenc
 和 Task admission 继续是后续独立门。汇合候选完整非慢速门为 6,300 passed、1 个 expected integration
 skip，未增加 public export、MCP tool、durable schema、Provider call、CAD operation 或 Task/Revision/HEAD
 路径。
+
+第三个 A11 候选完成 authority-free evaluator：唯一入口只接 exact Proposal、sealed VisualInputStore、
+Provider image batch、raw Provider feature points 与 confirmed planar landmarks/frame。application 内部重新
+读取 sealed PNG、计算 capture quality、按 profile byte-exact 重建 no-crop batch、生成 calibration、绑定 raw
+evidence、套用固定 fit policy、重跑 geometry fit 并 derive coverage；调用方不能传 capture/evidence/fit/
+receipt/plan/requirements/policy/tolerance/clarification override。矩形 Pad 与可选 1/3/16 Hole 可得到无权威
+`COMPLETE`；空白图、点位偏移/坍缩、替代 batch、缺显式确认、高不确定度与 LINE-only profile 均不能。
+sealed report digest 完整绑定 capture/evidence/fit 记录，`task_adoption_eligible` 仍恒为 false。独立复核发现
+并关闭 4 个 P1；最终完整非慢速门为 6,312 passed、1 skipped、145 deselected。durable admission sidecar
+与 Task creation 仍未实现。
 ```
 
 当前 A11 隔离分支均从 `main@6fc966e` 创建；S41 实现分支为
@@ -979,6 +989,7 @@ preflight/readiness 并行切片，随后串行接入统一照片产品流。`VC
 | `VCAD-E39` | `VCAD-A09` closeout 与用户批准继续并行 A11 | PR #22–#37 将 S43/S44、F10、M10/Q10/G10、F20、evidence/fit/overlay/review workflow 全部合入 main；A11 从模块建设转入统一照片产品流 | `main@6fc966e`；Actions [`31258950080`](https://github.com/wangtao9090/VibeCAD/actions/runs/31258950080) 全绿；没有开放 PR；私有 11-photo blade 为 42 parameters / 5 sketches `DoF=0` / 6 features + Fillet / valid one solid / 4 verifier pass / HEAD unchanged / IoU `0.957064`；恢复动作是并行 preflight 与 readiness，再串行接线 | main 上 post-v0.9 能力尚未发布；私有结果使用独立参考尺寸，只证明 bounded assisted reconstruction，不证明无尺度通用重建；私有输入和工件不入库 |
 | `VCAD-E40` | 用户改变 runtime 保留策略并继续批准并行执行 | VibeCAD-created managed runtime 默认持续保留/复用，只有用户明确要求才删除；scratch/cache/input copies/probes/临时宿主 session 仍可精确清理；Blender 实现等待 M4 mini | 当前私有 pilot runtime 已按旧规则删除，下一真实 FreeCAD gate 重装一次后保留；M4 mini 的 Blender/runtime/workspace 目标根为 `/Volumes/ExtSSD/DevArchive` | runtime fingerprint 或依赖变化仍需显式 conformance；持续环境不是跳过版本、完整性或真实运行时门的理由 |
 | `VCAD-E41` | A11 calibration-source 与 proposal-consumer coverage 合同门 | 私有 in-memory calibration receipt 从 exact ImageSet/Provider overview、confirmed landmarks 和 metric frame 内部拟合；私有 proposal plan 从 exact Proposal 自动枚举矩形 Pad 与可选 Through-All Hole 的完整 CAD consumer，拒绝 requirement 子集、orphan evidence/claim 与未验证 Hole 方向 | 两条实现分别独立 review、三项 calibration 与三项 coverage finding 均补回归闭合；汇合分支 176 focused/adjacent passed，完整非慢速 6,300 passed、1 skipped、145 deselected；Ruff/format/diff/worktree clean | receipt 未认证/未持久化且 `task_adoption_eligible=false`；coverage 尚未评估 confirmation/calibration/evidence/fit；不得接 Task、MCP、Revision/HEAD |
+| `VCAD-E42` | A11 application-owned proposal-evidence evaluator gate | 从 sealed store 与 raw Provider feature 输入内部重算 capture、provider batch、calibration、bound evidence、fit 与完整 coverage；固定 rectangle/Pad/optional Hole 包络，不接受 caller-derived report、policy 或 tolerance | 初审 3 个派生输入 P1 与终审 1 个 digest-binding P1 均补回归闭合；最终独立 review CLEAN；focused/adjacent 150 passed，完整非慢速 6,312 passed、1 skipped、145 deselected；Ruff/diff/worktree clean | report 仍为 process-local authority-free，`task_adoption_eligible=false`；ReconstructionDraft admission sidecar、重启恢复与 Task write seam 尚未实现 |
 
 ## 12. 研究依据
 
