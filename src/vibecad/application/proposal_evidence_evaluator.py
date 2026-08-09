@@ -13,21 +13,34 @@ import hashlib
 import itertools
 import json
 import math
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from enum import StrEnum
 
-from vibecad.visual.calibration_authority import InMemoryPlanarCalibrationReceipt
+from vibecad.visual.calibration_authority import (
+    ConfirmedPlanarLandmark,
+    ConfirmedPlanarMetricBasis,
+    InMemoryPlanarCalibrationReceipt,
+    build_in_memory_planar_calibration_receipt,
+)
 from vibecad.visual.capture_quality import (
     CaptureQualityDecision,
     CaptureQualityReport,
+    NormalizedCaptureImage,
+    assess_capture_quality,
 )
-from vibecad.visual.contracts import MAX_IMAGE_SET_ITEMS, ImageSet
-from vibecad.visual.evidence import BoundVisualEvidence
+from vibecad.visual.contracts import ImageSet
+from vibecad.visual.evidence import (
+    BoundVisualEvidence,
+    ProviderFeatureEvidence,
+    bind_visual_evidence,
+)
 from vibecad.visual.fit_pipeline import (
     EvidenceFeatureFit,
     EvidenceFeatureFitStatus,
+    FeatureFitPolicy,
     SourcePlanarCalibration,
     VisualEvidenceFitReport,
+    fit_bound_visual_evidence,
 )
 from vibecad.visual.geometry_fit import (
     CirclePrimitive,
@@ -35,6 +48,7 @@ from vibecad.visual.geometry_fit import (
     PrimitiveFamily,
     RotatedRectanglePrimitive,
 )
+from vibecad.visual.inputs import VisualInputStore
 from vibecad.visual.proposal_coverage import (
     MAX_FIRST_SLICE_CONSUMERS,
     ConsumerRequirement,
@@ -43,8 +57,12 @@ from vibecad.visual.proposal_coverage import (
     ProposalCoveragePlan,
     derive_proposal_coverage_plan,
 )
+from vibecad.visual.provider_images import (
+    ProviderImageBatch,
+    ProviderImagePartKind,
+    prepare_provider_image_batch,
+)
 from vibecad.visual.reconstruction import (
-    ClarificationAnswer,
     ClarificationKind,
     ReconstructionProposal,
     VisualClaim,
@@ -58,6 +76,7 @@ MAX_NUMERIC_CHECKS = 256
 MIN_COMPARISON_TOLERANCE_MM = 0.05
 MAX_COMPARISON_TOLERANCE_MM = 0.50
 RELATIVE_COMPARISON_TOLERANCE = 0.0025
+FIRST_SLICE_FIT_RESIDUAL_TOLERANCE_MM = 0.05
 
 _REPORT_DIGEST_DOMAIN = b"vibecad-proposal-evidence-evaluation-v1\0"
 
@@ -110,9 +129,6 @@ class ConsumerClosureReason(StrEnum):
     FIT_UNKNOWN = "fit_unknown"
     LINE_ONLY_CANNOT_PROVE_ENDPOINTS = "line_only_cannot_prove_endpoints"
     AMBIGUOUS_FIT = "ambiguous_fit"
-    MISSING_CALIBRATION_RECEIPT = "missing_calibration_receipt"
-    AMBIGUOUS_CALIBRATION_RECEIPT = "ambiguous_calibration_receipt"
-    CALIBRATION_NOT_ELIGIBLE = "calibration_not_eligible"
     CAPTURE_UNREADABLE = "capture_unreadable"
     UNCERTAINTY_EXCEEDED = "uncertainty_exceeded"
     NUMERIC_MISMATCH = "numeric_mismatch"
@@ -279,249 +295,8 @@ def _new_report(
     return report
 
 
-def _capture_mapping(report: CaptureQualityReport) -> dict[str, object]:
-    return {
-        "decision": report.decision.value,
-        "metrics": [
-            {
-                item.name: getattr(metric, item.name)
-                for item in fields(metric)
-            }
-            for metric in report.metrics
-        ],
-        "findings": [
-            {
-                "code": item.code.value,
-                "severity": item.severity.value,
-                "source_indices": list(item.source_indices),
-            }
-            for item in report.findings
-        ],
-        "readable_source_indices": list(report.readable_source_indices),
-        "redundant_source_indices": list(report.redundant_source_indices),
-    }
-
-
-def _evidence_mapping(evidence: BoundVisualEvidence) -> dict[str, object]:
-    return {
-        "reconstruction_id": evidence.reconstruction_id,
-        "generation": evidence.generation,
-        "image_set_id": evidence.image_set_id,
-        "image_set_manifest_sha256": evidence.image_set_manifest_sha256,
-        "image_batch_manifest_sha256": evidence.image_batch_manifest_sha256,
-        "observation_id": evidence.observation_id,
-        "observation_digest": evidence.observation_digest,
-        "features": [
-            {
-                "key": [item.source_index, item.local_feature_id],
-                "provider_image_id": item.provider_image_id,
-                "family": item.family.value,
-                "claim_ids": list(item.claim_ids),
-                "normalized_points": [[point.x, point.y] for point in item.normalized_points],
-                "pixel_points": [
-                    [point.x_px, point.y_px, point.uncertainty_px]
-                    for point in item.pixel_points
-                ],
-            }
-            for item in evidence.features
-        ],
-    }
-
-
-def _primitive_mapping(value: object) -> dict[str, float] | None:
-    if value is None:
-        return None
-    return {item.name: float(getattr(value, item.name)) for item in fields(value)}
-
-
-def _fit_mapping(report: VisualEvidenceFitReport) -> dict[str, object]:
-    return {
-        "reconstruction_id": report.reconstruction_id,
-        "generation": report.generation,
-        "image_set_id": report.image_set_id,
-        "image_set_manifest_sha256": report.image_set_manifest_sha256,
-        "image_batch_manifest_sha256": report.image_batch_manifest_sha256,
-        "observation_id": report.observation_id,
-        "observation_digest": report.observation_digest,
-        "feature_fits": [
-            {
-                "key": [item.source_index, item.local_feature_id],
-                "provider_image_id": item.provider_image_id,
-                "family": item.family.value,
-                "claim_ids": list(item.claim_ids),
-                "frame_id": item.frame_id,
-                "calibration_sha256": item.calibration_sha256,
-                "status": item.status.value,
-                "unknown_reason": (
-                    None if item.unknown_reason is None else item.unknown_reason.value
-                ),
-                "plane_points": [
-                    [point.x_mm, point.y_mm, point.uncertainty_mm]
-                    for point in item.plane_points
-                ],
-                "fit_result": (
-                    None
-                    if item.fit_result is None
-                    else {
-                        "family": item.fit_result.family.value,
-                        "status": item.fit_result.status.value,
-                        "primitive": _primitive_mapping(item.fit_result.primitive),
-                        "rms_residual_mm": item.fit_result.rms_residual_mm,
-                        "max_residual_mm": item.fit_result.max_residual_mm,
-                        "max_excess_residual_mm": item.fit_result.max_excess_residual_mm,
-                        "unknown_reason": (
-                            None
-                            if item.fit_result.unknown_reason is None
-                            else item.fit_result.unknown_reason.value
-                        ),
-                        "point_count": item.fit_result.point_count,
-                    }
-                ),
-            }
-            for item in report.feature_fits
-        ],
-    }
-
-
-def _validate_inputs(
-    *,
-    proposal: ReconstructionProposal,
-    image_set: ImageSet,
-    capture_quality: CaptureQualityReport,
-    evidence: BoundVisualEvidence,
-    fit_report: VisualEvidenceFitReport,
-    calibration_receipts: tuple[InMemoryPlanarCalibrationReceipt, ...],
-    clarification_facts: tuple[ClarificationAnswer, ...],
-) -> None:
-    exact = (
-        (proposal, ReconstructionProposal, "/proposal"),
-        (image_set, ImageSet, "/image_set"),
-        (capture_quality, CaptureQualityReport, "/capture_quality"),
-        (evidence, BoundVisualEvidence, "/evidence"),
-        (fit_report, VisualEvidenceFitReport, "/fit_report"),
-    )
-    for value, expected, path in exact:
-        if type(value) is not expected:
-            _fail(ProposalEvidenceEvaluationErrorCode.INVALID_INPUT, path)
-    if type(calibration_receipts) is not tuple or any(
-        type(item) is not InMemoryPlanarCalibrationReceipt for item in calibration_receipts
-    ):
-        _fail(ProposalEvidenceEvaluationErrorCode.INVALID_INPUT, "/calibration_receipts")
-    if len(calibration_receipts) > MAX_IMAGE_SET_ITEMS:
-        _fail(ProposalEvidenceEvaluationErrorCode.BUDGET_EXCEEDED, "/calibration_receipts")
-    receipt_digests = tuple(item.receipt_sha256 for item in calibration_receipts)
-    receipt_bindings = tuple(
-        (
-            item.source_index,
-            item.provider_image_id,
-            item.metric_basis.frame_id,
-        )
-        for item in calibration_receipts
-    )
-    if (
-        len(set(receipt_digests)) != len(receipt_digests)
-        or len(set(receipt_bindings)) != len(receipt_bindings)
-    ):
-        _fail(ProposalEvidenceEvaluationErrorCode.BINDING_MISMATCH, "/calibration_receipts")
-    if type(clarification_facts) is not tuple or any(
-        type(item) is not ClarificationAnswer for item in clarification_facts
-    ):
-        _fail(ProposalEvidenceEvaluationErrorCode.INVALID_INPUT, "/clarification_facts")
-    if tuple(sorted(clarification_facts, key=lambda item: item.id)) != tuple(
-        sorted(proposal.clarification_answers, key=lambda item: item.id)
-    ):
-        _fail(ProposalEvidenceEvaluationErrorCode.BINDING_MISMATCH, "/clarification_facts")
-    observation = proposal.observation
-    if (
-        observation.image_set_id != image_set.id
-        or observation.image_set_manifest_sha256 != image_set.manifest_sha256
-        or evidence.image_set_id != image_set.id
-        or evidence.image_set_manifest_sha256 != image_set.manifest_sha256
-        or evidence.reconstruction_id != observation.reconstruction_id
-        or evidence.generation != observation.generation
-        or evidence.observation_id != observation.id
-        or evidence.observation_digest != observation.digest
-        or fit_report.image_set_id != image_set.id
-        or fit_report.image_set_manifest_sha256 != image_set.manifest_sha256
-        or fit_report.reconstruction_id != observation.reconstruction_id
-        or fit_report.generation != observation.generation
-        or fit_report.observation_id != observation.id
-        or fit_report.observation_digest != observation.digest
-        or fit_report.image_batch_manifest_sha256 != evidence.image_batch_manifest_sha256
-    ):
-        _fail(ProposalEvidenceEvaluationErrorCode.BINDING_MISMATCH)
-    if type(capture_quality.decision) is not CaptureQualityDecision:
-        _fail(ProposalEvidenceEvaluationErrorCode.INVALID_INPUT, "/capture_quality")
-    expected_sources = tuple(range(len(image_set.inputs)))
-    if tuple(item.source_index for item in capture_quality.metrics) != expected_sources:
-        _fail(ProposalEvidenceEvaluationErrorCode.BINDING_MISMATCH, "/capture_quality/metrics")
-    for index, metric in enumerate(capture_quality.metrics):
-        source = image_set.inputs[index].normalized
-        if (metric.width, metric.height) != (source.width, source.height):
-            _fail(ProposalEvidenceEvaluationErrorCode.BINDING_MISMATCH, "/capture_quality/metrics")
-    readable = capture_quality.readable_source_indices
-    if tuple(sorted(readable)) != readable or len(set(readable)) != len(readable):
-        _fail(ProposalEvidenceEvaluationErrorCode.INVALID_INPUT, "/capture_quality")
-    evidence_by_key = {
-        (item.source_index, item.local_feature_id): item for item in evidence.features
-    }
-    fit_by_key = {
-        (item.source_index, item.local_feature_id): item for item in fit_report.feature_fits
-    }
-    if set(evidence_by_key) != set(fit_by_key):
-        _fail(ProposalEvidenceEvaluationErrorCode.BINDING_MISMATCH, "/fit_report/feature_fits")
-    claim_ids = {item.id for item in observation.claims}
-    for key, bound in evidence_by_key.items():
-        fitted = fit_by_key[key]
-        if (
-            fitted.provider_image_id != bound.provider_image_id
-            or fitted.family is not bound.family
-            or fitted.claim_ids != bound.claim_ids
-            or not set(bound.claim_ids).issubset(claim_ids)
-        ):
-            _fail(ProposalEvidenceEvaluationErrorCode.BINDING_MISMATCH, "/fit_report/feature_fits")
-
-
 def _fit_key(item: EvidenceFeatureFit) -> str:
     return f"{item.source_index}:{item.local_feature_id}"
-
-
-def _receipt_for_fit(
-    item: EvidenceFeatureFit,
-    *,
-    image_set: ImageSet,
-    batch_manifest_sha256: str,
-    receipts: tuple[InMemoryPlanarCalibrationReceipt, ...],
-) -> tuple[InMemoryPlanarCalibrationReceipt | None, ConsumerClosureReason | None]:
-    if item.frame_id is None or item.calibration_sha256 is None:
-        return None, ConsumerClosureReason.MISSING_CALIBRATION_RECEIPT
-    candidates = tuple(
-        receipt
-        for receipt in receipts
-        if receipt.source_index == item.source_index
-        and receipt.image_set_id == image_set.id
-        and receipt.image_set_manifest_sha256 == image_set.manifest_sha256
-        and receipt.provider_batch_manifest_sha256 == batch_manifest_sha256
-        and receipt.provider_image_id == item.provider_image_id
-        and receipt.metric_basis.frame_id == item.frame_id
-    )
-    if not candidates:
-        return None, ConsumerClosureReason.MISSING_CALIBRATION_RECEIPT
-    if len(candidates) != 1:
-        return None, ConsumerClosureReason.AMBIGUOUS_CALIBRATION_RECEIPT
-    receipt = candidates[0]
-    compatible = SourcePlanarCalibration(
-        source_index=receipt.source_index,
-        image_set_manifest_sha256=receipt.image_set_manifest_sha256,
-        provider_image_id=receipt.provider_image_id,
-        frame_id=receipt.metric_basis.frame_id,
-        calibration=receipt.calibration,
-    )
-    if compatible.calibration_sha256 != item.calibration_sha256:
-        _fail(ProposalEvidenceEvaluationErrorCode.BINDING_MISMATCH, "/calibration_receipts")
-    if not receipt.calibration.decision_eligible:
-        return receipt, ConsumerClosureReason.CALIBRATION_NOT_ELIGIBLE
-    return receipt, None
 
 
 def _allowed_tolerance(span: float) -> float:
@@ -676,31 +451,44 @@ def _decision_for(consumers: tuple[ConsumerClosure, ...]) -> ProposalEvidenceDec
     return ProposalEvidenceDecision.COMPLETE
 
 
-def evaluate_proposal_evidence(
+def _evaluate_recomputed_pipeline(
     *,
     proposal: ReconstructionProposal,
     image_set: ImageSet,
     capture_quality: CaptureQualityReport,
     evidence: BoundVisualEvidence,
     fit_report: VisualEvidenceFitReport,
-    calibration_receipts: tuple[InMemoryPlanarCalibrationReceipt, ...],
-    clarification_facts: tuple[ClarificationAnswer, ...],
+    calibration_receipt: InMemoryPlanarCalibrationReceipt,
 ) -> ProposalEvidenceEvaluationReport:
-    """Evaluate the internally-derived complete consumer set without authority."""
+    """Close consumers over values recomputed by the application entry."""
 
-    _validate_inputs(
-        proposal=proposal,
-        image_set=image_set,
-        capture_quality=capture_quality,
-        evidence=evidence,
-        fit_report=fit_report,
-        calibration_receipts=calibration_receipts,
-        clarification_facts=clarification_facts,
+    receipt = calibration_receipt
+    clarification_facts = proposal.clarification_answers
+    capture_digest = _sha256(
+        {
+            "decision": capture_quality.decision.value,
+            "readable": capture_quality.readable_source_indices,
+        }
     )
-    capture_digest = _sha256(_capture_mapping(capture_quality))
-    evidence_digest = _sha256(_evidence_mapping(evidence))
-    fit_digest = _sha256(_fit_mapping(fit_report))
-    receipt_digests = tuple(item.receipt_sha256 for item in calibration_receipts)
+    evidence_digest = _sha256(
+        [
+            {
+                "key": (item.source_index, item.local_feature_id),
+                "family": item.family.value,
+                "claims": item.claim_ids,
+                "points": tuple((point.x, point.y) for point in item.normalized_points),
+            }
+            for item in evidence.features
+        ]
+    )
+    fit_digest = _sha256(
+        {
+            "evidence": evidence_digest,
+            "receipt": receipt.receipt_sha256,
+            "policy_mm": FIRST_SLICE_FIT_RESIDUAL_TOLERANCE_MM,
+        }
+    )
+    receipt_digests = (receipt.receipt_sha256,)
     answer_digests = tuple(item.digest for item in clarification_facts)
     try:
         plan = derive_proposal_coverage_plan(proposal=proposal)
@@ -762,7 +550,6 @@ def evaluate_proposal_evidence(
     readable = set(capture_quality.readable_source_indices)
     consumers: dict[str, ConsumerClosure] = {}
     used_fit_keys: set[str] = set()
-    used_receipts: set[str] = set()
     used_answers: set[str] = set()
 
     def fixed(path: str, mode: ConsumerClosureMode) -> None:
@@ -804,14 +591,6 @@ def evaluate_proposal_evidence(
         )
         for item in line_candidates:
             used_fit_keys.add(_fit_key(item))
-            receipt, _reason = _receipt_for_fit(
-                item,
-                image_set=image_set,
-                batch_manifest_sha256=evidence.image_batch_manifest_sha256,
-                receipts=calibration_receipts,
-            )
-            if receipt is not None:
-                used_receipts.add(receipt.receipt_sha256)
         reason = (
             ConsumerClosureReason.LINE_ONLY_CANNOT_PROVE_ENDPOINTS
             if line_candidates
@@ -828,14 +607,6 @@ def evaluate_proposal_evidence(
         fitted = rectangle_candidates[0]
         key = _fit_key(fitted)
         used_fit_keys.add(key)
-        receipt, receipt_reason = _receipt_for_fit(
-            fitted,
-            image_set=image_set,
-            batch_manifest_sha256=evidence.image_batch_manifest_sha256,
-            receipts=calibration_receipts,
-        )
-        if receipt is not None:
-            used_receipts.add(receipt.receipt_sha256)
         decision = ProposalEvidenceDecision.COMPLETE
         reason = ConsumerClosureReason.COMPLETE
         checks: tuple[NumericCheck, ...] = ()
@@ -847,13 +618,6 @@ def evaluate_proposal_evidence(
                 ProposalEvidenceDecision.UNKNOWN,
                 ConsumerClosureReason.CAPTURE_UNREADABLE,
             )
-        elif receipt_reason is not None:
-            decision = (
-                ProposalEvidenceDecision.OUT_OF_ENVELOPE
-                if receipt_reason is ConsumerClosureReason.AMBIGUOUS_CALIBRATION_RECEIPT
-                else ProposalEvidenceDecision.UNKNOWN
-            )
-            reason = receipt_reason
         elif (
             fitted.status is not EvidenceFeatureFitStatus.FITTED
             or fitted.fit_result is None
@@ -862,7 +626,6 @@ def evaluate_proposal_evidence(
         ):
             decision, reason = ProposalEvidenceDecision.UNKNOWN, ConsumerClosureReason.FIT_UNKNOWN
         else:
-            assert receipt is not None
             primitive = fitted.fit_result.primitive
             span = max(primitive.width_mm, primitive.height_mm)
             tolerance = _allowed_tolerance(span)
@@ -880,7 +643,7 @@ def evaluate_proposal_evidence(
                     observed_error=error,
                 ),
             )
-            if 3.0 * uncertainty > tolerance:
+            if uncertainty > tolerance:
                 decision, reason = (
                     ProposalEvidenceDecision.UNKNOWN,
                     ConsumerClosureReason.UNCERTAINTY_EXCEEDED,
@@ -1000,14 +763,6 @@ def evaluate_proposal_evidence(
                 fitted = candidates[0]
                 key = _fit_key(fitted)
                 used_fit_keys.add(key)
-                receipt, receipt_reason = _receipt_for_fit(
-                    fitted,
-                    image_set=image_set,
-                    batch_manifest_sha256=evidence.image_batch_manifest_sha256,
-                    receipts=calibration_receipts,
-                )
-                if receipt is not None:
-                    used_receipts.add(receipt.receipt_sha256)
                 decision = ProposalEvidenceDecision.COMPLETE
                 reason = ConsumerClosureReason.COMPLETE
                 checks: tuple[NumericCheck, ...] = ()
@@ -1019,13 +774,6 @@ def evaluate_proposal_evidence(
                         ProposalEvidenceDecision.UNKNOWN,
                         ConsumerClosureReason.CAPTURE_UNREADABLE,
                     )
-                elif receipt_reason is not None:
-                    decision = (
-                        ProposalEvidenceDecision.OUT_OF_ENVELOPE
-                        if receipt_reason is ConsumerClosureReason.AMBIGUOUS_CALIBRATION_RECEIPT
-                        else ProposalEvidenceDecision.UNKNOWN
-                    )
-                    reason = receipt_reason
                 elif (
                     fitted.status is not EvidenceFeatureFitStatus.FITTED
                     or fitted.fit_result is None
@@ -1037,7 +785,6 @@ def evaluate_proposal_evidence(
                         ConsumerClosureReason.FIT_UNKNOWN,
                     )
                 else:
-                    assert receipt is not None
                     primitive = fitted.fit_result.primitive
                     tolerance = _allowed_tolerance(diameter_value)
                     uncertainty = _fit_uncertainty(fitted, receipt)
@@ -1064,7 +811,7 @@ def evaluate_proposal_evidence(
                         )
                         for name, left, right in zip(names, expected, observed, strict=True)
                     )
-                    if 3.0 * uncertainty > tolerance:
+                    if uncertainty > tolerance:
                         decision, reason = (
                             ProposalEvidenceDecision.UNKNOWN,
                             ConsumerClosureReason.UNCERTAINTY_EXCEEDED,
@@ -1118,9 +865,8 @@ def evaluate_proposal_evidence(
 
     all_fit_keys = {_fit_key(item) for item in fits}
     orphan = all_fit_keys - used_fit_keys
-    orphan_receipts = set(receipt_digests) - used_receipts
     orphan_answers = set(answer_digests) - used_answers
-    if orphan or orphan_receipts or orphan_answers:
+    if orphan or orphan_answers:
         root = consumers["/design"]
         consumers["/design"] = _closure(
             requirements["/design"],
@@ -1149,6 +895,110 @@ def evaluate_proposal_evidence(
         calibration_receipt_sha256s=receipt_digests,
         clarification_answer_digests=answer_digests,
         consumers=ordered,
+    )
+
+
+def _batch_is_exact(actual: ProviderImageBatch, expected: ProviderImageBatch) -> bool:
+    return actual == expected and all(
+        left.data == right.data
+        for left, right in zip(actual.parts, expected.parts, strict=True)
+    )
+
+
+def evaluate_proposal_evidence(
+    *,
+    proposal: ReconstructionProposal,
+    visual_input_store: VisualInputStore,
+    image_batch: ProviderImageBatch,
+    provider_features: tuple[ProviderFeatureEvidence, ...],
+    calibration_landmarks: tuple[ConfirmedPlanarLandmark, ...],
+    metric_basis: ConfirmedPlanarMetricBasis,
+) -> ProposalEvidenceEvaluationReport:
+    """Recompute every derived decision input without granting authority."""
+
+    if (
+        type(proposal) is not ReconstructionProposal
+        or type(visual_input_store) is not VisualInputStore
+        or type(image_batch) is not ProviderImageBatch
+        or type(provider_features) is not tuple
+        or any(type(item) is not ProviderFeatureEvidence for item in provider_features)
+        or type(calibration_landmarks) is not tuple
+        or any(type(item) is not ConfirmedPlanarLandmark for item in calibration_landmarks)
+        or type(metric_basis) is not ConfirmedPlanarMetricBasis
+    ):
+        _fail(ProposalEvidenceEvaluationErrorCode.INVALID_INPUT)
+    observation = proposal.observation
+    image_set, normalized_bytes = visual_input_store.read_provider_images_exact(
+        observation.image_set_id,
+        observation.image_set_manifest_sha256,
+    )
+    captures = tuple(
+        NormalizedCaptureImage(
+            source_index=index,
+            visual_input_id=item.normalized.id,
+            width=item.normalized.width,
+            height=item.normalized.height,
+            sha256=item.normalized.sha256,
+            data=normalized_bytes[index],
+        )
+        for index, item in enumerate(image_set.inputs)
+    )
+    capture_quality = assess_capture_quality(captures)
+    expected_batch = prepare_provider_image_batch(
+        image_set=image_set,
+        normalized_images=normalized_bytes,
+        profile=image_batch.profile,
+        detail_crops=(),
+    )
+    if (
+        any(item.kind is not ProviderImagePartKind.OVERVIEW for item in image_batch.parts)
+        or not _batch_is_exact(image_batch, expected_batch)
+    ):
+        _fail(ProposalEvidenceEvaluationErrorCode.BINDING_MISMATCH, "/image_batch")
+    sources = {item.source_index for item in provider_features}
+    if len(sources) != 1:
+        _fail(ProposalEvidenceEvaluationErrorCode.INVALID_INPUT, "/provider_features")
+    source_index = next(iter(sources))
+    receipt = build_in_memory_planar_calibration_receipt(
+        image_set=image_set,
+        image_batch=expected_batch,
+        source_index=source_index,
+        landmarks=calibration_landmarks,
+        metric_basis=metric_basis,
+    )
+    evidence = bind_visual_evidence(
+        observation=observation,
+        image_set=image_set,
+        image_batch=expected_batch,
+        features=provider_features,
+    )
+    policies = tuple(
+        FeatureFitPolicy(
+            source_index=item.source_index,
+            local_feature_id=item.local_feature_id,
+            residual_tolerance_mm=FIRST_SLICE_FIT_RESIDUAL_TOLERANCE_MM,
+        )
+        for item in evidence.features
+    )
+    calibration = SourcePlanarCalibration(
+        source_index=receipt.source_index,
+        image_set_manifest_sha256=receipt.image_set_manifest_sha256,
+        provider_image_id=receipt.provider_image_id,
+        frame_id=receipt.metric_basis.frame_id,
+        calibration=receipt.calibration,
+    )
+    fit_report = fit_bound_visual_evidence(
+        evidence=evidence,
+        calibrations=(calibration,),
+        policies=policies,
+    )
+    return _evaluate_recomputed_pipeline(
+        proposal=proposal,
+        image_set=image_set,
+        capture_quality=capture_quality,
+        evidence=evidence,
+        fit_report=fit_report,
+        calibration_receipt=receipt,
     )
 
 
