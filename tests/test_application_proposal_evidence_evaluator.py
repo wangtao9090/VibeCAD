@@ -401,6 +401,23 @@ def test_high_raw_uncertainty_is_unknown(tmp_path: Path) -> None:
     assert ConsumerClosureReason.UNCERTAINTY_EXCEEDED in report.reasons
 
 
+def test_raw_uncertainty_mutation_changes_all_sealed_evidence_digests(
+    tmp_path: Path,
+) -> None:
+    proposal, store, batch, features, landmarks, basis = _case(tmp_path)
+    first = _evaluate((proposal, store, batch, features, landmarks, basis))
+    changed = dataclasses.replace(
+        features[0],
+        localization_uncertainty_norm=0.000002,
+    )
+    second = _evaluate((proposal, store, batch, (changed,), landmarks, basis))
+
+    assert first.decision is second.decision is ProposalEvidenceDecision.COMPLETE
+    assert first.evidence_sha256 != second.evidence_sha256
+    assert first.fit_report_sha256 != second.fit_report_sha256
+    assert first.digest != second.digest
+
+
 def test_line_only_raw_profile_never_completes(tmp_path: Path) -> None:
     proposal, store, batch, features, landmarks, basis = _case(tmp_path)
     line = dataclasses.replace(

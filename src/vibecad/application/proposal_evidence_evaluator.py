@@ -13,7 +13,7 @@ import hashlib
 import itertools
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from enum import StrEnum
 
 from vibecad.visual.calibration_authority import (
@@ -295,6 +295,134 @@ def _new_report(
     return report
 
 
+def _capture_mapping(report: CaptureQualityReport) -> dict[str, object]:
+    return {
+        "schema_version": report.schema_version,
+        "decision": report.decision.value,
+        "metrics": [
+            {field.name: getattr(metric, field.name) for field in fields(metric)}
+            for metric in report.metrics
+        ],
+        "findings": [
+            {
+                "code": item.code.value,
+                "severity": item.severity.value,
+                "source_indices": item.source_indices,
+            }
+            for item in report.findings
+        ],
+        "readable_source_indices": report.readable_source_indices,
+        "redundant_source_indices": report.redundant_source_indices,
+    }
+
+
+def _evidence_mapping(
+    evidence: BoundVisualEvidence,
+    provider_features: tuple[ProviderFeatureEvidence, ...],
+) -> dict[str, object]:
+    return {
+        "schema_version": evidence.schema_version,
+        "reconstruction_id": evidence.reconstruction_id,
+        "generation": evidence.generation,
+        "image_set_id": evidence.image_set_id,
+        "image_set_manifest_sha256": evidence.image_set_manifest_sha256,
+        "image_batch_manifest_sha256": evidence.image_batch_manifest_sha256,
+        "observation_id": evidence.observation_id,
+        "observation_digest": evidence.observation_digest,
+        "provider_features": [
+            {
+                "schema_version": item.schema_version,
+                "key": (item.source_index, item.local_feature_id),
+                "provider_image_id": item.provider_image_id,
+                "family": item.family.value,
+                "claim_ids": item.claim_ids,
+                "coordinate_space": item.coordinate_space.value,
+                "localization_uncertainty_norm": item.localization_uncertainty_norm,
+                "points": tuple((point.x, point.y) for point in item.points),
+            }
+            for item in provider_features
+        ],
+        "bound_features": [
+            {
+                "key": (item.source_index, item.local_feature_id),
+                "provider_image_id": item.provider_image_id,
+                "family": item.family.value,
+                "claim_ids": item.claim_ids,
+                "normalized_points": tuple(
+                    (point.x, point.y) for point in item.normalized_points
+                ),
+                "pixel_points": tuple(
+                    (point.x_px, point.y_px, point.uncertainty_px)
+                    for point in item.pixel_points
+                ),
+            }
+            for item in evidence.features
+        ],
+    }
+
+
+def _primitive_mapping(value: object) -> dict[str, float] | None:
+    if value is None:
+        return None
+    return {field.name: float(getattr(value, field.name)) for field in fields(value)}
+
+
+def _fit_mapping(
+    report: VisualEvidenceFitReport,
+    *,
+    evidence_sha256: str,
+) -> dict[str, object]:
+    return {
+        "schema_version": report.schema_version,
+        "evidence_sha256": evidence_sha256,
+        "reconstruction_id": report.reconstruction_id,
+        "generation": report.generation,
+        "image_set_id": report.image_set_id,
+        "image_set_manifest_sha256": report.image_set_manifest_sha256,
+        "image_batch_manifest_sha256": report.image_batch_manifest_sha256,
+        "observation_id": report.observation_id,
+        "observation_digest": report.observation_digest,
+        "feature_fits": [
+            {
+                "key": (item.source_index, item.local_feature_id),
+                "provider_image_id": item.provider_image_id,
+                "family": item.family.value,
+                "claim_ids": item.claim_ids,
+                "frame_id": item.frame_id,
+                "calibration_sha256": item.calibration_sha256,
+                "status": item.status.value,
+                "unknown_reason": (
+                    None if item.unknown_reason is None else item.unknown_reason.value
+                ),
+                "plane_points": tuple(
+                    (point.x_mm, point.y_mm, point.uncertainty_mm)
+                    for point in item.plane_points
+                ),
+                "fit_result": (
+                    None
+                    if item.fit_result is None
+                    else {
+                        "schema_version": item.fit_result.schema_version,
+                        "family": item.fit_result.family.value,
+                        "status": item.fit_result.status.value,
+                        "primitive": _primitive_mapping(item.fit_result.primitive),
+                        "rms_residual_mm": item.fit_result.rms_residual_mm,
+                        "max_residual_mm": item.fit_result.max_residual_mm,
+                        "max_excess_residual_mm": item.fit_result.max_excess_residual_mm,
+                        "unknown_reason": (
+                            None
+                            if item.fit_result.unknown_reason is None
+                            else item.fit_result.unknown_reason.value
+                        ),
+                        "point_count": item.fit_result.point_count,
+                    }
+                ),
+            }
+            for item in report.feature_fits
+        ],
+    }
+
+
 def _fit_key(item: EvidenceFeatureFit) -> str:
     return f"{item.source_index}:{item.local_feature_id}"
 
@@ -459,32 +587,18 @@ def _evaluate_recomputed_pipeline(
     evidence: BoundVisualEvidence,
     fit_report: VisualEvidenceFitReport,
     calibration_receipt: InMemoryPlanarCalibrationReceipt,
+    provider_features: tuple[ProviderFeatureEvidence, ...],
 ) -> ProposalEvidenceEvaluationReport:
     """Close consumers over values recomputed by the application entry."""
 
     receipt = calibration_receipt
     clarification_facts = proposal.clarification_answers
-    capture_digest = _sha256(
-        {
-            "decision": capture_quality.decision.value,
-            "readable": capture_quality.readable_source_indices,
-        }
-    )
-    evidence_digest = _sha256(
-        [
-            {
-                "key": (item.source_index, item.local_feature_id),
-                "family": item.family.value,
-                "claims": item.claim_ids,
-                "points": tuple((point.x, point.y) for point in item.normalized_points),
-            }
-            for item in evidence.features
-        ]
-    )
+    capture_digest = _sha256(_capture_mapping(capture_quality))
+    evidence_digest = _sha256(_evidence_mapping(evidence, provider_features))
     fit_digest = _sha256(
-        {
-            "evidence": evidence_digest,
-            "receipt": receipt.receipt_sha256,
+        _fit_mapping(fit_report, evidence_sha256=evidence_digest)
+        | {
+            "calibration_receipt_sha256": receipt.receipt_sha256,
             "policy_mm": FIRST_SLICE_FIT_RESIDUAL_TOLERANCE_MM,
         }
     )
@@ -999,6 +1113,7 @@ def evaluate_proposal_evidence(
         evidence=evidence,
         fit_report=fit_report,
         calibration_receipt=receipt,
+        provider_features=provider_features,
     )
 
 
