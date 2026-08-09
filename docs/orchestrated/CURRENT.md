@@ -95,6 +95,13 @@ fresh-process recovery and Resource reads; the three hosts do not substitute for
 one another, and no new runner or validation framework is introduced merely for
 that matrix.
 
+The first A11 implementation remains authority-free: it adds exact sealed capture
+preflight and a deterministic advisory readiness receipt. The Task write boundary
+is intentionally withheld until a follow-on contract proves both the exact
+calibration source and complete coverage of every proposal/IR evidence consumer.
+The older public `adopt_reconstruction` entry remains unchanged, so this slice must
+not be described as a product-wide or global adoption interlock.
+
 The latest private blade outcome is additional A11 evidence, not a public fixture.
 Eleven ordinary photos were sealed and analyzed before the user-supplied STEP was
 opened. The STEP content and topology never entered the visual/model context; it

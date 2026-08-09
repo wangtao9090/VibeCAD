@@ -902,6 +902,11 @@ ParametricDesignIR/ModelProgram -> REQUIRE_REVIEW Task -> FCStd/STEP Resource �
 该入口在缺尺度、遮挡、冲突或 required fit unknown 时不得创建 CAD Task；成功路径仍停在
 awaiting_user_review，HEAD 不自动前移。随后使用同一候选身份分别完成 Codex、Claude、WorkBuddy
 fresh-process 恢复和 Resource read，再决定下一版本发布。Blender/B10 实现继续等待 M4 mini 迁移。
+
+首个 A11 候选保持无权威：只增加 exact sealed capture preflight 与 deterministic advisory
+readiness receipt。Task 写边界要等后续合同同时证明“校准来源不可替换”和“proposal/IR 所有 evidence
+consumer 完整覆盖”后再接入。旧的公开 `adopt_reconstruction` 入口保持不变，因此当前不能声明照片
+产品或所有旧 adoption 路径已经被全局拦截。
 ```
 
 当前 A11 隔离分支均从 `main@6fc966e` 创建；S41 实现分支为

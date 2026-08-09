@@ -441,6 +441,7 @@ def _evidence_mapping(evidence: BoundVisualEvidence) -> dict[str, object]:
                 "provider_image_id": item.provider_image_id,
                 "family": item.family.value,
                 "claim_ids": list(item.claim_ids),
+                "normalized_points": [[point.x, point.y] for point in item.normalized_points],
                 "points": [
                     [point.x_px, point.y_px, point.uncertainty_px] for point in item.pixel_points
                 ],
@@ -494,6 +495,9 @@ def _fit_mapping(item: EvidenceFeatureFit) -> dict[str, object]:
         "calibration_sha256": item.calibration_sha256,
         "status": item.status.value,
         "unknown_reason": None if item.unknown_reason is None else item.unknown_reason.value,
+        "plane_points": [
+            [point.x_mm, point.y_mm, point.uncertainty_mm] for point in item.plane_points
+        ],
         "fit_result": None
         if result is None
         else {

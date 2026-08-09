@@ -677,3 +677,49 @@ def test_report_digest_rejects_tamper() -> None:
     assert inconsistent_decision.value.code is PhotoReadinessErrorCode.INVALID_INPUT
 
     assert MAX_CAPTURE_QUALITY_FINDINGS == 5 * 16 - 1
+
+
+def test_readiness_digest_binds_normalized_evidence_and_all_plane_points() -> None:
+    case = _ready_case()
+    baseline = _assess(case)
+    image_set, quality, observation, evidence, fit_report, requirement = case
+
+    feature = evidence.features[0]
+    shifted_normalized = dataclasses.replace(
+        feature,
+        normalized_points=tuple(
+            dataclasses.replace(point, x=min(1.0, point.x + 0.01))
+            for point in feature.normalized_points
+        ),
+    )
+    changed_evidence = dataclasses.replace(evidence, features=(shifted_normalized,))
+    evidence_result = assess_photo_readiness(
+        image_set=image_set,
+        capture_quality=quality,
+        observation=observation,
+        evidence=changed_evidence,
+        fit_report=fit_report,
+        required_features=(requirement,),
+    )
+
+    fitted = fit_report.feature_fits[0]
+    shifted_fit = dataclasses.replace(
+        fitted,
+        plane_points=tuple(
+            dataclasses.replace(point, x_mm=point.x_mm + 100.0) for point in fitted.plane_points
+        ),
+    )
+    changed_fit_report = dataclasses.replace(fit_report, feature_fits=(shifted_fit,))
+    fit_result = assess_photo_readiness(
+        image_set=image_set,
+        capture_quality=quality,
+        observation=observation,
+        evidence=evidence,
+        fit_report=changed_fit_report,
+        required_features=(requirement,),
+    )
+
+    assert evidence_result.evidence_sha256 != baseline.evidence_sha256
+    assert evidence_result.digest != baseline.digest
+    assert fit_result.fit_report_sha256 != baseline.fit_report_sha256
+    assert fit_result.digest != baseline.digest
