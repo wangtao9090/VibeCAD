@@ -60,6 +60,7 @@ class ProposalCoverageErrorCode(StrEnum):
     MISSING_COVERAGE = "missing_coverage"
     AMBIGUOUS_COVERAGE = "ambiguous_coverage"
     ORPHAN_EVIDENCE = "orphan_evidence"
+    ORPHAN_CLAIM = "orphan_claim"
     INTEGRITY_FAILURE = "integrity_failure"
 
 
@@ -233,9 +234,14 @@ class ConsumerRequirement:
         return self._body_mapping() | {"digest": self.digest}
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclass(frozen=True, slots=True, kw_only=True, init=False)
 class ProposalCoveragePlan:
-    """Authority-free proof that the complete first-slice consumer set was frozen."""
+    """Authority-free proof that the complete first-slice consumer set was frozen.
+
+    The ordinary constructor is intentionally unavailable.  A future evaluator
+    must accept the exact proposal and call :func:`derive_proposal_coverage_plan`
+    internally; it must never accept a caller-supplied plan or requirements.
+    """
 
     proposal_id: str
     proposal_digest: str
@@ -247,7 +253,7 @@ class ProposalCoveragePlan:
     digest: str = ""
     schema_version: int = PROPOSAL_COVERAGE_SCHEMA_VERSION
 
-    def __post_init__(self) -> None:
+    def _seal(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != 1:
             _fail(ProposalCoverageErrorCode.INVALID_INPUT, "/schema_version")
         object.__setattr__(self, "proposal_id", _bounded_text(self.proposal_id, "/proposal_id"))
@@ -300,6 +306,35 @@ class ProposalCoveragePlan:
 
     def to_mapping(self) -> dict[str, object]:
         return self._body_mapping() | {"digest": self.digest}
+
+
+def _new_proposal_coverage_plan(
+    *,
+    proposal_id: str,
+    proposal_digest: str,
+    design_digest: str,
+    observation_digest: str,
+    acceptance_digest: str,
+    expected_operation_payload_sha256: str,
+    requirements: tuple[ConsumerRequirement, ...],
+) -> ProposalCoveragePlan:
+    """Construct one plan for the derivation path; never consume caller input."""
+
+    plan = object.__new__(ProposalCoveragePlan)
+    for name, value in (
+        ("proposal_id", proposal_id),
+        ("proposal_digest", proposal_digest),
+        ("design_digest", design_digest),
+        ("observation_digest", observation_digest),
+        ("acceptance_digest", acceptance_digest),
+        ("expected_operation_payload_sha256", expected_operation_payload_sha256),
+        ("requirements", requirements),
+        ("digest", ""),
+        ("schema_version", PROPOSAL_COVERAGE_SCHEMA_VERSION),
+    ):
+        object.__setattr__(plan, name, value)
+    plan._seal()
+    return plan
 
 
 def _payload_digest(value: object) -> str:
@@ -501,7 +536,9 @@ def _check_features(
         or hole.extent is not FeatureExtent.THROUGH_ALL
         or hole.axis is not None
         or set(hole.location_geometry_ids) != {item.id for item in locations.geometries}
-        or hole.reversed
+        # The verified origin-XY compiler/guided-photo contract cuts through
+        # the positive Pad by reversing the Hole direction.
+        or not hole.reversed
         or hole.symmetric
     ):
         _fail(ProposalCoverageErrorCode.OUT_OF_ENVELOPE, "/design/features/1")
@@ -737,6 +774,15 @@ def derive_proposal_coverage_plan(*, proposal: ReconstructionProposal) -> Propos
             code,
             "/design/evidence",
         )
+    consumed_claim_ids = set(claim_counts)
+    declared_claim_ids = {claim.id for claim in proposal.observation.claims}
+    if consumed_claim_ids != declared_claim_ids:
+        code = (
+            ProposalCoverageErrorCode.ORPHAN_CLAIM
+            if declared_claim_ids - consumed_claim_ids
+            else ProposalCoverageErrorCode.INTEGRITY_FAILURE
+        )
+        _fail(code, "/observation/claims")
 
     operation = ModelCommand(
         id="visual-adoption-create-design",
@@ -765,7 +811,7 @@ def derive_proposal_coverage_plan(*, proposal: ReconstructionProposal) -> Propos
     )
     if len(requirements) > MAX_FIRST_SLICE_CONSUMERS:
         _fail(ProposalCoverageErrorCode.BUDGET_EXCEEDED, "/requirements")
-    return ProposalCoveragePlan(
+    return _new_proposal_coverage_plan(
         proposal_id=proposal.id,
         proposal_digest=proposal.digest,
         design_digest=proposal.design_digest,

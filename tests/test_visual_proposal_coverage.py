@@ -5,6 +5,7 @@ import inspect
 
 import pytest
 
+from tests.guided_photo_designs import guided_photo_targets
 from vibecad.parametric.contracts import (
     BodyDefinition,
     ConstraintKind,
@@ -114,7 +115,9 @@ def _proposal(
     shared_geometry_evidence: bool = False,
     shared_claim: bool = False,
     orphan_evidence: bool = False,
+    orphan_claim: bool = False,
     derived_constraint_count: int = 0,
+    hole_reversed: bool = True,
 ) -> ReconstructionProposal:
     keys = ["length", "profile", "edge0", "edge1", "edge2", "edge3", "pad"]
     if missing_first_geometry_evidence:
@@ -127,6 +130,15 @@ def _proposal(
     if orphan_evidence:
         keys.append("orphan")
     claims = {key: _claim(key, index) for index, key in enumerate(keys)}
+    if orphan_claim:
+        claims["orphan"] = VisualClaim(
+            name="coverage.orphan",
+            status=VisualClaimStatus.CONFIRMED,
+            source_indices=(0,),
+            value=999,
+            unit=VisualClaimUnit.MM,
+            description="Confirmed but unused CAD-effective value",
+        )
     evidence_ids = {key: _ir_id("evidence", index + 1) for index, key in enumerate(keys)}
     evidence = tuple(
         DesignEvidence(
@@ -245,6 +257,7 @@ def _proposal(
                 evidence_ids=(evidence_ids["hole_feature"],),
                 extent=FeatureExtent.THROUGH_ALL,
                 location_geometry_ids=tuple(item.id for item in circles),
+                reversed=hole_reversed,
             )
         )
     design = ParametricDesignIR(
@@ -355,6 +368,44 @@ def test_optional_holes_are_all_enumerated_and_bind_expected_operation() -> None
     assert operation["op"] == "create_parametric_design"
 
 
+def test_hole_direction_matches_verified_guided_photo_contract() -> None:
+    proposal = _proposal(holes=2)
+    guided = next(
+        target for target in guided_photo_targets() if target.case_id == "guided-photo-washer-ready"
+    )
+    proposed_hole = proposal.design.features[-1]
+    guided_hole = guided.design.features[-1]
+
+    assert (
+        proposed_hole.kind,
+        proposed_hole.extent,
+        proposed_hole.reversed,
+        proposal.design.sketches[-1].plane,
+    ) == (
+        guided_hole.kind,
+        guided_hole.extent,
+        guided_hole.reversed,
+        guided.design.sketches[-1].plane,
+    )
+    assert proposed_hole.kind is FeatureKind.HOLE
+    assert proposed_hole.extent is FeatureExtent.THROUGH_ALL
+    assert proposed_hole.reversed is True
+    assert set(proposed_hole.location_geometry_ids) == {
+        item.id for item in proposal.design.sketches[-1].geometries
+    }
+    assert derive_proposal_coverage_plan(proposal=proposal).requirements
+
+
+def test_non_reversed_origin_xy_hole_is_out_of_envelope() -> None:
+    proposal = _proposal(holes=1, hole_reversed=False)
+
+    with pytest.raises(ProposalCoverageError) as caught:
+        derive_proposal_coverage_plan(proposal=proposal)
+
+    assert caught.value.code is ProposalCoverageErrorCode.OUT_OF_ENVELOPE
+    assert caught.value.path == "/design/features/1"
+
+
 def test_canonical_declaration_order_produces_same_plan() -> None:
     forward = derive_proposal_coverage_plan(proposal=_proposal())
     reversed_plan = derive_proposal_coverage_plan(proposal=_proposal(reverse_declarations=True))
@@ -423,6 +474,16 @@ def test_orphan_evidence_fails_closed() -> None:
 
     assert caught.value.code is ProposalCoverageErrorCode.ORPHAN_EVIDENCE
     assert caught.value.path == "/design/evidence"
+
+
+def test_orphan_observation_claim_fails_closed() -> None:
+    proposal = _proposal(orphan_claim=True)
+
+    with pytest.raises(ProposalCoverageError) as caught:
+        derive_proposal_coverage_plan(proposal=proposal)
+
+    assert caught.value.code is ProposalCoverageErrorCode.ORPHAN_CLAIM
+    assert caught.value.path == "/observation/claims"
 
 
 def test_slot_profile_is_out_of_first_slice_envelope() -> None:
@@ -503,6 +564,21 @@ def test_first_slice_requirement_budget_is_fail_closed() -> None:
     assert MAX_FIRST_SLICE_CONSUMERS == 64
 
 
+def test_plan_constructor_cannot_rebuild_a_requirement_subset() -> None:
+    plan = derive_proposal_coverage_plan(proposal=_proposal())
+
+    with pytest.raises(TypeError):
+        ProposalCoveragePlan(
+            proposal_id=plan.proposal_id,
+            proposal_digest=plan.proposal_digest,
+            design_digest=plan.design_digest,
+            observation_digest=plan.observation_digest,
+            acceptance_digest=plan.acceptance_digest,
+            expected_operation_payload_sha256=plan.expected_operation_payload_sha256,
+            requirements=plan.requirements[:1],
+        )
+
+
 def test_plan_and_requirement_reject_tampered_digests() -> None:
     plan = derive_proposal_coverage_plan(proposal=_proposal())
     requirement = plan.requirements[0]
@@ -511,9 +587,8 @@ def test_plan_and_requirement_reject_tampered_digests() -> None:
         dataclasses.replace(requirement, digest="0" * 64)
     assert requirement_error.value.code is ProposalCoverageErrorCode.INTEGRITY_FAILURE
 
-    with pytest.raises(ProposalCoverageError) as plan_error:
+    with pytest.raises(TypeError):
         dataclasses.replace(plan, digest="0" * 64)
-    assert plan_error.value.code is ProposalCoverageErrorCode.INTEGRITY_FAILURE
 
 
 def test_rejects_non_exact_proposal_type() -> None:
