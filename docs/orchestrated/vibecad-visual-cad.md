@@ -907,6 +907,16 @@ fresh-process 恢复和 Resource read，再决定下一版本发布。Blender/B1
 readiness receipt。Task 写边界要等后续合同同时证明“校准来源不可替换”和“proposal/IR 所有 evidence
 consumer 完整覆盖”后再接入。旧的公开 `adopt_reconstruction` 入口保持不变，因此当前不能声明照片
 产品或所有旧 adoption 路径已经被全局拦截。
+
+第二个 A11 候选已在不接写路径的前提下冻结这两份合同：planar calibration 只接收 exact
+ImageSet/Provider overview binding、已确认 metric landmarks 与 metric frame，矩阵、eligibility 和 receipt
+digest 全部由内部推导，且 `task_adoption_eligible` 恒为 false；proposal coverage 只接收 exact
+ReconstructionProposal，自动枚举首期矩形 Pad 与可选 Through-All Hole 的全部 CAD-effective consumer，
+拒绝 caller requirements 子集、orphan evidence/claim、未验证 Hole 方向和超出包络的 feature。两者仍只是
+process-local integrity/checklist artifact；confirmation authenticity、evidence/fit evaluator、durable recovery
+和 Task admission 继续是后续独立门。汇合候选完整非慢速门为 6,300 passed、1 个 expected integration
+skip，未增加 public export、MCP tool、durable schema、Provider call、CAD operation 或 Task/Revision/HEAD
+路径。
 ```
 
 当前 A11 隔离分支均从 `main@6fc966e` 创建；S41 实现分支为
@@ -968,6 +978,7 @@ preflight/readiness 并行切片，随后串行接入统一照片产品流。`VC
 | `VCAD-E38` | S42 PR/CI/merge closeout | PR #18 从 draft 转为 ready，在无 review blocker、`CLEAN` 状态下以 merge commit 合入 main；测试 runtime/cache 与探针在合并前已精确清理，用户 FreeCAD app 与未跟踪文件保持不变 | `lint-unit` 3m24s、`runtime-integration` 2m49s；Actions [`31173378976`](https://github.com/wangtao9090/VibeCAD/actions/runs/31173378976) 全绿；main `5950da2a852b3f3b1fa530b6bf06de9f7504d32b`；完整回归和真实 FreeCAD 证据沿用 E37 | S42 完成；任意 STEP 边、自动切线链、变量 Chamfer、多点半径律、复杂 blend、语义 merge 和手工拓扑修复继续不在范围 |
 | `VCAD-E39` | `VCAD-A09` closeout 与用户批准继续并行 A11 | PR #22–#37 将 S43/S44、F10、M10/Q10/G10、F20、evidence/fit/overlay/review workflow 全部合入 main；A11 从模块建设转入统一照片产品流 | `main@6fc966e`；Actions [`31258950080`](https://github.com/wangtao9090/VibeCAD/actions/runs/31258950080) 全绿；没有开放 PR；私有 11-photo blade 为 42 parameters / 5 sketches `DoF=0` / 6 features + Fillet / valid one solid / 4 verifier pass / HEAD unchanged / IoU `0.957064`；恢复动作是并行 preflight 与 readiness，再串行接线 | main 上 post-v0.9 能力尚未发布；私有结果使用独立参考尺寸，只证明 bounded assisted reconstruction，不证明无尺度通用重建；私有输入和工件不入库 |
 | `VCAD-E40` | 用户改变 runtime 保留策略并继续批准并行执行 | VibeCAD-created managed runtime 默认持续保留/复用，只有用户明确要求才删除；scratch/cache/input copies/probes/临时宿主 session 仍可精确清理；Blender 实现等待 M4 mini | 当前私有 pilot runtime 已按旧规则删除，下一真实 FreeCAD gate 重装一次后保留；M4 mini 的 Blender/runtime/workspace 目标根为 `/Volumes/ExtSSD/DevArchive` | runtime fingerprint 或依赖变化仍需显式 conformance；持续环境不是跳过版本、完整性或真实运行时门的理由 |
+| `VCAD-E41` | A11 calibration-source 与 proposal-consumer coverage 合同门 | 私有 in-memory calibration receipt 从 exact ImageSet/Provider overview、confirmed landmarks 和 metric frame 内部拟合；私有 proposal plan 从 exact Proposal 自动枚举矩形 Pad 与可选 Through-All Hole 的完整 CAD consumer，拒绝 requirement 子集、orphan evidence/claim 与未验证 Hole 方向 | 两条实现分别独立 review、三项 calibration 与三项 coverage finding 均补回归闭合；汇合分支 176 focused/adjacent passed，完整非慢速 6,300 passed、1 skipped、145 deselected；Ruff/format/diff/worktree clean | receipt 未认证/未持久化且 `task_adoption_eligible=false`；coverage 尚未评估 confirmation/calibration/evidence/fit；不得接 Task、MCP、Revision/HEAD |
 
 ## 12. 研究依据
 
