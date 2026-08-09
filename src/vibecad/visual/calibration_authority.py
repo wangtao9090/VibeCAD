@@ -35,6 +35,7 @@ from vibecad.visual.metrology import (
     PlanePoint,
     calibrate_planar_homography,
 )
+from vibecad.visual.overlay_render import OverlayRenderError, _decode_source
 from vibecad.visual.provider_images import (
     MAX_PROVIDER_LONG_EDGE,
     ProviderImageBatch,
@@ -117,7 +118,10 @@ def _finite_number(
 ) -> float:
     if type(value) not in {int, float}:
         _fail(CalibrationAuthorityErrorCode.INVALID_INPUT, path)
-    converted = float(value)
+    try:
+        converted = float(value)
+    except OverflowError:
+        _fail(CalibrationAuthorityErrorCode.INVALID_INPUT, path)
     if not math.isfinite(converted) or not minimum <= converted <= maximum:
         _fail(CalibrationAuthorityErrorCode.INVALID_INPUT, path)
     return 0.0 if converted == 0.0 else converted
@@ -352,7 +356,7 @@ def _basis_landmarks(
         _fail(CalibrationAuthorityErrorCode.BINDING_MISMATCH, "/metric_basis/origin")
     if positive_x.x_mm <= 0.0 or positive_x.y_mm != 0.0:
         _fail(CalibrationAuthorityErrorCode.BINDING_MISMATCH, "/metric_basis/positive_x")
-    if positive_y.y_mm <= 0.0:
+    if positive_y.x_mm != 0.0 or positive_y.y_mm <= 0.0:
         _fail(CalibrationAuthorityErrorCode.BINDING_MISMATCH, "/metric_basis/positive_y")
 
 
@@ -576,6 +580,14 @@ def _aspect_preserved(part: ProviderImagePart, *, source_width: int, source_heig
     return cross_error <= max(source_width, source_height)
 
 
+def _validate_overview_png(part: ProviderImagePart) -> None:
+    try:
+        decoded = _decode_source(part.data, width=part.width, height=part.height)
+    except OverlayRenderError:
+        _fail(CalibrationAuthorityErrorCode.INTEGRITY_FAILURE, "/provider_overview/data")
+    decoded.close()
+
+
 def build_in_memory_planar_calibration_receipt(
     *,
     image_set: object,
@@ -620,6 +632,7 @@ def build_in_memory_planar_calibration_receipt(
     if len(overviews) != 1:
         _fail(CalibrationAuthorityErrorCode.BINDING_MISMATCH, "/provider_overview")
     overview = overviews[0]
+    _validate_overview_png(overview)
     source = image_set.inputs[source_index]
     if (
         overview.source_sha256 != source.original.sha256

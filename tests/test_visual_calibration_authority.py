@@ -322,6 +322,51 @@ def test_mismatched_batch_and_invalid_metric_basis_fail_closed() -> None:
     assert basis.value.code is CalibrationAuthorityErrorCode.BINDING_MISMATCH
 
 
+def test_positive_y_basis_landmark_must_lie_on_the_y_axis() -> None:
+    image_set, batch = _sealed_inputs()
+    landmarks = tuple(
+        dataclasses.replace(item, x_mm=5.0) if item.landmark_id == "positive-y" else item
+        for item in _landmarks()
+    )
+
+    with pytest.raises(CalibrationAuthorityError) as caught:
+        build_in_memory_planar_calibration_receipt(
+            image_set=image_set,
+            image_batch=batch,
+            source_index=0,
+            landmarks=landmarks,
+            metric_basis=_basis(),
+        )
+
+    assert caught.value.code is CalibrationAuthorityErrorCode.BINDING_MISMATCH
+    assert caught.value.path == "/metric_basis/positive_y"
+
+
+def test_overview_declared_dimensions_must_match_bounded_png_decode() -> None:
+    image_set, batch = _sealed_inputs()
+    forged_part = dataclasses.replace(batch.parts[0], width=201, height=201)
+    forged_batch = dataclasses.replace(
+        batch,
+        parts=(forged_part,),
+        manifest_sha256="",
+    )
+
+    with pytest.raises(CalibrationAuthorityError) as caught:
+        build_in_memory_planar_calibration_receipt(
+            image_set=image_set,
+            image_batch=forged_batch,
+            source_index=0,
+            landmarks=_landmarks(),
+            metric_basis=_basis(),
+        )
+
+    assert forged_part.data == batch.parts[0].data
+    assert (forged_part.width, forged_part.height) == (201, 201)
+    assert forged_batch.manifest_sha256 != batch.manifest_sha256
+    assert caught.value.code is CalibrationAuthorityErrorCode.INTEGRITY_FAILURE
+    assert caught.value.path == "/provider_overview/data"
+
+
 @pytest.mark.parametrize(
     ("landmarks", "expected"),
     (
@@ -382,3 +427,19 @@ def test_nonfinite_and_nonexact_inputs_are_rejected_before_calibration() -> None
 
     assert nonfinite.value.code is CalibrationAuthorityErrorCode.INVALID_INPUT
     assert nonexact.value.code is CalibrationAuthorityErrorCode.INVALID_INPUT
+
+
+def test_huge_integer_conversion_is_a_bounded_invalid_input() -> None:
+    with pytest.raises(CalibrationAuthorityError) as caught:
+        ConfirmedPlanarLandmark(
+            landmark_id="huge",
+            confirmation_id="confirm-huge",
+            normalized_x=0.0,
+            normalized_y=0.0,
+            localization_uncertainty_norm=0.0,
+            x_mm=10**10_000,
+            y_mm=0.0,
+        )
+
+    assert caught.value.code is CalibrationAuthorityErrorCode.INVALID_INPUT
+    assert caught.value.path == "/x_mm"
