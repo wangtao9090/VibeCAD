@@ -102,6 +102,20 @@ calibration source and complete coverage of every proposal/IR evidence consumer.
 The older public `adopt_reconstruction` entry remains unchanged, so this slice must
 not be described as a product-wide or global adoption interlock.
 
+The next authority-free A11 candidate now freezes both missing contracts without
+opening that write boundary. Its planar-calibration builder accepts only exact
+ImageSet/Provider-overview bindings, confirmed metric landmarks, and a metric
+frame; the matrix, eligibility, and all receipt digests are derived internally,
+and `task_adoption_eligible` is always false. Its proposal-coverage planner accepts
+only an exact `ReconstructionProposal`, enumerates every supported CAD-effective
+consumer, rejects caller-selected requirement subsets and orphan evidence/claims,
+and currently supports only an origin-XY rectangular Pad with an optional verified
+Through-All Hole set. These records are still process-local integrity/checklist
+artifacts: confirmation authenticity, evidence/fit evaluation, durable recovery,
+and Task admission remain separate gates. The combined candidate passed 6,300
+non-slow tests with one expected integration skip; it added no public export, MCP
+tool, durable schema, Provider call, CAD operation, Task, Revision, or HEAD path.
+
 The latest private blade outcome is additional A11 evidence, not a public fixture.
 Eleven ordinary photos were sealed and analyzed before the user-supplied STEP was
 opened. The STEP content and topology never entered the visual/model context; it
