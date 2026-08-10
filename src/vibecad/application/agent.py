@@ -227,6 +227,7 @@ class AgentApplication:
         "_task_api",
         "_task_store",
         "_visual_adoption",
+        "_visual_admission",
         "_visual_api",
         "_visual_drafts",
         "_visual_gate",
@@ -328,6 +329,7 @@ class AgentApplication:
         self._visual_drafts = None
         self._visual_review_port = None
         self._visual_reviews = None
+        self._visual_admission = None
         self._visual_adoption = None
         self._visual_service = None
         self._visual_api = None
@@ -636,6 +638,9 @@ class AgentApplication:
             api = self._visual_api
             service = self._visual_service
             if api is None or service is None:
+                from vibecad.application.visual_admission import (
+                    ApplicationVisualAdmissionGate,
+                )
                 from vibecad.application.visual_adoption import (
                     ApplicationVisualAdoptionPort,
                 )
@@ -668,6 +673,12 @@ class AgentApplication:
                 adoption = self._visual_adoption
                 if adoption is None:
                     adoption = ApplicationVisualAdoptionPort(application=self)
+                admission = self._visual_admission
+                if admission is None:
+                    admission = ApplicationVisualAdmissionGate(
+                        reconstruction_store=drafts,
+                        visual_input_store=inputs,
+                    )
                 review_store = self._visual_reviews
                 if review_store is None:
                     review_store = VisualReviewArtifactStore(
@@ -686,6 +697,7 @@ class AgentApplication:
                         inputs=inputs,
                         drafts=drafts,
                         provider=VisualProviderBinding(provider=provider),
+                        admission=admission,
                         adoption=adoption,
                         review_cleanup=review_port,
                     )
@@ -693,6 +705,7 @@ class AgentApplication:
                     api = VisualApi(service=service)
                 self._visual_inputs = inputs
                 self._visual_drafts = drafts
+                self._visual_admission = admission
                 self._visual_adoption = adoption
                 self._visual_reviews = review_store
                 self._visual_review_port = review_port

@@ -26,6 +26,11 @@ from vibecad.runtime.contracts import (
     RuntimeResult,
     RuntimeStatus,
 )
+from vibecad.visual.admission_gate import (
+    VisualAdmissionGate,
+    VisualAdmissionGateError,
+    VisualAdmissionGateErrorCode,
+)
 from vibecad.visual.adoption import (
     VisualAdoptionAbsenceReceipt,
     VisualAdoptionPort,
@@ -262,7 +267,14 @@ def _validate_provider_source_bindings(
 class VisualReconstructionService:
     """Coordinate the recoverable, provider-only portion of reconstruction."""
 
-    __slots__ = ("_adoption", "_drafts", "_inputs", "_provider", "_review_cleanup")
+    __slots__ = (
+        "_admission",
+        "_adoption",
+        "_drafts",
+        "_inputs",
+        "_provider",
+        "_review_cleanup",
+    )
 
     def __init__(
         self,
@@ -270,6 +282,7 @@ class VisualReconstructionService:
         inputs: VisualInputStore,
         drafts: ReconstructionDraftStore,
         provider: VisualProviderBinding,
+        admission: VisualAdmissionGate | None = None,
         adoption: VisualAdoptionPort | None = None,
         review_cleanup: VisualReviewCleanupPort | None = None,
     ) -> None:
@@ -277,6 +290,7 @@ class VisualReconstructionService:
             type(inputs) is not VisualInputStore
             or type(drafts) is not ReconstructionDraftStore
             or type(provider) is not VisualProviderBinding
+            or (admission is not None and not isinstance(admission, VisualAdmissionGate))
             or (adoption is not None and not isinstance(adoption, VisualAdoptionPort))
             or (
                 review_cleanup is not None
@@ -287,6 +301,7 @@ class VisualReconstructionService:
         self._inputs = inputs
         self._drafts = drafts
         self._provider = provider
+        self._admission = admission
         self._adoption = adoption
         self._review_cleanup = review_cleanup
 
@@ -736,10 +751,12 @@ class VisualReconstructionService:
             draft.status is not ReconstructionStatus.PROPOSED
             or draft.proposal_ref is None
             or draft.base_head is None
+            or self._admission is None
             or self._adoption is None
         ):
             _fail(VisualServiceErrorCode.INVALID_STATE)
         proposal = self._load_proposal(draft)
+        self._require_admission(draft)
         try:
             current_head = self._adoption.inspect_head(draft.base_head.project_id)
         except Exception:
@@ -776,6 +793,22 @@ class VisualReconstructionService:
             return self._publish_adoption_recovery(durable, phase="ensure_task")
         return self._complete_adoption(durable, request, receipt)
 
+    def _require_admission(self, draft: ReconstructionDraft) -> None:
+        gate = self._admission
+        if gate is None:
+            _fail(VisualServiceErrorCode.INVALID_STATE)
+        try:
+            gate.require_exact(
+                draft.reconstruction_id,
+                expected_generation=draft.generation,
+            )
+        except VisualAdmissionGateError as error:
+            if error.code is VisualAdmissionGateErrorCode.NOT_READY:
+                _fail(VisualServiceErrorCode.INVALID_STATE)
+            if error.code is VisualAdmissionGateErrorCode.INTEGRITY_FAILURE:
+                _fail(VisualServiceErrorCode.PROVIDER_RECEIPT_MISMATCH)
+            _fail(VisualServiceErrorCode.ADOPTION_UNAVAILABLE)
+
     def _load_proposal(self, draft: ReconstructionDraft) -> ReconstructionProposal:
         if draft.proposal_ref is None:
             _fail(VisualServiceErrorCode.INVALID_STATE)
@@ -793,9 +826,17 @@ class VisualReconstructionService:
             _fail(VisualServiceErrorCode.INVALID_STATE)
         return proposal
 
-    def _adoption_request_for(self, draft: ReconstructionDraft) -> VisualAdoptionRequest:
+    def _adoption_request_for(
+        self,
+        draft: ReconstructionDraft,
+        proposal: ReconstructionProposal,
+    ) -> VisualAdoptionRequest:
         if (
-            draft.base_head is None
+            type(proposal) is not ReconstructionProposal
+            or draft.proposal_ref is None
+            or proposal.digest != draft.proposal_ref.contract_digest
+            or proposal.observation.reconstruction_id != draft.reconstruction_id
+            or draft.base_head is None
             or draft.adoption_key_sha256 is None
             or draft.adoption_intent_sha256 is None
         ):
@@ -805,13 +846,21 @@ class VisualReconstructionService:
             adoption_key_sha256=draft.adoption_key_sha256,
             adoption_intent_sha256=draft.adoption_intent_sha256,
             base_head=draft.base_head,
-            proposal=self._load_proposal(draft),
+            proposal=proposal,
         )
 
     def _reconcile_adoption(self, draft: ReconstructionDraft) -> ReconstructionDraft:
         if self._adoption is None:
             _fail(VisualServiceErrorCode.INVALID_STATE)
-        request = self._adoption_request_for(draft)
+        proposal = self._load_proposal(draft)
+        try:
+            self._require_admission(draft)
+        except Exception:
+            return self._publish_adoption_recovery(
+                draft,
+                phase="admission_revalidate",
+            )
+        request = self._adoption_request_for(draft, proposal)
         try:
             receipt = self._adoption.reconcile_review_task(request)
         except Exception:

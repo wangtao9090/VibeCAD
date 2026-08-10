@@ -111,14 +111,26 @@ def _load_expected_draft(
     reconstruction_store: ReconstructionDraftStore,
     reconstruction_id: str,
     expected_generation: int,
+    *,
+    revalidation: bool = False,
 ) -> ReconstructionDraft:
     try:
         draft = reconstruction_store.load(reconstruction_id)
     except ReconstructionDraftStoreError as error:
         _store_failure(error)
+    allowed_status = draft.status is ReconstructionStatus.PROPOSED or (
+        revalidation
+        and (
+            draft.status is ReconstructionStatus.ADOPTING
+            or (
+                draft.status is ReconstructionStatus.RECOVERY_REQUIRED
+                and draft.adoption_key_sha256 is not None
+            )
+        )
+    )
     if (
         draft.generation != expected_generation
-        or draft.status is not ReconstructionStatus.PROPOSED
+        or not allowed_status
         or draft.base_head is None
         or draft.observation_ref is None
         or draft.proposal_ref is None
@@ -335,6 +347,7 @@ def revalidate_proposal_admission(
         reconstruction_store,
         reconstruction_id,
         selected_generation,
+        revalidation=True,
     )
     try:
         bundle = reconstruction_store._load_admission_exact(
@@ -392,6 +405,7 @@ def revalidate_proposal_admission(
         reconstruction_store,
         reconstruction_id,
         selected_generation,
+        revalidation=True,
     )
     if final_draft != draft:
         _fail(ProposalAdmissionErrorCode.BINDING_MISMATCH, "/draft")
