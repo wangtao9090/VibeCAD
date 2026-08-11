@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import json
 import shutil
@@ -63,7 +62,8 @@ def short_case_root() -> Path:
     try:
         yield root
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(root)
+        assert not root.exists()
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +94,14 @@ class _RawMcpSession:
             self.sink,
             failure_response=server._owned_failure_response,  # noqa: SLF001
         )
-        _initialize_owned(self.source, self.sink, self.runner)
+        try:
+            _initialize_owned(self.source, self.sink, self.runner)
+        except BaseException as primary:
+            try:
+                self.close()
+            except BaseException as cleanup:
+                primary.add_note(f"raw MCP initialization cleanup failed: {type(cleanup).__name__}")
+            raise
         self._request_id = 0
 
     def rpc(self, method: str, params: dict[str, object] | None = None) -> dict[str, object]:
@@ -125,9 +132,26 @@ class _RawMcpSession:
         return envelope
 
     def close(self) -> None:
-        self.source.close()
-        self.thread.join(10)
-        assert not self.thread.is_alive()
+        failure = None
+        try:
+            self.source.close()
+        except BaseException as error:
+            failure = error
+        try:
+            self.thread.join(10)
+        except BaseException as error:
+            if failure is None:
+                failure = error
+            else:
+                failure.add_note(f"raw MCP runner join failed: {type(error).__name__}")
+        if self.thread.is_alive():
+            alive = AssertionError("raw MCP runner did not stop")
+            if failure is None:
+                failure = alive
+            else:
+                failure.add_note(str(alive))
+        if failure is not None:
+            raise failure
 
 
 def _prepare_case(tmp_path: Path, *, mutation: str | None = None) -> _PreparedCase:
@@ -339,20 +363,59 @@ def _start_daemon(data_root: Path) -> tuple[LocalKernelDaemon, LocalAgentClient]
         data_root=data_root,
         application_factory=application_factory,
     )
-    client = LocalAgentClient.connect(
-        daemon.run_root,
-        artifact_root=data_root / "artifacts",
-        release_root=data_root / "releases",
-        visual_review_root=data_root / "visual_reviews",
-    )
+    try:
+        client = LocalAgentClient.connect(
+            daemon.run_root,
+            artifact_root=data_root / "artifacts",
+            release_root=data_root / "releases",
+            visual_review_root=data_root / "visual_reviews",
+        )
+    except BaseException as primary:
+        try:
+            daemon.close()
+        except BaseException as cleanup:
+            primary.add_note(f"daemon connect cleanup failed: {type(cleanup).__name__}")
+        raise
     return daemon, client
 
 
 def _close_daemon(daemon: LocalKernelDaemon, client: LocalAgentClient) -> None:
-    with contextlib.suppress(Exception):
+    failure = None
+    try:
         client.close()
-    if daemon.state is not LocalKernelState.CLOSED:
+    except BaseException as error:
+        failure = error
+    try:
         daemon.close()
+    except BaseException as error:
+        if failure is None:
+            failure = error
+        else:
+            failure.add_note(f"daemon cleanup failed: {type(error).__name__}")
+    if failure is not None:
+        raise failure
+
+
+def _close_session_and_daemon(
+    session: _RawMcpSession | None,
+    daemon: LocalKernelDaemon,
+    client: LocalAgentClient,
+) -> None:
+    failure = None
+    if session is not None:
+        try:
+            session.close()
+        except BaseException as error:
+            failure = error
+    try:
+        _close_daemon(daemon, client)
+    except BaseException as error:
+        if failure is None:
+            failure = error
+        else:
+            failure.add_note(f"daemon teardown failed: {type(error).__name__}")
+    if failure is not None:
+        raise failure
 
 
 def _bind_raw_server(monkeypatch: pytest.MonkeyPatch, client: LocalAgentClient) -> None:
@@ -384,6 +447,94 @@ def _adopt(session: _RawMcpSession, case: _PreparedCase) -> dict[str, object]:
             "expected_generation": case.generation,
         },
     )
+
+
+def test_daemon_connect_failure_closes_started_daemon(
+    short_case_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[LocalKernelDaemon] = []
+    real_start = LocalKernelDaemon.start
+
+    def capture_start(_cls, **kwargs):
+        daemon = real_start(**kwargs)
+        started.append(daemon)
+        return daemon
+
+    def fail_connect(_cls, *_args, **_kwargs):
+        raise RuntimeError("injected connect failure")
+
+    monkeypatch.setattr(LocalKernelDaemon, "start", classmethod(capture_start))
+    monkeypatch.setattr(LocalAgentClient, "connect", classmethod(fail_connect))
+
+    with pytest.raises(RuntimeError, match="injected connect failure"):
+        _start_daemon(short_case_root / "data")
+
+    assert len(started) == 1
+    assert started[0].state is LocalKernelState.CLOSED
+
+
+def test_raw_mcp_initialize_failure_closes_source_and_joins_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = sys.modules[__name__]
+    sources = []
+    threads = []
+    original_source = _ChunkSource
+    original_run = _run_owned
+
+    class ObservedSource(original_source):
+        closed = False
+
+        def __init__(self) -> None:
+            super().__init__()
+            sources.append(self)
+
+        def close(self) -> None:
+            self.closed = True
+            super().close()
+
+    def capture_run(*args, **kwargs):
+        result = original_run(*args, **kwargs)
+        threads.append(result[1])
+        return result
+
+    def fail_initialize(*_args, **_kwargs):
+        raise RuntimeError("injected initialize failure")
+
+    monkeypatch.setattr(module, "_ChunkSource", ObservedSource)
+    monkeypatch.setattr(module, "_run_owned", capture_run)
+    monkeypatch.setattr(module, "_initialize_owned", fail_initialize)
+
+    with pytest.raises(RuntimeError, match="injected initialize failure"):
+        _RawMcpSession()
+
+    assert len(sources) == len(threads) == 1
+    assert sources[0].closed is True
+    assert not threads[0].is_alive()
+
+
+def test_teardown_attempts_session_client_and_daemon_cleanup_independently() -> None:
+    calls = []
+
+    class BrokenSession:
+        def close(self) -> None:
+            calls.append("session")
+            raise RuntimeError("injected session close failure")
+
+    class BrokenClient:
+        def close(self) -> None:
+            calls.append("client")
+            raise RuntimeError("injected client close failure")
+
+    class ObservedDaemon:
+        def close(self) -> None:
+            calls.append("daemon")
+
+    with pytest.raises(RuntimeError, match="injected session close failure"):
+        _close_session_and_daemon(BrokenSession(), ObservedDaemon(), BrokenClient())
+
+    assert calls == ["session", "client", "daemon"]
 
 
 def test_raw_stdio_discovery_matches_mcpb_and_keeps_adopt_schema_closed() -> None:
@@ -431,9 +582,7 @@ def test_valid_sidecar_adopts_over_raw_stdio_and_daemon_restart_does_not_duplica
         adopted = _adopt(session, case)
         after = _state(session, case.project_id)
     finally:
-        if session is not None:
-            session.close()
-        _close_daemon(daemon, client)
+        _close_session_and_daemon(session, daemon, client)
 
     assert adopted["ok"] is True
     assert adopted["result"]["status"] == "adopted"
@@ -454,9 +603,11 @@ def test_valid_sidecar_adopts_over_raw_stdio_and_daemon_restart_does_not_duplica
         replay = _adopt(restarted_session, case)
         restarted_state = _state(restarted_session, case.project_id)
     finally:
-        if restarted_session is not None:
-            restarted_session.close()
-        _close_daemon(restarted_daemon, restarted_client)
+        _close_session_and_daemon(
+            restarted_session,
+            restarted_daemon,
+            restarted_client,
+        )
 
     assert recovered["ok"] is True
     assert recovered["result"]["status"] == "adopted"
@@ -481,9 +632,7 @@ def test_missing_or_tampered_sidecar_fails_closed_without_task_revision_or_head_
         rejected = _adopt(session, case)
         after = _state(session, case.project_id)
     finally:
-        if session is not None:
-            session.close()
-        _close_daemon(daemon, client)
+        _close_session_and_daemon(session, daemon, client)
 
     assert rejected["ok"] is False
     assert rejected["error"]["code"] == "integrity_failure"
