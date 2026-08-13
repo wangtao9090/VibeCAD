@@ -223,6 +223,7 @@ def _decode_json(raw: object, *, maximum: int) -> object:
 class CapabilityKind(StrEnum):
     MODULE = "module"
     WORKBENCH = "workbench"
+    NATIVE_TYPE = "native_type"
     DOCUMENT_OBJECT = "document_object"
     PROPERTY_TYPE = "property_type"
     EXTENSION_TYPE = "extension_type"
