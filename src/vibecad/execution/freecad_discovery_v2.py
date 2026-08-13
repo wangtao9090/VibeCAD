@@ -11,8 +11,9 @@ its immediate parent type in another page through ``ExternalCapabilityRef``.
 The aggregate index validates the complete parent chain, keeping deep native
 inheritance bounded without duplicating every ancestor into each leaf page.
 A standalone page is only a transport segment, not a closed capability view;
-consumers must load the manifest's complete page set into the aggregate index
-before treating external references or transitive ancestry as resolved.
+consumers must pass the manifest's ordered, complete page set through
+``validate_freecad_capability_page_set`` before treating external references
+or transitive ancestry as resolved.
 """
 
 from __future__ import annotations
@@ -420,6 +421,7 @@ class FreeCadCapabilityManifest:
     discovery_algorithm_version: str
     module_count: int
     type_count: int
+    probe_modules: tuple[str, ...]
     page_descriptor_limit: int
     page_descriptors: tuple[FreeCadCapabilityPageDescriptor, ...]
 
@@ -451,12 +453,20 @@ class FreeCadCapabilityManifest:
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "type_count")
         if self.module_count + self.type_count > MAX_FREECAD_DISCOVERY_V2_DESCRIPTORS:
             _fail(CapabilityCatalogErrorCode.BUDGET_EXCEEDED, "type_count")
+        if type(self.probe_modules) is not tuple:
+            _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "probe_modules")
+        if len(self.probe_modules) > MAX_FREECAD_DISCOVERY_V2_MODULES:
+            _fail(CapabilityCatalogErrorCode.BUDGET_EXCEEDED, "probe_modules")
+        probe_modules = tuple(_name(item, "probe_modules") for item in self.probe_modules)
+        if len(set(probe_modules)) != len(probe_modules):
+            _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "probe_modules")
+        probe_modules = tuple(sorted(probe_modules))
         if (
             type(self.page_descriptor_limit) is not int
             or not 1 <= self.page_descriptor_limit <= MAX_CAPABILITY_DESCRIPTORS
         ):
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "page_descriptor_limit")
-        if type(self.page_descriptors) is not tuple or not self.page_descriptors:
+        if type(self.page_descriptors) is not tuple:
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "page_descriptors")
         if len(self.page_descriptors) > MAX_FREECAD_DISCOVERY_V2_PAGES:
             _fail(CapabilityCatalogErrorCode.BUDGET_EXCEEDED, "page_descriptors")
@@ -466,16 +476,20 @@ class FreeCadCapabilityManifest:
         if tuple(item.page_index for item in pages) != tuple(range(len(pages))):
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "page_descriptors")
         scopes = tuple(item.scope_module for item in pages)
-        if scopes != tuple(sorted(scopes)) or len(set(scopes)) != self.module_count:
+        if scopes != tuple(sorted(scopes)):
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "page_descriptors")
+        paged_modules = set(scopes)
+        if len(set(probe_modules) | paged_modules) != self.module_count:
+            _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "module_count")
         if any(item.descriptor_count > self.page_descriptor_limit for item in pages):
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "page_descriptors")
         if len({item.catalog_sha256 for item in pages}) != len(pages):
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "page_descriptors")
         if len({item.segment_id for item in pages}) != len(pages):
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "page_descriptors")
-        if sum(item.descriptor_count for item in pages) != self.module_count + self.type_count:
+        if sum(item.descriptor_count for item in pages) != len(paged_modules) + self.type_count:
             _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "page_descriptors")
+        object.__setattr__(self, "probe_modules", probe_modules)
         object.__setattr__(self, "page_descriptors", pages)
         _canonical(self._body_mapping(), maximum=MAX_FREECAD_DISCOVERY_V2_MANIFEST_BYTES)
 
@@ -487,6 +501,7 @@ class FreeCadCapabilityManifest:
             "module_count": self.module_count,
             "page_descriptor_limit": self.page_descriptor_limit,
             "page_descriptors": [_page_descriptor_mapping(item) for item in self.page_descriptors],
+            "probe_modules": list(self.probe_modules),
             "schema_version": self.schema_version,
             "snapshot_sha256": self.snapshot_sha256,
             "type_count": self.type_count,
@@ -548,6 +563,7 @@ def _decode_freecad_capability_manifest(raw: object) -> FreeCadCapabilityManifes
             "module_count",
             "page_descriptor_limit",
             "page_descriptors",
+            "probe_modules",
             "schema_version",
             "snapshot_sha256",
             "type_count",
@@ -580,6 +596,9 @@ def _decode_freecad_capability_manifest(raw: object) -> FreeCadCapabilityManifes
     raw_pages = item["page_descriptors"]
     if type(raw_pages) is not list:
         _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "page_descriptors")
+    raw_probe_modules = item["probe_modules"]
+    if type(raw_probe_modules) is not list:
+        _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "probe_modules")
     manifest = FreeCadCapabilityManifest(
         schema_version=item["schema_version"],
         backend=parsed_backend,
@@ -588,6 +607,7 @@ def _decode_freecad_capability_manifest(raw: object) -> FreeCadCapabilityManifes
         discovery_algorithm_version=item["discovery_algorithm_version"],
         module_count=item["module_count"],
         type_count=item["type_count"],
+        probe_modules=tuple(raw_probe_modules),
         page_descriptor_limit=item["page_descriptor_limit"],
         page_descriptors=tuple(
             _page_descriptor_from(page, f"page_descriptors/{index}")
@@ -781,7 +801,8 @@ def _project_pages(
     *,
     max_descriptors_per_page: int,
 ) -> tuple[tuple[str, CapabilityCatalogSegment], ...]:
-    module_descriptors = {module: _module_descriptor(module) for module in snapshot.scope_modules}
+    paged_modules = tuple(sorted({item.declaring_module for item in snapshot.registered_types}))
+    module_descriptors = {module: _module_descriptor(module) for module in paged_modules}
     type_descriptors = {
         item.native_type_id: _type_descriptor(item) for item in snapshot.registered_types
     }
@@ -794,7 +815,7 @@ def _project_pages(
         for item in snapshot.registered_types
     }
     scoped_pages: list[tuple[str, CapabilityCatalogSegment]] = []
-    for module in snapshot.scope_modules:
+    for module in paged_modules:
         module_types = tuple(
             sorted(
                 (item for item in snapshot.registered_types if item.declaring_module == module),
@@ -834,6 +855,184 @@ def _project_pages(
     return tuple(scoped_pages)
 
 
+def validate_freecad_capability_page_set(
+    manifest: object,
+    pages: object,
+) -> tuple[CapabilityCatalogSegment, ...]:
+    """Validate one ordered, complete page set against its trusted manifest.
+
+    A manifest digest is expected to be authenticated by the caller.  This
+    function proves that every supplied canonical page matches the manifest,
+    that no page is missing, substituted, reordered, or duplicated, and that
+    all cross-page references close in the aggregate index.  Probe-only empty
+    modules remain bound by ``manifest.probe_modules`` without consuming a
+    catalog page.
+    """
+
+    if type(manifest) is not FreeCadCapabilityManifest:
+        _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "manifest")
+    if type(pages) is not tuple:
+        _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "pages")
+    if len(pages) > MAX_FREECAD_DISCOVERY_V2_PAGES:
+        _fail(CapabilityCatalogErrorCode.BUDGET_EXCEEDED, "pages")
+    if not all(type(item) is CapabilityCatalogSegment for item in pages):
+        _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "pages")
+    if len(pages) != len(manifest.page_descriptors):
+        _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "pages")
+
+    expected_terms = _terms()
+    module_descriptor_ids: set[str] = set()
+    type_descriptor_count = 0
+    type_descriptors_by_id: dict[str, CapabilityDescriptor] = {}
+    parent_by_source: dict[str, str] = {}
+    relation_id_by_source: dict[str, str] = {}
+    for page_index, (metadata, page) in enumerate(
+        zip(manifest.page_descriptors, pages, strict=True)
+    ):
+        expected_metadata = _page_descriptor(
+            page_index=page_index,
+            scope_module=metadata.scope_module,
+            page=page,
+        )
+        if metadata != expected_metadata:
+            _fail(
+                CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
+                f"pages/{page_index}",
+            )
+        if (
+            page.backend != manifest.backend
+            or page.discovery_algorithm_id != FREECAD_DISCOVERY_V2_ALGORITHM_ID
+            or page.discovery_algorithm_version != FREECAD_DISCOVERY_V2_ALGORITHM_VERSION
+            or page.terms != expected_terms
+        ):
+            _fail(
+                CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
+                f"pages/{page_index}",
+            )
+        expected_module_id = freecad_module_capability_id(metadata.scope_module)
+        local_descriptor_ids = {item.capability_id for item in page.descriptors}
+        expected_external_ids: set[str] = set()
+        for descriptor in page.descriptors:
+            if (
+                descriptor.declaring_module_id != expected_module_id
+                or descriptor.status is not CapabilitySupportStatus.DISCOVERED
+                or descriptor.risk_class is not CapabilityRiskClass.UNKNOWN
+            ):
+                _fail(
+                    CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
+                    f"pages/{page_index}/descriptors",
+                )
+            if descriptor.kind is CapabilityKind.MODULE:
+                if (
+                    descriptor != _module_descriptor(metadata.scope_module)
+                    or descriptor.capability_id in module_descriptor_ids
+                ):
+                    _fail(
+                        CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
+                        f"pages/{page_index}/descriptors",
+                    )
+                module_descriptor_ids.add(descriptor.capability_id)
+            elif descriptor.kind not in {
+                CapabilityKind.NATIVE_TYPE,
+                CapabilityKind.DOCUMENT_OBJECT,
+                CapabilityKind.PROPERTY_TYPE,
+                CapabilityKind.EXTENSION_TYPE,
+            }:
+                _fail(
+                    CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
+                    f"pages/{page_index}/descriptors",
+                )
+            else:
+                expected_semantic_term = {
+                    CapabilityKind.NATIVE_TYPE: "semantic.freecad.native_type",
+                    CapabilityKind.DOCUMENT_OBJECT: "semantic.freecad.document_object",
+                    CapabilityKind.PROPERTY_TYPE: "semantic.freecad.property_type",
+                    CapabilityKind.EXTENSION_TYPE: "semantic.freecad.extension_type",
+                }[descriptor.kind]
+                if (
+                    descriptor.capability_id
+                    != freecad_type_capability_id(descriptor.native_identifier)
+                    or descriptor.semantic_term_ref_ids != (expected_semantic_term,)
+                    or descriptor.facts
+                    or descriptor.execution_profiles
+                    or descriptor.lifecycle_stages
+                    or descriptor.dependency_ids
+                    or descriptor.verification is not None
+                ):
+                    _fail(
+                        CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
+                        f"pages/{page_index}/descriptors",
+                    )
+                type_descriptors_by_id[descriptor.capability_id] = descriptor
+                type_descriptor_count += 1
+            if descriptor.declaring_module_id not in local_descriptor_ids:
+                expected_external_ids.add(descriptor.declaring_module_id)
+        for relation in page.relations:
+            if (
+                relation.relation_term_ref_id != "relation.native.inherits"
+                or len(relation.target_capability_ids) != 1
+                or relation.source_capability_id not in local_descriptor_ids
+                or relation.source_capability_id in parent_by_source
+                or relation.facts
+            ):
+                _fail(
+                    CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
+                    f"pages/{page_index}/relations",
+                )
+            parent_by_source[relation.source_capability_id] = relation.target_capability_ids[0]
+            relation_id_by_source[relation.source_capability_id] = relation.relation_id
+            expected_external_ids.update(
+                target_id
+                for target_id in relation.target_capability_ids
+                if target_id not in local_descriptor_ids
+            )
+        if {item.capability_id for item in page.external_refs} != expected_external_ids:
+            _fail(
+                CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
+                f"pages/{page_index}/external_refs",
+            )
+
+    paged_modules = {item.scope_module for item in manifest.page_descriptors}
+    if (
+        len(module_descriptor_ids) != len(paged_modules)
+        or type_descriptor_count != manifest.type_count
+    ):
+        _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "pages/descriptors")
+    if pages:
+        index = CapabilityCatalogIndex(pages)
+        if len(index.descriptors) != len(module_descriptor_ids) + type_descriptor_count:
+            _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "pages/descriptors")
+        for source_id, target_id in parent_by_source.items():
+            source = type_descriptors_by_id.get(source_id)
+            target = type_descriptors_by_id.get(target_id)
+            if source is None or target is None or source_id == target_id:
+                _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "pages/relations")
+            expected_relation = _relation(
+                FreeCadRegisteredType(
+                    native_type_id=source.native_identifier,
+                    declaring_module="Validator",
+                    parent_native_type_id=target.native_identifier,
+                    category=FreeCadNativeTypeCategory.NATIVE_TYPE,
+                )
+            )
+            if (
+                expected_relation is None
+                or expected_relation.relation_id != relation_id_by_source[source_id]
+            ):
+                _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "pages/relations")
+        trail_complete: set[str] = set()
+        for start in parent_by_source:
+            trail: set[str] = set()
+            cursor = start
+            while cursor in parent_by_source and cursor not in trail_complete:
+                if cursor in trail:
+                    _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "pages/relations")
+                trail.add(cursor)
+                cursor = parent_by_source[cursor]
+            trail_complete.update(trail)
+    return pages
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FreeCadPagedCapabilityCatalog:
     snapshot: FreeCadDiscoverySnapshotV2
@@ -845,12 +1044,13 @@ class FreeCadPagedCapabilityCatalog:
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "snapshot")
         if type(self.manifest) is not FreeCadCapabilityManifest:
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "manifest")
-        if type(self.pages) is not tuple or not self.pages:
+        if type(self.pages) is not tuple:
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "pages")
         if len(self.pages) > MAX_FREECAD_DISCOVERY_V2_PAGES:
             _fail(CapabilityCatalogErrorCode.BUDGET_EXCEEDED, "pages")
         if not all(type(item) is CapabilityCatalogSegment for item in self.pages):
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "pages")
+        validate_freecad_capability_page_set(self.manifest, self.pages)
         expected_scoped_pages = _project_pages(
             self.snapshot,
             max_descriptors_per_page=self.manifest.page_descriptor_limit,
@@ -858,15 +1058,17 @@ class FreeCadPagedCapabilityCatalog:
         expected_pages = tuple(page for _scope, page in expected_scoped_pages)
         if self.pages != expected_pages:
             _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "pages")
-        index = CapabilityCatalogIndex(self.pages)
+        index = CapabilityCatalogIndex(self.pages) if self.pages else None
+        declaring_modules = {item.declaring_module for item in self.snapshot.registered_types}
         expected_capability_ids = {
-            *(freecad_module_capability_id(module) for module in self.snapshot.scope_modules),
+            *(freecad_module_capability_id(module) for module in declaring_modules),
             *(
                 freecad_type_capability_id(item.native_type_id)
                 for item in self.snapshot.registered_types
             ),
         }
-        if set(index.descriptors) != expected_capability_ids:
+        actual_capability_ids = set() if index is None else set(index.descriptors)
+        if actual_capability_ids != expected_capability_ids:
             _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "pages")
         actual_parent_edges = {
             (relation.source_capability_id, relation.target_capability_ids)
@@ -896,6 +1098,7 @@ class FreeCadPagedCapabilityCatalog:
             discovery_algorithm_version=FREECAD_DISCOVERY_V2_ALGORITHM_VERSION,
             module_count=len(self.snapshot.scope_modules),
             type_count=len(self.snapshot.registered_types),
+            probe_modules=self.snapshot.probe_modules,
             page_descriptor_limit=self.manifest.page_descriptor_limit,
             page_descriptors=expected_page_descriptors,
         )
@@ -933,6 +1136,7 @@ def build_paged_freecad_type_catalog(
         discovery_algorithm_version=FREECAD_DISCOVERY_V2_ALGORITHM_VERSION,
         module_count=len(snapshot.scope_modules),
         type_count=len(snapshot.registered_types),
+        probe_modules=snapshot.probe_modules,
         page_descriptor_limit=max_descriptors_per_page,
         page_descriptors=page_descriptors,
     )

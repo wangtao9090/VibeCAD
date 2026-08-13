@@ -27,10 +27,12 @@ from vibecad.execution.freecad_capabilities import (
 )
 from vibecad.execution.freecad_discovery_v2 import (
     FREECAD_DISCOVERY_V2_SCHEMA_VERSION,
+    MAX_FREECAD_DISCOVERY_V2_MODULES,
     FreeCadDiscoverySnapshotV2,
     build_paged_freecad_type_catalog,
     decode_freecad_capability_manifest,
     encode_freecad_capability_manifest,
+    validate_freecad_capability_page_set,
 )
 
 
@@ -190,6 +192,135 @@ def test_650_type_deep_parent_chain_stays_page_bounded_and_fully_resolves() -> N
     assert cursor not in parent_by_child
 
 
+def test_manifest_aware_validator_rejects_incomplete_reordered_or_substituted_pages() -> None:
+    values = tuple(_type(f"Vendor::Type{index}") for index in range(6))
+    bundle = build_paged_freecad_type_catalog(_snapshot(values), max_descriptors_per_page=2)
+    substitute = build_paged_freecad_type_catalog(
+        _snapshot(tuple(_type(f"Vendor::Other{index}") for index in range(6))),
+        max_descriptors_per_page=2,
+    )
+
+    assert validate_freecad_capability_page_set(bundle.manifest, bundle.pages) == bundle.pages
+    for rejected in (
+        bundle.pages[:-1],
+        (*bundle.pages, bundle.pages[-1]),
+        tuple(reversed(bundle.pages)),
+        (substitute.pages[0], *bundle.pages[1:]),
+    ):
+        with pytest.raises(CapabilityCatalogError) as failure:
+            validate_freecad_capability_page_set(bundle.manifest, rejected)
+        assert failure.value.code is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("segment_id", "substituted.segment"),
+        ("catalog_id", "substituted.catalog"),
+        ("catalog_sha256", _sha("substituted-catalog")),
+        ("catalog_size_bytes", 1),
+        ("external_ref_count", 1),
+        ("relation_count", 1),
+        ("first_capability_id", "a"),
+        ("last_capability_id", "z"),
+    ),
+)
+def test_manifest_aware_validator_rejects_page_metadata_mismatch(
+    field: str,
+    replacement: object,
+) -> None:
+    bundle = build_paged_freecad_type_catalog(_snapshot((_type("Vendor::A"),)))
+    metadata = dataclasses.replace(
+        bundle.manifest.page_descriptors[0],
+        **{field: replacement},
+    )
+    manifest = dataclasses.replace(bundle.manifest, page_descriptors=(metadata,))
+
+    with pytest.raises(CapabilityCatalogError) as failure:
+        validate_freecad_capability_page_set(manifest, bundle.pages)
+    assert failure.value.code is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+
+
+def test_manifest_aware_validator_rejects_descriptor_count_mismatch() -> None:
+    bundle = build_paged_freecad_type_catalog(_snapshot((_type("Vendor::A"),)))
+    metadata = dataclasses.replace(
+        bundle.manifest.page_descriptors[0],
+        descriptor_count=bundle.manifest.page_descriptors[0].descriptor_count + 1,
+    )
+    manifest = dataclasses.replace(
+        bundle.manifest,
+        type_count=bundle.manifest.type_count + 1,
+        page_descriptors=(metadata,),
+    )
+
+    with pytest.raises(CapabilityCatalogError) as failure:
+        validate_freecad_capability_page_set(manifest, bundle.pages)
+    assert failure.value.code is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+
+
+def test_64_modules_with_512_concentrated_types_project_and_n_plus_one_is_rejected() -> None:
+    modules = tuple(f"M{index:02d}" for index in range(MAX_FREECAD_DISCOVERY_V2_MODULES))
+    values = tuple(_type(f"M00::Type{index:03d}", module="M00") for index in range(512))
+    snapshot = _snapshot(values, probe_modules=modules)
+
+    bundle = build_paged_freecad_type_catalog(snapshot)
+
+    assert bundle.manifest.module_count == MAX_FREECAD_DISCOVERY_V2_MODULES
+    assert bundle.manifest.probe_modules == modules
+    assert {item.scope_module for item in bundle.manifest.page_descriptors} == {"M00"}
+    assert len(bundle.pages) == 3
+    assert sum(len(page.descriptors) for page in bundle.pages) == 513
+    assert CapabilityCatalogIndex(bundle.pages).coverage().total == 513
+    assert validate_freecad_capability_page_set(bundle.manifest, bundle.pages) == bundle.pages
+
+    with pytest.raises(CapabilityCatalogError) as overflow:
+        _snapshot(values, probe_modules=(*modules, "M64"))
+    assert overflow.value.code is CapabilityCatalogErrorCode.BUDGET_EXCEEDED
+
+
+def test_probe_only_empty_modules_are_manifest_bound_without_pages() -> None:
+    modules = tuple(f"M{index:02d}" for index in range(MAX_FREECAD_DISCOVERY_V2_MODULES))
+    bundle = build_paged_freecad_type_catalog(_snapshot((), probe_modules=modules))
+
+    assert bundle.pages == ()
+    assert bundle.manifest.page_descriptors == ()
+    assert bundle.manifest.probe_modules == modules
+    assert bundle.manifest.module_count == len(modules)
+    assert bundle.manifest.type_count == 0
+    assert validate_freecad_capability_page_set(bundle.manifest, ()) == ()
+    assert (
+        decode_freecad_capability_manifest(encode_freecad_capability_manifest(bundle.manifest))
+        == bundle.manifest
+    )
+
+
+def test_manifest_validator_keeps_discovered_only_trust_boundary() -> None:
+    bundle = build_paged_freecad_type_catalog(_snapshot((_type("Vendor::A"),)))
+    page = bundle.pages[0]
+    changed_descriptors = tuple(
+        dataclasses.replace(item, status=CapabilitySupportStatus.REPRESENTABLE)
+        if item.native_identifier == "Vendor::A"
+        else item
+        for item in page.descriptors
+    )
+    changed_page = dataclasses.replace(page, descriptors=changed_descriptors)
+    changed_metadata = dataclasses.replace(
+        bundle.manifest.page_descriptors[0],
+        segment_id=changed_page.segment_id,
+        catalog_id=changed_page.catalog_id,
+        catalog_sha256=changed_page.catalog_sha256,
+        catalog_size_bytes=len(encode_capability_catalog(changed_page)),
+    )
+    changed_manifest = dataclasses.replace(
+        bundle.manifest,
+        page_descriptors=(changed_metadata,),
+    )
+
+    with pytest.raises(CapabilityCatalogError) as promoted:
+        validate_freecad_capability_page_set(changed_manifest, (changed_page,))
+    assert promoted.value.code is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+
+
 def test_profile_and_build_are_bound_into_snapshot_pages_and_manifest() -> None:
     values = (_type("Vendor::A"),)
     headless = build_paged_freecad_type_catalog(_snapshot(values))
@@ -253,9 +384,7 @@ def test_all_adversarial_manifest_decode_failures_are_bounded_contract_errors() 
     malformed_values = (
         b"[]",
         b"\xff",
-        json.dumps(
-            {"x" * 300: "y" * 4_097}, separators=(",", ":"), sort_keys=True
-        ).encode("ascii"),
+        json.dumps({"x" * 300: "y" * 4_097}, separators=(",", ":"), sort_keys=True).encode("ascii"),
         json.dumps(bad_profile, separators=(",", ":"), sort_keys=True).encode("ascii"),
         json.dumps(bad_page, separators=(",", ":"), sort_keys=True).encode("ascii"),
         json.dumps(bad_digest, separators=(",", ":"), sort_keys=True).encode("ascii"),
