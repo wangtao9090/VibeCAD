@@ -57,20 +57,26 @@ def _semantic_mapping(term: BridgeTermRef) -> dict[str, str]:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RuleEndpointSignature:
-    """Exact ontology role and subject type for one assertion endpoint."""
+    """Exact ontology selector, role, and subject type for one endpoint."""
 
+    selector_kind_term: BridgeTermRef
     role_term: BridgeTermRef
     subject_type_term: BridgeTermRef
 
     def __post_init__(self) -> None:
-        if (
-            type(self.role_term) is not BridgeTermRef
-            or type(self.subject_type_term) is not BridgeTermRef
+        if any(
+            type(item) is not BridgeTermRef
+            for item in (
+                self.selector_kind_term,
+                self.role_term,
+                self.subject_type_term,
+            )
         ):
             _fail(IntentBridgeErrorCode.INVALID_INPUT, "/endpoint_signature")
 
     def semantic_mapping(self) -> dict[str, object]:
         return {
+            "selector_kind_term": _semantic_mapping(self.selector_kind_term),
             "role_term": _semantic_mapping(self.role_term),
             "subject_type_term": _semantic_mapping(self.subject_type_term),
         }
@@ -220,7 +226,11 @@ class TrustedRulePolicy:
                 *(
                     term
                     for endpoint in (*descriptor.premises, *descriptor.conclusions)
-                    for term in (endpoint.role_term, endpoint.subject_type_term)
+                    for term in (
+                        endpoint.selector_kind_term,
+                        endpoint.role_term,
+                        endpoint.subject_type_term,
+                    )
                 ),
             )
             for term in terms:
@@ -286,10 +296,10 @@ class TrustedRulePolicy:
         }
         if set(resolved_by_subject) != referenced_subjects:
             _fail(IntentBridgeErrorCode.INTEGRITY_FAILURE, "/resolved_subjects")
-        document_by_id = {item.document.artifact_id: item.document for item in documents}
-        expected_documents = {item.artifact_id: item for item in bundle.documents}
-        if document_by_id != expected_documents or any(
-            item.subject.artifact_id not in document_by_id for item in resolved_subjects
+        actual_documents = tuple(item.document for item in documents)
+        document_ids = {item.artifact_id for item in actual_documents}
+        if actual_documents != bundle.documents or any(
+            item.subject.artifact_id not in document_ids for item in resolved_subjects
         ):
             _fail(IntentBridgeErrorCode.INTEGRITY_FAILURE, "/documents")
 
@@ -328,6 +338,11 @@ class TrustedRulePolicy:
                 )
             except IntentBridgeError:
                 raise
+            except SystemExit:
+                # A reviewed evaluator must not terminate its host process.
+                # Interactive cancellation signals such as KeyboardInterrupt
+                # deliberately remain host-owned and are not swallowed here.
+                _fail(IntentBridgeErrorCode.INTEGRITY_FAILURE, "/evaluators/validate")
             except Exception:
                 _fail(IntentBridgeErrorCode.INTEGRITY_FAILURE, "/evaluators/validate")
 
@@ -344,10 +359,12 @@ class TrustedRulePolicy:
             _fail(IntentBridgeErrorCode.AUTHORITY_VIOLATION, path)
         result: list[ResolvedSubject] = []
         for endpoint, signature in zip(actual, expected, strict=True):
+            selector_term = term_by_id[endpoint.subject.selector_kind_term_ref_id]
             role_term = term_by_id[endpoint.role_term_ref_id]
             resolved = resolved_by_subject[endpoint.subject]
             if (
-                role_term.semantic_identity != signature.role_term.semantic_identity
+                selector_term.semantic_identity != signature.selector_kind_term.semantic_identity
+                or role_term.semantic_identity != signature.role_term.semantic_identity
                 or resolved.semantic_type.semantic_identity
                 != signature.subject_type_term.semantic_identity
             ):

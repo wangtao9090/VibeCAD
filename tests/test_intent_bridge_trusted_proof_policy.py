@@ -87,12 +87,20 @@ def _descriptor(
         predicate_term=_semantic_alias(predicate, f"descriptor_{predicate.term_ref_id}"),
         premises=(
             RuleEndpointSignature(
+                selector_kind_term=_semantic_alias(
+                    SELECTOR,
+                    "descriptor_selector_source",
+                ),
                 role_term=_semantic_alias(source_role, "descriptor_role_source"),
                 subject_type_term=_semantic_alias(TYPE_SOURCE, "descriptor_type_source"),
             ),
         ),
         conclusions=(
             RuleEndpointSignature(
+                selector_kind_term=_semantic_alias(
+                    SELECTOR,
+                    "descriptor_selector_result",
+                ),
                 role_term=_semantic_alias(ROLE_RESULT, "descriptor_role_result"),
                 subject_type_term=_semantic_alias(TYPE_RESULT, "descriptor_type_result"),
             ),
@@ -296,17 +304,30 @@ def test_policy_runs_actual_semantic_evaluator_through_outer_proof_gate() -> Non
     assert bundle.adapter_binding_required
 
 
-def test_unknown_rule_predicate_role_and_subject_type_never_select_code() -> None:
+def test_unknown_rule_predicate_selector_role_and_subject_type_never_select_code() -> None:
     evaluator = _Evaluator()
     policy = TrustedRulePolicy(evaluators=(evaluator,))
     unknown_rule = _term("rule_unknown", "rule.unknown", definition="e")
     wrong_predicate = _term("predicate_wrong", "predicate.wrong", definition="f")
     wrong_role = _term("role_wrong", "role.wrong", definition="0")
+    rebound_selector = dataclasses.replace(
+        SELECTOR,
+        term_definition_sha256="f" * 64,
+    )
+    rebound_bundle = _bundle(policy)
+    rebound_bundle = dataclasses.replace(
+        rebound_bundle,
+        terms=tuple(
+            rebound_selector if term.term_ref_id == SELECTOR.term_ref_id else term
+            for term in rebound_bundle.terms
+        ),
+    )
 
     cases = (
         (_bundle(policy, rule=unknown_rule), TYPE_SOURCE),
         (_bundle(policy, predicate=wrong_predicate), TYPE_SOURCE),
         (_bundle(policy, source_role=wrong_role), TYPE_SOURCE),
+        (rebound_bundle, TYPE_SOURCE),
         (_bundle(policy), TYPE_RESULT),
     )
     for bundle, source_type in cases:
@@ -359,6 +380,13 @@ def test_evaluator_failures_are_bounded_and_cannot_become_complete() -> None:
     assert str(crashed_error.value) == (
         "intent bridge error (integrity_failure) at /evaluators/validate"
     )
+
+    exited = _Evaluator(failure=SystemExit(17))
+    exited_policy = TrustedRulePolicy(evaluators=(exited,))
+    exited_bundle = _bundle(exited_policy)
+    with pytest.raises(IntentBridgeError) as exited_error:
+        exited_policy.validate(exited_bundle, *_context(exited_bundle))
+    assert exited_error.value.code is IntentBridgeErrorCode.INTEGRITY_FAILURE
 
 
 def test_policy_catalog_is_order_stable_and_rejects_semantic_equivocation() -> None:
@@ -414,6 +442,10 @@ def test_policy_rejects_document_or_resolved_subject_substitution() -> None:
     with pytest.raises(IntentBridgeError) as document_error:
         policy.validate(bundle, (extra_document,), subjects)
     assert document_error.value.code is IntentBridgeErrorCode.INTEGRITY_FAILURE
+
+    with pytest.raises(IntentBridgeError) as duplicate_document_error:
+        policy.validate(bundle, (documents[0], documents[0]), subjects)
+    assert duplicate_document_error.value.code is IntentBridgeErrorCode.INTEGRITY_FAILURE
 
     with pytest.raises(IntentBridgeError) as subject_error:
         policy.validate(bundle, documents, subjects[:1])
