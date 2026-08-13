@@ -2,9 +2,10 @@
 
 This module is deliberately an inert interchange boundary.  It describes a
 feature/result graph without naming a CAD backend or claiming that an ontology
-term is executable.  Operation families, value types, operators, port roles,
-and result semantics are all content-addressed terms.  A trusted adapter must
-bind every referenced term and verify its own port contract before execution.
+term is executable.  Structural kinds, operation families, value types,
+expression source kinds and operators, port roles, and result semantics are all
+content-addressed terms.  A trusted adapter must bind every referenced term and
+verify its own port contract before execution.
 
 The core wire stays stable when a vocabulary adds a new feature family, value
 type, expression operator, or semantic role: unknown terms round-trip as inert
@@ -369,13 +370,6 @@ def _typed_value_json(value: object) -> bytes:
     )
 
 
-class FeatureNodeKind(StrEnum):
-    """Only graph structure is closed; feature semantics are ontology terms."""
-
-    FEATURE = "feature"
-    REFERENCE = "reference"
-
-
 class SemanticReferenceScope(StrEnum):
     ORIGIN = "origin"
     FEATURE = "feature"
@@ -631,8 +625,10 @@ class TermTypedValueV2:
 class ExpressionInputV2:
     input_id: str
     role_term_ref_id: str
+    source_kind_term_ref_id: str
     value_type_term_ref_id: str
     source_id: str
+    source_content_sha256: str | None = None
     ordinal: int = 0
 
     def __post_init__(self) -> None:
@@ -644,10 +640,21 @@ class ExpressionInputV2:
         )
         object.__setattr__(
             self,
+            "source_kind_term_ref_id",
+            _identifier(self.source_kind_term_ref_id, "/source_kind_term_ref_id"),
+        )
+        object.__setattr__(
+            self,
             "value_type_term_ref_id",
             _identifier(self.value_type_term_ref_id, "/value_type_term_ref_id"),
         )
         object.__setattr__(self, "source_id", _identifier(self.source_id, "/source_id"))
+        if self.source_content_sha256 is not None:
+            object.__setattr__(
+                self,
+                "source_content_sha256",
+                _digest(self.source_content_sha256, "/source_content_sha256"),
+            )
         object.__setattr__(
             self,
             "ordinal",
@@ -658,8 +665,10 @@ class ExpressionInputV2:
         return {
             "input_id": self.input_id,
             "role_term_ref_id": self.role_term_ref_id,
+            "source_kind_term_ref_id": self.source_kind_term_ref_id,
             "value_type_term_ref_id": self.value_type_term_ref_id,
             "source_id": self.source_id,
+            "source_content_sha256": self.source_content_sha256,
             "ordinal": self.ordinal,
         }
 
@@ -668,8 +677,10 @@ class ExpressionInputV2:
         keys = {
             "input_id",
             "role_term_ref_id",
+            "source_kind_term_ref_id",
             "value_type_term_ref_id",
             "source_id",
+            "source_content_sha256",
             "ordinal",
         }
         return cls(**_fields(value, allowed=keys, required=keys, path=path))
@@ -908,6 +919,8 @@ class DesignParameterV2:
 class OccurrencePathStepV2:
     transform_node_id: str
     transform_result_id: str
+    expected_result_role_term_ref_id: str
+    expected_result_value_type_term_ref_id: str
     occurrence_index: int
 
     def __post_init__(self) -> None:
@@ -923,6 +936,22 @@ class OccurrencePathStepV2:
         )
         object.__setattr__(
             self,
+            "expected_result_role_term_ref_id",
+            _identifier(
+                self.expected_result_role_term_ref_id,
+                "/expected_result_role_term_ref_id",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "expected_result_value_type_term_ref_id",
+            _identifier(
+                self.expected_result_value_type_term_ref_id,
+                "/expected_result_value_type_term_ref_id",
+            ),
+        )
+        object.__setattr__(
+            self,
             "occurrence_index",
             _integer(self.occurrence_index, "/occurrence_index"),
         )
@@ -931,12 +960,22 @@ class OccurrencePathStepV2:
         return {
             "transform_node_id": self.transform_node_id,
             "transform_result_id": self.transform_result_id,
+            "expected_result_role_term_ref_id": self.expected_result_role_term_ref_id,
+            "expected_result_value_type_term_ref_id": (
+                self.expected_result_value_type_term_ref_id
+            ),
             "occurrence_index": self.occurrence_index,
         }
 
     @classmethod
     def from_mapping(cls, value: object, path: str = "") -> Self:
-        keys = {"transform_node_id", "transform_result_id", "occurrence_index"}
+        keys = {
+            "transform_node_id",
+            "transform_result_id",
+            "expected_result_role_term_ref_id",
+            "expected_result_value_type_term_ref_id",
+            "occurrence_index",
+        }
         return cls(**_fields(value, allowed=keys, required=keys, path=path))
 
 
@@ -1347,7 +1386,7 @@ def _binding_order(item: object) -> tuple[str, int, str]:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FeatureIntentV2:
-    node_kind: FeatureNodeKind
+    structural_kind_term_ref_id: str
     family_term_ref_id: str
     operation_term_ref_id: str
     input_ports: tuple[FeatureInputPortV2, ...] = ()
@@ -1357,12 +1396,11 @@ class FeatureIntentV2:
     extension_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "node_kind",
-            _enum(self.node_kind, FeatureNodeKind, "/node_kind"),
-        )
-        for field in ("family_term_ref_id", "operation_term_ref_id"):
+        for field in (
+            "structural_kind_term_ref_id",
+            "family_term_ref_id",
+            "operation_term_ref_id",
+        ):
             object.__setattr__(self, field, _identifier(getattr(self, field), f"/{field}"))
         ports = _tuple(
             self.input_ports,
@@ -1436,7 +1474,7 @@ class FeatureIntentV2:
 
     def to_mapping(self) -> dict[str, object]:
         return {
-            "node_kind": self.node_kind.value,
+            "structural_kind_term_ref_id": self.structural_kind_term_ref_id,
             "family_term_ref_id": self.family_term_ref_id,
             "operation_term_ref_id": self.operation_term_ref_id,
             "input_ports": [item.to_mapping() for item in self.input_ports],
@@ -1449,7 +1487,7 @@ class FeatureIntentV2:
     @classmethod
     def from_mapping(cls, value: object, path: str = "") -> Self:
         keys = {
-            "node_kind",
+            "structural_kind_term_ref_id",
             "family_term_ref_id",
             "operation_term_ref_id",
             "input_ports",
@@ -1476,7 +1514,7 @@ class FeatureIntentV2:
             maximum=MAX_PARAMETERS_PER_NODE,
         )
         return cls(
-            node_kind=_enum(fields["node_kind"], FeatureNodeKind, f"{path}/node_kind"),
+            structural_kind_term_ref_id=fields["structural_kind_term_ref_id"],
             family_term_ref_id=fields["family_term_ref_id"],
             operation_term_ref_id=fields["operation_term_ref_id"],
             input_ports=tuple(
@@ -1769,12 +1807,21 @@ class ParametricFeatureGraphV2:
         )
 
         term_ids = {item.term_ref_id for item in terms}
+        term_identities = tuple(
+            (item.namespace, item.vocabulary_version, item.term_id) for item in terms
+        )
+        if len(set(term_identities)) != len(term_identities):
+            _fail(ParametricFeatureGraphErrorCode.INVALID_INPUT, "/terms")
         body_ids = {item.body_id for item in bodies}
         extension_ids = {item.extension_id for item in extensions}
         parameter_by_id = {item.parameter_id: item for item in parameters}
         reference_by_id = {item.reference_id: item for item in references}
         result_by_node = {
             node.node_id: {result.result_id: result for result in node.results} for node in nodes
+        }
+        result_by_id = {result.result_id: result for node in nodes for result in node.results}
+        result_owner_by_id = {
+            result.result_id: node.node_id for node in nodes for result in node.results
         }
 
         all_result_ids = tuple(result.result_id for node in nodes for result in node.results)
@@ -1795,6 +1842,9 @@ class ParametricFeatureGraphV2:
             for values in (all_result_ids, all_port_ids, all_binding_ids, value_ids, expression_ids)
         ):
             _fail(ParametricFeatureGraphErrorCode.INVALID_INPUT, "/identifiers")
+        sourceable_ids = (*parameter_by_id, *reference_by_id, *all_result_ids)
+        if len(set(sourceable_ids)) != len(sourceable_ids):
+            _fail(ParametricFeatureGraphErrorCode.INVALID_INPUT, "/identifiers")
         if {node.body_id for node in nodes} != body_ids:
             _fail(ParametricFeatureGraphErrorCode.UNKNOWN_REFERENCE, "/bodies")
 
@@ -1806,6 +1856,8 @@ class ParametricFeatureGraphV2:
             )
 
         parameter_dependencies: dict[str, tuple[str, ...]] = {}
+        parameter_node_dependencies: dict[str, tuple[str, ...]] = {}
+        content_sources: dict[str, tuple[str, str, str]] = {}
         for index, parameter in enumerate(parameters):
             value = parameter.value
             _require_known(
@@ -1825,6 +1877,7 @@ class ParametricFeatureGraphV2:
             expression = parameter.expression
             if expression is None:
                 parameter_dependencies[parameter.parameter_id] = ()
+                parameter_node_dependencies[parameter.parameter_id] = ()
                 continue
             _require_known(
                 expression.extension_ids,
@@ -1832,12 +1885,13 @@ class ParametricFeatureGraphV2:
                 f"/parameters/{index}/expression/extension_ids",
             )
             expression_by_id = {node.expression_node_id: node for node in expression.nodes}
-            if set(expression_by_id) & set(parameter_by_id):
+            if set(expression_by_id) & set(sourceable_ids):
                 _fail(
                     ParametricFeatureGraphErrorCode.INVALID_INPUT, f"/parameters/{index}/expression"
                 )
             local_graph: dict[str, tuple[str, ...]] = {}
             external_parameters: set[str] = set()
+            external_nodes: set[str] = set()
             for node_index, expression_node in enumerate(expression.nodes):
                 _require_known(
                     (
@@ -1846,7 +1900,11 @@ class ParametricFeatureGraphV2:
                         *(
                             term_id
                             for item in expression_node.inputs
-                            for term_id in (item.role_term_ref_id, item.value_type_term_ref_id)
+                            for term_id in (
+                                item.role_term_ref_id,
+                                item.source_kind_term_ref_id,
+                                item.value_type_term_ref_id,
+                            )
                         ),
                     ),
                     term_ids,
@@ -1861,12 +1919,51 @@ class ParametricFeatureGraphV2:
                 for input_index, expression_input in enumerate(expression_node.inputs):
                     source_expression = expression_by_id.get(expression_input.source_id)
                     source_parameter = parameter_by_id.get(expression_input.source_id)
+                    source_reference = reference_by_id.get(expression_input.source_id)
+                    source_result = result_by_id.get(expression_input.source_id)
+                    source_content = expression_input.source_content_sha256
+                    if source_content is not None and any(
+                        item is not None
+                        for item in (
+                            source_expression,
+                            source_parameter,
+                            source_reference,
+                            source_result,
+                        )
+                    ):
+                        _fail(
+                            ParametricFeatureGraphErrorCode.INVALID_INPUT,
+                            f"/parameters/{index}/expression/nodes/{node_index}/inputs/{input_index}/source_content_sha256",
+                        )
                     if source_expression is not None:
                         source_type = source_expression.result_type_term_ref_id
                         local_dependencies.append(source_expression.expression_node_id)
                     elif source_parameter is not None:
                         source_type = source_parameter.value.value_type_term_ref_id
                         external_parameters.add(source_parameter.parameter_id)
+                    elif source_reference is not None:
+                        source_type = source_reference.value_type_term_ref_id
+                        if source_reference.source_node_id is not None:
+                            external_nodes.add(source_reference.source_node_id)
+                        external_nodes.update(
+                            step.transform_node_id for step in source_reference.occurrence_path
+                        )
+                    elif source_result is not None:
+                        source_type = source_result.value_type_term_ref_id
+                        external_nodes.add(result_owner_by_id[source_result.result_id])
+                    elif source_content is not None:
+                        source_type = expression_input.value_type_term_ref_id
+                        identity = (
+                            source_content,
+                            expression_input.source_kind_term_ref_id,
+                            expression_input.value_type_term_ref_id,
+                        )
+                        prior = content_sources.setdefault(expression_input.source_id, identity)
+                        if prior != identity:
+                            _fail(
+                                ParametricFeatureGraphErrorCode.INTEGRITY_FAILURE,
+                                f"/parameters/{index}/expression/nodes/{node_index}/inputs/{input_index}/source_content_sha256",
+                            )
                     else:
                         _fail(
                             ParametricFeatureGraphErrorCode.UNKNOWN_REFERENCE,
@@ -1886,6 +1983,7 @@ class ParametricFeatureGraphV2:
                     f"/parameters/{index}/expression/result_node_id",
                 )
             parameter_dependencies[parameter.parameter_id] = tuple(sorted(external_parameters))
+            parameter_node_dependencies[parameter.parameter_id] = tuple(sorted(external_nodes))
         _visit_acyclic(parameter_dependencies, path="/parameters")
 
         for index, reference in enumerate(references):
@@ -1895,6 +1993,14 @@ class ParametricFeatureGraphV2:
                     reference.value_type_term_ref_id,
                     reference.locator_term_ref_id,
                     *reference.qualifier_term_ref_ids,
+                    *(
+                        term_id
+                        for step in reference.occurrence_path
+                        for term_id in (
+                            step.expected_result_role_term_ref_id,
+                            step.expected_result_value_type_term_ref_id,
+                        )
+                    ),
                 ),
                 term_ids,
                 f"/references/{index}/terms",
@@ -1928,12 +2034,27 @@ class ParametricFeatureGraphV2:
                         ParametricFeatureGraphErrorCode.UNKNOWN_REFERENCE,
                         f"/references/{index}/occurrence_path/{step_index}/transform_result_id",
                     )
+                if (
+                    source.semantic_role_term_ref_id
+                    != step.expected_result_role_term_ref_id
+                    or source.value_type_term_ref_id
+                    != step.expected_result_value_type_term_ref_id
+                ):
+                    _fail(
+                        ParametricFeatureGraphErrorCode.INVALID_INPUT,
+                        f"/references/{index}/occurrence_path/{step_index}/transform_result_id",
+                    )
 
         dependency_graph: dict[str, tuple[str, ...]] = {}
+        node_parameter_dependencies: dict[str, tuple[str, ...]] = {}
         for index, node in enumerate(nodes):
             intent = node.intent
             port_by_id = {item.port_id: item for item in intent.input_ports}
-            term_refs = [intent.family_term_ref_id, intent.operation_term_ref_id]
+            term_refs = [
+                intent.structural_kind_term_ref_id,
+                intent.family_term_ref_id,
+                intent.operation_term_ref_id,
+            ]
             term_refs.extend(
                 term_id
                 for port in intent.input_ports
@@ -1988,6 +2109,7 @@ class ParametricFeatureGraphV2:
                         ParametricFeatureGraphErrorCode.INVALID_INPUT,
                         f"/nodes/{index}/intent/references/{binding_index}/port_id",
                     )
+            bound_parameter_ids: list[str] = []
             for binding_index, binding in enumerate(intent.parameter_bindings):
                 parameter = parameter_by_id.get(binding.parameter_id)
                 if parameter is None:
@@ -2003,6 +2125,8 @@ class ParametricFeatureGraphV2:
                         ParametricFeatureGraphErrorCode.INVALID_INPUT,
                         f"/nodes/{index}/intent/parameter_bindings/{binding_index}/port_id",
                     )
+                bound_parameter_ids.append(parameter.parameter_id)
+            node_parameter_dependencies[node.node_id] = tuple(sorted(bound_parameter_ids))
         _visit_acyclic(dependency_graph, path="/nodes")
 
         closure_cache: dict[str, frozenset[str]] = {}
@@ -2035,6 +2159,24 @@ class ParametricFeatureGraphV2:
                         ParametricFeatureGraphErrorCode.INVALID_ORDER,
                         f"/nodes/{index}/intent/references/{binding_index}/reference_id",
                     )
+
+        combined_dependency_graph = {
+            **{
+                f"parameter:{parameter_id}": tuple(
+                    [f"parameter:{item}" for item in parameter_dependencies[parameter_id]]
+                    + [f"node:{item}" for item in parameter_node_dependencies[parameter_id]]
+                )
+                for parameter_id in parameter_by_id
+            },
+            **{
+                f"node:{node_id}": tuple(
+                    [f"node:{item}" for item in dependency_graph[node_id]]
+                    + [f"parameter:{item}" for item in node_parameter_dependencies[node_id]]
+                )
+                for node_id in dependency_graph
+            },
+        }
+        _visit_acyclic(combined_dependency_graph, path="/dependencies")
 
         for index, selection in enumerate(graph_results):
             if selection.result_id not in result_by_node.get(selection.node_id, {}):
@@ -2160,6 +2302,8 @@ def decode_parametric_feature_graph_v2(
         expected_sha256 = _digest(expected_sha256, "/expected_sha256")
     mapping = _decode_json(raw)
     result = ParametricFeatureGraphV2.from_mapping(mapping)
+    if type(raw) is not bytes or not hmac.compare_digest(raw, result.canonical_bytes):
+        _fail(ParametricFeatureGraphErrorCode.INTEGRITY_FAILURE)
     if expected_sha256 is not None and not hmac.compare_digest(
         result.graph_sha256,
         expected_sha256,
@@ -2178,7 +2322,6 @@ __all__ = [
     "FeatureGraphResultV2",
     "FeatureInputPortV2",
     "FeatureIntentV2",
-    "FeatureNodeKind",
     "FeatureNodeV2",
     "FeatureParameterBindingV2",
     "FeatureReferenceBindingV2",

@@ -20,7 +20,6 @@ from vibecad.parametric.feature_graph_v2 import (
     FeatureGraphResultV2,
     FeatureInputPortV2,
     FeatureIntentV2,
-    FeatureNodeKind,
     FeatureNodeV2,
     FeatureParameterBindingV2,
     FeatureReferenceBindingV2,
@@ -175,7 +174,7 @@ def _node(
     family: str,
     *,
     body: str = "main",
-    kind: FeatureNodeKind = FeatureNodeKind.FEATURE,
+    structural_kind: str = "feature",
     ports: tuple[FeatureInputPortV2, ...] = (),
     dependencies: tuple[FeatureDependencyV2, ...] = (),
     references: tuple[FeatureReferenceBindingV2, ...] = (),
@@ -187,7 +186,7 @@ def _node(
         body_id=f"body.{body}",
         name=name.title(),
         intent=FeatureIntentV2(
-            node_kind=kind,
+            structural_kind_term_ref_id=f"structure.{structural_kind}",
             family_term_ref_id=f"family.{family}",
             operation_term_ref_id=f"operation.{family}",
             input_ports=ports,
@@ -220,6 +219,7 @@ def _graph() -> ParametricFeatureGraphV2:
                     ExpressionInputV2(
                         input_id="expr-input.sin.length",
                         role_term_ref_id="expression-role.operand",
+                        source_kind_term_ref_id="expression-source.parameter",
                         value_type_term_ref_id="type.scalar",
                         source_id="parameter.length",
                     ),
@@ -233,6 +233,7 @@ def _graph() -> ParametricFeatureGraphV2:
                     ExpressionInputV2(
                         input_id="expr-input.scale.sin",
                         role_term_ref_id="expression-role.operand",
+                        source_kind_term_ref_id="expression-source.expression-result",
                         value_type_term_ref_id="type.scalar",
                         source_id="expr.sin",
                     ),
@@ -303,6 +304,8 @@ def _graph() -> ParametricFeatureGraphV2:
                 OccurrencePathStepV2(
                     transform_node_id="node.transform",
                     transform_result_id="result.transform.transform",
+                    expected_result_role_term_ref_id="result-role.transform",
+                    expected_result_value_type_term_ref_id="type.transform",
                     occurrence_index=0,
                 ),
             ),
@@ -313,7 +316,7 @@ def _graph() -> ParametricFeatureGraphV2:
             "reference",
             "reference",
             body="reference",
-            kind=FeatureNodeKind.REFERENCE,
+            structural_kind="reference",
             results=(
                 _result("reference", "profile-a", "wire"),
                 _result("reference", "profile-b", "wire"),
@@ -431,6 +434,8 @@ def _graph() -> ParametricFeatureGraphV2:
     term_ids = {
         "encoding.canonical-json",
         "expression-role.operand",
+        "expression-source.expression-result",
+        "expression-source.parameter",
         "locator.declared-result",
         "locator.origin-z-axis",
         "operator.scale",
@@ -446,6 +451,8 @@ def _graph() -> ParametricFeatureGraphV2:
         "schema.blob",
         "schema.extension",
         "semantic.parameter",
+        "structure.feature",
+        "structure.reference",
         *(f"family.{family}" for family in FAMILIES),
         *(f"operation.{family}" for family in FAMILIES),
         *(
@@ -576,6 +583,24 @@ def test_review_repro_source_geometry_must_name_declared_typed_result() -> None:
     )
 
 
+def test_occurrence_path_closes_to_declared_result_role_and_type() -> None:
+    wrong_result = _graph().to_mapping()
+    reference = _find(wrong_result["references"], "reference_id", "reference.edge")
+    reference["occurrence_path"][0]["transform_result_id"] = "result.transform.solid"
+    _assert_error(
+        ParametricFeatureGraphErrorCode.INVALID_INPUT,
+        lambda: ParametricFeatureGraphV2.from_mapping(wrong_result),
+    )
+
+    wrong_role = _graph().to_mapping()
+    reference = _find(wrong_role["references"], "reference_id", "reference.edge")
+    reference["occurrence_path"][0]["expected_result_role_term_ref_id"] = "result-role.solid"
+    _assert_error(
+        ParametricFeatureGraphErrorCode.INVALID_INPUT,
+        lambda: ParametricFeatureGraphV2.from_mapping(wrong_role),
+    )
+
+
 def test_dependency_closes_to_exact_upstream_result_and_typed_port() -> None:
     dangling = _graph().to_mapping()
     boolean = _find(dangling["nodes"], "node_id", "node.boolean")
@@ -636,6 +661,127 @@ def test_new_family_type_and_operator_terms_round_trip_inert_without_wire_change
     )
 
 
+def test_structural_kind_and_expression_source_envelopes_expand_by_terms() -> None:
+    mapping = _graph().to_mapping()
+    for term_id in (
+        "expression-source.content",
+        "expression-source.reference",
+        "operator.vendor-inspect",
+        "structure.assembly-occurrence",
+    ):
+        mapping["terms"].append(_term(term_id).to_mapping())
+    boolean = _find(mapping["nodes"], "node_id", "node.boolean")
+    boolean["intent"]["structural_kind_term_ref_id"] = "structure.assembly-occurrence"
+    parameter = _find(mapping["parameters"], "parameter_id", "parameter.double-length")
+    parameter["expression"]["nodes"].extend(
+        (
+            ExpressionNodeV2(
+                expression_node_id="expr.inspect-reference",
+                operator_term_ref_id="operator.vendor-inspect",
+                result_type_term_ref_id="type.scalar",
+                inputs=(
+                    ExpressionInputV2(
+                        input_id="expr-input.inspect-reference.axis",
+                        role_term_ref_id="expression-role.operand",
+                        source_kind_term_ref_id="expression-source.reference",
+                        value_type_term_ref_id="type.axis",
+                        source_id="reference.axis",
+                    ),
+                ),
+            ).to_mapping(),
+            ExpressionNodeV2(
+                expression_node_id="expr.inspect-content",
+                operator_term_ref_id="operator.vendor-inspect",
+                result_type_term_ref_id="type.scalar",
+                inputs=(
+                    ExpressionInputV2(
+                        input_id="expr-input.inspect-content.field",
+                        role_term_ref_id="expression-role.operand",
+                        source_kind_term_ref_id="expression-source.content",
+                        value_type_term_ref_id="type.matrix",
+                        source_id="source.vendor-field",
+                        source_content_sha256=_sha256("vendor field"),
+                    ),
+                ),
+            ).to_mapping(),
+        )
+    )
+
+    restored = ParametricFeatureGraphV2.from_mapping(mapping)
+
+    restored_boolean = _find(restored.to_mapping()["nodes"], "node_id", "node.boolean")
+    assert (
+        restored_boolean["intent"]["structural_kind_term_ref_id"]
+        == "structure.assembly-occurrence"
+    )
+    assert restored.executable is False
+    assert restored.adapter_binding_required is True
+
+
+def test_expression_result_source_participates_in_cross_domain_cycle_detection() -> None:
+    cyclic = _graph().to_mapping()
+    cyclic["terms"].append(_term("expression-source.feature-result").to_mapping())
+    extrusion = _find(cyclic["nodes"], "node_id", "node.extrusion")
+    extrusion["intent"]["parameter_bindings"][0]["parameter_id"] = "parameter.double-length"
+    parameter = _find(cyclic["parameters"], "parameter_id", "parameter.double-length")
+    expression_input = _find(
+        parameter["expression"]["nodes"], "expression_node_id", "expr.sin"
+    )["inputs"][0]
+    expression_input["source_kind_term_ref_id"] = "expression-source.feature-result"
+    expression_input["source_id"] = "result.boolean.solid"
+    expression_input["value_type_term_ref_id"] = "type.solid"
+
+    _assert_error(
+        ParametricFeatureGraphErrorCode.CYCLE,
+        lambda: ParametricFeatureGraphV2.from_mapping(cyclic),
+    )
+
+
+def test_external_expression_source_identity_cannot_rebind_content() -> None:
+    mapping = _graph().to_mapping()
+    mapping["terms"].append(_term("expression-source.content").to_mapping())
+    parameter = _find(mapping["parameters"], "parameter_id", "parameter.double-length")
+    parameter["expression"]["nodes"].extend(
+        (
+            ExpressionNodeV2(
+                expression_node_id="expr.content-a",
+                operator_term_ref_id="operator.scale",
+                result_type_term_ref_id="type.scalar",
+                inputs=(
+                    ExpressionInputV2(
+                        input_id="expr-input.content-a.source",
+                        role_term_ref_id="expression-role.operand",
+                        source_kind_term_ref_id="expression-source.content",
+                        value_type_term_ref_id="type.matrix",
+                        source_id="source.shared",
+                        source_content_sha256=_sha256("content a"),
+                    ),
+                ),
+            ).to_mapping(),
+            ExpressionNodeV2(
+                expression_node_id="expr.content-b",
+                operator_term_ref_id="operator.scale",
+                result_type_term_ref_id="type.scalar",
+                inputs=(
+                    ExpressionInputV2(
+                        input_id="expr-input.content-b.source",
+                        role_term_ref_id="expression-role.operand",
+                        source_kind_term_ref_id="expression-source.content",
+                        value_type_term_ref_id="type.matrix",
+                        source_id="source.shared",
+                        source_content_sha256=_sha256("content b"),
+                    ),
+                ),
+            ).to_mapping(),
+        )
+    )
+
+    _assert_error(
+        ParametricFeatureGraphErrorCode.INTEGRITY_FAILURE,
+        lambda: ParametricFeatureGraphV2.from_mapping(mapping),
+    )
+
+
 def test_expression_dangling_source_and_local_cycle_fail_closed() -> None:
     dangling = _graph().to_mapping()
     parameter = _find(dangling["parameters"], "parameter_id", "parameter.double-length")
@@ -675,7 +821,7 @@ def _budget_graph() -> ParametricFeatureGraphV2:
         _node(
             f"n{index:03d}",
             "reference",
-            kind=FeatureNodeKind.REFERENCE,
+            structural_kind="reference",
         )
         for index in range(MAX_FEATURE_GRAPH_NODES)
     )
@@ -688,6 +834,7 @@ def _budget_graph() -> ParametricFeatureGraphV2:
                 "family.reference",
                 "operation.reference",
                 "result-role.solid",
+                "structure.reference",
                 "type.solid",
             )
         ),
@@ -774,6 +921,28 @@ def test_canonical_digest_is_order_independent_content_bound_and_tamper_evident(
         lambda: decode_parametric_feature_graph_v2(
             _canonical(tampered), expected_sha256=graph.graph_sha256
         ),
+    )
+
+    noncanonical_wire = graph.to_mapping()
+    noncanonical_wire["terms"].reverse()
+    _assert_error(
+        ParametricFeatureGraphErrorCode.INTEGRITY_FAILURE,
+        lambda: decode_parametric_feature_graph_v2(
+            _canonical(noncanonical_wire), expected_sha256=graph.graph_sha256
+        ),
+    )
+
+
+def test_duplicate_semantic_term_identity_is_rejected() -> None:
+    mapping = _graph().to_mapping()
+    duplicate = deepcopy(mapping["terms"][0])
+    duplicate["term_ref_id"] = "term.alias"
+    duplicate["term_definition_sha256"] = _sha256("conflicting definition")
+    mapping["terms"].append(duplicate)
+
+    _assert_error(
+        ParametricFeatureGraphErrorCode.INVALID_INPUT,
+        lambda: ParametricFeatureGraphV2.from_mapping(mapping),
     )
 
 
