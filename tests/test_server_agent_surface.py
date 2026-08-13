@@ -1090,9 +1090,13 @@ def test_mutator_schema_uses_full_selector_v1_and_never_result_ref():
     assert selector["properties"]["provenance"]["additionalProperties"] is False
     arguments = spec.input_schema["properties"]["arguments"]
     assert arguments["properties"]["parameter"]["enum"] == (
+        "base_radius",
         "height",
         "length",
+        "major_radius",
+        "minor_radius",
         "radius",
+        "top_radius",
         "width",
     )
     expected_preserve = DEFAULT_OPERATION_REGISTRY.operations[
@@ -1457,7 +1461,7 @@ def test_owned_tools_list_fixed_frame_fits_the_discovery_budget() -> None:
         + b"\n"
     )
     assert response["id"] == 1
-    assert len(frame) == 30_415
+    assert len(frame) == 30_643
     assert len(frame) <= 32_768
 
 
@@ -3245,7 +3249,7 @@ os.environ['VIBECAD_HOME'] = {str(home)!r}
 import vibecad.server as server
 result = anyio.run(server._handle_call_tool, 'get_capabilities', {{'schema_version': 1}})
 assert result.isError is False
-assert len(result.structuredContent['result']['operations']) == 11
+assert len(result.structuredContent['result']['operations']) == 14
 assert 'vibecad.application.agent' not in sys.modules
 assert 'vibecad.interaction.cad' not in sys.modules
 assert 'FreeCAD' not in sys.modules and 'Part' not in sys.modules

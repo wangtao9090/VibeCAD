@@ -2,6 +2,7 @@
 """参数修改工具（Round 6b）：改一个参数，FreeCAD 依赖链（布尔/孔/圆角）自动重算
 ——方案 B 选 FreeCAD 的核心红利。纪律：校验 → 事务 → 设参 → recompute →
 回读确认生效 → 几何断言 → 结构化 dict。"""
+
 from __future__ import annotations
 
 import math
@@ -22,13 +23,19 @@ from vibecad.tools._integrity import (
 _WHITELIST: dict[str, dict[str, str | None]] = {
     "Part::Box": {"length": "Length", "width": "Width", "height": "Height"},
     "Part::Cylinder": {"radius": "Radius", "height": "Height"},
+    "Part::Cone": {
+        "base_radius": "Radius1",
+        "top_radius": "Radius2",
+        "height": "Height",
+    },
+    "Part::Sphere": {"radius": "Radius"},
+    "Part::Torus": {"major_radius": "Radius1", "minor_radius": "Radius2"},
     "Part::Fillet": {"radius": None},
     "Part::Chamfer": {"size": None},
 }
 
 
-def list_parameters(doc: Any,
-                    session: Any = None) -> dict[str, dict[str, dict[str, float]]]:
+def list_parameters(doc: Any, session: Any = None) -> dict[str, dict[str, dict[str, float]]]:
     """文档对象 → 白名单参数当前值（附进每步 result 的 parts 字段，给 AI 读）。
 
     Round 8：统一新形态 {零件名: {对象名: {参数名: 值}}}。
@@ -95,21 +102,49 @@ def _assert_shape_reflects(obj: Any, key: str, value: float) -> None:
         bb = obj.Shape.BoundBox
         actual = {"length": bb.XLength, "width": bb.YLength, "height": bb.ZLength}[key]
     elif type_id == "Part::Cylinder":
-        cyl_faces = [f for f in obj.Shape.Faces
-                     if type(f.Surface).__name__ == "Cylinder"]
+        cyl_faces = [f for f in obj.Shape.Faces if type(f.Surface).__name__ == "Cylinder"]
         if not cyl_faces:
             raise RuntimeError(
-                "几何断言失败：参数已写入但圆柱对象的 Shape 中找不到圆柱面"
-                "——依赖链可能未重算")
+                "几何断言失败：参数已写入但圆柱对象的 Shape 中找不到圆柱面——依赖链可能未重算"
+            )
         if key == "radius":
             actual = float(cyl_faces[0].Surface.Radius)
         else:  # height
             pr = cyl_faces[0].ParameterRange
             actual = abs(float(pr[3]) - float(pr[2]))
+    elif type_id == "Part::Sphere":
+        sphere_faces = [face for face in obj.Shape.Faces if type(face.Surface).__name__ == "Sphere"]
+        if not sphere_faces:
+            raise RuntimeError(
+                "几何断言失败：参数已写入但球体对象的 Shape 中找不到球面——依赖链可能未重算"
+            )
+        actual = float(sphere_faces[0].Surface.Radius)
+    elif type_id == "Part::Torus":
+        torus_faces = [face for face in obj.Shape.Faces if type(face.Surface).__name__ == "Torus"]
+        if not torus_faces:
+            raise RuntimeError(
+                "几何断言失败：参数已写入但圆环体对象的 Shape 中找不到环面——依赖链可能未重算"
+            )
+        surface = torus_faces[0].Surface
+        actual = float(surface.MajorRadius if key == "major_radius" else surface.MinorRadius)
+    elif type_id == "Part::Cone":
+        if key == "height":
+            actual = float(
+                obj.Shape.BoundBox.XLength
+                if abs(obj.Placement.Rotation.Q[1]) > 0.5
+                else (
+                    obj.Shape.BoundBox.YLength
+                    if abs(obj.Placement.Rotation.Q[0]) > 0.5
+                    else obj.Shape.BoundBox.ZLength
+                )
+            )
+        else:
+            actual = float(getattr(obj, "Radius1" if key == "base_radius" else "Radius2"))
     if actual is not None and abs(actual - value) > 1e-6:
         raise RuntimeError(
             f"几何断言失败：参数已写入但形状几何未更新（{key}={value:g} vs "
-            f"实测 {actual:g}）——依赖链可能未重算")
+            f"实测 {actual:g}）——依赖链可能未重算"
+        )
 
 
 def modify_part(session: Session, name: str, parameter: str, value: float) -> dict[str, Any]:
@@ -118,31 +153,50 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
         raise ValueError("name 必须是非空字符串（对象名，见返回的 parts 字段）")
     if not parameter or not isinstance(parameter, str):
         raise ValueError("parameter 必须是非空字符串（可改参数见 parts 字段）")
-    if not isinstance(value, (int, float)) or isinstance(value, bool) \
-            or not math.isfinite(value) or value <= 0:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or value <= 0
+    ):
         raise ValueError(f"value 必须是 > 0 的有限数字（得到 {value!r}）")
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+
     with session._transaction("modify_part"):
         with silence_fd1():
             try:
                 obj = session.get_object(name)
             except KeyError as exc:
-                names = [o.Name for o in session.doc.Objects
-                         if getattr(o, "TypeId", "") in _WHITELIST]
+                names = [
+                    o.Name for o in session.doc.Objects if getattr(o, "TypeId", "") in _WHITELIST
+                ]
                 raise ValueError(
-                    f"对象 {name!r} 不存在——文档现有可改对象：{names or '（无）'}") from exc
+                    f"对象 {name!r} 不存在——文档现有可改对象：{names or '（无）'}"
+                ) from exc
             wl = _WHITELIST.get(getattr(obj, "TypeId", ""))
             if wl is None:
-                names = [o.Name for o in session.doc.Objects
-                         if getattr(o, "TypeId", "") in _WHITELIST]
+                names = [
+                    o.Name for o in session.doc.Objects if getattr(o, "TypeId", "") in _WHITELIST
+                ]
                 raise ValueError(
                     f"对象 {name!r}（{getattr(obj, 'TypeId', '?')}）不支持参数修改"
-                    f"——可修改对象：{names or '（无）'}")
+                    f"——可修改对象：{names or '（无）'}"
+                )
             key = parameter.lower()
             if key not in wl:
-                raise ValueError(
-                    f"对象 {name!r} 没有可改参数 {parameter!r}——可改：{sorted(wl)}")
+                raise ValueError(f"对象 {name!r} 没有可改参数 {parameter!r}——可改：{sorted(wl)}")
             attr = wl[key]
+            type_id = getattr(obj, "TypeId", "")
+            if type_id == "Part::Cone":
+                next_base = float(value) if key == "base_radius" else float(obj.Radius1)
+                next_top = float(value) if key == "top_radius" else float(obj.Radius2)
+                if next_base == 0 and next_top == 0:
+                    raise ValueError("圆锥的 base_radius 与 top_radius 不能同时为零")
+            if type_id == "Part::Torus":
+                next_major = float(value) if key == "major_radius" else float(obj.Radius1)
+                next_minor = float(value) if key == "minor_radius" else float(obj.Radius2)
+                if next_major <= next_minor:
+                    raise ValueError("圆环体 major_radius 必须大于 minor_radius，避免自相交几何")
             if attr is None:
                 old = float(obj.Edges[0][1])
             else:
@@ -156,7 +210,8 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
             if session._parts and owner is None:
                 raise ValueError(
                     f"对象 {obj.Name!r} 不属于任何已注册零件"
-                    f"（已有零件：{list(session._parts)}）——装配状态异常，拒绝操作")
+                    f"（已有零件：{list(session._parts)}）——装配状态异常，拒绝操作"
+                )
             owner_names = session._parts[owner]["objects"] if owner is not None else None
             result_obj_before = session.get_result_object(owner)
             before_name = result_obj_before.Name
@@ -193,22 +248,19 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
                     modified_tool_rk = round(float(tool.Radius), 6)
                     break
             expected_counts: dict[float, int] = hole_count_snapshot(shape_before, all_radii)
-            if modified_tool_rk is not None \
-                    and expected_counts.get(modified_tool_rk, 0) > 0:
+            if modified_tool_rk is not None and expected_counts.get(modified_tool_rk, 0) > 0:
                 expected_counts[modified_tool_rk] -= 1
                 new_rk = round(float(value), 6)
                 expected_counts[new_rk] = expected_counts.get(new_rk, 0) + 1
             if attr is None:
-                obj.Edges = [(idx, float(value), float(value))
-                             for (idx, _r1, _r2) in obj.Edges]
+                obj.Edges = [(idx, float(value), float(value)) for (idx, _r1, _r2) in obj.Edges]
             else:
                 setattr(obj, attr, float(value))
             session.doc.recompute()
             # 回读确认参数生效（recompute 返回值不可信，几何断言才可信）
             now = float(obj.Edges[0][1]) if attr is None else float(getattr(obj, attr))
             if abs(now - value) > 1e-9:
-                raise RuntimeError(
-                    f"几何断言失败：参数 {key} 设为 {value:g} 后回读为 {now:g}")
+                raise RuntimeError(f"几何断言失败：参数 {key} 设为 {value:g} 后回读为 {now:g}")
             # 依赖链执行账本断言（复审 D：recompute 失灵时全部几何断言凭旧几何
             # 通过 + 体积不变放行 = 静默失败粉饰成 ok+note）。真机取证：primitive
             # 的 Shape 在 setattr 后【即时重建】（box.Length=45 后未 recompute
@@ -233,12 +285,13 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
             # 密封内腔（孔完整面仍在、计数不变）——与 reposition 封孔同族，接同一探针
             # 装配模式只探 owner 自己的孔（跨零件坐标系混用误报，终审 C-E）
             assert_no_sealed_holes(session.doc, shape, owner_names=owner_names)
-            result = {"ok": True,
-                      "modified": {"name": obj.Name, "parameter": key,
-                                   "from": old, "to": float(value)},
-                      "volume": shape.Volume,
-                      "labels_stale": True,
-                      "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注"}
+            result = {
+                "ok": True,
+                "modified": {"name": obj.Name, "parameter": key, "from": old, "to": float(value)},
+                "volume": shape.Volume,
+                "labels_stale": True,
+                "hint": "几何已变更，调用 render_part(annotate='faces') 查看最新标注",
+            }
             # 体积不变是合法情形（审查 E6：通孔在零件外的部分加长）——但放行前
             # 必须做被改对象的 Shape 级几何回读（复审 D：recompute 失灵时属性回读
             # /漂移/孔完整性断言全部凭旧几何通过，放行+note 会粉饰静默失败）
@@ -251,7 +304,8 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
                     # recompute 失灵场景被 note 粉饰）。
                     raise RuntimeError(
                         f"几何断言失败：{key} 修改后体积无变化——圆角/倒角半径"
-                        "改变必然改变体积，依赖链可能未重算")
+                        "改变必然改变体积，依赖链可能未重算"
+                    )
                 _assert_shape_reflects(obj, key, float(value))
                 result["note"] = "该修改未改变最终几何（参数已生效，例如通孔在零件外的部分加长）"
     return result

@@ -244,7 +244,7 @@ def test_release_workflow_executes_the_exact_built_artifacts_before_publish():
     assert 'vibecad.__version__ == os.environ["EXPECTED_VERSION"]' in package_body
     assert (
         "spec.PUBLIC_SURFACE_SHA256 == "
-        '"6c1f226119f272e4bfcabd7364c3aa5c52c1f150a98387ba52443ddd26a7e689"'
+        '"cb336a972554881bdf400a8699d8004cceeac877b2e52afb0659c78fb37f701d"'
     ) in package_body
     assert "assert len(public_tool_specs()) == 38" in package_body
 

@@ -84,7 +84,10 @@ from vibecad.parametric.compiler import (
 )
 from vibecad.parametric.contracts import ParametricDesignIR
 from vibecad.tools.modeling import add_box as _add_box
+from vibecad.tools.modeling import add_cone as _add_cone
 from vibecad.tools.modeling import add_cylinder as _add_cylinder
+from vibecad.tools.modeling import add_sphere as _add_sphere
+from vibecad.tools.modeling import add_torus as _add_torus
 from vibecad.tools.modify import modify_part as _modify_part
 from vibecad.tools.transform import move_part as _move_part
 from vibecad.tools.transform import rotate_part as _rotate_part
@@ -149,6 +152,25 @@ _PARAMETER_FIELDS = {
         ("angle", "Angle", "deg"),
         ("height", "Height", "mm"),
         ("radius", "Radius", "mm"),
+    ),
+    "Part::Cone": (
+        ("angle", "Angle", "deg"),
+        ("base_radius", "Radius1", "mm"),
+        ("height", "Height", "mm"),
+        ("top_radius", "Radius2", "mm"),
+    ),
+    "Part::Sphere": (
+        ("angle1", "Angle1", "deg"),
+        ("angle2", "Angle2", "deg"),
+        ("angle3", "Angle3", "deg"),
+        ("radius", "Radius", "mm"),
+    ),
+    "Part::Torus": (
+        ("angle1", "Angle1", "deg"),
+        ("angle2", "Angle2", "deg"),
+        ("angle3", "Angle3", "deg"),
+        ("major_radius", "Radius1", "mm"),
+        ("minor_radius", "Radius2", "mm"),
     ),
 }
 
@@ -1397,6 +1419,100 @@ def _managed_create(
             float(origin) + offset
             for origin, offset in zip(expected_position, center_offset, strict=True)
         )
+    elif context.operation == "create_cone":
+        expected_parameters = {
+            "angle": 360.0,
+            "base_radius": kwargs.get("radius1"),
+            "height": kwargs.get("height"),
+            "top_radius": kwargs.get("radius2", 0.0),
+        }
+        radius1 = expected_parameters["base_radius"]
+        radius2 = expected_parameters["top_radius"]
+        height = expected_parameters["height"]
+        if any(type(item) not in {int, float} for item in (radius1, radius2, height)):
+            raise _operation_failure()
+        base_radius = float(radius1)
+        top_radius = float(radius2)
+        cone_height = float(height)
+        radius_sum = base_radius**2 + base_radius * top_radius + top_radius**2
+        if base_radius <= 0 or top_radius < 0 or cone_height <= 0 or radius_sum <= 0:
+            raise _operation_failure()
+        expected_volume = math.pi * cone_height * radius_sum / 3.0
+        slant = math.hypot(cone_height, base_radius - top_radius)
+        expected_area = math.pi * (
+            base_radius**2 + top_radius**2 + (base_radius + top_radius) * slant
+        )
+        local_center_z = (
+            cone_height
+            * (base_radius**2 + 2.0 * base_radius * top_radius + 3.0 * top_radius**2)
+            / (4.0 * radius_sum)
+        )
+        cone_axis = kwargs.get("axis", "z")
+        diameter = 2.0 * max(base_radius, top_radius)
+        if cone_axis == "x":
+            expected_rotation = _axis_rotation("y", 90.0)
+            expected_bbox = (cone_height, diameter, diameter)
+        elif cone_axis == "y":
+            expected_rotation = _axis_rotation("x", -90.0)
+            expected_bbox = (diameter, cone_height, diameter)
+        elif cone_axis == "z":
+            expected_rotation = (0.0, 0.0, 0.0, 1.0)
+            expected_bbox = (diameter, diameter, cone_height)
+        else:
+            raise _operation_failure()
+        center_offset = _rotate_vector(expected_rotation, (0.0, 0.0, local_center_z))
+        expected_center = tuple(
+            float(origin) + offset
+            for origin, offset in zip(expected_position, center_offset, strict=True)
+        )
+    elif context.operation == "create_sphere":
+        expected_parameters = {
+            "angle1": -90.0,
+            "angle2": 90.0,
+            "angle3": 360.0,
+            "radius": kwargs.get("radius"),
+        }
+        radius = expected_parameters["radius"]
+        if type(radius) not in {int, float} or float(radius) <= 0:
+            raise _operation_failure()
+        sphere_radius = float(radius)
+        expected_volume = 4.0 * math.pi * sphere_radius**3 / 3.0
+        expected_area = 4.0 * math.pi * sphere_radius**2
+        expected_bbox = (2.0 * sphere_radius,) * 3
+        expected_center = tuple(float(component) for component in expected_position)
+        expected_rotation = (0.0, 0.0, 0.0, 1.0)
+    elif context.operation == "create_torus":
+        expected_parameters = {
+            "angle1": -180.0,
+            "angle2": 180.0,
+            "angle3": 360.0,
+            "major_radius": kwargs.get("radius1"),
+            "minor_radius": kwargs.get("radius2"),
+        }
+        radius1 = expected_parameters["major_radius"]
+        radius2 = expected_parameters["minor_radius"]
+        if type(radius1) not in {int, float} or type(radius2) not in {int, float}:
+            raise _operation_failure()
+        major_radius = float(radius1)
+        minor_radius = float(radius2)
+        if major_radius <= minor_radius or minor_radius <= 0:
+            raise _operation_failure()
+        expected_volume = 2.0 * math.pi**2 * major_radius * minor_radius**2
+        expected_area = 4.0 * math.pi**2 * major_radius * minor_radius
+        torus_axis = kwargs.get("axis", "z")
+        if torus_axis == "x":
+            expected_rotation = _axis_rotation("y", 90.0)
+        elif torus_axis == "y":
+            expected_rotation = _axis_rotation("x", -90.0)
+        elif torus_axis == "z":
+            expected_rotation = (0.0, 0.0, 0.0, 1.0)
+        else:
+            raise _operation_failure()
+        # OCC's torus triangulation can conservatively enlarge the reported X/Y
+        # bounding box.  Volume, area, center, native parameters and one-solid
+        # validity remain the exact creation contract.
+        expected_bbox = None
+        expected_center = tuple(float(component) for component in expected_position)
     else:
         raise _operation_failure()
     if set(parameters) != set(expected_parameters) or any(
@@ -1421,7 +1537,7 @@ def _managed_create(
         or created.center_of_mass_mm is None
         or not _same_geometry_number(created.volume_mm3, expected_volume)
         or not _same_geometry_number(created.area_mm2, expected_area)
-        or not _same_geometry_vector(created.bbox_mm, expected_bbox)
+        or (expected_bbox is not None and not _same_geometry_vector(created.bbox_mm, expected_bbox))
         or not _same_geometry_vector(created.center_of_mass_mm, expected_center)
     ):
         raise _operation_failure()
@@ -3292,7 +3408,10 @@ class InProcessCadExecutor(CadExecutionPort):
                 raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
             fixed_leaves = (
                 _add_box,
+                _add_cone,
                 _add_cylinder,
+                _add_sphere,
+                _add_torus,
                 _modify_part,
                 _move_part,
                 _rotate_part,
@@ -3335,6 +3454,39 @@ class InProcessCadExecutor(CadExecutionPort):
                         session,
                         leaf=_add_cylinder,
                         expected_type="Part::Cylinder",
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "create_cone": _queued_handler(
+                    contexts.get("create_cone", deque()),
+                    partial(
+                        _managed_create,
+                        session,
+                        leaf=_add_cone,
+                        expected_type="Part::Cone",
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "create_sphere": _queued_handler(
+                    contexts.get("create_sphere", deque()),
+                    partial(
+                        _managed_create,
+                        session,
+                        leaf=_add_sphere,
+                        expected_type="Part::Sphere",
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "create_torus": _queued_handler(
+                    contexts.get("create_torus", deque()),
+                    partial(
+                        _managed_create,
+                        session,
+                        leaf=_add_torus,
+                        expected_type="Part::Torus",
                         project_id=project_id,
                         revision_id=revision_id,
                     ),

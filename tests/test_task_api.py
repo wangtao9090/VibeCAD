@@ -2130,8 +2130,11 @@ def test_capabilities_match_the_exact_sorted_public_projection():
     assert [item["operation"] for item in operations] == [
         "create_box",
         "create_component",
+        "create_cone",
         "create_cylinder",
         "create_parametric_design",
+        "create_sphere",
+        "create_torus",
         "inspect_model",
         "modify_parameter",
         "modify_parametric_parameter",
@@ -2186,7 +2189,9 @@ def test_capabilities_match_the_exact_sorted_public_projection():
         "position_mm",
         "width_mm",
     ]
-    create_parametric_design = operations[3]
+    create_parametric_design = next(
+        item for item in operations if item["operation"] == "create_parametric_design"
+    )
     assert create_parametric_design["target_fields"] == []
     assert create_parametric_design["argument_fields"] == [
         {

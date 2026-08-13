@@ -78,7 +78,7 @@ ALLOWED_APPLICATION_OPERATIONS = frozenset(
 )
 KERNEL_API_EPOCH = 1
 KERNEL_API_NAME = "vibecad.task-kernel"
-KERNEL_BUILD_ID = "vcad-a11-proposal-admission-gate"
+KERNEL_BUILD_ID = "vcad-a12-native-part-primitives"
 
 _DIRECT_OPERATIONS = frozenset(
     {

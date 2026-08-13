@@ -62,7 +62,7 @@ def test_default_registry_projects_all_operations_as_executable() -> None:
     assert decode_capability_catalog(encode_capability_catalog(catalog)) == catalog
     assert len(catalog.descriptors) == len(DEFAULT_OPERATION_REGISTRY) + 1
     operations = [item for item in catalog.descriptors if item.kind is CapabilityKind.OPERATION]
-    assert len(operations) == 11
+    assert len(operations) == 14
     assert all(item.status is CapabilitySupportStatus.EXECUTABLE for item in operations)
     assert all(
         item.execution_profiles == (CapabilityExecutionProfile.HEADLESS,) for item in operations

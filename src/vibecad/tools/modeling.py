@@ -128,6 +128,150 @@ def add_cylinder(
     return result
 
 
+def add_cone(
+    session: Session,
+    radius1: float,
+    height: float,
+    radius2: float = 0.0,
+    position=(0.0, 0.0, 0.0),
+    axis="z",
+    *,
+    part: str | None = None,
+) -> dict[str, Any]:
+    """Create one full circular cone or frustum with its base at ``position``."""
+
+    for field, value in (("radius1", radius1), ("radius2", radius2), ("height", height)):
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+        ):
+            raise ValueError(f"{field} 必须是有限数字（得到 {value!r}）")
+    if radius1 <= 0:
+        raise ValueError(f"radius1 必须 > 0（得到 {radius1}）")
+    if radius2 < 0:
+        raise ValueError(f"radius2 必须 >= 0（得到 {radius2}）")
+    if height <= 0:
+        raise ValueError(f"height 必须 > 0（得到 {height}）")
+    _validate_position(position)
+    if axis not in _AXIS:
+        raise ValueError(f"axis 必须是 x/y/z（得到 {axis!r}）")
+    from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+
+    with session._transaction("add_cone", part=part):
+        with silence_fd1():
+            import FreeCAD  # noqa: PLC0415
+
+            obj = session.doc.addObject("Part::Cone", "Cone")
+            obj.Radius1, obj.Radius2, obj.Height, obj.Angle = radius1, radius2, height, 360.0
+            rot_axis, angle = _AXIS[axis]
+            obj.Placement = FreeCAD.Placement(
+                FreeCAD.Vector(*position), FreeCAD.Rotation(FreeCAD.Vector(*rot_axis), angle)
+            )
+            session.doc.recompute()
+            session.assert_valid_solid(obj.Shape)
+            session.set_result_object(obj, part=part)
+            result = {
+                "ok": True,
+                "name": obj.Name,
+                "volume": obj.Shape.Volume,
+                "position": list(position),
+                "axis": axis,
+                **_stale_hint(session),
+            }
+    return result
+
+
+def add_sphere(
+    session: Session,
+    radius: float,
+    position=(0.0, 0.0, 0.0),
+    *,
+    part: str | None = None,
+) -> dict[str, Any]:
+    """Create one complete sphere centered at ``position``."""
+
+    if (
+        not isinstance(radius, (int, float))
+        or isinstance(radius, bool)
+        or not math.isfinite(radius)
+        or radius <= 0
+    ):
+        raise ValueError(f"radius 必须是 > 0 的有限数字（得到 {radius!r}）")
+    _validate_position(position)
+    from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+
+    with session._transaction("add_sphere", part=part):
+        with silence_fd1():
+            import FreeCAD  # noqa: PLC0415
+
+            obj = session.doc.addObject("Part::Sphere", "Sphere")
+            obj.Radius, obj.Angle1, obj.Angle2, obj.Angle3 = radius, -90.0, 90.0, 360.0
+            obj.Placement = FreeCAD.Placement(FreeCAD.Vector(*position), FreeCAD.Rotation())
+            session.doc.recompute()
+            session.assert_valid_solid(obj.Shape)
+            session.set_result_object(obj, part=part)
+            result = {
+                "ok": True,
+                "name": obj.Name,
+                "volume": obj.Shape.Volume,
+                "position": list(position),
+                **_stale_hint(session),
+            }
+    return result
+
+
+def add_torus(
+    session: Session,
+    radius1: float,
+    radius2: float,
+    position=(0.0, 0.0, 0.0),
+    axis="z",
+    *,
+    part: str | None = None,
+) -> dict[str, Any]:
+    """Create one non-self-intersecting full torus centered at ``position``."""
+
+    for field, value in (("radius1", radius1), ("radius2", radius2)):
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError(f"{field} 必须是 > 0 的有限数字（得到 {value!r}）")
+    if radius1 <= radius2:
+        raise ValueError("radius1 必须大于 radius2，避免自相交圆环体")
+    _validate_position(position)
+    if axis not in _AXIS:
+        raise ValueError(f"axis 必须是 x/y/z（得到 {axis!r}）")
+    from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+
+    with session._transaction("add_torus", part=part):
+        with silence_fd1():
+            import FreeCAD  # noqa: PLC0415
+
+            obj = session.doc.addObject("Part::Torus", "Torus")
+            obj.Radius1, obj.Radius2 = radius1, radius2
+            obj.Angle1, obj.Angle2, obj.Angle3 = -180.0, 180.0, 360.0
+            rot_axis, angle = _AXIS[axis]
+            obj.Placement = FreeCAD.Placement(
+                FreeCAD.Vector(*position), FreeCAD.Rotation(FreeCAD.Vector(*rot_axis), angle)
+            )
+            session.doc.recompute()
+            session.assert_valid_solid(obj.Shape)
+            session.set_result_object(obj, part=part)
+            result = {
+                "ok": True,
+                "name": obj.Name,
+                "volume": obj.Shape.Volume,
+                "position": list(position),
+                "axis": axis,
+                **_stale_hint(session),
+            }
+    return result
+
+
 def _validate_boolean_names(base_name: str, tool_name: str) -> None:
     if not base_name or not isinstance(base_name, str):
         raise ValueError("base_name 必须是非空字符串")

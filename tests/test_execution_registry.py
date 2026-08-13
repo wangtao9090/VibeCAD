@@ -124,7 +124,7 @@ def _operation(
     )
 
 
-def test_default_registry_exposes_six_direct_and_five_private_operations():
+def test_default_registry_exposes_six_direct_and_eight_private_operations():
     assert tuple(DEFAULT_OPERATION_REGISTRY) == (
         "create_box",
         "create_cylinder",
@@ -132,13 +132,16 @@ def test_default_registry_exposes_six_direct_and_five_private_operations():
         "move_part",
         "rotate_part",
         "inspect_model",
+        "create_cone",
+        "create_sphere",
+        "create_torus",
         "create_component",
         "set_component_bom",
         "place_component",
         "create_parametric_design",
         "modify_parametric_parameter",
     )
-    assert len(DEFAULT_OPERATION_REGISTRY) == 11
+    assert len(DEFAULT_OPERATION_REGISTRY) == 14
     assert all(
         metadata.handler_name == operation
         for operation, metadata in DEFAULT_OPERATION_REGISTRY.operations.items()
@@ -239,6 +242,9 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
         "move_part",
         "rotate_part",
         "inspect_model",
+        "create_cone",
+        "create_sphere",
+        "create_torus",
         "create_component",
         "set_component_bom",
         "place_component",
@@ -269,6 +275,9 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
     assert all(
         not DEFAULT_OPERATION_REGISTRY.lookup(name).direct_exposed
         for name in (
+            "create_cone",
+            "create_sphere",
+            "create_torus",
             "create_component",
             "set_component_bom",
             "place_component",
@@ -458,6 +467,9 @@ def test_default_registry_has_exact_handler_risk_and_evidence_metadata():
         "move_part": ("move_part", RiskClass.MUTATING, True),
         "rotate_part": ("rotate_part", RiskClass.MUTATING, True),
         "inspect_model": ("inspect_model", RiskClass.READ_ONLY, False),
+        "create_cone": ("create_cone", RiskClass.MUTATING, True),
+        "create_sphere": ("create_sphere", RiskClass.MUTATING, True),
+        "create_torus": ("create_torus", RiskClass.MUTATING, True),
         "create_component": ("create_component", RiskClass.MUTATING, True),
         "set_component_bom": ("set_component_bom", RiskClass.MUTATING, True),
         "place_component": ("place_component", RiskClass.MUTATING, True),
@@ -511,6 +523,31 @@ def test_default_registry_has_exact_field_shapes_and_bindings():
     )
     assert create_cylinder.argument_fields[3].enum_values == ("x", "y", "z")
 
+    create_cone = DEFAULT_OPERATION_REGISTRY.lookup("create_cone")
+    assert _fields(create_cone.argument_fields) == (
+        ("base_radius_mm", "radius1", ValueShape.POSITIVE_NUMBER, True),
+        ("top_radius_mm", "radius2", ValueShape.POSITIVE_NUMBER, False),
+        ("height_mm", "height", ValueShape.POSITIVE_NUMBER, True),
+        ("position_mm", "position", ValueShape.VECTOR3, False),
+        ("axis", "axis", ValueShape.ENUM, False),
+    )
+    assert create_cone.argument_fields[-1].enum_values == ("x", "y", "z")
+
+    create_sphere = DEFAULT_OPERATION_REGISTRY.lookup("create_sphere")
+    assert _fields(create_sphere.argument_fields) == (
+        ("radius_mm", "radius", ValueShape.POSITIVE_NUMBER, True),
+        ("position_mm", "position", ValueShape.VECTOR3, False),
+    )
+
+    create_torus = DEFAULT_OPERATION_REGISTRY.lookup("create_torus")
+    assert _fields(create_torus.argument_fields) == (
+        ("major_radius_mm", "radius1", ValueShape.POSITIVE_NUMBER, True),
+        ("minor_radius_mm", "radius2", ValueShape.POSITIVE_NUMBER, True),
+        ("position_mm", "position", ValueShape.VECTOR3, False),
+        ("axis", "axis", ValueShape.ENUM, False),
+    )
+    assert create_torus.argument_fields[-1].enum_values == ("x", "y", "z")
+
     modify_parameter = DEFAULT_OPERATION_REGISTRY.lookup("modify_parameter")
     assert _fields(modify_parameter.target_fields) == (
         ("object", "target", ValueShape.ENTITY_TARGET, True),
@@ -521,9 +558,13 @@ def test_default_registry_has_exact_field_shapes_and_bindings():
         ("value_mm", "value", ValueShape.POSITIVE_NUMBER, True),
     )
     assert modify_parameter.argument_fields[0].enum_values == (
+        "base_radius",
         "height",
         "length",
+        "major_radius",
+        "minor_radius",
         "radius",
+        "top_radius",
         "width",
     )
 
@@ -619,15 +660,19 @@ def test_only_entity_mutators_declare_the_closed_preservation_vocabulary():
     expected = (
         "angle",
         "area_mm2",
+        "base_radius",
         "bbox_mm",
         "center_of_mass_mm",
         "geometry",
         "height",
         "length",
+        "major_radius",
+        "minor_radius",
         "parameters",
         "placement",
         "radius",
         "solid_count",
+        "top_radius",
         "valid_shape",
         "volume_mm3",
         "width",
@@ -1044,14 +1089,14 @@ def test_hostile_iterators_preserve_registry_errors_and_do_not_catch_base_except
 
 def test_unknown_lookup_fails_with_a_stable_machine_readable_error():
     with pytest.raises(RegistryError) as caught:
-        DEFAULT_OPERATION_REGISTRY.lookup("create_sphere")
+        DEFAULT_OPERATION_REGISTRY.lookup("create_prism")
 
     assert caught.value.code is RegistryErrorCode.UNKNOWN_OPERATION
-    assert caught.value.operation == "create_sphere"
+    assert caught.value.operation == "create_prism"
     assert caught.value.to_mapping() == {
         "schema_version": 1,
         "code": "unknown_operation",
-        "operation": "create_sphere",
+        "operation": "create_prism",
         "field": None,
         "message": "operation is not registered",
     }

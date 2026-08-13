@@ -218,7 +218,7 @@ AR-1 发现 S3-7 discovery 缺少 tool description，而且重复广播完整 ta
 `tools/list` 约 350 KB。S3-8 已补齐描述、从宿主发现投影中省略可选 output schema，并继续在服务端
 保留完整输出验证；当前固定 38-tool 完整 discovery frame 为 30,415 bytes，低于 32,768-byte
 上限；receipt 绑定的完整 public-surface digest 为
-`6c1f226119f272e4bfcabd7364c3aa5c52c1f150a98387ba52443ddd26a7e689`。direct operation 与稳定工具
+`cb336a972554881bdf400a8699d8004cceeac877b2e52afb0659c78fb37f701d`。direct operation 与稳定工具
 重名会 fail closed。
 
 ## 6. Application 与 Task Kernel 分层
@@ -548,7 +548,7 @@ verifier 与 HEAD 权威。详见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VER
 
 - tag、source、manifest、FreeCAD package、lock 和 managed server receipt 的目标版本为 0.9.0；公开工具 38 个，MCP 1.27.2，
   server epoch 4，FreeCAD 1.1.0；receipt public-surface digest 为
-  `6c1f226119f272e4bfcabd7364c3aa5c52c1f150a98387ba52443ddd26a7e689`；
+  `cb336a972554881bdf400a8699d8004cceeac877b2e52afb0659c78fb37f701d`；
 - 固定 38-tool 完整 discovery frame 为 30,415 bytes。tool description 和 input
   schema 对宿主可见，完整 output validation 保留在服务端；
 - canonical skill 位于 `skills/vibecad-agent/`；source、sdist、MCPB 和 standalone skill archive 携带

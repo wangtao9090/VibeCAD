@@ -445,6 +445,140 @@ def _fake_add_cylinder(
     return object()
 
 
+def _axis_quaternion(axis: str) -> tuple[float, float, float, float]:
+    sine = math.sin(math.pi / 4)
+    return {
+        "x": (0.0, sine, 0.0, sine),
+        "y": (-sine, 0.0, 0.0, sine),
+        "z": (0.0, 0.0, 0.0, 1.0),
+    }[axis]
+
+
+def _fake_add_cone(
+    session: _FakeSession,
+    *,
+    radius1: float,
+    height: float,
+    radius2: float = 0.0,
+    position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    axis: str = "z",
+    part: str | None = None,
+) -> object:
+    obj = type("ManagedCone", (), {})()
+    obj.Name = "Cone"
+    obj.TypeId = "Part::Cone"
+    obj.Radius1 = radius1
+    obj.Radius2 = radius2
+    obj.Height = height
+    obj.Angle = 360.0
+    obj.Placement = _FakePlacement(*position, q=_axis_quaternion(axis))
+    radius_sum = radius1**2 + radius1 * radius2 + radius2**2
+    center_z = height * (radius1**2 + 2 * radius1 * radius2 + 3 * radius2**2) / (4 * radius_sum)
+    center_offsets = {
+        "x": (center_z, 0.0, 0.0),
+        "y": (0.0, center_z, 0.0),
+        "z": (0.0, 0.0, center_z),
+    }
+    diameter = 2 * max(radius1, radius2)
+    bboxes = {
+        "x": (height, diameter, diameter),
+        "y": (diameter, height, diameter),
+        "z": (diameter, diameter, height),
+    }
+    bbox_offsets = {
+        "x": (height / 2, 0.0, 0.0),
+        "y": (0.0, height / 2, 0.0),
+        "z": (0.0, 0.0, height / 2),
+    }
+    center = tuple(
+        origin + offset for origin, offset in zip(position, center_offsets[axis], strict=True)
+    )
+    bbox_center = tuple(
+        origin + offset for origin, offset in zip(position, bbox_offsets[axis], strict=True)
+    )
+    slant = math.hypot(height, radius1 - radius2)
+    obj.Shape = _FakeShape(
+        volume=math.pi * height * radius_sum / 3,
+        area=math.pi * (radius1**2 + radius2**2 + (radius1 + radius2) * slant),
+        bbox=bboxes[axis],
+        center=center,
+        bbox_center=bbox_center,
+    )
+    session.doc.Objects = (*session.doc.Objects, obj)
+    if part is not None:
+        session._parts[part]["objects"].add(obj.Name)  # type: ignore[attr-defined]
+    session.set_result_object(obj, part=part)
+    return object()
+
+
+def _fake_add_sphere(
+    session: _FakeSession,
+    *,
+    radius: float,
+    position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    part: str | None = None,
+) -> object:
+    obj = type("ManagedSphere", (), {})()
+    obj.Name = "Sphere"
+    obj.TypeId = "Part::Sphere"
+    obj.Radius = radius
+    obj.Angle1 = -90.0
+    obj.Angle2 = 90.0
+    obj.Angle3 = 360.0
+    obj.Placement = _FakePlacement(*position)
+    obj.Shape = _FakeShape(
+        volume=4 * math.pi * radius**3 / 3,
+        area=4 * math.pi * radius**2,
+        bbox=(2 * radius, 2 * radius, 2 * radius),
+        center=position,
+        bbox_center=position,
+    )
+    session.doc.Objects = (*session.doc.Objects, obj)
+    if part is not None:
+        session._parts[part]["objects"].add(obj.Name)  # type: ignore[attr-defined]
+    session.set_result_object(obj, part=part)
+    return object()
+
+
+def _fake_add_torus(
+    session: _FakeSession,
+    *,
+    radius1: float,
+    radius2: float,
+    position: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    axis: str = "z",
+    part: str | None = None,
+) -> object:
+    obj = type("ManagedTorus", (), {})()
+    obj.Name = "Torus"
+    obj.TypeId = "Part::Torus"
+    obj.Radius1 = radius1
+    obj.Radius2 = radius2
+    obj.Angle1 = -180.0
+    obj.Angle2 = 180.0
+    obj.Angle3 = 360.0
+    obj.Placement = _FakePlacement(*position, q=_axis_quaternion(axis))
+    diameter = 2 * (radius1 + radius2)
+    thickness = 2 * radius2
+    bboxes = {
+        "x": (thickness, diameter, diameter),
+        "y": (diameter, thickness, diameter),
+        "z": (diameter, diameter, thickness),
+    }
+    obj.Shape = _FakeShape(
+        volume=2 * math.pi**2 * radius1 * radius2**2,
+        area=4 * math.pi**2 * radius1 * radius2,
+        bbox=bboxes[axis],
+        center=position,
+        bbox_center=position,
+    )
+    session.doc.Objects = (*session.doc.Objects, obj)
+    if part is not None:
+        session._parts[part]["objects"].add(obj.Name)  # type: ignore[attr-defined]
+    session.set_result_object(obj, part=part)
+    return object()
+
+
 def _fake_modify_part(
     session: _FakeSession,
     *,
@@ -754,6 +888,44 @@ def _six_operation_program() -> ModelProgram:
             ),
         ),
         acceptance=AcceptanceSpec(id="acceptance-executor-six", criteria=()),
+    )
+
+
+def _part_native_primitives_program() -> ModelProgram:
+    return ModelProgram(
+        task_id="task-executor-part-primitives",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "cone",
+                "create_cone",
+                args={
+                    "base_radius_mm": 6,
+                    "top_radius_mm": 2,
+                    "height_mm": 15,
+                    "position_mm": (1, 2, 3),
+                    "axis": "x",
+                },
+            ),
+            _command(
+                "sphere",
+                "create_sphere",
+                args={"radius_mm": 4, "position_mm": (30, 5, -2)},
+                depends_on=("cone",),
+            ),
+            _command(
+                "torus",
+                "create_torus",
+                args={
+                    "major_radius_mm": 8,
+                    "minor_radius_mm": 2,
+                    "position_mm": (60, 0, 0),
+                    "axis": "y",
+                },
+                depends_on=("sphere",),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-part-primitives", criteria=()),
     )
 
 
@@ -1402,6 +1574,43 @@ def test_execute_program_runs_all_six_managed_operations_with_fixed_traces(
     assert len({identity.object_id for identity in identities}) == 2
     assert values[0]["object_id"] == identities[0].object_id  # type: ignore[index]
     assert values[1]["object_id"] == identities[1].object_id  # type: ignore[index]
+
+
+def test_execute_program_creates_native_cone_sphere_and_torus_with_live_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_cone", _fake_add_cone)
+    monkeypatch.setattr(executor_module, "_add_sphere", _fake_add_sphere)
+    monkeypatch.setattr(executor_module, "_add_torus", _fake_add_torus)
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_part_native_primitives_program()),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True]
+    assert [outcome.result.operation_id for outcome in outcomes] == ["cone", "sphere", "torus"]
+    values = [outcome.result.value for outcome in outcomes]
+    assert [value["operation"] for value in values] == [  # type: ignore[index]
+        "create_cone",
+        "create_sphere",
+        "create_torus",
+    ]
+    assert [value["after"]["object_type"] for value in values] == [  # type: ignore[index]
+        "Part::Cone",
+        "Part::Sphere",
+        "Part::Torus",
+    ]
+    identities = [identity for _, identity in session.attached_identities]
+    assert [identity.provenance.operation_id for identity in identities] == [
+        "cone",
+        "sphere",
+        "torus",
+    ]
+    assert len({identity.object_id for identity in identities}) == 3
 
 
 def test_execute_program_builds_places_and_inspects_explicit_components(
