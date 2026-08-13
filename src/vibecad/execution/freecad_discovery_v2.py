@@ -10,6 +10,9 @@ Descriptors have one owning page.  A page may refer to its declaring module or
 its immediate parent type in another page through ``ExternalCapabilityRef``.
 The aggregate index validates the complete parent chain, keeping deep native
 inheritance bounded without duplicating every ancestor into each leaf page.
+A standalone page is only a transport segment, not a closed capability view;
+consumers must load the manifest's complete page set into the aggregate index
+before treating external references or transitive ancestry as resolved.
 """
 
 from __future__ import annotations
