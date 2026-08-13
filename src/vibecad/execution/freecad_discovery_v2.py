@@ -7,9 +7,9 @@ FreeCAD module is imported, and no durable or public transport contract is
 changed here.
 
 Descriptors have one owning page.  A page may refer to its declaring module or
-to any ancestor type in another page through ``ExternalCapabilityRef``.  The
-full ancestor chain is referenced, so every page has explicit parent closure
-while the aggregate remains de-duplicated.
+its immediate parent type in another page through ``ExternalCapabilityRef``.
+The aggregate index validates the complete parent chain, keeping deep native
+inheritance bounded without duplicating every ancestor into each leaf page.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from vibecad.execution.capabilities import (
     ExternalCapabilityRef,
     encode_capability_catalog,
 )
+from vibecad.execution.capability_index import CapabilityCatalogIndex
 from vibecad.execution.freecad_capabilities import (
     FreeCadNativeTypeCategory,
     FreeCadRegisteredType,
@@ -145,8 +146,8 @@ def _json_tree(value: object, path: str, depth: int, remaining: list[int]) -> No
         for key, item in value.items():
             if type(key) is not str:
                 _fail(CapabilityCatalogErrorCode.INVALID_INPUT, path)
-            _json_tree(key, path, depth + 1, remaining)
-            _json_tree(item, f"{path}/{key}", depth + 1, remaining)
+            _json_tree(key, f"{path}/key", depth + 1, remaining)
+            _json_tree(item, f"{path}/field", depth + 1, remaining)
         return
     _fail(CapabilityCatalogErrorCode.INVALID_INPUT, path)
 
@@ -524,6 +525,15 @@ def _page_descriptor_from(value: object, path: str) -> FreeCadCapabilityPageDesc
 
 
 def decode_freecad_capability_manifest(raw: object) -> FreeCadCapabilityManifest:
+    try:
+        return _decode_freecad_capability_manifest(raw)
+    except CapabilityCatalogError:
+        raise
+    except (KeyError, TypeError, ValueError, UnicodeError, OverflowError, RecursionError):
+        _fail(CapabilityCatalogErrorCode.INVALID_INPUT)
+
+
+def _decode_freecad_capability_manifest(raw: object) -> FreeCadCapabilityManifest:
     value = _decode_json(raw, maximum=MAX_FREECAD_DISCOVERY_V2_MANIFEST_BYTES)
     item = _exact(
         value,
@@ -584,6 +594,8 @@ def decode_freecad_capability_manifest(raw: object) -> FreeCadCapabilityManifest
     supplied_digest = _digest(item["manifest_sha256"], "manifest_sha256")
     if not hmac.compare_digest(supplied_digest, manifest.manifest_sha256):
         _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "manifest_sha256")
+    if encode_freecad_capability_manifest(manifest) != raw:
+        _fail(CapabilityCatalogErrorCode.INVALID_INPUT)
     return manifest
 
 
@@ -660,19 +672,6 @@ def _relation(value: FreeCadRegisteredType) -> CapabilityRelation | None:
     )
 
 
-def _ancestors(
-    value: FreeCadRegisteredType,
-    *,
-    types_by_id: dict[str, FreeCadRegisteredType],
-) -> tuple[str, ...]:
-    result: list[str] = []
-    parent = value.parent_native_type_id
-    while parent is not None:
-        result.append(parent)
-        parent = types_by_id[parent].parent_native_type_id
-    return tuple(result)
-
-
 def _page_receipt(
     *,
     snapshot: FreeCadDiscoverySnapshotV2,
@@ -709,7 +708,6 @@ def _build_page(
     owned_descriptors: tuple[CapabilityDescriptor, ...],
     native_by_capability: dict[str, FreeCadRegisteredType],
     descriptors_by_id: dict[str, CapabilityDescriptor],
-    types_by_id: dict[str, FreeCadRegisteredType],
 ) -> CapabilityCatalogSegment:
     local_ids = {item.capability_id for item in owned_descriptors}
     external_ids: set[str] = set()
@@ -720,10 +718,11 @@ def _build_page(
         native_type = native_by_capability.get(descriptor.capability_id)
         if native_type is None:
             continue
-        for ancestor in _ancestors(native_type, types_by_id=types_by_id):
-            ancestor_id = freecad_type_capability_id(ancestor)
-            if ancestor_id not in local_ids:
-                external_ids.add(ancestor_id)
+        parent = native_type.parent_native_type_id
+        if parent is not None:
+            parent_id = freecad_type_capability_id(parent)
+            if parent_id not in local_ids:
+                external_ids.add(parent_id)
         relation = _relation(native_type)
         if relation is not None:
             relations.append(relation)
@@ -779,7 +778,6 @@ def _project_pages(
     *,
     max_descriptors_per_page: int,
 ) -> tuple[tuple[str, CapabilityCatalogSegment], ...]:
-    types_by_id = {item.native_type_id: item for item in snapshot.registered_types}
     module_descriptors = {module: _module_descriptor(module) for module in snapshot.scope_modules}
     type_descriptors = {
         item.native_type_id: _type_descriptor(item) for item in snapshot.registered_types
@@ -815,7 +813,6 @@ def _project_pages(
                         owned_descriptors=owned[offset : offset + count],
                         native_by_capability=native_by_capability,
                         descriptors_by_id=descriptors_by_id,
-                        types_by_id=types_by_id,
                     )
                     encode_capability_catalog(candidate)
                 except CapabilityCatalogError as error:
@@ -858,6 +855,32 @@ class FreeCadPagedCapabilityCatalog:
         expected_pages = tuple(page for _scope, page in expected_scoped_pages)
         if self.pages != expected_pages:
             _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "pages")
+        index = CapabilityCatalogIndex(self.pages)
+        expected_capability_ids = {
+            *(freecad_module_capability_id(module) for module in self.snapshot.scope_modules),
+            *(
+                freecad_type_capability_id(item.native_type_id)
+                for item in self.snapshot.registered_types
+            ),
+        }
+        if set(index.descriptors) != expected_capability_ids:
+            _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "pages")
+        actual_parent_edges = {
+            (relation.source_capability_id, relation.target_capability_ids)
+            for page in self.pages
+            for relation in page.relations
+            if relation.relation_term_ref_id == "relation.native.inherits"
+        }
+        expected_parent_edges = {
+            (
+                freecad_type_capability_id(item.native_type_id),
+                (freecad_type_capability_id(item.parent_native_type_id),),
+            )
+            for item in self.snapshot.registered_types
+            if item.parent_native_type_id is not None
+        }
+        if actual_parent_edges != expected_parent_edges:
+            _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "pages/relations")
         expected_page_descriptors = tuple(
             _page_descriptor(page_index=index, scope_module=scope, page=page)
             for index, (scope, page) in enumerate(expected_scoped_pages)

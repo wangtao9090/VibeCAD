@@ -110,7 +110,7 @@ def test_reordered_inputs_have_identical_snapshot_pages_and_manifest() -> None:
     )
 
 
-def test_cross_page_full_parent_closure_uses_content_addressed_refs() -> None:
+def test_cross_page_immediate_parent_refs_have_aggregate_closure() -> None:
     values = (
         _type("Base::Root", module="Base"),
         _type("App::Parent", module="App", parent="Base::Root"),
@@ -128,21 +128,25 @@ def test_cross_page_full_parent_closure_uses_content_addressed_refs() -> None:
 
     assert freecad_module_capability_id("Part") not in external
     assert freecad_type_capability_id("App::Parent") in external
-    assert freecad_type_capability_id("Base::Root") in external
+    assert freecad_type_capability_id("Base::Root") not in external
     assert CapabilityCatalogIndex(bundle.pages).coverage().total == 6
 
-    root_id = freecad_type_capability_id("Base::Root")
-    without_transitive_parent = dataclasses.replace(
+    parent_id = freecad_type_capability_id("App::Parent")
+    bad_parent_digest = dataclasses.replace(
         leaf_page,
         external_refs=tuple(
-            item for item in leaf_page.external_refs if item.capability_id != root_id
+            dataclasses.replace(item, descriptor_sha256=_sha("wrong-parent"))
+            if item.capability_id == parent_id
+            else item
+            for item in leaf_page.external_refs
         ),
     )
-    tampered_pages = list(bundle.pages)
-    tampered_pages[tampered_pages.index(leaf_page)] = without_transitive_parent
-    with pytest.raises(CapabilityCatalogError) as missing_closure:
-        dataclasses.replace(bundle, pages=tuple(tampered_pages))
-    assert missing_closure.value.code is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+    tampered_pages = tuple(
+        bad_parent_digest if page is leaf_page else page for page in bundle.pages
+    )
+    with pytest.raises(CapabilityCatalogError) as unresolved_parent:
+        CapabilityCatalogIndex(tampered_pages)
+    assert unresolved_parent.value.code is CapabilityCatalogErrorCode.UNKNOWN_REFERENCE
 
 
 def test_more_than_v1_480_types_fit_bounded_catalog_pages() -> None:
@@ -157,6 +161,33 @@ def test_more_than_v1_480_types_fit_bounded_catalog_pages() -> None:
         for page in bundle.pages
     )
     assert CapabilityCatalogIndex(bundle.pages).coverage().total == 651
+
+
+def test_650_type_deep_parent_chain_stays_page_bounded_and_fully_resolves() -> None:
+    values = tuple(
+        _type(
+            f"Vendor::Type{index:04d}",
+            parent=f"Vendor::Type{index - 1:04d}" if index else None,
+        )
+        for index in range(650)
+    )
+    bundle = build_paged_freecad_type_catalog(_snapshot(values))
+    index = CapabilityCatalogIndex(bundle.pages)
+    parent_by_child = {
+        relation.source_capability_id: relation.target_capability_ids[0]
+        for page in bundle.pages
+        for relation in page.relations
+    }
+
+    assert index.coverage().total == 651
+    assert sum(len(page.relations) for page in bundle.pages) == 649
+    assert all(len(page.external_refs) <= 2 for page in bundle.pages)
+    cursor = freecad_type_capability_id("Vendor::Type0649")
+    for expected_index in range(648, -1, -1):
+        cursor = parent_by_child[cursor]
+        assert cursor == freecad_type_capability_id(f"Vendor::Type{expected_index:04d}")
+        assert index.lookup(cursor).status is CapabilitySupportStatus.DISCOVERED
+    assert cursor not in parent_by_child
 
 
 def test_profile_and_build_are_bound_into_snapshot_pages_and_manifest() -> None:
@@ -192,6 +223,50 @@ def test_manifest_round_trip_is_strict_and_digest_checked() -> None:
     with pytest.raises(CapabilityCatalogError) as formatting:
         decode_freecad_capability_manifest(noncanonical)
     assert formatting.value.code is CapabilityCatalogErrorCode.INVALID_INPUT
+
+
+def test_manifest_decode_rejects_semantically_noncanonical_page_order() -> None:
+    values = tuple(_type(f"Vendor::Type{index}") for index in range(4))
+    bundle = build_paged_freecad_type_catalog(_snapshot(values), max_descriptors_per_page=2)
+    parsed = json.loads(encode_freecad_capability_manifest(bundle.manifest))
+    parsed["page_descriptors"].reverse()
+    reordered = json.dumps(parsed, separators=(",", ":"), sort_keys=True).encode("ascii")
+
+    with pytest.raises(CapabilityCatalogError) as error:
+        decode_freecad_capability_manifest(reordered)
+    assert error.value.code is CapabilityCatalogErrorCode.INVALID_INPUT
+
+
+def test_all_adversarial_manifest_decode_failures_are_bounded_contract_errors() -> None:
+    bundle = build_paged_freecad_type_catalog(_snapshot((_type("Vendor::A"),)))
+    valid = json.loads(encode_freecad_capability_manifest(bundle.manifest))
+
+    bad_profile = json.loads(json.dumps(valid))
+    bad_profile["backend"]["discovery_profile"] = []
+    bad_page = json.loads(json.dumps(valid))
+    bad_page["page_descriptors"][0]["page_index"] = {}
+    bad_digest = json.loads(json.dumps(valid))
+    bad_digest["manifest_sha256"] = []
+    nested: object = None
+    for _ in range(26):
+        nested = [nested]
+    malformed_values = (
+        b"[]",
+        b"\xff",
+        json.dumps(
+            {"x" * 300: "y" * 4_097}, separators=(",", ":"), sort_keys=True
+        ).encode("ascii"),
+        json.dumps(bad_profile, separators=(",", ":"), sort_keys=True).encode("ascii"),
+        json.dumps(bad_page, separators=(",", ":"), sort_keys=True).encode("ascii"),
+        json.dumps(bad_digest, separators=(",", ":"), sort_keys=True).encode("ascii"),
+        json.dumps(nested, separators=(",", ":")).encode("ascii"),
+    )
+
+    for malformed in malformed_values:
+        with pytest.raises(CapabilityCatalogError) as error:
+            decode_freecad_capability_manifest(malformed)
+        assert type(error.value) is CapabilityCatalogError
+        assert len(error.value.path.encode("utf-8")) <= 256
 
 
 def test_manifest_and_bundle_reject_page_reordering_or_substitution() -> None:
