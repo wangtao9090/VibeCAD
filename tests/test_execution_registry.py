@@ -124,7 +124,7 @@ def _operation(
     )
 
 
-def test_default_registry_exposes_six_direct_and_eight_private_operations():
+def test_default_registry_exposes_six_direct_and_eleven_private_operations():
     assert tuple(DEFAULT_OPERATION_REGISTRY) == (
         "create_box",
         "create_cylinder",
@@ -135,13 +135,16 @@ def test_default_registry_exposes_six_direct_and_eight_private_operations():
         "create_cone",
         "create_sphere",
         "create_torus",
+        "boolean_cut",
+        "boolean_fuse",
+        "boolean_common",
         "create_component",
         "set_component_bom",
         "place_component",
         "create_parametric_design",
         "modify_parametric_parameter",
     )
-    assert len(DEFAULT_OPERATION_REGISTRY) == 14
+    assert len(DEFAULT_OPERATION_REGISTRY) == 17
     assert all(
         metadata.handler_name == operation
         for operation, metadata in DEFAULT_OPERATION_REGISTRY.operations.items()
@@ -245,6 +248,9 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
         "create_cone",
         "create_sphere",
         "create_torus",
+        "boolean_cut",
+        "boolean_fuse",
+        "boolean_common",
         "create_component",
         "set_component_bom",
         "place_component",
@@ -278,6 +284,9 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
             "create_cone",
             "create_sphere",
             "create_torus",
+            "boolean_cut",
+            "boolean_fuse",
+            "boolean_common",
             "create_component",
             "set_component_bom",
             "place_component",
@@ -470,6 +479,9 @@ def test_default_registry_has_exact_handler_risk_and_evidence_metadata():
         "create_cone": ("create_cone", RiskClass.MUTATING, True),
         "create_sphere": ("create_sphere", RiskClass.MUTATING, True),
         "create_torus": ("create_torus", RiskClass.MUTATING, True),
+        "boolean_cut": ("boolean_cut", RiskClass.MUTATING, True),
+        "boolean_fuse": ("boolean_fuse", RiskClass.MUTATING, True),
+        "boolean_common": ("boolean_common", RiskClass.MUTATING, True),
         "create_component": ("create_component", RiskClass.MUTATING, True),
         "set_component_bom": ("set_component_bom", RiskClass.MUTATING, True),
         "place_component": ("place_component", RiskClass.MUTATING, True),
@@ -547,6 +559,19 @@ def test_default_registry_has_exact_field_shapes_and_bindings():
         ("axis", "axis", ValueShape.ENUM, False),
     )
     assert create_torus.argument_fields[-1].enum_values == ("x", "y", "z")
+
+    for operation in ("boolean_cut", "boolean_fuse", "boolean_common"):
+        metadata = DEFAULT_OPERATION_REGISTRY.lookup(operation)
+        assert _fields(metadata.target_fields) == (
+            ("base", "base", ValueShape.ENTITY_TARGET, True),
+            ("tool", "tool", ValueShape.ENTITY_TARGET, True),
+        )
+        assert all(
+            field.referenced_value_shape is ValueShape.OBJECT_ID for field in metadata.target_fields
+        )
+        assert metadata.argument_fields == ()
+        assert metadata.direct_exposed is False
+        assert tuple(slot.name for slot in metadata.result_slots) == ("object",)
 
     modify_parameter = DEFAULT_OPERATION_REGISTRY.lookup("modify_parameter")
     assert _fields(modify_parameter.target_fields) == (

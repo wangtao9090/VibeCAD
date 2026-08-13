@@ -2128,6 +2128,9 @@ def test_capabilities_match_the_exact_sorted_public_projection():
     assert result["registry_schema_version"] == 1
     operations = result["operations"]
     assert [item["operation"] for item in operations] == [
+        "boolean_common",
+        "boolean_cut",
+        "boolean_fuse",
         "create_box",
         "create_component",
         "create_cone",
@@ -2182,7 +2185,7 @@ def test_capabilities_match_the_exact_sorted_public_projection():
             assert all(set(item) == field_keys for item in operation[group])
         assert all(set(item) == slot_keys for item in operation["result_slots"])
         assert operation["preservation_fields"] == sorted(operation["preservation_fields"])
-    create_box = operations[0]
+    create_box = next(item for item in operations if item["operation"] == "create_box")
     assert [item["name"] for item in create_box["argument_fields"]] == [
         "height_mm",
         "length_mm",

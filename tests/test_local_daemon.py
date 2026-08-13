@@ -962,7 +962,7 @@ def test_real_client_authenticates_and_claims_one_path_bound_checkout_grant() ->
             },
             "implementation": {
                 "package_version": "0.10.0",
-                "build_id": "vcad-a12-native-part-primitives",
+                "build_id": "vcad-a12-native-part-booleans",
             },
         }
         capabilities = client.call(

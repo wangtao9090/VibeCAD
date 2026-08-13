@@ -1291,6 +1291,87 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
             result_slots=(ResultSlotMetadata("object", "object_id", ValueShape.OBJECT_ID),),
         ),
         OperationMetadata(
+            operation="boolean_cut",
+            handler_name="boolean_cut",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "base",
+                    "base",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+                FieldMetadata(
+                    "tool",
+                    "tool",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=1,
+                max_result_bytes=65_536,
+            ),
+            description="在模型程序中对两个同零件实体创建材料差集",
+            result_slots=(ResultSlotMetadata("object", "object_id", ValueShape.OBJECT_ID),),
+        ),
+        OperationMetadata(
+            operation="boolean_fuse",
+            handler_name="boolean_fuse",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "base",
+                    "base",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+                FieldMetadata(
+                    "tool",
+                    "tool",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=1,
+                max_result_bytes=65_536,
+            ),
+            description="在模型程序中合并两个相交或相接的同零件实体",
+            result_slots=(ResultSlotMetadata("object", "object_id", ValueShape.OBJECT_ID),),
+        ),
+        OperationMetadata(
+            operation="boolean_common",
+            handler_name="boolean_common",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            target_fields=(
+                FieldMetadata(
+                    "base",
+                    "base",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+                FieldMetadata(
+                    "tool",
+                    "tool",
+                    ValueShape.ENTITY_TARGET,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=1,
+                max_result_bytes=65_536,
+            ),
+            description="在模型程序中创建两个同零件实体的实体交集",
+            result_slots=(ResultSlotMetadata("object", "object_id", ValueShape.OBJECT_ID),),
+        ),
+        OperationMetadata(
             operation="create_component",
             handler_name="create_component",
             risk_class=RiskClass.MUTATING,

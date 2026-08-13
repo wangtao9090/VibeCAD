@@ -83,12 +83,19 @@ from vibecad.parametric.compiler import (
     stabilize_parametric_session as _stabilize_parametric_session,
 )
 from vibecad.parametric.contracts import ParametricDesignIR
+from vibecad.tools.modeling import (
+    _boolean_common_uncommitted,
+    _boolean_cut_uncommitted,
+    _boolean_fuse_uncommitted,
+)
 from vibecad.tools.modeling import add_box as _add_box
 from vibecad.tools.modeling import add_cone as _add_cone
 from vibecad.tools.modeling import add_cylinder as _add_cylinder
 from vibecad.tools.modeling import add_sphere as _add_sphere
 from vibecad.tools.modeling import add_torus as _add_torus
+from vibecad.tools.modify import _modify_part_uncommitted
 from vibecad.tools.modify import modify_part as _modify_part
+from vibecad.tools.transform import _move_part_uncommitted, _rotate_part_uncommitted
 from vibecad.tools.transform import move_part as _move_part
 from vibecad.tools.transform import rotate_part as _rotate_part
 from vibecad.validation import (
@@ -173,6 +180,303 @@ _PARAMETER_FIELDS = {
         ("minor_radius", "Radius2", "mm"),
     ),
 }
+_BOOLEAN_OPERATIONS = {
+    "Part::Common": "common",
+    "Part::Cut": "cut",
+    "Part::Fuse": "fuse",
+}
+_NATIVE_ENTITY_TYPES = frozenset((*_PARAMETER_FIELDS, *_BOOLEAN_OPERATIONS))
+
+
+def _native_dependency_graph(
+    pairs: tuple[tuple[object, EntityIdentity], ...],
+) -> tuple[
+    dict[str, tuple[object, EntityIdentity]],
+    dict[str, tuple[str, str]],
+    frozenset[str],
+]:
+    """Validate one bounded native Part forest and return its exact links.
+
+    Boolean operands may themselves be prior boolean roots, but every native
+    object has at most one consumer.  This keeps the document a forest rather
+    than a shared-expression DAG whose overlapping roots would be ambiguous in
+    an assembly observation or STEP export.
+    """
+
+    modelable = tuple(
+        (obj, identity) for obj, identity in pairs if identity.object_type in _NATIVE_ENTITY_TYPES
+    )
+    by_name: dict[str, tuple[object, EntityIdentity]] = {}
+    for obj, identity in modelable:
+        name = getattr(obj, "Name", None)
+        is_boolean = identity.object_type in _BOOLEAN_OPERATIONS
+        key = name if type(name) is str and name else identity.object_id
+        expected_role = SemanticRole.FEATURE if is_boolean else SemanticRole.PRIMITIVE
+        if (
+            (is_boolean and (type(name) is not str or not name))
+            or key in by_name
+            or identity.semantic_role is not expected_role
+            or (is_boolean and identity.feature_id is None)
+        ):
+            raise _ObservationFailure
+        by_name[key] = (obj, identity)
+
+    dependencies: dict[str, tuple[str, str]] = {}
+    consumers: dict[str, str] = {}
+    for name, (obj, identity) in by_name.items():
+        if identity.object_type not in _BOOLEAN_OPERATIONS:
+            continue
+        operand_names = tuple(
+            getattr(getattr(obj, relation, None), "Name", None) for relation in ("Base", "Tool")
+        )
+        if (
+            any(type(item) is not str or item not in by_name for item in operand_names)
+            or len(set(operand_names)) != 2
+        ):
+            raise _ObservationFailure
+        base_name, tool_name = operand_names
+        assert type(base_name) is str and type(tool_name) is str
+        if by_name[base_name][0] is not getattr(obj, "Base", None) or by_name[tool_name][
+            0
+        ] is not getattr(obj, "Tool", None):
+            raise _ObservationFailure
+        for operand_name in (base_name, tool_name):
+            if operand_name in consumers:
+                raise _ObservationFailure
+            consumers[operand_name] = name
+        dependencies[name] = (base_name, tool_name)
+
+    resolved = {name for name in by_name if name not in dependencies}
+    pending = set(dependencies)
+    while pending:
+        ready = tuple(
+            name for name in sorted(pending) if set(dependencies[name]).issubset(resolved)
+        )
+        if not ready:
+            raise _ObservationFailure
+        resolved.update(ready)
+        pending.difference_update(ready)
+    if resolved != set(by_name):
+        raise _ObservationFailure
+    return by_name, dependencies, frozenset(consumers)
+
+
+def _native_boolean_descendants(
+    dependencies: dict[str, tuple[str, str]],
+    *,
+    target_name: str,
+) -> tuple[str, ...]:
+    """Return the unique ordered consumer chain for one native operand."""
+
+    consumer_by_operand = {
+        operand: feature_name
+        for feature_name, operands in dependencies.items()
+        for operand in operands
+    }
+    descendants: list[str] = []
+    current = target_name
+    while current in consumer_by_operand:
+        current = consumer_by_operand[current]
+        descendants.append(current)
+    return tuple(descendants)
+
+
+def _require_recomputed_boolean_descendants(
+    by_name: dict[str, tuple[object, EntityIdentity]],
+    descendant_names: tuple[str, ...],
+    recomputed_objects: frozenset[int],
+    target: object,
+) -> frozenset[str]:
+    """Consume one executor-created dependency-execution challenge.
+
+    A legitimate operand edit can leave the final BRep mathematically
+    unchanged (for example, moving one solid wholly inside a fused base).  The
+    old aggregate-metric test therefore rejected correct edits.  Freshness is
+    instead proved by the reviewed dependency links, a short-lived FreeCAD
+    document-observer receipt, and the post-recompute ``State`` ledger.  The
+    leaf's full recompute must emit an event for the exact target and every
+    authenticated descendant, leave neither ``Touched`` nor ``Invalid``
+    behind, and leave the whole document clean.  The returned object-id set is
+    consumed by the observation validator so an incomplete receipt cannot
+    silently skip one descendant.
+    """
+
+    if id(target) not in recomputed_objects:
+        raise _operation_failure()
+    recomputed: set[str] = set()
+    for name in descendant_names:
+        try:
+            obj, identity = by_name[name]
+            state = tuple(obj.State)
+        except Exception:
+            raise _operation_failure() from None
+        if (
+            any(type(item) is not str for item in state)
+            or id(obj) not in recomputed_objects
+            or "Touched" in state
+            or "Invalid" in state
+        ):
+            raise _operation_failure()
+        recomputed.add(identity.object_id)
+    if len(recomputed) != len(descendant_names):
+        raise _operation_failure()
+    try:
+        document = by_name[descendant_names[0]][0].Document
+        touched = document.isTouched()
+    except Exception:
+        raise _operation_failure() from None
+    if type(touched) is not bool or touched:
+        raise _operation_failure()
+    return frozenset(recomputed)
+
+
+@dataclass(slots=True)
+class _RecomputeReceipt:
+    document: object
+    object_ids: set[int]
+
+    def slotRecomputedObject(self, obj: object) -> None:  # noqa: N802 - FreeCAD API
+        if getattr(obj, "Document", None) is self.document:
+            self.object_ids.add(id(obj))
+
+
+class _DocumentRecomputeObserver:
+    """Short-lived FreeCAD observer proving which objects this leaf recomputed."""
+
+    def __init__(self, document: object) -> None:
+        name = getattr(document, "Name", None)
+        if type(name) is not str or not name:
+            raise _operation_failure()
+        self._receipt = _RecomputeReceipt(document=document, object_ids=set())
+        self._freecad: object | None = None
+
+    def __enter__(self) -> _RecomputeReceipt:
+        try:
+            with _silence_fd1():
+                import FreeCAD  # noqa: PLC0415
+
+                FreeCAD.addDocumentObserver(self._receipt)
+        except Exception:
+            raise _operation_failure() from None
+        self._freecad = FreeCAD
+        return self._receipt
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        try:
+            assert self._freecad is not None
+            self._freecad.removeDocumentObserver(self._receipt)  # type: ignore[attr-defined]
+        except Exception:
+            raise _operation_failure() from None
+
+
+def _validated_explicit_component_roots(
+    session: object,
+    *,
+    pairs: tuple[tuple[object, EntityIdentity], ...] | None = None,
+    records: tuple[tuple[object, ...], ...] | None = None,
+    require_complete: bool = True,
+) -> dict[str, object]:
+    """Authenticate the reviewed native-Part component result profile.
+
+    Native Part operands are hidden by their Boolean result in FreeCAD, but
+    remain document members.  A persisted or externally changed component
+    registry must therefore keep every operand and its consuming feature under
+    the same explicit component, and a component result may never point back
+    to a consumed operand.  Entity-level observation permits multiple
+    unconsumed roots while a later Boolean is being assembled.  Component and
+    export boundaries set ``require_complete`` and require exactly one root.
+
+    FreeCAD ``OutList`` is deliberately not authority here: it mixes consuming
+    geometry links with attachment, support, containment, and arbitrary dynamic
+    properties.  The only consuming edges accepted by this profile are the
+    reviewed native Boolean ``Base``/``Tool`` links validated by
+    :func:`_native_dependency_graph`.  A new object family must add an explicit
+    semantic profile before it can pass component delivery; unknown families
+    fail closed instead of being hidden behind a plausible result shape.
+    """
+
+    list_records = getattr(session, "list_component_identity_records", None)
+    if not callable(list_records):
+        return {}
+    try:
+        component_records = tuple(list_records()) if records is None else records
+        if not component_records:
+            return {}
+        list_identities = getattr(session, "list_object_identities", None)
+        get_result_object = getattr(session, "get_result_object", None)
+        if pairs is None and (not callable(list_identities) or not callable(get_result_object)):
+            # Compatibility-only observer fixtures do not expose managed identity
+            # or result-root authority.  Production Session always exposes both.
+            return {
+                part_name: session.get_result_shape(part_name)  # type: ignore[attr-defined]
+                for part_name, _container, _identity, members in component_records
+                if members
+            }
+        identified = tuple(list_identities()) if pairs is None else pairs
+        by_name, dependencies, consumed = _native_dependency_graph(identified)
+        owner_by_name: dict[str, str] = {}
+        member_names_by_part: dict[str, frozenset[str]] = {}
+        ordered_parts: list[str] = []
+        for record in component_records:
+            if len(record) != 4:
+                raise _ObservationFailure
+            part_name, _container, _identity, members = record
+            if type(part_name) is not str or not part_name or type(members) is not tuple:
+                raise _ObservationFailure
+            member_names = tuple(getattr(obj, "Name", None) for obj, _identity in members)
+            if (
+                any(type(name) is not str or not name for name in member_names)
+                or len(member_names) != len(set(member_names))
+                or part_name in member_names_by_part
+            ):
+                raise _ObservationFailure
+            ordered_parts.append(part_name)
+            member_names_by_part[part_name] = frozenset(member_names)
+            for name in member_names:
+                assert type(name) is str
+                if name in owner_by_name:
+                    raise _ObservationFailure
+                owner_by_name[name] = part_name
+
+        # Once explicit components exist, every managed native object must have
+        # exactly one owner.  Otherwise a cross-component Boolean can be counted
+        # once through its result and again through a leaked operand.
+        if set(by_name) - set(owner_by_name):
+            raise _ObservationFailure
+        for feature_name, operands in dependencies.items():
+            owners = {
+                owner_by_name.get(feature_name),
+                *(owner_by_name.get(name) for name in operands),
+            }
+            if None in owners or len(owners) != 1:
+                raise _ObservationFailure
+
+        roots: dict[str, object] = {}
+        for part_name in ordered_parts:
+            member_names = member_names_by_part[part_name]
+            if not member_names:
+                continue
+            root = get_result_object(part_name)
+            root_name = getattr(root, "Name", None)
+            if (
+                type(root_name) is not str
+                or root_name not in member_names
+                or root_name not in by_name
+                or by_name[root_name][0] is not root
+                or root_name in consumed
+            ):
+                raise _ObservationFailure
+            if require_complete:
+                native_members = member_names & set(by_name)
+                native_roots = native_members - consumed
+                if native_members != set(member_names) or native_roots != {root_name}:
+                    raise _ObservationFailure
+            roots[part_name] = root.Shape
+        return roots
+    except _ObservationFailure:
+        raise
+    except Exception:
+        raise _ObservationFailure from None
 
 
 def _fixed_error(code: ExecutorErrorCode) -> ExecutorError:
@@ -397,16 +701,22 @@ def _managed_assembly_shape(session: object) -> object:
     """
 
     list_components = getattr(session, "list_component_identity_records", None)
-    if callable(list_components) and tuple(list_components()):
-        return session.get_assembly_shape()  # type: ignore[attr-defined]
+    if callable(list_components):
+        records = tuple(list_components())
+        if records:
+            _validated_explicit_component_roots(session, records=records)
+            return session.get_assembly_shape()  # type: ignore[attr-defined]
     list_identities = getattr(session, "list_object_identities", None)
     if not callable(list_identities):
         return session.get_assembly_shape()  # type: ignore[attr-defined]
     pairs = tuple(list_identities())
-    modelable = tuple(obj for obj, identity in pairs if identity.object_type in _PARAMETER_FIELDS)
-    if not modelable:
+    by_name, _dependencies, consumed = _native_dependency_graph(pairs)
+    if not by_name:
         return session.get_assembly_shape()  # type: ignore[attr-defined]
-    shapes = tuple(obj.Shape for obj in modelable)
+    roots = tuple(obj for name, (obj, _identity) in by_name.items() if name not in consumed)
+    if not roots:
+        raise _ObservationFailure
+    shapes = tuple(obj.Shape for obj in roots)
     if len(shapes) == 1:
         return shapes[0]
     with _silence_fd1():
@@ -604,7 +914,12 @@ def _bound_box_center(shape: object) -> tuple[int | float, int | float, int | fl
     return tuple((float(low) + float(high)) / 2.0 for low, high in bounds)  # type: ignore[return-value]
 
 
-def _entity_observation(obj: object, identity: EntityIdentity) -> EntityObservation:
+def _entity_observation(
+    obj: object,
+    identity: EntityIdentity,
+    *,
+    identities_by_name: dict[str, EntityIdentity] | None = None,
+) -> EntityObservation:
     try:
         standard_parameters = tuple(
             EntityParameterObservation(
@@ -614,12 +929,43 @@ def _entity_observation(obj: object, identity: EntityIdentity) -> EntityObservat
             )
             for name, property_name, unit in _PARAMETER_FIELDS.get(identity.object_type, ())
         )
+        relation_parameters: tuple[EntityParameterObservation, ...] = ()
+        if identity.object_type in _BOOLEAN_OPERATIONS:
+            if identities_by_name is None or identity.semantic_role is not SemanticRole.FEATURE:
+                raise _ObservationFailure
+            base_name = getattr(getattr(obj, "Base", None), "Name", None)
+            tool_name = getattr(getattr(obj, "Tool", None), "Name", None)
+            base_identity = identities_by_name.get(base_name) if type(base_name) is str else None
+            tool_identity = identities_by_name.get(tool_name) if type(tool_name) is str else None
+            if (
+                type(base_identity) is not EntityIdentity
+                or type(tool_identity) is not EntityIdentity
+                or base_identity == tool_identity
+            ):
+                raise _ObservationFailure
+            relation_parameters = (
+                EntityParameterObservation(
+                    name="base_object_id",
+                    value=base_identity.object_id,
+                ),
+                EntityParameterObservation(
+                    name="operation",
+                    value=_BOOLEAN_OPERATIONS[identity.object_type],
+                ),
+                EntityParameterObservation(
+                    name="tool_object_id",
+                    value=tool_identity.object_id,
+                ),
+            )
         parametric_parameters = tuple(
             EntityParameterObservation(name=fact.name, value=fact.value, unit=fact.unit)
             for fact in parametric_entity_facts(obj)
         )
         parameters = tuple(
-            sorted((*standard_parameters, *parametric_parameters), key=lambda item: item.name)
+            sorted(
+                (*standard_parameters, *relation_parameters, *parametric_parameters),
+                key=lambda item: item.name,
+            )
         )
         placement = _canonical_placement(obj.Placement)  # type: ignore[attr-defined]
         # ``App::Part`` starts exposing an aggregate Shape after its first member is
@@ -666,15 +1012,36 @@ def _entity_observations(session: object) -> tuple[EntityObservation, ...]:
             identities = index_entity_identities(document_objects)
             pairs = tuple(zip(document_objects, identities, strict=True))
         modelable_objects = tuple(
-            obj for obj in document_objects if getattr(obj, "TypeId", None) in _PARAMETER_FIELDS
+            obj for obj in document_objects if getattr(obj, "TypeId", None) in _NATIVE_ENTITY_TYPES
         )
         if any(
             sum(current is obj for current, _ in pairs) != 1 for obj in modelable_objects
         ) or any(not any(current is obj for obj in document_objects) for current, _ in pairs):
             raise _ObservationFailure
+        named_identities = tuple(
+            (name, identity)
+            for obj, identity in pairs
+            if type(name := getattr(obj, "Name", None)) is str and name
+        )
+        identities_by_name = dict(named_identities)
+        if len(identities_by_name) != len(named_identities):
+            raise _ObservationFailure
+        _native_dependency_graph(pairs)
+        _validated_explicit_component_roots(
+            session,
+            pairs=pairs,
+            require_complete=False,
+        )
         observations = tuple(
             sorted(
-                (_entity_observation(obj, identity) for obj, identity in pairs),
+                (
+                    _entity_observation(
+                        obj,
+                        identity,
+                        identities_by_name=identities_by_name,
+                    )
+                    for obj, identity in pairs
+                ),
                 key=lambda item: item.object_id,
             )
         )
@@ -698,9 +1065,11 @@ def _component_observations(session: object) -> tuple[ComponentObservation, ...]
         return ()
     read_bom = getattr(session, "read_component_bom_metadata", None)
     try:
+        records = tuple(list_records())
+        roots = _validated_explicit_component_roots(session, records=records)
         observations = []
-        for part_name, container, identity, members in tuple(list_records()):
-            local_shape = session.get_result_shape(part_name)  # type: ignore[attr-defined]
+        for part_name, container, identity, members in records:
+            local_shape = roots[part_name]
             shape = local_shape.transformed(container.Placement.toMatrix())
             observations.append(
                 ComponentObservation(
@@ -733,10 +1102,9 @@ def _interference_observations(session: object) -> tuple[InterferenceObservation
         return ()
     try:
         records = tuple(list_records())
+        roots = _validated_explicit_component_roots(session, records=records)
         global_shapes = {
-            identity.object_id: session.get_result_shape(part_name).transformed(  # type: ignore[attr-defined]
-                container.Placement.toMatrix()
-            )
+            identity.object_id: roots[part_name].transformed(container.Placement.toMatrix())
             for part_name, container, identity, _members in records
         }
         observations = []
@@ -772,8 +1140,13 @@ def _component_geometry_digest(
     try:
         local_geometry = _entity_geometry(session.get_result_shape(part_name))  # type: ignore[attr-defined]
         member_facts = []
+        identities_by_name = {obj.Name: identity for obj, identity in members}
         for obj, identity in members:
-            observation = _entity_observation(obj, identity)
+            observation = _entity_observation(
+                obj,
+                identity,
+                identities_by_name=identities_by_name,
+            )
             member_facts.append(
                 {
                     "object_type": observation.object_type,
@@ -1555,6 +1928,212 @@ def _managed_create(
     return result
 
 
+def _managed_boolean(
+    session: object,
+    context: _InvocationContext,
+    *,
+    leaf: Callable[..., object],
+    expected_type: str,
+    project_id: str,
+    revision_id: str,
+    base: object,
+    tool: object,
+) -> dict[str, object]:
+    """Create one native Part boolean and seal its operand dependency links."""
+
+    if context.preserve or expected_type not in _BOOLEAN_OPERATIONS:
+        raise _operation_failure()
+    before = _entity_observations(session)
+    before_by_id = _observation_map(before)
+    base_obj, base_identity = _resolve_entity_target(
+        session,
+        base,
+        project_id=project_id,
+        revision_id=revision_id,
+    )
+    tool_obj, tool_identity = _resolve_entity_target(
+        session,
+        tool,
+        project_id=project_id,
+        revision_id=revision_id,
+    )
+    try:
+        pairs = _identified_pairs(session)
+        by_name, _dependencies, consumed = _native_dependency_graph(pairs)
+        base_name = base_obj.Name
+        tool_name = tool_obj.Name
+        if (
+            base_obj is tool_obj
+            or base_identity == tool_identity
+            or base_name not in by_name
+            or tool_name not in by_name
+            or by_name[base_name] != (base_obj, base_identity)
+            or by_name[tool_name] != (tool_obj, tool_identity)
+            or base_name in consumed
+            or tool_name in consumed
+        ):
+            raise ValueError
+        owner_of = getattr(session, "owner_of", None)
+        if not callable(owner_of):
+            raise ValueError
+        base_owner = owner_of(base_name)
+        tool_owner = owner_of(tool_name)
+        if base_owner != tool_owner:
+            raise ValueError
+        document_before = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+    except Exception:
+        raise _operation_failure() from None
+
+    attach = getattr(session, "attach_object_identity", None)
+    read_identity = getattr(session, "read_object_identity", None)
+    get_result = getattr(session, "get_result_object", None)
+    transaction = getattr(session, "_transaction", None)
+    claim_new_objects = getattr(session, "_claim_new_objects", None)
+    if (
+        not callable(attach)
+        or not callable(read_identity)
+        or not callable(get_result)
+        or not callable(transaction)
+        or (base_owner is not None and not callable(claim_new_objects))
+    ):
+        raise _operation_failure()
+    try:
+        with transaction(
+            f"VibeCAD {context.operation}",
+            part=base_owner,
+            claim_new_objects=False,
+        ):
+            leaf(session, base_name=base_name, tool_name=tool_name)
+            document_after = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+            if any(
+                not any(current is obj for current in document_after) for obj in document_before
+            ):
+                raise ValueError
+            added = tuple(
+                obj
+                for obj in document_after
+                if not any(obj is current for current in document_before)
+            )
+            result_candidates = tuple(
+                obj for obj in added if getattr(obj, "TypeId", None) == expected_type
+            )
+            if len(result_candidates) != 1:
+                raise ValueError
+            result_obj = result_candidates[0]
+            managed_added = tuple(
+                obj
+                for obj in added
+                if getattr(obj, "TypeId", None) in _NATIVE_ENTITY_TYPES
+                or any(
+                    getattr(obj, property_name, None)
+                    for property_name in (
+                        "VibeCADObjectId",
+                        "VibeCADFeatureId",
+                        "VibeCADSemanticRole",
+                        "VibeCADProvenance",
+                    )
+                )
+            )
+            if managed_added != (result_obj,):
+                raise ValueError
+            if (
+                result_obj.TypeId != expected_type
+                or result_obj.Base is not base_obj
+                or result_obj.Tool is not tool_obj
+            ):
+                raise ValueError
+            identity = EntityIdentity(
+                object_id=f"object_{secrets.token_hex(16)}",
+                feature_id=f"feature_{secrets.token_hex(16)}",
+                object_type=expected_type,
+                semantic_role=SemanticRole.FEATURE,
+                provenance=Provenance(
+                    source=ProvenanceSource(context.source.value),
+                    operation_id=context.operation_id,
+                ),
+            )
+            if attach(result_obj, identity) != identity or read_identity(result_obj) != identity:
+                raise ValueError
+            if base_owner is not None:
+                claim_new_objects(
+                    {obj.Name for obj in document_before},
+                    part=base_owner,
+                )
+                if owner_of(result_obj.Name) != base_owner:
+                    raise ValueError
+            if get_result(base_owner) is not result_obj:
+                raise ValueError
+            after = _entity_observations(session)
+            after_by_id = _observation_map(after)
+            if set(before_by_id) - set(after_by_id) or set(after_by_id) - set(before_by_id) != {
+                identity.object_id
+            }:
+                raise ValueError
+            comparisons = _require_non_target_preservation(
+                before_by_id,
+                {key: value for key, value in after_by_id.items() if key != identity.object_id},
+                target=None,
+            )
+            created = after_by_id[identity.object_id]
+            parameters = {item.name: item.value for item in created.parameters}
+            expected_parameters = {
+                "base_object_id": base_identity.object_id,
+                "operation": _BOOLEAN_OPERATIONS[expected_type],
+                "tool_object_id": tool_identity.object_id,
+            }
+            base_observation = before_by_id.get(base_identity.object_id)
+            tool_observation = before_by_id.get(tool_identity.object_id)
+            if (
+                created.object_type != expected_type
+                or created.feature_id != identity.feature_id
+                or parameters != expected_parameters
+                or base_observation is None
+                or tool_observation is None
+                or base_observation.volume_mm3 is None
+                or tool_observation.volume_mm3 is None
+                or created.valid_shape is not True
+                or created.solid_count != 1
+                or created.volume_mm3 is None
+                or created.volume_mm3 <= 0
+                or created.area_mm2 is None
+                or created.area_mm2 <= 0
+                or created.bbox_mm is None
+                or any(component <= 0 for component in created.bbox_mm)
+                or created.center_of_mass_mm is None
+            ):
+                raise ValueError
+            result_volume = float(created.volume_mm3)
+            base_volume = float(base_observation.volume_mm3)
+            tool_volume = float(tool_observation.volume_mm3)
+            tolerance = max(base_volume, tool_volume, 1.0) * 1e-7
+            operation = _BOOLEAN_OPERATIONS[expected_type]
+            if operation == "cut" and not result_volume < base_volume - tolerance:
+                raise ValueError
+            if operation == "fuse" and not (
+                max(base_volume, tool_volume) - tolerance
+                <= result_volume
+                <= base_volume + tool_volume + tolerance
+            ):
+                raise ValueError
+            if operation == "common" and not (
+                0 < result_volume <= min(base_volume, tool_volume) + tolerance
+            ):
+                raise ValueError
+    except Exception:
+        raise _operation_failure() from None
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "boolean_created",
+        "operation": context.operation,
+        "object_id": created.object_id,
+        "feature_id": created.feature_id,
+        "base_object_id": base_identity.object_id,
+        "tool_object_id": tool_identity.object_id,
+        "after": created.to_mapping(),
+        "preservation": [item.to_mapping() for item in comparisons],
+    }
+
+
 def _managed_create_parametric_design(
     session: object,
     context: _InvocationContext,
@@ -2086,52 +2665,68 @@ def _parameter_value(observation: EntityObservation, name: str) -> int | float:
     return parameter.value
 
 
-def _managed_mutation(
-    session: object,
-    context: _InvocationContext,
+def _validated_managed_mutation_result(
     *,
-    project_id: str,
-    revision_id: str,
-    target: object,
-    leaf: Callable[..., object],
+    context: _InvocationContext,
+    identity: EntityIdentity,
+    old: EntityObservation,
+    before_by_id: dict[str, EntityObservation],
+    after: tuple[EntityObservation, ...],
+    descendant_ids: frozenset[str],
+    descendant_before: dict[str, EntityObservation],
+    recomputed_descendant_ids: frozenset[str],
+    rotation_pivot: tuple[int | float, int | float, int | float] | None,
+    parameter: str | None,
+    value: object,
+    position: object,
     leaf_kwargs: dict[str, object],
-    parameter: str | None = None,
-    value: object = None,
-    position: object = None,
 ) -> dict[str, object]:
-    before = _entity_observations(session)
-    before_by_id = _observation_map(before)
-    obj, identity = _resolve_entity_target(
-        session,
-        target,
-        project_id=project_id,
-        revision_id=revision_id,
-    )
-    old = before_by_id.get(identity.object_id)
-    if old is None:
-        raise _operation_failure()
-    rotation_pivot: tuple[int | float, int | float, int | float] | None = None
-    if context.operation == "rotate_part":
-        try:
-            rotation_pivot = _bound_box_center(obj.Shape)
-        except _ObservationFailure:
-            raise _operation_failure() from None
-    set_result = getattr(session, "set_result_object", None)
-    if not callable(set_result):
-        raise _operation_failure()
-    set_result(obj)
-    leaf(session, name=obj.Name, **leaf_kwargs)
+    """Validate one mutation and every authenticated native Boolean descendant."""
 
-    after = _entity_observations(session)
     after_by_id = _observation_map(after)
     new = after_by_id.get(identity.object_id)
-    if new is None:
+    if new is None or set(before_by_id) != set(after_by_id):
         raise _operation_failure()
-    comparisons = _require_non_target_preservation(
-        before_by_id,
-        after_by_id,
-        target=identity.object_id,
-    )
+    comparisons: list[PreservationObservation] = []
+    for object_id in sorted(before_by_id):
+        if object_id == identity.object_id:
+            continue
+        if object_id in descendant_ids:
+            descendant = after_by_id[object_id]
+            previous = descendant_before[object_id]
+            if (
+                object_id not in recomputed_descendant_ids
+                or descendant.valid_shape is not True
+                or descendant.solid_count != 1
+                or descendant.volume_mm3 is None
+                or descendant.volume_mm3 <= 0
+                or descendant.area_mm2 is None
+                or descendant.area_mm2 <= 0
+                or descendant.bbox_mm is None
+                or descendant.center_of_mass_mm is None
+                or previous.volume_mm3 is None
+                or previous.area_mm2 is None
+                or previous.bbox_mm is None
+                or previous.center_of_mass_mm is None
+            ):
+                raise _operation_failure()
+            comparisons.append(
+                _require_preserved(
+                    before_by_id[object_id],
+                    descendant,
+                    target=object_id,
+                    preserve=("placement", "parameters"),
+                )
+            )
+        else:
+            comparisons.append(
+                _require_preserved(
+                    before_by_id[object_id],
+                    after_by_id[object_id],
+                    target=object_id,
+                )
+            )
+
     parameter_names = {item.name for item in old.parameters}
     fixed: set[str]
     if context.operation == "modify_parameter":
@@ -2235,6 +2830,147 @@ def _managed_mutation(
         "after": new.to_mapping(),
         "preservation": [item.to_mapping() for item in comparisons],
     }
+
+
+def _managed_mutation(
+    session: object,
+    context: _InvocationContext,
+    *,
+    project_id: str,
+    revision_id: str,
+    target: object,
+    leaf: Callable[..., object],
+    leaf_kwargs: dict[str, object],
+    parameter: str | None = None,
+    value: object = None,
+    position: object = None,
+) -> dict[str, object]:
+    before = _entity_observations(session)
+    before_by_id = _observation_map(before)
+    obj, identity = _resolve_entity_target(
+        session,
+        target,
+        project_id=project_id,
+        revision_id=revision_id,
+    )
+    old = before_by_id.get(identity.object_id)
+    if old is None:
+        raise _operation_failure()
+    try:
+        by_name, dependencies, _consumed = _native_dependency_graph(_identified_pairs(session))
+        target_name = obj.Name
+        if target_name not in by_name or by_name[target_name] != (obj, identity):
+            raise ValueError
+        descendant_names = _native_boolean_descendants(
+            dependencies,
+            target_name=target_name,
+        )
+        descendant_ids = frozenset(by_name[name][1].object_id for name in descendant_names)
+        descendant_before = {
+            by_name[name][1].object_id: before_by_id[by_name[name][1].object_id]
+            for name in descendant_names
+        }
+    except Exception:
+        raise _operation_failure() from None
+    rotation_pivot: tuple[int | float, int | float, int | float] | None = None
+    if context.operation == "rotate_part":
+        try:
+            rotation_pivot = _bound_box_center(obj.Shape)
+        except _ObservationFailure:
+            raise _operation_failure() from None
+    set_result = getattr(session, "set_result_object", None)
+    if not callable(set_result):
+        raise _operation_failure()
+    owner_of = getattr(session, "owner_of", None)
+    if not callable(owner_of):
+        raise _operation_failure()
+    try:
+        owner = owner_of(target_name)
+        result_obj = by_name[descendant_names[-1]][0] if descendant_names else obj
+    except Exception:
+        raise _operation_failure() from None
+    transaction = getattr(session, "_transaction", None)
+    use_outer_transaction = bool(descendant_names)
+    if use_outer_transaction and not callable(transaction):
+        raise _operation_failure()
+    try:
+        if use_outer_transaction:
+            with transaction(
+                f"VibeCAD {context.operation}",
+                part=owner,
+                claim_new_objects=False,
+            ):
+                set_result(result_obj, part=owner)
+                with _DocumentRecomputeObserver(session.doc) as receipt:  # type: ignore[attr-defined]
+                    if context.operation == "modify_parameter":
+                        _modify_part_uncommitted(
+                            session,
+                            name=obj.Name,
+                            parameter=leaf_kwargs["parameter"],
+                            value=leaf_kwargs["value"],
+                            result_name=result_obj.Name,
+                        )
+                    elif context.operation == "move_part":
+                        _move_part_uncommitted(
+                            session,
+                            name=obj.Name,
+                            position=leaf_kwargs["position"],
+                            result_name=result_obj.Name,
+                        )
+                    elif context.operation == "rotate_part":
+                        _rotate_part_uncommitted(
+                            session,
+                            name=obj.Name,
+                            axis=leaf_kwargs["axis"],
+                            angle=leaf_kwargs["angle"],
+                            result_name=result_obj.Name,
+                        )
+                    else:
+                        raise ValueError
+                recomputed_descendant_ids = _require_recomputed_boolean_descendants(
+                    by_name,
+                    descendant_names,
+                    frozenset(receipt.object_ids),
+                    obj,
+                )
+                after = _entity_observations(session)
+                result = _validated_managed_mutation_result(
+                    context=context,
+                    identity=identity,
+                    old=old,
+                    before_by_id=before_by_id,
+                    after=after,
+                    descendant_ids=descendant_ids,
+                    descendant_before=descendant_before,
+                    recomputed_descendant_ids=recomputed_descendant_ids,
+                    rotation_pivot=rotation_pivot,
+                    parameter=parameter,
+                    value=value,
+                    position=position,
+                    leaf_kwargs=leaf_kwargs,
+                )
+        else:
+            set_result(result_obj, part=owner)
+            leaf(session, name=obj.Name, **leaf_kwargs)
+            after = _entity_observations(session)
+            result = _validated_managed_mutation_result(
+                context=context,
+                identity=identity,
+                old=old,
+                before_by_id=before_by_id,
+                after=after,
+                descendant_ids=descendant_ids,
+                descendant_before=descendant_before,
+                recomputed_descendant_ids=frozenset(),
+                rotation_pivot=rotation_pivot,
+                parameter=parameter,
+                value=value,
+                position=position,
+                leaf_kwargs=leaf_kwargs,
+            )
+    except Exception:
+        raise _operation_failure() from None
+    return result
 
 
 def _managed_inspect(
@@ -3254,6 +3990,7 @@ class InProcessCadExecutor(CadExecutionPort):
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
         try:
             session.load_document(path)
+            _entity_observations(session)
         except Exception:
             try:
                 session.close_document()
@@ -3271,6 +4008,7 @@ class InProcessCadExecutor(CadExecutionPort):
             document = session.doc
             document.recompute()
             _stabilize_parametric_session(session)
+            _entity_observations(session)
             session.persist_state()
         except Exception:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
@@ -3412,6 +4150,9 @@ class InProcessCadExecutor(CadExecutionPort):
                 _add_cylinder,
                 _add_sphere,
                 _add_torus,
+                _boolean_common_uncommitted,
+                _boolean_cut_uncommitted,
+                _boolean_fuse_uncommitted,
                 _modify_part,
                 _move_part,
                 _rotate_part,
@@ -3487,6 +4228,39 @@ class InProcessCadExecutor(CadExecutionPort):
                         session,
                         leaf=_add_torus,
                         expected_type="Part::Torus",
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "boolean_cut": _queued_handler(
+                    contexts.get("boolean_cut", deque()),
+                    partial(
+                        _managed_boolean,
+                        session,
+                        leaf=_boolean_cut_uncommitted,
+                        expected_type="Part::Cut",
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "boolean_fuse": _queued_handler(
+                    contexts.get("boolean_fuse", deque()),
+                    partial(
+                        _managed_boolean,
+                        session,
+                        leaf=_boolean_fuse_uncommitted,
+                        expected_type="Part::Fuse",
+                        project_id=project_id,
+                        revision_id=revision_id,
+                    ),
+                ),
+                "boolean_common": _queued_handler(
+                    contexts.get("boolean_common", deque()),
+                    partial(
+                        _managed_boolean,
+                        session,
+                        leaf=_boolean_common_uncommitted,
+                        expected_type="Part::Common",
                         project_id=project_id,
                         revision_id=revision_id,
                     ),

@@ -311,34 +311,44 @@ def _boolean_owner(session: Session, base_name: str, tool_name: str) -> str | No
 def boolean_cut(session: Session, base_name: str, tool_name: str) -> dict[str, Any]:
     _validate_boolean_names(base_name, tool_name)
     owner = _boolean_owner(session, base_name, tool_name)
+    with session._transaction("boolean_cut", part=owner):
+        return _boolean_cut_uncommitted(session, base_name, tool_name)
+
+
+def _boolean_cut_uncommitted(
+    session: Session,
+    base_name: str,
+    tool_name: str,
+) -> dict[str, Any]:
+    """Create a checked cut inside an executor-owned surrounding transaction."""
+
+    _validate_boolean_names(base_name, tool_name)
+    owner = _boolean_owner(session, base_name, tool_name)
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
 
-    with session._transaction("boolean_cut", part=owner):
-        with silence_fd1():
-            base = _solid_object(session, base_name)
-            tool = _solid_object(session, tool_name)
-            session.doc.recompute()  # 防守：确保 Base/Tool 已算
-            base_vol = base.Shape.Volume
-            cut = session.doc.addObject("Part::Cut", "Cut")
-            cut.Base = base
-            cut.Tool = tool
-            session.doc.recompute()
-            session.assert_valid_solid(cut.Shape)
-            assert_solid_integrity(session, cut.Shape, "boolean_cut", part=owner)
-            if cut.Shape.Volume >= base_vol - 1e-6:
-                raise RuntimeError(
-                    f"几何断言失败：布尔差集未移除任何材料（base={base_vol:.3f}, "
-                    f"cut={cut.Shape.Volume:.3f}）——tool '{tool_name}' 可能因 position/axis "
-                    f"未与 base '{base_name}' 相交"
-                )
-            session.set_result_object(cut, part=owner)
-            result = {
-                "ok": True,
-                "name": cut.Name,
-                "volume": cut.Shape.Volume,
-                **_stale_hint(session),
-            }
-    return result
+    with silence_fd1():
+        base = _solid_object(session, base_name)
+        tool = _solid_object(session, tool_name)
+        session.doc.recompute()
+        base_vol = float(base.Shape.Volume)
+        cut = session.doc.addObject("Part::Cut", "Cut")
+        cut.Base, cut.Tool = base, tool
+        session.doc.recompute()
+        session.assert_valid_solid(cut.Shape)
+        assert_solid_integrity(session, cut.Shape, "boolean_cut", part=owner)
+        if float(cut.Shape.Volume) >= base_vol - 1e-6:
+            raise RuntimeError(
+                f"几何断言失败：布尔差集未移除任何材料（base={base_vol:.3f}, "
+                f"cut={cut.Shape.Volume:.3f}）——tool '{tool_name}' 可能因 position/axis "
+                f"未与 base '{base_name}' 相交"
+            )
+        session.set_result_object(cut, part=owner)
+        return {
+            "ok": True,
+            "name": cut.Name,
+            "volume": float(cut.Shape.Volume),
+            **_stale_hint(session),
+        }
 
 
 def _boolean_combine(
@@ -350,52 +360,96 @@ def _boolean_combine(
 ) -> dict[str, Any]:
     _validate_boolean_names(base_name, tool_name)
     owner = _boolean_owner(session, base_name, tool_name)
+    with session._transaction(f"boolean_{operation}", part=owner):
+        return _boolean_combine_uncommitted(
+            session,
+            base_name,
+            tool_name,
+            operation=operation,
+        )
+
+
+def _boolean_combine_uncommitted(
+    session: Session,
+    base_name: str,
+    tool_name: str,
+    *,
+    operation: str,
+) -> dict[str, Any]:
+    """Create a checked fuse/common inside an executor-owned transaction."""
+
+    _validate_boolean_names(base_name, tool_name)
+    owner = _boolean_owner(session, base_name, tool_name)
     if operation not in ("fuse", "common"):
         raise ValueError(f"未知布尔运算 {operation!r}")
     type_name = "Part::Fuse" if operation == "fuse" else "Part::Common"
     label = "Fuse" if operation == "fuse" else "Common"
     from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
 
-    with session._transaction(f"boolean_{operation}", part=owner):
-        with silence_fd1():
-            base = _solid_object(session, base_name)
-            tool = _solid_object(session, tool_name)
-            session.doc.recompute()
-            base_vol, tool_vol = float(base.Shape.Volume), float(tool.Shape.Volume)
-            obj = session.doc.addObject(type_name, label)
-            obj.Base, obj.Tool = base, tool
-            session.doc.recompute()
-            session.assert_valid_solid(obj.Shape)
-            assert_solid_integrity(session, obj.Shape, f"boolean_{operation}", part=owner)
-            volume = float(obj.Shape.Volume)
-            tol = max(base_vol, tool_vol, 1.0) * 1e-7
-            if operation == "fuse":
-                if volume < max(base_vol, tool_vol) - tol:
-                    raise RuntimeError(
-                        "几何断言失败：并集体积小于较大输入体积，运算可能丢失材料"
-                        f"（{volume:.3f} < {max(base_vol, tool_vol):.3f}）"
-                    )
-                if volume > base_vol + tool_vol + tol:
-                    raise RuntimeError(
-                        "几何断言失败：并集体积大于两个输入体积之和"
-                        f"（{volume:.3f} > {base_vol + tool_vol:.3f}）"
-                    )
-            elif volume > min(base_vol, tool_vol) + tol:
+    with silence_fd1():
+        base = _solid_object(session, base_name)
+        tool = _solid_object(session, tool_name)
+        session.doc.recompute()
+        base_vol, tool_vol = float(base.Shape.Volume), float(tool.Shape.Volume)
+        obj = session.doc.addObject(type_name, label)
+        obj.Base, obj.Tool = base, tool
+        session.doc.recompute()
+        session.assert_valid_solid(obj.Shape)
+        assert_solid_integrity(session, obj.Shape, f"boolean_{operation}", part=owner)
+        volume = float(obj.Shape.Volume)
+        tol = max(base_vol, tool_vol, 1.0) * 1e-7
+        if operation == "fuse":
+            if volume < max(base_vol, tool_vol) - tol:
                 raise RuntimeError(
-                    "几何断言失败：交集体积大于较小输入体积"
-                    f"（{volume:.3f} > {min(base_vol, tool_vol):.3f}）"
+                    "几何断言失败：并集体积小于较大输入体积，运算可能丢失材料"
+                    f"（{volume:.3f} < {max(base_vol, tool_vol):.3f}）"
                 )
-            session.set_result_object(obj, part=owner)
-            result = {
-                "ok": True,
-                "name": obj.Name,
-                "operation": operation,
-                "base": base_name,
-                "tool": tool_name,
-                "volume": volume,
-                **_stale_hint(session),
-            }
-    return result
+            if volume > base_vol + tool_vol + tol:
+                raise RuntimeError(
+                    "几何断言失败：并集体积大于两个输入体积之和"
+                    f"（{volume:.3f} > {base_vol + tool_vol:.3f}）"
+                )
+        elif not 0 < volume <= min(base_vol, tool_vol) + tol:
+            raise RuntimeError(
+                "几何断言失败：交集体积为空或大于较小输入体积"
+                f"（common={volume:.3f}, min={min(base_vol, tool_vol):.3f}）"
+            )
+        session.set_result_object(obj, part=owner)
+        return {
+            "ok": True,
+            "name": obj.Name,
+            "operation": operation,
+            "base": base_name,
+            "tool": tool_name,
+            "volume": volume,
+            **_stale_hint(session),
+        }
+
+
+def _boolean_fuse_uncommitted(
+    session: Session,
+    base_name: str,
+    tool_name: str,
+) -> dict[str, Any]:
+    return _boolean_combine_uncommitted(
+        session,
+        base_name,
+        tool_name,
+        operation="fuse",
+    )
+
+
+def _boolean_common_uncommitted(
+    session: Session,
+    base_name: str,
+    tool_name: str,
+) -> dict[str, Any]:
+    return _boolean_combine_uncommitted(
+        session,
+        base_name,
+        tool_name,
+        operation="common",
+    )
 
 
 def boolean_fuse(session: Session, base_name: str, tool_name: str) -> dict[str, Any]:

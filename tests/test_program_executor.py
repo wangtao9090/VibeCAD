@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import copy
 import dataclasses
 import json
 import math
@@ -153,9 +155,17 @@ class _FakeDocument:
         self.recompute_calls = 0
         self.save_calls: list[str] = []
         self.Objects: tuple[object, ...] = ()
+        self._recompute_observers: list[object] = []
+        self.Name = "FakeDocument"
 
     def recompute(self) -> None:
         self.recompute_calls += 1
+        for obj in self.Objects:
+            for observer in tuple(self._recompute_observers):
+                observer.slotRecomputedObject(obj)
+
+    def isTouched(self) -> bool:  # noqa: N802 - FreeCAD API spelling
+        return False
 
     def saveCopy(self, path: str) -> None:  # noqa: N802 - FreeCAD API spelling
         self.save_calls.append(path)
@@ -182,8 +192,64 @@ class _FakeSession:
         self.identity_object.Height = 30.0
         self.identity_object.Placement = _FakePlacement(0.0)
         self.identity_object.Shape = _FakeShape()
+        self.identity_object.State = []
         self.attached_identities: list[tuple[object, object]] = []
         self.result_object: object | None = None
+
+    @contextlib.contextmanager
+    def _transaction(
+        self,
+        _label: str,
+        part: str | None = None,
+        *,
+        claim_new_objects: bool = True,
+    ):
+        del claim_new_objects
+        objects_before = self.doc.Objects
+        object_state_before = tuple(
+            (
+                obj,
+                {
+                    name: copy.deepcopy(getattr(obj, name))
+                    for name in (
+                        "Length",
+                        "Width",
+                        "Height",
+                        "Radius",
+                        "Radius1",
+                        "Radius2",
+                        "Placement",
+                        "Shape",
+                    )
+                    if hasattr(obj, name)
+                },
+            )
+            for obj in objects_before
+        )
+        identities_before = list(self.attached_identities)
+        result_before = self.result_object
+        result_by_part_before = dict(getattr(self, "_result_by_part", {}))
+        parts_before = {
+            name: {**info, "objects": set(info["objects"])}
+            for name, info in getattr(self, "_parts", {}).items()
+        }
+        try:
+            yield
+        except BaseException:
+            self.doc.Objects = objects_before
+            for obj, values in object_state_before:
+                for name, value in values.items():
+                    setattr(obj, name, value)
+            self.attached_identities = identities_before
+            self.result_object = result_before
+            if hasattr(self, "_result_by_part"):
+                self._result_by_part = result_by_part_before
+            if hasattr(self, "_parts"):
+                self._parts = {
+                    name: {**info, "objects": set(info["objects"])}
+                    for name, info in parts_before.items()
+                }
+            raise
 
     def load_document(self, path: Path) -> object:
         self.loaded.append(path)
@@ -212,6 +278,7 @@ class _FakeSession:
         raise KeyError(name)
 
     def attach_object_identity(self, obj: object, identity: object) -> object:
+        obj.Document = self.doc  # type: ignore[attr-defined]
         obj.VibeCADObjectId = identity.object_id  # type: ignore[attr-defined]
         obj.VibeCADFeatureId = identity.feature_id or ""  # type: ignore[attr-defined]
         obj.VibeCADSemanticRole = identity.semantic_role.value  # type: ignore[attr-defined]
@@ -240,6 +307,20 @@ class _FakeSession:
     def set_result_object(self, obj: object, part: str | None = None) -> None:
         del part
         self.result_object = obj
+
+    def get_result_object(self, part: str | None = None) -> object:
+        del part
+        if self.result_object is None:
+            raise RuntimeError("result object missing")
+        return self.result_object
+
+    def assert_valid_solid(self, shape: object) -> None:
+        if not shape.isValid() or shape.Volume <= 0:  # type: ignore[attr-defined]
+            raise RuntimeError("invalid fake solid")
+
+    def owner_of(self, object_name: str) -> str | None:
+        del object_name
+        return None
 
 
 class _FakeRotation:
@@ -325,8 +406,23 @@ class _FakeComponentSession(_FakeSession):
             return
         self._result_by_part[part] = obj
 
+    def get_result_object(self, part: str | None = None) -> object:
+        if part is None:
+            return super().get_result_object()
+        return self._result_by_part[part]
+
+    def _claim_new_objects(self, before: set[str], part: str | None = None) -> None:
+        assert part is not None
+        self._parts[part]["objects"].update(  # type: ignore[attr-defined]
+            obj.Name for obj in self.doc.Objects if obj.Name not in before
+        )
+
     def get_result_shape(self, part_name: str):
         return self._result_by_part[part_name].Shape
+
+    def assert_valid_solid(self, shape: object) -> None:
+        if not shape.isValid() or shape.Volume <= 0:  # type: ignore[attr-defined]
+            raise RuntimeError("invalid fake solid")
 
     def read_component_bom_metadata(self, part_name: str) -> ComponentBomMetadata | None:
         return self._bom_by_part.get(part_name)
@@ -391,6 +487,7 @@ def _fake_add_box(
             position[2] + height / 2,
         ),
     )
+    obj.State = []
     session.doc.Objects = (*session.doc.Objects, obj)
     if part is not None:
         session._parts[part]["objects"].add(obj.Name)  # type: ignore[attr-defined]
@@ -438,6 +535,7 @@ def _fake_add_cylinder(
             origin + offset for origin, offset in zip(position, center_offset, strict=True)
         ),
     )
+    obj.State = []
     session.doc.Objects = (*session.doc.Objects, obj)
     if part is not None:
         session._parts[part]["objects"].add(obj.Name)  # type: ignore[attr-defined]
@@ -579,6 +677,105 @@ def _fake_add_torus(
     return object()
 
 
+def _fake_boolean(
+    session: _FakeSession,
+    *,
+    base_name: str,
+    tool_name: str,
+    type_id: str,
+) -> object:
+    base = session.get_object(base_name)
+    tool = session.get_object(tool_name)
+    volume = {
+        "Part::Cut": base.Shape.Volume - tool.Shape.Volume / 2,
+        "Part::Fuse": base.Shape.Volume + tool.Shape.Volume / 2,
+        "Part::Common": min(base.Shape.Volume, tool.Shape.Volume) / 2,
+    }[type_id]
+    obj = type("ManagedBoolean", (), {})()
+    label = type_id.removeprefix("Part::")
+    ordinal = sum(getattr(current, "TypeId", None) == type_id for current in session.doc.Objects)
+    obj.Name = label if ordinal == 0 else f"{label}{ordinal:03d}"
+    obj.TypeId = type_id
+    obj.Base = base
+    obj.Tool = tool
+    obj.Placement = _FakePlacement(0.0)
+    obj.Shape = _FakeShape(
+        volume=volume,
+        area=max(1.0, base.Shape.Area / 2),
+        bbox=(10.0, 10.0, 10.0),
+        center=(5.0, 5.0, 5.0),
+    )
+    obj.State = []
+    session.doc.Objects = (*session.doc.Objects, obj)
+    session.set_result_object(obj, part=session.owner_of(base_name))
+    return object()
+
+
+def _fake_boolean_cut(
+    session: _FakeSession,
+    *,
+    base_name: str,
+    tool_name: str,
+) -> object:
+    return _fake_boolean(
+        session,
+        base_name=base_name,
+        tool_name=tool_name,
+        type_id="Part::Cut",
+    )
+
+
+def _fake_boolean_fuse(
+    session: _FakeSession,
+    *,
+    base_name: str,
+    tool_name: str,
+) -> object:
+    return _fake_boolean(
+        session,
+        base_name=base_name,
+        tool_name=tool_name,
+        type_id="Part::Fuse",
+    )
+
+
+def _fake_boolean_common(
+    session: _FakeSession,
+    *,
+    base_name: str,
+    tool_name: str,
+) -> object:
+    return _fake_boolean(
+        session,
+        base_name=base_name,
+        tool_name=tool_name,
+        type_id="Part::Common",
+    )
+
+
+class _FakeRecomputeObserver:
+    def __init__(self, document: _FakeDocument) -> None:
+        self.document = document
+
+    def __enter__(self) -> executor_module._RecomputeReceipt:
+        receipt = executor_module._RecomputeReceipt(document=self.document, object_ids=set())
+        self.document._recompute_observers.append(self)
+        self.receipt = receipt
+        return receipt
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        self.document._recompute_observers.remove(self)
+
+    def slotRecomputedObject(self, obj: object) -> None:  # noqa: N802 - FreeCAD API
+        self.receipt.object_ids.add(id(obj))
+
+
+class _FakeMissingDescendantRecomputeObserver(_FakeRecomputeObserver):
+    def slotRecomputedObject(self, obj: object) -> None:  # noqa: N802 - FreeCAD API
+        if getattr(obj, "TypeId", None) not in {"Part::Cut", "Part::Fuse", "Part::Common"}:
+            super().slotRecomputedObject(obj)
+
+
 def _fake_modify_part(
     session: _FakeSession,
     *,
@@ -600,6 +797,43 @@ def _fake_modify_part(
         ),
     )
     return object()
+
+
+def _refresh_fake_boolean_descendants(session: _FakeSession, source: object) -> None:
+    """Refresh the unique fake Boolean consumer chain after one operand edit."""
+
+    current = source
+    while True:
+        matches = tuple(
+            obj
+            for obj in session.doc.Objects
+            if getattr(obj, "TypeId", None) in {"Part::Cut", "Part::Fuse", "Part::Common"}
+            and (getattr(obj, "Base", None) is current or getattr(obj, "Tool", None) is current)
+        )
+        if not matches:
+            return
+        assert len(matches) == 1
+        current = matches[0]
+        base = current.Base
+        tool = current.Tool
+        current.Shape = _FakeShape(
+            volume={
+                "Part::Cut": base.Shape.Volume - tool.Shape.Volume / 2,
+                "Part::Fuse": base.Shape.Volume + tool.Shape.Volume / 2,
+                "Part::Common": min(base.Shape.Volume, tool.Shape.Volume) / 2,
+            }[current.TypeId],
+            area=max(1.0, base.Shape.Area / 2),
+            bbox=(
+                base.Shape.BoundBox.XLength,
+                base.Shape.BoundBox.YLength,
+                base.Shape.BoundBox.ZLength,
+            ),
+            center=(
+                base.Shape.CenterOfMass.x,
+                base.Shape.CenterOfMass.y,
+                base.Shape.CenterOfMass.z,
+            ),
+        )
 
 
 def _fake_move_part(
@@ -812,6 +1046,15 @@ def _command(
     )
 
 
+@pytest.fixture(autouse=True)
+def _fake_recompute_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    if request.node.get_closest_marker("slow") is None:
+        monkeypatch.setattr(executor_module, "_DocumentRecomputeObserver", _FakeRecomputeObserver)
+
+
 def _program() -> ModelProgram:
     return ModelProgram(
         task_id="task-executor",
@@ -926,6 +1169,143 @@ def _part_native_primitives_program() -> ModelProgram:
             ),
         ),
         acceptance=AcceptanceSpec(id="acceptance-part-primitives", criteria=()),
+    )
+
+
+def _part_boolean_program(operation: str) -> ModelProgram:
+    return ModelProgram(
+        task_id=f"task-executor-{operation}",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "base",
+                "create_box",
+                args={"length_mm": 20, "width_mm": 20, "height_mm": 20},
+            ),
+            _command(
+                "tool",
+                "create_box",
+                args={
+                    "length_mm": 10,
+                    "width_mm": 10,
+                    "height_mm": 10,
+                    "position_mm": (5, 5, 5),
+                },
+                depends_on=("base",),
+            ),
+            _command(
+                "boolean",
+                operation,
+                target={
+                    "base": {"command_id": "base", "slot": "object"},
+                    "tool": {"command_id": "tool", "slot": "object"},
+                },
+                depends_on=("base", "tool"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id=f"acceptance-{operation}", criteria=()),
+    )
+
+
+def _part_boolean_edit_program(operation: str) -> ModelProgram:
+    created = _part_boolean_program(operation).operations
+    return ModelProgram(
+        task_id=f"task-executor-{operation}-edit",
+        base_revision=BASE_REVISION,
+        operations=(
+            *created,
+            _command(
+                "edit",
+                "modify_parameter",
+                target={"object": {"command_id": "base", "slot": "object"}},
+                args={"parameter": "length", "value_mm": 22},
+                depends_on=("base", "boolean"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id=f"acceptance-{operation}-edit", criteria=()),
+    )
+
+
+def _component_boolean_program(*, include_empty_component: bool = False) -> ModelProgram:
+    operations = (
+        _command("component", "create_component", args={"name": "Bracket"}),
+        _command(
+            "base",
+            "create_box",
+            target={"component": {"command_id": "component", "slot": "component"}},
+            args={"length_mm": 20, "width_mm": 10, "height_mm": 10},
+            depends_on=("component",),
+        ),
+        _command(
+            "tool",
+            "create_box",
+            target={"component": {"command_id": "component", "slot": "component"}},
+            args={
+                "length_mm": 10,
+                "width_mm": 10,
+                "height_mm": 10,
+                "position_mm": (15, 0, 0),
+            },
+            depends_on=("base",),
+        ),
+        _command(
+            "boolean",
+            "boolean_fuse",
+            target={
+                "base": {"command_id": "base", "slot": "object"},
+                "tool": {"command_id": "tool", "slot": "object"},
+            },
+            depends_on=("base", "tool"),
+        ),
+    )
+    if include_empty_component:
+        operations = (
+            *operations,
+            _command(
+                "other",
+                "create_component",
+                args={"name": "Other"},
+                depends_on=("boolean",),
+            ),
+        )
+    return ModelProgram(
+        task_id="task-executor-component-boolean",
+        base_revision=BASE_REVISION,
+        operations=operations,
+        acceptance=AcceptanceSpec(id="acceptance-component-boolean", criteria=()),
+    )
+
+
+def _nested_component_boolean_program() -> ModelProgram:
+    operations = _component_boolean_program().operations
+    return ModelProgram(
+        task_id="task-executor-nested-component-boolean",
+        base_revision=BASE_REVISION,
+        operations=(
+            *operations,
+            _command(
+                "second_tool",
+                "create_box",
+                target={"component": {"command_id": "component", "slot": "component"}},
+                args={
+                    "length_mm": 5,
+                    "width_mm": 10,
+                    "height_mm": 10,
+                    "position_mm": (22, 0, 0),
+                },
+                depends_on=("boolean",),
+            ),
+            _command(
+                "second_boolean",
+                "boolean_fuse",
+                target={
+                    "base": {"command_id": "boolean", "slot": "object"},
+                    "tool": {"command_id": "second_tool", "slot": "object"},
+                },
+                depends_on=("boolean", "second_tool"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-nested-component-boolean", criteria=()),
     )
 
 
@@ -1613,6 +1993,454 @@ def test_execute_program_creates_native_cone_sphere_and_torus_with_live_evidence
     assert len({identity.object_id for identity in identities}) == 3
 
 
+@pytest.mark.parametrize(
+    ("operation", "leaf", "object_type", "relation"),
+    (
+        ("boolean_cut", _fake_boolean_cut, "Part::Cut", "cut"),
+        ("boolean_fuse", _fake_boolean_fuse, "Part::Fuse", "fuse"),
+        ("boolean_common", _fake_boolean_common, "Part::Common", "common"),
+    ),
+)
+def test_execute_program_creates_managed_native_boolean_feature(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    leaf: object,
+    object_type: str,
+    relation: str,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, f"_{operation}_uncommitted", leaf)
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_part_boolean_program(operation)),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True]
+    value = outcomes[-1].result.value
+    assert value["kind"] == "boolean_created"  # type: ignore[index]
+    assert value["operation"] == operation  # type: ignore[index]
+    assert value["after"]["object_type"] == object_type  # type: ignore[index]
+    assert value["after"]["semantic_role"] == "feature"  # type: ignore[index]
+    parameters = {
+        item["name"]: item["value"]
+        for item in value["after"]["parameters"]  # type: ignore[index]
+    }
+    assert parameters == {
+        "base_object_id": value["base_object_id"],  # type: ignore[index]
+        "operation": relation,
+        "tool_object_id": value["tool_object_id"],  # type: ignore[index]
+    }
+    assert session.result_object is session.doc.Objects[-1]
+
+
+def test_managed_boolean_rolls_back_creation_when_identity_attachment_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(
+        executor_module,
+        "_boolean_cut_uncommitted",
+        _fake_boolean_cut,
+    )
+    session = _FakeSession()
+    original_attach = session.attach_object_identity
+
+    def attach(obj: object, identity: object) -> object:
+        if getattr(obj, "TypeId", None) == "Part::Cut":
+            raise RuntimeError("private identity fault")
+        return original_attach(obj, identity)
+
+    session.attach_object_identity = attach  # type: ignore[method-assign]
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_part_boolean_program("boolean_cut")),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, False]
+    assert [obj.TypeId for obj in session.doc.Objects] == ["Part::Box", "Part::Box"]
+    assert session.result_object is session.doc.Objects[-1]
+    assert all(identity.object_type != "Part::Cut" for _, identity in session.attached_identities)
+
+
+def test_managed_boolean_rolls_back_identity_owner_and_root_after_late_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(
+        executor_module,
+        "_boolean_cut_uncommitted",
+        _fake_boolean_cut,
+    )
+    session = _FakeSession()
+    original_attach = session.attach_object_identity
+
+    def attach_then_corrupt(obj: object, identity: object) -> object:
+        attached = original_attach(obj, identity)
+        if getattr(obj, "TypeId", None) == "Part::Cut":
+            obj.Shape = _FakeShape(volume=0.0)  # type: ignore[attr-defined]
+        return attached
+
+    session.attach_object_identity = attach_then_corrupt  # type: ignore[method-assign]
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(_part_boolean_program("boolean_cut")),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, False]
+    assert [obj.TypeId for obj in session.doc.Objects] == ["Part::Box", "Part::Box"]
+    assert session.result_object is session.doc.Objects[-1]
+    assert all(identity.object_type != "Part::Cut" for _, identity in session.attached_identities)
+
+
+@pytest.mark.parametrize(
+    ("operation", "leaf"),
+    (
+        ("boolean_cut", _fake_boolean_cut),
+        ("boolean_fuse", _fake_boolean_fuse),
+        ("boolean_common", _fake_boolean_common),
+    ),
+)
+def test_managed_boolean_operand_edit_propagates_to_each_native_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    leaf: object,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, f"_{operation}_uncommitted", leaf)
+
+    def modify(session: _FakeSession, **kwargs: object) -> object:
+        kwargs.pop("result_name", None)
+        result = _fake_modify_part(session, **kwargs)  # type: ignore[arg-type]
+        _refresh_fake_boolean_descendants(session, session.get_object(str(kwargs["name"])))
+        session.doc.recompute()
+        return result
+
+    monkeypatch.setattr(executor_module, "_modify_part_uncommitted", modify)
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_part_boolean_edit_program(operation)),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True, True]
+    assert session.doc.Objects[-1].Shape.BoundBox.XLength == 22
+
+
+def test_managed_boolean_operand_edit_rejects_stale_descendant_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(
+        executor_module,
+        "_boolean_cut_uncommitted",
+        _fake_boolean_cut,
+    )
+
+    def modify_without_recompute(session: _FakeSession, **kwargs: object) -> object:
+        kwargs.pop("result_name", None)
+        return _fake_modify_part(session, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        executor_module,
+        "_modify_part_uncommitted",
+        modify_without_recompute,
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_DocumentRecomputeObserver",
+        _FakeMissingDescendantRecomputeObserver,
+    )
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_part_boolean_edit_program("boolean_cut")),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True, False]
+    assert session.doc.Objects[0].Length == 20
+    assert session.doc.Objects[-1].Shape.Volume == 7500
+
+
+def test_boolean_recompute_receipt_rejects_missing_target_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_cut_uncommitted", _fake_boolean_cut)
+
+    class DescendantOnly(_FakeRecomputeObserver):
+        def slotRecomputedObject(self, obj: object) -> None:  # noqa: N802 - FreeCAD API
+            if getattr(obj, "TypeId", None) == "Part::Cut":
+                super().slotRecomputedObject(obj)
+
+    monkeypatch.setattr(executor_module, "_DocumentRecomputeObserver", DescendantOnly)
+
+    def modify(session: _FakeSession, **kwargs: object) -> object:
+        kwargs.pop("result_name", None)
+        result = _fake_modify_part(session, **kwargs)  # type: ignore[arg-type]
+        _refresh_fake_boolean_descendants(session, session.get_object(str(kwargs["name"])))
+        session.doc.recompute()
+        return result
+
+    monkeypatch.setattr(executor_module, "_modify_part_uncommitted", modify)
+    session = _FakeSession()
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(_part_boolean_edit_program("boolean_cut")),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [item.result.ok for item in outcomes] == [True, True, True, False]
+    assert session.doc.Objects[0].Length == 20
+
+
+@pytest.mark.parametrize(
+    ("operation", "arguments", "private_leaf"),
+    (
+        ("move_part", {"position_mm": (1, 0, 0)}, "_move_part_uncommitted"),
+        ("rotate_part", {"axis": "z", "angle_deg": 90}, "_rotate_part_uncommitted"),
+    ),
+)
+def test_managed_boolean_operand_transform_propagates_inside_one_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    arguments: dict[str, object],
+    private_leaf: str,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_cut_uncommitted", _fake_boolean_cut)
+
+    def transform(session: _FakeSession, **kwargs: object) -> object:
+        kwargs.pop("result_name", None)
+        target = session.get_object(str(kwargs["name"]))
+        result = (
+            _fake_move_part(session, **kwargs)  # type: ignore[arg-type]
+            if operation == "move_part"
+            else _fake_rotate_part(session, **kwargs)  # type: ignore[arg-type]
+        )
+        _refresh_fake_boolean_descendants(session, target)
+        session.doc.recompute()
+        return result
+
+    monkeypatch.setattr(executor_module, private_leaf, transform)
+    created = _part_boolean_program("boolean_cut").operations
+    program = ModelProgram(
+        task_id=f"task-executor-boolean-{operation}",
+        base_revision=BASE_REVISION,
+        operations=(
+            *created,
+            _command(
+                "transform",
+                operation,
+                target={"object": {"command_id": "base", "slot": "object"}},
+                args=arguments,
+                depends_on=("base", "boolean"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id=f"acceptance-boolean-{operation}", criteria=()),
+    )
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+    outcomes = executor.execute_program(
+        program=executor.validate_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True, True]
+
+
+def test_managed_boolean_remains_owned_by_its_explicit_component(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_fuse_uncommitted", _fake_boolean_fuse)
+    program = _component_boolean_program()
+    session = _FakeComponentSession()
+    executor = InProcessCadExecutor(store=_store())
+    outcomes = executor.execute_program(
+        program=executor.validate_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True, True]
+    result = session.doc.Objects[-1]
+    assert session.owner_of(result.Name) == "Bracket"
+    assert session.get_result_object("Bracket") is result
+    records = session.list_component_identity_records()
+    assert sorted(identity.object_type for _obj, identity in records[0][3]) == [
+        "Part::Box",
+        "Part::Box",
+        "Part::Fuse",
+    ]
+
+
+def test_component_boolean_can_add_another_tool_and_close_a_nested_tree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_fuse_uncommitted", _fake_boolean_fuse)
+    session = _FakeComponentSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(_nested_component_boolean_program()),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True] * 6
+    records = session.list_component_identity_records()
+    assert len(records[0][3]) == 5
+    assert sum(identity.object_type == "Part::Fuse" for _obj, identity in records[0][3]) == 2
+    assert executor_module._component_observations(session)[0].solid_count == 1
+
+
+def test_component_delivery_rejects_an_unconsumed_second_solid_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    program = ModelProgram(
+        task_id="task-executor-incomplete-component",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command("component", "create_component", args={"name": "Bracket"}),
+            _command(
+                "first",
+                "create_box",
+                target={"component": {"command_id": "component", "slot": "component"}},
+                args={"length_mm": 20, "width_mm": 10, "height_mm": 10},
+                depends_on=("component",),
+            ),
+            _command(
+                "second",
+                "create_box",
+                target={"component": {"command_id": "component", "slot": "component"}},
+                args={
+                    "length_mm": 5,
+                    "width_mm": 5,
+                    "height_mm": 5,
+                    "position_mm": (30, 0, 0),
+                },
+                depends_on=("first",),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-incomplete-component", criteria=()),
+    )
+    session = _FakeComponentSession()
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+    assert all(outcome.result.ok for outcome in outcomes)
+
+    with pytest.raises(executor_module._ObservationFailure):
+        executor_module._component_observations(session)
+    with pytest.raises(executor_module._ObservationFailure):
+        executor_module._managed_assembly_shape(session)
+
+
+def test_component_boolean_observation_rejects_consumed_result_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_fuse_uncommitted", _fake_boolean_fuse)
+    session = _FakeComponentSession()
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(_component_boolean_program()),
+        candidate=_active(session, tmp_path),
+    )
+    assert all(outcome.result.ok for outcome in outcomes)
+    base = next(obj for obj in session.doc.Objects if obj.TypeId == "Part::Box")
+    session._result_by_part["Bracket"] = base
+
+    with pytest.raises(executor_module._ObservationFailure):
+        executor_module._component_observations(session)
+    with pytest.raises(executor_module._ObservationFailure):
+        executor_module._managed_assembly_shape(session)
+
+
+def test_component_boolean_observation_rejects_cross_component_operand(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_fuse_uncommitted", _fake_boolean_fuse)
+    session = _FakeComponentSession()
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(
+            _component_boolean_program(include_empty_component=True),
+        ),
+        candidate=_active(session, tmp_path),
+    )
+    assert all(outcome.result.ok for outcome in outcomes)
+    tool = next(
+        obj
+        for obj in session.doc.Objects
+        if obj.TypeId == "Part::Box" and obj.Placement.Base.x == 15
+    )
+    session._parts["Bracket"]["objects"].remove(tool.Name)  # type: ignore[attr-defined]
+    session._parts["Other"]["objects"].add(tool.Name)  # type: ignore[attr-defined]
+    session._result_by_part["Other"] = tool
+
+    with pytest.raises(executor_module._ObservationFailure):
+        executor_module._entity_observations(session)
+    with pytest.raises(executor_module._ObservationFailure):
+        executor_module._component_observations(session)
+
+
+def test_managed_boolean_rejects_reusing_an_already_consumed_operand(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(executor_module, "_add_box", _fake_add_box)
+    monkeypatch.setattr(executor_module, "_boolean_cut_uncommitted", _fake_boolean_cut)
+    program = ModelProgram(
+        task_id="task-executor-reused-boolean-operand",
+        base_revision=BASE_REVISION,
+        operations=(
+            *_part_boolean_program("boolean_cut").operations,
+            _command(
+                "reuse",
+                "boolean_cut",
+                target={
+                    "base": {"command_id": "base", "slot": "object"},
+                    "tool": {"command_id": "boolean", "slot": "object"},
+                },
+                depends_on=("base", "boolean"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reused-boolean-operand", criteria=()),
+    )
+    session = _FakeSession()
+    executor = InProcessCadExecutor(store=_store())
+
+    outcomes = executor.execute_program(
+        program=executor.validate_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [outcome.result.ok for outcome in outcomes] == [True, True, True, False]
+    assert outcomes[-1].result.error is not None
+    assert outcomes[-1].result.error.category.value == "runtime"
+
+
 def test_execute_program_builds_places_and_inspects_explicit_components(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1896,6 +2724,291 @@ def test_real_freecad_component_program_checkpoints_reloads_and_exports_step(
     )
     assert result.returncode == 0, result.stderr
     assert "REAL_COMPONENT_PROGRAM_OK" in result.stdout
+
+
+@pytest.mark.slow
+def test_real_freecad_native_booleans_edit_reopen_and_export_step(
+    tmp_path: Path,
+) -> None:
+    if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
+        pytest.skip("set VIBECAD_RUN_INTEGRATION=1 to run the real FreeCAD gate")
+    from vibecad.runtime import paths as runtime_paths
+    from vibecad.runtime import status as runtime_status
+
+    runtime_python = runtime_paths.active_runtime_python()
+    if not runtime_python.is_file() or not runtime_paths.ready_sentinel().is_file():
+        pytest.fail("an existing ready managed FreeCAD runtime is required")
+    if not runtime_status.engine_compatible(runtime_python):
+        pytest.fail("the existing managed FreeCAD runtime does not match current engine pins")
+    code = (
+        f"import sys; sys.path.insert(0, {str(Path(__file__).parents[1] / 'src')!r})\n"
+        + "from pathlib import Path\n"
+        + "from vibecad.execution.candidate import ActiveCandidate, SessionBinding\n"
+        + "from vibecad.execution.executor import (\n"
+        + "    InProcessCadExecutor, _entity_observations, _export_session_step, "
+        + "_shape_observation,\n"
+        + ")\n"
+        + "from vibecad.execution.revisions import LocalRevisionStore, ProjectHead\n"
+        + "from vibecad.workflow.contracts import (\n"
+        + "    AcceptanceSpec, ModelCommand, ModelProgram, ValueSource,\n"
+        + ")\n"
+        + f"root = Path({str(tmp_path)!r})\n"
+        + f"project_id = {PROJECT_ID!r}\n"
+        + f"base_revision = {BASE_REVISION!r}\n"
+        + f"candidate_revision = {CANDIDATE_REVISION!r}\n"
+        + "def command(identifier, operation, *, target=None, args=None, depends=()):\n"
+        + "    return ModelCommand(\n"
+        + "        id=identifier, op=operation, target=target or {}, args=args or {},\n"
+        + "        depends_on=depends, preserve=(), source=ValueSource.MODEL,\n"
+        + "    )\n"
+        + "def ref(identifier):\n"
+        + "    return {'command_id': identifier, 'slot': 'object'}\n"
+        + "program = ModelProgram(\n"
+        + "    task_id='task-real-native-booleans', base_revision=base_revision, operations=(\n"
+        + "        command('cut_base', 'create_box',\n"
+        + "            args={'length_mm': 20, 'width_mm': 20, 'height_mm': 20}),\n"
+        + "        command('cut_tool', 'create_cylinder',\n"
+        + "            args={'radius_mm': 3, 'height_mm': 20,\n"
+        + "                'position_mm': [10, 10, 0], 'axis': 'z'},\n"
+        + "            depends=('cut_base',)),\n"
+        + "        command('cut', 'boolean_cut',\n"
+        + "            target={'base': ref('cut_base'), 'tool': ref('cut_tool')},\n"
+        + "            depends=('cut_base', 'cut_tool')),\n"
+        + "        command('edit_cut_tool', 'modify_parameter',\n"
+        + "            target={'object': ref('cut_tool')},\n"
+        + "            args={'parameter': 'radius', 'value_mm': 4},\n"
+        + "            depends=('cut_tool', 'cut')),\n"
+        + "        command('fuse_base', 'create_box',\n"
+        + "            args={'length_mm': 10, 'width_mm': 6, 'height_mm': 10,\n"
+        + "                'position_mm': [40, 0, 0]}, depends=('edit_cut_tool',)),\n"
+        + "        command('fuse_tool', 'create_box',\n"
+        + "            args={'length_mm': 10, 'width_mm': 10, 'height_mm': 10,\n"
+        + "                'position_mm': [45, 0, 0]}, depends=('fuse_base',)),\n"
+        + "        command('fuse', 'boolean_fuse',\n"
+        + "            target={'base': ref('fuse_base'), 'tool': ref('fuse_tool')},\n"
+        + "            depends=('fuse_base', 'fuse_tool')),\n"
+        + "        command('edit_fuse_base', 'modify_parameter',\n"
+        + "            target={'object': ref('fuse_base')},\n"
+        + "            args={'parameter': 'length', 'value_mm': 16},\n"
+        + "            depends=('fuse_base', 'fuse')),\n"
+        + "        command('rotate_fuse_base', 'rotate_part',\n"
+        + "            target={'object': ref('fuse_base')},\n"
+        + "            args={'axis': 'z', 'angle_deg': 90},\n"
+        + "            depends=('edit_fuse_base', 'fuse')),\n"
+        + "        command('common_base', 'create_box',\n"
+        + "            args={'length_mm': 10, 'width_mm': 10, 'height_mm': 10,\n"
+        + "                'position_mm': [80, 0, 0]}, depends=('rotate_fuse_base',)),\n"
+        + "        command('common_tool', 'create_box',\n"
+        + "            args={'length_mm': 10, 'width_mm': 10, 'height_mm': 10,\n"
+        + "                'position_mm': [85, 0, 0]}, depends=('common_base',)),\n"
+        + "        command('common', 'boolean_common',\n"
+        + "            target={'base': ref('common_base'), 'tool': ref('common_tool')},\n"
+        + "            depends=('common_base', 'common_tool')),\n"
+        + "        command('edit_common_base', 'modify_parameter',\n"
+        + "            target={'object': ref('common_base')},\n"
+        + "            args={'parameter': 'length', 'value_mm': 12},\n"
+        + "            depends=('common_base', 'common')),\n"
+        + "        command('move_common_base', 'move_part',\n"
+        + "            target={'object': ref('common_base')},\n"
+        + "            args={'position_mm': [79, 0, 0]},\n"
+        + "            depends=('edit_common_base', 'common')),\n"
+        + "        command('contained_base', 'create_box',\n"
+        + "            args={'length_mm': 20, 'width_mm': 20, 'height_mm': 20,\n"
+        + "                'position_mm': [120, 0, 0]}, depends=('move_common_base',)),\n"
+        + "        command('contained_tool', 'create_box',\n"
+        + "            args={'length_mm': 5, 'width_mm': 5, 'height_mm': 5,\n"
+        + "                'position_mm': [122, 2, 2]}, depends=('contained_base',)),\n"
+        + "        command('contained_fuse', 'boolean_fuse',\n"
+        + "            target={'base': ref('contained_base'), 'tool': ref('contained_tool')},\n"
+        + "            depends=('contained_base', 'contained_tool')),\n"
+        + "        command('move_contained_tool', 'move_part',\n"
+        + "            target={'object': ref('contained_tool')},\n"
+        + "            args={'position_mm': [130, 2, 2]},\n"
+        + "            depends=('contained_tool', 'contained_fuse')),\n"
+        + "        command('inspect', 'inspect_model', depends=('move_contained_tool',)),\n"
+        + "    ), acceptance=AcceptanceSpec(id='accept-real-booleans', criteria=()),\n"
+        + ")\n"
+        + "store = object.__new__(LocalRevisionStore)\n"
+        + "executor = InProcessCadExecutor(store=store)\n"
+        + "session = executor.create_empty(revision_id=candidate_revision)\n"
+        + "loaded = None\n"
+        + "try:\n"
+        + "    head = ProjectHead(project_id=project_id, generation=0,\n"
+        + "        revision_id=base_revision, manifest_sha256='a' * 64)\n"
+        + "    candidate = ActiveCandidate(project_id=project_id, base_head=head,\n"
+        + "        binding=SessionBinding(project_id=project_id,\n"
+        + "            revision_id=candidate_revision, session=session),\n"
+        + "        model_path=root / 'model.FCStd', step_path=root / 'model.step')\n"
+        + "    outcomes = executor.execute_program(\n"
+        + "        program=executor.validate_program(program), candidate=candidate)\n"
+        + "    assert len(outcomes) == 19 and all(item.result.ok for item in outcomes), "
+        + "[item.result.to_mapping() for item in outcomes]\n"
+        + "    observed = _entity_observations(session)\n"
+        + "    by_operation = {item.provenance['operation_id']: item for item in observed}\n"
+        + "    assert by_operation['cut'].object_type == 'Part::Cut'\n"
+        + "    assert by_operation['fuse'].object_type == 'Part::Fuse'\n"
+        + "    assert by_operation['common'].object_type == 'Part::Common'\n"
+        + "    assert by_operation['cut'].semantic_role == 'feature'\n"
+        + "    assert dict((p.name, p.value) for p in by_operation['cut'].parameters) == {\n"
+        + "        'base_object_id': by_operation['cut_base'].object_id,\n"
+        + "        'operation': 'cut',\n"
+        + "        'tool_object_id': by_operation['cut_tool'].object_id,\n"
+        + "    }\n"
+        + "    assert dict((p.name, p.value) for p in by_operation['cut_tool'].parameters) "
+        + "['radius'] == 4\n"
+        + "    assert dict((p.name, p.value) for p in by_operation['fuse_base'].parameters) "
+        + "['length'] == 16\n"
+        + "    assert dict((p.name, p.value) for p in by_operation['common_base'].parameters) "
+        + "['length'] == 12\n"
+        + "    assert by_operation['fuse_base'].placement[3:] != (0, 0, 0, 1)\n"
+        + "    assert by_operation['common_base'].placement[:3] == (79, 0, 0)\n"
+        + "    assert by_operation['contained_tool'].placement[:3] == (130, 2, 2)\n"
+        + "    assert abs(by_operation['contained_fuse'].volume_mm3 - 8000) <= 1e-7\n"
+        + "    assert by_operation['cut'].volume_mm3 < 8000\n"
+        + "    shape_before = _shape_observation(session)\n"
+        + "    assert shape_before.solid_count == 4, shape_before.to_mapping()\n"
+        + "    executor.checkpoint_fcstd(session, root / 'model.FCStd')\n"
+        + "    (root / 'model.step').touch(mode=0o600)\n"
+        + "    _export_session_step(session=session, model_path=root / 'model.FCStd',\n"
+        + "        step_path=root / 'model.step')\n"
+        + "    assert (root / 'model.step').stat().st_size > 0\n"
+        + "    loaded = executor.load_fcstd(root / 'model.FCStd')\n"
+        + "    loaded_observed = _entity_observations(loaded)\n"
+        + "    assert [item.object_id for item in loaded_observed] == "
+        + "[item.object_id for item in observed]\n"
+        + "    assert all((item.object_id, item.feature_id, item.object_type, "
+        + "item.semantic_role, dict(item.provenance)) == "
+        + "(loaded_item.object_id, loaded_item.feature_id, loaded_item.object_type, "
+        + "loaded_item.semantic_role, dict(loaded_item.provenance)) "
+        + "for item, loaded_item in zip(observed, loaded_observed))\n"
+        + "    assert all(item.parameters == loaded_item.parameters "
+        + "for item, loaded_item in zip(observed, loaded_observed))\n"
+        + "    assert all(item.placement == loaded_item.placement "
+        + "for item, loaded_item in zip(observed, loaded_observed))\n"
+        + "    assert all(item.valid_shape == loaded_item.valid_shape "
+        + "and item.solid_count == loaded_item.solid_count "
+        + "for item, loaded_item in zip(observed, loaded_observed))\n"
+        + "    assert all(abs(item.volume_mm3 - loaded_item.volume_mm3) <= 1e-7 "
+        + "and abs(item.area_mm2 - loaded_item.area_mm2) <= 1e-7 "
+        + "and all(abs(a-b) <= 1e-7 for a,b in zip(item.bbox_mm, loaded_item.bbox_mm)) "
+        + "and all(abs(a-b) <= 1e-7 for a,b in zip(item.center_of_mass_mm, "
+        + "loaded_item.center_of_mass_mm)) for item, loaded_item in "
+        + "zip(observed, loaded_observed))\n"
+        + "    loaded_shape = _shape_observation(loaded)\n"
+        + "    assert loaded_shape.target == shape_before.target\n"
+        + "    assert loaded_shape.valid_shape == shape_before.valid_shape\n"
+        + "    assert loaded_shape.solid_count == shape_before.solid_count\n"
+        + "    assert abs(loaded_shape.volume_mm3 - shape_before.volume_mm3) <= 1e-7\n"
+        + "    assert abs(loaded_shape.area_mm2 - shape_before.area_mm2) <= 1e-7\n"
+        + "    assert all(abs(a-b) <= 1e-7 for a,b in "
+        + "zip(loaded_shape.bbox_mm, shape_before.bbox_mm))\n"
+        + "    assert all(abs(a-b) <= 1e-7 for a,b in "
+        + "zip(loaded_shape.center_of_mass_mm, shape_before.center_of_mass_mm))\n"
+        + "    print('REAL_NATIVE_BOOLEANS_OK')\n"
+        + "finally:\n"
+        + "    if loaded is not None:\n"
+        + "        loaded.close_document()\n"
+        + "    session.close_document()\n"
+    )
+    result = subprocess.run(
+        [str(runtime_python), "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "REAL_NATIVE_BOOLEANS_OK" in result.stdout
+
+
+@pytest.mark.slow
+def test_real_freecad_component_boolean_owner_root_reopen_and_export_step(
+    tmp_path: Path,
+) -> None:
+    if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
+        pytest.skip("set VIBECAD_RUN_INTEGRATION=1 to run the real FreeCAD gate")
+    from vibecad.runtime import paths as runtime_paths
+    from vibecad.runtime import status as runtime_status
+
+    runtime_python = runtime_paths.active_runtime_python()
+    if not runtime_python.is_file() or not runtime_paths.ready_sentinel().is_file():
+        pytest.fail("an existing ready managed FreeCAD runtime is required")
+    if not runtime_status.engine_compatible(runtime_python):
+        pytest.fail("the existing managed FreeCAD runtime does not match current engine pins")
+    code = (
+        f"import sys; sys.path.insert(0, {str(Path(__file__).parents[1] / 'src')!r})\n"
+        + "from pathlib import Path\n"
+        + "from vibecad.execution.candidate import ActiveCandidate, SessionBinding\n"
+        + "from vibecad.execution.executor import (InProcessCadExecutor, "
+        + "_component_observations, _entity_observations, _export_session_step)\n"
+        + "from vibecad.execution.revisions import LocalRevisionStore, ProjectHead\n"
+        + "from vibecad.workflow.contracts import (AcceptanceSpec, ModelCommand, "
+        + "ModelProgram, ValueSource)\n"
+        + f"root = Path({str(tmp_path)!r})\n"
+        + f"project_id = {PROJECT_ID!r}\n"
+        + f"base_revision = {BASE_REVISION!r}\n"
+        + f"candidate_revision = {CANDIDATE_REVISION!r}\n"
+        + "def command(identifier, operation, *, target=None, args=None, depends=()):\n"
+        + "    return ModelCommand(id=identifier, op=operation, target=target or {}, "
+        + "args=args or {}, depends_on=depends, preserve=(), source=ValueSource.MODEL)\n"
+        + "def ref(identifier): return {'command_id': identifier, 'slot': 'object'}\n"
+        + "program = ModelProgram(task_id='task-real-component-boolean', "
+        + "base_revision=base_revision, operations=(\n"
+        + "    command('component', 'create_component', args={'name': 'Bracket'}),\n"
+        + "    command('base', 'create_box', target={'component': {'command_id': "
+        + "'component', 'slot': 'component'}}, args={'length_mm': 20, 'width_mm': 10, "
+        + "'height_mm': 10}, depends=('component',)),\n"
+        + "    command('tool', 'create_box', target={'component': {'command_id': "
+        + "'component', 'slot': 'component'}}, args={'length_mm': 10, 'width_mm': 10, "
+        + "'height_mm': 10, 'position_mm': [15, 0, 0]}, depends=('base',)),\n"
+        + "    command('fuse', 'boolean_fuse', target={'base': ref('base'), "
+        + "'tool': ref('tool')}, depends=('base', 'tool')),\n"
+        + "    command('second_tool', 'create_box', target={'component': {'command_id': "
+        + "'component', 'slot': 'component'}}, args={'length_mm': 5, 'width_mm': 10, "
+        + "'height_mm': 10, 'position_mm': [22, 0, 0]}, depends=('fuse',)),\n"
+        + "    command('second_fuse', 'boolean_fuse', target={'base': ref('fuse'), "
+        + "'tool': ref('second_tool')}, depends=('fuse', 'second_tool')),\n"
+        + "    command('inspect', 'inspect_model', depends=('second_fuse',)),\n"
+        + "), acceptance=AcceptanceSpec(id='accept-real-component-boolean', criteria=()))\n"
+        + "executor = InProcessCadExecutor(store=object.__new__(LocalRevisionStore))\n"
+        + "session = executor.create_empty(revision_id=candidate_revision); loaded = None\n"
+        + "try:\n"
+        + "    head = ProjectHead(project_id=project_id, generation=0, "
+        + "revision_id=base_revision, manifest_sha256='a' * 64)\n"
+        + "    candidate = ActiveCandidate(project_id=project_id, base_head=head, "
+        + "binding=SessionBinding(project_id=project_id, revision_id=candidate_revision, "
+        + "session=session), model_path=root/'model.FCStd', step_path=root/'model.step')\n"
+        + "    outcomes = executor.execute_program(program=executor.validate_program(program), "
+        + "candidate=candidate)\n"
+        + "    assert len(outcomes) == 7 and all(item.result.ok for item in outcomes), "
+        + "[item.result.to_mapping() for item in outcomes]\n"
+        + "    observed = _entity_observations(session); components = "
+        + "_component_observations(session)\n"
+        + "    fuses = [item for item in observed if item.object_type == 'Part::Fuse']\n"
+        + "    assert len(fuses) == 2 and all(item.semantic_role == 'feature' for item in fuses)\n"
+        + "    assert len(components) == 1 and components[0].member_object_ids == "
+        + "tuple(sorted(item.object_id for item in observed if item.object_type != 'App::Part'))\n"
+        + "    executor.checkpoint_fcstd(session, root/'model.FCStd')\n"
+        + "    (root/'model.step').touch(mode=0o600)\n"
+        + "    _export_session_step(session=session, model_path=root/'model.FCStd', "
+        + "step_path=root/'model.step')\n"
+        + "    loaded = executor.load_fcstd(root/'model.FCStd')\n"
+        + "    assert [item.object_id for item in _entity_observations(loaded)] == "
+        + "[item.object_id for item in observed]\n"
+        + "    assert _component_observations(loaded)[0].member_object_ids == "
+        + "components[0].member_object_ids\n"
+        + "    print('REAL_COMPONENT_BOOLEAN_OK')\n"
+        + "finally:\n"
+        + "    if loaded is not None: loaded.close_document()\n"
+        + "    session.close_document()\n"
+    )
+    result = subprocess.run(
+        [str(runtime_python), "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "REAL_COMPONENT_BOOLEAN_OK" in result.stdout
 
 
 def test_rotate_rejects_requested_quaternion_with_wrong_translation(

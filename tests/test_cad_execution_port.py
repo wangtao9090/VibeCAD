@@ -2035,10 +2035,10 @@ def test_revalidate_normalized_import_maps_cad_faults_and_closes_exactly_once(
     ("object_types", "expected_code"),
     [
         ((), ExecutorErrorCode.INVALID_INPUT),
-        (("Part::Sphere",), ExecutorErrorCode.INVALID_INPUT),
-        (("Part::Box", "Part::Sphere"), ExecutorErrorCode.INVALID_INPUT),
+        (("Part::Feature",), ExecutorErrorCode.INVALID_INPUT),
+        (("Part::Box", "Part::Feature"), ExecutorErrorCode.INVALID_INPUT),
         (("Part::Box",), ExecutorErrorCode.CAD_FAILURE),
-        (("Part::Box", "Part::Cylinder"), ExecutorErrorCode.CAD_FAILURE),
+        (("Part::Box", "Part::Sphere"), ExecutorErrorCode.CAD_FAILURE),
     ],
 )
 def test_revalidate_normalized_import_distinguishes_envelope_rejection_from_crash_state(
@@ -2147,7 +2147,7 @@ def test_revalidate_normalized_import_maps_envelope_inspection_faults_to_cad_fai
 
 @pytest.mark.parametrize(
     "object_types",
-    ((), ("Part::Sphere",), ("Part::Box", "Part::Sphere")),
+    ((), ("Part::Feature",), ("Part::Box", "Part::Feature")),
 )
 def test_revalidate_normalized_import_close_fault_overrides_invalid_envelope(
     monkeypatch: pytest.MonkeyPatch,

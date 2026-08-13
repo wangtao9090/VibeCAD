@@ -102,7 +102,7 @@ def test_index_aggregates_native_compiler_and_operation_surfaces() -> None:
 
     assert index.catalog_sha256 == reordered.catalog_sha256
     assert index.coverage().total == len(index.descriptors)
-    assert index.coverage(kind=CapabilityKind.OPERATION).executable == 27
+    assert index.coverage(kind=CapabilityKind.OPERATION).executable == 30
     assert index.coverage(kind=CapabilityKind.DOCUMENT_OBJECT).discovered == 2
     same_native = index.lookup_native("PartDesign::Pad")
     assert {item.kind for item in same_native} == {

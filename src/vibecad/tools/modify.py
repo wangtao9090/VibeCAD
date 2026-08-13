@@ -309,3 +309,75 @@ def modify_part(session: Session, name: str, parameter: str, value: float) -> di
                 _assert_shape_reflects(obj, key, float(value))
                 result["note"] = "该修改未改变最终几何（参数已生效，例如通孔在零件外的部分加长）"
     return result
+
+
+def _modify_part_uncommitted(
+    session: Session,
+    name: str,
+    parameter: str,
+    value: float,
+    *,
+    result_name: str,
+) -> dict[str, Any]:
+    """Edit one primitive inside an executor-owned Boolean transaction.
+
+    The caller authenticates the dependency graph and owns the surrounding
+    transaction.  This leaf intentionally performs only local write/readback,
+    recompute, touched-state, explicit-result and one-solid checks; executor
+    observations prove identity preservation and an exact descendant recompute
+    receipt, including valid edits whose final Boolean geometry is invariant.
+    """
+
+    if (
+        type(name) is not str
+        or not name
+        or type(parameter) is not str
+        or not parameter
+        or type(value) not in {int, float}
+        or not math.isfinite(value)
+        or value <= 0
+        or type(result_name) is not str
+        or not result_name
+    ):
+        raise ValueError("无效的受管参数修改")
+    obj = session.get_object(name)
+    whitelist = _WHITELIST.get(getattr(obj, "TypeId", ""))
+    key = parameter.lower()
+    if whitelist is None or key not in whitelist or whitelist[key] is None:
+        raise ValueError("对象或参数不支持受管依赖修改")
+    attr = whitelist[key]
+    assert type(attr) is str
+    old = float(getattr(obj, attr))
+    if abs(old - value) < 1e-9:
+        raise ValueError("参数值未变化")
+    if getattr(obj, "TypeId", "") == "Part::Cone":
+        next_base = float(value) if key == "base_radius" else float(obj.Radius1)
+        next_top = float(value) if key == "top_radius" else float(obj.Radius2)
+        if next_base == 0 and next_top == 0:
+            raise ValueError("圆锥半径无效")
+    if getattr(obj, "TypeId", "") == "Part::Torus":
+        next_major = float(value) if key == "major_radius" else float(obj.Radius1)
+        next_minor = float(value) if key == "minor_radius" else float(obj.Radius2)
+        if next_major <= next_minor:
+            raise ValueError("圆环体半径无效")
+    setattr(obj, attr, float(value))
+    session.doc.recompute()
+    if abs(float(getattr(obj, attr)) - value) > 1e-9:
+        raise RuntimeError("受管参数回读不一致")
+    assert_not_touched(obj, f"参数 {key}")
+    result_obj = session.get_result_object(session.owner_of(name))
+    if result_obj.Name != result_name:
+        raise RuntimeError("受管结果对象发生漂移")
+    session.assert_valid_solid(result_obj.Shape)
+    assert_solid_integrity(
+        session,
+        result_obj.Shape,
+        "受管依赖参数修改",
+        part=session.owner_of(name),
+    )
+    return {
+        "ok": True,
+        "modified": {"name": name, "parameter": key, "from": old, "to": float(value)},
+        "volume": float(result_obj.Shape.Volume),
+        "labels_stale": True,
+    }
