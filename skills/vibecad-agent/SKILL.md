@@ -158,6 +158,12 @@ primitives, and uncertainty, but it cannot accept a CAD draft, change Task/Revis
 an uncalibrated image into dimensional truth. An empty list is valid before review evidence has
 been rendered; never fabricate a URI or fall back to an arbitrary local path.
 
+Adoption is eligible only when VibeCAD's internal exact-evidence admission recomputes as `COMPLETE`
+from the sealed images, provider evidence, calibration facts, fitted geometry, proposal, and user
+answers. The caller cannot supply or narrow that admission. Missing, stale, ambiguous, or tampered
+input fails closed before Task creation; inspect the reconstruction and recreate the affected input
+instead of blindly retrying `adopt_reconstruction`.
+
 Call `adopt_reconstruction` only after the user chooses the displayed proposal. Adoption creates an ordinary `REQUIRE_REVIEW` CAD Task; it does not accept a draft or advance project HEAD. Continue that returned task through the normal task/review workflow. Use `reject_reconstruction` to retain a rejected record, or `delete_reconstruction` only when the user wants the draft and its bound local image source removed. Do not treat the deterministic default provider as real photo-to-CAD inference, and do not make this optional lifecycle the default when the host already sees the images.
 
 ## Artifact delivery

@@ -13,9 +13,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: tag/version consistency guard
         # Do not install the project: this stdlib-only guard rejects identity drift first.
-        run: python3 .github/scripts/check_release_versions.py "$GITHUB_REF_NAME"
+        run: >-
+          python3 .github/scripts/check_release_versions.py "$GITHUB_REF_NAME"
+          --expected-ref "$GITHUB_REF" --expected-object "$GITHUB_SHA" --require-clean
 
   quality:
     needs: version-guard
@@ -119,7 +124,12 @@ jobs:
         run: printf 'RELEASE_DIST=%s\n' "$RUNNER_TEMP/release-dist" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: recheck exact release identity before packaging
+        run: >-
+          python3 .github/scripts/check_release_versions.py "$GITHUB_REF_NAME"
+          --expected-ref "$GITHUB_REF" --expected-object "$GITHUB_SHA" --require-clean
       - uses: astral-sh/setup-uv@v6
       - name: build wheel and sdist from the guarded tag
         run: |
@@ -364,7 +374,7 @@ jobs:
             uv pip install --python "$environment/bin/python" --no-deps "$artifact"
           EXPECTED_VERSION="${GITHUB_REF_NAME#v}" EXPECTED_ROOT="$environment" \
             "$environment/bin/python" -I -c \
-              'import os,pathlib,vibecad; from vibecad.application.public_surface import public_tool_specs; from vibecad.runtime import spec; root=pathlib.Path(os.environ["EXPECTED_ROOT"]).resolve(); installed=pathlib.Path(vibecad.__file__).resolve(); assert installed.is_relative_to(root); assert vibecad.__version__ == os.environ["EXPECTED_VERSION"]; assert spec.SERVER_PACKAGE_EPOCH == 4; assert spec.PUBLIC_SURFACE_SHA256 == "1353ab35c0dd1055890a9e0702a644a7e606719964831d583f6205679034fdbe"; assert len(public_tool_specs()) == 38'
+              'import os,pathlib,vibecad; from vibecad.application.public_surface import public_tool_specs; from vibecad.runtime import spec; root=pathlib.Path(os.environ["EXPECTED_ROOT"]).resolve(); installed=pathlib.Path(vibecad.__file__).resolve(); assert installed.is_relative_to(root); assert vibecad.__version__ == os.environ["EXPECTED_VERSION"]; assert spec.SERVER_PACKAGE_EPOCH == 4; assert spec.PUBLIC_SURFACE_SHA256 == "6c1f226119f272e4bfcabd7364c3aa5c52c1f150a98387ba52443ddd26a7e689"; assert len(public_tool_specs()) == 38'
           done
       - name: upload gated Python distributions
         uses: actions/upload-artifact@v4

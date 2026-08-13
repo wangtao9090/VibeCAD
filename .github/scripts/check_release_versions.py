@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""发布前校验 tag 与六个分发版本面一致。纯 stdlib。"""
+"""发布前校验 tag 与五个分发版本面一致，并可绑定 exact Git checkout。纯 stdlib。"""
 
 from __future__ import annotations
 
@@ -7,10 +7,18 @@ import argparse
 import ast
 import json
 import os
+import re
+import subprocess
 import sys
 import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+_GIT_OBJECT_RE = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
+
+
+class ReleaseIdentityError(ValueError):
+    """The checked-out source is not the exact clean commit named by the release tag."""
 
 
 def _source_version(path: Path) -> str:
@@ -69,6 +77,44 @@ def collect_versions(root: Path, tag: str) -> dict[str, str]:
     return versions
 
 
+def _git_output(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        raise ReleaseIdentityError(f"git {' '.join(args)} 失败")
+    return result.stdout.strip()
+
+
+def verify_release_identity(
+    root: Path,
+    tag: str,
+    *,
+    expected_ref: str,
+    expected_object: str,
+    require_clean: bool,
+) -> None:
+    """Bind the workflow event, tag, checkout, and optional clean-tree invariant."""
+
+    tag_ref = f"refs/tags/{tag}"
+    if expected_ref != tag_ref:
+        raise ReleaseIdentityError(f"workflow ref 必须是 {tag_ref!r}（得到 {expected_ref!r}）")
+    if _GIT_OBJECT_RE.fullmatch(expected_object) is None:
+        raise ReleaseIdentityError("workflow object 必须是完整 Git object id")
+
+    head_commit = _git_output(root, "rev-parse", "--verify", "HEAD^{commit}")
+    tag_commit = _git_output(root, "rev-parse", "--verify", f"{tag_ref}^{{commit}}")
+    event_commit = _git_output(root, "rev-parse", "--verify", f"{expected_object}^{{commit}}")
+    if not head_commit == tag_commit == event_commit:
+        raise ReleaseIdentityError("checkout HEAD、发布 tag 与 workflow object 未解析到同一 commit")
+    if require_clean and _git_output(root, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise ReleaseIdentityError("发布 checkout 必须是 clean worktree")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -78,7 +124,19 @@ def main(argv: list[str] | None = None) -> int:
         help="发布 tag（默认读取 GITHUB_REF_NAME）",
     )
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="仓库根目录")
+    parser.add_argument("--expected-ref", help="workflow 的完整 tag ref（例如 refs/tags/v1.2.3）")
+    parser.add_argument("--expected-object", help="workflow 提供的完整 Git object id")
+    parser.add_argument(
+        "--require-clean",
+        action="store_true",
+        help="拒绝 tracked 或 untracked worktree 漂移",
+    )
     args = parser.parse_args(argv)
+
+    if (args.expected_ref is None) != (args.expected_object is None):
+        parser.error("--expected-ref 与 --expected-object 必须同时提供")
+    if args.require_clean and args.expected_ref is None:
+        parser.error("--require-clean 需要同时提供 workflow ref 与 object")
 
     try:
         versions = collect_versions(args.root.resolve(), args.tag)
@@ -103,7 +161,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::error::发布版本不一致：{details}", file=sys.stderr)
         return 1
 
-    print(f"发布版本校验通过：v{expected}（tag 与六个分发版本面）")
+    if args.expected_ref is not None and args.expected_object is not None:
+        try:
+            verify_release_identity(
+                args.root.resolve(),
+                args.tag,
+                expected_ref=args.expected_ref,
+                expected_object=args.expected_object,
+                require_clean=args.require_clean,
+            )
+        except (OSError, subprocess.SubprocessError, ReleaseIdentityError) as exc:
+            print(f"::error::发布 Git 身份校验失败：{exc}", file=sys.stderr)
+            return 1
+
+    suffix = "，Git tag/commit/checkout 已绑定" if args.expected_ref is not None else ""
+    print(f"发布版本校验通过：v{expected}（tag 与五个分发版本面{suffix}）")
     return 0
 
 

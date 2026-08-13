@@ -270,6 +270,10 @@ def test_skill_routes_visual_reconstruction_without_claiming_attachment_ingress(
     for forbidden in ("path", "base64", "resource uri"):
         assert forbidden in normalized
     assert re.search(r"never|must not|禁止|不得|不能", visual, re.IGNORECASE)
+    assert "exact-evidence admission" in normalized
+    assert "complete" in normalized
+    assert "fails closed before task creation" in normalized
+    assert "instead of blindly retrying" in normalized
 
 
 def test_skill_freezes_the_multi_view_mechanical_envelope_and_safe_failures():
@@ -703,7 +707,7 @@ def test_skill_distribution_channels_are_explicit_and_non_overlapping():
     assert not any(pattern.startswith("skills") for pattern in ignored)
 
 
-def test_manifest_projection_and_all_package_versions_target_0_9_0():
+def test_manifest_projection_and_all_package_versions_target_0_10_0():
     from vibecad.application.public_surface import public_tool_specs
     from vibecad.runtime import spec
 
@@ -722,9 +726,9 @@ def test_manifest_projection_and_all_package_versions_target_0_9_0():
     with (ROOT / "uv.lock").open("rb") as handle:
         lock = tomllib.load(handle)
     locked = [package["version"] for package in lock["package"] if package.get("name") == "vibecad"]
-    assert locked == ["0.9.0"]
-    assert manifest["version"] == project_version == source_version.group(1) == "0.9.0"
-    assert spec.VIBECAD_VERSION == "0.9.0"
+    assert locked == ["0.10.0"]
+    assert manifest["version"] == project_version == source_version.group(1) == "0.10.0"
+    assert spec.VIBECAD_VERSION == "0.10.0"
 
 
 def test_release_documents_project_the_0_9_0_backend_truth():
@@ -817,6 +821,15 @@ def test_release_documents_project_the_0_9_0_backend_truth():
     assert "vibecad-agent-skill-0.9.0.zip" in release_notes
     assert "epoch stays at 4" in release_notes
     assert "tool count stays at 38" in release_notes
+
+    current_release = _normalized(_read(ROOT / "docs" / "releases" / "v0.10.0.md"))
+    assert current_release.startswith("# vibecad v0.10.0 ")
+    assert "evidence-gated" in current_release
+    assert "1–16 circular locations" in current_release
+    assert "reversed `through_all` hole" in current_release
+    assert "loggedin=false" in current_release
+    assert "runtime epoch 4" in current_release
+    assert "38-tool public mcp surface" in current_release
 
 
 def test_release_publishers_consume_gated_archives_and_attach_the_skill_asset():
