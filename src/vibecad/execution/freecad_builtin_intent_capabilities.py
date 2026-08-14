@@ -25,6 +25,10 @@ from vibecad.intent_bridge.freecad_parametric_adapter import (
     FREECAD_GROOVE_ADAPTER_DESCRIPTOR,
     GROOVE_OPERATION_TERM,
 )
+from vibecad.intent_bridge.freecad_partdesign_primitive_adapter import (
+    FREECAD_PARTDESIGN_PRIMITIVE_ADAPTER_DESCRIPTOR,
+    PRIMITIVE_OPERATION_TERMS,
+)
 from vibecad.intent_bridge.freecad_partdesign_promotion_adapter import (
     FREECAD_PARTDESIGN_PROMOTION_ADAPTER_DESCRIPTOR,
     PROMOTION_OPERATION_TERMS,
@@ -32,6 +36,11 @@ from vibecad.intent_bridge.freecad_partdesign_promotion_adapter import (
 from vibecad.intent_bridge.freecad_partdesign_reference_adapter import (
     FREECAD_REFERENCE_ADAPTER_DESCRIPTOR,
     REFERENCE_OPERATION_TERMS,
+)
+from vibecad.parametric.freecad_partdesign_primitive_rules import (
+    PARTDESIGN_PRIMITIVE_RULE_CONTRACT_SHA256,
+    PARTDESIGN_PRIMITIVE_RULE_ID,
+    PartDesignPrimitiveOperation,
 )
 from vibecad.parametric.freecad_partdesign_promotion_rules import (
     PARTDESIGN_PROMOTION_RULE_CONTRACT_SHA256,
@@ -72,6 +81,25 @@ _REFERENCE_NATIVE_TYPES: Final = {
     PartDesignReferenceKind.DATUM_POINT: "PartDesign::Point",
     PartDesignReferenceKind.SHAPE_BINDER: "PartDesign::ShapeBinder",
     PartDesignReferenceKind.SUBSHAPE_BINDER: "PartDesign::SubShapeBinder",
+}
+
+_PRIMITIVE_NATIVE_TYPES: Final = {
+    PartDesignPrimitiveOperation.ADDITIVE_BOX: "PartDesign::AdditiveBox",
+    PartDesignPrimitiveOperation.SUBTRACTIVE_BOX: "PartDesign::SubtractiveBox",
+    PartDesignPrimitiveOperation.ADDITIVE_CYLINDER: "PartDesign::AdditiveCylinder",
+    PartDesignPrimitiveOperation.SUBTRACTIVE_CYLINDER: "PartDesign::SubtractiveCylinder",
+    PartDesignPrimitiveOperation.ADDITIVE_SPHERE: "PartDesign::AdditiveSphere",
+    PartDesignPrimitiveOperation.SUBTRACTIVE_SPHERE: "PartDesign::SubtractiveSphere",
+    PartDesignPrimitiveOperation.ADDITIVE_CONE: "PartDesign::AdditiveCone",
+    PartDesignPrimitiveOperation.SUBTRACTIVE_CONE: "PartDesign::SubtractiveCone",
+    PartDesignPrimitiveOperation.ADDITIVE_ELLIPSOID: "PartDesign::AdditiveEllipsoid",
+    PartDesignPrimitiveOperation.SUBTRACTIVE_ELLIPSOID: "PartDesign::SubtractiveEllipsoid",
+    PartDesignPrimitiveOperation.ADDITIVE_PRISM: "PartDesign::AdditivePrism",
+    PartDesignPrimitiveOperation.SUBTRACTIVE_PRISM: "PartDesign::SubtractivePrism",
+    PartDesignPrimitiveOperation.ADDITIVE_WEDGE: "PartDesign::AdditiveWedge",
+    PartDesignPrimitiveOperation.SUBTRACTIVE_WEDGE: "PartDesign::SubtractiveWedge",
+    PartDesignPrimitiveOperation.ADDITIVE_TORUS: "PartDesign::AdditiveTorus",
+    PartDesignPrimitiveOperation.SUBTRACTIVE_TORUS: "PartDesign::SubtractiveTorus",
 }
 
 
@@ -133,6 +161,17 @@ def current_freecad_intent_capability_specs() -> tuple[FreeCadIntentCapabilitySp
             rule_contract_sha256=REFERENCE_RULE_CONTRACT_SHA256,
         )
         for kind in PartDesignReferenceKind
+    )
+    specs.extend(
+        _spec(
+            operation_id=f"partdesign.{item.operation.value}",
+            semantic_operation=item.operation_term.term_id,
+            native_type_id=_PRIMITIVE_NATIVE_TYPES[item.operation],
+            adapter=FREECAD_PARTDESIGN_PRIMITIVE_ADAPTER_DESCRIPTOR,
+            rule_id=PARTDESIGN_PRIMITIVE_RULE_ID,
+            rule_contract_sha256=PARTDESIGN_PRIMITIVE_RULE_CONTRACT_SHA256,
+        )
+        for item in PRIMITIVE_OPERATION_TERMS
     )
     return tuple(sorted(specs, key=lambda item: item.operation_id))
 
