@@ -37,6 +37,14 @@ from vibecad.intent_bridge.freecad_partdesign_reference_adapter import (
     FREECAD_REFERENCE_ADAPTER_DESCRIPTOR,
     REFERENCE_OPERATION_TERMS,
 )
+from vibecad.intent_bridge.freecad_planar_mechanical_adapter import (
+    FREECAD_PLANAR_MECHANICAL_ADAPTER_DESCRIPTOR,
+)
+from vibecad.intent_rules.planar_mechanical_v1.terms import (
+    PFG_OPERATION_ADD,
+    PFG_OPERATION_REFERENCE_PROFILES,
+    PFG_OPERATION_REMOVE,
+)
 from vibecad.parametric.freecad_partdesign_primitive_rules import (
     PARTDESIGN_PRIMITIVE_RULE_CONTRACT_SHA256,
     PARTDESIGN_PRIMITIVE_RULE_ID,
@@ -55,6 +63,10 @@ from vibecad.parametric.freecad_partdesign_reference_rules import (
 from vibecad.parametric.freecad_partdesign_sketch_rules import (
     GROOVE_RULE_CONTRACT_SHA256,
     GROOVE_RULE_ID,
+)
+from vibecad.parametric.freecad_planar_mechanical_rules import (
+    PLANAR_MECHANICAL_RULE_CONTRACT_SHA256,
+    PLANAR_MECHANICAL_RULE_ID,
 )
 
 _LIFECYCLE: Final = (
@@ -101,6 +113,24 @@ _PRIMITIVE_NATIVE_TYPES: Final = {
     PartDesignPrimitiveOperation.ADDITIVE_TORUS: "PartDesign::AdditiveTorus",
     PartDesignPrimitiveOperation.SUBTRACTIVE_TORUS: "PartDesign::SubtractiveTorus",
 }
+
+_PLANAR_MECHANICAL_NATIVE_TYPES: Final = (
+    (
+        "partdesign.planar-mechanical.reference-profiles",
+        PFG_OPERATION_REFERENCE_PROFILES.term_id,
+        "Sketcher::SketchObject",
+    ),
+    (
+        "partdesign.planar-mechanical.add",
+        PFG_OPERATION_ADD.term_id,
+        "PartDesign::Pad",
+    ),
+    (
+        "partdesign.planar-mechanical.remove",
+        PFG_OPERATION_REMOVE.term_id,
+        "PartDesign::Pocket",
+    ),
+)
 
 
 def _spec(
@@ -172,6 +202,17 @@ def current_freecad_intent_capability_specs() -> tuple[FreeCadIntentCapabilitySp
             rule_contract_sha256=PARTDESIGN_PRIMITIVE_RULE_CONTRACT_SHA256,
         )
         for item in PRIMITIVE_OPERATION_TERMS
+    )
+    specs.extend(
+        _spec(
+            operation_id=operation_id,
+            semantic_operation=semantic_operation,
+            native_type_id=native_type_id,
+            adapter=FREECAD_PLANAR_MECHANICAL_ADAPTER_DESCRIPTOR,
+            rule_id=PLANAR_MECHANICAL_RULE_ID,
+            rule_contract_sha256=PLANAR_MECHANICAL_RULE_CONTRACT_SHA256,
+        )
+        for operation_id, semantic_operation, native_type_id in (_PLANAR_MECHANICAL_NATIVE_TYPES)
     )
     return tuple(sorted(specs, key=lambda item: item.operation_id))
 

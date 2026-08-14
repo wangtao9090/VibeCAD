@@ -48,7 +48,7 @@ def _discovery(extra: tuple[FreeCadRegisteredType, ...] = ()):
         build_fingerprint_sha256=_sha("freecad-build"),
         platform_id="macos.arm64",
         probe_profile=CapabilityExecutionProfile.HEADLESS,
-        probe_modules=("Part", "PartDesign"),
+        probe_modules=("Part", "PartDesign", "Sketcher"),
         registered_types=(
             FreeCadRegisteredType(
                 native_type_id="Base::BaseClass",
@@ -71,7 +71,7 @@ def _discovery(extra: tuple[FreeCadRegisteredType, ...] = ()):
             *(
                 FreeCadRegisteredType(
                     native_type_id=native_type_id,
-                    declaring_module="PartDesign",
+                    declaring_module=native_type_id.split("::", 1)[0],
                     parent_native_type_id="Part::Feature",
                     category=FreeCadNativeTypeCategory.DOCUMENT_OBJECT,
                 )
@@ -87,17 +87,18 @@ def _fact(entry, key: str):
     return next(item.decoded_value for item in entry.facts if item.key_term_ref_id == key)
 
 
-def test_current_specs_build_four_packs_and_promote_all_twenty_eight_type_ids() -> None:
+def test_current_specs_build_five_packs_and_promote_all_thirty_one_type_ids() -> None:
     discovery = _discovery()
     specs = current_freecad_intent_capability_specs()
     packs = build_freecad_intent_capability_promotion_packs(discovery=discovery, specs=specs)
-    assert len(packs) == 4
-    assert sum(len(item.entries) for item in packs) == 28
+    assert len(packs) == 5
+    assert sum(len(item.entries) for item in packs) == 31
     assert {item.adapter_id for item in packs} == {
         "freecad_parametric_groove_adapter",
         "freecad_partdesign_promotion_adapter",
         "freecad_partdesign_reference_adapter",
         "freecad_partdesign_primitive_adapter",
+        "freecad_planar_mechanical_v1_adapter",
     }
     assert all(
         entry.target_status is CapabilitySupportStatus.EXECUTABLE
@@ -118,7 +119,7 @@ def test_current_specs_build_four_packs_and_promote_all_twenty_eight_type_ids() 
         if item.native_type_id in {spec.native_type_id for spec in specs}
     }
     assert promoted == {item.native_type_id: CapabilitySupportStatus.EXECUTABLE for item in specs}
-    assert len(projection.manifest.formal_bindings) == 28
+    assert len(projection.manifest.formal_bindings) == 31
 
 
 def test_multiple_semantics_for_one_type_are_consolidated() -> None:

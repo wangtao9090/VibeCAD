@@ -194,10 +194,10 @@ def _extra_catalog(
 def _promotion_pack(
     discovery: FreeCadPagedCapabilityCatalog,
 ) -> FreeCadCapabilityPromotionPack:
-    term = _term("pad-representable")
+    term = _term("mirrored-representable")
     return FreeCadCapabilityPromotionPack(
         schema_version=FREECAD_CAPABILITY_PROMOTION_PACK_SCHEMA_VERSION,
-        pack_id="test.pad.representable",
+        pack_id="test.mirrored.representable",
         lane_id="test.partdesign",
         adapter_id="vcad.test.partdesign",
         adapter_version="1.0",
@@ -208,7 +208,7 @@ def _promotion_pack(
         terms=(term,),
         entries=(
             FreeCadCapabilityPromotionEntry(
-                native_type_id="PartDesign::Pad",
+                native_type_id="PartDesign::Mirrored",
                 semantic_kind=FreeCadCapabilitySemanticKind.DOCUMENT_OBJECT,
                 target_status=CapabilitySupportStatus.REPRESENTABLE,
                 risk_class=CapabilityRiskClass.MUTATING,
@@ -280,10 +280,10 @@ def test_composes_builtin_extra_and_promotion_catalogs_with_exact_binding(
     assert forward.binding.extra_formal_catalog_sha256 == tuple(
         sorted((alpha.catalog_sha256, beta.catalog_sha256))
     )
-    assert len(forward.binding.promotion_pack_sha256) == 5
+    assert len(forward.binding.promotion_pack_sha256) == 6
     assert pack.pack_sha256 in forward.binding.promotion_pack_sha256
     assert forward.binding.intent_catalog_sha256 == forward.intent_catalog.catalog_sha256
-    assert len(forward.projection.manifest.formal_bindings) == 39
+    assert len(forward.projection.manifest.formal_bindings) == 42
     assert {
         binding.formal_capability_id for binding in forward.projection.manifest.formal_bindings
     }.issuperset(spec.capability_id for spec in current_freecad_intent_capability_specs())
@@ -296,7 +296,7 @@ def test_composes_builtin_extra_and_promotion_catalogs_with_exact_binding(
         is CapabilitySupportStatus.EXECUTABLE
     )
     assert (
-        forward.projection.index.lookup(freecad_type_capability_id("PartDesign::Pad")).status
+        forward.projection.index.lookup(freecad_type_capability_id("PartDesign::Mirrored")).status
         is CapabilitySupportStatus.REPRESENTABLE
     )
     assert {
@@ -350,9 +350,9 @@ def test_query_filters_and_n_plus_one_pages_are_stable_and_content_addressed(
         runtime,
         minimum_status=CapabilitySupportStatus.VERIFIED,
     )
-    assert representable.total_matches == 29
+    assert representable.total_matches == 32
     assert "PartDesign::Pad" in {item.native_type_id for item in representable.entries}
-    assert executable.total_matches == len(current_freecad_intent_capability_specs()) == 28
+    assert executable.total_matches == len(current_freecad_intent_capability_specs()) == 31
     assert verified.total_matches == 0
     assert verified.entries == () and verified.next_cursor is None
 
@@ -569,8 +569,8 @@ def test_real_managed_freecad_runtime_composes_449_and_pages_with_extra_catalog(
     assert "FreeCADGui" not in sys.modules
     assert runtime.binding.native_type_count == 449
     assert len(runtime.projection.manifest.entries) == 449
-    assert len(runtime.projection.manifest.formal_bindings) == 39
-    assert len(runtime.binding.promotion_pack_sha256) == 4
+    assert len(runtime.projection.manifest.formal_bindings) == 42
+    assert len(runtime.binding.promotion_pack_sha256) == 5
     assert len(part_ids) == len(set(part_ids)) == 141
     assert part_ids == sorted(part_ids)
     assert len(document_ids) == len(set(document_ids)) == 175
@@ -583,7 +583,7 @@ def test_real_managed_freecad_runtime_composes_449_and_pages_with_extra_catalog(
         runtime,
         minimum_status=CapabilitySupportStatus.EXECUTABLE,
     )
-    assert executable.total_matches == 28
+    assert executable.total_matches == 31
     assert {item.native_type_id for item in executable.entries} == {
         spec.native_type_id for spec in current_freecad_intent_capability_specs()
     }
