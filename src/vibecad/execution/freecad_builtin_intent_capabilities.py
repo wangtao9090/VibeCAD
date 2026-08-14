@@ -25,6 +25,10 @@ from vibecad.intent_bridge.freecad_parametric_adapter import (
     FREECAD_GROOVE_ADAPTER_DESCRIPTOR,
     GROOVE_OPERATION_TERM,
 )
+from vibecad.intent_bridge.freecad_partdesign_dressup_transform_adapter import (
+    DRESSUP_TRANSFORM_OPERATION_TERMS,
+    FREECAD_PARTDESIGN_DRESSUP_TRANSFORM_ADAPTER_DESCRIPTOR,
+)
 from vibecad.intent_bridge.freecad_partdesign_primitive_adapter import (
     FREECAD_PARTDESIGN_PRIMITIVE_ADAPTER_DESCRIPTOR,
     PRIMITIVE_OPERATION_TERMS,
@@ -44,6 +48,11 @@ from vibecad.intent_rules.planar_mechanical_v1.terms import (
     PFG_OPERATION_ADD,
     PFG_OPERATION_REFERENCE_PROFILES,
     PFG_OPERATION_REMOVE,
+)
+from vibecad.parametric.freecad_partdesign_dressup_transform_rules import (
+    PARTDESIGN_DRESSUP_TRANSFORM_RULE_CONTRACT_SHA256,
+    PARTDESIGN_DRESSUP_TRANSFORM_RULE_ID,
+    PartDesignDressupTransformOperation,
 )
 from vibecad.parametric.freecad_partdesign_primitive_rules import (
     PARTDESIGN_PRIMITIVE_RULE_CONTRACT_SHA256,
@@ -132,6 +141,15 @@ _PLANAR_MECHANICAL_NATIVE_TYPES: Final = (
     ),
 )
 
+_DRESSUP_TRANSFORM_NATIVE_TYPES: Final = {
+    PartDesignDressupTransformOperation.SCALED: "PartDesign::Scaled",
+    PartDesignDressupTransformOperation.MULTI_TRANSFORM: "PartDesign::MultiTransform",
+    PartDesignDressupTransformOperation.FILLET: "PartDesign::Fillet",
+    PartDesignDressupTransformOperation.CHAMFER: "PartDesign::Chamfer",
+    PartDesignDressupTransformOperation.DRAFT: "PartDesign::Draft",
+    PartDesignDressupTransformOperation.THICKNESS: "PartDesign::Thickness",
+}
+
 
 def _spec(
     *,
@@ -213,6 +231,17 @@ def current_freecad_intent_capability_specs() -> tuple[FreeCadIntentCapabilitySp
             rule_contract_sha256=PLANAR_MECHANICAL_RULE_CONTRACT_SHA256,
         )
         for operation_id, semantic_operation, native_type_id in (_PLANAR_MECHANICAL_NATIVE_TYPES)
+    )
+    specs.extend(
+        _spec(
+            operation_id=f"partdesign.{item.operation.value}",
+            semantic_operation=item.operation_term.term_id,
+            native_type_id=_DRESSUP_TRANSFORM_NATIVE_TYPES[item.operation],
+            adapter=FREECAD_PARTDESIGN_DRESSUP_TRANSFORM_ADAPTER_DESCRIPTOR,
+            rule_id=PARTDESIGN_DRESSUP_TRANSFORM_RULE_ID,
+            rule_contract_sha256=PARTDESIGN_DRESSUP_TRANSFORM_RULE_CONTRACT_SHA256,
+        )
+        for item in DRESSUP_TRANSFORM_OPERATION_TERMS
     )
     return tuple(sorted(specs, key=lambda item: item.operation_id))
 

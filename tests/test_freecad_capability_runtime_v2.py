@@ -286,10 +286,10 @@ def test_composes_builtin_extra_and_promotion_catalogs_with_exact_binding(
     assert forward.binding.extra_formal_catalog_sha256 == tuple(
         sorted((alpha.catalog_sha256, beta.catalog_sha256))
     )
-    assert len(forward.binding.promotion_pack_sha256) == 6
+    assert len(forward.binding.promotion_pack_sha256) == 7
     assert pack.pack_sha256 in forward.binding.promotion_pack_sha256
     assert forward.binding.intent_catalog_sha256 == forward.intent_catalog.catalog_sha256
-    assert len(forward.projection.manifest.formal_bindings) == 42
+    assert len(forward.projection.manifest.formal_bindings) == 48
     assert {
         binding.formal_capability_id for binding in forward.projection.manifest.formal_bindings
     }.issuperset(spec.capability_id for spec in current_freecad_intent_capability_specs())
@@ -358,9 +358,9 @@ def test_query_filters_and_n_plus_one_pages_are_stable_and_content_addressed(
         runtime,
         minimum_status=CapabilitySupportStatus.VERIFIED,
     )
-    assert representable.total_matches == 32
+    assert representable.total_matches == 38
     assert "PartDesign::Pad" in {item.native_type_id for item in representable.entries}
-    assert executable.total_matches == len(current_freecad_intent_capability_specs()) == 31
+    assert executable.total_matches == len(current_freecad_intent_capability_specs()) == 37
     assert verified.total_matches == 0
     assert verified.entries == () and verified.next_cursor is None
 
@@ -577,8 +577,8 @@ def test_real_managed_freecad_runtime_composes_449_and_pages_with_extra_catalog(
     assert "FreeCADGui" not in sys.modules
     assert runtime.binding.native_type_count == 449
     assert len(runtime.projection.manifest.entries) == 449
-    assert len(runtime.projection.manifest.formal_bindings) == 42
-    assert len(runtime.binding.promotion_pack_sha256) == 5
+    assert len(runtime.projection.manifest.formal_bindings) == 48
+    assert len(runtime.binding.promotion_pack_sha256) == 6
     assert len(part_ids) == len(set(part_ids)) == 141
     assert part_ids == sorted(part_ids)
     assert len(document_ids) == len(set(document_ids)) == 175
@@ -591,7 +591,7 @@ def test_real_managed_freecad_runtime_composes_449_and_pages_with_extra_catalog(
         runtime,
         minimum_status=CapabilitySupportStatus.EXECUTABLE,
     )
-    assert executable.total_matches == 31
+    assert executable.total_matches == 37
     assert {item.native_type_id for item in executable.entries} == {
         spec.native_type_id for spec in current_freecad_intent_capability_specs()
     }

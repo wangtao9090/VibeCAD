@@ -28,7 +28,7 @@ def _backend() -> CapabilityBackend:
 
 def test_current_specs_cover_all_reviewed_adapter_families() -> None:
     specs = current_freecad_intent_capability_specs()
-    assert len(specs) == 31
+    assert len(specs) == 37
     assert {item.native_type_id for item in specs} == {
         "PartDesign::Groove",
         "PartDesign::AdditiveLoft",
@@ -61,6 +61,12 @@ def test_current_specs_cover_all_reviewed_adapter_families() -> None:
         "Sketcher::SketchObject",
         "PartDesign::Pad",
         "PartDesign::Pocket",
+        "PartDesign::Scaled",
+        "PartDesign::MultiTransform",
+        "PartDesign::Fillet",
+        "PartDesign::Chamfer",
+        "PartDesign::Draft",
+        "PartDesign::Thickness",
     }
     assert len({item.operation_id for item in specs}) == len(specs)
     assert len({item.semantic_operation for item in specs}) == len(specs)
@@ -70,6 +76,7 @@ def test_current_specs_cover_all_reviewed_adapter_families() -> None:
         "freecad_partdesign_reference_adapter",
         "freecad_partdesign_primitive_adapter",
         "freecad_planar_mechanical_v1_adapter",
+        "freecad_partdesign_dressup_transform_adapter",
     }
     assert all(item.verification is None for item in specs)
 
@@ -80,7 +87,7 @@ def test_current_catalog_is_deterministic_and_executable_not_verified() -> None:
     assert encode_capability_catalog(before) == encode_capability_catalog(after)
 
     operations = tuple(item for item in before.descriptors if item.kind is CapabilityKind.OPERATION)
-    assert len(operations) == 31
+    assert len(operations) == 37
     assert all(item.status is CapabilitySupportStatus.EXECUTABLE for item in operations)
     assert all(item.verification is None for item in operations)
 
