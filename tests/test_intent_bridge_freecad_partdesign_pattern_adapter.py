@@ -616,6 +616,7 @@ def test_plan_decoder_rejects_tamper_duplicate_keys_and_budget() -> None:
     assert caught.value.code is IntentBridgeErrorCode.BUDGET_EXCEEDED
 
 
+@pytest.mark.slow
 def test_real_freecad_batch_create_edit_save_reopen_and_invalid_rollback(
     tmp_path: Path,
 ) -> None:
