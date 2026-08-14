@@ -25,9 +25,17 @@ from vibecad.intent_bridge.freecad_parametric_adapter import (
     FREECAD_GROOVE_ADAPTER_DESCRIPTOR,
     GROOVE_OPERATION_TERM,
 )
+from vibecad.intent_bridge.freecad_partdesign_boolean_adapter import (
+    BOOLEAN_OPERATION_TERMS,
+    FREECAD_PARTDESIGN_BOOLEAN_ADAPTER_DESCRIPTOR,
+)
 from vibecad.intent_bridge.freecad_partdesign_dressup_transform_adapter import (
     DRESSUP_TRANSFORM_OPERATION_TERMS,
     FREECAD_PARTDESIGN_DRESSUP_TRANSFORM_ADAPTER_DESCRIPTOR,
+)
+from vibecad.intent_bridge.freecad_partdesign_pattern_adapter import (
+    FREECAD_PARTDESIGN_PATTERN_ADAPTER_DESCRIPTOR,
+    PATTERN_OPERATION_TERMS,
 )
 from vibecad.intent_bridge.freecad_partdesign_primitive_adapter import (
     FREECAD_PARTDESIGN_PRIMITIVE_ADAPTER_DESCRIPTOR,
@@ -49,10 +57,19 @@ from vibecad.intent_rules.planar_mechanical_v1.terms import (
     PFG_OPERATION_REFERENCE_PROFILES,
     PFG_OPERATION_REMOVE,
 )
+from vibecad.parametric.freecad_partdesign_boolean_rules import (
+    PARTDESIGN_BOOLEAN_RULE_CONTRACT_SHA256,
+    PARTDESIGN_BOOLEAN_RULE_ID,
+)
 from vibecad.parametric.freecad_partdesign_dressup_transform_rules import (
     PARTDESIGN_DRESSUP_TRANSFORM_RULE_CONTRACT_SHA256,
     PARTDESIGN_DRESSUP_TRANSFORM_RULE_ID,
     PartDesignDressupTransformOperation,
+)
+from vibecad.parametric.freecad_partdesign_pattern_rules import (
+    PARTDESIGN_PATTERN_RULE_CONTRACT_SHA256,
+    PARTDESIGN_PATTERN_RULE_ID,
+    PartDesignPatternOperation,
 )
 from vibecad.parametric.freecad_partdesign_primitive_rules import (
     PARTDESIGN_PRIMITIVE_RULE_CONTRACT_SHA256,
@@ -150,6 +167,12 @@ _DRESSUP_TRANSFORM_NATIVE_TYPES: Final = {
     PartDesignDressupTransformOperation.THICKNESS: "PartDesign::Thickness",
 }
 
+_PATTERN_NATIVE_TYPES: Final = {
+    PartDesignPatternOperation.LINEAR_PATTERN: "PartDesign::LinearPattern",
+    PartDesignPatternOperation.POLAR_PATTERN: "PartDesign::PolarPattern",
+    PartDesignPatternOperation.MIRRORED: "PartDesign::Mirrored",
+}
+
 
 def _spec(
     *,
@@ -242,6 +265,28 @@ def current_freecad_intent_capability_specs() -> tuple[FreeCadIntentCapabilitySp
             rule_contract_sha256=PARTDESIGN_DRESSUP_TRANSFORM_RULE_CONTRACT_SHA256,
         )
         for item in DRESSUP_TRANSFORM_OPERATION_TERMS
+    )
+    specs.extend(
+        _spec(
+            operation_id=f"partdesign.{item.operation.value}",
+            semantic_operation=item.operation_term.term_id,
+            native_type_id=_PATTERN_NATIVE_TYPES[item.operation],
+            adapter=FREECAD_PARTDESIGN_PATTERN_ADAPTER_DESCRIPTOR,
+            rule_id=PARTDESIGN_PATTERN_RULE_ID,
+            rule_contract_sha256=PARTDESIGN_PATTERN_RULE_CONTRACT_SHA256,
+        )
+        for item in PATTERN_OPERATION_TERMS
+    )
+    specs.extend(
+        _spec(
+            operation_id=f"partdesign.boolean.{item.operation.value}",
+            semantic_operation=item.operation_term.term_id,
+            native_type_id="PartDesign::Boolean",
+            adapter=FREECAD_PARTDESIGN_BOOLEAN_ADAPTER_DESCRIPTOR,
+            rule_id=PARTDESIGN_BOOLEAN_RULE_ID,
+            rule_contract_sha256=PARTDESIGN_BOOLEAN_RULE_CONTRACT_SHA256,
+        )
+        for item in BOOLEAN_OPERATION_TERMS
     )
     return tuple(sorted(specs, key=lambda item: item.operation_id))
 
