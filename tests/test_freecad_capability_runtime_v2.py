@@ -126,6 +126,12 @@ def _discovery() -> FreeCadPagedCapabilityCatalog:
             )
             for native_type_id in compiler_type_ids
         ),
+        _registered(
+            "PartDesign::TestRepresentableFeature",
+            "PartDesign",
+            FreeCadNativeTypeCategory.DOCUMENT_OBJECT,
+            "App::DocumentObject",
+        ),
     )
     snapshot = FreeCadDiscoverySnapshotV2(
         schema_version=FREECAD_DISCOVERY_V2_SCHEMA_VERSION,
@@ -194,10 +200,10 @@ def _extra_catalog(
 def _promotion_pack(
     discovery: FreeCadPagedCapabilityCatalog,
 ) -> FreeCadCapabilityPromotionPack:
-    term = _term("mirrored-representable")
+    term = _term("synthetic-representable")
     return FreeCadCapabilityPromotionPack(
         schema_version=FREECAD_CAPABILITY_PROMOTION_PACK_SCHEMA_VERSION,
-        pack_id="test.mirrored.representable",
+        pack_id="test.synthetic.representable",
         lane_id="test.partdesign",
         adapter_id="vcad.test.partdesign",
         adapter_version="1.0",
@@ -208,7 +214,7 @@ def _promotion_pack(
         terms=(term,),
         entries=(
             FreeCadCapabilityPromotionEntry(
-                native_type_id="PartDesign::Mirrored",
+                native_type_id="PartDesign::TestRepresentableFeature",
                 semantic_kind=FreeCadCapabilitySemanticKind.DOCUMENT_OBJECT,
                 target_status=CapabilitySupportStatus.REPRESENTABLE,
                 risk_class=CapabilityRiskClass.MUTATING,
@@ -296,7 +302,9 @@ def test_composes_builtin_extra_and_promotion_catalogs_with_exact_binding(
         is CapabilitySupportStatus.EXECUTABLE
     )
     assert (
-        forward.projection.index.lookup(freecad_type_capability_id("PartDesign::Mirrored")).status
+        forward.projection.index.lookup(
+            freecad_type_capability_id("PartDesign::TestRepresentableFeature")
+        ).status
         is CapabilitySupportStatus.REPRESENTABLE
     )
     assert {
