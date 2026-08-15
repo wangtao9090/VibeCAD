@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import inspect
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
 
 from vibecad.execution.freecad_builtin_intent_capabilities import (
     current_freecad_intent_capability_specs,
@@ -10,6 +15,7 @@ from vibecad.execution.freecad_legacy_reviewed_verification import (
     LEGACY_REVIEWED_FAMILY_MANIFESTS,
     LEGACY_REVIEWED_OPERATION_SPEC_BY_ID,
     LEGACY_REVIEWED_OPERATION_SPECS,
+    build_managed_freecad_legacy_reviewed_verification_receipts,
 )
 from vibecad.execution.freecad_reviewed_verification import (
     REQUIRED_REVIEWED_CONFORMANCE_FACETS,
@@ -83,3 +89,84 @@ def test_legacy_verification_inventory_is_import_only_and_has_no_promotion_side_
     assert module is not None
     assert "apply_promotion" not in inspect.getsource(module)
     assert "write_receipt" not in inspect.getsource(module)
+    assert tuple(
+        inspect.signature(build_managed_freecad_legacy_reviewed_verification_receipts).parameters
+    ) == ("freecad",)
+
+
+@pytest.mark.slow
+def test_real_managed_freecad_builds_exact_legacy_43_by_7_receipts() -> None:
+    if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
+        pytest.skip("set VIBECAD_RUN_INTEGRATION=1 to run the real FreeCAD batch gate")
+    from vibecad.runtime import paths as runtime_paths
+    from vibecad.runtime import status as runtime_status
+
+    runtime_python = runtime_paths.active_runtime_python()
+    if not runtime_python.is_file() or not runtime_paths.ready_sentinel().is_file():
+        pytest.fail("an existing ready managed FreeCAD runtime is required")
+    if not runtime_status.engine_compatible(runtime_python):
+        pytest.fail("the existing managed FreeCAD runtime does not match current engine pins")
+
+    source_root = Path(__file__).parents[1] / "src"
+    code = f"""
+import sys
+sys.path.insert(0, {str(source_root)!r})
+from vibecad.freecad_env import prepare_freecad_import
+prepare_freecad_import()
+import FreeCAD
+from vibecad.execution.freecad_builtin_intent_capabilities import (
+    current_freecad_intent_capability_specs,
+)
+from vibecad.execution.freecad_legacy_reviewed_verification import (
+    LEGACY_REVIEWED_FAMILY_MANIFESTS,
+    LEGACY_REVIEWED_OPERATION_SPEC_BY_ID,
+    build_managed_freecad_legacy_reviewed_verification_receipts,
+)
+from vibecad.execution.freecad_reviewed_verification import (
+    ReviewedConformanceEvidenceKind,
+)
+
+assert FreeCAD.GuiUp == 0 and FreeCAD.listDocuments() == {{}}
+pairs = build_managed_freecad_legacy_reviewed_verification_receipts(freecad=FreeCAD)
+assert len(pairs) == len(LEGACY_REVIEWED_FAMILY_MANIFESTS) == 8
+assert sum(len(receipt.results) for receipt, _binding in pairs) == 43 * 7
+assert FreeCAD.listDocuments() == {{}} and FreeCAD.GuiUp == 0
+formal = {{item.operation_id: item for item in current_freecad_intent_capability_specs()}}
+for manifest, (receipt, binding) in zip(
+    LEGACY_REVIEWED_FAMILY_MANIFESTS, pairs, strict=True
+):
+    contract = receipt.contract
+    assert contract.family_manifest_sha256 == manifest.manifest_sha256
+    assert contract.adapter_id == manifest.adapter.adapter_id
+    assert contract.adapter_version == manifest.adapter.adapter_version
+    assert contract.adapter_contract_sha256 == manifest.adapter.adapter_contract_sha256
+    assert contract.rule_id == manifest.rule_id
+    assert contract.rule_contract_sha256 == manifest.rule_contract_sha256
+    assert contract.evidence_kind is ReviewedConformanceEvidenceKind.MANAGED_FREECAD
+    assert {{item.operation_id for item in contract.operations}} == {{
+        item.operation_id for item in manifest.operations
+    }}
+    for item in contract.operations:
+        reviewed = LEGACY_REVIEWED_OPERATION_SPEC_BY_ID[item.operation_id]
+        capability = formal[item.operation_id]
+        assert item.operation_specification_sha256 == reviewed.specification_sha256
+        assert item.native_type_id == reviewed.native_type_id == capability.native_type_id
+        assert capability.verification is None
+    assert binding.runtime_build_sha256 == contract.runtime_backend.build_fingerprint_sha256
+    assert binding.adapter_contract_sha256 == contract.adapter_contract_sha256
+    assert binding.test_contract_sha256 == receipt.test_contract_sha256
+    assert binding.test_receipt_sha256 == receipt.test_receipt_sha256
+    assert binding.test_receipt_size_bytes == receipt.test_receipt_size_bytes
+    assert binding.verifier_id == contract.verifier_id
+    assert binding.verifier_version == contract.verifier_version
+    assert not receipt.executable and not receipt.grants_execution_authority
+print("REAL_FREECAD_LEGACY_REVIEWED_43_BY_7_OK")
+"""
+    completed = subprocess.run(
+        [str(runtime_python), "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "REAL_FREECAD_LEGACY_REVIEWED_43_BY_7_OK" in completed.stdout
