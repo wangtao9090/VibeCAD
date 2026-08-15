@@ -10,4 +10,8 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Final
 
-PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE: Final = MappingProxyType({})
+PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE: Final = MappingProxyType(
+    {
+        "0.10.0": "0135830059981607ba5f87feda2d045ce0da62c97252ef5af4436a678466b4bb",
+    }
+)

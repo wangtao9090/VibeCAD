@@ -10,6 +10,12 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ADDON_ROOT = _REPO_ROOT / "freecad" / "VibeCAD"
+_ATTESTATION_RESOURCE = (
+    _REPO_ROOT / "src/vibecad/execution/_attestations/freecad-reviewed-release-attestation-v1.json"
+)
+_ATTESTATION_PINS = (
+    _REPO_ROOT / "src/vibecad/execution/_attestations/freecad_reviewed_release_attestation_pins.py"
+)
 _EXPECTED_FILES = {
     "Init.py",
     "InitGui.py",
@@ -73,6 +79,18 @@ def test_wheel_and_sdist_contain_the_complete_addon(tmp_path: Path) -> None:
             for name in archive.namelist()
             if name.startswith("vibecad/_freecad/VibeCAD/") and not name.endswith("/")
         }
+        assert (
+            archive.read(
+                "vibecad/execution/_attestations/freecad-reviewed-release-attestation-v1.json"
+            )
+            == _ATTESTATION_RESOURCE.read_bytes()
+        )
+        assert (
+            archive.read(
+                "vibecad/execution/_attestations/freecad_reviewed_release_attestation_pins.py"
+            )
+            == _ATTESTATION_PINS.read_bytes()
+        )
     assert packaged == _EXPECTED_FILES
 
     with tarfile.open(sdist, "r:gz") as archive:
@@ -81,6 +99,26 @@ def test_wheel_and_sdist_contain_the_complete_addon(tmp_path: Path) -> None:
             for name in archive.getnames()
             if "/freecad/VibeCAD/" in name and not name.endswith("/")
         }
+        resource_members = [
+            member
+            for member in archive.getmembers()
+            if member.name.endswith(
+                "/src/vibecad/execution/_attestations/freecad-reviewed-release-attestation-v1.json"
+            )
+        ]
+        pin_members = [
+            member
+            for member in archive.getmembers()
+            if member.name.endswith(
+                "/src/vibecad/execution/_attestations/freecad_reviewed_release_attestation_pins.py"
+            )
+        ]
+        assert len(resource_members) == len(pin_members) == 1
+        resource_stream = archive.extractfile(resource_members[0])
+        pin_stream = archive.extractfile(pin_members[0])
+        assert resource_stream is not None and pin_stream is not None
+        assert resource_stream.read() == _ATTESTATION_RESOURCE.read_bytes()
+        assert pin_stream.read() == _ATTESTATION_PINS.read_bytes()
     assert source == _EXPECTED_FILES
 
 
