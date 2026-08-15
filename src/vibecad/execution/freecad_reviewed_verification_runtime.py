@@ -683,9 +683,7 @@ class FreeCadManagedReviewedVerificationSet:
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "receipts")
         if len(self.receipts) > MAX_FREECAD_REVIEWED_VERIFICATION_RECEIPTS:
             _fail(CapabilityCatalogErrorCode.BUDGET_EXCEEDED, "receipts")
-        if any(
-            type(item) is not FreeCadReviewedReceiptContractSummary for item in self.receipts
-        ):
+        if any(type(item) is not FreeCadReviewedReceiptContractSummary for item in self.receipts):
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "receipts")
         if self.receipts != tuple(
             sorted(self.receipts, key=lambda item: item.test_receipt_sha256)
@@ -727,17 +725,14 @@ class FreeCadManagedReviewedVerificationSet:
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "native_types")
         formal_ids = {item.operation_id for item in self.formal_operations}
         receipt_by_sha256 = {item.test_receipt_sha256: item for item in self.receipts}
-        referenced_receipts = {
-            item.test_receipt_sha256 for item in self.formal_operations
-        }
+        referenced_receipts = {item.test_receipt_sha256 for item in self.formal_operations}
         native_formal_ids = [
             operation_id for item in self.native_types for operation_id in item.formal_operation_ids
         ]
         if (
             referenced_receipts != set(receipt_by_sha256)
             or any(
-                item.test_receipt_sha256 not in receipt_by_sha256
-                for item in self.formal_operations
+                item.test_receipt_sha256 not in receipt_by_sha256 for item in self.formal_operations
             )
             or any(
                 not set(item.formal_operation_ids) <= formal_ids
@@ -1039,10 +1034,7 @@ def build_managed_reviewed_verification_set(
         current_promotion_catalog_sha256=current_promotion_catalog_sha256,
         receipts=tuple(
             sorted(
-                (
-                    FreeCadReviewedReceiptContractSummary._from_receipt(item)
-                    for item in receipts
-                ),
+                (FreeCadReviewedReceiptContractSummary._from_receipt(item) for item in receipts),
                 key=lambda item: item.test_receipt_sha256,
             )
         ),
@@ -1080,15 +1072,12 @@ def validate_managed_reviewed_verification_set(
         current_formal_catalog_sha256,
         current_promotion_catalog_sha256,
     ) = _current_catalogs()
-    if (
-        not hmac.compare_digest(
-            value.current_formal_catalog_sha256,
-            current_formal_catalog_sha256,
-        )
-        or not hmac.compare_digest(
-            value.current_promotion_catalog_sha256,
-            current_promotion_catalog_sha256,
-        )
+    if not hmac.compare_digest(
+        value.current_formal_catalog_sha256,
+        current_formal_catalog_sha256,
+    ) or not hmac.compare_digest(
+        value.current_promotion_catalog_sha256,
+        current_promotion_catalog_sha256,
     ):
         _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "verification_set/current_catalog")
 

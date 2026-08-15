@@ -158,10 +158,14 @@ def _decode_canonical_mapping(raw: object) -> dict[str, object]:
         )
     except (TypeError, ValueError, UnicodeError, RecursionError, OverflowError):
         _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "release_attestation")
-    if type(value) is not dict or _canonical(
-        value,
-        maximum=MAX_FREECAD_REVIEWED_RELEASE_ATTESTATION_BYTES,
-    ) != raw:
+    if (
+        type(value) is not dict
+        or _canonical(
+            value,
+            maximum=MAX_FREECAD_REVIEWED_RELEASE_ATTESTATION_BYTES,
+        )
+        != raw
+    ):
         _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "release_attestation")
     return value
 

@@ -168,11 +168,14 @@ def test_v2_full_current_closure_retains_all_receipts_and_sketch_without_native_
     assert len(formal) == len(verification_set.formal_operations) == 124
     assert len(promotion) == 104
     assert len(verification_set.native_types) == 102
-    assert validate_managed_reviewed_verification_set(
-        verification_set,
-        runtime_backend=_backend(),
-        require_complete=True,
-    ) is verification_set
+    assert (
+        validate_managed_reviewed_verification_set(
+            verification_set,
+            runtime_backend=_backend(),
+            require_complete=True,
+        )
+        is verification_set
+    )
 
     sketch = next(item for item in verification_set.receipts if "reviewed_sketch" in item.family_id)
     assert any(
@@ -257,9 +260,7 @@ def test_set_decoder_rejects_duplicate_unknown_noncanonical_budget_and_digest_ta
 
 
 def test_self_consistent_receipt_orphan_and_n_plus_one_fail_closed(current_closure) -> None:
-    mapping = json.loads(
-        encode_freecad_managed_reviewed_verification_set(current_closure[4])
-    )
+    mapping = json.loads(encode_freecad_managed_reviewed_verification_set(current_closure[4]))
     rebound = copy.deepcopy(mapping)
     target_receipt = rebound["native_types"][0]["verification"]["test_receipt_sha256"]
     rebound_test_contract = _sha("rebound-test-contract")
@@ -285,18 +286,14 @@ def test_self_consistent_receipt_orphan_and_n_plus_one_fail_closed(current_closu
         is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
     )
 
-    over = json.loads(
-        encode_freecad_managed_reviewed_verification_set(current_closure[4])
-    )
+    over = json.loads(encode_freecad_managed_reviewed_verification_set(current_closure[4]))
     template = over["receipts"][0]
     over["receipts"] = []
     for index in range(MAX_FREECAD_REVIEWED_VERIFICATION_RECEIPTS + 1):
         item = copy.deepcopy(template)
         item["test_receipt_sha256"] = hashlib.sha256(f"receipt-{index}".encode()).hexdigest()
         item["family"]["id"] = f"vcad.test.family-{index}"
-        item["family"]["manifest_sha256"] = hashlib.sha256(
-            f"manifest-{index}".encode()
-        ).hexdigest()
+        item["family"]["manifest_sha256"] = hashlib.sha256(f"manifest-{index}".encode()).hexdigest()
         over["receipts"].append(item)
     over["receipts"].sort(key=lambda item: item["test_receipt_sha256"])
     assert (
@@ -336,14 +333,17 @@ def test_direct_build_is_inert_and_source_pinned_outer_binds_release_build_and_d
         raw,
         expected_source_attestation_sha256=source_sha256,
     )
-    assert validate_freecad_reviewed_release_attestation(
-        attestation,
-        expected_release_version=_RELEASE_VERSION,
-        runtime_backend=_backend(),
-        discovery_snapshot_sha256=_DISCOVERY_SNAPSHOT_SHA256,
-        discovery_manifest_sha256=_DISCOVERY_MANIFEST_SHA256,
-        expected_source_attestation_sha256=source_sha256,
-    ) is attestation
+    assert (
+        validate_freecad_reviewed_release_attestation(
+            attestation,
+            expected_release_version=_RELEASE_VERSION,
+            runtime_backend=_backend(),
+            discovery_snapshot_sha256=_DISCOVERY_SNAPSHOT_SHA256,
+            discovery_manifest_sha256=_DISCOVERY_MANIFEST_SHA256,
+            expected_source_attestation_sha256=source_sha256,
+        )
+        is attestation
+    )
 
     assert (
         _code(
@@ -412,9 +412,7 @@ def test_outer_decoder_rejects_structure_digest_catalog_and_budget_tamper(
     tampered = _canonical(tampered_mapping)
     for candidate in (unknown, duplicate, noncanonical):
         assert (
-            _code(
-                lambda candidate=candidate: _decode_outer_for_test(candidate)
-            )
+            _code(lambda candidate=candidate: _decode_outer_for_test(candidate))
             is CapabilityCatalogErrorCode.INVALID_INPUT
         )
     assert (
@@ -440,6 +438,5 @@ def test_outer_decoder_rejects_structure_digest_catalog_and_budget_tamper(
         ),
     )
     assert (
-        _code(lambda: _decode_outer_for_test(raw))
-        is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+        _code(lambda: _decode_outer_for_test(raw)) is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
     )
