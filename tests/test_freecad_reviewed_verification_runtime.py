@@ -12,6 +12,13 @@ from vibecad.execution.capabilities import (
     CapabilityCatalogErrorCode,
     CapabilityExecutionProfile,
 )
+from vibecad.execution.freecad_builtin_intent_capabilities import (
+    current_freecad_intent_capability_specs,
+    current_freecad_intent_promotion_specs,
+)
+from vibecad.execution.freecad_legacy_reviewed_verification import (
+    LEGACY_REVIEWED_FAMILY_MANIFESTS,
+)
 from vibecad.execution.freecad_reviewed_family_capabilities import (
     build_reviewed_family_capability_specs,
 )
@@ -102,6 +109,9 @@ def test_complete_managed_receipts_close_formal_and_native_coverage_deterministi
 
     assert forward == reverse
     assert forward.verification_set_sha256 == reverse.verification_set_sha256
+    assert len(forward.current_formal_catalog_sha256) == 64
+    assert len(forward.current_promotion_catalog_sha256) == 64
+    assert forward.current_formal_catalog_sha256 != forward.current_promotion_catalog_sha256
     assert len(forward.formal_operations) == len(specs) == 28
     assert len(forward.native_types) == len(forward.verification_by_native_type) == 28
     assert set(forward.verification_by_native_type) == {item.native_type_id for item in specs}
@@ -215,6 +225,69 @@ def test_formal_semantic_adapter_and_promotion_substitution_fail_closed() -> Non
                 manifests=manifests,
                 formal_specs=specs,
                 promotion_specs=(drifted_promotion, *specs[1:]),
+            )
+        )
+        is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+    )
+
+
+def test_reviewed_bare_operation_and_semantic_downgrades_fail_closed() -> None:
+    manifests, specs, receipts = _inputs()
+    target = next(
+        item for item in specs if item.operation_id.startswith(f"{PART_CORE_MANIFEST.family_id}.")
+    )
+    local_operation_id = target.operation_id.removeprefix(f"{PART_CORE_MANIFEST.family_id}.")
+    operation = next(
+        item for item in PART_CORE_MANIFEST.operations if item.operation_id == local_operation_id
+    )
+    for drifted in (
+        dataclasses.replace(target, operation_id=local_operation_id),
+        dataclasses.replace(target, semantic_operation=operation.semantic_term.term_id),
+    ):
+        changed = tuple(
+            drifted if item.operation_id == target.operation_id else item for item in specs
+        )
+        assert (
+            _code(
+                lambda changed=changed: build_managed_reviewed_verification_set(
+                    runtime_backend=_backend(),
+                    receipts=receipts,
+                    manifests=manifests,
+                    formal_specs=changed,
+                    promotion_specs=changed,
+                )
+            )
+            is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+        )
+
+
+def test_legacy_full_identity_stays_compatible_and_native_scope_is_exact() -> None:
+    all_formal = {item.operation_id: item for item in current_freecad_intent_capability_specs()}
+    all_promotion = {item.operation_id: item for item in current_freecad_intent_promotion_specs()}
+    groove = next(item for item in LEGACY_REVIEWED_FAMILY_MANIFESTS if "groove" in item.family_id)
+    groove_specs = tuple(all_formal[item.operation_id] for item in groove.operations)
+    result = build_managed_reviewed_verification_set(
+        runtime_backend=_backend(),
+        receipts=(_managed_receipt(groove),),
+        manifests=(groove,),
+        formal_specs=groove_specs,
+        promotion_specs=tuple(all_promotion[item.operation_id] for item in groove.operations),
+    )
+    assert tuple(item.operation_id for item in result.formal_operations) == tuple(
+        sorted(item.operation_id for item in groove.operations)
+    )
+
+    boolean = next(item for item in LEGACY_REVIEWED_FAMILY_MANIFESTS if "boolean" in item.family_id)
+    boolean_formal = tuple(all_formal[item.operation_id] for item in boolean.operations)
+    boolean_promotion = tuple(all_promotion[item.operation_id] for item in boolean.operations)
+    assert (
+        _code(
+            lambda: build_managed_reviewed_verification_set(
+                runtime_backend=_backend(),
+                receipts=(_managed_receipt(boolean),),
+                manifests=(boolean,),
+                formal_specs=boolean_formal,
+                promotion_specs=boolean_promotion[:1],
             )
         )
         is CapabilityCatalogErrorCode.INTEGRITY_FAILURE

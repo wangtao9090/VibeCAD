@@ -12,8 +12,10 @@ from pathlib import Path
 
 import pytest
 
+import vibecad.execution.freecad_builtin_intent_capabilities as builtin_intent_capabilities
 import vibecad.execution.freecad_capability_runtime_v2 as runtime_capabilities
 import vibecad.execution.freecad_discovery_runtime_v2 as runtime_discovery
+from vibecad.execution import freecad_reviewed_verification as verification
 from vibecad.execution.capabilities import (
     CapabilityBackend,
     CapabilityCatalogError,
@@ -60,7 +62,21 @@ from vibecad.execution.freecad_discovery_v2 import (
     FreeCadPagedCapabilityCatalog,
     build_paged_freecad_type_catalog,
 )
+from vibecad.execution.freecad_reviewed_family_capabilities import (
+    build_reviewed_family_capability_specs,
+)
+from vibecad.execution.freecad_reviewed_verification import (
+    ReviewedCaseManifestKind,
+    ReviewedConformanceEvidenceKind,
+    build_reviewed_family_conformance_case_manifest,
+    build_reviewed_verification_receipt,
+)
+from vibecad.execution.freecad_reviewed_verification_runtime import (
+    FreeCadManagedReviewedVerificationSet,
+    build_managed_reviewed_verification_set,
+)
 from vibecad.execution.operation_capabilities import operation_capability_id
+from vibecad.intent_bridge.freecad_imageplane_adapter import IMAGEPLANE_MANIFEST
 from vibecad.parametric.compiler import (
     _EDGE_TREATMENT_TYPE_IDS,
     _FEATURE_TYPE_IDS,
@@ -242,6 +258,48 @@ def _verification_binding(
     )
 
 
+def _managed_verification_set(
+    discovery: FreeCadPagedCapabilityCatalog,
+    *,
+    runtime_backend: CapabilityBackend | None = None,
+) -> FreeCadManagedReviewedVerificationSet:
+    backend = runtime_backend or discovery.snapshot.backend
+    synthetic = build_reviewed_family_conformance_case_manifest(IMAGEPLANE_MANIFEST)
+    case_manifest = verification._admit_reviewed_host_conformance_case_manifest(  # noqa: SLF001
+        manifest=IMAGEPLANE_MANIFEST,
+        cases=synthetic.cases,
+    )
+    assert case_manifest.manifest_kind is ReviewedCaseManifestKind.REVIEWED_HOST
+
+    def execute(case, challenge_sha256):
+        return f"{case.case_sha256}:{challenge_sha256}:managed-test-observation".encode("ascii")
+
+    host = verification._ReviewedConformanceHost._create(  # noqa: SLF001
+        runtime_backend=backend,
+        case_manifest_sha256=case_manifest.case_manifest_sha256,
+        evidence_kind=ReviewedConformanceEvidenceKind.MANAGED_FREECAD,
+        verifier_id="vcad.test.runtime-capability",
+        verifier_version="1.0.0",
+        execute_case=execute,
+        guard=lambda: None,
+        revalidate=lambda: backend,
+        builder_token=verification._HOST_BUILDER_TOKEN,  # noqa: SLF001
+    )
+    receipt = build_reviewed_verification_receipt(
+        manifest=IMAGEPLANE_MANIFEST,
+        case_manifest=case_manifest,
+        host=host,
+    )
+    specs = build_reviewed_family_capability_specs((IMAGEPLANE_MANIFEST,))
+    return build_managed_reviewed_verification_set(
+        runtime_backend=backend,
+        receipts=(receipt,),
+        manifests=(IMAGEPLANE_MANIFEST,),
+        formal_specs=specs,
+        promotion_specs=specs,
+    )
+
+
 def _install_fake_collector(
     monkeypatch: pytest.MonkeyPatch,
     discovery: FreeCadPagedCapabilityCatalog,
@@ -386,23 +444,16 @@ def test_query_filters_and_n_plus_one_pages_are_stable_and_content_addressed(
     assert verified.entries == () and verified.next_cursor is None
 
 
-def test_exact_managed_verification_binding_promotes_only_its_reviewed_native_type(
+def test_opaque_managed_verification_set_promotes_only_its_reviewed_native_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     discovery = _discovery()
     _install_fake_collector(monkeypatch, discovery)
-    spec = next(
-        item
-        for item in current_freecad_intent_promotion_specs()
-        if item.native_type_id == "PartDesign::Groove"
-    )
-    binding = _verification_binding(
-        discovery,
-        adapter_contract_sha256=spec.adapter_contract_sha256,
-    )
+    verification_set = _managed_verification_set(discovery)
+    native_type_id = verification_set.native_types[0].native_type_id
     runtime = compose_managed_freecad_capability_runtime_v2(
         freecad=object(),
-        verification_by_native_type={spec.native_type_id: binding},
+        verification_set=verification_set,
     )
 
     verified = query_freecad_capability_runtime_v2(
@@ -410,27 +461,122 @@ def test_exact_managed_verification_binding_promotes_only_its_reviewed_native_ty
         minimum_status=CapabilitySupportStatus.VERIFIED,
     )
     assert verified.total_matches == 1
-    assert tuple(item.native_type_id for item in verified.entries) == ("PartDesign::Groove",)
-    entry = runtime.projection.index.lookup(freecad_type_capability_id("PartDesign::Groove"))
+    assert tuple(item.native_type_id for item in verified.entries) == (native_type_id,)
+    entry = runtime.projection.index.lookup(freecad_type_capability_id(native_type_id))
     assert entry.status is CapabilitySupportStatus.VERIFIED
     assert entry.verification is not None
-    assert entry.verification.verifier_id == binding.verifier_id
+    assert entry.verification.verifier_id == "vcad.test.runtime-capability"
     manifest_entry = next(
         item
         for item in runtime.projection.manifest.entries
-        if item.native_type_id == "PartDesign::Groove"
+        if item.native_type_id == native_type_id
     )
     assert manifest_entry.layer(CapabilitySupportStatus.VERIFIED) is not None
 
-    wrong_adapter = dataclasses.replace(
-        binding,
-        adapter_contract_sha256=_sha("wrong-adapter"),
+    fake_binding = _verification_binding(
+        discovery,
+        adapter_contract_sha256=next(
+            item.adapter_contract_sha256
+            for item in current_freecad_intent_promotion_specs()
+            if item.native_type_id == native_type_id
+        ),
     )
     assert (
         _error_code(
             lambda: compose_managed_freecad_capability_runtime_v2(
                 freecad=object(),
-                verification_by_native_type={spec.native_type_id: wrong_adapter},
+                verification_set=fake_binding,
+            )
+        )
+        is CapabilityCatalogErrorCode.INVALID_INPUT
+    )
+
+
+def test_verification_set_build_and_current_formal_catalog_drift_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    discovery = _discovery()
+    _install_fake_collector(monkeypatch, discovery)
+    verification_set = _managed_verification_set(discovery)
+    drifted_backend = dataclasses.replace(
+        discovery.snapshot.backend,
+        build_fingerprint_sha256=_sha("drifted-managed-freecad-build"),
+    )
+    drifted_set = _managed_verification_set(
+        discovery,
+        runtime_backend=drifted_backend,
+    )
+    assert (
+        _error_code(
+            lambda: compose_managed_freecad_capability_runtime_v2(
+                freecad=object(),
+                verification_set=drifted_set,
+            )
+        )
+        is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+    )
+
+    formal = current_freecad_intent_capability_specs()
+    drifted_formal = (
+        dataclasses.replace(formal[0], rule_contract_sha256=_sha("catalog-drift")),
+        *formal[1:],
+    )
+    monkeypatch.setattr(
+        builtin_intent_capabilities,
+        "current_freecad_intent_capability_specs",
+        lambda: drifted_formal,
+    )
+    assert (
+        _error_code(
+            lambda: compose_managed_freecad_capability_runtime_v2(
+                freecad=object(),
+                verification_set=verification_set,
+            )
+        )
+        is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+    )
+
+
+def test_verification_set_current_promotion_catalog_drift_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    discovery = _discovery()
+    _install_fake_collector(monkeypatch, discovery)
+    verification_set = _managed_verification_set(discovery)
+    promotion = current_freecad_intent_promotion_specs()
+    drifted_promotion = (
+        dataclasses.replace(promotion[0], rule_contract_sha256=_sha("promotion-catalog-drift")),
+        *promotion[1:],
+    )
+    monkeypatch.setattr(
+        builtin_intent_capabilities,
+        "current_freecad_intent_promotion_specs",
+        lambda: drifted_promotion,
+    )
+    assert (
+        _error_code(
+            lambda: compose_managed_freecad_capability_runtime_v2(
+                freecad=object(),
+                verification_set=verification_set,
+            )
+        )
+        is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+    )
+
+
+def test_verification_set_native_scope_object_tamper_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    discovery = _discovery()
+    _install_fake_collector(monkeypatch, discovery)
+    verification_set = _managed_verification_set(discovery)
+    object.__setattr__(verification_set, "native_types", ())
+
+    assert (
+        _error_code(
+            lambda: compose_managed_freecad_capability_runtime_v2(
+                freecad=object(),
+                verification_set=verification_set,
             )
         )
         is CapabilityCatalogErrorCode.INTEGRITY_FAILURE

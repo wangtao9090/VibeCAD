@@ -41,7 +41,6 @@ from vibecad.execution.freecad_capability_projection_v2 import (
     FreeCadCapabilityProjectionV2,
     FreeCadCapabilityPromotionPack,
     FreeCadCapabilitySemanticKind,
-    FreeCadPromotionVerificationBinding,
     build_freecad_capability_projection_v2,
 )
 from vibecad.execution.freecad_discovery_runtime_v2 import (
@@ -54,6 +53,10 @@ from vibecad.execution.freecad_discovery_v2 import (
 )
 from vibecad.execution.freecad_intent_promotions import (
     build_freecad_intent_capability_promotion_packs,
+)
+from vibecad.execution.freecad_reviewed_verification_runtime import (
+    FreeCadManagedReviewedVerificationSet,
+    validated_verification_by_native_type,
 )
 from vibecad.execution.operation_capabilities import (
     build_operation_capability_catalog,
@@ -317,15 +320,15 @@ def compose_managed_freecad_capability_runtime_v2(
     module_importer: Callable[[str], object] = importlib.import_module,
     extra_formal_catalogs: tuple[CapabilityCatalogSegment, ...] = (),
     promotion_packs: tuple[FreeCadCapabilityPromotionPack, ...] = (),
-    verification_by_native_type: dict[str, FreeCadPromotionVerificationBinding] | None = None,
+    verification_set: FreeCadManagedReviewedVerificationSet | None = None,
 ) -> FreeCadCapabilityRuntimeV2:
     """Collect and compose one exact managed runtime capability view.
 
-    ``verification_by_native_type`` is intentionally not a discovery or
-    execution hook.  It accepts only the existing content-bound verification
-    record and is revalidated by the promotion builder against the discovered
-    build and each reviewed adapter contract.  With no supplied records the
-    historical executable-only projection is byte-for-byte unchanged.
+    ``verification_set`` is an opaque, ephemeral managed-receipt closure, not
+    a discovery/execution hook or a persisted release attestation.  It is
+    revalidated against the discovered build and exact current formal and
+    promotion catalogs before its native bindings are derived.  With no set,
+    the historical executable-only projection is byte-for-byte unchanged.
     """
 
     if type(extra_formal_catalogs) is not tuple:
@@ -340,6 +343,11 @@ def compose_managed_freecad_capability_runtime_v2(
         _fail(CapabilityCatalogErrorCode.BUDGET_EXCEEDED, "promotion_packs")
     if not all(type(item) is FreeCadCapabilityPromotionPack for item in promotion_packs):
         _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "promotion_packs")
+    if (
+        verification_set is not None
+        and type(verification_set) is not FreeCadManagedReviewedVerificationSet
+    ):
+        _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "verification_set")
     discovery = collect_managed_freecad_discovery_v2(
         freecad=freecad,
         probe_modules=probe_modules,
@@ -347,6 +355,14 @@ def compose_managed_freecad_capability_runtime_v2(
         module_importer=module_importer,
     )
     backend = discovery.snapshot.backend
+    verification_by_native_type = (
+        None
+        if verification_set is None
+        else validated_verification_by_native_type(
+            verification_set,
+            runtime_backend=backend,
+        )
+    )
     compiler_catalog = build_current_compiler_capability_catalog(backend=backend)
     operation_catalog = build_operation_capability_catalog(
         registry=DEFAULT_OPERATION_REGISTRY,
