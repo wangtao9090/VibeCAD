@@ -98,8 +98,7 @@ def _current_exact_inputs() -> tuple[tuple[FamilyBatchManifest, ...], tuple, tup
         or _manifest_identities(scheduled_reviewed) != _manifest_identities(reviewed)
         or len(legacy) != _CURRENT_LEGACY_FAMILY_COUNT
         or len(manifests) != CURRENT_MANAGED_VERIFICATION_RECEIPT_COUNT
-        or len(_manifest_identities(manifests))
-        != len(set(_manifest_identities(manifests)))
+        or len(_manifest_identities(manifests)) != len(set(_manifest_identities(manifests)))
         or sum(len(item.operations) for item in manifests)
         != CURRENT_MANAGED_VERIFICATION_FORMAL_OPERATION_COUNT
     ):
@@ -131,8 +130,7 @@ def _receipt_from_pair(
         or type(binding) is not FreeCadPromotionVerificationBinding
         or binding.test_receipt_sha256 != receipt.test_receipt_sha256
         or binding.test_contract_sha256 != receipt.test_contract_sha256
-        or binding.runtime_build_sha256
-        != receipt.contract.runtime_backend.build_fingerprint_sha256
+        or binding.runtime_build_sha256 != receipt.contract.runtime_backend.build_fingerprint_sha256
     ):
         _fail(path)
     return receipt
@@ -185,9 +183,7 @@ def _collect_current_receipts(*, freecad: object) -> tuple[ReviewedVerificationR
         count=3,
         path="current_managed_verification/wave_d",
     )
-    legacy_raw = build_managed_freecad_legacy_reviewed_verification_receipts(
-        freecad=freecad
-    )
+    legacy_raw = build_managed_freecad_legacy_reviewed_verification_receipts(freecad=freecad)
     if type(legacy_raw) is not tuple or len(legacy_raw) != 8:
         _fail("current_managed_verification/legacy")
     legacy = tuple(
@@ -222,9 +218,7 @@ def _close_documents_created_after(
         current = freecad.listDocuments()
         if type(current) is not dict:
             _fail("current_managed_verification/cleanup")
-        owned = tuple(
-            (name, document) for name, document in current.items() if name not in before
-        )
+        owned = tuple((name, document) for name, document in current.items() if name not in before)
         for name, document in owned:
             latest = freecad.listDocuments()
             if type(latest) is not dict:

@@ -178,9 +178,7 @@ def _install_valid_builders(
         call_log.append("wave_d")
         return WaveDManagedVerificationBatch(
             receipts=wave_d,
-            promotion_bindings=tuple(
-                build_promotion_verification_binding(item) for item in wave_d
-            ),
+            promotion_bindings=tuple(build_promotion_verification_binding(item) for item in wave_d),
         )
 
     def legacy_builder(*, freecad):
@@ -348,9 +346,7 @@ def test_exception_cleanup_closes_only_documents_created_by_this_run(
         failing_builder,
     )
     with pytest.raises(RuntimeError, match="fixture failed"):
-        build_current_managed_freecad_reviewed_verification_set_for_maintainers(
-            freecad=freecad
-        )
+        build_current_managed_freecad_reviewed_verification_set_for_maintainers(freecad=freecad)
     assert freecad.listDocuments() == {"Preexisting": preexisting}
     assert freecad.closed == ["Owned"]
 
@@ -394,9 +390,7 @@ def test_process_lock_rejects_concurrent_full_gate_without_waiting(
     assert entered.wait(timeout=5)
     started = time.monotonic()
     with pytest.raises(CapabilityCatalogError) as caught:
-        build_current_managed_freecad_reviewed_verification_set_for_maintainers(
-            freecad=freecad
-        )
+        build_current_managed_freecad_reviewed_verification_set_for_maintainers(freecad=freecad)
     elapsed = time.monotonic() - started
     assert caught.value.path == "current_managed_verification/concurrent_verification"
     assert elapsed < 0.5
