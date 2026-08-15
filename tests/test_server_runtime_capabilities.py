@@ -525,6 +525,37 @@ def test_real_managed_runtime_traverses_public_pages_without_documents(
     assert native_ids == sorted(native_ids)
     assert len(native_ids) == len(set(native_ids))
     assert "Part::Box" in native_ids
+
+    verified_ids: list[str] = []
+    cursor = None
+    while True:
+        request = {
+            "schema_version": 1,
+            "minimum_status": "verified",
+            "limit": 31,
+        }
+        if cursor is not None:
+            request["cursor"] = cursor
+        response = anyio.run(
+            server._handle_call_tool,
+            "query_freecad_runtime_capabilities",
+            request,
+        )
+        assert response.isError is False
+        result = response.structuredContent["result"]
+        binding = result["runtime_binding"]
+        page = result["query_page"]
+        assert binding["binding_sha256"] == binding_sha256
+        assert page["runtime_binding_sha256"] == binding_sha256
+        assert page["total_matches"] == 102
+        assert all(entry["status"] == "verified" for entry in page["entries"])
+        verified_ids.extend(entry["native_type_id"] for entry in page["entries"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+
+    assert verified_ids == sorted(verified_ids)
+    assert len(verified_ids) == len(set(verified_ids)) == 102
     assert FreeCAD.listDocuments() == {}
     assert FreeCAD.GuiUp == 0
     assert "FreeCADGui" not in sys.modules

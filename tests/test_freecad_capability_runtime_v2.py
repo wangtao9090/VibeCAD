@@ -837,10 +837,23 @@ def test_real_managed_freecad_runtime_composes_449_and_pages_with_extra_catalog(
     assert {item.native_type_id for item in executable.entries} == {
         spec.native_type_id for spec in current_freecad_intent_capability_specs()
     }
-    assert (
-        query_freecad_capability_runtime_v2(
+    verified_ids: list[str] = []
+    cursor = None
+    while True:
+        page = query_freecad_capability_runtime_v2(
             runtime,
             minimum_status=CapabilitySupportStatus.VERIFIED,
-        ).total_matches
-        == 0
-    )
+            page_size=37,
+            cursor=cursor,
+        )
+        assert page.total_matches == 102
+        assert all(item.status is CapabilitySupportStatus.VERIFIED for item in page.entries)
+        verified_ids.extend(item.native_type_id for item in page.entries)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    assert verified_ids == sorted(verified_ids)
+    assert len(verified_ids) == len(set(verified_ids)) == 102
+    assert set(verified_ids) == {
+        spec.native_type_id for spec in current_freecad_intent_promotion_specs()
+    }
