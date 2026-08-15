@@ -21,6 +21,9 @@ from vibecad.execution.freecad_intent_capabilities import (
     FreeCadIntentCapabilitySpec,
     build_freecad_intent_capability_catalog,
 )
+from vibecad.execution.freecad_reviewed_family_capabilities import (
+    current_freecad_reviewed_family_capability_specs,
+)
 from vibecad.intent_bridge.freecad_parametric_adapter import (
     FREECAD_GROOVE_ADAPTER_DESCRIPTOR,
     GROOVE_OPERATION_TERM,
@@ -198,8 +201,8 @@ def _spec(
     )
 
 
-def current_freecad_intent_capability_specs() -> tuple[FreeCadIntentCapabilitySpec, ...]:
-    """Return the exact current built-in intent adapter declarations."""
+def _legacy_freecad_intent_capability_specs() -> tuple[FreeCadIntentCapabilitySpec, ...]:
+    """Return declarations that predate the shared reviewed-family registry."""
 
     specs = [
         _spec(
@@ -289,6 +292,37 @@ def current_freecad_intent_capability_specs() -> tuple[FreeCadIntentCapabilitySp
         for item in BOOLEAN_OPERATION_TERMS
     )
     return tuple(sorted(specs, key=lambda item: item.operation_id))
+
+
+def current_freecad_intent_capability_specs() -> tuple[FreeCadIntentCapabilitySpec, ...]:
+    """Return every exact current built-in and Reviewed semantic declaration."""
+
+    specs = (
+        *_legacy_freecad_intent_capability_specs(),
+        *current_freecad_reviewed_family_capability_specs(),
+    )
+    return tuple(sorted(specs, key=lambda item: item.operation_id))
+
+
+def current_freecad_intent_promotion_specs() -> tuple[FreeCadIntentCapabilitySpec, ...]:
+    """Return one unambiguous adapter owner per native TypeId for promotion.
+
+    Formal capabilities retain every Reviewed semantic operation. Native
+    promotion is a TypeId-level layer whose v1 wire can name only one adapter,
+    so an existing built-in owner remains authoritative when a Reviewed family
+    adds more semantics for that same TypeId. Today this applies only to
+    ``Sketcher::SketchObject``. No Reviewed operation is dropped from the
+    formal catalog, and this selection never creates verification evidence.
+    """
+
+    legacy = _legacy_freecad_intent_capability_specs()
+    owned_native_types = {item.native_type_id for item in legacy}
+    reviewed = tuple(
+        item
+        for item in current_freecad_reviewed_family_capability_specs()
+        if item.native_type_id not in owned_native_types
+    )
+    return tuple(sorted((*legacy, *reviewed), key=lambda item: item.operation_id))
 
 
 def build_current_freecad_intent_capability_catalog(

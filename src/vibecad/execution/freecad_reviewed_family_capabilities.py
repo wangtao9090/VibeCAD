@@ -20,6 +20,21 @@ from vibecad.execution.capabilities import (
     CapabilityRiskClass,
 )
 from vibecad.execution.freecad_intent_capabilities import FreeCadIntentCapabilitySpec
+from vibecad.intent_bridge.freecad_app_family_adapter import APP_FAMILY_MANIFEST
+from vibecad.intent_bridge.freecad_part_core_adapter import PART_CORE_MANIFEST
+from vibecad.intent_bridge.freecad_part_curve_adapter import PART_CURVE_MANIFEST
+from vibecad.intent_bridge.freecad_part_datum_adapter import PART_DATUM_MANIFEST
+from vibecad.intent_bridge.freecad_part_dressup_adapter import PART_DRESSUP_MANIFEST
+from vibecad.intent_bridge.freecad_part_file_import_adapter import PART_FILE_IMPORT_MANIFEST
+from vibecad.intent_bridge.freecad_part_profile_surface_adapter import (
+    PART_PROFILE_SURFACE_MANIFEST,
+)
+from vibecad.intent_bridge.freecad_partdesign_residual_adapter import (
+    PARTDESIGN_RESIDUAL_MANIFEST,
+)
+from vibecad.intent_bridge.freecad_sketch_intent_adapter import (
+    REVIEWED_SKETCH_FAMILY_MANIFEST,
+)
 from vibecad.intent_bridge.reviewed_family_engine import FamilyBatchManifest
 
 MAX_REVIEWED_CAPABILITY_FAMILIES = 32
@@ -33,9 +48,37 @@ _LIFECYCLE = (
     CapabilityLifecycleStage.REOPEN,
 )
 
+# This tuple is the sole static registry for reviewed-family capability
+# projection.  Every entry is already a canonical, content-addressed manifest;
+# registry membership means reviewed, not runtime-verified.  VERIFIED still
+# requires a separately persisted test receipt bound to the exact runtime.
+CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS = tuple(
+    sorted(
+        (
+            APP_FAMILY_MANIFEST,
+            PART_CORE_MANIFEST,
+            PART_CURVE_MANIFEST,
+            PART_DATUM_MANIFEST,
+            PART_DRESSUP_MANIFEST,
+            PART_FILE_IMPORT_MANIFEST,
+            PART_PROFILE_SURFACE_MANIFEST,
+            PARTDESIGN_RESIDUAL_MANIFEST,
+            REVIEWED_SKETCH_FAMILY_MANIFEST,
+        ),
+        key=lambda item: item.family_id,
+    )
+)
+
 
 def _fail(code: CapabilityCatalogErrorCode, path: str) -> None:
     raise CapabilityCatalogError(code, path)
+
+
+def _semantic_operation(identity: tuple[str, str, str, str]) -> str:
+    """Encode the complete ontology identity in the existing spec field."""
+
+    namespace, vocabulary_version, term_id, definition_sha256 = identity
+    return f"{namespace}/{vocabulary_version}/{term_id}@{definition_sha256}"
 
 
 def build_reviewed_family_capability_specs(
@@ -66,7 +109,7 @@ def build_reviewed_family_capability_specs(
 
     specs: list[FreeCadIntentCapabilitySpec] = []
     semantic_identities: set[tuple[str, str, str, str]] = set()
-    semantic_term_ids: set[str] = set()
+    semantic_operations: set[str] = set()
     native_adapters: dict[str, tuple[str, str, str]] = {}
     for manifest in ordered:
         adapter_identity = (
@@ -76,16 +119,17 @@ def build_reviewed_family_capability_specs(
         )
         for operation in manifest.operations:
             semantic_identity = operation.semantic_term.semantic_identity
+            semantic_operation = _semantic_operation(semantic_identity)
             if (
                 semantic_identity in semantic_identities
-                or operation.semantic_term.term_id in semantic_term_ids
+                or semantic_operation in semantic_operations
             ):
                 _fail(
                     CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
                     "manifests/operations/semantic_term",
                 )
             semantic_identities.add(semantic_identity)
-            semantic_term_ids.add(operation.semantic_term.term_id)
+            semantic_operations.add(semantic_operation)
             prior_adapter = native_adapters.setdefault(
                 operation.native_type_id,
                 adapter_identity,
@@ -98,7 +142,7 @@ def build_reviewed_family_capability_specs(
             specs.append(
                 FreeCadIntentCapabilitySpec(
                     operation_id=f"{manifest.family_id}.{operation.operation_id}",
-                    semantic_operation=operation.semantic_term.term_id,
+                    semantic_operation=semantic_operation,
                     native_type_id=operation.native_type_id,
                     adapter_id=manifest.adapter.adapter_id,
                     adapter_version=manifest.adapter.adapter_version,
@@ -114,6 +158,12 @@ def build_reviewed_family_capability_specs(
     if len({item.operation_id for item in specs}) != len(specs):
         _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "manifests/operations/operation_id")
     return tuple(sorted(specs, key=lambda item: item.operation_id))
+
+
+def current_freecad_reviewed_family_capability_specs() -> tuple[FreeCadIntentCapabilitySpec, ...]:
+    """Project the exact current Reviewed registry without claiming VERIFIED."""
+
+    return build_reviewed_family_capability_specs(CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS)
 
 
 __all__ = ()

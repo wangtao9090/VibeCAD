@@ -286,10 +286,10 @@ def test_composes_builtin_extra_and_promotion_catalogs_with_exact_binding(
     assert forward.binding.extra_formal_catalog_sha256 == tuple(
         sorted((alpha.catalog_sha256, beta.catalog_sha256))
     )
-    assert len(forward.binding.promotion_pack_sha256) == 9
+    assert len(forward.binding.promotion_pack_sha256) == 17
     assert pack.pack_sha256 in forward.binding.promotion_pack_sha256
     assert forward.binding.intent_catalog_sha256 == forward.intent_catalog.catalog_sha256
-    assert len(forward.projection.manifest.formal_bindings) == 54
+    assert len(forward.projection.manifest.formal_bindings) == 131
     assert {
         binding.formal_capability_id for binding in forward.projection.manifest.formal_bindings
     }.issuperset(spec.capability_id for spec in current_freecad_intent_capability_specs())
@@ -330,16 +330,13 @@ def test_query_filters_and_n_plus_one_pages_are_stable_and_content_addressed(
         page_size=2,
         cursor=first.next_cursor,
     )
-    exact = query_freecad_capability_runtime_v2(runtime, module="App", page_size=3)
+    exact = query_freecad_capability_runtime_v2(runtime, module="App", page_size=13)
 
-    assert first.total_matches == exact.total_matches == 3
-    assert [item.native_type_id for item in first.entries] == [
-        "App::DocumentObject",
-        "App::Extension",
-    ]
-    assert [item.native_type_id for item in second.entries] == ["App::Property"]
+    assert first.total_matches == exact.total_matches == 13
+    assert first.entries == exact.entries[:2]
+    assert second.entries == exact.entries[2:4]
     assert first.offset == 0 and second.offset == 2
-    assert first.next_cursor is not None and second.next_cursor is None
+    assert first.next_cursor is not None and second.next_cursor is not None
     assert exact.next_cursor is None
     assert first.page_sha256 == repeated.page_sha256
     assert first.next_cursor == repeated.next_cursor
@@ -349,21 +346,23 @@ def test_query_filters_and_n_plus_one_pages_are_stable_and_content_addressed(
         runtime,
         semantic_kind=FreeCadCapabilitySemanticKind.DOCUMENT_OBJECT,
         minimum_status=CapabilitySupportStatus.REPRESENTABLE,
+        page_size=128,
     )
     executable = query_freecad_capability_runtime_v2(
         runtime,
         minimum_status=CapabilitySupportStatus.EXECUTABLE,
+        page_size=128,
     )
     verified = query_freecad_capability_runtime_v2(
         runtime,
         minimum_status=CapabilitySupportStatus.VERIFIED,
     )
-    assert representable.total_matches == 42
+    assert representable.total_matches == 99
     assert "PartDesign::Pad" in {item.native_type_id for item in representable.entries}
     assert (
         executable.total_matches
         == len({item.native_type_id for item in current_freecad_intent_capability_specs()})
-        == 41
+        == 98
     )
     assert verified.total_matches == 0
     assert verified.entries == () and verified.next_cursor is None
@@ -581,8 +580,8 @@ def test_real_managed_freecad_runtime_composes_449_and_pages_with_extra_catalog(
     assert "FreeCADGui" not in sys.modules
     assert runtime.binding.native_type_count == 449
     assert len(runtime.projection.manifest.entries) == 449
-    assert len(runtime.projection.manifest.formal_bindings) == 54
-    assert len(runtime.binding.promotion_pack_sha256) == 8
+    assert len(runtime.projection.manifest.formal_bindings) == 131
+    assert len(runtime.binding.promotion_pack_sha256) == 16
     assert len(part_ids) == len(set(part_ids)) == 141
     assert part_ids == sorted(part_ids)
     assert len(document_ids) == len(set(document_ids)) == 175
@@ -594,8 +593,9 @@ def test_real_managed_freecad_runtime_composes_449_and_pages_with_extra_catalog(
     executable = query_freecad_capability_runtime_v2(
         runtime,
         minimum_status=CapabilitySupportStatus.EXECUTABLE,
+        page_size=128,
     )
-    assert executable.total_matches == 41
+    assert executable.total_matches == 98
     assert {item.native_type_id for item in executable.entries} == {
         spec.native_type_id for spec in current_freecad_intent_capability_specs()
     }

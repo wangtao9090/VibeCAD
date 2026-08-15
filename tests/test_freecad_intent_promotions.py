@@ -15,6 +15,7 @@ from vibecad.execution.capabilities import (
 from vibecad.execution.freecad_builtin_intent_capabilities import (
     build_current_freecad_intent_capability_catalog,
     current_freecad_intent_capability_specs,
+    current_freecad_intent_promotion_specs,
 )
 from vibecad.execution.freecad_capabilities import (
     FreeCadNativeTypeCategory,
@@ -87,22 +88,13 @@ def _fact(entry, key: str):
     return next(item.decoded_value for item in entry.facts if item.key_term_ref_id == key)
 
 
-def test_current_specs_build_eight_packs_and_promote_all_forty_one_type_ids() -> None:
+def test_current_specs_build_sixteen_packs_and_promote_all_ninety_eight_type_ids() -> None:
     discovery = _discovery()
-    specs = current_freecad_intent_capability_specs()
+    specs = current_freecad_intent_promotion_specs()
     packs = build_freecad_intent_capability_promotion_packs(discovery=discovery, specs=specs)
-    assert len(packs) == 8
-    assert sum(len(item.entries) for item in packs) == 41
-    assert {item.adapter_id for item in packs} == {
-        "freecad_parametric_groove_adapter",
-        "freecad_partdesign_promotion_adapter",
-        "freecad_partdesign_reference_adapter",
-        "freecad_partdesign_primitive_adapter",
-        "freecad_planar_mechanical_v1_adapter",
-        "freecad_partdesign_dressup_transform_adapter",
-        "freecad_partdesign_pattern_adapter",
-        "freecad_partdesign_boolean_adapter",
-    }
+    assert len(packs) == 16
+    assert sum(len(item.entries) for item in packs) == 98
+    assert {item.adapter_id for item in packs} == {item.adapter_id for item in specs}
     assert all(
         entry.target_status is CapabilitySupportStatus.EXECUTABLE
         for pack in packs
@@ -122,7 +114,7 @@ def test_current_specs_build_eight_packs_and_promote_all_forty_one_type_ids() ->
         if item.native_type_id in {spec.native_type_id for spec in specs}
     }
     assert promoted == {item.native_type_id: CapabilitySupportStatus.EXECUTABLE for item in specs}
-    assert len(projection.manifest.formal_bindings) == 43
+    assert len(projection.manifest.formal_bindings) == 120
 
 
 def test_multiple_semantics_for_one_type_are_consolidated() -> None:

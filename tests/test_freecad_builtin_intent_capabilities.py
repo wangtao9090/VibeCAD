@@ -13,6 +13,10 @@ from vibecad.execution.capabilities import (
 from vibecad.execution.freecad_builtin_intent_capabilities import (
     build_current_freecad_intent_capability_catalog,
     current_freecad_intent_capability_specs,
+    current_freecad_intent_promotion_specs,
+)
+from vibecad.execution.freecad_reviewed_family_capabilities import (
+    current_freecad_reviewed_family_capability_specs,
 )
 
 
@@ -28,8 +32,8 @@ def _backend() -> CapabilityBackend:
 
 def test_current_specs_cover_all_reviewed_adapter_families() -> None:
     specs = current_freecad_intent_capability_specs()
-    assert len(specs) == 43
-    assert {item.native_type_id for item in specs} == {
+    reviewed = current_freecad_reviewed_family_capability_specs()
+    legacy_native_types = {
         "PartDesign::Groove",
         "PartDesign::AdditiveLoft",
         "PartDesign::SubtractiveLoft",
@@ -72,6 +76,11 @@ def test_current_specs_cover_all_reviewed_adapter_families() -> None:
         "PartDesign::Mirrored",
         "PartDesign::Boolean",
     }
+    assert len(specs) == 120
+    assert len({item.native_type_id for item in specs}) == 98
+    assert {item.native_type_id for item in specs} == legacy_native_types | {
+        item.native_type_id for item in reviewed
+    }
     assert len({item.operation_id for item in specs}) == len(specs)
     assert len({item.semantic_operation for item in specs}) == len(specs)
     assert {item.adapter_id for item in specs} == {
@@ -83,7 +92,18 @@ def test_current_specs_cover_all_reviewed_adapter_families() -> None:
         "freecad_partdesign_dressup_transform_adapter",
         "freecad_partdesign_pattern_adapter",
         "freecad_partdesign_boolean_adapter",
-    }
+    } | {item.adapter_id for item in reviewed}
+    assert all(item.verification is None for item in specs)
+
+
+def test_native_promotion_keeps_one_owner_for_shared_sketch_type() -> None:
+    specs = current_freecad_intent_promotion_specs()
+
+    assert len(specs) == 100
+    assert len({item.native_type_id for item in specs}) == 98
+    sketch_specs = tuple(item for item in specs if item.native_type_id == "Sketcher::SketchObject")
+    assert len(sketch_specs) == 1
+    assert sketch_specs[0].adapter_id == "freecad_planar_mechanical_v1_adapter"
     assert all(item.verification is None for item in specs)
 
 
@@ -93,7 +113,7 @@ def test_current_catalog_is_deterministic_and_executable_not_verified() -> None:
     assert encode_capability_catalog(before) == encode_capability_catalog(after)
 
     operations = tuple(item for item in before.descriptors if item.kind is CapabilityKind.OPERATION)
-    assert len(operations) == 43
+    assert len(operations) == 120
     assert all(item.status is CapabilitySupportStatus.EXECUTABLE for item in operations)
     assert all(item.verification is None for item in operations)
 

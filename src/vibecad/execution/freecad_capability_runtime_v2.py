@@ -32,7 +32,7 @@ from vibecad.execution.compiler_capabilities import (
 )
 from vibecad.execution.freecad_builtin_intent_capabilities import (
     build_current_freecad_intent_capability_catalog,
-    current_freecad_intent_capability_specs,
+    current_freecad_intent_promotion_specs,
 )
 from vibecad.execution.freecad_capability_projection_v2 import (
     MAX_FREECAD_CAPABILITY_FORMAL_CATALOGS,
@@ -346,7 +346,7 @@ def compose_managed_freecad_capability_runtime_v2(
     intent_catalog = build_current_freecad_intent_capability_catalog(backend=backend)
     intent_promotion_packs = build_freecad_intent_capability_promotion_packs(
         discovery=discovery,
-        specs=current_freecad_intent_capability_specs(),
+        specs=current_freecad_intent_promotion_specs(),
     )
     if len(intent_promotion_packs) + len(promotion_packs) > MAX_FREECAD_CAPABILITY_PROMOTION_PACKS:
         _fail(CapabilityCatalogErrorCode.BUDGET_EXCEEDED, "promotion_packs")
