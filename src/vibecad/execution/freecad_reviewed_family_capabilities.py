@@ -21,6 +21,7 @@ from vibecad.execution.capabilities import (
 )
 from vibecad.execution.freecad_intent_capabilities import FreeCadIntentCapabilitySpec
 from vibecad.intent_bridge.freecad_app_family_adapter import APP_FAMILY_MANIFEST
+from vibecad.intent_bridge.freecad_imageplane_adapter import IMAGEPLANE_MANIFEST
 from vibecad.intent_bridge.freecad_part_core_adapter import PART_CORE_MANIFEST
 from vibecad.intent_bridge.freecad_part_curve_adapter import PART_CURVE_MANIFEST
 from vibecad.intent_bridge.freecad_part_datum_adapter import PART_DATUM_MANIFEST
@@ -59,6 +60,7 @@ CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS = tuple(
     sorted(
         (
             APP_FAMILY_MANIFEST,
+            IMAGEPLANE_MANIFEST,
             PART_CORE_MANIFEST,
             PART_CURVE_MANIFEST,
             PART_DATUM_MANIFEST,

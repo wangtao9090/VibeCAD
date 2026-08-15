@@ -53,10 +53,11 @@ def test_current_reviewed_registry_is_complete_content_bound_and_not_verified() 
     manifests = CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS
     specs = current_freecad_reviewed_family_capability_specs()
 
-    assert len(manifests) == 10
+    assert len(manifests) == 11
     assert manifests == tuple(sorted(manifests, key=lambda item: item.family_id))
     assert {item.family_id for item in manifests} == {
         "application_document_objects",
+        "freecad_imageplane",
         "freecad_part_core",
         "freecad_part_curve_path",
         "freecad_part_file_import",
@@ -67,11 +68,11 @@ def test_current_reviewed_registry_is_complete_content_bound_and_not_verified() 
         "part_dressup",
         "partdesign_residual",
     }
-    assert len({item.manifest_sha256 for item in manifests}) == 10
-    assert len(specs) == 80
-    assert len({item.native_type_id for item in specs}) == 61
-    assert len({item.operation_id for item in specs}) == 80
-    assert len({item.semantic_operation for item in specs}) == 80
+    assert len({item.manifest_sha256 for item in manifests}) == 11
+    assert len(specs) == 81
+    assert len({item.native_type_id for item in specs}) == 62
+    assert len({item.operation_id for item in specs}) == 81
+    assert len({item.semantic_operation for item in specs}) == 81
     assert all(item.verification is None for item in specs)
 
     coordinate_systems = tuple(
