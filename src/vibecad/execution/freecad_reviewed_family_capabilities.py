@@ -26,6 +26,9 @@ from vibecad.intent_bridge.freecad_part_curve_adapter import PART_CURVE_MANIFEST
 from vibecad.intent_bridge.freecad_part_datum_adapter import PART_DATUM_MANIFEST
 from vibecad.intent_bridge.freecad_part_dressup_adapter import PART_DRESSUP_MANIFEST
 from vibecad.intent_bridge.freecad_part_file_import_adapter import PART_FILE_IMPORT_MANIFEST
+from vibecad.intent_bridge.freecad_part_offset_projection_adapter import (
+    PART_OFFSET_MANIFEST,
+)
 from vibecad.intent_bridge.freecad_part_profile_surface_adapter import (
     PART_PROFILE_SURFACE_MANIFEST,
 )
@@ -61,6 +64,7 @@ CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS = tuple(
             PART_DATUM_MANIFEST,
             PART_DRESSUP_MANIFEST,
             PART_FILE_IMPORT_MANIFEST,
+            PART_OFFSET_MANIFEST,
             PART_PROFILE_SURFACE_MANIFEST,
             PARTDESIGN_RESIDUAL_MANIFEST,
             REVIEWED_SKETCH_FAMILY_MANIFEST,

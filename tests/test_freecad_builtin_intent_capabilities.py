@@ -76,8 +76,8 @@ def test_current_specs_cover_all_reviewed_adapter_families() -> None:
         "PartDesign::Mirrored",
         "PartDesign::Boolean",
     }
-    assert len(specs) == 120
-    assert len({item.native_type_id for item in specs}) == 98
+    assert len(specs) == 123
+    assert len({item.native_type_id for item in specs}) == 101
     assert {item.native_type_id for item in specs} == legacy_native_types | {
         item.native_type_id for item in reviewed
     }
@@ -99,8 +99,8 @@ def test_current_specs_cover_all_reviewed_adapter_families() -> None:
 def test_native_promotion_keeps_one_owner_for_shared_sketch_type() -> None:
     specs = current_freecad_intent_promotion_specs()
 
-    assert len(specs) == 100
-    assert len({item.native_type_id for item in specs}) == 98
+    assert len(specs) == 103
+    assert len({item.native_type_id for item in specs}) == 101
     sketch_specs = tuple(item for item in specs if item.native_type_id == "Sketcher::SketchObject")
     assert len(sketch_specs) == 1
     assert sketch_specs[0].adapter_id == "freecad_planar_mechanical_v1_adapter"
@@ -113,7 +113,7 @@ def test_current_catalog_is_deterministic_and_executable_not_verified() -> None:
     assert encode_capability_catalog(before) == encode_capability_catalog(after)
 
     operations = tuple(item for item in before.descriptors if item.kind is CapabilityKind.OPERATION)
-    assert len(operations) == 120
+    assert len(operations) == 123
     assert all(item.status is CapabilitySupportStatus.EXECUTABLE for item in operations)
     assert all(item.verification is None for item in operations)
 
