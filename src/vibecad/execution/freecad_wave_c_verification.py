@@ -326,10 +326,9 @@ def _build_case_manifest(
     fixtures: tuple[WaveCFixtureDescriptor, ...],
 ) -> ReviewedConformanceCaseManifest:
     operations = {item.operation_id: item for item in manifest.operations}
-    if (
-        {item.operation_id for item in fixtures} != set(operations)
-        or {item.family_id for item in fixtures} != {manifest.family_id}
-    ):
+    if {item.operation_id for item in fixtures} != set(operations) or {
+        item.family_id for item in fixtures
+    } != {manifest.family_id}:
         _fail("wave_c/fixtures/closure")
     cases = []
     for fixture in fixtures:
@@ -370,6 +369,12 @@ SKETCH_REVIEWED_HOST_CASE_MANIFEST: Final = _build_case_manifest(
 APP_REVIEWED_HOST_CASE_MANIFEST: Final = _build_case_manifest(
     APP_FAMILY_MANIFEST,
     _APP_FIXTURES,
+)
+WAVE_C_FAMILY_MANIFESTS: Final = tuple(
+    sorted(
+        (REVIEWED_SKETCH_FAMILY_MANIFEST, APP_FAMILY_MANIFEST),
+        key=lambda item: item.manifest_sha256,
+    )
 )
 
 
@@ -449,9 +454,7 @@ def _sketch_plan(
         source_graph_sha256="1" * 64,
         source_content_sha256="2" * 64,
         request_digest="3" * 64,
-        adapter_contract_sha256=(
-            REVIEWED_SKETCH_FAMILY_MANIFEST.adapter.adapter_contract_sha256
-        ),
+        adapter_contract_sha256=(REVIEWED_SKETCH_FAMILY_MANIFEST.adapter.adapter_contract_sha256),
         manifest_sha256=REVIEWED_SKETCH_FAMILY_MANIFEST.manifest_sha256,
         operation_specification_sha256=_specification_sha256(
             REVIEWED_SKETCH_FAMILY_MANIFEST,
@@ -464,8 +467,7 @@ def _sketch_plan(
         ),
         operation=operation,
         parameters=tuple(
-            ReviewedSketchParameter(key=key, value=value)
-            for key, value in parameters.items()
+            ReviewedSketchParameter(key=key, value=value) for key, value in parameters.items()
         ),
         references=references,
         results=tuple(
@@ -880,9 +882,7 @@ def _edit_sketch_geometry(
         _fail("wave_c/sketch/edit")
     return {
         "strategy": _SKETCH_GEOMETRY_RECIPES[operation]["edit"],
-        "topology_preserved": (
-            len(before[0]) == len(after[0]) and len(before[1]) == len(after[1])
-        ),
+        "topology_preserved": (len(before[0]) == len(after[0]) and len(before[1]) == len(after[1])),
         "solver": {
             "result": solve_result,
             "dof": dof,
@@ -1270,9 +1270,7 @@ def _app_plan(operation: AppFamilyOperation) -> AppFamilyBackendPlan:
             operation,
             _APP_CONFIGURATIONS[operation],
         ),
-        related_node_id=(
-            None if relation_kind is AppFamilyRelationKind.NONE else "node_related"
-        ),
+        related_node_id=(None if relation_kind is AppFamilyRelationKind.NONE else "node_related"),
         related_result_id=(
             None if relation_kind is AppFamilyRelationKind.NONE else "result_related"
         ),
@@ -1709,9 +1707,7 @@ class _AppExecutor:
                     "native_receipt_sha256": receipt.receipt_sha256,
                     "owned_object_count": len(receipt.owned_object_names),
                     "state": created_state,
-                    "configuration_sha256": hashlib.sha256(
-                        plan.configuration_bytes
-                    ).hexdigest(),
+                    "configuration_sha256": hashlib.sha256(plan.configuration_bytes).hexdigest(),
                 }
 
                 before_recompute = _app_state(feature, operation)
@@ -1781,13 +1777,7 @@ def _build_managed(
 def build_app_family_managed_verification(
     *, freecad: object
 ) -> tuple[ReviewedVerificationReceipt, FreeCadPromotionVerificationBinding]:
-    """Run the exact ten-operation/70-case App matrix.
-
-    Sketch descriptors and their reviewed executor live beside this function,
-    but a managed Sketch receipt is intentionally not exposed until the
-    existing native Slot solver instability is fixed under a new exact rule
-    contract.  The returned App receipt and binding remain ephemeral.
-    """
+    """Run the exact ten-operation/70-case App matrix."""
 
     if not _VERIFICATION_LOCK.acquire(blocking=False):
         _fail("wave_c/concurrent_verification")
@@ -1802,11 +1792,72 @@ def build_app_family_managed_verification(
         _VERIFICATION_LOCK.release()
 
 
+def build_sketch_family_managed_verification(
+    *, freecad: object
+) -> tuple[ReviewedVerificationReceipt, FreeCadPromotionVerificationBinding]:
+    """Run the exact twenty-operation/140-case Sketch matrix."""
+
+    if not _VERIFICATION_LOCK.acquire(blocking=False):
+        _fail("wave_c/concurrent_verification")
+    try:
+        return _build_managed(
+            freecad=freecad,
+            manifest=REVIEWED_SKETCH_FAMILY_MANIFEST,
+            case_manifest=SKETCH_REVIEWED_HOST_CASE_MANIFEST,
+            executor=_SketchExecutor(freecad),
+        )
+    finally:
+        _VERIFICATION_LOCK.release()
+
+
+def build_sketch_and_app_managed_verification(
+    *, freecad: object
+) -> tuple[
+    tuple[ReviewedVerificationReceipt, FreeCadPromotionVerificationBinding],
+    tuple[ReviewedVerificationReceipt, FreeCadPromotionVerificationBinding],
+]:
+    """Run both Wave C matrices under one same-process exclusion boundary.
+
+    Returned receipts and promotion bindings are ephemeral evidence only.  The
+    function neither persists them nor changes capability promotion state.
+    """
+
+    if not _VERIFICATION_LOCK.acquire(blocking=False):
+        _fail("wave_c/concurrent_verification")
+    try:
+        results: list[tuple[ReviewedVerificationReceipt, FreeCadPromotionVerificationBinding]] = []
+        for manifest in WAVE_C_FAMILY_MANIFESTS:
+            if manifest is REVIEWED_SKETCH_FAMILY_MANIFEST:
+                case_manifest = SKETCH_REVIEWED_HOST_CASE_MANIFEST
+                executor = _SketchExecutor(freecad)
+            elif manifest is APP_FAMILY_MANIFEST:
+                case_manifest = APP_REVIEWED_HOST_CASE_MANIFEST
+                executor = _AppExecutor(freecad)
+            else:
+                _fail("wave_c/family_manifest")
+            results.append(
+                _build_managed(
+                    freecad=freecad,
+                    manifest=manifest,
+                    case_manifest=case_manifest,
+                    executor=executor,
+                )
+            )
+        if len(results) != 2:
+            _fail("wave_c/family_manifest")
+        return results[0], results[1]
+    finally:
+        _VERIFICATION_LOCK.release()
+
+
 __all__ = (
     "APP_REVIEWED_HOST_CASE_MANIFEST",
     "SKETCH_REVIEWED_HOST_CASE_MANIFEST",
+    "WAVE_C_FAMILY_MANIFESTS",
     "WAVE_C_VERIFIER_ID",
     "WAVE_C_VERIFIER_VERSION",
     "WaveCFixtureDescriptor",
     "build_app_family_managed_verification",
+    "build_sketch_and_app_managed_verification",
+    "build_sketch_family_managed_verification",
 )

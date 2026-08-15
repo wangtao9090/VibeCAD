@@ -539,7 +539,7 @@ for operation, node_id, parameters, results in cases:
             document=document, sketch=sketch, sketch_id='sketch_geometry_batch'),
     ))
 assert [item.operation for item in receipts] == [item[0] for item in cases]
-assert sketch.GeometryCount == 8 and sketch.ConstraintCount == 9 and sketch.solve() == 0
+assert sketch.GeometryCount == 8 and sketch.ConstraintCount == 5 and sketch.solve() == 0
 document.recompute()
 document.saveAs({str(target)!r})
 FreeCAD.closeDocument(document.Name)
@@ -547,7 +547,7 @@ FreeCAD.closeDocument(document.Name)
 reopened = FreeCAD.openDocument({str(target)!r})
 reopened.UndoMode = 1
 sketch = reopened.getObject('Sketch')
-assert sketch.GeometryCount == 8 and sketch.ConstraintCount == 9 and sketch.solve() == 0
+assert sketch.GeometryCount == 8 and sketch.ConstraintCount == 5 and sketch.solve() == 0
 sketch.moveGeometry(0, 1, FreeCAD.Vector(2.0, 4.0, 0.0))
 assert sketch.solve() == 0
 extra = make_plan(
@@ -560,8 +560,98 @@ apply_reviewed_sketch_plan(
     bindings=ReviewedSketchExecutionBindings(
         document=reopened, sketch=sketch, sketch_id='sketch_geometry_batch'),
 )
-assert sketch.GeometryCount == 9 and sketch.ConstraintCount == 9 and sketch.solve() == 0
+assert sketch.GeometryCount == 9 and sketch.ConstraintCount == 5 and sketch.solve() == 0
 FreeCAD.closeDocument(reopened.Name)
+"""
+    _run_freecad(code)
+
+
+@pytest.mark.slow
+def test_real_freecad_slot_point_tangent_batch_stress_is_deterministic() -> None:
+    source_root = Path(__file__).parents[1] / "src"
+    code = f"""
+import hashlib, math, os, random, sys
+sys.path.insert(0, os.path.join(sys.prefix, 'lib'))
+sys.path.insert(0, {str(source_root)!r})
+import FreeCAD
+from vibecad.intent_bridge.freecad_sketch_intent_adapter import REVIEWED_SKETCH_FAMILY_MANIFEST
+from vibecad.parametric.freecad_sketch_intent_rules import (
+    ReviewedSketchBackendPlan, ReviewedSketchExecutionBindings, ReviewedSketchOperation,
+    ReviewedSketchParameter, ReviewedSketchResult, apply_reviewed_sketch_plan,
+    reviewed_sketch_node_sha256,
+)
+
+spec = next(item for item in REVIEWED_SKETCH_FAMILY_MANIFEST.operations
+            if item.operation_id == ReviewedSketchOperation.SLOT.value)
+
+def run_case(case_id, x1, y1, x2, y2, width):
+    plan = ReviewedSketchBackendPlan(
+        source_artifact_id='artifact_slot_stress', source_graph_id='graph_slot_stress',
+        source_graph_sha256='1' * 64, source_content_sha256='2' * 64,
+        request_digest=hashlib.sha256(str(case_id).encode('ascii')).hexdigest(),
+        adapter_contract_sha256=REVIEWED_SKETCH_FAMILY_MANIFEST.adapter.adapter_contract_sha256,
+        manifest_sha256=REVIEWED_SKETCH_FAMILY_MANIFEST.manifest_sha256,
+        operation_specification_sha256=spec.specification_sha256,
+        sketch_id=f'sketch_slot_{{case_id}}', node_id=f'geometry_slot_{{case_id}}',
+        node_sha256=reviewed_sketch_node_sha256({{'operation': 'slot', 'case': case_id}}),
+        operation=ReviewedSketchOperation.SLOT,
+        parameters=tuple(ReviewedSketchParameter(key=key, value=value) for key, value in {{
+            'width_mm': width, 'x1_mm': x1, 'x2_mm': x2, 'y1_mm': y1, 'y2_mm': y2,
+        }}.items()),
+        references=(),
+        results=tuple(ReviewedSketchResult(result_id=f'result_{{case_id}}_{{port}}', port_id=port)
+                      for port in ('cap_end', 'cap_start', 'side_a', 'side_b')),
+        construction=False, mode=None, enabled=None,
+    )
+    document = FreeCAD.newDocument(f'ReviewedSlotStress{{case_id}}')
+    document.UndoMode = 1
+    try:
+        sketch = document.addObject('Sketcher::SketchObject', 'Sketch')
+        payload = plan.canonical_bytes
+        receipt = apply_reviewed_sketch_plan(
+            payload, expected_content_sha256=hashlib.sha256(payload).hexdigest(),
+            expected_plan_sha256=plan.plan_sha256,
+            bindings=ReviewedSketchExecutionBindings(
+                document=document, sketch=sketch, sketch_id=plan.sketch_id),
+        )
+        document.recompute()
+        assert receipt.geometry_indices == (0, 1, 2, 3)
+        assert receipt.constraint_indices == (0, 1, 2, 3, 4)
+        assert tuple(item.TypeId for item in sketch.Geometry) == (
+            'Part::GeomArcOfCircle', 'Part::GeomArcOfCircle',
+            'Part::GeomLineSegment', 'Part::GeomLineSegment',
+        )
+        assert tuple(item.Type for item in sketch.Constraints) == (
+            'Tangent', 'Tangent', 'Tangent', 'Tangent', 'Equal',
+        )
+        assert sketch.solve() == 0 and sketch.DoF == 5
+        assert not any((sketch.ConflictingConstraints, sketch.RedundantConstraints,
+                        sketch.PartiallyRedundantConstraints, sketch.MalformedConstraints))
+    finally:
+        FreeCAD.closeDocument(document.Name)
+
+fixed = (
+    (-10.0, 0.0, 10.0, 3.0, 4.0),
+    (-10.0, -10.0, 10.0, -7.0, 4.0),
+    (0.0, 0.0, 20.0, 0.0, 2.0),
+    (5.0, -8.0, -4.0, 13.0, 7.5),
+)
+for case_id, values in enumerate(fixed):
+    run_case(case_id, *values)
+
+rng = random.Random(0x5107)
+for offset in range(128):
+    x1, y1 = rng.uniform(-100.0, 100.0), rng.uniform(-100.0, 100.0)
+    angle, length = rng.uniform(-math.pi, math.pi), rng.uniform(0.5, 200.0)
+    run_case(
+        len(fixed) + offset,
+        x1, y1,
+        x1 + math.cos(angle) * length,
+        y1 + math.sin(angle) * length,
+        rng.uniform(0.2, 20.0),
+    )
+assert FreeCAD.listDocuments() == {{}}
+print('SLOT_POINT_TANGENT_STRESS_OK cases=132')
 """
     _run_freecad(code)
 

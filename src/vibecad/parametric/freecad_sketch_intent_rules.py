@@ -656,10 +656,10 @@ _NATIVE_GEOMETRY_TYPES: Final = {
     ReviewedSketchOperation.CIRCLE: ("Part::GeomCircle",),
     ReviewedSketchOperation.ARC: ("Part::GeomArcOfCircle",),
     ReviewedSketchOperation.SLOT: (
-        "Part::GeomLineSegment",
+        "Part::GeomArcOfCircle",
         "Part::GeomArcOfCircle",
         "Part::GeomLineSegment",
-        "Part::GeomArcOfCircle",
+        "Part::GeomLineSegment",
     ),
 }
 _PORT_OFFSETS: Final = {
@@ -668,17 +668,13 @@ _PORT_OFFSETS: Final = {
     ReviewedSketchOperation.CIRCLE: {"curve": 0},
     ReviewedSketchOperation.ARC: {"curve": 0},
     ReviewedSketchOperation.SLOT: {
-        "side_a": 0,
-        "cap_end": 1,
-        "side_b": 2,
-        "cap_start": 3,
+        "cap_end": 0,
+        "cap_start": 1,
+        "side_a": 2,
+        "side_b": 3,
     },
 }
 _SLOT_INTERNAL_CONSTRAINT_TYPES: Final = (
-    "Coincident",
-    "Coincident",
-    "Coincident",
-    "Coincident",
     "Tangent",
     "Tangent",
     "Tangent",
@@ -708,6 +704,9 @@ _RULE_CONTRACT = {
     ],
     "slot": {
         "meaning": "centerline-start-end-plus-total-width",
+        "native_geometry_order": "cap-end-cap-start-side-a-side-b",
+        "native_admission": "single-geometry-batch-then-single-constraint-batch",
+        "tangent_binding": "point-aware-endpoint-tangent",
         "internal_constraints": list(_SLOT_INTERNAL_CONSTRAINT_TYPES),
         "expected_dof": 5,
     },
@@ -1377,10 +1376,10 @@ def _geometry_values(
             end_middle = vector(x2 + ux * radius, y2 + uy * radius, 0.0)
             start_middle = vector(x1 - ux * radius, y1 - uy * radius, 0.0)
             return (
-                Part.LineSegment(start_positive, end_positive),
                 Part.Arc(end_positive, end_middle, end_negative),
-                Part.LineSegment(end_negative, start_negative),
                 Part.Arc(start_negative, start_middle, start_positive),
+                Part.LineSegment(end_positive, start_positive),
+                Part.LineSegment(end_negative, start_negative),
             )
     except Exception:
         _fail(ReviewedSketchRuleErrorCode.CONFORMANCE_FAILED, "/geometry")
@@ -1388,19 +1387,15 @@ def _geometry_values(
 
 
 def _slot_constraints(Sketcher: object, indices: tuple[int, ...]) -> tuple[object, ...]:
-    first, second, third, fourth = indices
+    cap_end, cap_start, side_a, side_b = indices
     try:
         make = Sketcher.Constraint
         return (
-            make("Coincident", first, 2, second, 1),
-            make("Coincident", second, 2, third, 1),
-            make("Coincident", third, 2, fourth, 1),
-            make("Coincident", fourth, 2, first, 1),
-            make("Tangent", first, second),
-            make("Tangent", second, third),
-            make("Tangent", third, fourth),
-            make("Tangent", fourth, first),
-            make("Equal", second, fourth),
+            make("Tangent", cap_end, 1, side_a, 1),
+            make("Tangent", cap_end, 2, side_b, 1),
+            make("Tangent", cap_start, 2, side_a, 2),
+            make("Tangent", cap_start, 1, side_b, 2),
+            make("Equal", cap_end, cap_start),
         )
     except Exception:
         _fail(ReviewedSketchRuleErrorCode.CONFORMANCE_FAILED, "/geometry/slot")
@@ -1412,7 +1407,7 @@ def _slot_stabilizing_constraints(
     plan: ReviewedSketchBackendPlan,
 ) -> tuple[object, ...]:
     values = {item.key: item.value for item in plan.parameters}
-    _, cap_end, _, cap_start = indices
+    cap_end, cap_start, _, _ = indices
     try:
         make = Sketcher.Constraint
         return (
@@ -1432,7 +1427,7 @@ def _slot_matches_plan(
     plan: ReviewedSketchBackendPlan,
 ) -> bool:
     values = {item.key: item.value for item in plan.parameters}
-    _, cap_end, _, cap_start = indices
+    cap_end, cap_start, _, _ = indices
     try:
         expected = (
             values["x1_mm"],
@@ -1822,7 +1817,15 @@ def _apply_geometry(
     document, sketch = bindings.document, bindings.sketch
     values = _geometry_values(FreeCAD, Part, plan)
     try:
-        indices = tuple(sketch.addGeometry(value, plan.construction) for value in values)
+        if plan.operation is ReviewedSketchOperation.SLOT:
+            added_geometry = sketch.addGeometry(list(values), plan.construction)
+            if type(added_geometry) not in {list, tuple} or not all(
+                type(item) is int for item in added_geometry
+            ):
+                _fail(ReviewedSketchRuleErrorCode.CONFORMANCE_FAILED, "/geometry/add")
+            indices = tuple(added_geometry)
+        else:
+            indices = tuple(sketch.addGeometry(value, plan.construction) for value in values)
     except Exception:
         _fail(ReviewedSketchRuleErrorCode.CONFORMANCE_FAILED, "/geometry/add")
     expected_types = _NATIVE_GEOMETRY_TYPES[plan.operation]
@@ -1842,18 +1845,20 @@ def _apply_geometry(
     internal: tuple[int, ...] = ()
     if plan.operation is ReviewedSketchOperation.SLOT:
         try:
-            internal = tuple(
-                sketch.addConstraint(item) for item in _slot_constraints(Sketcher, indices)
-            )
-            for offset, constraint_index in enumerate(internal):
-                sketch.renameConstraint(constraint_index, f"slot_{plan.node_id}_{offset}")
-            temporary = sketch.addConstraint(
-                list(_slot_stabilizing_constraints(Sketcher, indices, plan))
-            )
-            if type(temporary) not in {list, tuple} or not all(
-                type(item) is int for item in temporary
+            internal_values = _slot_constraints(Sketcher, indices)
+            stabilizing_values = _slot_stabilizing_constraints(Sketcher, indices, plan)
+            added_constraints = sketch.addConstraint(list((*internal_values, *stabilizing_values)))
+            if type(added_constraints) not in {list, tuple} or not all(
+                type(item) is int for item in added_constraints
             ):
                 _fail(ReviewedSketchRuleErrorCode.CONFORMANCE_FAILED, "/geometry/slot")
+            internal_count = len(internal_values)
+            if len(added_constraints) != internal_count + len(stabilizing_values):
+                _fail(ReviewedSketchRuleErrorCode.CONFORMANCE_FAILED, "/geometry/slot")
+            internal = tuple(added_constraints[:internal_count])
+            temporary = tuple(added_constraints[internal_count:])
+            for offset, constraint_index in enumerate(internal):
+                sketch.renameConstraint(constraint_index, f"slot_{plan.node_id}_{offset}")
             _, temporary_dof, _ = _solver_facts(sketch)
             if temporary_dof != before_dof:
                 _fail(ReviewedSketchRuleErrorCode.CONFORMANCE_FAILED, "/geometry/slot")
