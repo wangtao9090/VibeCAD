@@ -464,7 +464,12 @@ class _RuntimeCapabilitySlot:
 
 
 def _compose_freecad_runtime_capabilities() -> object:
-    """Compose only after the managed-runtime and application-effect gates."""
+    """Compose the source-attested view after the runtime/effect gates.
+
+    The capability composer owns the fixed package-resource load.  This seam
+    intentionally supplies only the managed FreeCAD module and cannot inject
+    candidate attestation bytes or run a maintainer verifier.
+    """
 
     _prepare_freecad_import()
     freecad = importlib.import_module("FreeCAD")

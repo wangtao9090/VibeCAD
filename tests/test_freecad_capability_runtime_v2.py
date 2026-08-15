@@ -10,12 +10,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import vibecad.execution.freecad_capability_runtime_v2 as runtime_capabilities
 import vibecad.execution.freecad_discovery_runtime_v2 as runtime_discovery
-from vibecad.execution import freecad_reviewed_verification as verification
 from vibecad.execution.capabilities import (
     CapabilityBackend,
     CapabilityCatalogError,
@@ -31,6 +31,7 @@ from vibecad.execution.capabilities import (
 )
 from vibecad.execution.freecad_builtin_intent_capabilities import (
     current_freecad_intent_capability_specs,
+    current_freecad_intent_promotion_specs,
 )
 from vibecad.execution.freecad_capabilities import (
     FreeCadNativeTypeCategory,
@@ -43,6 +44,7 @@ from vibecad.execution.freecad_capability_projection_v2 import (
     FreeCadCapabilityPromotionEntry,
     FreeCadCapabilityPromotionPack,
     FreeCadCapabilitySemanticKind,
+    FreeCadPromotionVerificationBinding,
 )
 from vibecad.execution.freecad_capability_runtime_v2 import (
     MAX_FREECAD_CAPABILITY_QUERY_PAGE_SIZE,
@@ -60,21 +62,10 @@ from vibecad.execution.freecad_discovery_v2 import (
     FreeCadPagedCapabilityCatalog,
     build_paged_freecad_type_catalog,
 )
-from vibecad.execution.freecad_reviewed_family_capabilities import (
-    build_reviewed_family_capability_specs,
-)
-from vibecad.execution.freecad_reviewed_verification import (
-    ReviewedCaseManifestKind,
-    ReviewedConformanceEvidenceKind,
-    build_reviewed_family_conformance_case_manifest,
-    build_reviewed_verification_receipt,
-)
-from vibecad.execution.freecad_reviewed_verification_runtime import (
-    FreeCadManagedReviewedVerificationSet,
-    build_managed_reviewed_verification_set,
+from vibecad.execution.freecad_reviewed_release_attestation_resource import (
+    FreeCadPackagedReviewedReleaseAttestation,
 )
 from vibecad.execution.operation_capabilities import operation_capability_id
-from vibecad.intent_bridge.freecad_imageplane_adapter import IMAGEPLANE_MANIFEST
 from vibecad.parametric.compiler import (
     _EDGE_TREATMENT_TYPE_IDS,
     _FEATURE_TYPE_IDS,
@@ -83,6 +74,54 @@ from vibecad.parametric.compiler import (
 
 def _sha(label: str) -> str:
     return hashlib.sha256(label.encode("ascii")).hexdigest()
+
+
+def _packaged_attestation() -> FreeCadPackagedReviewedReleaseAttestation:
+    raw = json.dumps(
+        {
+            "attestation_sha256": _sha("synthetic-attestation"),
+            "discovery_manifest_sha256": _sha("synthetic-manifest"),
+            "discovery_snapshot_sha256": _sha("synthetic-snapshot"),
+            "release_version": "0.10.0",
+            "runtime_backend": {},
+            "schema_version": 1,
+            "verification_set": {},
+        },
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return FreeCadPackagedReviewedReleaseAttestation(
+        release_version="0.10.0",
+        attestation_sha256=_sha("synthetic-attestation"),
+        resource_sha256=hashlib.sha256(raw).hexdigest(),
+        raw=raw,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _fixed_inert_attestation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep generic composition tests independent of the ungenerated resource."""
+
+    packaged = _packaged_attestation()
+    decoded = object()
+    validated = SimpleNamespace(verification_set=SimpleNamespace(verification_by_native_type={}))
+    monkeypatch.setattr(
+        runtime_capabilities,
+        "load_current_packaged_freecad_reviewed_release_attestation",
+        lambda: packaged,
+    )
+    monkeypatch.setattr(
+        runtime_capabilities,
+        "decode_freecad_reviewed_release_attestation",
+        lambda raw, *, expected_source_attestation_sha256: decoded,
+    )
+    monkeypatch.setattr(
+        runtime_capabilities,
+        "validate_freecad_reviewed_release_attestation",
+        lambda value, **kwargs: validated,
+    )
 
 
 def _registered(
@@ -240,48 +279,6 @@ def _promotion_pack(
     )
 
 
-def _managed_verification_set(
-    discovery: FreeCadPagedCapabilityCatalog,
-    *,
-    runtime_backend: CapabilityBackend | None = None,
-) -> FreeCadManagedReviewedVerificationSet:
-    backend = runtime_backend or discovery.snapshot.backend
-    synthetic = build_reviewed_family_conformance_case_manifest(IMAGEPLANE_MANIFEST)
-    case_manifest = verification._admit_reviewed_host_conformance_case_manifest(  # noqa: SLF001
-        manifest=IMAGEPLANE_MANIFEST,
-        cases=synthetic.cases,
-    )
-    assert case_manifest.manifest_kind is ReviewedCaseManifestKind.REVIEWED_HOST
-
-    def execute(case, challenge_sha256):
-        return f"{case.case_sha256}:{challenge_sha256}:managed-test-observation".encode("ascii")
-
-    host = verification._ReviewedConformanceHost._create(  # noqa: SLF001
-        runtime_backend=backend,
-        case_manifest_sha256=case_manifest.case_manifest_sha256,
-        evidence_kind=ReviewedConformanceEvidenceKind.MANAGED_FREECAD,
-        verifier_id="vcad.test.runtime-capability",
-        verifier_version="1.0.0",
-        execute_case=execute,
-        guard=lambda: None,
-        revalidate=lambda: backend,
-        builder_token=verification._HOST_BUILDER_TOKEN,  # noqa: SLF001
-    )
-    receipt = build_reviewed_verification_receipt(
-        manifest=IMAGEPLANE_MANIFEST,
-        case_manifest=case_manifest,
-        host=host,
-    )
-    specs = build_reviewed_family_capability_specs((IMAGEPLANE_MANIFEST,))
-    return build_managed_reviewed_verification_set(
-        runtime_backend=backend,
-        receipts=(receipt,),
-        manifests=(IMAGEPLANE_MANIFEST,),
-        formal_specs=specs,
-        promotion_specs=specs,
-    )
-
-
 def _install_fake_collector(
     monkeypatch: pytest.MonkeyPatch,
     discovery: FreeCadPagedCapabilityCatalog,
@@ -298,6 +295,29 @@ def _install_fake_collector(
         collect,
     )
     return calls
+
+
+def _complete_verification_map(
+    discovery: FreeCadPagedCapabilityCatalog,
+) -> dict[str, FreeCadPromotionVerificationBinding]:
+    grouped: dict[str, list] = {}
+    for spec in current_freecad_intent_promotion_specs():
+        grouped.setdefault(spec.native_type_id, []).append(spec)
+    result: dict[str, FreeCadPromotionVerificationBinding] = {}
+    for native_type_id, specs in grouped.items():
+        adapter_contracts = {item.adapter_contract_sha256 for item in specs}
+        assert len(adapter_contracts) == 1
+        result[native_type_id] = FreeCadPromotionVerificationBinding(
+            runtime_build_sha256=discovery.snapshot.backend.build_fingerprint_sha256,
+            adapter_contract_sha256=next(iter(adapter_contracts)),
+            test_contract_sha256=_sha(f"test-contract:{native_type_id}"),
+            test_receipt_sha256=_sha(f"test-receipt:{native_type_id}"),
+            test_receipt_size_bytes=4_096,
+            verifier_id="vcad.test.packaged-attestation",
+            verifier_version="1.0.0",
+        )
+    assert len(result) == 102
+    return result
 
 
 def _error_code(call) -> CapabilityCatalogErrorCode:
@@ -426,23 +446,23 @@ def test_query_filters_and_n_plus_one_pages_are_stable_and_content_addressed(
     assert verified.entries == () and verified.next_cursor is None
 
 
-def test_v1_verification_sets_are_not_runtime_composer_authority(
+def test_candidate_attestations_are_not_runtime_composer_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     discovery = _discovery()
     calls = _install_fake_collector(monkeypatch, discovery)
-    real_v1_set = _managed_verification_set(discovery)
-    forged_v1_set = object.__new__(FreeCadManagedReviewedVerificationSet)
-
-    assert (
-        "verification_set"
-        not in inspect.signature(compose_managed_freecad_capability_runtime_v2).parameters
-    )
-    for candidate in (real_v1_set, forged_v1_set):
-        with pytest.raises(TypeError, match="verification_set"):
+    parameters = inspect.signature(compose_managed_freecad_capability_runtime_v2).parameters
+    for forbidden in (
+        "verification_set",
+        "release_attestation",
+        "attestation_raw",
+        "source_attestation_sha256",
+    ):
+        assert forbidden not in parameters
+        with pytest.raises(TypeError, match=forbidden):
             compose_managed_freecad_capability_runtime_v2(
                 freecad=object(),
-                verification_set=candidate,  # type: ignore[call-arg]
+                **{forbidden: object()},  # type: ignore[arg-type]
             )
     assert calls == []
 
@@ -454,6 +474,136 @@ def test_v1_verification_sets_are_not_runtime_composer_authority(
     )
     assert verified.total_matches == 0
     assert verified.entries == () and verified.next_cursor is None
+
+
+def test_fixed_packaged_attestation_promotes_all_102_without_running_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vibecad.execution.freecad_current_managed_verification as live_verifier
+
+    discovery = _discovery()
+    _install_fake_collector(monkeypatch, discovery)
+    packaged = _packaged_attestation()
+    decoded = object()
+    verification_by_native_type = _complete_verification_map(discovery)
+    validated = SimpleNamespace(
+        verification_set=SimpleNamespace(
+            verification_by_native_type=verification_by_native_type,
+        )
+    )
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        live_verifier,
+        "build_current_managed_freecad_reviewed_verification_set_for_maintainers",
+        lambda **kwargs: pytest.fail("runtime must not execute the maintainer verifier"),
+    )
+    monkeypatch.setattr(
+        runtime_capabilities,
+        "load_current_packaged_freecad_reviewed_release_attestation",
+        lambda: calls.append(("load", None)) or packaged,
+    )
+
+    def decode(raw, *, expected_source_attestation_sha256):
+        calls.append(("decode", (raw, expected_source_attestation_sha256)))
+        assert raw == packaged.raw
+        assert expected_source_attestation_sha256 == packaged.resource_sha256
+        return decoded
+
+    def validate(value, **kwargs):
+        calls.append(("validate", (value, kwargs)))
+        assert value is decoded
+        assert kwargs == {
+            "expected_release_version": "0.10.0",
+            "runtime_backend": discovery.snapshot.backend,
+            "discovery_snapshot_sha256": discovery.snapshot.snapshot_sha256,
+            "discovery_manifest_sha256": discovery.manifest.manifest_sha256,
+            "expected_source_attestation_sha256": packaged.resource_sha256,
+        }
+        return validated
+
+    monkeypatch.setattr(
+        runtime_capabilities,
+        "decode_freecad_reviewed_release_attestation",
+        decode,
+    )
+    monkeypatch.setattr(
+        runtime_capabilities,
+        "validate_freecad_reviewed_release_attestation",
+        validate,
+    )
+
+    runtime = compose_managed_freecad_capability_runtime_v2(freecad=object())
+    verified = query_freecad_capability_runtime_v2(
+        runtime,
+        minimum_status=CapabilitySupportStatus.VERIFIED,
+        page_size=128,
+    )
+
+    assert [name for name, _value in calls] == ["load", "decode", "validate"]
+    assert verified.total_matches == 102
+    assert {item.native_type_id for item in verified.entries} == set(verification_by_native_type)
+    assert all(item.status is CapabilitySupportStatus.VERIFIED for item in verified.entries)
+
+
+@pytest.mark.parametrize("failure_stage", ("missing", "tampered", "drift"))
+def test_packaged_attestation_failures_never_degrade_to_executable_only(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    discovery = _discovery()
+    collector_calls = _install_fake_collector(monkeypatch, discovery)
+    packaged = _packaged_attestation()
+    decoded = object()
+
+    expected_code = (
+        CapabilityCatalogErrorCode.UNKNOWN_REFERENCE
+        if failure_stage == "missing"
+        else CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+    )
+
+    def fail(path: str, *, code: CapabilityCatalogErrorCode = expected_code):
+        raise CapabilityCatalogError(code, path)
+
+    if failure_stage == "missing":
+        monkeypatch.setattr(
+            runtime_capabilities,
+            "load_current_packaged_freecad_reviewed_release_attestation",
+            lambda: fail("package_attestation/resource"),
+        )
+    elif failure_stage == "tampered":
+        monkeypatch.setattr(
+            runtime_capabilities,
+            "load_current_packaged_freecad_reviewed_release_attestation",
+            lambda: packaged,
+        )
+        monkeypatch.setattr(
+            runtime_capabilities,
+            "decode_freecad_reviewed_release_attestation",
+            lambda *args, **kwargs: fail("release_attestation/source_attestation_sha256"),
+        )
+    else:
+        monkeypatch.setattr(
+            runtime_capabilities,
+            "load_current_packaged_freecad_reviewed_release_attestation",
+            lambda: packaged,
+        )
+        monkeypatch.setattr(
+            runtime_capabilities,
+            "decode_freecad_reviewed_release_attestation",
+            lambda *args, **kwargs: decoded,
+        )
+        monkeypatch.setattr(
+            runtime_capabilities,
+            "validate_freecad_reviewed_release_attestation",
+            lambda *args, **kwargs: fail("release_attestation/discovery_manifest_sha256"),
+        )
+
+    with pytest.raises(CapabilityCatalogError) as raised:
+        compose_managed_freecad_capability_runtime_v2(freecad=object())
+
+    assert raised.value.code is expected_code
+    assert len(collector_calls) == (1 if failure_stage == "drift" else 0)
 
 
 def test_cursor_tamper_query_drift_runtime_drift_and_unknown_module_fail_closed(

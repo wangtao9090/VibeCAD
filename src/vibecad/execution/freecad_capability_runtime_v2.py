@@ -20,6 +20,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from vibecad import __version__
 from vibecad.execution.capabilities import (
     CapabilityBackend,
     CapabilityCatalogError,
@@ -53,6 +54,14 @@ from vibecad.execution.freecad_discovery_v2 import (
 )
 from vibecad.execution.freecad_intent_promotions import (
     build_freecad_intent_capability_promotion_packs,
+)
+from vibecad.execution.freecad_reviewed_release_attestation import (
+    decode_freecad_reviewed_release_attestation,
+    validate_freecad_reviewed_release_attestation,
+)
+from vibecad.execution.freecad_reviewed_release_attestation_resource import (
+    FreeCadPackagedReviewedReleaseAttestation,
+    load_current_packaged_freecad_reviewed_release_attestation,
 )
 from vibecad.execution.operation_capabilities import (
     build_operation_capability_catalog,
@@ -319,9 +328,10 @@ def compose_managed_freecad_capability_runtime_v2(
 ) -> FreeCadCapabilityRuntimeV2:
     """Collect and compose one exact managed runtime capability view.
 
-    The runtime accepts formal catalogs and promotion packs only.  It does not
-    accept ephemeral reviewed-verification sets: a future release attestation
-    is the sole supported route for VERIFIED promotion.
+    VERIFIED promotion can come only from the fixed, source-pinned package
+    resource loaded inside this function.  There is deliberately no caller
+    parameter for raw bytes, an attestation object, a source digest, or an
+    ephemeral verification set.
     """
 
     if type(extra_formal_catalogs) is not tuple:
@@ -336,6 +346,13 @@ def compose_managed_freecad_capability_runtime_v2(
         _fail(CapabilityCatalogErrorCode.BUDGET_EXCEEDED, "promotion_packs")
     if not all(type(item) is FreeCadCapabilityPromotionPack for item in promotion_packs):
         _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "promotion_packs")
+    packaged_attestation = load_current_packaged_freecad_reviewed_release_attestation()
+    if type(packaged_attestation) is not FreeCadPackagedReviewedReleaseAttestation:
+        _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "package_attestation")
+    release_attestation = decode_freecad_reviewed_release_attestation(
+        packaged_attestation.raw,
+        expected_source_attestation_sha256=packaged_attestation.resource_sha256,
+    )
     discovery = collect_managed_freecad_discovery_v2(
         freecad=freecad,
         probe_modules=probe_modules,
@@ -343,6 +360,15 @@ def compose_managed_freecad_capability_runtime_v2(
         module_importer=module_importer,
     )
     backend = discovery.snapshot.backend
+    validated_attestation = validate_freecad_reviewed_release_attestation(
+        release_attestation,
+        expected_release_version=__version__,
+        runtime_backend=backend,
+        discovery_snapshot_sha256=discovery.snapshot.snapshot_sha256,
+        discovery_manifest_sha256=discovery.manifest.manifest_sha256,
+        expected_source_attestation_sha256=packaged_attestation.resource_sha256,
+    )
+    verification_by_native_type = validated_attestation.verification_set.verification_by_native_type
     compiler_catalog = build_current_compiler_capability_catalog(backend=backend)
     operation_catalog = build_operation_capability_catalog(
         registry=DEFAULT_OPERATION_REGISTRY,
@@ -352,6 +378,7 @@ def compose_managed_freecad_capability_runtime_v2(
     intent_promotion_packs = build_freecad_intent_capability_promotion_packs(
         discovery=discovery,
         specs=current_freecad_intent_promotion_specs(),
+        verification_by_native_type=verification_by_native_type,
     )
     if len(intent_promotion_packs) + len(promotion_packs) > MAX_FREECAD_CAPABILITY_PROMOTION_PACKS:
         _fail(CapabilityCatalogErrorCode.BUDGET_EXCEEDED, "promotion_packs")

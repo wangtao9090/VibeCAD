@@ -348,6 +348,97 @@ def test_runtime_capability_slot_is_single_flight_cached_and_retryable() -> None
     assert attempts == 2
 
 
+def test_public_verified_query_composes_without_importing_or_running_live_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import vibecad.execution.freecad_current_managed_verification as live_verifier
+
+    calls: list[object] = []
+    freecad = object()
+    runtime = SimpleNamespace(binding=object())
+    page = object()
+
+    monkeypatch.setattr(
+        live_verifier,
+        "build_current_managed_freecad_reviewed_verification_set_for_maintainers",
+        lambda **kwargs: pytest.fail("public query must not run the maintainer verifier"),
+    )
+    monkeypatch.setattr(
+        server,
+        "_prepare_freecad_import",
+        lambda: calls.append("prepare"),
+    )
+
+    def import_module(name: str) -> object:
+        calls.append(("import", name))
+        if name == "FreeCAD":
+            return freecad
+        if name == "vibecad.execution.freecad_capability_runtime_v2":
+            return runtime_capabilities
+        raise AssertionError(f"unexpected runtime import: {name}")
+
+    def compose(**kwargs: object) -> object:
+        calls.append(("compose", kwargs))
+        assert kwargs == {"freecad": freecad}
+        return runtime
+
+    def query(value: object, **kwargs: object) -> object:
+        calls.append(("query", kwargs))
+        assert value is runtime
+        assert kwargs["minimum_status"] is CapabilitySupportStatus.VERIFIED
+        return page
+
+    monkeypatch.setattr(server.importlib, "import_module", import_module)
+    monkeypatch.setattr(
+        runtime_capabilities,
+        "compose_managed_freecad_capability_runtime_v2",
+        compose,
+    )
+    monkeypatch.setattr(runtime_capabilities, "query_freecad_capability_runtime_v2", query)
+    monkeypatch.setattr(
+        runtime_capabilities,
+        "encode_freecad_capability_runtime_binding_v2",
+        lambda value: _canonical(_binding_mapping()),
+    )
+    monkeypatch.setattr(
+        runtime_capabilities,
+        "encode_freecad_capability_query_page_v2",
+        lambda value: _canonical(_page_mapping()),
+    )
+    monkeypatch.setattr(server._installer, "is_ready", lambda: True)
+    monkeypatch.setattr(server, "_in_conda_runtime", lambda: True)
+    monkeypatch.setattr(server, "_enter_application_effect", lambda: True)
+    monkeypatch.setattr(
+        server,
+        "_runtime_capability_slot",
+        server._RuntimeCapabilitySlot(server._compose_freecad_runtime_capabilities),
+    )
+
+    result = anyio.run(
+        server._handle_call_tool,
+        "query_freecad_runtime_capabilities",
+        {"schema_version": 1, "minimum_status": "verified"},
+    )
+
+    assert result.isError is False
+    assert calls == [
+        "prepare",
+        ("import", "FreeCAD"),
+        ("import", "vibecad.execution.freecad_capability_runtime_v2"),
+        ("compose", {"freecad": freecad}),
+        (
+            "query",
+            {
+                "module": None,
+                "semantic_kind": None,
+                "minimum_status": CapabilitySupportStatus.VERIFIED,
+                "page_size": 64,
+                "cursor": None,
+            },
+        ),
+    ]
+
+
 def test_tool_manifest_stays_bounded_and_bootstrap_does_not_import_freecad() -> None:
     listed = anyio.run(server._handle_list_tools)
     raw = json.dumps(
