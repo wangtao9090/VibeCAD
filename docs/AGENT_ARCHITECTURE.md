@@ -42,7 +42,7 @@ OCCT 的事实独立验收，并原子提交或安全保留审核草案。
 | Guided Photo V3 / Freeform/STL/仿真 Provider | 受限普通照片可经拍摄/尺度/完整性门进入同一 Task Kernel；其余架构预留 | 可声明固定包络，不可宣称通用逆向工程 |
 | 任意 Python/FreeCAD 代码 Worker | 不存在，也不是主路径 | 不能 |
 
-所以准确说法是：**CAD 与任务内核已经打通，0.9.0 的 38-tool 公共协议、单 Kernel backend、
+所以准确说法是：**CAD 与任务内核已经打通，0.9.0 的 39-tool 公共协议、单 Kernel backend、
 受控参数化/视觉机械/Guided Photo V3、派生参数与语义边处理能力和分发合同已完成；Codex、Claude、WorkBuddy 用同一发布包 smoke 分别认证，
 WorkBuddy 再增加跨进程恢复、Release 批准、Blob 取回和 strict-error 兼容证据。**
 
@@ -154,8 +154,8 @@ HEAD、源文件或交付目录。active CAD 状态会先持久化 `cancel_reque
 - 两者都产生 TaskRun、candidate/draft、verification report、revision 和 artifact；
 - 工具数量不是能力目标。稳定控制面保持小而稳定，CAD operation 可按准入门逐批扩展。
 
-当前 38 个公开工具中，只有 6 个是 direct CAD 工具；其余是 32 个
-service/runtime/project/revision/task/review/artifact/release/visual facade。不能把“38 个公开工具”误写为“38 个
+当前 39 个公开工具中，只有 6 个是 direct CAD 工具；其余是 33 个
+service/runtime/project/revision/task/review/artifact/release/visual facade。不能把“39 个公开工具”误写为“39 个
 CAD command”。
 
 每个新增 operation 必须同时具备：

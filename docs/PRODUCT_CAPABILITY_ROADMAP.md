@@ -8,7 +8,7 @@
 >
 > 日期：2026-08-01
 >
-> 当前基线：VibeCAD 0.9.0 候选 / runtime epoch 4、`38-tool 公共 MCP、durable review/release/visual`、首批六操作、
+> 当前基线：VibeCAD 0.9.0 候选 / runtime epoch 4、`39-tool 公共 MCP、durable review/release/visual`、首批六操作、
 > host-neutral skill 与 FCStd/STEP/PDF/ZIP ResourceLink。P0-B 已交付 keyed replay/discovery、compare/revert、
 > read-only manifest、`durable active cancellation`、单 Application/shared Task Kernel、same-user
 > authenticated runnable daemon、session-bound file grants 和 managed killable Worker。G1 已交付

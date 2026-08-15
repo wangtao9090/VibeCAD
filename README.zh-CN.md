@@ -20,7 +20,7 @@ VibeCAD 不内置或转售大模型。推理使用用户自己的宿主模型及
 - 确定性的 Task Kernel 执行：隔离候选、明确审核策略、经过验证的 FCStd/STEP 制品、恢复与安全重放；
 - 支持有界派生参数联动和语义 Fillet/Chamfer 的可编辑参数化设计，包括同一有向边从起点到终点
   线性变化半径的圆角；
-- 面向 Codex、Claude、WorkBuddy 及其他兼容 Agent 的 host-neutral 38-tool MCP 与 Skill 合同；
+- 面向 Codex、Claude、WorkBuddy 及其他兼容 Agent 的 host-neutral 39-tool MCP 与 Skill 合同；
   每个真实宿主都用同一发布包 smoke 单独认证；
 - WorkBuddy 5.3.5 另有严格错误恢复、重启恢复、精确 Release 批准和 PDF/ZIP 原生 MCP Blob
   读取的兼容性覆盖；
@@ -110,13 +110,13 @@ sharp-shoulder 阶梯轴，以及一个三视图 L 型支架（同平面双孔�
 
 ## 当前公开能力（开发分支）
 
-MCPB manifest 与运行时投影同一份冻结合同，当前公开 38 个工具。每个工具都有简短说明、严格输入
+MCPB manifest 与运行时投影同一份冻结合同，当前公开 39 个工具。每个工具都有简短说明、严格输入
 schema 与副作用标记；宿主应先调用 `get_capabilities`，不能根据工具数量或模型常识猜能力。
 
 | 类别 | 工具 |
 |---|---|
 | 服务与运行时 | `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime` |
-| 能力发现 | `get_capabilities` |
+| 能力发现 | `get_capabilities`, `query_freecad_runtime_capabilities` |
 | 项目与版本 | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
 | 任务与草案 | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task`, `accept_draft`, `reject_draft` |
 | 交付 | `get_artifact_manifest`, `export_task_artifacts`, `create_release`, `get_release`, `approve_release` |
@@ -129,6 +129,11 @@ schema 与副作用标记；宿主应先调用 `get_capabilities`，不能根据
 路径、文件名、base64 或图片字节。宿主多模态模型已经能看图时不需要这条 store/provider 路径。
 WorkBuddy 附件直接进入 VibeCAD sealed store 仍未验证，MCP 接口也不接受图片路径、base64 内容或
 visual Resource URI。
+
+`get_capabilities` 仍是稳定、可执行的 Agent 操作合同。只读的
+`query_freecad_runtime_capabilities` 分页返回当前受管 FreeCAD build 的内容绑定原生 TypeId 清单；
+`discovered` 只表示库存，不授予执行权限。opaque cursor 与运行时、筛选条件和页大小绑定，发生任何
+漂移都会安全失败。
 
 一次成功的 `export_task_artifacts` 返回规范结果及两个有类型的 `ResourceLink`：
 
@@ -225,7 +230,7 @@ WorkBuddy 提示时批准这个项目级服务，等待运行时 ready 后再开
 适配层。GLM-5.2 已通过标准多轮任务，但目前只是暂定默认模型：自主 CAD 任务的 allowed tools 应
 排除运行时维护工具，`uninstall_runtime` 必须保留显式用户确认。
 
-在当前 38-tool visual 开发 profile 中，WorkBuddy 5.3.5 应把手写 ModelProgram 放入 canonical skill
+在当前 39-tool visual 开发 profile 中，WorkBuddy 5.3.5 应把手写 ModelProgram 放入 canonical skill
 规定的四字段项目本地请求，并只执行有界命令
 `vibecad --workbuddy-submit .vibecad-workbuddy-request-<name>.json`。这会保留可能被 WorkBuddy
 折叠为 `-32603` 的精确合同路径；它不是 artifact 适配或第二执行路径：ResourceLink/Blob 继续走
@@ -259,7 +264,7 @@ VIBECAD_RUN_INTEGRATION=1 PYTHONPATH=src uv run --frozen pytest -m slow
 ## Host-ready 的准确含义
 
 0.9.0 发布合同独立于宿主验证 MCP 协议、Skill 包结构、FCStd/STEP 与 Release ResourceLink、
-受管 FreeCAD E2E 和精确 38-tool discovery。Codex、Claude、WorkBuddy 的真实发布包 smoke 分别记录，
+受管 FreeCAD E2E 和精确 39-tool discovery。Codex、Claude、WorkBuddy 的真实发布包 smoke 分别记录，
 任一宿主通过都不替代另外两个。WorkBuddy 另有上述兼容性覆盖，但不代表其中所有模型都已认证。
 
 ## 架构边界与路线

@@ -1,9 +1,11 @@
 """Atomic Agent MCP surface over the pinned low-level SDK server.
 
-Discovery is deliberately inert.  The authenticated local-daemon client is
-opened only after a domain request passes both public-schema validation and the
-managed-runtime guard.  The daemon, never this MCP process, owns the concrete
-``AgentApplication`` and Task Kernel.
+MCP tool discovery is deliberately inert.  The explicit native-capability
+query enters its managed-runtime/application-effect gate before a lazy local
+composition, but never opens the daemon or durable store.  The authenticated
+local-daemon client is opened only after a domain request passes both
+public-schema validation and the managed-runtime guard.  The daemon, never
+this MCP process, owns the concrete ``AgentApplication`` and Task Kernel.
 """
 
 from __future__ import annotations
@@ -56,7 +58,9 @@ _ERROR_MESSAGES = {
     "unsupported_version": "The request schema version is not supported.",
     "invalid_type": "A request value has an invalid type.",
     "invalid_value": "A request value is invalid.",
+    "invalid_input": "The request is invalid.",
     "budget_exceeded": "The request exceeds a resource budget.",
+    "integrity_failure": "The capability integrity check failed.",
     "runtime_failure": "The runtime operation failed.",
     "store_failure": "The runtime state operation failed.",
     "recovery_required": "The runtime operation requires recovery.",
@@ -229,6 +233,7 @@ _CONTROL_NAMES = frozenset(
         "ensure_runtime",
         "uninstall_runtime",
         "get_capabilities",
+        "query_freecad_runtime_capabilities",
     }
 )
 _DIRECT_NAMES = frozenset(_SPEC_BY_NAME) - _CONTROL_NAMES - frozenset(_STABLE_DOMAIN_FACADES)
@@ -391,6 +396,84 @@ class _ApplicationSlot:
         return closed
 
 
+class _RuntimeCapabilitySlot:
+    """PID-bound lazy single-flight cache for one immutable runtime view."""
+
+    def __init__(self, composer: Callable[[], object]) -> None:
+        if not callable(composer):
+            raise TypeError("runtime capability composer must be callable")
+        self._composer = composer
+        self._condition = threading.Condition()
+        self._pid = os.getpid()
+        self._state = "UNOPENED"
+        self._runtime: object | None = None
+        self._generation = 0
+        self._failed_generation = -1
+
+    @property
+    def state(self) -> str:
+        if os.getpid() != self._pid:
+            return "CLOSED"
+        with self._condition:
+            return self._state
+
+    def _check_pid(self) -> None:
+        if os.getpid() != self._pid:
+            raise RuntimeError("runtime capability slot is unavailable in this process")
+
+    def get(self) -> object:
+        self._check_pid()
+        waited_for: int | None = None
+        with self._condition:
+            while True:
+                self._check_pid()
+                if self._state == "READY":
+                    assert self._runtime is not None
+                    return self._runtime
+                if self._state == "OPENING":
+                    if waited_for is None:
+                        waited_for = self._generation
+                    self._condition.wait()
+                    if self._failed_generation == waited_for:
+                        raise RuntimeError("runtime capability composition failed")
+                    continue
+                self._state = "OPENING"
+                self._generation += 1
+                generation = self._generation
+                break
+
+        try:
+            candidate = self._composer()
+            if candidate is None:
+                raise RuntimeError("runtime capability composition failed")
+        except BaseException:
+            with self._condition:
+                if self._state == "OPENING" and self._generation == generation:
+                    self._failed_generation = generation
+                    self._state = "UNOPENED"
+                    self._condition.notify_all()
+            raise RuntimeError("runtime capability composition failed") from None
+
+        with self._condition:
+            if self._state != "OPENING" or self._generation != generation:
+                raise RuntimeError("runtime capability slot is unavailable")
+            self._runtime = candidate
+            self._state = "READY"
+            self._condition.notify_all()
+            return candidate
+
+
+def _compose_freecad_runtime_capabilities() -> object:
+    """Compose only after the managed-runtime and application-effect gates."""
+
+    _prepare_freecad_import()
+    freecad = importlib.import_module("FreeCAD")
+    capabilities = importlib.import_module("vibecad.execution.freecad_capability_runtime_v2")
+    return capabilities.compose_managed_freecad_capability_runtime_v2(
+        freecad=freecad,
+    )
+
+
 _application_effect_entered = threading.Event()
 _runtime_transition_lock = threading.Lock()
 
@@ -412,6 +495,7 @@ def _initialize_application_process_runtime() -> None:
 
 
 _application_slot = _ApplicationSlot(_open_agent_application)
+_runtime_capability_slot = _RuntimeCapabilitySlot(_compose_freecad_runtime_capabilities)
 
 
 def _close_application_for_uninstall() -> bool:
@@ -692,6 +776,131 @@ def _canonical_json(value: object) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
+    )
+
+
+def _decode_internal_canonical_mapping(raw: object, *, maximum_bytes: int) -> dict[str, object]:
+    """Decode one trusted codec output while retaining its exact canonical claim."""
+
+    if type(raw) is not bytes or not raw or len(raw) > maximum_bytes:
+        raise RuntimeError("runtime capability mapping is invalid")
+
+    def pairs_hook(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate mapping key")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(raw.decode("ascii"), object_pairs_hook=pairs_hook)
+        canonical = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeError, RecursionError, OverflowError):
+        raise RuntimeError("runtime capability mapping is invalid") from None
+    if type(value) is not dict or canonical != raw:
+        raise RuntimeError("runtime capability mapping is invalid")
+    return value
+
+
+def _runtime_capability_failure(error: object) -> dict[str, object]:
+    code = getattr(getattr(error, "code", None), "value", None)
+    public_code = {
+        "invalid_input": "invalid_input",
+        "unsupported_version": "unsupported_version",
+        "budget_exceeded": "budget_exceeded",
+        "integrity_failure": "integrity_failure",
+        "unknown_reference": "invalid_input",
+        "invalid_status": "invalid_input",
+    }.get(code, "internal_error")
+    raw_path = getattr(error, "path", "")
+    path = ""
+    if type(raw_path) is str:
+        first = raw_path.split("/", 1)[0]
+        public_field = {
+            "module": "module",
+            "semantic_kind": "semantic_kind",
+            "minimum_status": "minimum_status",
+            "page_size": "limit",
+            "cursor": "cursor",
+        }.get(first)
+        if public_field is not None:
+            path = f"/{public_field}"
+    return _failure(public_code, path)
+
+
+def _query_freecad_runtime_capabilities(arguments: dict[str, object]) -> dict[str, object]:
+    guarded = _application_runtime_guard()
+    if guarded is not None:
+        return guarded
+    if not _enter_application_effect():
+        return _runtime_unavailable()
+
+    try:
+        runtime = _runtime_capability_slot.get()
+    except BaseException:
+        return _failure("runtime_failure")
+
+    try:
+        from vibecad.execution.capabilities import (
+            CapabilityCatalogError,
+            CapabilitySupportStatus,
+        )
+        from vibecad.execution.freecad_capability_projection_v2 import (
+            FreeCadCapabilitySemanticKind,
+        )
+        from vibecad.execution.freecad_capability_runtime_v2 import (
+            MAX_FREECAD_CAPABILITY_QUERY_PAGE_BYTES,
+            MAX_FREECAD_CAPABILITY_RUNTIME_BINDING_BYTES,
+            encode_freecad_capability_query_page_v2,
+            encode_freecad_capability_runtime_binding_v2,
+            query_freecad_capability_runtime_v2,
+        )
+
+        semantic_kind_raw = arguments.get("semantic_kind")
+        semantic_kind = (
+            None if semantic_kind_raw is None else FreeCadCapabilitySemanticKind(semantic_kind_raw)
+        )
+        minimum_status = CapabilitySupportStatus(
+            arguments.get("minimum_status", CapabilitySupportStatus.DISCOVERED.value)
+        )
+        page = query_freecad_capability_runtime_v2(
+            runtime,
+            module=arguments.get("module"),
+            semantic_kind=semantic_kind,
+            minimum_status=minimum_status,
+            page_size=arguments.get("limit", 64),
+            cursor=arguments.get("cursor"),
+        )
+        binding_mapping = _decode_internal_canonical_mapping(
+            encode_freecad_capability_runtime_binding_v2(runtime.binding),
+            maximum_bytes=MAX_FREECAD_CAPABILITY_RUNTIME_BINDING_BYTES,
+        )
+        page_mapping = _decode_internal_canonical_mapping(
+            encode_freecad_capability_query_page_v2(page),
+            maximum_bytes=MAX_FREECAD_CAPABILITY_QUERY_PAGE_BYTES,
+        )
+        if page_mapping.get("runtime_binding_sha256") != binding_mapping.get("binding_sha256"):
+            raise RuntimeError("runtime capability binding mismatch")
+    except CapabilityCatalogError as error:
+        return _runtime_capability_failure(error)
+    except (TypeError, ValueError):
+        return _failure("invalid_input")
+    except BaseException:
+        return _failure("internal_error")
+
+    return _success(
+        {
+            "schema_version": _SCHEMA_VERSION,
+            "runtime_binding": binding_mapping,
+            "query_page": page_mapping,
+        }
     )
 
 
@@ -1101,6 +1310,8 @@ def _control_envelope(name: str, arguments: dict[str, object]) -> dict[str, obje
             from vibecad.application.task_api import TaskApi
 
             return TaskApi(port=object()).get_capabilities(arguments)
+        if name == "query_freecad_runtime_capabilities":
+            return _query_freecad_runtime_capabilities(arguments)
     except (OSError, RuntimeError, ValueError):
         return _failure("recovery_required" if name == "uninstall_runtime" else "runtime_failure")
     except BaseException:

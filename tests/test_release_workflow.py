@@ -244,9 +244,9 @@ def test_release_workflow_executes_the_exact_built_artifacts_before_publish():
     assert 'vibecad.__version__ == os.environ["EXPECTED_VERSION"]' in package_body
     assert (
         "spec.PUBLIC_SURFACE_SHA256 == "
-        '"cb336a972554881bdf400a8699d8004cceeac877b2e52afb0659c78fb37f701d"'
+        '"fa260ce63582a49bfb940bd65e013021e7387c44e50d4670e7bd83887f66f70d"'
     ) in package_body
-    assert "assert len(public_tool_specs()) == 38" in package_body
+    assert "assert len(public_tool_specs()) == 39" in package_body
 
     assert managed_body.count("actions/download-artifact@v4") == 2
     assert "name: python-distributions" in managed_body

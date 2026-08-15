@@ -38,6 +38,7 @@ PUBLIC_TOOL_NAMES = (
     "ensure_runtime",
     "uninstall_runtime",
     "get_capabilities",
+    "query_freecad_runtime_capabilities",
     "create_project",
     "get_project",
     "list_projects",
@@ -229,12 +230,12 @@ def test_skill_has_canonical_files_and_minimal_trigger_frontmatter():
     assert "$vibecad-agent" in interface["default_prompt"]
 
 
-def test_skill_teaches_the_exact_thirty_eight_tool_agent_first_flow():
+def test_skill_teaches_the_exact_thirty_nine_tool_agent_first_flow():
     _metadata, body = _skill_parts()
     code_tokens = _inline_code(body)
     assert set(PUBLIC_TOOL_NAMES) <= code_tokens
     assert LEGACY_TOOL_NAMES.isdisjoint(code_tokens)
-    assert re.search(r"\b38(?:-tool| tools?)\b|38\s*个", body, re.IGNORECASE)
+    assert re.search(r"\b39(?:-tool| tools?)\b|39\s*个", body, re.IGNORECASE)
 
     essential_order = (
         "get_capabilities",
@@ -618,7 +619,7 @@ def test_skill_teaches_resource_links_and_fail_closed_product_limits():
     assert path_rule is not None
     assert re.search(r"never|must not|禁止|不得|不能", path_rule, re.IGNORECASE)
 
-    retired_rule = _paragraph_with(body, "retired", "38")
+    retired_rule = _paragraph_with(body, "retired", "39")
     assert re.search(r"never|must not|禁止|不得|不能", retired_rule, re.IGNORECASE)
     code_rule = _paragraph_with(body, "Python", "FreeCAD", "code")
     assert re.search(r"never|must not|禁止|不得|不能", code_rule, re.IGNORECASE)
@@ -764,7 +765,7 @@ def test_release_documents_project_the_0_9_0_backend_truth():
         )
     }
     for path, normalized in product_documents.items():
-        assert any(claim in normalized for claim in ("38-tool", "38 个工具", "38 个公开工具")), path
+        assert any(claim in normalized for claim in ("39-tool", "39 个工具", "39 个公开工具")), path
         assert "daemon" in normalized, path
         assert "task kernel" in normalized, path
 

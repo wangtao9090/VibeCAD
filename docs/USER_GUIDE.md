@@ -20,12 +20,12 @@ VibeCAD 不出售模型 token，也不会从 MCPB 中获得 Claude/Codex 的订�
 
 ## 2. 当前能做什么
 
-公开面固定为 38 个工具：
+公开面固定为 39 个工具：
 
 | 类别 | 工具 |
 |---|---|
 | 运行时 | `ping`, `get_runtime_status`, `ensure_runtime`, `uninstall_runtime` |
-| 能力发现 | `get_capabilities` |
+| 能力发现 | `get_capabilities`, `query_freecad_runtime_capabilities` |
 | 项目与版本 | `create_project`, `get_project`, `list_projects`, `list_revisions`, `compare_revisions`, `revert_project` |
 | 任务 | `create_task`, `list_tasks`, `get_task`, `get_task_events`, `submit_model_program`, `resume_task`, `cancel_task` |
 | 审核 | `accept_draft`, `reject_draft` |
@@ -105,7 +105,7 @@ WorkBuddy 5.3.5 + GLM-5.2 已完成真实多轮、重启恢复、Release 摘要�
 因此该精确 Profile 可以描述为 `host-verified`；不要把它扩展为 Claude/Codex 或所有 WorkBuddy
 模型都已认证。
 
-当前 38-tool visual 开发分支还对 GLM-5V-Turbo 完成了完整尺寸单孔板和三视图 L 型支架 outcome；
+当前 39-tool visual 开发分支还对 GLM-5V-Turbo 完成了完整尺寸单孔板和三视图 L 型支架 outcome；
 L 型支架包含同平面两个 Ø6 通孔及另一平面一个 Ø6 通孔，最终 Task 停在
 `awaiting_user_review`，四项确定性验收通过且 HEAD 不变。缺拉伸深度与 50/45 mm 视图冲突两个
 只读负例均在 Task 创建前返回 `SAFE_FAILURE`。这次多视图运行也表明模型第一次手写的 IR 仍可能
@@ -375,5 +375,5 @@ STEP 等只适合作为 accepted Revision 的可选 Git LFS 快照；Git 不是 
 原生 CAD 文件。完整边界见 [`CAD_GIT_VERSIONING_RESEARCH.md`](CAD_GIT_VERSIONING_RESEARCH.md)。
 
 0.9.0 对 Codex、Claude、WorkBuddy 使用同一发布包 smoke 合同，并分别记录宿主版本、Skill/package
-hash、38-tool discovery、任务恢复、建模和 ResourceLink/`resources/read` 结果。WorkBuddy 另测其
+hash、39-tool discovery、任务恢复、建模和 ResourceLink/`resources/read` 结果。WorkBuddy 另测其
 严格错误呈现与 bounded submit 兼容路径；任一宿主通过都不替代另外两个。

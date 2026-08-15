@@ -2030,6 +2030,7 @@ def test_default_replay_tool_set_matches_public_idempotence_contract() -> None:
     assert "cancel_task" in supervisor._DEFAULT_IDEMPOTENT_TOOLS
     assert "create_release" in supervisor._DEFAULT_IDEMPOTENT_TOOLS
     assert "approve_release" in supervisor._DEFAULT_IDEMPOTENT_TOOLS
+    assert "query_freecad_runtime_capabilities" in supervisor._DEFAULT_IDEMPOTENT_TOOLS
     assert {
         "list_projects",
         "list_revisions",
