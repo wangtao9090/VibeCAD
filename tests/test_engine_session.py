@@ -539,6 +539,7 @@ class _LifecycleDoc:
     def __init__(self, name):
         self.Name = name
         self.UndoMode = 0
+        self.TransientDir = ""
 
 
 def test_replace_document_close_failure_restores_old_session(monkeypatch):

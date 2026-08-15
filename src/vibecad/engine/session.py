@@ -17,6 +17,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from vibecad.engine.document_assets import DocumentAssetWorkspace
+
 #: 单零件模式（_parts 空）下标签注册表的命名空间键
 _SINGLE = "__single__"
 
@@ -50,10 +52,16 @@ _BOM_PROPERTY_DOC = "Canonical VibeCAD component BOM metadata JSON"
 
 
 class Session:
-    def __init__(self, checkpoint_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        checkpoint_dir: Path | None = None,
+        *,
+        document_asset_root: Path | None = None,
+    ) -> None:
         self._doc: Any = None
         self._loaded: bool = False
         self._checkpoint_dir = checkpoint_dir
+        self._document_assets = DocumentAssetWorkspace(document_asset_root)
         # 标签注册表按零件分命名空间：{part_key: {"faces":…, "edges":…, "shown":…}}；
         # part_key = 活动零件名，单零件模式恒为 _SINGLE（对外行为与 R7 零差异）
         self._labels: dict[str, dict] | None = None
@@ -666,6 +674,16 @@ class Session:
                 raise RuntimeError(f"拒绝关闭已被其他 Session 占用的 FreeCAD 文档 {name!r}")
             FreeCAD.closeDocument(name)
 
+    def _discard_candidate(self, doc: Any) -> None:
+        """Best-effort candidate disposal without deleting a live document workspace."""
+
+        try:
+            self._close_owned_document(doc)
+        except Exception:
+            return
+        with contextlib.suppress(Exception):
+            self._document_assets.release_after_close(doc)
+
     def _replace_document(self, doc: Any, *, restore_state: bool) -> Any:
         """原子切换活动文档：新文档成功获得后才关闭旧文档，避免打开失败丢会话。"""
         old = self._doc
@@ -685,6 +703,7 @@ class Session:
             self._undo_revisions,
             self._redo_revisions,
         )
+        old_closed = False
         try:
             self._doc = doc
             self._reset_model_state()
@@ -696,7 +715,14 @@ class Session:
                 self.mark_saved()
             if old is not None and old is not doc:
                 self._close_owned_document(old)
+                old_closed = True
+                self._document_assets.release_after_close(old)
         except BaseException:
+            # Native close is irreversible.  If only post-close workspace
+            # cleanup failed, retain the already-prepared candidate instead of
+            # restoring a proxy which FreeCAD has closed.
+            if old_closed:
+                raise
             self._doc = old
             (
                 self._labels,
@@ -715,8 +741,7 @@ class Session:
                 self._redo_revisions,
             ) = state_before
             if doc is not old:
-                with contextlib.suppress(Exception):
-                    self._close_owned_document(doc)
+                self._discard_candidate(doc)
             raise
         return self._doc
 
@@ -728,6 +753,12 @@ class Session:
             import FreeCAD  # noqa: PLC0415
 
             doc = FreeCAD.newDocument(name)
+        try:
+            self._document_assets.attach(doc)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                self._close_owned_document(doc)
+            raise
         # headless 默认 UndoMode=0，openTransaction/abort 是 no-op；必须显式开启。
         return self._replace_document(doc, restore_state=False)
 
@@ -749,12 +780,12 @@ class Session:
             # candidate 完整恢复成功后才替换旧会话；失败则清理 candidate，旧会话不动。
             doc = FreeCAD.newDocument()
             try:
+                self._document_assets.attach(doc)
                 doc.load(str(source))
                 doc.recompute()
             except BaseException:
                 # 候选清理失败不能覆盖真正的 load/recompute 错误。
-                with contextlib.suppress(Exception):
-                    self._close_owned_document(doc)
+                self._discard_candidate(doc)
                 raise
         return self._replace_document(doc, restore_state=True)
 
@@ -763,9 +794,11 @@ class Session:
             self._reset_model_state()
             return
         # FreeCAD 关闭成功后才发布“无文档”状态；失败时完整保留可继续操作的会话。
-        self._close_owned_document(self._doc)
+        closed = self._doc
+        self._close_owned_document(closed)
         self._doc = None
         self._reset_model_state()
+        self._document_assets.release_after_close(closed)
 
     def _checkpoint(self) -> Path:
         if self._doc is None:
