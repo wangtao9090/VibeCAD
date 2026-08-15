@@ -41,6 +41,7 @@ from vibecad.execution.freecad_capability_projection_v2 import (
     FreeCadCapabilityProjectionV2,
     FreeCadCapabilityPromotionPack,
     FreeCadCapabilitySemanticKind,
+    FreeCadPromotionVerificationBinding,
     build_freecad_capability_projection_v2,
 )
 from vibecad.execution.freecad_discovery_runtime_v2 import (
@@ -316,8 +317,16 @@ def compose_managed_freecad_capability_runtime_v2(
     module_importer: Callable[[str], object] = importlib.import_module,
     extra_formal_catalogs: tuple[CapabilityCatalogSegment, ...] = (),
     promotion_packs: tuple[FreeCadCapabilityPromotionPack, ...] = (),
+    verification_by_native_type: dict[str, FreeCadPromotionVerificationBinding] | None = None,
 ) -> FreeCadCapabilityRuntimeV2:
-    """Collect and compose one exact managed runtime capability view."""
+    """Collect and compose one exact managed runtime capability view.
+
+    ``verification_by_native_type`` is intentionally not a discovery or
+    execution hook.  It accepts only the existing content-bound verification
+    record and is revalidated by the promotion builder against the discovered
+    build and each reviewed adapter contract.  With no supplied records the
+    historical executable-only projection is byte-for-byte unchanged.
+    """
 
     if type(extra_formal_catalogs) is not tuple:
         _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "extra_formal_catalogs")
@@ -347,6 +356,7 @@ def compose_managed_freecad_capability_runtime_v2(
     intent_promotion_packs = build_freecad_intent_capability_promotion_packs(
         discovery=discovery,
         specs=current_freecad_intent_promotion_specs(),
+        verification_by_native_type=verification_by_native_type,
     )
     if len(intent_promotion_packs) + len(promotion_packs) > MAX_FREECAD_CAPABILITY_PROMOTION_PACKS:
         _fail(CapabilityCatalogErrorCode.BUDGET_EXCEEDED, "promotion_packs")

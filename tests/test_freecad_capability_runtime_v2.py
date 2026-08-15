@@ -29,6 +29,7 @@ from vibecad.execution.capabilities import (
 )
 from vibecad.execution.freecad_builtin_intent_capabilities import (
     current_freecad_intent_capability_specs,
+    current_freecad_intent_promotion_specs,
 )
 from vibecad.execution.freecad_capabilities import (
     FreeCadNativeTypeCategory,
@@ -41,6 +42,7 @@ from vibecad.execution.freecad_capability_projection_v2 import (
     FreeCadCapabilityPromotionEntry,
     FreeCadCapabilityPromotionPack,
     FreeCadCapabilitySemanticKind,
+    FreeCadPromotionVerificationBinding,
 )
 from vibecad.execution.freecad_capability_runtime_v2 import (
     MAX_FREECAD_CAPABILITY_QUERY_PAGE_SIZE,
@@ -224,6 +226,22 @@ def _promotion_pack(
     )
 
 
+def _verification_binding(
+    discovery: FreeCadPagedCapabilityCatalog,
+    *,
+    adapter_contract_sha256: str,
+) -> FreeCadPromotionVerificationBinding:
+    return FreeCadPromotionVerificationBinding(
+        runtime_build_sha256=discovery.snapshot.backend.build_fingerprint_sha256,
+        adapter_contract_sha256=adapter_contract_sha256,
+        test_contract_sha256=_sha("managed-test-contract"),
+        test_receipt_sha256=_sha("managed-test-receipt"),
+        test_receipt_size_bytes=4_096,
+        verifier_id="vcad.test.managed-review",
+        verifier_version="1.0.0",
+    )
+
+
 def _install_fake_collector(
     monkeypatch: pytest.MonkeyPatch,
     discovery: FreeCadPagedCapabilityCatalog,
@@ -366,6 +384,57 @@ def test_query_filters_and_n_plus_one_pages_are_stable_and_content_addressed(
     )
     assert verified.total_matches == 0
     assert verified.entries == () and verified.next_cursor is None
+
+
+def test_exact_managed_verification_binding_promotes_only_its_reviewed_native_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    discovery = _discovery()
+    _install_fake_collector(monkeypatch, discovery)
+    spec = next(
+        item
+        for item in current_freecad_intent_promotion_specs()
+        if item.native_type_id == "PartDesign::Groove"
+    )
+    binding = _verification_binding(
+        discovery,
+        adapter_contract_sha256=spec.adapter_contract_sha256,
+    )
+    runtime = compose_managed_freecad_capability_runtime_v2(
+        freecad=object(),
+        verification_by_native_type={spec.native_type_id: binding},
+    )
+
+    verified = query_freecad_capability_runtime_v2(
+        runtime,
+        minimum_status=CapabilitySupportStatus.VERIFIED,
+    )
+    assert verified.total_matches == 1
+    assert tuple(item.native_type_id for item in verified.entries) == ("PartDesign::Groove",)
+    entry = runtime.projection.index.lookup(freecad_type_capability_id("PartDesign::Groove"))
+    assert entry.status is CapabilitySupportStatus.VERIFIED
+    assert entry.verification is not None
+    assert entry.verification.verifier_id == binding.verifier_id
+    manifest_entry = next(
+        item
+        for item in runtime.projection.manifest.entries
+        if item.native_type_id == "PartDesign::Groove"
+    )
+    assert manifest_entry.layer(CapabilitySupportStatus.VERIFIED) is not None
+
+    wrong_adapter = dataclasses.replace(
+        binding,
+        adapter_contract_sha256=_sha("wrong-adapter"),
+    )
+    assert (
+        _error_code(
+            lambda: compose_managed_freecad_capability_runtime_v2(
+                freecad=object(),
+                verification_by_native_type={spec.native_type_id: wrong_adapter},
+            )
+        )
+        is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+    )
 
 
 def test_cursor_tamper_query_drift_runtime_drift_and_unknown_module_fail_closed(
