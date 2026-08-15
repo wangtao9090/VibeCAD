@@ -783,6 +783,12 @@ def _content_sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _stable_fcstd_save_facts(raw: bytes) -> dict[str, object]:
+    if type(raw) is not bytes or not raw:
+        _fail("legacy_reviewed/save")
+    return {"format": "FCStd", "nonempty": True, "saved": True}
+
+
 def _close_owned_documents(freecad: object, owned: dict[str, object]) -> None:
     try:
         current = freecad.listDocuments()
@@ -1062,7 +1068,7 @@ def _execute_primitive_operation(
     model_path = temporary_root / f"{suffix}.FCStd"
     document.saveAs(str(model_path))
     saved = model_path.read_bytes()
-    save_facts = {"size_bytes": len(saved), "content_sha256": _content_sha256(saved)}
+    save_facts = _stable_fcstd_save_facts(saved)
     object_name = feature.Name
     body_name = body.Name
     freecad.closeDocument(document.Name)
@@ -1321,7 +1327,7 @@ def _execute_boolean_operation(
     model_path = temporary_root / f"{suffix}.FCStd"
     document.saveAs(str(model_path))
     saved = model_path.read_bytes()
-    save_facts = {"size_bytes": len(saved), "content_sha256": _content_sha256(saved)}
+    save_facts = _stable_fcstd_save_facts(saved)
     feature_name = feature.Name
     target_name = target.Name
     tool_name = tool.Name
@@ -1632,7 +1638,7 @@ def _execute_pattern_operation(
     model_path = temporary_root / f"{suffix}.FCStd"
     document.saveAs(str(model_path))
     saved = model_path.read_bytes()
-    save_facts = {"size_bytes": len(saved), "content_sha256": _content_sha256(saved)}
+    save_facts = _stable_fcstd_save_facts(saved)
     feature_name = feature.Name
     freecad.closeDocument(document.Name)
     reopened = freecad.openDocument(str(model_path))
@@ -1859,7 +1865,7 @@ def _execute_groove_operation(
     model_path = temporary_root / "groove.FCStd"
     document.saveAs(str(model_path))
     saved = model_path.read_bytes()
-    save_facts = {"size_bytes": len(saved), "content_sha256": _content_sha256(saved)}
+    save_facts = _stable_fcstd_save_facts(saved)
     feature_name = feature.Name
     freecad.closeDocument(document.Name)
     reopened = freecad.openDocument(str(model_path))
@@ -2122,7 +2128,7 @@ def _execute_reference_operation(
     model_path = temporary_root / f"{suffix}.FCStd"
     document.saveAs(str(model_path))
     saved = model_path.read_bytes()
-    save_facts = {"size_bytes": len(saved), "content_sha256": _content_sha256(saved)}
+    save_facts = _stable_fcstd_save_facts(saved)
     result_name = result.Name
     body_name = body.Name
     freecad.closeDocument(document.Name)
@@ -2378,7 +2384,7 @@ def _execute_planar_mechanical_operation(
     model_path = temporary_root / f"{suffix}.FCStd"
     document.saveAs(str(model_path))
     saved = model_path.read_bytes()
-    save_facts = {"size_bytes": len(saved), "content_sha256": _content_sha256(saved)}
+    save_facts = _stable_fcstd_save_facts(saved)
     body_name = body.Name
     focused_name = focused.Name
     tip_name = body.Tip.Name
@@ -2743,7 +2749,7 @@ def _execute_promotion_operation(
     model_path = temporary_root / f"{suffix}.FCStd"
     document.saveAs(str(model_path))
     saved = model_path.read_bytes()
-    save_facts = {"size_bytes": len(saved), "content_sha256": _content_sha256(saved)}
+    save_facts = _stable_fcstd_save_facts(saved)
     feature_name = feature.Name
     body_name = body.Name
     freecad.closeDocument(document.Name)
@@ -3056,7 +3062,7 @@ def _execute_dressup_operation(
     model_path = temporary_root / f"{suffix}.FCStd"
     document.saveAs(str(model_path))
     saved = model_path.read_bytes()
-    save_facts = {"size_bytes": len(saved), "content_sha256": _content_sha256(saved)}
+    save_facts = _stable_fcstd_save_facts(saved)
     feature_name = feature.Name
     body_name = body.Name
     child_names = tuple(receipt.object_names[1:])

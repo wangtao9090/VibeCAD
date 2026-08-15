@@ -207,9 +207,9 @@ def _file_import_plan(
 
 
 def _offset_plan(operation: PartOffsetOperation) -> PartOffsetBackendPlan:
-    configuration = {} if operation is PartOffsetOperation.EDGE_ON_FACE_PROJECTION else {
-        "distance_mm": 2.0
-    }
+    configuration = (
+        {} if operation is PartOffsetOperation.EDGE_ON_FACE_PROJECTION else {"distance_mm": 2.0}
+    )
     return PartOffsetBackendPlan(
         **_common_fields(PART_OFFSET_MANIFEST, operation.value, "primary"),
         container_id="document_root",
@@ -504,9 +504,7 @@ def _document_snapshot(document: object) -> tuple[object, ...]:
     return (
         objects,
         tuple(
-            (item, tuple(item.Group))
-            for item in objects
-            if "Group" in tuple(item.PropertiesList)
+            (item, tuple(item.Group)) for item in objects if "Group" in tuple(item.PropertiesList)
         ),
         tuple(
             (item, bool(item.Visibility))
@@ -734,8 +732,9 @@ def _execute_file_import(
     _require(str(staging_root).encode() not in saved, "import staging path leaked into FCStd")
     if descriptor.facet is ReviewedConformanceFacet.SAVE:
         return {
-            "file_size_bytes": size,
+            "format": "FCStd",
             "native_type_id": feature.TypeId,
+            "nonempty": True,
             "saved": True,
             "staging_path_absent": True,
         }
@@ -754,8 +753,9 @@ def _execute_file_import(
         "import reopen readback failed",
     )
     return {
-        "file_size_bytes": size,
+        "format": "FCStd",
         "native_type_id": reopened_feature.TypeId,
+        "nonempty": True,
         "reopened": True,
         "shape": expected_shape,
     }
@@ -978,7 +978,12 @@ def _execute_offset(
     size = save_path.stat().st_size
     _require(size > 0, "offset save produced an empty FCStd")
     if descriptor.facet is ReviewedConformanceFacet.SAVE:
-        return {"file_size_bytes": size, "native_type_id": feature.TypeId, "saved": True}
+        return {
+            "format": "FCStd",
+            "native_type_id": feature.TypeId,
+            "nonempty": True,
+            "saved": True,
+        }
     _require(descriptor.facet is ReviewedConformanceFacet.REOPEN, "unexpected offset facet")
     object_name = feature.Name
     expected_shape = _shape_facts(feature.Shape)
@@ -995,8 +1000,9 @@ def _execute_offset(
         "offset reopen readback failed",
     )
     return {
-        "file_size_bytes": size,
+        "format": "FCStd",
         "native_type_id": reopened_feature.TypeId,
+        "nonempty": True,
         "reopened": True,
         "shape": expected_shape,
     }
@@ -1235,8 +1241,9 @@ def _execute_imageplane(
     if descriptor.facet is ReviewedConformanceFacet.SAVE:
         facts = {
             "embedded_alias": receipt.retained_alias,
-            "file_size_bytes": size,
+            "format": "FCStd",
             "native_type_id": feature.TypeId,
+            "nonempty": True,
             "saved": True,
         }
         _close_workspace_document(freecad, workspace, document)
@@ -1260,8 +1267,9 @@ def _execute_imageplane(
         "ImagePlane reopen readback failed",
     )
     facts = {
-        "file_size_bytes": size,
+        "format": "FCStd",
         "native_type_id": reopened_feature.TypeId,
+        "nonempty": True,
         "reopened": True,
         "state": expected,
     }

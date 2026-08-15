@@ -739,7 +739,12 @@ def _execute_residual(
     size = save_path.stat().st_size
     _require(size > 0, "residual save produced an empty file")
     if descriptor.facet is ReviewedConformanceFacet.SAVE:
-        return {"file_size_bytes": size, "native_type_id": feature.TypeId, "saved": True}
+        return {
+            "format": "FCStd",
+            "native_type_id": feature.TypeId,
+            "nonempty": True,
+            "saved": True,
+        }
     _require(descriptor.facet is ReviewedConformanceFacet.REOPEN, "unexpected residual facet")
     object_name = feature.Name
     freecad.closeDocument(document.Name)
@@ -752,8 +757,9 @@ def _execute_residual(
         "residual reopen readback failed",
     )
     return {
-        "file_size_bytes": size,
+        "format": "FCStd",
         "native_type_id": reopened_feature.TypeId,
+        "nonempty": True,
         "reopened": True,
         "state": tuple(reopened_feature.State),
     }
@@ -882,7 +888,12 @@ def _execute_datum(
     size = save_path.stat().st_size
     _require(size > 0, "datum save produced an empty file")
     if descriptor.facet is ReviewedConformanceFacet.SAVE:
-        return {"file_size_bytes": size, "native_type_id": feature.TypeId, "saved": True}
+        return {
+            "format": "FCStd",
+            "native_type_id": feature.TypeId,
+            "nonempty": True,
+            "saved": True,
+        }
     _require(descriptor.facet is ReviewedConformanceFacet.REOPEN, "unexpected datum facet")
     object_name = feature.Name
     expected_owned = len(receipt.owned_object_names)
@@ -901,8 +912,9 @@ def _execute_datum(
             "datum LCS helper reopen readback failed",
         )
     return {
-        "file_size_bytes": size,
+        "format": "FCStd",
         "native_type_id": reopened_feature.TypeId,
+        "nonempty": True,
         "owned_object_count": expected_owned,
         "reopened": True,
     }
@@ -1065,7 +1077,12 @@ def _execute_dressup(
     size = save_path.stat().st_size
     _require(size > 0, "dressup save produced an empty file")
     if descriptor.facet is ReviewedConformanceFacet.SAVE:
-        return {"file_size_bytes": size, "native_type_id": feature.TypeId, "saved": True}
+        return {
+            "format": "FCStd",
+            "native_type_id": feature.TypeId,
+            "nonempty": True,
+            "saved": True,
+        }
     _require(descriptor.facet is ReviewedConformanceFacet.REOPEN, "unexpected dressup facet")
     object_name = feature.Name
     expected_shape = _shape_facts(feature.Shape)
@@ -1080,8 +1097,9 @@ def _execute_dressup(
         "dressup reopen readback failed",
     )
     return {
-        "file_size_bytes": size,
+        "format": "FCStd",
         "native_type_id": reopened_feature.TypeId,
+        "nonempty": True,
         "reopened": True,
         "shape": expected_shape,
     }
@@ -1420,7 +1438,12 @@ def _execute_profile(
     size = save_path.stat().st_size
     _require(size > 0, "profile/surface save produced an empty file")
     if descriptor.facet is ReviewedConformanceFacet.SAVE:
-        return {"file_size_bytes": size, "native_type_id": feature.TypeId, "saved": True}
+        return {
+            "format": "FCStd",
+            "native_type_id": feature.TypeId,
+            "nonempty": True,
+            "saved": True,
+        }
     _require(descriptor.facet is ReviewedConformanceFacet.REOPEN, "unexpected profile facet")
     object_name = feature.Name
     expected_source_count = len(sources)
@@ -1438,8 +1461,9 @@ def _execute_profile(
         "profile/surface reopen readback failed",
     )
     return {
-        "file_size_bytes": size,
+        "format": "FCStd",
         "native_type_id": reopened_feature.TypeId,
+        "nonempty": True,
         "reopened": True,
         "shape": expected_shape,
         "source_count": expected_source_count,
