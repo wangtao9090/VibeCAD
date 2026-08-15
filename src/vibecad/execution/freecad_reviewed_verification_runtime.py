@@ -187,7 +187,10 @@ class FreeCadManagedReviewedVerificationSet:
     verification_set_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
-        if self.schema_version != FREECAD_REVIEWED_VERIFICATION_SET_SCHEMA_VERSION:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != FREECAD_REVIEWED_VERIFICATION_SET_SCHEMA_VERSION
+        ):
             _fail(CapabilityCatalogErrorCode.UNSUPPORTED_VERSION, "schema_version")
         if type(self.runtime_backend) is not CapabilityBackend:
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "runtime_backend")
@@ -217,10 +220,13 @@ class FreeCadManagedReviewedVerificationSet:
             or any(type(item) is not FreeCadVerifiedNativeType for item in self.native_types)
         ):
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "native_types")
-        if self.formal_operations != tuple(
-            sorted(self.formal_operations, key=lambda item: item.operation_id)
-        ) or len({item.operation_id for item in self.formal_operations}) != len(
+        if (
             self.formal_operations
+            != tuple(sorted(self.formal_operations, key=lambda item: item.operation_id))
+            or len({item.operation_id for item in self.formal_operations})
+            != len(self.formal_operations)
+            or len({item.formal_spec_sha256 for item in self.formal_operations})
+            != len(self.formal_operations)
         ):
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "formal_operations")
         if self.native_types != tuple(
@@ -228,13 +234,22 @@ class FreeCadManagedReviewedVerificationSet:
         ) or len({item.native_type_id for item in self.native_types}) != len(self.native_types):
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "native_types")
         formal_ids = {item.operation_id for item in self.formal_operations}
-        if any(
-            item.test_receipt_sha256 not in self.receipt_sha256 for item in self.formal_operations
-        ) or any(
-            not set(item.formal_operation_ids) <= formal_ids
-            or item.verification.runtime_build_sha256
-            != self.runtime_backend.build_fingerprint_sha256
-            for item in self.native_types
+        native_formal_ids = [
+            operation_id for item in self.native_types for operation_id in item.formal_operation_ids
+        ]
+        if (
+            any(
+                item.test_receipt_sha256 not in self.receipt_sha256
+                for item in self.formal_operations
+            )
+            or any(
+                not set(item.formal_operation_ids) <= formal_ids
+                or item.verification.runtime_build_sha256
+                != self.runtime_backend.build_fingerprint_sha256
+                or item.verification.test_receipt_sha256 not in self.receipt_sha256
+                for item in self.native_types
+            )
+            or len(set(native_formal_ids)) != len(native_formal_ids)
         ):
             _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "verification_set")
         body = self._mapping()
@@ -371,6 +386,7 @@ def build_managed_reviewed_verification_set(
         len({item.test_receipt_sha256 for item in receipts}) != len(receipts)
         or len({item.contract.family_manifest_sha256 for item in receipts}) != len(receipts)
         or len({item.manifest_sha256 for item in manifests}) != len(manifests)
+        or len({item.family_id for item in manifests}) != len(manifests)
         or len({item.operation_id for item in formal_specs}) != len(formal_specs)
         or len({item.operation_id for item in promotion_specs}) != len(promotion_specs)
     ):
