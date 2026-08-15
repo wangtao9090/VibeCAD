@@ -2434,7 +2434,7 @@ def test_client_eof_and_bad_secret_kill_only_connection_then_fresh_client_succee
 def test_visual_tools_expand_public_count_without_file_grants() -> None:
     from vibecad.application.public_surface import public_tool_specs
 
-    assert len(public_tool_specs()) == 38
+    assert len(public_tool_specs()) == 39
     assert tuple(spec.name for spec in public_tool_specs())[-6:] == (
         "create_box",
         "create_cylinder",

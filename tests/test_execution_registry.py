@@ -31,6 +31,7 @@ _STABLE_PUBLIC_TOOL_NAMES = (
     "ensure_runtime",
     "uninstall_runtime",
     "get_capabilities",
+    "query_freecad_runtime_capabilities",
     "create_project",
     "get_project",
     "list_projects",
@@ -234,7 +235,7 @@ def test_public_tool_names_are_unique_across_stable_and_direct_surfaces():
     names = tuple(spec.name for spec in public_tool_specs())
 
     assert names[: len(_STABLE_PUBLIC_TOOL_NAMES)] == _STABLE_PUBLIC_TOOL_NAMES
-    assert len(names) == len(set(names)) == 38
+    assert len(names) == len(set(names)) == 39
 
 
 def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contracts():

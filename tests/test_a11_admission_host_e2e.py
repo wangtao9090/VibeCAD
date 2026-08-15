@@ -546,7 +546,7 @@ def test_raw_stdio_discovery_matches_mcpb_and_keeps_adopt_schema_closed() -> Non
 
     tools = response["result"]["tools"]
     manifest = json.loads((Path(__file__).parents[1] / "manifest.json").read_bytes())
-    assert len(tools) == 38
+    assert len(tools) == 39
     assert [item["name"] for item in tools] == [item["name"] for item in manifest["tools"]]
     adopt = next(item for item in tools if item["name"] == "adopt_reconstruction")
     assert adopt["inputSchema"] == {
