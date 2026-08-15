@@ -101,8 +101,14 @@ def _packaged_attestation() -> FreeCadPackagedReviewedReleaseAttestation:
 
 
 @pytest.fixture(autouse=True)
-def _fixed_inert_attestation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep generic composition tests independent of the ungenerated resource."""
+def _fixed_inert_attestation(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Keep synthetic tests isolated while real slow gates use the package pin."""
+
+    if request.node.get_closest_marker("slow") is not None:
+        return
 
     packaged = _packaged_attestation()
     decoded = object()

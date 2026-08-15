@@ -548,7 +548,7 @@ def test_real_managed_runtime_traverses_public_pages_without_documents(
         assert binding["binding_sha256"] == binding_sha256
         assert page["runtime_binding_sha256"] == binding_sha256
         assert page["total_matches"] == 102
-        assert all(entry["status"] == "verified" for entry in page["entries"])
+        assert all(entry["active_status"] == "verified" for entry in page["entries"])
         verified_ids.extend(entry["native_type_id"] for entry in page["entries"])
         cursor = page["next_cursor"]
         if cursor is None:
