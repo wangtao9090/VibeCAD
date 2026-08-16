@@ -47,6 +47,7 @@ _RESOURCE_PATH = _ATTESTATION_DIRECTORY / "freecad-reviewed-release-attestation-
 _PINS_PATH = _ATTESTATION_DIRECTORY / "freecad_reviewed_release_attestation_pins.py"
 _PIN_NAME = "PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE"
 _MAX_EXISTING_FILE_BYTES = 2 * 1024 * 1024
+_FREECAD_USER_TEMP_ENV = "FREECAD_USER_TEMP"
 
 _PINS_DOCSTRING = """Generated pins for packaged reviewed FreeCAD attestations.
 
@@ -218,13 +219,81 @@ def _assert_headless_empty(freecad: object, *, stage: str) -> None:
         raise GenerationError(f"managed FreeCAD is not headless and empty at {stage}")
 
 
+def _assert_freecad_user_temp(freecad: object, expected_root: Path) -> None:
+    try:
+        actual = Path(freecad.getUserCachePath())
+        actual_info = actual.lstat()
+        expected_info = expected_root.lstat()
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        raise GenerationError("cannot authenticate the FreeCAD document cache") from exc
+    if (
+        actual.resolve(strict=True) != expected_root.resolve(strict=True)
+        or stat.S_ISLNK(actual_info.st_mode)
+        or actual_info.st_dev != expected_info.st_dev
+        or actual_info.st_ino != expected_info.st_ino
+    ):
+        raise GenerationError("FreeCAD ignored the private document cache binding")
+
+
+@contextlib.contextmanager
+def _private_freecad_user_temp():
+    """Bind one private native document-cache root before importing FreeCAD."""
+
+    previous = os.environ.get(_FREECAD_USER_TEMP_ENV)
+    failed = False
+    with tempfile.TemporaryDirectory(prefix=".vibecad-reviewed-freecad-") as raw_root:
+        root = Path(raw_root).resolve(strict=True)
+        root.chmod(0o700)
+        info = root.lstat()
+        if (
+            root.is_symlink()
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise GenerationError("cannot establish a private FreeCAD document cache")
+        os.environ[_FREECAD_USER_TEMP_ENV] = str(root)
+        try:
+            yield root
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            if previous is None:
+                os.environ.pop(_FREECAD_USER_TEMP_ENV, None)
+            else:
+                os.environ[_FREECAD_USER_TEMP_ENV] = previous
+            if not failed:
+                try:
+                    residual = tuple(root.iterdir())
+                except OSError as exc:
+                    raise GenerationError(
+                        "cannot verify the private FreeCAD document cache"
+                    ) from exc
+                if residual:
+                    raise GenerationError("FreeCAD left a document cache entry behind")
+
+
 def _build_release_attestation() -> GenerationResult:
     started = time.perf_counter()
+    with _private_freecad_user_temp() as native_root:
+        return _build_release_attestation_in_private_profile(
+            started=started,
+            native_root=native_root,
+        )
+
+
+def _build_release_attestation_in_private_profile(
+    *,
+    started: float,
+    native_root: Path,
+) -> GenerationResult:
     from vibecad.freecad_env import prepare_freecad_import
 
     prepare_freecad_import()
     import FreeCAD  # noqa: PLC0415
 
+    _assert_freecad_user_temp(FreeCAD, native_root)
     _assert_headless_empty(FreeCAD, stage="start")
     discovery = collect_managed_freecad_discovery_v2(
         freecad=FreeCAD,

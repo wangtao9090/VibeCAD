@@ -646,7 +646,8 @@ def test_real_freecad_imageplane_create_edit_roundtrip_tamper_and_rollback(
     asset_root = tmp_path / "document-assets"
     staging_root = tmp_path / "staging"
     checkpoint_root = tmp_path / "checkpoints"
-    for root in (asset_root, staging_root, checkpoint_root):
+    native_root = tmp_path / "freecad-native-cache"
+    for root in (asset_root, staging_root, checkpoint_root, native_root):
         root.mkdir(mode=0o700)
         root.chmod(0o700)
     source_root = Path(__file__).parents[1] / "src"
@@ -841,7 +842,7 @@ inner = App.newDocument('ImagePlaneRollback')
 inner.UndoMode = 1
 fault = FaultDocument(inner)
 workspace = DocumentAssetWorkspace(asset_root)
-workspace.attach(fault)
+workspace.attach_fresh_document(fault)
 original = apply_case(fault, workspace, cases[0])
 feature = inner.getObject(original.object_name)
 before_objects = tuple(inner.Objects)
@@ -870,11 +871,18 @@ assert (
 ) == before_configuration
 assert workspace_manifest(Path(fault.TransientDir)) == before_workspace
 assert tuple(staging_root.iterdir()) == () and not inner.HasPendingTransaction
+workspace.require_attached(fault)
+assert App.getDocument(inner.Name) is inner
 App.closeDocument(inner.Name)
 workspace.release_after_close(fault)
 assert tuple(asset_root.iterdir()) == ()
 """
-    subprocess.run([str(runtime_python), "-c", code], check=True)
+    subprocess.run(
+        [str(runtime_python), "-c", code],
+        check=True,
+        env={**os.environ, "FREECAD_USER_TEMP": str(native_root)},
+    )
     assert model_path.is_file()
     assert tuple(asset_root.iterdir()) == ()
     assert tuple(staging_root.iterdir()) == ()
+    assert tuple(native_root.iterdir()) == ()

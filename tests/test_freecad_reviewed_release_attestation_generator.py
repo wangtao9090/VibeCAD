@@ -169,8 +169,10 @@ def test_real_builder_sequence_is_discovery_then_exact_current_verification_and_
     fake_freecad = types.ModuleType("FreeCAD")
     fake_freecad.GuiUp = 0
     fake_freecad.listDocuments = lambda: {}
+    fake_freecad.getUserCachePath = lambda: os.environ["FREECAD_USER_TEMP"]
     monkeypatch.setitem(sys.modules, "FreeCAD", fake_freecad)
     monkeypatch.delitem(sys.modules, "FreeCADGui", raising=False)
+    monkeypatch.setenv("FREECAD_USER_TEMP", "caller-value")
 
     import vibecad.freecad_env as freecad_env
 
@@ -183,6 +185,10 @@ def test_real_builder_sequence_is_discovery_then_exact_current_verification_and_
     def collect(*, freecad, probe_modules):
         assert freecad is fake_freecad
         assert probe_modules == generator.FREECAD_DISCOVERY_V2_ALLOWED_MODULES
+        native_root = Path(os.environ["FREECAD_USER_TEMP"])
+        assert native_root != Path("caller-value")
+        assert native_root.is_dir()
+        assert native_root.stat().st_mode & 0o777 == 0o700
         events.append("discover")
         return discovery
 
@@ -232,6 +238,7 @@ def test_real_builder_sequence_is_discovery_then_exact_current_verification_and_
     assert result.receipt_count == 19
     assert result.formal_operation_count == 124
     assert result.native_type_count == 102
+    assert os.environ["FREECAD_USER_TEMP"] == "caller-value"
     assert fake_freecad.listDocuments() == {}
     assert "FreeCADGui" not in sys.modules
 

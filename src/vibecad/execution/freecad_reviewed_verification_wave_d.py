@@ -616,10 +616,14 @@ def _execute_file_import(
     primary = _FILE_PRIMARY_PLANS[operation]
     payload = _FILE_IMPORT_PAYLOADS[operation]
     staging_root = temporary_root / "staging"
-    staging_root.mkdir(mode=0o700)
-    staging_root.chmod(0o700)
+    asset_root = temporary_root / "document-assets"
+    for root in (staging_root, asset_root):
+        root.mkdir(mode=0o700)
+        root.chmod(0o700)
     document = freecad.newDocument(f"VerifyImport_{operation.value}_{primary.plan_sha256[:8]}")
     document.UndoMode = 1
+    workspace = DocumentAssetWorkspace(asset_root)
+    workspace.attach_fresh_document(document)
     if descriptor.facet is ReviewedConformanceFacet.NEGATIVE:
         before = _document_snapshot(document)
         artifact = build_part_file_import_artifact_document(
@@ -649,12 +653,19 @@ def _execute_file_import(
         except PartFileImportRuleError as error:
             _require(_same_document_snapshot(document, before), "import reject mutated document")
             _require(not tuple(staging_root.iterdir()), "import reject leaked staged files")
-            return {
+            facts = {
                 "error_code": error.code.value,
                 "error_path": error.path,
                 "rollback_exact": True,
                 "staging_empty": True,
             }
+            return _close_workspace_with_facts(
+                freecad,
+                workspace,
+                document,
+                asset_root,
+                facts,
+            )
         raise RuntimeError("tampered import plan was accepted")
     if descriptor.facet is ReviewedConformanceFacet.LATE_ROLLBACK:
         late = _FILE_LATE_PLANS[operation]
@@ -668,13 +679,20 @@ def _execute_file_import(
                 "invalid exact import did not restore the document",
             )
             _require(not tuple(staging_root.iterdir()), "import rollback leaked staged files")
-            return {
+            facts = {
                 "error_code": error.code.value,
                 "error_path": error.path,
                 "late_native_failure": True,
                 "rollback_exact": True,
                 "staging_empty": True,
             }
+            return _close_workspace_with_facts(
+                freecad,
+                workspace,
+                document,
+                asset_root,
+                facts,
+            )
         raise RuntimeError("invalid exact import artifact was accepted")
 
     receipt = _apply_file_import(primary, payload, document, staging_root)
@@ -690,7 +708,7 @@ def _execute_file_import(
     )
     _require(not tuple(staging_root.iterdir()), "import create leaked staged files")
     if descriptor.facet is ReviewedConformanceFacet.CREATE:
-        return {
+        facts = {
             "artifact_content_sha256": receipt.artifact_content_sha256,
             "native_type_id": feature.TypeId,
             "object_name": feature.Name,
@@ -698,6 +716,13 @@ def _execute_file_import(
             "shape": _shape_facts(feature.Shape),
             "staging_empty": True,
         }
+        return _close_workspace_with_facts(
+            freecad,
+            workspace,
+            document,
+            asset_root,
+            facts,
+        )
     if descriptor.facet is ReviewedConformanceFacet.EDIT:
         before = tuple(float(item) for item in feature.Placement.Base)
         feature.Placement = freecad.Placement(
@@ -707,22 +732,36 @@ def _execute_file_import(
         document.recompute()
         after = tuple(round(float(item), 9) for item in feature.Placement.Base)
         _require(after == (4.0, 5.0, 6.0) and after != before, "import placement edit failed")
-        return {
+        facts = {
             "native_type_id": feature.TypeId,
             "placement_before": list(before),
             "placement_after": list(after),
             "shape_valid": feature.Shape.isValid(),
         }
+        return _close_workspace_with_facts(
+            freecad,
+            workspace,
+            document,
+            asset_root,
+            facts,
+        )
     if descriptor.facet is ReviewedConformanceFacet.RECOMPUTE:
         before = _shape_facts(feature.Shape)
         document.recompute()
         after = _shape_facts(feature.Shape)
         _require(before == after and feature.FileName == "", "detached import recompute drift")
-        return {
+        facts = {
             "detached_recompute_stable": True,
             "native_type_id": feature.TypeId,
             "shape": after,
         }
+        return _close_workspace_with_facts(
+            freecad,
+            workspace,
+            document,
+            asset_root,
+            facts,
+        )
     save_path = temporary_root / f"{descriptor.case.case_sha256}.FCStd"
     document.saveAs(str(save_path))
     size = save_path.stat().st_size
@@ -731,18 +770,29 @@ def _execute_file_import(
         saved = b"".join(archive.read(name) for name in archive.namelist())
     _require(str(staging_root).encode() not in saved, "import staging path leaked into FCStd")
     if descriptor.facet is ReviewedConformanceFacet.SAVE:
-        return {
+        facts = {
             "format": "FCStd",
             "native_type_id": feature.TypeId,
             "nonempty": True,
             "saved": True,
             "staging_path_absent": True,
         }
+        return _close_workspace_with_facts(
+            freecad,
+            workspace,
+            document,
+            asset_root,
+            facts,
+        )
     _require(descriptor.facet is ReviewedConformanceFacet.REOPEN, "unexpected import facet")
     object_name = feature.Name
     expected_shape = _shape_facts(feature.Shape)
-    freecad.closeDocument(document.Name)
-    reopened = freecad.openDocument(str(save_path))
+    _close_workspace_document(freecad, workspace, document)
+    reopened = freecad.newDocument()
+    reopened_workspace = DocumentAssetWorkspace(asset_root)
+    reopened_workspace.attach_fresh_document(reopened)
+    reopened.load(str(save_path))
+    reopened.recompute()
     reopened_feature = reopened.getObject(object_name)
     _require(
         reopened_feature is not None
@@ -752,13 +802,20 @@ def _execute_file_import(
         and _shape_facts(reopened_feature.Shape) == expected_shape,
         "import reopen readback failed",
     )
-    return {
+    facts = {
         "format": "FCStd",
         "native_type_id": reopened_feature.TypeId,
         "nonempty": True,
         "reopened": True,
         "shape": expected_shape,
     }
+    return _close_workspace_with_facts(
+        freecad,
+        reopened_workspace,
+        reopened,
+        asset_root,
+        facts,
+    )
 
 
 def _offset_sources(
@@ -866,8 +923,13 @@ def _execute_offset(
 ) -> dict[str, object]:
     operation = PartOffsetOperation(descriptor.operation_id)
     plan = _OFFSET_PLANS[operation]
+    asset_root = temporary_root / "document-assets"
+    asset_root.mkdir(mode=0o700)
+    asset_root.chmod(0o700)
     document = freecad.newDocument(f"VerifyOffset_{operation.value}_{plan.plan_sha256[:8]}")
     document.UndoMode = 1
+    workspace = DocumentAssetWorkspace(asset_root)
+    workspace.attach_fresh_document(document)
     sources = _offset_sources(freecad, part, document, operation)
     document.recompute()
     bindings = _offset_bindings(plan, document, sources)
@@ -883,11 +945,18 @@ def _execute_offset(
             )
         except PartOffsetRuleError as error:
             _require(_same_document_snapshot(document, before), "offset reject mutated document")
-            return {
+            facts = {
                 "error_code": error.code.value,
                 "error_path": error.path,
                 "rollback_exact": True,
             }
+            return _close_workspace_with_facts(
+                freecad,
+                workspace,
+                document,
+                asset_root,
+                facts,
+            )
         raise RuntimeError("tampered offset plan was accepted")
     if descriptor.facet is ReviewedConformanceFacet.LATE_ROLLBACK:
         group = document.addObject("App::DocumentObjectGroup", "GuardGroup")
@@ -913,12 +982,19 @@ def _execute_offset(
                     _same_document_snapshot(document, before),
                     "offset late failure did not restore exact snapshot",
                 )
-                return {
+                facts = {
                     "error_code": error.code.value,
                     "error_path": error.path,
                     "rollback_exact": True,
                     "sabotage_observed": True,
                 }
+                return _close_workspace_with_facts(
+                    freecad,
+                    workspace,
+                    document,
+                    asset_root,
+                    facts,
+                )
             raise RuntimeError("offset late ownership sabotage was accepted")
         finally:
             freecad.removeDocumentObserver(observer)
@@ -934,13 +1010,20 @@ def _execute_offset(
         "offset create readback failed",
     )
     if descriptor.facet is ReviewedConformanceFacet.CREATE:
-        return {
+        facts = {
             "native_type_id": feature.TypeId,
             "object_name": feature.Name,
             "receipt_sha256": receipt.receipt_sha256,
             "shape": _shape_facts(feature.Shape),
             "source_count": len(receipt.source_object_names),
         }
+        return _close_workspace_with_facts(
+            freecad,
+            workspace,
+            document,
+            asset_root,
+            facts,
+        )
     if descriptor.facet is ReviewedConformanceFacet.EDIT:
         before = _shape_facts(feature.Shape)
         if operation in {
@@ -955,41 +1038,66 @@ def _execute_offset(
         document.recompute()
         after = _shape_facts(feature.Shape)
         _require(after != before and feature.isValid(), "offset edit did not propagate")
-        return {
+        facts = {
             "edited": edited,
             "native_type_id": feature.TypeId,
             "shape_after": after,
             "shape_before": before,
         }
+        return _close_workspace_with_facts(
+            freecad,
+            workspace,
+            document,
+            asset_root,
+            facts,
+        )
     if descriptor.facet is ReviewedConformanceFacet.RECOMPUTE:
         before = _shape_facts(feature.Shape)
         _change_offset_source(freecad, part, operation, sources, extent=30.0)
         document.recompute()
         after = _shape_facts(feature.Shape)
         _require(after != before and feature.isValid(), "offset source recompute did not propagate")
-        return {
+        facts = {
             "native_type_id": feature.TypeId,
             "propagated": True,
             "shape_after": after,
             "shape_before": before,
         }
+        return _close_workspace_with_facts(
+            freecad,
+            workspace,
+            document,
+            asset_root,
+            facts,
+        )
     save_path = temporary_root / f"{descriptor.case.case_sha256}.FCStd"
     document.saveAs(str(save_path))
     size = save_path.stat().st_size
     _require(size > 0, "offset save produced an empty FCStd")
     if descriptor.facet is ReviewedConformanceFacet.SAVE:
-        return {
+        facts = {
             "format": "FCStd",
             "native_type_id": feature.TypeId,
             "nonempty": True,
             "saved": True,
         }
+        return _close_workspace_with_facts(
+            freecad,
+            workspace,
+            document,
+            asset_root,
+            facts,
+        )
     _require(descriptor.facet is ReviewedConformanceFacet.REOPEN, "unexpected offset facet")
     object_name = feature.Name
     expected_shape = _shape_facts(feature.Shape)
     expected_sources = tuple(item.Name for item in sources.values())
-    freecad.closeDocument(document.Name)
-    reopened = freecad.openDocument(str(save_path))
+    _close_workspace_document(freecad, workspace, document)
+    reopened = freecad.newDocument()
+    reopened_workspace = DocumentAssetWorkspace(asset_root)
+    reopened_workspace.attach_fresh_document(reopened)
+    reopened.load(str(save_path))
+    reopened.recompute()
     reopened_feature = reopened.getObject(object_name)
     _require(
         reopened_feature is not None
@@ -999,13 +1107,20 @@ def _execute_offset(
         and tuple(item.Name for item in reopened_feature.OutList) == expected_sources,
         "offset reopen readback failed",
     )
-    return {
+    facts = {
         "format": "FCStd",
         "native_type_id": reopened_feature.TypeId,
         "nonempty": True,
         "reopened": True,
         "shape": expected_shape,
     }
+    return _close_workspace_with_facts(
+        freecad,
+        reopened_workspace,
+        reopened,
+        asset_root,
+        facts,
+    )
 
 
 def _image_artifact_document():
@@ -1070,10 +1185,31 @@ def _close_workspace_document(
     freecad: object,
     workspace: DocumentAssetWorkspace,
     document: object,
+    *,
+    native_document: object | None = None,
 ) -> None:
-    if document.Name in freecad.listDocuments():
-        freecad.closeDocument(document.Name)
+    native = document if native_document is None else native_document
+    name = document.Name
+    if name in freecad.listDocuments():
+        if freecad.getDocument(name) is not native:
+            raise RuntimeError("ImagePlane document registry identity drifted")
+        workspace.require_attached(document)
+        freecad.closeDocument(name)
     workspace.release_after_close(document)
+
+
+def _close_workspace_with_facts(
+    freecad: object,
+    workspace: DocumentAssetWorkspace,
+    document: object,
+    asset_root: Path,
+    facts: dict[str, object],
+) -> dict[str, object]:
+    """Close one exact owned document before returning stable case evidence."""
+
+    _close_workspace_document(freecad, workspace, document)
+    _require(not tuple(asset_root.iterdir()), "Wave D document workspace leaked")
+    return facts
 
 
 def _execute_imageplane(
@@ -1089,7 +1225,7 @@ def _execute_imageplane(
     document = freecad.newDocument(f"VerifyImage_{descriptor.case.case_sha256[:8]}")
     document.UndoMode = 1
     workspace = DocumentAssetWorkspace(asset_root)
-    workspace.attach(document)
+    workspace.attach_fresh_document(document)
     if descriptor.facet is ReviewedConformanceFacet.NEGATIVE:
         before = _document_snapshot(document)
         before_workspace = _workspace_manifest(Path(document.TransientDir))
@@ -1146,7 +1282,7 @@ def _execute_imageplane(
         inner.UndoMode = 1
         fault = FaultDocument(inner)
         workspace = DocumentAssetWorkspace(asset_root)
-        workspace.attach(fault)
+        workspace.attach_fresh_document(fault)
         initial = _apply_image(_IMAGE_CREATE_PLAN, fault, workspace, staging_root)
         feature = inner.getObject(initial.object_name)
         before_objects = tuple(inner.Objects)
@@ -1163,7 +1299,12 @@ def _execute_imageplane(
                 "ImagePlane rollback workspace drift",
             )
             _require(not tuple(staging_root.iterdir()), "ImagePlane rollback leaked staging")
-            _close_workspace_document(freecad, workspace, fault)
+            _close_workspace_document(
+                freecad,
+                workspace,
+                fault,
+                native_document=inner,
+            )
             _require(not tuple(asset_root.iterdir()), "ImagePlane rollback leaked workspace")
             return {
                 "error_code": error.code.value,
@@ -1256,7 +1397,7 @@ def _execute_imageplane(
     reopened = freecad.newDocument()
     reopened.UndoMode = 1
     reopened_workspace = DocumentAssetWorkspace(asset_root)
-    reopened_workspace.attach(reopened)
+    reopened_workspace.attach_fresh_document(reopened)
     reopened.load(str(save_path))
     reopened.recompute()
     reopened_feature = reopened.getObject(object_name)
@@ -1291,23 +1432,19 @@ def _execute_wave_d_case(
     descriptor = _DESCRIPTOR_BY_CASE_SHA256.get(case.case_sha256)
     if descriptor is None or descriptor.case != case:
         raise RuntimeError("unreviewed Wave D verification case")
-    try:
-        with tempfile.TemporaryDirectory(prefix="vibecad-wave-d-") as temporary:
-            temporary_root = Path(temporary)
-            if descriptor.family_id == PART_FILE_IMPORT_MANIFEST.family_id:
-                facts = _execute_file_import(freecad, descriptor, temporary_root)
-            elif descriptor.family_id == PART_OFFSET_MANIFEST.family_id:
-                import Part  # type: ignore[import-not-found]  # noqa: PLC0415
+    with tempfile.TemporaryDirectory(prefix="vibecad-wave-d-") as temporary:
+        temporary_root = Path(temporary)
+        if descriptor.family_id == PART_FILE_IMPORT_MANIFEST.family_id:
+            facts = _execute_file_import(freecad, descriptor, temporary_root)
+        elif descriptor.family_id == PART_OFFSET_MANIFEST.family_id:
+            import Part  # type: ignore[import-not-found]  # noqa: PLC0415
 
-                facts = _execute_offset(freecad, Part, descriptor, temporary_root)
-            elif descriptor.family_id == IMAGEPLANE_MANIFEST.family_id:
-                facts = _execute_imageplane(freecad, descriptor, temporary_root)
-            else:
-                raise RuntimeError("unreviewed Wave D verification family")
-            return _observation(descriptor, challenge_sha256, facts)
-    finally:
-        for document_name in tuple(freecad.listDocuments()):
-            freecad.closeDocument(document_name)
+            facts = _execute_offset(freecad, Part, descriptor, temporary_root)
+        elif descriptor.family_id == IMAGEPLANE_MANIFEST.family_id:
+            facts = _execute_imageplane(freecad, descriptor, temporary_root)
+        else:
+            raise RuntimeError("unreviewed Wave D verification family")
+        return _observation(descriptor, challenge_sha256, facts)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

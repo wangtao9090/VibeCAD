@@ -416,6 +416,7 @@ def _executor_code(error: ExecutorError) -> WorkerWireErrorCode:
         ExecutorErrorCode.CAD_FAILURE: WorkerWireErrorCode.CAD_FAILURE,
         ExecutorErrorCode.ARTIFACT_FAILURE: WorkerWireErrorCode.ARTIFACT_FAILURE,
         ExecutorErrorCode.INTEGRITY_FAILURE: WorkerWireErrorCode.INTEGRITY_FAILURE,
+        ExecutorErrorCode.INTERNAL_FAILURE: WorkerWireErrorCode.INTERNAL_ERROR,
     }[error.code]
 
 
@@ -1367,11 +1368,13 @@ def serve_worker(connection: socket.socket, generation_id: str) -> int:
                 )
                 internal = error.code is WorkerWireErrorCode.INTERNAL_ERROR
             except ExecutorError as error:
+                code = _executor_code(error)
                 response = error_response(
                     generation_id=generation_id,
                     request_id=request["request_id"],  # type: ignore[arg-type]
-                    code=_executor_code(error),
+                    code=code,
                 )
+                internal = code is WorkerWireErrorCode.INTERNAL_ERROR
             except AdapterError:
                 response = error_response(
                     generation_id=generation_id,

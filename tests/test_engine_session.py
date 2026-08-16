@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from vibecad.engine.session import Session
+from vibecad.engine.document_assets import DocumentAssetWorkspace
+from vibecad.engine.session import Session, SessionLifecycleError
 from vibecad.execution.selectors import (
     EntityIdentity,
     Provenance,
@@ -583,7 +584,7 @@ def test_close_document_failure_preserves_session_state(monkeypatch):
     assert s._revision_id == revision
 
 
-def test_load_document_cleanup_failure_does_not_mask_load_error(monkeypatch, tmp_path):
+def test_load_document_cleanup_failure_poisoning_is_explicit(monkeypatch, tmp_path):
     source = tmp_path / "broken.FCStd"
     source.write_text("not a FreeCAD document", encoding="utf-8")
     candidate = _LifecycleDoc("Candidate")
@@ -596,8 +597,41 @@ def test_load_document_cleanup_failure_does_not_mask_load_error(monkeypatch, tmp
         s, "_close_owned_document", lambda doc: (_ for _ in ()).throw(RuntimeError("cleanup"))
     )
 
-    with pytest.raises(ValueError, match="invalid FCStd"):
+    with pytest.raises(SessionLifecycleError, match="candidate document close failed") as caught:
         s.load_document(source)
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert str(caught.value.__cause__) == "invalid FCStd"
+
+
+def test_close_document_retries_pending_workspace_release_before_reporting_closed(
+    monkeypatch,
+):
+    session = Session()
+    document = _LifecycleDoc("PendingRelease")
+    session._doc = document
+    monkeypatch.setattr(session, "_close_owned_document", lambda doc: None)
+    attempts = 0
+
+    def release(workspace, doc):
+        assert workspace is session._document_assets
+        nonlocal attempts
+        assert doc is document
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("workspace release failed")
+
+    monkeypatch.setattr(DocumentAssetWorkspace, "release_after_close", release)
+
+    with pytest.raises(RuntimeError, match="workspace release failed"):
+        session.close_document()
+
+    assert session.doc is None
+    assert session._closed_documents_pending_release == [document]
+
+    session.close_document()
+
+    assert attempts == 2
+    assert session._closed_documents_pending_release == []
 
 
 @pytest.mark.slow

@@ -16,6 +16,7 @@ class ExecutorErrorCode(StrEnum):
     CAD_FAILURE = "cad_failure"
     ARTIFACT_FAILURE = "artifact_failure"
     INTEGRITY_FAILURE = "integrity_failure"
+    INTERNAL_FAILURE = "internal_failure"
 
 
 _ERROR_MESSAGES = {
@@ -25,6 +26,7 @@ _ERROR_MESSAGES = {
     ExecutorErrorCode.CAD_FAILURE: "The CAD operation failed.",
     ExecutorErrorCode.ARTIFACT_FAILURE: "The CAD artifact is invalid.",
     ExecutorErrorCode.INTEGRITY_FAILURE: "The candidate integrity check failed.",
+    ExecutorErrorCode.INTERNAL_FAILURE: "The managed CAD generation failed internally.",
 }
 
 

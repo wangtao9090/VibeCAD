@@ -17,7 +17,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from vibecad.engine.document_assets import DocumentAssetWorkspace
+from vibecad.engine.document_assets import (
+    DocumentAssetWorkspace,
+    DocumentAssetWorkspaceError,
+)
 
 #: 单零件模式（_parts 空）下标签注册表的命名空间键
 _SINGLE = "__single__"
@@ -51,6 +54,10 @@ _BOM_PROPERTY = "VibeCADBomMetadata"
 _BOM_PROPERTY_DOC = "Canonical VibeCAD component BOM metadata JSON"
 
 
+class SessionLifecycleError(RuntimeError):
+    """A native document may remain live or its workspace release is unproven."""
+
+
 class Session:
     def __init__(
         self,
@@ -62,6 +69,10 @@ class Session:
         self._loaded: bool = False
         self._checkpoint_dir = checkpoint_dir
         self._document_assets = DocumentAssetWorkspace(document_asset_root)
+        # Native close is irreversible, while workspace release can still fail.  Keep
+        # those exact closed proxies until release succeeds so a second close/open
+        # cannot silently report success or reuse a poisoned worker generation.
+        self._closed_documents_pending_release: list[Any] = []
         # 标签注册表按零件分命名空间：{part_key: {"faces":…, "edges":…, "shown":…}}；
         # part_key = 活动零件名，单零件模式恒为 _SINGLE（对外行为与 R7 零差异）
         self._labels: dict[str, dict] | None = None
@@ -94,6 +105,7 @@ class Session:
             self._loaded = True
 
     def _require_doc(self) -> None:
+        self._drain_pending_closed_documents()
         if self._doc is None:  # 否则 AttributeError 穿透，绕过 RuntimeError/ValueError 契约
             raise RuntimeError("无活动文档——请先调用 new_document 创建文档")
 
@@ -656,33 +668,86 @@ class Session:
         self._redo_revisions = []
 
     @staticmethod
-    def _close_owned_document(doc: Any) -> None:
-        """只关闭仍由 FreeCAD 全局注册表指向同一代理的文档。"""
+    def _registered_document_proxy(doc: Any) -> tuple[Any, str]:
+        """Return the exact native registry proxy without closing it."""
+
+        import FreeCAD  # noqa: PLC0415
+
+        name = getattr(doc, "Name", None)
+        if not isinstance(name, str) or not name:
+            raise RuntimeError("拒绝关闭没有有效 Name 的 FreeCAD 文档")
+        try:
+            current = FreeCAD.getDocument(name)
+        except Exception as exc:
+            raise RuntimeError(f"FreeCAD 文档 {name!r} 已不在全局注册表中") from exc
+        if current is not doc:
+            raise RuntimeError(f"拒绝关闭已被其他 Session 占用的 FreeCAD 文档 {name!r}")
+        return FreeCAD, name
+
+    def _close_owned_document(self, doc: Any) -> None:
+        """Prove the asset directory identity immediately before native close."""
+
         from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
 
         with silence_fd1():
-            import FreeCAD  # noqa: PLC0415
-
-            name = getattr(doc, "Name", None)
-            if not isinstance(name, str) or not name:
-                raise RuntimeError("拒绝关闭没有有效 Name 的 FreeCAD 文档")
+            freecad, name = self._registered_document_proxy(doc)
             try:
-                current = FreeCAD.getDocument(name)
-            except Exception as exc:
-                raise RuntimeError(f"FreeCAD 文档 {name!r} 已不在全局注册表中") from exc
-            if current is not doc:
-                raise RuntimeError(f"拒绝关闭已被其他 Session 占用的 FreeCAD 文档 {name!r}")
-            FreeCAD.closeDocument(name)
+                self._document_assets.require_attached(doc)
+            except DocumentAssetWorkspaceError as error:
+                raise SessionLifecycleError("document workspace preflight failed") from error
+            try:
+                freecad.closeDocument(name)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as error:
+                raise SessionLifecycleError("native document close failed") from error
+
+    def _close_empty_unattached_fresh_document(self, doc: Any) -> None:
+        """Close an attach-failure candidate only when it has no delete target."""
+
+        from vibecad.freecad_env import silence_fd1  # noqa: PLC0415
+
+        with silence_fd1():
+            freecad, name = self._registered_document_proxy(doc)
+            self._document_assets.require_empty_unattached_fresh_document(doc)
+            try:
+                freecad.closeDocument(name)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as error:
+                raise SessionLifecycleError("native fresh document close failed") from error
+
+    def _release_closed_document(self, doc: Any) -> None:
+        """Release one already-closed workspace without losing retry state."""
+
+        try:
+            self._document_assets.release_after_close(doc)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as error:
+            if not any(item is doc for item in self._closed_documents_pending_release):
+                self._closed_documents_pending_release.append(doc)
+            raise SessionLifecycleError("closed document workspace release failed") from error
+        self._closed_documents_pending_release = [
+            item for item in self._closed_documents_pending_release if item is not doc
+        ]
+
+    def _drain_pending_closed_documents(self) -> None:
+        """Retry exact release before allowing any further Session operation."""
+
+        for document in tuple(self._closed_documents_pending_release):
+            self._release_closed_document(document)
 
     def _discard_candidate(self, doc: Any) -> None:
-        """Best-effort candidate disposal without deleting a live document workspace."""
+        """Close and release a failed candidate, or fail the generation closed."""
 
         try:
             self._close_owned_document(doc)
-        except Exception:
-            return
-        with contextlib.suppress(Exception):
-            self._document_assets.release_after_close(doc)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as error:
+            raise SessionLifecycleError("candidate document close failed") from error
+        self._release_closed_document(doc)
 
     def _replace_document(self, doc: Any, *, restore_state: bool) -> Any:
         """原子切换活动文档：新文档成功获得后才关闭旧文档，避免打开失败丢会话。"""
@@ -716,8 +781,8 @@ class Session:
             if old is not None and old is not doc:
                 self._close_owned_document(old)
                 old_closed = True
-                self._document_assets.release_after_close(old)
-        except BaseException:
+                self._release_closed_document(old)
+        except BaseException as replace_error:
             # Native close is irreversible.  If only post-close workspace
             # cleanup failed, retain the already-prepared candidate instead of
             # restoring a proxy which FreeCAD has closed.
@@ -741,11 +806,15 @@ class Session:
                 self._redo_revisions,
             ) = state_before
             if doc is not old:
-                self._discard_candidate(doc)
+                try:
+                    self._discard_candidate(doc)
+                except BaseException as cleanup_error:
+                    raise cleanup_error from replace_error
             raise
         return self._doc
 
     def open_document(self, name: str) -> Any:
+        self._drain_pending_closed_documents()
         self._ensure_freecad()
         from vibecad.freecad_env import silence_fd1
 
@@ -754,16 +823,19 @@ class Session:
 
             doc = FreeCAD.newDocument(name)
         try:
-            self._document_assets.attach(doc)
+            self._document_assets.attach_fresh_document(doc)
         except BaseException:
-            with contextlib.suppress(Exception):
-                self._close_owned_document(doc)
+            try:
+                self._close_empty_unattached_fresh_document(doc)
+            except BaseException as cleanup_error:
+                raise SessionLifecycleError("fresh document cleanup failed") from cleanup_error
             raise
         # headless 默认 UndoMode=0，openTransaction/abort 是 no-op；必须显式开启。
         return self._replace_document(doc, restore_state=False)
 
     def load_document(self, path: str | Path) -> Any:
         """打开 FCStd；只有新文件完整恢复后才替换当前会话。"""
+        self._drain_pending_closed_documents()
         source = Path(path).expanduser().resolve()
         if not source.is_file():
             raise ValueError(f"项目文件不存在：{source}")
@@ -780,16 +852,29 @@ class Session:
             # candidate 完整恢复成功后才替换旧会话；失败则清理 candidate，旧会话不动。
             doc = FreeCAD.newDocument()
             try:
-                self._document_assets.attach(doc)
+                self._document_assets.attach_fresh_document(doc)
+            except BaseException:
+                try:
+                    self._close_empty_unattached_fresh_document(doc)
+                except BaseException as cleanup_error:
+                    raise SessionLifecycleError("fresh document cleanup failed") from cleanup_error
+                raise
+            try:
                 doc.load(str(source))
                 doc.recompute()
-            except BaseException:
-                # 候选清理失败不能覆盖真正的 load/recompute 错误。
-                self._discard_candidate(doc)
+            except BaseException as load_error:
+                try:
+                    self._discard_candidate(doc)
+                except BaseException as cleanup_error:
+                    # A failed cleanup poisons the worker generation and must be
+                    # observable even though the original load failure is retained
+                    # as its explicit cause.
+                    raise cleanup_error from load_error
                 raise
         return self._replace_document(doc, restore_state=True)
 
     def close_document(self) -> None:
+        self._drain_pending_closed_documents()
         if self._doc is None:
             self._reset_model_state()
             return
@@ -798,7 +883,7 @@ class Session:
         self._close_owned_document(closed)
         self._doc = None
         self._reset_model_state()
-        self._document_assets.release_after_close(closed)
+        self._release_closed_document(closed)
 
     def _checkpoint(self) -> Path:
         if self._doc is None:

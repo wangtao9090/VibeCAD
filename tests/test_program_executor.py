@@ -1506,6 +1506,7 @@ def test_public_contract_and_fixed_redacted_errors() -> None:
         "cad_failure",
         "artifact_failure",
         "integrity_failure",
+        "internal_failure",
     }
     for code in ExecutorErrorCode:
         error = ExecutorError(code)
@@ -1518,6 +1519,14 @@ def test_public_contract_and_fixed_redacted_errors() -> None:
         json.dumps(error.to_mapping())
     with pytest.raises(TypeError):
         ExecutorError("secret")  # type: ignore[arg-type]
+
+
+def test_internal_cleanup_failure_supersedes_recoverable_operation_failure() -> None:
+    operation = ExecutorError(ExecutorErrorCode.CAD_FAILURE)
+    cleanup = ExecutorError(ExecutorErrorCode.INTERNAL_FAILURE)
+
+    assert executor_module._prefer_cleanup_failure(operation, cleanup) is cleanup
+    assert executor_module._prefer_cleanup_failure(None, operation) is operation
 
 
 def test_constructor_requires_exact_revision_store() -> None:

@@ -117,7 +117,10 @@ def test_wave_d_synthetic_runtime_cannot_issue_managed_evidence() -> None:
 
 
 @pytest.mark.slow
-def test_real_managed_freecad_wave_d_seven_by_seven_receipt_batch() -> None:
+def test_real_managed_freecad_wave_d_seven_by_seven_receipt_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
         pytest.skip("set VIBECAD_RUN_INTEGRATION=1 for the managed Wave D gate")
     from vibecad.runtime import paths as runtime_paths
@@ -131,12 +134,18 @@ def test_real_managed_freecad_wave_d_seven_by_seven_receipt_batch() -> None:
     if Path(sys.executable).resolve() != runtime_python.resolve():
         pytest.fail("this slow gate must execute inside the managed FreeCAD process")
 
+    native_root = tmp_path / "freecad-native-cache"
+    native_root.mkdir(mode=0o700)
+    native_root.chmod(0o700)
+    monkeypatch.setenv("FREECAD_USER_TEMP", str(native_root))
+    assert "FreeCAD" not in sys.modules
     sys.path.insert(0, str(Path(sys.prefix) / "lib"))
     import FreeCAD  # type: ignore[import-not-found]  # noqa: PLC0415
 
     assert FreeCAD.GuiUp == 0
     assert FreeCAD.listDocuments() == {}
     assert "FreeCADGui" not in sys.modules
+    assert tuple(native_root.iterdir()) == ()
     batch = build_managed_freecad_wave_d_verification(freecad=FreeCAD)
     assert len(batch.receipts) == 3
     assert len(batch.promotion_bindings) == 3
@@ -161,3 +170,4 @@ def test_real_managed_freecad_wave_d_seven_by_seven_receipt_batch() -> None:
         assert binding.test_contract_sha256 == receipt.test_contract_sha256
     assert FreeCAD.listDocuments() == {}
     assert "FreeCADGui" not in sys.modules
+    assert tuple(native_root.iterdir()) == ()

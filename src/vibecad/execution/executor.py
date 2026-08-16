@@ -27,6 +27,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from vibecad.engine.session import Session as _Session
+from vibecad.engine.session import SessionLifecycleError as _SessionLifecycleError
 from vibecad.execution.adapter import (
     AdapterError as _AdapterError,
 )
@@ -481,6 +482,17 @@ def _validated_explicit_component_roots(
 
 def _fixed_error(code: ExecutorErrorCode) -> ExecutorError:
     return ExecutorError(code)
+
+
+def _prefer_cleanup_failure(
+    current: ExecutorError | None,
+    cleanup: ExecutorError,
+) -> ExecutorError:
+    """Never let a recoverable operation error hide a fatal lifecycle failure."""
+
+    if current is None or cleanup.code is ExecutorErrorCode.INTERNAL_FAILURE:
+        return cleanup
+    return current
 
 
 def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
@@ -1338,12 +1350,16 @@ def _reloaded_observations(
         components = _component_observations(probe)
         interferences = _interference_observations(probe)
         bom = _bom_observation(probe, components)
+    except _SessionLifecycleError:
+        raise
     except Exception:
         failed = True
     finally:
         if probe is not None:
             try:
                 probe.close_document()
+            except _SessionLifecycleError:
+                raise
             except Exception:
                 failed = True
     if failed:
@@ -3697,8 +3713,7 @@ class InProcessCadExecutor(CadExecutionPort):
             try:
                 self.close(session)
             except ExecutorError as close_error:
-                if failed is None:
-                    failed = close_error
+                failed = _prefer_cleanup_failure(failed, close_error)
         if failed is not None:
             raise failed
         assert normalized is not None
@@ -3722,8 +3737,7 @@ class InProcessCadExecutor(CadExecutionPort):
             try:
                 self.close(probe)
             except ExecutorError as close_error:
-                if failed is None:
-                    failed = close_error
+                failed = _prefer_cleanup_failure(failed, close_error)
         if failed is not None:
             raise failed
         if not _same_import_observations(reloaded, normalized):
@@ -3795,11 +3809,15 @@ class InProcessCadExecutor(CadExecutionPort):
                     if unsupported_envelope:
                         code = ExecutorErrorCode.INVALID_INPUT
                 cad_failure = _fixed_error(code)
+            except _SessionLifecycleError:
+                raise
             except BaseException:
                 cad_failure = _fixed_error(ExecutorErrorCode.CAD_FAILURE)
         finally:
             try:
                 session.close_document()
+            except _SessionLifecycleError:
+                raise
             except BaseException:
                 cad_failure = _fixed_error(ExecutorErrorCode.CAD_FAILURE)
         if cad_failure is not None:
@@ -3863,8 +3881,7 @@ class InProcessCadExecutor(CadExecutionPort):
             try:
                 self.close(session)
             except ExecutorError as close_error:
-                if failed is None:
-                    failed = close_error
+                failed = _prefer_cleanup_failure(failed, close_error)
         if failed is not None:
             raise failed
 
@@ -3943,8 +3960,7 @@ class InProcessCadExecutor(CadExecutionPort):
             try:
                 self.close(session)
             except ExecutorError as close_error:
-                if failed is None:
-                    failed = close_error
+                failed = _prefer_cleanup_failure(failed, close_error)
         if failed is not None:
             raise failed
         try:
@@ -3969,9 +3985,13 @@ class InProcessCadExecutor(CadExecutionPort):
         try:
             suffix = revision_id.removeprefix("revision_")
             session.open_document(f"VibeCADCandidate_{suffix}")
+        except _SessionLifecycleError:
+            raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
         except Exception:
             try:
                 session.close_document()
+            except _SessionLifecycleError:
+                raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
             except Exception:
                 pass
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
@@ -3991,9 +4011,13 @@ class InProcessCadExecutor(CadExecutionPort):
         try:
             session.load_document(path)
             _entity_observations(session)
+        except _SessionLifecycleError:
+            raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
         except Exception:
             try:
                 session.close_document()
+            except _SessionLifecycleError:
+                raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
             except Exception:
                 pass
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
@@ -4044,6 +4068,8 @@ class InProcessCadExecutor(CadExecutionPort):
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
         try:
             session.close_document()
+        except _SessionLifecycleError:
+            raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
         except Exception:
             raise _fixed_error(ExecutorErrorCode.CAD_FAILURE) from None
 
