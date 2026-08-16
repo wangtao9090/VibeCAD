@@ -199,12 +199,15 @@ def test_release_workflow_gates_publishers_with_version_quality_managed_and_pack
         r"    needs: \[version-guard, quality\]$",
         workflow,
     )
+    assert re.search(r"(?m)^  reviewed-attestation:\n    needs: package-gate$", workflow)
     assert re.search(
-        r"(?m)^  pypi:\n    needs: \[package-gate, managed-agent\]$",
+        r"(?m)^  pypi:\n"
+        r"    needs: \[package-gate, managed-agent, reviewed-attestation\]$",
         workflow,
     )
     assert re.search(
-        r"(?m)^  mcpb:\n    needs: \[package-gate, managed-agent\]$",
+        r"(?m)^  mcpb:\n"
+        r"    needs: \[package-gate, managed-agent, reviewed-attestation\]$",
         workflow,
     )
 
@@ -257,6 +260,38 @@ def test_release_workflow_executes_the_exact_built_artifacts_before_publish():
     assert (
         "tests/test_runtime_integration.py::test_unpacked_mcpb_agent_first_stdio_acceptance"
     ) in managed_body
+
+
+def test_release_reviewed_attestation_gate_covers_exact_trusted_macos_platforms():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    gate = re.search(
+        r"(?ms)^  reviewed-attestation:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
+        workflow,
+    )
+    assert gate is not None
+    body = gate.group("body")
+
+    assert re.search(r"(?m)^    runs-on: \$\{\{ matrix\.runner \}\}$", body)
+    assert re.search(
+        r"(?m)^          - platform_id: macos\.x86_64\n"
+        r"            runner: macos-15-intel\n"
+        r"          - platform_id: macos\.arm64\n"
+        r"            runner: macos-15$",
+        body,
+    )
+    assert "fail-fast: false" in body
+    assert 'runtime_home="$RUNNER_TEMP/vibecad-reviewed-attestation"' in body
+    assert 'test ! -e "$runtime_home"' in body
+    assert body.count("actions/download-artifact@v4") == 1
+    assert "name: python-distributions" in body
+    assert "[[ ${#wheels[@]} -eq 1 ]]" in body
+    assert "VIBECAD_PIP_SPEC: ${{ steps.package.outputs.wheel }}" in body
+    assert 'uv pip install --python "$bootstrap/bin/python" --no-deps "$VIBECAD_PIP_SPEC"' in body
+    assert "RuntimeInstaller().install()" in body
+    assert "from vibecad.execution.freecad_discovery_runtime_v2 import _platform_id" in body
+    assert "assert actual == expected" in body
+    assert '"$VIBECAD_MANAGED_FREECAD_PYTHON" -I' in body
+    assert ".github/scripts/generate_freecad_reviewed_release_attestation.py --check" in body
 
 
 def test_release_workflow_uses_explicit_least_privilege_permissions():
