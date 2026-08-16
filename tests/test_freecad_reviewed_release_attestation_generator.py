@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import os
+import subprocess
 import sys
+import threading
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +17,25 @@ import vibecad.execution.freecad_reviewed_release_attestation_resource as packag
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / ".github/scripts/generate_freecad_reviewed_release_attestation.py"
+
+_LOCK_HOLDER = """
+import fcntl
+import os
+import sys
+
+flags = (
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+descriptor = os.open(sys.argv[1], flags)
+mode = {"exclusive": fcntl.LOCK_EX, "shared": fcntl.LOCK_SH}[sys.argv[2]]
+fcntl.flock(descriptor, mode)
+sys.stdout.buffer.write(b"locked\\n")
+sys.stdout.buffer.flush()
+sys.stdin.buffer.read(1)
+"""
 
 
 @pytest.fixture(scope="module")
@@ -38,10 +60,167 @@ def _bind_fixed_targets(generator, monkeypatch: pytest.MonkeyPatch, root: Path):
     return directory, x86_resource, arm_resource, pins
 
 
+def _start_lock_holder(directory: Path, mode: str) -> subprocess.Popen[bytes]:
+    process = subprocess.Popen(
+        [sys.executable, "-c", _LOCK_HOLDER, str(directory), mode],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline()
+    if ready != b"locked\n":
+        _stdout, stderr = process.communicate(timeout=5)
+        raise AssertionError(f"lock holder failed: {stderr.decode('utf-8', errors='replace')}")
+    return process
+
+
+def _release_lock_holder(process: subprocess.Popen[bytes]) -> None:
+    assert process.stdin is not None
+    process.stdin.write(b"x")
+    process.stdin.flush()
+    process.stdin.close()
+    assert process.wait(timeout=5) == 0
+    assert process.stderr is not None
+    assert process.stderr.read() == b""
+
+
 def test_fixed_platform_resource_names_match_the_runtime_loader(generator) -> None:
     assert generator._RESOURCE_NAME_BY_PLATFORM_ID == dict(
         packaged_resource.FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_NAME_BY_PLATFORM_ID
     )
+
+
+@pytest.mark.parametrize(
+    ("holder_mode", "waiter_exclusive"),
+    [
+        ("exclusive", True),
+        ("exclusive", False),
+        ("shared", True),
+    ],
+)
+def test_directory_lock_serializes_writers_and_excludes_checks_during_publication(
+    generator,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    holder_mode: str,
+    waiter_exclusive: bool,
+) -> None:
+    directory, _x86_resource, _arm_resource, _pins = _bind_fixed_targets(
+        generator, monkeypatch, tmp_path
+    )
+    holder = _start_lock_holder(directory, holder_mode)
+    started = threading.Event()
+    acquired = threading.Event()
+    failures: list[BaseException] = []
+
+    def wait_for_lock() -> None:
+        started.set()
+        try:
+            with generator._attestation_index_lock(exclusive=waiter_exclusive):
+                acquired.set()
+        except BaseException as exc:
+            failures.append(exc)
+
+    waiter = threading.Thread(target=wait_for_lock, daemon=True)
+    waiter.start()
+    assert started.wait(timeout=2)
+    try:
+        assert not acquired.wait(timeout=0.5)
+    finally:
+        _release_lock_holder(holder)
+    assert acquired.wait(timeout=5)
+    waiter.join(timeout=5)
+    assert not waiter.is_alive()
+    assert failures == []
+
+
+def test_directory_lock_allows_concurrent_checks(
+    generator,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    directory, _x86_resource, _arm_resource, _pins = _bind_fixed_targets(
+        generator, monkeypatch, tmp_path
+    )
+    holder = _start_lock_holder(directory, "shared")
+    acquired = threading.Event()
+    failures: list[BaseException] = []
+
+    def share_lock() -> None:
+        try:
+            with generator._attestation_index_lock(exclusive=False):
+                acquired.set()
+        except BaseException as exc:
+            failures.append(exc)
+
+    waiter = threading.Thread(target=share_lock, daemon=True)
+    waiter.start()
+    try:
+        assert acquired.wait(timeout=5)
+    finally:
+        _release_lock_holder(holder)
+    waiter.join(timeout=5)
+    assert not waiter.is_alive()
+    assert failures == []
+
+
+@pytest.mark.parametrize(
+    ("check", "expected_exclusive", "expected_changed", "expected_mode"),
+    [
+        (False, True, True, "generate"),
+        (True, False, False, "check"),
+    ],
+)
+def test_current_platform_pair_transaction_holds_the_required_lock_mode(
+    generator,
+    monkeypatch: pytest.MonkeyPatch,
+    check: bool,
+    expected_exclusive: bool,
+    expected_changed: bool,
+    expected_mode: str,
+) -> None:
+    active_lock: list[bool] = []
+    events: list[str] = []
+    result = SimpleNamespace(resource=b"result")
+
+    @contextlib.contextmanager
+    def lock(*, exclusive: bool):
+        assert active_lock == []
+        active_lock.append(exclusive)
+        events.append("lock-enter")
+        try:
+            yield
+        finally:
+            events.append("lock-exit")
+            active_lock.clear()
+
+    def select(_result):
+        assert active_lock == [expected_exclusive]
+        events.append("select")
+        return "macos.x86_64", Path("resource.json"), b"pins"
+
+    def check_pair(**_kwargs):
+        assert check is True
+        assert active_lock == [False]
+        events.append("check")
+
+    def publish_pair(**_kwargs):
+        assert check is False
+        assert active_lock == [True]
+        events.append("generate")
+        return True
+
+    monkeypatch.setattr(generator, "_attestation_index_lock", lock)
+    monkeypatch.setattr(generator, "_current_platform_publication", select)
+    monkeypatch.setattr(generator, "_check_pair", check_pair)
+    monkeypatch.setattr(generator, "_publish_pair", publish_pair)
+
+    changed, mode = generator._apply_current_platform_result(result, check=check)
+
+    assert changed is expected_changed
+    assert mode == expected_mode
+    assert events == ["lock-enter", "select", expected_mode, "lock-exit"]
 
 
 def test_pin_source_is_canonical_sorted_and_round_trips(generator) -> None:

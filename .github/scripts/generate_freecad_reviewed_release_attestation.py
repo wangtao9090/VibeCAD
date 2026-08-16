@@ -6,7 +6,8 @@ Python.  It has no path or platform override: the trusted current platform
 selects one fixed canonical JSON resource and one key in the shared pin source.
 Generation preserves every sibling-platform pin.  ``--check`` performs the same
 real discovery and 124-by-seven conformance run, but only reads and compares
-the two selected checked-in files.
+the two selected checked-in files.  A directory-inode process lock serializes
+pin read/merge/publication while allowing concurrent read-only checks.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -209,6 +211,66 @@ def _fixed_output_paths() -> frozenset[Path]:
             ),
         }
     )
+
+
+def _validate_attestation_lock_directory(
+    descriptor: int,
+    expected: os.stat_result,
+) -> None:
+    try:
+        opened = os.fstat(descriptor)
+        live = _ATTESTATION_DIRECTORY.lstat()
+    except OSError as exc:
+        raise GenerationError("cannot validate the attestation directory lock") from exc
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(live.st_mode)
+        or stat.S_ISLNK(live.st_mode)
+        or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)
+        or (live.st_dev, live.st_ino) != (expected.st_dev, expected.st_ino)
+    ):
+        raise GenerationError("the attestation directory changed while locked")
+
+
+@contextlib.contextmanager
+def _attestation_index_lock(*, exclusive: bool):
+    """Hold one inode-stable process lock over the shared resource/pin index."""
+
+    if type(exclusive) is not bool:
+        raise GenerationError("invalid attestation lock mode")
+    descriptor = -1
+    try:
+        expected = _ATTESTATION_DIRECTORY.lstat()
+        if not stat.S_ISDIR(expected.st_mode) or stat.S_ISLNK(expected.st_mode):
+            raise GenerationError("the attestation lock target is not a real directory")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(_ATTESTATION_DIRECTORY, flags)
+        _validate_attestation_lock_directory(descriptor, expected)
+        fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    except GenerationError:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        raise
+    except OSError as exc:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        raise GenerationError("cannot acquire the attestation directory lock") from exc
+    try:
+        _validate_attestation_lock_directory(descriptor, expected)
+        yield
+        _validate_attestation_lock_directory(descriptor, expected)
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
 
 
 def _read_fixed_file(path: Path, *, required: bool) -> bytes | None:
@@ -549,6 +611,28 @@ def _current_platform_publication(result: GenerationResult) -> tuple[str, Path, 
     return current_platform_id, resource_path, _render_pins(updated_pins)
 
 
+def _apply_current_platform_result(
+    result: GenerationResult,
+    *,
+    check: bool,
+) -> tuple[bool, str]:
+    """Check or publish one result while holding the whole shared-index transaction."""
+
+    if type(check) is not bool:
+        raise GenerationError("invalid release-attestation mode")
+    with _attestation_index_lock(exclusive=not check):
+        _current_platform_id, resource_path, pins = _current_platform_publication(result)
+        if check:
+            _check_pair(resource_path=resource_path, resource=result.resource, pins=pins)
+            return False, "check"
+        changed = _publish_pair(
+            resource_path=resource_path,
+            resource=result.resource,
+            pins=pins,
+        )
+        return changed, "generate"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Generate or verify the fixed Reviewed-FreeCAD release attestation."
@@ -561,18 +645,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = _build_release_attestation()
-        _current_platform_id, resource_path, pins = _current_platform_publication(result)
-        if args.check:
-            _check_pair(resource_path=resource_path, resource=result.resource, pins=pins)
-            changed = False
-            mode = "check"
-        else:
-            changed = _publish_pair(
-                resource_path=resource_path,
-                resource=result.resource,
-                pins=pins,
-            )
-            mode = "generate"
+        changed, mode = _apply_current_platform_result(result, check=args.check)
     except GenerationError as exc:
         parser.exit(1, f"release attestation failed: {exc}\n")
     sys.stdout.buffer.write(_summary(result, mode=mode, changed=changed) + b"\n")
