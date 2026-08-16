@@ -218,18 +218,25 @@ def test_checked_in_current_release_resource_is_pinned_canonical_and_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(resource, "_platform_id", lambda: "macos.x86_64")
-    loaded = resource.load_current_packaged_freecad_reviewed_release_attestation()
+    loaded_x86 = resource.load_current_packaged_freecad_reviewed_release_attestation()
+    monkeypatch.setattr(resource, "_platform_id", lambda: "macos.arm64")
+    loaded_arm = resource.load_current_packaged_freecad_reviewed_release_attestation()
 
-    assert loaded.release_version == __version__ == "0.10.0"
+    assert loaded_x86.release_version == loaded_arm.release_version == __version__ == "0.10.0"
     assert PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM == {
-        (__version__, "macos.x86_64"): loaded.resource_sha256
+        (__version__, "macos.arm64"): loaded_arm.resource_sha256,
+        (__version__, "macos.x86_64"): loaded_x86.resource_sha256,
     }
-    decoded = decode_freecad_reviewed_release_attestation(
-        loaded.raw,
-        expected_source_attestation_sha256=loaded.resource_sha256,
-    )
-    assert decoded.release_version == __version__
-    assert decoded.runtime_backend.platform_id == "macos.x86_64"
-    assert len(decoded.verification_set.receipts) == 19
-    assert len(decoded.verification_set.formal_operations) == 124
-    assert len(decoded.verification_set.native_types) == 102
+    for loaded, platform_id in (
+        (loaded_arm, "macos.arm64"),
+        (loaded_x86, "macos.x86_64"),
+    ):
+        decoded = decode_freecad_reviewed_release_attestation(
+            loaded.raw,
+            expected_source_attestation_sha256=loaded.resource_sha256,
+        )
+        assert decoded.release_version == __version__
+        assert decoded.runtime_backend.platform_id == platform_id
+        assert len(decoded.verification_set.receipts) == 19
+        assert len(decoded.verification_set.formal_operations) == 124
+        assert len(decoded.verification_set.native_types) == 102
