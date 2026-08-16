@@ -1,10 +1,11 @@
-"""Read one release-bound reviewed-FreeCAD attestation from package data.
+"""Read one platform-indexed reviewed-FreeCAD attestation from package data.
 
 This is deliberately a narrow package-data boundary.  It does not execute
 FreeCAD, accept a file path or environment override, decode a user cache, or
 grant a capability.  The v2 attestation codec owns semantic validation; this
 module establishes that its exact canonical bytes are present in the installed
-package, pinned for this VibeCAD release, and self-identify with that release.
+package, pinned for this VibeCAD release and the trusted current platform, and
+self-identify with both bindings.
 """
 
 from __future__ import annotations
@@ -15,17 +16,22 @@ import importlib.resources
 import json
 import re
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final
 
 from vibecad import __version__
 from vibecad.execution._attestations.freecad_reviewed_release_attestation_pins import (
-    PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE,
+    PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM,
 )
 from vibecad.execution.capabilities import CapabilityCatalogError, CapabilityCatalogErrorCode
+from vibecad.execution.freecad_discovery_runtime_v2 import _platform_id
 
 FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_PACKAGE: Final = "vibecad.execution._attestations"
-FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_NAME: Final = (
-    "freecad-reviewed-release-attestation-v1.json"
+FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_NAME_BY_PLATFORM_ID: Final = MappingProxyType(
+    {
+        "macos.arm64": "freecad-reviewed-release-attestation-macos-arm64-v1.json",
+        "macos.x86_64": "freecad-reviewed-release-attestation-macos-x86_64-v1.json",
+    }
 )
 MAX_FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_BYTES: Final = 2 * 1024 * 1024
 
@@ -75,7 +81,7 @@ def _canonical(value: object) -> bytes:
     return raw
 
 
-def _decode_outer_header(raw: object) -> tuple[str, str]:
+def _decode_outer_header(raw: object) -> tuple[str, str, str]:
     if type(raw) is not bytes or not raw:
         _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "package_attestation/resource")
     if len(raw) > MAX_FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_BYTES:
@@ -97,23 +103,37 @@ def _decode_outer_header(raw: object) -> tuple[str, str]:
         _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "package_attestation/canonical")
     release_version = value["release_version"]
     attestation_sha256 = value["attestation_sha256"]
+    runtime_backend = value["runtime_backend"]
+    runtime_platform_id = (
+        runtime_backend.get("platform_id") if type(runtime_backend) is dict else None
+    )
     if (
         type(release_version) is not str
         or _RELEASE_VERSION.fullmatch(release_version) is None
         or type(attestation_sha256) is not str
         or _DIGEST.fullmatch(attestation_sha256) is None
+        or type(runtime_platform_id) is not str
+        or runtime_platform_id
+        not in FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_NAME_BY_PLATFORM_ID
     ):
         _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "package_attestation/header")
-    return release_version, attestation_sha256
+    return release_version, attestation_sha256, runtime_platform_id
 
 
-def _read_packaged_resource_bytes() -> bytes:
-    """Read only the fixed installed package resource; no caller-controlled path."""
+def _read_packaged_resource_bytes(resource_name: object) -> bytes:
+    """Read one allowlisted package resource selected by trusted platform state."""
+
+    if (
+        type(resource_name) is not str
+        or resource_name
+        not in FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_NAME_BY_PLATFORM_ID.values()
+    ):
+        _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "package_attestation/resource_name")
 
     try:
         raw = (
             importlib.resources.files(FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_PACKAGE)
-            .joinpath(FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_NAME)
+            .joinpath(resource_name)
             .read_bytes()
         )
     except (AttributeError, FileNotFoundError, IsADirectoryError, ModuleNotFoundError, OSError):
@@ -143,7 +163,7 @@ class FreeCadPackagedReviewedReleaseAttestation:
             or type(self.raw) is not bytes
         ):
             _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "package_attestation")
-        header_release, header_attestation = _decode_outer_header(self.raw)
+        header_release, header_attestation, _header_platform = _decode_outer_header(self.raw)
         expected_resource = hashlib.sha256(self.raw).hexdigest()
         if (
             header_release != self.release_version
@@ -163,20 +183,29 @@ def load_current_packaged_freecad_reviewed_release_attestation() -> (
     reverified receipt for this release-bound evidence.
     """
 
-    expected_resource_sha256 = PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE.get(
-        __version__
+    runtime_platform_id = _platform_id()
+    resource_name = FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_NAME_BY_PLATFORM_ID.get(
+        runtime_platform_id
+    )
+    if type(resource_name) is not str:
+        _fail(CapabilityCatalogErrorCode.INVALID_STATUS, "package_attestation/platform")
+    expected_resource_sha256 = (
+        PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM.get(
+            (__version__, runtime_platform_id)
+        )
     )
     if (
         type(expected_resource_sha256) is not str
         or _DIGEST.fullmatch(expected_resource_sha256) is None
     ):
         _fail(CapabilityCatalogErrorCode.INVALID_STATUS, "package_attestation/pin")
-    raw = _read_packaged_resource_bytes()
-    release_version, attestation_sha256 = _decode_outer_header(raw)
+    raw = _read_packaged_resource_bytes(resource_name)
+    release_version, attestation_sha256, resource_platform_id = _decode_outer_header(raw)
     resource_sha256 = hashlib.sha256(raw).hexdigest()
     if (
         not hmac.compare_digest(resource_sha256, expected_resource_sha256)
         or release_version != __version__
+        or resource_platform_id != runtime_platform_id
     ):
         _fail(CapabilityCatalogErrorCode.INTEGRITY_FAILURE, "package_attestation/binding")
     return FreeCadPackagedReviewedReleaseAttestation(

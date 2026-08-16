@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import vibecad.execution.freecad_reviewed_release_attestation_resource as packaged_resource
+
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / ".github/scripts/generate_freecad_reviewed_release_attestation.py"
 
@@ -28,24 +30,32 @@ def generator():
 def _bind_fixed_targets(generator, monkeypatch: pytest.MonkeyPatch, root: Path):
     directory = root / "src/vibecad/execution/_attestations"
     directory.mkdir(parents=True)
-    resource = directory / "freecad-reviewed-release-attestation-v1.json"
+    x86_resource = directory / generator._RESOURCE_NAME_BY_PLATFORM_ID["macos.x86_64"]
+    arm_resource = directory / generator._RESOURCE_NAME_BY_PLATFORM_ID["macos.arm64"]
     pins = directory / "freecad_reviewed_release_attestation_pins.py"
     monkeypatch.setattr(generator, "_ATTESTATION_DIRECTORY", directory)
-    monkeypatch.setattr(generator, "_RESOURCE_PATH", resource)
     monkeypatch.setattr(generator, "_PINS_PATH", pins)
-    return directory, resource, pins
+    return directory, x86_resource, arm_resource, pins
+
+
+def test_fixed_platform_resource_names_match_the_runtime_loader(generator) -> None:
+    assert generator._RESOURCE_NAME_BY_PLATFORM_ID == dict(
+        packaged_resource.FREECAD_REVIEWED_RELEASE_ATTESTATION_RESOURCE_NAME_BY_PLATFORM_ID
+    )
 
 
 def test_pin_source_is_canonical_sorted_and_round_trips(generator) -> None:
     mapping = {
-        "0.10.1": hashlib.sha256(b"later").hexdigest(),
-        "0.10.0": hashlib.sha256(b"current").hexdigest(),
+        ("0.10.1", "macos.x86_64"): hashlib.sha256(b"later").hexdigest(),
+        ("0.10.0", "macos.x86_64"): hashlib.sha256(b"current").hexdigest(),
+        ("0.10.0", "macos.arm64"): hashlib.sha256(b"arm").hexdigest(),
     }
 
     raw = generator._render_pins(mapping)
 
     assert generator._decode_canonical_pins(raw) == mapping
-    assert raw.index(b'"0.10.0"') < raw.index(b'"0.10.1"')
+    assert raw.index(b'"macos.arm64"') < raw.index(b'"macos.x86_64"')
+    assert raw.index(b'"macos.x86_64"') < raw.rindex(b'"0.10.1"')
     checked_in = (
         ROOT / "src/vibecad/execution/_attestations/freecad_reviewed_release_attestation_pins.py"
     ).read_bytes()
@@ -57,10 +67,12 @@ def test_check_mode_compares_exact_bytes_without_any_write(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    _directory, resource, pins = _bind_fixed_targets(generator, monkeypatch, tmp_path)
+    _directory, resource, _arm_resource, pins = _bind_fixed_targets(
+        generator, monkeypatch, tmp_path
+    )
     expected_resource = b'{"canonical":true}'
     expected_pins = generator._render_pins(
-        {"0.10.0": hashlib.sha256(expected_resource).hexdigest()}
+        {("0.10.0", "macos.x86_64"): hashlib.sha256(expected_resource).hexdigest()}
     )
     resource.write_bytes(expected_resource)
     pins.write_bytes(expected_pins)
@@ -80,7 +92,11 @@ def test_check_mode_compares_exact_bytes_without_any_write(
         lambda *_args: pytest.fail("--check must not replace a file"),
     )
 
-    generator._check_pair(resource=expected_resource, pins=expected_pins)
+    generator._check_pair(
+        resource_path=resource,
+        resource=expected_resource,
+        pins=expected_pins,
+    )
 
     assert before == {
         path: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
@@ -93,11 +109,13 @@ def test_pair_publication_restores_the_old_resource_if_the_pin_replace_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    directory, resource, pins = _bind_fixed_targets(generator, monkeypatch, tmp_path)
+    directory, resource, _arm_resource, pins = _bind_fixed_targets(generator, monkeypatch, tmp_path)
     old_resource = b'{"release":"old"}'
     new_resource = b'{"release":"new"}'
     old_pins = generator._render_pins({})
-    new_pins = generator._render_pins({"0.10.0": hashlib.sha256(new_resource).hexdigest()})
+    new_pins = generator._render_pins(
+        {("0.10.0", "macos.x86_64"): hashlib.sha256(new_resource).hexdigest()}
+    )
     resource.write_bytes(old_resource)
     pins.write_bytes(old_pins)
     monkeypatch.setattr(generator, "_decode_canonical_resource", lambda raw: None)
@@ -114,7 +132,11 @@ def test_pair_publication_restores_the_old_resource_if_the_pin_replace_fails(
     monkeypatch.setattr(generator.os, "replace", fail_second_replace)
 
     with pytest.raises(generator.GenerationError, match="both files were restored"):
-        generator._publish_pair(resource=new_resource, pins=new_pins)
+        generator._publish_pair(
+            resource_path=resource,
+            resource=new_resource,
+            pins=new_pins,
+        )
 
     assert replace_count == 3
     assert resource.read_bytes() == old_resource
@@ -122,12 +144,83 @@ def test_pair_publication_restores_the_old_resource_if_the_pin_replace_fails(
     assert {path.name for path in directory.iterdir()} == {resource.name, pins.name}
 
 
+def test_arm_publication_preserves_the_x86_resource_and_sibling_pin(
+    generator,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _directory, x86_resource, arm_resource, pins = _bind_fixed_targets(
+        generator, monkeypatch, tmp_path
+    )
+    x86_raw = b'{"platform":"x86"}'
+    arm_raw = b'{"platform":"arm"}'
+    x86_digest = hashlib.sha256(x86_raw).hexdigest()
+    arm_digest = hashlib.sha256(arm_raw).hexdigest()
+    x86_resource.write_bytes(x86_raw)
+    pins.write_bytes(generator._render_pins({("0.10.0", "macos.x86_64"): x86_digest}))
+    monkeypatch.setattr(generator, "_platform_id", lambda: "macos.arm64")
+    monkeypatch.setattr(generator, "_decode_canonical_resource", lambda raw: None)
+    result = SimpleNamespace(
+        release_version="0.10.0",
+        resource_sha256=arm_digest,
+        runtime_platform_id="macos.arm64",
+    )
+
+    platform_id, selected_resource, updated_pins = generator._current_platform_publication(result)
+    changed = generator._publish_pair(
+        resource_path=selected_resource,
+        resource=arm_raw,
+        pins=updated_pins,
+    )
+
+    assert changed is True
+    assert platform_id == "macos.arm64"
+    assert selected_resource == arm_resource
+    assert arm_resource.read_bytes() == arm_raw
+    assert x86_resource.read_bytes() == x86_raw
+    assert generator._decode_canonical_pins(pins.read_bytes()) == {
+        ("0.10.0", "macos.arm64"): arm_digest,
+        ("0.10.0", "macos.x86_64"): x86_digest,
+    }
+
+
+@pytest.mark.parametrize(
+    ("trusted_platform", "observed_platform", "message"),
+    [
+        ("linux.x86_64", "linux.x86_64", "no fixed attestation resource"),
+        ("macos.arm64", "macos.x86_64", "does not match"),
+    ],
+)
+def test_publication_rejects_unsupported_or_discovery_selected_platforms_before_pin_read(
+    generator,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    trusted_platform: str,
+    observed_platform: str,
+    message: str,
+) -> None:
+    _directory, _x86_resource, _arm_resource, _pins = _bind_fixed_targets(
+        generator, monkeypatch, tmp_path
+    )
+    monkeypatch.setattr(generator, "_platform_id", lambda: trusted_platform)
+    result = SimpleNamespace(
+        release_version="0.10.0",
+        resource_sha256="a" * 64,
+        runtime_platform_id=observed_platform,
+    )
+
+    with pytest.raises(generator.GenerationError, match=message):
+        generator._current_platform_publication(result)
+
+
 def test_fixed_outputs_reject_symlinks_and_noncanonical_pin_source(
     generator,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    _directory, resource, pins = _bind_fixed_targets(generator, monkeypatch, tmp_path)
+    _directory, resource, _arm_resource, pins = _bind_fixed_targets(
+        generator, monkeypatch, tmp_path
+    )
     target = tmp_path / "outside.json"
     target.write_bytes(b"{}")
     resource.symlink_to(target)

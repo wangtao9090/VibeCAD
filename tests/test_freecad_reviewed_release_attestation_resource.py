@@ -10,7 +10,7 @@ import pytest
 import vibecad.execution.freecad_reviewed_release_attestation_resource as resource
 from vibecad import __version__
 from vibecad.execution._attestations.freecad_reviewed_release_attestation_pins import (
-    PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE,
+    PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM,
 )
 from vibecad.execution.capabilities import CapabilityCatalogError, CapabilityCatalogErrorCode
 from vibecad.execution.freecad_reviewed_release_attestation import (
@@ -18,14 +18,18 @@ from vibecad.execution.freecad_reviewed_release_attestation import (
 )
 
 
-def _raw(*, release_version: str = "0.10.0") -> bytes:
+def _raw(
+    *,
+    release_version: str = "0.10.0",
+    platform_id: str = "macos.x86_64",
+) -> bytes:
     return json.dumps(
         {
             "attestation_sha256": "a" * 64,
             "discovery_manifest_sha256": "b" * 64,
             "discovery_snapshot_sha256": "c" * 64,
             "release_version": release_version,
-            "runtime_backend": {},
+            "runtime_backend": {"platform_id": platform_id},
             "schema_version": 1,
             "verification_set": {},
         },
@@ -36,11 +40,16 @@ def _raw(*, release_version: str = "0.10.0") -> bytes:
     ).encode("ascii")
 
 
-def _pin(monkeypatch: pytest.MonkeyPatch, raw: bytes) -> None:
+def _pin(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: bytes,
+    *,
+    platform_id: str = "macos.x86_64",
+) -> None:
     monkeypatch.setattr(
         resource,
-        "PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE",
-        {"0.10.0": hashlib.sha256(raw).hexdigest()},
+        "PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM",
+        {("0.10.0", platform_id): hashlib.sha256(raw).hexdigest()},
     )
 
 
@@ -51,7 +60,13 @@ def _noncanonical_raw() -> bytes:
 def test_loads_only_canonical_pinned_bytes_for_the_installed_release(monkeypatch):
     raw = _raw()
     _pin(monkeypatch, raw)
-    monkeypatch.setattr(resource, "_read_packaged_resource_bytes", lambda: raw)
+    selected_names: list[str] = []
+    monkeypatch.setattr(resource, "_platform_id", lambda: "macos.x86_64")
+    monkeypatch.setattr(
+        resource,
+        "_read_packaged_resource_bytes",
+        lambda name: selected_names.append(name) or raw,
+    )
 
     loaded = resource.load_current_packaged_freecad_reviewed_release_attestation()
 
@@ -59,6 +74,63 @@ def test_loads_only_canonical_pinned_bytes_for_the_installed_release(monkeypatch
     assert loaded.attestation_sha256 == "a" * 64
     assert loaded.resource_sha256 == hashlib.sha256(raw).hexdigest()
     assert loaded.raw == raw
+    assert selected_names == ["freecad-reviewed-release-attestation-macos-x86_64-v1.json"]
+
+
+def test_trusted_arm_platform_selects_only_the_fixed_arm_resource(monkeypatch):
+    raw = _raw(platform_id="macos.arm64")
+    _pin(monkeypatch, raw, platform_id="macos.arm64")
+    selected_names: list[str] = []
+    monkeypatch.setattr(resource, "_platform_id", lambda: "macos.arm64")
+    monkeypatch.setattr(
+        resource,
+        "_read_packaged_resource_bytes",
+        lambda name: selected_names.append(name) or raw,
+    )
+
+    loaded = resource.load_current_packaged_freecad_reviewed_release_attestation()
+
+    assert loaded.raw == raw
+    assert selected_names == ["freecad-reviewed-release-attestation-macos-arm64-v1.json"]
+
+
+def test_candidate_platform_cannot_select_or_cross_bind_a_sibling_resource(monkeypatch):
+    candidate = _raw(platform_id="macos.arm64")
+    _pin(monkeypatch, candidate, platform_id="macos.x86_64")
+    selected_names: list[str] = []
+    monkeypatch.setattr(resource, "_platform_id", lambda: "macos.x86_64")
+    monkeypatch.setattr(
+        resource,
+        "_read_packaged_resource_bytes",
+        lambda name: selected_names.append(name) or candidate,
+    )
+
+    with pytest.raises(CapabilityCatalogError) as raised:
+        resource.load_current_packaged_freecad_reviewed_release_attestation()
+
+    assert raised.value.code is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+    assert raised.value.path == "package_attestation/binding"
+    assert selected_names == ["freecad-reviewed-release-attestation-macos-x86_64-v1.json"]
+
+
+def test_unsupported_current_platform_fails_before_pin_or_resource_lookup(monkeypatch):
+    monkeypatch.setattr(resource, "_platform_id", lambda: "linux.x86_64")
+    monkeypatch.setattr(
+        resource,
+        "PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM",
+        pytest.fail,
+    )
+    monkeypatch.setattr(
+        resource,
+        "_read_packaged_resource_bytes",
+        lambda _name: pytest.fail("must not read for an unsupported platform"),
+    )
+
+    with pytest.raises(CapabilityCatalogError) as raised:
+        resource.load_current_packaged_freecad_reviewed_release_attestation()
+
+    assert raised.value.code is CapabilityCatalogErrorCode.INVALID_STATUS
+    assert raised.value.path == "package_attestation/platform"
 
 
 @pytest.mark.parametrize(
@@ -88,7 +160,8 @@ def test_rejects_noncanonical_tampered_and_release_drifted_resources(
     monkeypatch, raw, pin, path, code
 ):
     _pin(monkeypatch, _raw() if pin else b"tampered")
-    monkeypatch.setattr(resource, "_read_packaged_resource_bytes", lambda: raw)
+    monkeypatch.setattr(resource, "_platform_id", lambda: "macos.x86_64")
+    monkeypatch.setattr(resource, "_read_packaged_resource_bytes", lambda _name: raw)
 
     with pytest.raises(CapabilityCatalogError) as raised:
         resource.load_current_packaged_freecad_reviewed_release_attestation()
@@ -100,13 +173,14 @@ def test_rejects_noncanonical_tampered_and_release_drifted_resources(
 def test_rejects_missing_release_pin_before_reading_a_resource(monkeypatch):
     monkeypatch.setattr(
         resource,
-        "PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE",
+        "PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM",
         {},
     )
+    monkeypatch.setattr(resource, "_platform_id", lambda: "macos.arm64")
     monkeypatch.setattr(
         resource,
         "_read_packaged_resource_bytes",
-        lambda: pytest.fail("must not read an unpinned resource"),
+        lambda _name: pytest.fail("must not read an unpinned resource or fall back to x86"),
     )
 
     with pytest.raises(CapabilityCatalogError) as raised:
@@ -119,8 +193,9 @@ def test_rejects_missing_release_pin_before_reading_a_resource(monkeypatch):
 def test_rejects_a_missing_fixed_package_resource(monkeypatch):
     raw = _raw()
     _pin(monkeypatch, raw)
+    monkeypatch.setattr(resource, "_platform_id", lambda: "macos.x86_64")
 
-    def missing() -> bytes:
+    def missing(_resource_name: str) -> bytes:
         raise CapabilityCatalogError(
             CapabilityCatalogErrorCode.UNKNOWN_REFERENCE,
             "package_attestation/resource",
@@ -139,12 +214,15 @@ def test_loader_has_no_path_or_environment_override_surface():
     assert loader.__code__.co_argcount == 0
 
 
-def test_checked_in_current_release_resource_is_pinned_canonical_and_complete() -> None:
+def test_checked_in_current_release_resource_is_pinned_canonical_and_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resource, "_platform_id", lambda: "macos.x86_64")
     loaded = resource.load_current_packaged_freecad_reviewed_release_attestation()
 
     assert loaded.release_version == __version__ == "0.10.0"
-    assert PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE == {
-        __version__: loaded.resource_sha256
+    assert PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM == {
+        (__version__, "macos.x86_64"): loaded.resource_sha256
     }
     decoded = decode_freecad_reviewed_release_attestation(
         loaded.raw,

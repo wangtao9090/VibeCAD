@@ -2,10 +2,11 @@
 """Generate or verify the fixed VibeCAD Reviewed-FreeCAD release attestation.
 
 This maintainer-only command must run inside the pinned managed FreeCAD
-Python.  It has no path override: the canonical JSON resource and its source
-pin are always addressed relative to this checkout.  ``--check`` performs the
-same real discovery and 124-by-seven conformance run, but only reads and
-compares the two checked-in files.
+Python.  It has no path or platform override: the trusted current platform
+selects one fixed canonical JSON resource and one key in the shared pin source.
+Generation preserves every sibling-platform pin.  ``--check`` performs the same
+real discovery and 124-by-seven conformance run, but only reads and compares
+the two selected checked-in files.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from vibecad.execution.freecad_current_managed_verification import (
 )
 from vibecad.execution.freecad_discovery_runtime_v2 import (
     FREECAD_DISCOVERY_V2_ALLOWED_MODULES,
+    _platform_id,
     collect_managed_freecad_discovery_v2,
 )
 from vibecad.execution.freecad_reviewed_release_attestation import (
@@ -43,17 +45,22 @@ from vibecad.execution.freecad_reviewed_release_attestation import (
 
 _ROOT = Path(__file__).resolve().parents[2]
 _ATTESTATION_DIRECTORY = _ROOT / "src/vibecad/execution/_attestations"
-_RESOURCE_PATH = _ATTESTATION_DIRECTORY / "freecad-reviewed-release-attestation-v1.json"
 _PINS_PATH = _ATTESTATION_DIRECTORY / "freecad_reviewed_release_attestation_pins.py"
-_PIN_NAME = "PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE"
+_RESOURCE_NAME_BY_PLATFORM_ID = {
+    "macos.arm64": "freecad-reviewed-release-attestation-macos-arm64-v1.json",
+    "macos.x86_64": "freecad-reviewed-release-attestation-macos-x86_64-v1.json",
+}
+_PIN_NAME = "PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM"
 _MAX_EXISTING_FILE_BYTES = 2 * 1024 * 1024
 _FREECAD_USER_TEMP_ENV = "FREECAD_USER_TEMP"
 
-_PINS_DOCSTRING = """Generated pins for packaged reviewed FreeCAD attestations.
+_PINS_DOCSTRING = """Generated platform pins for packaged reviewed FreeCAD attestations.
 
 The release generator replaces this mapping together with the canonical JSON
-resource.  Keeping an empty mapping in an un-attested source checkout is
-intentional: consumers fail closed and cannot manufacture VERIFIED coverage.
+resource for its trusted current platform.  A key is ``(release_version,
+platform_id)``; the generator preserves sibling-platform keys.  Keeping an
+empty mapping in an un-attested source checkout is intentional: consumers fail
+closed and cannot manufacture VERIFIED coverage.
 """
 
 
@@ -89,16 +96,20 @@ def _canonical_json(value: object) -> bytes:
         raise GenerationError("cannot encode the generation summary canonically") from exc
 
 
-def _render_pins(mapping: dict[str, str]) -> bytes:
+def _render_pins(mapping: dict[tuple[str, str], str]) -> bytes:
     if type(mapping) is not dict or any(
-        type(version) is not str
-        or not version
+        type(key) is not tuple
+        or len(key) != 2
+        or type(key[0]) is not str
+        or not key[0]
+        or type(key[1]) is not str
+        or key[1] not in _RESOURCE_NAME_BY_PLATFORM_ID
         or type(digest) is not str
         or len(digest) != 64
         or any(character not in "0123456789abcdef" for character in digest)
-        for version, digest in mapping.items()
+        for key, digest in mapping.items()
     ):
-        raise GenerationError("invalid release pin mapping")
+        raise GenerationError("invalid release-platform pin mapping")
     lines = [
         f'"""{_PINS_DOCSTRING}"""',
         "",
@@ -116,10 +127,14 @@ def _render_pins(mapping: dict[str, str]) -> bytes:
                 f"{_PIN_NAME}: Final = MappingProxyType(",
                 "    {",
                 *(
-                    "        "
-                    f"{json.dumps(version, ensure_ascii=True)}: "
-                    f"{json.dumps(mapping[version], ensure_ascii=True)},"
-                    for version in sorted(mapping)
+                    line
+                    for key in sorted(mapping)
+                    for line in (
+                        "        (",
+                        f"            {json.dumps(key[0], ensure_ascii=True)},",
+                        f"            {json.dumps(key[1], ensure_ascii=True)},",
+                        f"        ): {json.dumps(mapping[key], ensure_ascii=True)},",
+                    )
                 ),
                 "    }",
                 ")",
@@ -128,7 +143,7 @@ def _render_pins(mapping: dict[str, str]) -> bytes:
     return ("\n".join(lines) + "\n").encode("ascii")
 
 
-def _decode_canonical_pins(raw: bytes) -> dict[str, str]:
+def _decode_canonical_pins(raw: bytes) -> dict[tuple[str, str], str]:
     if type(raw) is not bytes or not raw or len(raw) > _MAX_EXISTING_FILE_BYTES:
         raise GenerationError("the existing pin source is missing or oversized")
     try:
@@ -149,7 +164,12 @@ def _decode_canonical_pins(raw: bytes) -> dict[str, str]:
     except (SyntaxError, UnicodeError, ValueError, TypeError, IndexError) as exc:
         raise GenerationError("the existing pin source is not canonical") from exc
     if type(value) is not dict or any(
-        type(version) is not str or type(digest) is not str for version, digest in value.items()
+        type(key) is not tuple
+        or len(key) != 2
+        or type(key[0]) is not str
+        or type(key[1]) is not str
+        or type(digest) is not str
+        for key, digest in value.items()
     ):
         raise GenerationError("the existing pin source is not canonical")
     if _render_pins(value) != raw:
@@ -170,8 +190,29 @@ def _decode_canonical_resource(raw: bytes) -> None:
         raise GenerationError("the existing attestation resource is not canonical") from exc
 
 
+def _resource_path_for_platform(platform_id: object) -> Path:
+    resource_name = (
+        _RESOURCE_NAME_BY_PLATFORM_ID.get(platform_id) if type(platform_id) is str else None
+    )
+    if type(resource_name) is not str:
+        raise GenerationError("the current platform has no fixed attestation resource")
+    return _ATTESTATION_DIRECTORY / resource_name
+
+
+def _fixed_output_paths() -> frozenset[Path]:
+    return frozenset(
+        {
+            _PINS_PATH,
+            *(
+                _ATTESTATION_DIRECTORY / resource_name
+                for resource_name in _RESOURCE_NAME_BY_PLATFORM_ID.values()
+            ),
+        }
+    )
+
+
 def _read_fixed_file(path: Path, *, required: bool) -> bytes | None:
-    if path not in {_RESOURCE_PATH, _PINS_PATH}:
+    if path not in _fixed_output_paths():
         raise GenerationError("a non-fixed output path was requested")
     try:
         parent = path.parent.resolve(strict=True)
@@ -196,10 +237,10 @@ def _read_fixed_file(path: Path, *, required: bool) -> bytes | None:
         raise GenerationError(f"cannot read fixed output: {path.name}") from exc
     if len(raw) != metadata.st_size:
         raise GenerationError(f"fixed output changed while reading: {path.name}")
-    if path == _RESOURCE_PATH:
-        _decode_canonical_resource(raw)
-    else:
+    if path == _PINS_PATH:
         _decode_canonical_pins(raw)
+    else:
+        _decode_canonical_resource(raw)
     return raw
 
 
@@ -386,10 +427,12 @@ def _fsync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
-def _publish_pair(*, resource: bytes, pins: bytes) -> bool:
+def _publish_pair(*, resource_path: Path, resource: bytes, pins: bytes) -> bool:
+    if resource_path not in _fixed_output_paths() or resource_path == _PINS_PATH:
+        raise GenerationError("a non-fixed resource path was requested")
     _decode_canonical_resource(resource)
     _decode_canonical_pins(pins)
-    old_resource = _read_fixed_file(_RESOURCE_PATH, required=False)
+    old_resource = _read_fixed_file(resource_path, required=False)
     old_pins = _read_fixed_file(_PINS_PATH, required=True)
     if old_resource == resource and old_pins == pins:
         return False
@@ -403,7 +446,7 @@ def _publish_pair(*, resource: bytes, pins: bytes) -> bool:
     try:
         staged_resource = _stage_file(
             directory=_ATTESTATION_DIRECTORY,
-            name=_RESOURCE_PATH.name,
+            name=resource_path.name,
             raw=resource,
         )
         staged_pins = _stage_file(
@@ -414,7 +457,7 @@ def _publish_pair(*, resource: bytes, pins: bytes) -> bool:
         if old_resource is not None:
             rollback_resource = _stage_file(
                 directory=_ATTESTATION_DIRECTORY,
-                name=f"rollback-{_RESOURCE_PATH.name}",
+                name=f"rollback-{resource_path.name}",
                 raw=old_resource,
             )
         rollback_pins = _stage_file(
@@ -422,7 +465,7 @@ def _publish_pair(*, resource: bytes, pins: bytes) -> bool:
             name=f"rollback-{_PINS_PATH.name}",
             raw=old_pins,
         )
-        os.replace(staged_resource, _RESOURCE_PATH)
+        os.replace(staged_resource, resource_path)
         staged_resource = None
         resource_replaced = True
         os.replace(staged_pins, _PINS_PATH)
@@ -437,9 +480,9 @@ def _publish_pair(*, resource: bytes, pins: bytes) -> bool:
                 rollback_pins = None
             if resource_replaced:
                 if rollback_resource is None:
-                    _RESOURCE_PATH.unlink(missing_ok=True)
+                    resource_path.unlink(missing_ok=True)
                 else:
-                    os.replace(rollback_resource, _RESOURCE_PATH)
+                    os.replace(rollback_resource, resource_path)
                     rollback_resource = None
             _fsync_directory(_ATTESTATION_DIRECTORY)
         except Exception as rollback_exc:
@@ -460,10 +503,12 @@ def _publish_pair(*, resource: bytes, pins: bytes) -> bool:
     return True
 
 
-def _check_pair(*, resource: bytes, pins: bytes) -> None:
+def _check_pair(*, resource_path: Path, resource: bytes, pins: bytes) -> None:
+    if resource_path not in _fixed_output_paths() or resource_path == _PINS_PATH:
+        raise GenerationError("a non-fixed resource path was requested")
     _decode_canonical_resource(resource)
     _decode_canonical_pins(pins)
-    if _read_fixed_file(_RESOURCE_PATH, required=True) != resource:
+    if _read_fixed_file(resource_path, required=True) != resource:
         raise GenerationError("the packaged attestation resource is stale")
     if _read_fixed_file(_PINS_PATH, required=True) != pins:
         raise GenerationError("the packaged attestation pin source is stale")
@@ -489,6 +534,21 @@ def _summary(result: GenerationResult, *, mode: str, changed: bool) -> bytes:
     )
 
 
+def _current_platform_publication(result: GenerationResult) -> tuple[str, Path, bytes]:
+    try:
+        current_platform_id = _platform_id()
+    except Exception as exc:
+        raise GenerationError("cannot identify the trusted current platform") from exc
+    if type(current_platform_id) is not str or result.runtime_platform_id != current_platform_id:
+        raise GenerationError("discovery does not match the trusted current platform")
+    resource_path = _resource_path_for_platform(current_platform_id)
+    existing_pins_raw = _read_fixed_file(_PINS_PATH, required=True)
+    assert existing_pins_raw is not None
+    updated_pins = _decode_canonical_pins(existing_pins_raw)
+    updated_pins[(result.release_version, current_platform_id)] = result.resource_sha256
+    return current_platform_id, resource_path, _render_pins(updated_pins)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Generate or verify the fixed Reviewed-FreeCAD release attestation."
@@ -501,13 +561,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = _build_release_attestation()
-        pins = _render_pins({result.release_version: result.resource_sha256})
+        _current_platform_id, resource_path, pins = _current_platform_publication(result)
         if args.check:
-            _check_pair(resource=result.resource, pins=pins)
+            _check_pair(resource_path=resource_path, resource=result.resource, pins=pins)
             changed = False
             mode = "check"
         else:
-            changed = _publish_pair(resource=result.resource, pins=pins)
+            changed = _publish_pair(
+                resource_path=resource_path,
+                resource=result.resource,
+                pins=pins,
+            )
             mode = "generate"
     except GenerationError as exc:
         parser.exit(1, f"release attestation failed: {exc}\n")

@@ -83,7 +83,7 @@ def _packaged_attestation() -> FreeCadPackagedReviewedReleaseAttestation:
             "discovery_manifest_sha256": _sha("synthetic-manifest"),
             "discovery_snapshot_sha256": _sha("synthetic-snapshot"),
             "release_version": "0.10.0",
-            "runtime_backend": {},
+            "runtime_backend": {"platform_id": "macos.x86_64"},
             "schema_version": 1,
             "verification_set": {},
         },
