@@ -290,8 +290,19 @@ def test_release_reviewed_attestation_gate_covers_exact_trusted_macos_platforms(
     assert "RuntimeInstaller().install()" in body
     assert "from vibecad.execution.freecad_discovery_runtime_v2 import _platform_id" in body
     assert "assert actual == expected" in body
+    packaged_loader = "load_current_packaged_freecad_reviewed_release_attestation"
+    generator = ".github/scripts/generate_freecad_reviewed_release_attestation.py --check"
+    assert body.count(packaged_loader) == 2
+    assert f"packaged={packaged_loader}()" in body
+    assert "decode_freecad_reviewed_release_attestation(packaged.raw" in body
+    assert "assert installed.is_relative_to(home)" in body
+    assert "assert attestation.runtime_backend.platform_id == expected" in body
+    assert "assert len(verification.receipts) == 19" in body
+    assert "assert len(verification.formal_operations) == 124" in body
+    assert "assert len(verification.native_types) == 102" in body
+    assert body.index(f"packaged={packaged_loader}()") < body.index(generator)
     assert '"$VIBECAD_MANAGED_FREECAD_PYTHON" -I' in body
-    assert ".github/scripts/generate_freecad_reviewed_release_attestation.py --check" in body
+    assert generator in body
 
 
 def test_release_workflow_uses_explicit_least_privilege_permissions():

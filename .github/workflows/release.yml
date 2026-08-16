@@ -453,6 +453,21 @@ jobs:
           executable=pathlib.Path(sys.executable).resolve(); home=pathlib.Path(os.environ['VIBECAD_HOME']).resolve();
           assert executable.is_relative_to(home), (executable,home);
           assert actual == expected, (actual,expected)"
+      - name: validate the exact installed reviewed-attestation resource
+        run: >-
+          "$VIBECAD_MANAGED_FREECAD_PYTHON" -I -c
+          "import os,pathlib,vibecad;
+          from vibecad.execution.freecad_reviewed_release_attestation import decode_freecad_reviewed_release_attestation;
+          from vibecad.execution.freecad_reviewed_release_attestation_resource import load_current_packaged_freecad_reviewed_release_attestation;
+          home=pathlib.Path(os.environ['VIBECAD_HOME']).resolve(); installed=pathlib.Path(vibecad.__file__).resolve();
+          assert installed.is_relative_to(home), (installed,home);
+          packaged=load_current_packaged_freecad_reviewed_release_attestation();
+          attestation=decode_freecad_reviewed_release_attestation(packaged.raw,expected_source_attestation_sha256=packaged.resource_sha256);
+          verification=attestation.verification_set; expected=os.environ['EXPECTED_PLATFORM_ID'];
+          assert attestation.runtime_backend.platform_id == expected, (attestation.runtime_backend.platform_id,expected);
+          assert len(verification.receipts) == 19;
+          assert len(verification.formal_operations) == 124;
+          assert len(verification.native_types) == 102"
       - name: exact packaged reviewed-attestation gate (${{ matrix.platform_id }})
         run: >-
           "$VIBECAD_MANAGED_FREECAD_PYTHON" -I
