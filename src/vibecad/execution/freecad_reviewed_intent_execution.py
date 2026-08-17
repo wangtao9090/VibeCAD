@@ -193,17 +193,31 @@ class ReviewedIntentRoute:
         )
 
 
-_BOX_OPERATION: Final = next(
-    item for item in PART_CORE_OPERATION_SPECS if item.operation_id == PartCoreOperation.BOX.value
+_REVIEWED_PART_PRIMITIVE_OPERATIONS: Final = (
+    PartCoreOperation.BOX,
+    PartCoreOperation.CONE,
+    PartCoreOperation.CYLINDER,
+    PartCoreOperation.ELLIPSOID,
+    PartCoreOperation.PRISM,
+    PartCoreOperation.SPHERE,
+    PartCoreOperation.TORUS,
+    PartCoreOperation.WEDGE,
 )
-REVIEWED_PART_BOX_ROUTE: Final = ReviewedIntentRoute(
-    operation_id="freecad_part_core.box",
-    semantic_operation=_semantic_operation(_BOX_OPERATION),
-    manifest=PART_CORE_MANIFEST,
-    operation=_BOX_OPERATION,
-    subject_type_term=_bridge_term(PART_CORE_STRUCTURE_TERM),
+REVIEWED_PART_PRIMITIVE_ROUTES: Final = tuple(
+    ReviewedIntentRoute(
+        operation_id=f"freecad_part_core.{operation.value}",
+        semantic_operation=_semantic_operation(spec),
+        manifest=PART_CORE_MANIFEST,
+        operation=spec,
+        subject_type_term=_bridge_term(PART_CORE_STRUCTURE_TERM),
+    )
+    for operation in _REVIEWED_PART_PRIMITIVE_OPERATIONS
+    for spec in (
+        next(item for item in PART_CORE_OPERATION_SPECS if item.operation_id == operation.value),
+    )
 )
-CURRENT_REVIEWED_INTENT_ROUTES: Final = (REVIEWED_PART_BOX_ROUTE,)
+REVIEWED_PART_BOX_ROUTE: Final = REVIEWED_PART_PRIMITIVE_ROUTES[0]
+CURRENT_REVIEWED_INTENT_ROUTES: Final = REVIEWED_PART_PRIMITIVE_ROUTES
 _ROUTES_BY_IDENTITY: Final = MappingProxyType(
     {(item.operation_id, item.semantic_operation): item for item in CURRENT_REVIEWED_INTENT_ROUTES}
 )
@@ -481,7 +495,7 @@ def lower_reviewed_intent(value: object) -> LoweredReviewedIntent:
         _fail(ReviewedIntentExecutionErrorCode.LOWERING_FAILED)
     if (
         type(plan) is not PartCoreBackendPlan
-        or plan.operation is not PartCoreOperation.BOX
+        or plan.operation.value != route.operation.operation_id
         or plan.sources
         or receipt.operation != route.operation
     ):
@@ -648,6 +662,7 @@ def execute_reviewed_intent_native(
 __all__ = [
     "CURRENT_REVIEWED_INTENT_ROUTES",
     "REVIEWED_PART_BOX_ROUTE",
+    "REVIEWED_PART_PRIMITIVE_ROUTES",
     "LoweredReviewedIntent",
     "ReviewedIntentExecutionError",
     "ReviewedIntentExecutionErrorCode",

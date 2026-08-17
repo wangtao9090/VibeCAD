@@ -17,7 +17,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 import vibecad.execution.executor as executor_module
-from test_reviewed_intent_program import reviewed_box_program
+from test_reviewed_intent_program import reviewed_box_program, reviewed_primitive_program
 from vibecad.execution.candidate import (
     ActiveCandidate,
     CadSnapshotPort,
@@ -52,6 +52,7 @@ from vibecad.execution.revisions import (
 )
 from vibecad.execution.selectors import index_entity_identities
 from vibecad.parametric.freecad_part_core_rules import (
+    PART_CORE_NATIVE_SPECS,
     PartCoreConformanceReceipt,
     PartCoreOperation,
 )
@@ -1929,7 +1930,7 @@ def test_execute_program_applies_one_reviewed_box_and_adopts_identity(
 
 
 @pytest.mark.slow
-def test_real_freecad_reviewed_box_executes_checkpoints_reopens_and_rejects_duplicate(
+def test_real_freecad_reviewed_primitives_execute_checkpoint_reopen_and_reject_duplicate(
     tmp_path: Path,
 ) -> None:
     if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
@@ -1943,13 +1944,27 @@ def test_real_freecad_reviewed_box_executes_checkpoints_reopens_and_rejects_dupl
     if not runtime_status.engine_compatible(runtime_python):
         pytest.fail("the existing managed FreeCAD runtime does not match current engine pins")
     source_root = Path(__file__).parents[1] / "src"
-    reviewed_mapping = reviewed_box_program().to_mapping()
+    operations = (
+        PartCoreOperation.BOX,
+        PartCoreOperation.CONE,
+        PartCoreOperation.CYLINDER,
+        PartCoreOperation.ELLIPSOID,
+        PartCoreOperation.PRISM,
+        PartCoreOperation.SPHERE,
+        PartCoreOperation.TORUS,
+        PartCoreOperation.WEDGE,
+    )
+    reviewed_mappings = tuple(
+        reviewed_primitive_program(operation).to_mapping() for operation in operations
+    )
+    expected_types = tuple(PART_CORE_NATIVE_SPECS[operation].type_id for operation in operations)
     code = (
         f"import sys; sys.path.insert(0, {str(source_root)!r})\n"
         + "import os\n"
         + "from pathlib import Path\n"
         + "from vibecad.execution.candidate import ActiveCandidate, SessionBinding\n"
-        + "from vibecad.execution.executor import InProcessCadExecutor, _entity_observations\n"
+        + "from vibecad.execution.executor import "
+        + "InProcessCadExecutor, _entity_observations, _same_import_observations\n"
         + "from vibecad.execution.revisions import LocalRevisionStore, ProjectHead\n"
         + "from vibecad.workflow.contracts import "
         + "AcceptanceSpec, ModelCommand, ModelProgram, ValueSource\n"
@@ -1957,16 +1972,18 @@ def test_real_freecad_reviewed_box_executes_checkpoints_reopens_and_rejects_dupl
         + "native_root = root / 'freecad-native-cache'\n"
         + "native_root.mkdir(mode=0o700)\n"
         + "os.environ['FREECAD_USER_TEMP'] = str(native_root)\n"
-        + f"reviewed_mapping = {reviewed_mapping!r}\n"
+        + f"reviewed_mappings = {reviewed_mappings!r}\n"
+        + f"expected_types = {expected_types!r}\n"
         + f"project_id = {PROJECT_ID!r}\n"
         + f"base_revision = {BASE_REVISION!r}\n"
         + f"candidate_revision = {CANDIDATE_REVISION!r}\n"
-        + "command = ModelCommand(id='reviewed_box', op='apply_reviewed_intent', "
-        + "target={}, args={'intent': reviewed_mapping}, depends_on=(), preserve=(), "
-        + "source=ValueSource.MODEL)\n"
-        + "program = ModelProgram(task_id='task-real-reviewed-box', "
-        + "base_revision=base_revision, operations=(command,), "
-        + "acceptance=AcceptanceSpec(id='accept-real-reviewed-box', criteria=()))\n"
+        + "commands = tuple(ModelCommand(id=f'reviewed_{index}', "
+        + "op='apply_reviewed_intent', target={}, args={'intent': mapping}, "
+        + "depends_on=(), preserve=(), source=ValueSource.MODEL) "
+        + "for index, mapping in enumerate(reviewed_mappings))\n"
+        + "program = ModelProgram(task_id='task-real-reviewed-primitives', "
+        + "base_revision=base_revision, operations=commands, "
+        + "acceptance=AcceptanceSpec(id='accept-real-reviewed-primitives', criteria=()))\n"
         + "store = object.__new__(LocalRevisionStore)\n"
         + "executor = InProcessCadExecutor(store=store)\n"
         + "session = executor.create_empty(revision_id=candidate_revision)\n"
@@ -1980,24 +1997,28 @@ def test_real_freecad_reviewed_box_executes_checkpoints_reopens_and_rejects_dupl
         + "step_path=root / 'model.step')\n"
         + "    validated = executor.validate_program(program)\n"
         + "    outcomes = executor.execute_program(program=validated, candidate=candidate)\n"
-        + "    assert len(outcomes) == 1 and outcomes[0].result.ok, "
-        + "outcomes[0].result.to_mapping()\n"
-        + "    value = outcomes[0].result.value\n"
-        + "    assert value['kind'] == 'reviewed_intent_applied'\n"
+        + "    assert len(outcomes) == len(reviewed_mappings), "
+        + "tuple(item.result.to_mapping() for item in outcomes)\n"
+        + "    assert all(item.result.ok for item in outcomes)\n"
+        + "    assert all(item.result.value['kind'] == 'reviewed_intent_applied' "
+        + "for item in outcomes)\n"
         + "    entities = _entity_observations(session)\n"
-        + "    assert len(entities) == 1 and entities[0].object_type == 'Part::Box'\n"
-        + "    parameters = {item.name: item.value for item in entities[0].parameters}\n"
-        + "    assert parameters == {'height': 6.0, 'length': 10.0, 'width': 8.0}\n"
-        + "    assert session.get_result_object().Name.startswith('VcPart_box_')\n"
+        + "    assert len(entities) == len(expected_types)\n"
+        + "    assert {item.object_type for item in entities} == set(expected_types)\n"
+        + "    assert all(item.valid_shape and item.solid_count == 1 "
+        + "and item.volume_mm3 is not None and item.volume_mm3 > 0 for item in entities), "
+        + "tuple(item.to_mapping() for item in entities)\n"
+        + "    assert session.get_result_object().Name.startswith('VcPart_wedge_')\n"
         + "    before_duplicate = tuple(session.doc.Objects)\n"
         + "    duplicate = executor.execute_program(program=validated, candidate=candidate)\n"
         + "    assert len(duplicate) == 1 and not duplicate[0].result.ok\n"
         + "    assert tuple(session.doc.Objects) == before_duplicate\n"
         + "    executor.checkpoint_fcstd(session, root / 'model.FCStd')\n"
         + "    loaded = executor.load_fcstd(root / 'model.FCStd')\n"
-        + "    assert _entity_observations(loaded) == entities\n"
+        + "    reloaded = _entity_observations(loaded)\n"
+        + "    assert _same_import_observations(reloaded, entities)\n"
         + "    assert loaded.get_result_object().Name == session.get_result_object().Name\n"
-        + "    print('REAL_REVIEWED_BOX_OK')\n"
+        + "    print('REAL_REVIEWED_PRIMITIVES_OK')\n"
         + "finally:\n"
         + "    if loaded is not None:\n"
         + "        loaded.close_document()\n"
@@ -2011,7 +2032,7 @@ def test_real_freecad_reviewed_box_executes_checkpoints_reopens_and_rejects_dupl
         timeout=180,
     )
     assert result.returncode == 0, result.stderr
-    assert "REAL_REVIEWED_BOX_OK" in result.stdout
+    assert "REAL_REVIEWED_PRIMITIVES_OK" in result.stdout
 
 
 def test_execute_program_supplies_trusted_profile_version_and_object_counter(

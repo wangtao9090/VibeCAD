@@ -6,9 +6,12 @@ import hashlib
 import pytest
 
 from vibecad.execution.freecad_reviewed_intent_execution import (
+    CURRENT_REVIEWED_INTENT_ROUTES,
+    REVIEWED_PART_PRIMITIVE_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
     lower_reviewed_intent,
+    route_reviewed_intent,
 )
 from vibecad.execution.registry import DEFAULT_OPERATION_REGISTRY, ValueShape
 from vibecad.intent_bridge.freecad_part_core_adapter import (
@@ -42,21 +45,79 @@ from vibecad.workflow.reviewed_intent import (
     ReviewedIntentProgramV1,
 )
 
+_PRIMITIVE_PARAMETERS: dict[PartCoreOperation, dict[str, object]] = {
+    PartCoreOperation.BOX: {
+        "size_x_mm": 10.0,
+        "size_y_mm": 8.0,
+        "size_z_mm": 6.0,
+    },
+    PartCoreOperation.CONE: {
+        "base_radius_mm": 5.0,
+        "top_radius_mm": 2.0,
+        "height_mm": 8.0,
+        "sweep_degrees": 360.0,
+    },
+    PartCoreOperation.CYLINDER: {
+        "radius_mm": 5.0,
+        "height_mm": 8.0,
+        "sweep_degrees": 360.0,
+    },
+    PartCoreOperation.ELLIPSOID: {
+        "radius_x_mm": 5.0,
+        "radius_y_mm": 4.0,
+        "radius_z_mm": 3.0,
+        "latitude_min_degrees": -90.0,
+        "latitude_max_degrees": 90.0,
+        "sweep_degrees": 360.0,
+    },
+    PartCoreOperation.PRISM: {
+        "side_count": 6,
+        "circumradius_mm": 5.0,
+        "height_mm": 8.0,
+    },
+    PartCoreOperation.SPHERE: {
+        "radius_mm": 5.0,
+        "latitude_min_degrees": -90.0,
+        "latitude_max_degrees": 90.0,
+        "sweep_degrees": 360.0,
+    },
+    PartCoreOperation.TORUS: {
+        "major_radius_mm": 8.0,
+        "minor_radius_mm": 2.0,
+        "latitude_min_degrees": -180.0,
+        "latitude_max_degrees": 180.0,
+        "sweep_degrees": 360.0,
+    },
+    PartCoreOperation.WEDGE: {
+        "x_min_mm": 0.0,
+        "y_min_mm": 0.0,
+        "z_min_mm": 0.0,
+        "x_inner_min_mm": 2.0,
+        "z_inner_min_mm": 1.0,
+        "x_max_mm": 10.0,
+        "y_max_mm": 8.0,
+        "z_max_mm": 6.0,
+        "x_inner_max_mm": 8.0,
+        "z_inner_max_mm": 5.0,
+    },
+}
 
-def _box_graph() -> ParametricFeatureGraphV2:
+
+def _primitive_graph(operation: PartCoreOperation) -> ParametricFeatureGraphV2:
     operation_terms = next(
-        item for item in PART_CORE_OPERATION_TERMS if item.operation is PartCoreOperation.BOX
+        item for item in PART_CORE_OPERATION_TERMS if item.operation is operation
     )
+    operation_id = operation.value
     parameter = DesignParameterV2(
-        parameter_id="parameter_box",
-        name="Reviewed box dimensions",
+        parameter_id=f"parameter_{operation_id}",
+        name=f"Reviewed {operation_id} parameters",
         semantic_role_term_ref_id=PART_CORE_PARAMETERS_ROLE_TERM.term_ref_id,
         value=TermTypedValueV2.from_value(
-            value_id="value_box",
+            value_id=f"value_{operation_id}",
             value_type_term_ref_id=PART_CORE_PARAMETERS_TYPE_TERM.term_ref_id,
             encoding_term_ref_id=PART_CORE_CANONICAL_JSON_TERM.term_ref_id,
             value={
-                "shape": {"size_x_mm": 10.0, "size_y_mm": 8.0, "size_z_mm": 6.0},
+                "shape": _PRIMITIVE_PARAMETERS[operation],
                 "placement": {
                     "translation_mm": [0.0, 0.0, 0.0],
                     "rotation_axis": [0.0, 0.0, 1.0],
@@ -66,9 +127,9 @@ def _box_graph() -> ParametricFeatureGraphV2:
         ),
     )
     target = FeatureNodeV2(
-        node_id="node_box",
+        node_id=f"node_{operation_id}",
         body_id="body_main",
-        name="Reviewed box",
+        name=f"Reviewed {operation_id}",
         intent=FeatureIntentV2(
             structural_kind_term_ref_id=PART_CORE_STRUCTURE_TERM.term_ref_id,
             family_term_ref_id=operation_terms.family_term.term_ref_id,
@@ -93,7 +154,7 @@ def _box_graph() -> ParametricFeatureGraphV2:
             ),
             parameter_bindings=(
                 FeatureParameterBindingV2(
-                    binding_id="binding_box",
+                    binding_id=f"binding_{operation_id}",
                     port_id="port_parameters",
                     parameter_id=parameter.parameter_id,
                 ),
@@ -108,8 +169,8 @@ def _box_graph() -> ParametricFeatureGraphV2:
         ),
     )
     return ParametricFeatureGraphV2(
-        graph_id="graph_reviewed_box",
-        name="Reviewed product box",
+        graph_id=f"graph_reviewed_{operation_id}",
+        name=f"Reviewed product {operation_id}",
         terms=PART_CORE_PFG_TERMS,
         bodies=(FeatureBodyV2(body_id="body_main", name="Main body"),),
         parameters=(parameter,),
@@ -117,7 +178,7 @@ def _box_graph() -> ParametricFeatureGraphV2:
         nodes=(target,),
         graph_results=(
             FeatureGraphResultV2(
-                selection_id="selection_box",
+                selection_id=f"selection_{operation_id}",
                 node_id=target.node_id,
                 result_id=target.results[0].result_id,
             ),
@@ -125,21 +186,25 @@ def _box_graph() -> ParametricFeatureGraphV2:
     )
 
 
-def _semantic_operation() -> str:
-    operation = next(item for item in PART_CORE_OPERATION_SPECS if item.operation_id == "box")
-    namespace, version, term_id, digest = operation.semantic_term.semantic_identity
+def _semantic_operation(operation: PartCoreOperation) -> str:
+    spec = next(item for item in PART_CORE_OPERATION_SPECS if item.operation_id == operation.value)
+    namespace, version, term_id, digest = spec.semantic_term.semantic_identity
     return f"{namespace}/{version}/{term_id}@{digest}"
 
 
-def reviewed_box_program() -> ReviewedIntentProgramV1:
-    graph = _box_graph()
+def reviewed_primitive_program(operation: PartCoreOperation) -> ReviewedIntentProgramV1:
+    graph = _primitive_graph(operation)
     return ReviewedIntentProgramV1(
-        operation_id="freecad_part_core.box",
-        semantic_operation=_semantic_operation(),
+        operation_id=f"freecad_part_core.{operation.value}",
+        semantic_operation=_semantic_operation(operation),
         intent_graph_sha256=graph.graph_sha256,
         intent_content_sha256=hashlib.sha256(graph.canonical_bytes).hexdigest(),
         intent_graph=graph,
     )
+
+
+def reviewed_box_program() -> ReviewedIntentProgramV1:
+    return reviewed_primitive_program(PartCoreOperation.BOX)
 
 
 def test_reviewed_intent_program_is_canonical_content_bound_and_registry_closed() -> None:
@@ -194,20 +259,39 @@ def test_reviewed_intent_program_rejects_digest_rebound_and_extra_authority() ->
     assert caught.value.code is ReviewedIntentExecutionErrorCode.LOWERING_FAILED
 
 
-def test_reviewed_box_lowers_through_the_reviewed_adapter() -> None:
-    program = reviewed_box_program()
+@pytest.mark.parametrize("operation", tuple(_PRIMITIVE_PARAMETERS))
+def test_reviewed_primitives_lower_through_the_reviewed_adapter(
+    operation: PartCoreOperation,
+) -> None:
+    program = reviewed_primitive_program(operation)
 
     lowered = lower_reviewed_intent(program)
 
     assert lowered.route.operation_id == program.operation_id
-    assert lowered.plan.operation is PartCoreOperation.BOX
+    assert lowered.plan.operation is operation
     assert lowered.plan.sources == ()
-    assert lowered.plan.parameters.value["shape"] == {
-        "size_x_mm": 10.0,
-        "size_y_mm": 8.0,
-        "size_z_mm": 6.0,
-    }
+    assert lowered.plan.parameters.value["shape"] == _PRIMITIVE_PARAMETERS[operation]
     assert lowered.result.plan_document.document_digest == lowered.plan.plan_sha256
 
 
-__all__ = ["reviewed_box_program"]
+def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
+    programs = tuple(reviewed_primitive_program(operation) for operation in _PRIMITIVE_PARAMETERS)
+
+    assert CURRENT_REVIEWED_INTENT_ROUTES == REVIEWED_PART_PRIMITIVE_ROUTES
+    assert len(REVIEWED_PART_PRIMITIVE_ROUTES) == len(programs) == 8
+    assert tuple(route_reviewed_intent(program) for program in programs) == (
+        REVIEWED_PART_PRIMITIVE_ROUTES
+    )
+    assert {route.operation.native_type_id for route in REVIEWED_PART_PRIMITIVE_ROUTES} == {
+        "Part::Box",
+        "Part::Cone",
+        "Part::Cylinder",
+        "Part::Ellipsoid",
+        "Part::Prism",
+        "Part::Sphere",
+        "Part::Torus",
+        "Part::Wedge",
+    }
+
+
+__all__ = ["reviewed_box_program", "reviewed_primitive_program"]
