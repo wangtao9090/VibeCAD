@@ -125,7 +125,7 @@ def _operation(
     )
 
 
-def test_default_registry_exposes_six_direct_and_eleven_private_operations():
+def test_default_registry_exposes_six_direct_and_twelve_private_operations():
     assert tuple(DEFAULT_OPERATION_REGISTRY) == (
         "create_box",
         "create_cylinder",
@@ -144,8 +144,9 @@ def test_default_registry_exposes_six_direct_and_eleven_private_operations():
         "place_component",
         "create_parametric_design",
         "modify_parametric_parameter",
+        "apply_reviewed_intent",
     )
-    assert len(DEFAULT_OPERATION_REGISTRY) == 17
+    assert len(DEFAULT_OPERATION_REGISTRY) == 18
     assert all(
         metadata.handler_name == operation
         for operation, metadata in DEFAULT_OPERATION_REGISTRY.operations.items()
@@ -257,6 +258,7 @@ def test_stage3_registry_removes_document_lifecycle_and_declares_execution_contr
         "place_component",
         "create_parametric_design",
         "modify_parametric_parameter",
+        "apply_reviewed_intent",
     )
 
     create_box = DEFAULT_OPERATION_REGISTRY.lookup("create_box")
@@ -328,6 +330,7 @@ def test_stage3_value_shapes_and_execution_profiles_are_closed():
         "entity_target",
         "angle_degrees",
         "parametric_design_ir",
+        "reviewed_intent",
     }
 
 
@@ -493,6 +496,11 @@ def test_default_registry_has_exact_handler_risk_and_evidence_metadata():
         ),
         "modify_parametric_parameter": (
             "modify_parametric_parameter",
+            RiskClass.MUTATING,
+            True,
+        ),
+        "apply_reviewed_intent": (
+            "apply_reviewed_intent",
             RiskClass.MUTATING,
             True,
         ),

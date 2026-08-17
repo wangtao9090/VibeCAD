@@ -19,6 +19,7 @@ from typing import Self
 from vibecad.execution.selectors import EntityKind, SelectorV1, SemanticRole
 from vibecad.parametric.contracts import ParametricDesignIR
 from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER, SCHEMA_VERSION
+from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 
 _SNAKE_CASE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 _OBJECT_ID = re.compile(r"^object_[0-9a-f]{32}$")
@@ -111,6 +112,7 @@ class ValueShape(StrEnum):
     ENTITY_TARGET = "entity_target"
     ANGLE_DEGREES = "angle_degrees"
     PARAMETRIC_DESIGN_IR = "parametric_design_ir"
+    REVIEWED_INTENT = "reviewed_intent"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -238,6 +240,12 @@ def _matches_value_shape(
     if shape is ValueShape.PARAMETRIC_DESIGN_IR:
         try:
             ParametricDesignIR.from_mapping(value)
+        except Exception:
+            return False
+        return True
+    if shape is ValueShape.REVIEWED_INTENT:
+        try:
+            ReviewedIntentProgramV1.from_mapping(value)
         except Exception:
             return False
         return True
@@ -1501,6 +1509,33 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                 max_result_bytes=65_536,
             ),
             direct_exposed=False,
+        ),
+        OperationMetadata(
+            operation="apply_reviewed_intent",
+            handler_name="apply_reviewed_intent",
+            risk_class=RiskClass.MUTATING,
+            evidence_required=True,
+            argument_fields=(
+                FieldMetadata(
+                    "intent",
+                    "intent",
+                    ValueShape.REVIEWED_INTENT,
+                ),
+            ),
+            resource_budget=ResourceBudget(
+                max_runtime_ms=30_000,
+                max_created_objects=1,
+                max_result_bytes=65_536,
+            ),
+            direct_exposed=False,
+            description="通过当前平台已验证的 Reviewed 语义执行一个受限参数化意图",
+            result_slots=(
+                ResultSlotMetadata(
+                    "object",
+                    "object_id",
+                    ValueShape.OBJECT_ID,
+                ),
+            ),
         ),
     )
 )

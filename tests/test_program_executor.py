@@ -17,6 +17,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 import vibecad.execution.executor as executor_module
+from test_reviewed_intent_program import reviewed_box_program
 from vibecad.execution.candidate import (
     ActiveCandidate,
     CadSnapshotPort,
@@ -29,6 +30,10 @@ from vibecad.execution.executor import (
     ExecutorError,
     ExecutorErrorCode,
     InProcessCadExecutor,
+)
+from vibecad.execution.freecad_reviewed_intent_execution import (
+    REVIEWED_PART_BOX_ROUTE,
+    ReviewedNativeExecutionResult,
 )
 from vibecad.execution.registry import (
     FieldMetadata,
@@ -46,6 +51,10 @@ from vibecad.execution.revisions import (
     RevisionStoreErrorCode,
 )
 from vibecad.execution.selectors import index_entity_identities
+from vibecad.parametric.freecad_part_core_rules import (
+    PartCoreConformanceReceipt,
+    PartCoreOperation,
+)
 from vibecad.validation import ComponentBomMetadata
 from vibecad.workflow.contracts import AcceptanceSpec, ModelCommand, ModelProgram, ValueSource
 from vibecad.workflow.errors import SCHEMA_VERSION
@@ -1851,6 +1860,158 @@ def test_execute_program_binds_fixed_handlers_once_and_preserves_order(
         "parameter": "length",
         "value": 12,
     }
+
+
+def test_execute_program_applies_one_reviewed_box_and_adopts_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed = reviewed_box_program()
+
+    def execute(session: _FakeSession, value: object) -> ReviewedNativeExecutionResult:
+        assert value == reviewed
+        obj = session.identity_object
+        obj.Length = 10.0
+        obj.Width = 8.0
+        obj.Height = 6.0
+        obj.Placement = _FakePlacement(0.0)
+        obj.Shape = _FakeShape(
+            volume=480.0,
+            area=376.0,
+            bbox=(10.0, 8.0, 6.0),
+            center=(5.0, 4.0, 3.0),
+        )
+        session.doc.Objects = (*session.doc.Objects, obj)
+        return ReviewedNativeExecutionResult(
+            route=REVIEWED_PART_BOX_ROUTE,
+            object=obj,
+            plan_sha256="a" * 64,
+            plan_content_sha256="b" * 64,
+            native_receipt=PartCoreConformanceReceipt(
+                plan_sha256="a" * 64,
+                operation=PartCoreOperation.BOX,
+                object_name=obj.Name,
+                source_shape_sha256s=(),
+                result_shape_sha256="c" * 64,
+            ),
+        )
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute)
+    session = _FakeSession()
+    program = ModelProgram(
+        task_id="task-reviewed-box",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "reviewed_box",
+                "apply_reviewed_intent",
+                args={"intent": reviewed.to_mapping()},
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-box", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].result.ok is True
+    result = outcomes[0].result.value
+    identity = session.read_object_identity(session.identity_object)
+    assert result["kind"] == "reviewed_intent_applied"
+    assert result["reviewed_operation_id"] == reviewed.operation_id
+    assert result["object_id"] == identity.object_id
+    assert result["feature_id"] == identity.feature_id
+    assert result["plan_sha256"] == "a" * 64
+    assert session.result_object is session.identity_object
+
+
+@pytest.mark.slow
+def test_real_freecad_reviewed_box_executes_checkpoints_reopens_and_rejects_duplicate(
+    tmp_path: Path,
+) -> None:
+    if os.environ.get("VIBECAD_RUN_INTEGRATION") != "1":
+        pytest.skip("set VIBECAD_RUN_INTEGRATION=1 to run the real FreeCAD gate")
+    from vibecad.runtime import paths as runtime_paths
+    from vibecad.runtime import status as runtime_status
+
+    runtime_python = runtime_paths.active_runtime_python()
+    if not runtime_python.is_file() or not runtime_paths.ready_sentinel().is_file():
+        pytest.fail("an existing ready managed FreeCAD runtime is required")
+    if not runtime_status.engine_compatible(runtime_python):
+        pytest.fail("the existing managed FreeCAD runtime does not match current engine pins")
+    source_root = Path(__file__).parents[1] / "src"
+    reviewed_mapping = reviewed_box_program().to_mapping()
+    code = (
+        f"import sys; sys.path.insert(0, {str(source_root)!r})\n"
+        + "import os\n"
+        + "from pathlib import Path\n"
+        + "from vibecad.execution.candidate import ActiveCandidate, SessionBinding\n"
+        + "from vibecad.execution.executor import InProcessCadExecutor, _entity_observations\n"
+        + "from vibecad.execution.revisions import LocalRevisionStore, ProjectHead\n"
+        + "from vibecad.workflow.contracts import "
+        + "AcceptanceSpec, ModelCommand, ModelProgram, ValueSource\n"
+        + f"root = Path({str(tmp_path)!r})\n"
+        + "native_root = root / 'freecad-native-cache'\n"
+        + "native_root.mkdir(mode=0o700)\n"
+        + "os.environ['FREECAD_USER_TEMP'] = str(native_root)\n"
+        + f"reviewed_mapping = {reviewed_mapping!r}\n"
+        + f"project_id = {PROJECT_ID!r}\n"
+        + f"base_revision = {BASE_REVISION!r}\n"
+        + f"candidate_revision = {CANDIDATE_REVISION!r}\n"
+        + "command = ModelCommand(id='reviewed_box', op='apply_reviewed_intent', "
+        + "target={}, args={'intent': reviewed_mapping}, depends_on=(), preserve=(), "
+        + "source=ValueSource.MODEL)\n"
+        + "program = ModelProgram(task_id='task-real-reviewed-box', "
+        + "base_revision=base_revision, operations=(command,), "
+        + "acceptance=AcceptanceSpec(id='accept-real-reviewed-box', criteria=()))\n"
+        + "store = object.__new__(LocalRevisionStore)\n"
+        + "executor = InProcessCadExecutor(store=store)\n"
+        + "session = executor.create_empty(revision_id=candidate_revision)\n"
+        + "loaded = None\n"
+        + "try:\n"
+        + "    head = ProjectHead(project_id=project_id, generation=0, "
+        + "revision_id=base_revision, manifest_sha256='a' * 64)\n"
+        + "    candidate = ActiveCandidate(project_id=project_id, base_head=head, "
+        + "binding=SessionBinding(project_id=project_id, revision_id=candidate_revision, "
+        + "session=session), model_path=root / 'model.FCStd', "
+        + "step_path=root / 'model.step')\n"
+        + "    validated = executor.validate_program(program)\n"
+        + "    outcomes = executor.execute_program(program=validated, candidate=candidate)\n"
+        + "    assert len(outcomes) == 1 and outcomes[0].result.ok, "
+        + "outcomes[0].result.to_mapping()\n"
+        + "    value = outcomes[0].result.value\n"
+        + "    assert value['kind'] == 'reviewed_intent_applied'\n"
+        + "    entities = _entity_observations(session)\n"
+        + "    assert len(entities) == 1 and entities[0].object_type == 'Part::Box'\n"
+        + "    parameters = {item.name: item.value for item in entities[0].parameters}\n"
+        + "    assert parameters == {'height': 6.0, 'length': 10.0, 'width': 8.0}\n"
+        + "    assert session.get_result_object().Name.startswith('VcPart_box_')\n"
+        + "    before_duplicate = tuple(session.doc.Objects)\n"
+        + "    duplicate = executor.execute_program(program=validated, candidate=candidate)\n"
+        + "    assert len(duplicate) == 1 and not duplicate[0].result.ok\n"
+        + "    assert tuple(session.doc.Objects) == before_duplicate\n"
+        + "    executor.checkpoint_fcstd(session, root / 'model.FCStd')\n"
+        + "    loaded = executor.load_fcstd(root / 'model.FCStd')\n"
+        + "    assert _entity_observations(loaded) == entities\n"
+        + "    assert loaded.get_result_object().Name == session.get_result_object().Name\n"
+        + "    print('REAL_REVIEWED_BOX_OK')\n"
+        + "finally:\n"
+        + "    if loaded is not None:\n"
+        + "        loaded.close_document()\n"
+        + "    session.close_document()\n"
+        + "assert tuple(native_root.iterdir()) == ()\n"
+    )
+    result = subprocess.run(
+        [str(runtime_python), "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "REAL_REVIEWED_BOX_OK" in result.stdout
 
 
 def test_execute_program_supplies_trusted_profile_version_and_object_counter(

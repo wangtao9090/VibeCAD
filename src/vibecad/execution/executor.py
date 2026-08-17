@@ -43,6 +43,12 @@ from vibecad.execution.candidate import (
     SealedCandidate,
 )
 from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
+from vibecad.execution.freecad_reviewed_intent_execution import (
+    ReviewedNativeExecutionResult,
+)
+from vibecad.execution.freecad_reviewed_intent_execution import (
+    execute_reviewed_intent_native as _execute_reviewed_intent_native,
+)
 from vibecad.execution.registry import ExecutionProfile, ValueShape, _matches_value_shape
 from vibecad.execution.results import NormalizedToolOutcome
 from vibecad.execution.revisions import (
@@ -118,6 +124,7 @@ from vibecad.workflow.contracts import ModelProgram, ValueSource
 from vibecad.workflow.errors import SCHEMA_VERSION
 from vibecad.workflow.lease import ProjectWriteLease
 from vibecad.workflow.program import ValidatedProgram, validate_model_program
+from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 from vibecad.workflow.state import TaskArtifactRef
 
 _MAX_ARTIFACT_BYTES = 536_870_912
@@ -2349,6 +2356,111 @@ def _managed_create_parametric_design(
     }
 
 
+def _managed_apply_reviewed_intent(
+    session: object,
+    context: _InvocationContext,
+    *,
+    intent: object,
+) -> dict[str, object]:
+    """Execute and adopt one statically routed Reviewed intent."""
+
+    if context.preserve:
+        raise _operation_failure()
+    try:
+        checked = ReviewedIntentProgramV1.from_mapping(intent)
+        attach = session.attach_object_identity  # type: ignore[attr-defined]
+        read_identity = session.read_object_identity  # type: ignore[attr-defined]
+        set_result = session.set_result_object  # type: ignore[attr-defined]
+        get_result = session.get_result_object  # type: ignore[attr-defined]
+        transaction = session._transaction  # type: ignore[attr-defined]
+        if not all(
+            callable(item) for item in (attach, read_identity, set_result, get_result, transaction)
+        ):
+            raise ValueError
+        before = _entity_observations(session)
+        before_by_id = _observation_map(before)
+        document_before = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+    except Exception:
+        raise _operation_failure() from None
+
+    try:
+        executed = _execute_reviewed_intent_native(session, checked)
+        if type(executed) is not ReviewedNativeExecutionResult:
+            raise ValueError
+        obj = executed.object
+        document_after = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+        added = tuple(
+            item
+            for item in document_after
+            if not any(item is existing for existing in document_before)
+        )
+        if (
+            len(document_after) != len(document_before) + 1
+            or len(added) != 1
+            or added[0] is not obj
+            or getattr(obj, "TypeId", None) != executed.route.operation.native_type_id
+        ):
+            raise ValueError
+        provenance = Provenance(
+            source=ProvenanceSource(context.source.value),
+            operation_id=context.operation_id,
+        )
+        identity = EntityIdentity(
+            object_id=f"object_{secrets.token_hex(16)}",
+            feature_id=f"feature_{secrets.token_hex(16)}",
+            object_type=executed.route.operation.native_type_id,
+            semantic_role=SemanticRole.PRIMITIVE,
+            provenance=provenance,
+        )
+        with transaction(
+            "VibeCAD adopt reviewed intent",
+            claim_new_objects=False,
+        ):
+            if attach(obj, identity) != identity or read_identity(obj) != identity:
+                raise ValueError
+            set_result(obj)
+            if get_result() is not obj:
+                raise ValueError
+            after = _entity_observations(session)
+            after_by_id = _observation_map(after)
+            if set(after_by_id) != {*before_by_id, identity.object_id}:
+                raise ValueError
+            comparisons = _require_non_target_preservation(
+                before_by_id,
+                {key: value for key, value in after_by_id.items() if key != identity.object_id},
+                target=None,
+            )
+            created = after_by_id[identity.object_id]
+            if (
+                created.feature_id != identity.feature_id
+                or created.object_type != identity.object_type
+                or created.semantic_role != SemanticRole.PRIMITIVE.value
+                or created.provenance != provenance.to_mapping()
+                or created.valid_shape is not True
+                or created.solid_count != 1
+                or created.volume_mm3 is None
+                or created.volume_mm3 <= 0
+            ):
+                raise ValueError
+    except Exception:
+        raise _operation_failure() from None
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "reviewed_intent_applied",
+        "operation": context.operation,
+        "reviewed_operation_id": executed.route.operation_id,
+        "semantic_operation": executed.route.semantic_operation,
+        "object_id": identity.object_id,
+        "feature_id": identity.feature_id,
+        "plan_sha256": executed.plan_sha256,
+        "plan_content_sha256": executed.plan_content_sha256,
+        "native_receipt_sha256": executed.native_receipt.receipt_sha256,
+        "after": created.to_mapping(),
+        "preservation": [item.to_mapping() for item in comparisons],
+    }
+
+
 def _same_parametric_entity_envelope(
     before: EntityObservation,
     after: EntityObservation,
@@ -4185,6 +4297,7 @@ class InProcessCadExecutor(CadExecutionPort):
                 _set_absolute_component_placement,
                 _compile_parametric_design,
                 _modify_parametric_parameter,
+                _execute_reviewed_intent_native,
             )
             if not all(callable(item) for item in fixed_leaves):
                 raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
@@ -4361,6 +4474,10 @@ class InProcessCadExecutor(CadExecutionPort):
                         project_id=project_id,
                         revision_id=revision_id,
                     ),
+                ),
+                "apply_reviewed_intent": _queued_handler(
+                    contexts.get("apply_reviewed_intent", deque()),
+                    partial(_managed_apply_reviewed_intent, session),
                 ),
             }
         except ExecutorError:
