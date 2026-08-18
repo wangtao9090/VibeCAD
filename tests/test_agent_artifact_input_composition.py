@@ -129,7 +129,9 @@ def test_private_composition_passes_exact_provider_and_preflight_identities(
     app.close()
 
 
-def test_default_application_composition_has_no_task_input_authority(tmp_path: Path) -> None:
+def test_default_application_composition_uses_host_reviewed_input_authority(
+    tmp_path: Path,
+) -> None:
     assert (
         agent_module._task_input_cad_port_factory()  # noqa: SLF001
         is agent_module._default_cad_port_factory  # noqa: SLF001
@@ -138,8 +140,8 @@ def test_default_application_composition_has_no_task_input_authority(tmp_path: P
     with app._cad_gate:  # noqa: SLF001
         port = app._cad_execution_port_under_gate()  # noqa: SLF001
 
-    assert port._task_input_snapshot_provider is None  # noqa: SLF001
-    assert port._task_input_preflight is None  # noqa: SLF001
+    assert port._task_input_snapshot_provider is app._reviewed_inputs  # noqa: SLF001
+    assert port._task_input_preflight is app._reviewed_inputs  # noqa: SLF001
     app.close()
 
 

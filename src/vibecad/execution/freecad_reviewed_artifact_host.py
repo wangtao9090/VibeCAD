@@ -8,11 +8,13 @@ Worker without ever accepting or exposing a filesystem path.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import hmac
 import json
 import os
+import re
 import stat
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
@@ -31,6 +33,7 @@ _FILE_MODE = 0o600
 _MANIFEST_MAX_BYTES = 512 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
 _FILE_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+_CLEANUP_NAME = re.compile(r"\.[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}\Z")
 
 
 class TaskInputSnapshotErrorCode(StrEnum):
@@ -279,24 +282,154 @@ def _validate_snapshot_directory(
         _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
 
 
+class _OwnedSnapshotCleanup(_OpaqueCapability):
+    """Descriptor-relative owner for one private run snapshot directory."""
+
+    __slots__ = ("_closed", "_expected_names", "_identity", "_name", "_parent_fd")
+
+    def __init__(self, *, parent_fd: int, name: str, expected_names: tuple[str, ...]) -> None:
+        if (
+            type(parent_fd) is not int
+            or parent_fd < 0
+            or type(name) is not str
+            or _CLEANUP_NAME.fullmatch(name) is None
+            or name in {".", ".."}
+            or type(expected_names) is not tuple
+            or not expected_names
+            or any(
+                type(item) is not str or not item or "/" in item or item in {".", ".."}
+                for item in expected_names
+            )
+            or len(set(expected_names)) != len(expected_names)
+        ):
+            _fail(TaskInputSnapshotErrorCode.INVALID_INPUT)
+        duplicate = -1
+        directory = -1
+        try:
+            duplicate = os.dup(parent_fd)
+            os.set_inheritable(duplicate, False)
+            _require_read_only(duplicate)
+            parent = os.fstat(duplicate)
+            _validate_directory_stat(parent)
+            directory = os.open(
+                name,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=duplicate,
+            )
+            current = os.fstat(directory)
+            if current.st_dev != parent.st_dev:
+                _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+            identity = _validate_directory_stat(current)
+            if set(os.listdir(directory)) != set(expected_names):
+                _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+        except TaskInputSnapshotError:
+            if duplicate >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(duplicate)
+            raise
+        except OSError:
+            if duplicate >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(duplicate)
+            _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
+        finally:
+            if directory >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(directory)
+        self._parent_fd = duplicate
+        self._name = name
+        self._expected_names = expected_names
+        self._identity = identity
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        directory = -1
+        failed = False
+        try:
+            directory = os.open(
+                self._name,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=self._parent_fd,
+            )
+            current = os.fstat(directory)
+            names = tuple(os.listdir(directory))
+            if _validate_directory_stat(current) != self._identity or set(names) != set(
+                self._expected_names
+            ):
+                _fail(TaskInputSnapshotErrorCode.CLEANUP_FAILED)
+            for name in names:
+                entry = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(entry.st_mode)
+                    or entry.st_dev != current.st_dev
+                    or entry.st_uid != os.geteuid()
+                    or entry.st_nlink != 1
+                    or stat.S_IMODE(entry.st_mode) != _FILE_MODE
+                ):
+                    _fail(TaskInputSnapshotErrorCode.CLEANUP_FAILED)
+                os.unlink(name, dir_fd=directory)
+            os.fsync(directory)
+            os.close(directory)
+            directory = -1
+            os.rmdir(self._name, dir_fd=self._parent_fd)
+            os.fsync(self._parent_fd)
+        except (OSError, TaskInputSnapshotError):
+            failed = True
+        finally:
+            if directory >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(directory)
+            try:
+                os.close(self._parent_fd)
+            except OSError:
+                failed = True
+            self._parent_fd = -1
+        if failed:
+            _fail(TaskInputSnapshotErrorCode.CLEANUP_FAILED)
+
+
 class TaskInputSnapshotLease(_OpaqueCapability):
     """Opaque owner of one validated, run-bound immutable directory FD."""
 
-    __slots__ = ("_closed", "_directory_fd", "_identity", "_snapshot")
+    __slots__ = ("_cleanup", "_closed", "_directory_fd", "_identity", "_snapshot")
 
     def __init__(
         self,
         *,
         snapshot: ReviewedArtifactCatalogSnapshot,
         directory_fd: int,
+        cleanup_parent_fd: int | None = None,
+        cleanup_name: str | None = None,
     ) -> None:
         if type(directory_fd) is not int or directory_fd < 0:
             _fail(TaskInputSnapshotErrorCode.INVALID_INPUT)
+        if (cleanup_parent_fd is None) != (cleanup_name is None):
+            _fail(TaskInputSnapshotErrorCode.INVALID_INPUT)
         self._closed = True
         self._directory_fd = -1
-        self._snapshot = _copy_snapshot(snapshot)
+        self._cleanup = None
         duplicate = -1
         try:
+            self._snapshot = _copy_snapshot(snapshot)
+            if cleanup_parent_fd is not None:
+                assert cleanup_name is not None
+                self._cleanup = _OwnedSnapshotCleanup(
+                    parent_fd=cleanup_parent_fd,
+                    name=cleanup_name,
+                    expected_names=(
+                        REVIEWED_ARTIFACT_MANIFEST_NAME,
+                        *(record.artifact_id for record in self._snapshot.records),
+                    ),
+                )
             duplicate = os.dup(directory_fd)
             os.set_inheritable(duplicate, False)
             identity = _validate_snapshot_directory(duplicate, self._snapshot)
@@ -306,12 +439,22 @@ class TaskInputSnapshotLease(_OpaqueCapability):
                     os.close(duplicate)
                 except OSError:
                     pass
+            if self._cleanup is not None:
+                try:
+                    self._cleanup.close()
+                except BaseException:
+                    pass
             raise
         except OSError:
             if duplicate >= 0:
                 try:
                     os.close(duplicate)
                 except OSError:
+                    pass
+            if self._cleanup is not None:
+                try:
+                    self._cleanup.close()
+                except BaseException:
                     pass
             _fail(TaskInputSnapshotErrorCode.INTEGRITY_FAILURE)
         self._directory_fd = duplicate
@@ -373,9 +516,19 @@ class TaskInputSnapshotLease(_OpaqueCapability):
         self._closed = True
         descriptor = self._directory_fd
         self._directory_fd = -1
+        cleanup = self._cleanup
+        self._cleanup = None
+        failed = False
         try:
             os.close(descriptor)
         except OSError:
+            failed = True
+        if cleanup is not None:
+            try:
+                cleanup.close()
+            except BaseException:
+                failed = True
+        if failed:
             _fail(TaskInputSnapshotErrorCode.CLEANUP_FAILED)
 
     def __enter__(self) -> TaskInputSnapshotLease:
