@@ -105,7 +105,9 @@ def test_reference_plan_and_live_binding_identifiers_are_strictly_bounded() -> N
             body_id="body_main",
             support_reference_id="reference_support",
             support_reference_sha256="5" * 64,
-            support_subname="Face1\nInjected",
+            target_body_entity_identity_sha256="6" * 64,
+            support_entity_identity_sha256="7" * 64,
+            selection_receipt=object(),
         )
 
     changed = dataclasses.replace(
@@ -157,7 +159,8 @@ from pathlib import Path
 import FreeCAD, Part, PartDesign
 from vibecad.parametric.freecad_partdesign_reference_rules import (
     PartDesignReferenceKind, ReferenceExecutionBindings, ReferenceRuleError,
-    apply_partdesign_reference_plan,
+    apply_partdesign_reference_plan, decode_partdesign_reference_plan,
+    locate_reviewed_reference_subelement,
 )
 payload_paths = {payload_mapping!r}
 content_digests = {content_mapping!r}
@@ -172,13 +175,6 @@ source = source_body.newObject('PartDesign::Feature', 'Source')
 source.Shape = Part.makeCylinder(3, 10)
 document.recompute()
 initial_tip = body.Tip
-subnames = {{
-    'datum_plane': 'Face6',
-    'datum_line': 'Edge10',
-    'datum_point': 'Vertex7',
-    'shape_binder': '',
-    'subshape_binder': 'Face1',
-}}
 supports = {{
     'datum_plane': base,
     'datum_line': base,
@@ -187,14 +183,29 @@ supports = {{
     'subshape_binder': source,
 }}
 receipts = {{}}
-for kind_value in subnames:
+selections = {{}}
+for kind_value in supports:
     payload = Path(payload_paths[kind_value]).read_bytes()
+    plan = decode_partdesign_reference_plan(payload)
     support = supports[kind_value]
+    selection = locate_reviewed_reference_subelement(
+        plan=plan,
+        reference_plan_content_sha256=content_digests[kind_value],
+        source_shape=support.Shape,
+        source_plan_sha256={"6" * 64!r},
+        source_plan_content_sha256=plan.support_reference_sha256,
+        source_native_receipt_sha256={"7" * 64!r},
+        target_body_entity_identity_sha256={"8" * 64!r},
+        support_entity_identity_sha256={"9" * 64!r},
+    )
+    selections[kind_value] = selection
     bindings = ReferenceExecutionBindings(
         document=document, body=body, support=support,
         body_id='body_main', support_reference_id='reference_support',
         support_reference_sha256={"5" * 64!r},
-        support_subname=subnames[kind_value])
+        target_body_entity_identity_sha256={"8" * 64!r},
+        support_entity_identity_sha256={"9" * 64!r},
+        selection_receipt=selection)
     receipt = apply_partdesign_reference_plan(
         payload, expected_content_sha256=content_digests[kind_value],
         expected_plan_sha256=plan_digests[kind_value], bindings=bindings)
@@ -230,9 +241,13 @@ for key, name in names.items():
     result = reopened.getObject(name)
     assert result.TypeId == expected_types[key] and result.isValid()
 assert reopened.getObject(names['datum_plane']).AttachmentSupport[0][0].Name == 'Base'
-assert tuple(reopened.getObject(names['datum_plane']).AttachmentSupport[0][1]) == ('Face6',)
+assert tuple(reopened.getObject(names['datum_plane']).AttachmentSupport[0][1]) == (
+    selections['datum_plane'].support_subname,
+)
 assert reopened.getObject(names['shape_binder']).Support[0][0].Name == 'Source'
-assert tuple(reopened.getObject(names['subshape_binder']).Support[0][1]) == ('Face1',)
+assert tuple(reopened.getObject(names['subshape_binder']).Support[0][1]) == (
+    selections['subshape_binder'].support_subname,
+)
 assert abs(float(reopened.getObject(names['shape_binder']).Shape.Volume)
            - float(reopened.getObject('Source').Shape.Volume)) < 1e-7
 FreeCAD.closeDocument(reopened.Name)
@@ -250,10 +265,24 @@ before_names = tuple(item.Name for item in bad.Objects)
 before_group = tuple(item.Name for item in bad_body.Group)
 before_tip = bad_body.Tip
 bad_payload = Path(payload_paths['datum_plane']).read_bytes()
+bad_plan = decode_partdesign_reference_plan(bad_payload)
+bad_selection = locate_reviewed_reference_subelement(
+    plan=bad_plan,
+    reference_plan_content_sha256=content_digests['datum_plane'],
+    source_shape=bad_base.Shape,
+    source_plan_sha256={"6" * 64!r},
+    source_plan_content_sha256=bad_plan.support_reference_sha256,
+    source_native_receipt_sha256={"7" * 64!r},
+    target_body_entity_identity_sha256={"8" * 64!r},
+    support_entity_identity_sha256={"9" * 64!r},
+)
 bad_bindings = ReferenceExecutionBindings(
     document=bad, body=bad_body, support=bad_source,
     body_id='body_main', support_reference_id='reference_support',
-    support_reference_sha256={"5" * 64!r}, support_subname='Face1')
+    support_reference_sha256={"5" * 64!r},
+    target_body_entity_identity_sha256={"8" * 64!r},
+    support_entity_identity_sha256={"9" * 64!r},
+    selection_receipt=bad_selection)
 try:
     apply_partdesign_reference_plan(
         bad_payload, expected_content_sha256=content_digests['datum_plane'],

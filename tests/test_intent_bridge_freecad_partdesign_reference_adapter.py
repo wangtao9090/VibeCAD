@@ -7,6 +7,10 @@ import hashlib
 
 import pytest
 
+from vibecad.execution.freecad_partdesign_reference_reviewed_execution import (
+    PARTDESIGN_REFERENCE_COMPAT_MANIFEST,
+    partdesign_reference_reviewed_adapter_factory,
+)
 from vibecad.intent_bridge.contracts import (
     BackendLoweringRequest,
     BridgeBudget,
@@ -45,6 +49,7 @@ from vibecad.intent_bridge.parametric_feature_graph_codec import (
     ParametricFeatureGraphV2Codec,
 )
 from vibecad.intent_bridge.ports import IntentBackendAdapter, TrustedCodecRegistry
+from vibecad.intent_bridge.reviewed_family_engine import ExactReviewedFamilyAdapter
 from vibecad.intent_bridge.trusted_proof_policy import (
     RuleEndpointSignature,
     TrustedRuleEvaluation,
@@ -382,6 +387,75 @@ def _lower(
         codecs=TrustedCodecRegistry((ParametricFeatureGraphV2Codec(),)),
         proof_policy=policy,
     )
+
+
+def _exact_request(
+    graph: ParametricFeatureGraphV2,
+    kind: PartDesignReferenceKind,
+) -> tuple[BackendLoweringRequest, _Reader, TrustedRulePolicy]:
+    intent_document, intent_payload = _intent_document(graph)
+    capability_document, capability_payload = (
+        PARTDESIGN_REFERENCE_COMPAT_MANIFEST.capability_document()
+    )
+    policy = TrustedRulePolicy(evaluators=(_ReferenceEvaluator(kind),))
+    proof = _proof(policy, intent_document, kind)
+    request = BackendLoweringRequest(
+        adapter=PARTDESIGN_REFERENCE_COMPAT_MANIFEST.adapter,
+        terms=tuple(
+            (
+                *REFERENCE_REQUEST_TERMS,
+                RULE,
+                PREDICATE,
+                ROLE_PREMISE,
+                ROLE_CONCLUSION,
+                PFG_SELECTOR_FEATURE_NODE,
+            )
+        ),
+        documents=(intent_document, capability_document),
+        intent_artifact_ids=(intent_document.artifact_id,),
+        capability_artifact_ids=(capability_document.artifact_id,),
+        proof_bundle=proof,
+        budget=BridgeBudget(
+            max_input_bytes=len(intent_payload) + len(capability_payload),
+            max_output_bytes=MAX_REFERENCE_PLAN_BYTES,
+            max_subject_lookups=1,
+            max_rule_applications=1,
+        ),
+    )
+    return (
+        request,
+        _Reader(
+            {
+                intent_document.artifact_id: intent_payload,
+                capability_document.artifact_id: capability_payload,
+            }
+        ),
+        policy,
+    )
+
+
+@pytest.mark.parametrize("kind", tuple(PartDesignReferenceKind))
+def test_exact_reviewed_family_adapter_lowers_all_five_without_native_locators(
+    kind: PartDesignReferenceKind,
+) -> None:
+    request, reader, policy = _exact_request(_graph(kind), kind)
+    sink = _MemoryPlanSink()
+    adapter = partdesign_reference_reviewed_adapter_factory(sink)
+
+    result, receipt = adapter.lower_with_receipt(
+        request,
+        artifacts=reader,
+        codecs=TrustedCodecRegistry((ParametricFeatureGraphV2Codec(),)),
+        proof_policy=policy,
+    )
+    plan, payload = adapter.read_plan(receipt)
+
+    assert type(adapter) is ExactReviewedFamilyAdapter
+    assert plan.kind is kind
+    assert receipt.operation.operation_id == kind.value
+    assert result.plan_document.document_digest == plan.plan_sha256
+    assert payload == plan.canonical_bytes
+    assert all(token not in payload for token in (b"Face", b"Edge", b"Vertex"))
 
 
 @pytest.mark.parametrize("kind", tuple(PartDesignReferenceKind))

@@ -21,6 +21,25 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
 
+from vibecad.parametric.freecad_partdesign_dressup_transform_rules import (
+    Axis,
+    AxisAlignedEdgeRole,
+    AxisAlignedFaceRole,
+    Side,
+)
+from vibecad.parametric.freecad_partdesign_dressup_transform_rules import (
+    _bounds as _axis_aligned_bounds,  # noqa: PLC2701
+)
+from vibecad.parametric.freecad_partdesign_dressup_transform_rules import (
+    _coordinates as _axis_aligned_coordinates,  # noqa: PLC2701
+)
+from vibecad.parametric.freecad_partdesign_dressup_transform_rules import (
+    _resolve_edge as _resolve_axis_aligned_edge,  # noqa: PLC2701
+)
+from vibecad.parametric.freecad_partdesign_dressup_transform_rules import (
+    _resolve_face as _resolve_axis_aligned_face,  # noqa: PLC2701
+)
+
 REFERENCE_PLAN_SCHEMA_VERSION: Final = 1
 REFERENCE_PLAN_MEDIA_TYPE: Final = "application/vnd.vibecad.freecad-partdesign-reference-plan+json"
 MAX_REFERENCE_PLAN_BYTES: Final = 16 * 1024
@@ -34,6 +53,10 @@ _VERTEX = re.compile(r"Vertex([1-9][0-9]*)\Z")
 _PLAN_DIGEST_DOMAIN = b"vibecad.freecad-partdesign-reference-plan.v1\0"
 _RULE_CONTRACT_DOMAIN = b"vibecad.freecad-partdesign-reference-rule.v1\0"
 _RECEIPT_DIGEST_DOMAIN = b"vibecad.freecad-partdesign-reference-conformance-receipt.v1\0"
+_SELECTION_RECEIPT_DIGEST_DOMAIN = b"vibecad.freecad-partdesign-reference-selection-receipt.v1\0"
+_GEOMETRIC_SIGNATURE_DIGEST_DOMAIN = (
+    b"vibecad.freecad-partdesign-reference-geometric-signature.v1\0"
+)
 
 REFERENCE_RULE_ID: Final = "freecad.partdesign.reference-family.v1"
 _NATIVE_CONTRACT = (
@@ -53,6 +76,20 @@ REFERENCE_RULE_CONTRACT_SHA256: Final = hashlib.sha256(
     _RULE_CONTRACT_DOMAIN + _NATIVE_CONTRACT.encode("ascii")
 ).hexdigest()
 
+REFERENCE_REVIEWED_SELECTION_RULE_ID: Final = (
+    "freecad.partdesign.reference-family.reviewed-selection.v2"
+)
+_REVIEWED_SELECTION_NATIVE_CONTRACT = (
+    _NATIVE_CONTRACT
+    + ";same-run-authenticated-target-body=true"
+    + ";content-bound-selection-receipt=true"
+    + ";unique-semantic-role-resolution=true"
+    + ";durable-native-subelement-names=false"
+)
+REFERENCE_REVIEWED_SELECTION_RULE_CONTRACT_SHA256: Final = hashlib.sha256(
+    _RULE_CONTRACT_DOMAIN + _REVIEWED_SELECTION_NATIVE_CONTRACT.encode("ascii")
+).hexdigest()
+
 
 class PartDesignReferenceKind(StrEnum):
     DATUM_PLANE = "datum_plane"
@@ -60,6 +97,22 @@ class PartDesignReferenceKind(StrEnum):
     DATUM_POINT = "datum_point"
     SHAPE_BINDER = "shape_binder"
     SUBSHAPE_BINDER = "subshape_binder"
+
+
+class ReviewedSubelementKind(StrEnum):
+    FACE = "face"
+    EDGE = "edge"
+    VERTEX = "vertex"
+    WHOLE_OBJECT = "whole_object"
+
+
+class ReviewedReferenceSemanticRole(StrEnum):
+    AXIS_ALIGNED_FACE_Z_POSITIVE = "axis_aligned_face.z.positive"
+    AXIS_ALIGNED_EDGE_X_Y_NEGATIVE_Z_POSITIVE = "axis_aligned_edge.x.y_negative.z_positive"
+    AXIS_ALIGNED_VERTEX_X_POSITIVE_Y_POSITIVE_Z_POSITIVE = (
+        "axis_aligned_vertex.x_positive.y_positive.z_positive"
+    )
+    WHOLE_OBJECT = "whole_object"
 
 
 class ReferenceRuleErrorCode(StrEnum):
@@ -349,6 +402,97 @@ def decode_partdesign_reference_plan(
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ReviewedSubelementSelectionReceipt:
+    """Engine-owned proof of one unique live semantic subelement selection."""
+
+    reference_plan_sha256: str
+    reference_plan_content_sha256: str
+    source_plan_sha256: str
+    source_plan_content_sha256: str
+    source_native_receipt_sha256: str
+    target_body_entity_identity_sha256: str
+    support_entity_identity_sha256: str
+    source_shape_sha256: str
+    subelement_kind: ReviewedSubelementKind
+    semantic_role: ReviewedReferenceSemanticRole
+    geometric_signature_sha256: str
+    support_subname: str = field(repr=False)
+    receipt_id: str = field(init=False)
+    receipt_sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "reference_plan_sha256",
+            "reference_plan_content_sha256",
+            "source_plan_sha256",
+            "source_plan_content_sha256",
+            "source_native_receipt_sha256",
+            "target_body_entity_identity_sha256",
+            "support_entity_identity_sha256",
+            "source_shape_sha256",
+            "geometric_signature_sha256",
+        ):
+            object.__setattr__(self, name, _digest(getattr(self, name), f"/selection/{name}"))
+        if type(self.subelement_kind) is not ReviewedSubelementKind:
+            _fail(ReferenceRuleErrorCode.INVALID_INPUT, "/selection/subelement_kind")
+        if type(self.semantic_role) is not ReviewedReferenceSemanticRole:
+            _fail(ReferenceRuleErrorCode.INVALID_INPUT, "/selection/semantic_role")
+        if (
+            type(self.support_subname) is not str
+            or len(self.support_subname) > 32
+            or not self.support_subname.isascii()
+            or not self.support_subname.isprintable()
+        ):
+            _fail(ReferenceRuleErrorCode.INVALID_INPUT, "/selection/support_subname")
+        expected_prefix = {
+            ReviewedSubelementKind.FACE: "Face",
+            ReviewedSubelementKind.EDGE: "Edge",
+            ReviewedSubelementKind.VERTEX: "Vertex",
+            ReviewedSubelementKind.WHOLE_OBJECT: "",
+        }[self.subelement_kind]
+        if (
+            self.subelement_kind is ReviewedSubelementKind.WHOLE_OBJECT
+            and self.support_subname != ""
+        ) or (
+            self.subelement_kind is not ReviewedSubelementKind.WHOLE_OBJECT
+            and not self.support_subname.startswith(expected_prefix)
+        ):
+            _fail(ReferenceRuleErrorCode.INVALID_INPUT, "/selection/support_subname")
+        body = {
+            "authority": "none",
+            "reference_plan_sha256": self.reference_plan_sha256,
+            "reference_plan_content_sha256": self.reference_plan_content_sha256,
+            "source_execution": {
+                "plan_sha256": self.source_plan_sha256,
+                "plan_content_sha256": self.source_plan_content_sha256,
+                "native_receipt_sha256": self.source_native_receipt_sha256,
+            },
+            "entity_identities": {
+                "target_body_sha256": self.target_body_entity_identity_sha256,
+                "support_sha256": self.support_entity_identity_sha256,
+            },
+            "source_shape_sha256": self.source_shape_sha256,
+            "subelement_kind": self.subelement_kind.value,
+            "semantic_role": self.semantic_role.value,
+            "geometric_signature_sha256": self.geometric_signature_sha256,
+            "transient_support_subname": self.support_subname,
+        }
+        digest = hashlib.sha256(
+            _SELECTION_RECEIPT_DIGEST_DOMAIN + _canonical_json(body)
+        ).hexdigest()
+        object.__setattr__(self, "receipt_sha256", digest)
+        object.__setattr__(self, "receipt_id", f"reference_selection_{digest[:32]}")
+
+    @property
+    def executable(self) -> bool:
+        return False
+
+    @property
+    def grants_execution_authority(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ReferenceExecutionBindings:
     """Host-authenticated semantic support resolved to one live FreeCAD object."""
 
@@ -358,7 +502,9 @@ class ReferenceExecutionBindings:
     body_id: str
     support_reference_id: str
     support_reference_sha256: str
-    support_subname: str
+    target_body_entity_identity_sha256: str
+    support_entity_identity_sha256: str
+    selection_receipt: ReviewedSubelementSelectionReceipt
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "body_id", _identifier(self.body_id, "/body_id"))
@@ -372,15 +518,15 @@ class ReferenceExecutionBindings:
             "support_reference_sha256",
             _digest(self.support_reference_sha256, "/support_reference_sha256"),
         )
+        for name in (
+            "target_body_entity_identity_sha256",
+            "support_entity_identity_sha256",
+        ):
+            object.__setattr__(self, name, _digest(getattr(self, name), f"/{name}"))
         if self.document is None or self.body is None or self.support is None:
             _fail(ReferenceRuleErrorCode.INVALID_INPUT, "/bindings")
-        if (
-            type(self.support_subname) is not str
-            or len(self.support_subname) > 32
-            or not self.support_subname.isascii()
-            or not self.support_subname.isprintable()
-        ):
-            _fail(ReferenceRuleErrorCode.INVALID_INPUT, "/support_subname")
+        if type(self.selection_receipt) is not ReviewedSubelementSelectionReceipt:
+            _fail(ReferenceRuleErrorCode.INVALID_INPUT, "/selection_receipt")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -389,6 +535,7 @@ class ReferenceConformanceReceipt:
     object_name: str
     kind: PartDesignReferenceKind
     support_subname: str
+    selection_receipt_sha256: str
     face_count: int
     edge_count: int
     vertex_count: int
@@ -400,6 +547,11 @@ class ReferenceConformanceReceipt:
         object.__setattr__(self, "object_name", _identifier(self.object_name, "/object_name"))
         if type(self.kind) is not PartDesignReferenceKind:
             _fail(ReferenceRuleErrorCode.CONFORMANCE_FAILED, "/receipt/kind")
+        object.__setattr__(
+            self,
+            "selection_receipt_sha256",
+            _digest(self.selection_receipt_sha256, "/receipt/selection_receipt_sha256"),
+        )
         if (
             type(self.support_subname) is not str
             or len(self.support_subname) > 32
@@ -417,6 +569,7 @@ class ReferenceConformanceReceipt:
             "object_name": self.object_name,
             "kind": self.kind.value,
             "support_subname": self.support_subname,
+            "selection_receipt_sha256": self.selection_receipt_sha256,
             "topology": {
                 "faces": self.face_count,
                 "edges": self.edge_count,
@@ -468,6 +621,190 @@ _NATIVE_PROFILE: Final = {
         (_FACE, _EDGE, _VERTEX),
     ),
 }
+
+_REFERENCE_SELECTION_PROFILE: Final = {
+    PartDesignReferenceKind.DATUM_PLANE: (
+        ReviewedSubelementKind.FACE,
+        ReviewedReferenceSemanticRole.AXIS_ALIGNED_FACE_Z_POSITIVE,
+    ),
+    PartDesignReferenceKind.DATUM_LINE: (
+        ReviewedSubelementKind.EDGE,
+        ReviewedReferenceSemanticRole.AXIS_ALIGNED_EDGE_X_Y_NEGATIVE_Z_POSITIVE,
+    ),
+    PartDesignReferenceKind.DATUM_POINT: (
+        ReviewedSubelementKind.VERTEX,
+        ReviewedReferenceSemanticRole.AXIS_ALIGNED_VERTEX_X_POSITIVE_Y_POSITIVE_Z_POSITIVE,
+    ),
+    PartDesignReferenceKind.SHAPE_BINDER: (
+        ReviewedSubelementKind.WHOLE_OBJECT,
+        ReviewedReferenceSemanticRole.WHOLE_OBJECT,
+    ),
+    PartDesignReferenceKind.SUBSHAPE_BINDER: (
+        ReviewedSubelementKind.FACE,
+        ReviewedReferenceSemanticRole.AXIS_ALIGNED_FACE_Z_POSITIVE,
+    ),
+}
+
+
+def _shape_sha256(shape: object, path: str) -> str:
+    try:
+        raw = shape.exportBrepToString().encode("utf-8")
+    except (Exception, SystemExit):
+        _fail(ReferenceRuleErrorCode.PRECONDITION_FAILED, path)
+    if not raw:
+        _fail(ReferenceRuleErrorCode.PRECONDITION_FAILED, path)
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _resolve_positive_vertex(shape: object) -> str:
+    try:
+        _minimum, maximum, tolerance = _axis_aligned_bounds(shape)
+        vertices = tuple(shape.Vertexes)
+        candidates = tuple(
+            index
+            for index, vertex in enumerate(vertices, start=1)
+            if all(
+                abs(actual - expected) <= tolerance
+                for actual, expected in zip(
+                    _axis_aligned_coordinates(vertex.Point), maximum, strict=True
+                )
+            )
+        )
+    except (Exception, SystemExit):
+        _fail(ReferenceRuleErrorCode.PRECONDITION_FAILED, "/selection/semantic_role")
+    if len(candidates) != 1:
+        _fail(ReferenceRuleErrorCode.PRECONDITION_FAILED, "/selection/ambiguous")
+    return f"Vertex{candidates[0]}"
+
+
+def _resolve_semantic_selection(
+    shape: object,
+    kind: ReviewedSubelementKind,
+    role: ReviewedReferenceSemanticRole,
+) -> tuple[str, object]:
+    try:
+        if (
+            kind is ReviewedSubelementKind.FACE
+            and role is ReviewedReferenceSemanticRole.AXIS_ALIGNED_FACE_Z_POSITIVE
+        ):
+            subname = _resolve_axis_aligned_face(
+                shape,
+                AxisAlignedFaceRole(axis=Axis.Z, side=Side.MAXIMUM),
+            )
+            selected = shape.Faces[int(subname.removeprefix("Face")) - 1]
+        elif (
+            kind is ReviewedSubelementKind.EDGE
+            and role is ReviewedReferenceSemanticRole.AXIS_ALIGNED_EDGE_X_Y_NEGATIVE_Z_POSITIVE
+        ):
+            subname = _resolve_axis_aligned_edge(
+                shape,
+                AxisAlignedEdgeRole(
+                    axis=Axis.X,
+                    first_side=Side.MINIMUM,
+                    second_side=Side.MAXIMUM,
+                ),
+            )
+            selected = shape.Edges[int(subname.removeprefix("Edge")) - 1]
+        elif (
+            kind is ReviewedSubelementKind.VERTEX
+            and role
+            is ReviewedReferenceSemanticRole.AXIS_ALIGNED_VERTEX_X_POSITIVE_Y_POSITIVE_Z_POSITIVE
+        ):
+            subname = _resolve_positive_vertex(shape)
+            selected = shape.Vertexes[int(subname.removeprefix("Vertex")) - 1]
+        elif (
+            kind is ReviewedSubelementKind.WHOLE_OBJECT
+            and role is ReviewedReferenceSemanticRole.WHOLE_OBJECT
+        ):
+            subname = ""
+            selected = shape
+        else:
+            _fail(ReferenceRuleErrorCode.INTEGRITY_FAILURE, "/selection/contract")
+    except ReferenceRuleError:
+        raise
+    except (Exception, SystemExit):
+        _fail(ReferenceRuleErrorCode.PRECONDITION_FAILED, "/selection/semantic_role")
+    return subname, selected
+
+
+def _geometric_signature_sha256(
+    *,
+    source_shape_sha256: str,
+    kind: ReviewedSubelementKind,
+    role: ReviewedReferenceSemanticRole,
+    selected: object,
+) -> str:
+    selected_sha256 = _shape_sha256(selected, "/selection/geometric_signature")
+    payload = _canonical_json(
+        {
+            "schema_version": 1,
+            "source_shape_sha256": source_shape_sha256,
+            "subelement_kind": kind.value,
+            "semantic_role": role.value,
+            "selected_shape_sha256": selected_sha256,
+        }
+    )
+    return hashlib.sha256(_GEOMETRIC_SIGNATURE_DIGEST_DOMAIN + payload).hexdigest()
+
+
+def locate_reviewed_reference_subelement(
+    *,
+    plan: PartDesignReferencePlan,
+    reference_plan_content_sha256: str,
+    source_shape: object,
+    source_plan_sha256: str,
+    source_plan_content_sha256: str,
+    source_native_receipt_sha256: str,
+    target_body_entity_identity_sha256: str,
+    support_entity_identity_sha256: str,
+) -> ReviewedSubelementSelectionReceipt:
+    """Resolve exactly one live semantic role without accepting native names."""
+
+    if type(plan) is not PartDesignReferencePlan or source_shape is None:
+        _fail(ReferenceRuleErrorCode.INVALID_INPUT, "/selection")
+    reference_plan_content_sha256 = _digest(
+        reference_plan_content_sha256, "/selection/reference_plan_content_sha256"
+    )
+    source_plan_sha256 = _digest(source_plan_sha256, "/selection/source_plan_sha256")
+    source_plan_content_sha256 = _digest(
+        source_plan_content_sha256, "/selection/source_plan_content_sha256"
+    )
+    source_native_receipt_sha256 = _digest(
+        source_native_receipt_sha256, "/selection/source_native_receipt_sha256"
+    )
+    target_body_entity_identity_sha256 = _digest(
+        target_body_entity_identity_sha256,
+        "/selection/target_body_entity_identity_sha256",
+    )
+    support_entity_identity_sha256 = _digest(
+        support_entity_identity_sha256,
+        "/selection/support_entity_identity_sha256",
+    )
+    if not hmac.compare_digest(plan.support_reference_sha256, source_plan_content_sha256):
+        _fail(ReferenceRuleErrorCode.INTEGRITY_FAILURE, "/selection/source_execution")
+    source_shape_sha256 = _shape_sha256(source_shape, "/selection/source_shape")
+    kind, role = _REFERENCE_SELECTION_PROFILE[plan.kind]
+    subname, selected = _resolve_semantic_selection(source_shape, kind, role)
+    signature = _geometric_signature_sha256(
+        source_shape_sha256=source_shape_sha256,
+        kind=kind,
+        role=role,
+        selected=selected,
+    )
+    return ReviewedSubelementSelectionReceipt(
+        reference_plan_sha256=plan.plan_sha256,
+        reference_plan_content_sha256=reference_plan_content_sha256,
+        source_plan_sha256=source_plan_sha256,
+        source_plan_content_sha256=source_plan_content_sha256,
+        source_native_receipt_sha256=source_native_receipt_sha256,
+        target_body_entity_identity_sha256=target_body_entity_identity_sha256,
+        support_entity_identity_sha256=support_entity_identity_sha256,
+        source_shape_sha256=source_shape_sha256,
+        subelement_kind=kind,
+        semantic_role=role,
+        geometric_signature_sha256=signature,
+        support_subname=subname,
+    )
 
 
 def _shape_topology(shape: object, path: str) -> tuple[int, int, int]:
@@ -537,12 +874,30 @@ def _identity_sequence_plus(
 
 
 def _validate_bindings(
-    plan: PartDesignReferencePlan, bindings: ReferenceExecutionBindings
+    plan: PartDesignReferencePlan,
+    bindings: ReferenceExecutionBindings,
+    reference_plan_content_sha256: str,
 ) -> tuple[object, tuple[int, int, int]]:
+    receipt = bindings.selection_receipt
     if (
         bindings.body_id != plan.body_id
         or bindings.support_reference_id != plan.support_reference_id
         or not hmac.compare_digest(bindings.support_reference_sha256, plan.support_reference_sha256)
+        or not hmac.compare_digest(receipt.reference_plan_sha256, plan.plan_sha256)
+        or not hmac.compare_digest(
+            receipt.reference_plan_content_sha256, reference_plan_content_sha256
+        )
+        or not hmac.compare_digest(
+            receipt.source_plan_content_sha256, plan.support_reference_sha256
+        )
+        or not hmac.compare_digest(
+            receipt.target_body_entity_identity_sha256,
+            bindings.target_body_entity_identity_sha256,
+        )
+        or not hmac.compare_digest(
+            receipt.support_entity_identity_sha256,
+            bindings.support_entity_identity_sha256,
+        )
     ):
         _fail(ReferenceRuleErrorCode.INTEGRITY_FAILURE, "/bindings/identity")
     document, body, support = bindings.document, bindings.body, bindings.support
@@ -563,7 +918,28 @@ def _validate_bindings(
     except Exception:
         _fail(ReferenceRuleErrorCode.PRECONDITION_FAILED, "/bindings")
     topology = _shape_topology(support_shape, "/bindings/support")
-    _support_index(plan.kind, bindings.support_subname, support_shape)
+    expected_kind, expected_role = _REFERENCE_SELECTION_PROFILE[plan.kind]
+    support_subname, selected = _resolve_semantic_selection(
+        support_shape,
+        expected_kind,
+        expected_role,
+    )
+    source_shape_sha256 = _shape_sha256(support_shape, "/bindings/support")
+    signature = _geometric_signature_sha256(
+        source_shape_sha256=source_shape_sha256,
+        kind=expected_kind,
+        role=expected_role,
+        selected=selected,
+    )
+    if (
+        receipt.subelement_kind is not expected_kind
+        or receipt.semantic_role is not expected_role
+        or receipt.support_subname != support_subname
+        or not hmac.compare_digest(receipt.source_shape_sha256, source_shape_sha256)
+        or not hmac.compare_digest(receipt.geometric_signature_sha256, signature)
+    ):
+        _fail(ReferenceRuleErrorCode.INTEGRITY_FAILURE, "/bindings/selection_receipt")
+    _support_index(plan.kind, support_subname, support_shape)
     return support_shape, topology
 
 
@@ -665,8 +1041,14 @@ def apply_partdesign_reference_plan(
         expected_content_sha256=expected_content_sha256,
         expected_plan_sha256=expected_plan_sha256,
     )
-    support_shape, _support_topology = _validate_bindings(plan, bindings)
+    support_shape, _support_topology = _validate_bindings(
+        plan,
+        bindings,
+        expected_content_sha256,
+    )
     document, body, support = bindings.document, bindings.body, bindings.support
+    selection_receipt = bindings.selection_receipt
+    support_subname = selection_receipt.support_subname
     object_name = f"Reference_{plan.plan_sha256[:16]}"
     try:
         if document.getObject(object_name) is not None:
@@ -686,7 +1068,7 @@ def apply_partdesign_reference_plan(
         document.openTransaction("VibeCAD trusted PartDesign reference")
         transaction_open = True
         result = body.newObject(type_id, object_name)
-        setattr(result, link_property, [(support, [bindings.support_subname])])
+        setattr(result, link_property, [(support, [support_subname])])
         if map_mode is not None:
             result.MapMode = map_mode
         elif plan.kind is PartDesignReferenceKind.SHAPE_BINDER:
@@ -704,7 +1086,7 @@ def apply_partdesign_reference_plan(
             body=body,
             support=support,
             support_shape=support_shape,
-            support_subname=bindings.support_subname,
+            support_subname=support_subname,
             preserved_tip=before_tip,
         )
         if not _identity_sequence_plus(before_objects, tuple(document.Objects), result) or not (
@@ -758,7 +1140,8 @@ def apply_partdesign_reference_plan(
         plan_sha256=plan.plan_sha256,
         object_name=object_name,
         kind=plan.kind,
-        support_subname=bindings.support_subname,
+        support_subname=support_subname,
+        selection_receipt_sha256=selection_receipt.receipt_sha256,
         face_count=topology[0],
         edge_count=topology[1],
         vertex_count=topology[2],
@@ -770,14 +1153,20 @@ __all__ = [
     "REFERENCE_FREECAD_ENGINE_BUILD_ID",
     "REFERENCE_PLAN_MEDIA_TYPE",
     "REFERENCE_PLAN_SCHEMA_VERSION",
+    "REFERENCE_REVIEWED_SELECTION_RULE_CONTRACT_SHA256",
+    "REFERENCE_REVIEWED_SELECTION_RULE_ID",
     "REFERENCE_RULE_CONTRACT_SHA256",
     "REFERENCE_RULE_ID",
     "PartDesignReferenceKind",
     "PartDesignReferencePlan",
     "ReferenceConformanceReceipt",
     "ReferenceExecutionBindings",
+    "ReviewedReferenceSemanticRole",
+    "ReviewedSubelementKind",
+    "ReviewedSubelementSelectionReceipt",
     "ReferenceRuleError",
     "ReferenceRuleErrorCode",
     "apply_partdesign_reference_plan",
     "decode_partdesign_reference_plan",
+    "locate_reviewed_reference_subelement",
 ]

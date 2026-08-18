@@ -219,6 +219,7 @@ from vibecad.parametric.freecad_partdesign_reference_rules import (
     ReferenceExecutionBindings,
     ReferenceRuleError,
     apply_partdesign_reference_plan,
+    locate_reviewed_reference_subelement,
 )
 from vibecad.parametric.freecad_partdesign_sketch_rules import (
     GROOVE_PLAN_MEDIA_TYPE,
@@ -1973,15 +1974,6 @@ def _reference_plan(
     )
 
 
-_REFERENCE_SUBNAMES: Final = {
-    PartDesignReferenceKind.DATUM_PLANE: "Face6",
-    PartDesignReferenceKind.DATUM_LINE: "Edge10",
-    PartDesignReferenceKind.DATUM_POINT: "Vertex7",
-    PartDesignReferenceKind.SHAPE_BINDER: "",
-    PartDesignReferenceKind.SUBSHAPE_BINDER: "Face1",
-}
-
-
 def _reference_fixture(
     part: object,
     document: object,
@@ -2007,6 +1999,20 @@ def _reference_fixture(
         }
         else source
     )
+    target_identity_sha256 = hashlib.sha256(f"target-body:{suffix}".encode()).hexdigest()
+    support_identity_sha256 = hashlib.sha256(f"support-object:{suffix}".encode()).hexdigest()
+    selection = locate_reviewed_reference_subelement(
+        plan=plan,
+        reference_plan_content_sha256=_content_sha256(plan.canonical_bytes),
+        source_shape=support.Shape,
+        source_plan_sha256=hashlib.sha256(f"source-plan:{suffix}".encode()).hexdigest(),
+        source_plan_content_sha256=plan.support_reference_sha256,
+        source_native_receipt_sha256=hashlib.sha256(
+            f"source-receipt:{suffix}".encode()
+        ).hexdigest(),
+        target_body_entity_identity_sha256=target_identity_sha256,
+        support_entity_identity_sha256=support_identity_sha256,
+    )
     bindings = ReferenceExecutionBindings(
         document=document,
         body=body if body_override is None else body_override,
@@ -2014,7 +2020,9 @@ def _reference_fixture(
         body_id=plan.body_id,
         support_reference_id=plan.support_reference_id,
         support_reference_sha256=plan.support_reference_sha256,
-        support_subname=_REFERENCE_SUBNAMES[plan.kind],
+        target_body_entity_identity_sha256=target_identity_sha256,
+        support_entity_identity_sha256=support_identity_sha256,
+        selection_receipt=selection,
     )
     return body, base, source, support, bindings
 
@@ -2175,11 +2183,13 @@ def _execute_reference_operation(
 
     rollback_document = freecad.newDocument(f"LegacyReferenceRollback_{suffix}")
     rollback_document.UndoMode = 1
-    rollback_body, rollback_base, rollback_source, rollback_support, _ = _reference_fixture(
-        Part,
-        rollback_document,
-        plan,
-        suffix=f"rollback_{suffix}",
+    rollback_body, rollback_base, rollback_source, rollback_support, original_bindings = (
+        _reference_fixture(
+            Part,
+            rollback_document,
+            plan,
+            suffix=f"rollback_{suffix}",
+        )
     )
     rollback_bindings = ReferenceExecutionBindings(
         document=rollback_document,
@@ -2188,7 +2198,9 @@ def _execute_reference_operation(
         body_id=plan.body_id,
         support_reference_id=plan.support_reference_id,
         support_reference_sha256=plan.support_reference_sha256,
-        support_subname=_REFERENCE_SUBNAMES[kind],
+        target_body_entity_identity_sha256=(original_bindings.target_body_entity_identity_sha256),
+        support_entity_identity_sha256=original_bindings.support_entity_identity_sha256,
+        selection_receipt=original_bindings.selection_receipt,
     )
     rollback_before = _document_snapshot(rollback_document, rollback_body)
     rollback_rejected = False
