@@ -12,6 +12,7 @@ from vibecad.execution.freecad_reviewed_intent_execution import (
     CURRENT_REVIEWED_INTENT_ROUTES,
     REVIEWED_PART_CSG_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
+    REVIEWED_PART_DATUM_ROUTES,
     REVIEWED_PART_PRIMITIVE_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
@@ -224,6 +225,7 @@ def test_reviewed_intent_program_is_canonical_content_bound_and_registry_closed(
     assert metadata.direct_exposed is False
     assert metadata.argument_fields[0].value_shape is ValueShape.REVIEWED_INTENT
     assert metadata.result_slots[0].value_shape is ValueShape.OBJECT_ID
+    assert metadata.resource_budget.max_created_objects == 8
 
 
 def test_reviewed_intent_program_rejects_digest_rebound_and_extra_authority() -> None:
@@ -286,11 +288,37 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
         *REVIEWED_PART_PRIMITIVE_ROUTES,
         *REVIEWED_PART_CURVE_ROUTES,
         *REVIEWED_PART_CSG_ROUTES,
+        *REVIEWED_PART_DATUM_ROUTES,
     )
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 20
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 24
     assert len(REVIEWED_PART_PRIMITIVE_ROUTES) == len(programs) == 8
     assert len(REVIEWED_PART_CURVE_ROUTES) == 9
     assert len(REVIEWED_PART_CSG_ROUTES) == 3
+    assert len(REVIEWED_PART_DATUM_ROUTES) == 4
+    assert {
+        route.family.product_result(route.operation).result_kind.value
+        for route in REVIEWED_PART_PRIMITIVE_ROUTES
+    } == {"solid"}
+    assert {
+        route.family.product_result(route.operation).result_kind.value
+        for route in REVIEWED_PART_CURVE_ROUTES
+    } == {"valid_shape"}
+    assert {
+        route.family.product_result(route.operation).result_kind.value
+        for route in REVIEWED_PART_CSG_ROUTES
+    } == {"solid"}
+    assert all(
+        route.family.product_result(route.operation).semantic_roles[0].value == "feature"
+        for route in REVIEWED_PART_CSG_ROUTES
+    )
+    assert all(
+        len(route.family.product_result(route.operation).owned_type_ids) == 1
+        for route in (
+            *REVIEWED_PART_PRIMITIVE_ROUTES,
+            *REVIEWED_PART_CURVE_ROUTES,
+            *REVIEWED_PART_CSG_ROUTES,
+        )
+    )
     assert tuple(route_reviewed_intent(program) for program in programs) == (
         REVIEWED_PART_PRIMITIVE_ROUTES
     )
@@ -339,7 +367,14 @@ def test_reviewed_family_descriptor_owns_lower_read_and_execute_callbacks(
         assert context.session.doc is document
         assert context.source_results == ()
         calls.append("execute")
-        result = SimpleNamespace(TypeId=operation.native_type_id)
+        result = SimpleNamespace(
+            TypeId=operation.native_type_id,
+            Shape=SimpleNamespace(
+                isValid=lambda: True,
+                Solids=(object(),),
+                Volume=1.0,
+            ),
+        )
         document.Objects = (*document.Objects, result)
         return reviewed_execution._ReviewedFamilyNativeExecution(
             object=result,
@@ -352,6 +387,7 @@ def test_reviewed_family_descriptor_owns_lower_read_and_execute_callbacks(
         adapter_factory=adapter_factory,
         validate_plan=validate_plan,
         execute_plan=execute_plan,
+        product_results=base_route.family.product_results,
     )
     route = dataclasses.replace(base_route, family=family)
     monkeypatch.setattr(

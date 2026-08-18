@@ -1538,7 +1538,10 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
             ),
             resource_budget=ResourceBudget(
                 max_runtime_ms=30_000,
-                max_created_objects=1,
+                # Static reviewed family contracts remain the exact authority.
+                # The coarse operation envelope admits the largest registered
+                # closure: one Part LCS plus its seven owned origin helpers.
+                max_created_objects=8,
                 max_result_bytes=65_536,
             ),
             direct_exposed=False,

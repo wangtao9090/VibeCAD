@@ -18,6 +18,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 import vibecad.execution.executor as executor_module
+from test_intent_bridge_freecad_part_datum_adapter import _graph as _datum_graph
 from test_reviewed_intent_program import reviewed_box_program, reviewed_primitive_program
 from test_reviewed_part_csg_product import reviewed_csg_program
 from vibecad.execution.candidate import (
@@ -36,6 +37,9 @@ from vibecad.execution.executor import (
 from vibecad.execution.freecad_reviewed_intent_execution import (
     REVIEWED_PART_BOX_ROUTE,
     REVIEWED_PART_CSG_ROUTES,
+    REVIEWED_PART_DATUM_ROUTES,
+    ReviewedIntentExecutionError,
+    ReviewedIntentExecutionErrorCode,
     ReviewedNativeExecutionResult,
 )
 from vibecad.execution.registry import (
@@ -53,17 +57,29 @@ from vibecad.execution.revisions import (
     RevisionStoreError,
     RevisionStoreErrorCode,
 )
-from vibecad.execution.selectors import index_entity_identities
+from vibecad.execution.selectors import (
+    EntityIdentity,
+    ProvenanceSource,
+    SemanticRole,
+    index_entity_identities,
+)
+from vibecad.intent_bridge.freecad_part_datum_adapter import PART_DATUM_MANIFEST
 from vibecad.parametric.freecad_part_core_rules import (
     PART_CORE_NATIVE_SPECS,
     PartCoreConformanceReceipt,
     PartCoreOperation,
+)
+from vibecad.parametric.freecad_part_datum_rules import (
+    PART_DATUM_NATIVE_TYPE_IDS,
+    PartDatumConformanceReceipt,
+    PartDatumOperation,
 )
 from vibecad.validation import ComponentBomMetadata
 from vibecad.workflow.contracts import AcceptanceSpec, ModelCommand, ModelProgram, ValueSource
 from vibecad.workflow.errors import SCHEMA_VERSION
 from vibecad.workflow.lease import ProjectWriteLease
 from vibecad.workflow.program import ValidatedProgram, validate_model_program
+from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 from vibecad.workflow.state import TaskArtifactRef
 
 PROJECT_ID = "project_0123456789abcdef0123456789abcdef"
@@ -182,6 +198,7 @@ class _FakeDocument:
         self.recompute_calls = 0
         self.save_calls: list[str] = []
         self.Objects: tuple[object, ...] = ()
+        self._transaction_objects: tuple[object, ...] | None = None
         self._recompute_observers: list[object] = []
         self.Name = "FakeDocument"
 
@@ -193,6 +210,20 @@ class _FakeDocument:
 
     def isTouched(self) -> bool:  # noqa: N802 - FreeCAD API spelling
         return False
+
+    def openTransaction(self, _label: str) -> None:  # noqa: N802 - FreeCAD API spelling
+        self._transaction_objects = tuple(self.Objects)
+
+    def commitTransaction(self) -> None:  # noqa: N802 - FreeCAD API spelling
+        self._transaction_objects = None
+
+    def abortTransaction(self) -> None:  # noqa: N802 - FreeCAD API spelling
+        if self._transaction_objects is not None:
+            self.Objects = self._transaction_objects
+        self._transaction_objects = None
+
+    def removeObject(self, name: str) -> None:  # noqa: N802 - FreeCAD API spelling
+        self.Objects = tuple(item for item in self.Objects if getattr(item, "Name", None) != name)
 
     def saveCopy(self, path: str) -> None:  # noqa: N802 - FreeCAD API spelling
         self.save_calls.append(path)
@@ -965,6 +996,21 @@ def _fake_rotate_part(
 
 def _store() -> LocalRevisionStore:
     return object.__new__(LocalRevisionStore)
+
+
+def _reviewed_datum_program(operation: PartDatumOperation) -> ReviewedIntentProgramV1:
+    graph = _datum_graph(operation)
+    reviewed = next(
+        item for item in PART_DATUM_MANIFEST.operations if item.operation_id == operation.value
+    )
+    namespace, version, term_id, digest = reviewed.semantic_term.semantic_identity
+    return ReviewedIntentProgramV1(
+        operation_id=f"{PART_DATUM_MANIFEST.family_id}.{operation.value}",
+        semantic_operation=f"{namespace}/{version}/{term_id}@{digest}",
+        intent_graph_sha256=graph.graph_sha256,
+        intent_content_sha256=hashlib.sha256(graph.canonical_bytes).hexdigest(),
+        intent_graph=graph,
+    )
 
 
 def _lease(*, project_id: str = PROJECT_ID, released: bool = False) -> ProjectWriteLease:
@@ -1944,6 +1990,223 @@ def test_execute_program_applies_one_reviewed_box_and_adopts_identity(
     assert result["feature_id"] == identity.feature_id
     assert result["plan_sha256"] == "a" * 64
     assert session.result_object is session.identity_object
+
+
+class _ManagedDatumFeature:
+    def __init__(self, document: _FakeDocument, name: str, type_id: str) -> None:
+        self.Document = document
+        self.Name = name
+        self.TypeId = type_id
+        self.Placement = _FakePlacement(10.0, 20.0, 30.0)
+        self.State = ("Up-to-date",)
+        self.OriginFeatures: tuple[object, ...] = ()
+
+    def isValid(self) -> bool:  # noqa: N802 - FreeCAD API spelling
+        return True
+
+
+@pytest.mark.parametrize(
+    ("operation", "owned_type_ids"),
+    (
+        (PartDatumOperation.DATUM_POINT, ("Part::DatumPoint",)),
+        (
+            PartDatumOperation.LOCAL_COORDINATE_SYSTEM,
+            (
+                "Part::LocalCoordinateSystem",
+                "App::Line",
+                "App::Line",
+                "App::Line",
+                "App::Plane",
+                "App::Plane",
+                "App::Plane",
+                "App::Point",
+            ),
+        ),
+    ),
+)
+def test_managed_reviewed_datum_adopts_closure_checkpoints_reopens_and_rejects_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: PartDatumOperation,
+    owned_type_ids: tuple[str, ...],
+) -> None:
+    reviewed = _reviewed_datum_program(operation)
+    route = next(
+        item for item in REVIEWED_PART_DATUM_ROUTES if item.operation_id == reviewed.operation_id
+    )
+
+    def execute(session: _FakeSession, value: object) -> ReviewedNativeExecutionResult:
+        assert value == reviewed
+        primary_name = f"Managed_{operation.value}_{reviewed.intent_graph_sha256[:16]}"
+        if any(getattr(item, "Name", None) == primary_name for item in session.doc.Objects):
+            raise ReviewedIntentExecutionError(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
+        owned = tuple(
+            _ManagedDatumFeature(
+                session.doc,
+                primary_name if index == 0 else f"{primary_name}_Helper{index}",
+                type_id,
+            )
+            for index, type_id in enumerate(owned_type_ids)
+        )
+        owned[0].OriginFeatures = owned[1:]
+        session.doc.Objects = (*session.doc.Objects, *owned)
+        receipt = PartDatumConformanceReceipt(
+            plan_sha256="d" * 64,
+            operation=operation,
+            object_name=primary_name,
+            native_type_id=PART_DATUM_NATIVE_TYPE_IDS[operation],
+            owned_object_names=tuple(item.Name for item in owned),
+        )
+        return ReviewedNativeExecutionResult(
+            route=route,
+            object=owned[0],
+            plan_sha256="d" * 64,
+            plan_content_sha256="e" * 64,
+            native_receipt=receipt,
+            owned_objects=owned,
+        )
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute)
+    program = validate_model_program(
+        ModelProgram(
+            task_id=f"task-managed-{operation.value}",
+            base_revision=BASE_REVISION,
+            operations=(
+                _command(
+                    f"reviewed_{operation.value}",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed.to_mapping()},
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="accept-managed-datum", criteria=()),
+        )
+    )
+    executor = InProcessCadExecutor(store=_store())
+    session = _FakeSession()
+
+    outcomes = executor.execute_program(
+        program=program,
+        candidate=_active(session, tmp_path),
+    )
+
+    assert len(outcomes) == 1 and outcomes[0].result.ok is True
+    public_result = outcomes[0].result.value
+    identities = tuple(identity for _, identity in session.attached_identities)
+    assert public_result["object_id"] == identities[0].object_id
+    assert "owned_object_ids" not in public_result
+    assert len(identities) == len(owned_type_ids)
+    assert tuple(item.object_type for item in identities) == owned_type_ids
+    assert all(item.semantic_role is SemanticRole.SUPPORT for item in identities)
+    assert all(item.provenance.source is ProvenanceSource.MODEL for item in identities)
+    assert session.result_object is None
+
+    checkpoint = tmp_path / f"{operation.value}.FCStd"
+    executor.checkpoint_fcstd(session, checkpoint)
+    persisted_identities = tuple(
+        EntityIdentity.from_mapping(identity.to_mapping()) for identity in identities
+    )
+
+    def reopen_factory() -> _FakeSession:
+        reopened = _FakeSession()
+        reopened.doc = copy.deepcopy(session.doc)
+        reopened.attached_identities = list(
+            zip(reopened.doc.Objects, persisted_identities, strict=True)
+        )
+        return reopened
+
+    monkeypatch.setattr(executor_module, "_Session", reopen_factory)
+    reopened = executor.load_fcstd(checkpoint)
+    reopened_identities = tuple(identity for _, identity in reopened.list_object_identities())
+    assert reopened_identities == persisted_identities
+    before_duplicate = tuple(reopened.doc.Objects)
+
+    duplicate = executor.execute_program(
+        program=program,
+        candidate=_active(reopened, tmp_path),
+    )
+
+    assert len(duplicate) == 1 and duplicate[0].result.ok is False
+    assert tuple(reopened.doc.Objects) == before_duplicate
+    assert tuple(identity for _, identity in reopened.list_object_identities()) == (
+        persisted_identities
+    )
+
+
+@pytest.mark.parametrize("failure", ("missing_helper", "extra_helper", "tip_drift"))
+def test_managed_reviewed_datum_validation_failure_restores_document(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    operation = (
+        PartDatumOperation.DATUM_POINT
+        if failure == "tip_drift"
+        else PartDatumOperation.LOCAL_COORDINATE_SYSTEM
+    )
+    reviewed = _reviewed_datum_program(operation)
+
+    class RollbackSession(_FakeSession):
+        def list_object_identities(self) -> tuple[tuple[object, object], ...]:
+            return tuple(self.attached_identities)
+
+    session = RollbackSession()
+    if failure == "tip_drift":
+        body = type(
+            "ExistingBody",
+            (),
+            {"TypeId": "PartDesign::Body", "Tip": object()},
+        )()
+        session.doc.Objects = (body,)
+
+    def fail_after_mutation(session: _FakeSession, value: object) -> object:
+        assert value == reviewed
+        if failure == "tip_drift":
+            session.doc.Objects[0].Tip = object()
+        else:
+            count = 7 if failure == "missing_helper" else 9
+            created = tuple(
+                _ManagedDatumFeature(
+                    session.doc,
+                    f"InvalidLCS_{index}",
+                    "Part::LocalCoordinateSystem" if index == 0 else "App::Line",
+                )
+                for index in range(count)
+            )
+            session.doc.Objects = (*session.doc.Objects, *created)
+        raise ReviewedIntentExecutionError(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+    monkeypatch.setattr(
+        executor_module,
+        "_execute_reviewed_intent_native",
+        fail_after_mutation,
+    )
+    program = validate_model_program(
+        ModelProgram(
+            task_id=f"task-managed-rollback-{failure}",
+            base_revision=BASE_REVISION,
+            operations=(
+                _command(
+                    f"reviewed_rollback_{failure}",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed.to_mapping()},
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="accept-managed-datum-rollback", criteria=()),
+        )
+    )
+    before_objects = tuple(session.doc.Objects)
+    before_tip = getattr(before_objects[0], "Tip", None) if before_objects else None
+
+    outcome = InProcessCadExecutor(store=_store()).execute_program(
+        program=program,
+        candidate=_active(session, tmp_path),
+    )
+
+    assert len(outcome) == 1 and outcome[0].result.ok is False
+    assert tuple(session.doc.Objects) == before_objects
+    if before_objects:
+        assert before_objects[0].Tip is before_tip
+    assert session.attached_identities == []
 
 
 def test_execute_program_resolves_two_prior_reviewed_outputs_for_csg(

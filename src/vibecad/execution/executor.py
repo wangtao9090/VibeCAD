@@ -45,6 +45,7 @@ from vibecad.execution.candidate import (
 from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
 from vibecad.execution.freecad_reviewed_intent_execution import (
     ReviewedNativeExecutionResult,
+    _ReviewedProductResultKind,
 )
 from vibecad.execution.freecad_reviewed_intent_execution import (
     execute_reviewed_intent_native as _execute_reviewed_intent_native,
@@ -2374,12 +2375,7 @@ class _ReviewedProductRunRecord:
 
 
 class _ReviewedProductRunState:
-    """Ordered opaque Reviewed outputs scoped to one execution cursor.
-
-    The resolver is intentionally cardinality-generic for dependency-bearing
-    Reviewed families.  Public registry fields still decide which exact
-    cardinalities a model may request.
-    """
+    """Ordered opaque Reviewed outputs scoped to one execution cursor."""
 
     __slots__ = ("_records",)
 
@@ -2429,6 +2425,78 @@ class _ReviewedProductRunState:
         raise TypeError("reviewed product run state cannot be serialized")
 
 
+def _reviewed_document_matches(
+    document: object,
+    before: tuple[object, ...],
+    body_tips: tuple[tuple[object, object], ...],
+) -> bool:
+    try:
+        current = tuple(document.Objects)
+        return (
+            len(current) == len(before)
+            and all(actual is expected for actual, expected in zip(current, before, strict=True))
+            and all(body.Tip is tip for body, tip in body_tips)
+        )
+    except Exception:
+        return False
+
+
+def _rollback_reviewed_document(
+    document: object,
+    before: tuple[object, ...],
+    body_tips: tuple[tuple[object, object], ...],
+) -> bool:
+    """Compensate a committed family mutation after later product validation fails."""
+
+    if _reviewed_document_matches(document, before, body_tips):
+        return True
+    try:
+        current = tuple(document.Objects)
+        if len(current) < len(before) or any(
+            actual is not expected
+            for actual, expected in zip(current[: len(before)], before, strict=True)
+        ):
+            return False
+        added = current[len(before) :]
+        names = tuple(getattr(item, "Name", None) for item in added)
+        if (
+            any(type(name) is not str or not name for name in names)
+            or len(set(names)) != len(names)
+            or not all(
+                callable(getattr(document, name, None))
+                for name in (
+                    "openTransaction",
+                    "commitTransaction",
+                    "abortTransaction",
+                    "removeObject",
+                    "recompute",
+                )
+            )
+        ):
+            return False
+        document.openTransaction("VibeCAD rollback reviewed intent")
+    except Exception:
+        return False
+    try:
+        for item, name in reversed(tuple(zip(added, names, strict=True))):
+            if any(item is current_item for current_item in tuple(document.Objects)):
+                document.removeObject(name)
+        for body, tip in body_tips:
+            body.Tip = tip
+        document.recompute()
+        if not _reviewed_document_matches(document, before, body_tips):
+            raise ValueError
+        document.commitTransaction()
+        return _reviewed_document_matches(document, before, body_tips)
+    except BaseException:
+        try:
+            document.abortTransaction()
+            document.recompute()
+        except BaseException:
+            pass
+        return False
+
+
 def _managed_apply_reviewed_intent(
     session: object,
     context: _InvocationContext,
@@ -2468,6 +2536,11 @@ def _managed_apply_reviewed_intent(
         before = _entity_observations(session)
         before_by_id = _observation_map(before)
         document_before = tuple(session.doc.Objects)  # type: ignore[attr-defined]
+        body_tips_before = tuple(
+            (item, item.Tip)
+            for item in document_before
+            if getattr(item, "TypeId", None) == "PartDesign::Body"
+        )
     except Exception:
         raise _operation_failure() from None
 
@@ -2489,6 +2562,7 @@ def _managed_apply_reviewed_intent(
         if type(executed) is not ReviewedNativeExecutionResult:
             raise ValueError
         obj = executed.object
+        owned = executed.owned_objects
         document_after = tuple(session.doc.Objects)  # type: ignore[attr-defined]
         added = tuple(
             item
@@ -2496,9 +2570,10 @@ def _managed_apply_reviewed_intent(
             if not any(item is existing for existing in document_before)
         )
         if (
-            len(document_after) != len(document_before) + 1
-            or len(added) != 1
-            or added[0] is not obj
+            len(document_after) != len(document_before) + len(owned)
+            or len(added) != len(owned)
+            or any(actual is not expected for actual, expected in zip(added, owned, strict=True))
+            or owned[0] is not obj
             or getattr(obj, "TypeId", None) != executed.route.operation.native_type_id
         ):
             raise ValueError
@@ -2506,50 +2581,75 @@ def _managed_apply_reviewed_intent(
             source=ProvenanceSource(context.source.value),
             operation_id=context.operation_id,
         )
-        semantic_role = (
-            SemanticRole.FEATURE
-            if executed.route.operation.native_type_id in _BOOLEAN_OPERATIONS
-            else SemanticRole.PRIMITIVE
-        )
-        identity = EntityIdentity(
-            object_id=f"object_{secrets.token_hex(16)}",
-            feature_id=f"feature_{secrets.token_hex(16)}",
-            object_type=executed.route.operation.native_type_id,
-            semantic_role=semantic_role,
-            provenance=provenance,
+        identities = tuple(
+            EntityIdentity(
+                object_id=f"object_{secrets.token_hex(16)}",
+                feature_id=f"feature_{secrets.token_hex(16)}",
+                object_type=owned_object.TypeId,
+                semantic_role=semantic_role,
+                provenance=provenance,
+            )
+            for owned_object, semantic_role in zip(
+                owned,
+                executed.semantic_roles,
+                strict=True,
+            )
         )
         with transaction(
             "VibeCAD adopt reviewed intent",
             claim_new_objects=False,
         ):
-            if attach(obj, identity) != identity or read_identity(obj) != identity:
-                raise ValueError
-            set_result(obj)
-            if get_result() is not obj:
-                raise ValueError
+            for owned_object, identity in zip(owned, identities, strict=True):
+                if (
+                    attach(owned_object, identity) != identity
+                    or read_identity(owned_object) != identity
+                ):
+                    raise ValueError
+            if executed.result_kind is _ReviewedProductResultKind.SOLID:
+                set_result(obj)
+                if get_result() is not obj:
+                    raise ValueError
             after = _entity_observations(session)
             after_by_id = _observation_map(after)
-            if set(after_by_id) != {*before_by_id, identity.object_id}:
+            identity_ids = {identity.object_id for identity in identities}
+            if set(after_by_id) != {*before_by_id, *identity_ids}:
                 raise ValueError
             comparisons = _require_non_target_preservation(
                 before_by_id,
-                {key: value for key, value in after_by_id.items() if key != identity.object_id},
+                {key: value for key, value in after_by_id.items() if key not in identity_ids},
                 target=None,
             )
-            created = after_by_id[identity.object_id]
-            if (
+            created_closure = tuple(after_by_id[identity.object_id] for identity in identities)
+            if any(
                 created.feature_id != identity.feature_id
                 or created.object_type != identity.object_type
-                or created.semantic_role != semantic_role.value
+                or created.semantic_role != identity.semantic_role.value
                 or created.provenance != provenance.to_mapping()
-                or created.valid_shape is not True
-                or created.solid_count != 1
-                or created.volume_mm3 is None
-                or created.volume_mm3 <= 0
+                for created, identity in zip(created_closure, identities, strict=True)
             ):
                 raise ValueError
-        reviewed_products.retain(executed, identity)
+            created = created_closure[0]
+            if executed.result_kind is _ReviewedProductResultKind.SOLID:
+                if (
+                    created.valid_shape is not True
+                    or created.solid_count != 1
+                    or created.volume_mm3 is None
+                    or created.volume_mm3 <= 0
+                ):
+                    raise ValueError
+            elif (
+                executed.result_kind is _ReviewedProductResultKind.VALID_SHAPE
+                and created.valid_shape is not True
+            ):
+                raise ValueError
+        reviewed_products.retain(executed, identities[0])
     except Exception:
+        if not _rollback_reviewed_document(
+            session.doc,  # type: ignore[attr-defined]
+            document_before,
+            body_tips_before,
+        ):
+            raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
         raise _operation_failure() from None
 
     return {
@@ -2558,8 +2658,8 @@ def _managed_apply_reviewed_intent(
         "operation": context.operation,
         "reviewed_operation_id": executed.route.operation_id,
         "semantic_operation": executed.route.semantic_operation,
-        "object_id": identity.object_id,
-        "feature_id": identity.feature_id,
+        "object_id": identities[0].object_id,
+        "feature_id": identities[0].feature_id,
         "plan_sha256": executed.plan_sha256,
         "plan_content_sha256": executed.plan_content_sha256,
         "native_receipt_sha256": executed.native_receipt.receipt_sha256,

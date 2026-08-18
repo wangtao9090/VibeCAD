@@ -197,6 +197,14 @@ def reviewed_csg_program(operation: PartCoreOperation) -> ReviewedIntentProgramV
 class _Shape:
     def __init__(self, brep: str) -> None:
         self.brep = brep
+        self.Solids = (object(),)
+        self.Volume = 1.0
+
+    def isNull(self) -> bool:  # noqa: N802 - FreeCAD API spelling
+        return False
+
+    def isValid(self) -> bool:  # noqa: N802 - FreeCAD API spelling
+        return True
 
     def exportBrepToString(self) -> str:
         return self.brep
@@ -315,8 +323,14 @@ def test_reviewed_part_csg_route_table_is_exact_and_closed() -> None:
     )
 
     assert tuple(route_reviewed_intent(item) for item in programs) == (REVIEWED_PART_CSG_ROUTES)
-    assert CURRENT_REVIEWED_INTENT_ROUTES[-3:] == REVIEWED_PART_CSG_ROUTES
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 20
+    assert CURRENT_REVIEWED_INTENT_ROUTES[17:20] == REVIEWED_PART_CSG_ROUTES
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 24
+    assert all(
+        route.family.product_result(route.operation).result_kind.value == "solid"
+        and route.family.product_result(route.operation).owned_type_ids
+        == (route.operation.native_type_id,)
+        for route in REVIEWED_PART_CSG_ROUTES
+    )
     assert {item.operation.native_type_id for item in REVIEWED_PART_CSG_ROUTES} == {
         "Part::Cut",
         "Part::Fuse",

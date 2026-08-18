@@ -38,6 +38,9 @@ from vibecad.execution.freecad_discovery_runtime_v2 import (
 from vibecad.execution.freecad_part_curve_reviewed_execution import (
     PART_CURVE_REVIEWED_FAMILY_SPEC,
 )
+from vibecad.execution.freecad_part_datum_reviewed_execution import (
+    PART_DATUM_REVIEWED_FAMILY_SPEC,
+)
 from vibecad.execution.freecad_reviewed_part_csg_execution import (
     PART_CSG_REVIEWED_FAMILY_SPEC,
 )
@@ -49,6 +52,7 @@ from vibecad.execution.freecad_reviewed_release_attestation_resource import (
     FreeCadPackagedReviewedReleaseAttestation,
     load_current_packaged_freecad_reviewed_release_attestation,
 )
+from vibecad.execution.selectors import SemanticRole
 from vibecad.intent_bridge.contracts import (
     BackendLoweringRequest,
     BackendLoweringResult,
@@ -146,9 +150,22 @@ class _ReviewedFamilyNativeExecution:
 
     object: object = field(repr=False, compare=False)
     receipt: object
+    owned_objects: tuple[object, ...] = field(default=(), repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.object is None or self.receipt is None:
+        owned = self.owned_objects
+        if type(owned) is not tuple:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if not owned:
+            owned = (self.object,)
+            object.__setattr__(self, "owned_objects", owned)
+        if (
+            self.object is None
+            or self.receipt is None
+            or owned[0] is not self.object
+            or any(item is None for item in owned)
+            or len({id(item) for item in owned}) != len(owned)
+        ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
 
@@ -168,6 +185,87 @@ class _ReviewedFamilyExecutionContext:
             or len(self.source_results) > 8
             or any(item is None for item in self.source_results)
         ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+
+class _ReviewedProductResultKind(StrEnum):
+    """Closed product-side observation contract selected by a static route."""
+
+    SOLID = "solid"
+    VALID_SHAPE = "valid_shape"
+    REFERENCE = "reference"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ReviewedProductResultContract:
+    """Exact primary/closure contract owned by one reviewed operation."""
+
+    operation_id: str
+    result_kind: _ReviewedProductResultKind
+    owned_type_ids: tuple[str, ...]
+    semantic_roles: tuple[SemanticRole, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.operation_id) is not str
+            or not self.operation_id
+            or type(self.result_kind) is not _ReviewedProductResultKind
+            or type(self.owned_type_ids) is not tuple
+            or not self.owned_type_ids
+            or any(type(item) is not str or not item for item in self.owned_type_ids)
+            or type(self.semantic_roles) is not tuple
+            or len(self.semantic_roles) != len(self.owned_type_ids)
+            or any(type(item) is not SemanticRole for item in self.semantic_roles)
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+    def validate(
+        self,
+        operation: ReviewedOperationSpec,
+        primary: object,
+        owned: tuple[object, ...],
+    ) -> None:
+        if (
+            type(operation) is not ReviewedOperationSpec
+            or operation.operation_id != self.operation_id
+            or operation.native_type_id != self.owned_type_ids[0]
+            or type(owned) is not tuple
+            or len(owned) != len(self.owned_type_ids)
+            or not owned
+            or owned[0] is not primary
+            or len({id(item) for item in owned}) != len(owned)
+            or any(
+                getattr(item, "TypeId", None) != expected
+                for item, expected in zip(owned, self.owned_type_ids, strict=True)
+            )
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if self.result_kind is _ReviewedProductResultKind.REFERENCE:
+            try:
+                is_valid = getattr(primary, "isValid", None)
+                if (
+                    not callable(is_valid)
+                    or is_valid() is not True
+                    or tuple(primary.State) != ("Up-to-date",)
+                ):
+                    raise ValueError
+            except (Exception, SystemExit):
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            return
+        try:
+            shape = primary.Shape
+            is_null = getattr(shape, "isNull", None)
+            if (
+                shape is None
+                or (callable(is_null) and is_null() is not False)
+                or shape.isValid() is not True
+            ):
+                raise ValueError
+            if self.result_kind is _ReviewedProductResultKind.SOLID and (
+                len(shape.Solids) != 1 or float(shape.Volume) <= 0.0
+            ):
+                raise ValueError
+        except (Exception, SystemExit, TypeError, ValueError, OverflowError):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
 
@@ -195,6 +293,7 @@ class _ReviewedIntentFamilyDescriptor:
     adapter_factory: _AdapterFactory = field(repr=False, compare=False)
     validate_plan: _PlanValidator = field(repr=False, compare=False)
     execute_plan: _NativeExecutor = field(repr=False, compare=False)
+    product_results: tuple[_ReviewedProductResultContract, ...]
     minimum_sources: int = 0
     maximum_sources: int = 0
 
@@ -205,6 +304,20 @@ class _ReviewedIntentFamilyDescriptor:
             or not callable(self.adapter_factory)
             or not callable(self.validate_plan)
             or not callable(self.execute_plan)
+            or type(self.product_results) is not tuple
+            or not self.product_results
+            or any(
+                type(item) is not _ReviewedProductResultContract for item in self.product_results
+            )
+            or len({item.operation_id for item in self.product_results})
+            != len(self.product_results)
+            or any(
+                not any(
+                    operation.operation_id == item.operation_id
+                    for operation in self.manifest.operations
+                )
+                for item in self.product_results
+            )
             or not any(term == self.subject_type_term for term in self.manifest.request_terms)
             or type(self.minimum_sources) is not int
             or type(self.maximum_sources) is not int
@@ -274,6 +387,29 @@ class _ReviewedIntentFamilyDescriptor:
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         return result
 
+    def product_result(
+        self,
+        operation: ReviewedOperationSpec,
+    ) -> _ReviewedProductResultContract:
+        if type(operation) is not ReviewedOperationSpec:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        matching = tuple(
+            item for item in self.product_results if item.operation_id == operation.operation_id
+        )
+        if len(matching) != 1:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return matching[0]
+
+    def accept_product_result(
+        self,
+        operation: ReviewedOperationSpec,
+        primary: object,
+        owned: tuple[object, ...],
+    ) -> _ReviewedProductResultContract:
+        contract = self.product_result(operation)
+        contract.validate(operation, primary, owned)
+        return contract
+
 
 def _validate_part_core_plan(
     plan: object,
@@ -329,12 +465,54 @@ def _execute_part_core_plan(
     return _ReviewedFamilyNativeExecution(object=result, receipt=receipt)
 
 
+_REVIEWED_PART_PRIMITIVE_OPERATIONS: Final = (
+    PartCoreOperation.BOX,
+    PartCoreOperation.CONE,
+    PartCoreOperation.CYLINDER,
+    PartCoreOperation.ELLIPSOID,
+    PartCoreOperation.PRISM,
+    PartCoreOperation.SPHERE,
+    PartCoreOperation.TORUS,
+    PartCoreOperation.WEDGE,
+)
+
+
+def _singleton_product_results(
+    manifest: FamilyBatchManifest,
+    operation_ids: tuple[str, ...],
+    *,
+    result_kind: _ReviewedProductResultKind,
+    semantic_role: SemanticRole,
+) -> tuple[_ReviewedProductResultContract, ...]:
+    return tuple(
+        _ReviewedProductResultContract(
+            operation_id=operation_id,
+            result_kind=result_kind,
+            owned_type_ids=(
+                next(
+                    item.native_type_id
+                    for item in manifest.operations
+                    if item.operation_id == operation_id
+                ),
+            ),
+            semantic_roles=(semantic_role,),
+        )
+        for operation_id in operation_ids
+    )
+
+
 _PART_CORE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     manifest=PART_CORE_MANIFEST,
     subject_type_term=_bridge_term(PART_CORE_STRUCTURE_TERM),
     adapter_factory=build_part_core_adapter,
     validate_plan=_validate_part_core_plan,
     execute_plan=_execute_part_core_plan,
+    product_results=_singleton_product_results(
+        PART_CORE_MANIFEST,
+        tuple(item.value for item in _REVIEWED_PART_PRIMITIVE_OPERATIONS),
+        result_kind=_ReviewedProductResultKind.SOLID,
+        semantic_role=SemanticRole.PRIMITIVE,
+    ),
 )
 
 _PART_CURVE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
@@ -343,6 +521,12 @@ _PART_CURVE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     adapter_factory=PART_CURVE_REVIEWED_FAMILY_SPEC.adapter_factory,
     validate_plan=PART_CURVE_REVIEWED_FAMILY_SPEC.validate_plan,
     execute_plan=PART_CURVE_REVIEWED_FAMILY_SPEC.execute_plan,
+    product_results=_singleton_product_results(
+        PART_CURVE_REVIEWED_FAMILY_SPEC.manifest,
+        PART_CURVE_REVIEWED_FAMILY_SPEC.operation_ids,
+        result_kind=_ReviewedProductResultKind.VALID_SHAPE,
+        semantic_role=SemanticRole.PRIMITIVE,
+    ),
 )
 
 _PART_CSG_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
@@ -351,8 +535,54 @@ _PART_CSG_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     adapter_factory=PART_CSG_REVIEWED_FAMILY_SPEC.adapter_factory,
     validate_plan=PART_CSG_REVIEWED_FAMILY_SPEC.validate_plan,
     execute_plan=PART_CSG_REVIEWED_FAMILY_SPEC.execute_plan,
+    product_results=_singleton_product_results(
+        PART_CSG_REVIEWED_FAMILY_SPEC.manifest,
+        PART_CSG_REVIEWED_FAMILY_SPEC.operation_ids,
+        result_kind=_ReviewedProductResultKind.SOLID,
+        semantic_role=SemanticRole.FEATURE,
+    ),
     minimum_sources=2,
     maximum_sources=2,
+)
+
+_PART_DATUM_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=PART_DATUM_REVIEWED_FAMILY_SPEC.manifest,
+    subject_type_term=PART_DATUM_REVIEWED_FAMILY_SPEC.subject_type_term,
+    adapter_factory=PART_DATUM_REVIEWED_FAMILY_SPEC.adapter_factory,
+    validate_plan=PART_DATUM_REVIEWED_FAMILY_SPEC.validate_plan,
+    execute_plan=PART_DATUM_REVIEWED_FAMILY_SPEC.execute_plan,
+    product_results=tuple(
+        _ReviewedProductResultContract(
+            operation_id=operation_id,
+            result_kind=_ReviewedProductResultKind.REFERENCE,
+            owned_type_ids=(
+                next(
+                    item.native_type_id
+                    for item in PART_DATUM_REVIEWED_FAMILY_SPEC.manifest.operations
+                    if item.operation_id == operation_id
+                ),
+                *(
+                    (
+                        "App::Line",
+                        "App::Line",
+                        "App::Line",
+                        "App::Plane",
+                        "App::Plane",
+                        "App::Plane",
+                        "App::Point",
+                    )
+                    if operation_id == "local_coordinate_system"
+                    else ()
+                ),
+            ),
+            semantic_roles=(
+                (SemanticRole.SUPPORT,) * 8
+                if operation_id == "local_coordinate_system"
+                else (SemanticRole.SUPPORT,)
+            ),
+        )
+        for operation_id in PART_DATUM_REVIEWED_FAMILY_SPEC.operation_ids
+    ),
 )
 
 
@@ -415,18 +645,6 @@ class ReviewedIntentRoute:
         )
 
 
-_REVIEWED_PART_PRIMITIVE_OPERATIONS: Final = (
-    PartCoreOperation.BOX,
-    PartCoreOperation.CONE,
-    PartCoreOperation.CYLINDER,
-    PartCoreOperation.ELLIPSOID,
-    PartCoreOperation.PRISM,
-    PartCoreOperation.SPHERE,
-    PartCoreOperation.TORUS,
-    PartCoreOperation.WEDGE,
-)
-
-
 def _routes_for_family(
     family: _ReviewedIntentFamilyDescriptor,
     operation_ids: tuple[str, ...],
@@ -474,10 +692,15 @@ REVIEWED_PART_CSG_ROUTES: Final = _routes_for_family(
     _PART_CSG_FAMILY,
     PART_CSG_REVIEWED_FAMILY_SPEC.operation_ids,
 )
+REVIEWED_PART_DATUM_ROUTES: Final = _routes_for_family(
+    _PART_DATUM_FAMILY,
+    PART_DATUM_REVIEWED_FAMILY_SPEC.operation_ids,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
     REVIEWED_PART_CSG_ROUTES,
+    REVIEWED_PART_DATUM_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -875,8 +1098,17 @@ class ReviewedNativeExecutionResult:
     plan_sha256: str
     plan_content_sha256: str
     native_receipt: object
+    owned_objects: tuple[object, ...] = field(default=(), repr=False, compare=False)
+    result_kind: _ReviewedProductResultKind = field(init=False)
+    semantic_roles: tuple[SemanticRole, ...] = field(init=False)
 
     def __post_init__(self) -> None:
+        owned = self.owned_objects
+        if type(owned) is not tuple:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if not owned:
+            owned = (self.object,)
+            object.__setattr__(self, "owned_objects", owned)
         if (
             type(self.route) is not ReviewedIntentRoute
             or self.object is None
@@ -888,6 +1120,13 @@ class ReviewedNativeExecutionResult:
             or getattr(self.native_receipt, "plan_sha256", None) != self.plan_sha256
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        contract = self.route.family.accept_product_result(
+            self.route.operation,
+            self.object,
+            owned,
+        )
+        object.__setattr__(self, "result_kind", contract.result_kind)
+        object.__setattr__(self, "semantic_roles", contract.semantic_roles)
 
 
 def execute_reviewed_intent_native(
@@ -937,10 +1176,12 @@ def execute_reviewed_intent_native(
     except BaseException:
         _fail(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
     added = tuple(item for item in after if not any(item is existing for existing in before))
+    owned = family_result.owned_objects
     if (
-        len(after) != len(before) + 1
-        or len(added) != 1
-        or result is not added[0]
+        len(after) != len(before) + len(owned)
+        or len(added) != len(owned)
+        or any(actual is not expected for actual, expected in zip(added, owned, strict=True))
+        or result is not owned[0]
         or getattr(result, "TypeId", None) != route.operation.native_type_id
     ):
         _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
@@ -950,14 +1191,16 @@ def execute_reviewed_intent_native(
         plan_sha256=lowered.result.plan_document.document_digest,
         plan_content_sha256=lowered.result.plan_document.content_sha256,
         native_receipt=family_result.receipt,
+        owned_objects=owned,
     )
 
 
 __all__ = [
     "CURRENT_REVIEWED_INTENT_ROUTES",
     "REVIEWED_PART_BOX_ROUTE",
-    "REVIEWED_PART_CURVE_ROUTES",
     "REVIEWED_PART_CSG_ROUTES",
+    "REVIEWED_PART_CURVE_ROUTES",
+    "REVIEWED_PART_DATUM_ROUTES",
     "REVIEWED_PART_PRIMITIVE_ROUTES",
     "LoweredReviewedIntent",
     "ReviewedIntentExecutionError",

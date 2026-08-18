@@ -217,11 +217,7 @@ def _decode_mapping(raw: object) -> dict[str, object]:
 
 
 def _exact_fields(value: object, keys: set[str], path: str) -> dict[str, object]:
-    if (
-        type(value) is not dict
-        or set(value) != keys
-        or any(type(key) is not str for key in value)
-    ):
+    if type(value) is not dict or set(value) != keys or any(type(key) is not str for key in value):
         _fail(PartDatumRuleErrorCode.INVALID_INPUT, path)
     return value
 
@@ -506,9 +502,7 @@ class PartDatumConformanceReceipt:
         )
         if len(set(checked)) != len(checked) or checked[0] != self.object_name:
             _fail(PartDatumRuleErrorCode.INVALID_INPUT, "/owned_object_names")
-        expected_count = (
-            8 if self.operation is PartDatumOperation.LOCAL_COORDINATE_SYSTEM else 1
-        )
+        expected_count = 8 if self.operation is PartDatumOperation.LOCAL_COORDINATE_SYSTEM else 1
         if len(checked) != expected_count:
             _fail(PartDatumRuleErrorCode.INVALID_INPUT, "/owned_object_names")
         object.__setattr__(self, "owned_object_names", checked)
@@ -550,20 +544,39 @@ def _snapshot(document: object):
         for item in objects
         if "Visibility" in tuple(item.PropertiesList)
     )
-    return objects, groups, visibility
+    body_tips = tuple((item, item.Tip) for item in objects if item.TypeId == "PartDesign::Body")
+    return objects, groups, visibility, body_tips
 
 
 def _rollback_matches(document: object, before: object) -> bool:
-    objects, groups, visibility = before
+    objects, groups, visibility, body_tips = before
     if not _same_identity_sequence(document.Objects, objects):
         return False
     for item, members in groups:
         if not _same_identity_sequence(item.Group, members):
             return False
     try:
-        return all(bool(item.Visibility) is value for item, value in visibility)
+        return all(bool(item.Visibility) is value for item, value in visibility) and all(
+            item.Tip is tip for item, tip in body_tips
+        )
     except Exception:
         return False
+
+
+def _same_body_tips(
+    objects: tuple[object, ...],
+    expected: tuple[tuple[object, object], ...],
+) -> bool:
+    try:
+        actual = tuple((item, item.Tip) for item in objects if item.TypeId == "PartDesign::Body")
+    except Exception:
+        return False
+    return len(actual) == len(expected) and all(
+        actual_body is expected_body and actual_tip is expected_tip
+        for (actual_body, actual_tip), (expected_body, expected_tip) in zip(
+            actual, expected, strict=True
+        )
+    )
 
 
 def _placement_matches(actual: object, expected: ExplicitDatumPlacement) -> bool:
@@ -580,23 +593,15 @@ def _placement_matches(actual: object, expected: ExplicitDatumPlacement) -> bool
         )
         same = all(
             abs(actual_value - expected_value) <= 1e-9
-            for actual_value, expected_value in zip(
-                quaternion, expected_quaternion, strict=True
-            )
+            for actual_value, expected_value in zip(quaternion, expected_quaternion, strict=True)
         )
         negated = all(
             abs(actual_value + expected_value) <= 1e-9
-            for actual_value, expected_value in zip(
-                quaternion, expected_quaternion, strict=True
-            )
+            for actual_value, expected_value in zip(quaternion, expected_quaternion, strict=True)
         )
-        return (
-            all(
-                abs(position[index] - expected.position_mm[index]) <= 1e-9
-                for index in range(3)
-            )
-            and (same or negated)
-        )
+        return all(
+            abs(position[index] - expected.position_mm[index]) <= 1e-9 for index in range(3)
+        ) and (same or negated)
     except Exception:
         return False
 
@@ -678,6 +683,9 @@ def apply_part_datum_plan(
         if document.getObject(object_name) is not None or bool(document.HasPendingTransaction):
             _fail(PartDatumRuleErrorCode.PRECONDITION_FAILED, "/document")
         before_objects = tuple(document.Objects)
+        body_tips = tuple(
+            (item, item.Tip) for item in before_objects if item.TypeId == "PartDesign::Body"
+        )
     except PartDatumRuleError:
         raise
     except Exception:
@@ -697,7 +705,9 @@ def apply_part_datum_plan(
         )
         document.recompute()
         after_objects = tuple(document.Objects)
-        if not _same_identity_sequence(after_objects[: len(before_objects)], before_objects):
+        if not _same_identity_sequence(
+            after_objects[: len(before_objects)], before_objects
+        ) or not _same_body_tips(after_objects, body_tips):
             _fail(PartDatumRuleErrorCode.CONFORMANCE_FAILED, "/result/ownership")
         owned = after_objects[len(before_objects) :]
         try:
