@@ -103,10 +103,16 @@ from vibecad.intent_bridge.freecad_part_core_adapter import (
     build_part_core_adapter,
 )
 from vibecad.intent_bridge.parametric_feature_graph_codec import (
+    PARAMETRIC_FEATURE_GRAPH_V2_MEDIA_TYPE,
+    PARAMETRIC_FEATURE_GRAPH_V2_SCHEMA_TERM,
     PFG_SELECTOR_FEATURE_NODE,
     ParametricFeatureGraphV2Codec,
 )
-from vibecad.intent_bridge.ports import TrustedCodecRegistry
+from vibecad.intent_bridge.ports import (
+    GraphCodec,
+    GraphCodecDescriptor,
+    TrustedCodecRegistry,
+)
 from vibecad.intent_bridge.reviewed_family_engine import (
     ExactReviewedFamilyAdapter,
     FamilyBatchManifest,
@@ -119,7 +125,7 @@ from vibecad.intent_bridge.trusted_proof_policy import (
     TrustedRuleEvaluatorDescriptor,
     TrustedRulePolicy,
 )
-from vibecad.parametric.feature_graph_v2 import SemanticTermRefV2
+from vibecad.parametric.feature_graph_v2 import ParametricFeatureGraphV2, SemanticTermRefV2
 from vibecad.parametric.freecad_part_core_rules import (
     PartCoreBackendPlan,
     PartCoreExecutionBindings,
@@ -129,6 +135,7 @@ from vibecad.parametric.freecad_part_core_rules import (
 from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 
 _ROUTE_CONTRACT_DOMAIN = b"vibecad-reviewed-product-route-v1\0"
+_INTENT_BINDING_CONTRACT_DOMAIN = b"vibecad-reviewed-intent-document-binding-v1\0"
 _PROOF_TERM_DOMAIN = b"vibecad-reviewed-product-proof-term-v1\0"
 _PROOF_EVALUATOR_DOMAIN = b"vibecad-reviewed-product-proof-evaluator-v1\0"
 
@@ -516,6 +523,368 @@ class _ReviewedDynamicOwnershipResolverDescriptor:
         )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ReviewedIntentDocumentSelection:
+    """Canonical document and exact semantic subject selected by one binding."""
+
+    payload: bytes = field(repr=False, compare=False)
+    document_id: str
+    document_digest: str
+    selector_kind_term: BridgeTermRef
+    selector_id: str
+    subject_type_term: BridgeTermRef
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.payload) is not bytes
+            or not self.payload
+            or type(self.document_id) is not str
+            or not self.document_id
+            or type(self.document_digest) is not str
+            or len(self.document_digest) != 64
+            or any(character not in "0123456789abcdef" for character in self.document_digest)
+            or type(self.selector_kind_term) is not BridgeTermRef
+            or type(self.selector_id) is not str
+            or not self.selector_id
+            or type(self.subject_type_term) is not BridgeTermRef
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+
+_IntentCodecFactory = Callable[[], GraphCodec]
+_IntentSubjectTypeSelector = Callable[[ReviewedOperationSpec], BridgeTermRef]
+_IntentDocumentSelector = Callable[
+    [ReviewedIntentProgramV1, ReviewedOperationSpec],
+    _ReviewedIntentDocumentSelection,
+]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ReviewedIntentDocumentBinding:
+    """Static family-owned codec, document, and subject-selection authority."""
+
+    binding_id: str
+    binding_version: str
+    binding_contract_sha256: str
+    codec_descriptor: GraphCodecDescriptor
+    schema_term: BridgeTermRef
+    media_type: str
+    selector_kind_terms: tuple[BridgeTermRef, ...]
+    root_subject_type_term: BridgeTermRef
+    additional_terms: tuple[BridgeTermRef, ...] = ()
+    codec_factory: _IntentCodecFactory = field(repr=False, compare=False)
+    select_subject_type: _IntentSubjectTypeSelector = field(repr=False, compare=False)
+    select_document: _IntentDocumentSelector = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        identifiers = (self.binding_id, self.binding_version)
+        terms = (
+            self.schema_term,
+            *self.selector_kind_terms,
+            self.root_subject_type_term,
+            *self.additional_terms,
+        )
+        if (
+            any(
+                type(item) is not str
+                or not 1 <= len(item) <= 128
+                or not item[0].isalnum()
+                or any(
+                    not (character.isascii() and (character.isalnum() or character in "._:-"))
+                    for character in item
+                )
+                for item in identifiers
+            )
+            or type(self.binding_contract_sha256) is not str
+            or len(self.binding_contract_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.binding_contract_sha256
+            )
+            or type(self.codec_descriptor) is not GraphCodecDescriptor
+            or type(self.schema_term) is not BridgeTermRef
+            or self.codec_descriptor.schema_term != self.schema_term
+            or type(self.media_type) is not str
+            or not self.media_type
+            or type(self.selector_kind_terms) is not tuple
+            or not self.selector_kind_terms
+            or type(self.root_subject_type_term) is not BridgeTermRef
+            or type(self.additional_terms) is not tuple
+            or any(type(item) is not BridgeTermRef for item in terms)
+            or len({item.term_ref_id for item in terms}) != len(terms)
+            or len({item.semantic_identity[:3] for item in terms}) != len(terms)
+            or not callable(self.codec_factory)
+            or not callable(self.select_subject_type)
+            or not callable(self.select_document)
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        self.build_codec()
+
+    def build_codec(self) -> GraphCodec:
+        try:
+            codec = self.codec_factory()
+            descriptor = codec.descriptor
+        except (Exception, SystemExit):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if not isinstance(codec, GraphCodec) or descriptor != self.codec_descriptor:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return codec
+
+    def subject_type_for(self, operation: ReviewedOperationSpec) -> BridgeTermRef:
+        if type(operation) is not ReviewedOperationSpec:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        try:
+            subject_type = self.select_subject_type(operation)
+        except ReviewedIntentExecutionError:
+            raise
+        except (Exception, SystemExit):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if type(subject_type) is not BridgeTermRef:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return subject_type
+
+    def materialize(
+        self,
+        value: ReviewedIntentProgramV1,
+        operation: ReviewedOperationSpec,
+    ) -> _ReviewedIntentDocumentSelection:
+        if (
+            type(value) is not ReviewedIntentProgramV1
+            or type(operation) is not ReviewedOperationSpec
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INVALID_INPUT)
+        try:
+            selected = self.select_document(value, operation)
+        except ReviewedIntentExecutionError:
+            raise
+        except (Exception, SystemExit):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if (
+            type(selected) is not _ReviewedIntentDocumentSelection
+            or selected.selector_kind_term not in self.selector_kind_terms
+            or selected.subject_type_term != self.subject_type_for(operation)
+            or not hmac.compare_digest(selected.document_digest, value.intent_graph_sha256)
+            or not hmac.compare_digest(
+                hashlib.sha256(selected.payload).hexdigest(),
+                value.intent_content_sha256,
+            )
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return selected
+
+    def terms_for(
+        self,
+        operation: ReviewedOperationSpec,
+        selector_kind_term: BridgeTermRef,
+    ) -> tuple[BridgeTermRef, ...]:
+        subject_type = self.subject_type_for(operation)
+        if selector_kind_term not in self.selector_kind_terms:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return _unique_terms(
+            (
+                self.schema_term,
+                selector_kind_term,
+                self.root_subject_type_term,
+                subject_type,
+                *self.additional_terms,
+            )
+        )
+
+
+def _unique_terms(terms: tuple[BridgeTermRef, ...]) -> tuple[BridgeTermRef, ...]:
+    by_id: dict[str, BridgeTermRef] = {}
+    identities: dict[tuple[str, str, str], BridgeTermRef] = {}
+    for term in terms:
+        if type(term) is not BridgeTermRef:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        existing_id = by_id.get(term.term_ref_id)
+        existing_identity = identities.get(term.semantic_identity[:3])
+        if (existing_id is not None and existing_id != term) or (
+            existing_identity is not None and existing_identity != term
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        by_id[term.term_ref_id] = term
+        identities[term.semantic_identity[:3]] = term
+    return tuple(by_id.values())
+
+
+def _intent_binding_digest(
+    *,
+    strategy_id: str,
+    codec_descriptor: GraphCodecDescriptor,
+    media_type: str,
+    selector_terms: tuple[BridgeTermRef, ...],
+    root_subject_type: BridgeTermRef,
+    additional_terms: tuple[BridgeTermRef, ...] = (),
+) -> str:
+    body = (
+        strategy_id,
+        codec_descriptor.codec_id,
+        codec_descriptor.codec_version,
+        codec_descriptor.codec_contract_sha256,
+        *codec_descriptor.schema_term.semantic_identity,
+        media_type,
+        *("|".join((term.term_ref_id, *term.semantic_identity)) for term in selector_terms),
+        "root|" + "|".join((root_subject_type.term_ref_id, *root_subject_type.semantic_identity)),
+        *(
+            "extra|" + "|".join((term.term_ref_id, *term.semantic_identity))
+            for term in additional_terms
+        ),
+    )
+    return hashlib.sha256(
+        _INTENT_BINDING_CONTRACT_DOMAIN + "\0".join(body).encode("utf-8")
+    ).hexdigest()
+
+
+def _pfg_intent_binding(subject_type_term: BridgeTermRef) -> _ReviewedIntentDocumentBinding:
+    if type(subject_type_term) is not BridgeTermRef:
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    codec_descriptor = ParametricFeatureGraphV2Codec().descriptor
+    strategy_id = "pfg-v2-single-result-feature-node-v1"
+
+    def subject_type_for(_operation: ReviewedOperationSpec) -> BridgeTermRef:
+        return subject_type_term
+
+    def select_document(
+        value: ReviewedIntentProgramV1,
+        _operation: ReviewedOperationSpec,
+    ) -> _ReviewedIntentDocumentSelection:
+        graph = value.intent_graph
+        if type(graph) is not ParametricFeatureGraphV2 or len(graph.graph_results) != 1:
+            _fail(ReviewedIntentExecutionErrorCode.INVALID_INPUT)
+        node_id = graph.graph_results[0].node_id
+        node = next((item for item in graph.nodes if item.node_id == node_id), None)
+        term = (
+            None
+            if node is None
+            else next(
+                (
+                    item
+                    for item in graph.terms
+                    if item.term_ref_id == node.intent.structural_kind_term_ref_id
+                ),
+                None,
+            )
+        )
+        if term is None or _bridge_term(term) != subject_type_term:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return _ReviewedIntentDocumentSelection(
+            payload=graph.canonical_bytes,
+            document_id=graph.graph_id,
+            document_digest=graph.graph_sha256,
+            selector_kind_term=PFG_SELECTOR_FEATURE_NODE,
+            selector_id=node_id,
+            subject_type_term=subject_type_term,
+        )
+
+    return _ReviewedIntentDocumentBinding(
+        binding_id="reviewed_pfg_v2_feature_node",
+        binding_version="1.0.0",
+        binding_contract_sha256=_intent_binding_digest(
+            strategy_id=strategy_id,
+            codec_descriptor=codec_descriptor,
+            media_type=PARAMETRIC_FEATURE_GRAPH_V2_MEDIA_TYPE,
+            selector_terms=(PFG_SELECTOR_FEATURE_NODE,),
+            root_subject_type=subject_type_term,
+        ),
+        codec_descriptor=codec_descriptor,
+        schema_term=PARAMETRIC_FEATURE_GRAPH_V2_SCHEMA_TERM,
+        media_type=PARAMETRIC_FEATURE_GRAPH_V2_MEDIA_TYPE,
+        selector_kind_terms=(PFG_SELECTOR_FEATURE_NODE,),
+        root_subject_type_term=subject_type_term,
+        codec_factory=ParametricFeatureGraphV2Codec,
+        select_subject_type=subject_type_for,
+        select_document=select_document,
+    )
+
+
+def _sketch_intent_binding() -> _ReviewedIntentDocumentBinding:
+    """Build the unregistered Sketch graph binding used by reviewed family plugins."""
+
+    from vibecad.intent_bridge.sketch_intent_graph_codec import (  # noqa: PLC0415
+        SKETCH_CONSTRAINT_SELECTOR_TERM,
+        SKETCH_GEOMETRY_SELECTOR_TERM,
+        SKETCH_INTENT_GRAPH_MEDIA_TYPE,
+        SKETCH_INTENT_GRAPH_SCHEMA_TERM,
+        SKETCH_ROOT_SEMANTIC_TYPE_TERM,
+        SketchIntentGraphCodec,
+    )
+    from vibecad.sketch.contracts import (  # noqa: PLC0415
+        SketchConstraintNode,
+        SketchGeometryNode,
+        SketchIntentGraph,
+        encode_sketch_intent_graph,
+    )
+
+    codec_descriptor = SketchIntentGraphCodec().descriptor
+    selector_terms = (SKETCH_GEOMETRY_SELECTOR_TERM, SKETCH_CONSTRAINT_SELECTOR_TERM)
+    strategy_id = "sketch-v1-operation-node-v1"
+
+    def subject_type_for(operation: ReviewedOperationSpec) -> BridgeTermRef:
+        return operation.semantic_term
+
+    def select_document(
+        value: ReviewedIntentProgramV1,
+        operation: ReviewedOperationSpec,
+    ) -> _ReviewedIntentDocumentSelection:
+        graph = value.intent_graph
+        if type(graph) is not SketchIntentGraph:
+            _fail(ReviewedIntentExecutionErrorCode.INVALID_INPUT)
+        term_by_id = {
+            item.term_ref_id: BridgeTermRef(**item.to_mapping()) for item in graph.terms
+        }
+        matching_geometry = tuple(
+            item
+            for item in graph.geometries
+            if term_by_id.get(item.geometry_term_ref_id) == operation.semantic_term
+        )
+        matching_constraint = tuple(
+            item
+            for item in graph.constraints
+            if term_by_id.get(item.constraint_term_ref_id) == operation.semantic_term
+        )
+        matching = (*matching_geometry, *matching_constraint)
+        if len(matching) != 1:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        selected = matching[0]
+        if type(selected) is SketchGeometryNode:
+            selector_kind = SKETCH_GEOMETRY_SELECTOR_TERM
+            selector_id = selected.geometry_id
+        elif type(selected) is SketchConstraintNode:
+            selector_kind = SKETCH_CONSTRAINT_SELECTOR_TERM
+            selector_id = selected.constraint_id
+        else:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return _ReviewedIntentDocumentSelection(
+            payload=encode_sketch_intent_graph(graph),
+            document_id=graph.graph_id,
+            document_digest=graph.graph_sha256,
+            selector_kind_term=selector_kind,
+            selector_id=selector_id,
+            subject_type_term=operation.semantic_term,
+        )
+
+    return _ReviewedIntentDocumentBinding(
+        binding_id="reviewed_sketch_v1_operation_node",
+        binding_version="1.0.0",
+        binding_contract_sha256=_intent_binding_digest(
+            strategy_id=strategy_id,
+            codec_descriptor=codec_descriptor,
+            media_type=SKETCH_INTENT_GRAPH_MEDIA_TYPE,
+            selector_terms=selector_terms,
+            root_subject_type=SKETCH_ROOT_SEMANTIC_TYPE_TERM,
+        ),
+        codec_descriptor=codec_descriptor,
+        schema_term=SKETCH_INTENT_GRAPH_SCHEMA_TERM,
+        media_type=SKETCH_INTENT_GRAPH_MEDIA_TYPE,
+        selector_kind_terms=selector_terms,
+        root_subject_type_term=SKETCH_ROOT_SEMANTIC_TYPE_TERM,
+        codec_factory=SketchIntentGraphCodec,
+        select_subject_type=subject_type_for,
+        select_document=select_document,
+    )
+
+
 _AdapterFactory = Callable[[PlanSink], ExactReviewedFamilyAdapter]
 _PlanValidator = Callable[[object, ReviewedPlanReceipt, ReviewedOperationSpec], None]
 _NativeExecutor = Callable[
@@ -554,6 +923,11 @@ class _ReviewedIntentFamilyDescriptor:
     validate_plan: _PlanValidator = field(repr=False, compare=False)
     execute_plan: _NativeExecutor = field(repr=False, compare=False)
     product_results: tuple[_ReviewedProductResultContract, ...]
+    intent_binding: _ReviewedIntentDocumentBinding | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     minimum_sources: int = 0
     maximum_sources: int = 0
     formal_semantic_binding: _ReviewedFormalSemanticBinding = (
@@ -576,9 +950,24 @@ class _ReviewedIntentFamilyDescriptor:
     )
 
     def __post_init__(self) -> None:
+        binding = self.intent_binding
+        if binding is None and type(self.subject_type_term) is BridgeTermRef:
+            binding = _pfg_intent_binding(self.subject_type_term)
+            object.__setattr__(self, "intent_binding", binding)
         if (
             type(self.manifest) is not FamilyBatchManifest
             or type(self.subject_type_term) is not BridgeTermRef
+            or type(binding) is not _ReviewedIntentDocumentBinding
+            or binding.root_subject_type_term != self.subject_type_term
+            or binding.schema_term != self.manifest.intent_schema_term
+            or binding.media_type != self.manifest.intent_media_type
+            or any(
+                not any(
+                    term == binding.subject_type_for(operation)
+                    for term in self.manifest.request_terms
+                )
+                for operation in self.manifest.operations
+            )
             or not callable(self.adapter_factory)
             or not callable(self.validate_plan)
             or not callable(self.execute_plan)
@@ -593,7 +982,6 @@ class _ReviewedIntentFamilyDescriptor:
                 )
                 for item in self.product_results
             )
-            or not any(term == self.subject_type_term for term in self.manifest.request_terms)
             or type(self.minimum_sources) is not int
             or type(self.maximum_sources) is not int
             or not 0 <= self.minimum_sources <= self.maximum_sources <= 8
@@ -1255,7 +1643,9 @@ class ReviewedIntentRoute:
             or type(self.operation) is not ReviewedOperationSpec
             or type(self.subject_type_term) is not BridgeTermRef
             or self.manifest != self.family.manifest
-            or self.subject_type_term != self.family.subject_type_term
+            or self.family.intent_binding is None
+            or self.subject_type_term
+            != self.family.intent_binding.subject_type_for(self.operation)
             or self.operation not in self.manifest.operations
             or self.operation_id != f"{self.manifest.family_id}.{self.operation.operation_id}"
         ):
@@ -1304,6 +1694,9 @@ class ReviewedIntentRoute:
                 self.manifest_semantic_operation,
                 self.family.formal_semantic_binding.value,
                 self.family.product_execution_mode(self.operation).value,
+                self.family.intent_binding.binding_id,
+                self.family.intent_binding.binding_version,
+                self.family.intent_binding.binding_contract_sha256,
                 self.manifest.manifest_sha256,
                 self.manifest.adapter.adapter_id,
                 self.manifest.adapter.adapter_version,
@@ -1370,7 +1763,7 @@ def _routes_for_family(
             family=family,
             manifest=family.manifest,
             operation=operation,
-            subject_type_term=family.subject_type_term,
+            subject_type_term=family.intent_binding.subject_type_for(operation),
         )
         for operation in operations
     )
@@ -1507,13 +1900,25 @@ _CONCLUSION_ROLE_TERM: Final = _proof_term(
 class _ReviewedProductEvaluator:
     __slots__ = ("_descriptor", "_subject")
 
-    def __init__(self, route: ReviewedIntentRoute, subject: SubjectRef) -> None:
-        if type(route) is not ReviewedIntentRoute or type(subject) is not SubjectRef:
+    def __init__(
+        self,
+        route: ReviewedIntentRoute,
+        subject: SubjectRef,
+        selector_kind_term: BridgeTermRef,
+    ) -> None:
+        if (
+            type(route) is not ReviewedIntentRoute
+            or type(subject) is not SubjectRef
+            or type(selector_kind_term) is not BridgeTermRef
+            or route.family.intent_binding is None
+            or selector_kind_term not in route.family.intent_binding.selector_kind_terms
+            or subject.selector_kind_term_ref_id != selector_kind_term.term_ref_id
+        ):
             _fail(ReviewedIntentExecutionErrorCode.INVALID_INPUT)
 
         def signature(role: BridgeTermRef) -> RuleEndpointSignature:
             return RuleEndpointSignature(
-                selector_kind_term=PFG_SELECTOR_FEATURE_NODE,
+                selector_kind_term=selector_kind_term,
                 role_term=role,
                 subject_type_term=route.subject_type_term,
             )
@@ -1627,43 +2032,45 @@ class LoweredReviewedIntent:
 
 
 def lower_reviewed_intent(value: object) -> LoweredReviewedIntent:
-    """Lower one exact PFG through the existing Reviewed adapter and proof gate."""
+    """Lower one exact family-bound intent through its Reviewed proof gate."""
 
     if type(value) is not ReviewedIntentProgramV1:
         _fail(ReviewedIntentExecutionErrorCode.INVALID_INPUT)
     route = route_reviewed_intent(value)
-    graph = value.intent_graph
-    if len(graph.graph_results) != 1:
-        _fail(ReviewedIntentExecutionErrorCode.INVALID_INPUT)
+    binding = route.family.intent_binding
+    if type(binding) is not _ReviewedIntentDocumentBinding:
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    selected = binding.materialize(value, route.operation)
     subject = SubjectRef(
         artifact_id=f"artifact_reviewed_intent_{value.intent_content_sha256[:32]}",
-        selector_kind_term_ref_id=PFG_SELECTOR_FEATURE_NODE.term_ref_id,
-        selector_id=graph.graph_results[0].node_id,
+        selector_kind_term_ref_id=selected.selector_kind_term.term_ref_id,
+        selector_id=selected.selector_id,
     )
-    evaluator = _ReviewedProductEvaluator(route, subject)
+    evaluator = _ReviewedProductEvaluator(route, subject, selected.selector_kind_term)
     policy = TrustedRulePolicy(evaluators=(evaluator,))
-    intent_payload = graph.canonical_bytes
+    intent_payload = selected.payload
     intent_document = DocumentRef(
         artifact_id=subject.artifact_id,
         role_term_ref_id=route.manifest.intent_role_term.term_ref_id,
-        schema_term_ref_id=route.manifest.intent_schema_term.term_ref_id,
-        document_id=graph.graph_id,
-        document_digest=graph.graph_sha256,
+        schema_term_ref_id=binding.schema_term.term_ref_id,
+        document_id=selected.document_id,
+        document_digest=selected.document_digest,
         content_sha256=hashlib.sha256(intent_payload).hexdigest(),
         size_bytes=len(intent_payload),
-        media_type=route.manifest.intent_media_type,
+        media_type=binding.media_type,
     )
     capability_document, capability_payload = route.manifest.capability_document()
+    binding_terms = binding.terms_for(route.operation, selected.selector_kind_term)
     proof = ProofBundle(
-        terms=(
-            _RULE_TERM,
-            _PREDICATE_TERM,
-            _PREMISE_ROLE_TERM,
-            _CONCLUSION_ROLE_TERM,
-            route.subject_type_term,
-            route.manifest.intent_role_term,
-            route.manifest.intent_schema_term,
-            PFG_SELECTOR_FEATURE_NODE,
+        terms=_unique_terms(
+            (
+                _RULE_TERM,
+                _PREDICATE_TERM,
+                _PREMISE_ROLE_TERM,
+                _CONCLUSION_ROLE_TERM,
+                route.manifest.intent_role_term,
+                *binding_terms,
+            )
         ),
         documents=(intent_document,),
         assertions=(
@@ -1699,12 +2106,15 @@ def lower_reviewed_intent(value: object) -> LoweredReviewedIntent:
     )
     request = BackendLoweringRequest(
         adapter=route.manifest.adapter,
-        terms=(
-            *route.manifest.request_terms,
-            _RULE_TERM,
-            _PREDICATE_TERM,
-            _PREMISE_ROLE_TERM,
-            _CONCLUSION_ROLE_TERM,
+        terms=_unique_terms(
+            (
+                *route.manifest.request_terms,
+                *binding_terms,
+                _RULE_TERM,
+                _PREDICATE_TERM,
+                _PREMISE_ROLE_TERM,
+                _CONCLUSION_ROLE_TERM,
+            )
         ),
         documents=(intent_document, capability_document),
         intent_artifact_ids=(intent_document.artifact_id,),
@@ -1729,7 +2139,7 @@ def lower_reviewed_intent(value: object) -> LoweredReviewedIntent:
         result, receipt = adapter.lower_with_receipt(
             request,
             artifacts=reader,
-            codecs=TrustedCodecRegistry((ParametricFeatureGraphV2Codec(),)),
+            codecs=TrustedCodecRegistry((binding.build_codec(),)),
             proof_policy=policy,
         )
         plan, payload = adapter.read_plan(receipt)

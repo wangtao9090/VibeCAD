@@ -1,6 +1,6 @@
 """Closed ModelProgram payload for one Reviewed semantic intent.
 
-The payload carries a backend-neutral Parametric Feature Graph plus the exact
+The payload carries one closed backend-neutral intent graph plus the exact
 public semantic identity selected by the planner.  It deliberately carries no
 FreeCAD ``TypeId``, property name, callable, import path, proof authority, or
 native execution selector.  A trusted product router must independently bind
@@ -19,8 +19,15 @@ from enum import StrEnum
 from typing import Self
 
 from vibecad.parametric.feature_graph_v2 import (
+    PARAMETRIC_FEATURE_GRAPH_SCHEMA_VERSION,
     ParametricFeatureGraphError,
     ParametricFeatureGraphV2,
+)
+from vibecad.sketch.contracts import (
+    SKETCH_INTENT_SCHEMA_VERSION,
+    SketchIntentError,
+    SketchIntentGraph,
+    encode_sketch_intent_graph,
 )
 
 REVIEWED_INTENT_PROGRAM_SCHEMA_VERSION = 1
@@ -32,6 +39,8 @@ _OPERATION_ID = re.compile(r"^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)+$")
 _LEGACY_SEMANTIC_OPERATION = re.compile(r"^operation\.[a-z0-9]+(?:[.-][a-z0-9]+)*$")
 _MAX_OPERATION_ID_BYTES = 256
 _MAX_SEMANTIC_OPERATION_BYTES = 512
+
+ReviewedIntentGraph = ParametricFeatureGraphV2 | SketchIntentGraph
 
 
 class ReviewedIntentProgramErrorCode(StrEnum):
@@ -165,7 +174,7 @@ def _exact_mapping(value: object) -> dict[str, object]:
 
 
 def _plain_json(value: object, *, depth: int = 0) -> object:
-    """Thaw ModelProgram's immutable JSON representation for PFG decoding."""
+    """Thaw ModelProgram's immutable JSON representation for graph decoding."""
 
     if depth > 64:
         _fail(ReviewedIntentProgramErrorCode.BUDGET_EXCEEDED, "/intent_graph")
@@ -186,6 +195,55 @@ def _plain_json(value: object, *, depth: int = 0) -> object:
     _fail(ReviewedIntentProgramErrorCode.INVALID_INPUT, "/intent_graph")
 
 
+def _validated_graph(value: object) -> ReviewedIntentGraph:
+    try:
+        if type(value) is ParametricFeatureGraphV2:
+            return ParametricFeatureGraphV2.from_mapping(value.to_mapping())
+        if type(value) is SketchIntentGraph:
+            return SketchIntentGraph.from_mapping(value.to_mapping())
+    except (
+        ParametricFeatureGraphError,
+        SketchIntentError,
+        AttributeError,
+        TypeError,
+        ValueError,
+    ):
+        pass
+    _fail(ReviewedIntentProgramErrorCode.INVALID_INPUT, "/intent_graph")
+
+
+def _decode_graph_mapping(value: object) -> ReviewedIntentGraph:
+    graph_mapping = _plain_json(value)
+    _canonical(graph_mapping)
+    if not isinstance(graph_mapping, Mapping):
+        _fail(ReviewedIntentProgramErrorCode.INVALID_INPUT, "/intent_graph")
+    try:
+        schema_version = graph_mapping["schema_version"]
+    except Exception:
+        _fail(ReviewedIntentProgramErrorCode.INVALID_INPUT, "/intent_graph/schema_version")
+    if type(schema_version) is not int:
+        _fail(ReviewedIntentProgramErrorCode.INVALID_INPUT, "/intent_graph/schema_version")
+    try:
+        if schema_version == PARAMETRIC_FEATURE_GRAPH_SCHEMA_VERSION:
+            return ParametricFeatureGraphV2.from_mapping(graph_mapping)
+        if schema_version == SKETCH_INTENT_SCHEMA_VERSION:
+            return SketchIntentGraph.from_mapping(graph_mapping)
+    except (ParametricFeatureGraphError, SketchIntentError, TypeError, ValueError):
+        _fail(ReviewedIntentProgramErrorCode.INVALID_INPUT, "/intent_graph")
+    _fail(ReviewedIntentProgramErrorCode.UNSUPPORTED_VERSION, "/intent_graph/schema_version")
+
+
+def _graph_payload(value: ReviewedIntentGraph) -> bytes:
+    if type(value) is ParametricFeatureGraphV2:
+        return value.canonical_bytes
+    if type(value) is SketchIntentGraph:
+        try:
+            return encode_sketch_intent_graph(value)
+        except SketchIntentError:
+            _fail(ReviewedIntentProgramErrorCode.INVALID_INPUT, "/intent_graph")
+    _fail(ReviewedIntentProgramErrorCode.INVALID_INPUT, "/intent_graph")
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReviewedIntentProgramV1:
     """One exact Reviewed semantic request carried by a ModelProgram command."""
@@ -194,7 +252,7 @@ class ReviewedIntentProgramV1:
     semantic_operation: str
     intent_graph_sha256: str
     intent_content_sha256: str
-    intent_graph: ParametricFeatureGraphV2
+    intent_graph: ReviewedIntentGraph
     schema_version: int = REVIEWED_INTENT_PROGRAM_SCHEMA_VERSION
     program_sha256: str = field(init=False)
     canonical_bytes: bytes = field(init=False, repr=False, compare=False)
@@ -221,16 +279,11 @@ class ReviewedIntentProgramV1:
             "intent_content_sha256",
             _digest(self.intent_content_sha256, "/intent_content_sha256"),
         )
-        if type(self.intent_graph) is not ParametricFeatureGraphV2:
-            _fail(ReviewedIntentProgramErrorCode.INVALID_INPUT, "/intent_graph")
-        try:
-            graph = ParametricFeatureGraphV2.from_mapping(self.intent_graph.to_mapping())
-        except (ParametricFeatureGraphError, AttributeError, TypeError, ValueError):
-            _fail(ReviewedIntentProgramErrorCode.INVALID_INPUT, "/intent_graph")
+        graph = _validated_graph(self.intent_graph)
         if not hmac.compare_digest(
             graph.graph_sha256, self.intent_graph_sha256
         ) or not hmac.compare_digest(
-            hashlib.sha256(graph.canonical_bytes).hexdigest(),
+            hashlib.sha256(_graph_payload(graph)).hexdigest(),
             self.intent_content_sha256,
         ):
             _fail(ReviewedIntentProgramErrorCode.INTEGRITY_FAILURE, "/intent_graph")
@@ -256,12 +309,7 @@ class ReviewedIntentProgramV1:
     @classmethod
     def from_mapping(cls, value: object) -> Self:
         item = _exact_mapping(value)
-        try:
-            graph_mapping = _plain_json(item["intent_graph"])
-            _canonical(graph_mapping)
-            graph = ParametricFeatureGraphV2.from_mapping(graph_mapping)
-        except (ParametricFeatureGraphError, TypeError, ValueError):
-            _fail(ReviewedIntentProgramErrorCode.INVALID_INPUT, "/intent_graph")
+        graph = _decode_graph_mapping(item["intent_graph"])
         return cls(
             schema_version=item["schema_version"],
             operation_id=item["operation_id"],
@@ -277,5 +325,6 @@ __all__ = [
     "REVIEWED_INTENT_PROGRAM_SCHEMA_VERSION",
     "ReviewedIntentProgramError",
     "ReviewedIntentProgramErrorCode",
+    "ReviewedIntentGraph",
     "ReviewedIntentProgramV1",
 ]
