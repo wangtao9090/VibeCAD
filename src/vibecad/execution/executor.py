@@ -2650,7 +2650,11 @@ def _managed_apply_reviewed_intent(
     resolved_source_identities: tuple[EntityIdentity, ...] = ()
     try:
         route = _route_reviewed_intent(checked)
-        execution_mode = route.family.product_execution_mode(route.operation)
+        source_values = _normalize_reviewed_source_ids(sources, source_a, source_b)
+        execution_mode = route.family.product_execution_mode(
+            route.operation,
+            source_count=len(source_values),
+        )
         artifact_kwargs: dict[str, object] = {}
         if route.family.artifact_requirement_for(route.operation) is not None:
             if (
@@ -2660,9 +2664,8 @@ def _managed_apply_reviewed_intent(
                 raise ValueError
             artifact_kwargs = {
                 "_reviewed_artifact_resolver": artifact_resolver,
-                "_reviewed_run_token": artifact_run_token,
+                "_reviewed_artifact_run_token": artifact_run_token,
             }
-        source_values = _normalize_reviewed_source_ids(sources, source_a, source_b)
         if not route.family.minimum_sources <= len(source_values) <= route.family.maximum_sources:
             raise ValueError
         if (
@@ -2690,8 +2693,6 @@ def _managed_apply_reviewed_intent(
                 execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY
                 or route.family.requires_same_run_sources
             ):
-                if "_reviewed_run_token" in artifact_kwargs:
-                    raise ValueError
                 execution_kwargs["_reviewed_run_token"] = reviewed_products.execution_token
             execution_kwargs.update(artifact_kwargs)
             executed = execution_leaf(

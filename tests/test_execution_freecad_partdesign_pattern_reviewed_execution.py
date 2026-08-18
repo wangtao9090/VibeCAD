@@ -128,8 +128,8 @@ def test_pattern_family_has_three_exact_routes_and_ordered_source_roles() -> Non
     family = routes[0].family
 
     assert family.manifest is PARTDESIGN_PATTERN_MANIFEST
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 81
-    assert CURRENT_REVIEWED_INTENT_ROUTES[-26:-23] == routes
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 82
+    assert CURRENT_REVIEWED_INTENT_ROUTES[-27:-24] == routes
     assert len(routes) == len(PARTDESIGN_PATTERN_REVIEWED_PRODUCT_IDENTITIES) == 3
     assert PARTDESIGN_PATTERN_REVIEWED_OPERATIONS == tuple(PartDesignPatternOperation)
     assert PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC.minimum_sources == 2

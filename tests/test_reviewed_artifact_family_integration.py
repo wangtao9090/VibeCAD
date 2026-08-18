@@ -1,4 +1,4 @@
-"""Focused integration for registered Import and withheld Image artifacts."""
+"""Focused integration for registered Import and ImagePlane artifacts."""
 
 from __future__ import annotations
 
@@ -14,6 +14,9 @@ import vibecad.execution.freecad_imageplane_reviewed_execution as image_product
 import vibecad.execution.freecad_reviewed_intent_execution as shared
 from tests import test_execution_freecad_imageplane_reviewed_execution as image_fakes
 from tests import test_execution_freecad_part_file_import_reviewed_execution as import_fakes
+from tests.test_intent_bridge_freecad_imageplane_adapter import (
+    _configuration as image_configuration,
+)
 from tests.test_intent_bridge_freecad_imageplane_adapter import (
     _graph as image_graph,
 )
@@ -52,6 +55,12 @@ from vibecad.execution.freecad_reviewed_artifact_inputs import (
     ReviewedArtifactCatalogRecord,
     ReviewedArtifactCatalogSnapshot,
     _ReviewedArtifactRunResolver,
+)
+from vibecad.execution.selectors import (
+    EntityIdentity,
+    Provenance,
+    ProvenanceSource,
+    SemanticRole,
 )
 from vibecad.intent_bridge.freecad_imageplane_adapter import (
     IMAGEPLANE_OPERATION_SPEC,
@@ -423,10 +432,119 @@ def test_unregistered_image_resolver_failure_is_pre_mutation(
     resolver.close()
 
 
-def test_import_is_registered_image_remains_withheld_and_nonartifact_context_is_none(
+def test_image_update_rollback_restores_exact_prior_alias_object_and_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session, token, resolver, _source, _stagers = _image_case(
+        monkeypatch,
+        tmp_path / "create",
+    )
+    created = shared.execute_reviewed_intent_native(
+        session,
+        reviewed_box_program(),
+        _reviewed_run_token=token,
+        _reviewed_artifact_resolver=resolver,
+    )
+    assert shared._commit_reviewed_native_create(created) is True  # noqa: SLF001
+    created._retain_for_run(token)  # noqa: SLF001
+    feature = created.object
+    identity = EntityIdentity(
+        object_id="object_0123456789abcdef0123456789abcdef",
+        feature_id="feature_0123456789abcdef0123456789abcdef",
+        object_type="Image::ImagePlane",
+        semantic_role=SemanticRole.SUPPORT,
+        provenance=Provenance(
+            source=ProvenanceSource.MODEL,
+            operation_id="create",
+        ),
+    )
+    session.read_object_identity = lambda item: identity if item is feature else None
+    old_image_file = feature.ImageFile
+    old_manifest = image_product.imageplane_rules._workspace_manifest(  # noqa: SLF001
+        Path(session.doc.TransientDir)
+    )
+    resolver.close()
+
+    edit_payload = (
+        Path(__file__).parent / "fixtures" / "guided_photo_v1" / "images" / "washer_outer.png"
+    ).read_bytes()
+    edit_artifact = build_imageplane_artifact_document(
+        edit_payload,
+        media_type="image/png",
+        artifact_id="artifact_imageplane_edit",
+    )
+    request, reader, policy = image_request(
+        image_graph(
+            edit_artifact.content_sha256,
+            artifact_id=edit_artifact.artifact_id,
+            configuration=image_configuration(x_size_mm=140.0),
+        )
+    )
+    adapter = FreeCADImagePlaneAdapter(ImageSink())
+    result, receipt = image_lower(adapter, request, reader, policy)
+    plan, payload = adapter.read_plan(receipt)
+    family = build_imageplane_reviewed_family_descriptor()
+    route = _unregistered_route(family, IMAGEPLANE_OPERATION_SPEC)
+    _install_unregistered(
+        monkeypatch,
+        route,
+        result=result,
+        receipt=receipt,
+        plan=plan,
+        payload=payload,
+    )
+    monkeypatch.setattr(
+        image_product,
+        "apply_imageplane_plan",
+        image_fakes._fake_native_apply(plan, edit_payload),  # noqa: SLF001
+    )
+    edit_resolver, _edit_source, _edit_stagers = _resolver(
+        artifact=edit_artifact,
+        family_id=family.manifest.family_id,
+        operation_id=IMAGEPLANE_OPERATION_SPEC.operation_id,
+        payload=edit_payload,
+        stager=HostOwnedImageStager(_private_root(tmp_path / "edit-staging")),
+        token=token,
+    )
+
+    updated = shared.execute_reviewed_intent_native(
+        session,
+        reviewed_box_program(),
+        source_results=(created,),
+        _reviewed_run_token=token,
+        _reviewed_artifact_resolver=edit_resolver,
+    )
+
+    assert updated.object is feature
+    assert updated.execution_mode.value == "update_primary"
+    assert feature.XSize == 140.0
+    assert feature.ImageFile != old_image_file
+    assert (
+        len(
+            image_product.imageplane_rules._workspace_manifest(  # noqa: SLF001
+                Path(session.doc.TransientDir)
+            )
+        )
+        == len(old_manifest) + 1
+    )
+    assert shared._rollback_reviewed_native_update(updated) is True  # noqa: SLF001
+    assert feature.XSize == 80.0
+    assert feature.ImageFile == old_image_file
+    assert (
+        image_product.imageplane_rules._workspace_manifest(  # noqa: SLF001
+            Path(session.doc.TransientDir)
+        )
+        == old_manifest
+    )
+    created._release_from_run(token)  # noqa: SLF001
+    edit_resolver.close()
+
+
+def test_artifact_families_are_registered_and_nonartifact_context_is_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert len(shared.CURRENT_REVIEWED_INTENT_ROUTES) == 81
+    assert len(shared.CURRENT_REVIEWED_INTENT_ROUTES) == 82
     assert tuple(
         route.operation.operation_id for route in shared.REVIEWED_PART_FILE_IMPORT_ROUTES
     ) == ("brep", "iges", "step")
@@ -436,14 +554,18 @@ def test_import_is_registered_image_remains_withheld_and_nonartifact_context_is_
         and route.family.product_execution_mode(route.operation).value == "create"
         for route in shared.REVIEWED_PART_FILE_IMPORT_ROUTES
     )
-    assert not any(
-        route.manifest.family_id == "freecad_imageplane"
-        for route in shared.CURRENT_REVIEWED_INTENT_ROUTES
-    )
+    assert shared.REVIEWED_IMAGEPLANE_ROUTES == (shared.CURRENT_REVIEWED_INTENT_ROUTES[-1],)
     image_family = build_imageplane_reviewed_family_descriptor()
     assert IMAGEPLANE_OPERATION_SPEC.operation_id == "place_or_edit_image_plane"
-    assert image_family.product_execution_mode(IMAGEPLANE_OPERATION_SPEC).value == "create"
-    assert image_family.minimum_sources == image_family.maximum_sources == 0
+    assert (
+        image_family.product_execution_mode(IMAGEPLANE_OPERATION_SPEC, source_count=0).value
+        == "create"
+    )
+    assert (
+        image_family.product_execution_mode(IMAGEPLANE_OPERATION_SPEC, source_count=1).value
+        == "update_primary"
+    )
+    assert (image_family.minimum_sources, image_family.maximum_sources) == (0, 1)
     base = shared.REVIEWED_PART_BOX_ROUTE.family
     seen: list[object] = []
 

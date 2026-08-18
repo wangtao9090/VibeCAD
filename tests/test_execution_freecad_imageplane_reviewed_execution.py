@@ -143,6 +143,9 @@ class _Document:
     def getObject(self, name: str) -> object | None:
         return next((item for item in self.Objects if getattr(item, "Name", None) == name), None)
 
+    def recompute(self) -> None:
+        return None
+
 
 def _lowered() -> tuple[object, object, ImagePlaneBackendPlan, bytes, object]:
     artifact = build_imageplane_artifact_document(_IMAGE, media_type="image/png")
@@ -185,6 +188,7 @@ def _artifact_context(
 
 def _fake_native_apply(
     plan: ImagePlaneBackendPlan,
+    artifact_payload: bytes = _IMAGE,
 ):
     def apply(
         raw: bytes,
@@ -204,17 +208,31 @@ def _fake_native_apply(
             bindings.artifact_document,
             maximum_bytes=MAX_IMAGEPLANE_ARTIFACT_BYTES,
         )
-        assert payload == _IMAGE
+        assert payload == artifact_payload
         alias = plan.artifact_content_sha256 + ".png"
         retained = Path(bindings.document.TransientDir) / alias
         retained.write_bytes(payload)
         os.chmod(retained, 0o600)
-        feature = _Feature(document=bindings.document, plan=plan, image_file=retained)
-        bindings.document.Objects.append(feature)
+        feature = bindings.document.getObject(imageplane_rules._object_name(plan))  # noqa: SLF001
+        disposition = "updated"
+        configured = _Feature(document=bindings.document, plan=plan, image_file=retained)
+        if feature is None:
+            feature = configured
+            objects = bindings.document.Objects
+            if isinstance(objects, list):
+                objects.append(feature)
+            else:
+                bindings.document.Objects = (*objects, feature)
+            disposition = "created"
+        else:
+            feature.ImageFile = configured.ImageFile
+            feature.XSize = configured.XSize
+            feature.YSize = configured.YSize
+            feature.Placement = configured.Placement
         signature = imageplane_rules._placement_signature(feature.Placement)  # noqa: SLF001
         return ImagePlaneConformanceReceipt(
             plan_sha256=plan.plan_sha256,
-            disposition="created",
+            disposition=disposition,
             object_name=feature.Name,
             binding_sha256=feature.VibeCADImagePlaneKey,
             artifact_id=plan.artifact_id,
@@ -240,8 +258,8 @@ def test_imageplane_family_spec_freezes_exact_reference_create_contract() -> Non
     assert contract.result_kind == "reference"
     assert contract.owned_type_ids == ("Image::ImagePlane",)
     assert contract.semantic_roles == (SemanticRole.SUPPORT,)
-    assert contract.execution_mode == "create"
-    assert contract.minimum_sources == contract.maximum_sources == 0
+    assert contract.execution_modes == ("create", "update_primary")
+    assert (contract.minimum_sources, contract.maximum_sources) == (0, 1)
     assert product.resolve_imageplane_reviewed_operation(*identity) is IMAGEPLANE_OPERATION_SPEC
     assert product.resolve_imageplane_reviewed_operation(identity[0], identity[1] + "x") is None
 

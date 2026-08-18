@@ -42,6 +42,10 @@ from vibecad.execution.freecad_discovery_runtime_v2 import (
     _freecad_version,
     _platform_id,
 )
+from vibecad.execution.freecad_imageplane_reviewed_execution import (
+    IMAGEPLANE_REVIEWED_FAMILY_SPEC,
+    build_imageplane_reviewed_family_descriptor,
+)
 from vibecad.execution.freecad_part_curve_reviewed_execution import (
     PART_CURVE_REVIEWED_FAMILY_SPEC,
 )
@@ -1198,7 +1202,8 @@ class _ReviewedIntentFamilyDescriptor:
                 len(variants) != 1 or variants[0].source_count is not None
             ):
                 _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
-            if len({item.execution_mode for item in variants}) != 1:
+            modes = {item.execution_mode for item in variants}
+            if len(modes) != 1 and any(item.source_count is None for item in variants):
                 _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         resolver = self.dynamic_ownership_resolver
         if not self.product_results and resolver is None:
@@ -1234,8 +1239,11 @@ class _ReviewedIntentFamilyDescriptor:
             }
             if any(
                 operation_id not in operations
-                or self.product_execution_mode(operations[operation_id])
-                is not _ReviewedProductExecutionMode.CREATE
+                or not any(
+                    item.operation_id == operation_id
+                    and item.execution_mode is _ReviewedProductExecutionMode.CREATE
+                    for item in self.product_results
+                )
                 for operation_id in create_recovery.operation_ids
             ):
                 _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
@@ -1265,15 +1273,62 @@ class _ReviewedIntentFamilyDescriptor:
     def create_recovery_for(
         self,
         operation: ReviewedOperationSpec,
+        *,
+        context: _ReviewedFamilyExecutionContext | None = None,
+        source_count: int | None = None,
     ) -> _ReviewedCreateRecoveryDescriptor | None:
-        if type(operation) is not ReviewedOperationSpec:
+        if type(operation) is not ReviewedOperationSpec or (
+            context is not None and source_count is not None
+        ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         descriptor = self.create_recovery
         if descriptor is None or not descriptor.handles(operation):
             return None
-        if self.product_execution_mode(operation) is not _ReviewedProductExecutionMode.CREATE:
-            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if context is None and source_count is None:
+            modes = {
+                item.execution_mode
+                for item in self.product_results
+                if item.operation_id == operation.operation_id
+            }
+            if _ReviewedProductExecutionMode.CREATE not in modes:
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            return descriptor
+        if (
+            self.product_execution_mode(
+                operation,
+                context=context,
+                source_count=source_count,
+            )
+            is not _ReviewedProductExecutionMode.CREATE
+        ):
+            return None
         return descriptor
+
+    def product_execution_contract_fields(
+        self,
+        operation: ReviewedOperationSpec,
+    ) -> tuple[str, ...]:
+        """Return stable route-hash fields without changing legacy route bytes."""
+
+        if type(operation) is not ReviewedOperationSpec:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if self.dynamic_resolver_for(operation) is not None:
+            return (_ReviewedProductExecutionMode.CREATE.value,)
+        variants = tuple(
+            item for item in self.product_results if item.operation_id == operation.operation_id
+        )
+        modes = {item.execution_mode for item in variants}
+        if len(modes) == 1:
+            return (next(iter(modes)).value,)
+        if not variants or any(item.source_count is None for item in variants):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return (
+            "source-count-execution-modes-v1",
+            *tuple(
+                f"{item.source_count}:{item.execution_mode.value}"
+                for item in sorted(variants, key=lambda candidate: candidate.source_count)
+            ),
+        )
 
     def build_adapter(self, sink: PlanSink) -> ExactReviewedFamilyAdapter:
         try:
@@ -1377,18 +1432,32 @@ class _ReviewedIntentFamilyDescriptor:
     def product_execution_mode(
         self,
         operation: ReviewedOperationSpec,
+        *,
+        context: _ReviewedFamilyExecutionContext | None = None,
+        source_count: int | None = None,
     ) -> _ReviewedProductExecutionMode:
-        if type(operation) is not ReviewedOperationSpec:
+        if (
+            type(operation) is not ReviewedOperationSpec
+            or (context is not None and type(context) is not _ReviewedFamilyExecutionContext)
+            or (source_count is not None and type(source_count) is not int)
+            or (context is not None and source_count is not None)
+        ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         if self.dynamic_resolver_for(operation) is not None:
             return _ReviewedProductExecutionMode.CREATE
-        modes = {
-            item.execution_mode
-            for item in self.product_results
-            if item.operation_id == operation.operation_id
-        }
+        matching = tuple(
+            item for item in self.product_results if item.operation_id == operation.operation_id
+        )
+        modes = {item.execution_mode for item in matching}
         if len(modes) != 1:
-            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            if context is not None:
+                source_count = len(context.source_results)
+            if source_count is None:
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            selected = tuple(item for item in matching if item.source_count == source_count)
+            if len(selected) != 1:
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            return selected[0].execution_mode
         return next(iter(modes))
 
     def capture_primary_update(
@@ -1398,7 +1467,7 @@ class _ReviewedIntentFamilyDescriptor:
         context: _ReviewedFamilyExecutionContext,
     ) -> _ReviewedPrimaryUpdateSnapshot:
         if (
-            self.product_execution_mode(operation)
+            self.product_execution_mode(operation, context=context)
             is not _ReviewedProductExecutionMode.UPDATE_PRIMARY
             or type(context) is not _ReviewedFamilyExecutionContext
             or context.document is not document
@@ -1452,7 +1521,7 @@ class _ReviewedIntentFamilyDescriptor:
         context: _ReviewedFamilyExecutionContext,
     ) -> None:
         if (
-            self.product_execution_mode(operation)
+            self.product_execution_mode(operation, context=context)
             is not _ReviewedProductExecutionMode.UPDATE_PRIMARY
             or type(snapshot) is not _ReviewedPrimaryUpdateSnapshot
             or self.rollback_update_state is None
@@ -1900,6 +1969,7 @@ _APP_ONE_SOURCE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
 # therefore covered by the shared document CREATE rollback, while exact
 # artifact authority remains mandatory before the family callback can run.
 _PART_FILE_IMPORT_FAMILY: Final = build_part_file_import_reviewed_family_descriptor()
+_IMAGEPLANE_FAMILY: Final = build_imageplane_reviewed_family_descriptor()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1975,7 +2045,7 @@ class ReviewedIntentRoute:
                 self.semantic_operation,
                 self.manifest_semantic_operation,
                 self.family.formal_semantic_binding.value,
-                self.family.product_execution_mode(self.operation).value,
+                *self.family.product_execution_contract_fields(self.operation),
                 self.family.intent_binding.binding_id,
                 self.family.intent_binding.binding_version,
                 self.family.intent_binding.binding_contract_sha256,
@@ -2136,6 +2206,10 @@ REVIEWED_PART_FILE_IMPORT_ROUTES: Final = _routes_for_family(
     _PART_FILE_IMPORT_FAMILY,
     PART_FILE_IMPORT_REVIEWED_FAMILY_SPEC.operation_ids,
 )
+REVIEWED_IMAGEPLANE_ROUTES: Final = _routes_for_family(
+    _IMAGEPLANE_FAMILY,
+    IMAGEPLANE_REVIEWED_FAMILY_SPEC.operation_ids,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
@@ -2151,8 +2225,9 @@ _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PARTDESIGN_GROOVE_ROUTES,
     REVIEWED_APP_ROUTES,
     # Preserve every pre-existing route's ordinal and route-contract digest;
-    # the three full-identity artifact routes are an append-only extension.
+    # the full-identity artifact routes are append-only extensions.
     REVIEWED_PART_FILE_IMPORT_ROUTES,
+    REVIEWED_IMAGEPLANE_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -2583,7 +2658,11 @@ class _ReviewedCreateRecoveryCapsule:
             self._seal is not _CREATE_RECOVERY_CAPSULE_SEAL
             or type(self.family) is not _ReviewedIntentFamilyDescriptor
             or type(self.descriptor) is not _ReviewedCreateRecoveryDescriptor
-            or self.family.create_recovery_for(self.operation) is not self.descriptor
+            or self.family.create_recovery_for(
+                self.operation,
+                context=self.context,
+            )
+            is not self.descriptor
             or self.document is None
             or type(self.operation) is not ReviewedOperationSpec
             or type(self.context) is not _ReviewedFamilyExecutionContext
@@ -2630,7 +2709,7 @@ class _ReviewedCreateRecoveryCapsule:
             return (
                 self._seal is _CREATE_RECOVERY_CAPSULE_SEAL
                 and self.family is family
-                and self.descriptor is family.create_recovery_for(operation)
+                and self.descriptor is family.create_recovery_for(operation, context=context)
                 and self.operation == operation
                 and self.context is context
                 and self.context.document is self.document
@@ -2669,7 +2748,7 @@ def _prepare_create_recovery(
     operation: ReviewedOperationSpec,
     context: _ReviewedFamilyExecutionContext,
 ) -> _ReviewedCreateRecoveryCapsule | None:
-    descriptor = family.create_recovery_for(operation)
+    descriptor = family.create_recovery_for(operation, context=context)
     if descriptor is None:
         return None
     try:
@@ -2911,7 +2990,10 @@ class ReviewedNativeExecutionResult:
             except (Exception, SystemExit):
                 _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         if contract.execution_mode is _ReviewedProductExecutionMode.CREATE:
-            descriptor = self.route.family.create_recovery_for(self.route.operation)
+            descriptor = self.route.family.create_recovery_for(
+                self.route.operation,
+                context=_verified_execution_context,
+            )
             if (
                 self._update_recovery is not None
                 or (descriptor is None and self._create_recovery is not None)
@@ -3092,6 +3174,7 @@ def execute_reviewed_intent_native(
     source_results: object = (),
     _reviewed_run_token: object | None = None,
     _reviewed_artifact_resolver: object | None = None,
+    _reviewed_artifact_run_token: object | None = None,
 ) -> ReviewedNativeExecutionResult:
     """Execute one static route through its family-owned native authority seam."""
 
@@ -3115,9 +3198,14 @@ def execute_reviewed_intent_native(
     artifact_context: ReviewedArtifactContext | None = None
     artifact_requirement = route.family.artifact_requirement_for(route.operation)
     if artifact_requirement is not None:
+        artifact_run_token = (
+            _reviewed_run_token
+            if _reviewed_artifact_run_token is None
+            else _reviewed_artifact_run_token
+        )
         if (
             type(_reviewed_artifact_resolver) is not _ReviewedArtifactRunResolver
-            or _reviewed_run_token is None
+            or artifact_run_token is None
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         try:
@@ -3129,7 +3217,7 @@ def execute_reviewed_intent_native(
             if type(requirement) is not _ReviewedArtifactRequirement:
                 _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
             resolution = _reviewed_artifact_resolver.resolve(
-                run_token=_reviewed_run_token,
+                run_token=artifact_run_token,
                 family_id=route.manifest.family_id,
                 operation_id=route.operation.operation_id,
                 artifact_id=requirement.artifact_id,
@@ -3156,7 +3244,7 @@ def execute_reviewed_intent_native(
         run_token=_reviewed_run_token,
         artifact_context=artifact_context,
     )
-    mode = route.family.product_execution_mode(route.operation)
+    mode = route.family.product_execution_mode(route.operation, context=context)
     before: tuple[object, ...]
     update_before: _ReviewedPrimaryUpdateSnapshot | None = None
     update_identities: tuple[EntityIdentity, ...] = ()
@@ -3346,6 +3434,7 @@ __all__ = [
     "REVIEWED_PART_DATUM_ROUTES",
     "REVIEWED_PART_OFFSET_ROUTES",
     "REVIEWED_PART_FILE_IMPORT_ROUTES",
+    "REVIEWED_IMAGEPLANE_ROUTES",
     "REVIEWED_PART_PROFILE_SURFACE_ROUTES",
     "REVIEWED_PART_PRIMITIVE_ROUTES",
     "REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES",

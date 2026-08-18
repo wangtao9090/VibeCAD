@@ -435,8 +435,8 @@ def test_app_routes_are_exact_full_identity_reference_products_and_lower(
         item for item in route.family.product_results if item.operation_id == operation.value
     )
 
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 81
-    assert CURRENT_REVIEWED_INTENT_ROUTES[-13:-3] == REVIEWED_APP_ROUTES
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 82
+    assert CURRENT_REVIEWED_INTENT_ROUTES[-14:-4] == REVIEWED_APP_ROUTES
     assert REVIEWED_APP_ROUTES == (
         *REVIEWED_APP_NO_SOURCE_ROUTES,
         *REVIEWED_APP_ONE_SOURCE_ROUTES,

@@ -7,13 +7,11 @@ requires one engine-owned :class:`ImagePlaneReviewedArtifactContext` carrying
 the exact ``DocumentRef``, ``ArtifactReader``, document workspace, and private
 stager.
 
-Core68 does not yet place such a bundle on its shared family execution
-context.  The dispatcher-compatible callback therefore fails before native
-mutation today; ``execute_imageplane_reviewed_plan_with_artifacts`` is the
-minimal integration hook.  The product contract is the safe CREATE subset of
-the native place-or-edit rule.  An already-bound plane is rejected before the
-rule is entered rather than silently performing an UPDATE under a CREATE
-contract.
+The shared dispatcher supplies that bundle through its exact artifact
+resolver.  The one formal place-or-edit operation has two finite product
+variants selected only by engine-owned source count: zero sources is CREATE;
+one same-run current ImagePlane primary is UPDATE_PRIMARY.  Object existence
+is checked only as a conformance precondition for the already-selected mode.
 """
 
 from __future__ import annotations
@@ -62,6 +60,7 @@ from vibecad.parametric.freecad_imageplane_rules import (
 from vibecad.validation.contracts import EntityObservation
 
 _OWNERSHIP_RECEIPT_DOMAIN = b"vibecad.reviewed-imageplane-product-ownership.v1\0"
+_STATE_DOMAIN = b"vibecad.reviewed-imageplane-state.v1\0"
 _ARTIFACT_REQUIREMENT_CONTRACT_SHA256: Final = hashlib.sha256(
     b"vibecad-reviewed-imageplane-artifact-requirement-v1\0"
     + IMAGEPLANE_MANIFEST.manifest_sha256.encode("ascii")
@@ -116,9 +115,9 @@ class ImagePlaneReviewedProductResultContract:
     result_kind: str = "reference"
     owned_type_ids: tuple[str, ...] = ("Image::ImagePlane",)
     semantic_roles: tuple[SemanticRole, ...] = (SemanticRole.SUPPORT,)
-    execution_mode: str = "create"
+    execution_modes: tuple[str, ...] = ("create", "update_primary")
     minimum_sources: int = 0
-    maximum_sources: int = 0
+    maximum_sources: int = 1
 
     def __post_init__(self) -> None:
         if (
@@ -126,9 +125,9 @@ class ImagePlaneReviewedProductResultContract:
             or self.result_kind != "reference"
             or self.owned_type_ids != (IMAGEPLANE_OPERATION_SPEC.native_type_id,)
             or self.semantic_roles != (SemanticRole.SUPPORT,)
-            or self.execution_mode != "create"
+            or self.execution_modes != ("create", "update_primary")
             or self.minimum_sources != 0
-            or self.maximum_sources != 0
+            or self.maximum_sources != 1
         ):
             _integrity_failure()
 
@@ -315,6 +314,8 @@ class ImagePlaneOwnershipClosure:
     native_receipt: ImagePlaneConformanceReceipt
     plan: ImagePlaneBackendPlan = field(repr=False)
     document_assets: DocumentAssetWorkspace = field(repr=False, compare=False)
+    expected_disposition: str
+    state_sha256: str
     receipt_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -323,7 +324,11 @@ class ImagePlaneOwnershipClosure:
             or type(self.native_receipt) is not ImagePlaneConformanceReceipt
             or type(self.plan) is not ImagePlaneBackendPlan
             or type(self.document_assets) is not DocumentAssetWorkspace
-            or self.native_receipt.disposition != "created"
+            or self.expected_disposition not in {"created", "updated"}
+            or self.native_receipt.disposition != self.expected_disposition
+            or type(self.state_sha256) is not str
+            or len(self.state_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.state_sha256)
             or self.native_receipt.plan_sha256 != self.plan.plan_sha256
             or self.native_receipt.artifact_id != self.plan.artifact_id
             or not hmac.compare_digest(
@@ -339,6 +344,8 @@ class ImagePlaneOwnershipClosure:
                 self.plan.plan_sha256,
                 self.plan.artifact_content_sha256,
                 self.native_receipt.retained_alias,
+                self.expected_disposition,
+                self.state_sha256,
                 "document-workspace-owned;fcstd-included;reference-result",
             )
         ).encode("ascii")
@@ -404,6 +411,19 @@ class ImagePlaneOwnershipClosure:
         self.validate_native_result(document, result)
         self.invariant.validate_adopted_observation(observation)
 
+    def validate_current(
+        self,
+        document: object,
+        result: object,
+        owned: tuple[object, ...],
+    ) -> None:
+        if owned != (result,):
+            _integrity_failure()
+        self.validate_native_result(document, result)
+        current = _read_imageplane_state(document, result, self.document_assets)
+        if not hmac.compare_digest(current.state_sha256, self.state_sha256):
+            _integrity_failure()
+
 
 def _body_tips(document: object) -> tuple[tuple[object, object], ...]:
     try:
@@ -443,6 +463,77 @@ def _workspace_state_sha256(manifest: tuple[tuple[str, str, int, str], ...]) -> 
     return hashlib.sha256(
         b"vibecad-reviewed-imageplane-workspace-state-v1\0" + repr(manifest).encode("ascii")
     ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ImagePlaneState:
+    object_name: str
+    x_size_mm: float
+    y_size_mm: float
+    placement: tuple[float, ...]
+    image_file: str
+    retained_size: int
+    retained_sha256: str
+    binding_values: tuple[str, str, str]
+    workspace_manifest: tuple[tuple[str, str, int, str], ...]
+    state_sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        body = repr(
+            (
+                self.object_name,
+                self.x_size_mm,
+                self.y_size_mm,
+                self.placement,
+                self.image_file,
+                self.retained_size,
+                self.retained_sha256,
+                self.binding_values,
+                self.workspace_manifest,
+            )
+        ).encode("ascii")
+        object.__setattr__(
+            self,
+            "state_sha256",
+            hashlib.sha256(_STATE_DOMAIN + body).hexdigest(),
+        )
+
+
+def _read_imageplane_state(
+    document: object,
+    feature: object,
+    document_assets: DocumentAssetWorkspace,
+) -> _ImagePlaneState:
+    try:
+        workspace = document_assets.require_attached(document)
+        image_file = str(feature.ImageFile)
+        image_path = Path(image_file)
+        if (
+            feature.Document is not document
+            or document.getObject(str(feature.Name)) is not feature
+            or not any(feature is item for item in tuple(document.Objects))
+            or feature.TypeId != IMAGEPLANE_OPERATION_SPEC.native_type_id
+            or feature.getParentGroup() is not None
+            or image_path.parent != workspace
+        ):
+            _integrity_failure()
+        retained_size, retained_sha256 = imageplane_rules._read_regular_digest(  # noqa: SLF001
+            image_path,
+            maximum=MAX_IMAGEPLANE_ARTIFACT_BYTES,
+        )
+        return _ImagePlaneState(
+            object_name=str(feature.Name),
+            x_size_mm=float(feature.XSize),
+            y_size_mm=float(feature.YSize),
+            placement=imageplane_rules._placement_signature(feature.Placement),  # noqa: SLF001
+            image_file=image_file,
+            retained_size=retained_size,
+            retained_sha256=retained_sha256,
+            binding_values=imageplane_rules._binding_values(feature),  # noqa: SLF001
+            workspace_manifest=imageplane_rules._workspace_manifest(workspace),  # noqa: SLF001
+        )
+    except (Exception, SystemExit):
+        _integrity_failure()
 
 
 def _require_workspace_recovery(
@@ -613,8 +704,146 @@ def imageplane_create_recovery_descriptor() -> object:
     )
 
 
-def _require_unbound_create(document: object, plan: ImagePlaneBackendPlan) -> None:
-    """Reject the native rule's edit branch before any artifact read or mutation."""
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ImagePlaneUpdateRecovery:
+    document_assets: DocumentAssetWorkspace = field(repr=False, compare=False)
+    document: object = field(repr=False, compare=False)
+    workspace: Path
+    state: _ImagePlaneState
+    placement_value: object = field(repr=False, compare=False)
+
+
+def _capture_imageplane_update_state(
+    document: object,
+    operation: ReviewedOperationSpec,
+    context: object,
+) -> object:
+    from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
+        ReviewedNativeExecutionResult,
+        _ReviewedFamilyExecutionContext,
+        _ReviewedPrimaryUpdateSnapshot,
+    )
+
+    if (
+        type(context) is not _ReviewedFamilyExecutionContext
+        or context.document is not document
+        or operation is not IMAGEPLANE_OPERATION_SPEC
+        or len(context.source_results) != 1
+        or type(context.source_results[0]) is not ReviewedNativeExecutionResult
+    ):
+        _integrity_failure()
+    source = context.source_results[0]
+    feature = source.object
+    assets = getattr(context.session, "_document_assets", None)
+    if type(assets) is not DocumentAssetWorkspace:
+        _integrity_failure()
+    try:
+        workspace = assets.require_attached(document)
+        state = _read_imageplane_state(document, feature, assets)
+        placement = feature.Placement
+    except (Exception, SystemExit):
+        _integrity_failure()
+    return _ReviewedPrimaryUpdateSnapshot(
+        primary=feature,
+        owned_objects=(feature,),
+        state_sha256=state.state_sha256,
+        rollback_state=_ImagePlaneUpdateRecovery(
+            document_assets=assets,
+            document=document,
+            workspace=workspace,
+            state=state,
+            placement_value=placement,
+        ),
+    )
+
+
+def _rollback_imageplane_update_state(
+    document: object,
+    snapshot: object,
+    operation: ReviewedOperationSpec,
+    context: object,
+) -> None:
+    from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
+        _ReviewedFamilyExecutionContext,
+        _ReviewedPrimaryUpdateSnapshot,
+    )
+
+    if (
+        type(context) is not _ReviewedFamilyExecutionContext
+        or context.document is not document
+        or operation is not IMAGEPLANE_OPERATION_SPEC
+        or type(snapshot) is not _ReviewedPrimaryUpdateSnapshot
+        or type(snapshot.rollback_state) is not _ImagePlaneUpdateRecovery
+        or type(context.artifact_context) is not ReviewedArtifactContext
+    ):
+        _integrity_failure()
+    recovery = snapshot.rollback_state
+    feature = snapshot.primary
+    generic = context.artifact_context
+    artifact = generic.artifact_document
+    try:
+        spec = IMAGEPLANE_ARTIFACT_SPECS[artifact.media_type]
+        current_manifest = imageplane_rules._workspace_manifest(recovery.workspace)  # noqa: SLF001
+        expected_entry = (
+            artifact.content_sha256 + spec.suffix,
+            "file",
+            artifact.size_bytes,
+            artifact.content_sha256,
+        )
+        if (
+            recovery.document is not document
+            or recovery.document_assets is not getattr(context.session, "_document_assets", None)
+            or recovery.document_assets.require_attached(document) != recovery.workspace
+            or document.getObject(recovery.state.object_name) is not feature
+            or (
+                current_manifest != recovery.state.workspace_manifest
+                and not _imageplane_workspace_is_committed(
+                    recovery.state.workspace_manifest,
+                    current_manifest,
+                    expected_entry,
+                )
+            )
+        ):
+            _integrity_failure()
+        feature.ImageFile = recovery.state.image_file
+        feature.XSize = recovery.state.x_size_mm
+        feature.YSize = recovery.state.y_size_mm
+        feature.Placement = recovery.placement_value
+        for name, value in zip(
+            (
+                "VibeCADImagePlaneKey",
+                "VibeCADImagePlaneGraphId",
+                "VibeCADImagePlaneNodeId",
+            ),
+            recovery.state.binding_values,
+            strict=True,
+        ):
+            setattr(feature, name, value)
+        document.recompute()
+        if (
+            current_manifest != recovery.state.workspace_manifest
+            and expected_entry not in recovery.state.workspace_manifest
+        ):
+            retained = recovery.workspace / expected_entry[0]
+            if retained.parent != recovery.workspace:
+                _integrity_failure()
+            retained.unlink()
+        restored = _read_imageplane_state(document, feature, recovery.document_assets)
+    except (Exception, SystemExit):
+        _integrity_failure()
+    if restored != recovery.state or not hmac.compare_digest(
+        restored.state_sha256,
+        snapshot.state_sha256,
+    ):
+        _integrity_failure()
+
+
+def _require_selected_object(
+    document: object,
+    plan: ImagePlaneBackendPlan,
+    source_object: object | None,
+) -> str:
+    """Prove object state agrees with the already source-count-selected mode."""
 
     try:
         object_name = imageplane_rules._object_name(plan)  # noqa: SLF001
@@ -628,8 +857,17 @@ def _require_unbound_create(document: object, plan: ImagePlaneBackendPlan) -> No
         )
     except (Exception, SystemExit):
         _integrity_failure()
-    if existing is not None or matches:
+    if source_object is None:
+        if existing is not None or matches:
+            _integrity_failure()
+        return "created"
+    if existing is not source_object or matches != (source_object,):
         _integrity_failure()
+    try:
+        imageplane_rules._validate_bound_feature(source_object, plan)  # noqa: SLF001
+    except (Exception, SystemExit):
+        _integrity_failure()
+    return "updated"
 
 
 def execute_imageplane_reviewed_plan(
@@ -640,7 +878,7 @@ def execute_imageplane_reviewed_plan(
     operation: ReviewedOperationSpec,
     context: object,
 ) -> object:
-    """Dispatcher-compatible callback; blocked until shared supplies artifacts."""
+    """Execute the source-count-selected variant with exact artifact authority."""
 
     from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
         _ReviewedFamilyExecutionContext,
@@ -651,7 +889,7 @@ def execute_imageplane_reviewed_plan(
         or type(payload) is not bytes
         or type(context) is not _ReviewedFamilyExecutionContext
         or context.document is not document
-        or context.source_results
+        or len(context.source_results) > 1
     ):
         _integrity_failure()
     generic = context.artifact_context
@@ -673,6 +911,7 @@ def execute_imageplane_reviewed_plan(
         artifacts=generic.artifacts,
         stager=stager,
     )
+    source_object = context.source_results[0].object if context.source_results else None
     return execute_imageplane_reviewed_plan_with_artifacts(
         document,
         plan,
@@ -681,6 +920,7 @@ def execute_imageplane_reviewed_plan(
         operation,
         artifact_context,
         session=context.session,
+        source_object=source_object,
     )
 
 
@@ -693,8 +933,9 @@ def execute_imageplane_reviewed_plan_with_artifacts(
     artifact_context: ImagePlaneReviewedArtifactContext,
     *,
     session: object,
+    source_object: object | None = None,
 ) -> object:
-    """Execute the safe CREATE subset with an authenticated artifact bundle."""
+    """Execute one statically selected CREATE or UPDATE_PRIMARY variant."""
 
     checked = _validate_plan_contract(plan, plan_document, operation)
     if (
@@ -719,7 +960,7 @@ def execute_imageplane_reviewed_plan_with_artifacts(
         _integrity_failure()
     if decoded != checked:
         _integrity_failure()
-    _require_unbound_create(document, checked)
+    expected_disposition = _require_selected_object(document, checked, source_object)
 
     receipt = apply_imageplane_plan(
         payload,
@@ -745,21 +986,36 @@ def execute_imageplane_reviewed_plan_with_artifacts(
         _integrity_failure()
     if (
         type(receipt) is not ImagePlaneConformanceReceipt
-        or receipt.disposition != "created"
+        or receipt.disposition != expected_disposition
         or receipt.plan_sha256 != checked.plan_sha256
-        or len(after) != len(before) + 1
-        or len(added) != 1
-        or result is not added[0]
+        or (
+            expected_disposition == "created"
+            and (len(after) != len(before) + 1 or len(added) != 1 or result is not added[0])
+        )
+        or (
+            expected_disposition == "updated"
+            and (
+                len(after) != len(before)
+                or added
+                or result is not source_object
+                or any(
+                    actual is not expected for actual, expected in zip(after, before, strict=True)
+                )
+            )
+        )
         or getattr(result, "Document", None) is not document
         or getattr(result, "TypeId", None) != operation.native_type_id
         or not _same_body_tips(_body_tips(document), body_tips)
     ):
         _integrity_failure()
+    state = _read_imageplane_state(document, result, artifact_context.document_assets)
     ownership = ImagePlaneOwnershipClosure(
         invariant=IMAGEPLANE_RESULT_INVARIANT,
         native_receipt=receipt,
         plan=checked,
         document_assets=artifact_context.document_assets,
+        expected_disposition=expected_disposition,
+        state_sha256=state.state_sha256,
     )
     ownership.validate_native_result(document, result)
 
@@ -767,7 +1023,11 @@ def execute_imageplane_reviewed_plan_with_artifacts(
         _ReviewedFamilyNativeExecution,
     )
 
-    return _ReviewedFamilyNativeExecution(object=result, receipt=ownership)
+    return _ReviewedFamilyNativeExecution(
+        object=result,
+        receipt=ownership,
+        state_sha256=state.state_sha256,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,10 +1055,11 @@ IMAGEPLANE_REVIEWED_FAMILY_SPEC: Final = ImagePlaneReviewedFamilySpec(
 
 
 def build_imageplane_reviewed_family_descriptor() -> object:
-    """Return the complete private descriptor; registration stays deliberately separate."""
+    """Return the complete finite CREATE/UPDATE_PRIMARY family descriptor."""
 
     from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
         _ReviewedIntentFamilyDescriptor,
+        _ReviewedProductExecutionMode,
         _ReviewedProductResultContract,
         _ReviewedProductResultKind,
     )
@@ -815,10 +1076,25 @@ def build_imageplane_reviewed_family_descriptor() -> object:
                 result_kind=_ReviewedProductResultKind.REFERENCE,
                 owned_type_ids=(IMAGEPLANE_OPERATION_SPEC.native_type_id,),
                 semantic_roles=(SemanticRole.SUPPORT,),
+                source_count=0,
+                requires_state_sha256=True,
+            ),
+            _ReviewedProductResultContract(
+                operation_id=IMAGEPLANE_OPERATION_SPEC.operation_id,
+                result_kind=_ReviewedProductResultKind.REFERENCE,
+                owned_type_ids=(IMAGEPLANE_OPERATION_SPEC.native_type_id,),
+                semantic_roles=(SemanticRole.SUPPORT,),
+                source_count=1,
+                execution_mode=_ReviewedProductExecutionMode.UPDATE_PRIMARY,
+                requires_state_sha256=True,
             ),
         ),
+        minimum_sources=0,
+        maximum_sources=1,
         artifact_requirement=imageplane_artifact_requirement_descriptor(),
         create_recovery=imageplane_create_recovery_descriptor(),
+        capture_update_state=_capture_imageplane_update_state,
+        rollback_update_state=_rollback_imageplane_update_state,
     )
 
 

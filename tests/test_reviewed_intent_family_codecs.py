@@ -205,7 +205,7 @@ def test_synthetic_sketch_binding_routes_and_lowers_operation_selected_subject(
         route.operation,
         selector_term,
     )
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 81
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 82
     assert route not in CURRENT_REVIEWED_INTENT_ROUTES
 
 
@@ -228,7 +228,7 @@ def test_reviewed_wire_union_preserves_pfg_v2_and_rejects_unknown_discriminator(
 
 
 def test_current_routes_bind_exact_pfg_document_contract() -> None:
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 81
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 82
     assert {route.family.intent_binding.binding_id for route in CURRENT_REVIEWED_INTENT_ROUTES} == {
         "reviewed_pfg_v2_feature_node"
     }
@@ -244,6 +244,15 @@ def test_current_routes_bind_exact_pfg_document_contract() -> None:
     assert legacy_route_catalog_sha256 == (
         "99393c47a73561abca78c686fca061221c146747180edcf539070254baf63f41"
     )
+    import81_route_catalog_sha256 = hashlib.sha256(
+        "\n".join(
+            f"{route.operation_id}:{route.route_contract_sha256}"
+            for route in CURRENT_REVIEWED_INTENT_ROUTES[:81]
+        ).encode("ascii")
+    ).hexdigest()
+    assert import81_route_catalog_sha256 == (
+        "e2dc595f83cd2196b10bd8fca9d4f406b6d57703f4126190142b66d797aa08e2"
+    )
     current_route_catalog_sha256 = hashlib.sha256(
         "\n".join(
             f"{route.operation_id}:{route.route_contract_sha256}"
@@ -251,7 +260,7 @@ def test_current_routes_bind_exact_pfg_document_contract() -> None:
         ).encode("ascii")
     ).hexdigest()
     assert current_route_catalog_sha256 == (
-        "e2dc595f83cd2196b10bd8fca9d4f406b6d57703f4126190142b66d797aa08e2"
+        "750f77f2b790a434ce44643aa00711c30c5f53579f93c86102d3fec71db395be"
     )
 
 

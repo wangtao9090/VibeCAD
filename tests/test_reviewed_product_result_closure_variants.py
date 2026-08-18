@@ -182,6 +182,57 @@ def test_family_descriptor_rejects_ambiguous_or_out_of_range_variants(
     assert caught.value.code is ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE
 
 
+def test_mixed_execution_modes_are_source_count_selected_and_route_bound() -> None:
+    base = REVIEWED_PART_PRIMITIVE_ROUTES[0]
+    variants = _variant_contracts()
+    mixed = (
+        variants[0],
+        dataclasses.replace(
+            variants[1],
+            execution_mode=reviewed_execution._ReviewedProductExecutionMode.UPDATE_PRIMARY,
+        ),
+    )
+    family = reviewed_execution._ReviewedIntentFamilyDescriptor(
+        manifest=base.manifest,
+        subject_type_term=base.subject_type_term,
+        adapter_factory=base.family.adapter_factory,
+        validate_plan=base.family.validate_plan,
+        execute_plan=lambda *_args: None,
+        product_results=mixed,
+        minimum_sources=0,
+        maximum_sources=1,
+        capture_update_state=lambda *_args: None,
+        rollback_update_state=lambda *_args: None,
+    )
+    route = dataclasses.replace(base, family=family)
+
+    assert family.product_execution_mode(base.operation, source_count=0).value == "create"
+    assert family.product_execution_mode(base.operation, source_count=1).value == "update_primary"
+    assert family.product_execution_contract_fields(base.operation) == (
+        "source-count-execution-modes-v1",
+        "0:create",
+        "1:update_primary",
+    )
+    with pytest.raises(ReviewedIntentExecutionError):
+        family.product_execution_mode(base.operation)
+
+    changed = dataclasses.replace(
+        family,
+        product_results=(
+            mixed[0],
+            dataclasses.replace(
+                mixed[1],
+                execution_mode=reviewed_execution._ReviewedProductExecutionMode.CREATE,
+            ),
+        ),
+        capture_update_state=None,
+        rollback_update_state=None,
+    )
+    assert dataclasses.replace(base, family=changed).route_contract_sha256 != (
+        route.route_contract_sha256
+    )
+
+
 @pytest.mark.parametrize("source_count", (0, 1))
 def test_executor_accepts_owned_primary_first_when_document_add_order_differs(
     monkeypatch: pytest.MonkeyPatch,
