@@ -215,7 +215,7 @@ def test_loader_has_no_path_or_environment_override_surface():
     assert loader.__code__.co_argcount == 0
 
 
-def test_checked_in_resources_track_the_cross_platform_catalog126_rollout(
+def test_checked_in_resources_track_the_cross_platform_catalog126_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(resource, "_platform_id", lambda: "macos.x86_64")
@@ -233,8 +233,11 @@ def test_checked_in_resources_track_the_cross_platform_catalog126_rollout(
     assert len(x86_raw["verification_set"]["receipts"]) == 21
     assert len(x86_raw["verification_set"]["formal_operations"]) == 126
     assert len(x86_raw["verification_set"]["native_types"]) == 102
-    assert x86_raw["verification_set"]["current_formal_catalog_sha256"] == (
-        verification_runtime._current_catalogs()[2]  # noqa: SLF001
+    assert (
+        x86_raw["verification_set"]["current_formal_catalog_sha256"]
+        == (
+            verification_runtime._current_catalogs()[2]  # noqa: SLF001
+        )
     )
     decode_freecad_reviewed_release_attestation(
         loaded_x86.raw,
@@ -243,16 +246,31 @@ def test_checked_in_resources_track_the_cross_platform_catalog126_rollout(
 
     arm_raw = json.loads(loaded_arm.raw)
     assert arm_raw["runtime_backend"]["platform_id"] == "macos.arm64"
-    assert len(arm_raw["verification_set"]["receipts"]) == 19
-    assert len(arm_raw["verification_set"]["formal_operations"]) == 124
+    assert len(arm_raw["verification_set"]["receipts"]) == 21
+    assert len(arm_raw["verification_set"]["formal_operations"]) == 126
     assert len(arm_raw["verification_set"]["native_types"]) == 102
-    assert arm_raw["verification_set"]["current_formal_catalog_sha256"] != (
-        verification_runtime._current_catalogs()[2]  # noqa: SLF001
-    )
-    with pytest.raises(CapabilityCatalogError) as raised:
-        decode_freecad_reviewed_release_attestation(
-            loaded_arm.raw,
-            expected_source_attestation_sha256=loaded_arm.resource_sha256,
+    assert (
+        arm_raw["verification_set"]["current_formal_catalog_sha256"]
+        == (
+            verification_runtime._current_catalogs()[2]  # noqa: SLF001
         )
-    assert raised.value.code is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
-    assert raised.value.path == "verification_set/current_catalog"
+    )
+    decode_freecad_reviewed_release_attestation(
+        loaded_arm.raw,
+        expected_source_attestation_sha256=loaded_arm.resource_sha256,
+    )
+
+    assert [
+        (operation["operation_id"], operation["formal_spec_sha256"])
+        for operation in x86_raw["verification_set"]["formal_operations"]
+    ] == [
+        (operation["operation_id"], operation["formal_spec_sha256"])
+        for operation in arm_raw["verification_set"]["formal_operations"]
+    ]
+    assert [
+        (native["native_type_id"], native["formal_operation_ids"])
+        for native in x86_raw["verification_set"]["native_types"]
+    ] == [
+        (native["native_type_id"], native["formal_operation_ids"])
+        for native in arm_raw["verification_set"]["native_types"]
+    ]
