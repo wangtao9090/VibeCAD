@@ -17,6 +17,7 @@ from vibecad.execution.freecad_reviewed_intent_execution import (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_PROFILE_SURFACE_ROUTES,
     REVIEWED_PARTDESIGN_BOOLEAN_ROUTES,
+    REVIEWED_PARTDESIGN_DRESSUP_ROUTES,
     REVIEWED_PARTDESIGN_PATTERN_ROUTES,
     REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES,
     REVIEWED_PARTDESIGN_PROMOTION_ROUTES,
@@ -301,8 +302,9 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
         *REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES,
         *REVIEWED_PARTDESIGN_PATTERN_ROUTES,
         *REVIEWED_PARTDESIGN_BOOLEAN_ROUTES,
+        *REVIEWED_PARTDESIGN_DRESSUP_ROUTES,
     )
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 61
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 67
     assert len(REVIEWED_PART_PRIMITIVE_ROUTES) == len(programs) == 8
     assert len(REVIEWED_PART_CURVE_ROUTES) == 9
     assert len(REVIEWED_PART_CSG_ROUTES) == 3
@@ -313,6 +315,7 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
     assert len(REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES) == 16
     assert len(REVIEWED_PARTDESIGN_PATTERN_ROUTES) == 3
     assert len(REVIEWED_PARTDESIGN_BOOLEAN_ROUTES) == 3
+    assert len(REVIEWED_PARTDESIGN_DRESSUP_ROUTES) == 6
     assert {
         route.family.product_result(route.operation).result_kind.value
         for route in REVIEWED_PART_PRIMITIVE_ROUTES
@@ -345,6 +348,16 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
         route.family.product_result(route.operation).result_kind.value
         for route in REVIEWED_PARTDESIGN_BOOLEAN_ROUTES
     } == {"solid"}
+    assert {
+        route.family.product_result(route.operation).result_kind.value
+        for route in REVIEWED_PARTDESIGN_DRESSUP_ROUTES
+        if route.family.dynamic_resolver_for(route.operation) is None
+    } == {"solid"}
+    assert tuple(
+        route.operation.operation_id
+        for route in REVIEWED_PARTDESIGN_DRESSUP_ROUTES
+        if route.family.dynamic_resolver_for(route.operation) is not None
+    ) == ("multi_transform",)
     assert all(
         route.family.product_result(route.operation).semantic_roles[0].value == "feature"
         for route in REVIEWED_PART_CSG_ROUTES
@@ -364,7 +377,9 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
             *REVIEWED_PARTDESIGN_PROMOTION_ROUTES,
             *REVIEWED_PARTDESIGN_PATTERN_ROUTES,
             *REVIEWED_PARTDESIGN_BOOLEAN_ROUTES,
+            *REVIEWED_PARTDESIGN_DRESSUP_ROUTES,
         )
+        if route.family.dynamic_resolver_for(route.operation) is None
     )
     assert tuple(route_reviewed_intent(program) for program in programs) == (
         REVIEWED_PART_PRIMITIVE_ROUTES

@@ -54,6 +54,9 @@ from vibecad.execution.freecad_part_profile_surface_reviewed_execution import (
 from vibecad.execution.freecad_partdesign_boolean_reviewed_execution import (
     PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC,
 )
+from vibecad.execution.freecad_partdesign_dressup_transform_reviewed_execution import (
+    PARTDESIGN_DRESSUP_REVIEWED_FAMILY_SPEC,
+)
 from vibecad.execution.freecad_partdesign_pattern_reviewed_execution import (
     PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC,
 )
@@ -304,6 +307,162 @@ class _ReviewedProductResultContract:
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ReviewedDynamicProductResolution:
+    """One content-bound result contract emitted by a sealed resolver."""
+
+    resolver_id: str
+    resolver_version: str
+    resolver_contract_sha256: str
+    plan_sha256: str
+    plan_content_sha256: str
+    contract: _ReviewedProductResultContract
+
+    def __post_init__(self) -> None:
+        identifiers = (self.resolver_id, self.resolver_version)
+        digests = (
+            self.resolver_contract_sha256,
+            self.plan_sha256,
+            self.plan_content_sha256,
+        )
+        if (
+            any(
+                type(item) is not str
+                or not 1 <= len(item) <= 128
+                or not item[0].isalnum()
+                or any(
+                    not (character.isascii() and (character.isalnum() or character in "._:-"))
+                    for character in item
+                )
+                for item in identifiers
+            )
+            or any(
+                type(item) is not str
+                or len(item) != 64
+                or any(character not in "0123456789abcdef" for character in item)
+                for item in digests
+            )
+            or type(self.contract) is not _ReviewedProductResultContract
+            or self.contract.source_count is not None
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+
+_DynamicOwnershipResolverCallback = Callable[
+    [object, _ReviewedFamilyNativeExecution],
+    _ReviewedProductResultContract,
+]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ReviewedDynamicOwnershipResolverDescriptor:
+    """Static authority and identity for one plan-bound ownership resolver."""
+
+    resolver_id: str
+    resolver_version: str
+    resolver_contract_sha256: str
+    operation_ids: tuple[str, ...]
+    resolve_ownership: _DynamicOwnershipResolverCallback = field(
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        identifiers = (self.resolver_id, self.resolver_version)
+        if (
+            any(
+                type(item) is not str
+                or not 1 <= len(item) <= 128
+                or not item[0].isalnum()
+                or any(
+                    not (character.isascii() and (character.isalnum() or character in "._:-"))
+                    for character in item
+                )
+                for item in identifiers
+            )
+            or type(self.resolver_contract_sha256) is not str
+            or len(self.resolver_contract_sha256) != 64
+            or any(
+                character not in "0123456789abcdef" for character in self.resolver_contract_sha256
+            )
+            or type(self.operation_ids) is not tuple
+            or not self.operation_ids
+            or len(set(self.operation_ids)) != len(self.operation_ids)
+            or any(
+                type(item) is not str or not item or len(item) > 128 for item in self.operation_ids
+            )
+            or not callable(self.resolve_ownership)
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+    def handles(self, operation: ReviewedOperationSpec) -> bool:
+        if type(operation) is not ReviewedOperationSpec:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return operation.operation_id in self.operation_ids
+
+    def resolve(
+        self,
+        plan: object,
+        plan_document: DocumentRef,
+        operation: ReviewedOperationSpec,
+        execution: _ReviewedFamilyNativeExecution,
+    ) -> _ReviewedDynamicProductResolution:
+        if (
+            type(plan_document) is not DocumentRef
+            or type(operation) is not ReviewedOperationSpec
+            or type(execution) is not _ReviewedFamilyNativeExecution
+            or not self.handles(operation)
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        try:
+            canonical = plan.canonical_bytes
+            semantic_plan_sha256 = plan.plan_sha256
+            plan_operation = plan.operation
+            receipt = execution.receipt
+            receipt_operation = receipt.operation
+        except (Exception, SystemExit):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if (
+            type(canonical) is not bytes
+            or len(canonical) != plan_document.size_bytes
+            or not hmac.compare_digest(
+                hashlib.sha256(canonical).hexdigest(),
+                plan_document.content_sha256,
+            )
+            or type(semantic_plan_sha256) is not str
+            or not hmac.compare_digest(
+                semantic_plan_sha256,
+                plan_document.document_digest,
+            )
+            or getattr(plan_operation, "value", None) != operation.operation_id
+            or getattr(receipt_operation, "value", None) != operation.operation_id
+            or getattr(receipt, "plan_sha256", None) != plan_document.document_digest
+            or getattr(receipt, "plan_content_sha256", None) != plan_document.content_sha256
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        try:
+            contract = self.resolve_ownership(plan, execution)
+        except ReviewedIntentExecutionError:
+            raise
+        except (Exception, SystemExit):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if (
+            type(contract) is not _ReviewedProductResultContract
+            or contract.operation_id != operation.operation_id
+            or contract.source_count is not None
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        contract.validate(operation, execution.object, execution.owned_objects)
+        return _ReviewedDynamicProductResolution(
+            resolver_id=self.resolver_id,
+            resolver_version=self.resolver_version,
+            resolver_contract_sha256=self.resolver_contract_sha256,
+            plan_sha256=plan_document.document_digest,
+            plan_content_sha256=plan_document.content_sha256,
+            contract=contract,
+        )
+
+
 _AdapterFactory = Callable[[PlanSink], ExactReviewedFamilyAdapter]
 _PlanValidator = Callable[[object, ReviewedPlanReceipt, ReviewedOperationSpec], None]
 _NativeExecutor = Callable[
@@ -334,6 +493,11 @@ class _ReviewedIntentFamilyDescriptor:
     formal_semantic_binding: _ReviewedFormalSemanticBinding = (
         _ReviewedFormalSemanticBinding.FULL_IDENTITY
     )
+    dynamic_ownership_resolver: _ReviewedDynamicOwnershipResolverDescriptor | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -343,7 +507,6 @@ class _ReviewedIntentFamilyDescriptor:
             or not callable(self.validate_plan)
             or not callable(self.execute_plan)
             or type(self.product_results) is not tuple
-            or not self.product_results
             or any(
                 type(item) is not _ReviewedProductResultContract for item in self.product_results
             )
@@ -359,6 +522,11 @@ class _ReviewedIntentFamilyDescriptor:
             or type(self.maximum_sources) is not int
             or not 0 <= self.minimum_sources <= self.maximum_sources <= 8
             or type(self.formal_semantic_binding) is not _ReviewedFormalSemanticBinding
+            or (
+                self.dynamic_ownership_resolver is not None
+                and type(self.dynamic_ownership_resolver)
+                is not _ReviewedDynamicOwnershipResolverDescriptor
+            )
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         keys = tuple((item.operation_id, item.source_count) for item in self.product_results)
@@ -376,6 +544,30 @@ class _ReviewedIntentFamilyDescriptor:
                 len(variants) != 1 or variants[0].source_count is not None
             ):
                 _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        resolver = self.dynamic_ownership_resolver
+        if not self.product_results and resolver is None:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if resolver is not None and (
+            any(
+                not any(
+                    operation.operation_id == operation_id for operation in self.manifest.operations
+                )
+                for operation_id in resolver.operation_ids
+            )
+            or any(item.operation_id in resolver.operation_ids for item in self.product_results)
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+    def dynamic_resolver_for(
+        self,
+        operation: ReviewedOperationSpec,
+    ) -> _ReviewedDynamicOwnershipResolverDescriptor | None:
+        if type(operation) is not ReviewedOperationSpec:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        resolver = self.dynamic_ownership_resolver
+        if resolver is None or not resolver.handles(operation):
+            return None
+        return resolver
 
     def build_adapter(self, sink: PlanSink) -> ExactReviewedFamilyAdapter:
         try:
@@ -422,7 +614,8 @@ class _ReviewedIntentFamilyDescriptor:
             or not self.minimum_sources <= len(context.source_results) <= self.maximum_sources
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
-        self.product_result(operation, context=context)
+        if self.dynamic_resolver_for(operation) is None:
+            self.product_result(operation, context=context)
         try:
             result = self.execute_plan(
                 document,
@@ -449,6 +642,8 @@ class _ReviewedIntentFamilyDescriptor:
         if type(operation) is not ReviewedOperationSpec or (
             context is not None and type(context) is not _ReviewedFamilyExecutionContext
         ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if self.dynamic_resolver_for(operation) is not None:
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         matching = tuple(
             item for item in self.product_results if item.operation_id == operation.operation_id
@@ -480,6 +675,18 @@ class _ReviewedIntentFamilyDescriptor:
         contract = self.product_result(operation, context=context)
         contract.validate(operation, primary, owned)
         return contract
+
+    def resolve_dynamic_product_result(
+        self,
+        plan: object,
+        plan_document: DocumentRef,
+        operation: ReviewedOperationSpec,
+        execution: _ReviewedFamilyNativeExecution,
+    ) -> _ReviewedDynamicProductResolution | None:
+        resolver = self.dynamic_resolver_for(operation)
+        if resolver is None:
+            return None
+        return resolver.resolve(plan, plan_document, operation, execution)
 
 
 def _validate_part_core_plan(
@@ -797,6 +1004,37 @@ _PARTDESIGN_BOOLEAN_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     formal_semantic_binding=_ReviewedFormalSemanticBinding.LEGACY_TERM_ID,
 )
 
+from vibecad.execution.freecad_partdesign_multitransform_dynamic_ownership import (  # noqa: E402
+    build_partdesign_multitransform_dynamic_ownership_resolver,
+)
+
+PARTDESIGN_MULTITRANSFORM_DYNAMIC_OWNERSHIP_RESOLVER: Final = (
+    build_partdesign_multitransform_dynamic_ownership_resolver()
+)
+
+_PARTDESIGN_DRESSUP_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=PARTDESIGN_DRESSUP_REVIEWED_FAMILY_SPEC.manifest,
+    subject_type_term=PARTDESIGN_DRESSUP_REVIEWED_FAMILY_SPEC.subject_type_term,
+    adapter_factory=PARTDESIGN_DRESSUP_REVIEWED_FAMILY_SPEC.adapter_factory,
+    validate_plan=PARTDESIGN_DRESSUP_REVIEWED_FAMILY_SPEC.validate_plan,
+    execute_plan=PARTDESIGN_DRESSUP_REVIEWED_FAMILY_SPEC.execute_plan,
+    product_results=_singleton_product_results(
+        PARTDESIGN_DRESSUP_REVIEWED_FAMILY_SPEC.manifest,
+        tuple(
+            operation_id
+            for operation_id in PARTDESIGN_DRESSUP_REVIEWED_FAMILY_SPEC.operation_ids
+            if operation_id
+            not in PARTDESIGN_MULTITRANSFORM_DYNAMIC_OWNERSHIP_RESOLVER.operation_ids
+        ),
+        result_kind=_ReviewedProductResultKind.SOLID,
+        semantic_role=SemanticRole.FEATURE,
+    ),
+    minimum_sources=PARTDESIGN_DRESSUP_REVIEWED_FAMILY_SPEC.minimum_sources,
+    maximum_sources=PARTDESIGN_DRESSUP_REVIEWED_FAMILY_SPEC.maximum_sources,
+    formal_semantic_binding=_ReviewedFormalSemanticBinding.LEGACY_TERM_ID,
+    dynamic_ownership_resolver=PARTDESIGN_MULTITRANSFORM_DYNAMIC_OWNERSHIP_RESOLVER,
+)
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReviewedIntentRoute:
@@ -837,6 +1075,12 @@ class ReviewedIntentRoute:
             expected_formal_semantic = self.operation.semantic_term.term_id
         else:
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        resolver = self.family.dynamic_resolver_for(self.operation)
+        static_results = tuple(
+            item
+            for item in self.family.product_results
+            if item.operation_id == self.operation.operation_id
+        )
         if (
             len(formal) != 1
             or formal[0].semantic_operation != self.semantic_operation
@@ -847,6 +1091,8 @@ class ReviewedIntentRoute:
             or formal[0].adapter_contract_sha256 != self.manifest.adapter.adapter_contract_sha256
             or formal[0].rule_id != self.manifest.rule_id
             or formal[0].rule_contract_sha256 != self.manifest.rule_contract_sha256
+            or (resolver is None and not static_results)
+            or (resolver is not None and static_results)
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         object.__setattr__(
@@ -868,6 +1114,16 @@ class ReviewedIntentRoute:
                 self.manifest.rule_contract_sha256,
                 self.operation.specification_sha256,
                 *self.subject_type_term.semantic_identity,
+                *(
+                    (
+                        "dynamic-ownership-resolver-v1",
+                        resolver.resolver_id,
+                        resolver.resolver_version,
+                        resolver.resolver_contract_sha256,
+                    )
+                    if resolver is not None
+                    else ()
+                ),
             )
         ).encode("utf-8")
         object.__setattr__(
@@ -963,6 +1219,10 @@ REVIEWED_PARTDESIGN_BOOLEAN_ROUTES: Final = _routes_for_family(
     _PARTDESIGN_BOOLEAN_FAMILY,
     PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC.operation_ids,
 )
+REVIEWED_PARTDESIGN_DRESSUP_ROUTES: Final = _routes_for_family(
+    _PARTDESIGN_DRESSUP_FAMILY,
+    PARTDESIGN_DRESSUP_REVIEWED_FAMILY_SPEC.operation_ids,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
@@ -974,6 +1234,7 @@ _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES,
     REVIEWED_PARTDESIGN_PATTERN_ROUTES,
     REVIEWED_PARTDESIGN_BOOLEAN_ROUTES,
+    REVIEWED_PARTDESIGN_DRESSUP_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -1373,12 +1634,14 @@ class ReviewedNativeExecutionResult:
     native_receipt: object
     owned_objects: tuple[object, ...] = field(default=(), repr=False, compare=False)
     _verified_execution_context: InitVar[_ReviewedFamilyExecutionContext | None] = None
+    _verified_dynamic_resolution: InitVar[_ReviewedDynamicProductResolution | None] = None
     result_kind: _ReviewedProductResultKind = field(init=False)
     semantic_roles: tuple[SemanticRole, ...] = field(init=False)
 
     def __post_init__(
         self,
         _verified_execution_context: _ReviewedFamilyExecutionContext | None,
+        _verified_dynamic_resolution: _ReviewedDynamicProductResolution | None,
     ) -> None:
         owned = self.owned_objects
         if type(owned) is not tuple:
@@ -1397,12 +1660,33 @@ class ReviewedNativeExecutionResult:
             or getattr(self.native_receipt, "plan_sha256", None) != self.plan_sha256
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
-        contract = self.route.family.accept_product_result(
-            self.route.operation,
-            self.object,
-            owned,
-            context=_verified_execution_context,
-        )
+        resolver = self.route.family.dynamic_resolver_for(self.route.operation)
+        if resolver is None:
+            if _verified_dynamic_resolution is not None:
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            contract = self.route.family.accept_product_result(
+                self.route.operation,
+                self.object,
+                owned,
+                context=_verified_execution_context,
+            )
+        else:
+            resolution = _verified_dynamic_resolution
+            if (
+                type(_verified_execution_context) is not _ReviewedFamilyExecutionContext
+                or not self.route.family.minimum_sources
+                <= len(_verified_execution_context.source_results)
+                <= self.route.family.maximum_sources
+                or type(resolution) is not _ReviewedDynamicProductResolution
+                or resolution.resolver_id != resolver.resolver_id
+                or resolution.resolver_version != resolver.resolver_version
+                or resolution.resolver_contract_sha256 != resolver.resolver_contract_sha256
+                or resolution.plan_sha256 != self.plan_sha256
+                or resolution.plan_content_sha256 != self.plan_content_sha256
+            ):
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            contract = resolution.contract
+            contract.validate(self.route.operation, self.object, owned)
         object.__setattr__(self, "result_kind", contract.result_kind)
         object.__setattr__(self, "semantic_roles", contract.semantic_roles)
 
@@ -1447,6 +1731,12 @@ def execute_reviewed_intent_native(
             route.operation,
             context,
         )
+        dynamic_resolution = route.family.resolve_dynamic_product_result(
+            lowered.plan,
+            lowered.result.plan_document,
+            route.operation,
+            family_result,
+        )
         result = family_result.object
         after = tuple(document.Objects)
     except ReviewedIntentExecutionError:
@@ -1472,6 +1762,7 @@ def execute_reviewed_intent_native(
         native_receipt=family_result.receipt,
         owned_objects=owned,
         _verified_execution_context=context,
+        _verified_dynamic_resolution=dynamic_resolution,
     )
 
 
@@ -1486,6 +1777,7 @@ __all__ = [
     "REVIEWED_PART_PRIMITIVE_ROUTES",
     "REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES",
     "REVIEWED_PARTDESIGN_BOOLEAN_ROUTES",
+    "REVIEWED_PARTDESIGN_DRESSUP_ROUTES",
     "REVIEWED_PARTDESIGN_PATTERN_ROUTES",
     "REVIEWED_PARTDESIGN_PROMOTION_ROUTES",
     "LoweredReviewedIntent",

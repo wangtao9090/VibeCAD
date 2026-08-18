@@ -28,6 +28,12 @@ from tests.test_execution_freecad_part_offset_projection_reviewed_execution impo
 from tests.test_execution_freecad_part_profile_surface_reviewed_execution import (
     _program as reviewed_profile_surface_program,
 )
+from tests.test_execution_freecad_partdesign_dressup_transform_reviewed_execution import (
+    _lower as lower_reviewed_dressup,
+)
+from tests.test_execution_freecad_partdesign_dressup_transform_reviewed_execution import (
+    _program as reviewed_dressup_program,
+)
 from tests.test_execution_freecad_partdesign_primitive_reviewed_execution import (
     _program as reviewed_partdesign_primitive_program,
 )
@@ -55,6 +61,9 @@ from vibecad.execution.freecad_part_profile_surface_reviewed_execution import (
     PART_PROFILE_SURFACE_RESULT_INVARIANTS,
     PartProfileSurfaceOwnershipClosure,
 )
+from vibecad.execution.freecad_partdesign_dressup_transform_reviewed_execution import (
+    PartDesignDressupOwnershipClosure,
+)
 from vibecad.execution.freecad_partdesign_primitive_reviewed_execution import (
     PARTDESIGN_PRIMITIVE_RESULT_INVARIANTS,
     PartDesignPrimitiveOwnershipClosure,
@@ -66,11 +75,13 @@ from vibecad.execution.freecad_reviewed_intent_execution import (
     REVIEWED_PART_DATUM_ROUTES,
     REVIEWED_PART_OFFSET_ROUTES,
     REVIEWED_PART_PROFILE_SURFACE_ROUTES,
+    REVIEWED_PARTDESIGN_DRESSUP_ROUTES,
     REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
     ReviewedNativeExecutionResult,
     _ReviewedFamilyExecutionContext,
+    _ReviewedFamilyNativeExecution,
     lower_reviewed_intent,
 )
 from vibecad.execution.registry import (
@@ -90,11 +101,13 @@ from vibecad.execution.revisions import (
 )
 from vibecad.execution.selectors import (
     EntityIdentity,
+    Provenance,
     ProvenanceSource,
     SemanticRole,
     index_entity_identities,
 )
 from vibecad.intent_bridge.freecad_part_datum_adapter import PART_DATUM_MANIFEST
+from vibecad.parametric import freecad_partdesign_dressup_transform_rules as dressup_rules
 from vibecad.parametric.freecad_part_core_rules import (
     PART_CORE_NATIVE_SPECS,
     PartCoreConformanceReceipt,
@@ -117,6 +130,11 @@ from vibecad.parametric.freecad_part_offset_projection_rules import (
 from vibecad.parametric.freecad_part_profile_surface_rules import (
     PartProfileSurfaceConformanceReceipt,
     PartProfileSurfaceOperation,
+)
+from vibecad.parametric.freecad_partdesign_dressup_transform_rules import (
+    MultiTransformParameters,
+    PartDesignDressupTransformConformanceReceipt,
+    PartDesignDressupTransformOperation,
 )
 from vibecad.parametric.freecad_partdesign_primitive_rules import (
     PartDesignPrimitiveConformanceReceipt,
@@ -2502,6 +2520,355 @@ def test_managed_first_additive_rolls_back_ten_objects_after_late_adoption_failu
     assert session.doc.Objects == ()
     assert session.attached_identities == []
     assert session.result_object is None
+
+
+class _ManagedMultiTransformFeature:
+    def __init__(
+        self,
+        document: _FakeDocument,
+        name: str,
+        type_id: str,
+        *,
+        volume: float,
+    ) -> None:
+        self.Document = document
+        self.Name = name
+        self.TypeId = type_id
+        self.Placement = _FakePlacement(0.0)
+        self.State = ("Up-to-date",)
+        self.Shape = _FakeShape(volume=volume)
+        self.BaseFeature = None
+
+    def isValid(self) -> bool:  # noqa: N802 - FreeCAD API spelling
+        return True
+
+
+def test_managed_multitransform_adopts_full_closure_and_rejects_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed_base = reviewed_box_program()
+    reviewed_multi = reviewed_dressup_program(PartDesignDressupTransformOperation.MULTI_TRANSFORM)
+    _, _, _, plan, _ = lower_reviewed_dressup(PartDesignDressupTransformOperation.MULTI_TRANSFORM)
+    assert type(plan.parameters) is MultiTransformParameters
+    route = next(
+        item
+        for item in REVIEWED_PARTDESIGN_DRESSUP_ROUTES
+        if item.operation.operation_id == "multi_transform"
+    )
+    plan_document = route.manifest.plan_document(plan.canonical_bytes, plan.plan_sha256)
+
+    def execute(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        if value == reviewed_base:
+            assert source_results == ()
+            base = _ManagedMultiTransformFeature(
+                session.doc,
+                "ReviewedBase",
+                REVIEWED_PART_BOX_ROUTE.operation.native_type_id,
+                volume=10.0,
+            )
+            base.Length = 5.0
+            base.Width = 2.0
+            base.Height = 1.0
+            session.doc.Objects = (*session.doc.Objects, base)
+            return ReviewedNativeExecutionResult(
+                route=REVIEWED_PART_BOX_ROUTE,
+                object=base,
+                plan_sha256="a" * 64,
+                plan_content_sha256="b" * 64,
+                native_receipt=PartCoreConformanceReceipt(
+                    plan_sha256="a" * 64,
+                    operation=PartCoreOperation.BOX,
+                    object_name=base.Name,
+                    source_shape_sha256s=(),
+                    result_shape_sha256=hashlib.sha256(
+                        base.Shape.exportBrepToString().encode()
+                    ).hexdigest(),
+                ),
+            )
+        assert value == reviewed_multi
+        assert len(source_results) == 1 and source_results[0].route is REVIEWED_PART_BOX_ROUTE
+        primary_name = f"ManagedMulti_{reviewed_multi.intent_graph_sha256[:16]}"
+        if session.doc.getObject(primary_name) is not None:
+            raise ReviewedIntentExecutionError(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
+        type_ids = (
+            route.operation.native_type_id,
+            *(
+                dressup_rules._NATIVE_STEP_SPECS[step.kind].type_id  # noqa: SLF001
+                for step in plan.parameters.steps
+            ),
+        )
+        owned = tuple(
+            _ManagedMultiTransformFeature(
+                session.doc,
+                primary_name if index == 0 else f"{primary_name}_Child{index}",
+                type_id,
+                volume=15.0 if index == 0 else 1.0,
+            )
+            for index, type_id in enumerate(type_ids)
+        )
+        owned[0].BaseFeature = source_results[0].object
+        session.doc.Objects = (*session.doc.Objects, *owned)
+        native_receipt = PartDesignDressupTransformConformanceReceipt(
+            plan_sha256=plan.plan_sha256,
+            operation=PartDesignDressupTransformOperation.MULTI_TRANSFORM,
+            object_names=tuple(item.Name for item in owned),
+            before_volume_mm3=10.0,
+            after_volume_mm3=15.0,
+        )
+        receipt = PartDesignDressupOwnershipClosure(
+            native_receipt=native_receipt,
+            body_id=plan.body_id,
+            node_id=plan.node_id,
+            result_id=plan.result_id,
+            plan_content_sha256=plan_document.content_sha256,
+            result_shape_sha256=hashlib.sha256(
+                owned[0].Shape.exportBrepToString().encode()
+            ).hexdigest(),
+            native_type_id=route.operation.native_type_id,
+        )
+        native = _ReviewedFamilyNativeExecution(
+            object=owned[0],
+            receipt=receipt,
+            owned_objects=owned,
+        )
+        resolution = route.family.resolve_dynamic_product_result(
+            plan,
+            plan_document,
+            route.operation,
+            native,
+        )
+        assert resolution is not None
+        return ReviewedNativeExecutionResult(
+            route=route,
+            object=owned[0],
+            plan_sha256=plan_document.document_digest,
+            plan_content_sha256=plan_document.content_sha256,
+            native_receipt=receipt,
+            owned_objects=owned,
+            _verified_execution_context=_ReviewedFamilyExecutionContext(
+                session=session,
+                document=session.doc,
+                source_results=source_results,
+            ),
+            _verified_dynamic_resolution=resolution,
+        )
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute)
+    source_ref = ({"command_id": "source", "slot": "object"},)
+    program = validate_model_program(
+        ModelProgram(
+            task_id="task-managed-multi-transform",
+            base_revision=BASE_REVISION,
+            operations=(
+                _command(
+                    "source",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed_base.to_mapping()},
+                ),
+                _command(
+                    "multi",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed_multi.to_mapping(), "sources": source_ref},
+                    depends_on=("source",),
+                ),
+                _command(
+                    "multi_duplicate",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed_multi.to_mapping(), "sources": source_ref},
+                    depends_on=("source",),
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="accept-managed-multi-transform", criteria=()),
+        )
+    )
+    session = _FakeSession()
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=program,
+        candidate=_active(session, tmp_path),
+    )
+
+    assert tuple(item.result.ok for item in outcomes) == (True, True, False)
+    closure_identities = tuple(identity for _, identity in session.attached_identities[1:])
+    assert tuple(item.semantic_role for item in closure_identities) == (
+        SemanticRole.FEATURE,
+        SemanticRole.SUPPORT,
+        SemanticRole.SUPPORT,
+    )
+    assert tuple(item.object_type for item in closure_identities) == (
+        "PartDesign::MultiTransform",
+        "PartDesign::Scaled",
+        "PartDesign::Mirrored",
+    )
+    assert all(item.provenance.operation_id == "multi" for item in closure_identities)
+    assert session.result_object is session.doc.Objects[1]
+    assert len(session.doc.Objects) == 4
+
+
+def test_managed_multitransform_failure_rolls_back_full_closure_and_body_tip(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed = reviewed_dressup_program(PartDesignDressupTransformOperation.MULTI_TRANSFORM)
+    _, _, _, plan, _ = lower_reviewed_dressup(PartDesignDressupTransformOperation.MULTI_TRANSFORM)
+    route = next(
+        item
+        for item in REVIEWED_PARTDESIGN_DRESSUP_ROUTES
+        if item.operation.operation_id == "multi_transform"
+    )
+    plan_document = route.manifest.plan_document(plan.canonical_bytes, plan.plan_sha256)
+    session = _FakeSession()
+    old_tip = object()
+    body = _ManagedDatumFeature(session.doc, "Body", "PartDesign::Body")
+    body.Tip = old_tip
+    session.attach_object_identity(
+        body,
+        EntityIdentity(
+            object_id="object_" + "1" * 32,
+            feature_id="feature_" + "2" * 32,
+            object_type="PartDesign::Body",
+            semantic_role=SemanticRole.SUPPORT,
+            provenance=Provenance(
+                source=ProvenanceSource.MODEL,
+                operation_id="existing_body",
+            ),
+        ),
+    )
+
+    def fail_after_mutation(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...],
+    ) -> ReviewedNativeExecutionResult:
+        assert value == reviewed and len(source_results) == 1
+        body.Tip = object()
+        created = tuple(
+            _ManagedMultiTransformFeature(
+                session.doc,
+                f"InvalidMulti{index}",
+                type_id,
+                volume=15.0 if index == 0 else 1.0,
+            )
+            for index, type_id in enumerate(
+                (
+                    "PartDesign::MultiTransform",
+                    "PartDesign::Scaled",
+                    "PartDesign::Mirrored",
+                    "PartDesign::Scaled",
+                )
+            )
+        )
+        session.doc.Objects = (*session.doc.Objects, *created)
+        native_receipt = PartDesignDressupTransformConformanceReceipt(
+            plan_sha256=plan.plan_sha256,
+            operation=PartDesignDressupTransformOperation.MULTI_TRANSFORM,
+            object_names=tuple(item.Name for item in created),
+            before_volume_mm3=10.0,
+            after_volume_mm3=15.0,
+        )
+        receipt = PartDesignDressupOwnershipClosure(
+            native_receipt=native_receipt,
+            body_id=plan.body_id,
+            node_id=plan.node_id,
+            result_id=plan.result_id,
+            plan_content_sha256=plan_document.content_sha256,
+            result_shape_sha256=hashlib.sha256(
+                created[0].Shape.exportBrepToString().encode()
+            ).hexdigest(),
+            native_type_id=route.operation.native_type_id,
+        )
+        native = _ReviewedFamilyNativeExecution(
+            object=created[0],
+            receipt=receipt,
+            owned_objects=created,
+        )
+        route.family.resolve_dynamic_product_result(
+            plan,
+            plan_document,
+            route.operation,
+            native,
+        )
+        raise AssertionError("extra child must fail in the dynamic resolver")
+
+    base_result: ReviewedNativeExecutionResult | None = None
+
+    def execute(
+        current: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        nonlocal base_result
+        if value != reviewed:
+            base = _ManagedMultiTransformFeature(
+                current.doc,
+                "RollbackBase",
+                "Part::Box",
+                volume=10.0,
+            )
+            base.Length = 5.0
+            base.Width = 2.0
+            base.Height = 1.0
+            current.doc.Objects = (*current.doc.Objects, base)
+            base_result = ReviewedNativeExecutionResult(
+                route=REVIEWED_PART_BOX_ROUTE,
+                object=base,
+                plan_sha256="1" * 64,
+                plan_content_sha256="2" * 64,
+                native_receipt=PartCoreConformanceReceipt(
+                    plan_sha256="1" * 64,
+                    operation=PartCoreOperation.BOX,
+                    object_name=base.Name,
+                    source_shape_sha256s=(),
+                    result_shape_sha256="3" * 64,
+                ),
+            )
+            return base_result
+        return fail_after_mutation(current, value, source_results=source_results)
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute)
+    base = reviewed_box_program()
+    program = validate_model_program(
+        ModelProgram(
+            task_id="task-managed-multi-rollback",
+            base_revision=BASE_REVISION,
+            operations=(
+                _command(
+                    "source",
+                    "apply_reviewed_intent",
+                    args={"intent": base.to_mapping()},
+                ),
+                _command(
+                    "multi",
+                    "apply_reviewed_intent",
+                    args={
+                        "intent": reviewed.to_mapping(),
+                        "sources": ({"command_id": "source", "slot": "object"},),
+                    },
+                    depends_on=("source",),
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="accept-managed-multi-rollback", criteria=()),
+        )
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=program,
+        candidate=_active(session, tmp_path),
+    )
+
+    assert tuple(item.result.ok for item in outcomes) == (True, False)
+    assert body.Tip is old_tip
+    assert tuple(item.Name for item in session.doc.Objects) == ("Body", "RollbackBase")
+    assert len(session.attached_identities) == 2
+    assert base_result is not None
 
 
 @pytest.mark.parametrize("source_interface", ("legacy_pair", "ordered_collection"))
