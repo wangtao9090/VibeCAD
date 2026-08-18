@@ -54,7 +54,7 @@ def test_current_reviewed_registry_is_complete_content_bound_and_not_verified() 
     manifests = CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS
     specs = current_freecad_reviewed_family_capability_specs()
 
-    assert len(manifests) == 12
+    assert len(manifests) == 13
     assert manifests == tuple(sorted(manifests, key=lambda item: item.family_id))
     assert {item.family_id for item in manifests} == {
         "application_document_objects",
@@ -66,15 +66,16 @@ def test_current_reviewed_registry_is_complete_content_bound_and_not_verified() 
         "freecad_part_profile_surface",
         "freecad_reviewed_sketch",
         "freecad_sketch_bootstrap",
+        "freecad_sketch_flatface_bootstrap",
         "part_datum",
         "part_dressup",
         "partdesign_residual",
     }
-    assert len({item.manifest_sha256 for item in manifests}) == 12
-    assert len(specs) == 82
+    assert len({item.manifest_sha256 for item in manifests}) == 13
+    assert len(specs) == 83
     assert len({item.native_type_id for item in specs}) == 62
-    assert len({item.operation_id for item in specs}) == 82
-    assert len({item.semantic_operation for item in specs}) == 82
+    assert len({item.operation_id for item in specs}) == 83
+    assert len({item.semantic_operation for item in specs}) == 83
     assert all(item.verification is None for item in specs)
 
     sketch_native_specs = tuple(
@@ -87,6 +88,7 @@ def test_current_reviewed_registry_is_complete_content_bound_and_not_verified() 
     assert {item.adapter_id for item in sketch_native_specs} == {
         "freecad_reviewed_sketch_adapter",
         "freecad_sketch_bootstrap_adapter",
+        "freecad_sketch_flatface_bootstrap_adapter",
     }
 
     coordinate_systems = tuple(

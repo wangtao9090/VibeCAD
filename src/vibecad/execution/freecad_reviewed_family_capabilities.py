@@ -39,6 +39,9 @@ from vibecad.intent_bridge.freecad_partdesign_residual_adapter import (
 from vibecad.intent_bridge.freecad_sketch_bootstrap_adapter import (
     SKETCH_BOOTSTRAP_FAMILY_MANIFEST,
 )
+from vibecad.intent_bridge.freecad_sketch_flatface_bootstrap_adapter import (
+    FLATFACE_SKETCH_FAMILY_MANIFEST,
+)
 from vibecad.intent_bridge.freecad_sketch_intent_adapter import (
     REVIEWED_SKETCH_FAMILY_MANIFEST,
 )
@@ -74,22 +77,27 @@ CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS = tuple(
             PARTDESIGN_RESIDUAL_MANIFEST,
             REVIEWED_SKETCH_FAMILY_MANIFEST,
             SKETCH_BOOTSTRAP_FAMILY_MANIFEST,
+            FLATFACE_SKETCH_FAMILY_MANIFEST,
         ),
         key=lambda item: item.family_id,
     )
 )
 
-# The CREATE bootstrap is a formal semantic, not a second native promotion
+# The two CREATE bootstraps are formal semantics, not additional native promotion
 # owner.  ``Sketcher::SketchObject`` already belongs to the established
 # reviewed Sketch adapter here and to the legacy planar-mechanical adapter in
-# the promotion catalog.  Keep this exception content-bound to the sole new
-# operation; the generic projection below remains strict for every caller.
+# the promotion catalog.  Keep this exception content-bound to these two
+# operations; the generic projection below remains strict for every caller.
 _CURRENT_FORMAL_ONLY_OPERATION_IDS = frozenset(
     {
         (
             SKETCH_BOOTSTRAP_FAMILY_MANIFEST.family_id,
             SKETCH_BOOTSTRAP_FAMILY_MANIFEST.operations[0].operation_id,
-        )
+        ),
+        (
+            FLATFACE_SKETCH_FAMILY_MANIFEST.family_id,
+            FLATFACE_SKETCH_FAMILY_MANIFEST.operations[0].operation_id,
+        ),
     }
 )
 

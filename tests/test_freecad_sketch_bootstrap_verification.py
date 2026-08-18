@@ -84,13 +84,13 @@ def test_internal_exact_adapter_lowering_returns_bound_plan_receipt() -> None:
     assert receipt.grants_execution_authority is False
 
 
-def test_catalog125_family20_handoff_is_current_but_inert_pending_attestation() -> None:
+def test_original_bootstrap_stays_in_catalog126_but_inert_pending_attestation() -> None:
     candidate = subject.SKETCH_BOOTSTRAP_CANDIDATE_FORMAL_SPEC
     handoff = subject.SKETCH_BOOTSTRAP_FORMAL_VERIFICATION_HANDOFF
     current_specs = current_freecad_intent_capability_specs()
 
-    assert len(current_specs) == 125
-    assert len({item.operation_id for item in current_specs}) == 125
+    assert len(current_specs) == 126
+    assert len({item.operation_id for item in current_specs}) == 126
     assert candidate.operation_id == ("freecad_sketch_bootstrap.create_body_owned_closed_circle")
     assert candidate.native_type_id == SKETCH_BOOTSTRAP_NATIVE_TYPE_ID
     assert candidate.verification is None

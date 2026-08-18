@@ -114,7 +114,7 @@ def test_current_specs_build_eighteen_packs_and_promote_all_one_hundred_two_type
         if item.native_type_id in {spec.native_type_id for spec in specs}
     }
     assert promoted == {item.native_type_id: CapabilitySupportStatus.EXECUTABLE for item in specs}
-    assert len(projection.manifest.formal_bindings) == 125
+    assert len(projection.manifest.formal_bindings) == 126
 
 
 def test_multiple_semantics_for_one_type_are_consolidated() -> None:
