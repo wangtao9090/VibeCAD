@@ -29,6 +29,11 @@ from vibecad.execution.capabilities import (
     CapabilityCatalogError,
     CapabilityExecutionProfile,
 )
+from vibecad.execution.freecad_app_reviewed_execution import (
+    APP_NO_SOURCE_REVIEWED_FAMILY_SPEC,
+    APP_ONE_SOURCE_REVIEWED_FAMILY_SPEC,
+    AppReviewedFamilySpec,
+)
 from vibecad.execution.freecad_builtin_intent_capabilities import (
     current_freecad_intent_capability_specs,
 )
@@ -267,6 +272,7 @@ class _ReviewedProductResultContract:
     semantic_roles: tuple[SemanticRole, ...]
     source_count: int | None = None
     execution_mode: _ReviewedProductExecutionMode = _ReviewedProductExecutionMode.CREATE
+    requires_state_sha256: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -280,6 +286,7 @@ class _ReviewedProductResultContract:
             or len(self.semantic_roles) != len(self.owned_type_ids)
             or any(type(item) is not SemanticRole for item in self.semantic_roles)
             or type(self.execution_mode) is not _ReviewedProductExecutionMode
+            or type(self.requires_state_sha256) is not bool
             or (
                 self.source_count is not None
                 and (type(self.source_count) is not int or not 0 <= self.source_count <= 8)
@@ -598,8 +605,7 @@ class _ReviewedIntentDocumentBinding:
             or type(self.binding_contract_sha256) is not str
             or len(self.binding_contract_sha256) != 64
             or any(
-                character not in "0123456789abcdef"
-                for character in self.binding_contract_sha256
+                character not in "0123456789abcdef" for character in self.binding_contract_sha256
             )
             or type(self.codec_descriptor) is not GraphCodecDescriptor
             or type(self.schema_term) is not BridgeTermRef
@@ -830,9 +836,7 @@ def _sketch_intent_binding() -> _ReviewedIntentDocumentBinding:
         graph = value.intent_graph
         if type(graph) is not SketchIntentGraph:
             _fail(ReviewedIntentExecutionErrorCode.INVALID_INPUT)
-        term_by_id = {
-            item.term_ref_id: BridgeTermRef(**item.to_mapping()) for item in graph.terms
-        }
+        term_by_id = {item.term_ref_id: BridgeTermRef(**item.to_mapping()) for item in graph.terms}
         matching_geometry = tuple(
             item
             for item in graph.geometries
@@ -933,6 +937,7 @@ class _ReviewedIntentFamilyDescriptor:
     formal_semantic_binding: _ReviewedFormalSemanticBinding = (
         _ReviewedFormalSemanticBinding.FULL_IDENTITY
     )
+    requires_same_run_sources: bool = False
     dynamic_ownership_resolver: _ReviewedDynamicOwnershipResolverDescriptor | None = field(
         default=None,
         repr=False,
@@ -986,6 +991,8 @@ class _ReviewedIntentFamilyDescriptor:
             or type(self.maximum_sources) is not int
             or not 0 <= self.minimum_sources <= self.maximum_sources <= 8
             or type(self.formal_semantic_binding) is not _ReviewedFormalSemanticBinding
+            or type(self.requires_same_run_sources) is not bool
+            or (self.requires_same_run_sources and self.minimum_sources < 1)
             or (
                 self.dynamic_ownership_resolver is not None
                 and type(self.dynamic_ownership_resolver)
@@ -1347,6 +1354,22 @@ def _singleton_product_results(
     )
 
 
+def _app_product_results(
+    spec: AppReviewedFamilySpec,
+) -> tuple[_ReviewedProductResultContract, ...]:
+    return tuple(
+        _ReviewedProductResultContract(
+            operation_id=contract.operation_id,
+            result_kind=_ReviewedProductResultKind.REFERENCE,
+            owned_type_ids=contract.owned_type_ids,
+            semantic_roles=contract.semantic_roles,
+            source_count=contract.minimum_sources,
+            requires_state_sha256=True,
+        )
+        for contract in spec.product_contracts
+    )
+
+
 _PART_CORE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     manifest=PART_CORE_MANIFEST,
     subject_type_term=_bridge_term(PART_CORE_STRUCTURE_TERM),
@@ -1620,6 +1643,29 @@ _PARTDESIGN_GROOVE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     formal_semantic_binding=_ReviewedFormalSemanticBinding.LEGACY_TERM_ID,
 )
 
+_APP_NO_SOURCE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=APP_NO_SOURCE_REVIEWED_FAMILY_SPEC.manifest,
+    subject_type_term=APP_NO_SOURCE_REVIEWED_FAMILY_SPEC.subject_type_term,
+    adapter_factory=APP_NO_SOURCE_REVIEWED_FAMILY_SPEC.adapter_factory,
+    validate_plan=APP_NO_SOURCE_REVIEWED_FAMILY_SPEC.validate_plan,
+    execute_plan=APP_NO_SOURCE_REVIEWED_FAMILY_SPEC.execute_plan,
+    product_results=_app_product_results(APP_NO_SOURCE_REVIEWED_FAMILY_SPEC),
+    minimum_sources=APP_NO_SOURCE_REVIEWED_FAMILY_SPEC.minimum_sources,
+    maximum_sources=APP_NO_SOURCE_REVIEWED_FAMILY_SPEC.maximum_sources,
+)
+
+_APP_ONE_SOURCE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=APP_ONE_SOURCE_REVIEWED_FAMILY_SPEC.manifest,
+    subject_type_term=APP_ONE_SOURCE_REVIEWED_FAMILY_SPEC.subject_type_term,
+    adapter_factory=APP_ONE_SOURCE_REVIEWED_FAMILY_SPEC.adapter_factory,
+    validate_plan=APP_ONE_SOURCE_REVIEWED_FAMILY_SPEC.validate_plan,
+    execute_plan=APP_ONE_SOURCE_REVIEWED_FAMILY_SPEC.execute_plan,
+    product_results=_app_product_results(APP_ONE_SOURCE_REVIEWED_FAMILY_SPEC),
+    minimum_sources=APP_ONE_SOURCE_REVIEWED_FAMILY_SPEC.minimum_sources,
+    maximum_sources=APP_ONE_SOURCE_REVIEWED_FAMILY_SPEC.maximum_sources,
+    requires_same_run_sources=True,
+)
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReviewedIntentRoute:
@@ -1644,8 +1690,7 @@ class ReviewedIntentRoute:
             or type(self.subject_type_term) is not BridgeTermRef
             or self.manifest != self.family.manifest
             or self.family.intent_binding is None
-            or self.subject_type_term
-            != self.family.intent_binding.subject_type_for(self.operation)
+            or self.subject_type_term != self.family.intent_binding.subject_type_for(self.operation)
             or self.operation not in self.manifest.operations
             or self.operation_id != f"{self.manifest.family_id}.{self.operation.operation_id}"
         ):
@@ -1818,6 +1863,18 @@ REVIEWED_PARTDESIGN_GROOVE_ROUTES: Final = _routes_for_family(
     _PARTDESIGN_GROOVE_FAMILY,
     PARTDESIGN_GROOVE_REVIEWED_FAMILY_SPEC.operation_ids,
 )
+REVIEWED_APP_NO_SOURCE_ROUTES: Final = _routes_for_family(
+    _APP_NO_SOURCE_FAMILY,
+    APP_NO_SOURCE_REVIEWED_FAMILY_SPEC.operation_ids,
+)
+REVIEWED_APP_ONE_SOURCE_ROUTES: Final = _routes_for_family(
+    _APP_ONE_SOURCE_FAMILY,
+    APP_ONE_SOURCE_REVIEWED_FAMILY_SPEC.operation_ids,
+)
+REVIEWED_APP_ROUTES: Final = (
+    *REVIEWED_APP_NO_SOURCE_ROUTES,
+    *REVIEWED_APP_ONE_SOURCE_ROUTES,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
@@ -1831,6 +1888,7 @@ _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PARTDESIGN_BOOLEAN_ROUTES,
     REVIEWED_PARTDESIGN_DRESSUP_ROUTES,
     REVIEWED_PARTDESIGN_GROOVE_ROUTES,
+    REVIEWED_APP_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -2349,6 +2407,7 @@ class ReviewedNativeExecutionResult:
     result_kind: _ReviewedProductResultKind = field(init=False)
     semantic_roles: tuple[SemanticRole, ...] = field(init=False)
     execution_mode: _ReviewedProductExecutionMode = field(init=False)
+    requires_state_sha256: bool = field(init=False)
     _retained_run_token: object | None = field(
         default=None,
         init=False,
@@ -2416,6 +2475,27 @@ class ReviewedNativeExecutionResult:
         object.__setattr__(self, "result_kind", contract.result_kind)
         object.__setattr__(self, "semantic_roles", contract.semantic_roles)
         object.__setattr__(self, "execution_mode", contract.execution_mode)
+        object.__setattr__(self, "requires_state_sha256", contract.requires_state_sha256)
+        if contract.requires_state_sha256:
+            receipt_state_sha256 = getattr(self.native_receipt, "state_sha256", None)
+            validate_current = getattr(self.native_receipt, "validate_current", None)
+            try:
+                document = self.object.Document
+            except (Exception, SystemExit):
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            if (
+                self.state_sha256 is None
+                or type(receipt_state_sha256) is not str
+                or not hmac.compare_digest(self.state_sha256, receipt_state_sha256)
+                or not callable(validate_current)
+            ):
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            try:
+                validate_current(document, self.object, owned)
+            except ReviewedIntentExecutionError:
+                raise
+            except (Exception, SystemExit):
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         if contract.execution_mode is _ReviewedProductExecutionMode.CREATE:
             if self._update_recovery is not None:
                 _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
@@ -2663,6 +2743,9 @@ def execute_reviewed_intent_native(
 
 __all__ = [
     "CURRENT_REVIEWED_INTENT_ROUTES",
+    "REVIEWED_APP_NO_SOURCE_ROUTES",
+    "REVIEWED_APP_ONE_SOURCE_ROUTES",
+    "REVIEWED_APP_ROUTES",
     "REVIEWED_PART_BOX_ROUTE",
     "REVIEWED_PART_CSG_ROUTES",
     "REVIEWED_PART_CURVE_ROUTES",

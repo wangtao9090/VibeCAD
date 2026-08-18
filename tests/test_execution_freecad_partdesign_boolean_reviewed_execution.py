@@ -123,8 +123,8 @@ def test_boolean_family_has_three_exact_routes_and_ordered_source_roles() -> Non
     family = routes[0].family
 
     assert family.manifest is PARTDESIGN_BOOLEAN_MANIFEST
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 68
-    assert CURRENT_REVIEWED_INTENT_ROUTES[-10:-7] == routes
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 78
+    assert CURRENT_REVIEWED_INTENT_ROUTES[-20:-17] == routes
     assert len(routes) == len(PARTDESIGN_BOOLEAN_REVIEWED_PRODUCT_IDENTITIES) == 3
     assert PARTDESIGN_BOOLEAN_REVIEWED_OPERATIONS == tuple(PartDesignBooleanOperation)
     assert PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC.minimum_sources == 2

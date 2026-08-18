@@ -109,9 +109,7 @@ def _synthetic_route(
         formal_semantic_binding=_ReviewedFormalSemanticBinding.FULL_IDENTITY,
     )
     semantic_operation = reviewed_execution._semantic_operation(operation_spec)  # noqa: SLF001
-    operation_id = (
-        f"{sketch_adapter.REVIEWED_SKETCH_FAMILY_MANIFEST.family_id}.{operation.value}"
-    )
+    operation_id = f"{sketch_adapter.REVIEWED_SKETCH_FAMILY_MANIFEST.family_id}.{operation.value}"
     formal = FreeCadIntentCapabilitySpec(
         operation_id=operation_id,
         semantic_operation=semantic_operation,
@@ -207,7 +205,7 @@ def test_synthetic_sketch_binding_routes_and_lowers_operation_selected_subject(
         route.operation,
         selector_term,
     )
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 68
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 78
     assert route not in CURRENT_REVIEWED_INTENT_ROUTES
 
 
@@ -230,13 +228,12 @@ def test_reviewed_wire_union_preserves_pfg_v2_and_rejects_unknown_discriminator(
 
 
 def test_current_routes_bind_exact_pfg_document_contract() -> None:
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 68
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 78
+    assert {route.family.intent_binding.binding_id for route in CURRENT_REVIEWED_INTENT_ROUTES} == {
+        "reviewed_pfg_v2_feature_node"
+    }
     assert {
-        route.family.intent_binding.binding_id for route in CURRENT_REVIEWED_INTENT_ROUTES
-    } == {"reviewed_pfg_v2_feature_node"}
-    assert {
-        route.family.intent_binding.binding_version
-        for route in CURRENT_REVIEWED_INTENT_ROUTES
+        route.family.intent_binding.binding_version for route in CURRENT_REVIEWED_INTENT_ROUTES
     } == {"1.0.0"}
     route_catalog_sha256 = hashlib.sha256(
         "\n".join(
@@ -245,7 +242,7 @@ def test_current_routes_bind_exact_pfg_document_contract() -> None:
         ).encode("ascii")
     ).hexdigest()
     assert route_catalog_sha256 == (
-        "0743bc76858e72a0293039bd89baa2a8ecef2ffb88ec3f082a8a601816d944fc"
+        "99393c47a73561abca78c686fca061221c146747180edcf539070254baf63f41"
     )
 
 
@@ -313,9 +310,7 @@ def test_sketch_binding_rejects_wrong_payload_selector_schema_codec_and_tamper(
     tampered_graph = dict(tampered["intent_graph"])
     tampered_graph["sketch_id"] = "sketch_tampered"
     with pytest.raises(ReviewedIntentProgramError) as captured:
-        ReviewedIntentProgramV1.from_mapping(
-            {**tampered, "intent_graph": tampered_graph}
-        )
+        ReviewedIntentProgramV1.from_mapping({**tampered, "intent_graph": tampered_graph})
     assert captured.value.code is ReviewedIntentProgramErrorCode.INTEGRITY_FAILURE
 
 

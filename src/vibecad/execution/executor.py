@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import hmac
 import io
 import json
 import math
@@ -2642,7 +2643,10 @@ def _managed_apply_reviewed_intent(
                 if any(type(item) is not EntityIdentity for item in resolved_source_identities):
                     raise ValueError
             execution_kwargs: dict[str, object] = {"source_results": resolved_sources}
-            if execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY:
+            if (
+                execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY
+                or route.family.requires_same_run_sources
+            ):
                 execution_kwargs["_reviewed_run_token"] = reviewed_products.execution_token
             executed = execution_leaf(
                 session,
@@ -2790,7 +2794,24 @@ def _managed_apply_reviewed_intent(
             ):
                 raise ValueError
             adoption_validator = getattr(executed.native_receipt, "validate_adoption", None)
-            if adoption_validator is not None:
+            if executed.requires_state_sha256:
+                receipt_state_sha256 = getattr(
+                    executed.native_receipt,
+                    "state_sha256",
+                    None,
+                )
+                if (
+                    executed.state_sha256 is None
+                    or type(receipt_state_sha256) is not str
+                    or not hmac.compare_digest(
+                        executed.state_sha256,
+                        receipt_state_sha256,
+                    )
+                    or not callable(adoption_validator)
+                ):
+                    raise ValueError
+                adoption_validator(session.doc, obj, created)  # type: ignore[attr-defined]
+            elif adoption_validator is not None:
                 if not callable(adoption_validator):
                     raise ValueError
                 adoption_validator(session.doc, obj, created)  # type: ignore[attr-defined]

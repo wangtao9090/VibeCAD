@@ -10,6 +10,7 @@ import pytest
 import vibecad.execution.freecad_reviewed_intent_execution as reviewed_execution
 from vibecad.execution.freecad_reviewed_intent_execution import (
     CURRENT_REVIEWED_INTENT_ROUTES,
+    REVIEWED_APP_ROUTES,
     REVIEWED_PART_CSG_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
     REVIEWED_PART_DATUM_ROUTES,
@@ -305,8 +306,9 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
         *REVIEWED_PARTDESIGN_BOOLEAN_ROUTES,
         *REVIEWED_PARTDESIGN_DRESSUP_ROUTES,
         *REVIEWED_PARTDESIGN_GROOVE_ROUTES,
+        *REVIEWED_APP_ROUTES,
     )
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 68
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 78
     assert len(REVIEWED_PART_PRIMITIVE_ROUTES) == len(programs) == 8
     assert len(REVIEWED_PART_CURVE_ROUTES) == 9
     assert len(REVIEWED_PART_CSG_ROUTES) == 3
@@ -319,6 +321,7 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
     assert len(REVIEWED_PARTDESIGN_BOOLEAN_ROUTES) == 3
     assert len(REVIEWED_PARTDESIGN_DRESSUP_ROUTES) == 6
     assert len(REVIEWED_PARTDESIGN_GROOVE_ROUTES) == 1
+    assert len(REVIEWED_APP_ROUTES) == 10
     assert {
         route.family.product_result(route.operation).result_kind.value
         for route in REVIEWED_PART_PRIMITIVE_ROUTES

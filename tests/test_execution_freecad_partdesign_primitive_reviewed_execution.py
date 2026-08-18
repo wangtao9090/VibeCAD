@@ -479,8 +479,8 @@ def test_partdesign_primitive_product_identity_and_source_tables_are_exact() -> 
 
 
 def test_shared_routes_strictly_bind_legacy_formal_to_full_primitive_manifest() -> None:
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 68
-    assert CURRENT_REVIEWED_INTENT_ROUTES[-29:-13] == REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 78
+    assert CURRENT_REVIEWED_INTENT_ROUTES[-39:-23] == REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES
     assert len(REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES) == 16
     assert len(REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES[0].family.product_results) == 24
     formal = reviewed_execution.current_freecad_intent_capability_specs()
