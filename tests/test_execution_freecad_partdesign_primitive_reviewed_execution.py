@@ -479,7 +479,7 @@ def test_partdesign_primitive_product_identity_and_source_tables_are_exact() -> 
 
 
 def test_shared_routes_strictly_bind_legacy_formal_to_full_primitive_manifest() -> None:
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 96
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 99
     assert CURRENT_REVIEWED_INTENT_ROUTES[39:55] == REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES
     assert len(REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES) == 16
     assert len(REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES[0].family.product_results) == 24

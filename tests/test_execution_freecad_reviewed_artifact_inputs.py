@@ -152,6 +152,24 @@ def _resolve(resolver: _ReviewedArtifactRunResolver, token: object, **changes: o
     return resolver.resolve(**values)
 
 
+def _resolve_unique(
+    resolver: _ReviewedArtifactRunResolver,
+    token: object,
+    **changes: object,
+):
+    values: dict[str, object] = {
+        "run_token": token,
+        "family_id": "freecad_part_file_import",
+        "operation_id": "step",
+        "role_term_ref_id": "role_part_file_import_artifact",
+        "schema_term_ref_id": "schema_part_step_artifact_v1",
+        "media_type": "model/step",
+        "maximum_bytes": MAX_REVIEWED_ARTIFACT_BYTES,
+    }
+    values.update(changes)
+    return resolver.resolve_unique(**values)
+
+
 def test_catalog_is_canonical_and_binds_the_complete_run() -> None:
     alpha = _record(artifact_id="artifact_a", operation_ids=("step_b", "step_a"))
     beta = _record(artifact_id="artifact_b")
@@ -231,6 +249,35 @@ def test_resolver_returns_one_exact_reader_and_stager_context() -> None:
     assert context.stager_factory.create() is stagers.stager
     assert source.reads == [(resolver._snapshot.records[0], MAX_REVIEWED_ARTIFACT_BYTES)]
     assert stagers.creates == [(resolver._snapshot.records[0], "freecad_part_file_import", "step")]
+
+
+def test_unique_resolver_requires_one_complete_static_contract_match() -> None:
+    resolver, token, source, _stagers = _resolver()
+    resolution = _resolve_unique(resolver, token)
+    assert (
+        read_verified_document(
+            resolution.artifact_context.artifacts,
+            resolution.artifact_context.artifact_document,
+            maximum_bytes=MAX_REVIEWED_ARTIFACT_BYTES,
+        )
+        == _PAYLOAD
+    )
+    assert len(source.reads) == 1
+
+    empty, empty_token, _, _ = _resolver(snapshot=_snapshot(()))
+    with pytest.raises(ReviewedArtifactInputError) as missing:
+        _resolve_unique(empty, empty_token)
+    assert missing.value.code is ReviewedArtifactInputErrorCode.UNKNOWN_ARTIFACT
+
+    duplicate = _record(artifact_id="artifact_step_duplicate")
+    ambiguous, ambiguous_token, _, _ = _resolver(snapshot=_snapshot((_record(), duplicate)))
+    with pytest.raises(ReviewedArtifactInputError) as duplicated:
+        _resolve_unique(ambiguous, ambiguous_token)
+    assert duplicated.value.code is ReviewedArtifactInputErrorCode.AUTHORITY_VIOLATION
+
+    with pytest.raises(ReviewedArtifactInputError) as wrong_media:
+        _resolve_unique(resolver, token, media_type="model/iges")
+    assert wrong_media.value.code is ReviewedArtifactInputErrorCode.UNKNOWN_ARTIFACT
 
 
 def test_same_foundation_resolves_the_imageplane_artifact_contract() -> None:

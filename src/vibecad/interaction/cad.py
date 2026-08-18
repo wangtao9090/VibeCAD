@@ -29,7 +29,9 @@ from vibecad.workflow.program import ValidatedProgram
 from vibecad.workflow.state import TaskArtifactRef
 
 MAX_ADMITTED_RUNTIME_MS = 30_000
-MAX_ADMITTED_CREATED_OBJECTS = 32
+# PM1 owns Body + Origin + seven helpers + outer Sketch + Pad and one
+# Sketch/Pocket pair for each of its bounded 16 circles: 11 + 2 * 16.
+MAX_ADMITTED_CREATED_OBJECTS = 43
 MAX_ADMITTED_RESULT_BYTES = 262_144
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")

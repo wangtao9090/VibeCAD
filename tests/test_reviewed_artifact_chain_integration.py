@@ -12,8 +12,10 @@ import pytest
 import vibecad.execution.executor as executor_module
 import vibecad.execution.freecad_imageplane_reviewed_execution as image_execution
 import vibecad.execution.freecad_part_file_import_reviewed_execution as import_execution
+import vibecad.execution.freecad_planar_mechanical_reviewed_execution as pm_execution
 import vibecad.execution.freecad_reviewed_intent_execution as reviewed_execution
 from tests import test_execution_freecad_imageplane_reviewed_execution as image_fakes
+from tests import test_execution_freecad_planar_mechanical_reviewed_execution as pm_fakes
 from tests.test_intent_bridge_freecad_imageplane_adapter import (
     _configuration as image_configuration,
 )
@@ -62,6 +64,10 @@ from vibecad.parametric.freecad_part_file_import_rules import (
     PartFileImportConformanceReceipt,
     PartFileImportExecutionBindings,
     PartFileImportOperation,
+)
+from vibecad.parametric.freecad_planar_mechanical_rules import (
+    PlanarMechanicalExecutionBindings,
+    decode_planar_mechanical_plan,
 )
 from vibecad.workflow.contracts import AcceptanceSpec, ModelProgram
 from vibecad.workflow.program import validate_model_program
@@ -360,6 +366,150 @@ def test_registered_import_without_resolver_fails_before_native_mutation(
     assert outcome.result.ok is False
     assert native_calls == []
     assert tuple(session.doc.Objects) == ()
+
+
+def _install_managed_pm1_apply(
+    monkeypatch: pytest.MonkeyPatch,
+    session: _FakeSession,
+) -> list[object]:
+    calls: list[object] = []
+
+    def apply(
+        raw: bytes,
+        *,
+        expected_content_sha256: str,
+        expected_plan_sha256: str,
+        bindings: PlanarMechanicalExecutionBindings,
+    ):
+        assert bindings.document is session.doc
+        plan = decode_planar_mechanical_plan(
+            raw,
+            expected_content_sha256=expected_content_sha256,
+            expected_plan_sha256=expected_plan_sha256,
+        )
+        calls.append(plan)
+        before = tuple(session.doc.Objects)
+        session.doc.Objects = list(before)
+        try:
+            receipt = pm_fakes._fake_apply(session.doc, plan)  # noqa: SLF001
+            for item in session.doc.Objects:
+                if not hasattr(item, "Placement"):
+                    item.Placement = _FakePlacement(0.0)
+                shape = getattr(item, "Shape", None)
+                if shape is not None:
+                    item.Shape = _FakeShape(
+                        volume=float(shape.Volume),
+                        solid_count=len(shape.Solids),
+                        shape_type="Solid" if shape.Solids else "Wire",
+                        wire_closed=True,
+                    )
+            return receipt
+        finally:
+            session.doc.Objects = tuple(session.doc.Objects)
+
+    monkeypatch.setattr(pm_execution, "apply_planar_mechanical_plan", apply)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("operation_id", "circle_count"),
+    (("reference-profiles", 0), ("add", 1), ("remove", 1)),
+)
+def test_registered_pm1_executes_from_public_model_program_with_sealed_visual(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation_id: str,
+    circle_count: int,
+) -> None:
+    intent = pm_fakes._reviewed_program(  # noqa: SLF001
+        operation_id,
+        circle_count=circle_count,
+    )
+    resolver, token = pm_fakes._reviewed_resolver(circle_count=circle_count)  # noqa: SLF001
+    session = _FakeSession()
+    session.doc.UndoMode = 1
+    session.doc.HasPendingTransaction = False
+    native_calls = _install_managed_pm1_apply(monkeypatch, session)
+    monkeypatch.setitem(sys.modules, "FreeCAD", ModuleType("FreeCAD"))
+    monkeypatch.setattr(
+        reviewed_execution,
+        "require_reviewed_route_verified",
+        lambda route, *, freecad: None,
+    )
+    cursor = InProcessCadExecutor(store=_store())._prepare_program_execution(
+        program=_program(intent),
+        candidate=_active(session, tmp_path),
+        artifact_resolver=resolver,
+        artifact_run_token=token,
+    )
+    cursor._bind_run_resource(resolver)  # noqa: SLF001
+
+    outcome = cursor.step()
+
+    assert outcome.result.ok is True
+    assert outcome.result.value["reviewed_operation_id"] == intent.operation_id
+    assert len(native_calls) == 1
+    assert len(session.doc.Objects) == 11 + 2 * circle_count
+
+
+def test_registered_pm1_without_sealed_visual_fails_before_native_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    intent = pm_fakes._reviewed_program("add", circle_count=0)  # noqa: SLF001
+    session = _FakeSession()
+    session.doc.UndoMode = 1
+    session.doc.HasPendingTransaction = False
+    native_calls = _install_managed_pm1_apply(monkeypatch, session)
+    cursor = InProcessCadExecutor(store=_store())._prepare_program_execution(
+        program=_program(intent),
+        candidate=_active(session, tmp_path),
+    )
+
+    outcome = cursor.step()
+
+    assert outcome.result.ok is False
+    assert native_calls == []
+    assert tuple(session.doc.Objects) == ()
+
+
+def test_registered_pm1_late_adoption_failure_rolls_back_the_whole_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FailingAttachSession(_FakeSession):
+        def attach_object_identity(self, obj: object, identity: object) -> object:
+            if len(self.attached_identities) == 4:
+                raise RuntimeError("bounded PM1 late-adoption failure")
+            return super().attach_object_identity(obj, identity)
+
+    intent = pm_fakes._reviewed_program("add", circle_count=1)  # noqa: SLF001
+    resolver, token = pm_fakes._reviewed_resolver(circle_count=1)  # noqa: SLF001
+    session = FailingAttachSession()
+    session.doc.UndoMode = 1
+    session.doc.HasPendingTransaction = False
+    native_calls = _install_managed_pm1_apply(monkeypatch, session)
+    monkeypatch.setitem(sys.modules, "FreeCAD", ModuleType("FreeCAD"))
+    monkeypatch.setattr(
+        reviewed_execution,
+        "require_reviewed_route_verified",
+        lambda route, *, freecad: None,
+    )
+    cursor = InProcessCadExecutor(store=_store())._prepare_program_execution(
+        program=_program(intent),
+        candidate=_active(session, tmp_path),
+        artifact_resolver=resolver,
+        artifact_run_token=token,
+    )
+    cursor._bind_run_resource(resolver)  # noqa: SLF001
+
+    outcome = cursor.step()
+
+    assert outcome.result.ok is False
+    assert len(native_calls) == 1
+    assert tuple(session.doc.Objects) == ()
+    assert session.attached_identities == []
+    assert session.result_object is None
 
 
 def test_registered_imageplane_public_create_then_same_run_edit_preserves_identity(

@@ -1,4 +1,4 @@
-"""Product-closure tests for the non-routable PM1 reviewed handoff."""
+"""Product-closure tests for the routed PM1 reviewed handoff."""
 
 from __future__ import annotations
 
@@ -9,6 +9,10 @@ from dataclasses import dataclass
 import pytest
 
 import vibecad.execution.freecad_planar_mechanical_reviewed_execution as pm_execution
+from tests.test_intent_bridge_freecad_planar_mechanical_adapter import _compiled
+from tests.test_intent_rules_planar_mechanical_v1 import _document as _visual_document
+from tests.test_intent_rules_planar_mechanical_v1 import _graph as _visual_graph
+from vibecad.application.reviewed_input_ingress import ReviewedInputKind, _artifact_id
 from vibecad.execution.freecad_planar_mechanical_reviewed_execution import (
     PLANAR_MECHANICAL_REVIEWED_OPERATION_SPECS,
     PLANAR_MECHANICAL_REVIEWED_PRODUCT_HANDOFF,
@@ -17,10 +21,18 @@ from vibecad.execution.freecad_planar_mechanical_reviewed_execution import (
     resolve_planar_mechanical_product_contract,
     resolve_planar_mechanical_reviewed_operation,
 )
+from vibecad.execution.freecad_reviewed_artifact_inputs import (
+    MAX_REVIEWED_ARTIFACT_BYTES,
+    ReviewedArtifactCatalogRecord,
+    ReviewedArtifactCatalogSnapshot,
+    _ReviewedArtifactRunResolver,
+)
 from vibecad.execution.freecad_reviewed_intent_execution import (
     CURRENT_REVIEWED_INTENT_ROUTES,
+    REVIEWED_PLANAR_MECHANICAL_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
+    lower_reviewed_intent,
 )
 from vibecad.execution.selectors import SemanticRole
 from vibecad.intent_bridge.contracts import DocumentRef
@@ -29,6 +41,7 @@ from vibecad.intent_bridge.freecad_planar_mechanical_adapter import (
     PLANAR_PLAN_DOCUMENT_ROLE_TERM,
     PLANAR_PLAN_SCHEMA_TERM,
 )
+from vibecad.parametric.feature_graph_v2 import decode_parametric_feature_graph_v2
 from vibecad.parametric.freecad_planar_mechanical_rules import (
     PLANAR_MECHANICAL_PLAN_MEDIA_TYPE,
     PlanarCircleRemoval,
@@ -37,6 +50,7 @@ from vibecad.parametric.freecad_planar_mechanical_rules import (
     PlanarMechanicalConformanceReceipt,
     PlanarRectangleProfile,
 )
+from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 
 
 def _semantic_operation(operation) -> str:
@@ -49,6 +63,101 @@ def _operation(suffix: str):
         item
         for item in PLANAR_MECHANICAL_REVIEWED_OPERATION_SPECS
         if item.operation_id.endswith(suffix)
+    )
+
+
+class _VisualSource:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def read(self, record: ReviewedArtifactCatalogRecord, maximum_bytes: int) -> bytes:
+        assert record.content_sha256 == hashlib.sha256(self.payload).hexdigest()
+        assert len(self.payload) <= maximum_bytes
+        return self.payload
+
+    def close(self) -> None:
+        return None
+
+
+class _UnusedStagerFactory:
+    def create(self, **_kwargs: object) -> object:
+        raise AssertionError("the PM1 proof bridge must not stage a path")
+
+    def close(self) -> None:
+        return None
+
+
+def _reviewed_program(
+    operation_id: str,
+    *,
+    circle_count: int,
+) -> ReviewedIntentProgramV1:
+    compile_result, _stack, payloads = _compiled(circle_count)
+    parametric_document = next(
+        item
+        for item in compile_result.output_documents
+        if item.media_type == "application/vnd.vibecad.parametric-feature-graph-v2+json"
+    )
+    graph = decode_parametric_feature_graph_v2(payloads[parametric_document.artifact_id])
+    route = next(
+        item
+        for item in REVIEWED_PLANAR_MECHANICAL_ROUTES
+        if item.operation.operation_id == operation_id
+    )
+    return ReviewedIntentProgramV1(
+        operation_id=route.operation_id,
+        semantic_operation=route.semantic_operation,
+        intent_graph_sha256=graph.graph_sha256,
+        intent_content_sha256=hashlib.sha256(graph.canonical_bytes).hexdigest(),
+        intent_graph=graph,
+    )
+
+
+def _reviewed_resolver(
+    *,
+    circle_count: int,
+    record_changes: dict[str, object] | None = None,
+    extra_records: tuple[ReviewedArtifactCatalogRecord, ...] = (),
+) -> tuple[_ReviewedArtifactRunResolver, object]:
+    _visual, payload = _visual_document(_visual_graph(circle_count))
+    values: dict[str, object] = {
+        "artifact_id": _artifact_id(
+            ReviewedInputKind.PLANAR_MECHANICAL_VISUAL,
+            hashlib.sha256(payload).hexdigest(),
+        ),
+        "content_sha256": hashlib.sha256(payload).hexdigest(),
+        "size_bytes": len(payload),
+        "media_type": "application/vnd.vibecad.visual-feature-graph+json",
+        "role_term_ref_id": "pm1.role.visual-evidence",
+        "schema_term_ref_id": "vfg.schema.v1",
+        "document_id": ("planar_mechanical_visual_" + hashlib.sha256(payload).hexdigest()[:32]),
+        "family_id": "partdesign.planar-mechanical",
+        "operation_ids": ("add", "reference-profiles", "remove"),
+        "maximum_bytes": MAX_REVIEWED_ARTIFACT_BYTES,
+    }
+    if record_changes is not None:
+        values.update(record_changes)
+    record = ReviewedArtifactCatalogRecord(**values)
+    snapshot = ReviewedArtifactCatalogSnapshot(
+        task_id="task_pm1_reviewed",
+        project_id="project_pm1_reviewed",
+        base_revision="revision_pm1_reviewed",
+        run_id="artifact_run_pm1_reviewed",
+        records=(record, *extra_records),
+    )
+    token = object()
+    return (
+        _ReviewedArtifactRunResolver(
+            snapshot=snapshot,
+            source=_VisualSource(payload),
+            stager_factory=_UnusedStagerFactory(),
+            task_id=snapshot.task_id,
+            project_id=snapshot.project_id,
+            base_revision=snapshot.base_revision,
+            run_id=snapshot.run_id,
+            run_token=token,
+        ),
+        token,
     )
 
 
@@ -68,8 +177,8 @@ def _plan(circle_count: int) -> PlanarMechanicalBackendPlan:
                 result_id=result,
                 base_node_id=base_node,
                 base_result_id=base_result,
-                center_x_mm=-4.0 + index * 8.0,
-                center_y_mm=0.0,
+                center_x_mm=-14.0 + (index % 8) * 4.0,
+                center_y_mm=-4.0 + (index // 8) * 8.0,
                 radius_mm=1.0,
             )
         )
@@ -347,15 +456,15 @@ def _install_fake_apply(
     monkeypatch.setattr(pm_execution, "apply_planar_mechanical_plan", apply)
 
 
-def test_handoff_is_exact_and_intentionally_not_current() -> None:
+def test_handoff_is_exact_and_current_through_the_multidocument_bridge() -> None:
     handoff = PLANAR_MECHANICAL_REVIEWED_PRODUCT_HANDOFF
-    assert handoff.lowering_ready is False
+    assert handoff.lowering_ready is True
     assert handoff.minimum_source_results == handoff.maximum_source_results == 0
     assert len(handoff.required_intent_media_types) == 2
     assert len(handoff.required_proof_media_types) == 3
     assert len(handoff.handoff_sha256) == 64
     ids = {item.operation_id for item in PLANAR_MECHANICAL_REVIEWED_OPERATION_SPECS}
-    assert ids.isdisjoint(item.operation_id for item in CURRENT_REVIEWED_INTENT_ROUTES)
+    assert ids <= {item.operation_id for item in CURRENT_REVIEWED_INTENT_ROUTES}
     for operation in PLANAR_MECHANICAL_REVIEWED_OPERATION_SPECS:
         assert (
             resolve_planar_mechanical_reviewed_operation(
@@ -374,10 +483,114 @@ def test_handoff_is_exact_and_intentionally_not_current() -> None:
 
 
 @pytest.mark.parametrize(
+    ("operation_id", "circle_count"),
+    (("reference-profiles", 0), ("add", 1), ("remove", 1)),
+)
+def test_public_reviewed_program_lowers_all_three_routes_through_original_pm1_proof(
+    operation_id: str,
+    circle_count: int,
+) -> None:
+    program = _reviewed_program(operation_id, circle_count=circle_count)
+    resolver, token = _reviewed_resolver(circle_count=circle_count)
+
+    lowered = lower_reviewed_intent(
+        program,
+        _reviewed_artifact_resolver=resolver,
+        _reviewed_artifact_run_token=token,
+    )
+
+    assert lowered.route.operation.operation_id == operation_id
+    assert len(lowered.result.supported_subjects) == 2
+    assert lowered.plan.parametric_document.document_digest == program.intent_graph_sha256
+    assert len(lowered.plan.circles) == circle_count
+
+
+def test_multidocument_bridge_rejects_program_pfg_tamper() -> None:
+    program = _reviewed_program("add", circle_count=0)
+    resolver, token = _reviewed_resolver(circle_count=1)
+
+    with pytest.raises(ReviewedIntentExecutionError) as failure:
+        lower_reviewed_intent(
+            program,
+            _reviewed_artifact_resolver=resolver,
+            _reviewed_artifact_run_token=token,
+        )
+
+    assert failure.value.code is ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE
+
+
+def test_multidocument_bridge_rejects_missing_or_mistyped_visual_document() -> None:
+    program = _reviewed_program("add", circle_count=0)
+    resolver, token = _reviewed_resolver(
+        circle_count=0,
+        record_changes={"media_type": "application/json"},
+    )
+    with pytest.raises(ReviewedIntentExecutionError) as wrong_media:
+        lower_reviewed_intent(
+            program,
+            _reviewed_artifact_resolver=resolver,
+            _reviewed_artifact_run_token=token,
+        )
+    assert wrong_media.value.code is ReviewedIntentExecutionErrorCode.LOWERING_FAILED
+
+    snapshot = ReviewedArtifactCatalogSnapshot(
+        task_id="task_pm1_reviewed",
+        project_id="project_pm1_reviewed",
+        base_revision="revision_pm1_reviewed",
+        run_id="artifact_run_pm1_reviewed",
+        records=(),
+    )
+    missing_token = object()
+    missing = _ReviewedArtifactRunResolver(
+        snapshot=snapshot,
+        source=_VisualSource(b"missing"),
+        stager_factory=_UnusedStagerFactory(),
+        task_id=snapshot.task_id,
+        project_id=snapshot.project_id,
+        base_revision=snapshot.base_revision,
+        run_id=snapshot.run_id,
+        run_token=missing_token,
+    )
+    with pytest.raises(ReviewedIntentExecutionError) as missing_document:
+        lower_reviewed_intent(
+            program,
+            _reviewed_artifact_resolver=missing,
+            _reviewed_artifact_run_token=missing_token,
+        )
+    assert missing_document.value.code is ReviewedIntentExecutionErrorCode.LOWERING_FAILED
+
+
+def test_multidocument_bridge_rejects_ambiguous_document_order() -> None:
+    visual, payload = _visual_document(_visual_graph(0))
+    duplicate = ReviewedArtifactCatalogRecord(
+        artifact_id=f"{visual.artifact_id}_duplicate",
+        content_sha256=hashlib.sha256(payload).hexdigest(),
+        size_bytes=len(payload),
+        media_type="application/vnd.vibecad.visual-feature-graph+json",
+        role_term_ref_id="pm1.role.visual-evidence",
+        schema_term_ref_id="vfg.schema.v1",
+        document_id=f"{visual.document_id}_duplicate",
+        family_id="partdesign.planar-mechanical",
+        operation_ids=("remove", "reference-profiles", "add"),
+        maximum_bytes=MAX_REVIEWED_ARTIFACT_BYTES,
+    )
+    resolver, token = _reviewed_resolver(circle_count=0, extra_records=(duplicate,))
+
+    with pytest.raises(ReviewedIntentExecutionError) as failure:
+        lower_reviewed_intent(
+            _reviewed_program("add", circle_count=0),
+            _reviewed_artifact_resolver=resolver,
+            _reviewed_artifact_run_token=token,
+        )
+
+    assert failure.value.code is ReviewedIntentExecutionErrorCode.LOWERING_FAILED
+
+
+@pytest.mark.parametrize(
     ("suffix", "circle_count", "primary_type", "primary_role", "owned_count"),
     (
         ("reference-profiles", 0, "Sketcher::SketchObject", SemanticRole.SUPPORT, 11),
-        (".add", 2, "PartDesign::Pad", SemanticRole.FEATURE, 15),
+        (".add", 16, "PartDesign::Pad", SemanticRole.FEATURE, 43),
         (".remove", 2, "PartDesign::Pocket", SemanticRole.FEATURE, 15),
     ),
 )

@@ -95,6 +95,14 @@ from vibecad.execution.freecad_partdesign_residual_reviewed_execution import (
     PARTDESIGN_RESIDUAL_REVIEWED_FAMILY_SPEC,
     build_partdesign_residual_reviewed_family_descriptor,
 )
+from vibecad.execution.freecad_planar_mechanical_reviewed_execution import (
+    PLANAR_MECHANICAL_PRODUCT_MANIFEST,
+    execute_planar_mechanical_reviewed_plan,
+    lower_planar_mechanical_reviewed_multi_document,
+    planar_mechanical_create_recovery_descriptor,
+    resolve_planar_mechanical_product_contract,
+    validate_planar_mechanical_reviewed_plan,
+)
 from vibecad.execution.freecad_reviewed_artifact_inputs import (
     ReviewedArtifactContext,
     ReviewedArtifactInputError,
@@ -137,6 +145,8 @@ from vibecad.intent_bridge.parametric_feature_graph_codec import (
     PARAMETRIC_FEATURE_GRAPH_V2_MEDIA_TYPE,
     PARAMETRIC_FEATURE_GRAPH_V2_SCHEMA_TERM,
     PFG_SELECTOR_FEATURE_NODE,
+    PFG_SELECTOR_GRAPH_RESULT,
+    PFG_TYPE_DOCUMENT_ROOT,
     ParametricFeatureGraphV2Codec,
 )
 from vibecad.intent_bridge.ports import (
@@ -296,6 +306,7 @@ class _ReviewedFormalSemanticBinding(StrEnum):
 
     FULL_IDENTITY = "full_identity"
     LEGACY_TERM_ID = "legacy_term_id"
+    FORMAL_TERM_ID_PROGRAM_FULL_IDENTITY = "formal_term_id_program_full_identity"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -465,6 +476,7 @@ class _ReviewedDynamicOwnershipResolverDescriptor:
     resolver_version: str
     resolver_contract_sha256: str
     operation_ids: tuple[str, ...]
+    operation_neutral_plan: bool = False
     resolve_ownership: _DynamicOwnershipResolverCallback = field(
         repr=False,
         compare=False,
@@ -494,6 +506,7 @@ class _ReviewedDynamicOwnershipResolverDescriptor:
             or any(
                 type(item) is not str or not item or len(item) > 128 for item in self.operation_ids
             )
+            or type(self.operation_neutral_plan) is not bool
             or not callable(self.resolve_ownership)
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
@@ -520,7 +533,7 @@ class _ReviewedDynamicOwnershipResolverDescriptor:
         try:
             canonical = plan.canonical_bytes
             semantic_plan_sha256 = plan.plan_sha256
-            plan_operation = plan.operation
+            plan_operation = getattr(plan, "operation", None)
             receipt = execution.receipt
             receipt_operation = receipt.operation
         except (Exception, SystemExit):
@@ -537,8 +550,17 @@ class _ReviewedDynamicOwnershipResolverDescriptor:
                 semantic_plan_sha256,
                 plan_document.document_digest,
             )
-            or getattr(plan_operation, "value", None) != operation.operation_id
-            or getattr(receipt_operation, "value", None) != operation.operation_id
+            or (self.operation_neutral_plan and plan_operation is not None)
+            or (
+                not self.operation_neutral_plan
+                and getattr(plan_operation, "value", None) != operation.operation_id
+            )
+            or (
+                receipt_operation.operation_id
+                if type(receipt_operation) is ReviewedOperationSpec
+                else getattr(receipt_operation, "value", None)
+            )
+            != operation.operation_id
             or getattr(receipt, "plan_sha256", None) != plan_document.document_digest
             or getattr(receipt, "plan_content_sha256", None) != plan_document.content_sha256
         ):
@@ -733,6 +755,120 @@ class _ReviewedIntentDocumentBinding:
         )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ReviewedMultiDocumentLowering:
+    """Family-built lowering result preserving the shared execution handoff."""
+
+    result: BackendLoweringResult
+    receipt: ReviewedPlanReceipt
+    plan: object = field(repr=False, compare=False)
+    payload: bytes = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.result) is not BackendLoweringResult
+            or type(self.receipt) is not ReviewedPlanReceipt
+            or self.plan is None
+            or type(self.payload) is not bytes
+            or not self.payload
+            or self.result.disposition is not BridgeDisposition.COMPLETE
+            or self.result.plan_document != self.receipt.plan_document
+            or self.receipt.plan_document.size_bytes != len(self.payload)
+            or not hmac.compare_digest(
+                self.receipt.plan_document.content_sha256,
+                hashlib.sha256(self.payload).hexdigest(),
+            )
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+
+_MultiDocumentLoweringCallback = Callable[
+    [
+        ReviewedIntentProgramV1,
+        ReviewedOperationSpec,
+        _ReviewedArtifactRunResolver,
+        object,
+        FamilyBatchManifest,
+    ],
+    _ReviewedMultiDocumentLowering,
+]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False)
+class _ReviewedMultiDocumentIntentBinding:
+    """Static family authority for a proof-preserving multi-document lowerer."""
+
+    binding_id: str
+    binding_version: str
+    binding_contract_sha256: str
+    operation_ids: tuple[str, ...]
+    lower: _MultiDocumentLoweringCallback = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        identifiers = (self.binding_id, self.binding_version)
+        if (
+            any(
+                type(item) is not str
+                or not 1 <= len(item) <= 128
+                or not item[0].isalnum()
+                or any(
+                    not (character.isascii() and (character.isalnum() or character in "._:-"))
+                    for character in item
+                )
+                for item in identifiers
+            )
+            or not _is_sha256(self.binding_contract_sha256)
+            or type(self.operation_ids) is not tuple
+            or not self.operation_ids
+            or any(
+                type(item) is not str
+                or not 1 <= len(item) <= 128
+                or not item[0].isalnum()
+                or any(
+                    not (character.isascii() and (character.isalnum() or character in "._:-"))
+                    for character in item
+                )
+                for item in self.operation_ids
+            )
+            or len(set(self.operation_ids)) != len(self.operation_ids)
+            or not callable(self.lower)
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+    def materialize(
+        self,
+        value: ReviewedIntentProgramV1,
+        operation: ReviewedOperationSpec,
+        resolver: _ReviewedArtifactRunResolver,
+        run_token: object,
+        manifest: FamilyBatchManifest,
+    ) -> _ReviewedMultiDocumentLowering:
+        if (
+            type(value) is not ReviewedIntentProgramV1
+            or type(operation) is not ReviewedOperationSpec
+            or operation.operation_id not in self.operation_ids
+            or type(resolver) is not _ReviewedArtifactRunResolver
+            or run_token is None
+            or type(manifest) is not FamilyBatchManifest
+            or operation not in manifest.operations
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        try:
+            lowered = self.lower(value, operation, resolver, run_token, manifest)
+        except ReviewedIntentExecutionError:
+            raise
+        except BaseException:
+            _fail(ReviewedIntentExecutionErrorCode.LOWERING_FAILED)
+        if (
+            type(lowered) is not _ReviewedMultiDocumentLowering
+            or lowered.receipt.operation != operation
+            or lowered.receipt.manifest_sha256 != manifest.manifest_sha256
+            or lowered.receipt.adapter != manifest.adapter
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return lowered
+
+
 def _unique_terms(terms: tuple[BridgeTermRef, ...]) -> tuple[BridgeTermRef, ...]:
     by_id: dict[str, BridgeTermRef] = {}
     identities: dict[tuple[str, str, str], BridgeTermRef] = {}
@@ -925,6 +1061,70 @@ def _sketch_intent_binding() -> _ReviewedIntentDocumentBinding:
     )
 
 
+def _planar_mechanical_intent_binding() -> _ReviewedIntentDocumentBinding:
+    """Bind one PM1 PFG while allowing a route to focus an owned sub-operation."""
+
+    codec_descriptor = ParametricFeatureGraphV2Codec().descriptor
+    operations = PLANAR_MECHANICAL_PRODUCT_MANIFEST.operations
+    operation_terms = tuple(item.semantic_term for item in operations)
+    strategy_id = "pm1-pfg-v2-whole-transaction-operation-focus-v1"
+
+    def subject_type_for(operation: ReviewedOperationSpec) -> BridgeTermRef:
+        return operation.semantic_term
+
+    def select_document(
+        value: ReviewedIntentProgramV1,
+        operation: ReviewedOperationSpec,
+    ) -> _ReviewedIntentDocumentSelection:
+        graph = value.intent_graph
+        if type(graph) is not ParametricFeatureGraphV2 or len(graph.graph_results) != 1:
+            _fail(ReviewedIntentExecutionErrorCode.INVALID_INPUT)
+        matching = tuple(
+            node
+            for node in graph.nodes
+            if node.intent.operation_term_ref_id == operation.semantic_term.term_ref_id
+        )
+        if (
+            (operation.operation_id in {"reference-profiles", "add"} and len(matching) != 1)
+            or (operation.operation_id == "remove" and not matching)
+            or (
+                operation.operation_id == "remove"
+                and matching[-1].node_id != graph.graph_results[0].node_id
+            )
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return _ReviewedIntentDocumentSelection(
+            payload=graph.canonical_bytes,
+            document_id=graph.graph_id,
+            document_digest=graph.graph_sha256,
+            selector_kind_term=PFG_SELECTOR_GRAPH_RESULT,
+            selector_id=graph.graph_results[0].selection_id,
+            subject_type_term=operation.semantic_term,
+        )
+
+    return _ReviewedIntentDocumentBinding(
+        binding_id="reviewed_pm1_pfg_v2_whole_transaction",
+        binding_version="1.0.0",
+        binding_contract_sha256=_intent_binding_digest(
+            strategy_id=strategy_id,
+            codec_descriptor=codec_descriptor,
+            media_type=PARAMETRIC_FEATURE_GRAPH_V2_MEDIA_TYPE,
+            selector_terms=(PFG_SELECTOR_GRAPH_RESULT,),
+            root_subject_type=PFG_TYPE_DOCUMENT_ROOT,
+            additional_terms=operation_terms,
+        ),
+        codec_descriptor=codec_descriptor,
+        schema_term=PARAMETRIC_FEATURE_GRAPH_V2_SCHEMA_TERM,
+        media_type=PARAMETRIC_FEATURE_GRAPH_V2_MEDIA_TYPE,
+        selector_kind_terms=(PFG_SELECTOR_GRAPH_RESULT,),
+        root_subject_type_term=PFG_TYPE_DOCUMENT_ROOT,
+        additional_terms=operation_terms,
+        codec_factory=ParametricFeatureGraphV2Codec,
+        select_subject_type=subject_type_for,
+        select_document=select_document,
+    )
+
+
 _AdapterFactory = Callable[[PlanSink], ExactReviewedFamilyAdapter]
 _PlanValidator = Callable[[object, ReviewedPlanReceipt, ReviewedOperationSpec], None]
 _NativeExecutor = Callable[
@@ -1101,11 +1301,16 @@ class _ReviewedIntentFamilyDescriptor:
 
     manifest: FamilyBatchManifest
     subject_type_term: BridgeTermRef
-    adapter_factory: _AdapterFactory = field(repr=False, compare=False)
+    adapter_factory: _AdapterFactory | None = field(repr=False, compare=False)
     validate_plan: _PlanValidator = field(repr=False, compare=False)
     execute_plan: _NativeExecutor = field(repr=False, compare=False)
     product_results: tuple[_ReviewedProductResultContract, ...]
     intent_binding: _ReviewedIntentDocumentBinding | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    multi_document_binding: _ReviewedMultiDocumentIntentBinding | None = field(
         default=None,
         repr=False,
         compare=False,
@@ -1161,7 +1366,16 @@ class _ReviewedIntentFamilyDescriptor:
                 )
                 for operation in self.manifest.operations
             )
-            or not callable(self.adapter_factory)
+            or (self.multi_document_binding is None and not callable(self.adapter_factory))
+            or (
+                self.multi_document_binding is not None
+                and (
+                    type(self.multi_document_binding) is not _ReviewedMultiDocumentIntentBinding
+                    or self.adapter_factory is not None
+                    or set(self.multi_document_binding.operation_ids)
+                    != {item.operation_id for item in self.manifest.operations}
+                )
+            )
             or not callable(self.validate_plan)
             or not callable(self.execute_plan)
             or type(self.product_results) is not tuple
@@ -1251,10 +1465,13 @@ class _ReviewedIntentFamilyDescriptor:
             }
             if any(
                 operation_id not in operations
-                or not any(
-                    item.operation_id == operation_id
-                    and item.execution_mode is _ReviewedProductExecutionMode.CREATE
-                    for item in self.product_results
+                or not (
+                    any(
+                        item.operation_id == operation_id
+                        and item.execution_mode is _ReviewedProductExecutionMode.CREATE
+                        for item in self.product_results
+                    )
+                    or (resolver is not None and operation_id in resolver.operation_ids)
                 )
                 for operation_id in create_recovery.operation_ids
             ):
@@ -1297,6 +1514,8 @@ class _ReviewedIntentFamilyDescriptor:
         if descriptor is None or not descriptor.handles(operation):
             return None
         if context is None and source_count is None:
+            if self.dynamic_resolver_for(operation) is not None:
+                return descriptor
             modes = {
                 item.execution_mode
                 for item in self.product_results
@@ -1343,6 +1562,8 @@ class _ReviewedIntentFamilyDescriptor:
         )
 
     def build_adapter(self, sink: PlanSink) -> ExactReviewedFamilyAdapter:
+        if self.adapter_factory is None or self.multi_document_binding is not None:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         try:
             adapter = self.adapter_factory(sink)
         except ReviewedIntentExecutionError:
@@ -1987,6 +2208,71 @@ _PART_DRESSUP_FAMILY: Final = build_part_dressup_reviewed_family_descriptor()
 _PARTDESIGN_RESIDUAL_FAMILY: Final = build_partdesign_residual_reviewed_family_descriptor()
 
 
+def _resolve_planar_mechanical_dynamic_ownership(
+    plan: object,
+    execution: _ReviewedFamilyNativeExecution,
+) -> _ReviewedProductResultContract:
+    if type(execution) is not _ReviewedFamilyNativeExecution:
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    try:
+        operation = execution.receipt.operation
+    except (Exception, SystemExit):
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    result = resolve_planar_mechanical_product_contract(plan, operation)
+    if type(result) is not _ReviewedProductResultContract:
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    return result
+
+
+_PLANAR_MECHANICAL_MULTI_DOCUMENT_BINDING: Final = _ReviewedMultiDocumentIntentBinding(
+    binding_id="reviewed_pm1_sealed_visual_compile_proof",
+    binding_version="1.0.0",
+    binding_contract_sha256=hashlib.sha256(
+        b"vibecad-reviewed-pm1-multi-document-binding-v1\0"
+        + PLANAR_MECHANICAL_PRODUCT_MANIFEST.manifest_sha256.encode("ascii")
+        + b"\0sealed-unique-canonical-vfg;original-pm1-compiler;"
+        b"byte-exact-program-pfg;three-proof-documents;two-intent-artifacts;"
+        b"original-pm1-adapter"
+    ).hexdigest(),
+    operation_ids=tuple(
+        item.operation_id for item in PLANAR_MECHANICAL_PRODUCT_MANIFEST.operations
+    ),
+    lower=lower_planar_mechanical_reviewed_multi_document,
+)
+
+_PLANAR_MECHANICAL_DYNAMIC_OWNERSHIP: Final = _ReviewedDynamicOwnershipResolverDescriptor(
+    resolver_id="reviewed_pm1_dynamic_transaction_ownership",
+    resolver_version="1.0.0",
+    resolver_contract_sha256=hashlib.sha256(
+        b"vibecad-reviewed-pm1-dynamic-ownership-v1\0"
+        + PLANAR_MECHANICAL_PRODUCT_MANIFEST.manifest_sha256.encode("ascii")
+        + b"\011+2N;body-origin8;outer-sketch;pad;circle-sketch-pocket-pairs;"
+        b"operation-focused-primary;exact-order"
+    ).hexdigest(),
+    operation_ids=tuple(
+        item.operation_id for item in PLANAR_MECHANICAL_PRODUCT_MANIFEST.operations
+    ),
+    operation_neutral_plan=True,
+    resolve_ownership=_resolve_planar_mechanical_dynamic_ownership,
+)
+
+_PLANAR_MECHANICAL_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=PLANAR_MECHANICAL_PRODUCT_MANIFEST,
+    subject_type_term=PFG_TYPE_DOCUMENT_ROOT,
+    adapter_factory=None,
+    validate_plan=validate_planar_mechanical_reviewed_plan,
+    execute_plan=execute_planar_mechanical_reviewed_plan,
+    product_results=(),
+    intent_binding=_planar_mechanical_intent_binding(),
+    multi_document_binding=_PLANAR_MECHANICAL_MULTI_DOCUMENT_BINDING,
+    minimum_sources=0,
+    maximum_sources=0,
+    formal_semantic_binding=(_ReviewedFormalSemanticBinding.FORMAL_TERM_ID_PROGRAM_FULL_IDENTITY),
+    dynamic_ownership_resolver=_PLANAR_MECHANICAL_DYNAMIC_OWNERSHIP,
+    create_recovery=planar_mechanical_create_recovery_descriptor(),
+)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReviewedIntentRoute:
     """One exact formal route, independently bound to reviewed contracts."""
@@ -2023,13 +2309,22 @@ class ReviewedIntentRoute:
         )
         if self.family.formal_semantic_binding is _ReviewedFormalSemanticBinding.FULL_IDENTITY:
             expected_formal_semantic = manifest_semantic_operation
+            expected_program_semantic = manifest_semantic_operation
         elif self.family.formal_semantic_binding is _ReviewedFormalSemanticBinding.LEGACY_TERM_ID:
             expected_formal_semantic = self.operation.semantic_term.term_id
+            expected_program_semantic = expected_formal_semantic
+        elif (
+            self.family.formal_semantic_binding
+            is _ReviewedFormalSemanticBinding.FORMAL_TERM_ID_PROGRAM_FULL_IDENTITY
+        ):
+            expected_formal_semantic = self.operation.semantic_term.term_id
+            expected_program_semantic = manifest_semantic_operation
         else:
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         resolver = self.family.dynamic_resolver_for(self.operation)
         artifact_requirement = self.family.artifact_requirement_for(self.operation)
         create_recovery = self.family.create_recovery_for(self.operation)
+        multi_document_binding = self.family.multi_document_binding
         static_results = tuple(
             item
             for item in self.family.product_results
@@ -2037,8 +2332,8 @@ class ReviewedIntentRoute:
         )
         if (
             len(formal) != 1
-            or formal[0].semantic_operation != self.semantic_operation
-            or self.semantic_operation != expected_formal_semantic
+            or formal[0].semantic_operation != expected_formal_semantic
+            or self.semantic_operation != expected_program_semantic
             or formal[0].native_type_id != self.operation.native_type_id
             or formal[0].adapter_id != self.manifest.adapter.adapter_id
             or formal[0].adapter_version != self.manifest.adapter.adapter_version
@@ -2102,6 +2397,16 @@ class ReviewedIntentRoute:
                     if create_recovery is not None
                     else ()
                 ),
+                *(
+                    (
+                        "multi-document-intent-binding-v1",
+                        multi_document_binding.binding_id,
+                        multi_document_binding.binding_version,
+                        multi_document_binding.binding_contract_sha256,
+                    )
+                    if multi_document_binding is not None
+                    else ()
+                ),
             )
         ).encode("utf-8")
         object.__setattr__(
@@ -2146,7 +2451,12 @@ def _routes_for_family(
     return tuple(
         ReviewedIntentRoute(
             operation_id=f"{family.manifest.family_id}.{operation.operation_id}",
-            semantic_operation=formal_by_operation[operation.operation_id][0].semantic_operation,
+            semantic_operation=(
+                _semantic_operation(operation)
+                if family.formal_semantic_binding
+                is _ReviewedFormalSemanticBinding.FORMAL_TERM_ID_PROGRAM_FULL_IDENTITY
+                else formal_by_operation[operation.operation_id][0].semantic_operation
+            ),
             family=family,
             manifest=family.manifest,
             operation=operation,
@@ -2237,6 +2547,10 @@ REVIEWED_PARTDESIGN_RESIDUAL_ROUTES: Final = _routes_for_family(
     _PARTDESIGN_RESIDUAL_FAMILY,
     PARTDESIGN_RESIDUAL_REVIEWED_FAMILY_SPEC.operation_ids,
 )
+REVIEWED_PLANAR_MECHANICAL_ROUTES: Final = _routes_for_family(
+    _PLANAR_MECHANICAL_FAMILY,
+    tuple(item.operation_id for item in PLANAR_MECHANICAL_PRODUCT_MANIFEST.operations),
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
@@ -2260,6 +2574,7 @@ _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_RESIDUAL_ROUTES,
     REVIEWED_PART_DRESSUP_ROUTES,
     REVIEWED_PARTDESIGN_RESIDUAL_ROUTES,
+    REVIEWED_PLANAR_MECHANICAL_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -2460,12 +2775,40 @@ class LoweredReviewedIntent:
         self.route.family.accept_plan(self.plan, self.receipt, self.route.operation)
 
 
-def lower_reviewed_intent(value: object) -> LoweredReviewedIntent:
+def lower_reviewed_intent(
+    value: object,
+    *,
+    _reviewed_artifact_resolver: object | None = None,
+    _reviewed_artifact_run_token: object | None = None,
+) -> LoweredReviewedIntent:
     """Lower one exact family-bound intent through its Reviewed proof gate."""
 
     if type(value) is not ReviewedIntentProgramV1:
         _fail(ReviewedIntentExecutionErrorCode.INVALID_INPUT)
     route = route_reviewed_intent(value)
+    multi_document_binding = route.family.multi_document_binding
+    if multi_document_binding is not None:
+        if (
+            type(_reviewed_artifact_resolver) is not _ReviewedArtifactRunResolver
+            or _reviewed_artifact_run_token is None
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        prepared = multi_document_binding.materialize(
+            value,
+            route.operation,
+            _reviewed_artifact_resolver,
+            _reviewed_artifact_run_token,
+            route.manifest,
+        )
+        return LoweredReviewedIntent(
+            route=route,
+            result=prepared.result,
+            receipt=prepared.receipt,
+            plan=prepared.plan,
+            payload=prepared.payload,
+        )
+    if _reviewed_artifact_resolver is not None or _reviewed_artifact_run_token is not None:
+        _fail(ReviewedIntentExecutionErrorCode.INVALID_INPUT)
     binding = route.family.intent_binding
     if type(binding) is not _ReviewedIntentDocumentBinding:
         _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
@@ -3226,15 +3569,22 @@ def execute_reviewed_intent_native(
     except BaseException:
         _fail(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
     require_reviewed_route_verified(route, freecad=FreeCAD)
-    lowered = lower_reviewed_intent(value)
+    artifact_run_token = (
+        _reviewed_run_token
+        if _reviewed_artifact_run_token is None
+        else _reviewed_artifact_run_token
+    )
+    if route.family.multi_document_binding is None:
+        lowered = lower_reviewed_intent(value)
+    else:
+        lowered = lower_reviewed_intent(
+            value,
+            _reviewed_artifact_resolver=_reviewed_artifact_resolver,
+            _reviewed_artifact_run_token=artifact_run_token,
+        )
     artifact_context: ReviewedArtifactContext | None = None
     artifact_requirement = route.family.artifact_requirement_for(route.operation)
     if artifact_requirement is not None:
-        artifact_run_token = (
-            _reviewed_run_token
-            if _reviewed_artifact_run_token is None
-            else _reviewed_artifact_run_token
-        )
         if (
             type(_reviewed_artifact_resolver) is not _ReviewedArtifactRunResolver
             or artifact_run_token is None
@@ -3466,6 +3816,7 @@ __all__ = [
     "REVIEWED_PART_DATUM_ROUTES",
     "REVIEWED_PART_DRESSUP_ROUTES",
     "REVIEWED_PART_OFFSET_ROUTES",
+    "REVIEWED_PLANAR_MECHANICAL_ROUTES",
     "REVIEWED_PART_FILE_IMPORT_ROUTES",
     "REVIEWED_IMAGEPLANE_ROUTES",
     "REVIEWED_PART_PROFILE_SURFACE_ROUTES",

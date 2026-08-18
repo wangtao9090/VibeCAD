@@ -75,6 +75,7 @@ class ReviewedInputKind(StrEnum):
     STEP = "step"
     PNG = "png"
     JPEG = "jpeg"
+    PLANAR_MECHANICAL_VISUAL = "planar_mechanical_visual"
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +129,14 @@ _KIND_SPECS: Final = MappingProxyType(
             "freecad_imageplane",
             ("place_or_edit_image_plane",),
             "imageplane",
+        ),
+        ReviewedInputKind.PLANAR_MECHANICAL_VISUAL: _KindSpec(
+            "application/vnd.vibecad.visual-feature-graph+json",
+            "pm1.role.visual-evidence",
+            "vfg.schema.v1",
+            "partdesign.planar-mechanical",
+            ("add", "reference-profiles", "remove"),
+            "planar_mechanical_visual",
         ),
     }
 )
@@ -456,6 +465,22 @@ def _validate_media(kind: ReviewedInputKind, payload: bytes) -> None:
             )
 
             validate_imageplane_artifact_payload(payload, _KIND_SPECS[kind].media_type)
+            return
+        if kind is ReviewedInputKind.PLANAR_MECHANICAL_VISUAL:
+            from vibecad.intent_rules.planar_mechanical_v1.rule_set import (  # noqa: PLC0415
+                analyze_visual_feature_graph,
+            )
+            from vibecad.visual.feature_graph import (  # noqa: PLC0415
+                decode_visual_feature_graph,
+                encode_visual_feature_graph,
+            )
+
+            graph = decode_visual_feature_graph(payload)
+            if (
+                not hmac.compare_digest(payload, encode_visual_feature_graph(graph))
+                or analyze_visual_feature_graph(graph) is None
+            ):
+                _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
             return
     except BaseException:
         _fail(ReviewedInputIngressErrorCode.INTEGRITY_FAILURE)
@@ -1030,11 +1055,16 @@ class ReviewedInputCatalogStore:
         from vibecad.execution.freecad_reviewed_intent_execution import (
             REVIEWED_IMAGEPLANE_ROUTES,
             REVIEWED_PART_FILE_IMPORT_ROUTES,
+            REVIEWED_PLANAR_MECHANICAL_ROUTES,
         )
 
         artifact_route_identities = {
             (route.operation_id, route.semantic_operation)
-            for route in (*REVIEWED_PART_FILE_IMPORT_ROUTES, *REVIEWED_IMAGEPLANE_ROUTES)
+            for route in (
+                *REVIEWED_PART_FILE_IMPORT_ROUTES,
+                *REVIEWED_IMAGEPLANE_ROUTES,
+                *REVIEWED_PLANAR_MECHANICAL_ROUTES,
+            )
         }
         if not any(
             command.operation == "apply_reviewed_intent"

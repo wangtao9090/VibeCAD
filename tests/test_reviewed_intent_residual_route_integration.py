@@ -461,8 +461,8 @@ def test_reference_v2_manifest_remains_fail_closed_against_formal_v1() -> None:
 
 
 def test_residual_routes_are_append_only_with_exact_order_and_digest() -> None:
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 96
-    assert CURRENT_REVIEWED_INTENT_ROUTES[82:] == (
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 99
+    assert CURRENT_REVIEWED_INTENT_ROUTES[82:96] == (
         *REVIEWED_PART_RESIDUAL_ROUTES,
         *REVIEWED_PART_DRESSUP_ROUTES,
         *REVIEWED_PARTDESIGN_RESIDUAL_ROUTES,
@@ -470,7 +470,7 @@ def test_residual_routes_are_append_only_with_exact_order_and_digest() -> None:
     catalog_sha256 = hashlib.sha256(
         "\n".join(
             f"{route.operation_id}:{route.route_contract_sha256}"
-            for route in CURRENT_REVIEWED_INTENT_ROUTES
+            for route in CURRENT_REVIEWED_INTENT_ROUTES[:96]
         ).encode("ascii")
     ).hexdigest()
     assert catalog_sha256 == "6896d4ab9d1d991756c8b92a2538000bbd1201af26206a79131b087bb9a59d9a"

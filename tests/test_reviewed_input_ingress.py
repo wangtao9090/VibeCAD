@@ -13,9 +13,13 @@ import pytest
 from PIL import Image
 
 import vibecad.application.reviewed_input_ingress as ingress_module
+from tests.test_execution_freecad_planar_mechanical_reviewed_execution import (
+    _reviewed_program as planar_reviewed_program,
+)
 from tests.test_intent_bridge_freecad_part_file_import_adapter import (
     _graph as import_graph,
 )
+from tests.test_intent_rules_planar_mechanical_v1 import _graph as planar_visual_graph
 from vibecad.application.agent import AgentApplication
 from vibecad.application.reviewed_input_ingress import (
     REVIEWED_INPUT_CATALOG_DIRECTORY,
@@ -30,6 +34,7 @@ from vibecad.application.reviewed_input_ingress import (
 )
 from vibecad.execution.freecad_reviewed_artifact_host import REVIEWED_ARTIFACT_MANIFEST_NAME
 from vibecad.parametric.freecad_part_file_import_rules import PartFileImportOperation
+from vibecad.visual.feature_graph import encode_visual_feature_graph
 from vibecad.workflow.contracts import AcceptanceSpec, ModelCommand, ModelProgram, ValueSource
 from vibecad.workflow.program import validate_model_program
 from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
@@ -54,6 +59,7 @@ def _jpeg() -> bytes:
 
 
 _JPEG = _jpeg()
+_PLANAR_VISUAL = encode_visual_feature_graph(planar_visual_graph(1))
 
 
 def _private(path: Path) -> Path:
@@ -121,6 +127,29 @@ def _artifact_program(task_id: str = _TASK_ID, base_revision: str = _BASE_REVISI
                 ),
             ),
             acceptance=AcceptanceSpec(id="accept_reviewed_artifact", criteria=()),
+        )
+    )
+
+
+def _planar_artifact_program(
+    task_id: str = _TASK_ID,
+    base_revision: str = _BASE_REVISION,
+):
+    intent = planar_reviewed_program("remove", circle_count=1)
+    return validate_model_program(
+        ModelProgram(
+            task_id=task_id,
+            base_revision=base_revision,
+            operations=(
+                ModelCommand(
+                    id="planar_remove",
+                    op="apply_reviewed_intent",
+                    target={},
+                    args={"intent": intent.to_mapping()},
+                    source=ValueSource.MODEL,
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="accept_planar_artifact", criteria=()),
         )
     )
 
@@ -219,6 +248,109 @@ def test_closed_kind_descriptor_derives_exact_product_authority(
         project_id=_PROJECT_ID,
         base_revision=_BASE_REVISION,
     )
+    store.close()
+
+
+def test_planar_visual_kind_derives_the_complete_static_family_authority(
+    tmp_path: Path,
+) -> None:
+    root = _private(tmp_path / "data")
+    store = _store(root)
+    receipt = store.seal(
+        task_id=_TASK_ID,
+        project_id=_PROJECT_ID,
+        base_revision=_BASE_REVISION,
+        inputs=(
+            TrustedReviewedInputBytes(
+                descriptor=_descriptor(
+                    ReviewedInputKind.PLANAR_MECHANICAL_VISUAL,
+                    _PLANAR_VISUAL,
+                ),
+                payload=_PLANAR_VISUAL,
+            ),
+        ),
+    )
+    record = receipt.records[0]
+    assert (
+        record.media_type,
+        record.role_term_ref_id,
+        record.schema_term_ref_id,
+        record.family_id,
+        record.operation_ids,
+    ) == (
+        "application/vnd.vibecad.visual-feature-graph+json",
+        "pm1.role.visual-evidence",
+        "vfg.schema.v1",
+        "partdesign.planar-mechanical",
+        ("add", "reference-profiles", "remove"),
+    )
+    store.discard(
+        task_id=_TASK_ID,
+        project_id=_PROJECT_ID,
+        base_revision=_BASE_REVISION,
+    )
+    store.close()
+
+
+def test_planar_visual_ingress_rejects_noncanonical_payload_tamper(
+    tmp_path: Path,
+) -> None:
+    payload = _PLANAR_VISUAL + b"\n"
+    root = _private(tmp_path / "data")
+    store = _store(root)
+    with pytest.raises(ReviewedInputIngressError) as failure:
+        store.seal(
+            task_id=_TASK_ID,
+            project_id=_PROJECT_ID,
+            base_revision=_BASE_REVISION,
+            inputs=(
+                TrustedReviewedInputBytes(
+                    descriptor=_descriptor(
+                        ReviewedInputKind.PLANAR_MECHANICAL_VISUAL,
+                        payload,
+                    ),
+                    payload=payload,
+                ),
+            ),
+        )
+    assert failure.value.code is ReviewedInputIngressErrorCode.INTEGRITY_FAILURE
+    store.close()
+
+
+def test_planar_public_program_preflights_and_acquires_the_sealed_visual(
+    tmp_path: Path,
+) -> None:
+    root = _private(tmp_path / "data")
+    store = _store(root)
+    sealed = store.seal(
+        task_id=_TASK_ID,
+        project_id=_PROJECT_ID,
+        base_revision=_BASE_REVISION,
+        inputs=(
+            TrustedReviewedInputBytes(
+                descriptor=_descriptor(
+                    ReviewedInputKind.PLANAR_MECHANICAL_VISUAL,
+                    _PLANAR_VISUAL,
+                ),
+                payload=_PLANAR_VISUAL,
+            ),
+        ),
+    )
+    assert store.requires_artifact_snapshot(_planar_artifact_program()) is True
+    lease = store.acquire(
+        task_id=_TASK_ID,
+        project_id=_PROJECT_ID,
+        base_revision=_BASE_REVISION,
+        run_id=_RUN_ID,
+    )
+    assert lease.snapshot.records == sealed.records
+    lease.close()
+    store.discard(
+        task_id=_TASK_ID,
+        project_id=_PROJECT_ID,
+        base_revision=_BASE_REVISION,
+    )
+    assert store.requires_artifact_snapshot(_planar_artifact_program()) is False
     store.close()
 
 

@@ -608,6 +608,70 @@ class _ReviewedArtifactRunResolver(_OpaqueCapability):
         )
         return ReviewedArtifactResolution(artifact_context=context)
 
+    def resolve_unique(
+        self,
+        *,
+        run_token: object,
+        family_id: str,
+        operation_id: str,
+        role_term_ref_id: str,
+        schema_term_ref_id: str,
+        media_type: str,
+        maximum_bytes: int,
+    ) -> ReviewedArtifactResolution:
+        """Resolve one uniquely matching sealed route input.
+
+        Some reviewed inputs are primary evidence rather than references named
+        by the model-visible intent graph.  For those inputs, trusted host code
+        selects only the complete static family/operation/document contract and
+        this resolver requires the catalog to contain exactly one match.  It
+        never falls back to a path, label, object name, or insertion order.
+        """
+
+        self._require_live()
+        self._require_snapshot_authentic()
+        if run_token is not self._run_token:
+            _fail(ReviewedArtifactInputErrorCode.AUTHORITY_VIOLATION)
+        family = _identifier(family_id)
+        operation = _identifier(operation_id)
+        role = _identifier(role_term_ref_id)
+        schema = _identifier(schema_term_ref_id)
+        media = _media_type(media_type)
+        if type(maximum_bytes) is not int:
+            _fail(ReviewedArtifactInputErrorCode.INVALID_INPUT)
+        matches = tuple(
+            record
+            for record in self._snapshot.records
+            if record.family_id == family
+            and operation in record.operation_ids
+            and record.role_term_ref_id == role
+            and record.schema_term_ref_id == schema
+            and record.media_type == media
+            and record.maximum_bytes == maximum_bytes
+        )
+        if not matches:
+            _fail(ReviewedArtifactInputErrorCode.UNKNOWN_ARTIFACT)
+        if len(matches) != 1:
+            _fail(ReviewedArtifactInputErrorCode.AUTHORITY_VIOLATION)
+        record = matches[0]
+        document = DocumentRef(
+            artifact_id=record.artifact_id,
+            role_term_ref_id=record.role_term_ref_id,
+            schema_term_ref_id=record.schema_term_ref_id,
+            document_id=record.document_id,
+            document_digest=record.content_sha256,
+            content_sha256=record.content_sha256,
+            size_bytes=record.size_bytes,
+            media_type=record.media_type,
+        )
+        return ReviewedArtifactResolution(
+            artifact_context=ReviewedArtifactContext(
+                artifact_document=document,
+                artifacts=_ExactArtifactReader(self, record, document),
+                stager_factory=_ExactStagerHandle(self, record, family, operation),
+            )
+        )
+
     def close(self) -> None:
         """Close all owned capabilities exactly once, remaining closed on error."""
 

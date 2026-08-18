@@ -7,11 +7,10 @@ engine-created Origin helpers.  This module never presents the focused Sketch,
 Pad, or Pocket as the transaction's only side effect.
 
 The existing PM1 adapter requires a VisualFeatureGraph proof plus exact Sketch
-and ParametricFeatureGraph intent documents.  ``ReviewedIntentProgramV1`` can
-currently carry only one intent graph, so this handoff is deliberately not a
-``FamilyBatchManifest`` and is not registered in ``CURRENT``.  A future wire may
-use the operation specs and native callback here only after it preserves the
-adapter's original three-document proof contract.
+and ParametricFeatureGraph intent documents.  The reviewed product wire keeps
+the public v1 ParametricFeatureGraph program while a family-owned binding
+compiles one uniquely sealed VisualFeatureGraph into the original Sketch/PFG
+pair and validates the adapter's unchanged three-document proof contract.
 """
 
 from __future__ import annotations
@@ -24,25 +23,64 @@ from types import MappingProxyType
 from typing import Final
 
 from vibecad.execution.selectors import SemanticRole
-from vibecad.intent_bridge.contracts import BridgeTermRef, DocumentRef
+from vibecad.intent_bridge.contracts import (
+    BackendLoweringRequest,
+    BridgeBudget,
+    BridgeDisposition,
+    BridgeTermRef,
+    CompileInputBinding,
+    DocumentRef,
+    IntentCompileRequest,
+    RequestedOutput,
+)
 from vibecad.intent_bridge.freecad_planar_mechanical_adapter import (
     FREECAD_PLANAR_MECHANICAL_ADAPTER_DESCRIPTOR,
+    PLANAR_CAPABILITY_DOCUMENT_ROLE_TERM,
+    PLANAR_CAPABILITY_SCHEMA_TERM,
     PLANAR_PLAN_DOCUMENT_ROLE_TERM,
     PLANAR_PLAN_SCHEMA_TERM,
+    PLANAR_REQUEST_TERMS,
+    FreeCADPlanarMechanicalAdapter,
+    build_planar_mechanical_capability_document,
 )
 from vibecad.intent_bridge.parametric_feature_graph_codec import (
     PARAMETRIC_FEATURE_GRAPH_V2_MEDIA_TYPE,
+    PARAMETRIC_FEATURE_GRAPH_V2_SCHEMA_TERM,
+    PFG_TYPE_DOCUMENT_ROOT,
 )
-from vibecad.intent_bridge.reviewed_family_engine import ReviewedOperationSpec
-from vibecad.intent_bridge.sketch_intent_graph_codec import SKETCH_INTENT_GRAPH_MEDIA_TYPE
-from vibecad.intent_bridge.visual_feature_graph_codec import VISUAL_FEATURE_GRAPH_MEDIA_TYPE
+from vibecad.intent_bridge.reviewed_family_engine import (
+    FamilyBatchManifest,
+    ReviewedOperationSpec,
+    ReviewedPlanReceipt,
+)
+from vibecad.intent_bridge.sketch_intent_graph_codec import (
+    SKETCH_INTENT_GRAPH_MEDIA_TYPE,
+    SKETCH_INTENT_GRAPH_SCHEMA_TERM,
+)
+from vibecad.intent_bridge.visual_feature_graph_codec import (
+    VISUAL_FEATURE_GRAPH_MEDIA_TYPE,
+    VISUAL_FEATURE_GRAPH_SCHEMA_TERM,
+)
+from vibecad.intent_compiler.artifacts import InMemoryIntentArtifactPublisher
+from vibecad.intent_rules.planar_mechanical_v1.catalog import (
+    build_planar_mechanical_v1_stack,
+    planar_mechanical_v1_request_terms,
+)
 from vibecad.intent_rules.planar_mechanical_v1.terms import (
     PFG_OPERATION_ADD,
     PFG_OPERATION_REFERENCE_PROFILES,
     PFG_OPERATION_REMOVE,
+    ROLE_PARAMETRIC_INTENT,
+    ROLE_SKETCH_INTENT,
+    ROLE_VISUAL_EVIDENCE,
 )
-from vibecad.parametric.feature_graph_v2 import SemanticTermRefV2
+from vibecad.parametric.feature_graph_v2 import (
+    ParametricFeatureGraphV2,
+    SemanticTermRefV2,
+)
 from vibecad.parametric.freecad_planar_mechanical_rules import (
+    MAX_PLANAR_MECHANICAL_PLAN_BYTES,
+    PLANAR_MECHANICAL_FREECAD_ENGINE_BUILD_ID,
     PLANAR_MECHANICAL_PLAN_MEDIA_TYPE,
     PLANAR_MECHANICAL_RULE_CONTRACT_SHA256,
     PLANAR_MECHANICAL_RULE_ID,
@@ -52,9 +90,15 @@ from vibecad.parametric.freecad_planar_mechanical_rules import (
     apply_planar_mechanical_plan,
     decode_planar_mechanical_plan,
 )
+from vibecad.visual.feature_graph import (
+    decode_visual_feature_graph,
+    encode_visual_feature_graph,
+)
+from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 
 _OWNERSHIP_DIGEST_DOMAIN = b"vibecad.planar-mechanical-product-ownership.v1\0"
 _HANDOFF_DIGEST_DOMAIN = b"vibecad.planar-mechanical-product-handoff.v1\0"
+_CREATE_RECOVERY_STATE_DOMAIN = b"vibecad.planar-mechanical-create-recovery-state.v1\0"
 _LEGACY_MANIFEST_SHA256 = "4c1479a158c2bc15eb384fc51d3ec4b574e9e76b1c600a5de785d39ea6721feb"
 
 _BODY_HELPER_TYPE_IDS: Final = (
@@ -134,10 +178,76 @@ _OPERATIONS_BY_ID: Final = MappingProxyType(
     {item.operation_id: item for item in PLANAR_MECHANICAL_REVIEWED_OPERATION_SPECS}
 )
 
+PLANAR_MECHANICAL_PRODUCT_OPERATION_SPECS: Final = tuple(
+    ReviewedOperationSpec(
+        operation_id=operation.operation_id.removeprefix("partdesign.planar-mechanical."),
+        semantic_term=operation.semantic_term,
+        native_type_id=operation.native_type_id,
+        native_operation=operation.native_operation,
+        native_property_names=operation.native_property_names,
+    )
+    for operation in PLANAR_MECHANICAL_REVIEWED_OPERATION_SPECS
+)
+_PRODUCT_OPERATIONS_BY_ID: Final = MappingProxyType(
+    {item.operation_id: item for item in PLANAR_MECHANICAL_PRODUCT_OPERATION_SPECS}
+)
+
+
+def _merge_terms(*groups: tuple[BridgeTermRef, ...]) -> tuple[BridgeTermRef, ...]:
+    by_id: dict[str, BridgeTermRef] = {}
+    for term in (item for group in groups for item in group):
+        prior = by_id.get(term.term_ref_id)
+        if prior is not None and prior != term:
+            _integrity_failure()
+        by_id[term.term_ref_id] = term
+    return tuple(sorted(by_id.values(), key=lambda item: item.term_ref_id))
+
+
+PLANAR_MECHANICAL_PRODUCT_MANIFEST: Final = FamilyBatchManifest(
+    family_id="partdesign.planar-mechanical",
+    family_version="1.0.0",
+    adapter=FREECAD_PLANAR_MECHANICAL_ADAPTER_DESCRIPTOR,
+    backend_engine="FreeCAD",
+    backend_version="1.1.0",
+    backend_build_id=hashlib.sha256(
+        PLANAR_MECHANICAL_FREECAD_ENGINE_BUILD_ID.encode("ascii")
+    ).hexdigest(),
+    rule_id=PLANAR_MECHANICAL_RULE_ID,
+    rule_contract_sha256=PLANAR_MECHANICAL_RULE_CONTRACT_SHA256,
+    intent_role_term=ROLE_PARAMETRIC_INTENT,
+    intent_schema_term=PARAMETRIC_FEATURE_GRAPH_V2_SCHEMA_TERM,
+    intent_media_type=PARAMETRIC_FEATURE_GRAPH_V2_MEDIA_TYPE,
+    capability_role_term=PLANAR_CAPABILITY_DOCUMENT_ROLE_TERM,
+    capability_schema_term=PLANAR_CAPABILITY_SCHEMA_TERM,
+    capability_media_type=("application/vnd.vibecad.freecad-planar-mechanical-capability+json"),
+    plan_role_term=PLANAR_PLAN_DOCUMENT_ROLE_TERM,
+    plan_schema_term=PLANAR_PLAN_SCHEMA_TERM,
+    plan_media_type=PLANAR_MECHANICAL_PLAN_MEDIA_TYPE,
+    request_terms=_merge_terms(
+        PLANAR_REQUEST_TERMS,
+        tuple(item.semantic_term for item in PLANAR_MECHANICAL_PRODUCT_OPERATION_SPECS),
+        (PFG_TYPE_DOCUMENT_ROOT,),
+    ),
+    operations=PLANAR_MECHANICAL_PRODUCT_OPERATION_SPECS,
+    max_plan_bytes=MAX_PLANAR_MECHANICAL_PLAN_BYTES,
+)
+
+
+def _operation_kind(operation: ReviewedOperationSpec) -> str:
+    identifier = operation.operation_id
+    if identifier.startswith("partdesign.planar-mechanical."):
+        identifier = identifier.removeprefix("partdesign.planar-mechanical.")
+        expected = _OPERATIONS_BY_ID.get(operation.operation_id)
+    else:
+        expected = _PRODUCT_OPERATIONS_BY_ID.get(identifier)
+    if operation != expected or identifier not in {"reference-profiles", "add", "remove"}:
+        _integrity_failure()
+    return identifier
+
 
 @dataclass(frozen=True, slots=True)
 class PlanarMechanicalReviewedProductHandoff:
-    """Static, non-routable bridge facts for a future multi-document wire."""
+    """Static bridge facts for the sealed-visual multi-document wire."""
 
     operation_specs: tuple[ReviewedOperationSpec, ...]
     required_intent_media_types: tuple[str, ...]
@@ -145,7 +255,7 @@ class PlanarMechanicalReviewedProductHandoff:
     legacy_manifest_sha256: str
     adapter_contract_sha256: str
     rule_contract_sha256: str
-    lowering_ready: bool = False
+    lowering_ready: bool = True
     minimum_source_results: int = 0
     maximum_source_results: int = 0
     handoff_sha256: str = field(init=False)
@@ -165,7 +275,7 @@ class PlanarMechanicalReviewedProductHandoff:
             or self.adapter_contract_sha256
             != FREECAD_PLANAR_MECHANICAL_ADAPTER_DESCRIPTOR.adapter_contract_sha256
             or self.rule_contract_sha256 != PLANAR_MECHANICAL_RULE_CONTRACT_SHA256
-            or self.lowering_ready is not False
+            or self.lowering_ready is not True
             or self.minimum_source_results != 0
             or self.maximum_source_results != 0
         ):
@@ -179,7 +289,7 @@ class PlanarMechanicalReviewedProductHandoff:
                 *(item.operation_id for item in self.operation_specs),
                 *self.required_intent_media_types,
                 *self.required_proof_media_types,
-                "lowering-ready=false",
+                "lowering-ready=true",
                 "source-results=0",
                 "owned-additions=11+2N",
             )
@@ -222,6 +332,245 @@ def resolve_planar_mechanical_reviewed_operation(
     namespace, version, term_id, digest = operation.semantic_term.semantic_identity
     expected = f"{namespace}/{version}/{term_id}@{digest}"
     return operation if hmac.compare_digest(semantic_operation, expected) else None
+
+
+class _PlanarMechanicalDocumentReader:
+    __slots__ = ("_items",)
+
+    def __init__(self, items: tuple[tuple[DocumentRef, bytes], ...]) -> None:
+        if (
+            type(items) is not tuple
+            or not items
+            or any(
+                type(document) is not DocumentRef or type(payload) is not bytes
+                for document, payload in items
+            )
+            or len({document.artifact_id for document, _payload in items}) != len(items)
+        ):
+            _integrity_failure()
+        self._items = MappingProxyType(
+            {document.artifact_id: (document, payload) for document, payload in items}
+        )
+
+    def read(self, document: DocumentRef, maximum_bytes: int) -> bytes:
+        try:
+            expected, payload = self._items[document.artifact_id]
+        except (AttributeError, KeyError):
+            _integrity_failure()
+        if (
+            expected != document
+            or type(maximum_bytes) is not int
+            or len(payload) > maximum_bytes
+            or len(payload) != document.size_bytes
+            or not hmac.compare_digest(hashlib.sha256(payload).hexdigest(), document.content_sha256)
+        ):
+            _integrity_failure()
+        return payload
+
+
+def _visual_compile_request(
+    compiler: object,
+    visual_document: DocumentRef,
+    visual_size: int,
+) -> IntentCompileRequest:
+    try:
+        descriptor = compiler.descriptor
+    except (Exception, SystemExit):
+        _integrity_failure()
+    return IntentCompileRequest(
+        compiler=descriptor,
+        terms=planar_mechanical_v1_request_terms(),
+        documents=(visual_document,),
+        inputs=(
+            CompileInputBinding(
+                binding_id="input.visual",
+                ordinal=0,
+                role_term_ref_id=ROLE_VISUAL_EVIDENCE.term_ref_id,
+                artifact_id=visual_document.artifact_id,
+            ),
+        ),
+        requested_outputs=(
+            RequestedOutput(
+                output_id="output.sketch",
+                ordinal=0,
+                role_term_ref_id=ROLE_SKETCH_INTENT.term_ref_id,
+                schema_term_ref_id=SKETCH_INTENT_GRAPH_SCHEMA_TERM.term_ref_id,
+            ),
+            RequestedOutput(
+                output_id="output.parametric",
+                ordinal=1,
+                role_term_ref_id=ROLE_PARAMETRIC_INTENT.term_ref_id,
+                schema_term_ref_id=PARAMETRIC_FEATURE_GRAPH_V2_SCHEMA_TERM.term_ref_id,
+            ),
+        ),
+        budget=BridgeBudget(
+            max_input_bytes=visual_size,
+            max_output_bytes=512 * 1024,
+            max_subject_lookups=6,
+            max_rule_applications=2,
+        ),
+    )
+
+
+def lower_planar_mechanical_reviewed_multi_document(
+    value: ReviewedIntentProgramV1,
+    operation: ReviewedOperationSpec,
+    resolver: object,
+    run_token: object,
+    manifest: FamilyBatchManifest,
+) -> object:
+    """Compile sealed VFG evidence and lower its original three-document proof."""
+
+    from vibecad.execution.freecad_reviewed_artifact_inputs import (  # noqa: PLC0415
+        MAX_REVIEWED_ARTIFACT_BYTES,
+        ReviewedArtifactContext,
+        ReviewedArtifactResolution,
+        _ReviewedArtifactRunResolver,
+    )
+    from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
+        _ExactPlanSink,
+        _ReviewedMultiDocumentLowering,
+    )
+
+    kind = _operation_kind(operation)
+    if (
+        type(value) is not ReviewedIntentProgramV1
+        or type(value.intent_graph) is not ParametricFeatureGraphV2
+        or type(resolver) is not _ReviewedArtifactRunResolver
+        or run_token is None
+        or manifest != PLANAR_MECHANICAL_PRODUCT_MANIFEST
+    ):
+        _integrity_failure()
+    resolution = resolver.resolve_unique(
+        run_token=run_token,
+        family_id=manifest.family_id,
+        operation_id=operation.operation_id,
+        role_term_ref_id=ROLE_VISUAL_EVIDENCE.term_ref_id,
+        schema_term_ref_id=VISUAL_FEATURE_GRAPH_SCHEMA_TERM.term_ref_id,
+        media_type=VISUAL_FEATURE_GRAPH_MEDIA_TYPE,
+        maximum_bytes=MAX_REVIEWED_ARTIFACT_BYTES,
+    )
+    if (
+        type(resolution) is not ReviewedArtifactResolution
+        or type(resolution.artifact_context) is not ReviewedArtifactContext
+    ):
+        _integrity_failure()
+    context = resolution.artifact_context
+    visual_payload = context.artifacts.read(
+        context.artifact_document,
+        MAX_REVIEWED_ARTIFACT_BYTES,
+    )
+    visual = decode_visual_feature_graph(visual_payload)
+    if not hmac.compare_digest(visual_payload, encode_visual_feature_graph(visual)):
+        _integrity_failure()
+    visual_document = DocumentRef(
+        artifact_id=context.artifact_document.artifact_id,
+        role_term_ref_id=ROLE_VISUAL_EVIDENCE.term_ref_id,
+        schema_term_ref_id=VISUAL_FEATURE_GRAPH_SCHEMA_TERM.term_ref_id,
+        document_id=visual.graph_id,
+        document_digest=visual.graph_digest,
+        content_sha256=hashlib.sha256(visual_payload).hexdigest(),
+        size_bytes=len(visual_payload),
+        media_type=VISUAL_FEATURE_GRAPH_MEDIA_TYPE,
+    )
+    publisher = InMemoryIntentArtifactPublisher()
+    stack = build_planar_mechanical_v1_stack(publisher=publisher)
+    compile_result = stack.compiler.compile(
+        _visual_compile_request(stack.compiler, visual_document, len(visual_payload)),
+        artifacts=_PlanarMechanicalDocumentReader(((visual_document, visual_payload),)),
+        codecs=stack.codecs,
+        proof_policy=stack.proof_policy,
+    )
+    if (
+        compile_result.disposition is not BridgeDisposition.COMPLETE
+        or compile_result.proof_bundle is None
+        or len(compile_result.output_documents) != 2
+        or len(compile_result.proof_bundle.documents) != 3
+        or len(compile_result.proof_bundle.assertions) != 2
+    ):
+        _integrity_failure()
+    by_media = {item.media_type: item for item in compile_result.output_documents}
+    try:
+        sketch_document = by_media[SKETCH_INTENT_GRAPH_MEDIA_TYPE]
+        parametric_document = by_media[PARAMETRIC_FEATURE_GRAPH_V2_MEDIA_TYPE]
+        sketch_payload = publisher.read(sketch_document, 512 * 1024)
+        parametric_payload = publisher.read(parametric_document, 512 * 1024)
+    except (Exception, SystemExit):
+        _integrity_failure()
+    if (
+        not hmac.compare_digest(parametric_payload, value.intent_graph.canonical_bytes)
+        or not hmac.compare_digest(parametric_document.document_digest, value.intent_graph_sha256)
+        or not hmac.compare_digest(parametric_document.content_sha256, value.intent_content_sha256)
+    ):
+        _integrity_failure()
+    matching_nodes = tuple(
+        node
+        for node in value.intent_graph.nodes
+        if node.intent.operation_term_ref_id == operation.semantic_term.term_ref_id
+    )
+    if (kind in {"reference-profiles", "add"} and len(matching_nodes) != 1) or (
+        kind == "remove" and not matching_nodes
+    ):
+        _integrity_failure()
+    if kind == "remove":
+        final_node_id = value.intent_graph.graph_results[0].node_id
+        if matching_nodes[-1].node_id != final_node_id:
+            _integrity_failure()
+
+    capability_document, capability_payload = build_planar_mechanical_capability_document()
+    proof_bytes = sum(item.size_bytes for item in compile_result.proof_bundle.documents)
+    request = BackendLoweringRequest(
+        adapter=manifest.adapter,
+        terms=PLANAR_REQUEST_TERMS,
+        documents=(*compile_result.output_documents, capability_document),
+        intent_artifact_ids=tuple(item.artifact_id for item in compile_result.output_documents),
+        capability_artifact_ids=(capability_document.artifact_id,),
+        proof_bundle=compile_result.proof_bundle,
+        budget=BridgeBudget(
+            max_input_bytes=proof_bytes + len(capability_payload),
+            max_output_bytes=manifest.max_plan_bytes,
+            max_subject_lookups=6,
+            max_rule_applications=2,
+        ),
+    )
+    reader = _PlanarMechanicalDocumentReader(
+        (
+            (visual_document, visual_payload),
+            (sketch_document, sketch_payload),
+            (parametric_document, parametric_payload),
+            (capability_document, capability_payload),
+        )
+    )
+    sink = _ExactPlanSink()
+    adapter = FreeCADPlanarMechanicalAdapter(sink)
+    result, planar_receipt = adapter.lower_with_receipt(
+        request,
+        artifacts=reader,
+        codecs=stack.codecs,
+        proof_policy=stack.proof_policy,
+    )
+    plan, payload = adapter.read_plan(planar_receipt)
+    if (
+        planar_receipt.parametric_document != parametric_document
+        or planar_receipt.sketch_document != sketch_document
+        or plan.parametric_document.artifact_id != parametric_document.artifact_id
+        or plan.sketch_document.artifact_id != sketch_document.artifact_id
+    ):
+        _integrity_failure()
+    receipt = ReviewedPlanReceipt(
+        manifest_sha256=manifest.manifest_sha256,
+        request_digest=request.request_digest,
+        adapter=manifest.adapter,
+        operation=operation,
+        source_document=parametric_document,
+        plan_document=result.plan_document,
+    )
+    return _ReviewedMultiDocumentLowering(
+        result=result,
+        receipt=receipt,
+        plan=plan,
+        payload=payload,
+    )
 
 
 def _shape_sha256(item: object) -> str:
@@ -321,10 +670,9 @@ class PlanarMechanicalOwnershipClosure:
     receipt_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
-        expected = _OPERATIONS_BY_ID.get(getattr(self.operation, "operation_id", None))
+        operation_kind = _operation_kind(self.operation)
         if (
             type(self.operation) is not ReviewedOperationSpec
-            or self.operation != expected
             or type(self.plan) is not PlanarMechanicalBackendPlan
             or type(self.native_receipt) is not PlanarMechanicalConformanceReceipt
             or self.native_receipt.plan_sha256 != self.plan.plan_sha256
@@ -344,10 +692,10 @@ class PlanarMechanicalOwnershipClosure:
         ):
             _integrity_failure()
         expected_primary = {
-            "partdesign.planar-mechanical.reference-profiles": self.outer_sketch,
-            "partdesign.planar-mechanical.add": self.pad,
-            "partdesign.planar-mechanical.remove": self.pockets[-1] if self.pockets else None,
-        }[self.operation.operation_id]
+            "reference-profiles": self.outer_sketch,
+            "add": self.pad,
+            "remove": self.pockets[-1] if self.pockets else None,
+        }[operation_kind]
         if self.primary is not expected_primary:
             _integrity_failure()
         body = "\0".join(
@@ -372,6 +720,10 @@ class PlanarMechanicalOwnershipClosure:
     @property
     def plan_sha256(self) -> str:
         return self.plan.plan_sha256
+
+    @property
+    def plan_content_sha256(self) -> str:
+        return hashlib.sha256(self.plan.canonical_bytes).hexdigest()
 
     @property
     def object_name(self) -> str:
@@ -482,8 +834,7 @@ class PlanarMechanicalOwnershipClosure:
                 )
                 and _valid_shape(
                     self.primary,
-                    solid=self.operation.operation_id
-                    != "partdesign.planar-mechanical.reference-profiles",
+                    solid=_operation_kind(self.operation) != "reference-profiles",
                 )
                 and hmac.compare_digest(
                     self.primary_shape_sha256,
@@ -511,7 +862,7 @@ class PlanarMechanicalOwnershipClosure:
         from vibecad.validation import EntityObservation  # noqa: PLC0415
 
         self.validate_native_result(document, result)
-        reference = self.operation.operation_id == "partdesign.planar-mechanical.reference-profiles"
+        reference = _operation_kind(self.operation) == "reference-profiles"
         try:
             valid = (
                 type(observation) is EntityObservation
@@ -579,19 +930,175 @@ def _restore_document(document: object, before: tuple[object, ...]) -> None:
         _integrity_failure()
 
 
+@dataclass(frozen=True, slots=True)
+class _PlanarMechanicalCreateRecovery:
+    document: object = field(repr=False, compare=False)
+    before: tuple[object, ...] = field(repr=False, compare=False)
+    state_sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.document is None
+            or type(self.before) is not tuple
+            or len({id(item) for item in self.before}) != len(self.before)
+            or type(self.state_sha256) is not str
+            or len(self.state_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.state_sha256)
+        ):
+            _integrity_failure()
+
+
+def _object_identity_sequence_sha256(before: tuple[object, ...]) -> str:
+    try:
+        body = "\0".join(f"{index}:{id(item):x}" for index, item in enumerate(before)).encode(
+            "ascii"
+        )
+    except (Exception, SystemExit):
+        _integrity_failure()
+    return hashlib.sha256(_CREATE_RECOVERY_STATE_DOMAIN + body).hexdigest()
+
+
+def _create_recovery_state_sha256(document: object, before: tuple[object, ...]) -> str:
+    try:
+        current = tuple(document.Objects)
+        if len(current) != len(before) or any(
+            actual is not expected for actual, expected in zip(current, before, strict=True)
+        ):
+            raise ValueError
+    except (Exception, SystemExit):
+        _integrity_failure()
+    return _object_identity_sequence_sha256(before)
+
+
+def _require_create_recovery(
+    document: object,
+    operation: ReviewedOperationSpec,
+    context: object,
+    opaque: object,
+) -> _PlanarMechanicalCreateRecovery:
+    from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
+        _ReviewedFamilyExecutionContext,
+    )
+
+    if (
+        type(opaque) is not _PlanarMechanicalCreateRecovery
+        or opaque.document is not document
+        or type(context) is not _ReviewedFamilyExecutionContext
+        or context.document is not document
+        or context.source_results
+        or _operation_kind(operation) not in {"reference-profiles", "add", "remove"}
+        or not hmac.compare_digest(
+            opaque.state_sha256,
+            _object_identity_sequence_sha256(opaque.before),
+        )
+    ):
+        _integrity_failure()
+    return opaque
+
+
+def _prepare_planar_mechanical_create_recovery(
+    document: object,
+    operation: ReviewedOperationSpec,
+    context: object,
+) -> tuple[str, object]:
+    before = _document_snapshot(document)
+    state_sha256 = _create_recovery_state_sha256(document, before)
+    recovery = _PlanarMechanicalCreateRecovery(
+        document=document,
+        before=before,
+        state_sha256=state_sha256,
+    )
+    _require_create_recovery(document, operation, context, recovery)
+    return state_sha256, recovery
+
+
+def _recover_planar_mechanical_create(
+    document: object,
+    opaque: object,
+    operation: ReviewedOperationSpec,
+    context: object,
+) -> None:
+    checked = _require_create_recovery(document, operation, context, opaque)
+    _restore_document(document, checked.before)
+
+
+def _verify_planar_mechanical_create_state(
+    document: object,
+    opaque: object,
+    operation: ReviewedOperationSpec,
+    context: object,
+) -> str:
+    checked = _require_create_recovery(document, operation, context, opaque)
+    return _create_recovery_state_sha256(document, checked.before)
+
+
+def _commit_planar_mechanical_create(
+    document: object,
+    opaque: object,
+    operation: ReviewedOperationSpec,
+    context: object,
+) -> None:
+    checked = _require_create_recovery(document, operation, context, opaque)
+    try:
+        current = tuple(document.Objects)
+        added = current[len(checked.before) :]
+        valid = (
+            len(current) >= len(checked.before)
+            and all(
+                actual is expected
+                for actual, expected in zip(
+                    current[: len(checked.before)],
+                    checked.before,
+                    strict=True,
+                )
+            )
+            and len(added) in range(11, 44, 2)
+            and len({id(item) for item in added}) == len(added)
+            and sum(getattr(item, "TypeId", None) == "PartDesign::Body" for item in added) == 1
+            and all(getattr(item, "Document", None) is document for item in added)
+        )
+    except (Exception, SystemExit):
+        valid = False
+    if not valid:
+        _integrity_failure()
+
+
+def planar_mechanical_create_recovery_descriptor() -> object:
+    """Build the shared late-adoption recovery descriptor for one PM1 CREATE."""
+
+    from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
+        _ReviewedCreateRecoveryDescriptor,
+    )
+
+    return _ReviewedCreateRecoveryDescriptor(
+        descriptor_id="reviewed_pm1_whole_transaction",
+        descriptor_version="1.0.0",
+        descriptor_contract_sha256=hashlib.sha256(
+            _CREATE_RECOVERY_STATE_DOMAIN + b"exact-pre-object-identities;whole-create-rollback;"
+            b"owned-additions=11+2N;N<=16"
+        ).hexdigest(),
+        operation_ids=tuple(
+            item.operation_id for item in PLANAR_MECHANICAL_PRODUCT_MANIFEST.operations
+        ),
+        prepare=_prepare_planar_mechanical_create_recovery,
+        recover=_recover_planar_mechanical_create,
+        verify=_verify_planar_mechanical_create_state,
+        commit=_commit_planar_mechanical_create,
+    )
+
+
 def _checked_plan(
     plan: object,
     payload: object,
     plan_document: object,
     operation: object,
 ) -> PlanarMechanicalBackendPlan:
-    expected_operation = _OPERATIONS_BY_ID.get(getattr(operation, "operation_id", None))
+    operation_kind = _operation_kind(operation)
     if (
         type(plan) is not PlanarMechanicalBackendPlan
         or type(payload) is not bytes
         or type(plan_document) is not DocumentRef
         or type(operation) is not ReviewedOperationSpec
-        or operation != expected_operation
         or plan.adapter_contract_sha256
         != FREECAD_PLANAR_MECHANICAL_ADAPTER_DESCRIPTOR.adapter_contract_sha256
         or plan_document.role_term_ref_id != PLANAR_PLAN_DOCUMENT_ROLE_TERM.term_ref_id
@@ -604,7 +1111,7 @@ def _checked_plan(
         )
         or not hmac.compare_digest(plan_document.document_digest, plan.plan_sha256)
         or not hmac.compare_digest(payload, plan.canonical_bytes)
-        or (operation.operation_id == "partdesign.planar-mechanical.remove" and not plan.circles)
+        or (operation_kind == "remove" and not plan.circles)
     ):
         _integrity_failure()
     try:
@@ -620,6 +1127,29 @@ def _checked_plan(
     return plan
 
 
+def validate_planar_mechanical_reviewed_plan(
+    plan: object,
+    receipt: ReviewedPlanReceipt,
+    operation: ReviewedOperationSpec,
+) -> None:
+    operation_kind = _operation_kind(operation)
+    if (
+        type(plan) is not PlanarMechanicalBackendPlan
+        or type(receipt) is not ReviewedPlanReceipt
+        or receipt.operation != operation
+        or receipt.manifest_sha256 != PLANAR_MECHANICAL_PRODUCT_MANIFEST.manifest_sha256
+        or receipt.adapter != FREECAD_PLANAR_MECHANICAL_ADAPTER_DESCRIPTOR
+        or receipt.source_document.media_type != PARAMETRIC_FEATURE_GRAPH_V2_MEDIA_TYPE
+        or plan.plan_sha256 != receipt.plan_document.document_digest
+        or plan.parametric_document.artifact_id != receipt.source_document.artifact_id
+        or plan.parametric_document.document_id != receipt.source_document.document_id
+        or plan.parametric_document.document_digest != receipt.source_document.document_digest
+        or plan.parametric_document.content_sha256 != receipt.source_document.content_sha256
+        or (operation_kind == "remove" and not plan.circles)
+    ):
+        _integrity_failure()
+
+
 def _resolve_native_closure(
     document: object,
     plan: PlanarMechanicalBackendPlan,
@@ -633,10 +1163,10 @@ def _resolve_native_closure(
         circle_sketches = tuple(document.getObject(name) for name in receipt.circle_sketch_names)
         pockets = tuple(document.getObject(name) for name in receipt.pocket_names)
         primary = {
-            "partdesign.planar-mechanical.reference-profiles": outer,
-            "partdesign.planar-mechanical.add": pad,
-            "partdesign.planar-mechanical.remove": pockets[-1] if pockets else None,
-        }[operation.operation_id]
+            "reference-profiles": outer,
+            "add": pad,
+            "remove": pockets[-1] if pockets else None,
+        }[_operation_kind(operation)]
     except (Exception, SystemExit):
         _integrity_failure()
     if primary is None:
@@ -756,11 +1286,11 @@ def resolve_planar_mechanical_product_contract(
         _ReviewedProductResultKind,
     )
 
+    operation_kind = _operation_kind(operation)
     if (
         type(plan) is not PlanarMechanicalBackendPlan
         or type(operation) is not ReviewedOperationSpec
-        or operation != _OPERATIONS_BY_ID.get(operation.operation_id)
-        or (operation.operation_id == "partdesign.planar-mechanical.remove" and not plan.circles)
+        or (operation_kind == "remove" and not plan.circles)
     ):
         _integrity_failure()
     additions_types: list[str] = [
@@ -778,10 +1308,10 @@ def resolve_planar_mechanical_product_contract(
         additions_types.extend(("Sketcher::SketchObject", "PartDesign::Pocket"))
         additions_roles.extend((SemanticRole.SUPPORT, SemanticRole.FEATURE))
     primary_index = {
-        "partdesign.planar-mechanical.reference-profiles": 9,
-        "partdesign.planar-mechanical.add": 10,
-        "partdesign.planar-mechanical.remove": len(additions_types) - 1,
-    }[operation.operation_id]
+        "reference-profiles": 9,
+        "add": 10,
+        "remove": len(additions_types) - 1,
+    }[operation_kind]
     owned_types = (
         additions_types[primary_index],
         *(item for index, item in enumerate(additions_types) if index != primary_index),
@@ -794,7 +1324,7 @@ def resolve_planar_mechanical_product_contract(
         operation_id=operation.operation_id,
         result_kind=(
             _ReviewedProductResultKind.VALID_SHAPE
-            if operation.operation_id == "partdesign.planar-mechanical.reference-profiles"
+            if operation_kind == "reference-profiles"
             else _ReviewedProductResultKind.SOLID
         ),
         owned_type_ids=tuple(owned_types),
@@ -805,12 +1335,17 @@ def resolve_planar_mechanical_product_contract(
 
 
 __all__ = [
+    "PLANAR_MECHANICAL_PRODUCT_MANIFEST",
+    "PLANAR_MECHANICAL_PRODUCT_OPERATION_SPECS",
     "PLANAR_MECHANICAL_REVIEWED_OPERATION_SPECS",
     "PLANAR_MECHANICAL_REVIEWED_PRODUCT_HANDOFF",
     "PlanarMechanicalOwnershipClosure",
     "PlanarMechanicalReviewedProductHandoff",
     "execute_planar_mechanical_reviewed_plan",
     "execute_planar_mechanical_reviewed_plan_with_sources",
+    "lower_planar_mechanical_reviewed_multi_document",
+    "planar_mechanical_create_recovery_descriptor",
     "resolve_planar_mechanical_product_contract",
     "resolve_planar_mechanical_reviewed_operation",
+    "validate_planar_mechanical_reviewed_plan",
 ]

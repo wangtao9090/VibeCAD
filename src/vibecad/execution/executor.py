@@ -2656,7 +2656,10 @@ def _managed_apply_reviewed_intent(
             source_count=len(source_values),
         )
         artifact_kwargs: dict[str, object] = {}
-        if route.family.artifact_requirement_for(route.operation) is not None:
+        if (
+            route.family.artifact_requirement_for(route.operation) is not None
+            or route.family.multi_document_binding is not None
+        ):
             if (
                 type(artifact_resolver) is not _ReviewedArtifactRunResolver
                 or artifact_run_token is None

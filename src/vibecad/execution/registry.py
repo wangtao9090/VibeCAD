@@ -1562,9 +1562,9 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
             resource_budget=ResourceBudget(
                 max_runtime_ms=30_000,
                 # Static reviewed family contracts remain the exact authority.
-                # The coarse operation envelope admits the largest registered
-                # closure: a PartDesign feature, Body, Origin, and seven helpers.
-                max_created_objects=10,
+                # The coarse envelope admits PM1's bounded whole transaction:
+                # Body + Origin + seven helpers + Sketch + Pad + 2 * 16 cuts.
+                max_created_objects=43,
                 max_result_bytes=65_536,
             ),
             direct_exposed=False,
