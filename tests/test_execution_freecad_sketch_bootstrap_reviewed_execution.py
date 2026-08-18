@@ -97,7 +97,6 @@ def test_manifest_is_one_new_create_and_family_only() -> None:
     )
     assert bootstrap_adapter.SKETCH_BOOTSTRAP_FORMAL_HANDOFF.blockers == (
         "shared-dispatcher-registration-not-in-family-scope",
-        "formal-verification-receipt-pending",
         "intel-and-arm-release-attestation-refresh-pending",
     )
     identity = SKETCH_BOOTSTRAP_REVIEWED_PRODUCT_IDENTITIES[0]

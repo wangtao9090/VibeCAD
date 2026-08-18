@@ -594,7 +594,7 @@ def build_sketch_bootstrap_intent_graph(
 
 @dataclass(frozen=True, slots=True)
 class SketchBootstrapFormalHandoff:
-    """Family-only handoff; this is evidence, never shared registration."""
+    """Bootstrap handoff; catalog inclusion does not authorize product routes."""
 
     manifest_sha256: str
     operation_specification_sha256: str
@@ -612,7 +612,6 @@ SKETCH_BOOTSTRAP_FORMAL_HANDOFF: Final = SketchBootstrapFormalHandoff(
     rule_contract_sha256=SKETCH_BOOTSTRAP_RULE_CONTRACT_SHA256,
     blockers=(
         "shared-dispatcher-registration-not-in-family-scope",
-        "formal-verification-receipt-pending",
         "intel-and-arm-release-attestation-refresh-pending",
     ),
 )

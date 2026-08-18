@@ -8,6 +8,7 @@ import json
 import pytest
 
 import vibecad.execution.freecad_reviewed_release_attestation_resource as resource
+import vibecad.execution.freecad_reviewed_verification_runtime as verification_runtime
 from vibecad import __version__
 from vibecad.execution._attestations.freecad_reviewed_release_attestation_pins import (
     PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM,
@@ -214,7 +215,7 @@ def test_loader_has_no_path_or_environment_override_surface():
     assert loader.__code__.co_argcount == 0
 
 
-def test_checked_in_current_release_resource_is_pinned_canonical_and_complete(
+def test_checked_in_resources_are_pinned_but_fail_closed_pending_catalog125_regeneration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(resource, "_platform_id", lambda: "macos.x86_64")
@@ -231,12 +232,23 @@ def test_checked_in_current_release_resource_is_pinned_canonical_and_complete(
         (loaded_arm, "macos.arm64"),
         (loaded_x86, "macos.x86_64"),
     ):
-        decoded = decode_freecad_reviewed_release_attestation(
-            loaded.raw,
-            expected_source_attestation_sha256=loaded.resource_sha256,
+        raw = json.loads(loaded.raw)
+        assert raw["release_version"] == __version__
+        assert raw["runtime_backend"]["platform_id"] == platform_id
+        assert len(raw["verification_set"]["receipts"]) == 19
+        assert len(raw["verification_set"]["formal_operations"]) == 124
+        assert len(raw["verification_set"]["native_types"]) == 102
+        assert (
+            raw["verification_set"]["current_formal_catalog_sha256"]
+            != verification_runtime._current_catalogs()[2]  # noqa: SLF001
         )
-        assert decoded.release_version == __version__
-        assert decoded.runtime_backend.platform_id == platform_id
-        assert len(decoded.verification_set.receipts) == 19
-        assert len(decoded.verification_set.formal_operations) == 124
-        assert len(decoded.verification_set.native_types) == 102
+
+        # Platform resources remain pinned and canonical, but are deliberately
+        # unusable until the 20-receipt/125-operation attestations are regenerated.
+        with pytest.raises(CapabilityCatalogError) as raised:
+            decode_freecad_reviewed_release_attestation(
+                loaded.raw,
+                expected_source_attestation_sha256=loaded.resource_sha256,
+            )
+        assert raised.value.code is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+        assert raised.value.path == "verification_set/current_catalog"

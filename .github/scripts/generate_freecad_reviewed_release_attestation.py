@@ -5,7 +5,7 @@ This maintainer-only command must run inside the pinned managed FreeCAD
 Python.  It has no path or platform override: the trusted current platform
 selects one fixed canonical JSON resource and one key in the shared pin source.
 Generation preserves every sibling-platform pin.  ``--check`` performs the same
-real discovery and 124-by-seven conformance run, but only reads and compares
+real discovery and 125-by-seven conformance run, but only reads and compares
 the two selected checked-in files.  A directory-inode process lock serializes
 pin read/merge/publication while allowing concurrent read-only checks.
 """

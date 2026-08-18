@@ -507,8 +507,8 @@ def test_real_builder_sequence_is_discovery_then_exact_current_verification_and_
 
     assert events == ["prepare", "discover", "verify", "build", "encode", "decode", "validate"]
     assert result.resource == encoded
-    assert result.receipt_count == 19
-    assert result.formal_operation_count == 124
+    assert result.receipt_count == 20
+    assert result.formal_operation_count == 125
     assert result.native_type_count == 102
     assert os.environ["FREECAD_USER_TEMP"] == "caller-value"
     assert fake_freecad.listDocuments() == {}

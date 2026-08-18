@@ -36,6 +36,9 @@ from vibecad.intent_bridge.freecad_part_profile_surface_adapter import (
 from vibecad.intent_bridge.freecad_partdesign_residual_adapter import (
     PARTDESIGN_RESIDUAL_MANIFEST,
 )
+from vibecad.intent_bridge.freecad_sketch_bootstrap_adapter import (
+    SKETCH_BOOTSTRAP_FAMILY_MANIFEST,
+)
 from vibecad.intent_bridge.freecad_sketch_intent_adapter import (
     REVIEWED_SKETCH_FAMILY_MANIFEST,
 )
@@ -70,9 +73,24 @@ CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS = tuple(
             PART_PROFILE_SURFACE_MANIFEST,
             PARTDESIGN_RESIDUAL_MANIFEST,
             REVIEWED_SKETCH_FAMILY_MANIFEST,
+            SKETCH_BOOTSTRAP_FAMILY_MANIFEST,
         ),
         key=lambda item: item.family_id,
     )
+)
+
+# The CREATE bootstrap is a formal semantic, not a second native promotion
+# owner.  ``Sketcher::SketchObject`` already belongs to the established
+# reviewed Sketch adapter here and to the legacy planar-mechanical adapter in
+# the promotion catalog.  Keep this exception content-bound to the sole new
+# operation; the generic projection below remains strict for every caller.
+_CURRENT_FORMAL_ONLY_OPERATION_IDS = frozenset(
+    {
+        (
+            SKETCH_BOOTSTRAP_FAMILY_MANIFEST.family_id,
+            SKETCH_BOOTSTRAP_FAMILY_MANIFEST.operations[0].operation_id,
+        )
+    }
 )
 
 
@@ -87,8 +105,10 @@ def _semantic_operation(identity: tuple[str, str, str, str]) -> str:
     return f"{namespace}/{vocabulary_version}/{term_id}@{definition_sha256}"
 
 
-def build_reviewed_family_capability_specs(
+def _build_reviewed_family_capability_specs(
     manifests: tuple[FamilyBatchManifest, ...],
+    *,
+    formal_only_operation_ids: frozenset[tuple[str, str]],
 ) -> tuple[FreeCadIntentCapabilitySpec, ...]:
     """Return deterministic formal specs for exact reviewed-family manifests.
 
@@ -117,6 +137,7 @@ def build_reviewed_family_capability_specs(
     semantic_identities: set[tuple[str, str, str, str]] = set()
     semantic_operations: set[str] = set()
     native_adapters: dict[str, tuple[str, str, str]] = {}
+    formal_only_native_adapters: dict[tuple[str, str], tuple[str, tuple[str, str, str]]] = {}
     for manifest in ordered:
         adapter_identity = (
             manifest.adapter.adapter_id,
@@ -136,15 +157,22 @@ def build_reviewed_family_capability_specs(
                 )
             semantic_identities.add(semantic_identity)
             semantic_operations.add(semantic_operation)
-            prior_adapter = native_adapters.setdefault(
-                operation.native_type_id,
-                adapter_identity,
-            )
-            if prior_adapter != adapter_identity:
-                _fail(
-                    CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
-                    "manifests/operations/native_type_id",
+            operation_identity = (manifest.family_id, operation.operation_id)
+            if operation_identity in formal_only_operation_ids:
+                formal_only_native_adapters[operation_identity] = (
+                    operation.native_type_id,
+                    adapter_identity,
                 )
+            else:
+                prior_adapter = native_adapters.setdefault(
+                    operation.native_type_id,
+                    adapter_identity,
+                )
+                if prior_adapter != adapter_identity:
+                    _fail(
+                        CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
+                        "manifests/operations/native_type_id",
+                    )
             specs.append(
                 FreeCadIntentCapabilitySpec(
                     operation_id=f"{manifest.family_id}.{operation.operation_id}",
@@ -161,15 +189,42 @@ def build_reviewed_family_capability_specs(
                 )
             )
 
+    if set(formal_only_native_adapters) != set(formal_only_operation_ids):
+        _fail(
+            CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
+            "manifests/operations/formal_only",
+        )
+    if any(
+        native_type_id not in native_adapters or native_adapters[native_type_id] == adapter_identity
+        for native_type_id, adapter_identity in formal_only_native_adapters.values()
+    ):
+        _fail(
+            CapabilityCatalogErrorCode.INTEGRITY_FAILURE,
+            "manifests/operations/formal_only",
+        )
     if len({item.operation_id for item in specs}) != len(specs):
         _fail(CapabilityCatalogErrorCode.INVALID_INPUT, "manifests/operations/operation_id")
     return tuple(sorted(specs, key=lambda item: item.operation_id))
 
 
+def build_reviewed_family_capability_specs(
+    manifests: tuple[FamilyBatchManifest, ...],
+) -> tuple[FreeCadIntentCapabilitySpec, ...]:
+    """Return deterministic formal specs for exact reviewed-family manifests."""
+
+    return _build_reviewed_family_capability_specs(
+        manifests,
+        formal_only_operation_ids=frozenset(),
+    )
+
+
 def current_freecad_reviewed_family_capability_specs() -> tuple[FreeCadIntentCapabilitySpec, ...]:
     """Project the exact current Reviewed registry without claiming VERIFIED."""
 
-    return build_reviewed_family_capability_specs(CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS)
+    return _build_reviewed_family_capability_specs(
+        CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS,
+        formal_only_operation_ids=_CURRENT_FORMAL_ONLY_OPERATION_IDS,
+    )
 
 
 __all__ = ()

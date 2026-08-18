@@ -465,8 +465,8 @@ jobs:
           attestation=decode_freecad_reviewed_release_attestation(packaged.raw,expected_source_attestation_sha256=packaged.resource_sha256);
           verification=attestation.verification_set; expected=os.environ['EXPECTED_PLATFORM_ID'];
           assert attestation.runtime_backend.platform_id == expected, (attestation.runtime_backend.platform_id,expected);
-          assert len(verification.receipts) == 19;
-          assert len(verification.formal_operations) == 124;
+          assert len(verification.receipts) == 20;
+          assert len(verification.formal_operations) == 125;
           assert len(verification.native_types) == 102"
       - name: exact packaged reviewed-attestation gate (${{ matrix.platform_id }})
         run: >-

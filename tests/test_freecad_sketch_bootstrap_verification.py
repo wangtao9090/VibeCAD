@@ -84,24 +84,26 @@ def test_internal_exact_adapter_lowering_returns_bound_plan_receipt() -> None:
     assert receipt.grants_execution_authority is False
 
 
-def test_candidate_catalog125_family20_handoff_is_inert_and_not_current() -> None:
+def test_catalog125_family20_handoff_is_current_but_inert_pending_attestation() -> None:
     candidate = subject.SKETCH_BOOTSTRAP_CANDIDATE_FORMAL_SPEC
     handoff = subject.SKETCH_BOOTSTRAP_FORMAL_VERIFICATION_HANDOFF
     current_specs = current_freecad_intent_capability_specs()
 
-    assert len(current_specs) == 124
-    assert len({item.operation_id for item in current_specs}) == 124
+    assert len(current_specs) == 125
+    assert len({item.operation_id for item in current_specs}) == 125
     assert candidate.operation_id == ("freecad_sketch_bootstrap.create_body_owned_closed_circle")
     assert candidate.native_type_id == SKETCH_BOOTSTRAP_NATIVE_TYPE_ID
     assert candidate.verification is None
-    assert candidate.operation_id not in {item.operation_id for item in current_specs}
-    assert subject.SKETCH_BOOTSTRAP_CANDIDATE_FAMILY_MANIFEST not in (
+    assert candidate == next(
+        item for item in current_specs if item.operation_id == candidate.operation_id
+    )
+    assert subject.SKETCH_BOOTSTRAP_CANDIDATE_FAMILY_MANIFEST in (
         CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS
     )
     assert handoff.future_formal_operation_count == 125
     assert handoff.future_reviewed_family_count == 20
-    assert handoff.current_catalog_registered is False
-    assert handoff.current_family_registered is False
+    assert handoff.current_catalog_registered is True
+    assert handoff.current_family_registered is True
     assert handoff.release_attestation_refreshed is False
     assert handoff.defaults_to_verified is False
 

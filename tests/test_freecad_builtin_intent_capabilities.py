@@ -76,7 +76,7 @@ def test_current_specs_cover_all_reviewed_adapter_families() -> None:
         "PartDesign::Mirrored",
         "PartDesign::Boolean",
     }
-    assert len(specs) == 124
+    assert len(specs) == 125
     assert len({item.native_type_id for item in specs}) == 102
     assert {item.native_type_id for item in specs} == legacy_native_types | {
         item.native_type_id for item in reviewed
@@ -113,7 +113,7 @@ def test_current_catalog_is_deterministic_and_executable_not_verified() -> None:
     assert encode_capability_catalog(before) == encode_capability_catalog(after)
 
     operations = tuple(item for item in before.descriptors if item.kind is CapabilityKind.OPERATION)
-    assert len(operations) == 124
+    assert len(operations) == 125
     assert all(item.status is CapabilitySupportStatus.EXECUTABLE for item in operations)
     assert all(item.verification is None for item in operations)
 

@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from vibecad.execution import freecad_reviewed_family_capabilities as reviewed_capabilities
 from vibecad.execution.capabilities import CapabilityCatalogError, CapabilityCatalogErrorCode
 from vibecad.execution.freecad_reviewed_family_capabilities import (
     CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS,
@@ -53,7 +54,7 @@ def test_current_reviewed_registry_is_complete_content_bound_and_not_verified() 
     manifests = CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS
     specs = current_freecad_reviewed_family_capability_specs()
 
-    assert len(manifests) == 11
+    assert len(manifests) == 12
     assert manifests == tuple(sorted(manifests, key=lambda item: item.family_id))
     assert {item.family_id for item in manifests} == {
         "application_document_objects",
@@ -64,16 +65,29 @@ def test_current_reviewed_registry_is_complete_content_bound_and_not_verified() 
         "part_offset_projection",
         "freecad_part_profile_surface",
         "freecad_reviewed_sketch",
+        "freecad_sketch_bootstrap",
         "part_datum",
         "part_dressup",
         "partdesign_residual",
     }
-    assert len({item.manifest_sha256 for item in manifests}) == 11
-    assert len(specs) == 81
+    assert len({item.manifest_sha256 for item in manifests}) == 12
+    assert len(specs) == 82
     assert len({item.native_type_id for item in specs}) == 62
-    assert len({item.operation_id for item in specs}) == 81
-    assert len({item.semantic_operation for item in specs}) == 81
+    assert len({item.operation_id for item in specs}) == 82
+    assert len({item.semantic_operation for item in specs}) == 82
     assert all(item.verification is None for item in specs)
+
+    sketch_native_specs = tuple(
+        item for item in specs if item.native_type_id == "Sketcher::SketchObject"
+    )
+    assert any(
+        item.operation_id == "freecad_sketch_bootstrap.create_body_owned_closed_circle"
+        for item in sketch_native_specs
+    )
+    assert {item.adapter_id for item in sketch_native_specs} == {
+        "freecad_reviewed_sketch_adapter",
+        "freecad_sketch_bootstrap_adapter",
+    }
 
     coordinate_systems = tuple(
         item for item in specs if "/operation.local-coordinate-system@" in item.semantic_operation
@@ -106,6 +120,27 @@ def test_reviewed_family_projection_rejects_backend_and_native_adapter_drift() -
     with pytest.raises(CapabilityCatalogError) as caught:
         build_reviewed_family_capability_specs((PART_CORE_MANIFEST, rebound_adapter))
     assert caught.value.code is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+
+
+def test_current_formal_only_sketch_bootstrap_requires_an_existing_native_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = next(
+        item
+        for item in CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS
+        if item.family_id == "freecad_sketch_bootstrap"
+    )
+    monkeypatch.setattr(
+        reviewed_capabilities,
+        "CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS",
+        (bootstrap,),
+    )
+
+    with pytest.raises(CapabilityCatalogError) as caught:
+        reviewed_capabilities.current_freecad_reviewed_family_capability_specs()
+
+    assert caught.value.code is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+    assert caught.value.path == "manifests/operations/formal_only"
 
 
 def test_reviewed_family_projection_has_bounded_exact_input() -> None:

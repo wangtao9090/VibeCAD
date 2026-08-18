@@ -164,8 +164,8 @@ def test_v2_full_current_closure_retains_all_receipts_and_sketch_without_native_
 ) -> None:
     manifests, receipts, formal, promotion, verification_set, _attestation = current_closure
 
-    assert len(manifests) == len(receipts) == len(verification_set.receipts) == 19
-    assert len(formal) == len(verification_set.formal_operations) == 124
+    assert len(manifests) == len(receipts) == len(verification_set.receipts) == 20
+    assert len(formal) == len(verification_set.formal_operations) == 125
     assert len(promotion) == 104
     assert len(verification_set.native_types) == 102
     assert (
@@ -198,6 +198,25 @@ def test_v2_full_current_closure_retains_all_receipts_and_sketch_without_native_
             sketch.rule_contract_sha256,
         )
     )
+
+    bootstrap = next(
+        item for item in verification_set.receipts if item.family_id == "freecad_sketch_bootstrap"
+    )
+    bootstrap_formal = next(
+        item
+        for item in verification_set.formal_operations
+        if item.operation_id == "freecad_sketch_bootstrap.create_body_owned_closed_circle"
+    )
+    sketch_native = next(
+        item
+        for item in verification_set.native_types
+        if item.native_type_id == "Sketcher::SketchObject"
+    )
+    assert bootstrap_formal.test_receipt_sha256 == bootstrap.test_receipt_sha256
+    assert sketch_native.formal_operation_ids == (
+        "partdesign.planar-mechanical.reference-profiles",
+    )
+    assert sketch_native.verification.test_receipt_sha256 != bootstrap.test_receipt_sha256
 
 
 def test_v2_set_and_outer_attestation_round_trip_canonically_and_ignore_input_order(

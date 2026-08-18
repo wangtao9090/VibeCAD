@@ -1,9 +1,9 @@
-"""Private managed verification for the reviewed Sketch CREATE bootstrap.
+"""Private managed verification for the current reviewed Sketch CREATE family.
 
-The bootstrap family is intentionally not part of the current public route,
-formal catalog, or reviewed-family registry.  This module supplies the next
-handoff only: one admitted ``REVIEWED_HOST`` case manifest, a same-process
-managed-FreeCAD executor, and an inert candidate formal specification.
+The bootstrap family is part of the current formal catalog and reviewed-family
+registry, but intentionally remains outside the public product route.  This
+module supplies one admitted ``REVIEWED_HOST`` case manifest, a same-process
+managed-FreeCAD executor, and the inert current formal specification.
 
 Callers can provide only the authenticated FreeCAD module.  The executor,
 case results, challenges, pass decision, receipt, and promotion binding are
@@ -286,8 +286,8 @@ def _build_case_manifest() -> ReviewedConformanceCaseManifest:
 
 SKETCH_BOOTSTRAP_REVIEWED_HOST_CASE_MANIFEST: Final = _build_case_manifest()
 
-# Candidate-only metadata.  It is deliberately absent from
-# CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS and the current formal catalog.
+# The candidate names remain stable for the verification-to-catalog handoff;
+# their values now equal the current family and formal catalog entries.
 SKETCH_BOOTSTRAP_CANDIDATE_FAMILY_MANIFEST: Final = SKETCH_BOOTSTRAP_FAMILY_MANIFEST
 SKETCH_BOOTSTRAP_CANDIDATE_FORMAL_SPEC: Final[FreeCadIntentCapabilitySpec] = (
     build_reviewed_family_capability_specs((SKETCH_BOOTSTRAP_FAMILY_MANIFEST,))[0]
@@ -296,15 +296,15 @@ SKETCH_BOOTSTRAP_CANDIDATE_FORMAL_SPEC: Final[FreeCadIntentCapabilitySpec] = (
 
 @dataclass(frozen=True, slots=True)
 class SketchBootstrapFormalVerificationHandoff:
-    """Explicit future catalog125/family20 handoff, with no current authority."""
+    """Catalog125/family20 handoff with release evidence still pending."""
 
     family_manifest_sha256: str
     case_manifest_sha256: str
     candidate_operation_id: str
     future_formal_operation_count: int = 125
     future_reviewed_family_count: int = 20
-    current_catalog_registered: bool = False
-    current_family_registered: bool = False
+    current_catalog_registered: bool = True
+    current_family_registered: bool = True
     release_attestation_refreshed: bool = False
 
     @property
