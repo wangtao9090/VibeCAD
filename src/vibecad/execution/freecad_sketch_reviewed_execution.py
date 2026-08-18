@@ -22,6 +22,7 @@ from types import MappingProxyType
 from typing import Final
 
 from vibecad.execution.selectors import EntityIdentity, ProvenanceSource, SemanticRole
+from vibecad.intent_bridge import freecad_sketch_intent_adapter as sketch_adapter
 from vibecad.intent_bridge.contracts import BridgeTermRef, DocumentRef
 from vibecad.intent_bridge.freecad_parametric_adapter import PlanSink
 from vibecad.intent_bridge.freecad_sketch_intent_adapter import (
@@ -122,6 +123,40 @@ REVIEWED_SKETCH_SHARED_REGISTRATION_BLOCKERS: Final = (
     "no-reviewed-sketch-object-create-producer",
 )
 
+# The verified 1.0.0 manifest above remains immutable.  This compatibility
+# manifest adds only the codec-owned root semantic type required by the shared
+# intent-binding descriptor.  It deliberately has a distinct family version
+# and digest, and it does not claim a new verification receipt.
+REVIEWED_SKETCH_REGISTRATION_MANIFEST: Final = FamilyBatchManifest(
+    family_id=REVIEWED_SKETCH_FAMILY_MANIFEST.family_id,
+    family_version="1.0.1",
+    adapter=REVIEWED_SKETCH_FAMILY_MANIFEST.adapter,
+    backend_engine=REVIEWED_SKETCH_FAMILY_MANIFEST.backend_engine,
+    backend_version=REVIEWED_SKETCH_FAMILY_MANIFEST.backend_version,
+    backend_build_id=REVIEWED_SKETCH_FAMILY_MANIFEST.backend_build_id,
+    rule_id=REVIEWED_SKETCH_FAMILY_MANIFEST.rule_id,
+    rule_contract_sha256=REVIEWED_SKETCH_FAMILY_MANIFEST.rule_contract_sha256,
+    intent_role_term=REVIEWED_SKETCH_FAMILY_MANIFEST.intent_role_term,
+    intent_schema_term=REVIEWED_SKETCH_FAMILY_MANIFEST.intent_schema_term,
+    intent_media_type=REVIEWED_SKETCH_FAMILY_MANIFEST.intent_media_type,
+    capability_role_term=REVIEWED_SKETCH_FAMILY_MANIFEST.capability_role_term,
+    capability_schema_term=REVIEWED_SKETCH_FAMILY_MANIFEST.capability_schema_term,
+    capability_media_type=REVIEWED_SKETCH_FAMILY_MANIFEST.capability_media_type,
+    plan_role_term=REVIEWED_SKETCH_FAMILY_MANIFEST.plan_role_term,
+    plan_schema_term=REVIEWED_SKETCH_FAMILY_MANIFEST.plan_schema_term,
+    plan_media_type=REVIEWED_SKETCH_FAMILY_MANIFEST.plan_media_type,
+    request_terms=(
+        *REVIEWED_SKETCH_FAMILY_MANIFEST.request_terms,
+        _bridge_term(SKETCH_ROOT_SEMANTIC_TYPE_TERM),
+    ),
+    operations=REVIEWED_SKETCH_FAMILY_MANIFEST.operations,
+    max_plan_bytes=REVIEWED_SKETCH_FAMILY_MANIFEST.max_plan_bytes,
+)
+REVIEWED_SKETCH_REGISTRATION_MATERIAL_READY: Final = True
+REVIEWED_SKETCH_REGISTRATION_MANIFEST_HAS_VERIFICATION_RECEIPT: Final = False
+REVIEWED_SKETCH_PUBLIC_POSITIVE_READY: Final = False
+REVIEWED_SKETCH_PUBLIC_POSITIVE_BLOCKERS: Final = ("no-reviewed-sketch-object-create-producer",)
+
 _OPERATIONS_BY_ID: Final = MappingProxyType(
     {item.operation_id: item for item in REVIEWED_SKETCH_FAMILY_MANIFEST.operations}
 )
@@ -135,6 +170,61 @@ _PRODUCT_IDENTITIES: Final = MappingProxyType(
     }
 )
 REVIEWED_SKETCH_PRODUCT_IDENTITIES: Final = tuple(_PRODUCT_IDENTITIES)
+
+
+class FreeCADReviewedSketchRegistrationAdapter(ExactReviewedFamilyAdapter):
+    """Exact lowerer bound to the compatibility registration manifest."""
+
+    __slots__ = ()
+
+    def __init__(self, sink: PlanSink) -> None:
+        super().__init__(
+            REVIEWED_SKETCH_REGISTRATION_MANIFEST,
+            sink,
+            build_plan=sketch_adapter._build_plan,  # noqa: SLF001
+            decode_plan=decode_reviewed_sketch_backend_plan,
+            validate_binding=sketch_adapter._validate_binding,  # noqa: SLF001
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ReviewedSketchRegistrationProductResult:
+    """Family-local material for one shared UPDATE_PRIMARY contract."""
+
+    operation_id: str
+    result_kind: str = "reference"
+    owned_type_ids: tuple[str, ...] = (REVIEWED_SKETCH_NATIVE_TYPE_ID,)
+    semantic_roles: tuple[SemanticRole, ...] = (SemanticRole.FEATURE,)
+    source_count: int = 1
+    execution_mode: str = "update_primary"
+    primary_is_source: bool = True
+
+    def __post_init__(self) -> None:
+        operation = next(
+            (
+                item
+                for item in REVIEWED_SKETCH_REGISTRATION_MANIFEST.operations
+                if item.operation_id == self.operation_id
+            ),
+            None,
+        )
+        if (
+            operation is None
+            or operation.native_type_id != REVIEWED_SKETCH_NATIVE_TYPE_ID
+            or self.result_kind != "reference"
+            or self.owned_type_ids != (REVIEWED_SKETCH_NATIVE_TYPE_ID,)
+            or self.semantic_roles != (SemanticRole.FEATURE,)
+            or self.source_count != 1
+            or self.execution_mode != "update_primary"
+            or self.primary_is_source is not True
+        ):
+            _integrity_failure()
+
+
+REVIEWED_SKETCH_REGISTRATION_PRODUCT_RESULTS: Final = tuple(
+    ReviewedSketchRegistrationProductResult(operation_id=operation.value)
+    for operation in REVIEWED_SKETCH_PRODUCT_OPERATIONS
+)
 
 
 class ReviewedSketchOwnerKind(StrEnum):
@@ -397,21 +487,84 @@ def reviewed_sketch_adapter_factory(sink: PlanSink) -> ExactReviewedFamilyAdapte
     return FreeCADReviewedSketchAdapter(sink)._inner  # noqa: SLF001
 
 
+def reviewed_sketch_registration_adapter_factory(
+    sink: PlanSink,
+) -> ExactReviewedFamilyAdapter:
+    """Build the exact adapter bound to the compatibility manifest."""
+
+    return FreeCADReviewedSketchRegistrationAdapter(sink)
+
+
+def reviewed_sketch_registration_intent_binding() -> object:
+    """Return the shared codec/selector binding at the explicit handoff."""
+
+    from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
+        _sketch_intent_binding,
+    )
+
+    binding = _sketch_intent_binding()
+    try:
+        valid = (
+            binding.root_subject_type_term == SKETCH_ROOT_SEMANTIC_TYPE_TERM
+            and binding.schema_term == REVIEWED_SKETCH_REGISTRATION_MANIFEST.intent_schema_term
+            and binding.media_type == REVIEWED_SKETCH_REGISTRATION_MANIFEST.intent_media_type
+            and all(
+                binding.subject_type_for(operation) == operation.semantic_term
+                and operation.semantic_term in REVIEWED_SKETCH_REGISTRATION_MANIFEST.request_terms
+                for operation in REVIEWED_SKETCH_REGISTRATION_MANIFEST.operations
+            )
+        )
+    except (Exception, SystemExit):
+        valid = False
+    if not valid:
+        _integrity_failure()
+    return binding
+
+
+def reviewed_sketch_registration_product_results() -> tuple[object, ...]:
+    """Materialize exact private shared contracts without an import cycle."""
+
+    from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
+        _ReviewedProductExecutionMode,
+        _ReviewedProductResultContract,
+        _ReviewedProductResultKind,
+    )
+
+    return tuple(
+        _ReviewedProductResultContract(
+            operation_id=item.operation_id,
+            result_kind=_ReviewedProductResultKind.REFERENCE,
+            owned_type_ids=item.owned_type_ids,
+            semantic_roles=item.semantic_roles,
+            source_count=item.source_count,
+            execution_mode=_ReviewedProductExecutionMode.UPDATE_PRIMARY,
+        )
+        for item in REVIEWED_SKETCH_REGISTRATION_PRODUCT_RESULTS
+    )
+
+
 def _validate_plan_contract(
     plan: object,
     plan_document: DocumentRef,
     operation: ReviewedOperationSpec,
+    *,
+    manifest: FamilyBatchManifest = REVIEWED_SKETCH_FAMILY_MANIFEST,
 ) -> ReviewedSketchBackendPlan:
     if (
         type(plan) is not ReviewedSketchBackendPlan
         or type(plan_document) is not DocumentRef
         or type(operation) is not ReviewedOperationSpec
-        or operation not in REVIEWED_SKETCH_FAMILY_MANIFEST.operations
+        or type(manifest) is not FamilyBatchManifest
+        or manifest
+        not in (
+            REVIEWED_SKETCH_FAMILY_MANIFEST,
+            REVIEWED_SKETCH_REGISTRATION_MANIFEST,
+        )
+        or operation not in manifest.operations
         or plan.operation not in REVIEWED_SKETCH_PRODUCT_OPERATIONS
         or plan.operation.value != operation.operation_id
-        or plan.adapter_contract_sha256
-        != REVIEWED_SKETCH_FAMILY_MANIFEST.adapter.adapter_contract_sha256
-        or plan.manifest_sha256 != REVIEWED_SKETCH_FAMILY_MANIFEST.manifest_sha256
+        or plan.adapter_contract_sha256 != manifest.adapter.adapter_contract_sha256
+        or plan.manifest_sha256 != manifest.manifest_sha256
         or plan.operation_specification_sha256 != operation.specification_sha256
         or plan.plan_sha256 != plan_document.document_digest
         or hashlib.sha256(plan.canonical_bytes).hexdigest() != plan_document.content_sha256
@@ -444,7 +597,43 @@ def validate_reviewed_sketch_plan(
         or receipt.adapter != REVIEWED_SKETCH_FAMILY_MANIFEST.adapter
     ):
         _integrity_failure()
-    checked = _validate_plan_contract(plan, receipt.plan_document, operation)
+    checked = _validate_plan_contract(
+        plan,
+        receipt.plan_document,
+        operation,
+        manifest=REVIEWED_SKETCH_FAMILY_MANIFEST,
+    )
+    if (
+        checked.request_digest != receipt.request_digest
+        or checked.source_artifact_id != receipt.source_document.artifact_id
+        or checked.source_graph_id != receipt.source_document.document_id
+        or checked.source_graph_sha256 != receipt.source_document.document_digest
+        or checked.source_content_sha256 != receipt.source_document.content_sha256
+    ):
+        _integrity_failure()
+
+
+def validate_reviewed_sketch_registration_plan(
+    plan: object,
+    receipt: ReviewedPlanReceipt,
+    operation: ReviewedOperationSpec,
+) -> None:
+    """Bind one compatibility plan to its exact registration receipt."""
+
+    if (
+        type(receipt) is not ReviewedPlanReceipt
+        or type(operation) is not ReviewedOperationSpec
+        or receipt.operation != operation
+        or receipt.manifest_sha256 != REVIEWED_SKETCH_REGISTRATION_MANIFEST.manifest_sha256
+        or receipt.adapter != REVIEWED_SKETCH_REGISTRATION_MANIFEST.adapter
+    ):
+        _integrity_failure()
+    checked = _validate_plan_contract(
+        plan,
+        receipt.plan_document,
+        operation,
+        manifest=REVIEWED_SKETCH_REGISTRATION_MANIFEST,
+    )
     if (
         checked.request_digest != receipt.request_digest
         or checked.source_artifact_id != receipt.source_document.artifact_id
@@ -996,10 +1185,17 @@ def execute_reviewed_sketch_plan_on_bound_sketch(
     plan_document: DocumentRef,
     operation: ReviewedOperationSpec,
     sketch: object,
+    *,
+    manifest: FamilyBatchManifest = REVIEWED_SKETCH_FAMILY_MANIFEST,
 ) -> ReviewedSketchBoundExecution:
     """Pure family hook after the engine has authenticated one source sketch."""
 
-    checked = _validate_plan_contract(plan, plan_document, operation)
+    checked = _validate_plan_contract(
+        plan,
+        plan_document,
+        operation,
+        manifest=manifest,
+    )
     if document is None or type(payload) is not bytes:
         _integrity_failure()
     try:
@@ -1114,6 +1310,44 @@ def execute_reviewed_sketch_plan(
     return _ReviewedFamilyNativeExecution(**kwargs)
 
 
+def execute_reviewed_sketch_registration_plan(
+    document: object,
+    plan: object,
+    payload: bytes,
+    plan_document: DocumentRef,
+    operation: ReviewedOperationSpec,
+    context: object,
+) -> object:
+    """Compatibility-manifest callback; still requires one managed Sketch."""
+
+    checked = _validate_plan_contract(
+        plan,
+        plan_document,
+        operation,
+        manifest=REVIEWED_SKETCH_REGISTRATION_MANIFEST,
+    )
+    sketch = _authenticated_source(document, checked, context)
+    result = execute_reviewed_sketch_plan_on_bound_sketch(
+        document,
+        checked,
+        payload,
+        plan_document,
+        operation,
+        sketch,
+        manifest=REVIEWED_SKETCH_REGISTRATION_MANIFEST,
+    )
+    from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
+        _ReviewedFamilyNativeExecution,
+    )
+
+    return _ReviewedFamilyNativeExecution(
+        object=result.object,
+        receipt=result.receipt,
+        owned_objects=(result.object,),
+        state_sha256=result.state_sha256,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ReviewedSketchFamilySpec:
     manifest: FamilyBatchManifest
@@ -1148,7 +1382,96 @@ REVIEWED_SKETCH_FAMILY_SPEC: Final = ReviewedSketchFamilySpec(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class ReviewedSketchRegistrationSpec:
+    """Complete, unregistered handoff material for the shared descriptor."""
+
+    manifest: FamilyBatchManifest
+    subject_type_term: BridgeTermRef
+    operation_ids: tuple[str, ...]
+    product_identities: tuple[tuple[str, str], ...]
+    create_operation_ids: tuple[str, ...]
+    update_primary_operation_ids: tuple[str, ...]
+    minimum_sources: int
+    maximum_sources: int
+    product_results: tuple[ReviewedSketchRegistrationProductResult, ...]
+    adapter_factory: Callable[[PlanSink], ExactReviewedFamilyAdapter]
+    validate_plan: Callable[[object, ReviewedPlanReceipt, ReviewedOperationSpec], None]
+    execute_plan: Callable[
+        [object, object, bytes, DocumentRef, ReviewedOperationSpec, object], object
+    ]
+    intent_binding_factory: Callable[[], object]
+    product_results_factory: Callable[[], tuple[object, ...]]
+    capture_update_state: Callable[[object, ReviewedOperationSpec, object], object]
+    rollback_update_state: Callable[[object, object, ReviewedOperationSpec, object], None]
+    compatibility_manifest_has_verification_receipt: bool
+    public_positive_ready: bool
+    public_positive_blockers: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            self.manifest is not REVIEWED_SKETCH_REGISTRATION_MANIFEST
+            or self.subject_type_term != SKETCH_ROOT_SEMANTIC_TYPE_TERM
+            or self.operation_ids
+            != tuple(item.value for item in REVIEWED_SKETCH_PRODUCT_OPERATIONS)
+            or self.product_identities != REVIEWED_SKETCH_PRODUCT_IDENTITIES
+            or self.create_operation_ids
+            or self.update_primary_operation_ids != self.operation_ids
+            or (self.minimum_sources, self.maximum_sources) != (1, 1)
+            or self.product_results is not REVIEWED_SKETCH_REGISTRATION_PRODUCT_RESULTS
+            or any(
+                item.execution_mode != "update_primary"
+                or item.source_count != 1
+                or item.owned_type_ids != (REVIEWED_SKETCH_NATIVE_TYPE_ID,)
+                for item in self.product_results
+            )
+            or not callable(self.adapter_factory)
+            or not callable(self.validate_plan)
+            or not callable(self.execute_plan)
+            or not callable(self.intent_binding_factory)
+            or not callable(self.product_results_factory)
+            or not callable(self.capture_update_state)
+            or not callable(self.rollback_update_state)
+            or self.compatibility_manifest_has_verification_receipt is not False
+            or self.public_positive_ready is not False
+            or self.public_positive_blockers != ("no-reviewed-sketch-object-create-producer",)
+        ):
+            _integrity_failure()
+
+
+REVIEWED_SKETCH_REGISTRATION_SPEC: Final = ReviewedSketchRegistrationSpec(
+    manifest=REVIEWED_SKETCH_REGISTRATION_MANIFEST,
+    subject_type_term=_bridge_term(SKETCH_ROOT_SEMANTIC_TYPE_TERM),
+    operation_ids=tuple(item.value for item in REVIEWED_SKETCH_PRODUCT_OPERATIONS),
+    product_identities=REVIEWED_SKETCH_PRODUCT_IDENTITIES,
+    create_operation_ids=(),
+    update_primary_operation_ids=tuple(item.value for item in REVIEWED_SKETCH_PRODUCT_OPERATIONS),
+    minimum_sources=1,
+    maximum_sources=1,
+    product_results=REVIEWED_SKETCH_REGISTRATION_PRODUCT_RESULTS,
+    adapter_factory=reviewed_sketch_registration_adapter_factory,
+    validate_plan=validate_reviewed_sketch_registration_plan,
+    execute_plan=execute_reviewed_sketch_registration_plan,
+    intent_binding_factory=reviewed_sketch_registration_intent_binding,
+    product_results_factory=reviewed_sketch_registration_product_results,
+    capture_update_state=capture_reviewed_sketch_update_state,
+    rollback_update_state=rollback_reviewed_sketch_update_state,
+    compatibility_manifest_has_verification_receipt=(
+        REVIEWED_SKETCH_REGISTRATION_MANIFEST_HAS_VERIFICATION_RECEIPT
+    ),
+    public_positive_ready=REVIEWED_SKETCH_PUBLIC_POSITIVE_READY,
+    public_positive_blockers=REVIEWED_SKETCH_PUBLIC_POSITIVE_BLOCKERS,
+)
+
+
 __all__ = [
+    "REVIEWED_SKETCH_PUBLIC_POSITIVE_BLOCKERS",
+    "REVIEWED_SKETCH_PUBLIC_POSITIVE_READY",
+    "REVIEWED_SKETCH_REGISTRATION_MANIFEST",
+    "REVIEWED_SKETCH_REGISTRATION_MANIFEST_HAS_VERIFICATION_RECEIPT",
+    "REVIEWED_SKETCH_REGISTRATION_MATERIAL_READY",
+    "REVIEWED_SKETCH_REGISTRATION_PRODUCT_RESULTS",
+    "REVIEWED_SKETCH_REGISTRATION_SPEC",
     "REVIEWED_SKETCH_CREATE_OPERATIONS",
     "REVIEWED_SKETCH_FAMILY_SPEC",
     "REVIEWED_SKETCH_PRODUCT_IDENTITIES",
@@ -1156,6 +1479,7 @@ __all__ = [
     "REVIEWED_SKETCH_SHARED_REGISTRATION_BLOCKERS",
     "REVIEWED_SKETCH_SHARED_REGISTRATION_READY",
     "REVIEWED_SKETCH_UPDATE_PRIMARY_OPERATIONS",
+    "FreeCADReviewedSketchRegistrationAdapter",
     "ReviewedSketchBoundExecution",
     "ReviewedSketchFamilySpec",
     "ReviewedSketchOpaqueState",
@@ -1163,13 +1487,20 @@ __all__ = [
     "ReviewedSketchOwnerKind",
     "ReviewedSketchOwnershipClosure",
     "ReviewedSketchPrimaryUpdateSnapshot",
+    "ReviewedSketchRegistrationProductResult",
+    "ReviewedSketchRegistrationSpec",
     "ReviewedSketchShapeFacts",
     "capture_reviewed_sketch_native_state",
     "capture_reviewed_sketch_update_state",
     "execute_reviewed_sketch_plan",
     "execute_reviewed_sketch_plan_on_bound_sketch",
+    "execute_reviewed_sketch_registration_plan",
     "resolve_reviewed_sketch_operation",
     "reviewed_sketch_adapter_factory",
+    "reviewed_sketch_registration_adapter_factory",
+    "reviewed_sketch_registration_intent_binding",
+    "reviewed_sketch_registration_product_results",
     "rollback_reviewed_sketch_update_state",
     "validate_reviewed_sketch_plan",
+    "validate_reviewed_sketch_registration_plan",
 ]

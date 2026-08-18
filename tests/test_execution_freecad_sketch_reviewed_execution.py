@@ -9,9 +9,16 @@ from types import SimpleNamespace
 
 import pytest
 
+import vibecad.execution.freecad_reviewed_intent_execution as shared_execution
 import vibecad.execution.freecad_sketch_reviewed_execution as execution
+import vibecad.intent_bridge.freecad_sketch_intent_adapter as sketch_adapter
+from tests.test_intent_bridge_freecad_sketch_intent_adapter import (
+    _constraint_graph,
+    _geometry_graph,
+    _graph_document,
+)
 from vibecad.execution.freecad_reviewed_intent_execution import ReviewedIntentExecutionError
-from vibecad.intent_bridge.contracts import DocumentRef
+from vibecad.intent_bridge.contracts import DocumentRef, SubjectRef
 from vibecad.intent_bridge.freecad_sketch_intent_adapter import (
     REVIEWED_SKETCH_FAMILY_MANIFEST,
 )
@@ -19,7 +26,11 @@ from vibecad.intent_bridge.reviewed_family_engine import (
     ExactReviewedFamilyAdapter,
     ReviewedPlanReceipt,
 )
-from vibecad.intent_bridge.sketch_intent_graph_codec import SKETCH_ROOT_SEMANTIC_TYPE_TERM
+from vibecad.intent_bridge.sketch_intent_graph_codec import (
+    SKETCH_CONSTRAINT_SELECTOR_TERM,
+    SKETCH_GEOMETRY_SELECTOR_TERM,
+    SKETCH_ROOT_SEMANTIC_TYPE_TERM,
+)
 from vibecad.parametric import freecad_sketch_intent_rules as rules
 from vibecad.parametric.freecad_sketch_intent_rules import (
     ReviewedSketchBackendPlan,
@@ -28,7 +39,10 @@ from vibecad.parametric.freecad_sketch_intent_rules import (
     ReviewedSketchOperation,
     ReviewedSketchParameter,
     ReviewedSketchResult,
+    decode_reviewed_sketch_backend_plan,
 )
+from vibecad.sketch.contracts import SketchIntentGraph, encode_sketch_intent_graph
+from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 
 
 class _MemorySink:
@@ -306,6 +320,73 @@ def _source_document(plan: ReviewedSketchBackendPlan) -> DocumentRef:
     )
 
 
+def _registration_lowered(graph: SketchIntentGraph):
+    source_document, source_payload = _graph_document(graph)
+    draft = sketch_adapter._build_plan(  # noqa: SLF001
+        source_document,
+        source_payload,
+        "a" * 64,
+        execution.REVIEWED_SKETCH_REGISTRATION_MANIFEST,
+    )
+    plan = decode_reviewed_sketch_backend_plan(
+        draft.payload,
+        expected_plan_sha256=draft.semantic_plan_sha256,
+    )
+    plan_document = execution.REVIEWED_SKETCH_REGISTRATION_MANIFEST.plan_document(
+        plan.canonical_bytes,
+        plan.plan_sha256,
+    )
+    operation = next(
+        item
+        for item in execution.REVIEWED_SKETCH_REGISTRATION_MANIFEST.operations
+        if item.operation_id == plan.operation.value
+    )
+    receipt = ReviewedPlanReceipt(
+        manifest_sha256=execution.REVIEWED_SKETCH_REGISTRATION_MANIFEST.manifest_sha256,
+        request_digest=plan.request_digest,
+        adapter=execution.REVIEWED_SKETCH_REGISTRATION_MANIFEST.adapter,
+        operation=operation,
+        source_document=source_document,
+        plan_document=plan_document,
+    )
+    return plan, plan_document, operation, receipt
+
+
+def _reviewed_program(graph: SketchIntentGraph, operation: object) -> ReviewedIntentProgramV1:
+    namespace, version, term_id, digest = operation.semantic_term.semantic_identity
+    payload = encode_sketch_intent_graph(graph)
+    return ReviewedIntentProgramV1(
+        operation_id=(
+            f"{execution.REVIEWED_SKETCH_REGISTRATION_MANIFEST.family_id}.{operation.operation_id}"
+        ),
+        semantic_operation=f"{namespace}/{version}/{term_id}@{digest}",
+        intent_graph_sha256=graph.graph_sha256,
+        intent_content_sha256=hashlib.sha256(payload).hexdigest(),
+        intent_graph=graph,
+    )
+
+
+def _registration_routes():
+    spec = execution.REVIEWED_SKETCH_REGISTRATION_SPEC
+    descriptor = shared_execution._ReviewedIntentFamilyDescriptor(  # noqa: SLF001
+        manifest=spec.manifest,
+        subject_type_term=spec.subject_type_term,
+        adapter_factory=spec.adapter_factory,
+        validate_plan=spec.validate_plan,
+        execute_plan=spec.execute_plan,
+        product_results=spec.product_results_factory(),
+        intent_binding=spec.intent_binding_factory(),
+        minimum_sources=spec.minimum_sources,
+        maximum_sources=spec.maximum_sources,
+        capture_update_state=spec.capture_update_state,
+        rollback_update_state=spec.rollback_update_state,
+    )
+    return shared_execution._routes_for_family(  # noqa: SLF001
+        descriptor,
+        spec.operation_ids,
+    )
+
+
 def _install_circle(sketch: _Sketch, plan: ReviewedSketchBackendPlan) -> None:
     index = sketch.addGeometry(_Circle(), False)
     native = ReviewedSketchNativeResult(
@@ -388,6 +469,252 @@ def test_family_freezes_twenty_exact_update_only_routes_and_reports_subject_gap(
     # term would weaken the proof endpoint.
     assert spec.subject_type_term not in spec.manifest.request_terms
     assert isinstance(spec.adapter_factory(_MemorySink()), ExactReviewedFamilyAdapter)
+
+
+def test_registration_manifest_adds_only_root_type_without_claiming_attestation() -> None:
+    original = REVIEWED_SKETCH_FAMILY_MANIFEST
+    manifest = execution.REVIEWED_SKETCH_REGISTRATION_MANIFEST
+    spec = execution.REVIEWED_SKETCH_REGISTRATION_SPEC
+
+    assert original.family_version == "1.0.0"
+    assert SKETCH_ROOT_SEMANTIC_TYPE_TERM not in original.request_terms
+    assert manifest.family_version == "1.0.1"
+    assert manifest.manifest_sha256 != original.manifest_sha256
+    assert set(manifest.request_terms) == {
+        *original.request_terms,
+        SKETCH_ROOT_SEMANTIC_TYPE_TERM,
+    }
+    assert manifest.operations == original.operations
+    assert manifest.adapter == original.adapter
+    assert manifest.rule_id == original.rule_id
+    assert manifest.rule_contract_sha256 == original.rule_contract_sha256
+    assert spec.manifest is manifest
+    assert spec.subject_type_term == SKETCH_ROOT_SEMANTIC_TYPE_TERM
+    assert execution.REVIEWED_SKETCH_REGISTRATION_MATERIAL_READY is True
+    assert execution.REVIEWED_SKETCH_REGISTRATION_MANIFEST_HAS_VERIFICATION_RECEIPT is False
+    assert spec.compatibility_manifest_has_verification_receipt is False
+    assert execution.REVIEWED_SKETCH_PUBLIC_POSITIVE_READY is False
+    assert execution.REVIEWED_SKETCH_PUBLIC_POSITIVE_BLOCKERS == (
+        "no-reviewed-sketch-object-create-producer",
+    )
+    assert all(
+        route.manifest.family_id != manifest.family_id
+        for route in shared_execution.CURRENT_REVIEWED_INTENT_ROUTES
+    )
+
+
+def test_registration_spec_freezes_twenty_full_update_primary_contracts() -> None:
+    spec = execution.REVIEWED_SKETCH_REGISTRATION_SPEC
+    assert len(execution.REVIEWED_SKETCH_PRODUCT_IDENTITIES) == 20
+    assert len(spec.product_results) == 20
+    assert len(set(execution.REVIEWED_SKETCH_PRODUCT_IDENTITIES)) == 20
+    assert spec.product_identities == execution.REVIEWED_SKETCH_PRODUCT_IDENTITIES
+    assert spec.operation_ids == tuple(item.value for item in ReviewedSketchOperation)
+    assert spec.create_operation_ids == ()
+    assert spec.update_primary_operation_ids == spec.operation_ids
+    assert (spec.minimum_sources, spec.maximum_sources) == (1, 1)
+    assert spec.capture_update_state is execution.capture_reviewed_sketch_update_state
+    assert spec.rollback_update_state is execution.rollback_reviewed_sketch_update_state
+    for operation, identity, result in zip(
+        execution.REVIEWED_SKETCH_PRODUCT_OPERATIONS,
+        execution.REVIEWED_SKETCH_PRODUCT_IDENTITIES,
+        spec.product_results,
+        strict=True,
+    ):
+        reviewed = next(
+            item for item in spec.manifest.operations if item.operation_id == operation.value
+        )
+        namespace, version, term_id, digest = reviewed.semantic_term.semantic_identity
+        assert identity == (
+            f"{spec.manifest.family_id}.{operation.value}",
+            f"{namespace}/{version}/{term_id}@{digest}",
+        )
+        assert execution.resolve_reviewed_sketch_operation(*identity) is reviewed
+        assert result.operation_id == operation.value
+        assert result.result_kind == "reference"
+        assert result.owned_type_ids == ("Sketcher::SketchObject",)
+        assert result.semantic_roles == (execution.SemanticRole.FEATURE,)
+        assert result.source_count == 1
+        assert result.execution_mode == "update_primary"
+        assert result.primary_is_source is True
+
+    shared_results = spec.product_results_factory()
+    assert len(shared_results) == 20
+    assert all(item.result_kind.value == "reference" for item in shared_results)
+    assert all(item.execution_mode.value == "update_primary" for item in shared_results)
+    assert all(item.source_count == 1 for item in shared_results)
+
+    descriptor = shared_execution._ReviewedIntentFamilyDescriptor(  # noqa: SLF001
+        manifest=spec.manifest,
+        subject_type_term=spec.subject_type_term,
+        adapter_factory=spec.adapter_factory,
+        validate_plan=spec.validate_plan,
+        execute_plan=spec.execute_plan,
+        product_results=shared_results,
+        intent_binding=spec.intent_binding_factory(),
+        minimum_sources=spec.minimum_sources,
+        maximum_sources=spec.maximum_sources,
+        capture_update_state=spec.capture_update_state,
+        rollback_update_state=spec.rollback_update_state,
+    )
+    assert descriptor.manifest is spec.manifest
+    assert descriptor.product_results == shared_results
+    assert descriptor.minimum_sources == descriptor.maximum_sources == 1
+    routes = shared_execution._routes_for_family(  # noqa: SLF001
+        descriptor,
+        spec.operation_ids,
+    )
+    assert len(routes) == 20
+    assert tuple((item.operation_id, item.semantic_operation) for item in routes) == (
+        execution.REVIEWED_SKETCH_PRODUCT_IDENTITIES
+    )
+    assert all(item not in shared_execution.CURRENT_REVIEWED_INTENT_ROUTES for item in routes)
+
+
+def test_registration_exact_adapter_and_compatibility_plan_binding() -> None:
+    spec = execution.REVIEWED_SKETCH_REGISTRATION_SPEC
+    adapter = spec.adapter_factory(_MemorySink())
+    assert type(adapter) is execution.FreeCADReviewedSketchRegistrationAdapter
+    assert isinstance(adapter, ExactReviewedFamilyAdapter)
+    assert adapter.manifest is spec.manifest
+    assert adapter.descriptor == spec.manifest.adapter
+
+    plan, _, operation, receipt = _registration_lowered(
+        _geometry_graph(ReviewedSketchOperation.CIRCLE)
+    )
+    spec.validate_plan(plan, receipt, operation)
+    assert plan.manifest_sha256 == spec.manifest.manifest_sha256
+    with pytest.raises(ReviewedIntentExecutionError):
+        execution.validate_reviewed_sketch_plan(plan, receipt, operation)
+    with pytest.raises(ReviewedIntentExecutionError):
+        spec.validate_plan(
+            plan,
+            dataclasses.replace(
+                receipt,
+                manifest_sha256=REVIEWED_SKETCH_FAMILY_MANIFEST.manifest_sha256,
+            ),
+            operation,
+        )
+
+
+@pytest.mark.parametrize(
+    ("operation", "graph_factory", "expected_selector"),
+    (
+        (
+            ReviewedSketchOperation.CIRCLE,
+            _geometry_graph,
+            SKETCH_GEOMETRY_SELECTOR_TERM,
+        ),
+        (
+            ReviewedSketchOperation.HORIZONTAL,
+            _constraint_graph,
+            SKETCH_CONSTRAINT_SELECTOR_TERM,
+        ),
+    ),
+)
+def test_registration_binding_maps_geometry_and_constraint_subjects_exactly(
+    operation: ReviewedSketchOperation,
+    graph_factory,
+    expected_selector,
+) -> None:
+    spec = execution.REVIEWED_SKETCH_REGISTRATION_SPEC
+    graph = graph_factory(operation)
+    reviewed = next(
+        item for item in spec.manifest.operations if item.operation_id == operation.value
+    )
+    program = _reviewed_program(graph, reviewed)
+    binding = spec.intent_binding_factory()
+    selected = binding.materialize(program, reviewed)
+
+    assert binding.root_subject_type_term == SKETCH_ROOT_SEMANTIC_TYPE_TERM
+    assert selected.selector_kind_term == expected_selector
+    assert selected.subject_type_term == reviewed.semantic_term
+    assert selected.selector_id == (
+        graph.geometries[-1].geometry_id
+        if operation is ReviewedSketchOperation.CIRCLE
+        else graph.constraints[0].constraint_id
+    )
+    payload = encode_sketch_intent_graph(graph)
+    document = DocumentRef(
+        artifact_id="artifact_registration_binding",
+        role_term_ref_id=spec.manifest.intent_role_term.term_ref_id,
+        schema_term_ref_id=spec.manifest.intent_schema_term.term_ref_id,
+        document_id=graph.graph_id,
+        document_digest=graph.graph_sha256,
+        content_sha256=hashlib.sha256(payload).hexdigest(),
+        size_bytes=len(payload),
+        media_type=spec.manifest.intent_media_type,
+    )
+    subject = SubjectRef(
+        artifact_id=document.artifact_id,
+        selector_kind_term_ref_id=selected.selector_kind_term.term_ref_id,
+        selector_id=selected.selector_id,
+    )
+    resolved = binding.build_codec().resolve_subject(document, payload, subject)
+    assert resolved is not None
+    assert resolved.semantic_type == reviewed.semantic_term
+
+
+@pytest.mark.parametrize(
+    ("operation", "graph_factory"),
+    (
+        (ReviewedSketchOperation.CIRCLE, _geometry_graph),
+        (ReviewedSketchOperation.HORIZONTAL, _constraint_graph),
+    ),
+)
+def test_unregistered_geometry_and_constraint_routes_lower_with_sketch_codec(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: ReviewedSketchOperation,
+    graph_factory,
+) -> None:
+    routes = _registration_routes()
+    monkeypatch.setattr(shared_execution, "CURRENT_REVIEWED_INTENT_ROUTES", routes)
+    monkeypatch.setattr(
+        shared_execution,
+        "_ROUTES_BY_IDENTITY",
+        shared_execution._index_routes(routes),  # noqa: SLF001
+    )
+    reviewed = next(
+        item
+        for item in execution.REVIEWED_SKETCH_REGISTRATION_MANIFEST.operations
+        if item.operation_id == operation.value
+    )
+    lowered = shared_execution.lower_reviewed_intent(
+        _reviewed_program(graph_factory(operation), reviewed)
+    )
+    assert lowered.route in routes
+    assert lowered.route.operation is reviewed
+    assert lowered.plan.operation is operation
+    assert lowered.plan.manifest_sha256 == (
+        execution.REVIEWED_SKETCH_REGISTRATION_MANIFEST.manifest_sha256
+    )
+    execution.validate_reviewed_sketch_registration_plan(
+        lowered.plan,
+        lowered.receipt,
+        reviewed,
+    )
+
+
+def test_registration_compat_plan_uses_existing_capture_execute_rollback_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, plan_document, operation, _ = _registration_lowered(
+        _geometry_graph(ReviewedSketchOperation.CIRCLE)
+    )
+    document = _Document(body_owned=True)
+    monkeypatch.setattr(execution, "apply_reviewed_sketch_plan", _fake_apply)
+    result = execution.execute_reviewed_sketch_plan_on_bound_sketch(
+        document,
+        plan,
+        plan.canonical_bytes,
+        plan_document,
+        operation,
+        document.sketch,
+        manifest=execution.REVIEWED_SKETCH_REGISTRATION_MANIFEST,
+    )
+    assert result.object is document.sketch
+    assert result.receipt.closed_profile is True
+    assert result.state_sha256 == result.receipt.state_sha256
 
 
 def test_exact_identity_and_plan_binding_reject_rebound_or_tampered_inputs() -> None:
