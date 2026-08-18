@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import secrets
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -16,6 +17,12 @@ from vibecad.execution.candidate import (
     SealedCandidate,
 )
 from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
+from vibecad.execution.freecad_reviewed_artifact_host import (
+    TaskInputProgramPreflight,
+    TaskInputSnapshotError,
+    TaskInputSnapshotLease,
+    TaskInputSnapshotProvider,
+)
 from vibecad.execution.registry import ExecutionProfile
 from vibecad.execution.results import NormalizedToolOutcome
 from vibecad.execution.revisions import (
@@ -179,6 +186,8 @@ class WorkerCadExecutionPort(CadExecutionPort):
         "_source_root",
         "_start_in_flight",
         "_store",
+        "_task_input_preflight",
+        "_task_input_snapshot_provider",
         "_worker",
         "_worker_factory",
     )
@@ -189,17 +198,29 @@ class WorkerCadExecutionPort(CadExecutionPort):
         store: LocalRevisionStore,
         worker_factory: Callable[..., object] = _default_worker_factory,
         source_root: Path = _SOURCE_ROOT,
+        task_input_snapshot_provider: TaskInputSnapshotProvider | None = None,
+        task_input_preflight: TaskInputProgramPreflight | None = None,
     ) -> None:
         if (
             type(store) is not LocalRevisionStore
             or not callable(worker_factory)
             or type(source_root) is not type(Path("/"))
             or not source_root.is_absolute()
+            or (
+                task_input_snapshot_provider is not None
+                and not isinstance(task_input_snapshot_provider, TaskInputSnapshotProvider)
+            )
+            or (
+                task_input_preflight is not None
+                and not isinstance(task_input_preflight, TaskInputProgramPreflight)
+            )
         ):
             raise TypeError("invalid Worker CAD port composition")
         self._store = store
         self._worker_factory = worker_factory
         self._source_root = source_root
+        self._task_input_snapshot_provider = task_input_snapshot_provider
+        self._task_input_preflight = task_input_preflight
         self._worker = None
         self._lock = threading.RLock()
         self._operation_lock = threading.RLock()
@@ -568,6 +589,83 @@ class WorkerCadExecutionPort(CadExecutionPort):
         except Exception:
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT) from None
 
+    def _requires_task_input_snapshot(self, program: ValidatedProgram) -> bool:
+        preflight = self._task_input_preflight
+        if preflight is None:
+            return False
+        try:
+            required = preflight.requires_artifact_snapshot(program)
+        except Exception:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+        if type(required) is not bool:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+        return required
+
+    def _execute_program_with_task_inputs(
+        self,
+        *,
+        worker: object,
+        state: _Capability,
+        program: ValidatedProgram,
+        candidate: ActiveCandidate,
+    ) -> object:
+        provider = self._task_input_snapshot_provider
+        if provider is None:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+        source = program.program
+        if source.base_revision != candidate.base_head.revision_id:
+            raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+        run_id = f"run_{secrets.token_hex(16)}"
+        lease: TaskInputSnapshotLease | None = None
+        transferred_fd = -1
+        cleanup_failed = False
+        try:
+            try:
+                acquired = provider.acquire(
+                    task_id=source.task_id,
+                    project_id=candidate.project_id,
+                    base_revision=source.base_revision,
+                    run_id=run_id,
+                )
+                if type(acquired) is not TaskInputSnapshotLease:
+                    raise TypeError("provider returned an invalid snapshot lease")
+                lease = acquired
+                snapshot = lease.snapshot
+                if (
+                    not snapshot.records
+                    or snapshot.task_id != source.task_id
+                    or snapshot.project_id != candidate.project_id
+                    or snapshot.base_revision != source.base_revision
+                    or snapshot.run_id != run_id
+                ):
+                    raise ValueError("provider returned a snapshot for another run")
+                descriptor = lease.descriptor_mapping()
+                transferred_fd = lease.duplicate_directory_fd()
+            except Exception:
+                raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE) from None
+            return self._call(
+                worker,
+                "execute_program",
+                program=program,
+                candidate=state.value,
+                session=candidate.binding.session,
+                artifact_snapshot=descriptor,
+                artifact_snapshot_fd=transferred_fd,
+            )
+        finally:
+            if transferred_fd >= 0:
+                try:
+                    os.close(transferred_fd)
+                except OSError:
+                    cleanup_failed = True
+            if lease is not None:
+                try:
+                    lease.close()
+                except TaskInputSnapshotError:
+                    cleanup_failed = True
+            if cleanup_failed:
+                raise _fixed_error(ExecutorErrorCode.ARTIFACT_FAILURE)
+
     @_serialized
     def execute_program(
         self,
@@ -591,13 +689,21 @@ class WorkerCadExecutionPort(CadExecutionPort):
         validated = (
             program if type(program) is ValidatedProgram else self.validate_program(program)  # type: ignore[arg-type]
         )
-        result = self._call(
-            worker,
-            "execute_program",
-            program=validated,
-            candidate=state.value,
-            session=candidate.binding.session,
-        )
+        if self._requires_task_input_snapshot(validated):
+            result = self._execute_program_with_task_inputs(
+                worker=worker,
+                state=state,
+                program=validated,
+                candidate=candidate,
+            )
+        else:
+            result = self._call(
+                worker,
+                "execute_program",
+                program=validated,
+                candidate=state.value,
+                session=candidate.binding.session,
+            )
         if type(result) is not tuple or not all(
             type(item) is NormalizedToolOutcome for item in result
         ):

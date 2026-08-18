@@ -113,6 +113,35 @@ def _default_visual_provider_factory():
     return DeterministicFakeVisualProvider({})
 
 
+def _task_input_cad_port_factory(
+    *,
+    task_input_snapshot_provider: object | None = None,
+    task_input_preflight: object | None = None,
+):
+    """Bind trusted task-input dependencies without widening task operations."""
+
+    if task_input_snapshot_provider is None and task_input_preflight is None:
+        return _default_cad_port_factory
+    from vibecad.execution.freecad_reviewed_artifact_host import (
+        TaskInputProgramPreflight,
+        TaskInputSnapshotProvider,
+    )
+
+    if (
+        task_input_snapshot_provider is not None
+        and not isinstance(task_input_snapshot_provider, TaskInputSnapshotProvider)
+    ) or (
+        task_input_preflight is not None
+        and not isinstance(task_input_preflight, TaskInputProgramPreflight)
+    ):
+        raise TypeError("invalid CAD task input composition")
+    return partial(
+        _default_cad_port_factory,
+        task_input_snapshot_provider=task_input_snapshot_provider,
+        task_input_preflight=task_input_preflight,
+    )
+
+
 def _close_runtime(runtime: object) -> bool:
     try:
         return runtime.close() is True

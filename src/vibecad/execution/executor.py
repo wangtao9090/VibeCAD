@@ -44,6 +44,9 @@ from vibecad.execution.candidate import (
     SealedCandidate,
 )
 from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
+from vibecad.execution.freecad_reviewed_artifact_inputs import (
+    _ReviewedArtifactRunResolver,
+)
 from vibecad.execution.freecad_reviewed_intent_execution import (
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
@@ -2596,6 +2599,8 @@ def _managed_apply_reviewed_intent(
     *,
     execution_leaf: Callable[..., object],
     reviewed_products: _ReviewedProductRunState,
+    artifact_resolver: _ReviewedArtifactRunResolver | None = None,
+    artifact_run_token: object | None = None,
     intent: object,
     sources: object = None,
     source_a: object = None,
@@ -2646,6 +2651,17 @@ def _managed_apply_reviewed_intent(
     try:
         route = _route_reviewed_intent(checked)
         execution_mode = route.family.product_execution_mode(route.operation)
+        artifact_kwargs: dict[str, object] = {}
+        if route.family.artifact_requirement_for(route.operation) is not None:
+            if (
+                type(artifact_resolver) is not _ReviewedArtifactRunResolver
+                or artifact_run_token is None
+            ):
+                raise ValueError
+            artifact_kwargs = {
+                "_reviewed_artifact_resolver": artifact_resolver,
+                "_reviewed_run_token": artifact_run_token,
+            }
         source_values = _normalize_reviewed_source_ids(sources, source_a, source_b)
         if not route.family.minimum_sources <= len(source_values) <= route.family.maximum_sources:
             raise ValueError
@@ -2655,7 +2671,7 @@ def _managed_apply_reviewed_intent(
         ):
             raise ValueError
         if not source_values:
-            executed = execution_leaf(session, checked)
+            executed = execution_leaf(session, checked, **artifact_kwargs)
         else:
             resolved_sources = reviewed_products.resolve(
                 source_values,
@@ -2674,7 +2690,10 @@ def _managed_apply_reviewed_intent(
                 execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY
                 or route.family.requires_same_run_sources
             ):
+                if "_reviewed_run_token" in artifact_kwargs:
+                    raise ValueError
                 execution_kwargs["_reviewed_run_token"] = reviewed_products.execution_token
+            execution_kwargs.update(artifact_kwargs)
             executed = execution_leaf(
                 session,
                 checked,
@@ -4678,6 +4697,8 @@ class InProcessCadExecutor(CadExecutionPort):
         *,
         program: ValidatedProgram,
         candidate: ActiveCandidate,
+        artifact_resolver: _ReviewedArtifactRunResolver | None = None,
+        artifact_run_token: object | None = None,
     ):
         """Build the private command cursor used by in-process and Worker CAD."""
 
@@ -4690,6 +4711,8 @@ class InProcessCadExecutor(CadExecutionPort):
         ) = self._prepare_program_invocation(
             program=program,
             candidate=candidate,
+            artifact_resolver=artifact_resolver,
+            artifact_run_token=artifact_run_token,
         )
         try:
             return _prepare_validated_program_execution(
@@ -4709,6 +4732,8 @@ class InProcessCadExecutor(CadExecutionPort):
         *,
         program: ValidatedProgram,
         candidate: ActiveCandidate,
+        artifact_resolver: _ReviewedArtifactRunResolver | None = None,
+        artifact_run_token: object | None = None,
     ) -> tuple[
         ValidatedProgram,
         dict[str, Callable[..., object]],
@@ -4721,6 +4746,11 @@ class InProcessCadExecutor(CadExecutionPort):
         if type(candidate) is not ActiveCandidate:
             raise _fixed_error(ExecutorErrorCode.INVALID_CANDIDATE)
         if type(program) is not ValidatedProgram:
+            raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
+        if (artifact_resolver is None) != (artifact_run_token is None) or (
+            artifact_resolver is not None
+            and type(artifact_resolver) is not _ReviewedArtifactRunResolver
+        ):
             raise _fixed_error(ExecutorErrorCode.INVALID_INPUT)
         try:
             program.require_authentic()
@@ -4940,6 +4970,8 @@ class InProcessCadExecutor(CadExecutionPort):
                         session,
                         execution_leaf=_execute_reviewed_intent_native,
                         reviewed_products=reviewed_products,
+                        artifact_resolver=artifact_resolver,
+                        artifact_run_token=artifact_run_token,
                     ),
                 ),
             }

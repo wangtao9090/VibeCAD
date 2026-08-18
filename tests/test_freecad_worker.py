@@ -668,7 +668,7 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                                 result = {{"sha256": digest, "size_bytes": size}}
                         finally:
                             os.close(validation_fd)
-                    elif descriptors:
+                    elif descriptors and method != "program.begin":
                         raise SystemExit(2)
                     elif method == "candidate.release":
                         os.close(candidate_fd)
@@ -757,6 +757,11 @@ def _fake_worker_script(root: Path, mode: str) -> tuple[Path, Path]:
                             }},
                         }}
                     elif method == "program.begin":
+                        has_snapshot = "artifact_snapshot" in request["params"]
+                        if has_snapshot != (len(descriptors) == 1):
+                            raise SystemExit(2)
+                        for descriptor in descriptors:
+                            os.close(descriptor)
                         operations = request["params"]["program"]["operations"]
                         result = {{
                             "program_id": "worker_program_" + "9" * 32,

@@ -6,16 +6,18 @@ import array
 import base64
 import contextlib
 import hashlib
+import json
 import os
 import re
 import secrets
 import socket
 import stat
 import struct
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from vibecad.execution.adapter import AdapterError
+from vibecad.execution.adapter import AdapterError, _ValidatedProgramExecution
 from vibecad.execution.candidate import ActiveCandidate, SessionBinding
 from vibecad.execution.executor import (
     ExecutorError,
@@ -28,6 +30,15 @@ from vibecad.execution.executor import (
     _interference_observations,
     _shape_observation,
 )
+from vibecad.execution.freecad_reviewed_artifact_inputs import (
+    MAX_REVIEWED_ARTIFACT_BYTES,
+    MAX_REVIEWED_ARTIFACTS,
+    ReviewedArtifactCatalogRecord,
+    ReviewedArtifactCatalogSnapshot,
+    ReviewedArtifactInputError,
+    ReviewedArtifactInputErrorCode,
+    _ReviewedArtifactRunResolver,
+)
 from vibecad.execution.revisions import ProjectHead
 from vibecad.freecad_env import prepare_freecad_import
 from vibecad.freeform.compiler import FreeformCompileError, compile_freeform
@@ -36,6 +47,8 @@ from vibecad.interaction.cad import (
     ValidatedImportEvidence,
     ValidatedMaterializationEvidence,
 )
+from vibecad.parametric.freecad_imageplane_rules import HostOwnedImageStager
+from vibecad.parametric.freecad_part_file_import_rules import HostOwnedImportStager
 from vibecad.worker.codec import (
     MAX_WORKER_REQUEST_BYTES,
     WorkerCodecError,
@@ -54,6 +67,7 @@ _PROGRAM = re.compile(r"worker_program_[0-9a-f]{32}\Z")
 _PROJECT = re.compile(r"project_[0-9a-f]{32}\Z")
 _REVISION = re.compile(r"revision_[0-9a-f]{32}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_ARTIFACT_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*\Z")
 _REVISION_FILE = re.compile(r"(?:manifest\.json|model\.FCStd|model\.step)\Z")
 _STAGE_NAME = re.compile(r"\.(?:import|normalized|stage|work)\.[0-9a-f]{32}\.FCStd\Z")
 _MAX_SESSIONS = 6
@@ -62,6 +76,9 @@ _MAX_REVISIONS = 8
 _MAX_DIRECTORY_ENTRIES = 64
 _MAX_FILE_BYTES = 536_870_912
 _READ_CHUNK_BYTES = 1_048_576
+_MAX_ARTIFACT_MANIFEST_BYTES = 1_048_576
+_MAX_ARTIFACT_DIRECTORY_ENTRIES = MAX_REVIEWED_ARTIFACTS + 1
+_ARTIFACT_SNAPSHOT_KIND = "reviewed_artifact_snapshot_v1"
 
 
 class _WorkerExecutor(InProcessCadExecutor):
@@ -152,8 +169,15 @@ class _Program:
     candidate_id: str
     command_ids: tuple[str, ...]
     deadlines_ms: tuple[int, ...]
-    execution: object
+    execution: _ValidatedProgramExecution
+    artifact_resolver: _ReviewedArtifactRunResolver | None = None
+    artifact_run_token: object | None = None
     next_index: int = 0
+
+    def close(self) -> None:
+        self.execution.close()
+        self.artifact_resolver = None
+        self.artifact_run_token = None
 
 
 def _identity(value: os.stat_result) -> _Identity:
@@ -336,6 +360,436 @@ def _hash_relative(name: str) -> tuple[str, int, _Identity]:
     return result
 
 
+def _artifact_failure(code: ReviewedArtifactInputErrorCode) -> ReviewedArtifactInputError:
+    return ReviewedArtifactInputError(code)
+
+
+def _read_artifact_entry(
+    directory_fd: int,
+    name: str,
+    *,
+    maximum_bytes: int,
+    expected: _Identity,
+) -> bytes:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptor = -1
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+        before = os.fstat(descriptor)
+        if (
+            _identity(before) != expected
+            or not _private_file(before)
+            or not 1 <= before.st_size <= maximum_bytes
+        ):
+            raise OSError
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, min(_READ_CHUNK_BYTES, maximum_bytes + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > maximum_bytes:
+                raise OSError
+        after = os.fstat(descriptor)
+        live = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if size != before.st_size or _identity(after) != expected or _identity(live) != expected:
+            raise OSError
+        return b"".join(chunks)
+    except OSError:
+        raise _artifact_failure(ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE) from None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                raise _artifact_failure(ReviewedArtifactInputErrorCode.CLEANUP_FAILED) from None
+
+
+def _artifact_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if type(key) is not str or key in result:
+            raise ValueError
+        result[key] = value
+    return result
+
+
+def _reject_artifact_json_constant(_value: str) -> None:
+    raise ValueError
+
+
+def _artifact_record(value: object) -> ReviewedArtifactCatalogRecord:
+    fields = _exact_mapping(
+        value,
+        {
+            "artifact_id",
+            "content_sha256",
+            "document_id",
+            "family_id",
+            "maximum_bytes",
+            "media_type",
+            "operation_ids",
+            "role_term_ref_id",
+            "schema_term_ref_id",
+            "size_bytes",
+        },
+    )
+    operations = fields["operation_ids"]
+    if type(operations) is not list:
+        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+    try:
+        return ReviewedArtifactCatalogRecord(
+            artifact_id=fields["artifact_id"],  # type: ignore[arg-type]
+            content_sha256=fields["content_sha256"],  # type: ignore[arg-type]
+            document_id=fields["document_id"],  # type: ignore[arg-type]
+            family_id=fields["family_id"],  # type: ignore[arg-type]
+            maximum_bytes=fields["maximum_bytes"],  # type: ignore[arg-type]
+            media_type=fields["media_type"],  # type: ignore[arg-type]
+            operation_ids=tuple(operations),
+            role_term_ref_id=fields["role_term_ref_id"],  # type: ignore[arg-type]
+            schema_term_ref_id=fields["schema_term_ref_id"],  # type: ignore[arg-type]
+            size_bytes=fields["size_bytes"],  # type: ignore[arg-type]
+        )
+    except ReviewedArtifactInputError:
+        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+
+
+def _decode_artifact_manifest(raw: bytes) -> ReviewedArtifactCatalogSnapshot:
+    if type(raw) is not bytes or not raw or len(raw) > _MAX_ARTIFACT_MANIFEST_BYTES:
+        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+    try:
+        value = json.loads(
+            raw,
+            object_pairs_hook=_artifact_json_pairs,
+            parse_constant=_reject_artifact_json_constant,
+        )
+        fields = _exact_mapping(
+            value,
+            {
+                "base_revision",
+                "catalog_sha256",
+                "project_id",
+                "records",
+                "run_id",
+                "schema_version",
+                "task_id",
+            },
+        )
+        records = fields["records"]
+        if (
+            type(fields["schema_version"]) is not int
+            or fields["schema_version"] != 1
+            or type(records) is not list
+            or not records
+        ):
+            raise ValueError
+        snapshot = ReviewedArtifactCatalogSnapshot(
+            task_id=fields["task_id"],  # type: ignore[arg-type]
+            project_id=fields["project_id"],  # type: ignore[arg-type]
+            base_revision=fields["base_revision"],  # type: ignore[arg-type]
+            run_id=fields["run_id"],  # type: ignore[arg-type]
+            records=tuple(_artifact_record(item) for item in records),
+        )
+        canonical = json.dumps(
+            snapshot.to_mapping(),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if fields["catalog_sha256"] != snapshot.catalog_sha256 or canonical != raw:
+            raise ValueError
+        return snapshot
+    except (
+        ReviewedArtifactInputError,
+        _ServiceError,
+        TypeError,
+        ValueError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ):
+        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+
+
+def _artifact_snapshot_envelope(value: object) -> dict[str, object]:
+    fields = _exact_mapping(
+        value,
+        {
+            "base_revision",
+            "catalog_sha256",
+            "kind",
+            "project_id",
+            "run_id",
+            "schema_version",
+            "task_id",
+        },
+    )
+    if (
+        fields["kind"] != _ARTIFACT_SNAPSHOT_KIND
+        or type(fields["schema_version"]) is not int
+        or fields["schema_version"] != 1
+        or type(fields["catalog_sha256"]) is not str
+        or _DIGEST.fullmatch(fields["catalog_sha256"]) is None
+        or any(
+            type(fields[name]) is not str
+            or len(fields[name]) > 128
+            or _ARTIFACT_IDENTIFIER.fullmatch(fields[name]) is None
+            for name in ("task_id", "project_id", "base_revision", "run_id")
+        )
+    ):
+        raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+    return fields
+
+
+class _WorkerArtifactPayloadSource:
+    __slots__ = ("_closed", "_directory_fd", "_directory_identity", "_entries", "_records")
+
+    def __init__(
+        self,
+        *,
+        directory_fd: int,
+        directory_identity: _DirectoryIdentity,
+        entries: tuple[tuple[str, _Identity], ...],
+        snapshot: ReviewedArtifactCatalogSnapshot,
+    ) -> None:
+        self._directory_fd = directory_fd
+        self._directory_identity = directory_identity
+        self._entries = dict(entries)
+        self._records = {item.artifact_id: item for item in snapshot.records}
+        self._closed = False
+
+    def _require_live(self) -> None:
+        try:
+            current = os.fstat(self._directory_fd)
+        except OSError:
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.CLOSED) from None
+        if self._closed:
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.CLOSED)
+        if _directory_identity(current) != self._directory_identity or not _private_directory(
+            current
+        ):
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE)
+        try:
+            names = tuple(sorted(os.listdir(self._directory_fd)))
+            if names != tuple(sorted(self._entries)):
+                raise OSError
+            for name, expected in self._entries.items():
+                live = os.stat(name, dir_fd=self._directory_fd, follow_symlinks=False)
+                if _identity(live) != expected:
+                    raise OSError
+        except OSError:
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE) from None
+
+    def read(self, record: ReviewedArtifactCatalogRecord, maximum_bytes: int) -> bytes:
+        self._require_live()
+        if (
+            type(record) is not ReviewedArtifactCatalogRecord
+            or self._records.get(record.artifact_id) != record
+            or maximum_bytes != record.maximum_bytes
+        ):
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.AUTHORITY_VIOLATION)
+        expected = self._entries.get(record.artifact_id)
+        if expected is None:
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE)
+        payload = _read_artifact_entry(
+            self._directory_fd,
+            record.artifact_id,
+            maximum_bytes=maximum_bytes,
+            expected=expected,
+        )
+        if (
+            len(payload) != record.size_bytes
+            or hashlib.sha256(payload).hexdigest() != record.content_sha256
+        ):
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE)
+        return payload
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            os.close(self._directory_fd)
+        except OSError:
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.CLEANUP_FAILED) from None
+
+
+class _WorkerArtifactStagerFactory:
+    __slots__ = ("_closed", "_device", "_inode", "_root")
+
+    def __init__(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="vibecad-reviewed-artifact-"))
+        root.chmod(0o700)
+        info = root.lstat()
+        if not _private_directory(info):
+            raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
+        self._root = root
+        self._device = info.st_dev
+        self._inode = info.st_ino
+        self._closed = False
+
+    def _require_live(self) -> None:
+        if self._closed:
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.CLOSED)
+        try:
+            info = self._root.lstat()
+        except OSError:
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE) from None
+        if (
+            not _private_directory(info)
+            or info.st_dev != self._device
+            or info.st_ino != self._inode
+        ):
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.INTEGRITY_FAILURE)
+
+    def create(
+        self,
+        *,
+        record: ReviewedArtifactCatalogRecord,
+        family_id: str,
+        operation_id: str,
+    ) -> object:
+        self._require_live()
+        if (
+            type(record) is not ReviewedArtifactCatalogRecord
+            or family_id != record.family_id
+            or operation_id not in record.operation_ids
+        ):
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.AUTHORITY_VIOLATION)
+        if family_id == "freecad_part_file_import":
+            return HostOwnedImportStager(self._root)
+        if family_id == "freecad_imageplane":
+            return HostOwnedImageStager(self._root)
+        raise _artifact_failure(ReviewedArtifactInputErrorCode.AUTHORITY_VIOLATION)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            info = self._root.lstat()
+            if (
+                not _private_directory(info)
+                or info.st_dev != self._device
+                or info.st_ino != self._inode
+                or tuple(self._root.iterdir())
+            ):
+                raise OSError
+            self._root.rmdir()
+        except OSError:
+            raise _artifact_failure(ReviewedArtifactInputErrorCode.CLEANUP_FAILED) from None
+
+
+def _open_artifact_run_resolver(
+    descriptor: int,
+    envelope: dict[str, object],
+) -> tuple[_ReviewedArtifactRunResolver, object]:
+    pinned = -1
+    source: _WorkerArtifactPayloadSource | None = None
+    stagers: _WorkerArtifactStagerFactory | None = None
+    try:
+        received = os.fstat(descriptor)
+        if not _private_directory(received):
+            raise OSError
+        pinned = os.dup(descriptor)
+        os.set_inheritable(pinned, False)
+        captured = os.fstat(pinned)
+        if _directory_identity(received) != _directory_identity(captured):
+            raise OSError
+        names = tuple(sorted(os.listdir(pinned)))
+        if (
+            not names
+            or len(names) > _MAX_ARTIFACT_DIRECTORY_ENTRIES
+            or len(names) != len(set(names))
+        ):
+            raise OSError
+        entries: list[tuple[str, _Identity]] = []
+        for name in names:
+            current = os.stat(name, dir_fd=pinned, follow_symlinks=False)
+            if not _private_file(current) or current.st_dev != captured.st_dev:
+                raise OSError
+            entries.append((name, _identity(current)))
+        entry_map = dict(entries)
+        manifest_identity = entry_map.get("manifest.json")
+        if manifest_identity is None:
+            raise OSError
+        manifest = _read_artifact_entry(
+            pinned,
+            "manifest.json",
+            maximum_bytes=_MAX_ARTIFACT_MANIFEST_BYTES,
+            expected=manifest_identity,
+        )
+        snapshot = _decode_artifact_manifest(manifest)
+        expected_names = tuple(
+            sorted(("manifest.json", *(item.artifact_id for item in snapshot.records)))
+        )
+        if names != expected_names:
+            raise OSError
+        if (
+            envelope["task_id"] != snapshot.task_id
+            or envelope["project_id"] != snapshot.project_id
+            or envelope["base_revision"] != snapshot.base_revision
+            or envelope["run_id"] != snapshot.run_id
+            or envelope["catalog_sha256"] != snapshot.catalog_sha256
+        ):
+            raise OSError
+        for record in snapshot.records:
+            expected = entry_map[record.artifact_id]
+            payload = _read_artifact_entry(
+                pinned,
+                record.artifact_id,
+                maximum_bytes=min(record.maximum_bytes, MAX_REVIEWED_ARTIFACT_BYTES),
+                expected=expected,
+            )
+            if (
+                len(payload) != record.size_bytes
+                or hashlib.sha256(payload).hexdigest() != record.content_sha256
+            ):
+                raise OSError
+        if tuple(sorted(os.listdir(pinned))) != names or tuple(
+            (name, _identity(os.stat(name, dir_fd=pinned, follow_symlinks=False))) for name in names
+        ) != tuple(entries):
+            raise OSError
+        source = _WorkerArtifactPayloadSource(
+            directory_fd=pinned,
+            directory_identity=_directory_identity(captured),
+            entries=tuple(entries),
+            snapshot=snapshot,
+        )
+        pinned = -1
+        stagers = _WorkerArtifactStagerFactory()
+        run_token = object()
+        resolver = _ReviewedArtifactRunResolver(
+            snapshot=snapshot,
+            source=source,
+            stager_factory=stagers,
+            task_id=snapshot.task_id,
+            project_id=snapshot.project_id,
+            base_revision=snapshot.base_revision,
+            run_id=snapshot.run_id,
+            run_token=run_token,
+        )
+        return resolver, run_token
+    except (OSError, ReviewedArtifactInputError, _ServiceError):
+        if stagers is not None:
+            with contextlib.suppress(BaseException):
+                stagers.close()
+        if source is not None:
+            with contextlib.suppress(BaseException):
+                source.close()
+        if pinned >= 0:
+            with contextlib.suppress(OSError):
+                os.close(pinned)
+        raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE) from None
+
+
 def _exact_mapping(value: object, fields: set[str]) -> dict[str, object]:
     if type(value) is not dict or set(value) != fields:
         raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
@@ -476,6 +930,15 @@ class WorkerService:
         if program is None:
             raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
         return program
+
+    def _close_program(self, program: _Program) -> None:
+        current = self._programs.pop(program.program_id, None)
+        if current is not program:
+            raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR)
+        try:
+            program.close()
+        except BaseException:
+            raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
 
     def _require_pair(
         self,
@@ -836,16 +1299,20 @@ class WorkerService:
     def _close_session(self, params: object) -> dict[str, object]:
         fields = _exact_mapping(params, {"session_id"})
         session = self._session(fields["session_id"])
+        failed = False
+        for program in tuple(self._programs.values()):
+            if program.session_id == session.session_id:
+                try:
+                    self._close_program(program)
+                except _ServiceError:
+                    failed = True
         try:
             self._engine.close(session.value)
         except BaseException:
-            raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
-        self._programs = {
-            key: value
-            for key, value in self._programs.items()
-            if value.session_id != session.session_id
-        }
+            failed = True
         self._sessions.pop(session.session_id, None)
+        if failed:
+            raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR)
         return {"session_id": session.session_id}
 
     def _observe(self, params: object) -> dict[str, object]:
@@ -1037,11 +1504,25 @@ class WorkerService:
             raise _ServiceError(WorkerWireErrorCode.INTEGRITY_FAILURE)
         return result
 
-    def _begin_program(self, params: object) -> dict[str, object]:
-        fields = _exact_mapping(
-            params,
-            {"session_id", "candidate_id", "program"},
-        )
+    def _begin_program(
+        self,
+        params: object,
+        descriptors: tuple[int, ...],
+    ) -> dict[str, object]:
+        if type(params) is not dict:
+            raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+        if set(params) == {"session_id", "candidate_id", "program"}:
+            if descriptors:
+                raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+            fields = params
+            artifact_envelope = None
+        elif set(params) == {"session_id", "candidate_id", "program", "artifact_snapshot"}:
+            if len(descriptors) != 1:
+                raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
+            fields = params
+            artifact_envelope = _artifact_snapshot_envelope(fields["artifact_snapshot"])
+        else:
+            raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
         session, candidate = self._require_pair(
             session_id=fields["session_id"],
             candidate_id=fields["candidate_id"],
@@ -1050,8 +1531,28 @@ class WorkerService:
             raise _ServiceError(WorkerWireErrorCode.RESOURCE_EXHAUSTED)
         if session.freeform_digest is not None:
             raise _ServiceError(WorkerWireErrorCode.INVALID_HANDLE)
+        resolver: _ReviewedArtifactRunResolver | None = None
+        run_token: object | None = None
+        resolver_bound = False
+        execution = None
+
+        def close_pending() -> None:
+            if execution is not None:
+                with contextlib.suppress(BaseException):
+                    execution.close()
+            if resolver is not None and not resolver_bound:
+                with contextlib.suppress(BaseException):
+                    resolver.close()
+
         try:
             source = ModelProgram.from_mapping(fields["program"])
+            if artifact_envelope is not None and (
+                artifact_envelope["task_id"] != source.task_id
+                or artifact_envelope["project_id"] != candidate.project_id
+                or artifact_envelope["base_revision"] != source.base_revision
+                or source.base_revision != candidate.base_revision_id
+            ):
+                raise _ServiceError(WorkerWireErrorCode.INVALID_INPUT)
             validated = self._engine.validate_program(source)
             binding = SessionBinding(
                 project_id=candidate.project_id,
@@ -1070,15 +1571,37 @@ class WorkerService:
                 model_path=Path("model.FCStd"),
                 step_path=Path("model.step"),
             )
+            if artifact_envelope is not None:
+                resolver, run_token = _open_artifact_run_resolver(
+                    descriptors[0],
+                    artifact_envelope,
+                )
+            prepare_kwargs: dict[str, object] = {}
+            if resolver is not None:
+                prepare_kwargs = {
+                    "artifact_resolver": resolver,
+                    "artifact_run_token": run_token,
+                }
             execution = self._engine._prepare_program_execution(
                 program=validated,
                 candidate=active,
+                **prepare_kwargs,
             )
+            if artifact_envelope is not None:
+                if type(execution) is not _ValidatedProgramExecution:
+                    raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR)
+                execution._bind_run_resource(resolver)
+                resolver_bound = True
             command_ids = tuple(item.id for item in validated.commands)
             deadlines = tuple(item.resource_budget.max_runtime_ms for item in validated.commands)
         except (ExecutorError, AdapterError):
+            close_pending()
+            raise
+        except _ServiceError:
+            close_pending()
             raise
         except Exception:
+            close_pending()
             raise _ServiceError(WorkerWireErrorCode.INVALID_INPUT) from None
         program_id = f"worker_program_{secrets.token_hex(16)}"
         self._programs[program_id] = _Program(
@@ -1088,6 +1611,8 @@ class WorkerService:
             command_ids=command_ids,
             deadlines_ms=deadlines,
             execution=execution,
+            artifact_resolver=resolver,
+            artifact_run_token=run_token,
         )
         return {
             "program_id": program_id,
@@ -1108,20 +1633,23 @@ class WorkerService:
             raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
         try:
             outcome = program.execution.step()
+            done = program.execution.done
+            result = {
+                "index": index,
+                "command_id": program.command_ids[index],
+                "runtime_limit_ms": program.deadlines_ms[index],
+                "done": done,
+                "outcome": _outcome_mapping(outcome),
+            }
         except BaseException:
-            self._programs.pop(program.program_id, None)
+            try:
+                self._close_program(program)
+            except _ServiceError:
+                pass
             raise _ServiceError(WorkerWireErrorCode.INTERNAL_ERROR) from None
-        done = program.execution.done
-        result = {
-            "index": index,
-            "command_id": program.command_ids[index],
-            "runtime_limit_ms": program.deadlines_ms[index],
-            "done": done,
-            "outcome": _outcome_mapping(outcome),
-        }
         program.next_index += 1
         if done:
-            self._programs.pop(program.program_id, None)
+            self._close_program(program)
         return result
 
     def _export_step(self, params: object) -> dict[str, object]:
@@ -1173,7 +1701,11 @@ class WorkerService:
     def _shutdown_worker(self, params: object) -> dict[str, object]:
         _exact_mapping(params, set())
         failed = False
-        self._programs.clear()
+        for program in tuple(self._programs.values()):
+            try:
+                self._close_program(program)
+            except _ServiceError:
+                failed = True
         for session in tuple(self._sessions.values()):
             try:
                 self._engine.close(session.value)
@@ -1210,7 +1742,9 @@ class WorkerService:
             "validation.revalidate_import",
             "validation.validate_materialization",
         }
-        if (method in descriptor_methods) != bool(descriptors):
+        if (method in descriptor_methods and not descriptors) or (
+            method not in {*descriptor_methods, "program.begin"} and descriptors
+        ):
             raise _ServiceError(WorkerWireErrorCode.INVALID_REQUEST)
         handlers = {
             "worker.ready": self._ready,
@@ -1226,7 +1760,7 @@ class WorkerService:
             "session.observe": self._observe,
             "session.render_release": self._render_release,
             "session.close": self._close_session,
-            "program.begin": self._begin_program,
+            "program.begin": lambda value: self._begin_program(value, descriptors),
             "program.execute_command": self._execute_command,
             "session.export_step": self._export_step,
             "validation.validate_import": lambda value: self._validate_import(
@@ -1250,7 +1784,9 @@ class WorkerService:
         return handler(params)
 
     def close(self) -> None:
-        self._programs.clear()
+        for program in tuple(self._programs.values()):
+            with contextlib.suppress(BaseException):
+                self._close_program(program)
         for session in tuple(self._sessions.values()):
             with contextlib.suppress(Exception):
                 self._engine.close(session.value)
