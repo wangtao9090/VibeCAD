@@ -1,13 +1,13 @@
 """Trusted product bridge for executing Reviewed FreeCAD intents.
 
 This module is the narrow seam between an authority-free Reviewed lowering
-pipeline and an already-reviewed native rule.  Model input selects only a
+pipeline and already-reviewed native rules.  Model input selects only a
 complete public semantic identity.  The native ``TypeId``, adapter, proof
-policy, plan decoder, and callable are selected exclusively by this static
-module.
+policy, plan decoder, and callable are selected exclusively by a static family
+descriptor owned by this module.
 
-M0 intentionally exposes one route (``freecad_part_core.box``).  Later waves
-extend the same static table; they do not add model-provided callables or MCP
+Adding a family means registering one trusted descriptor and an explicit
+operation allowlist below.  It never adds model-provided callables or MCP
 tools.
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
@@ -33,6 +34,9 @@ from vibecad.execution.freecad_discovery_runtime_v2 import (
     _build_fingerprint,
     _freecad_version,
     _platform_id,
+)
+from vibecad.execution.freecad_part_curve_reviewed_execution import (
+    PART_CURVE_REVIEWED_FAMILY_SPEC,
 )
 from vibecad.execution.freecad_reviewed_release_attestation import (
     decode_freecad_reviewed_release_attestation,
@@ -56,23 +60,19 @@ from vibecad.intent_bridge.contracts import (
     ProofEndpoint,
     SubjectRef,
 )
+from vibecad.intent_bridge.freecad_parametric_adapter import PlanSink
 from vibecad.intent_bridge.freecad_part_core_adapter import (
-    FREECAD_PART_CORE_ADAPTER_DESCRIPTOR,
-    PART_CORE_INTENT_ROLE_TERM,
     PART_CORE_MANIFEST,
-    PART_CORE_OPERATION_SPECS,
-    PART_CORE_REQUEST_TERMS,
     PART_CORE_STRUCTURE_TERM,
     build_part_core_adapter,
 )
 from vibecad.intent_bridge.parametric_feature_graph_codec import (
-    PARAMETRIC_FEATURE_GRAPH_V2_MEDIA_TYPE,
-    PARAMETRIC_FEATURE_GRAPH_V2_SCHEMA_TERM,
     PFG_SELECTOR_FEATURE_NODE,
     ParametricFeatureGraphV2Codec,
 )
 from vibecad.intent_bridge.ports import TrustedCodecRegistry
 from vibecad.intent_bridge.reviewed_family_engine import (
+    ExactReviewedFamilyAdapter,
     FamilyBatchManifest,
     ReviewedOperationSpec,
     ReviewedPlanReceipt,
@@ -86,7 +86,6 @@ from vibecad.intent_bridge.trusted_proof_policy import (
 from vibecad.parametric.feature_graph_v2 import SemanticTermRefV2
 from vibecad.parametric.freecad_part_core_rules import (
     PartCoreBackendPlan,
-    PartCoreConformanceReceipt,
     PartCoreExecutionBindings,
     PartCoreOperation,
     apply_part_core_plan,
@@ -139,11 +138,175 @@ def _bridge_term(term: SemanticTermRefV2) -> BridgeTermRef:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class _ReviewedFamilyNativeExecution:
+    """Family callback result; shared code validates product-side invariants."""
+
+    object: object = field(repr=False, compare=False)
+    receipt: object
+
+    def __post_init__(self) -> None:
+        if self.object is None or self.receipt is None:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+
+_AdapterFactory = Callable[[PlanSink], ExactReviewedFamilyAdapter]
+_PlanValidator = Callable[[object, ReviewedPlanReceipt, ReviewedOperationSpec], None]
+_NativeExecutor = Callable[
+    [object, object, bytes, DocumentRef, ReviewedOperationSpec],
+    _ReviewedFamilyNativeExecution,
+]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False)
+class _ReviewedIntentFamilyDescriptor:
+    """Private static callbacks and contracts for one Reviewed family."""
+
+    manifest: FamilyBatchManifest
+    subject_type_term: BridgeTermRef
+    adapter_factory: _AdapterFactory = field(repr=False, compare=False)
+    validate_plan: _PlanValidator = field(repr=False, compare=False)
+    execute_plan: _NativeExecutor = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.manifest) is not FamilyBatchManifest
+            or type(self.subject_type_term) is not BridgeTermRef
+            or not callable(self.adapter_factory)
+            or not callable(self.validate_plan)
+            or not callable(self.execute_plan)
+            or not any(term == self.subject_type_term for term in self.manifest.request_terms)
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+    def build_adapter(self, sink: PlanSink) -> ExactReviewedFamilyAdapter:
+        try:
+            adapter = self.adapter_factory(sink)
+        except ReviewedIntentExecutionError:
+            raise
+        except (Exception, SystemExit):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if (
+            not isinstance(adapter, ExactReviewedFamilyAdapter)
+            or adapter.manifest != self.manifest
+            or adapter.descriptor != self.manifest.adapter
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return adapter
+
+    def accept_plan(
+        self,
+        plan: object,
+        receipt: ReviewedPlanReceipt,
+        operation: ReviewedOperationSpec,
+    ) -> None:
+        try:
+            accepted = self.validate_plan(plan, receipt, operation)
+        except ReviewedIntentExecutionError:
+            raise
+        except (Exception, SystemExit):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if accepted is not None:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+    def apply_plan(
+        self,
+        document: object,
+        plan: object,
+        payload: bytes,
+        plan_document: DocumentRef,
+        operation: ReviewedOperationSpec,
+    ) -> _ReviewedFamilyNativeExecution:
+        try:
+            result = self.execute_plan(
+                document,
+                plan,
+                payload,
+                plan_document,
+                operation,
+            )
+        except ReviewedIntentExecutionError:
+            raise
+        except (Exception, SystemExit):
+            _fail(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
+        if type(result) is not _ReviewedFamilyNativeExecution:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return result
+
+
+def _validate_part_core_plan(
+    plan: object,
+    receipt: ReviewedPlanReceipt,
+    operation: ReviewedOperationSpec,
+) -> None:
+    if (
+        type(plan) is not PartCoreBackendPlan
+        or type(receipt) is not ReviewedPlanReceipt
+        or type(operation) is not ReviewedOperationSpec
+        or receipt.operation != operation
+        or plan.operation.value != operation.operation_id
+        or plan.sources
+        or plan.plan_sha256 != receipt.plan_document.document_digest
+    ):
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+
+def _execute_part_core_plan(
+    document: object,
+    plan: object,
+    payload: bytes,
+    plan_document: DocumentRef,
+    operation: ReviewedOperationSpec,
+) -> _ReviewedFamilyNativeExecution:
+    if (
+        type(plan) is not PartCoreBackendPlan
+        or type(payload) is not bytes
+        or type(plan_document) is not DocumentRef
+        or type(operation) is not ReviewedOperationSpec
+        or plan.operation.value != operation.operation_id
+        or plan.sources
+    ):
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    receipt = apply_part_core_plan(
+        payload,
+        expected_content_sha256=plan_document.content_sha256,
+        expected_plan_sha256=plan_document.document_digest,
+        bindings=PartCoreExecutionBindings(
+            document=document,
+            body_id=plan.body_id,
+            sources=(),
+        ),
+    )
+    try:
+        result = document.getObject(receipt.object_name)
+    except (Exception, SystemExit):
+        _fail(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
+    return _ReviewedFamilyNativeExecution(object=result, receipt=receipt)
+
+
+_PART_CORE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=PART_CORE_MANIFEST,
+    subject_type_term=_bridge_term(PART_CORE_STRUCTURE_TERM),
+    adapter_factory=build_part_core_adapter,
+    validate_plan=_validate_part_core_plan,
+    execute_plan=_execute_part_core_plan,
+)
+
+_PART_CURVE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=PART_CURVE_REVIEWED_FAMILY_SPEC.manifest,
+    subject_type_term=PART_CURVE_REVIEWED_FAMILY_SPEC.subject_type_term,
+    adapter_factory=PART_CURVE_REVIEWED_FAMILY_SPEC.adapter_factory,
+    validate_plan=PART_CURVE_REVIEWED_FAMILY_SPEC.validate_plan,
+    execute_plan=PART_CURVE_REVIEWED_FAMILY_SPEC.execute_plan,
+)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ReviewedIntentRoute:
     """One static product route from public identity to reviewed contracts."""
 
     operation_id: str
     semantic_operation: str
+    family: _ReviewedIntentFamilyDescriptor = field(repr=False)
     manifest: FamilyBatchManifest
     operation: ReviewedOperationSpec
     subject_type_term: BridgeTermRef
@@ -153,9 +316,12 @@ class ReviewedIntentRoute:
         if (
             type(self.operation_id) is not str
             or type(self.semantic_operation) is not str
+            or type(self.family) is not _ReviewedIntentFamilyDescriptor
             or type(self.manifest) is not FamilyBatchManifest
             or type(self.operation) is not ReviewedOperationSpec
             or type(self.subject_type_term) is not BridgeTermRef
+            or self.manifest != self.family.manifest
+            or self.subject_type_term != self.family.subject_type_term
             or self.operation not in self.manifest.operations
             or self.operation_id != f"{self.manifest.family_id}.{self.operation.operation_id}"
             or self.semantic_operation != _semantic_operation(self.operation)
@@ -203,24 +369,80 @@ _REVIEWED_PART_PRIMITIVE_OPERATIONS: Final = (
     PartCoreOperation.TORUS,
     PartCoreOperation.WEDGE,
 )
-REVIEWED_PART_PRIMITIVE_ROUTES: Final = tuple(
-    ReviewedIntentRoute(
-        operation_id=f"freecad_part_core.{operation.value}",
-        semantic_operation=_semantic_operation(spec),
-        manifest=PART_CORE_MANIFEST,
-        operation=spec,
-        subject_type_term=_bridge_term(PART_CORE_STRUCTURE_TERM),
+
+
+def _routes_for_family(
+    family: _ReviewedIntentFamilyDescriptor,
+    operation_ids: tuple[str, ...],
+) -> tuple[ReviewedIntentRoute, ...]:
+    if (
+        type(family) is not _ReviewedIntentFamilyDescriptor
+        or type(operation_ids) is not tuple
+        or not operation_ids
+        or any(type(item) is not str for item in operation_ids)
+        or len(set(operation_ids)) != len(operation_ids)
+    ):
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    operations = tuple(
+        next(
+            (item for item in family.manifest.operations if item.operation_id == operation_id),
+            None,
+        )
+        for operation_id in operation_ids
     )
-    for operation in _REVIEWED_PART_PRIMITIVE_OPERATIONS
-    for spec in (
-        next(item for item in PART_CORE_OPERATION_SPECS if item.operation_id == operation.value),
+    if any(type(item) is not ReviewedOperationSpec for item in operations):
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    return tuple(
+        ReviewedIntentRoute(
+            operation_id=f"{family.manifest.family_id}.{operation.operation_id}",
+            semantic_operation=_semantic_operation(operation),
+            family=family,
+            manifest=family.manifest,
+            operation=operation,
+            subject_type_term=family.subject_type_term,
+        )
+        for operation in operations
     )
+
+
+REVIEWED_PART_PRIMITIVE_ROUTES: Final = _routes_for_family(
+    _PART_CORE_FAMILY,
+    tuple(operation.value for operation in _REVIEWED_PART_PRIMITIVE_OPERATIONS),
 )
 REVIEWED_PART_BOX_ROUTE: Final = REVIEWED_PART_PRIMITIVE_ROUTES[0]
-CURRENT_REVIEWED_INTENT_ROUTES: Final = REVIEWED_PART_PRIMITIVE_ROUTES
-_ROUTES_BY_IDENTITY: Final = MappingProxyType(
-    {(item.operation_id, item.semantic_operation): item for item in CURRENT_REVIEWED_INTENT_ROUTES}
+REVIEWED_PART_CURVE_ROUTES: Final = _routes_for_family(
+    _PART_CURVE_FAMILY,
+    PART_CURVE_REVIEWED_FAMILY_SPEC.operation_ids,
 )
+_REVIEWED_FAMILY_ROUTE_SETS: Final = (
+    REVIEWED_PART_PRIMITIVE_ROUTES,
+    REVIEWED_PART_CURVE_ROUTES,
+)
+CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
+    route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
+)
+
+
+def _index_routes(
+    routes: tuple[ReviewedIntentRoute, ...],
+) -> MappingProxyType:
+    if (
+        type(routes) is not tuple
+        or not routes
+        or any(type(route) is not ReviewedIntentRoute for route in routes)
+    ):
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    indexed = {(item.operation_id, item.semantic_operation): item for item in routes}
+    if (
+        len(indexed) != len(routes)
+        or len({item.operation_id for item in routes}) != len(routes)
+        or len({item.semantic_operation for item in routes}) != len(routes)
+    ):
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    return MappingProxyType(indexed)
+
+
+_ROUTES_BY_IDENTITY: Final = _index_routes(CURRENT_REVIEWED_INTENT_ROUTES)
 
 
 def route_reviewed_intent(value: object) -> ReviewedIntentRoute:
@@ -365,7 +587,7 @@ class LoweredReviewedIntent:
     route: ReviewedIntentRoute
     result: BackendLoweringResult
     receipt: ReviewedPlanReceipt
-    plan: PartCoreBackendPlan
+    plan: object = field(repr=False)
     payload: bytes = field(repr=False)
 
     def __post_init__(self) -> None:
@@ -373,13 +595,14 @@ class LoweredReviewedIntent:
             type(self.route) is not ReviewedIntentRoute
             or type(self.result) is not BackendLoweringResult
             or type(self.receipt) is not ReviewedPlanReceipt
-            or type(self.plan) is not PartCoreBackendPlan
+            or self.plan is None
             or type(self.payload) is not bytes
             or self.result.disposition is not BridgeDisposition.COMPLETE
             or self.result.plan_document != self.receipt.plan_document
-            or self.plan.plan_sha256 != self.receipt.plan_document.document_digest
+            or self.receipt.operation != self.route.operation
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        self.route.family.accept_plan(self.plan, self.receipt, self.route.operation)
 
 
 def lower_reviewed_intent(value: object) -> LoweredReviewedIntent:
@@ -401,13 +624,13 @@ def lower_reviewed_intent(value: object) -> LoweredReviewedIntent:
     intent_payload = graph.canonical_bytes
     intent_document = DocumentRef(
         artifact_id=subject.artifact_id,
-        role_term_ref_id=PART_CORE_INTENT_ROLE_TERM.term_ref_id,
-        schema_term_ref_id=PARAMETRIC_FEATURE_GRAPH_V2_SCHEMA_TERM.term_ref_id,
+        role_term_ref_id=route.manifest.intent_role_term.term_ref_id,
+        schema_term_ref_id=route.manifest.intent_schema_term.term_ref_id,
         document_id=graph.graph_id,
         document_digest=graph.graph_sha256,
         content_sha256=hashlib.sha256(intent_payload).hexdigest(),
         size_bytes=len(intent_payload),
-        media_type=PARAMETRIC_FEATURE_GRAPH_V2_MEDIA_TYPE,
+        media_type=route.manifest.intent_media_type,
     )
     capability_document, capability_payload = route.manifest.capability_document()
     proof = ProofBundle(
@@ -454,9 +677,9 @@ def lower_reviewed_intent(value: object) -> LoweredReviewedIntent:
         ),
     )
     request = BackendLoweringRequest(
-        adapter=FREECAD_PART_CORE_ADAPTER_DESCRIPTOR,
+        adapter=route.manifest.adapter,
         terms=(
-            *PART_CORE_REQUEST_TERMS,
+            *route.manifest.request_terms,
             _RULE_TERM,
             _PREDICATE_TERM,
             _PREMISE_ROLE_TERM,
@@ -480,7 +703,7 @@ def lower_reviewed_intent(value: object) -> LoweredReviewedIntent:
         }
     )
     sink = _ExactPlanSink()
-    adapter = build_part_core_adapter(sink)
+    adapter = route.family.build_adapter(sink)
     try:
         result, receipt = adapter.lower_with_receipt(
             request,
@@ -494,10 +717,9 @@ def lower_reviewed_intent(value: object) -> LoweredReviewedIntent:
     except BaseException:
         _fail(ReviewedIntentExecutionErrorCode.LOWERING_FAILED)
     if (
-        type(plan) is not PartCoreBackendPlan
-        or plan.operation.value != route.operation.operation_id
-        or plan.sources
-        or receipt.operation != route.operation
+        receipt.operation != route.operation
+        or receipt.manifest_sha256 != route.manifest.manifest_sha256
+        or receipt.adapter != route.manifest.adapter
     ):
         _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
     return LoweredReviewedIntent(
@@ -591,7 +813,7 @@ class ReviewedNativeExecutionResult:
     object: object = field(repr=False, compare=False)
     plan_sha256: str
     plan_content_sha256: str
-    native_receipt: PartCoreConformanceReceipt
+    native_receipt: object
 
     def __post_init__(self) -> None:
         if (
@@ -601,8 +823,8 @@ class ReviewedNativeExecutionResult:
             or type(self.plan_content_sha256) is not str
             or len(self.plan_sha256) != 64
             or len(self.plan_content_sha256) != 64
-            or type(self.native_receipt) is not PartCoreConformanceReceipt
-            or self.native_receipt.plan_sha256 != self.plan_sha256
+            or self.native_receipt is None
+            or getattr(self.native_receipt, "plan_sha256", None) != self.plan_sha256
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
@@ -611,7 +833,7 @@ def execute_reviewed_intent_native(
     session: object,
     value: object,
 ) -> ReviewedNativeExecutionResult:
-    """Execute the single M0 route through its reviewed native authority seam."""
+    """Execute one static route through its family-owned native authority seam."""
 
     if session is None or type(value) is not ReviewedIntentProgramV1:
         _fail(ReviewedIntentExecutionErrorCode.INVALID_INPUT)
@@ -626,17 +848,14 @@ def execute_reviewed_intent_native(
     lowered = lower_reviewed_intent(value)
     try:
         before = tuple(document.Objects)
-        receipt = apply_part_core_plan(
+        family_result = route.family.apply_plan(
+            document,
+            lowered.plan,
             lowered.payload,
-            expected_content_sha256=lowered.result.plan_document.content_sha256,
-            expected_plan_sha256=lowered.result.plan_document.document_digest,
-            bindings=PartCoreExecutionBindings(
-                document=document,
-                body_id=lowered.plan.body_id,
-                sources=(),
-            ),
+            lowered.result.plan_document,
+            route.operation,
         )
-        result = document.getObject(receipt.object_name)
+        result = family_result.object
         after = tuple(document.Objects)
     except ReviewedIntentExecutionError:
         raise
@@ -655,13 +874,14 @@ def execute_reviewed_intent_native(
         object=result,
         plan_sha256=lowered.result.plan_document.document_digest,
         plan_content_sha256=lowered.result.plan_document.content_sha256,
-        native_receipt=receipt,
+        native_receipt=family_result.receipt,
     )
 
 
 __all__ = [
     "CURRENT_REVIEWED_INTENT_ROUTES",
     "REVIEWED_PART_BOX_ROUTE",
+    "REVIEWED_PART_CURVE_ROUTES",
     "REVIEWED_PART_PRIMITIVE_ROUTES",
     "LoweredReviewedIntent",
     "ReviewedIntentExecutionError",

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import sys
+from types import MappingProxyType, ModuleType, SimpleNamespace
 
 import pytest
 
+import vibecad.execution.freecad_reviewed_intent_execution as reviewed_execution
 from vibecad.execution.freecad_reviewed_intent_execution import (
     CURRENT_REVIEWED_INTENT_ROUTES,
+    REVIEWED_PART_CURVE_ROUTES,
     REVIEWED_PART_PRIMITIVE_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
@@ -277,8 +281,13 @@ def test_reviewed_primitives_lower_through_the_reviewed_adapter(
 def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
     programs = tuple(reviewed_primitive_program(operation) for operation in _PRIMITIVE_PARAMETERS)
 
-    assert CURRENT_REVIEWED_INTENT_ROUTES == REVIEWED_PART_PRIMITIVE_ROUTES
+    assert CURRENT_REVIEWED_INTENT_ROUTES == (
+        *REVIEWED_PART_PRIMITIVE_ROUTES,
+        *REVIEWED_PART_CURVE_ROUTES,
+    )
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 17
     assert len(REVIEWED_PART_PRIMITIVE_ROUTES) == len(programs) == 8
+    assert len(REVIEWED_PART_CURVE_ROUTES) == 9
     assert tuple(route_reviewed_intent(program) for program in programs) == (
         REVIEWED_PART_PRIMITIVE_ROUTES
     )
@@ -292,6 +301,75 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
         "Part::Torus",
         "Part::Wedge",
     }
+    assert len({id(route.family) for route in REVIEWED_PART_PRIMITIVE_ROUTES}) == 1
+    assert all(route.manifest == route.family.manifest for route in REVIEWED_PART_PRIMITIVE_ROUTES)
+    assert all(
+        route.subject_type_term == route.family.subject_type_term
+        for route in REVIEWED_PART_PRIMITIVE_ROUTES
+    )
+
+
+def test_reviewed_family_descriptor_owns_lower_read_and_execute_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    base_route = REVIEWED_PART_PRIMITIVE_ROUTES[0]
+
+    def adapter_factory(sink: object):
+        calls.append("adapter")
+        return reviewed_execution.build_part_core_adapter(sink)
+
+    def validate_plan(plan: object, receipt: object, operation: object) -> None:
+        calls.append("validate")
+        reviewed_execution._validate_part_core_plan(plan, receipt, operation)
+
+    def execute_plan(
+        document: object,
+        plan: object,
+        payload: bytes,
+        plan_document: object,
+        operation: object,
+    ):
+        del plan, payload
+        calls.append("execute")
+        result = SimpleNamespace(TypeId=operation.native_type_id)
+        document.Objects = (*document.Objects, result)
+        return reviewed_execution._ReviewedFamilyNativeExecution(
+            object=result,
+            receipt=SimpleNamespace(plan_sha256=plan_document.document_digest),
+        )
+
+    family = reviewed_execution._ReviewedIntentFamilyDescriptor(
+        manifest=base_route.manifest,
+        subject_type_term=base_route.subject_type_term,
+        adapter_factory=adapter_factory,
+        validate_plan=validate_plan,
+        execute_plan=execute_plan,
+    )
+    route = dataclasses.replace(base_route, family=family)
+    monkeypatch.setattr(
+        reviewed_execution,
+        "_ROUTES_BY_IDENTITY",
+        MappingProxyType({(route.operation_id, route.semantic_operation): route}),
+    )
+    monkeypatch.setattr(
+        reviewed_execution,
+        "require_reviewed_route_verified",
+        lambda selected, *, freecad: None,
+    )
+    monkeypatch.setitem(sys.modules, "FreeCAD", ModuleType("FreeCAD"))
+    document = SimpleNamespace(Objects=())
+
+    result = reviewed_execution.execute_reviewed_intent_native(
+        SimpleNamespace(doc=document),
+        reviewed_box_program(),
+    )
+
+    assert calls == ["adapter", "validate", "execute"]
+    assert result.route == route
+    assert result.object is document.Objects[0]
+    assert result.object.TypeId == "Part::Box"
+    assert result.native_receipt.plan_sha256 == result.plan_sha256
 
 
 __all__ = ["reviewed_box_program", "reviewed_primitive_program"]
