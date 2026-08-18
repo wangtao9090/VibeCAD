@@ -215,7 +215,7 @@ def test_loader_has_no_path_or_environment_override_surface():
     assert loader.__code__.co_argcount == 0
 
 
-def test_checked_in_resources_are_pinned_but_fail_closed_pending_catalog125_regeneration(
+def test_checked_in_resources_are_pinned_but_fail_closed_pending_catalog126_regeneration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(resource, "_platform_id", lambda: "macos.x86_64")
@@ -244,7 +244,7 @@ def test_checked_in_resources_are_pinned_but_fail_closed_pending_catalog125_rege
         )
 
         # Platform resources remain pinned and canonical, but are deliberately
-        # unusable until the 20-receipt/125-operation attestations are regenerated.
+        # unusable until the 21-receipt/126-operation attestations are regenerated.
         with pytest.raises(CapabilityCatalogError) as raised:
             decode_freecad_reviewed_release_attestation(
                 loaded.raw,

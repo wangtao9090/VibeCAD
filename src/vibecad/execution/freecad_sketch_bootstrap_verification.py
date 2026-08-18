@@ -296,13 +296,13 @@ SKETCH_BOOTSTRAP_CANDIDATE_FORMAL_SPEC: Final[FreeCadIntentCapabilitySpec] = (
 
 @dataclass(frozen=True, slots=True)
 class SketchBootstrapFormalVerificationHandoff:
-    """Catalog125/family20 handoff with release evidence still pending."""
+    """Catalog126/family21 handoff with release evidence still pending."""
 
     family_manifest_sha256: str
     case_manifest_sha256: str
     candidate_operation_id: str
-    future_formal_operation_count: int = 125
-    future_reviewed_family_count: int = 20
+    future_formal_operation_count: int = 126
+    future_reviewed_family_count: int = 21
     current_catalog_registered: bool = True
     current_family_registered: bool = True
     release_attestation_refreshed: bool = False

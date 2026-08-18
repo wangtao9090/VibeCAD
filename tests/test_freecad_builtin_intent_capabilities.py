@@ -101,7 +101,7 @@ def test_current_specs_cover_all_reviewed_adapter_families() -> None:
     assert all(item.verification is None for item in specs)
 
 
-def test_reference5_current_formal_authority_is_exactly_v2_and_count_stays_125() -> None:
+def test_reference5_current_formal_authority_is_exactly_v2_with_flatface_count_126() -> None:
     specs = current_freecad_intent_capability_specs()
     reference = tuple(
         item
@@ -110,7 +110,7 @@ def test_reference5_current_formal_authority_is_exactly_v2_and_count_stays_125()
         and item.adapter_id == FREECAD_REFERENCE_REVIEWED_ADAPTER_DESCRIPTOR.adapter_id
     )
 
-    assert len(specs) == 125
+    assert len(specs) == 126
     assert {(item.operation_id, item.semantic_operation) for item in reference} == set(
         PARTDESIGN_REFERENCE_REVIEWED_PRODUCT_IDENTITIES
     )

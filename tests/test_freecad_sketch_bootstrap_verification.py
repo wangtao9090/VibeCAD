@@ -100,8 +100,8 @@ def test_original_bootstrap_stays_in_catalog126_but_inert_pending_attestation() 
     assert subject.SKETCH_BOOTSTRAP_CANDIDATE_FAMILY_MANIFEST in (
         CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS
     )
-    assert handoff.future_formal_operation_count == 125
-    assert handoff.future_reviewed_family_count == 20
+    assert handoff.future_formal_operation_count == 126
+    assert handoff.future_reviewed_family_count == 21
     assert handoff.current_catalog_registered is True
     assert handoff.current_family_registered is True
     assert handoff.release_attestation_refreshed is False

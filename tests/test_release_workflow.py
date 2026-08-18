@@ -297,8 +297,8 @@ def test_release_reviewed_attestation_gate_covers_exact_trusted_macos_platforms(
     assert "decode_freecad_reviewed_release_attestation(packaged.raw" in body
     assert "assert installed.is_relative_to(home)" in body
     assert "assert attestation.runtime_backend.platform_id == expected" in body
-    assert "assert len(verification.receipts) == 20" in body
-    assert "assert len(verification.formal_operations) == 125" in body
+    assert "assert len(verification.receipts) == 21" in body
+    assert "assert len(verification.formal_operations) == 126" in body
     assert "assert len(verification.native_types) == 102" in body
     assert body.index(f"packaged={packaged_loader}()") < body.index(generator)
     assert '"$VIBECAD_MANAGED_FREECAD_PYTHON" -I' in body

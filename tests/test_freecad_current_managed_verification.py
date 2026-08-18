@@ -57,6 +57,9 @@ from vibecad.execution.freecad_reviewed_verification_wave_d import (
 from vibecad.execution.freecad_sketch_bootstrap_verification import (
     SKETCH_BOOTSTRAP_REVIEWED_HOST_CASE_MANIFEST,
 )
+from vibecad.execution.freecad_sketch_flatface_bootstrap_verification import (
+    FLATFACE_SKETCH_REVIEWED_HOST_CASE_MANIFEST,
+)
 from vibecad.execution.freecad_wave_c_verification import (
     APP_REVIEWED_HOST_CASE_MANIFEST,
     SKETCH_REVIEWED_HOST_CASE_MANIFEST,
@@ -67,6 +70,9 @@ from vibecad.intent_bridge.freecad_part_curve_adapter import PART_CURVE_MANIFEST
 from vibecad.intent_bridge.freecad_sketch_bootstrap_adapter import (
     SKETCH_BOOTSTRAP_FAMILY_MANIFEST,
 )
+from vibecad.intent_bridge.freecad_sketch_flatface_bootstrap_adapter import (
+    FLATFACE_SKETCH_FAMILY_MANIFEST,
+)
 
 _MANAGED_BUILD_SHA256 = "7" * 64
 _EXPECTED_CALL_ORDER = (
@@ -76,6 +82,7 @@ _EXPECTED_CALL_ORDER = (
     "wave_c",
     "wave_d",
     "sketch_bootstrap",
+    "flatface_sketch",
     "legacy",
 )
 
@@ -113,6 +120,7 @@ def _all_manifests_in_execution_order():
         *WAVE_C_FAMILY_MANIFESTS,
         *WAVE_D_FAMILY_MANIFESTS,
         SKETCH_BOOTSTRAP_FAMILY_MANIFEST,
+        FLATFACE_SKETCH_FAMILY_MANIFEST,
         *LEGACY_REVIEWED_FAMILY_MANIFESTS,
     )
 
@@ -164,6 +172,7 @@ def _install_valid_builders(
     wave_c = tuple(next(receipts) for _ in range(2))
     wave_d = tuple(next(receipts) for _ in range(3))
     sketch_bootstrap = next(receipts)
+    flatface_sketch = next(receipts)
     legacy = tuple(next(receipts) for _ in range(8))
     with pytest.raises(StopIteration):
         next(receipts)
@@ -196,6 +205,13 @@ def _install_valid_builders(
         return (
             sketch_bootstrap,
             build_promotion_verification_binding(sketch_bootstrap),
+        )
+
+    def flatface_sketch_builder(*, freecad):
+        call_log.append("flatface_sketch")
+        return (
+            flatface_sketch,
+            build_promotion_verification_binding(flatface_sketch),
         )
 
     def legacy_builder(*, freecad):
@@ -234,12 +250,17 @@ def _install_valid_builders(
     )
     monkeypatch.setattr(
         current_verification,
+        "build_flatface_sketch_managed_verification",
+        flatface_sketch_builder,
+    )
+    monkeypatch.setattr(
+        current_verification,
         "build_managed_freecad_legacy_reviewed_verification_receipts",
         legacy_builder,
     )
 
 
-def test_current_inventory_is_exactly_twenty_receipts_and_125_by_seven_cases() -> None:
+def test_current_inventory_is_exactly_twenty_one_receipts_and_126_by_seven_cases() -> None:
     case_manifests = (
         PART_CORE_REVIEWED_HOST_CASE_MANIFEST,
         PART_CURVE_REVIEWED_HOST_CASE_MANIFEST,
@@ -248,12 +269,13 @@ def test_current_inventory_is_exactly_twenty_receipts_and_125_by_seven_cases() -
         APP_REVIEWED_HOST_CASE_MANIFEST,
         *WAVE_D_REVIEWED_CASE_MANIFESTS,
         SKETCH_BOOTSTRAP_REVIEWED_HOST_CASE_MANIFEST,
+        FLATFACE_SKETCH_REVIEWED_HOST_CASE_MANIFEST,
         *LEGACY_REVIEWED_CASE_MANIFESTS,
     )
-    assert len(_all_manifests_in_execution_order()) == len(case_manifests) == 20
-    assert sum(len(item.cases) for item in case_manifests) == 125 * 7
-    assert CURRENT_MANAGED_VERIFICATION_RECEIPT_COUNT == 20
-    assert CURRENT_MANAGED_VERIFICATION_FORMAL_OPERATION_COUNT == 125
+    assert len(_all_manifests_in_execution_order()) == len(case_manifests) == 21
+    assert sum(len(item.cases) for item in case_manifests) == 126 * 7
+    assert CURRENT_MANAGED_VERIFICATION_RECEIPT_COUNT == 21
+    assert CURRENT_MANAGED_VERIFICATION_FORMAL_OPERATION_COUNT == 126
     assert CURRENT_MANAGED_VERIFICATION_PROMOTION_OPERATION_COUNT == 104
     assert CURRENT_MANAGED_VERIFICATION_NATIVE_TYPE_COUNT == 102
 
@@ -272,8 +294,8 @@ def test_fast_managed_receipts_close_exact_coverage_in_sequential_order(
 
     assert type(result) is FreeCadManagedReviewedVerificationSet
     assert tuple(calls) == _EXPECTED_CALL_ORDER
-    assert len(result.receipt_sha256) == 20
-    assert len(result.formal_operations) == 125
+    assert len(result.receipt_sha256) == 21
+    assert len(result.formal_operations) == 126
     assert len(result.native_types) == len(result.verification_by_native_type) == 102
     bootstrap_receipt = managed_receipts[11]
     bootstrap_operation = next(
@@ -285,6 +307,18 @@ def test_fast_managed_receipts_close_exact_coverage_in_sequential_order(
     assert (
         result.verification_by_native_type["Sketcher::SketchObject"].test_receipt_sha256
         != bootstrap_receipt.test_receipt_sha256
+    )
+    flatface_receipt = managed_receipts[12]
+    flatface_operation = next(
+        item
+        for item in result.formal_operations
+        if item.operation_id
+        == "freecad_sketch_flatface_bootstrap.create_closed_circle_on_unique_zmax_planar_face"
+    )
+    assert flatface_operation.test_receipt_sha256 == flatface_receipt.test_receipt_sha256
+    assert (
+        result.verification_by_native_type["Sketcher::SketchObject"].test_receipt_sha256
+        != flatface_receipt.test_receipt_sha256
     )
     reference_receipt = next(
         item
@@ -491,7 +525,7 @@ print('CURRENT_MANAGED_VERIFICATION_IMPORT_OK')
 
 
 @pytest.mark.slow
-def test_real_managed_freecad_full_125_by_7_verification_set() -> None:
+def test_real_managed_freecad_full_126_by_7_verification_set() -> None:
     python_raw = os.environ.get("VIBECAD_MANAGED_FREECAD_PYTHON")
     if not python_raw:
         pytest.skip("managed FreeCAD Python was not requested")
@@ -513,8 +547,8 @@ def test_real_managed_freecad_full_125_by_7_verification_set() -> None:
     )
 
     assert type(result) is FreeCadManagedReviewedVerificationSet
-    assert len(result.receipt_sha256) == 20
-    assert len(result.formal_operations) == 125
+    assert len(result.receipt_sha256) == 21
+    assert len(result.formal_operations) == 126
     assert len(result.native_types) == len(result.verification_by_native_type) == 102
     assert all(
         item.runtime_build_sha256 == result.runtime_backend.build_fingerprint_sha256

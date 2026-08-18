@@ -8,7 +8,7 @@ the central coverage join.  It never persists evidence, changes capability
 status, or grants CAD execution authority.
 
 The entry point is intentionally unsuitable for a public capability query:
-the 125-operation, seven-facet matrix is a maintainer/CI conformance gate, not
+the 126-operation, seven-facet matrix is a maintainer/CI conformance gate, not
 an on-demand discovery path.
 """
 
@@ -56,6 +56,9 @@ from vibecad.execution.freecad_reviewed_verification_wave_d import (
 from vibecad.execution.freecad_sketch_bootstrap_verification import (
     build_sketch_bootstrap_managed_verification,
 )
+from vibecad.execution.freecad_sketch_flatface_bootstrap_verification import (
+    build_flatface_sketch_managed_verification,
+)
 from vibecad.execution.freecad_wave_c_verification import (
     WAVE_C_FAMILY_MANIFESTS,
     build_sketch_and_app_managed_verification,
@@ -65,14 +68,17 @@ from vibecad.intent_bridge.freecad_part_curve_adapter import PART_CURVE_MANIFEST
 from vibecad.intent_bridge.freecad_sketch_bootstrap_adapter import (
     SKETCH_BOOTSTRAP_FAMILY_MANIFEST,
 )
+from vibecad.intent_bridge.freecad_sketch_flatface_bootstrap_adapter import (
+    FLATFACE_SKETCH_FAMILY_MANIFEST,
+)
 from vibecad.intent_bridge.reviewed_family_engine import FamilyBatchManifest
 
-CURRENT_MANAGED_VERIFICATION_RECEIPT_COUNT: Final = 20
-CURRENT_MANAGED_VERIFICATION_FORMAL_OPERATION_COUNT: Final = 125
+CURRENT_MANAGED_VERIFICATION_RECEIPT_COUNT: Final = 21
+CURRENT_MANAGED_VERIFICATION_FORMAL_OPERATION_COUNT: Final = 126
 CURRENT_MANAGED_VERIFICATION_PROMOTION_OPERATION_COUNT: Final = 104
 CURRENT_MANAGED_VERIFICATION_NATIVE_TYPE_COUNT: Final = 102
 
-_CURRENT_REVIEWED_FAMILY_COUNT: Final = 12
+_CURRENT_REVIEWED_FAMILY_COUNT: Final = 13
 _CURRENT_LEGACY_FAMILY_COUNT: Final = 8
 _VERIFICATION_LOCK = threading.Lock()
 
@@ -95,6 +101,7 @@ def _current_exact_inputs() -> tuple[tuple[FamilyBatchManifest, ...], tuple, tup
         *WAVE_C_FAMILY_MANIFESTS,
         *WAVE_D_FAMILY_MANIFESTS,
         SKETCH_BOOTSTRAP_FAMILY_MANIFEST,
+        FLATFACE_SKETCH_FAMILY_MANIFEST,
     )
     reviewed = CURRENT_FREECAD_REVIEWED_FAMILY_MANIFESTS
     legacy = LEGACY_REVIEWED_FAMILY_MANIFESTS
@@ -194,6 +201,10 @@ def _collect_current_receipts(*, freecad: object) -> tuple[ReviewedVerificationR
         build_sketch_bootstrap_managed_verification(freecad=freecad),
         path="current_managed_verification/sketch_bootstrap",
     )
+    flatface_sketch = _receipt_from_pair(
+        build_flatface_sketch_managed_verification(freecad=freecad),
+        path="current_managed_verification/flatface_sketch",
+    )
     legacy_raw = build_managed_freecad_legacy_reviewed_verification_receipts(freecad=freecad)
     if type(legacy_raw) is not tuple or len(legacy_raw) != 8:
         _fail("current_managed_verification/legacy")
@@ -204,7 +215,16 @@ def _collect_current_receipts(*, freecad: object) -> tuple[ReviewedVerificationR
         )
         for index, item in enumerate(legacy_raw)
     )
-    receipts = (core, curves, *part_b, *wave_c, *wave_d, sketch_bootstrap, *legacy)
+    receipts = (
+        core,
+        curves,
+        *part_b,
+        *wave_c,
+        *wave_d,
+        sketch_bootstrap,
+        flatface_sketch,
+        *legacy,
+    )
     if len(receipts) != CURRENT_MANAGED_VERIFICATION_RECEIPT_COUNT:
         _fail("current_managed_verification/receipts")
     return receipts
@@ -246,10 +266,10 @@ def build_current_managed_freecad_reviewed_verification_set_for_maintainers(
     *,
     freecad: object,
 ) -> FreeCadManagedReviewedVerificationSet:
-    """Run the exact current 125-by-seven maintainer/CI verification matrix.
+    """Run the exact current 126-by-seven maintainer/CI verification matrix.
 
     The caller must inject the already authenticated, headless managed FreeCAD
-    module.  All twenty family verifiers execute sequentially against that
+    module.  All twenty-one family verifiers execute sequentially against that
     same object.  The returned set is ephemeral metadata: this function has no
     storage, public-query, promotion, adapter-dispatch, or execution seam.
     """
