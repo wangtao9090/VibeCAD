@@ -48,9 +48,12 @@ from vibecad.execution.freecad_reviewed_intent_execution import (
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
     ReviewedNativeExecutionResult,
+    _commit_reviewed_native_create,
     _commit_reviewed_native_update,
+    _reviewed_native_create_needs_recovery,
     _ReviewedProductExecutionMode,
     _ReviewedProductResultKind,
+    _rollback_reviewed_native_create,
     _rollback_reviewed_native_update,
 )
 from vibecad.execution.freecad_reviewed_intent_execution import (
@@ -2438,6 +2441,28 @@ class _ReviewedProductRunState:
             raise _operation_failure() from None
         self._records[identity.object_id] = replacement
 
+    def discard(self, result: ReviewedNativeExecutionResult, identity: EntityIdentity) -> None:
+        """Remove one failed CREATE adoption from this run without exposing it."""
+
+        if (
+            type(result) is not ReviewedNativeExecutionResult
+            or type(identity) is not EntityIdentity
+        ):
+            raise _operation_failure()
+        record = self._records.get(identity.object_id)
+        if (
+            record is None
+            or record.result is not result
+            or record.identity != identity
+            or not result._is_retained_for_run(self._token)
+        ):
+            raise _operation_failure()
+        try:
+            result._release_from_run(self._token)
+        except Exception:
+            raise _operation_failure() from None
+        del self._records[identity.object_id]
+
     def resolve(
         self,
         source_object_ids: tuple[object, ...],
@@ -2614,6 +2639,8 @@ def _managed_apply_reviewed_intent(
         raise _operation_failure() from None
 
     executed: ReviewedNativeExecutionResult | None = None
+    execution_mode: _ReviewedProductExecutionMode | None = None
+    retained_identity: EntityIdentity | None = None
     resolved_sources: tuple[ReviewedNativeExecutionResult, ...] = ()
     resolved_source_identities: tuple[EntityIdentity, ...] = ()
     try:
@@ -2831,11 +2858,42 @@ def _managed_apply_reviewed_intent(
         }
         if execution_mode is _ReviewedProductExecutionMode.CREATE:
             reviewed_products.retain(executed, identities[0])
+            retained_identity = identities[0]
+            if _reviewed_native_create_needs_recovery(executed) and not (
+                _commit_reviewed_native_create(executed)
+            ):
+                raise ValueError
         else:
             reviewed_products.replace(resolved_sources[0], executed, identities[0])
             if not _commit_reviewed_native_update(executed):
                 raise ValueError
     except (Exception, SystemExit) as error:
+        create_recovery_holder: object | None = None
+        if _reviewed_native_create_needs_recovery(executed):
+            create_recovery_holder = executed
+        elif _reviewed_native_create_needs_recovery(error):
+            create_recovery_holder = error
+        if execution_mode is _ReviewedProductExecutionMode.CREATE:
+            run_state_ok = not (
+                type(error) is ReviewedIntentExecutionError
+                and error.code is ReviewedIntentExecutionErrorCode.ROLLBACK_FAILED
+            )
+            if retained_identity is not None and type(executed) is ReviewedNativeExecutionResult:
+                try:
+                    reviewed_products.discard(executed, retained_identity)
+                except (Exception, SystemExit):
+                    run_state_ok = False
+            document_rollback_ok = _rollback_reviewed_document(
+                session.doc,  # type: ignore[attr-defined]
+                document_before,
+                body_tips_before,
+            )
+            create_recovery_ok = create_recovery_holder is None or (
+                _rollback_reviewed_native_create(create_recovery_holder)
+            )
+            if not run_state_ok or not document_rollback_ok or not create_recovery_ok:
+                raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
+            raise _operation_failure() from None
         native_rollback_ok = not (
             type(error) is ReviewedIntentExecutionError
             and error.code is ReviewedIntentExecutionErrorCode.ROLLBACK_FAILED

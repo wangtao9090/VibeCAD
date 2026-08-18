@@ -75,6 +75,12 @@ from vibecad.execution.freecad_partdesign_primitive_reviewed_execution import (
 from vibecad.execution.freecad_partdesign_promotion_reviewed_execution import (
     PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC,
 )
+from vibecad.execution.freecad_reviewed_artifact_inputs import (
+    ReviewedArtifactContext,
+    ReviewedArtifactInputError,
+    ReviewedArtifactResolution,
+    _ReviewedArtifactRunResolver,
+)
 from vibecad.execution.freecad_reviewed_part_csg_execution import (
     PART_CSG_REVIEWED_FAMILY_SPEC,
 )
@@ -140,6 +146,7 @@ from vibecad.parametric.freecad_part_core_rules import (
 from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 
 _ROUTE_CONTRACT_DOMAIN = b"vibecad-reviewed-product-route-v1\0"
+_CREATE_RECOVERY_CAPSULE_DOMAIN = b"vibecad-reviewed-create-recovery-capsule-v1\0"
 _INTENT_BINDING_CONTRACT_DOMAIN = b"vibecad-reviewed-intent-document-binding-v1\0"
 _PROOF_TERM_DOMAIN = b"vibecad-reviewed-product-proof-term-v1\0"
 _PROOF_EVALUATOR_DOMAIN = b"vibecad-reviewed-product-proof-evaluator-v1\0"
@@ -228,6 +235,11 @@ class _ReviewedFamilyExecutionContext:
     document: object = field(repr=False, compare=False)
     source_results: tuple[object, ...] = field(repr=False, compare=False)
     run_token: object | None = field(default=None, repr=False, compare=False)
+    artifact_context: ReviewedArtifactContext | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -236,6 +248,10 @@ class _ReviewedFamilyExecutionContext:
             or type(self.source_results) is not tuple
             or len(self.source_results) > 8
             or any(item is None for item in self.source_results)
+            or (
+                self.artifact_context is not None
+                and type(self.artifact_context) is not ReviewedArtifactContext
+            )
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
@@ -915,6 +931,148 @@ _UpdateStateRollback = Callable[
     ],
     None,
 ]
+_CreateRecoveryPrepare = Callable[
+    [object, ReviewedOperationSpec, _ReviewedFamilyExecutionContext],
+    tuple[str, object],
+]
+_CreateRecoveryAction = Callable[
+    [object, object, ReviewedOperationSpec, _ReviewedFamilyExecutionContext],
+    None,
+]
+_CreateRecoveryVerify = Callable[
+    [object, object, ReviewedOperationSpec, _ReviewedFamilyExecutionContext],
+    str,
+]
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ReviewedArtifactRequirement:
+    """Exact artifact facts extracted only from a canonical reviewed plan."""
+
+    artifact_id: str
+    content_sha256: str
+    role_term_ref_id: str
+    schema_term_ref_id: str
+    media_type: str
+    maximum_bytes: int
+
+    def __post_init__(self) -> None:
+        identifiers = (self.artifact_id, self.role_term_ref_id, self.schema_term_ref_id)
+        if (
+            any(
+                type(item) is not str
+                or not 1 <= len(item) <= 128
+                or not item[0].isalnum()
+                or any(
+                    not (character.isascii() and (character.isalnum() or character in "._:-"))
+                    for character in item
+                )
+                for item in identifiers
+            )
+            or not _is_sha256(self.content_sha256)
+            or type(self.media_type) is not str
+            or not 3 <= len(self.media_type) <= 128
+            or "/" not in self.media_type
+            or not self.media_type.isascii()
+            or type(self.maximum_bytes) is not int
+            or not 1 <= self.maximum_bytes <= 4 * 1024 * 1024
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+
+_ArtifactRequirementExtractor = Callable[
+    [object, DocumentRef, ReviewedOperationSpec],
+    _ReviewedArtifactRequirement,
+]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False)
+class _ReviewedArtifactRequirementDescriptor:
+    """Static route-owned authority for extracting one artifact requirement."""
+
+    descriptor_id: str
+    descriptor_version: str
+    descriptor_contract_sha256: str
+    operation_ids: tuple[str, ...]
+    extract: _ArtifactRequirementExtractor = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        identifiers = (self.descriptor_id, self.descriptor_version)
+        if (
+            any(
+                type(item) is not str
+                or not 1 <= len(item) <= 128
+                or not item[0].isalnum()
+                or any(
+                    not (character.isascii() and (character.isalnum() or character in "._:-"))
+                    for character in item
+                )
+                for item in identifiers
+            )
+            or not _is_sha256(self.descriptor_contract_sha256)
+            or type(self.operation_ids) is not tuple
+            or not self.operation_ids
+            or any(type(item) is not str or not item for item in self.operation_ids)
+            or len(set(self.operation_ids)) != len(self.operation_ids)
+            or not callable(self.extract)
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+    def handles(self, operation: ReviewedOperationSpec) -> bool:
+        if type(operation) is not ReviewedOperationSpec:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return operation.operation_id in self.operation_ids
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False)
+class _ReviewedCreateRecoveryDescriptor:
+    """Static family authority for one external-resource CREATE rollback seam."""
+
+    descriptor_id: str
+    descriptor_version: str
+    descriptor_contract_sha256: str
+    operation_ids: tuple[str, ...]
+    prepare: _CreateRecoveryPrepare = field(repr=False, compare=False)
+    recover: _CreateRecoveryAction = field(repr=False, compare=False)
+    verify: _CreateRecoveryVerify = field(repr=False, compare=False)
+    commit: _CreateRecoveryAction = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        identifiers = (self.descriptor_id, self.descriptor_version)
+        if (
+            any(
+                type(item) is not str
+                or not 1 <= len(item) <= 128
+                or not item[0].isalnum()
+                or any(
+                    not (character.isascii() and (character.isalnum() or character in "._:-"))
+                    for character in item
+                )
+                for item in identifiers
+            )
+            or not _is_sha256(self.descriptor_contract_sha256)
+            or type(self.operation_ids) is not tuple
+            or not self.operation_ids
+            or any(type(item) is not str or not item for item in self.operation_ids)
+            or len(set(self.operation_ids)) != len(self.operation_ids)
+            or not all(
+                callable(item) for item in (self.prepare, self.recover, self.verify, self.commit)
+            )
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+    def handles(self, operation: ReviewedOperationSpec) -> bool:
+        if type(operation) is not ReviewedOperationSpec:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return operation.operation_id in self.operation_ids
 
 
 @dataclass(frozen=True, slots=True, kw_only=True, eq=False)
@@ -939,6 +1097,16 @@ class _ReviewedIntentFamilyDescriptor:
     )
     requires_same_run_sources: bool = False
     dynamic_ownership_resolver: _ReviewedDynamicOwnershipResolverDescriptor | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    artifact_requirement: _ReviewedArtifactRequirementDescriptor | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    create_recovery: _ReviewedCreateRecoveryDescriptor | None = field(
         default=None,
         repr=False,
         compare=False,
@@ -998,6 +1166,14 @@ class _ReviewedIntentFamilyDescriptor:
                 and type(self.dynamic_ownership_resolver)
                 is not _ReviewedDynamicOwnershipResolverDescriptor
             )
+            or (
+                self.artifact_requirement is not None
+                and type(self.artifact_requirement) is not _ReviewedArtifactRequirementDescriptor
+            )
+            or (
+                self.create_recovery is not None
+                and type(self.create_recovery) is not _ReviewedCreateRecoveryDescriptor
+            )
             or (self.capture_update_state is None) != (self.rollback_update_state is None)
             or (self.capture_update_state is not None and not callable(self.capture_update_state))
             or (self.rollback_update_state is not None and not callable(self.rollback_update_state))
@@ -1039,6 +1215,37 @@ class _ReviewedIntentFamilyDescriptor:
         )
         if has_updates and self.capture_update_state is None:
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        create_recovery = self.create_recovery
+        artifact_requirement = self.artifact_requirement
+        if artifact_requirement is not None and any(
+            not any(
+                operation.operation_id == operation_id for operation in self.manifest.operations
+            )
+            for operation_id in artifact_requirement.operation_ids
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if create_recovery is not None:
+            operations = {
+                operation.operation_id: operation for operation in self.manifest.operations
+            }
+            if any(
+                operation_id not in operations
+                or self.product_execution_mode(operations[operation_id])
+                is not _ReviewedProductExecutionMode.CREATE
+                for operation_id in create_recovery.operation_ids
+            ):
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+    def artifact_requirement_for(
+        self,
+        operation: ReviewedOperationSpec,
+    ) -> _ReviewedArtifactRequirementDescriptor | None:
+        if type(operation) is not ReviewedOperationSpec:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        descriptor = self.artifact_requirement
+        if descriptor is None or not descriptor.handles(operation):
+            return None
+        return descriptor
 
     def dynamic_resolver_for(
         self,
@@ -1050,6 +1257,19 @@ class _ReviewedIntentFamilyDescriptor:
         if resolver is None or not resolver.handles(operation):
             return None
         return resolver
+
+    def create_recovery_for(
+        self,
+        operation: ReviewedOperationSpec,
+    ) -> _ReviewedCreateRecoveryDescriptor | None:
+        if type(operation) is not ReviewedOperationSpec:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        descriptor = self.create_recovery
+        if descriptor is None or not descriptor.handles(operation):
+            return None
+        if self.product_execution_mode(operation) is not _ReviewedProductExecutionMode.CREATE:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return descriptor
 
     def build_adapter(self, sink: PlanSink) -> ExactReviewedFamilyAdapter:
         try:
@@ -1094,6 +1314,10 @@ class _ReviewedIntentFamilyDescriptor:
             type(context) is not _ReviewedFamilyExecutionContext
             or context.document is not document
             or not self.minimum_sources <= len(context.source_results) <= self.maximum_sources
+            or (
+                (self.artifact_requirement_for(operation) is None)
+                != (context.artifact_context is None)
+            )
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         if self.dynamic_resolver_for(operation) is None:
@@ -1708,6 +1932,8 @@ class ReviewedIntentRoute:
         else:
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         resolver = self.family.dynamic_resolver_for(self.operation)
+        artifact_requirement = self.family.artifact_requirement_for(self.operation)
+        create_recovery = self.family.create_recovery_for(self.operation)
         static_results = tuple(
             item
             for item in self.family.product_results
@@ -1758,6 +1984,26 @@ class ReviewedIntentRoute:
                         resolver.resolver_contract_sha256,
                     )
                     if resolver is not None
+                    else ()
+                ),
+                *(
+                    (
+                        "artifact-requirement-v1",
+                        artifact_requirement.descriptor_id,
+                        artifact_requirement.descriptor_version,
+                        artifact_requirement.descriptor_contract_sha256,
+                    )
+                    if artifact_requirement is not None
+                    else ()
+                ),
+                *(
+                    (
+                        "create-recovery-capsule-v1",
+                        create_recovery.descriptor_id,
+                        create_recovery.descriptor_version,
+                        create_recovery.descriptor_contract_sha256,
+                    )
+                    if create_recovery is not None
                     else ()
                 ),
             )
@@ -2296,6 +2542,151 @@ def require_reviewed_route_verified(
     return backend
 
 
+_CREATE_RECOVERY_CAPSULE_SEAL: Final = object()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False)
+class _ReviewedCreateRecoveryCapsule:
+    """Shared-sealed opaque pre-state for one allowlisted CREATE operation."""
+
+    family: _ReviewedIntentFamilyDescriptor = field(repr=False, compare=False)
+    descriptor: _ReviewedCreateRecoveryDescriptor = field(repr=False, compare=False)
+    document: object = field(repr=False, compare=False)
+    operation: ReviewedOperationSpec
+    context: _ReviewedFamilyExecutionContext = field(repr=False, compare=False)
+    pre_state_sha256: str
+    opaque_state: object = field(repr=False, compare=False)
+    _seal: object = field(repr=False, compare=False)
+    capsule_sha256: str = field(init=False)
+    _status: str = field(default="active", init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if (
+            self._seal is not _CREATE_RECOVERY_CAPSULE_SEAL
+            or type(self.family) is not _ReviewedIntentFamilyDescriptor
+            or type(self.descriptor) is not _ReviewedCreateRecoveryDescriptor
+            or self.family.create_recovery_for(self.operation) is not self.descriptor
+            or self.document is None
+            or type(self.operation) is not ReviewedOperationSpec
+            or type(self.context) is not _ReviewedFamilyExecutionContext
+            or self.context.document is not self.document
+            or not _is_sha256(self.pre_state_sha256)
+            or self.opaque_state is None
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        body = "\0".join(
+            (
+                self.descriptor.descriptor_id,
+                self.descriptor.descriptor_version,
+                self.descriptor.descriptor_contract_sha256,
+                self.family.manifest.manifest_sha256,
+                self.operation.operation_id,
+                self.operation.specification_sha256,
+                self.pre_state_sha256,
+            )
+        ).encode("utf-8")
+        object.__setattr__(
+            self,
+            "capsule_sha256",
+            hashlib.sha256(_CREATE_RECOVERY_CAPSULE_DOMAIN + body).hexdigest(),
+        )
+
+    def is_valid_for(
+        self,
+        family: _ReviewedIntentFamilyDescriptor,
+        operation: ReviewedOperationSpec,
+        context: _ReviewedFamilyExecutionContext,
+    ) -> bool:
+        try:
+            body = "\0".join(
+                (
+                    self.descriptor.descriptor_id,
+                    self.descriptor.descriptor_version,
+                    self.descriptor.descriptor_contract_sha256,
+                    self.family.manifest.manifest_sha256,
+                    self.operation.operation_id,
+                    self.operation.specification_sha256,
+                    self.pre_state_sha256,
+                )
+            ).encode("utf-8")
+            return (
+                self._seal is _CREATE_RECOVERY_CAPSULE_SEAL
+                and self.family is family
+                and self.descriptor is family.create_recovery_for(operation)
+                and self.operation == operation
+                and self.context is context
+                and self.context.document is self.document
+                and _is_sha256(self.pre_state_sha256)
+                and self.opaque_state is not None
+                and _is_sha256(self.capsule_sha256)
+                and hmac.compare_digest(
+                    self.capsule_sha256,
+                    hashlib.sha256(_CREATE_RECOVERY_CAPSULE_DOMAIN + body).hexdigest(),
+                )
+                and self._status in {"active", "commit_failed"}
+            )
+        except BaseException:
+            return False
+
+
+class _ReviewedCreateRecoveryExecutionError(ReviewedIntentExecutionError):
+    """Failure carrying only a shared-sealed CREATE recovery capsule."""
+
+    __slots__ = ("_create_recovery",)
+
+    def __init__(
+        self,
+        code: ReviewedIntentExecutionErrorCode,
+        recovery: _ReviewedCreateRecoveryCapsule,
+    ) -> None:
+        if type(recovery) is not _ReviewedCreateRecoveryCapsule:
+            raise TypeError("recovery must be a sealed CREATE recovery capsule")
+        self._create_recovery = recovery
+        super().__init__(code)
+
+
+def _prepare_create_recovery(
+    family: _ReviewedIntentFamilyDescriptor,
+    document: object,
+    operation: ReviewedOperationSpec,
+    context: _ReviewedFamilyExecutionContext,
+) -> _ReviewedCreateRecoveryCapsule | None:
+    descriptor = family.create_recovery_for(operation)
+    if descriptor is None:
+        return None
+    try:
+        prepared = descriptor.prepare(document, operation, context)
+        if type(prepared) is not tuple or len(prepared) != 2:
+            raise TypeError
+        pre_state_sha256, opaque_state = prepared
+        if not _is_sha256(pre_state_sha256) or opaque_state is None:
+            raise TypeError
+        recovery = _ReviewedCreateRecoveryCapsule(
+            family=family,
+            descriptor=descriptor,
+            document=document,
+            operation=operation,
+            context=context,
+            pre_state_sha256=pre_state_sha256,
+            opaque_state=opaque_state,
+            _seal=_CREATE_RECOVERY_CAPSULE_SEAL,
+        )
+        try:
+            actual = descriptor.verify(document, opaque_state, operation, context)
+            if not _is_sha256(actual) or not hmac.compare_digest(actual, pre_state_sha256):
+                raise ValueError
+        except BaseException:
+            raise _ReviewedCreateRecoveryExecutionError(
+                ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE,
+                recovery,
+            ) from None
+        return recovery
+    except ReviewedIntentExecutionError:
+        raise
+    except (Exception, SystemExit):
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _ReviewedPrimaryUpdateRecovery:
     """Opaque recovery capsule retained only until managed adoption commits."""
@@ -2402,6 +2793,11 @@ class ReviewedNativeExecutionResult:
         repr=False,
         compare=False,
     )
+    _create_recovery: _ReviewedCreateRecoveryCapsule | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     _verified_execution_context: InitVar[_ReviewedFamilyExecutionContext | None] = None
     _verified_dynamic_resolution: InitVar[_ReviewedDynamicProductResolution | None] = None
     result_kind: _ReviewedProductResultKind = field(init=False)
@@ -2497,11 +2893,28 @@ class ReviewedNativeExecutionResult:
             except (Exception, SystemExit):
                 _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         if contract.execution_mode is _ReviewedProductExecutionMode.CREATE:
-            if self._update_recovery is not None:
+            descriptor = self.route.family.create_recovery_for(self.route.operation)
+            if (
+                self._update_recovery is not None
+                or (descriptor is None and self._create_recovery is not None)
+                or (
+                    descriptor is not None
+                    and (
+                        type(self._create_recovery) is not _ReviewedCreateRecoveryCapsule
+                        or type(_verified_execution_context) is not _ReviewedFamilyExecutionContext
+                        or not self._create_recovery.is_valid_for(
+                            self.route.family,
+                            self.route.operation,
+                            _verified_execution_context,
+                        )
+                    )
+                )
+            ):
                 _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
             return
         if (
             type(self._update_recovery) is not _ReviewedPrimaryUpdateRecovery
+            or self._create_recovery is not None
             or _verified_execution_context is None
             or self._update_recovery.context is not _verified_execution_context
             or self._update_recovery.family is not self.route.family
@@ -2524,6 +2937,105 @@ class ReviewedNativeExecutionResult:
 
     def _is_retained_for_run(self, token: object) -> bool:
         return token is not None and self._retained_run_token is token
+
+    def _release_from_run(self, token: object) -> None:
+        if token is None or self._retained_run_token is not token:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        object.__setattr__(self, "_retained_run_token", None)
+
+
+def _reviewed_native_create_needs_recovery(value: object) -> bool:
+    if type(value) is ReviewedNativeExecutionResult:
+        return value._create_recovery is not None
+    if type(value) is _ReviewedCreateRecoveryExecutionError:
+        return value._create_recovery is not None
+    return False
+
+
+def _rollback_reviewed_native_create(value: object) -> bool:
+    """Restore and prove exact external pre-state for one CREATE capsule."""
+
+    if type(value) is ReviewedNativeExecutionResult:
+        recovery = value._create_recovery
+        if value.execution_mode is not _ReviewedProductExecutionMode.CREATE:
+            return False
+    elif type(value) is _ReviewedCreateRecoveryExecutionError:
+        recovery = value._create_recovery
+    else:
+        return False
+    if (
+        type(recovery) is not _ReviewedCreateRecoveryCapsule
+        or recovery._status not in {"active", "commit_failed"}
+        or not recovery.is_valid_for(
+            recovery.family,
+            recovery.operation,
+            recovery.context,
+        )
+    ):
+        return False
+    object.__setattr__(recovery, "_status", "recover_started")
+    try:
+        accepted = recovery.descriptor.recover(
+            recovery.document,
+            recovery.opaque_state,
+            recovery.operation,
+            recovery.context,
+        )
+        actual = recovery.descriptor.verify(
+            recovery.document,
+            recovery.opaque_state,
+            recovery.operation,
+            recovery.context,
+        )
+        if (
+            accepted is not None
+            or not _is_sha256(actual)
+            or not hmac.compare_digest(actual, recovery.pre_state_sha256)
+        ):
+            raise ValueError
+    except BaseException:
+        object.__setattr__(recovery, "_status", "recover_failed")
+        return False
+    object.__setattr__(recovery, "_status", "recovered")
+    if type(value) is ReviewedNativeExecutionResult:
+        object.__setattr__(value, "_create_recovery", None)
+    else:
+        value._create_recovery = None
+    return True
+
+
+def _commit_reviewed_native_create(result: object) -> bool:
+    """Commit and clear CREATE external state only after managed adoption succeeds."""
+
+    if (
+        type(result) is not ReviewedNativeExecutionResult
+        or result.execution_mode is not _ReviewedProductExecutionMode.CREATE
+        or type(result._create_recovery) is not _ReviewedCreateRecoveryCapsule
+    ):
+        return False
+    recovery = result._create_recovery
+    if recovery._status != "active" or not recovery.is_valid_for(
+        result.route.family,
+        result.route.operation,
+        recovery.context,
+    ):
+        return False
+    object.__setattr__(recovery, "_status", "commit_started")
+    try:
+        accepted = recovery.descriptor.commit(
+            recovery.document,
+            recovery.opaque_state,
+            recovery.operation,
+            recovery.context,
+        )
+        if accepted is not None:
+            raise ValueError
+    except BaseException:
+        object.__setattr__(recovery, "_status", "commit_failed")
+        return False
+    object.__setattr__(recovery, "_status", "committed")
+    object.__setattr__(result, "_create_recovery", None)
+    return True
 
 
 def _rollback_reviewed_native_update(result: object) -> bool:
@@ -2561,6 +3073,7 @@ def execute_reviewed_intent_native(
     *,
     source_results: object = (),
     _reviewed_run_token: object | None = None,
+    _reviewed_artifact_resolver: object | None = None,
 ) -> ReviewedNativeExecutionResult:
     """Execute one static route through its family-owned native authority seam."""
 
@@ -2581,16 +3094,55 @@ def execute_reviewed_intent_native(
         _fail(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
     require_reviewed_route_verified(route, freecad=FreeCAD)
     lowered = lower_reviewed_intent(value)
+    artifact_context: ReviewedArtifactContext | None = None
+    artifact_requirement = route.family.artifact_requirement_for(route.operation)
+    if artifact_requirement is not None:
+        if (
+            type(_reviewed_artifact_resolver) is not _ReviewedArtifactRunResolver
+            or _reviewed_run_token is None
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        try:
+            requirement = artifact_requirement.extract(
+                lowered.plan,
+                lowered.result.plan_document,
+                route.operation,
+            )
+            if type(requirement) is not _ReviewedArtifactRequirement:
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            resolution = _reviewed_artifact_resolver.resolve(
+                run_token=_reviewed_run_token,
+                family_id=route.manifest.family_id,
+                operation_id=route.operation.operation_id,
+                artifact_id=requirement.artifact_id,
+                content_sha256=requirement.content_sha256,
+                role_term_ref_id=requirement.role_term_ref_id,
+                schema_term_ref_id=requirement.schema_term_ref_id,
+                media_type=requirement.media_type,
+                maximum_bytes=requirement.maximum_bytes,
+            )
+        except ReviewedIntentExecutionError:
+            raise
+        except (ReviewedArtifactInputError, Exception, SystemExit):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if (
+            type(resolution) is not ReviewedArtifactResolution
+            or type(resolution.artifact_context) is not ReviewedArtifactContext
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        artifact_context = resolution.artifact_context
     context = _ReviewedFamilyExecutionContext(
         session=session,
         document=document,
         source_results=source_results,
         run_token=_reviewed_run_token,
+        artifact_context=artifact_context,
     )
     mode = route.family.product_execution_mode(route.operation)
     before: tuple[object, ...]
     update_before: _ReviewedPrimaryUpdateSnapshot | None = None
     update_identities: tuple[EntityIdentity, ...] = ()
+    create_recovery: _ReviewedCreateRecoveryCapsule | None = None
     try:
         before = tuple(document.Objects)
         if mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY:
@@ -2607,6 +3159,13 @@ def execute_reviewed_intent_native(
             source = source_results[0]
             if not hmac.compare_digest(update_before.state_sha256, source.state_sha256):
                 _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        else:
+            create_recovery = _prepare_create_recovery(
+                route.family,
+                document,
+                route.operation,
+                context,
+            )
         family_result = route.family.apply_plan(
             document,
             lowered.plan,
@@ -2623,7 +3182,7 @@ def execute_reviewed_intent_native(
         )
         result = family_result.object
         after = tuple(document.Objects)
-    except ReviewedIntentExecutionError:
+    except ReviewedIntentExecutionError as error:
         if update_before is not None:
             recovery = _ReviewedPrimaryUpdateRecovery(
                 family=route.family,
@@ -2637,6 +3196,8 @@ def execute_reviewed_intent_native(
             )
             if not _rollback_primary_update(recovery):
                 _fail(ReviewedIntentExecutionErrorCode.ROLLBACK_FAILED)
+        if create_recovery is not None:
+            raise _ReviewedCreateRecoveryExecutionError(error.code, create_recovery) from None
         raise
     except BaseException:
         if update_before is not None:
@@ -2652,6 +3213,11 @@ def execute_reviewed_intent_native(
             )
             if not _rollback_primary_update(recovery):
                 _fail(ReviewedIntentExecutionErrorCode.ROLLBACK_FAILED)
+        if create_recovery is not None:
+            raise _ReviewedCreateRecoveryExecutionError(
+                ReviewedIntentExecutionErrorCode.EXECUTION_FAILED,
+                create_recovery,
+            ) from None
         _fail(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
     owned = family_result.owned_objects
     recovery: _ReviewedPrimaryUpdateRecovery | None = None
@@ -2720,10 +3286,11 @@ def execute_reviewed_intent_native(
             owned_objects=owned,
             state_sha256=state_sha256,
             _update_recovery=recovery,
+            _create_recovery=create_recovery,
             _verified_execution_context=context,
             _verified_dynamic_resolution=dynamic_resolution,
         )
-    except ReviewedIntentExecutionError:
+    except ReviewedIntentExecutionError as error:
         if update_before is not None:
             if recovery is None:
                 recovery = _ReviewedPrimaryUpdateRecovery(
@@ -2738,6 +3305,15 @@ def execute_reviewed_intent_native(
                 )
             if not _rollback_primary_update(recovery):
                 _fail(ReviewedIntentExecutionErrorCode.ROLLBACK_FAILED)
+        if create_recovery is not None:
+            raise _ReviewedCreateRecoveryExecutionError(error.code, create_recovery) from None
+        raise
+    except BaseException:
+        if create_recovery is not None:
+            raise _ReviewedCreateRecoveryExecutionError(
+                ReviewedIntentExecutionErrorCode.EXECUTION_FAILED,
+                create_recovery,
+            ) from None
         raise
 
 
