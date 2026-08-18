@@ -196,8 +196,8 @@ def test_static_manifest_exact_identities_and_adapter_factory() -> None:
 
 
 def test_shared_routes_strictly_dual_bind_legacy_formal_and_full_manifest_identity() -> None:
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 78
-    assert CURRENT_REVIEWED_INTENT_ROUTES[-45:-39] == REVIEWED_PARTDESIGN_PROMOTION_ROUTES
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 81
+    assert CURRENT_REVIEWED_INTENT_ROUTES[-48:-42] == REVIEWED_PARTDESIGN_PROMOTION_ROUTES
     assert (
         tuple(
             (route.operation_id, route.semantic_operation)

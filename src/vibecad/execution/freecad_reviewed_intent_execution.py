@@ -48,6 +48,10 @@ from vibecad.execution.freecad_part_curve_reviewed_execution import (
 from vibecad.execution.freecad_part_datum_reviewed_execution import (
     PART_DATUM_REVIEWED_FAMILY_SPEC,
 )
+from vibecad.execution.freecad_part_file_import_reviewed_execution import (
+    PART_FILE_IMPORT_REVIEWED_FAMILY_SPEC,
+    build_part_file_import_reviewed_family_descriptor,
+)
 from vibecad.execution.freecad_part_offset_projection_reviewed_execution import (
     PART_OFFSET_RESULT_INVARIANTS,
     PART_OFFSET_REVIEWED_FAMILY_SPEC,
@@ -1890,6 +1894,13 @@ _APP_ONE_SOURCE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     requires_same_run_sources=True,
 )
 
+# File import is a CREATE-only product route.  Its durable result is the
+# detached native shape; the private staging lease is closed by the family
+# rule before native execution returns.  Late managed-adoption failures are
+# therefore covered by the shared document CREATE rollback, while exact
+# artifact authority remains mandatory before the family callback can run.
+_PART_FILE_IMPORT_FAMILY: Final = build_part_file_import_reviewed_family_descriptor()
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReviewedIntentRoute:
@@ -2121,6 +2132,10 @@ REVIEWED_APP_ROUTES: Final = (
     *REVIEWED_APP_NO_SOURCE_ROUTES,
     *REVIEWED_APP_ONE_SOURCE_ROUTES,
 )
+REVIEWED_PART_FILE_IMPORT_ROUTES: Final = _routes_for_family(
+    _PART_FILE_IMPORT_FAMILY,
+    PART_FILE_IMPORT_REVIEWED_FAMILY_SPEC.operation_ids,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
@@ -2135,6 +2150,9 @@ _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PARTDESIGN_DRESSUP_ROUTES,
     REVIEWED_PARTDESIGN_GROOVE_ROUTES,
     REVIEWED_APP_ROUTES,
+    # Preserve every pre-existing route's ordinal and route-contract digest;
+    # the three full-identity artifact routes are an append-only extension.
+    REVIEWED_PART_FILE_IMPORT_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -3327,6 +3345,7 @@ __all__ = [
     "REVIEWED_PART_CURVE_ROUTES",
     "REVIEWED_PART_DATUM_ROUTES",
     "REVIEWED_PART_OFFSET_ROUTES",
+    "REVIEWED_PART_FILE_IMPORT_ROUTES",
     "REVIEWED_PART_PROFILE_SURFACE_ROUTES",
     "REVIEWED_PART_PRIMITIVE_ROUTES",
     "REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES",

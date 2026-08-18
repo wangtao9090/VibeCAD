@@ -229,7 +229,7 @@ def test_descriptor_is_allowlisted_and_changes_only_its_route_contract() -> None
         subject_type_term=clone.subject_type_term,
     )
 
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 78
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 81
     assert unchanged.route_contract_sha256 == REVIEWED_PART_BOX_ROUTE.route_contract_sha256
     assert route.route_contract_sha256 != REVIEWED_PART_BOX_ROUTE.route_contract_sha256
     sibling = REVIEWED_PART_PRIMITIVE_ROUTES[1]

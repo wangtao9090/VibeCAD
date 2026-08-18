@@ -1,4 +1,4 @@
-"""Focused unregistered integration for reviewed artifact families."""
+"""Focused integration for registered Import and withheld Image artifacts."""
 
 from __future__ import annotations
 
@@ -214,7 +214,7 @@ def _install_unregistered(
 
 
 @pytest.mark.parametrize("operation", tuple(PartFileImportOperation))
-def test_unregistered_import_routes_resolve_and_narrow_exact_artifacts(
+def test_import_family_descriptor_resolves_and_narrows_exact_artifacts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     operation: PartFileImportOperation,
@@ -269,7 +269,7 @@ def test_unregistered_import_routes_resolve_and_narrow_exact_artifacts(
 
 
 @pytest.mark.parametrize("mode", ("missing", "tamper"))
-def test_unregistered_import_resolver_failure_is_pre_mutation(
+def test_import_family_descriptor_resolver_failure_is_pre_mutation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     mode: str,
@@ -423,14 +423,27 @@ def test_unregistered_image_resolver_failure_is_pre_mutation(
     resolver.close()
 
 
-def test_artifact_families_remain_unregistered_and_nonartifact_context_is_none(
+def test_import_is_registered_image_remains_withheld_and_nonartifact_context_is_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert len(shared.CURRENT_REVIEWED_INTENT_ROUTES) == 78
+    assert len(shared.CURRENT_REVIEWED_INTENT_ROUTES) == 81
+    assert tuple(
+        route.operation.operation_id for route in shared.REVIEWED_PART_FILE_IMPORT_ROUTES
+    ) == ("brep", "iges", "step")
+    assert all(
+        route.family.formal_semantic_binding.value == "full_identity"
+        and route.family.artifact_requirement_for(route.operation) is not None
+        and route.family.product_execution_mode(route.operation).value == "create"
+        for route in shared.REVIEWED_PART_FILE_IMPORT_ROUTES
+    )
     assert not any(
-        route.manifest.family_id in {"freecad_part_file_import", "freecad_imageplane"}
+        route.manifest.family_id == "freecad_imageplane"
         for route in shared.CURRENT_REVIEWED_INTENT_ROUTES
     )
+    image_family = build_imageplane_reviewed_family_descriptor()
+    assert IMAGEPLANE_OPERATION_SPEC.operation_id == "place_or_edit_image_plane"
+    assert image_family.product_execution_mode(IMAGEPLANE_OPERATION_SPEC).value == "create"
+    assert image_family.minimum_sources == image_family.maximum_sources == 0
     base = shared.REVIEWED_PART_BOX_ROUTE.family
     seen: list[object] = []
 

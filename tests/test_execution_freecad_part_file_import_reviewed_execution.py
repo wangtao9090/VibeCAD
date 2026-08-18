@@ -28,6 +28,8 @@ from vibecad.execution.freecad_part_file_import_reviewed_execution import (
     validate_part_file_import_reviewed_plan,
 )
 from vibecad.execution.freecad_reviewed_intent_execution import (
+    CURRENT_REVIEWED_INTENT_ROUTES,
+    REVIEWED_PART_FILE_IMPORT_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
     _ReviewedFamilyExecutionContext,
@@ -184,10 +186,15 @@ def test_part_file_import_family_slice_freezes_three_exact_routes_and_blockers()
     assert PART_FILE_IMPORT_REVIEWED_FAMILY_SPEC.result_invariants is (
         PART_FILE_IMPORT_RESULT_INVARIANTS
     )
-    assert PART_FILE_IMPORT_SHARED_REGISTRATION_READY is False
-    assert PART_FILE_IMPORT_REVIEWED_FAMILY_SPEC.shared_registration_ready is False
-    assert PART_FILE_IMPORT_SHARED_BLOCKERS == (
-        "trusted-artifact-catalog-not-connected-to-program-run",
+    assert PART_FILE_IMPORT_SHARED_REGISTRATION_READY is True
+    assert PART_FILE_IMPORT_REVIEWED_FAMILY_SPEC.shared_registration_ready is True
+    assert PART_FILE_IMPORT_SHARED_BLOCKERS == ()
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 81
+    assert CURRENT_REVIEWED_INTENT_ROUTES[-3:] == REVIEWED_PART_FILE_IMPORT_ROUTES
+    assert tuple(route.operation.operation_id for route in REVIEWED_PART_FILE_IMPORT_ROUTES) == (
+        "brep",
+        "iges",
+        "step",
     )
     adapter = part_file_import_reviewed_adapter_factory(_Sink())
     assert type(adapter) is FreeCADPartFileImportAdapter
@@ -199,6 +206,15 @@ def test_part_file_import_family_slice_freezes_three_exact_routes_and_blockers()
         )
         namespace, version, term_id, digest = reviewed.semantic_term.semantic_identity
         semantic = f"{namespace}/{version}/{term_id}@{digest}"
+        route = next(
+            item
+            for item in REVIEWED_PART_FILE_IMPORT_ROUTES
+            if item.operation.operation_id == operation.value
+        )
+        assert route.semantic_operation == semantic
+        assert route.family.formal_semantic_binding.value == "full_identity"
+        assert route.family.artifact_requirement_for(route.operation) is not None
+        assert route.family.product_execution_mode(route.operation).value == "create"
         assert (
             resolve_part_file_import_reviewed_operation(
                 f"{PART_FILE_IMPORT_MANIFEST.family_id}.{operation.value}",

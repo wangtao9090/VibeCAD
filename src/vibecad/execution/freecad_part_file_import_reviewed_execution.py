@@ -1,12 +1,11 @@
 """Private product contracts for reviewed Part file imports.
 
-This family is intentionally not registered by the shared dispatcher yet.
-The existing native rule needs three engine-owned capabilities that the
-current reviewed-family execution context does not carry: an exact artifact
-``DocumentRef``, its authenticated ``ArtifactReader``, and a private host
-stager.  The shared callback therefore fails closed before mutation unless
-that complete authority bundle is present.  No path, label, store key, or
-document-object fallback is accepted here.
+The shared dispatcher registers this family only through the run-scoped
+artifact resolver.  The native rule needs three engine-owned capabilities:
+an exact artifact ``DocumentRef``, its authenticated ``ArtifactReader``, and
+a private host stager.  The shared callback therefore fails closed before
+mutation unless that complete authority bundle is present.  No path, label,
+store key, or document-object fallback is accepted here.
 """
 
 from __future__ import annotations
@@ -90,11 +89,11 @@ _PRODUCT_IDENTITIES: Final = MappingProxyType(
 )
 PART_FILE_IMPORT_REVIEWED_PRODUCT_IDENTITIES: Final = tuple(_PRODUCT_IDENTITIES)
 
-# Registration remains deliberately disabled until the shared executor owns
-# and supplies this authority.  These strings are stable integration facts,
-# not runtime feature detection.
-PART_FILE_IMPORT_SHARED_REGISTRATION_READY: Final = False
-PART_FILE_IMPORT_SHARED_BLOCKERS: Final = ("trusted-artifact-catalog-not-connected-to-program-run",)
+# The shared executor now owns and supplies exact run-scoped artifact
+# authority.  These constants freeze that registration decision for tests and
+# private integration consumers; they are not runtime feature detection.
+PART_FILE_IMPORT_SHARED_REGISTRATION_READY: Final = True
+PART_FILE_IMPORT_SHARED_BLOCKERS: Final = ()
 
 _ARTIFACT_REQUIREMENT_CONTRACT_SHA256: Final = hashlib.sha256(
     b"vibecad-reviewed-part-file-import-artifact-requirement-v1\0"
@@ -542,7 +541,7 @@ def execute_part_file_import_reviewed_plan(
 
 @dataclass(frozen=True, slots=True)
 class PartFileImportReviewedFamilySpec:
-    """Family descriptor payload, intentionally not registered yet."""
+    """Family descriptor payload registered by the shared dispatcher."""
 
     manifest: FamilyBatchManifest
     subject_type_term: BridgeTermRef
@@ -571,7 +570,7 @@ PART_FILE_IMPORT_REVIEWED_FAMILY_SPEC: Final = PartFileImportReviewedFamilySpec(
 
 
 def build_part_file_import_reviewed_family_descriptor() -> object:
-    """Return the complete private descriptor; registration stays deliberately separate."""
+    """Return the complete private descriptor used by shared registration."""
 
     from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
         _ReviewedIntentFamilyDescriptor,

@@ -99,8 +99,8 @@ def test_offset_descriptor_has_three_exact_reviewed_routes() -> None:
     assert family.manifest is PART_OFFSET_MANIFEST
     assert PART_OFFSET_REVIEWED_PRODUCT_OPERATIONS == tuple(PartOffsetOperation)
     assert len(routes) == len(PART_OFFSET_REVIEWED_PRODUCT_IDENTITIES) == 3
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 78
-    assert CURRENT_REVIEWED_INTENT_ROUTES[-48:-45] == routes
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 81
+    assert CURRENT_REVIEWED_INTENT_ROUTES[-51:-48] == routes
     assert tuple(item.operation.operation_id for item in routes) == (
         PART_OFFSET_REVIEWED_FAMILY_SPEC.operation_ids
     )
