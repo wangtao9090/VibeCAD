@@ -21,6 +21,9 @@ from vibecad.execution.freecad_intent_capabilities import (
     FreeCadIntentCapabilitySpec,
     build_freecad_intent_capability_catalog,
 )
+from vibecad.execution.freecad_partdesign_reference_reviewed_execution import (
+    FREECAD_REFERENCE_REVIEWED_ADAPTER_DESCRIPTOR,
+)
 from vibecad.execution.freecad_reviewed_family_capabilities import (
     current_freecad_reviewed_family_capability_specs,
 )
@@ -48,10 +51,7 @@ from vibecad.intent_bridge.freecad_partdesign_promotion_adapter import (
     FREECAD_PARTDESIGN_PROMOTION_ADAPTER_DESCRIPTOR,
     PROMOTION_OPERATION_TERMS,
 )
-from vibecad.intent_bridge.freecad_partdesign_reference_adapter import (
-    FREECAD_REFERENCE_ADAPTER_DESCRIPTOR,
-    REFERENCE_OPERATION_TERMS,
-)
+from vibecad.intent_bridge.freecad_partdesign_reference_adapter import REFERENCE_OPERATION_TERMS
 from vibecad.intent_bridge.freecad_planar_mechanical_adapter import (
     FREECAD_PLANAR_MECHANICAL_ADAPTER_DESCRIPTOR,
 )
@@ -85,8 +85,8 @@ from vibecad.parametric.freecad_partdesign_promotion_rules import (
     PartDesignPromotionOperation,
 )
 from vibecad.parametric.freecad_partdesign_reference_rules import (
-    REFERENCE_RULE_CONTRACT_SHA256,
-    REFERENCE_RULE_ID,
+    REFERENCE_REVIEWED_SELECTION_RULE_CONTRACT_SHA256,
+    REFERENCE_REVIEWED_SELECTION_RULE_ID,
     PartDesignReferenceKind,
 )
 from vibecad.parametric.freecad_partdesign_sketch_rules import (
@@ -230,9 +230,9 @@ def _legacy_freecad_intent_capability_specs() -> tuple[FreeCadIntentCapabilitySp
             operation_id=f"partdesign.{kind.value}",
             semantic_operation=REFERENCE_OPERATION_TERMS[kind].term_id,
             native_type_id=_REFERENCE_NATIVE_TYPES[kind],
-            adapter=FREECAD_REFERENCE_ADAPTER_DESCRIPTOR,
-            rule_id=REFERENCE_RULE_ID,
-            rule_contract_sha256=REFERENCE_RULE_CONTRACT_SHA256,
+            adapter=FREECAD_REFERENCE_REVIEWED_ADAPTER_DESCRIPTOR,
+            rule_id=REFERENCE_REVIEWED_SELECTION_RULE_ID,
+            rule_contract_sha256=REFERENCE_REVIEWED_SELECTION_RULE_CONTRACT_SHA256,
         )
         for kind in PartDesignReferenceKind
     )

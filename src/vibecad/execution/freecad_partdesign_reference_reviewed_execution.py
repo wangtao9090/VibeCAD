@@ -736,6 +736,61 @@ def build_partdesign_reference_reviewed_family_descriptor() -> object:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class PartDesignReferenceRouteRegistrationHandoff:
+    """Exact inert handoff for the later shared-route registration commit."""
+
+    manifest_sha256: str
+    adapter_id: str
+    adapter_version: str
+    adapter_contract_sha256: str
+    rule_id: str
+    rule_contract_sha256: str
+    operation_identities: tuple[tuple[str, str], ...]
+    blockers: tuple[str, ...]
+
+    @property
+    def shared_registration_ready(self) -> bool:
+        return False
+
+
+PARTDESIGN_REFERENCE_ROUTE_REGISTRATION_HANDOFF: Final = (
+    PartDesignReferenceRouteRegistrationHandoff(
+        manifest_sha256=PARTDESIGN_REFERENCE_COMPAT_MANIFEST.manifest_sha256,
+        adapter_id=PARTDESIGN_REFERENCE_COMPAT_MANIFEST.adapter.adapter_id,
+        adapter_version=PARTDESIGN_REFERENCE_COMPAT_MANIFEST.adapter.adapter_version,
+        adapter_contract_sha256=(
+            PARTDESIGN_REFERENCE_COMPAT_MANIFEST.adapter.adapter_contract_sha256
+        ),
+        rule_id=PARTDESIGN_REFERENCE_COMPAT_MANIFEST.rule_id,
+        rule_contract_sha256=PARTDESIGN_REFERENCE_COMPAT_MANIFEST.rule_contract_sha256,
+        operation_identities=PARTDESIGN_REFERENCE_REVIEWED_PRODUCT_IDENTITIES,
+        blockers=(
+            "shared-dispatcher-registration-not-in-family-scope",
+            "intel-and-arm-release-attestation-refresh-pending",
+        ),
+    )
+)
+
+
+def build_partdesign_reference_candidate_routes() -> tuple[object, ...]:
+    """Build, but do not register, five routes against the exact current formal specs."""
+
+    from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
+        _routes_for_family,
+    )
+
+    routes = _routes_for_family(
+        build_partdesign_reference_reviewed_family_descriptor(),
+        PARTDESIGN_REFERENCE_REVIEWED_FAMILY_SPEC.operation_ids,
+    )
+    if tuple((item.operation_id, item.semantic_operation) for item in routes) != (
+        PARTDESIGN_REFERENCE_ROUTE_REGISTRATION_HANDOFF.operation_identities
+    ):
+        _integrity_failure()
+    return routes
+
+
 __all__ = [
     "FREECAD_REFERENCE_REVIEWED_ADAPTER_DESCRIPTOR",
     "PARTDESIGN_REFERENCE_COMPAT_MANIFEST",
@@ -744,9 +799,12 @@ __all__ = [
     "PARTDESIGN_REFERENCE_REVIEWED_FAMILY_SPEC",
     "PARTDESIGN_REFERENCE_REVIEWED_OPERATIONS",
     "PARTDESIGN_REFERENCE_REVIEWED_PRODUCT_IDENTITIES",
+    "PARTDESIGN_REFERENCE_ROUTE_REGISTRATION_HANDOFF",
     "PartDesignReferenceOwnershipClosure",
     "PartDesignReferenceReviewedFamilySpec",
+    "PartDesignReferenceRouteRegistrationHandoff",
     "PartDesignReferenceSourceRole",
+    "build_partdesign_reference_candidate_routes",
     "build_partdesign_reference_reviewed_family_descriptor",
     "execute_partdesign_reference_reviewed_plan",
     "execute_partdesign_reference_reviewed_plan_with_sources",

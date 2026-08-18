@@ -33,6 +33,9 @@ from vibecad.execution.freecad_builtin_intent_capabilities import (
 from vibecad.execution.freecad_capability_projection_v2 import (
     FreeCadPromotionVerificationBinding,
 )
+from vibecad.execution.freecad_partdesign_reference_reviewed_execution import (
+    FREECAD_REFERENCE_REVIEWED_ADAPTER_DESCRIPTOR,
+)
 from vibecad.execution.freecad_reviewed_verification import (
     ReviewedConformanceCase,
     ReviewedConformanceCaseManifest,
@@ -105,7 +108,6 @@ from vibecad.intent_bridge.freecad_partdesign_promotion_adapter import (
     PROMOTION_REQUEST_TERMS,
 )
 from vibecad.intent_bridge.freecad_partdesign_reference_adapter import (
-    FREECAD_REFERENCE_ADAPTER_DESCRIPTOR,
     REFERENCE_CAPABILITY_DOCUMENT_ROLE_TERM,
     REFERENCE_CAPABILITY_SCHEMA_TERM,
     REFERENCE_INTENT_DOCUMENT_ROLE_TERM,
@@ -212,8 +214,8 @@ from vibecad.parametric.freecad_partdesign_promotion_rules import (
 from vibecad.parametric.freecad_partdesign_reference_rules import (
     MAX_REFERENCE_PLAN_BYTES,
     REFERENCE_PLAN_MEDIA_TYPE,
-    REFERENCE_RULE_CONTRACT_SHA256,
-    REFERENCE_RULE_ID,
+    REFERENCE_REVIEWED_SELECTION_RULE_CONTRACT_SHA256,
+    REFERENCE_REVIEWED_SELECTION_RULE_ID,
     PartDesignReferenceKind,
     PartDesignReferencePlan,
     ReferenceExecutionBindings,
@@ -499,9 +501,9 @@ _FAMILY_CONTRACTS: Final = (
     ),
     _LegacyFamilyContract(
         family_id="vcad.freecad.legacy.partdesign-reference",
-        adapter=FREECAD_REFERENCE_ADAPTER_DESCRIPTOR,
-        rule_id=REFERENCE_RULE_ID,
-        rule_contract_sha256=REFERENCE_RULE_CONTRACT_SHA256,
+        adapter=FREECAD_REFERENCE_REVIEWED_ADAPTER_DESCRIPTOR,
+        rule_id=REFERENCE_REVIEWED_SELECTION_RULE_ID,
+        rule_contract_sha256=REFERENCE_REVIEWED_SELECTION_RULE_CONTRACT_SHA256,
         intent_role_term=REFERENCE_INTENT_DOCUMENT_ROLE_TERM,
         capability_role_term=REFERENCE_CAPABILITY_DOCUMENT_ROLE_TERM,
         capability_schema_term=REFERENCE_CAPABILITY_SCHEMA_TERM,
@@ -761,6 +763,18 @@ def _build_case_manifest(manifest: FamilyBatchManifest) -> ReviewedConformanceCa
 
 LEGACY_REVIEWED_CASE_MANIFESTS: Final = tuple(
     _build_case_manifest(manifest) for manifest in LEGACY_REVIEWED_FAMILY_MANIFESTS
+)
+
+PARTDESIGN_REFERENCE_V2_VERIFICATION_FAMILY_MANIFEST: Final = next(
+    item
+    for item in LEGACY_REVIEWED_FAMILY_MANIFESTS
+    if item.adapter is FREECAD_REFERENCE_REVIEWED_ADAPTER_DESCRIPTOR
+)
+PARTDESIGN_REFERENCE_V2_REVIEWED_HOST_CASE_MANIFEST: Final = next(
+    item
+    for item in LEGACY_REVIEWED_CASE_MANIFESTS
+    if item.family_manifest_sha256
+    == PARTDESIGN_REFERENCE_V2_VERIFICATION_FAMILY_MANIFEST.manifest_sha256
 )
 
 
@@ -2106,7 +2120,9 @@ def _execute_reference_operation(
         _fail("legacy_reviewed/reference/create")
     create_facts = {
         "native_type_id": result.TypeId,
-        "support_subname": bindings.support_subname,
+        "selection_receipt_sha256": bindings.selection_receipt.receipt_sha256,
+        "selection_kind": bindings.selection_receipt.subelement_kind.value,
+        "selection_semantic_role": bindings.selection_receipt.semantic_role.value,
         "geometry": _reference_geometry_facts(result),
     }
     before_edit = _reference_geometry_facts(result)
@@ -3203,7 +3219,10 @@ class _LegacyFamilyExecutor:
                         self._manifest,
                         Path(temporary),
                     )
-                elif self._manifest.adapter.adapter_id == "freecad_partdesign_reference_adapter":
+                elif (
+                    self._manifest.adapter.adapter_id
+                    == "freecad_partdesign_reference_reviewed_adapter"
+                ):
                     facts = _execute_reference_operation(
                         self._freecad,
                         case.operation_id,
@@ -3307,5 +3326,7 @@ __all__ = (
     "LEGACY_REVIEWED_OPERATION_SPECS",
     "LEGACY_REVIEWED_VERIFIER_ID",
     "LEGACY_REVIEWED_VERIFIER_VERSION",
+    "PARTDESIGN_REFERENCE_V2_REVIEWED_HOST_CASE_MANIFEST",
+    "PARTDESIGN_REFERENCE_V2_VERIFICATION_FAMILY_MANIFEST",
     "build_managed_freecad_legacy_reviewed_verification_receipts",
 )

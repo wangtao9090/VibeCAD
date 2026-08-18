@@ -30,6 +30,7 @@ from vibecad.execution.freecad_current_managed_verification import (
 from vibecad.execution.freecad_legacy_reviewed_verification import (
     LEGACY_REVIEWED_CASE_MANIFESTS,
     LEGACY_REVIEWED_FAMILY_MANIFESTS,
+    PARTDESIGN_REFERENCE_V2_VERIFICATION_FAMILY_MANIFEST,
 )
 from vibecad.execution.freecad_part_a_verification import (
     PART_CORE_REVIEWED_HOST_CASE_MANIFEST,
@@ -284,6 +285,29 @@ def test_fast_managed_receipts_close_exact_coverage_in_sequential_order(
     assert (
         result.verification_by_native_type["Sketcher::SketchObject"].test_receipt_sha256
         != bootstrap_receipt.test_receipt_sha256
+    )
+    reference_receipt = next(
+        item
+        for item in managed_receipts
+        if item.contract.family_manifest_sha256
+        == PARTDESIGN_REFERENCE_V2_VERIFICATION_FAMILY_MANIFEST.manifest_sha256
+    )
+    reference_operation_ids = {
+        item.operation_id
+        for item in PARTDESIGN_REFERENCE_V2_VERIFICATION_FAMILY_MANIFEST.operations
+    }
+    assert {
+        item.operation_id
+        for item in result.formal_operations
+        if item.test_receipt_sha256 == reference_receipt.test_receipt_sha256
+    } == reference_operation_ids
+    assert (
+        reference_receipt.contract.adapter_contract_sha256
+        == PARTDESIGN_REFERENCE_V2_VERIFICATION_FAMILY_MANIFEST.adapter.adapter_contract_sha256
+    )
+    assert (
+        reference_receipt.contract.rule_contract_sha256
+        == PARTDESIGN_REFERENCE_V2_VERIFICATION_FAMILY_MANIFEST.rule_contract_sha256
     )
     assert result.runtime_backend == _backend()
     assert freecad.listDocuments() == {}

@@ -15,7 +15,13 @@ from vibecad.execution.freecad_legacy_reviewed_verification import (
     LEGACY_REVIEWED_FAMILY_MANIFESTS,
     LEGACY_REVIEWED_OPERATION_SPEC_BY_ID,
     LEGACY_REVIEWED_OPERATION_SPECS,
+    PARTDESIGN_REFERENCE_V2_REVIEWED_HOST_CASE_MANIFEST,
+    PARTDESIGN_REFERENCE_V2_VERIFICATION_FAMILY_MANIFEST,
     build_managed_freecad_legacy_reviewed_verification_receipts,
+)
+from vibecad.execution.freecad_partdesign_reference_reviewed_execution import (
+    FREECAD_REFERENCE_REVIEWED_ADAPTER_DESCRIPTOR,
+    PARTDESIGN_REFERENCE_REVIEWED_PRODUCT_IDENTITIES,
 )
 from vibecad.execution.freecad_reviewed_verification import (
     REQUIRED_REVIEWED_CONFORMANCE_FACETS,
@@ -25,7 +31,7 @@ from vibecad.execution.freecad_reviewed_verification import (
 _EXPECTED_ADAPTER_IDS = {
     "freecad_parametric_groove_adapter",
     "freecad_partdesign_promotion_adapter",
-    "freecad_partdesign_reference_adapter",
+    "freecad_partdesign_reference_reviewed_adapter",
     "freecad_partdesign_primitive_adapter",
     "freecad_planar_mechanical_v1_adapter",
     "freecad_partdesign_dressup_transform_adapter",
@@ -92,6 +98,35 @@ def test_legacy_verification_inventory_is_import_only_and_has_no_promotion_side_
     assert tuple(
         inspect.signature(build_managed_freecad_legacy_reviewed_verification_receipts).parameters
     ) == ("freecad",)
+
+
+def test_reference5_v2_verification_manifest_and_all_facets_match_current_formal() -> None:
+    manifest = PARTDESIGN_REFERENCE_V2_VERIFICATION_FAMILY_MANIFEST
+    case_manifest = PARTDESIGN_REFERENCE_V2_REVIEWED_HOST_CASE_MANIFEST
+    formal = {item.operation_id: item for item in current_freecad_intent_capability_specs()}
+    operation_ids = tuple(item[0] for item in PARTDESIGN_REFERENCE_REVIEWED_PRODUCT_IDENTITIES)
+
+    assert manifest.adapter is FREECAD_REFERENCE_REVIEWED_ADAPTER_DESCRIPTOR
+    assert {item.operation_id for item in manifest.operations} == set(operation_ids)
+    assert case_manifest.family_manifest_sha256 == manifest.manifest_sha256
+    assert len(case_manifest.cases) == 5 * 7
+    assert {(item.operation_id, item.facet) for item in case_manifest.cases} == {
+        (operation_id, facet)
+        for operation_id in operation_ids
+        for facet in REQUIRED_REVIEWED_CONFORMANCE_FACETS
+    }
+    for operation in manifest.operations:
+        spec = formal[operation.operation_id]
+        assert spec.adapter_id == manifest.adapter.adapter_id
+        assert spec.adapter_version == manifest.adapter.adapter_version == "2.0.0"
+        assert spec.adapter_contract_sha256 == manifest.adapter.adapter_contract_sha256
+        assert spec.rule_id == manifest.rule_id
+        assert spec.rule_contract_sha256 == manifest.rule_contract_sha256
+        assert operation.specification_sha256 in {
+            item.operation_specification_sha256
+            for item in case_manifest.cases
+            if item.operation_id == operation.operation_id
+        }
 
 
 @pytest.mark.slow

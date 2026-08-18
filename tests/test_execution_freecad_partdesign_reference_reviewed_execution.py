@@ -17,11 +17,15 @@ from vibecad.execution.freecad_partdesign_reference_reviewed_execution import (
     PARTDESIGN_REFERENCE_COMPAT_MANIFEST,
     PARTDESIGN_REFERENCE_REQUIRED_SOURCE_ROLES,
     PARTDESIGN_REFERENCE_REVIEWED_OPERATIONS,
+    PARTDESIGN_REFERENCE_REVIEWED_PRODUCT_IDENTITIES,
+    PARTDESIGN_REFERENCE_ROUTE_REGISTRATION_HANDOFF,
     _authenticated_bindings,
+    build_partdesign_reference_candidate_routes,
     build_partdesign_reference_reviewed_family_descriptor,
     execute_partdesign_reference_reviewed_plan_with_sources,
 )
 from vibecad.execution.freecad_reviewed_intent_execution import (
+    CURRENT_REVIEWED_INTENT_ROUTES,
     REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedNativeExecutionResult,
@@ -650,4 +654,27 @@ def test_private_descriptor_has_five_reference_result_contracts_without_registra
     )
     assert all(
         item.semantic_roles == (SemanticRole.SUPPORT,) for item in descriptor.product_results
+    )
+
+
+def test_candidate_route_handoff_matches_v2_formal_exactly_without_registration() -> None:
+    routes = build_partdesign_reference_candidate_routes()
+    handoff = PARTDESIGN_REFERENCE_ROUTE_REGISTRATION_HANDOFF
+
+    assert tuple((item.operation_id, item.semantic_operation) for item in routes) == (
+        PARTDESIGN_REFERENCE_REVIEWED_PRODUCT_IDENTITIES
+    )
+    assert not {item.operation_id for item in routes}.intersection(
+        item.operation_id for item in CURRENT_REVIEWED_INTENT_ROUTES
+    )
+    assert all(item.manifest is PARTDESIGN_REFERENCE_COMPAT_MANIFEST for item in routes)
+    assert all(
+        item.manifest.adapter.adapter_contract_sha256 == handoff.adapter_contract_sha256
+        and item.manifest.rule_contract_sha256 == handoff.rule_contract_sha256
+        for item in routes
+    )
+    assert handoff.shared_registration_ready is False
+    assert handoff.blockers == (
+        "shared-dispatcher-registration-not-in-family-scope",
+        "intel-and-arm-release-attestation-refresh-pending",
     )

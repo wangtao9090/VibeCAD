@@ -15,6 +15,11 @@ from vibecad.execution.freecad_builtin_intent_capabilities import (
     current_freecad_intent_capability_specs,
     current_freecad_intent_promotion_specs,
 )
+from vibecad.execution.freecad_partdesign_reference_reviewed_execution import (
+    FREECAD_REFERENCE_REVIEWED_ADAPTER_DESCRIPTOR,
+    PARTDESIGN_REFERENCE_COMPAT_MANIFEST,
+    PARTDESIGN_REFERENCE_REVIEWED_PRODUCT_IDENTITIES,
+)
 from vibecad.execution.freecad_reviewed_family_capabilities import (
     current_freecad_reviewed_family_capability_specs,
 )
@@ -86,7 +91,7 @@ def test_current_specs_cover_all_reviewed_adapter_families() -> None:
     assert {item.adapter_id for item in specs} == {
         "freecad_parametric_groove_adapter",
         "freecad_partdesign_promotion_adapter",
-        "freecad_partdesign_reference_adapter",
+        "freecad_partdesign_reference_reviewed_adapter",
         "freecad_partdesign_primitive_adapter",
         "freecad_planar_mechanical_v1_adapter",
         "freecad_partdesign_dressup_transform_adapter",
@@ -94,6 +99,33 @@ def test_current_specs_cover_all_reviewed_adapter_families() -> None:
         "freecad_partdesign_boolean_adapter",
     } | {item.adapter_id for item in reviewed}
     assert all(item.verification is None for item in specs)
+
+
+def test_reference5_current_formal_authority_is_exactly_v2_and_count_stays_125() -> None:
+    specs = current_freecad_intent_capability_specs()
+    reference = tuple(
+        item
+        for item in specs
+        if item.operation_id.startswith("partdesign.")
+        and item.adapter_id == FREECAD_REFERENCE_REVIEWED_ADAPTER_DESCRIPTOR.adapter_id
+    )
+
+    assert len(specs) == 125
+    assert {(item.operation_id, item.semantic_operation) for item in reference} == set(
+        PARTDESIGN_REFERENCE_REVIEWED_PRODUCT_IDENTITIES
+    )
+    assert all(item.adapter_version == "2.0.0" for item in reference)
+    assert all(
+        item.adapter_contract_sha256
+        == PARTDESIGN_REFERENCE_COMPAT_MANIFEST.adapter.adapter_contract_sha256
+        for item in reference
+    )
+    assert all(item.rule_id == PARTDESIGN_REFERENCE_COMPAT_MANIFEST.rule_id for item in reference)
+    assert all(
+        item.rule_contract_sha256 == PARTDESIGN_REFERENCE_COMPAT_MANIFEST.rule_contract_sha256
+        for item in reference
+    )
+    assert not any(item.adapter_id == "freecad_partdesign_reference_adapter" for item in specs)
 
 
 def test_native_promotion_keeps_one_owner_for_shared_sketch_type() -> None:
