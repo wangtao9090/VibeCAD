@@ -12,7 +12,7 @@ import pytest
 
 import vibecad.execution.freecad_partdesign_primitive_reviewed_execution as pd_execution
 import vibecad.execution.freecad_reviewed_intent_execution as reviewed_execution
-from test_intent_bridge_freecad_partdesign_primitive_adapter import (
+from tests.test_intent_bridge_freecad_partdesign_primitive_adapter import (
     _graph,
     _MemoryPlanSink,
     _request,

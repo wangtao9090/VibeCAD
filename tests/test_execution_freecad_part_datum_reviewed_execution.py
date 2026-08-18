@@ -11,7 +11,7 @@ import pytest
 import vibecad.execution.freecad_part_datum_reviewed_execution as datum_execution
 import vibecad.execution.freecad_reviewed_intent_execution as shared_execution
 import vibecad.parametric.freecad_part_datum_rules as datum_rules
-from test_intent_bridge_freecad_part_datum_adapter import _graph
+from tests.test_intent_bridge_freecad_part_datum_adapter import _graph
 from vibecad.execution.freecad_builtin_intent_capabilities import (
     current_freecad_intent_capability_specs,
 )
