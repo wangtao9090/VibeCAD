@@ -50,6 +50,9 @@ from vibecad.execution.freecad_reviewed_intent_execution import (
 from vibecad.execution.freecad_reviewed_intent_execution import (
     execute_reviewed_intent_native as _execute_reviewed_intent_native,
 )
+from vibecad.execution.freecad_reviewed_intent_execution import (
+    route_reviewed_intent as _route_reviewed_intent,
+)
 from vibecad.execution.registry import ExecutionProfile, ValueShape, _matches_value_shape
 from vibecad.execution.results import NormalizedToolOutcome
 from vibecad.execution.revisions import (
@@ -2545,8 +2548,13 @@ def _managed_apply_reviewed_intent(
         raise _operation_failure() from None
 
     try:
-        source_values = (source_a, source_b)
-        if source_values == (None, None):
+        route = _route_reviewed_intent(checked)
+        if source_a is None and source_b is not None:
+            raise ValueError
+        source_values = tuple(item for item in (source_a, source_b) if item is not None)
+        if not route.family.minimum_sources <= len(source_values) <= route.family.maximum_sources:
+            raise ValueError
+        if not source_values:
             executed = execution_leaf(session, checked)
         else:
             executed = execution_leaf(
@@ -2555,8 +2563,8 @@ def _managed_apply_reviewed_intent(
                 source_results=reviewed_products.resolve(
                     source_values,
                     read_identity=read_identity,
-                    minimum=2,
-                    maximum=2,
+                    minimum=len(source_values),
+                    maximum=len(source_values),
                 ),
             )
         if type(executed) is not ReviewedNativeExecutionResult:
@@ -2642,6 +2650,11 @@ def _managed_apply_reviewed_intent(
                 and created.valid_shape is not True
             ):
                 raise ValueError
+            adoption_validator = getattr(executed.native_receipt, "validate_adoption", None)
+            if adoption_validator is not None:
+                if not callable(adoption_validator):
+                    raise ValueError
+                adoption_validator(session.doc, obj, created)  # type: ignore[attr-defined]
         reviewed_products.retain(executed, identities[0])
     except Exception:
         if not _rollback_reviewed_document(

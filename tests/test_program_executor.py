@@ -18,6 +18,10 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 import vibecad.execution.executor as executor_module
+import vibecad.execution.freecad_part_profile_surface_reviewed_execution as profile_execution
+from test_execution_freecad_part_profile_surface_reviewed_execution import (
+    _program as reviewed_profile_surface_program,
+)
 from test_intent_bridge_freecad_part_datum_adapter import _graph as _datum_graph
 from test_reviewed_intent_program import reviewed_box_program, reviewed_primitive_program
 from test_reviewed_part_csg_product import reviewed_csg_program
@@ -34,13 +38,20 @@ from vibecad.execution.executor import (
     ExecutorErrorCode,
     InProcessCadExecutor,
 )
+from vibecad.execution.freecad_part_profile_surface_reviewed_execution import (
+    PART_PROFILE_SURFACE_RESULT_INVARIANTS,
+    PartProfileSurfaceOwnershipClosure,
+)
 from vibecad.execution.freecad_reviewed_intent_execution import (
     REVIEWED_PART_BOX_ROUTE,
     REVIEWED_PART_CSG_ROUTES,
     REVIEWED_PART_DATUM_ROUTES,
+    REVIEWED_PART_PROFILE_SURFACE_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
     ReviewedNativeExecutionResult,
+    _ReviewedFamilyExecutionContext,
+    lower_reviewed_intent,
 )
 from vibecad.execution.registry import (
     FieldMetadata,
@@ -73,6 +84,10 @@ from vibecad.parametric.freecad_part_datum_rules import (
     PART_DATUM_NATIVE_TYPE_IDS,
     PartDatumConformanceReceipt,
     PartDatumOperation,
+)
+from vibecad.parametric.freecad_part_profile_surface_rules import (
+    PartProfileSurfaceConformanceReceipt,
+    PartProfileSurfaceOperation,
 )
 from vibecad.validation import ComponentBomMetadata
 from vibecad.workflow.contracts import AcceptanceSpec, ModelCommand, ModelProgram, ValueSource
@@ -133,6 +148,10 @@ class _FakeShape:
         export_error: BaseException | None = None,
         volume: float = 7200.0,
         area: float = 2400.0,
+        shape_type: str = "Solid",
+        edge_count: int = 1,
+        face_count: int = 1,
+        solid_count: int = 1,
         bbox: tuple[float, float, float] = (12.0, 20.0, 30.0),
         center: tuple[float, float, float] = (6.0, 10.0, 15.0),
         bbox_center: tuple[float, float, float] | None = None,
@@ -141,12 +160,19 @@ class _FakeShape:
         self.Area = area
         self.BoundBox = _FakeBoundBox(*bbox, center=bbox_center or center)
         self.CenterOfMass = _FakeVector(*center)
-        self.Solids = (object(),)
+        self.ShapeType = shape_type
+        self.Edges = tuple(object() for _ in range(edge_count))
+        self.Faces = tuple(object() for _ in range(face_count))
+        self.Solids = tuple(object() for _ in range(solid_count))
+        self.Length = max(bbox)
         self.export_error = export_error
         self.export_calls: list[str] = []
 
     def isValid(self) -> bool:
         return True
+
+    def isNull(self) -> bool:  # noqa: N802 - FreeCAD API spelling
+        return False
 
     def exportStep(self, path: str) -> None:  # noqa: N802 - FreeCAD API spelling
         self.export_calls.append(path)
@@ -165,6 +191,10 @@ class _FakeShape:
                 self.CenterOfMass.x,
                 self.CenterOfMass.y,
                 self.CenterOfMass.z,
+                self.ShapeType,
+                len(self.Edges),
+                len(self.Faces),
+                len(self.Solids),
             )
         )
 
@@ -173,6 +203,10 @@ class _FakeShape:
         return _FakeShape(
             volume=self.Volume,
             area=self.Area,
+            shape_type=self.ShapeType,
+            edge_count=len(self.Edges),
+            face_count=len(self.Faces),
+            solid_count=len(self.Solids),
             bbox=(self.BoundBox.XLength, self.BoundBox.YLength, self.BoundBox.ZLength),
             center=(
                 self.CenterOfMass.x + x,
@@ -210,6 +244,9 @@ class _FakeDocument:
 
     def isTouched(self) -> bool:  # noqa: N802 - FreeCAD API spelling
         return False
+
+    def getObject(self, name: str):  # noqa: N802 - FreeCAD API spelling
+        return next((item for item in self.Objects if getattr(item, "Name", None) == name), None)
 
     def openTransaction(self, _label: str) -> None:  # noqa: N802 - FreeCAD API spelling
         self._transaction_objects = tuple(self.Objects)
@@ -2497,6 +2534,235 @@ def test_reviewed_csg_rejects_incomplete_source_pair_without_native_mutation(
     assert [item.result.ok for item in outcomes] == [True, False]
     assert dependency_called is False
     assert len(session.doc.Objects) == 1
+
+
+def test_execute_program_adopts_reviewed_face_as_managed_non_solid(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed_box = reviewed_box_program()
+    reviewed_face = reviewed_profile_surface_program(PartProfileSurfaceOperation.FACE)
+    source_result: ReviewedNativeExecutionResult | None = None
+
+    def execute_reviewed(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        nonlocal source_result
+        if value == reviewed_box:
+            assert source_results == ()
+            obj = session.identity_object
+            obj.Shape = _FakeShape(volume=480.0, area=376.0, bbox=(10.0, 8.0, 6.0))
+            session.doc.Objects = (*session.doc.Objects, obj)
+            source_result = ReviewedNativeExecutionResult(
+                route=REVIEWED_PART_BOX_ROUTE,
+                object=obj,
+                plan_sha256="1" * 64,
+                plan_content_sha256="2" * 64,
+                native_receipt=PartCoreConformanceReceipt(
+                    plan_sha256="1" * 64,
+                    operation=PartCoreOperation.BOX,
+                    object_name=obj.Name,
+                    source_shape_sha256s=(),
+                    result_shape_sha256=hashlib.sha256(
+                        obj.Shape.exportBrepToString().encode()
+                    ).hexdigest(),
+                ),
+            )
+            return source_result
+        assert value == reviewed_face
+        assert source_results == (source_result,)
+        obj = type("ManagedReviewedFace", (), {})()
+        obj.Name = "ReviewedFace"
+        obj.TypeId = REVIEWED_PART_PROFILE_SURFACE_ROUTES[-1].operation.native_type_id
+        obj.Placement = _FakePlacement(0.0)
+        obj.Shape = _FakeShape(
+            volume=0.0,
+            area=64.0,
+            shape_type="Face",
+            edge_count=4,
+            face_count=1,
+            solid_count=0,
+            bbox=(8.0, 8.0, 0.0),
+            center=(4.0, 4.0, 0.0),
+        )
+        obj.State = ("Up-to-date",)
+        obj.isValid = lambda: True
+        session.doc.Objects = (*session.doc.Objects, obj)
+        receipt = PartProfileSurfaceConformanceReceipt(
+            plan_sha256="3" * 64,
+            operation=PartProfileSurfaceOperation.FACE,
+            object_name=obj.Name,
+            source_shape_sha256s=(source_results[0].native_receipt.result_shape_sha256,),
+            result_shape_sha256=hashlib.sha256(obj.Shape.exportBrepToString().encode()).hexdigest(),
+        )
+        return ReviewedNativeExecutionResult(
+            route=REVIEWED_PART_PROFILE_SURFACE_ROUTES[-1],
+            object=obj,
+            plan_sha256="3" * 64,
+            plan_content_sha256="4" * 64,
+            native_receipt=PartProfileSurfaceOwnershipClosure(
+                invariant=PART_PROFILE_SURFACE_RESULT_INVARIANTS[PartProfileSurfaceOperation.FACE],
+                native_receipt=receipt,
+            ),
+        )
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute_reviewed)
+    session = _FakeSession()
+    program = ModelProgram(
+        task_id="task-reviewed-face",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "boundary",
+                "apply_reviewed_intent",
+                args={"intent": reviewed_box.to_mapping()},
+            ),
+            _command(
+                "face",
+                "apply_reviewed_intent",
+                args={
+                    "intent": reviewed_face.to_mapping(),
+                    "source_a": {"command_id": "boundary", "slot": "object"},
+                },
+                depends_on=("boundary",),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-face", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [item.result.ok for item in outcomes] == [True, True]
+    face_result = outcomes[-1].result.value
+    assert face_result["reviewed_operation_id"].endswith(".face")
+    identity = next(
+        identity
+        for _, identity in session.attached_identities
+        if identity.object_id == face_result["object_id"]
+    )
+    observation = face_result["after"]
+    assert identity.semantic_role.value == "feature"
+    assert observation["solid_count"] == 0
+    assert observation["area_mm2"] == 64.0
+    assert observation["volume_mm3"] == 0.0
+    assert session.result_object is source_result.object
+
+
+def test_two_reviewed_primitives_cannot_masquerade_as_ordered_loft_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed_box = reviewed_box_program()
+    reviewed_loft = reviewed_profile_surface_program(PartProfileSurfaceOperation.LOFT)
+    source_results: list[ReviewedNativeExecutionResult] = []
+    native_called = False
+
+    def execute_reviewed(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        if value == reviewed_box:
+            assert source_results == ()
+            index = len(source_results_holder)
+            obj = type("ManagedReviewedSolid", (), {})()
+            obj.Name = f"ReviewedSolid{index}"
+            obj.TypeId = "Part::Box"
+            obj.Length = 10.0
+            obj.Width = 8.0
+            obj.Height = 6.0
+            obj.Placement = _FakePlacement(float(index))
+            obj.Shape = _FakeShape(volume=480.0, area=376.0, bbox=(10.0, 8.0, 6.0))
+            obj.State = []
+            session.doc.Objects = (*session.doc.Objects, obj)
+            digest = f"{index + 5:x}" * 64
+            result = ReviewedNativeExecutionResult(
+                route=REVIEWED_PART_BOX_ROUTE,
+                object=obj,
+                plan_sha256=digest,
+                plan_content_sha256=f"{index + 7:x}" * 64,
+                native_receipt=PartCoreConformanceReceipt(
+                    plan_sha256=digest,
+                    operation=PartCoreOperation.BOX,
+                    object_name=obj.Name,
+                    source_shape_sha256s=(),
+                    result_shape_sha256=hashlib.sha256(
+                        obj.Shape.exportBrepToString().encode()
+                    ).hexdigest(),
+                ),
+            )
+            source_results_holder.append(result)
+            return result
+        assert value == reviewed_loft
+        assert source_results == tuple(source_results_holder)
+        lowered = lower_reviewed_intent(value)
+        return profile_execution.execute_part_profile_surface_reviewed_plan(
+            session.doc,
+            lowered.plan,
+            lowered.payload,
+            lowered.result.plan_document,
+            lowered.route.operation,
+            _ReviewedFamilyExecutionContext(
+                session=session,
+                document=session.doc,
+                source_results=source_results,
+            ),
+        )
+
+    source_results_holder = source_results
+
+    def apply(*args: object, **kwargs: object) -> object:
+        nonlocal native_called
+        del args, kwargs
+        native_called = True
+        raise AssertionError("solid primitives must not reach profile native apply")
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute_reviewed)
+    monkeypatch.setattr(profile_execution, "apply_part_profile_surface_plan", apply)
+    session = _FakeSession()
+    program = ModelProgram(
+        task_id="task-reviewed-loft-source-rejection",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "solid_a",
+                "apply_reviewed_intent",
+                args={"intent": reviewed_box.to_mapping()},
+            ),
+            _command(
+                "solid_b",
+                "apply_reviewed_intent",
+                args={"intent": reviewed_box.to_mapping()},
+            ),
+            _command(
+                "loft",
+                "apply_reviewed_intent",
+                args={
+                    "intent": reviewed_loft.to_mapping(),
+                    "source_a": {"command_id": "solid_a", "slot": "object"},
+                    "source_b": {"command_id": "solid_b", "slot": "object"},
+                },
+                depends_on=("solid_a", "solid_b"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-loft-rejection", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [item.result.ok for item in outcomes] == [True, True, False]
+    assert native_called is False
+    assert len(session.doc.Objects) == 2
 
 
 @pytest.mark.slow

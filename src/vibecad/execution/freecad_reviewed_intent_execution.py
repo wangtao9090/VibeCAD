@@ -41,6 +41,10 @@ from vibecad.execution.freecad_part_curve_reviewed_execution import (
 from vibecad.execution.freecad_part_datum_reviewed_execution import (
     PART_DATUM_REVIEWED_FAMILY_SPEC,
 )
+from vibecad.execution.freecad_part_profile_surface_reviewed_execution import (
+    PART_PROFILE_SURFACE_RESULT_INVARIANTS,
+    PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC,
+)
 from vibecad.execution.freecad_reviewed_part_csg_execution import (
     PART_CSG_REVIEWED_FAMILY_SPEC,
 )
@@ -585,6 +589,40 @@ _PART_DATUM_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     ),
 )
 
+_PART_PROFILE_SURFACE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC.manifest,
+    subject_type_term=PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC.subject_type_term,
+    adapter_factory=PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC.adapter_factory,
+    validate_plan=PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC.validate_plan,
+    execute_plan=PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC.execute_plan,
+    product_results=tuple(
+        _ReviewedProductResultContract(
+            operation_id=operation_id,
+            result_kind=(
+                _ReviewedProductResultKind.SOLID
+                if next(
+                    invariant
+                    for operation, invariant in PART_PROFILE_SURFACE_RESULT_INVARIANTS.items()
+                    if operation.value == operation_id
+                ).solid_count
+                == 1
+                else _ReviewedProductResultKind.VALID_SHAPE
+            ),
+            owned_type_ids=(
+                next(
+                    item.native_type_id
+                    for item in PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC.manifest.operations
+                    if item.operation_id == operation_id
+                ),
+            ),
+            semantic_roles=(SemanticRole.FEATURE,),
+        )
+        for operation_id in PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC.operation_ids
+    ),
+    minimum_sources=1,
+    maximum_sources=8,
+)
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReviewedIntentRoute:
@@ -696,11 +734,16 @@ REVIEWED_PART_DATUM_ROUTES: Final = _routes_for_family(
     _PART_DATUM_FAMILY,
     PART_DATUM_REVIEWED_FAMILY_SPEC.operation_ids,
 )
+REVIEWED_PART_PROFILE_SURFACE_ROUTES: Final = _routes_for_family(
+    _PART_PROFILE_SURFACE_FAMILY,
+    PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC.operation_ids,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
     REVIEWED_PART_CSG_ROUTES,
     REVIEWED_PART_DATUM_ROUTES,
+    REVIEWED_PART_PROFILE_SURFACE_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -1201,6 +1244,7 @@ __all__ = [
     "REVIEWED_PART_CSG_ROUTES",
     "REVIEWED_PART_CURVE_ROUTES",
     "REVIEWED_PART_DATUM_ROUTES",
+    "REVIEWED_PART_PROFILE_SURFACE_ROUTES",
     "REVIEWED_PART_PRIMITIVE_ROUTES",
     "LoweredReviewedIntent",
     "ReviewedIntentExecutionError",
