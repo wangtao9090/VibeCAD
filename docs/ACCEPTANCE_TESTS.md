@@ -169,6 +169,7 @@ open/tombstone 当前 reader 接受自己的 v1/v2 且 writer 写自己的 v2，
 | G14 | 三宿主发布包 | Codex、Claude、WorkBuddy 分别完成恢复、建模和 ResourceLink/资源读取；WorkBuddy 另过兼容适配门 | ☐ |
 | G15 | Guided Photo V3 | 三个公开正例各形成可编辑 review draft；缺尺寸和多物体负例均在 Task 前停止；真实 FreeCAD 证明 DoF、BRep、单实体和参数修改 | ☐ |
 | G16 | 参数联动与边处理 | 派生仿射表达式和语义 Fillet/Chamfer 通过 focused、完整回归、重开编辑及真实 FreeCAD runtime 门；歧义与无效几何原子失败 | ☐ |
+| G17 | Windows qualification | 按 [`WINDOWS_QUALIFICATION.md`](WINDOWS_QUALIFICATION.md) 完成 pinned hosted contracts、双系统 native managed/product gate、`windows.x86_64` reviewed attestation、发布依赖激活和环境清理；计划提交本身不得声称 Windows 已支持 | ☐ |
 
 ## 3. 自动化与打包 Gate
 
