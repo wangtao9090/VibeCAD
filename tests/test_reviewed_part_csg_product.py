@@ -256,9 +256,11 @@ def _identity(index: int, type_id: str) -> EntityIdentity:
     )
 
 
-def _source_fixture() -> tuple[
+def _source_fixture(
+    count: int = 2,
+) -> tuple[
     _Session,
-    tuple[ReviewedNativeExecutionResult, ReviewedNativeExecutionResult],
+    tuple[ReviewedNativeExecutionResult, ...],
 ]:
     document = _Document()
     objects = tuple(
@@ -268,7 +270,7 @@ def _source_fixture() -> tuple[
             type_id=route.operation.native_type_id,
             brep=f"shape-{index}",
         )
-        for index, route in enumerate(REVIEWED_PART_PRIMITIVE_ROUTES[:2])
+        for index, route in enumerate(REVIEWED_PART_PRIMITIVE_ROUTES[:count])
     )
     document.Objects = objects
     identities = {obj: _identity(index, obj.TypeId) for index, obj in enumerate(objects)}
@@ -287,11 +289,11 @@ def _source_fixture() -> tuple[
             ),
         )
         for index, (obj, route) in enumerate(
-            zip(objects, REVIEWED_PART_PRIMITIVE_ROUTES[:2], strict=True)
+            zip(objects, REVIEWED_PART_PRIMITIVE_ROUTES[:count], strict=True)
         )
     )
-    assert len(results) == 2
-    return _Session(document, identities), (results[0], results[1])
+    assert len(results) == count
+    return _Session(document, identities), results
 
 
 @pytest.mark.parametrize(
@@ -338,15 +340,18 @@ def test_reviewed_part_csg_route_table_is_exact_and_closed() -> None:
     }
 
 
-@pytest.mark.parametrize("source_count", (0, 1))
+@pytest.mark.parametrize("source_count", (0, 1, 3))
 def test_shared_csg_descriptor_rejects_non_exact_source_count(source_count: int) -> None:
     session, source_results = _source_fixture()
+    selected_sources = source_results[:source_count]
+    if source_count == 3:
+        selected_sources = (*source_results, source_results[0])
 
     with pytest.raises(ReviewedIntentExecutionError) as caught:
         execute_reviewed_intent_native(
             session,
             reviewed_csg_program(PartCoreOperation.CUT),
-            source_results=source_results[:source_count],
+            source_results=selected_sources,
         )
 
     assert caught.value.code is ReviewedIntentExecutionErrorCode.INVALID_INPUT
@@ -472,7 +477,7 @@ def test_two_existing_reviewed_products_bind_to_pfg_sources() -> None:
 
 
 def test_program_run_state_resolves_ordered_one_to_eight_source_records() -> None:
-    session, source_results = _source_fixture()
+    session, source_results = _source_fixture(8)
     state = executor_module._ReviewedProductRunState()
     for result in source_results:
         state.retain(result, session.read_object_identity(result.object))
@@ -493,12 +498,18 @@ def test_program_run_state_resolves_ordered_one_to_eight_source_records() -> Non
         maximum=8,
     ) == tuple(reversed(source_results))
 
+    assert state.resolve(
+        (source_ids[0], source_ids[0]),
+        read_identity=session.read_object_identity,
+        minimum=2,
+        maximum=2,
+    ) == (source_results[0], source_results[0])
     with pytest.raises(RuntimeError):
         state.resolve(
-            (source_ids[0], source_ids[0]),
+            ("object_ffffffffffffffffffffffffffffffff",),
             read_identity=session.read_object_identity,
-            minimum=2,
-            maximum=2,
+            minimum=1,
+            maximum=8,
         )
     session.identities[source_results[0].object] = dataclasses.replace(
         session.identities[source_results[0].object],
@@ -520,6 +531,43 @@ def test_program_run_state_resolves_ordered_one_to_eight_source_records() -> Non
         )
     with pytest.raises(TypeError):
         pickle.dumps(state)
+
+
+def test_reviewed_source_normalization_preserves_collection_and_legacy_pair() -> None:
+    object_ids = tuple(f"object_{index:032x}" for index in range(8))
+
+    assert executor_module._normalize_reviewed_source_ids(None, None, None) == ()
+    assert executor_module._normalize_reviewed_source_ids((), None, None) == ()
+    assert executor_module._normalize_reviewed_source_ids(None, object_ids[0], None) == (
+        object_ids[0],
+    )
+    assert (
+        executor_module._normalize_reviewed_source_ids(
+            None,
+            object_ids[0],
+            object_ids[1],
+        )
+        == object_ids[:2]
+    )
+    assert executor_module._normalize_reviewed_source_ids(object_ids, None, None) == object_ids
+
+
+@pytest.mark.parametrize(
+    ("sources", "source_a", "source_b"),
+    (
+        (None, None, "object_" + "2" * 32),
+        (("object_" + "1" * 32,), "object_" + "2" * 32, "object_" + "3" * 32),
+        (["object_" + "1" * 32], None, None),
+        (tuple(f"object_{index:032x}" for index in range(9)), None, None),
+    ),
+)
+def test_reviewed_source_normalization_rejects_mixed_partial_and_n_plus_one(
+    sources: object,
+    source_a: object,
+    source_b: object,
+) -> None:
+    with pytest.raises(RuntimeError):
+        executor_module._normalize_reviewed_source_ids(sources, source_a, source_b)
 
 
 @pytest.mark.parametrize(

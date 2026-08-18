@@ -2409,7 +2409,6 @@ class _ReviewedProductRunState:
             or any(
                 not _matches_value_shape(item, ValueShape.OBJECT_ID) for item in source_object_ids
             )
-            or len(set(source_object_ids)) != len(source_object_ids)
         ):
             raise _operation_failure()
         try:
@@ -2500,6 +2499,24 @@ def _rollback_reviewed_document(
         return False
 
 
+def _normalize_reviewed_source_ids(
+    sources: object,
+    source_a: object,
+    source_b: object,
+) -> tuple[object, ...]:
+    """Normalize the ordered collection and legacy pair without resolving either."""
+
+    if sources is None:
+        if source_a is None and source_b is None:
+            return ()
+        if source_a is not None:
+            return tuple(item for item in (source_a, source_b) if item is not None)
+        raise _operation_failure()
+    if type(sources) is tuple and len(sources) <= 8 and source_a is None and source_b is None:
+        return sources
+    raise _operation_failure()
+
+
 def _managed_apply_reviewed_intent(
     session: object,
     context: _InvocationContext,
@@ -2507,6 +2524,7 @@ def _managed_apply_reviewed_intent(
     execution_leaf: Callable[..., object],
     reviewed_products: _ReviewedProductRunState,
     intent: object,
+    sources: object = None,
     source_a: object = None,
     source_b: object = None,
 ) -> dict[str, object]:
@@ -2549,9 +2567,7 @@ def _managed_apply_reviewed_intent(
 
     try:
         route = _route_reviewed_intent(checked)
-        if source_a is None and source_b is not None:
-            raise ValueError
-        source_values = tuple(item for item in (source_a, source_b) if item is not None)
+        source_values = _normalize_reviewed_source_ids(sources, source_a, source_b)
         if not route.family.minimum_sources <= len(source_values) <= route.family.maximum_sources:
             raise ValueError
         if not source_values:
@@ -2563,8 +2579,8 @@ def _managed_apply_reviewed_intent(
                 source_results=reviewed_products.resolve(
                     source_values,
                     read_identity=read_identity,
-                    minimum=len(source_values),
-                    maximum=len(source_values),
+                    minimum=1,
+                    maximum=8,
                 ),
             )
         if type(executed) is not ReviewedNativeExecutionResult:

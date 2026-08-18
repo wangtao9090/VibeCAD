@@ -527,7 +527,7 @@ def _normalize_field(
         if _OBJECT_ID.fullmatch(value) is None:
             _raise(TaskApiErrorCode.INVALID_VALUE, path)
         return value, None
-    if shape is ValueShape.RESULT_REF:
+    if shape in {ValueShape.RESULT_REF, ValueShape.RESULT_REF_COLLECTION}:
         _raise(TaskApiErrorCode.INVALID_VALUE, path)
     _raise(TaskApiErrorCode.INVALID_INPUT, path)
 
@@ -1397,7 +1397,7 @@ def _field_schema(field: FieldMetadata) -> dict[str, object]:
         return _selector_schema()
     if shape is ValueShape.OBJECT_ID:
         return _id_schema(_OBJECT_ID.pattern)
-    if shape is ValueShape.RESULT_REF:
+    if shape in {ValueShape.RESULT_REF, ValueShape.RESULT_REF_COLLECTION}:
         raise ValueError("direct public tools cannot expose result references")
     raise ValueError("unsupported registry value shape")
 

@@ -107,6 +107,7 @@ class ValueShape(StrEnum):
     VECTOR3 = "vector3"
     QUANTITY = "quantity"
     RESULT_REF = "result_ref"
+    RESULT_REF_COLLECTION = "result_ref_collection"
     OBJECT_SELECTOR = "object_selector"
     OBJECT_ID = "object_id"
     ENTITY_TARGET = "entity_target"
@@ -217,6 +218,12 @@ def _matches_value_shape(
             and set(snapshot) == {"command_id", "slot"}
             and _is_safe_value_text(snapshot["command_id"])
             and _is_safe_value_text(snapshot["slot"])
+        )
+    if shape is ValueShape.RESULT_REF_COLLECTION:
+        return (
+            type(value) is tuple
+            and len(value) <= 8
+            and all(_matches_value_shape(item, ValueShape.RESULT_REF) for item in value)
         )
     if shape is ValueShape.OBJECT_SELECTOR:
         try:
@@ -548,11 +555,16 @@ def _validate_shape_constraints(
             "allowed_units are only valid for quantity fields",
             field=field_name,
         )
-    if value_shape in {ValueShape.RESULT_REF, ValueShape.ENTITY_TARGET}:
+    if value_shape in {
+        ValueShape.RESULT_REF,
+        ValueShape.RESULT_REF_COLLECTION,
+        ValueShape.ENTITY_TARGET,
+    }:
         if not isinstance(referenced_value_shape, ValueShape) or referenced_value_shape in {
             ValueShape.ENUM,
             ValueShape.QUANTITY,
             ValueShape.RESULT_REF,
+            ValueShape.RESULT_REF_COLLECTION,
             ValueShape.OBJECT_SELECTOR,
             ValueShape.ENTITY_TARGET,
         }:
@@ -562,12 +574,16 @@ def _validate_shape_constraints(
                 field=field_name,
             )
         if (
-            value_shape is ValueShape.ENTITY_TARGET
+            value_shape in {ValueShape.ENTITY_TARGET, ValueShape.RESULT_REF_COLLECTION}
             and referenced_value_shape is not ValueShape.OBJECT_ID
         ):
             raise RegistryError(
                 RegistryErrorCode.INVALID_METADATA,
-                "entity_target must reference an object_id result slot",
+                (
+                    "entity_target must reference an object_id result slot"
+                    if value_shape is ValueShape.ENTITY_TARGET
+                    else "result_ref_collection must reference an object_id result slot"
+                ),
                 field=field_name,
             )
     elif referenced_value_shape is not None:
@@ -639,7 +655,7 @@ class ResultSlotMetadata:
             referenced_value_shape=None,
             field_name=self.name,
         )
-        if self.value_shape is ValueShape.RESULT_REF:
+        if self.value_shape in {ValueShape.RESULT_REF, ValueShape.RESULT_REF_COLLECTION}:
             raise RegistryError(
                 RegistryErrorCode.INVALID_METADATA,
                 "result slots must expose concrete values",
@@ -1532,6 +1548,13 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                     "source_b",
                     "source_b",
                     ValueShape.RESULT_REF,
+                    required=False,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+                FieldMetadata(
+                    "sources",
+                    "sources",
+                    ValueShape.RESULT_REF_COLLECTION,
                     required=False,
                     referenced_value_shape=ValueShape.OBJECT_ID,
                 ),

@@ -57,11 +57,52 @@ def _program(
     operation: PartProfileSurfaceOperation,
     *,
     source_operation_definition: str | None = None,
+    source_count: int | None = None,
 ) -> ReviewedIntentProgramV1:
     graph = adapter_cases._graph(  # noqa: SLF001
         operation,
         source_operation_definition=source_operation_definition,
     )
+    if source_count is not None:
+        if operation is not PartProfileSurfaceOperation.LOFT or not 2 <= source_count <= 8:
+            raise ValueError("source_count is only supported for bounded loft profiles")
+        source_nodes = list(graph.nodes[:-1])
+        target = graph.nodes[-1]
+        template = source_nodes[-1]
+        dependencies = list(target.intent.dependencies)
+        for ordinal in range(len(source_nodes), source_count):
+            node_id = f"node_source_profile_{ordinal}"
+            result_id = f"result_source_profile_{ordinal}"
+            source_nodes.append(
+                dataclasses.replace(
+                    template,
+                    node_id=node_id,
+                    name=f"Authenticated profile {ordinal}",
+                    results=(
+                        dataclasses.replace(
+                            template.results[0],
+                            result_id=result_id,
+                        ),
+                    ),
+                )
+            )
+            dependencies.append(
+                dataclasses.replace(
+                    dependencies[-1],
+                    dependency_id=f"dependency_profile_{ordinal}",
+                    upstream_node_id=node_id,
+                    upstream_result_id=result_id,
+                    ordinal=ordinal,
+                )
+            )
+        target = dataclasses.replace(
+            target,
+            intent=dataclasses.replace(
+                target.intent,
+                dependencies=tuple(dependencies),
+            ),
+        )
+        graph = dataclasses.replace(graph, nodes=(*source_nodes, target))
     reviewed = next(
         item
         for item in PART_PROFILE_SURFACE_MANIFEST.operations
@@ -223,6 +264,23 @@ def test_profile_surface_routes_lower_to_canonical_source_bound_plans(
     assert all(item.minimum >= 1 for item in requirements)
 
 
+def test_three_profile_loft_lowers_one_exact_ordered_source_contract() -> None:
+    lowered = lower_reviewed_intent(_program(PartProfileSurfaceOperation.LOFT, source_count=3))
+
+    assert lowered.plan.operation is PartProfileSurfaceOperation.LOFT
+    assert tuple(
+        (item.role, item.node_id, item.result_id, item.ordinal) for item in lowered.plan.sources
+    ) == tuple(
+        (
+            PartProfileSurfaceSourceRole.PROFILE,
+            f"node_source_profile_{ordinal}",
+            f"result_source_profile_{ordinal}",
+            ordinal,
+        )
+        for ordinal in range(3)
+    )
+
+
 def test_profile_surface_unknown_and_tampered_routes_remain_inert(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -371,6 +429,33 @@ def test_profile_surface_descriptor_is_inert_without_authenticated_sources(
     assert len(routes) == 6
 
 
+@pytest.mark.parametrize("source_count", (2, 4))
+def test_three_profile_loft_rejects_n_minus_one_and_n_plus_one_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    source_count: int,
+) -> None:
+    document = _Document()
+    session = _Session(document, {})
+    called = False
+
+    def apply(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("wrong source cardinality must remain inert")
+
+    monkeypatch.setattr(profile_execution, "apply_part_profile_surface_plan", apply)
+    with pytest.raises(ReviewedIntentExecutionError) as caught:
+        execute_reviewed_intent_native(
+            session,
+            _program(PartProfileSurfaceOperation.LOFT, source_count=3),
+            source_results=tuple(object() for _ in range(source_count)),
+        )
+
+    assert caught.value.code is ReviewedIntentExecutionErrorCode.EXECUTION_FAILED
+    assert called is False
+    assert document.Objects == []
+
+
 def test_profile_surface_plan_document_tamper_fails_before_document_access(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -409,7 +494,12 @@ def test_profile_surface_source_aware_hook_consumes_only_ordered_reviewed_result
     operation: PartProfileSurfaceOperation,
 ) -> None:
     _install_routes(monkeypatch)
-    lowered = lower_reviewed_intent(_program(operation))
+    lowered = lower_reviewed_intent(
+        _program(
+            operation,
+            source_count=3 if operation is PartProfileSurfaceOperation.LOFT else None,
+        )
+    )
     document = _Document()
     source_results = []
     identities = {}
@@ -462,6 +552,9 @@ def test_profile_surface_source_aware_hook_consumes_only_ordered_reviewed_result
         assert bindings.document is document
         assert tuple((item.node_id, item.result_id) for item in bindings.sources) == tuple(
             (item.node_id, item.result_id) for item in lowered.plan.sources
+        )
+        assert tuple(item.object.Name for item in bindings.sources) == tuple(
+            f"Source{index}" for index in range(len(lowered.plan.sources))
         )
         name = f"Result_{operation.value}"
         invariant = PART_PROFILE_SURFACE_RESULT_INVARIANTS[operation]
@@ -530,6 +623,68 @@ def test_profile_surface_source_aware_hook_consumes_only_ordered_reviewed_result
             )
         )
     assert caught.value.code is ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE
+
+
+def test_three_profile_loft_rejects_duplicate_managed_source_by_family_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lowered = lower_reviewed_intent(_program(PartProfileSurfaceOperation.LOFT, source_count=3))
+    document = _Document()
+    route = REVIEWED_PART_CURVE_ROUTES[5]
+    source = _Feature(
+        document,
+        name="DuplicateProfile",
+        type_id=route.operation.native_type_id,
+        shape_type="Wire",
+        edge_count=4,
+        solid_count=0,
+        face_count=0,
+        volume=0.0,
+    )
+    document.Objects.append(source)
+    identity = EntityIdentity(
+        object_id="object_" + "d" * 32,
+        feature_id="feature_" + "e" * 32,
+        object_type=source.TypeId,
+        semantic_role=SemanticRole.PRIMITIVE,
+        provenance=Provenance(
+            source=ProvenanceSource.MODEL,
+            operation_id="reviewed_duplicate_profile",
+        ),
+    )
+    plan_sha256 = hashlib.sha256(b"duplicate-profile-plan").hexdigest()
+    source_result = ReviewedNativeExecutionResult(
+        route=route,
+        object=source,
+        plan_sha256=plan_sha256,
+        plan_content_sha256=hashlib.sha256(b"duplicate-profile-content").hexdigest(),
+        native_receipt=_SourceReceipt(
+            plan_sha256,
+            hashlib.sha256(source.Shape.exportBrepToString().encode()).hexdigest(),
+        ),
+    )
+    called = False
+
+    def apply(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("duplicate sources must remain inert")
+
+    monkeypatch.setattr(profile_execution, "apply_part_profile_surface_plan", apply)
+    with pytest.raises(ReviewedIntentExecutionError) as caught:
+        execute_part_profile_surface_reviewed_plan_with_sources(
+            document,
+            lowered.plan,
+            lowered.payload,
+            lowered.result.plan_document,
+            lowered.route.operation,
+            (source_result, source_result, source_result),
+            session=_Session(document, {source: identity}),
+        )
+
+    assert caught.value.code is ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE
+    assert called is False
+    assert document.Objects == [source]
 
 
 def test_profile_surface_source_aware_hook_rejects_stale_shape_before_apply(

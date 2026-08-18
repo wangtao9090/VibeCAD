@@ -5,12 +5,14 @@ from __future__ import annotations
 import builtins
 import copy
 import dataclasses
+import json
 import pickle
 from collections.abc import Iterator, Mapping
 from types import MappingProxyType
 
 import pytest
 
+from test_reviewed_intent_program import reviewed_box_program
 from vibecad.execution.registry import (
     DEFAULT_OPERATION_REGISTRY,
     ExecutionProfile,
@@ -27,6 +29,7 @@ from vibecad.workflow.errors import MAX_SAFE_JSON_INTEGER, SCHEMA_VERSION
 from vibecad.workflow.program import (
     DEFAULT_MAX_COMMANDS,
     BoundCommand,
+    BoundResultRef,
     ProgramErrorCode,
     ProgramValidationError,
     ValidatedProgram,
@@ -85,6 +88,35 @@ def _error(program: object, code: ProgramErrorCode, path: str, **kwargs):
     assert caught.value.code is code
     assert caught.value.path == path
     return caught.value
+
+
+def _reviewed_sources_program(source_count: int) -> ModelProgram:
+    source_ids = tuple(f"source_{index}" for index in range(source_count))
+    sources = tuple({"command_id": command_id, "slot": "object"} for command_id in source_ids)
+    return ModelProgram(
+        task_id="task-reviewed-ordered-sources",
+        base_revision="revision-1",
+        operations=(
+            *(
+                _command(
+                    command_id,
+                    "create_box",
+                    args={"length_mm": 10, "width_mm": 8, "height_mm": 6},
+                )
+                for command_id in source_ids
+            ),
+            _command(
+                "reviewed_target",
+                "apply_reviewed_intent",
+                args={
+                    "intent": reviewed_box_program().to_mapping(),
+                    "sources": sources,
+                },
+                depends_on=source_ids,
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-ordered-sources", criteria=()),
+    )
 
 
 def _custom_registry(
@@ -476,6 +508,101 @@ def test_result_ref_binds_a_declared_dependency_slot_without_resolving_it():
     assert type(bound_ref).__name__ == "BoundResultRef"
     assert bound_ref.command_id == "box"
     assert bound_ref.slot == "object"
+
+
+def test_ordered_result_refs_round_trip_and_bind_zero_to_eight_object_slots() -> None:
+    program = _reviewed_sources_program(8)
+    mapping = json.loads(json.dumps(program.to_mapping()))
+    restored = ModelProgram.from_mapping(mapping)
+    validated = validate_model_program(restored)
+
+    assert type(mapping["operations"][-1]["args"]["sources"]) is list
+    bound = validated.commands[-1].handler_kwargs["sources"]
+    assert type(bound) is tuple
+    assert len(bound) == 8
+    assert all(type(item) is BoundResultRef for item in bound)
+    assert tuple(item.command_id for item in bound) == tuple(
+        f"source_{index}" for index in range(8)
+    )
+    assert all(item.slot == "object" and item.value_shape is ValueShape.OBJECT_ID for item in bound)
+
+    empty = _reviewed_sources_program(0)
+    empty_bound = validate_model_program(empty).commands[0].handler_kwargs["sources"]
+    assert empty_bound == ()
+
+
+def test_ordered_result_refs_reject_n_plus_one_at_the_collection_boundary() -> None:
+    _error(
+        _reviewed_sources_program(9),
+        ProgramErrorCode.INVALID_RESULT_REFERENCE,
+        "/operations/9/args/sources",
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "depends_on"),
+    (
+        ("object_11111111111111111111111111111111", ("source",)),
+        ({"command_id": "source", "slot": "missing"}, ("source",)),
+        ({"command_id": "source", "slot": "object", "TypeId": "Part::Box"}, ("source",)),
+        ({"command_id": "source", "slot": "object"}, ()),
+    ),
+)
+def test_ordered_result_refs_reject_literals_wrong_slots_authority_and_cross_run_refs(
+    source: object,
+    depends_on: tuple[str, ...],
+) -> None:
+    program = ModelProgram(
+        task_id="task-reviewed-invalid-source",
+        base_revision="revision-1",
+        operations=(
+            _command(
+                "source",
+                "create_box",
+                args={"length_mm": 10, "width_mm": 8, "height_mm": 6},
+            ),
+            _command(
+                "reviewed_target",
+                "apply_reviewed_intent",
+                args={
+                    "intent": reviewed_box_program().to_mapping(),
+                    "sources": (source,),
+                },
+                depends_on=depends_on,
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-invalid-source", criteria=()),
+    )
+
+    _error(
+        program,
+        ProgramErrorCode.INVALID_RESULT_REFERENCE,
+        "/operations/1/args/sources/0",
+    )
+
+
+def test_ordered_result_ref_duplicates_remain_ordered_for_family_policy() -> None:
+    program = _reviewed_sources_program(1)
+    target = program.operations[-1]
+    duplicated = dataclasses.replace(
+        program,
+        operations=(
+            *program.operations[:-1],
+            dataclasses.replace(
+                target,
+                args={
+                    "intent": reviewed_box_program().to_mapping(),
+                    "sources": (
+                        {"command_id": "source_0", "slot": "object"},
+                        {"command_id": "source_0", "slot": "object"},
+                    ),
+                },
+            ),
+        ),
+    )
+
+    bound = validate_model_program(duplicated).commands[-1].handler_kwargs["sources"]
+    assert tuple(item.command_id for item in bound) == ("source_0", "source_0")
 
 
 def test_create_document_is_no_longer_a_model_program_operation():

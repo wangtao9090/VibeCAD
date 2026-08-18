@@ -642,6 +642,21 @@ def _bind_field_group(
                 operation_metadata=operation_metadata,
             )
             continue
+        if item.value_shape is ValueShape.RESULT_REF_COLLECTION:
+            if type(value) is not tuple or len(value) > 8:
+                raise _invalid_result_reference(field_path)
+            destination[item.handler_parameter] = tuple(
+                _bind_result_reference(
+                    reference,
+                    item,
+                    path=join_json_pointer(field_path, str(reference_index)),
+                    dependency_ids=dependency_ids,
+                    prior_command_ids=prior_command_ids,
+                    operation_metadata=operation_metadata,
+                )
+                for reference_index, reference in enumerate(value)
+            )
+            continue
         if item.value_shape is ValueShape.ENTITY_TARGET:
             if _matches_value_shape(value, ValueShape.RESULT_REF):
                 destination[item.handler_parameter] = _bind_result_reference(

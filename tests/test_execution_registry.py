@@ -325,6 +325,7 @@ def test_stage3_value_shapes_and_execution_profiles_are_closed():
         "vector3",
         "quantity",
         "result_ref",
+        "result_ref_collection",
         "object_selector",
         "object_id",
         "entity_target",
@@ -332,6 +333,29 @@ def test_stage3_value_shapes_and_execution_profiles_are_closed():
         "parametric_design_ir",
         "reviewed_intent",
     }
+
+
+def test_reviewed_intent_declares_one_bounded_ordered_source_collection() -> None:
+    metadata = DEFAULT_OPERATION_REGISTRY.lookup("apply_reviewed_intent")
+    fields = {item.name: item for item in metadata.argument_fields}
+
+    assert set(fields) == {"intent", "source_a", "source_b", "sources"}
+    assert fields["sources"] == FieldMetadata(
+        "sources",
+        "sources",
+        ValueShape.RESULT_REF_COLLECTION,
+        required=False,
+        referenced_value_shape=ValueShape.OBJECT_ID,
+    )
+    assert registry_module._matches_value_shape((), ValueShape.RESULT_REF_COLLECTION)  # noqa: SLF001
+    assert registry_module._matches_value_shape(  # noqa: SLF001
+        tuple({"command_id": f"source_{index}", "slot": "object"} for index in range(8)),
+        ValueShape.RESULT_REF_COLLECTION,
+    )
+    assert not registry_module._matches_value_shape(  # noqa: SLF001
+        tuple({"command_id": f"source_{index}", "slot": "object"} for index in range(9)),
+        ValueShape.RESULT_REF_COLLECTION,
+    )
 
 
 def test_component_selector_shape_accepts_only_explicit_app_part_objects():
@@ -463,9 +487,13 @@ def test_result_slot_and_result_ref_metadata_fail_closed():
         FieldMetadata("object", "name", ValueShape.RESULT_REF)
     assert caught.value.code is RegistryErrorCode.INVALID_METADATA
 
-    with pytest.raises(RegistryError) as caught:
-        ResultSlotMetadata("object", "name", ValueShape.RESULT_REF)
-    assert caught.value.code is RegistryErrorCode.INVALID_METADATA
+    for reference_shape in (
+        ValueShape.RESULT_REF,
+        ValueShape.RESULT_REF_COLLECTION,
+    ):
+        with pytest.raises(RegistryError) as caught:
+            ResultSlotMetadata("object", "name", reference_shape)
+        assert caught.value.code is RegistryErrorCode.INVALID_METADATA
 
     with pytest.raises(RegistryError) as caught:
         _operation(result_slots=(slot, slot))
@@ -786,6 +814,18 @@ def test_entity_target_metadata_requires_object_id_result_authority():
                 "object",
                 "target",
                 ValueShape.ENTITY_TARGET,
+                referenced_value_shape=referenced_shape,
+            )
+        assert caught.value.code is RegistryErrorCode.INVALID_METADATA
+
+
+def test_result_ref_collection_metadata_requires_object_id_result_authority():
+    for referenced_shape in (None, ValueShape.NONBLANK_STRING, ValueShape.RESULT_REF):
+        with pytest.raises(RegistryError) as caught:
+            FieldMetadata(
+                "sources",
+                "sources",
+                ValueShape.RESULT_REF_COLLECTION,
                 referenced_value_shape=referenced_shape,
             )
         assert caught.value.code is RegistryErrorCode.INVALID_METADATA
