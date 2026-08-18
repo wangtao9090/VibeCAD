@@ -19,18 +19,18 @@ import pytest
 
 import vibecad.execution.executor as executor_module
 import vibecad.execution.freecad_part_profile_surface_reviewed_execution as profile_execution
-from test_execution_freecad_part_curve_reviewed_execution import (
+from tests.test_execution_freecad_part_curve_reviewed_execution import (
     _reviewed_program as reviewed_curve_program,
 )
-from test_execution_freecad_part_offset_projection_reviewed_execution import (
+from tests.test_execution_freecad_part_offset_projection_reviewed_execution import (
     _program as reviewed_offset_program,
 )
-from test_execution_freecad_part_profile_surface_reviewed_execution import (
+from tests.test_execution_freecad_part_profile_surface_reviewed_execution import (
     _program as reviewed_profile_surface_program,
 )
-from test_intent_bridge_freecad_part_datum_adapter import _graph as _datum_graph
-from test_reviewed_intent_program import reviewed_box_program, reviewed_primitive_program
-from test_reviewed_part_csg_product import reviewed_csg_program
+from tests.test_intent_bridge_freecad_part_datum_adapter import _graph as _datum_graph
+from tests.test_reviewed_intent_program import reviewed_box_program, reviewed_primitive_program
+from tests.test_reviewed_part_csg_product import reviewed_csg_program
 from vibecad.execution.candidate import (
     ActiveCandidate,
     CadSnapshotPort,

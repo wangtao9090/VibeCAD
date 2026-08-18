@@ -8,7 +8,7 @@ import pytest
 
 import vibecad.execution.freecad_part_curve_reviewed_execution as curve_execution
 import vibecad.execution.freecad_reviewed_intent_execution as shared_execution
-from test_intent_bridge_freecad_part_curve_adapter import _graph
+from tests.test_intent_bridge_freecad_part_curve_adapter import _graph
 from vibecad.execution.freecad_builtin_intent_capabilities import (
     current_freecad_intent_capability_specs,
 )
