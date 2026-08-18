@@ -2596,7 +2596,8 @@ def _managed_apply_reviewed_intent(
         if (
             len(document_after) != len(document_before) + len(owned)
             or len(added) != len(owned)
-            or any(actual is not expected for actual, expected in zip(added, owned, strict=True))
+            or len({id(item) for item in added}) != len(added)
+            or {id(item) for item in added} != {id(item) for item in owned}
             or owned[0] is not obj
             or getattr(obj, "TypeId", None) != executed.route.operation.native_type_id
         ):

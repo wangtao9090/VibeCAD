@@ -28,6 +28,9 @@ from tests.test_execution_freecad_part_offset_projection_reviewed_execution impo
 from tests.test_execution_freecad_part_profile_surface_reviewed_execution import (
     _program as reviewed_profile_surface_program,
 )
+from tests.test_execution_freecad_partdesign_primitive_reviewed_execution import (
+    _program as reviewed_partdesign_primitive_program,
+)
 from tests.test_intent_bridge_freecad_part_datum_adapter import _graph as _datum_graph
 from tests.test_reviewed_intent_program import reviewed_box_program, reviewed_primitive_program
 from tests.test_reviewed_part_csg_product import reviewed_csg_program
@@ -52,6 +55,10 @@ from vibecad.execution.freecad_part_profile_surface_reviewed_execution import (
     PART_PROFILE_SURFACE_RESULT_INVARIANTS,
     PartProfileSurfaceOwnershipClosure,
 )
+from vibecad.execution.freecad_partdesign_primitive_reviewed_execution import (
+    PARTDESIGN_PRIMITIVE_RESULT_INVARIANTS,
+    PartDesignPrimitiveOwnershipClosure,
+)
 from vibecad.execution.freecad_reviewed_intent_execution import (
     REVIEWED_PART_BOX_ROUTE,
     REVIEWED_PART_CSG_ROUTES,
@@ -59,6 +66,7 @@ from vibecad.execution.freecad_reviewed_intent_execution import (
     REVIEWED_PART_DATUM_ROUTES,
     REVIEWED_PART_OFFSET_ROUTES,
     REVIEWED_PART_PROFILE_SURFACE_ROUTES,
+    REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
     ReviewedNativeExecutionResult,
@@ -109,6 +117,10 @@ from vibecad.parametric.freecad_part_offset_projection_rules import (
 from vibecad.parametric.freecad_part_profile_surface_rules import (
     PartProfileSurfaceConformanceReceipt,
     PartProfileSurfaceOperation,
+)
+from vibecad.parametric.freecad_partdesign_primitive_rules import (
+    PartDesignPrimitiveConformanceReceipt,
+    PartDesignPrimitiveOperation,
 )
 from vibecad.validation import ComponentBomMetadata
 from vibecad.workflow.contracts import AcceptanceSpec, ModelCommand, ModelProgram, ValueSource
@@ -2271,6 +2283,225 @@ def test_managed_reviewed_datum_validation_failure_restores_document(
     if before_objects:
         assert before_objects[0].Tip is before_tip
     assert session.attached_identities == []
+
+
+class _ManagedPartDesignPrimitiveObject(_ManagedDatumFeature):
+    def __init__(self, document: _FakeDocument, name: str, type_id: str) -> None:
+        super().__init__(document, name, type_id)
+        self.Group: tuple[object, ...] = ()
+        self.OriginFeatures: tuple[object, ...] = ()
+        self.BaseFeature: object | None = None
+
+
+def _managed_partdesign_additive_result(
+    session: _FakeSession,
+    reviewed: ReviewedIntentProgramV1,
+) -> ReviewedNativeExecutionResult:
+    route = next(
+        item
+        for item in REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES
+        if item.operation.operation_id == PartDesignPrimitiveOperation.ADDITIVE_BOX.value
+    )
+    primary_name = f"ManagedAdditiveBox_{reviewed.intent_graph_sha256[:16]}"
+    if session.doc.getObject(primary_name) is not None:
+        raise ReviewedIntentExecutionError(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
+    body = _ManagedPartDesignPrimitiveObject(
+        session.doc,
+        f"{primary_name}_Body",
+        "PartDesign::Body",
+    )
+    origin = _ManagedPartDesignPrimitiveObject(
+        session.doc,
+        f"{primary_name}_Origin",
+        "App::Origin",
+    )
+    helper_types = (
+        "App::Line",
+        "App::Line",
+        "App::Line",
+        "App::Plane",
+        "App::Plane",
+        "App::Plane",
+        "App::Point",
+    )
+    helper_roles = (
+        "X_Axis",
+        "Y_Axis",
+        "Z_Axis",
+        "XY_Plane",
+        "XZ_Plane",
+        "YZ_Plane",
+        "Origin",
+    )
+    helpers = tuple(
+        _ManagedPartDesignPrimitiveObject(
+            session.doc,
+            f"{primary_name}_Helper{index}",
+            type_id,
+        )
+        for index, type_id in enumerate(helper_types)
+    )
+    for helper, role in zip(helpers, helper_roles, strict=True):
+        helper.Role = role
+        helper.InList = (origin,)
+    origin.OriginFeatures = helpers
+    body.Origin = origin
+    primary = _ManagedPartDesignPrimitiveObject(
+        session.doc,
+        primary_name,
+        "PartDesign::AdditiveBox",
+    )
+    primary.Shape = _FakeShape(
+        volume=480.0,
+        area=376.0,
+        bbox=(10.0, 8.0, 6.0),
+        center=(5.0, 4.0, 3.0),
+    )
+    body.Group = (primary,)
+    body.Tip = primary
+    body_closure = (body, origin, *helpers)
+    session.doc.Objects = (*session.doc.Objects, *body_closure, primary)
+    plan_sha256 = "7" * 64
+    receipt = PartDesignPrimitiveConformanceReceipt(
+        plan_sha256=plan_sha256,
+        operation=PartDesignPrimitiveOperation.ADDITIVE_BOX,
+        object_name=primary.Name,
+        before_volume_mm3=0.0,
+        after_volume_mm3=480.0,
+    )
+    ownership = PartDesignPrimitiveOwnershipClosure(
+        invariant=PARTDESIGN_PRIMITIVE_RESULT_INVARIANTS[PartDesignPrimitiveOperation.ADDITIVE_BOX],
+        native_receipt=receipt,
+        object=primary,
+        body=body,
+        base=None,
+        body_closure=body_closure,
+        created_body=True,
+        base_shape_sha256=None,
+        result_shape_sha256=hashlib.sha256(primary.Shape.exportBrepToString().encode()).hexdigest(),
+    )
+    return ReviewedNativeExecutionResult(
+        route=route,
+        object=primary,
+        plan_sha256=plan_sha256,
+        plan_content_sha256="8" * 64,
+        native_receipt=ownership,
+        owned_objects=(primary, *body_closure),
+        _verified_execution_context=_ReviewedFamilyExecutionContext(
+            session=session,
+            document=session.doc,
+            source_results=(),
+        ),
+    )
+
+
+def test_managed_first_additive_adopts_ten_objects_and_rejects_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed = reviewed_partdesign_primitive_program(PartDesignPrimitiveOperation.ADDITIVE_BOX)
+
+    def execute(session: _FakeSession, value: object) -> ReviewedNativeExecutionResult:
+        assert value == reviewed
+        return _managed_partdesign_additive_result(session, reviewed)
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute)
+    program = validate_model_program(
+        ModelProgram(
+            task_id="task-managed-partdesign-first-additive",
+            base_revision=BASE_REVISION,
+            operations=(
+                _command(
+                    "reviewed_additive_box",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed.to_mapping()},
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="accept-managed-partdesign-first-additive", criteria=()),
+        )
+    )
+    executor = InProcessCadExecutor(store=_store())
+    session = _FakeSession()
+
+    outcomes = executor.execute_program(program=program, candidate=_active(session, tmp_path))
+
+    assert len(outcomes) == 1 and outcomes[0].result.ok is True
+    assert len(session.doc.Objects) == 10
+    assert len(session.attached_identities) == 10
+    assert session.result_object is session.doc.Objects[-1]
+    identities = tuple(identity for _, identity in session.attached_identities)
+    assert tuple(identity.semantic_role for identity in identities) == (
+        SemanticRole.FEATURE,
+        SemanticRole.PART,
+        *(SemanticRole.SUPPORT,) * 8,
+    )
+    assert tuple(item.TypeId for item in session.doc.Objects) == (
+        "PartDesign::Body",
+        "App::Origin",
+        "App::Line",
+        "App::Line",
+        "App::Line",
+        "App::Plane",
+        "App::Plane",
+        "App::Plane",
+        "App::Point",
+        "PartDesign::AdditiveBox",
+    )
+    before_duplicate = tuple(session.doc.Objects)
+    identities_before_duplicate = tuple(session.attached_identities)
+
+    duplicate = executor.execute_program(program=program, candidate=_active(session, tmp_path))
+
+    assert len(duplicate) == 1 and duplicate[0].result.ok is False
+    assert tuple(session.doc.Objects) == before_duplicate
+    assert tuple(session.attached_identities) == identities_before_duplicate
+
+
+def test_managed_first_additive_rolls_back_ten_objects_after_late_adoption_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed = reviewed_partdesign_primitive_program(PartDesignPrimitiveOperation.ADDITIVE_BOX)
+
+    class FailingAttachSession(_FakeSession):
+        def attach_object_identity(self, obj: object, identity: object) -> object:
+            if len(self.attached_identities) == 4:
+                raise RuntimeError("bounded late adoption failure")
+            return super().attach_object_identity(obj, identity)
+
+    def execute(session: _FakeSession, value: object) -> ReviewedNativeExecutionResult:
+        assert value == reviewed
+        return _managed_partdesign_additive_result(session, reviewed)
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute)
+    program = validate_model_program(
+        ModelProgram(
+            task_id="task-managed-partdesign-first-additive-rollback",
+            base_revision=BASE_REVISION,
+            operations=(
+                _command(
+                    "reviewed_additive_box_rollback",
+                    "apply_reviewed_intent",
+                    args={"intent": reviewed.to_mapping()},
+                ),
+            ),
+            acceptance=AcceptanceSpec(
+                id="accept-managed-partdesign-first-additive-rollback",
+                criteria=(),
+            ),
+        )
+    )
+    session = FailingAttachSession()
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=program,
+        candidate=_active(session, tmp_path),
+    )
+
+    assert len(outcomes) == 1 and outcomes[0].result.ok is False
+    assert session.doc.Objects == ()
+    assert session.attached_identities == []
+    assert session.result_object is None
 
 
 @pytest.mark.parametrize("source_interface", ("legacy_pair", "ordered_collection"))

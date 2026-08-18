@@ -16,6 +16,7 @@ from vibecad.execution.freecad_reviewed_intent_execution import (
     REVIEWED_PART_OFFSET_ROUTES,
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_PROFILE_SURFACE_ROUTES,
+    REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES,
     REVIEWED_PARTDESIGN_PROMOTION_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
@@ -228,7 +229,7 @@ def test_reviewed_intent_program_is_canonical_content_bound_and_registry_closed(
     assert metadata.direct_exposed is False
     assert metadata.argument_fields[0].value_shape is ValueShape.REVIEWED_INTENT
     assert metadata.result_slots[0].value_shape is ValueShape.OBJECT_ID
-    assert metadata.resource_budget.max_created_objects == 8
+    assert metadata.resource_budget.max_created_objects == 10
 
 
 def test_reviewed_intent_program_rejects_digest_rebound_and_extra_authority() -> None:
@@ -295,8 +296,9 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
         *REVIEWED_PART_PROFILE_SURFACE_ROUTES,
         *REVIEWED_PART_OFFSET_ROUTES,
         *REVIEWED_PARTDESIGN_PROMOTION_ROUTES,
+        *REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES,
     )
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 39
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 55
     assert len(REVIEWED_PART_PRIMITIVE_ROUTES) == len(programs) == 8
     assert len(REVIEWED_PART_CURVE_ROUTES) == 9
     assert len(REVIEWED_PART_CSG_ROUTES) == 3
@@ -304,6 +306,7 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
     assert len(REVIEWED_PART_PROFILE_SURFACE_ROUTES) == 6
     assert len(REVIEWED_PART_OFFSET_ROUTES) == 3
     assert len(REVIEWED_PARTDESIGN_PROMOTION_ROUTES) == 6
+    assert len(REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES) == 16
     assert {
         route.family.product_result(route.operation).result_kind.value
         for route in REVIEWED_PART_PRIMITIVE_ROUTES

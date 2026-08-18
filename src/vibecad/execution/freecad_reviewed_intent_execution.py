@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
@@ -50,6 +50,10 @@ from vibecad.execution.freecad_part_offset_projection_reviewed_execution import 
 from vibecad.execution.freecad_part_profile_surface_reviewed_execution import (
     PART_PROFILE_SURFACE_RESULT_INVARIANTS,
     PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC,
+)
+from vibecad.execution.freecad_partdesign_primitive_reviewed_execution import (
+    PARTDESIGN_PRIMITIVE_PRODUCT_CONTRACTS,
+    PARTDESIGN_PRIMITIVE_REVIEWED_FAMILY_SPEC,
 )
 from vibecad.execution.freecad_partdesign_promotion_reviewed_execution import (
     PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC,
@@ -224,6 +228,7 @@ class _ReviewedProductResultContract:
     result_kind: _ReviewedProductResultKind
     owned_type_ids: tuple[str, ...]
     semantic_roles: tuple[SemanticRole, ...]
+    source_count: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -236,6 +241,10 @@ class _ReviewedProductResultContract:
             or type(self.semantic_roles) is not tuple
             or len(self.semantic_roles) != len(self.owned_type_ids)
             or any(type(item) is not SemanticRole for item in self.semantic_roles)
+            or (
+                self.source_count is not None
+                and (type(self.source_count) is not int or not 0 <= self.source_count <= 8)
+            )
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
@@ -332,8 +341,6 @@ class _ReviewedIntentFamilyDescriptor:
             or any(
                 type(item) is not _ReviewedProductResultContract for item in self.product_results
             )
-            or len({item.operation_id for item in self.product_results})
-            != len(self.product_results)
             or any(
                 not any(
                     operation.operation_id == item.operation_id
@@ -348,6 +355,21 @@ class _ReviewedIntentFamilyDescriptor:
             or type(self.formal_semantic_binding) is not _ReviewedFormalSemanticBinding
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        keys = tuple((item.operation_id, item.source_count) for item in self.product_results)
+        if len(set(keys)) != len(keys) or any(
+            item.source_count is not None
+            and not self.minimum_sources <= item.source_count <= self.maximum_sources
+            for item in self.product_results
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        for operation_id in {item.operation_id for item in self.product_results}:
+            variants = tuple(
+                item for item in self.product_results if item.operation_id == operation_id
+            )
+            if any(item.source_count is None for item in variants) and (
+                len(variants) != 1 or variants[0].source_count is not None
+            ):
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
     def build_adapter(self, sink: PlanSink) -> ExactReviewedFamilyAdapter:
         try:
@@ -394,6 +416,7 @@ class _ReviewedIntentFamilyDescriptor:
             or not self.minimum_sources <= len(context.source_results) <= self.maximum_sources
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        self.product_result(operation, context=context)
         try:
             result = self.execute_plan(
                 document,
@@ -414,23 +437,41 @@ class _ReviewedIntentFamilyDescriptor:
     def product_result(
         self,
         operation: ReviewedOperationSpec,
+        *,
+        context: _ReviewedFamilyExecutionContext | None = None,
     ) -> _ReviewedProductResultContract:
-        if type(operation) is not ReviewedOperationSpec:
+        if type(operation) is not ReviewedOperationSpec or (
+            context is not None and type(context) is not _ReviewedFamilyExecutionContext
+        ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         matching = tuple(
             item for item in self.product_results if item.operation_id == operation.operation_id
         )
-        if len(matching) != 1:
+        if (
+            context is not None
+            and not self.minimum_sources <= len(context.source_results) <= self.maximum_sources
+        ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
-        return matching[0]
+        if len(matching) == 1 and matching[0].source_count is None:
+            return matching[0]
+        if context is None:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        selected = tuple(
+            item for item in matching if item.source_count == len(context.source_results)
+        )
+        if len(selected) != 1:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return selected[0]
 
     def accept_product_result(
         self,
         operation: ReviewedOperationSpec,
         primary: object,
         owned: tuple[object, ...],
+        *,
+        context: _ReviewedFamilyExecutionContext | None = None,
     ) -> _ReviewedProductResultContract:
-        contract = self.product_result(operation)
+        contract = self.product_result(operation, context=context)
         contract.validate(operation, primary, owned)
         return contract
 
@@ -694,6 +735,28 @@ _PARTDESIGN_PROMOTION_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     formal_semantic_binding=_ReviewedFormalSemanticBinding.LEGACY_TERM_ID,
 )
 
+_PARTDESIGN_PRIMITIVE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=PARTDESIGN_PRIMITIVE_REVIEWED_FAMILY_SPEC.manifest,
+    subject_type_term=PARTDESIGN_PRIMITIVE_REVIEWED_FAMILY_SPEC.subject_type_term,
+    adapter_factory=PARTDESIGN_PRIMITIVE_REVIEWED_FAMILY_SPEC.adapter_factory,
+    validate_plan=PARTDESIGN_PRIMITIVE_REVIEWED_FAMILY_SPEC.validate_plan,
+    execute_plan=PARTDESIGN_PRIMITIVE_REVIEWED_FAMILY_SPEC.execute_plan,
+    product_results=tuple(
+        _ReviewedProductResultContract(
+            operation_id=contract.operation.value,
+            result_kind=_ReviewedProductResultKind.SOLID,
+            owned_type_ids=variant.owned_type_ids,
+            semantic_roles=variant.semantic_roles,
+            source_count=variant.source_count,
+        )
+        for contract in PARTDESIGN_PRIMITIVE_PRODUCT_CONTRACTS.values()
+        for variant in contract.closure_variants
+    ),
+    minimum_sources=0,
+    maximum_sources=1,
+    formal_semantic_binding=_ReviewedFormalSemanticBinding.LEGACY_TERM_ID,
+)
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReviewedIntentRoute:
@@ -848,6 +911,10 @@ REVIEWED_PARTDESIGN_PROMOTION_ROUTES: Final = _routes_for_family(
     _PARTDESIGN_PROMOTION_FAMILY,
     PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC.operation_ids,
 )
+REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES: Final = _routes_for_family(
+    _PARTDESIGN_PRIMITIVE_FAMILY,
+    PARTDESIGN_PRIMITIVE_REVIEWED_FAMILY_SPEC.operation_ids,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
@@ -856,6 +923,7 @@ _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PROFILE_SURFACE_ROUTES,
     REVIEWED_PART_OFFSET_ROUTES,
     REVIEWED_PARTDESIGN_PROMOTION_ROUTES,
+    REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -1254,10 +1322,14 @@ class ReviewedNativeExecutionResult:
     plan_content_sha256: str
     native_receipt: object
     owned_objects: tuple[object, ...] = field(default=(), repr=False, compare=False)
+    _verified_execution_context: InitVar[_ReviewedFamilyExecutionContext | None] = None
     result_kind: _ReviewedProductResultKind = field(init=False)
     semantic_roles: tuple[SemanticRole, ...] = field(init=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _verified_execution_context: _ReviewedFamilyExecutionContext | None,
+    ) -> None:
         owned = self.owned_objects
         if type(owned) is not tuple:
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
@@ -1279,6 +1351,7 @@ class ReviewedNativeExecutionResult:
             self.route.operation,
             self.object,
             owned,
+            context=_verified_execution_context,
         )
         object.__setattr__(self, "result_kind", contract.result_kind)
         object.__setattr__(self, "semantic_roles", contract.semantic_roles)
@@ -1335,7 +1408,8 @@ def execute_reviewed_intent_native(
     if (
         len(after) != len(before) + len(owned)
         or len(added) != len(owned)
-        or any(actual is not expected for actual, expected in zip(added, owned, strict=True))
+        or len({id(item) for item in added}) != len(added)
+        or {id(item) for item in added} != {id(item) for item in owned}
         or result is not owned[0]
         or getattr(result, "TypeId", None) != route.operation.native_type_id
     ):
@@ -1347,6 +1421,7 @@ def execute_reviewed_intent_native(
         plan_content_sha256=lowered.result.plan_document.content_sha256,
         native_receipt=family_result.receipt,
         owned_objects=owned,
+        _verified_execution_context=context,
     )
 
 
@@ -1359,6 +1434,7 @@ __all__ = [
     "REVIEWED_PART_OFFSET_ROUTES",
     "REVIEWED_PART_PROFILE_SURFACE_ROUTES",
     "REVIEWED_PART_PRIMITIVE_ROUTES",
+    "REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES",
     "REVIEWED_PARTDESIGN_PROMOTION_ROUTES",
     "LoweredReviewedIntent",
     "ReviewedIntentExecutionError",

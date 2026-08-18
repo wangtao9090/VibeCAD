@@ -174,7 +174,7 @@ def test_datum_family_spec_is_exactly_four_static_product_routes() -> None:
         )
         == PART_DATUM_REVIEWED_PRODUCT_IDENTITIES
     )
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 39
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 55
     assert {route.operation.native_type_id for route in REVIEWED_PART_DATUM_ROUTES} == {
         "Part::DatumLine",
         "Part::DatumPlane",
