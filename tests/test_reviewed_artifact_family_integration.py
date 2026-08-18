@@ -544,7 +544,7 @@ def test_image_update_rollback_restores_exact_prior_alias_object_and_workspace(
 def test_artifact_families_are_registered_and_nonartifact_context_is_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert len(shared.CURRENT_REVIEWED_INTENT_ROUTES) == 82
+    assert len(shared.CURRENT_REVIEWED_INTENT_ROUTES) == 96
     assert tuple(
         route.operation.operation_id for route in shared.REVIEWED_PART_FILE_IMPORT_ROUTES
     ) == ("brep", "iges", "step")
@@ -554,7 +554,7 @@ def test_artifact_families_are_registered_and_nonartifact_context_is_none(
         and route.family.product_execution_mode(route.operation).value == "create"
         for route in shared.REVIEWED_PART_FILE_IMPORT_ROUTES
     )
-    assert shared.REVIEWED_IMAGEPLANE_ROUTES == (shared.CURRENT_REVIEWED_INTENT_ROUTES[-1],)
+    assert shared.REVIEWED_IMAGEPLANE_ROUTES == (shared.CURRENT_REVIEWED_INTENT_ROUTES[81],)
     image_family = build_imageplane_reviewed_family_descriptor()
     assert IMAGEPLANE_OPERATION_SPEC.operation_id == "place_or_edit_image_plane"
     assert (

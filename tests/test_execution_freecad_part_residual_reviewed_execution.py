@@ -30,6 +30,7 @@ from vibecad.execution.freecad_part_residual_reviewed_execution import (
 from vibecad.execution.freecad_reviewed_intent_execution import (
     CURRENT_REVIEWED_INTENT_ROUTES,
     REVIEWED_PART_PRIMITIVE_ROUTES,
+    REVIEWED_PART_RESIDUAL_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
     ReviewedNativeExecutionResult,
@@ -262,7 +263,7 @@ def _source_fixture(count: int) -> _SourceFixture:
     return _SourceFixture(session=session, results=results, token=token)
 
 
-def test_residual_family_is_exact_unregistered_and_truthful_about_wire_limit() -> None:
+def test_residual_family_is_exact_registered_and_truthful_about_wire_limit() -> None:
     assert len(PART_RESIDUAL_REVIEWED_PRODUCT_OPERATIONS) == 8
     assert len(PART_RESIDUAL_REVIEWED_PRODUCT_IDENTITIES) == 8
     assert PART_RESIDUAL_REVIEWED_FAMILY_SPEC.manifest is PART_CORE_MANIFEST
@@ -273,10 +274,11 @@ def test_residual_family_is_exact_unregistered_and_truthful_about_wire_limit() -
         PART_RESIDUAL_REVIEWED_FAMILY_SPEC.minimum_sources,
         PART_RESIDUAL_REVIEWED_FAMILY_SPEC.maximum_sources,
     ) == (1, 8)
-    assert not {
+    assert CURRENT_REVIEWED_INTENT_ROUTES[82:90] == REVIEWED_PART_RESIDUAL_ROUTES
+    assert tuple(route.operation_id for route in REVIEWED_PART_RESIDUAL_ROUTES) == tuple(
         f"{PART_CORE_MANIFEST.family_id}.{item.value}"
         for item in PART_RESIDUAL_REVIEWED_PRODUCT_OPERATIONS
-    }.intersection(item.operation_id for item in CURRENT_REVIEWED_INTENT_ROUTES)
+    )
 
     descriptor = build_part_residual_reviewed_family_descriptor()
     assert descriptor.manifest is PART_CORE_MANIFEST

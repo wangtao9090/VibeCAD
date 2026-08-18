@@ -189,8 +189,8 @@ def test_part_file_import_family_slice_freezes_three_exact_routes_and_blockers()
     assert PART_FILE_IMPORT_SHARED_REGISTRATION_READY is True
     assert PART_FILE_IMPORT_REVIEWED_FAMILY_SPEC.shared_registration_ready is True
     assert PART_FILE_IMPORT_SHARED_BLOCKERS == ()
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 82
-    assert CURRENT_REVIEWED_INTENT_ROUTES[-4:-1] == REVIEWED_PART_FILE_IMPORT_ROUTES
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 96
+    assert CURRENT_REVIEWED_INTENT_ROUTES[78:81] == REVIEWED_PART_FILE_IMPORT_ROUTES
     assert tuple(route.operation.operation_id for route in REVIEWED_PART_FILE_IMPORT_ROUTES) == (
         "brep",
         "iges",

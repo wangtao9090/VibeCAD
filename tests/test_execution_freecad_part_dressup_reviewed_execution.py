@@ -30,6 +30,7 @@ from vibecad.execution.freecad_part_dressup_reviewed_execution import (
 from vibecad.execution.freecad_reviewed_intent_execution import (
     CURRENT_REVIEWED_INTENT_ROUTES,
     REVIEWED_PART_BOX_ROUTE,
+    REVIEWED_PART_DRESSUP_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
     ReviewedNativeExecutionResult,
@@ -252,7 +253,7 @@ def _native_result(
     return result
 
 
-def test_part_dressup_family_payload_is_exact_and_stays_out_of_current() -> None:
+def test_part_dressup_family_payload_is_exact_and_registered_append_only() -> None:
     family = build_part_dressup_reviewed_family_descriptor()
 
     assert PART_DRESSUP_REVIEWED_PRODUCT_OPERATIONS == tuple(PartDressupOperation)
@@ -270,9 +271,10 @@ def test_part_dressup_family_payload_is_exact_and_stays_out_of_current() -> None
     assert len(family.product_results) == 3
     assert {item.result_kind.value for item in family.product_results} == {"solid"}
     assert {item.semantic_roles for item in family.product_results} == {(SemanticRole.FEATURE,)}
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 78
-    assert not any(
-        route.manifest.family_id == "part_dressup" for route in CURRENT_REVIEWED_INTENT_ROUTES
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 96
+    assert CURRENT_REVIEWED_INTENT_ROUTES[90:93] == REVIEWED_PART_DRESSUP_ROUTES
+    assert tuple(route.operation_id for route in REVIEWED_PART_DRESSUP_ROUTES) == tuple(
+        item[0] for item in PART_DRESSUP_REVIEWED_PRODUCT_IDENTITIES
     )
 
     formal = current_freecad_intent_capability_specs()

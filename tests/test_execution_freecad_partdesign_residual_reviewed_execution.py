@@ -22,6 +22,7 @@ from vibecad.execution.freecad_partdesign_residual_reviewed_execution import (
 )
 from vibecad.execution.freecad_reviewed_intent_execution import (
     CURRENT_REVIEWED_INTENT_ROUTES,
+    REVIEWED_PARTDESIGN_RESIDUAL_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
     ReviewedIntentRoute,
@@ -377,7 +378,7 @@ def _fake_native_apply(
     )
 
 
-def test_formal_manifest_verification_delta_is_exact_three_and_unregistered() -> None:
+def test_formal_manifest_verification_delta_is_exact_three_and_registered() -> None:
     assert PARTDESIGN_RESIDUAL_REVIEWED_PRODUCT_IDENTITIES == (
         (
             "partdesign_residual.hole",
@@ -403,9 +404,9 @@ def test_formal_manifest_verification_delta_is_exact_three_and_unregistered() ->
         "PartDesign::Revolution",
         "PartDesign::CoordinateSystem",
     )
-    assert not any(
-        route.operation_id in {item[0] for item in PARTDESIGN_RESIDUAL_REVIEWED_PRODUCT_IDENTITIES}
-        for route in CURRENT_REVIEWED_INTENT_ROUTES
+    assert CURRENT_REVIEWED_INTENT_ROUTES[93:96] == REVIEWED_PARTDESIGN_RESIDUAL_ROUTES
+    assert tuple(route.operation_id for route in REVIEWED_PARTDESIGN_RESIDUAL_ROUTES) == tuple(
+        item[0] for item in PARTDESIGN_RESIDUAL_REVIEWED_PRODUCT_IDENTITIES
     )
 
 

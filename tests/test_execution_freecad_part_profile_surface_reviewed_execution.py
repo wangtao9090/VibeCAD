@@ -134,8 +134,8 @@ def test_profile_surface_descriptor_has_six_exact_reviewed_routes() -> None:
     assert family.manifest is PART_PROFILE_SURFACE_MANIFEST
     assert PART_PROFILE_SURFACE_REVIEWED_PRODUCT_OPERATIONS == tuple(PartProfileSurfaceOperation)
     assert len(routes) == len(PART_PROFILE_SURFACE_REVIEWED_PRODUCT_IDENTITIES) == 6
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 82
-    assert CURRENT_REVIEWED_INTENT_ROUTES[-58:-52] == routes
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 96
+    assert CURRENT_REVIEWED_INTENT_ROUTES[24:30] == routes
     assert tuple(item.operation.operation_id for item in routes) == (
         PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC.operation_ids
     )

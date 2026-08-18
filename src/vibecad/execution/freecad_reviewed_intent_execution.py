@@ -52,6 +52,10 @@ from vibecad.execution.freecad_part_curve_reviewed_execution import (
 from vibecad.execution.freecad_part_datum_reviewed_execution import (
     PART_DATUM_REVIEWED_FAMILY_SPEC,
 )
+from vibecad.execution.freecad_part_dressup_reviewed_execution import (
+    PART_DRESSUP_REVIEWED_FAMILY_SPEC,
+    build_part_dressup_reviewed_family_descriptor,
+)
 from vibecad.execution.freecad_part_file_import_reviewed_execution import (
     PART_FILE_IMPORT_REVIEWED_FAMILY_SPEC,
     build_part_file_import_reviewed_family_descriptor,
@@ -63,6 +67,10 @@ from vibecad.execution.freecad_part_offset_projection_reviewed_execution import 
 from vibecad.execution.freecad_part_profile_surface_reviewed_execution import (
     PART_PROFILE_SURFACE_RESULT_INVARIANTS,
     PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC,
+)
+from vibecad.execution.freecad_part_residual_reviewed_execution import (
+    PART_RESIDUAL_REVIEWED_FAMILY_SPEC,
+    build_part_residual_reviewed_family_descriptor,
 )
 from vibecad.execution.freecad_partdesign_boolean_reviewed_execution import (
     PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC,
@@ -82,6 +90,10 @@ from vibecad.execution.freecad_partdesign_primitive_reviewed_execution import (
 )
 from vibecad.execution.freecad_partdesign_promotion_reviewed_execution import (
     PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC,
+)
+from vibecad.execution.freecad_partdesign_residual_reviewed_execution import (
+    PARTDESIGN_RESIDUAL_REVIEWED_FAMILY_SPEC,
+    build_partdesign_residual_reviewed_family_descriptor,
 )
 from vibecad.execution.freecad_reviewed_artifact_inputs import (
     ReviewedArtifactContext,
@@ -1970,6 +1982,9 @@ _APP_ONE_SOURCE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
 # artifact authority remains mandatory before the family callback can run.
 _PART_FILE_IMPORT_FAMILY: Final = build_part_file_import_reviewed_family_descriptor()
 _IMAGEPLANE_FAMILY: Final = build_imageplane_reviewed_family_descriptor()
+_PART_RESIDUAL_FAMILY: Final = build_part_residual_reviewed_family_descriptor()
+_PART_DRESSUP_FAMILY: Final = build_part_dressup_reviewed_family_descriptor()
+_PARTDESIGN_RESIDUAL_FAMILY: Final = build_partdesign_residual_reviewed_family_descriptor()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -2210,6 +2225,18 @@ REVIEWED_IMAGEPLANE_ROUTES: Final = _routes_for_family(
     _IMAGEPLANE_FAMILY,
     IMAGEPLANE_REVIEWED_FAMILY_SPEC.operation_ids,
 )
+REVIEWED_PART_RESIDUAL_ROUTES: Final = _routes_for_family(
+    _PART_RESIDUAL_FAMILY,
+    PART_RESIDUAL_REVIEWED_FAMILY_SPEC.operation_ids,
+)
+REVIEWED_PART_DRESSUP_ROUTES: Final = _routes_for_family(
+    _PART_DRESSUP_FAMILY,
+    PART_DRESSUP_REVIEWED_FAMILY_SPEC.operation_ids,
+)
+REVIEWED_PARTDESIGN_RESIDUAL_ROUTES: Final = _routes_for_family(
+    _PARTDESIGN_RESIDUAL_FAMILY,
+    PARTDESIGN_RESIDUAL_REVIEWED_FAMILY_SPEC.operation_ids,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
@@ -2228,6 +2255,11 @@ _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     # the full-identity artifact routes are append-only extensions.
     REVIEWED_PART_FILE_IMPORT_ROUTES,
     REVIEWED_IMAGEPLANE_ROUTES,
+    # Residual product families are also append-only: the original 82 route
+    # ordinals and contract digests remain stable.
+    REVIEWED_PART_RESIDUAL_ROUTES,
+    REVIEWED_PART_DRESSUP_ROUTES,
+    REVIEWED_PARTDESIGN_RESIDUAL_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -3432,17 +3464,20 @@ __all__ = [
     "REVIEWED_PART_CSG_ROUTES",
     "REVIEWED_PART_CURVE_ROUTES",
     "REVIEWED_PART_DATUM_ROUTES",
+    "REVIEWED_PART_DRESSUP_ROUTES",
     "REVIEWED_PART_OFFSET_ROUTES",
     "REVIEWED_PART_FILE_IMPORT_ROUTES",
     "REVIEWED_IMAGEPLANE_ROUTES",
     "REVIEWED_PART_PROFILE_SURFACE_ROUTES",
     "REVIEWED_PART_PRIMITIVE_ROUTES",
+    "REVIEWED_PART_RESIDUAL_ROUTES",
     "REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES",
     "REVIEWED_PARTDESIGN_BOOLEAN_ROUTES",
     "REVIEWED_PARTDESIGN_DRESSUP_ROUTES",
     "REVIEWED_PARTDESIGN_GROOVE_ROUTES",
     "REVIEWED_PARTDESIGN_PATTERN_ROUTES",
     "REVIEWED_PARTDESIGN_PROMOTION_ROUTES",
+    "REVIEWED_PARTDESIGN_RESIDUAL_ROUTES",
     "LoweredReviewedIntent",
     "ReviewedIntentExecutionError",
     "ReviewedIntentExecutionErrorCode",

@@ -133,8 +133,8 @@ def test_dressup_family_routes_six_operations_with_one_dynamic_closure() -> None
     family = routes[0].family
 
     assert family.manifest is PARTDESIGN_DRESSUP_TRANSFORM_MANIFEST
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 82
-    assert CURRENT_REVIEWED_INTENT_ROUTES[-21:-15] == routes
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 96
+    assert CURRENT_REVIEWED_INTENT_ROUTES[61:67] == routes
     assert PARTDESIGN_DRESSUP_TRANSFORM_CATALOG_OPERATIONS == tuple(
         PartDesignDressupTransformOperation
     )

@@ -197,8 +197,8 @@ def test_static_manifest_identity_adapter_and_source_contract() -> None:
 
 
 def test_shared_route_strictly_dual_binds_and_public_lower_is_reachable() -> None:
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 82
-    assert CURRENT_REVIEWED_INTENT_ROUTES[-15:-14] == REVIEWED_PARTDESIGN_GROOVE_ROUTES
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 96
+    assert CURRENT_REVIEWED_INTENT_ROUTES[67:68] == REVIEWED_PARTDESIGN_GROOVE_ROUTES
     route = REVIEWED_PARTDESIGN_GROOVE_ROUTES[0]
     assert route.operation_id == "partdesign.groove.angle"
     assert route.semantic_operation == GROOVE_OPERATION_TERM.term_id
