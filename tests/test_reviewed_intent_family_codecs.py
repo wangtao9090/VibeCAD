@@ -205,7 +205,7 @@ def test_synthetic_sketch_binding_routes_and_lowers_operation_selected_subject(
         route.operation,
         selector_term,
     )
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 120
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 126
     assert route not in CURRENT_REVIEWED_INTENT_ROUTES
 
 
@@ -228,7 +228,7 @@ def test_reviewed_wire_union_preserves_pfg_v2_and_rejects_unknown_discriminator(
 
 
 def test_current_routes_bind_exact_pfg_document_contract() -> None:
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 120
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 126
     assert {route.family.intent_binding.binding_id for route in CURRENT_REVIEWED_INTENT_ROUTES} == {
         "reviewed_pfg_v2_feature_node",
         "reviewed_pm1_pfg_v2_whole_transaction",
@@ -262,7 +262,7 @@ def test_current_routes_bind_exact_pfg_document_contract() -> None:
         ).encode("ascii")
     ).hexdigest()
     assert current_route_catalog_sha256 == (
-        "a1e7d91f945103dbf972a8aa3790fb0a0934156cd124dcf3d6d64e5a6a33196c"
+        "db733cab94f9e72f6ce380c3c2509791ecdd94b650249c28d719d1a190c351d3"
     )
 
 

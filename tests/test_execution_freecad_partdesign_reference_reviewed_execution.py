@@ -27,6 +27,7 @@ from vibecad.execution.freecad_partdesign_reference_reviewed_execution import (
 from vibecad.execution.freecad_reviewed_intent_execution import (
     CURRENT_REVIEWED_INTENT_ROUTES,
     REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES,
+    REVIEWED_PARTDESIGN_REFERENCE_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedNativeExecutionResult,
     _ReviewedProductResultKind,
@@ -640,7 +641,7 @@ def test_stale_shape_tampered_signature_and_ambiguous_role_fail_before_mutation(
     assert ambiguous.document.mutation_calls == 0
 
 
-def test_private_descriptor_has_five_reference_result_contracts_without_registration() -> None:
+def test_private_descriptor_has_five_reference_result_contracts() -> None:
     descriptor = build_partdesign_reference_reviewed_family_descriptor()
 
     assert descriptor.manifest is PARTDESIGN_REFERENCE_COMPAT_MANIFEST
@@ -657,16 +658,20 @@ def test_private_descriptor_has_five_reference_result_contracts_without_registra
     )
 
 
-def test_candidate_route_handoff_matches_v2_formal_exactly_without_registration() -> None:
+def test_registered_routes_match_candidate_handoff_and_v2_formal_exactly() -> None:
     routes = build_partdesign_reference_candidate_routes()
     handoff = PARTDESIGN_REFERENCE_ROUTE_REGISTRATION_HANDOFF
 
     assert tuple((item.operation_id, item.semantic_operation) for item in routes) == (
         PARTDESIGN_REFERENCE_REVIEWED_PRODUCT_IDENTITIES
     )
-    assert not {item.operation_id for item in routes}.intersection(
-        item.operation_id for item in CURRENT_REVIEWED_INTENT_ROUTES
+    assert tuple(
+        (item.operation_id, item.semantic_operation, item.route_contract_sha256) for item in routes
+    ) == tuple(
+        (item.operation_id, item.semantic_operation, item.route_contract_sha256)
+        for item in REVIEWED_PARTDESIGN_REFERENCE_ROUTES
     )
+    assert CURRENT_REVIEWED_INTENT_ROUTES[120:125] == REVIEWED_PARTDESIGN_REFERENCE_ROUTES
     assert all(item.manifest is PARTDESIGN_REFERENCE_COMPAT_MANIFEST for item in routes)
     assert all(
         item.manifest.adapter.adapter_contract_sha256 == handoff.adapter_contract_sha256

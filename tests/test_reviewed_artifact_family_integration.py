@@ -544,7 +544,7 @@ def test_image_update_rollback_restores_exact_prior_alias_object_and_workspace(
 def test_artifact_families_are_registered_and_nonartifact_context_is_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert len(shared.CURRENT_REVIEWED_INTENT_ROUTES) == 120
+    assert len(shared.CURRENT_REVIEWED_INTENT_ROUTES) == 126
     assert tuple(
         route.operation.operation_id for route in shared.REVIEWED_PART_FILE_IMPORT_ROUTES
     ) == ("brep", "iges", "step")

@@ -91,6 +91,10 @@ from vibecad.execution.freecad_partdesign_primitive_reviewed_execution import (
 from vibecad.execution.freecad_partdesign_promotion_reviewed_execution import (
     PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC,
 )
+from vibecad.execution.freecad_partdesign_reference_reviewed_execution import (
+    PARTDESIGN_REFERENCE_REVIEWED_FAMILY_SPEC,
+    build_partdesign_reference_reviewed_family_descriptor,
+)
 from vibecad.execution.freecad_partdesign_residual_reviewed_execution import (
     PARTDESIGN_RESIDUAL_REVIEWED_FAMILY_SPEC,
     build_partdesign_residual_reviewed_family_descriptor,
@@ -122,6 +126,10 @@ from vibecad.execution.freecad_reviewed_release_attestation_resource import (
 )
 from vibecad.execution.freecad_sketch_bootstrap_reviewed_execution import (
     SKETCH_BOOTSTRAP_REVIEWED_FAMILY_SPEC,
+)
+from vibecad.execution.freecad_sketch_flatface_bootstrap_reviewed_execution import (
+    FLATFACE_SKETCH_REVIEWED_FAMILY_SPEC,
+    build_flatface_sketch_reviewed_family_descriptor,
 )
 from vibecad.execution.freecad_sketch_reviewed_execution import (
     REVIEWED_SKETCH_REGISTRATION_SPEC,
@@ -2269,6 +2277,8 @@ _IMAGEPLANE_FAMILY: Final = build_imageplane_reviewed_family_descriptor()
 _PART_RESIDUAL_FAMILY: Final = build_part_residual_reviewed_family_descriptor()
 _PART_DRESSUP_FAMILY: Final = build_part_dressup_reviewed_family_descriptor()
 _PARTDESIGN_RESIDUAL_FAMILY: Final = build_partdesign_residual_reviewed_family_descriptor()
+_PARTDESIGN_REFERENCE_FAMILY: Final = build_partdesign_reference_reviewed_family_descriptor()
+_FLATFACE_SKETCH_FAMILY: Final = build_flatface_sketch_reviewed_family_descriptor()
 
 
 def _resolve_planar_mechanical_dynamic_ownership(
@@ -2661,6 +2671,14 @@ REVIEWED_SKETCH_ROUTES: Final = _routes_for_family(
     _SKETCH_FAMILY,
     REVIEWED_SKETCH_REGISTRATION_SPEC.operation_ids,
 )
+REVIEWED_PARTDESIGN_REFERENCE_ROUTES: Final = _routes_for_family(
+    _PARTDESIGN_REFERENCE_FAMILY,
+    PARTDESIGN_REFERENCE_REVIEWED_FAMILY_SPEC.operation_ids,
+)
+REVIEWED_FLATFACE_SKETCH_ROUTES: Final = _routes_for_family(
+    _FLATFACE_SKETCH_FAMILY,
+    FLATFACE_SKETCH_REVIEWED_FAMILY_SPEC.operation_ids,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
@@ -2687,6 +2705,10 @@ _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PLANAR_MECHANICAL_ROUTES,
     REVIEWED_SKETCH_BOOTSTRAP_ROUTES,
     REVIEWED_SKETCH_ROUTES,
+    # Reference v2 and source-bound FlatFace Sketch append after the Sketch
+    # product routes so all pre-existing route ordinals remain unchanged.
+    REVIEWED_PARTDESIGN_REFERENCE_ROUTES,
+    REVIEWED_FLATFACE_SKETCH_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -3922,6 +3944,7 @@ __all__ = [
     "REVIEWED_APP_NO_SOURCE_ROUTES",
     "REVIEWED_APP_ONE_SOURCE_ROUTES",
     "REVIEWED_APP_ROUTES",
+    "REVIEWED_FLATFACE_SKETCH_ROUTES",
     "REVIEWED_PART_BOX_ROUTE",
     "REVIEWED_PART_CSG_ROUTES",
     "REVIEWED_PART_CURVE_ROUTES",
@@ -3940,6 +3963,7 @@ __all__ = [
     "REVIEWED_PARTDESIGN_GROOVE_ROUTES",
     "REVIEWED_PARTDESIGN_PATTERN_ROUTES",
     "REVIEWED_PARTDESIGN_PROMOTION_ROUTES",
+    "REVIEWED_PARTDESIGN_REFERENCE_ROUTES",
     "REVIEWED_PARTDESIGN_RESIDUAL_ROUTES",
     "LoweredReviewedIntent",
     "ReviewedIntentExecutionError",

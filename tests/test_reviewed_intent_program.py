@@ -11,6 +11,7 @@ import vibecad.execution.freecad_reviewed_intent_execution as reviewed_execution
 from vibecad.execution.freecad_reviewed_intent_execution import (
     CURRENT_REVIEWED_INTENT_ROUTES,
     REVIEWED_APP_ROUTES,
+    REVIEWED_FLATFACE_SKETCH_ROUTES,
     REVIEWED_IMAGEPLANE_ROUTES,
     REVIEWED_PART_CSG_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
@@ -27,6 +28,7 @@ from vibecad.execution.freecad_reviewed_intent_execution import (
     REVIEWED_PARTDESIGN_PATTERN_ROUTES,
     REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES,
     REVIEWED_PARTDESIGN_PROMOTION_ROUTES,
+    REVIEWED_PARTDESIGN_REFERENCE_ROUTES,
     REVIEWED_PARTDESIGN_RESIDUAL_ROUTES,
     REVIEWED_PLANAR_MECHANICAL_ROUTES,
     REVIEWED_SKETCH_BOOTSTRAP_ROUTES,
@@ -323,8 +325,10 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
         *REVIEWED_PLANAR_MECHANICAL_ROUTES,
         *REVIEWED_SKETCH_BOOTSTRAP_ROUTES,
         *REVIEWED_SKETCH_ROUTES,
+        *REVIEWED_PARTDESIGN_REFERENCE_ROUTES,
+        *REVIEWED_FLATFACE_SKETCH_ROUTES,
     )
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 120
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 126
     assert len(REVIEWED_PART_PRIMITIVE_ROUTES) == len(programs) == 8
     assert len(REVIEWED_PART_CURVE_ROUTES) == 9
     assert len(REVIEWED_PART_CSG_ROUTES) == 3
@@ -346,6 +350,8 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
     assert len(REVIEWED_PLANAR_MECHANICAL_ROUTES) == 3
     assert len(REVIEWED_SKETCH_BOOTSTRAP_ROUTES) == 1
     assert len(REVIEWED_SKETCH_ROUTES) == 20
+    assert len(REVIEWED_PARTDESIGN_REFERENCE_ROUTES) == 5
+    assert len(REVIEWED_FLATFACE_SKETCH_ROUTES) == 1
     assert {
         route.family.product_result(route.operation).result_kind.value
         for route in REVIEWED_PART_PRIMITIVE_ROUTES

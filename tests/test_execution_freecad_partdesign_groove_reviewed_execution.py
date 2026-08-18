@@ -197,7 +197,7 @@ def test_static_manifest_identity_adapter_and_source_contract() -> None:
 
 
 def test_shared_route_strictly_dual_binds_and_public_lower_is_reachable() -> None:
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 120
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 126
     assert CURRENT_REVIEWED_INTENT_ROUTES[67:68] == REVIEWED_PARTDESIGN_GROOVE_ROUTES
     assert REVIEWED_PARTDESIGN_GROOVE_ROUTES[0] in CURRENT_REVIEWED_INTENT_ROUTES
     route = REVIEWED_PARTDESIGN_GROOVE_ROUTES[0]

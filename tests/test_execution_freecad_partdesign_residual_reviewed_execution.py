@@ -22,6 +22,7 @@ from vibecad.execution.freecad_partdesign_residual_reviewed_execution import (
 )
 from vibecad.execution.freecad_reviewed_intent_execution import (
     CURRENT_REVIEWED_INTENT_ROUTES,
+    REVIEWED_FLATFACE_SKETCH_ROUTES,
     REVIEWED_PARTDESIGN_RESIDUAL_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
@@ -589,13 +590,8 @@ def test_flat_face_hole_profile_is_exactly_bound_to_base(
     profile.MapMode = "FlatFace"
     profile.AttachmentSupport = [(base, ["Face1"])]
     token = object()
-    sketch_route = _unregistered_sketch_route()
+    sketch_route = REVIEWED_FLATFACE_SKETCH_ROUTES[0]
     base_route = _route_for_native_type("PartDesign::AdditiveBox")
-    monkeypatch.setattr(
-        reviewed_execution,
-        "CURRENT_REVIEWED_INTENT_ROUTES",
-        (*CURRENT_REVIEWED_INTENT_ROUTES, sketch_route),
-    )
     sources = (
         _source_result(
             base_route,

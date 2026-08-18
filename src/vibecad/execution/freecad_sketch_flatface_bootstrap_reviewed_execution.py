@@ -35,6 +35,11 @@ from vibecad.parametric.freecad_sketch_flatface_bootstrap_rules import (
 from vibecad.validation import EntityObservation
 
 _OWNERSHIP_DOMAIN = b"vibecad.flatface-sketch-product-ownership.v1\0"
+_CREATE_RECOVERY_STATE_DOMAIN = b"vibecad.flatface-sketch-create-recovery-state.v1\0"
+_CREATE_RECOVERY_CONTRACT_SHA256 = hashlib.sha256(
+    b"vibecad.flatface-sketch-create-recovery.v1\0"
+    b"document-sequence;body-group;body-tip;visibility;one-flatface-sketch"
+).hexdigest()
 
 
 def _integrity_failure() -> None:
@@ -402,6 +407,199 @@ class FlatFaceSketchOwnershipReceipt:
         ):
             _integrity_failure()
 
+    def validate_current(
+        self,
+        document: object,
+        result: object,
+        owned: tuple[object, ...],
+    ) -> None:
+        if owned != (result,):
+            _integrity_failure()
+        self.validate_native_result(document, result)
+        try:
+            _face, _native_label, evidence = select_unique_zmax_planar_face(self.base)
+            current = flatface_rules._state_sha256(  # noqa: SLF001
+                self.body,
+                self.base,
+                result,
+                evidence,
+            )
+        except (Exception, SystemExit):
+            _integrity_failure()
+        if not hmac.compare_digest(current, self.state_sha256):
+            _integrity_failure()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _FlatFaceSketchCreateRecovery:
+    document: object = field(repr=False, compare=False)
+    body: object = field(repr=False, compare=False)
+    base: object = field(repr=False, compare=False)
+    before: tuple[object, ...] = field(repr=False, compare=False)
+    snapshots: tuple[object, ...] = field(repr=False, compare=False)
+
+
+def _recovery_state_sha256(
+    objects: tuple[object, ...],
+    snapshots: tuple[object, ...],
+) -> str:
+    try:
+        if len(objects) != len(snapshots) or any(
+            snapshot.object is not item for item, snapshot in zip(objects, snapshots, strict=True)
+        ):
+            _integrity_failure()
+        fields = tuple(
+            (
+                id(item),
+                bool(snapshot.visibility),
+                tuple(id(member) for member in snapshot.group)
+                if snapshot.group is not None
+                else None,
+                id(snapshot.tip) if snapshot.tip is not None else None,
+            )
+            for item, snapshot in zip(objects, snapshots, strict=True)
+        )
+    except (Exception, SystemExit):
+        _integrity_failure()
+    return hashlib.sha256(_CREATE_RECOVERY_STATE_DOMAIN + repr(fields).encode("ascii")).hexdigest()
+
+
+def _require_create_recovery(
+    document: object,
+    operation: ReviewedOperationSpec,
+    context: object,
+    opaque: object,
+) -> _FlatFaceSketchCreateRecovery:
+    from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
+        _ReviewedFamilyExecutionContext,
+    )
+
+    if (
+        type(context) is not _ReviewedFamilyExecutionContext
+        or context.document is not document
+        or operation is not FLATFACE_SKETCH_OPERATION_SPEC
+        or type(opaque) is not _FlatFaceSketchCreateRecovery
+        or opaque.document is not document
+    ):
+        _integrity_failure()
+    return opaque
+
+
+def _prepare_flatface_sketch_create_recovery(
+    document: object,
+    operation: ReviewedOperationSpec,
+    context: object,
+) -> tuple[str, object]:
+    from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
+        _ReviewedFamilyExecutionContext,
+    )
+
+    if (
+        type(context) is not _ReviewedFamilyExecutionContext
+        or context.document is not document
+        or operation is not FLATFACE_SKETCH_OPERATION_SPEC
+        or len(context.source_results) != 1
+    ):
+        _integrity_failure()
+    try:
+        base = context.source_results[0].object
+        body = base.getParentGeoFeatureGroup()
+        before, snapshots = flatface_rules._snapshot_document(document)  # noqa: SLF001
+    except (Exception, SystemExit):
+        _integrity_failure()
+    opaque = _FlatFaceSketchCreateRecovery(
+        document=document,
+        body=body,
+        base=base,
+        before=before,
+        snapshots=snapshots,
+    )
+    return _recovery_state_sha256(before, snapshots), opaque
+
+
+def _recover_flatface_sketch_create(
+    document: object,
+    opaque: object,
+    operation: ReviewedOperationSpec,
+    context: object,
+) -> None:
+    checked = _require_create_recovery(document, operation, context, opaque)
+    if not flatface_rules._restore_document(  # noqa: SLF001
+        document,
+        checked.before,
+        checked.snapshots,
+    ):
+        _integrity_failure()
+
+
+def _verify_flatface_sketch_create_state(
+    document: object,
+    opaque: object,
+    operation: ReviewedOperationSpec,
+    context: object,
+) -> str:
+    _require_create_recovery(document, operation, context, opaque)
+    try:
+        objects, snapshots = flatface_rules._snapshot_document(document)  # noqa: SLF001
+    except (Exception, SystemExit):
+        _integrity_failure()
+    return _recovery_state_sha256(objects, snapshots)
+
+
+def _commit_flatface_sketch_create(
+    document: object,
+    opaque: object,
+    operation: ReviewedOperationSpec,
+    context: object,
+) -> None:
+    checked = _require_create_recovery(document, operation, context, opaque)
+    try:
+        current = tuple(document.Objects)
+        added = tuple(
+            item for item in current if not any(item is prior for prior in checked.before)
+        )
+        sketch = added[0]
+        valid = (
+            len(current) == len(checked.before) + 1
+            and len(added) == 1
+            and getattr(sketch, "TypeId", None) == FLATFACE_SKETCH_NATIVE_TYPE_ID
+            and checked.body.Tip is sketch
+            and tuple(checked.body.Group)
+            == (
+                *tuple(
+                    next(
+                        snapshot.group
+                        for snapshot in checked.snapshots
+                        if snapshot.object is checked.body
+                    )
+                ),
+                sketch,
+            )
+            and sketch.MapMode == "FlatFace"
+            and tuple(sketch.AttachmentSupport)[0][0] is checked.base
+        )
+    except (Exception, SystemExit, StopIteration):
+        valid = False
+    if not valid:
+        _integrity_failure()
+
+
+def flatface_sketch_create_recovery_descriptor() -> object:
+    from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
+        _ReviewedCreateRecoveryDescriptor,
+    )
+
+    return _ReviewedCreateRecoveryDescriptor(
+        descriptor_id="reviewed_flatface_sketch_document_state",
+        descriptor_version="1.0.0",
+        descriptor_contract_sha256=_CREATE_RECOVERY_CONTRACT_SHA256,
+        operation_ids=(FLATFACE_SKETCH_OPERATION_SPEC.operation_id,),
+        prepare=_prepare_flatface_sketch_create_recovery,
+        recover=_recover_flatface_sketch_create,
+        verify=_verify_flatface_sketch_create_state,
+        commit=_commit_flatface_sketch_create,
+    )
+
 
 def execute_flatface_sketch_reviewed_plan_with_sources(
     document: object,
@@ -555,6 +753,7 @@ def build_flatface_sketch_reviewed_family_descriptor() -> object:
         minimum_sources=1,
         maximum_sources=1,
         requires_same_run_sources=True,
+        create_recovery=flatface_sketch_create_recovery_descriptor(),
     )
 
 
@@ -611,5 +810,6 @@ __all__ = [
     "build_flatface_sketch_reviewed_family_descriptor",
     "execute_flatface_sketch_reviewed_plan",
     "execute_flatface_sketch_reviewed_plan_with_sources",
+    "flatface_sketch_create_recovery_descriptor",
     "resolve_flatface_sketch_reviewed_operation",
 ]

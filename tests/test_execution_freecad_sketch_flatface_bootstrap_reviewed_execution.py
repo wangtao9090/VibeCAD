@@ -8,7 +8,9 @@ import pytest
 
 from vibecad.execution.freecad_reviewed_intent_execution import (
     CURRENT_REVIEWED_INTENT_ROUTES,
+    REVIEWED_FLATFACE_SKETCH_ROUTES,
     ReviewedIntentExecutionError,
+    _ReviewedFamilyExecutionContext,
 )
 from vibecad.execution.freecad_sketch_flatface_bootstrap_reviewed_execution import (
     FLATFACE_SKETCH_PRODUCT_CONTRACT,
@@ -102,7 +104,10 @@ def test_manifest_is_independent_exact_one_source_and_handoff_only() -> None:
     identity = FLATFACE_SKETCH_REVIEWED_PRODUCT_IDENTITIES[0]
     assert resolve_flatface_sketch_reviewed_operation(*identity) is FLATFACE_SKETCH_OPERATION_SPEC
     assert resolve_flatface_sketch_reviewed_operation(identity[0], identity[1] + "x") is None
-    assert all(route.operation_id != identity[0] for route in CURRENT_REVIEWED_INTENT_ROUTES)
+    assert tuple(
+        (route.operation_id, route.semantic_operation) for route in REVIEWED_FLATFACE_SKETCH_ROUTES
+    ) == (identity,)
+    assert CURRENT_REVIEWED_INTENT_ROUTES[125:] == REVIEWED_FLATFACE_SKETCH_ROUTES
 
 
 def test_exact_adapter_lowers_dependency_without_native_subelement_authority() -> None:
@@ -265,6 +270,60 @@ def test_private_descriptor_is_exact_one_source_valid_shape() -> None:
     assert descriptor.product_results[0].source_count == 1
     assert descriptor.product_results[0].owned_type_ids == (FLATFACE_SKETCH_NATIVE_TYPE_ID,)
     assert descriptor.product_results[0].requires_state_sha256 is True
+    assert descriptor.create_recovery is not None
+
+
+def test_shared_create_recovery_restores_and_commits_exact_body_state() -> None:
+    base = _Object("Base")
+    body = _Body(base)
+    document = _Document(body, base)
+    base.getParentGeoFeatureGroup = lambda: body
+    context = _ReviewedFamilyExecutionContext(
+        session=object(),
+        document=document,
+        source_results=(type("Source", (), {"object": base})(),),
+        run_token=object(),
+    )
+    descriptor = build_flatface_sketch_reviewed_family_descriptor().create_recovery
+    assert descriptor is not None
+    before_sha256, opaque = descriptor.prepare(
+        document,
+        FLATFACE_SKETCH_OPERATION_SPEC,
+        context,
+    )
+    assert (
+        descriptor.verify(
+            document,
+            opaque,
+            FLATFACE_SKETCH_OPERATION_SPEC,
+            context,
+        )
+        == before_sha256
+    )
+
+    sketch = _Object("Sketch", FLATFACE_SKETCH_NATIVE_TYPE_ID)
+    sketch.MapMode = "FlatFace"
+    sketch.AttachmentSupport = [(base, ["Face2"])]
+    document.Objects.append(sketch)
+    body.Group.append(sketch)
+    body.Tip = sketch
+    base.Visibility = False
+    descriptor.commit(document, opaque, FLATFACE_SKETCH_OPERATION_SPEC, context)
+
+    descriptor.recover(document, opaque, FLATFACE_SKETCH_OPERATION_SPEC, context)
+    assert (
+        descriptor.verify(
+            document,
+            opaque,
+            FLATFACE_SKETCH_OPERATION_SPEC,
+            context,
+        )
+        == before_sha256
+    )
+    assert tuple(document.Objects) == (body, base)
+    assert tuple(body.Group) == (base,)
+    assert body.Tip is base
+    assert base.Visibility is True
 
 
 def test_product_entry_rejects_missing_source_before_native_rule() -> None:

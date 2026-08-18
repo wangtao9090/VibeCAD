@@ -214,16 +214,16 @@ def _apply(
     )
 
 
-def test_current_sketch_product_routes_are_exact_append_only_120() -> None:
+def test_current_sketch_product_routes_are_exact_at_positions_99_to_120() -> None:
     routes = reviewed_execution.CURRENT_REVIEWED_INTENT_ROUTES
-    assert len(routes) == 120
-    assert routes[-21:-20] == reviewed_execution.REVIEWED_SKETCH_BOOTSTRAP_ROUTES
-    assert routes[-20:] == reviewed_execution.REVIEWED_SKETCH_ROUTES
+    assert len(routes) == 126
+    assert routes[99:100] == reviewed_execution.REVIEWED_SKETCH_BOOTSTRAP_ROUTES
+    assert routes[100:120] == reviewed_execution.REVIEWED_SKETCH_ROUTES
     assert len(REVIEWED_SKETCH_REGISTRATION_MANIFEST.operations) == 20
     assert reviewed_execution.REVIEWED_SKETCH_BOOTSTRAP_ROUTES[0].family.minimum_sources == 0
     assert reviewed_execution.REVIEWED_SKETCH_BOOTSTRAP_ROUTES[0].family.maximum_sources == 0
-    assert all(route.family.minimum_sources == 1 for route in routes[-20:])
-    assert all(route.family.maximum_sources == 1 for route in routes[-20:])
+    assert all(route.family.minimum_sources == 1 for route in routes[100:120])
+    assert all(route.family.maximum_sources == 1 for route in routes[100:120])
 
 
 @pytest.mark.slow

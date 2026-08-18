@@ -271,7 +271,7 @@ def test_part_dressup_family_payload_is_exact_and_registered_append_only() -> No
     assert len(family.product_results) == 3
     assert {item.result_kind.value for item in family.product_results} == {"solid"}
     assert {item.semantic_roles for item in family.product_results} == {(SemanticRole.FEATURE,)}
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 120
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 126
     assert CURRENT_REVIEWED_INTENT_ROUTES[90:93] == REVIEWED_PART_DRESSUP_ROUTES
     assert tuple(route.operation_id for route in REVIEWED_PART_DRESSUP_ROUTES) == tuple(
         item[0] for item in PART_DRESSUP_REVIEWED_PRODUCT_IDENTITIES
