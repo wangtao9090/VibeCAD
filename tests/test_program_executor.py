@@ -19,6 +19,9 @@ import pytest
 
 import vibecad.execution.executor as executor_module
 import vibecad.execution.freecad_part_profile_surface_reviewed_execution as profile_execution
+from test_execution_freecad_part_offset_projection_reviewed_execution import (
+    _program as reviewed_offset_program,
+)
 from test_execution_freecad_part_profile_surface_reviewed_execution import (
     _program as reviewed_profile_surface_program,
 )
@@ -38,6 +41,10 @@ from vibecad.execution.executor import (
     ExecutorErrorCode,
     InProcessCadExecutor,
 )
+from vibecad.execution.freecad_part_offset_projection_reviewed_execution import (
+    PART_OFFSET_RESULT_INVARIANTS,
+    PartOffsetOwnershipClosure,
+)
 from vibecad.execution.freecad_part_profile_surface_reviewed_execution import (
     PART_PROFILE_SURFACE_RESULT_INVARIANTS,
     PartProfileSurfaceOwnershipClosure,
@@ -46,6 +53,7 @@ from vibecad.execution.freecad_reviewed_intent_execution import (
     REVIEWED_PART_BOX_ROUTE,
     REVIEWED_PART_CSG_ROUTES,
     REVIEWED_PART_DATUM_ROUTES,
+    REVIEWED_PART_OFFSET_ROUTES,
     REVIEWED_PART_PROFILE_SURFACE_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
@@ -84,6 +92,10 @@ from vibecad.parametric.freecad_part_datum_rules import (
     PART_DATUM_NATIVE_TYPE_IDS,
     PartDatumConformanceReceipt,
     PartDatumOperation,
+)
+from vibecad.parametric.freecad_part_offset_projection_rules import (
+    PartOffsetConformanceReceipt,
+    PartOffsetOperation,
 )
 from vibecad.parametric.freecad_part_profile_surface_rules import (
     PartProfileSurfaceConformanceReceipt,
@@ -2763,6 +2775,161 @@ def test_two_reviewed_primitives_cannot_masquerade_as_ordered_loft_profiles(
     assert [item.result.ok for item in outcomes] == [True, True, False]
     assert native_called is False
     assert len(session.doc.Objects) == 2
+
+
+@pytest.mark.parametrize(
+    ("operation", "shape_type", "source_count"),
+    (
+        (PartOffsetOperation.PLANAR_WIRE_OFFSET, "Wire", 1),
+        (PartOffsetOperation.EDGE_ON_FACE_PROJECTION, "Compound", 2),
+    ),
+)
+def test_execute_program_adopts_reviewed_offset_non_solids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: PartOffsetOperation,
+    shape_type: str,
+    source_count: int,
+) -> None:
+    reviewed_box = reviewed_box_program()
+    reviewed_offset = reviewed_offset_program(operation)
+    primitive_results: list[ReviewedNativeExecutionResult] = []
+
+    def execute_reviewed(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        if value == reviewed_box:
+            assert source_results == ()
+            index = len(primitive_results)
+            obj = type("ManagedReviewedOffsetSource", (), {})()
+            obj.Name = f"ReviewedOffsetSource{index}"
+            obj.TypeId = "Part::Box"
+            obj.Length = 10.0
+            obj.Width = 8.0
+            obj.Height = 6.0
+            obj.Placement = _FakePlacement(float(index))
+            obj.Shape = _FakeShape(volume=480.0, area=376.0, bbox=(10.0, 8.0, 6.0))
+            obj.State = []
+            session.doc.Objects = (*session.doc.Objects, obj)
+            plan_sha256 = f"{index + 1:x}" * 64
+            result = ReviewedNativeExecutionResult(
+                route=REVIEWED_PART_BOX_ROUTE,
+                object=obj,
+                plan_sha256=plan_sha256,
+                plan_content_sha256=f"{index + 3:x}" * 64,
+                native_receipt=PartCoreConformanceReceipt(
+                    plan_sha256=plan_sha256,
+                    operation=PartCoreOperation.BOX,
+                    object_name=obj.Name,
+                    source_shape_sha256s=(),
+                    result_shape_sha256=hashlib.sha256(
+                        obj.Shape.exportBrepToString().encode()
+                    ).hexdigest(),
+                ),
+            )
+            primitive_results.append(result)
+            return result
+
+        assert value == reviewed_offset
+        assert source_results == tuple(primitive_results)
+        route = next(
+            item
+            for item in REVIEWED_PART_OFFSET_ROUTES
+            if item.operation.operation_id == operation.value
+        )
+        obj = type("ManagedReviewedOffsetResult", (), {})()
+        obj.Name = f"Reviewed{shape_type}Offset"
+        obj.TypeId = route.operation.native_type_id
+        obj.Placement = _FakePlacement(0.0)
+        obj.Shape = _FakeShape(
+            volume=0.0,
+            area=64.0,
+            shape_type=shape_type,
+            edge_count=1,
+            face_count=0,
+            solid_count=0,
+            bbox=(8.0, 8.0, 1.0),
+            center=(4.0, 4.0, 0.5),
+        )
+        obj.State = ("Up-to-date",)
+        obj.isValid = lambda: True
+        session.doc.Objects = (*session.doc.Objects, obj)
+        plan_sha256 = "9" * 64
+        source_shape_sha256s = tuple(
+            item.native_receipt.result_shape_sha256 for item in source_results
+        )
+        receipt = PartOffsetConformanceReceipt(
+            plan_sha256=plan_sha256,
+            operation=operation,
+            object_name=obj.Name,
+            native_type_id=obj.TypeId,
+            source_object_names=tuple(item.object.Name for item in source_results),
+        )
+        return ReviewedNativeExecutionResult(
+            route=route,
+            object=obj,
+            plan_sha256=plan_sha256,
+            plan_content_sha256="a" * 64,
+            native_receipt=PartOffsetOwnershipClosure(
+                invariant=PART_OFFSET_RESULT_INVARIANTS[operation],
+                native_receipt=receipt,
+                source_shape_sha256s=source_shape_sha256s,
+                result_shape_sha256=hashlib.sha256(
+                    obj.Shape.exportBrepToString().encode()
+                ).hexdigest(),
+            ),
+        )
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute_reviewed)
+    source_commands = tuple(
+        _command(
+            f"source_{index}",
+            "apply_reviewed_intent",
+            args={"intent": reviewed_box.to_mapping()},
+        )
+        for index in range(source_count)
+    )
+    offset_args: dict[str, object] = {
+        "intent": reviewed_offset.to_mapping(),
+        "source_a": {"command_id": "source_0", "slot": "object"},
+    }
+    if source_count == 2:
+        offset_args["source_b"] = {"command_id": "source_1", "slot": "object"}
+    program = ModelProgram(
+        task_id=f"task-reviewed-{operation.value}",
+        base_revision=BASE_REVISION,
+        operations=(
+            *source_commands,
+            _command(
+                "offset",
+                "apply_reviewed_intent",
+                args=offset_args,
+                depends_on=tuple(f"source_{index}" for index in range(source_count)),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id=f"acceptance-{operation.value}", criteria=()),
+    )
+    session = _FakeSession()
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert all(item.result.ok for item in outcomes)
+    observation = outcomes[-1].result.value["after"]
+    result_object, identity = next(
+        (item, item_identity)
+        for item, item_identity in session.attached_identities
+        if item_identity.object_id == observation["object_id"]
+    )
+    assert identity.semantic_role.value == "feature"
+    assert result_object.Shape.ShapeType == shape_type
+    assert observation["solid_count"] == 0
+    assert observation["volume_mm3"] == 0.0
 
 
 @pytest.mark.slow

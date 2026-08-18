@@ -324,7 +324,7 @@ def test_reviewed_part_csg_route_table_is_exact_and_closed() -> None:
 
     assert tuple(route_reviewed_intent(item) for item in programs) == (REVIEWED_PART_CSG_ROUTES)
     assert CURRENT_REVIEWED_INTENT_ROUTES[17:20] == REVIEWED_PART_CSG_ROUTES
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 30
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 33
     assert all(
         route.family.product_result(route.operation).result_kind.value == "solid"
         and route.family.product_result(route.operation).owned_type_ids
