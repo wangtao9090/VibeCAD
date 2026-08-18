@@ -21,6 +21,6 @@ PACKAGED_FREECAD_REVIEWED_RELEASE_ATTESTATION_SHA256_BY_RELEASE_PLATFORM: Final 
         (
             "0.10.0",
             "macos.x86_64",
-        ): "0135830059981607ba5f87feda2d045ce0da62c97252ef5af4436a678466b4bb",
+        ): "66bf04706872d2ab96cb63ef36221c24f43d01ffdb041f939c62ee943ea45a9a",
     }
 )

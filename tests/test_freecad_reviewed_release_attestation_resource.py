@@ -215,7 +215,7 @@ def test_loader_has_no_path_or_environment_override_surface():
     assert loader.__code__.co_argcount == 0
 
 
-def test_checked_in_resources_are_pinned_but_fail_closed_pending_catalog126_regeneration(
+def test_checked_in_resources_track_the_cross_platform_catalog126_rollout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(resource, "_platform_id", lambda: "macos.x86_64")
@@ -228,27 +228,31 @@ def test_checked_in_resources_are_pinned_but_fail_closed_pending_catalog126_rege
         (__version__, "macos.arm64"): loaded_arm.resource_sha256,
         (__version__, "macos.x86_64"): loaded_x86.resource_sha256,
     }
-    for loaded, platform_id in (
-        (loaded_arm, "macos.arm64"),
-        (loaded_x86, "macos.x86_64"),
-    ):
-        raw = json.loads(loaded.raw)
-        assert raw["release_version"] == __version__
-        assert raw["runtime_backend"]["platform_id"] == platform_id
-        assert len(raw["verification_set"]["receipts"]) == 19
-        assert len(raw["verification_set"]["formal_operations"]) == 124
-        assert len(raw["verification_set"]["native_types"]) == 102
-        assert (
-            raw["verification_set"]["current_formal_catalog_sha256"]
-            != verification_runtime._current_catalogs()[2]  # noqa: SLF001
-        )
+    x86_raw = json.loads(loaded_x86.raw)
+    assert x86_raw["runtime_backend"]["platform_id"] == "macos.x86_64"
+    assert len(x86_raw["verification_set"]["receipts"]) == 21
+    assert len(x86_raw["verification_set"]["formal_operations"]) == 126
+    assert len(x86_raw["verification_set"]["native_types"]) == 102
+    assert x86_raw["verification_set"]["current_formal_catalog_sha256"] == (
+        verification_runtime._current_catalogs()[2]  # noqa: SLF001
+    )
+    decode_freecad_reviewed_release_attestation(
+        loaded_x86.raw,
+        expected_source_attestation_sha256=loaded_x86.resource_sha256,
+    )
 
-        # Platform resources remain pinned and canonical, but are deliberately
-        # unusable until the 21-receipt/126-operation attestations are regenerated.
-        with pytest.raises(CapabilityCatalogError) as raised:
-            decode_freecad_reviewed_release_attestation(
-                loaded.raw,
-                expected_source_attestation_sha256=loaded.resource_sha256,
-            )
-        assert raised.value.code is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
-        assert raised.value.path == "verification_set/current_catalog"
+    arm_raw = json.loads(loaded_arm.raw)
+    assert arm_raw["runtime_backend"]["platform_id"] == "macos.arm64"
+    assert len(arm_raw["verification_set"]["receipts"]) == 19
+    assert len(arm_raw["verification_set"]["formal_operations"]) == 124
+    assert len(arm_raw["verification_set"]["native_types"]) == 102
+    assert arm_raw["verification_set"]["current_formal_catalog_sha256"] != (
+        verification_runtime._current_catalogs()[2]  # noqa: SLF001
+    )
+    with pytest.raises(CapabilityCatalogError) as raised:
+        decode_freecad_reviewed_release_attestation(
+            loaded_arm.raw,
+            expected_source_attestation_sha256=loaded_arm.resource_sha256,
+        )
+    assert raised.value.code is CapabilityCatalogErrorCode.INTEGRITY_FAILURE
+    assert raised.value.path == "verification_set/current_catalog"
