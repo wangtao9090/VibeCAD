@@ -51,6 +51,12 @@ from vibecad.execution.freecad_part_profile_surface_reviewed_execution import (
     PART_PROFILE_SURFACE_RESULT_INVARIANTS,
     PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC,
 )
+from vibecad.execution.freecad_partdesign_boolean_reviewed_execution import (
+    PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC,
+)
+from vibecad.execution.freecad_partdesign_pattern_reviewed_execution import (
+    PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC,
+)
 from vibecad.execution.freecad_partdesign_primitive_reviewed_execution import (
     PARTDESIGN_PRIMITIVE_PRODUCT_CONTRACTS,
     PARTDESIGN_PRIMITIVE_REVIEWED_FAMILY_SPEC,
@@ -757,6 +763,40 @@ _PARTDESIGN_PRIMITIVE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     formal_semantic_binding=_ReviewedFormalSemanticBinding.LEGACY_TERM_ID,
 )
 
+_PARTDESIGN_PATTERN_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC.manifest,
+    subject_type_term=PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC.subject_type_term,
+    adapter_factory=PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC.adapter_factory,
+    validate_plan=PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC.validate_plan,
+    execute_plan=PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC.execute_plan,
+    product_results=_singleton_product_results(
+        PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC.manifest,
+        PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC.operation_ids,
+        result_kind=_ReviewedProductResultKind.SOLID,
+        semantic_role=SemanticRole.FEATURE,
+    ),
+    minimum_sources=PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC.minimum_sources,
+    maximum_sources=PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC.maximum_sources,
+    formal_semantic_binding=_ReviewedFormalSemanticBinding.LEGACY_TERM_ID,
+)
+
+_PARTDESIGN_BOOLEAN_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC.manifest,
+    subject_type_term=PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC.subject_type_term,
+    adapter_factory=PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC.adapter_factory,
+    validate_plan=PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC.validate_plan,
+    execute_plan=PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC.execute_plan,
+    product_results=_singleton_product_results(
+        PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC.manifest,
+        PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC.operation_ids,
+        result_kind=_ReviewedProductResultKind.SOLID,
+        semantic_role=SemanticRole.FEATURE,
+    ),
+    minimum_sources=PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC.minimum_sources,
+    maximum_sources=PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC.maximum_sources,
+    formal_semantic_binding=_ReviewedFormalSemanticBinding.LEGACY_TERM_ID,
+)
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReviewedIntentRoute:
@@ -915,6 +955,14 @@ REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES: Final = _routes_for_family(
     _PARTDESIGN_PRIMITIVE_FAMILY,
     PARTDESIGN_PRIMITIVE_REVIEWED_FAMILY_SPEC.operation_ids,
 )
+REVIEWED_PARTDESIGN_PATTERN_ROUTES: Final = _routes_for_family(
+    _PARTDESIGN_PATTERN_FAMILY,
+    PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC.operation_ids,
+)
+REVIEWED_PARTDESIGN_BOOLEAN_ROUTES: Final = _routes_for_family(
+    _PARTDESIGN_BOOLEAN_FAMILY,
+    PARTDESIGN_BOOLEAN_REVIEWED_FAMILY_SPEC.operation_ids,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
@@ -924,6 +972,8 @@ _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_OFFSET_ROUTES,
     REVIEWED_PARTDESIGN_PROMOTION_ROUTES,
     REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES,
+    REVIEWED_PARTDESIGN_PATTERN_ROUTES,
+    REVIEWED_PARTDESIGN_BOOLEAN_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -1435,6 +1485,8 @@ __all__ = [
     "REVIEWED_PART_PROFILE_SURFACE_ROUTES",
     "REVIEWED_PART_PRIMITIVE_ROUTES",
     "REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES",
+    "REVIEWED_PARTDESIGN_BOOLEAN_ROUTES",
+    "REVIEWED_PARTDESIGN_PATTERN_ROUTES",
     "REVIEWED_PARTDESIGN_PROMOTION_ROUTES",
     "LoweredReviewedIntent",
     "ReviewedIntentExecutionError",
