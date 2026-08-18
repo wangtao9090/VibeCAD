@@ -13,6 +13,9 @@ import pytest
 from PIL import Image
 
 import vibecad.application.reviewed_input_ingress as ingress_module
+from tests.test_intent_bridge_freecad_part_file_import_adapter import (
+    _graph as import_graph,
+)
 from vibecad.application.agent import AgentApplication
 from vibecad.application.reviewed_input_ingress import (
     REVIEWED_INPUT_CATALOG_DIRECTORY,
@@ -26,8 +29,10 @@ from vibecad.application.reviewed_input_ingress import (
     TrustedReviewedInputFileDescriptor,
 )
 from vibecad.execution.freecad_reviewed_artifact_host import REVIEWED_ARTIFACT_MANIFEST_NAME
+from vibecad.parametric.freecad_part_file_import_rules import PartFileImportOperation
 from vibecad.workflow.contracts import AcceptanceSpec, ModelCommand, ModelProgram, ValueSource
 from vibecad.workflow.program import validate_model_program
+from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 from vibecad.workflow.state import ReasoningOwner, ReviewPolicy
 
 _TASK_ID = "task_0123456789abcdef0123456789abcdef"
@@ -80,6 +85,42 @@ def _program(task_id: str = _TASK_ID, base_revision: str = _BASE_REVISION):
                 ),
             ),
             acceptance=AcceptanceSpec(id="accept_reviewed_inputs", criteria=()),
+        )
+    )
+
+
+def _artifact_program(task_id: str = _TASK_ID, base_revision: str = _BASE_REVISION):
+    from vibecad.execution.freecad_reviewed_intent_execution import (
+        REVIEWED_PART_FILE_IMPORT_ROUTES,
+    )
+
+    route = next(
+        item
+        for item in REVIEWED_PART_FILE_IMPORT_ROUTES
+        if item.operation.operation_id == PartFileImportOperation.STEP.value
+    )
+    graph = import_graph(PartFileImportOperation.STEP, hashlib.sha256(_STEP).hexdigest())
+    intent = ReviewedIntentProgramV1(
+        operation_id=route.operation_id,
+        semantic_operation=route.semantic_operation,
+        intent_graph_sha256=graph.graph_sha256,
+        intent_content_sha256=hashlib.sha256(graph.canonical_bytes).hexdigest(),
+        intent_graph=graph,
+    )
+    return validate_model_program(
+        ModelProgram(
+            task_id=task_id,
+            base_revision=base_revision,
+            operations=(
+                ModelCommand(
+                    id="import_step",
+                    op="apply_reviewed_intent",
+                    target={},
+                    args={"intent": intent.to_mapping()},
+                    source=ValueSource.MODEL,
+                ),
+            ),
+            acceptance=AcceptanceSpec(id="accept_reviewed_artifact", criteria=()),
         )
     )
 
@@ -260,7 +301,7 @@ def test_store_seals_exact_bytes_and_fd_then_cleans_run_and_catalog(tmp_path: Pa
 
     store.close()
     store = _store(root)
-    assert store.requires_artifact_snapshot(_program()) is True
+    assert store.requires_artifact_snapshot(_artifact_program()) is True
     lease = store.acquire(
         task_id=_TASK_ID,
         project_id=_PROJECT_ID,
@@ -288,6 +329,22 @@ def test_store_seals_exact_bytes_and_fd_then_cleans_run_and_catalog(tmp_path: Pa
         base_revision=_BASE_REVISION,
     )
     assert tuple(catalog_root.iterdir()) == ()
+    assert store.requires_artifact_snapshot(_artifact_program()) is False
+    store.close()
+
+
+def test_nonartifact_program_preflight_never_opens_reviewed_input_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _private(tmp_path / "data")
+    store = _store(root)
+
+    def reject_store_open(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("non-artifact preflight must not open the reviewed input store")
+
+    monkeypatch.setattr(ReviewedInputCatalogStore, "_open_root", reject_store_open)
+
     assert store.requires_artifact_snapshot(_program()) is False
     store.close()
 
@@ -421,7 +478,7 @@ def test_reloaded_catalog_rejects_recomputed_wrong_role(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ReviewedInputIngressError) as caught:
-        store.requires_artifact_snapshot(_program())
+        store.requires_artifact_snapshot(_artifact_program())
     assert caught.value.code is ReviewedInputIngressErrorCode.INTEGRITY_FAILURE
     store.close()
 
@@ -449,7 +506,7 @@ def test_application_host_attach_bind_preflight_acquire_close_discard(tmp_path: 
             ),
         ),
     )
-    validated = _program(task.id, task.base_revision)
+    validated = _artifact_program(task.id, task.base_revision)
 
     with application._cad_gate:  # noqa: SLF001
         port = application._cad_execution_port_under_gate()  # noqa: SLF001

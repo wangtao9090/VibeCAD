@@ -28,6 +28,7 @@ import secrets
 import stat
 import sys
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -1026,6 +1027,23 @@ class ReviewedInputCatalogStore:
 
         if type(program) is not ValidatedProgram:
             _fail(ReviewedInputIngressErrorCode.INVALID_INPUT)
+        from vibecad.execution.freecad_reviewed_intent_execution import (
+            REVIEWED_IMAGEPLANE_ROUTES,
+            REVIEWED_PART_FILE_IMPORT_ROUTES,
+        )
+
+        artifact_route_identities = {
+            (route.operation_id, route.semantic_operation)
+            for route in (*REVIEWED_PART_FILE_IMPORT_ROUTES, *REVIEWED_IMAGEPLANE_ROUTES)
+        }
+        if not any(
+            command.operation == "apply_reviewed_intent"
+            and isinstance(intent := command.handler_kwargs.get("intent"), Mapping)
+            and (intent.get("operation_id"), intent.get("semantic_operation"))
+            in artifact_route_identities
+            for command in program.commands
+        ):
+            return False
         source = program.program
         name = _catalog_name(source.task_id, source.base_revision)
         root_fd = -1
