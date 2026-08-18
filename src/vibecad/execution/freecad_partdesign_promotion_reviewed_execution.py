@@ -534,7 +534,8 @@ def _authenticated_source_bindings(
             or getattr(item, "Document", None) is not document
             or not any(item is existing for existing in document_objects)
             or source.result_kind is not expected_kind
-            or tuple(source.semantic_roles) != (identity.semantic_role,)
+            or not source.semantic_roles
+            or source.semantic_roles[0] is not identity.semantic_role
             or source.plan_sha256 != getattr(receipt, "plan_sha256", None)
             or getattr(receipt, "object_name", getattr(receipt, "sketch_object_name", None))
             != getattr(item, "Name", None)
@@ -566,7 +567,7 @@ def _authenticated_source_bindings(
             body.Document is not document
             or body.TypeId != "PartDesign::Body"
             or tuple(body.Group) != expected_group
-            or body.Tip is not (None if base is None else base.object)
+            or body.Tip is not (profiles[-1].object if base is None else base.object)
         ):
             raise ValueError
     except Exception:

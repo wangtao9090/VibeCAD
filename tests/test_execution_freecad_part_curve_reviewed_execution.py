@@ -278,7 +278,7 @@ def test_shared_product_bridge_routes_and_lowers_all_nine_curves(
     route = route_reviewed_intent(program)
     lowered = lower_reviewed_intent(program)
 
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 99
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 120
     assert route in REVIEWED_PART_CURVE_ROUTES
     assert route.operation_id == program.operation_id
     assert route.semantic_operation == program.semantic_operation

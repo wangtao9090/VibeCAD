@@ -96,6 +96,14 @@ class _IdentityObject:
     def getPropertyStatus(self, name):
         return list(self._property_status[name])
 
+    def setEditorMode(self, name, mode):
+        assert mode == 3
+        self._editor_modes[name] = ["ReadOnly", "Hidden"]
+
+    def setPropertyStatus(self, name, status):
+        assert status == "LockDynamic"
+        self._property_status[name] = ["LockDynamic"]
+
 
 class _IdentityDoc(FakeDoc):
     def __init__(self, *objects):
@@ -363,9 +371,11 @@ def test_attach_read_and_list_object_identity_uses_locked_persistent_properties(
     assert all(
         call[0] == "App::PropertyString"
         and call[2] == "VibeCAD"
-        and call[4:] == (0, True, True, True)
+        and call[4:] == (0, False, False, False)
         for call in obj.add_calls
     )
+    assert all(obj.getEditorMode(call[1]) == ["ReadOnly", "Hidden"] for call in obj.add_calls)
+    assert all(obj.getPropertyStatus(call[1]) == ["LockDynamic"] for call in obj.add_calls)
     assert session.read_object_identity(obj) == attached
     assert session.list_object_identities() == ((obj, attached),)
 

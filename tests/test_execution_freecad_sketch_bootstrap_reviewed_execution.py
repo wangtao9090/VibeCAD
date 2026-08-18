@@ -24,6 +24,7 @@ from vibecad.intent_bridge.reviewed_family_engine import (
     ExactReviewedFamilyAdapter,
     ReviewedPlanDraft,
 )
+from vibecad.parametric import freecad_sketch_intent_rules as sketch_rules
 from vibecad.parametric.freecad_sketch_bootstrap_rules import (
     SKETCH_BOOTSTRAP_FREECAD_ENGINE_BUILD_ID,
     SKETCH_BOOTSTRAP_ORIGIN_CLOSURE_TYPE_IDS,
@@ -260,6 +261,7 @@ class _Sketch(_Object):
         self.OpenVertices: tuple[object, ...] = ()
         self.Shape = _Shape()
         self.State = ("Up-to-date",)
+        self._properties: list[str] = []
 
     @property
     def GeometryCount(self) -> int:  # noqa: N802 - FreeCAD spelling
@@ -277,6 +279,16 @@ class _Sketch(_Object):
     def getConstruction(self, index: int) -> bool:  # noqa: N802 - FreeCAD spelling
         assert index == 0
         return False
+
+    @property
+    def PropertiesList(self) -> tuple[str, ...]:  # noqa: N802 - FreeCAD spelling
+        return tuple(self._properties)
+
+    def addProperty(self, _type_id: str, name: str, _group: str, _description: str) -> None:  # noqa: N802
+        self._properties.append(name)
+
+    def setEditorMode(self, name: str, mode: int) -> None:  # noqa: N802
+        assert name in self._properties and mode == 2
 
 
 class _Body(_Object):
@@ -489,6 +501,14 @@ def test_family_execution_requires_zero_sources_and_returns_primary_sketch(
     assert result.owned_objects[0] is result.object
     assert len(result.owned_objects) == 10
     assert result.receipt.shape_sha256
+    assert result.receipt.result_id == plan.result_id
+    assert len(result.receipt.profile_node_sha256) == 64
+    metadata, results = sketch_rules._validated_metadata(  # noqa: SLF001
+        result.object,
+        plan.node_id,
+    )
+    assert metadata["geometries"][0]["geometry_id"] == result.receipt.profile_geometry_id
+    assert results[plan.result_id]["producer_node_sha256"] == (result.receipt.profile_node_sha256)
     with pytest.raises(SketchBootstrapExecutionError):
         execute_sketch_bootstrap_reviewed_plan_with_sources(
             _Document(),

@@ -639,12 +639,15 @@ class Session:
                 _IDENTITY_GROUP,
                 _IDENTITY_PROPERTY_DOCS[name],
                 0,
-                True,
-                True,
-                True,
+                False,
+                False,
+                False,
             )
         for name, value in values.items():
             setattr(target, name, value)
+        for name in _IDENTITY_PROPERTIES:
+            target.setEditorMode(name, 3)
+            target.setPropertyStatus(name, "LockDynamic")
 
         attached = self.read_object_identity(target)
         if attached != identity:

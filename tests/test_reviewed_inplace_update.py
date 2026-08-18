@@ -329,6 +329,8 @@ def test_managed_update_preserves_identity_and_replaces_same_run_result(
     assert current.object is source.object
     assert current.state_sha256 != source.state_sha256
     assert current._update_recovery is None
+    assert current._is_retained_for_run(state.execution_token)
+    assert not source._is_retained_for_run(state.execution_token)
     assert behavior == {"execute_calls": 1}
 
 

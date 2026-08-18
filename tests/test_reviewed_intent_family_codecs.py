@@ -205,7 +205,7 @@ def test_synthetic_sketch_binding_routes_and_lowers_operation_selected_subject(
         route.operation,
         selector_term,
     )
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 99
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 120
     assert route not in CURRENT_REVIEWED_INTENT_ROUTES
 
 
@@ -228,10 +228,11 @@ def test_reviewed_wire_union_preserves_pfg_v2_and_rejects_unknown_discriminator(
 
 
 def test_current_routes_bind_exact_pfg_document_contract() -> None:
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 99
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 120
     assert {route.family.intent_binding.binding_id for route in CURRENT_REVIEWED_INTENT_ROUTES} == {
         "reviewed_pfg_v2_feature_node",
         "reviewed_pm1_pfg_v2_whole_transaction",
+        "reviewed_sketch_v1_operation_node",
     }
     assert {
         route.family.intent_binding.binding_version for route in CURRENT_REVIEWED_INTENT_ROUTES
@@ -243,7 +244,7 @@ def test_current_routes_bind_exact_pfg_document_contract() -> None:
         ).encode("ascii")
     ).hexdigest()
     assert legacy_route_catalog_sha256 == (
-        "99393c47a73561abca78c686fca061221c146747180edcf539070254baf63f41"
+        "65cfa7240d5e233af9bd4340a283c944f13f9cdca98be5d61b6ac7bbce715d30"
     )
     import81_route_catalog_sha256 = hashlib.sha256(
         "\n".join(
@@ -252,7 +253,7 @@ def test_current_routes_bind_exact_pfg_document_contract() -> None:
         ).encode("ascii")
     ).hexdigest()
     assert import81_route_catalog_sha256 == (
-        "e2dc595f83cd2196b10bd8fca9d4f406b6d57703f4126190142b66d797aa08e2"
+        "40c6ed706d59b612015d752c1d2cfb43c5910b9858b2ef991d633d50f345306b"
     )
     current_route_catalog_sha256 = hashlib.sha256(
         "\n".join(
@@ -261,7 +262,7 @@ def test_current_routes_bind_exact_pfg_document_contract() -> None:
         ).encode("ascii")
     ).hexdigest()
     assert current_route_catalog_sha256 == (
-        "df2c84eef93d2f3c2c32ef7c9688934d10253a414ff60c4674c5b7f8599c3caa"
+        "a1e7d91f945103dbf972a8aa3790fb0a0934156cd124dcf3d6d64e5a6a33196c"
     )
 
 

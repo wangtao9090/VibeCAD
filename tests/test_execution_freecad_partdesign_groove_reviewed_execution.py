@@ -197,8 +197,9 @@ def test_static_manifest_identity_adapter_and_source_contract() -> None:
 
 
 def test_shared_route_strictly_dual_binds_and_public_lower_is_reachable() -> None:
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 99
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 120
     assert CURRENT_REVIEWED_INTENT_ROUTES[67:68] == REVIEWED_PARTDESIGN_GROOVE_ROUTES
+    assert REVIEWED_PARTDESIGN_GROOVE_ROUTES[0] in CURRENT_REVIEWED_INTENT_ROUTES
     route = REVIEWED_PARTDESIGN_GROOVE_ROUTES[0]
     assert route.operation_id == "partdesign.groove.angle"
     assert route.semantic_operation == GROOVE_OPERATION_TERM.term_id
@@ -565,6 +566,10 @@ def test_public_execute_rejects_non_sketch_profile_before_native_mutation(
     import vibecad.execution.freecad_reviewed_intent_execution as shared
 
     document, _body, base, profile, session, _sources = _fixture()
+    assert any(
+        route.operation.native_type_id == "Sketcher::SketchObject"
+        for route in CURRENT_REVIEWED_INTENT_ROUTES
+    )
     base_route = next(
         route
         for route in REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES

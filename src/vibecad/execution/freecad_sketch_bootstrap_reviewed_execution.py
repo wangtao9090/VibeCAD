@@ -34,6 +34,7 @@ from vibecad.intent_bridge.reviewed_family_engine import (
     ReviewedPlanReceipt,
 )
 from vibecad.parametric import freecad_sketch_bootstrap_rules as bootstrap_rules
+from vibecad.parametric import freecad_sketch_intent_rules as sketch_rules
 from vibecad.parametric.freecad_sketch_bootstrap_rules import (
     SKETCH_BOOTSTRAP_NATIVE_TYPE_ID,
     SketchBootstrapBackendPlan,
@@ -43,8 +44,21 @@ from vibecad.parametric.freecad_sketch_bootstrap_rules import (
     apply_sketch_bootstrap_plan,
     decode_sketch_bootstrap_backend_plan,
 )
+from vibecad.parametric.freecad_sketch_intent_rules import (
+    ReviewedSketchNativeResult,
+    ReviewedSketchOperation,
+    reviewed_sketch_node_sha256,
+)
+from vibecad.sketch.contracts import (
+    SketchGeometryNode,
+    SketchProperty,
+    SketchResultPort,
+    SketchTypedValue,
+)
+from vibecad.sketch.ontology import SketchValueKind
 
 _OWNERSHIP_DIGEST_DOMAIN = b"vibecad.freecad-sketch-bootstrap-ownership.v1\0"
+_PROFILE_GEOMETRY_ID_DOMAIN = b"vibecad.freecad-sketch-bootstrap-profile-geometry.v1\0"
 
 
 class SketchBootstrapExecutionError(RuntimeError):
@@ -75,6 +89,135 @@ def _term_identity(term: object) -> tuple[str, str, str, str]:
 def _semantic_operation(operation: ReviewedOperationSpec) -> str:
     namespace, version, term_id, digest = operation.semantic_term.semantic_identity
     return f"{namespace}/{version}/{term_id}@{digest}"
+
+
+def sketch_bootstrap_profile_geometry_id(sketch_id: str) -> str:
+    """Return the deterministic SketchIntentGraph id for the bootstrap circle."""
+
+    if type(sketch_id) is not str or not sketch_id:
+        _integrity_failure()
+    digest = hashlib.sha256(_PROFILE_GEOMETRY_ID_DOMAIN + sketch_id.encode("utf-8")).hexdigest()
+    return f"geometry_bootstrap_{digest[:24]}"
+
+
+def _bootstrap_circle_binding(
+    *, geometry_id: str, result_id: str
+) -> tuple[str, ReviewedSketchNativeResult]:
+    """Bind the bootstrap circle to the Sketch UPDATE family's exact node codec."""
+
+    node = SketchGeometryNode(
+        geometry_id=geometry_id,
+        geometry_term_ref_id="operation_circle",
+        properties=(
+            SketchProperty(
+                property_term_ref_id="property_center",
+                typed_value=SketchTypedValue(
+                    value_type_term_ref_id="type_point2",
+                    value_kind=SketchValueKind.VECTOR,
+                    value=[0.0, 0.0],
+                ),
+                unit_term_ref_id="unit_mm",
+            ),
+            SketchProperty(
+                property_term_ref_id="property_radius",
+                typed_value=SketchTypedValue(
+                    value_type_term_ref_id="type_length",
+                    value_kind=SketchValueKind.NUMBER,
+                    value=bootstrap_rules.SKETCH_BOOTSTRAP_CIRCLE_RADIUS_MM,
+                ),
+                unit_term_ref_id="unit_mm",
+            ),
+        ),
+        result_ids=(result_id,),
+        construction=False,
+    )
+    result = SketchResultPort(
+        result_id=result_id,
+        producer_id=geometry_id,
+        port_id="curve",
+        value_type_term_ref_id="type_circle",
+    )
+    node_sha256 = reviewed_sketch_node_sha256(
+        {
+            "node": node.to_mapping(),
+            "anchors": [],
+            "results": [result.to_mapping()],
+        }
+    )
+    return node_sha256, ReviewedSketchNativeResult(
+        result_id=result_id,
+        port_id="curve",
+        geometry_index=0,
+        geometry_type_id="Part::GeomCircle",
+    )
+
+
+def _install_reviewed_sketch_binding(
+    document: object,
+    sketch: object,
+    *,
+    sketch_id: str,
+    result_id: str,
+) -> tuple[str, str]:
+    """Atomically adopt the created circle into Sketch UPDATE-owned metadata."""
+
+    geometry_id = sketch_bootstrap_profile_geometry_id(sketch_id)
+    node_sha256, native_result = _bootstrap_circle_binding(
+        geometry_id=geometry_id,
+        result_id=result_id,
+    )
+    try:
+        if (
+            sketch.GeometryCount != 1
+            or sketch.ConstraintCount != 0
+            or sketch.Geometry[0].TypeId != "Part::GeomCircle"
+            or sketch.getConstruction(0)
+            or "VibeCADReviewedSketchIntent" in tuple(sketch.PropertiesList)
+            or bool(document.HasPendingTransaction)
+        ):
+            _integrity_failure()
+        metadata = {
+            "schema_version": 1,
+            "sketch_id": sketch_id,
+            "geometries": [
+                {
+                    "geometry_id": geometry_id,
+                    "node_sha256": node_sha256,
+                    "operation": ReviewedSketchOperation.CIRCLE.value,
+                    "geometry_indices": [0],
+                    "internal_constraint_indices": [],
+                    "native_fingerprint_sha256": sketch_rules._geometry_fingerprint(  # noqa: SLF001
+                        sketch, (0,)
+                    ),
+                    "results": [native_result.to_mapping()],
+                }
+            ],
+            "constraints": [],
+        }
+        document.openTransaction("VibeCAD adopt reviewed Sketch bootstrap")
+        sketch_rules._write_metadata(sketch, metadata)  # noqa: SLF001
+        document.recompute()
+        checked, results = sketch_rules._validated_metadata(  # noqa: SLF001
+            sketch, sketch_id
+        )
+        if checked != metadata or results.get(result_id, {}).get("producer_node_sha256") != (
+            node_sha256
+        ):
+            _integrity_failure()
+        document.commitTransaction()
+    except SketchBootstrapExecutionError:
+        try:
+            document.abortTransaction()
+        except BaseException:
+            pass
+        raise
+    except BaseException:
+        try:
+            document.abortTransaction()
+        except BaseException:
+            pass
+        _execution_failure()
+    return geometry_id, node_sha256
 
 
 SKETCH_BOOTSTRAP_REVIEWED_PRODUCT_IDENTITIES: Final = (
@@ -133,6 +276,10 @@ class SketchBootstrapOwnershipReceipt:
     object: object = field(repr=False, compare=False)
     body: object = field(repr=False, compare=False)
     origin_closure: tuple[object, ...] = field(repr=False, compare=False)
+    sketch_id: str
+    result_id: str
+    profile_geometry_id: str
+    profile_node_sha256: str
     ownership_identity: tuple[str, str, str, str]
     plane_identity: tuple[str, str, str, str]
     profile_identity: tuple[str, str, str, str]
@@ -145,6 +292,14 @@ class SketchBootstrapOwnershipReceipt:
             or self.body is None
             or type(self.origin_closure) is not tuple
             or len(self.origin_closure) != 8
+            or type(self.sketch_id) is not str
+            or not self.sketch_id
+            or type(self.result_id) is not str
+            or not self.result_id
+            or type(self.profile_geometry_id) is not str
+            or not self.profile_geometry_id
+            or type(self.profile_node_sha256) is not str
+            or len(self.profile_node_sha256) != 64
             or any(
                 type(item) is not tuple
                 or len(item) != 4
@@ -160,6 +315,10 @@ class SketchBootstrapOwnershipReceipt:
         body = "\0".join(
             (
                 self.native_receipt.receipt_sha256,
+                self.sketch_id,
+                self.result_id,
+                self.profile_geometry_id,
+                self.profile_node_sha256,
                 *self.ownership_identity,
                 *self.plane_identity,
                 *self.profile_identity,
@@ -189,6 +348,10 @@ class SketchBootstrapOwnershipReceipt:
 
     @property
     def shape_sha256(self) -> str:
+        return self.native_receipt.shape_sha256
+
+    @property
+    def result_shape_sha256(self) -> str:
         return self.native_receipt.shape_sha256
 
     @property
@@ -366,11 +529,21 @@ def execute_sketch_bootstrap_reviewed_plan_with_sources(
         if body is None or result is None:
             _integrity_failure()
         origin = bootstrap_rules._origin_closure(body)  # noqa: SLF001
+        profile_geometry_id, profile_node_sha256 = _install_reviewed_sketch_binding(
+            document,
+            result,
+            sketch_id=checked.node_id,
+            result_id=checked.result_id,
+        )
         ownership = SketchBootstrapOwnershipReceipt(
             native_receipt=native_receipt,
             object=result,
             body=body,
             origin_closure=origin,
+            sketch_id=checked.node_id,
+            result_id=checked.result_id,
+            profile_geometry_id=profile_geometry_id,
+            profile_node_sha256=profile_node_sha256,
             ownership_identity=_term_identity(SKETCH_BOOTSTRAP_BODY_OWNERSHIP_TERM),
             plane_identity=_term_identity(SKETCH_BOOTSTRAP_XY_PLANE_TERM),
             profile_identity=_term_identity(SKETCH_BOOTSTRAP_CLOSED_CIRCLE_PROFILE_TERM),
@@ -447,4 +620,5 @@ __all__ = [
     "SketchBootstrapReviewedFamilySpec",
     "execute_sketch_bootstrap_reviewed_plan_with_sources",
     "resolve_sketch_bootstrap_reviewed_operation",
+    "sketch_bootstrap_profile_geometry_id",
 ]

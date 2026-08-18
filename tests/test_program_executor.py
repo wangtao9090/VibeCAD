@@ -5300,6 +5300,40 @@ def test_compound_observation_derives_volume_weighted_center_of_mass() -> None:
     assert entity_geometry["solid_count"] == 2
 
 
+def test_zero_volume_valid_shape_uses_bound_box_center_when_mass_is_undefined() -> None:
+    class WireShape:
+        Volume = 0.0
+        Area = 0.0
+        Solids = ()
+        BoundBox = SimpleNamespace(
+            XMin=-5.0,
+            XMax=15.0,
+            YMin=-2.0,
+            YMax=4.0,
+            ZMin=0.0,
+            ZMax=0.0,
+            XLength=20.0,
+            YLength=6.0,
+            ZLength=0.0,
+        )
+
+        @property
+        def CenterOfMass(self):  # noqa: N802 - native spelling
+            raise RuntimeError("undefined for a wire")
+
+        def isNull(self) -> bool:  # noqa: N802 - native spelling
+            return False
+
+        def isValid(self) -> bool:  # noqa: N802 - native spelling
+            return True
+
+    assert executor_module._entity_geometry(WireShape())["center_of_mass_mm"] == (
+        5.0,
+        1.0,
+        0.0,
+    )
+
+
 def test_derived_geometry_tolerance_accepts_roundoff_but_rejects_material_error() -> None:
     reference = 11_650_984.713_924_531
     assert executor_module._same_geometry_number(reference, reference + 1.862_645e-9)

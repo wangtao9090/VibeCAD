@@ -84,7 +84,7 @@ _NATIVE_CONTRACT = (
     "additive_helix:PartDesign::AdditiveHelix,"
     "subtractive_helix:PartDesign::SubtractiveHelix;"
     "common=Profile,BaseFeature,Midplane=false,Reversed=false,Refine=true,"
-    "AllowMultiFace=false,Body.Tip,single-solid,strict-volume-direction;"
+    "AllowMultiFace=false,Body.Tip=base-or-last-profile,single-solid,strict-volume-direction;"
     "loft=Sections[2..8],Closed=false,Ruled=false;"
     "pipe=Spine/all-continuous-edges,Mode=Standard,Transformation=Constant,"
     "Transition=Transformed,Sections=[],AuxiliarySpine=null,"
@@ -787,7 +787,7 @@ def _validate_bindings(
             or body.Document is not document
             or body.TypeId != "PartDesign::Body"
             or tuple(body.Group) != expected_group
-            or body.Tip is not base_object
+            or body.Tip is not (base_object if base_object is not None else profile_objects[-1])
         ):
             _fail(PartDesignPromotionRuleErrorCode.PRECONDITION_FAILED, "/bindings")
         for profile in profile_objects:

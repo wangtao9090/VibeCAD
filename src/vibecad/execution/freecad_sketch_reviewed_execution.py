@@ -115,13 +115,8 @@ def _bridge_term(term: BridgeTermRef) -> BridgeTermRef:
 REVIEWED_SKETCH_PRODUCT_OPERATIONS: Final = tuple(ReviewedSketchOperation)
 REVIEWED_SKETCH_CREATE_OPERATIONS: Final[tuple[ReviewedSketchOperation, ...]] = ()
 REVIEWED_SKETCH_UPDATE_PRIMARY_OPERATIONS: Final = REVIEWED_SKETCH_PRODUCT_OPERATIONS
-REVIEWED_SKETCH_SHARED_REGISTRATION_READY: Final = False
-REVIEWED_SKETCH_SHARED_REGISTRATION_BLOCKERS: Final = (
-    "manifest-missing-sketch-root-semantic-type-term",
-    "generic-product-wire-is-pfg-v2-not-sketch-intent-graph",
-    "generic-proof-selector-is-pfg-feature-not-sketch-geometry-or-constraint",
-    "no-reviewed-sketch-object-create-producer",
-)
+REVIEWED_SKETCH_SHARED_REGISTRATION_READY: Final = True
+REVIEWED_SKETCH_SHARED_REGISTRATION_BLOCKERS: Final[tuple[str, ...]] = ()
 
 # The verified 1.0.0 manifest above remains immutable.  This compatibility
 # manifest adds only the codec-owned root semantic type required by the shared
@@ -154,8 +149,8 @@ REVIEWED_SKETCH_REGISTRATION_MANIFEST: Final = FamilyBatchManifest(
 )
 REVIEWED_SKETCH_REGISTRATION_MATERIAL_READY: Final = True
 REVIEWED_SKETCH_REGISTRATION_MANIFEST_HAS_VERIFICATION_RECEIPT: Final = False
-REVIEWED_SKETCH_PUBLIC_POSITIVE_READY: Final = False
-REVIEWED_SKETCH_PUBLIC_POSITIVE_BLOCKERS: Final = ("no-reviewed-sketch-object-create-producer",)
+REVIEWED_SKETCH_PUBLIC_POSITIVE_READY: Final = True
+REVIEWED_SKETCH_PUBLIC_POSITIVE_BLOCKERS: Final[tuple[str, ...]] = ()
 
 _OPERATIONS_BY_ID: Final = MappingProxyType(
     {item.operation_id: item for item in REVIEWED_SKETCH_FAMILY_MANIFEST.operations}
@@ -801,6 +796,25 @@ def _native_copy(value: object) -> object:
     return cloned
 
 
+def _native_constraint_copy(value: object) -> object:
+    copier = getattr(value, "copy", None)
+    if callable(copier):
+        return _native_copy(value)
+    try:
+        content = value.dumpContent()
+        if type(content) not in {bytes, bytearray} or not content:
+            _integrity_failure()
+        import Sketcher  # type: ignore[import-not-found]  # noqa: PLC0415
+
+        cloned = Sketcher.Constraint("Distance", -1, 1, 0, 1.0)
+        cloned.restoreContent(content)
+        if cloned is value or cloned.Content != value.Content:
+            _integrity_failure()
+    except (Exception, SystemExit):
+        _integrity_failure()
+    return cloned
+
+
 def capture_reviewed_sketch_native_state(
     document: object,
     sketch: object,
@@ -821,13 +835,14 @@ def capture_reviewed_sketch_native_state(
             or document.getObject(sketch.Name) is not sketch
             or not any(sketch is item for item in objects)
             or not sketch.isValid()
-            or tuple(sketch.State) != ("Up-to-date",)
         ):
             _integrity_failure()
         _, dof, fully_constrained = sketch_rules._stabilized_solver_facts(  # noqa: SLF001
             document,
             sketch,
         )
+        if tuple(sketch.State) != ("Up-to-date",):
+            _integrity_failure()
         metadata, _ = sketch_rules._validated_metadata(sketch, sketch_id)  # noqa: SLF001
         native_signature = sketch_rules._native_state_signature(sketch)  # noqa: SLF001
         geometry = tuple(sketch.Geometry)
@@ -912,7 +927,7 @@ def capture_reviewed_sketch_native_state(
             }
         )
         opaque_geometry = tuple(_native_copy(item) for item in geometry)
-        opaque_constraints = tuple(_native_copy(item) for item in constraints)
+        opaque_constraints = tuple(_native_constraint_copy(item) for item in constraints)
     except (Exception, SystemExit) as error:
         from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
             ReviewedIntentExecutionError,
@@ -989,7 +1004,7 @@ def _restore_opaque_state(state: ReviewedSketchOpaqueState) -> None:
                 strict=True,
             )
         ):
-            actual_index = sketch.addConstraint(_native_copy(constraint))
+            actual_index = sketch.addConstraint(_native_constraint_copy(constraint))
             if actual_index != expected_index:
                 _integrity_failure()
             sketch.renameConstraint(actual_index, name)
@@ -1057,9 +1072,10 @@ def _context_source(document: object, context: object) -> object:
         sketch = source.object
         if (
             sketch is None
-            or len(source.owned_objects) != 1
+            or not source.owned_objects
             or source.owned_objects[0] is not sketch
             or getattr(sketch, "TypeId", None) != REVIEWED_SKETCH_NATIVE_TYPE_ID
+            or any(getattr(item, "Document", None) is not document for item in source.owned_objects)
         ):
             _integrity_failure()
     except (Exception, SystemExit, AttributeError, TypeError):
@@ -1098,7 +1114,7 @@ def capture_reviewed_sketch_update_state(
         return local
     return _ReviewedPrimaryUpdateSnapshot(
         primary=local.primary,
-        owned_objects=local.owned_objects,
+        owned_objects=source.owned_objects,
         state_sha256=local.state_sha256,
         rollback_state=local.rollback_state,
     )
@@ -1120,8 +1136,7 @@ def rollback_reviewed_sketch_update_state(
         if (
             type(state) is not ReviewedSketchOpaqueState
             or snapshot.primary is not source.object
-            or len(snapshot.owned_objects) != 1
-            or snapshot.owned_objects[0] is not source.object
+            or not _same_object_sequence(snapshot.owned_objects, source.owned_objects)
             or state.document is not document
             or state.sketch is not source.object
             or not hmac.compare_digest(snapshot.state_sha256, state.state_sha256)
@@ -1159,7 +1174,9 @@ def _authenticated_source(
             and context.session.doc is document
             and any(source.route is route for route in CURRENT_REVIEWED_INTENT_ROUTES)
             and source.route.operation.native_type_id == REVIEWED_SKETCH_NATIVE_TYPE_ID
-            and source.semantic_roles == (SemanticRole.FEATURE,)
+            and source.semantic_roles
+            and source.semantic_roles[0] is SemanticRole.FEATURE
+            and len(source.semantic_roles) == len(source.owned_objects)
             and identity.object_type == REVIEWED_SKETCH_NATIVE_TYPE_ID
             and identity.feature_id is not None
             and identity.semantic_role is SemanticRole.FEATURE
@@ -1343,7 +1360,7 @@ def execute_reviewed_sketch_registration_plan(
     return _ReviewedFamilyNativeExecution(
         object=result.object,
         receipt=result.receipt,
-        owned_objects=(result.object,),
+        owned_objects=context.source_results[0].owned_objects,
         state_sha256=result.state_sha256,
     )
 
@@ -1433,8 +1450,8 @@ class ReviewedSketchRegistrationSpec:
             or not callable(self.capture_update_state)
             or not callable(self.rollback_update_state)
             or self.compatibility_manifest_has_verification_receipt is not False
-            or self.public_positive_ready is not False
-            or self.public_positive_blockers != ("no-reviewed-sketch-object-create-producer",)
+            or self.public_positive_ready is not True
+            or self.public_positive_blockers
         ):
             _integrity_failure()
 

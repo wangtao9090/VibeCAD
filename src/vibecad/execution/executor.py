@@ -766,7 +766,24 @@ def _shape_center_of_mass(
 ) -> tuple[int | float, int | float, int | float]:
     try:
         center = shape.CenterOfMass  # type: ignore[attr-defined]
-    except AttributeError:
+    except Exception:
+        if not solids:
+            try:
+                if _finite_number(shape.Volume, nonnegative=True) != 0:  # type: ignore[attr-defined]
+                    raise _ObservationFailure
+                bounds = shape.BoundBox  # type: ignore[attr-defined]
+                return tuple(
+                    (
+                        _finite_number(getattr(bounds, f"{axis}Min"), nonnegative=False)
+                        + _finite_number(getattr(bounds, f"{axis}Max"), nonnegative=False)
+                    )
+                    / 2.0
+                    for axis in "XYZ"
+                )
+            except _ObservationFailure:
+                raise
+            except Exception:
+                raise _ObservationFailure from None
         weighted = [0.0, 0.0, 0.0]
         total_volume = 0.0
         try:
@@ -799,8 +816,6 @@ def _shape_center_of_mass(
             weighted[1] / total_volume,
             weighted[2] / total_volume,
         )
-    except Exception:
-        raise _ObservationFailure from None
     return (
         _finite_number(center.x, nonnegative=False),
         _finite_number(center.y, nonnegative=False),
@@ -1662,8 +1677,12 @@ def _require_non_target_preservation(
     after: dict[str, EntityObservation],
     *,
     target: str | None,
+    preserve_by_target: dict[str, tuple[str, ...]] | None = None,
 ) -> list[PreservationObservation]:
     if set(before) != set(after):
+        raise _operation_failure()
+    selected = {} if preserve_by_target is None else preserve_by_target
+    if not set(selected).issubset(before):
         raise _operation_failure()
     comparisons: list[PreservationObservation] = []
     for object_id in sorted(before):
@@ -1674,6 +1693,7 @@ def _require_non_target_preservation(
                 before[object_id],
                 after[object_id],
                 target=object_id,
+                preserve=selected.get(object_id, ()),
             )
         )
     return comparisons
@@ -2438,8 +2458,9 @@ class _ReviewedProductRunState:
         ):
             raise _operation_failure()
         try:
-            result._retain_for_run(self._token)
             replacement = _ReviewedProductRunRecord(result=result, identity=identity)
+            result._retain_for_run(self._token)
+            previous._release_from_run(self._token)
         except Exception:
             raise _operation_failure() from None
         self._records[identity.object_id] = replacement
@@ -2591,6 +2612,44 @@ def _normalize_reviewed_source_ids(
     if type(sources) is tuple and len(sources) <= 8 and source_a is None and source_b is None:
         return sources
     raise _operation_failure()
+
+
+def _reviewed_partdesign_owner_preservation(
+    result: object,
+    resolved_sources: tuple[ReviewedNativeExecutionResult, ...],
+    *,
+    read_identity: Callable[[object], object],
+) -> dict[str, tuple[str, ...]]:
+    """Allow only the authenticated source Body's derived shape to change."""
+
+    if not resolved_sources or not str(getattr(result, "TypeId", "")).startswith("PartDesign::"):
+        return {}
+    primaries = tuple(source.object for source in resolved_sources)
+    source_owned = tuple(item for source in resolved_sources for item in source.owned_objects)
+    try:
+        candidates = tuple(
+            item
+            for index, item in enumerate(source_owned)
+            if not any(item is prior for prior in source_owned[:index])
+            and getattr(item, "TypeId", None) == "PartDesign::Body"
+            and not any(item is primary for primary in primaries)
+            and item.Tip is result
+            and any(result is member for member in tuple(item.Group))
+        )
+    except Exception:
+        raise _operation_failure() from None
+    if not candidates:
+        return {}
+    if len(candidates) != 1:
+        raise _operation_failure()
+    identity = read_identity(candidates[0])
+    if (
+        type(identity) is not EntityIdentity
+        or identity.object_type != "PartDesign::Body"
+        or identity.semantic_role is not SemanticRole.PART
+    ):
+        raise _operation_failure()
+    return {identity.object_id: ("placement", "parameters")}
 
 
 def _managed_apply_reviewed_intent(
@@ -2781,6 +2840,15 @@ def _managed_apply_reviewed_intent(
             ):
                 raise ValueError
             provenance = identities[0].provenance
+        owner_preservation = (
+            _reviewed_partdesign_owner_preservation(
+                obj,
+                resolved_sources,
+                read_identity=read_identity,
+            )
+            if execution_mode is _ReviewedProductExecutionMode.CREATE
+            else {}
+        )
         with transaction(
             "VibeCAD adopt reviewed intent",
             claim_new_objects=False,
@@ -2801,6 +2869,8 @@ def _managed_apply_reviewed_intent(
                 set_result(obj)
                 if get_result() is not obj:
                     raise ValueError
+            if execution_mode is _ReviewedProductExecutionMode.CREATE:
+                session.doc.recompute()  # type: ignore[attr-defined]
             after = _entity_observations(session)
             after_by_id = _observation_map(after)
             identity_ids = {identity.object_id for identity in identities}
@@ -2811,6 +2881,7 @@ def _managed_apply_reviewed_intent(
                     before_by_id,
                     {key: value for key, value in after_by_id.items() if key not in identity_ids},
                     target=None,
+                    preserve_by_target=owner_preservation,
                 )
             else:
                 if set(after_by_id) != set(before_by_id):

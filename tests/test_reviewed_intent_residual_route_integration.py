@@ -427,25 +427,24 @@ def test_public_hole_rejects_non_flatface_profile_before_native_mutation(
     assert len(session.attached_identities) == 2
 
 
-def test_reference_v2_manifest_remains_fail_closed_against_formal_v1() -> None:
+def test_reference_v2_manifest_matches_formal_but_is_not_yet_publicly_registered() -> None:
     formal_by_id = {item.operation_id: item for item in current_freecad_intent_capability_specs()}
     assert not {item[0] for item in PARTDESIGN_REFERENCE_REVIEWED_PRODUCT_IDENTITIES}.intersection(
         route.operation_id for route in CURRENT_REVIEWED_INTENT_ROUTES
     )
     assert all(
         formal_by_id[operation_id].adapter_contract_sha256
-        != PARTDESIGN_REFERENCE_COMPAT_MANIFEST.adapter.adapter_contract_sha256
+        == PARTDESIGN_REFERENCE_COMPAT_MANIFEST.adapter.adapter_contract_sha256
         and formal_by_id[operation_id].rule_contract_sha256
-        != PARTDESIGN_REFERENCE_COMPAT_MANIFEST.rule_contract_sha256
+        == PARTDESIGN_REFERENCE_COMPAT_MANIFEST.rule_contract_sha256
         for operation_id, _semantic_operation in PARTDESIGN_REFERENCE_REVIEWED_PRODUCT_IDENTITIES
     )
 
-    with pytest.raises(ReviewedIntentExecutionError) as caught:
-        _routes_for_family(
-            build_partdesign_reference_reviewed_family_descriptor(),
-            PARTDESIGN_REFERENCE_REVIEWED_FAMILY_SPEC.operation_ids,
-        )
-    assert caught.value.code is ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE
+    candidates = _routes_for_family(
+        build_partdesign_reference_reviewed_family_descriptor(),
+        PARTDESIGN_REFERENCE_REVIEWED_FAMILY_SPEC.operation_ids,
+    )
+    assert len(candidates) == 5
 
     source = reviewed_box_program()
     blocked = ReviewedIntentProgramV1(
@@ -461,7 +460,7 @@ def test_reference_v2_manifest_remains_fail_closed_against_formal_v1() -> None:
 
 
 def test_residual_routes_are_append_only_with_exact_order_and_digest() -> None:
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 99
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 120
     assert CURRENT_REVIEWED_INTENT_ROUTES[82:96] == (
         *REVIEWED_PART_RESIDUAL_ROUTES,
         *REVIEWED_PART_DRESSUP_ROUTES,
@@ -473,4 +472,4 @@ def test_residual_routes_are_append_only_with_exact_order_and_digest() -> None:
             for route in CURRENT_REVIEWED_INTENT_ROUTES[:96]
         ).encode("ascii")
     ).hexdigest()
-    assert catalog_sha256 == "6896d4ab9d1d991756c8b92a2538000bbd1201af26206a79131b087bb9a59d9a"
+    assert catalog_sha256 == "53875bdb39d25f3226ae9db5cdb142654da2dd3ba4c734f98d132d813d4cf1ee"

@@ -477,7 +477,7 @@ def test_default_composition_executes_two_sealed_attachments_through_program_beg
         base_revision=task.base_revision,
     )
     assert tuple(catalog_root.iterdir()) == ()
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 99
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 120
     assert len(public_tool_specs()) == 39
     application.close()
     assert worker.close_calls == 1

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -50,6 +51,7 @@ from vibecad.intent_bridge.reviewed_family_engine import (
     ReviewedPlanDraft,
     ReviewedPlanReceipt,
 )
+from vibecad.parametric import freecad_sketch_intent_rules as sketch_rules
 from vibecad.parametric.feature_graph_v2 import (
     SemanticTermRefV2,
     decode_parametric_feature_graph_v2,
@@ -69,6 +71,7 @@ from vibecad.parametric.freecad_partdesign_sketch_rules import (
 from vibecad.validation import EntityObservation
 
 _OWNERSHIP_DIGEST_DOMAIN = b"vibecad.partdesign-groove-ownership.v1\0"
+_PROFILE_EXECUTION_DIGEST_DOMAIN = b"vibecad.partdesign-groove-profile-execution.v1\0"
 _FREECAD_BUILD_DESCRIPTOR_SHA256 = hashlib.sha256(
     GROOVE_FREECAD_ENGINE_BUILD_ID.encode("ascii")
 ).hexdigest()
@@ -329,6 +332,89 @@ def _source_receipt_fresh(item: object, receipt: object) -> bool:
         return False
 
 
+def _profile_execution_sha256(item: object) -> str:
+    """Bind native Sketch content while ignoring FreeCAD's reference-only BREP locations."""
+
+    if type(getattr(item, "GeometryCount", None)) is not int:
+        return _shape_sha256(item)
+    try:
+        native_geometry, native_constraints = sketch_rules._native_state_signature(  # noqa: SLF001
+            item
+        )
+        matrix = item.Placement.toMatrix()
+        placement = tuple(
+            float(getattr(matrix, name))
+            for name in (
+                "A11",
+                "A12",
+                "A13",
+                "A14",
+                "A21",
+                "A22",
+                "A23",
+                "A24",
+                "A31",
+                "A32",
+                "A33",
+                "A34",
+                "A41",
+                "A42",
+                "A43",
+                "A44",
+            )
+        )
+        support = tuple((entry[0].Name, tuple(entry[1])) for entry in tuple(item.AttachmentSupport))
+        shape = item.Shape
+        box = shape.BoundBox
+        payload = json.dumps(
+            {
+                "native_geometry_sha256s": native_geometry,
+                "native_constraint_sha256s": native_constraints,
+                "placement": placement,
+                "map_mode": str(item.MapMode),
+                "attachment_support": support,
+                "solver": {
+                    "dof": item.DoF,
+                    "fully_constrained": item.FullyConstrained,
+                    "diagnostics": tuple(
+                        tuple(getattr(item, name))
+                        for name in (
+                            "ConflictingConstraints",
+                            "RedundantConstraints",
+                            "PartiallyRedundantConstraints",
+                            "MalformedConstraints",
+                        )
+                    ),
+                },
+                "shape": {
+                    "type": str(shape.ShapeType),
+                    "vertices": len(shape.Vertexes),
+                    "edges": len(shape.Edges),
+                    "wires": len(shape.Wires),
+                    "faces": len(shape.Faces),
+                    "solids": len(shape.Solids),
+                    "open_vertices": len(item.OpenVertices),
+                    "bbox": (
+                        float(box.XMin),
+                        float(box.XMax),
+                        float(box.YMin),
+                        float(box.YMax),
+                        float(box.ZMin),
+                        float(box.ZMax),
+                    ),
+                },
+                "intent_bindings": item.VibeCADReviewedSketchIntent,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+    except Exception:
+        _integrity_failure()
+    return hashlib.sha256(_PROFILE_EXECUTION_DIGEST_DOMAIN + payload).hexdigest()
+
+
 def _solid_shape(item: object) -> bool:
     try:
         shape = item.Shape
@@ -448,7 +534,8 @@ def _authenticated_source_bindings(
             or getattr(item, "Document", None) is not document
             or not any(item is existing for existing in document_objects)
             or source.result_kind is not expected_kind
-            or tuple(source.semantic_roles) != (identity.semantic_role,)
+            or not source.semantic_roles
+            or source.semantic_roles[0] is not identity.semantic_role
             or source.plan_sha256 != getattr(receipt, "plan_sha256", None)
             or getattr(receipt, "object_name", getattr(receipt, "sketch_object_name", None))
             != getattr(item, "Name", None)
@@ -457,7 +544,9 @@ def _authenticated_source_bindings(
             or (role == "profile" and not _closed_profile(item))
         ):
             _integrity_failure()
-        digests.append(_shape_sha256(item))
+        digests.append(
+            _profile_execution_sha256(item) if role == "profile" else _shape_sha256(item)
+        )
 
     try:
         group = tuple(body.Group)
@@ -524,7 +613,6 @@ class PartDesignGrooveResultInvariant:
                 and tuple(result.State) == ("Up-to-date",)
                 and not shape.isNull()
                 and shape.isValid()
-                and str(shape.ShapeType) == "Solid"
                 and len(shape.Solids) == 1
                 and math.isfinite(float(shape.Volume))
                 and math.isclose(
@@ -639,7 +727,7 @@ class PartDesignGrooveOwnershipClosure:
         try:
             source_digests = (
                 _shape_sha256(self.bindings.base_feature),
-                _shape_sha256(self.bindings.profile),
+                _profile_execution_sha256(self.bindings.profile),
             )
             ownership_valid = (
                 source_digests == self.source_shape_sha256s
@@ -728,7 +816,7 @@ def execute_partdesign_groove_reviewed_plan_with_sources(
         after_group = tuple(bindings.body.Group)
         current_source_digests = (
             _shape_sha256(bindings.base_feature),
-            _shape_sha256(bindings.profile),
+            _profile_execution_sha256(bindings.profile),
         )
         result_digest = _shape_sha256(result)
     except Exception:

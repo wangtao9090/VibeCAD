@@ -454,15 +454,15 @@ def _fake_apply(
     )
 
 
-def test_family_freezes_twenty_exact_update_only_routes_and_reports_subject_gap() -> None:
+def test_family_freezes_twenty_exact_update_only_routes_and_closes_subject_gap() -> None:
     spec = execution.REVIEWED_SKETCH_FAMILY_SPEC
     assert len(execution.REVIEWED_SKETCH_PRODUCT_IDENTITIES) == 20
     assert set(spec.operation_ids) == {item.value for item in ReviewedSketchOperation}
     assert spec.create_operation_ids == ()
     assert spec.update_primary_operation_ids == spec.operation_ids
     assert (spec.minimum_sources, spec.maximum_sources) == (1, 1)
-    assert execution.REVIEWED_SKETCH_SHARED_REGISTRATION_READY is False
-    assert len(execution.REVIEWED_SKETCH_SHARED_REGISTRATION_BLOCKERS) == 4
+    assert execution.REVIEWED_SKETCH_SHARED_REGISTRATION_READY is True
+    assert execution.REVIEWED_SKETCH_SHARED_REGISTRATION_BLOCKERS == ()
     assert spec.subject_type_term == SKETCH_ROOT_SEMANTIC_TYPE_TERM
     # The current manifest omitted the codec's actual semantic subject type.
     # Registration must add this exact term; substituting a selector/schema
@@ -493,14 +493,15 @@ def test_registration_manifest_adds_only_root_type_without_claiming_attestation(
     assert execution.REVIEWED_SKETCH_REGISTRATION_MATERIAL_READY is True
     assert execution.REVIEWED_SKETCH_REGISTRATION_MANIFEST_HAS_VERIFICATION_RECEIPT is False
     assert spec.compatibility_manifest_has_verification_receipt is False
-    assert execution.REVIEWED_SKETCH_PUBLIC_POSITIVE_READY is False
-    assert execution.REVIEWED_SKETCH_PUBLIC_POSITIVE_BLOCKERS == (
-        "no-reviewed-sketch-object-create-producer",
-    )
-    assert all(
-        route.manifest.family_id != manifest.family_id
+    assert execution.REVIEWED_SKETCH_PUBLIC_POSITIVE_READY is True
+    assert execution.REVIEWED_SKETCH_PUBLIC_POSITIVE_BLOCKERS == ()
+    registered = tuple(
+        route
         for route in shared_execution.CURRENT_REVIEWED_INTENT_ROUTES
+        if route.manifest.family_id == manifest.family_id
     )
+    assert len(registered) == 20
+    assert all(route.manifest is manifest for route in registered)
 
 
 def test_registration_spec_freezes_twenty_full_update_primary_contracts() -> None:
@@ -662,18 +663,10 @@ def test_registration_binding_maps_geometry_and_constraint_subjects_exactly(
         (ReviewedSketchOperation.HORIZONTAL, _constraint_graph),
     ),
 )
-def test_unregistered_geometry_and_constraint_routes_lower_with_sketch_codec(
-    monkeypatch: pytest.MonkeyPatch,
+def test_public_geometry_and_constraint_routes_lower_with_sketch_codec(
     operation: ReviewedSketchOperation,
     graph_factory,
 ) -> None:
-    routes = _registration_routes()
-    monkeypatch.setattr(shared_execution, "CURRENT_REVIEWED_INTENT_ROUTES", routes)
-    monkeypatch.setattr(
-        shared_execution,
-        "_ROUTES_BY_IDENTITY",
-        shared_execution._index_routes(routes),  # noqa: SLF001
-    )
     reviewed = next(
         item
         for item in execution.REVIEWED_SKETCH_REGISTRATION_MANIFEST.operations
@@ -682,7 +675,7 @@ def test_unregistered_geometry_and_constraint_routes_lower_with_sketch_codec(
     lowered = shared_execution.lower_reviewed_intent(
         _reviewed_program(graph_factory(operation), reviewed)
     )
-    assert lowered.route in routes
+    assert lowered.route in shared_execution.REVIEWED_SKETCH_ROUTES
     assert lowered.route.operation is reviewed
     assert lowered.plan.operation is operation
     assert lowered.plan.manifest_sha256 == (

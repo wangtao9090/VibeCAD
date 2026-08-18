@@ -120,6 +120,13 @@ from vibecad.execution.freecad_reviewed_release_attestation_resource import (
     FreeCadPackagedReviewedReleaseAttestation,
     load_current_packaged_freecad_reviewed_release_attestation,
 )
+from vibecad.execution.freecad_sketch_bootstrap_reviewed_execution import (
+    SKETCH_BOOTSTRAP_REVIEWED_FAMILY_SPEC,
+)
+from vibecad.execution.freecad_sketch_reviewed_execution import (
+    REVIEWED_SKETCH_REGISTRATION_SPEC,
+    capture_reviewed_sketch_native_state,
+)
 from vibecad.execution.selectors import EntityIdentity, SemanticRole
 from vibecad.intent_bridge.contracts import (
     BackendLoweringRequest,
@@ -172,6 +179,10 @@ from vibecad.parametric.freecad_part_core_rules import (
     PartCoreExecutionBindings,
     PartCoreOperation,
     apply_part_core_plan,
+)
+from vibecad.parametric.freecad_sketch_bootstrap_rules import (
+    SKETCH_BOOTSTRAP_NATIVE_TYPE_ID,
+    SKETCH_BOOTSTRAP_ORIGIN_CLOSURE_TYPE_IDS,
 )
 from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 
@@ -1900,6 +1911,58 @@ def _app_product_results(
     )
 
 
+_SKETCH_OWNED_TYPE_IDS: Final = (
+    SKETCH_BOOTSTRAP_NATIVE_TYPE_ID,
+    "PartDesign::Body",
+    *SKETCH_BOOTSTRAP_ORIGIN_CLOSURE_TYPE_IDS,
+)
+_SKETCH_OWNED_ROLES: Final = (
+    SemanticRole.FEATURE,
+    SemanticRole.PART,
+    *(SemanticRole.SUPPORT for _ in SKETCH_BOOTSTRAP_ORIGIN_CLOSURE_TYPE_IDS),
+)
+
+
+def _execute_sketch_bootstrap_plan(
+    document: object,
+    plan: object,
+    payload: bytes,
+    plan_document: DocumentRef,
+    operation: ReviewedOperationSpec,
+    context: _ReviewedFamilyExecutionContext,
+) -> _ReviewedFamilyNativeExecution:
+    if (
+        type(context) is not _ReviewedFamilyExecutionContext
+        or context.document is not document
+        or context.source_results
+    ):
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    try:
+        result = SKETCH_BOOTSTRAP_REVIEWED_FAMILY_SPEC.execute_with_sources(
+            document,
+            plan,
+            payload,
+            plan_document,
+            operation,
+            context.source_results,
+        )
+    except ReviewedIntentExecutionError:
+        raise
+    except (Exception, SystemExit):
+        _fail(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
+    update_state = capture_reviewed_sketch_native_state(
+        document,
+        result.object,
+        sketch_id=result.receipt.sketch_id,
+    )
+    return _ReviewedFamilyNativeExecution(
+        object=result.object,
+        receipt=result.receipt,
+        owned_objects=result.owned_objects,
+        state_sha256=update_state.state_sha256,
+    )
+
+
 _PART_CORE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     manifest=PART_CORE_MANIFEST,
     subject_type_term=_bridge_term(PART_CORE_STRUCTURE_TERM),
@@ -2271,6 +2334,45 @@ _PLANAR_MECHANICAL_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     dynamic_ownership_resolver=_PLANAR_MECHANICAL_DYNAMIC_OWNERSHIP,
     create_recovery=planar_mechanical_create_recovery_descriptor(),
 )
+_SKETCH_BOOTSTRAP_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=SKETCH_BOOTSTRAP_REVIEWED_FAMILY_SPEC.manifest,
+    subject_type_term=SKETCH_BOOTSTRAP_REVIEWED_FAMILY_SPEC.subject_type_term,
+    adapter_factory=SKETCH_BOOTSTRAP_REVIEWED_FAMILY_SPEC.adapter_factory,
+    validate_plan=SKETCH_BOOTSTRAP_REVIEWED_FAMILY_SPEC.validate_plan,
+    execute_plan=_execute_sketch_bootstrap_plan,
+    product_results=(
+        _ReviewedProductResultContract(
+            operation_id=SKETCH_BOOTSTRAP_REVIEWED_FAMILY_SPEC.operation_ids[0],
+            result_kind=_ReviewedProductResultKind.VALID_SHAPE,
+            owned_type_ids=_SKETCH_OWNED_TYPE_IDS,
+            semantic_roles=_SKETCH_OWNED_ROLES,
+        ),
+    ),
+)
+_SKETCH_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=REVIEWED_SKETCH_REGISTRATION_SPEC.manifest,
+    subject_type_term=REVIEWED_SKETCH_REGISTRATION_SPEC.subject_type_term,
+    adapter_factory=REVIEWED_SKETCH_REGISTRATION_SPEC.adapter_factory,
+    validate_plan=REVIEWED_SKETCH_REGISTRATION_SPEC.validate_plan,
+    execute_plan=REVIEWED_SKETCH_REGISTRATION_SPEC.execute_plan,
+    product_results=tuple(
+        _ReviewedProductResultContract(
+            operation_id=operation_id,
+            result_kind=_ReviewedProductResultKind.VALID_SHAPE,
+            owned_type_ids=_SKETCH_OWNED_TYPE_IDS,
+            semantic_roles=_SKETCH_OWNED_ROLES,
+            source_count=1,
+            execution_mode=_ReviewedProductExecutionMode.UPDATE_PRIMARY,
+        )
+        for operation_id in REVIEWED_SKETCH_REGISTRATION_SPEC.operation_ids
+    ),
+    intent_binding=REVIEWED_SKETCH_REGISTRATION_SPEC.intent_binding_factory(),
+    minimum_sources=1,
+    maximum_sources=1,
+    requires_same_run_sources=True,
+    capture_update_state=REVIEWED_SKETCH_REGISTRATION_SPEC.capture_update_state,
+    rollback_update_state=REVIEWED_SKETCH_REGISTRATION_SPEC.rollback_update_state,
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -2551,6 +2653,14 @@ REVIEWED_PLANAR_MECHANICAL_ROUTES: Final = _routes_for_family(
     _PLANAR_MECHANICAL_FAMILY,
     tuple(item.operation_id for item in PLANAR_MECHANICAL_PRODUCT_MANIFEST.operations),
 )
+REVIEWED_SKETCH_BOOTSTRAP_ROUTES: Final = _routes_for_family(
+    _SKETCH_BOOTSTRAP_FAMILY,
+    SKETCH_BOOTSTRAP_REVIEWED_FAMILY_SPEC.operation_ids,
+)
+REVIEWED_SKETCH_ROUTES: Final = _routes_for_family(
+    _SKETCH_FAMILY,
+    REVIEWED_SKETCH_REGISTRATION_SPEC.operation_ids,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
@@ -2575,6 +2685,8 @@ _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_DRESSUP_ROUTES,
     REVIEWED_PARTDESIGN_RESIDUAL_ROUTES,
     REVIEWED_PLANAR_MECHANICAL_ROUTES,
+    REVIEWED_SKETCH_BOOTSTRAP_ROUTES,
+    REVIEWED_SKETCH_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
