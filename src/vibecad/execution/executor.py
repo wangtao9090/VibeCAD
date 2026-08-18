@@ -44,8 +44,13 @@ from vibecad.execution.candidate import (
 )
 from vibecad.execution.errors import ExecutorError, ExecutorErrorCode
 from vibecad.execution.freecad_reviewed_intent_execution import (
+    ReviewedIntentExecutionError,
+    ReviewedIntentExecutionErrorCode,
     ReviewedNativeExecutionResult,
+    _commit_reviewed_native_update,
+    _ReviewedProductExecutionMode,
     _ReviewedProductResultKind,
+    _rollback_reviewed_native_update,
 )
 from vibecad.execution.freecad_reviewed_intent_execution import (
     execute_reviewed_intent_native as _execute_reviewed_intent_native,
@@ -2380,16 +2385,57 @@ class _ReviewedProductRunRecord:
 class _ReviewedProductRunState:
     """Ordered opaque Reviewed outputs scoped to one execution cursor."""
 
-    __slots__ = ("_records",)
+    __slots__ = ("_records", "_token")
 
     def __init__(self) -> None:
         self._records: dict[str, _ReviewedProductRunRecord] = {}
+        self._token = object()
+
+    @property
+    def execution_token(self) -> object:
+        return self._token
 
     def retain(self, result: ReviewedNativeExecutionResult, identity: EntityIdentity) -> None:
         record = _ReviewedProductRunRecord(result=result, identity=identity)
         if identity.object_id in self._records:
             raise _operation_failure()
+        try:
+            result._retain_for_run(self._token)
+        except Exception:
+            raise _operation_failure() from None
         self._records[identity.object_id] = record
+
+    def replace(
+        self,
+        previous: ReviewedNativeExecutionResult,
+        result: ReviewedNativeExecutionResult,
+        identity: EntityIdentity,
+    ) -> None:
+        if (
+            type(previous) is not ReviewedNativeExecutionResult
+            or type(result) is not ReviewedNativeExecutionResult
+            or type(identity) is not EntityIdentity
+            or result.execution_mode is not _ReviewedProductExecutionMode.UPDATE_PRIMARY
+            or result.object is not previous.object
+            or result.state_sha256 is None
+            or previous.state_sha256 is None
+            or result.state_sha256 == previous.state_sha256
+        ):
+            raise _operation_failure()
+        record = self._records.get(identity.object_id)
+        if (
+            record is None
+            or record.result is not previous
+            or record.identity != identity
+            or not previous._is_retained_for_run(self._token)
+        ):
+            raise _operation_failure()
+        try:
+            result._retain_for_run(self._token)
+            replacement = _ReviewedProductRunRecord(result=result, identity=identity)
+        except Exception:
+            raise _operation_failure() from None
+        self._records[identity.object_id] = replacement
 
     def resolve(
         self,
@@ -2416,6 +2462,7 @@ class _ReviewedProductRunState:
             if any(
                 read_identity(record.result.object) != record.identity
                 or record.identity.object_id != object_id
+                or not record.result._is_retained_for_run(self._token)
                 for object_id, record in zip(source_object_ids, records, strict=True)
             ):
                 raise ValueError
@@ -2565,71 +2612,137 @@ def _managed_apply_reviewed_intent(
     except Exception:
         raise _operation_failure() from None
 
+    executed: ReviewedNativeExecutionResult | None = None
+    resolved_sources: tuple[ReviewedNativeExecutionResult, ...] = ()
+    resolved_source_identities: tuple[EntityIdentity, ...] = ()
     try:
         route = _route_reviewed_intent(checked)
+        execution_mode = route.family.product_execution_mode(route.operation)
         source_values = _normalize_reviewed_source_ids(sources, source_a, source_b)
         if not route.family.minimum_sources <= len(source_values) <= route.family.maximum_sources:
+            raise ValueError
+        if (
+            execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY
+            and len(source_values) != 1
+        ):
             raise ValueError
         if not source_values:
             executed = execution_leaf(session, checked)
         else:
+            resolved_sources = reviewed_products.resolve(
+                source_values,
+                read_identity=read_identity,
+                minimum=1,
+                maximum=8,
+            )
+            if execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY:
+                resolved_source_identities = tuple(
+                    read_identity(item) for item in resolved_sources[0].owned_objects
+                )
+                if any(type(item) is not EntityIdentity for item in resolved_source_identities):
+                    raise ValueError
+            execution_kwargs: dict[str, object] = {"source_results": resolved_sources}
+            if execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY:
+                execution_kwargs["_reviewed_run_token"] = reviewed_products.execution_token
             executed = execution_leaf(
                 session,
                 checked,
-                source_results=reviewed_products.resolve(
-                    source_values,
-                    read_identity=read_identity,
-                    minimum=1,
-                    maximum=8,
-                ),
+                **execution_kwargs,
             )
-        if type(executed) is not ReviewedNativeExecutionResult:
+        if (
+            type(executed) is not ReviewedNativeExecutionResult
+            or executed.execution_mode is not execution_mode
+        ):
             raise ValueError
         obj = executed.object
         owned = executed.owned_objects
         document_after = tuple(session.doc.Objects)  # type: ignore[attr-defined]
-        added = tuple(
-            item
-            for item in document_after
-            if not any(item is existing for existing in document_before)
-        )
-        if (
-            len(document_after) != len(document_before) + len(owned)
-            or len(added) != len(owned)
-            or len({id(item) for item in added}) != len(added)
-            or {id(item) for item in added} != {id(item) for item in owned}
-            or owned[0] is not obj
-            or getattr(obj, "TypeId", None) != executed.route.operation.native_type_id
-        ):
-            raise ValueError
-        provenance = Provenance(
-            source=ProvenanceSource(context.source.value),
-            operation_id=context.operation_id,
-        )
-        identities = tuple(
-            EntityIdentity(
-                object_id=f"object_{secrets.token_hex(16)}",
-                feature_id=f"feature_{secrets.token_hex(16)}",
-                object_type=owned_object.TypeId,
-                semantic_role=semantic_role,
-                provenance=provenance,
+        if execution_mode is _ReviewedProductExecutionMode.CREATE:
+            added = tuple(
+                item
+                for item in document_after
+                if not any(item is existing for existing in document_before)
             )
-            for owned_object, semantic_role in zip(
-                owned,
-                executed.semantic_roles,
-                strict=True,
+            if (
+                len(document_after) != len(document_before) + len(owned)
+                or len(added) != len(owned)
+                or len({id(item) for item in added}) != len(added)
+                or {id(item) for item in added} != {id(item) for item in owned}
+                or owned[0] is not obj
+                or getattr(obj, "TypeId", None) != executed.route.operation.native_type_id
+            ):
+                raise ValueError
+            provenance = Provenance(
+                source=ProvenanceSource(context.source.value),
+                operation_id=context.operation_id,
             )
-        )
+            identities = tuple(
+                EntityIdentity(
+                    object_id=f"object_{secrets.token_hex(16)}",
+                    feature_id=f"feature_{secrets.token_hex(16)}",
+                    object_type=owned_object.TypeId,
+                    semantic_role=semantic_role,
+                    provenance=provenance,
+                )
+                for owned_object, semantic_role in zip(
+                    owned,
+                    executed.semantic_roles,
+                    strict=True,
+                )
+            )
+        else:
+            if (
+                len(resolved_sources) != 1
+                or executed.object is not resolved_sources[0].object
+                or len(owned) != len(resolved_sources[0].owned_objects)
+                or any(
+                    item is not previous
+                    for item, previous in zip(
+                        owned,
+                        resolved_sources[0].owned_objects,
+                        strict=True,
+                    )
+                )
+                or len(document_after) != len(document_before)
+                or any(
+                    item is not previous
+                    for item, previous in zip(document_after, document_before, strict=True)
+                )
+            ):
+                raise ValueError
+            identities = tuple(read_identity(item) for item in owned)
+            if (
+                any(
+                    type(identity) is not EntityIdentity
+                    or identity.object_type != item.TypeId
+                    or identity.semantic_role is not role
+                    for identity, item, role in zip(
+                        identities,
+                        owned,
+                        executed.semantic_roles,
+                        strict=True,
+                    )
+                )
+                or identities != resolved_source_identities
+            ):
+                raise ValueError
+            provenance = identities[0].provenance
         with transaction(
             "VibeCAD adopt reviewed intent",
             claim_new_objects=False,
         ):
-            for owned_object, identity in zip(owned, identities, strict=True):
-                if (
-                    attach(owned_object, identity) != identity
-                    or read_identity(owned_object) != identity
-                ):
-                    raise ValueError
+            if execution_mode is _ReviewedProductExecutionMode.CREATE:
+                for owned_object, identity in zip(owned, identities, strict=True):
+                    if (
+                        attach(owned_object, identity) != identity
+                        or read_identity(owned_object) != identity
+                    ):
+                        raise ValueError
+            elif any(
+                read_identity(owned_object) != identity
+                for owned_object, identity in zip(owned, identities, strict=True)
+            ):
+                raise ValueError
             if executed.result_kind is _ReviewedProductResultKind.SOLID:
                 set_result(obj)
                 if get_result() is not obj:
@@ -2637,13 +2750,22 @@ def _managed_apply_reviewed_intent(
             after = _entity_observations(session)
             after_by_id = _observation_map(after)
             identity_ids = {identity.object_id for identity in identities}
-            if set(after_by_id) != {*before_by_id, *identity_ids}:
-                raise ValueError
-            comparisons = _require_non_target_preservation(
-                before_by_id,
-                {key: value for key, value in after_by_id.items() if key not in identity_ids},
-                target=None,
-            )
+            if execution_mode is _ReviewedProductExecutionMode.CREATE:
+                if set(after_by_id) != {*before_by_id, *identity_ids}:
+                    raise ValueError
+                comparisons = _require_non_target_preservation(
+                    before_by_id,
+                    {key: value for key, value in after_by_id.items() if key not in identity_ids},
+                    target=None,
+                )
+            else:
+                if set(after_by_id) != set(before_by_id):
+                    raise ValueError
+                comparisons = _require_non_target_preservation(
+                    before_by_id,
+                    after_by_id,
+                    target=identities[0].object_id,
+                )
             created_closure = tuple(after_by_id[identity.object_id] for identity in identities)
             if any(
                 created.feature_id != identity.feature_id
@@ -2672,30 +2794,49 @@ def _managed_apply_reviewed_intent(
                 if not callable(adoption_validator):
                     raise ValueError
                 adoption_validator(session.doc, obj, created)  # type: ignore[attr-defined]
-        reviewed_products.retain(executed, identities[0])
-    except Exception:
-        if not _rollback_reviewed_document(
-            session.doc,  # type: ignore[attr-defined]
-            document_before,
-            body_tips_before,
+        outcome = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "reviewed_intent_applied",
+            "operation": context.operation,
+            "reviewed_operation_id": executed.route.operation_id,
+            "semantic_operation": executed.route.semantic_operation,
+            "object_id": identities[0].object_id,
+            "feature_id": identities[0].feature_id,
+            "plan_sha256": executed.plan_sha256,
+            "plan_content_sha256": executed.plan_content_sha256,
+            "native_receipt_sha256": executed.native_receipt.receipt_sha256,
+            "after": created.to_mapping(),
+            "preservation": [item.to_mapping() for item in comparisons],
+        }
+        if execution_mode is _ReviewedProductExecutionMode.CREATE:
+            reviewed_products.retain(executed, identities[0])
+        else:
+            reviewed_products.replace(resolved_sources[0], executed, identities[0])
+            if not _commit_reviewed_native_update(executed):
+                raise ValueError
+    except (Exception, SystemExit) as error:
+        native_rollback_ok = not (
+            type(error) is ReviewedIntentExecutionError
+            and error.code is ReviewedIntentExecutionErrorCode.ROLLBACK_FAILED
+        )
+        if (
+            type(executed) is ReviewedNativeExecutionResult
+            and executed.execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY
+            and executed._update_recovery is not None
+        ):
+            native_rollback_ok = _rollback_reviewed_native_update(executed)
+        if (
+            not _rollback_reviewed_document(
+                session.doc,  # type: ignore[attr-defined]
+                document_before,
+                body_tips_before,
+            )
+            or not native_rollback_ok
         ):
             raise _fixed_error(ExecutorErrorCode.INTERNAL_FAILURE) from None
         raise _operation_failure() from None
 
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "kind": "reviewed_intent_applied",
-        "operation": context.operation,
-        "reviewed_operation_id": executed.route.operation_id,
-        "semantic_operation": executed.route.semantic_operation,
-        "object_id": identities[0].object_id,
-        "feature_id": identities[0].feature_id,
-        "plan_sha256": executed.plan_sha256,
-        "plan_content_sha256": executed.plan_content_sha256,
-        "native_receipt_sha256": executed.native_receipt.receipt_sha256,
-        "after": created.to_mapping(),
-        "preservation": [item.to_mapping() for item in comparisons],
-    }
+    return outcome
 
 
 def _same_parametric_entity_envelope(

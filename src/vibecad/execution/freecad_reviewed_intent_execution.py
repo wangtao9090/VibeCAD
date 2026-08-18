@@ -57,6 +57,9 @@ from vibecad.execution.freecad_partdesign_boolean_reviewed_execution import (
 from vibecad.execution.freecad_partdesign_dressup_transform_reviewed_execution import (
     PARTDESIGN_DRESSUP_REVIEWED_FAMILY_SPEC,
 )
+from vibecad.execution.freecad_partdesign_groove_reviewed_execution import (
+    PARTDESIGN_GROOVE_REVIEWED_FAMILY_SPEC,
+)
 from vibecad.execution.freecad_partdesign_pattern_reviewed_execution import (
     PARTDESIGN_PATTERN_REVIEWED_FAMILY_SPEC,
 )
@@ -78,7 +81,7 @@ from vibecad.execution.freecad_reviewed_release_attestation_resource import (
     FreeCadPackagedReviewedReleaseAttestation,
     load_current_packaged_freecad_reviewed_release_attestation,
 )
-from vibecad.execution.selectors import SemanticRole
+from vibecad.execution.selectors import EntityIdentity, SemanticRole
 from vibecad.intent_bridge.contracts import (
     BackendLoweringRequest,
     BackendLoweringResult,
@@ -139,6 +142,7 @@ class ReviewedIntentExecutionErrorCode(StrEnum):
     INTEGRITY_FAILURE = "integrity_failure"
     LOWERING_FAILED = "lowering_failed"
     EXECUTION_FAILED = "execution_failed"
+    ROLLBACK_FAILED = "rollback_failed"
 
 
 class ReviewedIntentExecutionError(ValueError):
@@ -177,6 +181,7 @@ class _ReviewedFamilyNativeExecution:
     object: object = field(repr=False, compare=False)
     receipt: object
     owned_objects: tuple[object, ...] = field(default=(), repr=False, compare=False)
+    state_sha256: str | None = None
 
     def __post_init__(self) -> None:
         owned = self.owned_objects
@@ -191,6 +196,14 @@ class _ReviewedFamilyNativeExecution:
             or owned[0] is not self.object
             or any(item is None for item in owned)
             or len({id(item) for item in owned}) != len(owned)
+            or (
+                self.state_sha256 is not None
+                and (
+                    type(self.state_sha256) is not str
+                    or len(self.state_sha256) != 64
+                    or any(character not in "0123456789abcdef" for character in self.state_sha256)
+                )
+            )
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
@@ -202,6 +215,7 @@ class _ReviewedFamilyExecutionContext:
     session: object = field(repr=False, compare=False)
     document: object = field(repr=False, compare=False)
     source_results: tuple[object, ...] = field(repr=False, compare=False)
+    run_token: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if (
@@ -222,6 +236,13 @@ class _ReviewedProductResultKind(StrEnum):
     REFERENCE = "reference"
 
 
+class _ReviewedProductExecutionMode(StrEnum):
+    """Static document-mutation mode selected only by a reviewed route."""
+
+    CREATE = "create"
+    UPDATE_PRIMARY = "update_primary"
+
+
 class _ReviewedFormalSemanticBinding(StrEnum):
     """Static public-formal to full-manifest semantic binding mode."""
 
@@ -238,6 +259,7 @@ class _ReviewedProductResultContract:
     owned_type_ids: tuple[str, ...]
     semantic_roles: tuple[SemanticRole, ...]
     source_count: int | None = None
+    execution_mode: _ReviewedProductExecutionMode = _ReviewedProductExecutionMode.CREATE
 
     def __post_init__(self) -> None:
         if (
@@ -250,9 +272,14 @@ class _ReviewedProductResultContract:
             or type(self.semantic_roles) is not tuple
             or len(self.semantic_roles) != len(self.owned_type_ids)
             or any(type(item) is not SemanticRole for item in self.semantic_roles)
+            or type(self.execution_mode) is not _ReviewedProductExecutionMode
             or (
                 self.source_count is not None
                 and (type(self.source_count) is not int or not 0 <= self.source_count <= 8)
+            )
+            or (
+                self.execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY
+                and self.source_count != 1
             )
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
@@ -344,6 +371,32 @@ class _ReviewedDynamicProductResolution:
             )
             or type(self.contract) is not _ReviewedProductResultContract
             or self.contract.source_count is not None
+            or self.contract.execution_mode is not _ReviewedProductExecutionMode.CREATE
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ReviewedPrimaryUpdateSnapshot:
+    """Family-owned reversible state with a shared, comparable state digest."""
+
+    primary: object = field(repr=False, compare=False)
+    owned_objects: tuple[object, ...] = field(repr=False, compare=False)
+    state_sha256: str
+    rollback_state: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if (
+            self.primary is None
+            or type(self.owned_objects) is not tuple
+            or not self.owned_objects
+            or self.owned_objects[0] is not self.primary
+            or any(item is None for item in self.owned_objects)
+            or len({id(item) for item in self.owned_objects}) != len(self.owned_objects)
+            or type(self.state_sha256) is not str
+            or len(self.state_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.state_sha256)
+            or self.rollback_state is None
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
@@ -476,6 +529,19 @@ _NativeExecutor = Callable[
     ],
     _ReviewedFamilyNativeExecution,
 ]
+_UpdateStateCapture = Callable[
+    [object, ReviewedOperationSpec, _ReviewedFamilyExecutionContext],
+    _ReviewedPrimaryUpdateSnapshot,
+]
+_UpdateStateRollback = Callable[
+    [
+        object,
+        _ReviewedPrimaryUpdateSnapshot,
+        ReviewedOperationSpec,
+        _ReviewedFamilyExecutionContext,
+    ],
+    None,
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True, eq=False)
@@ -494,6 +560,16 @@ class _ReviewedIntentFamilyDescriptor:
         _ReviewedFormalSemanticBinding.FULL_IDENTITY
     )
     dynamic_ownership_resolver: _ReviewedDynamicOwnershipResolverDescriptor | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    capture_update_state: _UpdateStateCapture | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    rollback_update_state: _UpdateStateRollback | None = field(
         default=None,
         repr=False,
         compare=False,
@@ -527,6 +603,9 @@ class _ReviewedIntentFamilyDescriptor:
                 and type(self.dynamic_ownership_resolver)
                 is not _ReviewedDynamicOwnershipResolverDescriptor
             )
+            or (self.capture_update_state is None) != (self.rollback_update_state is None)
+            or (self.capture_update_state is not None and not callable(self.capture_update_state))
+            or (self.rollback_update_state is not None and not callable(self.rollback_update_state))
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         keys = tuple((item.operation_id, item.source_count) for item in self.product_results)
@@ -544,6 +623,8 @@ class _ReviewedIntentFamilyDescriptor:
                 len(variants) != 1 or variants[0].source_count is not None
             ):
                 _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            if len({item.execution_mode for item in variants}) != 1:
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         resolver = self.dynamic_ownership_resolver
         if not self.product_results and resolver is None:
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
@@ -556,6 +637,12 @@ class _ReviewedIntentFamilyDescriptor:
             )
             or any(item.operation_id in resolver.operation_ids for item in self.product_results)
         ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        has_updates = any(
+            item.execution_mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY
+            for item in self.product_results
+        )
+        if has_updates and self.capture_update_state is None:
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
     def dynamic_resolver_for(
@@ -663,6 +750,99 @@ class _ReviewedIntentFamilyDescriptor:
         if len(selected) != 1:
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         return selected[0]
+
+    def product_execution_mode(
+        self,
+        operation: ReviewedOperationSpec,
+    ) -> _ReviewedProductExecutionMode:
+        if type(operation) is not ReviewedOperationSpec:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if self.dynamic_resolver_for(operation) is not None:
+            return _ReviewedProductExecutionMode.CREATE
+        modes = {
+            item.execution_mode
+            for item in self.product_results
+            if item.operation_id == operation.operation_id
+        }
+        if len(modes) != 1:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return next(iter(modes))
+
+    def capture_primary_update(
+        self,
+        document: object,
+        operation: ReviewedOperationSpec,
+        context: _ReviewedFamilyExecutionContext,
+    ) -> _ReviewedPrimaryUpdateSnapshot:
+        if (
+            self.product_execution_mode(operation)
+            is not _ReviewedProductExecutionMode.UPDATE_PRIMARY
+            or type(context) is not _ReviewedFamilyExecutionContext
+            or context.document is not document
+            or len(context.source_results) != 1
+            or self.capture_update_state is None
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        source = context.source_results[0]
+        contract = self.product_result(operation, context=context)
+        if (
+            type(source) is not ReviewedNativeExecutionResult
+            or context.run_token is None
+            or not source._is_retained_for_run(context.run_token)
+            or source.object is None
+            or source.state_sha256 is None
+            or source.object is not source.owned_objects[0]
+            or tuple(getattr(item, "TypeId", None) for item in source.owned_objects)
+            != contract.owned_type_ids
+            or source.semantic_roles != contract.semantic_roles
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        try:
+            snapshot = self.capture_update_state(document, operation, context)
+        except ReviewedIntentExecutionError:
+            raise
+        except (Exception, SystemExit):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if (
+            type(snapshot) is not _ReviewedPrimaryUpdateSnapshot
+            or snapshot.primary is not source.object
+            or len(snapshot.owned_objects) != len(source.owned_objects)
+            or any(
+                actual is not expected
+                for actual, expected in zip(
+                    snapshot.owned_objects,
+                    source.owned_objects,
+                    strict=True,
+                )
+            )
+            or tuple(getattr(item, "TypeId", None) for item in snapshot.owned_objects)
+            != tuple(getattr(item, "TypeId", None) for item in source.owned_objects)
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        return snapshot
+
+    def rollback_primary_update(
+        self,
+        document: object,
+        snapshot: _ReviewedPrimaryUpdateSnapshot,
+        operation: ReviewedOperationSpec,
+        context: _ReviewedFamilyExecutionContext,
+    ) -> None:
+        if (
+            self.product_execution_mode(operation)
+            is not _ReviewedProductExecutionMode.UPDATE_PRIMARY
+            or type(snapshot) is not _ReviewedPrimaryUpdateSnapshot
+            or self.rollback_update_state is None
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        try:
+            accepted = self.rollback_update_state(document, snapshot, operation, context)
+        except ReviewedIntentExecutionError:
+            raise
+        except (Exception, SystemExit):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        if accepted is not None:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
     def accept_product_result(
         self,
@@ -1035,6 +1215,23 @@ _PARTDESIGN_DRESSUP_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     dynamic_ownership_resolver=PARTDESIGN_MULTITRANSFORM_DYNAMIC_OWNERSHIP_RESOLVER,
 )
 
+_PARTDESIGN_GROOVE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=PARTDESIGN_GROOVE_REVIEWED_FAMILY_SPEC.manifest,
+    subject_type_term=PARTDESIGN_GROOVE_REVIEWED_FAMILY_SPEC.subject_type_term,
+    adapter_factory=PARTDESIGN_GROOVE_REVIEWED_FAMILY_SPEC.adapter_factory,
+    validate_plan=PARTDESIGN_GROOVE_REVIEWED_FAMILY_SPEC.validate_plan,
+    execute_plan=PARTDESIGN_GROOVE_REVIEWED_FAMILY_SPEC.execute_plan,
+    product_results=_singleton_product_results(
+        PARTDESIGN_GROOVE_REVIEWED_FAMILY_SPEC.manifest,
+        PARTDESIGN_GROOVE_REVIEWED_FAMILY_SPEC.operation_ids,
+        result_kind=_ReviewedProductResultKind.SOLID,
+        semantic_role=SemanticRole.FEATURE,
+    ),
+    minimum_sources=2,
+    maximum_sources=2,
+    formal_semantic_binding=_ReviewedFormalSemanticBinding.LEGACY_TERM_ID,
+)
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReviewedIntentRoute:
@@ -1106,6 +1303,7 @@ class ReviewedIntentRoute:
                 self.semantic_operation,
                 self.manifest_semantic_operation,
                 self.family.formal_semantic_binding.value,
+                self.family.product_execution_mode(self.operation).value,
                 self.manifest.manifest_sha256,
                 self.manifest.adapter.adapter_id,
                 self.manifest.adapter.adapter_version,
@@ -1223,6 +1421,10 @@ REVIEWED_PARTDESIGN_DRESSUP_ROUTES: Final = _routes_for_family(
     _PARTDESIGN_DRESSUP_FAMILY,
     PARTDESIGN_DRESSUP_REVIEWED_FAMILY_SPEC.operation_ids,
 )
+REVIEWED_PARTDESIGN_GROOVE_ROUTES: Final = _routes_for_family(
+    _PARTDESIGN_GROOVE_FAMILY,
+    PARTDESIGN_GROOVE_REVIEWED_FAMILY_SPEC.operation_ids,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
@@ -1235,6 +1437,7 @@ _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PARTDESIGN_PATTERN_ROUTES,
     REVIEWED_PARTDESIGN_BOOLEAN_ROUTES,
     REVIEWED_PARTDESIGN_DRESSUP_ROUTES,
+    REVIEWED_PARTDESIGN_GROOVE_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -1626,6 +1829,98 @@ def require_reviewed_route_verified(
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class _ReviewedPrimaryUpdateRecovery:
+    """Opaque recovery capsule retained only until managed adoption commits."""
+
+    family: _ReviewedIntentFamilyDescriptor = field(repr=False, compare=False)
+    document: object = field(repr=False, compare=False)
+    operation: ReviewedOperationSpec
+    context: _ReviewedFamilyExecutionContext = field(repr=False, compare=False)
+    document_objects: tuple[object, ...] = field(repr=False, compare=False)
+    owned_identities: tuple[EntityIdentity, ...] = field(repr=False, compare=False)
+    before: _ReviewedPrimaryUpdateSnapshot = field(repr=False, compare=False)
+    after_state_sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.family) is not _ReviewedIntentFamilyDescriptor
+            or self.document is None
+            or type(self.operation) is not ReviewedOperationSpec
+            or type(self.context) is not _ReviewedFamilyExecutionContext
+            or self.context.document is not self.document
+            or type(self.document_objects) is not tuple
+            or type(self.owned_identities) is not tuple
+            or type(self.before) is not _ReviewedPrimaryUpdateSnapshot
+            or len(self.owned_identities) != len(self.before.owned_objects)
+            or any(type(item) is not EntityIdentity for item in self.owned_identities)
+            or type(self.after_state_sha256) is not str
+            or len(self.after_state_sha256) != 64
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+
+def _same_object_sequence(actual: object, expected: tuple[object, ...]) -> bool:
+    return (
+        type(actual) is tuple
+        and len(actual) == len(expected)
+        and all(item is prior for item, prior in zip(actual, expected, strict=True))
+    )
+
+
+def _read_primary_update_identities(
+    context: _ReviewedFamilyExecutionContext,
+    owned: tuple[object, ...],
+) -> tuple[EntityIdentity, ...]:
+    try:
+        read_identity = context.session.read_object_identity
+        identities = tuple(read_identity(item) for item in owned)
+    except BaseException:
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    if (
+        not callable(read_identity)
+        or any(type(item) is not EntityIdentity for item in identities)
+        or any(
+            identity.object_type != getattr(item, "TypeId", None)
+            for identity, item in zip(identities, owned, strict=True)
+        )
+    ):
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    return identities
+
+
+def _rollback_primary_update(recovery: _ReviewedPrimaryUpdateRecovery) -> bool:
+    try:
+        recovery.family.rollback_primary_update(
+            recovery.document,
+            recovery.before,
+            recovery.operation,
+            recovery.context,
+        )
+        if not _same_object_sequence(
+            tuple(recovery.document.Objects),
+            recovery.document_objects,
+        ):
+            return False
+        restored = recovery.family.capture_primary_update(
+            recovery.document,
+            recovery.operation,
+            recovery.context,
+        )
+        return (
+            restored.primary is recovery.before.primary
+            and _same_object_sequence(restored.owned_objects, recovery.before.owned_objects)
+            and hmac.compare_digest(restored.state_sha256, recovery.before.state_sha256)
+            and _read_primary_update_identities(
+                recovery.context,
+                restored.owned_objects,
+            )
+            == recovery.owned_identities
+        )
+    except BaseException:
+        return False
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ReviewedNativeExecutionResult:
     route: ReviewedIntentRoute
     object: object = field(repr=False, compare=False)
@@ -1633,10 +1928,23 @@ class ReviewedNativeExecutionResult:
     plan_content_sha256: str
     native_receipt: object
     owned_objects: tuple[object, ...] = field(default=(), repr=False, compare=False)
+    state_sha256: str | None = None
+    _update_recovery: _ReviewedPrimaryUpdateRecovery | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     _verified_execution_context: InitVar[_ReviewedFamilyExecutionContext | None] = None
     _verified_dynamic_resolution: InitVar[_ReviewedDynamicProductResolution | None] = None
     result_kind: _ReviewedProductResultKind = field(init=False)
     semantic_roles: tuple[SemanticRole, ...] = field(init=False)
+    execution_mode: _ReviewedProductExecutionMode = field(init=False)
+    _retained_run_token: object | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(
         self,
@@ -1658,6 +1966,14 @@ class ReviewedNativeExecutionResult:
             or len(self.plan_content_sha256) != 64
             or self.native_receipt is None
             or getattr(self.native_receipt, "plan_sha256", None) != self.plan_sha256
+            or (
+                self.state_sha256 is not None
+                and (
+                    type(self.state_sha256) is not str
+                    or len(self.state_sha256) != 64
+                    or any(character not in "0123456789abcdef" for character in self.state_sha256)
+                )
+            )
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         resolver = self.route.family.dynamic_resolver_for(self.route.operation)
@@ -1689,6 +2005,64 @@ class ReviewedNativeExecutionResult:
             contract.validate(self.route.operation, self.object, owned)
         object.__setattr__(self, "result_kind", contract.result_kind)
         object.__setattr__(self, "semantic_roles", contract.semantic_roles)
+        object.__setattr__(self, "execution_mode", contract.execution_mode)
+        if contract.execution_mode is _ReviewedProductExecutionMode.CREATE:
+            if self._update_recovery is not None:
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            return
+        if (
+            type(self._update_recovery) is not _ReviewedPrimaryUpdateRecovery
+            or _verified_execution_context is None
+            or self._update_recovery.context is not _verified_execution_context
+            or self._update_recovery.family is not self.route.family
+            or self._update_recovery.operation != self.route.operation
+            or self._update_recovery.before.primary is not self.object
+            or self.state_sha256 is None
+            or not hmac.compare_digest(
+                self.state_sha256,
+                self._update_recovery.after_state_sha256,
+            )
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+    def _retain_for_run(self, token: object) -> None:
+        if token is None or (
+            self._retained_run_token is not None and self._retained_run_token is not token
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        object.__setattr__(self, "_retained_run_token", token)
+
+    def _is_retained_for_run(self, token: object) -> bool:
+        return token is not None and self._retained_run_token is token
+
+
+def _rollback_reviewed_native_update(result: object) -> bool:
+    """Restore an UPDATE_PRIMARY result and prove its exact pre-state digest."""
+
+    if (
+        type(result) is not ReviewedNativeExecutionResult
+        or result.execution_mode is not _ReviewedProductExecutionMode.UPDATE_PRIMARY
+        or type(result._update_recovery) is not _ReviewedPrimaryUpdateRecovery
+    ):
+        return False
+    recovery = result._update_recovery
+    restored = _rollback_primary_update(recovery)
+    if restored:
+        object.__setattr__(result, "_update_recovery", None)
+    return restored
+
+
+def _commit_reviewed_native_update(result: object) -> bool:
+    """Discard the rollback capsule only after managed adoption succeeds."""
+
+    if (
+        type(result) is not ReviewedNativeExecutionResult
+        or result.execution_mode is not _ReviewedProductExecutionMode.UPDATE_PRIMARY
+        or type(result._update_recovery) is not _ReviewedPrimaryUpdateRecovery
+    ):
+        return False
+    object.__setattr__(result, "_update_recovery", None)
+    return True
 
 
 def execute_reviewed_intent_native(
@@ -1696,6 +2070,7 @@ def execute_reviewed_intent_native(
     value: object,
     *,
     source_results: object = (),
+    _reviewed_run_token: object | None = None,
 ) -> ReviewedNativeExecutionResult:
     """Execute one static route through its family-owned native authority seam."""
 
@@ -1720,9 +2095,28 @@ def execute_reviewed_intent_native(
         session=session,
         document=document,
         source_results=source_results,
+        run_token=_reviewed_run_token,
     )
+    mode = route.family.product_execution_mode(route.operation)
+    before: tuple[object, ...]
+    update_before: _ReviewedPrimaryUpdateSnapshot | None = None
+    update_identities: tuple[EntityIdentity, ...] = ()
     try:
         before = tuple(document.Objects)
+        if mode is _ReviewedProductExecutionMode.UPDATE_PRIMARY:
+            captured = route.family.capture_primary_update(
+                document,
+                route.operation,
+                context,
+            )
+            update_identities = _read_primary_update_identities(
+                context,
+                captured.owned_objects,
+            )
+            update_before = captured
+            source = source_results[0]
+            if not hmac.compare_digest(update_before.state_sha256, source.state_sha256):
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         family_result = route.family.apply_plan(
             document,
             lowered.plan,
@@ -1740,30 +2134,121 @@ def execute_reviewed_intent_native(
         result = family_result.object
         after = tuple(document.Objects)
     except ReviewedIntentExecutionError:
+        if update_before is not None:
+            recovery = _ReviewedPrimaryUpdateRecovery(
+                family=route.family,
+                document=document,
+                operation=route.operation,
+                context=context,
+                document_objects=before,
+                owned_identities=update_identities,
+                before=update_before,
+                after_state_sha256=update_before.state_sha256,
+            )
+            if not _rollback_primary_update(recovery):
+                _fail(ReviewedIntentExecutionErrorCode.ROLLBACK_FAILED)
         raise
     except BaseException:
+        if update_before is not None:
+            recovery = _ReviewedPrimaryUpdateRecovery(
+                family=route.family,
+                document=document,
+                operation=route.operation,
+                context=context,
+                document_objects=before,
+                owned_identities=update_identities,
+                before=update_before,
+                after_state_sha256=update_before.state_sha256,
+            )
+            if not _rollback_primary_update(recovery):
+                _fail(ReviewedIntentExecutionErrorCode.ROLLBACK_FAILED)
         _fail(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
-    added = tuple(item for item in after if not any(item is existing for existing in before))
     owned = family_result.owned_objects
-    if (
-        len(after) != len(before) + len(owned)
-        or len(added) != len(owned)
-        or len({id(item) for item in added}) != len(added)
-        or {id(item) for item in added} != {id(item) for item in owned}
-        or result is not owned[0]
-        or getattr(result, "TypeId", None) != route.operation.native_type_id
-    ):
-        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
-    return ReviewedNativeExecutionResult(
-        route=route,
-        object=result,
-        plan_sha256=lowered.result.plan_document.document_digest,
-        plan_content_sha256=lowered.result.plan_document.content_sha256,
-        native_receipt=family_result.receipt,
-        owned_objects=owned,
-        _verified_execution_context=context,
-        _verified_dynamic_resolution=dynamic_resolution,
-    )
+    recovery: _ReviewedPrimaryUpdateRecovery | None = None
+    state_sha256 = family_result.state_sha256
+    try:
+        if mode is _ReviewedProductExecutionMode.CREATE:
+            added = tuple(
+                item for item in after if not any(item is existing for existing in before)
+            )
+            if (
+                len(after) != len(before) + len(owned)
+                or len(added) != len(owned)
+                or len({id(item) for item in added}) != len(added)
+                or {id(item) for item in added} != {id(item) for item in owned}
+                or result is not owned[0]
+                or getattr(result, "TypeId", None) != route.operation.native_type_id
+            ):
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        else:
+            if update_before is None:
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            source = source_results[0]
+            update_after = route.family.capture_primary_update(
+                document,
+                route.operation,
+                context,
+            )
+            if (
+                not _same_object_sequence(after, before)
+                or result is not source.object
+                or result is not update_after.primary
+                or not _same_object_sequence(owned, source.owned_objects)
+                or not _same_object_sequence(owned, update_after.owned_objects)
+                or getattr(result, "TypeId", None) != route.operation.native_type_id
+                or _read_primary_update_identities(context, owned) != update_identities
+                or hmac.compare_digest(
+                    update_before.state_sha256,
+                    update_after.state_sha256,
+                )
+                or (
+                    family_result.state_sha256 is not None
+                    and not hmac.compare_digest(
+                        family_result.state_sha256,
+                        update_after.state_sha256,
+                    )
+                )
+            ):
+                _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+            state_sha256 = update_after.state_sha256
+            recovery = _ReviewedPrimaryUpdateRecovery(
+                family=route.family,
+                document=document,
+                operation=route.operation,
+                context=context,
+                document_objects=before,
+                owned_identities=update_identities,
+                before=update_before,
+                after_state_sha256=update_after.state_sha256,
+            )
+        return ReviewedNativeExecutionResult(
+            route=route,
+            object=result,
+            plan_sha256=lowered.result.plan_document.document_digest,
+            plan_content_sha256=lowered.result.plan_document.content_sha256,
+            native_receipt=family_result.receipt,
+            owned_objects=owned,
+            state_sha256=state_sha256,
+            _update_recovery=recovery,
+            _verified_execution_context=context,
+            _verified_dynamic_resolution=dynamic_resolution,
+        )
+    except ReviewedIntentExecutionError:
+        if update_before is not None:
+            if recovery is None:
+                recovery = _ReviewedPrimaryUpdateRecovery(
+                    family=route.family,
+                    document=document,
+                    operation=route.operation,
+                    context=context,
+                    document_objects=before,
+                    owned_identities=update_identities,
+                    before=update_before,
+                    after_state_sha256=update_before.state_sha256,
+                )
+            if not _rollback_primary_update(recovery):
+                _fail(ReviewedIntentExecutionErrorCode.ROLLBACK_FAILED)
+        raise
 
 
 __all__ = [
@@ -1778,6 +2263,7 @@ __all__ = [
     "REVIEWED_PARTDESIGN_PRIMITIVE_ROUTES",
     "REVIEWED_PARTDESIGN_BOOLEAN_ROUTES",
     "REVIEWED_PARTDESIGN_DRESSUP_ROUTES",
+    "REVIEWED_PARTDESIGN_GROOVE_ROUTES",
     "REVIEWED_PARTDESIGN_PATTERN_ROUTES",
     "REVIEWED_PARTDESIGN_PROMOTION_ROUTES",
     "LoweredReviewedIntent",

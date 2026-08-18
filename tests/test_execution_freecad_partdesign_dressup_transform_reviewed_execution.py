@@ -133,8 +133,8 @@ def test_dressup_family_routes_six_operations_with_one_dynamic_closure() -> None
     family = routes[0].family
 
     assert family.manifest is PARTDESIGN_DRESSUP_TRANSFORM_MANIFEST
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 67
-    assert CURRENT_REVIEWED_INTENT_ROUTES[-6:] == routes
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 68
+    assert CURRENT_REVIEWED_INTENT_ROUTES[-7:-1] == routes
     assert PARTDESIGN_DRESSUP_TRANSFORM_CATALOG_OPERATIONS == tuple(
         PartDesignDressupTransformOperation
     )
@@ -188,6 +188,7 @@ def test_dressup_family_routes_six_operations_with_one_dynamic_closure() -> None
                 route.semantic_operation,
                 route.manifest_semantic_operation,
                 route.family.formal_semantic_binding.value,
+                route.family.product_execution_mode(route.operation).value,
                 route.manifest.manifest_sha256,
                 route.manifest.adapter.adapter_id,
                 route.manifest.adapter.adapter_version,
