@@ -373,7 +373,7 @@ def test_composes_builtin_extra_and_promotion_catalogs_with_exact_binding(
     assert len(forward.binding.promotion_pack_sha256) == 19
     assert pack.pack_sha256 in forward.binding.promotion_pack_sha256
     assert forward.binding.intent_catalog_sha256 == forward.intent_catalog.catalog_sha256
-    assert len(forward.projection.manifest.formal_bindings) == 136
+    assert len(forward.projection.manifest.formal_bindings) == 137
     assert {
         binding.formal_capability_id for binding in forward.projection.manifest.formal_bindings
     }.issuperset(spec.capability_id for spec in current_freecad_intent_capability_specs())
