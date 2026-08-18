@@ -192,6 +192,44 @@ def _decode_canonical_resource(raw: bytes) -> None:
         raise GenerationError("the existing attestation resource is not canonical") from exc
 
 
+def _decode_structural_canonical_resource(raw: bytes) -> None:
+    """Admit a canonical historical resource for transactional replacement.
+
+    A checked-in resource from the preceding catalog cannot pass the current
+    semantic decoder by design.  Generation still has to read it so an atomic
+    publication can restore the exact old bytes on failure.  This boundary
+    therefore proves bounded canonical JSON with no duplicate keys; the new
+    resource remains subject to the full current decoder in ``_publish_pair``.
+    """
+
+    if type(raw) is not bytes or not raw or len(raw) > _MAX_EXISTING_FILE_BYTES:
+        raise GenerationError("the existing attestation resource is missing or oversized")
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    def reject_constant(_value: str) -> object:
+        raise ValueError("non-finite JSON number")
+
+    try:
+        value = json.loads(
+            raw.decode("ascii"),
+            object_pairs_hook=unique_object,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeError, ValueError, TypeError, RecursionError) as exc:
+        raise GenerationError(
+            "the existing attestation resource is not structurally canonical"
+        ) from exc
+    if type(value) is not dict or _canonical_json(value) != raw:
+        raise GenerationError("the existing attestation resource is not structurally canonical")
+
+
 def _resource_path_for_platform(platform_id: object) -> Path:
     resource_name = (
         _RESOURCE_NAME_BY_PLATFORM_ID.get(platform_id) if type(platform_id) is str else None
@@ -302,7 +340,7 @@ def _read_fixed_file(path: Path, *, required: bool) -> bytes | None:
     if path == _PINS_PATH:
         _decode_canonical_pins(raw)
     else:
-        _decode_canonical_resource(raw)
+        _decode_structural_canonical_resource(raw)
     return raw
 
 

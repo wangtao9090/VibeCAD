@@ -412,6 +412,50 @@ def test_fixed_outputs_reject_symlinks_and_noncanonical_pin_source(
         generator._read_fixed_file(pins, required=True)
 
 
+def test_generate_can_transactionally_replace_a_canonical_stale_catalog_resource(
+    generator,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _directory, resource, _arm_resource, pins = _bind_fixed_targets(
+        generator, monkeypatch, tmp_path
+    )
+    stale = generator._canonical_json(
+        {
+            "schema_version": 1,
+            "verification_set": {"formal_operation_count": 124},
+        }
+    )
+    resource.write_bytes(stale)
+    pins.write_bytes(generator._render_pins({}))
+    monkeypatch.setattr(
+        generator,
+        "decode_freecad_reviewed_release_attestation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("stale catalog")),
+    )
+
+    assert generator._read_fixed_file(resource, required=True) == stale
+    with pytest.raises(generator.GenerationError, match="not canonical"):
+        generator._decode_canonical_resource(stale)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        b'{"a":1,"a":2}',
+        b'{"a":1}\n',
+        b"[]",
+        b'{"value":NaN}',
+    ),
+)
+def test_historical_resource_migration_still_requires_bounded_canonical_json(
+    generator,
+    raw: bytes,
+) -> None:
+    with pytest.raises(generator.GenerationError, match="structurally canonical"):
+        generator._decode_structural_canonical_resource(raw)
+
+
 def test_real_builder_sequence_is_discovery_then_exact_current_verification_and_codec(
     generator,
     monkeypatch: pytest.MonkeyPatch,
