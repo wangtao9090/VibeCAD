@@ -6,6 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
+import tests.test_intent_bridge_freecad_partdesign_promotion_adapter as adapter_cases
+import tests.test_reviewed_intent_program as reviewed_program_cases
+from vibecad.execution.freecad_builtin_intent_capabilities import (
+    current_freecad_intent_capability_specs,
+)
 from vibecad.execution.freecad_partdesign_promotion_reviewed_execution import (
     PARTDESIGN_PROMOTION_MANIFEST,
     PARTDESIGN_PROMOTION_RESULT_INVARIANTS,
@@ -19,12 +24,17 @@ from vibecad.execution.freecad_partdesign_promotion_reviewed_execution import (
     validate_partdesign_promotion_reviewed_plan,
 )
 from vibecad.execution.freecad_reviewed_intent_execution import (
+    CURRENT_REVIEWED_INTENT_ROUTES,
+    REVIEWED_PART_BOX_ROUTE,
+    REVIEWED_PARTDESIGN_PROMOTION_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
     ReviewedIntentRoute,
     ReviewedNativeExecutionResult,
     _ReviewedFamilyNativeExecution,
     _ReviewedProductResultKind,
+    lower_reviewed_intent,
+    route_reviewed_intent,
 )
 from vibecad.execution.selectors import (
     EntityIdentity,
@@ -47,6 +57,7 @@ from vibecad.parametric.freecad_partdesign_promotion_rules import (
     SemanticObjectSelection,
 )
 from vibecad.validation import EntityObservation
+from vibecad.workflow.reviewed_intent import ReviewedIntentProgramV1
 
 
 class _MemorySink(PlanSink):
@@ -139,6 +150,29 @@ def _receipt(plan: PartDesignPromotionBackendPlan) -> ReviewedPlanReceipt:
     )
 
 
+def _program(
+    operation: PartDesignPromotionOperation,
+    *,
+    semantic_operation: str | None = None,
+    operation_id: str | None = None,
+) -> ReviewedIntentProgramV1:
+    graph = adapter_cases._graph(operation)  # noqa: SLF001
+    route = next(
+        item
+        for item in REVIEWED_PARTDESIGN_PROMOTION_ROUTES
+        if item.operation.operation_id == operation.value
+    )
+    return ReviewedIntentProgramV1(
+        operation_id=route.operation_id if operation_id is None else operation_id,
+        semantic_operation=(
+            route.semantic_operation if semantic_operation is None else semantic_operation
+        ),
+        intent_graph_sha256=graph.graph_sha256,
+        intent_content_sha256=hashlib.sha256(graph.canonical_bytes).hexdigest(),
+        intent_graph=graph,
+    )
+
+
 def test_static_manifest_exact_identities_and_adapter_factory() -> None:
     assert len(PARTDESIGN_PROMOTION_MANIFEST.operations) == 6
     assert PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC.operation_ids == tuple(
@@ -159,6 +193,115 @@ def test_static_manifest_exact_identities_and_adapter_factory() -> None:
     adapter = partdesign_promotion_reviewed_adapter_factory(_MemorySink())
     assert isinstance(adapter, ExactReviewedFamilyAdapter)
     assert adapter.manifest is PARTDESIGN_PROMOTION_MANIFEST
+
+
+def test_shared_routes_strictly_dual_bind_legacy_formal_and_full_manifest_identity() -> None:
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 39
+    assert CURRENT_REVIEWED_INTENT_ROUTES[-6:] == REVIEWED_PARTDESIGN_PROMOTION_ROUTES
+    assert (
+        tuple(
+            (route.operation_id, route.semantic_operation)
+            for route in REVIEWED_PARTDESIGN_PROMOTION_ROUTES
+        )
+        == PARTDESIGN_PROMOTION_REVIEWED_PRODUCT_IDENTITIES
+    )
+    formal = current_freecad_intent_capability_specs()
+    for route in REVIEWED_PARTDESIGN_PROMOTION_ROUTES:
+        matching = tuple(item for item in formal if item.operation_id == route.operation_id)
+        assert len(matching) == 1
+        assert route.semantic_operation == matching[0].semantic_operation
+        assert route.semantic_operation == route.operation.semantic_term.term_id
+        assert "@" not in route.semantic_operation
+        assert route.manifest_semantic_operation.endswith(
+            f"@{route.operation.semantic_term.term_definition_sha256}"
+        )
+        assert route.manifest_semantic_operation != route.semantic_operation
+        assert (
+            resolve_partdesign_promotion_reviewed_operation(
+                route.operation_id,
+                route.manifest_semantic_operation,
+            )
+            is None
+        )
+        assert route.family.product_result(route.operation).result_kind.value == "solid"
+        assert route.family.product_result(route.operation).semantic_roles == (
+            SemanticRole.FEATURE,
+        )
+        assert route.family.minimum_sources == 1
+        assert route.family.maximum_sources == 8
+
+
+@pytest.mark.parametrize("operation", tuple(PartDesignPromotionOperation))
+def test_shared_legacy_route_and_lower_are_reachable(
+    operation: PartDesignPromotionOperation,
+) -> None:
+    program = _program(operation)
+    route = route_reviewed_intent(program)
+    lowered = lower_reviewed_intent(program)
+
+    assert route in REVIEWED_PARTDESIGN_PROMOTION_ROUTES
+    assert lowered.route is route
+    assert lowered.plan.operation is operation
+    assert lowered.receipt.operation is route.operation
+    assert lowered.plan.angle_degrees == (0.0 if "helix" in operation.value else None)
+
+
+def test_dual_binding_rejects_bare_full_rebound_and_operation_substitution() -> None:
+    route = REVIEWED_PARTDESIGN_PROMOTION_ROUTES[0]
+    operation = PartDesignPromotionOperation(route.operation.operation_id)
+    program = _program(operation)
+
+    full_rebound = dataclasses.replace(
+        program,
+        semantic_operation=route.manifest_semantic_operation,
+    )
+    with pytest.raises(ReviewedIntentExecutionError) as caught:
+        route_reviewed_intent(full_rebound)
+    assert caught.value.code is ReviewedIntentExecutionErrorCode.UNKNOWN_ROUTE
+
+    other = REVIEWED_PARTDESIGN_PROMOTION_ROUTES[1]
+    bare_rebound = dataclasses.replace(program, semantic_operation=other.semantic_operation)
+    with pytest.raises(ReviewedIntentExecutionError) as caught:
+        route_reviewed_intent(bare_rebound)
+    assert caught.value.code is ReviewedIntentExecutionErrorCode.UNKNOWN_ROUTE
+
+    substituted = _program(
+        operation,
+        operation_id=other.operation_id,
+        semantic_operation=other.semantic_operation,
+    )
+    assert route_reviewed_intent(substituted) is other
+    with pytest.raises(ReviewedIntentExecutionError) as caught:
+        lower_reviewed_intent(substituted)
+    assert caught.value.code in {
+        ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE,
+        ReviewedIntentExecutionErrorCode.LOWERING_FAILED,
+    }
+
+    with pytest.raises(ReviewedIntentExecutionError):
+        dataclasses.replace(route, semantic_operation=route.manifest_semantic_operation)
+    with pytest.raises(ReviewedIntentExecutionError):
+        dataclasses.replace(route, operation=other.operation)
+
+
+def test_modern_route_still_requires_full_identity_and_rejects_bare_term() -> None:
+    modern = REVIEWED_PART_BOX_ROUTE
+    assert modern.semantic_operation == modern.manifest_semantic_operation
+    program = reviewed_program_cases.reviewed_box_program()
+    assert route_reviewed_intent(program) is modern
+
+    rebound = dataclasses.replace(
+        program,
+        semantic_operation=modern.operation.semantic_term.term_id,
+    )
+    with pytest.raises(ReviewedIntentExecutionError) as caught:
+        route_reviewed_intent(rebound)
+    assert caught.value.code is ReviewedIntentExecutionErrorCode.UNKNOWN_ROUTE
+    with pytest.raises(ReviewedIntentExecutionError):
+        dataclasses.replace(
+            modern,
+            semantic_operation=modern.operation.semantic_term.term_id,
+        )
 
 
 @pytest.mark.parametrize(

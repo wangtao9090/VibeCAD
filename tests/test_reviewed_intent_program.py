@@ -16,6 +16,7 @@ from vibecad.execution.freecad_reviewed_intent_execution import (
     REVIEWED_PART_OFFSET_ROUTES,
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_PROFILE_SURFACE_ROUTES,
+    REVIEWED_PARTDESIGN_PROMOTION_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
     lower_reviewed_intent,
@@ -293,14 +294,16 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
         *REVIEWED_PART_DATUM_ROUTES,
         *REVIEWED_PART_PROFILE_SURFACE_ROUTES,
         *REVIEWED_PART_OFFSET_ROUTES,
+        *REVIEWED_PARTDESIGN_PROMOTION_ROUTES,
     )
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 33
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 39
     assert len(REVIEWED_PART_PRIMITIVE_ROUTES) == len(programs) == 8
     assert len(REVIEWED_PART_CURVE_ROUTES) == 9
     assert len(REVIEWED_PART_CSG_ROUTES) == 3
     assert len(REVIEWED_PART_DATUM_ROUTES) == 4
     assert len(REVIEWED_PART_PROFILE_SURFACE_ROUTES) == 6
     assert len(REVIEWED_PART_OFFSET_ROUTES) == 3
+    assert len(REVIEWED_PARTDESIGN_PROMOTION_ROUTES) == 6
     assert {
         route.family.product_result(route.operation).result_kind.value
         for route in REVIEWED_PART_PRIMITIVE_ROUTES
@@ -321,6 +324,10 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
         route.family.product_result(route.operation).result_kind.value
         for route in REVIEWED_PART_OFFSET_ROUTES
     } == {"solid", "valid_shape"}
+    assert {
+        route.family.product_result(route.operation).result_kind.value
+        for route in REVIEWED_PARTDESIGN_PROMOTION_ROUTES
+    } == {"solid"}
     assert all(
         route.family.product_result(route.operation).semantic_roles[0].value == "feature"
         for route in REVIEWED_PART_CSG_ROUTES
@@ -337,6 +344,7 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
             *REVIEWED_PART_CSG_ROUTES,
             *REVIEWED_PART_PROFILE_SURFACE_ROUTES,
             *REVIEWED_PART_OFFSET_ROUTES,
+            *REVIEWED_PARTDESIGN_PROMOTION_ROUTES,
         )
     )
     assert tuple(route_reviewed_intent(program) for program in programs) == (

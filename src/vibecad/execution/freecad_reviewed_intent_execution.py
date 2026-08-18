@@ -1,10 +1,12 @@
 """Trusted product bridge for executing Reviewed FreeCAD intents.
 
 This module is the narrow seam between an authority-free Reviewed lowering
-pipeline and already-reviewed native rules.  Model input selects only a
-complete public semantic identity.  The native ``TypeId``, adapter, proof
-policy, plan decoder, and callable are selected exclusively by a static family
-descriptor owned by this module.
+pipeline and already-reviewed native rules.  Model input selects only the
+exact semantic operation published by the current formal catalog.  Each route
+separately binds that public identity to the complete reviewed-manifest
+identity.  The native ``TypeId``, adapter, proof policy, plan decoder, and
+callable are selected exclusively by a static family descriptor owned by this
+module.
 
 Adding a family means registering one trusted descriptor and an explicit
 operation allowlist below.  It never adds model-provided callables or MCP
@@ -48,6 +50,9 @@ from vibecad.execution.freecad_part_offset_projection_reviewed_execution import 
 from vibecad.execution.freecad_part_profile_surface_reviewed_execution import (
     PART_PROFILE_SURFACE_RESULT_INVARIANTS,
     PART_PROFILE_SURFACE_REVIEWED_FAMILY_SPEC,
+)
+from vibecad.execution.freecad_partdesign_promotion_reviewed_execution import (
+    PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC,
 )
 from vibecad.execution.freecad_reviewed_part_csg_execution import (
     PART_CSG_REVIEWED_FAMILY_SPEC,
@@ -204,6 +209,13 @@ class _ReviewedProductResultKind(StrEnum):
     REFERENCE = "reference"
 
 
+class _ReviewedFormalSemanticBinding(StrEnum):
+    """Static public-formal to full-manifest semantic binding mode."""
+
+    FULL_IDENTITY = "full_identity"
+    LEGACY_TERM_ID = "legacy_term_id"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _ReviewedProductResultContract:
     """Exact primary/closure contract owned by one reviewed operation."""
@@ -304,6 +316,9 @@ class _ReviewedIntentFamilyDescriptor:
     product_results: tuple[_ReviewedProductResultContract, ...]
     minimum_sources: int = 0
     maximum_sources: int = 0
+    formal_semantic_binding: _ReviewedFormalSemanticBinding = (
+        _ReviewedFormalSemanticBinding.FULL_IDENTITY
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -330,6 +345,7 @@ class _ReviewedIntentFamilyDescriptor:
             or type(self.minimum_sources) is not int
             or type(self.maximum_sources) is not int
             or not 0 <= self.minimum_sources <= self.maximum_sources <= 8
+            or type(self.formal_semantic_binding) is not _ReviewedFormalSemanticBinding
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
@@ -661,10 +677,27 @@ _PART_OFFSET_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     maximum_sources=2,
 )
 
+_PARTDESIGN_PROMOTION_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC.manifest,
+    subject_type_term=PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC.subject_type_term,
+    adapter_factory=PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC.adapter_factory,
+    validate_plan=PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC.validate_plan,
+    execute_plan=PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC.execute_plan,
+    product_results=_singleton_product_results(
+        PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC.manifest,
+        PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC.operation_ids,
+        result_kind=_ReviewedProductResultKind.SOLID,
+        semantic_role=SemanticRole.FEATURE,
+    ),
+    minimum_sources=1,
+    maximum_sources=8,
+    formal_semantic_binding=_ReviewedFormalSemanticBinding.LEGACY_TERM_ID,
+)
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReviewedIntentRoute:
-    """One static product route from public identity to reviewed contracts."""
+    """One exact formal route, independently bound to reviewed contracts."""
 
     operation_id: str
     semantic_operation: str
@@ -672,6 +705,7 @@ class ReviewedIntentRoute:
     manifest: FamilyBatchManifest
     operation: ReviewedOperationSpec
     subject_type_term: BridgeTermRef
+    manifest_semantic_operation: str = field(init=False)
     route_contract_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -686,17 +720,24 @@ class ReviewedIntentRoute:
             or self.subject_type_term != self.family.subject_type_term
             or self.operation not in self.manifest.operations
             or self.operation_id != f"{self.manifest.family_id}.{self.operation.operation_id}"
-            or self.semantic_operation != _semantic_operation(self.operation)
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        manifest_semantic_operation = _semantic_operation(self.operation)
         formal = tuple(
             item
             for item in current_freecad_intent_capability_specs()
             if item.operation_id == self.operation_id
         )
+        if self.family.formal_semantic_binding is _ReviewedFormalSemanticBinding.FULL_IDENTITY:
+            expected_formal_semantic = manifest_semantic_operation
+        elif self.family.formal_semantic_binding is _ReviewedFormalSemanticBinding.LEGACY_TERM_ID:
+            expected_formal_semantic = self.operation.semantic_term.term_id
+        else:
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         if (
             len(formal) != 1
             or formal[0].semantic_operation != self.semantic_operation
+            or self.semantic_operation != expected_formal_semantic
             or formal[0].native_type_id != self.operation.native_type_id
             or formal[0].adapter_id != self.manifest.adapter.adapter_id
             or formal[0].adapter_version != self.manifest.adapter.adapter_version
@@ -705,11 +746,23 @@ class ReviewedIntentRoute:
             or formal[0].rule_contract_sha256 != self.manifest.rule_contract_sha256
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+        object.__setattr__(
+            self,
+            "manifest_semantic_operation",
+            manifest_semantic_operation,
+        )
         body = "\0".join(
             (
                 self.operation_id,
                 self.semantic_operation,
+                self.manifest_semantic_operation,
+                self.family.formal_semantic_binding.value,
                 self.manifest.manifest_sha256,
+                self.manifest.adapter.adapter_id,
+                self.manifest.adapter.adapter_version,
+                self.manifest.adapter.adapter_contract_sha256,
+                self.manifest.rule_id,
+                self.manifest.rule_contract_sha256,
                 self.operation.specification_sha256,
                 *self.subject_type_term.semantic_identity,
             )
@@ -742,10 +795,21 @@ def _routes_for_family(
     )
     if any(type(item) is not ReviewedOperationSpec for item in operations):
         _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+    formal_specs = current_freecad_intent_capability_specs()
+    formal_by_operation = {
+        operation.operation_id: tuple(
+            item
+            for item in formal_specs
+            if item.operation_id == f"{family.manifest.family_id}.{operation.operation_id}"
+        )
+        for operation in operations
+    }
+    if any(len(items) != 1 for items in formal_by_operation.values()):
+        _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
     return tuple(
         ReviewedIntentRoute(
             operation_id=f"{family.manifest.family_id}.{operation.operation_id}",
-            semantic_operation=_semantic_operation(operation),
+            semantic_operation=formal_by_operation[operation.operation_id][0].semantic_operation,
             family=family,
             manifest=family.manifest,
             operation=operation,
@@ -780,6 +844,10 @@ REVIEWED_PART_OFFSET_ROUTES: Final = _routes_for_family(
     _PART_OFFSET_FAMILY,
     PART_OFFSET_REVIEWED_FAMILY_SPEC.operation_ids,
 )
+REVIEWED_PARTDESIGN_PROMOTION_ROUTES: Final = _routes_for_family(
+    _PARTDESIGN_PROMOTION_FAMILY,
+    PARTDESIGN_PROMOTION_REVIEWED_FAMILY_SPEC.operation_ids,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
@@ -787,6 +855,7 @@ _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_DATUM_ROUTES,
     REVIEWED_PART_PROFILE_SURFACE_ROUTES,
     REVIEWED_PART_OFFSET_ROUTES,
+    REVIEWED_PARTDESIGN_PROMOTION_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -1290,6 +1359,7 @@ __all__ = [
     "REVIEWED_PART_OFFSET_ROUTES",
     "REVIEWED_PART_PROFILE_SURFACE_ROUTES",
     "REVIEWED_PART_PRIMITIVE_ROUTES",
+    "REVIEWED_PARTDESIGN_PROMOTION_ROUTES",
     "LoweredReviewedIntent",
     "ReviewedIntentExecutionError",
     "ReviewedIntentExecutionErrorCode",

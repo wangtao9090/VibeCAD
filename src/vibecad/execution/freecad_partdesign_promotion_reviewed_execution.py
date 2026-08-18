@@ -83,11 +83,6 @@ def _bridge_term(term: SemanticTermRefV2) -> BridgeTermRef:
     )
 
 
-def _semantic_operation(operation: ReviewedOperationSpec) -> str:
-    namespace, version, term_id, digest = operation.semantic_term.semantic_identity
-    return f"{namespace}/{version}/{term_id}@{digest}"
-
-
 def _integrity_failure() -> None:
     from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
         ReviewedIntentExecutionError,
@@ -196,7 +191,7 @@ _PRODUCT_IDENTITIES: Final = MappingProxyType(
     {
         (
             f"{PARTDESIGN_PROMOTION_MANIFEST.family_id}.{operation.value}",
-            _semantic_operation(_OPERATIONS_BY_ID[operation.value]),
+            _OPERATIONS_BY_ID[operation.value].semantic_term.term_id,
         ): _OPERATIONS_BY_ID[operation.value]
         for operation in PARTDESIGN_PROMOTION_REVIEWED_PRODUCT_OPERATIONS
     }

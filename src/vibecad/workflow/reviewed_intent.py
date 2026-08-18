@@ -29,6 +29,7 @@ MAX_REVIEWED_INTENT_PROGRAM_BYTES = 256 * 1024
 _PROGRAM_DIGEST_DOMAIN = b"vibecad-reviewed-intent-program-v1\0"
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _OPERATION_ID = re.compile(r"^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)+$")
+_LEGACY_SEMANTIC_OPERATION = re.compile(r"^operation\.[a-z0-9]+(?:[.-][a-z0-9]+)*$")
 _MAX_OPERATION_ID_BYTES = 256
 _MAX_SEMANTIC_OPERATION_BYTES = 512
 
@@ -108,6 +109,8 @@ def _semantic_operation(value: object) -> str:
         path="/semantic_operation",
     )
     prefix, separator, digest = result.rpartition("@")
+    if _LEGACY_SEMANTIC_OPERATION.fullmatch(result) is not None:
+        return result
     if (
         separator != "@"
         or not prefix
