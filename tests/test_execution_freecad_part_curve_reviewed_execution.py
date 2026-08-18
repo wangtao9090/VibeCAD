@@ -26,6 +26,7 @@ from vibecad.execution.freecad_reviewed_intent_execution import (
     REVIEWED_PART_CURVE_ROUTES,
     ReviewedIntentExecutionError,
     ReviewedIntentExecutionErrorCode,
+    _ReviewedFamilyExecutionContext,
     lower_reviewed_intent,
     route_reviewed_intent,
 )
@@ -277,7 +278,7 @@ def test_shared_product_bridge_routes_and_lowers_all_nine_curves(
     route = route_reviewed_intent(program)
     lowered = lower_reviewed_intent(program)
 
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 17
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 20
     assert route in REVIEWED_PART_CURVE_ROUTES
     assert route.operation_id == program.operation_id
     assert route.semantic_operation == program.semantic_operation
@@ -386,6 +387,11 @@ def test_curve_family_native_callback_returns_exact_product_object(
         plan.canonical_bytes,
         lowered.plan_document,
         reviewed,
+        _ReviewedFamilyExecutionContext(
+            session=object(),
+            document=document,
+            source_results=(),
+        ),
     )
 
     assert result.object is document.Objects[0]
@@ -419,6 +425,11 @@ def test_curve_family_tamper_fails_before_native_mutation(
             plan.canonical_bytes,
             tampered_document,
             lowered.operation,
+            _ReviewedFamilyExecutionContext(
+                session=object(),
+                document=document,
+                source_results=(),
+            ),
         )
     assert caught.value.code is ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE
     assert called is False

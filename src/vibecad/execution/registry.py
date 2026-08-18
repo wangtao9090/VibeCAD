@@ -1521,6 +1521,20 @@ DEFAULT_OPERATION_REGISTRY = OperationRegistry(
                     "intent",
                     ValueShape.REVIEWED_INTENT,
                 ),
+                FieldMetadata(
+                    "source_a",
+                    "source_a",
+                    ValueShape.RESULT_REF,
+                    required=False,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
+                FieldMetadata(
+                    "source_b",
+                    "source_b",
+                    ValueShape.RESULT_REF,
+                    required=False,
+                    referenced_value_shape=ValueShape.OBJECT_ID,
+                ),
             ),
             resource_budget=ResourceBudget(
                 max_runtime_ms=30_000,

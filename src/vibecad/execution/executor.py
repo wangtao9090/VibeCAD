@@ -2356,11 +2356,88 @@ def _managed_create_parametric_design(
     }
 
 
+@dataclass(frozen=True, slots=True)
+class _ReviewedProductRunRecord:
+    """One engine-owned Reviewed result retained only for this program run."""
+
+    result: ReviewedNativeExecutionResult
+    identity: EntityIdentity
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.result) is not ReviewedNativeExecutionResult
+            or type(self.identity) is not EntityIdentity
+            or self.result.object is None
+            or self.identity.object_type != self.result.route.operation.native_type_id
+        ):
+            raise _operation_failure()
+
+
+class _ReviewedProductRunState:
+    """Ordered opaque Reviewed outputs scoped to one execution cursor.
+
+    The resolver is intentionally cardinality-generic for dependency-bearing
+    Reviewed families.  Public registry fields still decide which exact
+    cardinalities a model may request.
+    """
+
+    __slots__ = ("_records",)
+
+    def __init__(self) -> None:
+        self._records: dict[str, _ReviewedProductRunRecord] = {}
+
+    def retain(self, result: ReviewedNativeExecutionResult, identity: EntityIdentity) -> None:
+        record = _ReviewedProductRunRecord(result=result, identity=identity)
+        if identity.object_id in self._records:
+            raise _operation_failure()
+        self._records[identity.object_id] = record
+
+    def resolve(
+        self,
+        source_object_ids: tuple[object, ...],
+        *,
+        read_identity: Callable[[object], object],
+        minimum: int = 1,
+        maximum: int = 8,
+    ) -> tuple[ReviewedNativeExecutionResult, ...]:
+        if (
+            type(source_object_ids) is not tuple
+            or type(minimum) is not int
+            or type(maximum) is not int
+            or not 1 <= minimum <= maximum <= 8
+            or not minimum <= len(source_object_ids) <= maximum
+            or not callable(read_identity)
+            or any(
+                not _matches_value_shape(item, ValueShape.OBJECT_ID) for item in source_object_ids
+            )
+            or len(set(source_object_ids)) != len(source_object_ids)
+        ):
+            raise _operation_failure()
+        try:
+            records = tuple(self._records[item] for item in source_object_ids)
+            if any(
+                read_identity(record.result.object) != record.identity
+                or record.identity.object_id != object_id
+                for object_id, record in zip(source_object_ids, records, strict=True)
+            ):
+                raise ValueError
+        except Exception:
+            raise _operation_failure() from None
+        return tuple(record.result for record in records)
+
+    def __reduce__(self):
+        raise TypeError("reviewed product run state cannot be serialized")
+
+
 def _managed_apply_reviewed_intent(
     session: object,
     context: _InvocationContext,
     *,
+    execution_leaf: Callable[..., object],
+    reviewed_products: _ReviewedProductRunState,
     intent: object,
+    source_a: object = None,
+    source_b: object = None,
 ) -> dict[str, object]:
     """Execute and adopt one statically routed Reviewed intent."""
 
@@ -2373,8 +2450,19 @@ def _managed_apply_reviewed_intent(
         set_result = session.set_result_object  # type: ignore[attr-defined]
         get_result = session.get_result_object  # type: ignore[attr-defined]
         transaction = session._transaction  # type: ignore[attr-defined]
-        if not all(
-            callable(item) for item in (attach, read_identity, set_result, get_result, transaction)
+        if (
+            not all(
+                callable(item)
+                for item in (
+                    attach,
+                    read_identity,
+                    set_result,
+                    get_result,
+                    transaction,
+                    execution_leaf,
+                )
+            )
+            or type(reviewed_products) is not _ReviewedProductRunState
         ):
             raise ValueError
         before = _entity_observations(session)
@@ -2384,7 +2472,20 @@ def _managed_apply_reviewed_intent(
         raise _operation_failure() from None
 
     try:
-        executed = _execute_reviewed_intent_native(session, checked)
+        source_values = (source_a, source_b)
+        if source_values == (None, None):
+            executed = execution_leaf(session, checked)
+        else:
+            executed = execution_leaf(
+                session,
+                checked,
+                source_results=reviewed_products.resolve(
+                    source_values,
+                    read_identity=read_identity,
+                    minimum=2,
+                    maximum=2,
+                ),
+            )
         if type(executed) is not ReviewedNativeExecutionResult:
             raise ValueError
         obj = executed.object
@@ -2405,11 +2506,16 @@ def _managed_apply_reviewed_intent(
             source=ProvenanceSource(context.source.value),
             operation_id=context.operation_id,
         )
+        semantic_role = (
+            SemanticRole.FEATURE
+            if executed.route.operation.native_type_id in _BOOLEAN_OPERATIONS
+            else SemanticRole.PRIMITIVE
+        )
         identity = EntityIdentity(
             object_id=f"object_{secrets.token_hex(16)}",
             feature_id=f"feature_{secrets.token_hex(16)}",
             object_type=executed.route.operation.native_type_id,
-            semantic_role=SemanticRole.PRIMITIVE,
+            semantic_role=semantic_role,
             provenance=provenance,
         )
         with transaction(
@@ -2434,7 +2540,7 @@ def _managed_apply_reviewed_intent(
             if (
                 created.feature_id != identity.feature_id
                 or created.object_type != identity.object_type
-                or created.semantic_role != SemanticRole.PRIMITIVE.value
+                or created.semantic_role != semantic_role.value
                 or created.provenance != provenance.to_mapping()
                 or created.valid_shape is not True
                 or created.solid_count != 1
@@ -2442,6 +2548,7 @@ def _managed_apply_reviewed_intent(
                 or created.volume_mm3 <= 0
             ):
                 raise ValueError
+        reviewed_products.retain(executed, identity)
     except Exception:
         raise _operation_failure() from None
 
@@ -4315,6 +4422,7 @@ class InProcessCadExecutor(CadExecutionPort):
             project_id = candidate.project_id
             revision_id = candidate.base_head.revision_id
             candidate_revision_id = candidate.binding.revision_id
+            reviewed_products = _ReviewedProductRunState()
             handlers = {
                 "create_box": _queued_handler(
                     contexts.get("create_box", deque()),
@@ -4477,7 +4585,12 @@ class InProcessCadExecutor(CadExecutionPort):
                 ),
                 "apply_reviewed_intent": _queued_handler(
                     contexts.get("apply_reviewed_intent", deque()),
-                    partial(_managed_apply_reviewed_intent, session),
+                    partial(
+                        _managed_apply_reviewed_intent,
+                        session,
+                        execution_leaf=_execute_reviewed_intent_native,
+                        reviewed_products=reviewed_products,
+                    ),
                 ),
             }
         except ExecutorError:

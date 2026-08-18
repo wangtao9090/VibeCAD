@@ -156,8 +156,13 @@ def execute_part_curve_reviewed_plan(
     payload: bytes,
     plan_document: DocumentRef,
     operation: ReviewedOperationSpec,
+    context: object,
 ) -> object:
     """Execute one exact curve plan and return the shared native result shape."""
+
+    from vibecad.execution.freecad_reviewed_intent_execution import (  # noqa: PLC0415
+        _ReviewedFamilyExecutionContext,
+    )
 
     if (
         document is None
@@ -171,6 +176,9 @@ def execute_part_curve_reviewed_plan(
         or plan.adapter_contract_sha256 != PART_CURVE_MANIFEST.adapter.adapter_contract_sha256
         or plan.manifest_sha256 != PART_CURVE_MANIFEST.manifest_sha256
         or plan.operation_specification_sha256 != operation.specification_sha256
+        or type(context) is not _ReviewedFamilyExecutionContext
+        or context.document is not document
+        or context.source_results
     ):
         _integrity_failure()
     try:
@@ -230,7 +238,9 @@ class PartCurveReviewedFamilySpec:
     operation_ids: tuple[str, ...]
     adapter_factory: Callable[[PlanSink], ExactReviewedFamilyAdapter]
     validate_plan: Callable[[object, ReviewedPlanReceipt, ReviewedOperationSpec], None]
-    execute_plan: Callable[[object, object, bytes, DocumentRef, ReviewedOperationSpec], object]
+    execute_plan: Callable[
+        [object, object, bytes, DocumentRef, ReviewedOperationSpec, object], object
+    ]
 
 
 PART_CURVE_REVIEWED_FAMILY_SPEC: Final = PartCurveReviewedFamilySpec(

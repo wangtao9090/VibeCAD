@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import dataclasses
+import hashlib
 import json
 import math
 import os
@@ -18,6 +19,7 @@ import pytest
 
 import vibecad.execution.executor as executor_module
 from test_reviewed_intent_program import reviewed_box_program, reviewed_primitive_program
+from test_reviewed_part_csg_product import reviewed_csg_program
 from vibecad.execution.candidate import (
     ActiveCandidate,
     CadSnapshotPort,
@@ -33,6 +35,7 @@ from vibecad.execution.executor import (
 )
 from vibecad.execution.freecad_reviewed_intent_execution import (
     REVIEWED_PART_BOX_ROUTE,
+    REVIEWED_PART_CSG_ROUTES,
     ReviewedNativeExecutionResult,
 )
 from vibecad.execution.registry import (
@@ -134,6 +137,20 @@ class _FakeShape:
         if self.export_error is not None:
             raise self.export_error
         Path(path).write_bytes(b"ISO-10303-21;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n")
+
+    def exportBrepToString(self) -> str:  # noqa: N802 - FreeCAD API spelling
+        return repr(
+            (
+                self.Volume,
+                self.Area,
+                self.BoundBox.XLength,
+                self.BoundBox.YLength,
+                self.BoundBox.ZLength,
+                self.CenterOfMass.x,
+                self.CenterOfMass.y,
+                self.CenterOfMass.z,
+            )
+        )
 
     def transformed(self, matrix):
         x, y, z = matrix[:3]
@@ -1927,6 +1944,296 @@ def test_execute_program_applies_one_reviewed_box_and_adopts_identity(
     assert result["feature_id"] == identity.feature_id
     assert result["plan_sha256"] == "a" * 64
     assert session.result_object is session.identity_object
+
+
+def test_execute_program_resolves_two_prior_reviewed_outputs_for_csg(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed_box = reviewed_box_program()
+    reviewed_cut = reviewed_csg_program(PartCoreOperation.CUT)
+    primitive_results: list[ReviewedNativeExecutionResult] = []
+    dependency_sources: list[tuple[ReviewedNativeExecutionResult, ...]] = []
+
+    def execute_primitive(
+        session: _FakeSession,
+        value: object,
+    ) -> ReviewedNativeExecutionResult:
+        assert value == reviewed_box
+        index = len(primitive_results)
+        obj = type("ManagedReviewedBox", (), {})()
+        obj.Name = f"ReviewedBox{index}"
+        obj.TypeId = "Part::Box"
+        obj.Length = 10.0
+        obj.Width = 8.0
+        obj.Height = 6.0
+        obj.Placement = _FakePlacement(float(index) * 2.0)
+        obj.Shape = _FakeShape(
+            volume=480.0,
+            area=376.0,
+            bbox=(10.0, 8.0, 6.0),
+            center=(5.0 + float(index) * 2.0, 4.0, 3.0),
+        )
+        obj.State = []
+        session.doc.Objects = (*session.doc.Objects, obj)
+        plan_sha256 = f"{index + 1:x}" * 64
+        result = ReviewedNativeExecutionResult(
+            route=REVIEWED_PART_BOX_ROUTE,
+            object=obj,
+            plan_sha256=plan_sha256,
+            plan_content_sha256=f"{index + 3:x}" * 64,
+            native_receipt=PartCoreConformanceReceipt(
+                plan_sha256=plan_sha256,
+                operation=PartCoreOperation.BOX,
+                object_name=obj.Name,
+                source_shape_sha256s=(),
+                result_shape_sha256=hashlib.sha256(
+                    obj.Shape.exportBrepToString().encode()
+                ).hexdigest(),
+            ),
+        )
+        primitive_results.append(result)
+        return result
+
+    def execute_csg(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...],
+    ) -> ReviewedNativeExecutionResult:
+        assert value == reviewed_cut
+        assert source_results == tuple(primitive_results)
+        dependency_sources.append(source_results)
+        obj = type("ManagedReviewedCut", (), {})()
+        obj.Name = "ReviewedCut"
+        obj.TypeId = "Part::Cut"
+        obj.Base = source_results[0].object
+        obj.Tool = source_results[1].object
+        obj.Refine = True
+        obj.Placement = _FakePlacement(0.0)
+        obj.Shape = _FakeShape(
+            volume=240.0,
+            area=300.0,
+            bbox=(8.0, 8.0, 6.0),
+            center=(4.0, 4.0, 3.0),
+        )
+        obj.State = []
+        session.doc.Objects = (*session.doc.Objects, obj)
+        return ReviewedNativeExecutionResult(
+            route=REVIEWED_PART_CSG_ROUTES[0],
+            object=obj,
+            plan_sha256="5" * 64,
+            plan_content_sha256="6" * 64,
+            native_receipt=PartCoreConformanceReceipt(
+                plan_sha256="5" * 64,
+                operation=PartCoreOperation.CUT,
+                object_name=obj.Name,
+                source_shape_sha256s=tuple(
+                    item.native_receipt.result_shape_sha256 for item in source_results
+                ),
+                result_shape_sha256=hashlib.sha256(
+                    obj.Shape.exportBrepToString().encode()
+                ).hexdigest(),
+            ),
+        )
+
+    def execute_reviewed(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        if value == reviewed_box:
+            assert source_results == ()
+            return execute_primitive(session, value)
+        return execute_csg(session, value, source_results=source_results)
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute_reviewed)
+    session = _FakeSession()
+    program = ModelProgram(
+        task_id="task-reviewed-csg",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "source_a",
+                "apply_reviewed_intent",
+                args={"intent": reviewed_box.to_mapping()},
+            ),
+            _command(
+                "source_b",
+                "apply_reviewed_intent",
+                args={"intent": reviewed_box.to_mapping()},
+            ),
+            _command(
+                "csg_cut",
+                "apply_reviewed_intent",
+                args={
+                    "intent": reviewed_cut.to_mapping(),
+                    "source_a": {"command_id": "source_a", "slot": "object"},
+                    "source_b": {"command_id": "source_b", "slot": "object"},
+                },
+                depends_on=("source_a", "source_b"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-csg", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert len(outcomes) == 3
+    assert all(item.result.ok for item in outcomes)
+    assert len(dependency_sources) == 1
+    assert outcomes[-1].result.value["reviewed_operation_id"] == "freecad_part_core.cut"
+    source_identities = tuple(
+        session.read_object_identity(item.object) for item in dependency_sources[0]
+    )
+    assert tuple(item.provenance.operation_id for item in source_identities) == (
+        "source_a",
+        "source_b",
+    )
+    result_identity = session.read_object_identity(session.result_object)
+    assert result_identity.semantic_role.value == "feature"
+    assert result_identity.provenance.operation_id == "csg_cut"
+
+
+def test_reviewed_csg_rejects_non_reviewed_result_slots_before_dependency_leaf(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed_cut = reviewed_csg_program(PartCoreOperation.CUT)
+    dependency_called = False
+
+    def add_box(session: _FakeSession, **kwargs: object) -> object:
+        return _fake_add_box(session, **kwargs)  # type: ignore[arg-type]
+
+    def execute_csg(*_args: object, **_kwargs: object) -> ReviewedNativeExecutionResult:
+        nonlocal dependency_called
+        dependency_called = True
+        raise AssertionError("dependency leaf must stay inert")
+
+    monkeypatch.setattr(executor_module, "_add_box", add_box)
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute_csg)
+    session = _FakeSession()
+    program = ModelProgram(
+        task_id="task-reviewed-csg-wrong-slots",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "plain_a",
+                "create_box",
+                args={"length_mm": 10, "width_mm": 8, "height_mm": 6},
+            ),
+            _command(
+                "plain_b",
+                "create_box",
+                args={"length_mm": 8, "width_mm": 6, "height_mm": 4},
+            ),
+            _command(
+                "csg_cut",
+                "apply_reviewed_intent",
+                args={
+                    "intent": reviewed_cut.to_mapping(),
+                    "source_a": {"command_id": "plain_a", "slot": "object"},
+                    "source_b": {"command_id": "plain_b", "slot": "object"},
+                },
+                depends_on=("plain_a", "plain_b"),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-csg-wrong-slots", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [item.result.ok for item in outcomes] == [True, True, False]
+    assert dependency_called is False
+    assert len(session.doc.Objects) == 2
+
+
+def test_reviewed_csg_rejects_incomplete_source_pair_without_native_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reviewed_box = reviewed_box_program()
+    reviewed_cut = reviewed_csg_program(PartCoreOperation.CUT)
+    dependency_called = False
+
+    def execute_primitive(
+        session: _FakeSession,
+        _value: object,
+    ) -> ReviewedNativeExecutionResult:
+        obj = session.identity_object
+        obj.Shape = _FakeShape(volume=480.0, area=376.0, bbox=(10.0, 8.0, 6.0))
+        session.doc.Objects = (*session.doc.Objects, obj)
+        return ReviewedNativeExecutionResult(
+            route=REVIEWED_PART_BOX_ROUTE,
+            object=obj,
+            plan_sha256="7" * 64,
+            plan_content_sha256="8" * 64,
+            native_receipt=PartCoreConformanceReceipt(
+                plan_sha256="7" * 64,
+                operation=PartCoreOperation.BOX,
+                object_name=obj.Name,
+                source_shape_sha256s=(),
+                result_shape_sha256=hashlib.sha256(
+                    obj.Shape.exportBrepToString().encode()
+                ).hexdigest(),
+            ),
+        )
+
+    def execute_csg(*_args: object, **_kwargs: object) -> ReviewedNativeExecutionResult:
+        nonlocal dependency_called
+        dependency_called = True
+        raise AssertionError("dependency leaf must stay inert")
+
+    def execute_reviewed(
+        session: _FakeSession,
+        value: object,
+        *,
+        source_results: tuple[ReviewedNativeExecutionResult, ...] = (),
+    ) -> ReviewedNativeExecutionResult:
+        if value == reviewed_box:
+            assert source_results == ()
+            return execute_primitive(session, value)
+        return execute_csg(session, value, source_results=source_results)
+
+    monkeypatch.setattr(executor_module, "_execute_reviewed_intent_native", execute_reviewed)
+    session = _FakeSession()
+    program = ModelProgram(
+        task_id="task-reviewed-csg-incomplete",
+        base_revision=BASE_REVISION,
+        operations=(
+            _command(
+                "source_a",
+                "apply_reviewed_intent",
+                args={"intent": reviewed_box.to_mapping()},
+            ),
+            _command(
+                "csg_cut",
+                "apply_reviewed_intent",
+                args={
+                    "intent": reviewed_cut.to_mapping(),
+                    "source_a": {"command_id": "source_a", "slot": "object"},
+                },
+                depends_on=("source_a",),
+            ),
+        ),
+        acceptance=AcceptanceSpec(id="acceptance-reviewed-csg-incomplete", criteria=()),
+    )
+
+    outcomes = InProcessCadExecutor(store=_store()).execute_program(
+        program=validate_model_program(program),
+        candidate=_active(session, tmp_path),
+    )
+
+    assert [item.result.ok for item in outcomes] == [True, False]
+    assert dependency_called is False
+    assert len(session.doc.Objects) == 1
 
 
 @pytest.mark.slow

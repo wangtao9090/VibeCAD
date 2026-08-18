@@ -10,6 +10,7 @@ import pytest
 import vibecad.execution.freecad_reviewed_intent_execution as reviewed_execution
 from vibecad.execution.freecad_reviewed_intent_execution import (
     CURRENT_REVIEWED_INTENT_ROUTES,
+    REVIEWED_PART_CSG_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
     REVIEWED_PART_PRIMITIVE_ROUTES,
     ReviewedIntentExecutionError,
@@ -284,10 +285,12 @@ def test_reviewed_primitive_route_table_is_exact_and_closed() -> None:
     assert CURRENT_REVIEWED_INTENT_ROUTES == (
         *REVIEWED_PART_PRIMITIVE_ROUTES,
         *REVIEWED_PART_CURVE_ROUTES,
+        *REVIEWED_PART_CSG_ROUTES,
     )
-    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 17
+    assert len(CURRENT_REVIEWED_INTENT_ROUTES) == 20
     assert len(REVIEWED_PART_PRIMITIVE_ROUTES) == len(programs) == 8
     assert len(REVIEWED_PART_CURVE_ROUTES) == 9
+    assert len(REVIEWED_PART_CSG_ROUTES) == 3
     assert tuple(route_reviewed_intent(program) for program in programs) == (
         REVIEWED_PART_PRIMITIVE_ROUTES
     )
@@ -329,8 +332,12 @@ def test_reviewed_family_descriptor_owns_lower_read_and_execute_callbacks(
         payload: bytes,
         plan_document: object,
         operation: object,
+        context: object,
     ):
         del plan, payload
+        assert context.document is document
+        assert context.session.doc is document
+        assert context.source_results == ()
         calls.append("execute")
         result = SimpleNamespace(TypeId=operation.native_type_id)
         document.Objects = (*document.Objects, result)

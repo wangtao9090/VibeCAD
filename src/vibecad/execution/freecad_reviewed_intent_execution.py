@@ -38,6 +38,9 @@ from vibecad.execution.freecad_discovery_runtime_v2 import (
 from vibecad.execution.freecad_part_curve_reviewed_execution import (
     PART_CURVE_REVIEWED_FAMILY_SPEC,
 )
+from vibecad.execution.freecad_reviewed_part_csg_execution import (
+    PART_CSG_REVIEWED_FAMILY_SPEC,
+)
 from vibecad.execution.freecad_reviewed_release_attestation import (
     decode_freecad_reviewed_release_attestation,
     validate_freecad_reviewed_release_attestation,
@@ -149,10 +152,36 @@ class _ReviewedFamilyNativeExecution:
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ReviewedFamilyExecutionContext:
+    """Executor-owned state supplied to one static family callback."""
+
+    session: object = field(repr=False, compare=False)
+    document: object = field(repr=False, compare=False)
+    source_results: tuple[object, ...] = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if (
+            self.session is None
+            or self.document is None
+            or type(self.source_results) is not tuple
+            or len(self.source_results) > 8
+            or any(item is None for item in self.source_results)
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
+
+
 _AdapterFactory = Callable[[PlanSink], ExactReviewedFamilyAdapter]
 _PlanValidator = Callable[[object, ReviewedPlanReceipt, ReviewedOperationSpec], None]
 _NativeExecutor = Callable[
-    [object, object, bytes, DocumentRef, ReviewedOperationSpec],
+    [
+        object,
+        object,
+        bytes,
+        DocumentRef,
+        ReviewedOperationSpec,
+        _ReviewedFamilyExecutionContext,
+    ],
     _ReviewedFamilyNativeExecution,
 ]
 
@@ -166,6 +195,8 @@ class _ReviewedIntentFamilyDescriptor:
     adapter_factory: _AdapterFactory = field(repr=False, compare=False)
     validate_plan: _PlanValidator = field(repr=False, compare=False)
     execute_plan: _NativeExecutor = field(repr=False, compare=False)
+    minimum_sources: int = 0
+    maximum_sources: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -175,6 +206,9 @@ class _ReviewedIntentFamilyDescriptor:
             or not callable(self.validate_plan)
             or not callable(self.execute_plan)
             or not any(term == self.subject_type_term for term in self.manifest.request_terms)
+            or type(self.minimum_sources) is not int
+            or type(self.maximum_sources) is not int
+            or not 0 <= self.minimum_sources <= self.maximum_sources <= 8
         ):
             _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
 
@@ -215,7 +249,14 @@ class _ReviewedIntentFamilyDescriptor:
         payload: bytes,
         plan_document: DocumentRef,
         operation: ReviewedOperationSpec,
+        context: _ReviewedFamilyExecutionContext,
     ) -> _ReviewedFamilyNativeExecution:
+        if (
+            type(context) is not _ReviewedFamilyExecutionContext
+            or context.document is not document
+            or not self.minimum_sources <= len(context.source_results) <= self.maximum_sources
+        ):
+            _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
         try:
             result = self.execute_plan(
                 document,
@@ -223,6 +264,7 @@ class _ReviewedIntentFamilyDescriptor:
                 payload,
                 plan_document,
                 operation,
+                context,
             )
         except ReviewedIntentExecutionError:
             raise
@@ -256,6 +298,7 @@ def _execute_part_core_plan(
     payload: bytes,
     plan_document: DocumentRef,
     operation: ReviewedOperationSpec,
+    context: _ReviewedFamilyExecutionContext,
 ) -> _ReviewedFamilyNativeExecution:
     if (
         type(plan) is not PartCoreBackendPlan
@@ -264,6 +307,9 @@ def _execute_part_core_plan(
         or type(operation) is not ReviewedOperationSpec
         or plan.operation.value != operation.operation_id
         or plan.sources
+        or type(context) is not _ReviewedFamilyExecutionContext
+        or context.document is not document
+        or context.source_results
     ):
         _fail(ReviewedIntentExecutionErrorCode.INTEGRITY_FAILURE)
     receipt = apply_part_core_plan(
@@ -297,6 +343,16 @@ _PART_CURVE_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
     adapter_factory=PART_CURVE_REVIEWED_FAMILY_SPEC.adapter_factory,
     validate_plan=PART_CURVE_REVIEWED_FAMILY_SPEC.validate_plan,
     execute_plan=PART_CURVE_REVIEWED_FAMILY_SPEC.execute_plan,
+)
+
+_PART_CSG_FAMILY: Final = _ReviewedIntentFamilyDescriptor(
+    manifest=PART_CSG_REVIEWED_FAMILY_SPEC.manifest,
+    subject_type_term=PART_CSG_REVIEWED_FAMILY_SPEC.subject_type_term,
+    adapter_factory=PART_CSG_REVIEWED_FAMILY_SPEC.adapter_factory,
+    validate_plan=PART_CSG_REVIEWED_FAMILY_SPEC.validate_plan,
+    execute_plan=PART_CSG_REVIEWED_FAMILY_SPEC.execute_plan,
+    minimum_sources=2,
+    maximum_sources=2,
 )
 
 
@@ -414,9 +470,14 @@ REVIEWED_PART_CURVE_ROUTES: Final = _routes_for_family(
     _PART_CURVE_FAMILY,
     PART_CURVE_REVIEWED_FAMILY_SPEC.operation_ids,
 )
+REVIEWED_PART_CSG_ROUTES: Final = _routes_for_family(
+    _PART_CSG_FAMILY,
+    PART_CSG_REVIEWED_FAMILY_SPEC.operation_ids,
+)
 _REVIEWED_FAMILY_ROUTE_SETS: Final = (
     REVIEWED_PART_PRIMITIVE_ROUTES,
     REVIEWED_PART_CURVE_ROUTES,
+    REVIEWED_PART_CSG_ROUTES,
 )
 CURRENT_REVIEWED_INTENT_ROUTES: Final = tuple(
     route for family_routes in _REVIEWED_FAMILY_ROUTE_SETS for route in family_routes
@@ -832,12 +893,20 @@ class ReviewedNativeExecutionResult:
 def execute_reviewed_intent_native(
     session: object,
     value: object,
+    *,
+    source_results: object = (),
 ) -> ReviewedNativeExecutionResult:
     """Execute one static route through its family-owned native authority seam."""
 
-    if session is None or type(value) is not ReviewedIntentProgramV1:
+    if (
+        session is None
+        or type(value) is not ReviewedIntentProgramV1
+        or type(source_results) is not tuple
+    ):
         _fail(ReviewedIntentExecutionErrorCode.INVALID_INPUT)
     route = route_reviewed_intent(value)
+    if not route.family.minimum_sources <= len(source_results) <= route.family.maximum_sources:
+        _fail(ReviewedIntentExecutionErrorCode.INVALID_INPUT)
     try:
         import FreeCAD  # type: ignore[import-not-found]  # noqa: PLC0415
 
@@ -846,6 +915,11 @@ def execute_reviewed_intent_native(
         _fail(ReviewedIntentExecutionErrorCode.EXECUTION_FAILED)
     require_reviewed_route_verified(route, freecad=FreeCAD)
     lowered = lower_reviewed_intent(value)
+    context = _ReviewedFamilyExecutionContext(
+        session=session,
+        document=document,
+        source_results=source_results,
+    )
     try:
         before = tuple(document.Objects)
         family_result = route.family.apply_plan(
@@ -854,6 +928,7 @@ def execute_reviewed_intent_native(
             lowered.payload,
             lowered.result.plan_document,
             route.operation,
+            context,
         )
         result = family_result.object
         after = tuple(document.Objects)
@@ -882,6 +957,7 @@ __all__ = [
     "CURRENT_REVIEWED_INTENT_ROUTES",
     "REVIEWED_PART_BOX_ROUTE",
     "REVIEWED_PART_CURVE_ROUTES",
+    "REVIEWED_PART_CSG_ROUTES",
     "REVIEWED_PART_PRIMITIVE_ROUTES",
     "LoweredReviewedIntent",
     "ReviewedIntentExecutionError",
