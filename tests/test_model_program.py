@@ -12,7 +12,7 @@ from types import MappingProxyType
 
 import pytest
 
-from test_reviewed_intent_program import reviewed_box_program
+from tests.test_reviewed_intent_program import reviewed_box_program
 from vibecad.execution.registry import (
     DEFAULT_OPERATION_REGISTRY,
     ExecutionProfile,

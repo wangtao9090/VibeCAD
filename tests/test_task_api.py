@@ -12,7 +12,7 @@ from types import MappingProxyType
 import pytest
 
 import vibecad.application.task_api as task_api_module
-from test_reviewed_intent_program import reviewed_box_program
+from tests.test_reviewed_intent_program import reviewed_box_program
 from vibecad.application.task_api import (
     TaskApi,
     TaskApiErrorCode,
