@@ -10,6 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 GUARD = ROOT / ".github" / "scripts" / "check_release_versions.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def _write_version_fixture(root: Path, version: str = "0.4.0") -> None:
@@ -220,6 +221,16 @@ def test_release_quality_gate_runs_on_the_supported_darwin_platform():
     )
     assert quality is not None
     assert re.search(r"(?m)^    runs-on: macos-latest$", quality.group("body"))
+
+
+def test_ci_runtime_gate_binds_private_freecad_process_directories():
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    binding = "from vibecad.runtime.status import freecad_process_environment"
+    direct_gate = '"$VIBECAD_MANAGED_FREECAD_PYTHON" -m pytest'
+
+    assert workflow.count(binding) == 1
+    assert '>> "$GITHUB_ENV"' in workflow
+    assert workflow.index(binding) < workflow.index(direct_gate)
 
 
 def test_release_workflow_executes_the_exact_built_artifacts_before_publish():
